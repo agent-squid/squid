@@ -1,0 +1,39 @@
+import os
+import shutil
+from typing import Optional
+
+# CLI executable names — override via env if installed elsewhere
+CLAUDE_CLI = "claude"
+CODEX_CLI  = "codex"
+
+# How long to wait for a CLI to produce its first byte before giving up
+FIRST_BYTE_TIMEOUT = 30   # seconds
+
+# Hard cap on total response time per request
+RESPONSE_TIMEOUT = 300    # seconds
+
+# Common install locations not always in subprocess PATH
+_EXTRA_PATHS = [
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+    os.path.expanduser("~/.local/bin"),
+    os.path.expanduser("~/.npm-global/bin"),
+    os.path.expanduser("~/node_modules/.bin"),
+]
+
+def find_cli(name: str) -> Optional[str]:
+    found = shutil.which(name)
+    if found:
+        return found
+    for base in _EXTRA_PATHS:
+        candidate = os.path.join(base, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    # Last resort: check if the binary exists at known path even if not executable by shutil
+    known = f"/usr/local/bin/{name}"
+    if os.path.exists(known):
+        return known
+    return None
+
+CLAUDE_PATH = find_cli(CLAUDE_CLI)
+CODEX_PATH  = find_cli(CODEX_CLI)
