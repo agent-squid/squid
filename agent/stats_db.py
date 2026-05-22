@@ -11,6 +11,10 @@ _TABLES = [
     """CREATE TABLE IF NOT EXISTS session_stats (
         session_id           TEXT PRIMARY KEY,
         topic                TEXT,
+        alias                TEXT,
+        backend              TEXT,
+        model                TEXT,
+        cwd                  TEXT,
         input_tokens         INTEGER,
         output_tokens        INTEGER,
         cache_read_tokens    INTEGER,
@@ -27,6 +31,7 @@ _TABLES = [
         backend    TEXT NOT NULL DEFAULT 'auto',
         model      TEXT,
         cwd        TEXT,
+        timeout    INTEGER,
         created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )""",
     """CREATE TABLE IF NOT EXISTS topics (
@@ -50,11 +55,17 @@ _TABLES = [
 ]
 
 _MIGRATIONS = [
+    "ALTER TABLE aliases ADD COLUMN timeout INTEGER",
+    "ALTER TABLE session_stats ADD COLUMN model TEXT",
+    "ALTER TABLE session_stats ADD COLUMN cwd TEXT",
     "ALTER TABLE session_stats ADD COLUMN created_at TEXT",
     "ALTER TABLE session_stats ADD COLUMN history_input_tokens INTEGER DEFAULT 0",
     "ALTER TABLE session_stats ADD COLUMN quota_before REAL",
     "ALTER TABLE session_stats ADD COLUMN quota_after REAL",
     "ALTER TABLE session_stats ADD COLUMN topic TEXT",
+    "ALTER TABLE session_stats ADD COLUMN alias TEXT",
+    "ALTER TABLE session_stats ADD COLUMN backend TEXT",
+    "ALTER TABLE chat_messages ADD COLUMN pinned INTEGER DEFAULT 0",
 ]
 
 
@@ -92,15 +103,17 @@ def get_alias(name: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
-def upsert_alias(name: str, backend: str, model: Optional[str], cwd: Optional[str]) -> None:
+def upsert_alias(name: str, backend: str, model: Optional[str], cwd: Optional[str],
+                 timeout: Optional[int] = None) -> None:
     with _connect() as conn:
         conn.execute(
-            """INSERT INTO aliases (name, backend, model, cwd) VALUES (?, ?, ?, ?)
+            """INSERT INTO aliases (name, backend, model, cwd, timeout) VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(name) DO UPDATE SET
                  backend = excluded.backend,
                  model   = excluded.model,
-                 cwd     = excluded.cwd""",
-            (name, backend, model, cwd),
+                 cwd     = excluded.cwd,
+                 timeout = excluded.timeout""",
+            (name, backend, model, cwd, timeout),
         )
 
 
@@ -111,6 +124,25 @@ def delete_alias(name: str) -> bool:
 
 
 # ── topics ────────────────────────────────────────────────────────────────────
+
+def get_topics_summary() -> list[dict]:
+    """Return all topics with their most recent prompt and timestamp."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT t.name, t.alias,
+                      u.content  AS last_prompt,
+                      a.created_at AS last_at
+               FROM topics t
+               LEFT JOIN chat_messages a ON a.id = (
+                   SELECT id FROM chat_messages
+                   WHERE topic = t.name AND role = 'assistant' AND status = 'done'
+                   ORDER BY id DESC LIMIT 1
+               )
+               LEFT JOIN chat_messages u ON u.id = a.reply_to
+               ORDER BY COALESCE(a.created_at, t.created_at) DESC"""
+        ).fetchall()
+    return [dict(r) for r in rows]
+
 
 def list_topics() -> list[dict]:
     with _connect() as conn:
@@ -169,25 +201,65 @@ def update_assistant_message(
         )
 
 
-def get_context_history(topic: str, limit: int) -> list[dict]:
-    """Return the last `limit` complete exchanges as [{role, content}] for prompt injection."""
-    if limit <= 0:
-        return []
+def pin_message(msg_id: int, pinned: int) -> None:
+    """pinned: 1 = always include, 0 = default, -1 = always exclude."""
     with _connect() as conn:
-        rows = conn.execute(
-            """SELECT u.content AS user_content, a.content AS asst_content
-               FROM chat_messages a
-               JOIN chat_messages u ON u.id = a.reply_to
-               WHERE a.topic = ? AND a.role = 'assistant' AND a.status = 'done'
-                 AND u.content IS NOT NULL AND a.content IS NOT NULL
-               ORDER BY a.id DESC LIMIT ?""",
-            (topic, limit),
+        conn.execute("UPDATE chat_messages SET pinned=? WHERE id=?", (pinned, msg_id))
+
+
+def reset_pins() -> None:
+    with _connect() as conn:
+        conn.execute("UPDATE chat_messages SET pinned=0 WHERE pinned != 0")
+
+
+def get_context_history(topic: str, limit: int) -> list[dict]:
+    """Return context exchanges: all pinned + last `limit` non-pinned (0 = pinned only)."""
+    base = """FROM chat_messages a
+              JOIN chat_messages u ON u.id = a.reply_to
+              WHERE a.topic = ? AND a.role = 'assistant' AND a.status = 'done'
+                AND u.content IS NOT NULL AND a.content IS NOT NULL"""
+    sel = ("SELECT a.id, u.content AS user_content, a.content AS asst_content,"
+           " a.model AS asst_model, a.backend AS asst_backend ")
+    with _connect() as conn:
+        pinned = conn.execute(
+            f"{sel}{base} AND a.pinned = 1 ORDER BY a.id ASC",
+            (topic,),
         ).fetchall()
+        recent = conn.execute(
+            f"{sel}{base} AND a.pinned = 0 ORDER BY a.id DESC LIMIT ?",
+            (topic, limit if limit > 0 else 0),
+        ).fetchall() if limit > 0 else []
+
+    def _pair(row):
+        return [
+            {"role": "user",      "content": row["user_content"]},
+            {"role": "assistant", "content": row["asst_content"],
+             "model": row["asst_model"], "backend": row["asst_backend"]},
+        ]
+
+    pinned_ids = {r["id"] for r in pinned}
     result = []
-    for row in reversed(rows):
-        result.append({"role": "user",      "content": row["user_content"]})
-        result.append({"role": "assistant", "content": row["asst_content"]})
+    for row in pinned:
+        result.extend(_pair(row))
+    for row in reversed(recent):
+        if row["id"] not in pinned_ids:
+            result.extend(_pair(row))
     return result
+
+
+def mark_orphaned_pending() -> int:
+    """On server start, any pending message from a previous run will never complete."""
+    with _connect() as conn:
+        cur = conn.execute("UPDATE chat_messages SET status='error' WHERE status='pending'")
+        return cur.rowcount
+
+
+def get_message(msg_id: int) -> Optional[dict]:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT id, status, content FROM chat_messages WHERE id=?", (msg_id,)
+        ).fetchone()
+    return dict(row) if row else None
 
 
 def get_messages(topic: Optional[str] = None, offset: int = 0, limit: int = 20) -> dict:
@@ -205,7 +277,9 @@ def get_messages(topic: Optional[str] = None, offset: int = 0, limit: int = 20) 
         rows = conn.execute(
             f"""SELECT a.id, a.topic, a.alias, a.backend, a.model, a.session_id,
                        u.content AS prompt, a.content AS response,
-                       a.status, a.created_at AS timestamp
+                       a.status, a.pinned,
+                       u.created_at AS user_timestamp,
+                       a.created_at AS timestamp
                 FROM chat_messages a
                 LEFT JOIN chat_messages u ON u.id = a.reply_to
                 {where}
@@ -221,16 +295,29 @@ def get_messages(topic: Optional[str] = None, offset: int = 0, limit: int = 20) 
 
 # ── session stats ─────────────────────────────────────────────────────────────
 
-def save_stats(session_id: str, stats: dict, topic: Optional[str] = None) -> None:
+def save_stats(
+    session_id: str,
+    stats: dict,
+    topic: Optional[str] = None,
+    alias: Optional[str] = None,
+    backend: Optional[str] = None,
+    model: Optional[str] = None,
+    cwd: Optional[str] = None,
+) -> None:
     with _connect() as conn:
         conn.execute(
             """INSERT INTO session_stats
-                   (session_id, topic, input_tokens, output_tokens,
+                   (session_id, topic, alias, backend, model, cwd,
+                    input_tokens, output_tokens,
                     cache_read_tokens, cache_write_tokens, history_input_tokens,
                     cost_usd, duration_ms)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(session_id) DO UPDATE SET
                    topic                = COALESCE(excluded.topic, topic),
+                   alias                = COALESCE(excluded.alias, alias),
+                   backend              = COALESCE(excluded.backend, backend),
+                   model                = COALESCE(excluded.model, model),
+                   cwd                  = COALESCE(excluded.cwd, cwd),
                    input_tokens         = excluded.input_tokens,
                    output_tokens        = excluded.output_tokens,
                    cache_read_tokens    = excluded.cache_read_tokens,
@@ -239,7 +326,7 @@ def save_stats(session_id: str, stats: dict, topic: Optional[str] = None) -> Non
                    cost_usd             = excluded.cost_usd,
                    duration_ms          = excluded.duration_ms""",
             (
-                session_id, topic,
+                session_id, topic, alias, backend, model, cwd,
                 stats.get("input_tokens", 0), stats.get("output_tokens", 0),
                 stats.get("cache_read_tokens", 0), stats.get("cache_write_tokens", 0),
                 stats.get("history_input_tokens", 0),
@@ -291,6 +378,25 @@ def get_aggregated_stats(period: str = "daily") -> list:
                     FROM session_stats WHERE created_at IS NOT NULL
                     GROUP BY period ORDER BY period DESC LIMIT ?""",
                 (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except sqlite3.OperationalError:
+        return []
+
+
+def get_stats_by_model() -> list:
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                """SELECT COALESCE(model, backend, 'unknown') AS model,
+                          COUNT(*) AS sessions,
+                          SUM(input_tokens) AS input_tokens,
+                          SUM(output_tokens) AS output_tokens,
+                          SUM(cache_read_tokens) AS cache_read_tokens,
+                          SUM(cache_write_tokens) AS cache_write_tokens,
+                          SUM(cost_usd) AS cost_usd
+                   FROM session_stats
+                   GROUP BY model ORDER BY sessions DESC"""
             ).fetchall()
         return [dict(r) for r in rows]
     except sqlite3.OperationalError:

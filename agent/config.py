@@ -3,14 +3,15 @@ import shutil
 from typing import Optional
 
 # CLI executable names — override via env if installed elsewhere
-CLAUDE_CLI = "claude"
-CODEX_CLI  = "codex"
+CLAUDE_CLI   = "claude"
+CODEX_CLI    = "codex"
+COPILOT_CLI  = "copilot"
 
 # How long to wait for a CLI to produce its first byte before giving up
 FIRST_BYTE_TIMEOUT = 30   # seconds
 
 # Hard cap on total response time per request
-RESPONSE_TIMEOUT = 300    # seconds
+RESPONSE_TIMEOUT = 900    # seconds (15 min default; overridable per alias)
 
 # Common install locations not always in subprocess PATH
 _EXTRA_PATHS = [
@@ -35,5 +36,6 @@ def find_cli(name: str) -> Optional[str]:
         return known
     return None
 
-CLAUDE_PATH = find_cli(CLAUDE_CLI)
-CODEX_PATH  = find_cli(CODEX_CLI)
+CLAUDE_PATH   = find_cli(CLAUDE_CLI)
+CODEX_PATH    = find_cli(CODEX_CLI)
+COPILOT_PATH  = find_cli(COPILOT_CLI)

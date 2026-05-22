@@ -13,7 +13,6 @@
       <img src="squid.jpg" id="logo" alt="Squid" />
       <span id="logo-name">agent-squid</span>
       <div id="quota-display" title="Session usage · click for credentials"></div>
-      <button id="aliases-btn" type="button" title="Model aliases">A</button>
       <button id="stats-btn" type="button" title="Usage stats">
         <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true">
           <rect x="1" y="7" width="3" height="6" rx="0.5"/>
@@ -37,54 +36,59 @@
           <button class="st active" data-period="daily" data-group="time">Daily</button>
           <button class="st" data-period="hourly" data-group="time">Hourly</button>
           <button class="st" data-period="" data-group="topic">By Topic</button>
+          <button class="st" data-period="" data-group="model">By Model</button>
+          <button class="st" data-period="" data-group="proc">Live</button>
         </div>
         <button id="stats-close" type="button">✕</button>
       </div>
       <div id="stats-content"></div>
     </div>
 
-    <!-- Aliases panel -->
-    <div id="aliases-panel">
-      <div id="aliases-header">
-        <span>Model Aliases</span>
-        <button id="aliases-close" type="button">✕</button>
-      </div>
-      <div id="aliases-list"></div>
-      <form id="alias-form">
-        <div class="alias-form-row">
-          <input id="af-name"    type="text" placeholder="name" spellcheck="false" required />
-          <select id="af-backend">
-            <option value="auto">auto</option>
-            <option value="claude">claude</option>
-            <option value="codex">codex</option>
-          </select>
-          <input id="af-model"   type="text" placeholder="model (e.g. gpt-4o)" spellcheck="false" />
-          <input id="af-cwd"     type="text" placeholder="cwd (rel to ~)" spellcheck="false" />
-          <button type="submit">Save</button>
-          <span id="alias-form-status"></span>
-        </div>
-      </form>
-    </div>
-
     <div id="messages"></div>
-    <button id="scroll-btn" aria-label="Scroll to bottom">↓</button>
+    <div id="scroll-btn" role="button" aria-label="Scroll to bottom">↓</div>
 
     <div id="settings-bar">
-      <span class="settings-label">Lookback</span>
-      <div id="lookback-control">
-        <button class="lb" data-val="0">Off</button>
-        <button class="lb" data-val="1">1</button>
-        <button class="lb" data-val="2">2</button>
-        <button class="lb" data-val="3">3</button>
-        <button class="lb active" data-val="5">5</button>
-        <button class="lb" data-val="10">10</button>
-        <button class="lb" data-val="all">All</button>
+      <div id="settings-aliases">
+        <span class="settings-label">Model Aliases</span>
+        <div id="aliases-list"></div>
+        <form id="alias-form">
+          <div class="alias-form-row">
+            <input id="af-name"    type="text" placeholder="name" spellcheck="false" required />
+            <select id="af-backend">
+              <option value="auto">auto</option>
+              <option value="claude">claude</option>
+              <option value="codex">codex</option>
+              <option value="copilot">copilot</option>
+            </select>
+            <input id="af-model"   type="text" placeholder="model (e.g. gpt-4o)" spellcheck="false" />
+            <input id="af-cwd"     type="text"   placeholder="cwd (rel to ~)" spellcheck="false" />
+            <input id="af-timeout" type="number" placeholder="timeout (s)" min="10" />
+            <button type="submit">Save</button>
+            <span id="alias-form-status"></span>
+          </div>
+        </form>
       </div>
-      <span class="settings-hint">exchanges per topic sent as context</span>
+      <div id="settings-lookback">
+        <span class="settings-label">Lookback</span>
+        <div id="lookback-control">
+          <button class="lb" data-val="0">Off</button>
+          <button class="lb" data-val="1">1</button>
+          <button class="lb" data-val="2">2</button>
+          <button class="lb" data-val="3">3</button>
+          <button class="lb active" data-val="5">5</button>
+          <button class="lb" data-val="10">10</button>
+          <button class="lb" data-val="all">All</button>
+        </div>
+        <span class="settings-hint">exchanges per topic sent as context</span>
+        <button id="reset-pins-btn" type="button">Reset pins</button>
+      </div>
     </div>
 
     <form id="form">
-      <textarea id="input" placeholder="#topic or #topic@alias message…" rows="1"></textarea>
+      <div id="input-area">
+        <div id="topic-chip"></div>
+        <textarea id="input" placeholder="#topic or #topic@alias message…" rows="1"></textarea>
+      </div>
       <button id="settings-btn" type="button" title="Settings">⚙</button>
       <button type="submit">Send</button>
     </form>

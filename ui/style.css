@@ -2,6 +2,7 @@
 
 body {
   font-family: system-ui, sans-serif;
+  font-size: 14px;
   background: #0f0f13;
   color: #e8e4dc;
   height: 100vh;
@@ -156,7 +157,17 @@ body {
 .loader span:nth-child(3) { animation-delay: 0.4s; }
 @keyframes pulse { 0%,80%,100% { opacity: 0.3; } 40% { opacity: 1; } }
 
-/* ephemeral status message */
+/* thinking / status bubble */
+.msg.assistant.msg-thinking {
+  font-size: 0.78em;
+  font-style: italic;
+  color: #555566;
+  padding: 0.45rem 0.9rem;
+  background: #18181f;
+}
+.msg.assistant.msg-thinking .loader span { background: #555; }
+
+/* ephemeral status message (legacy, kept for history items) */
 .status-msg {
   font-size: 0.75em;
   color: #484855;
@@ -174,13 +185,6 @@ body {
 
 .history-group { display: contents; }
 
-.history-header {
-  align-self: center;
-  font-size: 0.7em;
-  color: #3a3a48;
-  margin: 0.2rem 0 0.1rem;
-  text-align: center;
-}
 
 
 /* stats line */
@@ -229,20 +233,35 @@ body {
   cursor: pointer;
   font-size: 0.8em;
   padding: 0.35rem 0.9rem;
-  opacity: 0.9;
+  opacity: 0.8;
   z-index: 10;
+  user-select: none;
 }
 #scroll-btn.visible { display: block; }
 
 /* settings bar */
 #settings-bar {
   display: none;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.4rem 0.2rem;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.5rem 0.2rem;
   border-top: 1px solid #1e1e28;
 }
 #settings-bar.open { display: flex; }
+#settings-lookback {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+#settings-aliases {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+#settings-lookback {
+  padding-top: 0.4rem;
+  border-top: 1px solid #1a1a24;
+}
 .settings-label { font-size: 0.75em; color: #666; }
 .settings-hint { font-size: 0.68em; color: #444; }
 
@@ -272,6 +291,18 @@ body {
   padding: 0 0.6rem;
 }
 #settings-btn.active { color: #f07040; border-color: #f07040; }
+
+#reset-pins-btn {
+  background: transparent;
+  border: 1px solid #2a2a35;
+  border-radius: 4px;
+  color: #444;
+  cursor: pointer;
+  font-size: 0.72em;
+  padding: 0.15rem 0.5rem;
+  margin-left: auto;
+}
+#reset-pins-btn:hover { color: #e05030; border-color: #e05030; }
 
 /* stats panel — floats over messages, does not push them down */
 #stats-panel {
@@ -364,17 +395,45 @@ body {
 #stats-btn.active { color: #f07040; border-color: #f07040; }
 
 #form { display: flex; gap: 0.5rem; }
-#input {
+#input-area {
   flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
   background: #1e1e28;
   border: 1px solid #333;
   border-radius: 8px;
+  padding: 0 0.5rem;
+}
+#topic-chip {
+  display: none;
+  background: #2a1a10;
+  border: 1px solid #5a2a10;
+  color: #f07040;
+  border-radius: 5px;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.78em;
+  font-family: ui-monospace, monospace;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: pointer;
+  user-select: none;
+}
+#topic-chip.visible { display: block; }
+#input {
+  flex: 1;
+  background: none;
+  border: none;
+  outline: none;
   color: inherit;
-  padding: 0.6rem 0.9rem;
+  padding: 0.6rem 0.4rem;
   resize: none;
   font: inherit;
 }
 button {
+  -webkit-appearance: none;
+  appearance: none;
   background: #f07040;
   border: none;
   border-radius: 8px;
@@ -384,55 +443,6 @@ button {
   padding: 0 1.2rem;
 }
 
-/* aliases btn — same style as stats-btn */
-#aliases-btn {
-  background: transparent;
-  border: 1px solid #222;
-  border-radius: 8px;
-  color: #3a3a3a;
-  cursor: pointer;
-  font-size: 0.8em;
-  font-weight: 700;
-  padding: 0 0.6rem;
-  letter-spacing: 0.02em;
-}
-#aliases-btn:hover { color: #555; border-color: #333; }
-#aliases-btn.active { color: #f07040; border-color: #f07040; }
-
-/* aliases panel */
-#aliases-panel {
-  display: none;
-  position: absolute;
-  left: 0;
-  right: 0;
-  z-index: 20;
-  flex-direction: column;
-  background: #13131c;
-  border: 1px solid #2e2e3e;
-  border-radius: 8px;
-  max-height: 320px;
-  overflow: hidden;
-}
-#aliases-panel.open { display: flex; }
-
-#aliases-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0.4rem 0.8rem;
-  border-bottom: 1px solid #1e1e28;
-  font-size: 0.8em;
-  color: #888;
-}
-#aliases-close {
-  background: transparent;
-  border: none;
-  color: #444;
-  cursor: pointer;
-  font-size: 0.85em;
-  padding: 0.1rem 0.3rem;
-}
-#aliases-close:hover { color: #888; }
 
 #aliases-list {
   overflow-y: auto;
@@ -458,7 +468,7 @@ button {
   background: #13131c;
 }
 #aliases-list tbody tr:hover td { background: #1a1a24; }
-#aliases-list .del-btn {
+#aliases-list .edit-btn, #aliases-list .del-btn {
   background: transparent;
   border: 1px solid #333;
   border-radius: 4px;
@@ -468,6 +478,8 @@ button {
   font-weight: normal;
   padding: 0.05rem 0.4rem;
 }
+#aliases-list .edit-btn { margin-right: 2px; }
+#aliases-list .edit-btn:hover { color: #6090e0; border-color: #6090e0; }
 #aliases-list .del-btn:hover { color: #e05030; border-color: #e05030; }
 #aliases-list .empty { padding: 1rem; text-align: center; color: #444; }
 
@@ -491,8 +503,9 @@ button {
 }
 #af-name    { width: 80px; }
 #af-backend { width: 80px; }
-#af-model   { width: 160px; }
-#af-cwd     { width: 160px; }
+#af-model   { width: 130px; }
+#af-cwd     { width: 130px; }
+#af-timeout { width: 80px; }
 .alias-form-row button[type=submit] {
   background: #2a2a35;
   border: 1px solid #3a3a4a;
@@ -506,18 +519,104 @@ button {
 .alias-form-row button[type=submit]:hover { color: #f07040; border-color: #f07040; }
 #alias-form-status { font-size: 0.68em; color: #555; }
 
-/* topic badge on user messages */
-.topic-badge {
-  display: inline-block;
-  font-size: 0.72em;
+/* inline topic tag — used in user bubbles and response context header */
+.topic-tag {
+  font-size: 0.82em;
   color: #f07040;
-  background: rgba(240,112,64,0.12);
-  border: 1px solid rgba(240,112,64,0.25);
-  border-radius: 4px;
-  padding: 0.05rem 0.4rem;
-  margin-bottom: 0.3rem;
-  letter-spacing: 0.02em;
+  font-family: ui-monospace, monospace;
+  font-weight: 600;
+  letter-spacing: 0.01em;
 }
+
+/* response header — inside the assistant bubble, above streamed content */
+.response-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.72em;
+  color: #555;
+  padding-bottom: 0.35rem;
+  margin-bottom: 0.35rem;
+  border-bottom: 1px solid #2a2a35;
+}
+.response-header-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pin-btn {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid #2a2a35;
+  border-radius: 3px;
+  color: #3a3a4a;
+  cursor: pointer;
+  font-size: 0.85em;
+  padding: 0 0.3rem;
+  line-height: 1.4;
+}
+.pin-btn:hover { color: #666; border-color: #444; }
+.pin-btn.active { color: #7a4828; border-color: #4a3020; }
+.pin-btn.excluded { color: #4a3a3a; border-color: #3a2a2a; text-decoration: line-through; }
+.pin-btn.pinned { color: #f07040; border-color: #f07040; }
+
+/* error state inside assistant bubble */
+.msg-error {
+  font-size: 0.85em;
+  color: #7a3a3a;
+  font-style: italic;
+}
+
+/* per-message timestamps */
+.msg-time {
+  font-size: 0.65em;
+  color: #484858;
+  padding: 0 0.4rem 0.1rem;
+  align-self: flex-start;
+}
+.msg-time.right {
+  align-self: flex-end;
+  text-align: right;
+}
+
+/* live process dot */
+.proc-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #4a8a4a;
+  margin-right: 5px;
+  vertical-align: middle;
+  animation: pulse 1.8s ease-in-out infinite;
+}
+
+/* command feedback system message */
+.cmd-feedback {
+  font-size: 0.72em;
+  color: #555566;
+  font-style: italic;
+  font-family: ui-monospace, monospace;
+  align-self: center;
+  padding: 0.15rem 0.5rem;
+}
+
+/* list command inline topic table */
+.cmd-topic-list {
+  align-self: flex-start;
+  font-size: 0.78em;
+  font-family: ui-monospace, monospace;
+  padding: 0.4rem 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.ctl-row { display: flex; gap: 1rem; align-items: baseline; cursor: pointer; border-radius: 4px; padding: 0.1rem 0.3rem; margin: 0 -0.3rem; }
+.ctl-row:hover { background: #1e1e28; }
+.ctl-tag  { color: #f07040; font-weight: 600; min-width: 12ch; flex-shrink: 0; }
+.ctl-prompt { color: #777; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.ctl-time { color: #444455; flex-shrink: 0; }
 
 /* queue position indicator */
 .queue-msg {
