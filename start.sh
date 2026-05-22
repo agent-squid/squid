@@ -14,7 +14,11 @@ fi
 
 # ── start ────────────────────────────────────────────────────────────────────
 echo "Starting squid on http://${HOST}:${PORT}"
+RELOAD=""
+[[ "${DEV:-}" == "1" ]] && RELOAD="--reload"
+
 exec "$VENV/bin/uvicorn" agent.server:app \
   --host "$HOST" \
   --port "$PORT" \
-  --app-dir "$SCRIPT_DIR"
+  --app-dir "$SCRIPT_DIR" \
+  $RELOAD

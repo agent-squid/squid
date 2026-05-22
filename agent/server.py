@@ -28,6 +28,7 @@ Then from a terminal:
 import asyncio
 import json
 import logging
+import os
 from typing import AsyncGenerator, Literal, Optional
 
 from fastapi import FastAPI, Request
@@ -39,6 +40,13 @@ from pydantic import BaseModel, Field
 
 from .config import CLAUDE_PATH, CODEX_PATH
 from .runners import run_auto, run_claude, run_codex, CLINotFoundError, CLIError
+from .history import list_history
+from .stats_db import init_db, save_stats, get_aggregated_stats, save_quota_delta
+from . import creds
+
+_SERVER_CWD = os.getcwd()
+
+init_db()
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -101,10 +109,22 @@ UI_DIR = Path(__file__).parent.parent / "ui"
 # Request schema
 # ---------------------------------------------------------------------------
 
+class CredsRequest(BaseModel):
+    org_id: str = Field(..., min_length=1)
+    session_key: str = Field(..., min_length=1)
+
+
+class QuotaDeltaRequest(BaseModel):
+    session_id: str = Field(..., min_length=1)
+    before: float
+    after: float
+
+
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
     backend: Literal["auto", "claude", "codex"] = Field("auto")
     cwd: Optional[str] = Field(None)
+    history: list[dict] = Field(default_factory=list)
 
 # ---------------------------------------------------------------------------
 # SSE helpers
@@ -124,12 +144,22 @@ async def stream_response(
     message: str,
     backend: str,
     cwd: Optional[str],
+    history: list[dict],
 ) -> AsyncGenerator[str, None]:
     runner = {"auto": run_auto, "claude": run_claude, "codex": run_codex}[backend]
     try:
-        async for chunk in runner(message, cwd=cwd):
+        async for chunk in runner(message, cwd=cwd, history=history):
             if isinstance(chunk, dict) and "_stats" in chunk:
-                yield sse_event("stats", json.dumps(chunk["_stats"]))
+                stats = chunk["_stats"]
+                session_id = stats.pop("session_id", None)
+                if session_id:
+                    save_stats(session_id, stats)
+                    stats["session_id"] = session_id  # echo back for client quota association
+                yield sse_event("stats", json.dumps(stats))
+            elif isinstance(chunk, dict) and "_status" in chunk:
+                status_text = chunk["_status"].replace("\n", " ")
+                if status_text:
+                    yield sse_event("status", status_text)
             else:
                 yield sse_chunk(chunk)
             await asyncio.sleep(0)
@@ -150,9 +180,9 @@ async def stream_response(
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
-    log.info("chat  backend=%s  cwd=%s  msg=%.80r", req.backend, req.cwd, req.message)
+    log.info("chat  backend=%s  cwd=%s  history=%d  msg=%.80r", req.backend, req.cwd, len(req.history), req.message)
     return StreamingResponse(
-        stream_response(req.message, req.backend, req.cwd),
+        stream_response(req.message, req.backend, req.cwd, req.history),
         media_type="text/event-stream",
         headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
     )
@@ -167,6 +197,50 @@ async def health():
             "codex":  {"available": bool(CODEX_PATH),  "path": CODEX_PATH},
         },
     })
+
+
+@app.get("/history")
+async def history(offset: int = 0, limit: int = 5, cwd: Optional[str] = None):
+    return JSONResponse(list_history(cwd or _SERVER_CWD, offset=offset, limit=limit))
+
+
+@app.get("/stats")
+async def usage_stats(period: str = "daily"):
+    return JSONResponse(get_aggregated_stats(period))
+
+
+@app.post("/stats/quota-delta")
+async def record_quota_delta(req: QuotaDeltaRequest):
+    save_quota_delta(req.session_id, req.before, req.after)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/config/creds")
+async def save_creds(req: CredsRequest):
+    creds.save(req.org_id.strip(), req.session_key.strip())
+    return JSONResponse({"ok": True})
+
+
+@app.get("/quota")
+async def quota():
+    org_id = creds.get_org_id()
+    session_key = creds.get_session_key()
+    if not org_id or not session_key:
+        return JSONResponse({"error": "credentials not configured"}, status_code=400)
+    try:
+        from curl_cffi.requests import AsyncSession
+        async with AsyncSession() as session:
+            r = await session.get(
+                f"https://claude.ai/api/organizations/{org_id}/usage",
+                headers={"Cookie": f"sessionKey={session_key}"},
+                impersonate="chrome",
+            )
+        if r.status_code != 200:
+            return JSONResponse({"error": f"claude.ai returned {r.status_code}"}, status_code=502)
+        return JSONResponse(r.json())
+    except Exception as exc:
+        log.error("quota fetch failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=502)
 
 
 # Mount UI static files last so API routes take precedence

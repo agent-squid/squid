@@ -9,9 +9,53 @@
 </head>
 <body>
   <div id="app">
+    <header id="topbar">
+      <img src="squid.jpg" id="logo" alt="Squid" />
+      <span id="logo-name">agent-squid</span>
+      <div id="quota-display" title="Session usage · click for settings"></div>
+      <button id="stats-btn" type="button" title="Usage stats">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true">
+          <rect x="1" y="7" width="3" height="6" rx="0.5"/>
+          <rect x="5.5" y="3.5" width="3" height="9.5" rx="0.5"/>
+          <rect x="10" y="1" width="3" height="12" rx="0.5"/>
+        </svg>
+      </button>
+      <div id="quota-creds-popup">
+        <span class="settings-label">Claude.ai session</span>
+        <input id="creds-org" type="text" placeholder="Org ID" spellcheck="false" />
+        <input id="creds-key" type="password" placeholder="Session key" />
+        <button id="creds-save" type="button">Save</button>
+        <span id="creds-status"></span>
+      </div>
+    </header>
+    <div id="stats-panel">
+      <div id="stats-header">
+        <div id="stats-tabs">
+          <button class="st active" data-period="daily">Daily</button>
+          <button class="st" data-period="hourly">Hourly</button>
+        </div>
+        <button id="stats-close" type="button">✕</button>
+      </div>
+      <div id="stats-content"></div>
+    </div>
     <div id="messages"></div>
+    <button id="scroll-btn" aria-label="Scroll to bottom">↓</button>
+    <div id="settings-bar">
+      <span class="settings-label">Lookback</span>
+      <div id="lookback-control">
+        <button class="lb active" data-val="0">Off</button>
+        <button class="lb" data-val="1">1</button>
+        <button class="lb" data-val="2">2</button>
+        <button class="lb" data-val="3">3</button>
+        <button class="lb" data-val="5">5</button>
+        <button class="lb" data-val="10">10</button>
+        <button class="lb" data-val="all">All</button>
+      </div>
+      <span class="settings-hint">exchanges sent as context per message</span>
+    </div>
     <form id="form">
       <textarea id="input" placeholder="Message..." rows="1"></textarea>
+      <button id="settings-btn" type="button" title="Settings">⚙</button>
       <button type="submit">Send</button>
     </form>
   </div>

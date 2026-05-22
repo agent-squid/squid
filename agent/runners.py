@@ -70,8 +70,32 @@ async def _stream_lines(
         raise CLIError(f"CLI exited {proc.returncode}: {err}")
 
 
+def _build_prompt(prompt: str, history: Optional[List[dict]]) -> str:
+    if not history:
+        return prompt
+    lines = [
+        "The following is the conversation so far. Continue it naturally.\n",
+        "<conversation_history>",
+    ]
+    for msg in history:
+        role = "User" if msg.get("role") == "user" else "Assistant"
+        lines.append(f"{role}: {msg.get('content', '').strip()}")
+    lines.append("</conversation_history>")
+    lines.append("")
+    lines.append(f"User: {prompt}")
+    return "\n".join(lines)
+
+
+def _estimate_history_tokens(history: Optional[List[dict]]) -> int:
+    """Rough token estimate for injected history (4 chars ≈ 1 token)."""
+    if not history:
+        return 0
+    total_chars = sum(len(m.get("content", "")) for m in history)
+    return total_chars // 4
+
+
 async def run_claude(
-    prompt: str, cwd: Optional[str] = None
+    prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream text chunks from claude CLI, then yield a stats dict."""
     if not CLAUDE_PATH:
@@ -84,8 +108,11 @@ async def run_claude(
         "--output-format", "stream-json",
         "--include-partial-messages",
         "--verbose",
-        prompt,
+        "--dangerously-skip-permissions",
+        _build_prompt(prompt, history),
     ]
+
+    session_id: Optional[str] = None
 
     async for line in _stream_lines(cmd, cwd=cwd):
         if not line:
@@ -97,7 +124,10 @@ async def run_claude(
 
         t = event.get("type")
 
-        if t == "stream_event":
+        if t == "system":
+            session_id = event.get("session_id")
+
+        elif t == "stream_event":
             inner = event.get("event", {})
             if (
                 inner.get("type") == "content_block_delta"
@@ -105,16 +135,21 @@ async def run_claude(
             ):
                 text = inner["delta"].get("text", "")
                 if text:
-                    yield text
+                    yield {"_status": text}
 
         elif t == "result":
+            final_text = event.get("result", "")
+            if final_text:
+                yield final_text
             usage = event.get("usage", {})
             yield {
                 "_stats": {
+                    "session_id": session_id,
                     "input_tokens": usage.get("input_tokens", 0),
                     "output_tokens": usage.get("output_tokens", 0),
                     "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
                     "cache_write_tokens": usage.get("cache_creation_input_tokens", 0),
+                    "history_input_tokens": _estimate_history_tokens(history),
                     "cost_usd": event.get("total_cost_usd"),
                     "duration_ms": event.get("duration_ms"),
                 }
@@ -122,7 +157,7 @@ async def run_claude(
 
 
 async def run_codex(
-    prompt: str, cwd: Optional[str] = None
+    prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream a response from codex CLI using non-interactive exec mode."""
     if not CODEX_PATH:
@@ -133,7 +168,7 @@ async def run_codex(
         raise CLIError(
             "OPENAI_API_KEY is not set. Export it before starting the server."
         )
-    cmd = [CODEX_PATH, "exec", "--json", prompt]
+    cmd = [CODEX_PATH, "exec", "--json", _build_prompt(prompt, history)]
     async for line in _stream_lines(cmd, cwd=cwd):
         if not line:
             continue
@@ -151,14 +186,14 @@ async def run_codex(
 
 
 async def run_auto(
-    prompt: str, cwd: Optional[str] = None
+    prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Try claude first, fall back to codex."""
     if CLAUDE_PATH:
-        async for chunk in run_claude(prompt, cwd=cwd):
+        async for chunk in run_claude(prompt, cwd=cwd, history=history):
             yield chunk
     elif CODEX_PATH:
-        async for chunk in run_codex(prompt, cwd=cwd):
+        async for chunk in run_codex(prompt, cwd=cwd, history=history):
             yield chunk
     else:
         raise CLINotFoundError("Neither claude nor codex CLI found in PATH")
