@@ -7,6 +7,8 @@ const settingsBar = document.getElementById('settings-bar');
 const statsBtn    = document.getElementById('stats-btn');
 const statsPanel  = document.getElementById('stats-panel');
 const statsContent= document.getElementById('stats-content');
+const aliasesBtn  = document.getElementById('aliases-btn');
+const aliasesPanel= document.getElementById('aliases-panel');
 
 messages.addEventListener('scroll', () => {
   scrollBtn.classList.toggle('visible', !isAtBottom());
@@ -15,7 +17,9 @@ scrollBtn.addEventListener('click', () => {
   messages.scrollTop = messages.scrollHeight;
 });
 
-// ── settings ─────────────────────────────────────────────────────────────────
+marked.setOptions({ breaks: true });
+
+// ── settings / lookback ───────────────────────────────────────────────────────
 
 let lookback = localStorage.getItem('lookback') === 'all' ? 'all'
              : localStorage.getItem('lookback') != null ? (parseInt(localStorage.getItem('lookback'), 10) || 0)
@@ -24,15 +28,12 @@ let lookback = localStorage.getItem('lookback') === 'all' ? 'all'
 function initSettings() {
   document.querySelectorAll('.lb').forEach(btn => {
     const val = btn.dataset.val === 'all' ? 'all' : parseInt(btn.dataset.val);
-    if (val === lookback) btn.classList.add('active');
-    else btn.classList.remove('active');
-
+    btn.classList.toggle('active', val === lookback);
     btn.addEventListener('click', () => {
       lookback = val;
       localStorage.setItem('lookback', val);
       document.querySelectorAll('.lb').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
-      refreshFileHistory();
     });
   });
 }
@@ -42,51 +43,17 @@ settingsBtn.addEventListener('click', () => {
   settingsBtn.classList.toggle('active');
 });
 
-// ── conversation history ──────────────────────────────────────────────────────
+// ── prompt parsing ────────────────────────────────────────────────────────────
 
-const sessionHistory = []; // exchanges from current page session
-let fileHistory = [];      // exchanges loaded from /history files
-
-function buildContextHistory() {
-  if (lookback === 0) return [];
-  const combined = [...fileHistory, ...sessionHistory];
-  if (lookback === 'all') return combined;
-  return combined.slice(-(lookback * 2));
-}
-
-async function refreshFileHistory() {
-  if (lookback === 0) { fileHistory = []; return; }
-
-  // Skip the most recent N exchanges already captured in sessionHistory
-  const skipExchanges = Math.floor(sessionHistory.length / 2);
-  const wantExchanges = lookback === 'all' ? Infinity : lookback;
-
-  const items = [];
-  let offset = skipExchanges;
-  const batch = 20;
-
-  while (items.length < wantExchanges) {
-    const limit = Math.min(batch, wantExchanges === Infinity ? batch : wantExchanges - items.length);
-    let data;
-    try {
-      const res = await fetch(`/history?offset=${offset}&limit=${limit}`);
-      data = await res.json();
-    } catch { break; }
-    items.push(...data.items);
-    if (!data.has_more) break;
-    offset += data.items.length;
+function parseInput(text) {
+  const m = text.match(/^#(\w+)(?:@(\w+))?\s+([\s\S]*)$/);
+  if (m && m[3].trim()) {
+    return { topic: m[1], alias: m[2] || null, message: m[3].trim() };
   }
-
-  // API returns newest-first; reverse to chronological for context
-  fileHistory = [...items].reverse().flatMap(item => [
-    { role: 'user',      content: item.prompt   || '' },
-    { role: 'assistant', content: item.response || '' },
-  ]).filter(m => m.content);
+  return { topic: 'default', alias: null, message: text };
 }
 
-marked.setOptions({ breaks: true });
-
-// ── history pagination ────────────────────────────────────────────────────────
+// ── history pagination (display) ─────────────────────────────────────────────
 
 let historyOffset = 0;
 let historyExhausted = false;
@@ -113,25 +80,23 @@ async function loadHistory() {
   }
 
   const { items, has_more } = data;
-
   const prevHeight = messages.scrollHeight;
-
   const fragment = document.createDocumentFragment();
 
   for (const item of [...items].reverse()) {
+    if (!item.prompt && !item.response) continue;
+
     const group = document.createElement('div');
     group.className = 'history-group';
 
     const header = document.createElement('div');
     header.className = 'history-header';
-    const label = item.title || truncate(item.prompt, 60);
+    const label = truncate(item.prompt, 60);
     const ts = item.timestamp ? fmtDate(item.timestamp) : '';
     header.textContent = ts ? `${ts}  ·  ${label}` : label;
     group.appendChild(header);
 
-    const userBubble = document.createElement('div');
-    userBubble.className = 'msg user';
-    userBubble.textContent = item.prompt;
+    const userBubble = makeUserBubble(item.prompt || '', item.topic, item.alias);
     group.appendChild(userBubble);
 
     const asstBubble = document.createElement('div');
@@ -144,11 +109,8 @@ async function loadHistory() {
     fragment.appendChild(group);
   }
 
-  // Insert after sentinel (keeps sentinel pinned at top)
   const anchor = topSentinel ? topSentinel.nextSibling : messages.firstChild;
   messages.insertBefore(fragment, anchor);
-
-  // Restore scroll so existing content doesn't jump
   messages.scrollTop += messages.scrollHeight - prevHeight;
 
   historyOffset += items.length;
@@ -178,7 +140,6 @@ form.addEventListener('submit', (e) => {
   e.preventDefault();
   const text = input.value.trim();
   if (!text) return;
-  addMessage('user', text);
   input.value = '';
   sendMessage(text);
 });
@@ -191,24 +152,30 @@ input.addEventListener('keydown', (e) => {
 });
 
 async function sendMessage(text) {
-  const bubble = addMessage('assistant', '');
-  const loader = addLoader(bubble);
-  const quotaBefore = quotaRaw;  // snapshot before the exchange
-  let lastSessionId = null;
-  let statsEl = null;
-  let statusEl = null;
-  let statusBuf = '';
+  const { topic, alias, message } = parseInput(text);
 
-  const ctxHistory = buildContextHistory();
-  const ctxLabel = lookback === 0 ? 'off' : lookback === 'all' ? 'all' : `${ctxHistory.length / 2}`;
+  // User bubble with optional topic badge
+  messages.appendChild(makeUserBubble(message, topic, alias));
+  requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
+
+  const bubble   = addMessage('assistant', '');
+  const loader   = addLoader(bubble);
+  const quotaBefore = quotaRaw;
+  let lastSessionId = null;
+  let statsEl   = null;
+  let statusEl  = null;
+  let statusBuf = '';
+  let queueEl   = null;
+
+  const ctxLabel = lookback === 0 ? 'off' : lookback === 'all' ? 'all' : String(lookback);
 
   const res = await fetch('/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message: text, backend: 'auto', history: ctxHistory }),
+    body: JSON.stringify({ message, topic, alias, lookback }),
   });
 
-  const reader = res.body.getReader();
+  const reader  = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
   let raw = '';
@@ -231,14 +198,29 @@ async function sendMessage(text) {
         const data = line.slice(5);
         dataLineCount++;
 
-        if (eventName === 'stats') {
+        if (eventName === 'queued') {
+          try {
+            const info = JSON.parse(data);
+            loader.remove();
+            if (!queueEl) {
+              queueEl = document.createElement('div');
+              queueEl.className = 'queue-msg';
+              bubble.after(queueEl);
+            }
+            queueEl.textContent = `#${info.topic} · queued — position ${info.position}`;
+          } catch {}
+          eventName = null;
+
+        } else if (eventName === 'stats') {
           try {
             const stats = JSON.parse(data);
             lastSessionId = stats.session_id ?? null;
+            if (queueEl) { queueEl.remove(); queueEl = null; }
             loader.remove();
             statsEl = addStats(bubble, stats, ctxLabel);
           } catch {}
           eventName = null;
+
         } else if (eventName === 'status') {
           statusBuf += data;
           if (!statusEl) {
@@ -249,18 +231,23 @@ async function sendMessage(text) {
           const trimmed = statusBuf.replace(/\s+/g, ' ').trim();
           statusEl.textContent = trimmed.length > 120 ? '…' + trimmed.slice(-117) : trimmed;
           scrollToBottom();
+
         } else if (eventName === 'done' || eventName === 'error') {
           if (statusEl) { statusEl.remove(); statusEl = null; }
+          if (queueEl)  { queueEl.remove();  queueEl  = null; }
           loader.remove();
           eventName = null;
+
         } else {
           if (statusEl) { statusEl.remove(); statusEl = null; }
+          if (queueEl)  { queueEl.remove();  queueEl  = null; }
           if (loader.parentNode === bubble) bubble.after(loader);
           if (dataLineCount > 1) raw += '\n';
           raw += data;
           bubble.innerHTML = marked.parse(raw);
           scrollToBottom();
         }
+
       } else if (line === '') {
         eventName = null;
         dataLineCount = 0;
@@ -268,13 +255,7 @@ async function sendMessage(text) {
     }
   }
 
-  // Record this exchange in session history
-  if (raw) {
-    sessionHistory.push({ role: 'user',      content: text });
-    sessionHistory.push({ role: 'assistant', content: raw  });
-  }
-
-  // Refresh quota, then persist and display the before/after delta
+  // Quota delta
   await fetchQuota(true);
   if (statsEl && quotaDelta != null) {
     statsEl.querySelector('.stats-quota-delta').textContent = `  ·  quota +${quotaDelta}%`;
@@ -289,6 +270,21 @@ async function sendMessage(text) {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+function makeUserBubble(text, topic, alias) {
+  const div = document.createElement('div');
+  div.className = 'msg user';
+  if (topic && topic !== 'default') {
+    const badge = document.createElement('div');
+    badge.className = 'topic-badge';
+    badge.textContent = alias ? `#${topic}@${alias}` : `#${topic}`;
+    div.appendChild(badge);
+  }
+  const content = document.createElement('div');
+  content.textContent = text;
+  div.appendChild(content);
+  return div;
+}
 
 function isAtBottom() {
   return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 80;
@@ -318,16 +314,22 @@ function addStats(bubble, stats, ctxLabel) {
   const cost       = stats.cost_usd != null ? `$${stats.cost_usd.toFixed(4)}` : '';
   const cache      = cacheRead ? ` · ${fmtNum(cacheRead)} cached` : '';
   const dur        = stats.duration_ms ? ` · ${(stats.duration_ms / 1000).toFixed(1)}s` : '';
-  const ctx = ctxLabel != null ? `  · ctx:${ctxLabel}` : '';
+  const ctx        = ctxLabel != null ? `  · ctx:${ctxLabel}` : '';
+
   el.appendChild(document.createTextNode(
     `↑ ${fmtNum(inp)}${cache}  ↓ ${fmtNum(out)} tokens${cost ? '  ·  ' + cost : ''}${dur}${ctx}`
   ));
+
   const qdSpan = document.createElement('span');
   qdSpan.className = 'stats-quota-delta';
   el.appendChild(qdSpan);
 
-  // Tooltip breakdown
-  const RATES = { 'Cache read': [cacheRead, 0.30], 'Cache write': [cacheWrite, 3.75], 'Input': [input, 3.00], 'Output': [out, 15.00] };
+  const RATES = {
+    'Cache read':  [cacheRead,  0.30],
+    'Cache write': [cacheWrite, 3.75],
+    'Input':       [input,      3.00],
+    'Output':      [out,       15.00],
+  };
   const rows = Object.entries(RATES)
     .filter(([, [n]]) => n > 0)
     .map(([label, [n, rate]]) => {
@@ -336,12 +338,20 @@ function addStats(bubble, stats, ctxLabel) {
     }).join('');
 
   const ctxRow = ctxLabel != null
-    ? `<tr class="ctx-row"><td colspan="4">Context lookback: <b>${ctxLabel === 'off' ? 'off (no history)' : ctxLabel === 'all' ? 'all exchanges' : `${ctxLabel} exchange${ctxLabel !== '1' ? 's' : ''}`}</b></td></tr>`
+    ? `<tr class="ctx-row"><td colspan="4">Context lookback: <b>${
+        ctxLabel === 'off' ? 'off (no history)'
+        : ctxLabel === 'all' ? 'all exchanges'
+        : `${ctxLabel} exchange${ctxLabel !== '1' ? 's' : ''}`
+      }</b></td></tr>`
     : '';
 
   const tooltip = document.createElement('div');
   tooltip.className = 'stats-tooltip';
-  tooltip.innerHTML = `<table><thead><tr><th>Type</th><th>Tokens</th><th>Rate</th><th>Cost</th></tr></thead><tbody>${rows}${ctxRow}</tbody>${cost ? `<tfoot><tr><td colspan="3">Total</td><td>${cost}</td></tr></tfoot>` : ''}</table>`;
+  tooltip.innerHTML = `<table>
+    <thead><tr><th>Type</th><th>Tokens</th><th>Rate</th><th>Cost</th></tr></thead>
+    <tbody>${rows}${ctxRow}</tbody>
+    ${cost ? `<tfoot><tr><td colspan="3">Total</td><td>${cost}</td></tr></tfoot>` : ''}
+  </table>`;
   el.appendChild(tooltip);
 
   bubble.after(el);
@@ -381,10 +391,10 @@ function addMessage(role, content) {
 
 const quotaDisplay = document.getElementById('quota-display');
 let quotaResetAt = null;
-let quotaTimer = null;
-let quotaPct = null;
-let quotaRaw = null;   // raw float from API for DB storage
-let quotaDelta = null;
+let quotaTimer   = null;
+let quotaPct     = null;
+let quotaRaw     = null;
+let quotaDelta   = null;
 
 async function fetchQuota(trackDelta = false) {
   try {
@@ -401,8 +411,8 @@ async function fetchQuota(trackDelta = false) {
       const d = pct - quotaPct;
       quotaDelta = d > 0 ? d : null;
     }
-    quotaRaw = raw;
-    quotaPct = pct;
+    quotaRaw    = raw;
+    quotaPct    = pct;
     quotaResetAt = new Date(session.resets_at).getTime();
 
     const bar = document.getElementById('quota-bar');
@@ -449,10 +459,10 @@ function initQuota() {
 }
 
 function initCreds() {
-  const orgInput  = document.getElementById('creds-org');
-  const keyInput  = document.getElementById('creds-key');
-  const saveBtn   = document.getElementById('creds-save');
-  const status    = document.getElementById('creds-status');
+  const orgInput = document.getElementById('creds-org');
+  const keyInput = document.getElementById('creds-key');
+  const saveBtn  = document.getElementById('creds-save');
+  const status   = document.getElementById('creds-status');
 
   saveBtn.addEventListener('click', async () => {
     const org_id      = orgInput.value.trim();
@@ -479,12 +489,16 @@ function initCreds() {
 // ── usage stats panel ─────────────────────────────────────────────────────────
 
 let statsPeriod = 'daily';
+let statsGroup  = 'time';
 
 async function loadStats() {
   statsContent.innerHTML = '<div class="empty">Loading…</div>';
   let rows;
   try {
-    const res = await fetch(`/stats?period=${statsPeriod}`);
+    const url = statsGroup === 'topic'
+      ? '/stats?group=topic'
+      : `/stats?period=${statsPeriod}`;
+    const res = await fetch(url);
     rows = await res.json();
   } catch {
     statsContent.innerHTML = '<div class="empty">Failed to load.</div>';
@@ -496,16 +510,22 @@ async function loadStats() {
     return;
   }
 
-  let totalSessions = 0, totalIn = 0, totalOut = 0, totalCost = 0;
+  if (statsGroup === 'topic') {
+    renderTopicStats(rows);
+  } else {
+    renderTimeStats(rows);
+  }
+}
 
-  let totalQuotaDelta = 0;
+function renderTimeStats(rows) {
+  let totalSessions = 0, totalIn = 0, totalOut = 0, totalCost = 0, totalQuotaDelta = 0;
   const bodyRows = rows.map(r => {
-    const inp = (r.input_tokens || 0) + (r.cache_read_tokens || 0) + (r.cache_write_tokens || 0);
-    const out = r.output_tokens || 0;
+    const inp  = (r.input_tokens || 0) + (r.cache_read_tokens || 0) + (r.cache_write_tokens || 0);
+    const out  = r.output_tokens || 0;
     const cost = r.cost_usd || 0;
-    const qd = r.quota_delta;
+    const qd   = r.quota_delta;
     totalSessions += r.sessions || 0;
-    totalIn += inp;
+    totalIn  += inp;
     totalOut += out;
     totalCost += cost;
     if (qd != null) totalQuotaDelta += qd;
@@ -522,20 +542,46 @@ async function loadStats() {
   statsContent.innerHTML = `<table>
     <thead><tr>
       <th>${statsPeriod === 'hourly' ? 'Hour' : 'Date'}</th>
-      <th>Sessions</th>
-      <th>Tokens In</th>
-      <th>Tokens Out</th>
-      <th>Cost</th>
-      <th>Quota Δ</th>
+      <th>Sessions</th><th>Tokens In</th><th>Tokens Out</th><th>Cost</th><th>Quota Δ</th>
     </tr></thead>
     <tbody>${bodyRows}</tbody>
     <tfoot><tr>
-      <td>Total</td>
-      <td>${totalSessions}</td>
-      <td>${fmtNum(totalIn)}</td>
-      <td>${fmtNum(totalOut)}</td>
+      <td>Total</td><td>${totalSessions}</td>
+      <td>${fmtNum(totalIn)}</td><td>${fmtNum(totalOut)}</td>
       <td>$${totalCost.toFixed(4)}</td>
       <td>${totalQuotaDelta > 0 ? '+' + totalQuotaDelta.toFixed(1) + '%' : '—'}</td>
+    </tr></tfoot>
+  </table>`;
+}
+
+function renderTopicStats(rows) {
+  let totalSessions = 0, totalIn = 0, totalOut = 0, totalCost = 0;
+  const bodyRows = rows.map(r => {
+    const inp  = r.input_tokens  || 0;
+    const out  = r.output_tokens || 0;
+    const cost = r.cost_usd      || 0;
+    totalSessions += r.sessions || 0;
+    totalIn  += inp;
+    totalOut += out;
+    totalCost += cost;
+    return `<tr>
+      <td>#${r.topic}</td>
+      <td>${r.sessions}</td>
+      <td>${fmtNum(inp)}</td>
+      <td>${fmtNum(out)}</td>
+      <td>$${cost.toFixed(4)}</td>
+    </tr>`;
+  }).join('');
+
+  statsContent.innerHTML = `<table>
+    <thead><tr>
+      <th>Topic</th><th>Sessions</th><th>Tokens In</th><th>Tokens Out</th><th>Cost</th>
+    </tr></thead>
+    <tbody>${bodyRows}</tbody>
+    <tfoot><tr>
+      <td>Total</td><td>${totalSessions}</td>
+      <td>${fmtNum(totalIn)}</td><td>${fmtNum(totalOut)}</td>
+      <td>$${totalCost.toFixed(4)}</td>
     </tr></tfoot>
   </table>`;
 }
@@ -544,9 +590,12 @@ function initStats() {
   statsBtn.addEventListener('click', () => {
     const open = statsPanel.classList.toggle('open');
     statsBtn.classList.toggle('active', open);
+    if (aliasesPanel.classList.contains('open')) {
+      aliasesPanel.classList.remove('open');
+      aliasesBtn.classList.remove('active');
+    }
     if (open) {
-      const topbar = document.getElementById('topbar');
-      statsPanel.style.top = (topbar.offsetHeight + 4) + 'px';
+      statsPanel.style.top = (document.getElementById('topbar').offsetHeight + 4) + 'px';
       loadStats();
     }
   });
@@ -559,10 +608,98 @@ function initStats() {
   document.querySelectorAll('.st').forEach(btn => {
     btn.addEventListener('click', () => {
       statsPeriod = btn.dataset.period;
+      statsGroup  = btn.dataset.group;
       document.querySelectorAll('.st').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       loadStats();
     });
+  });
+}
+
+// ── alias manager ─────────────────────────────────────────────────────────────
+
+async function loadAliases() {
+  const listEl = document.getElementById('aliases-list');
+  listEl.innerHTML = '<div class="empty">Loading…</div>';
+  let aliases;
+  try {
+    const res = await fetch('/config/aliases');
+    aliases = await res.json();
+  } catch {
+    listEl.innerHTML = '<div class="empty">Failed to load.</div>';
+    return;
+  }
+  if (!aliases.length) {
+    listEl.innerHTML = '<div class="empty">No aliases yet. Add one below.</div>';
+    return;
+  }
+  const rows = aliases.map(a => `
+    <tr>
+      <td>${a.name}</td>
+      <td>${a.backend}</td>
+      <td>${a.model || '—'}</td>
+      <td>${a.cwd || '—'}</td>
+      <td><button class="del-btn" data-name="${a.name}">✕</button></td>
+    </tr>`).join('');
+  listEl.innerHTML = `<table>
+    <thead><tr><th>Name</th><th>Backend</th><th>Model</th><th>CWD</th><th></th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+
+  listEl.querySelectorAll('.del-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      await fetch(`/config/aliases/${btn.dataset.name}`, { method: 'DELETE' });
+      loadAliases();
+    });
+  });
+}
+
+function initAliases() {
+  aliasesBtn.addEventListener('click', () => {
+    const open = aliasesPanel.classList.toggle('open');
+    aliasesBtn.classList.toggle('active', open);
+    if (statsPanel.classList.contains('open')) {
+      statsPanel.classList.remove('open');
+      statsBtn.classList.remove('active');
+    }
+    if (open) {
+      aliasesPanel.style.top = (document.getElementById('topbar').offsetHeight + 4) + 'px';
+      loadAliases();
+    }
+  });
+
+  document.getElementById('aliases-close').addEventListener('click', () => {
+    aliasesPanel.classList.remove('open');
+    aliasesBtn.classList.remove('active');
+  });
+
+  const statusEl = document.getElementById('alias-form-status');
+  document.getElementById('alias-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const body = {
+      name:    document.getElementById('af-name').value.trim(),
+      backend: document.getElementById('af-backend').value,
+      model:   document.getElementById('af-model').value.trim() || null,
+      cwd:     document.getElementById('af-cwd').value.trim()   || null,
+    };
+    if (!body.name) return;
+    try {
+      const res = await fetch('/config/aliases', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        statusEl.textContent = 'saved ✓';
+        document.getElementById('af-name').value  = '';
+        document.getElementById('af-model').value = '';
+        document.getElementById('af-cwd').value   = '';
+        loadAliases();
+      } else {
+        statusEl.textContent = 'failed';
+      }
+    } catch { statusEl.textContent = 'error'; }
+    setTimeout(() => { statusEl.textContent = ''; }, 3000);
   });
 }
 
@@ -571,6 +708,6 @@ function initStats() {
 initSettings();
 initHistoryScroll();
 initStats();
+initAliases();
 initQuota();
 initCreds();
-refreshFileHistory();

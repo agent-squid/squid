@@ -383,3 +383,147 @@ button {
   font-weight: 600;
   padding: 0 1.2rem;
 }
+
+/* aliases btn — same style as stats-btn */
+#aliases-btn {
+  background: transparent;
+  border: 1px solid #222;
+  border-radius: 8px;
+  color: #3a3a3a;
+  cursor: pointer;
+  font-size: 0.8em;
+  font-weight: 700;
+  padding: 0 0.6rem;
+  letter-spacing: 0.02em;
+}
+#aliases-btn:hover { color: #555; border-color: #333; }
+#aliases-btn.active { color: #f07040; border-color: #f07040; }
+
+/* aliases panel */
+#aliases-panel {
+  display: none;
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  flex-direction: column;
+  background: #13131c;
+  border: 1px solid #2e2e3e;
+  border-radius: 8px;
+  max-height: 320px;
+  overflow: hidden;
+}
+#aliases-panel.open { display: flex; }
+
+#aliases-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.4rem 0.8rem;
+  border-bottom: 1px solid #1e1e28;
+  font-size: 0.8em;
+  color: #888;
+}
+#aliases-close {
+  background: transparent;
+  border: none;
+  color: #444;
+  cursor: pointer;
+  font-size: 0.85em;
+  padding: 0.1rem 0.3rem;
+}
+#aliases-close:hover { color: #888; }
+
+#aliases-list {
+  overflow-y: auto;
+  flex: 1;
+  font-size: 0.75em;
+}
+#aliases-list table {
+  width: 100%;
+  border-collapse: collapse;
+}
+#aliases-list th, #aliases-list td {
+  padding: 0.3rem 0.75rem;
+  text-align: left;
+  color: #888;
+  white-space: nowrap;
+}
+#aliases-list thead th {
+  color: #555;
+  font-weight: normal;
+  border-bottom: 1px solid #1e1e28;
+  position: sticky;
+  top: 0;
+  background: #13131c;
+}
+#aliases-list tbody tr:hover td { background: #1a1a24; }
+#aliases-list .del-btn {
+  background: transparent;
+  border: 1px solid #333;
+  border-radius: 4px;
+  color: #555;
+  cursor: pointer;
+  font-size: 0.85em;
+  font-weight: normal;
+  padding: 0.05rem 0.4rem;
+}
+#aliases-list .del-btn:hover { color: #e05030; border-color: #e05030; }
+#aliases-list .empty { padding: 1rem; text-align: center; color: #444; }
+
+#alias-form {
+  border-top: 1px solid #1e1e28;
+  padding: 0.4rem 0.6rem;
+}
+.alias-form-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.alias-form-row input, .alias-form-row select {
+  background: #1e1e28;
+  border: 1px solid #2e2e3e;
+  border-radius: 4px;
+  color: #aaa;
+  font-size: 0.72em;
+  padding: 0.25rem 0.5rem;
+}
+#af-name    { width: 80px; }
+#af-backend { width: 80px; }
+#af-model   { width: 160px; }
+#af-cwd     { width: 160px; }
+.alias-form-row button[type=submit] {
+  background: #2a2a35;
+  border: 1px solid #3a3a4a;
+  border-radius: 4px;
+  color: #888;
+  cursor: pointer;
+  font-size: 0.72em;
+  font-weight: normal;
+  padding: 0.25rem 0.7rem;
+}
+.alias-form-row button[type=submit]:hover { color: #f07040; border-color: #f07040; }
+#alias-form-status { font-size: 0.68em; color: #555; }
+
+/* topic badge on user messages */
+.topic-badge {
+  display: inline-block;
+  font-size: 0.72em;
+  color: #f07040;
+  background: rgba(240,112,64,0.12);
+  border: 1px solid rgba(240,112,64,0.25);
+  border-radius: 4px;
+  padding: 0.05rem 0.4rem;
+  margin-bottom: 0.3rem;
+  letter-spacing: 0.02em;
+}
+
+/* queue position indicator */
+.queue-msg {
+  font-size: 0.75em;
+  color: #555;
+  font-style: italic;
+  padding: 0.1rem 0.9rem 0.3rem;
+  align-self: flex-start;
+}

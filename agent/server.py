@@ -4,59 +4,59 @@ server.py — Chat relay server.
 Endpoints
 ---------
 POST /chat
-    Body (JSON): { "message": "...", "backend": "auto|claude|codex", "cwd": "/optional/path" }
-    Response: text/event-stream  (SSE)
+    Body: { message, topic?, alias?, lookback? }
+    Response: text/event-stream
 
-    SSE event format:
-        data: <text chunk>          — streamed content
-        event: done                 — stream finished cleanly
-        event: error\ndata: <msg>  — something went wrong
-
+GET /history?topic=X&offset=0&limit=10
+GET /topics
+GET /config/aliases
+POST /config/aliases
+DELETE /config/aliases/{name}
+GET /stats?period=daily|hourly  or  ?group=topic
+POST /stats/quota-delta
+POST /config/creds
+GET /quota
 GET /health
-    Returns JSON with which CLIs are available.
-
-Usage
------
-    uvicorn agent.server:app --port 8000
-
-Then from a terminal:
-    curl -N -X POST http://localhost:8000/chat \
-         -H 'Content-Type: application/json' \
-         -d '{"message": "write a hello world in Python"}'
 """
 
 import asyncio
 import json
 import logging
 import os
-from typing import AsyncGenerator, Literal, Optional
+from pathlib import Path
+from typing import AsyncGenerator, Literal, Optional, Union
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pathlib import Path
 from pydantic import BaseModel, Field
 
 from .config import CLAUDE_PATH, CODEX_PATH
 from .runners import run_auto, run_claude, run_codex, CLINotFoundError, CLIError
 from .history import list_history
-from .stats_db import init_db, save_stats, get_aggregated_stats, save_quota_delta
+from .topic_queue import TopicDispatcher
+from .stats_db import (
+    init_db, save_stats, get_aggregated_stats, save_quota_delta, get_stats_by_topic,
+    get_alias, upsert_alias, delete_alias, list_aliases,
+    get_topic, upsert_topic, list_topics,
+    insert_user_message, insert_assistant_message, update_assistant_message,
+    get_context_history,
+)
 from . import creds
 
-_SERVER_CWD = os.getcwd()
-
 init_db()
-
-# ---------------------------------------------------------------------------
-# App setup
-# ---------------------------------------------------------------------------
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 log = logging.getLogger(__name__)
 
+dispatcher = TopicDispatcher()
+
+# ---------------------------------------------------------------------------
+# App + health check helpers
+# ---------------------------------------------------------------------------
+
 def _claude_logged_in() -> bool:
-    """Returns True if claude reports a logged-in session."""
     if not CLAUDE_PATH:
         return False
     try:
@@ -72,21 +72,17 @@ def _claude_logged_in() -> bool:
 
 
 def _check_deps():
-    import os as _os
     missing, warnings = [], []
-
     if not CLAUDE_PATH:
         missing.append("claude  →  npm install -g @anthropic-ai/claude-code")
     elif not _claude_logged_in():
         warnings.append("claude is installed but not logged in  →  run: claude login")
-
     if not CODEX_PATH:
         missing.append("codex   →  npm install -g @openai/codex")
-    elif not _os.environ.get("OPENAI_API_KEY"):
+    elif not os.environ.get("OPENAI_API_KEY"):
         warnings.append("codex is installed but OPENAI_API_KEY is not set")
-
     if missing:
-        log.warning("Missing CLI tools (run ./install.sh):\n  " + "\n  ".join(missing))
+        log.warning("Missing CLI tools:\n  " + "\n  ".join(missing))
     if warnings:
         log.warning("Auth issues:\n  " + "\n  ".join(warnings))
     if not missing and not warnings:
@@ -94,20 +90,28 @@ def _check_deps():
 
 _check_deps()
 
-app = FastAPI(title="Squid", version="0.1.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="Squid", version="0.2.0")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 UI_DIR = Path(__file__).parent.parent / "ui"
 
 # ---------------------------------------------------------------------------
-# Request schema
+# Request schemas
 # ---------------------------------------------------------------------------
+
+class ChatRequest(BaseModel):
+    message: str = Field(..., min_length=1)
+    topic: str = Field("default")
+    alias: Optional[str] = None
+    lookback: Union[int, Literal["all"]] = Field(5)
+
+
+class AliasRequest(BaseModel):
+    name: str = Field(..., min_length=1)
+    backend: Literal["auto", "claude", "codex"] = "auto"
+    model: Optional[str] = None
+    cwd: Optional[str] = None
+
 
 class CredsRequest(BaseModel):
     org_id: str = Field(..., min_length=1)
@@ -119,20 +123,12 @@ class QuotaDeltaRequest(BaseModel):
     before: float
     after: float
 
-
-class ChatRequest(BaseModel):
-    message: str = Field(..., min_length=1)
-    backend: Literal["auto", "claude", "codex"] = Field("auto")
-    cwd: Optional[str] = Field(None)
-    history: list[dict] = Field(default_factory=list)
-
 # ---------------------------------------------------------------------------
 # SSE helpers
 # ---------------------------------------------------------------------------
 
 def sse_chunk(data: str) -> str:
-    escaped = data.replace("\n", "\ndata:")
-    return f"data:{escaped}\n\n"
+    return "data:" + data.replace("\n", "\ndata:") + "\n\n"
 
 def sse_event(event: str, data: str = "") -> str:
     lines = f"event: {event}\n"
@@ -140,39 +136,73 @@ def sse_event(event: str, data: str = "") -> str:
         lines += f"data: {data}\n"
     return lines + "\n"
 
+# ---------------------------------------------------------------------------
+# Streaming response generator
+# ---------------------------------------------------------------------------
+
 async def stream_response(
     message: str,
+    topic: str,
+    alias: Optional[str],
     backend: str,
+    model: Optional[str],
     cwd: Optional[str],
-    history: list[dict],
+    context_history: list[dict],
+    asst_msg_id: int,
 ) -> AsyncGenerator[str, None]:
-    runner = {"auto": run_auto, "claude": run_claude, "codex": run_codex}[backend]
+    out_q, seq, worker = await dispatcher.dispatch(
+        topic=topic, prompt=message, context_history=context_history,
+        backend=backend, model=model, cwd=cwd, alias=alias,
+    )
+
+    raw = ""
+    session_id: Optional[str] = None
+
     try:
-        async for chunk in runner(message, cwd=cwd, history=history):
+        while True:
+            position = worker.position_of(seq)
+            if position > 0:
+                yield sse_event("queued", json.dumps({"topic": topic, "position": position}))
+
+            try:
+                chunk = await asyncio.wait_for(out_q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+
+            if chunk is None:  # sentinel — worker finished
+                break
+
+            if isinstance(chunk, dict) and "_error" in chunk:
+                yield sse_event("error", chunk["_error"])
+                update_assistant_message(asst_msg_id, raw, session_id, "error")
+                return
+
             if isinstance(chunk, dict) and "_stats" in chunk:
                 stats = chunk["_stats"]
                 session_id = stats.pop("session_id", None)
                 if session_id:
-                    save_stats(session_id, stats)
-                    stats["session_id"] = session_id  # echo back for client quota association
+                    save_stats(session_id, stats, topic=topic)
+                    stats["session_id"] = session_id
                 yield sse_event("stats", json.dumps(stats))
+
             elif isinstance(chunk, dict) and "_status" in chunk:
-                status_text = chunk["_status"].replace("\n", " ")
-                if status_text:
-                    yield sse_event("status", status_text)
+                text = chunk["_status"].replace("\n", " ")
+                if text:
+                    yield sse_event("status", text)
+
             else:
+                raw += chunk
                 yield sse_chunk(chunk)
+
             await asyncio.sleep(0)
+
+        update_assistant_message(asst_msg_id, raw, session_id, "done")
         yield sse_event("done")
-    except CLINotFoundError as exc:
-        log.warning("CLI not found: %s", exc)
-        yield sse_event("error", str(exc))
-    except CLIError as exc:
-        log.error("CLI error: %s", exc)
-        yield sse_event("error", str(exc))
+
     except Exception as exc:
-        log.exception("Unexpected error")
-        yield sse_event("error", f"Internal server error: {exc}")
+        log.exception("Unexpected error in stream_response")
+        yield sse_event("error", f"Internal error: {exc}")
+        update_assistant_message(asst_msg_id, raw, session_id, "error")
 
 # ---------------------------------------------------------------------------
 # Routes
@@ -180,9 +210,38 @@ async def stream_response(
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
-    log.info("chat  backend=%s  cwd=%s  history=%d  msg=%.80r", req.backend, req.cwd, len(req.history), req.message)
+    # Resolve alias config: explicit alias wins, else use topic's stored alias
+    resolved_alias: Optional[str] = req.alias
+    alias_config: dict = {}
+
+    if req.alias:
+        alias_config = get_alias(req.alias) or {}
+        upsert_topic(req.topic, req.alias)
+    else:
+        topic_row = get_topic(req.topic)
+        if topic_row:
+            resolved_alias = topic_row.get("alias")
+            if resolved_alias:
+                alias_config = get_alias(resolved_alias) or {}
+        upsert_topic(req.topic)
+
+    backend = alias_config.get("backend") or "auto"
+    model: Optional[str] = alias_config.get("model")
+    raw_cwd: Optional[str] = alias_config.get("cwd")
+    cwd = str(Path(raw_cwd).expanduser()) if raw_cwd else None
+
+    lookback = 10_000 if req.lookback == "all" else int(req.lookback)
+    context_history = get_context_history(req.topic, lookback)
+
+    user_msg_id = insert_user_message(req.topic, resolved_alias, backend, model, req.message)
+    asst_msg_id = insert_assistant_message(req.topic, resolved_alias, backend, model, user_msg_id)
+
+    log.info(
+        "chat  topic=%s  alias=%s  backend=%s  model=%s  lookback=%d  msg=%.80r",
+        req.topic, resolved_alias, backend, model, lookback, req.message,
+    )
     return StreamingResponse(
-        stream_response(req.message, req.backend, req.cwd, req.history),
+        stream_response(req.message, req.topic, resolved_alias, backend, model, cwd, context_history, asst_msg_id),
         media_type="text/event-stream",
         headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
     )
@@ -200,12 +259,42 @@ async def health():
 
 
 @app.get("/history")
-async def history(offset: int = 0, limit: int = 5, cwd: Optional[str] = None):
-    return JSONResponse(list_history(cwd or _SERVER_CWD, offset=offset, limit=limit))
+async def history(offset: int = 0, limit: int = 5, topic: Optional[str] = None):
+    return JSONResponse(list_history(topic=topic, offset=offset, limit=limit))
+
+
+@app.get("/topics")
+async def topics_list():
+    db_topics = list_topics()
+    queue_map = {t["name"]: t for t in dispatcher.topics_info()}
+    for t in db_topics:
+        info = queue_map.get(t["name"], {})
+        t["queue_depth"] = info.get("queue_depth", 0)
+        t["active"] = info.get("active", False)
+    return JSONResponse(db_topics)
+
+
+@app.get("/config/aliases")
+async def get_aliases():
+    return JSONResponse(list_aliases())
+
+
+@app.post("/config/aliases")
+async def create_alias(req: AliasRequest):
+    upsert_alias(req.name, req.backend, req.model, req.cwd)
+    return JSONResponse({"ok": True})
+
+
+@app.delete("/config/aliases/{name}")
+async def remove_alias(name: str):
+    deleted = delete_alias(name)
+    return JSONResponse({"ok": deleted})
 
 
 @app.get("/stats")
-async def usage_stats(period: str = "daily"):
+async def usage_stats(period: str = "daily", group: str = "time"):
+    if group == "topic":
+        return JSONResponse(get_stats_by_topic())
     return JSONResponse(get_aggregated_stats(period))
 
 
@@ -243,6 +332,5 @@ async def quota():
         return JSONResponse({"error": str(exc)}, status_code=502)
 
 
-# Mount UI static files last so API routes take precedence
 if UI_DIR.exists():
     app.mount("/", StaticFiles(directory=UI_DIR, html=True), name="ui")

@@ -12,7 +12,8 @@
     <header id="topbar">
       <img src="squid.jpg" id="logo" alt="Squid" />
       <span id="logo-name">agent-squid</span>
-      <div id="quota-display" title="Session usage · click for settings"></div>
+      <div id="quota-display" title="Session usage · click for credentials"></div>
+      <button id="aliases-btn" type="button" title="Model aliases">A</button>
       <button id="stats-btn" type="button" title="Usage stats">
         <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true">
           <rect x="1" y="7" width="3" height="6" rx="0.5"/>
@@ -28,33 +29,62 @@
         <span id="creds-status"></span>
       </div>
     </header>
+
+    <!-- Stats panel -->
     <div id="stats-panel">
       <div id="stats-header">
         <div id="stats-tabs">
-          <button class="st active" data-period="daily">Daily</button>
-          <button class="st" data-period="hourly">Hourly</button>
+          <button class="st active" data-period="daily" data-group="time">Daily</button>
+          <button class="st" data-period="hourly" data-group="time">Hourly</button>
+          <button class="st" data-period="" data-group="topic">By Topic</button>
         </div>
         <button id="stats-close" type="button">✕</button>
       </div>
       <div id="stats-content"></div>
     </div>
+
+    <!-- Aliases panel -->
+    <div id="aliases-panel">
+      <div id="aliases-header">
+        <span>Model Aliases</span>
+        <button id="aliases-close" type="button">✕</button>
+      </div>
+      <div id="aliases-list"></div>
+      <form id="alias-form">
+        <div class="alias-form-row">
+          <input id="af-name"    type="text" placeholder="name" spellcheck="false" required />
+          <select id="af-backend">
+            <option value="auto">auto</option>
+            <option value="claude">claude</option>
+            <option value="codex">codex</option>
+          </select>
+          <input id="af-model"   type="text" placeholder="model (e.g. gpt-4o)" spellcheck="false" />
+          <input id="af-cwd"     type="text" placeholder="cwd (rel to ~)" spellcheck="false" />
+          <button type="submit">Save</button>
+          <span id="alias-form-status"></span>
+        </div>
+      </form>
+    </div>
+
     <div id="messages"></div>
     <button id="scroll-btn" aria-label="Scroll to bottom">↓</button>
+
     <div id="settings-bar">
       <span class="settings-label">Lookback</span>
       <div id="lookback-control">
-        <button class="lb active" data-val="0">Off</button>
+        <button class="lb" data-val="0">Off</button>
         <button class="lb" data-val="1">1</button>
         <button class="lb" data-val="2">2</button>
         <button class="lb" data-val="3">3</button>
-        <button class="lb" data-val="5">5</button>
+        <button class="lb active" data-val="5">5</button>
         <button class="lb" data-val="10">10</button>
         <button class="lb" data-val="all">All</button>
       </div>
-      <span class="settings-hint">exchanges sent as context per message</span>
+      <span class="settings-hint">exchanges per topic sent as context</span>
     </div>
+
     <form id="form">
-      <textarea id="input" placeholder="Message..." rows="1"></textarea>
+      <textarea id="input" placeholder="#topic or #topic@alias message…" rows="1"></textarea>
       <button id="settings-btn" type="button" title="Settings">⚙</button>
       <button type="submit">Send</button>
     </form>
