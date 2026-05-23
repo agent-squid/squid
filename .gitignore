@@ -6,5 +6,4 @@ dist/
 .env
 *.log
 squid.db
-stats.db
 squid-creds.json

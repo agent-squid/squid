@@ -46,13 +46,18 @@ function initSettings() {
     });
   });
 
-  document.getElementById('reset-pins-btn').addEventListener('click', async () => {
-    await fetch('/chat/reset-pins', { method: 'POST' });
-    document.querySelectorAll('.pin-btn.pinned, .pin-btn.excluded').forEach(b => {
-      b.classList.remove('pinned', 'excluded');
-      const pos = b.dataset.topicPos ? parseInt(b.dataset.topicPos) : null;
-      b.classList.toggle('active', _inLookbackWindow(pos));
-    });
+  document.getElementById('reset-pins-btn').addEventListener('click', async (e) => {
+    const resetBtn = e.currentTarget;
+    resetBtn.disabled = true;
+    try {
+      await fetch('/chat/reset-pins', { method: 'POST' });
+      document.querySelectorAll('.pin-btn.pinned, .pin-btn.excluded').forEach(b => {
+        b.classList.remove('pinned', 'excluded');
+      });
+      updatePinBtnStates();
+    } finally {
+      resetBtn.disabled = false;
+    }
   });
 }
 
@@ -292,6 +297,11 @@ function showCmdFeedback(text) {
   return el;
 }
 
+function resizeComposer() {
+  input.style.height = 'auto';
+  input.style.height = `${input.scrollHeight}px`;
+}
+
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   const text = input.value.trim();
@@ -300,12 +310,16 @@ form.addEventListener('submit', async (e) => {
   const cmd = parseCommand(message);
   if (cmd) {
     input.value = '';
+    resizeComposer();
     await handleCommand(cmd, topic);
     return;
   }
   input.value = '';
+  resizeComposer();
   sendMessage(text);
 });
+
+input.addEventListener('input', resizeComposer);
 
 input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -555,8 +569,8 @@ function _inLookbackWindow(topicPos) {
 function updatePinBtnStates() {
   document.querySelectorAll('.pin-btn').forEach(pb => {
     if (pb.classList.contains('pinned') || pb.classList.contains('excluded')) return;
-    if (!pb.dataset.topicPos) return;
-    pb.classList.toggle('active', _inLookbackWindow(parseInt(pb.dataset.topicPos)));
+    const pos = pb.dataset.topicPos ? parseInt(pb.dataset.topicPos) : null;
+    pb.classList.toggle('active', _inLookbackWindow(pos));
   });
 }
 

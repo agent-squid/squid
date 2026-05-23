@@ -2,9 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Squid</title>
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css?v=20260523-5" />
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
@@ -90,9 +90,14 @@
         <textarea id="input" placeholder="#topic or #topic@alias message…" rows="1"></textarea>
       </div>
       <button id="settings-btn" type="button" title="Settings">⚙</button>
-      <button type="submit">Send</button>
+      <button id="send-btn" type="submit" aria-label="Send message">
+        <span class="send-label">Send</span>
+        <svg class="send-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+          <path d="M3 9h11M10 5l4 4-4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
     </form>
   </div>
-  <script src="app.js"></script>
+  <script src="app.js?v=20260523-2"></script>
 </body>
 </html>
