@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import AsyncGenerator, Literal, Optional, Union
 
@@ -116,7 +117,7 @@ class AliasRequest(BaseModel):
     name: str = Field(..., min_length=1)
     backend: Literal["auto", "claude", "codex", "copilot"] = "auto"
     model: Optional[str] = None
-    cwd: Optional[str] = None
+    cwd: Optional[str] = None   # abs path; None = /tmp/squid (bare default)
     timeout: Optional[int] = None  # seconds; None = use global default
 
 
@@ -164,12 +165,14 @@ async def stream_response(
 
     out_q, seq, worker = await dispatcher.dispatch(
         topic=topic, prompt=message, context_history=context_history,
-        backend=backend, model=model, cwd=cwd, alias=alias,
+        backend=backend, model=model, alias=alias, cwd=cwd,
         response_timeout=response_timeout,
     )
 
     raw = ""
+    status_raw = ""
     session_id: Optional[str] = None
+    last_partial_save = time.monotonic()
 
     try:
         while True:
@@ -200,6 +203,7 @@ async def stream_response(
                 yield sse_event("stats", json.dumps(stats))
 
             elif isinstance(chunk, dict) and "_status" in chunk:
+                status_raw += chunk["_status"]
                 text = chunk["_status"].replace("\n", " ")
                 if text:
                     yield sse_event("status", text)
@@ -207,9 +211,16 @@ async def stream_response(
             else:
                 raw += chunk
                 yield sse_chunk(chunk)
+                now = time.monotonic()
+                if raw and now - last_partial_save >= 3.0:
+                    update_assistant_message(asst_msg_id, raw, session_id, "pending")
+                    last_partial_save = now
 
             await asyncio.sleep(0)
 
+        if not raw and status_raw:
+            raw = status_raw
+            yield sse_chunk(raw)
         update_assistant_message(asst_msg_id, raw, session_id, "done")
         yield sse_event("done")
 
@@ -242,12 +253,7 @@ async def chat(req: ChatRequest):
 
     backend = alias_config.get("backend") or "auto"
     model: Optional[str] = alias_config.get("model") or None
-    raw_cwd: Optional[str] = alias_config.get("cwd")
-    if raw_cwd:
-        p = Path(raw_cwd).expanduser()
-        cwd = str(p if p.is_absolute() else Path.home() / p)
-    else:
-        cwd = str(Path.home())  # default: home dir so CLAUDE.md is picked up
+    cwd: Optional[str] = alias_config.get("cwd") or None
     response_timeout: Optional[int] = alias_config.get("timeout")
 
     lookback = 10_000 if req.lookback == "all" else int(req.lookback)
@@ -329,7 +335,7 @@ async def toggle_pin(msg_id: int, req: PinRequest):
 
 @app.get("/topics")
 async def topics_list():
-    db_topics = list_topics()
+    db_topics = get_topics_summary()  # ordered by recency, includes last_prompt
     queue_map = {t["name"]: t for t in dispatcher.topics_info()}
     for t in db_topics:
         info = queue_map.get(t["name"], {})

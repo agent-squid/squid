@@ -4,7 +4,6 @@ topic_queue.py — Per-topic FIFO queues with parallel execution across topics.
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 log = logging.getLogger(__name__)
@@ -19,7 +18,7 @@ class QueueItem:
     context_history: list[dict]
     backend: str
     model: Optional[str]
-    cwd: Optional[str]
+    cwd: Optional[str] = None
     timeout: Optional[int] = None
     out_q: asyncio.Queue = field(default_factory=asyncio.Queue)
 
@@ -108,12 +107,13 @@ class TopicWorker:
 
     async def _process(self, item: QueueItem):
         from .runners import run_auto, run_claude, run_codex, run_copilot
+        from .config import SQUID_HOME
         runner = {"auto": run_auto, "claude": run_claude, "codex": run_codex, "copilot": run_copilot}.get(
             item.backend, run_auto
         )
-        cwd = str(Path(item.cwd).expanduser()) if item.cwd else None
         async for chunk in runner(
-            item.prompt, cwd=cwd, history=item.context_history, model=item.model,
+            item.prompt, history=item.context_history, model=item.model,
+            cwd=item.cwd or SQUID_HOME,
             topic=item.topic, alias=item.alias or "",
             response_timeout=item.timeout,
         ):
@@ -138,8 +138,8 @@ class TopicDispatcher:
         context_history: list[dict],
         backend: str,
         model: Optional[str],
-        cwd: Optional[str],
         alias: Optional[str] = None,
+        cwd: Optional[str] = None,
         response_timeout: Optional[int] = None,
     ) -> tuple[asyncio.Queue, int, TopicWorker]:
         worker = self._get_or_create(topic)

@@ -249,6 +249,41 @@ body {
 }
 #scroll-btn.visible { display: block; }
 
+/* command panel */
+#cmd-panel {
+  display: none;
+  flex-direction: column;
+  flex-shrink: 0;
+  background: #13131c;
+  border: 1px solid #2e2e3e;
+  border-radius: 8px;
+  max-height: 260px;
+  overflow: hidden;
+}
+#cmd-panel.open { display: flex; }
+#cmd-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid #1e1e28;
+}
+#cmd-panel-close {
+  background: transparent;
+  border: none;
+  color: #444;
+  cursor: pointer;
+  font-size: 0.85em;
+  padding: 0.1rem 0.3rem;
+}
+#cmd-panel-close:hover { color: #888; }
+#cmd-panel-content {
+  min-height: 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 /* settings bar */
 #settings-bar {
   display: none;
@@ -620,6 +655,19 @@ button {
     bottom: calc(4.5rem + env(safe-area-inset-bottom));
   }
 
+  #cmd-panel {
+    max-height: min(46dvh, 340px);
+  }
+
+  #cmd-panel-header {
+    padding: 0.45rem 0.6rem;
+  }
+
+  #cmd-panel-close {
+    flex: 0 0 34px;
+    min-height: 34px;
+  }
+
   #settings-bar {
     max-height: none;
     overflow: visible;
@@ -705,6 +753,7 @@ button {
 #aliases-list .edit-btn:hover { color: #6090e0; border-color: #6090e0; }
 #aliases-list .del-btn:hover { color: #e05030; border-color: #e05030; }
 #aliases-list .empty { padding: 1rem; text-align: center; color: #444; }
+#aliases-list .col-default { color: #3a3a4a; font-style: italic; }
 
 #alias-form {
   border-top: 1px solid #1e1e28;
@@ -741,6 +790,30 @@ button {
 }
 .alias-form-row button[type=submit]:hover { color: #f07040; border-color: #f07040; }
 #alias-form-status { font-size: 0.68em; color: #555; }
+
+/* autocomplete dropdown */
+#autocomplete {
+  display: none;
+  flex-direction: column;
+  background: #13131c;
+  border: 1px solid #2e2e3e;
+  border-radius: 8px;
+  overflow-y: auto;
+  max-height: 200px;
+  flex-shrink: 0;
+}
+#autocomplete.open { display: flex; }
+.ac-item { padding: 0.35rem 0.75rem; cursor: pointer; font-size: 0.8em; }
+.ac-item:hover, .ac-item.selected { background: #1e1e28; }
+.ac-row { display: flex; align-items: center; gap: 0; overflow: hidden; }
+.ac-name  { color: #f07040; font-family: ui-monospace, monospace; font-weight: 600; flex-shrink: 0; }
+.ac-model { color: #f07040; font-family: ui-monospace, monospace; font-weight: 600; flex-shrink: 0; }
+.ac-meta  { color: #444; font-size: 0.88em; margin-left: auto; padding-left: 0.5rem; white-space: nowrap; flex-shrink: 0; }
+.ac-sub   { color: #888; font-size: 0.9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; margin-left: 0.5rem; }
+
+@media (max-width: 768px) {
+  .ac-item { padding: 0.5rem 0.75rem; font-size: 0.85em; }
+}
 
 /* inline topic tag — used in user bubbles and response context header */
 .topic-tag {
@@ -827,7 +900,6 @@ button {
 
 /* list command inline topic table */
 .cmd-topic-list {
-  align-self: flex-start;
   font-size: 0.78em;
   font-family: ui-monospace, monospace;
   padding: 0.4rem 0.6rem;
@@ -835,11 +907,18 @@ button {
   flex-direction: column;
   gap: 0.25rem;
 }
-.ctl-row { display: flex; gap: 1rem; align-items: baseline; cursor: pointer; border-radius: 4px; padding: 0.1rem 0.3rem; margin: 0 -0.3rem; }
+.ctl-row { cursor: pointer; border-radius: 4px; padding: 0.1rem 0.3rem; margin: 0 -0.3rem; }
 .ctl-row:hover { background: #1e1e28; }
-.ctl-tag  { color: #f07040; font-weight: 600; min-width: 12ch; flex-shrink: 0; }
-.ctl-prompt { color: #777; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.ctl-time { color: #444455; flex-shrink: 0; }
+.ctl-main {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ctl-tag  { color: #f07040; font-weight: 600; }
+.ctl-prompt { color: #777; }
 
 /* queue position indicator */
 .queue-msg {
@@ -861,11 +940,14 @@ button {
     padding: 0.3rem 0 0;
   }
 
+  .col-model, .col-timeout { display: none; }
+  #af-model, #af-timeout { display: none; }
+
   .alias-form-row {
     align-items: center;
     display: grid;
     gap: 0.25rem;
-    grid-template-columns: 0.75fr 0.8fr 1.1fr 1.1fr 0.8fr auto;
+    grid-template-columns: 0.75fr 0.8fr 1.5fr auto;
   }
 
   .alias-form-row input,
@@ -882,24 +964,10 @@ button {
     padding-inline: 0.55rem;
   }
 
-  #af-model,
-  #af-cwd {
-    grid-column: auto;
-  }
-
   #alias-form-status {
     grid-column: 1 / -1;
     min-height: 0.85rem;
     line-height: 1;
-  }
-
-  .cmd-topic-list {
-    max-width: 100%;
-    overflow-x: auto;
-  }
-
-  .ctl-row {
-    gap: 0.65rem;
   }
 
   .pin-btn {

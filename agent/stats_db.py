@@ -103,8 +103,8 @@ def get_alias(name: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
-def upsert_alias(name: str, backend: str, model: Optional[str], cwd: Optional[str],
-                 timeout: Optional[int] = None) -> None:
+def upsert_alias(name: str, backend: str, model: Optional[str],
+                 cwd: Optional[str] = None, timeout: Optional[int] = None) -> None:
     with _connect() as conn:
         conn.execute(
             """INSERT INTO aliases (name, backend, model, cwd, timeout) VALUES (?, ?, ?, ?, ?)
@@ -130,12 +130,14 @@ def get_topics_summary() -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
             """SELECT t.name, t.alias,
+                      a.model AS last_model,
+                      a.backend AS last_backend,
                       u.content  AS last_prompt,
                       a.created_at AS last_at
                FROM topics t
                LEFT JOIN chat_messages a ON a.id = (
                    SELECT id FROM chat_messages
-                   WHERE topic = t.name AND role = 'assistant' AND status = 'done'
+                   WHERE topic = t.name AND role = 'assistant' AND status IN ('done', 'error')
                    ORDER BY id DESC LIMIT 1
                )
                LEFT JOIN chat_messages u ON u.id = a.reply_to

@@ -11,7 +11,7 @@ COPILOT_CLI  = "copilot"
 FIRST_BYTE_TIMEOUT = 30   # seconds
 
 # Hard cap on total response time per request
-RESPONSE_TIMEOUT = 900    # seconds (15 min default; overridable per alias)
+RESPONSE_TIMEOUT = 1800   # seconds (30 min default; overridable per alias)
 
 # Common install locations not always in subprocess PATH
 _EXTRA_PATHS = [
@@ -39,3 +39,6 @@ def find_cli(name: str) -> Optional[str]:
 CLAUDE_PATH   = find_cli(CLAUDE_CLI)
 CODEX_PATH    = find_cli(CODEX_CLI)
 COPILOT_PATH  = find_cli(COPILOT_CLI)
+
+# Subprocess working directory — symlink created by start.sh pointing to ./context/
+SQUID_HOME = "/tmp/squid"

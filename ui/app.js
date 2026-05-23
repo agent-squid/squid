@@ -7,6 +7,21 @@ const settingsBar = document.getElementById('settings-bar');
 const statsBtn    = document.getElementById('stats-btn');
 const statsPanel  = document.getElementById('stats-panel');
 const statsContent= document.getElementById('stats-content');
+const cmdPanel    = document.getElementById('cmd-panel');
+const cmdPanelContent = document.getElementById('cmd-panel-content');
+const acEl        = document.getElementById('autocomplete');
+
+window.scrollTo(0, 0);
+
+// Android PWA: dvh can be wrong after location.reload(); override with actual visual height
+(function() {
+  function setVh() {
+    const h = (window.visualViewport || window).height;
+    document.body.style.height = h + 'px';
+  }
+  setVh();
+  (window.visualViewport || window).addEventListener('resize', setVh);
+}());
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
@@ -70,6 +85,7 @@ function initSettings() {
 settingsBtn.addEventListener('click', () => {
   const open = settingsBar.classList.toggle('open');
   settingsBtn.classList.toggle('active', open);
+  if (open) closeCommandPanel();
   if (open) loadAliases();
 });
 
@@ -263,35 +279,50 @@ async function handleCommand(cmd, topic) {
 }
 
 function renderTopicList(topics) {
+  cmdPanelContent.innerHTML = '';
   const el = document.createElement('div');
   el.className = 'cmd-topic-list';
   if (!topics.length) {
     el.textContent = 'no topics yet';
-    messages.appendChild(el);
-    scrollToBottom();
+    cmdPanelContent.appendChild(el);
+    openCommandPanel();
     return;
   }
   topics.forEach(t => {
     const row = document.createElement('div');
     row.className = 'ctl-row';
-    const tag    = document.createElement('span');
+    const modelLabel = t.last_model || t.last_backend || t.alias;
+    const tagText = modelLabel ? `#${t.name}@${modelLabel}` : `#${t.name}`;
+    const main = document.createElement('span');
+    main.className = 'ctl-main';
+    const tag = document.createElement('span');
     tag.className = 'ctl-tag';
-    tag.textContent = t.alias ? `#${t.name}@${t.alias}` : `#${t.name}`;
+    tag.textContent = tagText;
     const prompt = document.createElement('span');
     prompt.className = 'ctl-prompt';
     prompt.textContent = t.last_prompt ? truncate(t.last_prompt, 60) : '—';
-    const when = document.createElement('span');
-    when.className = 'ctl-time';
-    when.textContent = t.last_at ? fmtTime(t.last_at) : '—';
-    row.append(tag, prompt, when);
+    main.append(tag, document.createTextNode(' '), prompt);
+    if (t.last_at) row.title = `Last used ${fmtTime(t.last_at)}`;
+    row.append(main);
     row.addEventListener('click', () => {
-      setTopicChip(t.name, t.alias || null);
+      setTopicChip(t.name, null);
+      closeCommandPanel();
       input.focus();
     });
     el.appendChild(row);
   });
-  messages.appendChild(el);
-  messages.scrollTop = messages.scrollHeight;
+  cmdPanelContent.appendChild(el);
+  openCommandPanel();
+}
+
+function openCommandPanel() {
+  settingsBar.classList.remove('open');
+  settingsBtn.classList.remove('active');
+  cmdPanel.classList.add('open');
+}
+
+function closeCommandPanel() {
+  cmdPanel.classList.remove('open');
 }
 
 function showCmdFeedback(text) {
@@ -317,17 +348,26 @@ form.addEventListener('submit', async (e) => {
   if (cmd) {
     input.value = '';
     resizeComposer();
+    hideAutocomplete();
     await handleCommand(cmd, topic);
     return;
   }
   input.value = '';
   resizeComposer();
+  hideAutocomplete();
+  invalidateTopicsCache();
   sendMessage(text);
 });
 
-input.addEventListener('input', resizeComposer);
+input.addEventListener('input', () => { resizeComposer(); updateAutocomplete(); });
 
 input.addEventListener('keydown', (e) => {
+  if (acOpen) {
+    if (e.key === 'ArrowDown') { e.preventDefault(); acSel = Math.min(acSel + 1, acItems.length - 1); _acHighlight(); return; }
+    if (e.key === 'ArrowUp')   { e.preventDefault(); acSel = Math.max(acSel - 1, -1); _acHighlight(); return; }
+    if (e.key === 'Tab' || (e.key === 'Enter' && acSel >= 0)) { e.preventDefault(); _acSelect(acSel >= 0 ? acSel : 0); return; }
+    if (e.key === 'Escape') { hideAutocomplete(); return; }
+  }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     form.requestSubmit();
@@ -369,7 +409,12 @@ async function sendMessage(text) {
   function freezeThinking() {
     if (thinkingFrozen) return;
     thinkingFrozen = true;
-    thinkingBubble.remove();
+    if (statusBuf.trim()) {
+      if (thinkingLoader.parentNode) thinkingLoader.remove();
+      thinkingContent.textContent = statusBuf.replace(/\s+/g, ' ').trim();
+    } else {
+      thinkingBubble.remove();
+    }
   }
 
   requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
@@ -398,111 +443,214 @@ async function sendMessage(text) {
   let lastSessionId = null;
   let statsEl = null;
   let doneTime = null;
+  let msgId = null;
+  let statusTimer = null;
+  let completedFromStatus = false;
+  let raw = '';
+  const controller = new AbortController();
 
   const ctxLabel = lookback === 0 ? 'off' : lookback === 'all' ? 'all' : String(lookback);
 
-  const res = await fetch('/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, topic, alias, lookback }),
-  });
-
-  const reader  = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = '';
-  let raw = '';
-  let eventName = null;
-  let dataLineCount = 0;
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buf += decoder.decode(value, { stream: true });
-    const lines = buf.split('\n');
-    buf = lines.pop();
-
-    for (const line of lines) {
-      if (line.startsWith('event:')) {
-        eventName = line.slice(6).trim();
-        dataLineCount = 0;
-      } else if (line.startsWith('data:')) {
-        const data = line.slice(5);
-        dataLineCount++;
-
-        if (eventName === 'meta') {
-          try {
-            const meta = JSON.parse(data);
-            const label = meta.alias || meta.backend;
-            const fullTag = `#${topic}@${label}`;
-            responseHeaderTag.textContent = fullTag;
-            if (userTopicTag) userTopicTag.textContent = fullTag + ' ';
-            if (meta.msg_id) pinBtn.dataset.msgId = meta.msg_id;
-          } catch {}
-          eventName = null;
-
-        } else if (eventName === 'queued') {
-          try {
-            const info = JSON.parse(data);
-            setThinkingText(`#${info.topic} · queued — position ${info.position}`);
-          } catch {}
-          eventName = null;
-
-        } else if (eventName === 'stats') {
-          try {
-            const stats = JSON.parse(data);
-            lastSessionId = stats.session_id ?? null;
-            statsEl = addStats(bubble, stats, ctxLabel, new Date().toISOString());
-          } catch {}
-          eventName = null;
-
-        } else if (eventName === 'status') {
-          statusBuf += data;
-          const trimmed = statusBuf.replace(/\s+/g, ' ').trim();
-          setThinkingText(trimmed.length > 120 ? '…' + trimmed.slice(-117) : trimmed);
-          // no eventName reset — allow multi-line accumulation
-
-        } else if (eventName === 'done') {
-          freezeThinking();
-          doneTime = new Date().toISOString();
-          eventName = null;
-
-        } else if (eventName === 'error') {
-          freezeThinking();
-          if (!firstDataReceived) {
-            firstDataReceived = true;
-            messages.appendChild(bubble);
-            messages.scrollTop = messages.scrollHeight;
-          }
-          const errLine = data.trim();
-          const errDisplay = errLine.split('\n')[0].replace(/^CLI exited \d+:\s*/, '');
-          contentDiv.innerHTML = `<span class="msg-error">${errDisplay}</span>`;
-          scrollToBottom();
-          eventName = null;
-
-        } else {
-          // Actual response content — reveal the response bubble on first chunk
-          if (!firstDataReceived) {
-            firstDataReceived = true;
-            freezeThinking();
-            messages.appendChild(bubble);
-            requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
-          }
-          if (dataLineCount > 1) raw += '\n';
-          raw += data;
-          contentDiv.innerHTML = marked.parse(raw);
-          scrollToBottom();
-        }
-
-      } else if (line === '') {
-        eventName = null;
-        dataLineCount = 0;
-      }
-    }
+  function revealResponseBubble() {
+    if (firstDataReceived) return;
+    firstDataReceived = true;
+    freezeThinking();
+    messages.appendChild(bubble);
+    requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
   }
 
-  if (!thinkingFrozen) freezeThinking();
-  if (!statsEl && doneTime && firstDataReceived) addTimestamp(bubble, doneTime, false);
+  function stopStatusFallback() {
+    if (!statusTimer) return;
+    clearInterval(statusTimer);
+    statusTimer = null;
+  }
+
+  function showError(text) {
+    revealResponseBubble();
+    const errDisplay = (text || 'Response interrupted.')
+      .split('\n')[0]
+      .replace(/^CLI exited \d+:\s*/, '')
+      .trim();
+    contentDiv.innerHTML = `<span class="msg-error">${errDisplay || 'Response interrupted.'}</span>`;
+    scrollToBottom();
+  }
+
+  function showStoredResponse(content) {
+    revealResponseBubble();
+    raw = content || '';
+    contentDiv.innerHTML = marked.parse(raw);
+    scrollToBottom();
+  }
+
+  function startStatusFallback(id) {
+    if (statusTimer || !id) return;
+    statusTimer = setInterval(async () => {
+      try {
+        const statusRes = await fetch(`/chat/${id}/status`);
+        if (!statusRes.ok) return;
+        const data = await statusRes.json();
+        if (data.status === 'done') {
+          completedFromStatus = true;
+          stopStatusFallback();
+          doneTime = new Date().toISOString();
+          showStoredResponse(data.content || '');
+          controller.abort();
+        } else if (data.status === 'error') {
+          completedFromStatus = true;
+          stopStatusFallback();
+          showError(data.content || 'Response interrupted.');
+          controller.abort();
+        }
+      } catch {}
+    }, 2000);
+  }
+
+  try {
+    const res = await fetch('/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, topic, alias, lookback }),
+      signal: controller.signal,
+    });
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+
+    const reader  = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let eventName = null;
+    let dataLineCount = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+
+      for (const line of lines) {
+        if (line.startsWith('event:')) {
+          eventName = line.slice(6).trim();
+          dataLineCount = 0;
+        } else if (line.startsWith('data:')) {
+          const data = line.slice(5);
+          dataLineCount++;
+
+          if (eventName === 'meta') {
+            try {
+              const meta = JSON.parse(data);
+              const label = meta.alias || meta.backend;
+              const fullTag = `#${topic}@${label}`;
+              responseHeaderTag.textContent = fullTag;
+              if (userTopicTag) userTopicTag.textContent = fullTag + ' ';
+              if (meta.msg_id) {
+                msgId = meta.msg_id;
+                pinBtn.dataset.msgId = msgId;
+                startStatusFallback(msgId);
+              }
+            } catch {}
+            eventName = null;
+
+          } else if (eventName === 'queued') {
+            try {
+              const info = JSON.parse(data);
+              setThinkingText(`#${info.topic} · queued — position ${info.position}`);
+            } catch {}
+            eventName = null;
+
+          } else if (eventName === 'stats') {
+            try {
+              const stats = JSON.parse(data);
+              lastSessionId = stats.session_id ?? null;
+              statsEl = addStats(bubble, stats, ctxLabel, new Date().toISOString());
+            } catch {}
+            eventName = null;
+
+          } else if (eventName === 'status') {
+            statusBuf += data;
+            const trimmed = statusBuf.replace(/\s+/g, ' ').trim();
+            setThinkingText(trimmed.length > 120 ? '…' + trimmed.slice(-117) : trimmed);
+            // no eventName reset — allow multi-line accumulation
+
+          } else if (eventName === 'done') {
+            stopStatusFallback();
+            freezeThinking();
+            doneTime = new Date().toISOString();
+            eventName = null;
+            // Assign proper topicPos now that this exchange is complete:
+            // it becomes position 1; all previously loaded exchanges shift by 1.
+            historyGlobalCount++;
+            document.querySelectorAll('.pin-btn[data-topic-pos]').forEach(pb => {
+              pb.dataset.topicPos = String(parseInt(pb.dataset.topicPos) + 1);
+            });
+            pinBtn.dataset.topicPos = '1';
+            updatePinBtnStates();
+
+          } else if (eventName === 'error') {
+            stopStatusFallback();
+            const errLine = data.trim();
+            showError(errLine);
+            eventName = null;
+
+          } else {
+            // Actual response content — reveal the response bubble on first chunk
+            if (!firstDataReceived) {
+              firstDataReceived = true;
+              freezeThinking();
+              messages.appendChild(bubble);
+              requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
+            }
+            if (dataLineCount > 1) raw += '\n';
+            raw += data;
+            contentDiv.innerHTML = marked.parse(raw);
+            scrollToBottom();
+          }
+
+        } else if (line === '') {
+          eventName = null;
+          dataLineCount = 0;
+        }
+      }
+    }
+  } catch (err) {
+    if (!completedFromStatus && err.name !== 'AbortError') {
+      if (msgId) {
+        try {
+          const statusRes = await fetch(`/chat/${msgId}/status`);
+          if (statusRes.ok) {
+            const data = await statusRes.json();
+            if (data.status === 'done') showStoredResponse(data.content || '');
+            else if (data.status === 'error') showError(data.content || 'Response interrupted.');
+            else showError('Connection interrupted before the response finished.');
+          } else {
+            showError('Connection interrupted before the response finished.');
+          }
+        } catch {
+          showError('Connection interrupted before the response finished.');
+        }
+      } else {
+        showError('Unable to start response stream.');
+      }
+    }
+  } finally {
+    stopStatusFallback();
+    if (!thinkingFrozen) {
+      if (msgId && !firstDataReceived && !completedFromStatus) {
+        const content = document.createElement('span');
+        content.className = 'msg-error';
+        content.textContent = 'Response is still running. Reopen the page or history to pick it up.';
+        if (!firstDataReceived) {
+          firstDataReceived = true;
+          freezeThinking();
+          messages.appendChild(bubble);
+          contentDiv.appendChild(content);
+        }
+      } else {
+        freezeThinking();
+      }
+    }
+    if (!statsEl && doneTime && firstDataReceived) addTimestamp(bubble, doneTime, false);
+  }
 
   // Quota delta
   await fetchQuota(true);
@@ -581,7 +729,7 @@ function updatePinBtnStates() {
 }
 
 async function pollMessageStatus(msgId, contentEl, bubbleEl) {
-  const MAX_POLLS = 480;  // 16 min at 2s intervals — covers 15 min alias timeout
+  const MAX_POLLS = 960;  // 32 min at 2s intervals — covers 30 min default timeout
   let count = 0;
   const timer = setInterval(async () => {
     count++;
@@ -599,6 +747,9 @@ async function pollMessageStatus(msgId, contentEl, bubbleEl) {
       } else if (count >= MAX_POLLS) {
         clearInterval(timer);
         contentEl.innerHTML = '<span class="msg-error">Response timed out.</span>';
+      } else if (data.content) {
+        contentEl.innerHTML = marked.parse(data.content);
+        addLoader(contentEl);
       }
     } catch {
       clearInterval(timer);
@@ -1081,16 +1232,16 @@ async function loadAliases() {
     <tr>
       <td>${a.name}</td>
       <td>${a.backend}</td>
-      <td>${a.model || '—'}</td>
-      <td>${a.cwd || '—'}</td>
-      <td>${a.timeout ? a.timeout + 's' : '—'}</td>
+      <td class="col-model">${a.model || '<span class="col-default">—</span>'}</td>
+      <td>${a.cwd || '<span class="col-default">/tmp/squid</span>'}</td>
+      <td class="col-timeout">${a.timeout ? a.timeout + 's' : '<span class="col-default">30m</span>'}</td>
       <td>
         <button class="edit-btn" data-name="${a.name}" data-backend="${a.backend}" data-model="${a.model || ''}" data-cwd="${a.cwd || ''}" data-timeout="${a.timeout || ''}">✎</button>
         <button class="del-btn" data-name="${a.name}">✕</button>
       </td>
     </tr>`).join('');
   listEl.innerHTML = `<table>
-    <thead><tr><th>Name</th><th>Backend</th><th>Model</th><th>CWD</th><th>Timeout</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Backend</th><th class="col-model">Model</th><th>CWD</th><th class="col-timeout">Timeout</th><th></th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
 
@@ -1147,11 +1298,131 @@ function initAliases() {
   });
 }
 
+// ── topic / alias autocomplete ───────────────────────────────────────────────
+
+let _topicsCache  = null;
+let _aliasesCache = null;
+let acOpen  = false;
+let acItems = [];
+let acSel   = -1;
+
+function invalidateTopicsCache() { _topicsCache = null; }
+
+async function _acTopics() {
+  if (_topicsCache) return _topicsCache;
+  try { _topicsCache = await (await fetch('/topics')).json(); } catch { _topicsCache = []; }
+  return _topicsCache;
+}
+
+async function _acAliases() {
+  if (_aliasesCache) return _aliasesCache;
+  try { _aliasesCache = await (await fetch('/config/aliases')).json(); } catch { _aliasesCache = []; }
+  return _aliasesCache;
+}
+
+function hideAutocomplete() {
+  acEl.classList.remove('open');
+  acOpen = false; acItems = []; acSel = -1;
+}
+
+function _acHighlight() {
+  acEl.querySelectorAll('.ac-item').forEach((el, i) => el.classList.toggle('selected', i === acSel));
+  if (acSel >= 0) acEl.children[acSel]?.scrollIntoView({ block: 'nearest' });
+}
+
+function _acRender(items) {
+  if (!items.length) { hideAutocomplete(); return; }
+  acItems = items; acSel = -1;
+  acEl.innerHTML = items.map((item, i) =>
+    `<div class="ac-item" data-i="${i}">` +
+    `<div class="ac-row"><span class="ac-name">${item.label}</span>` +
+    (item.model ? `<span class="ac-model">@${item.model}</span>` : '') +
+    (item.sub ? `<span class="ac-sub">${item.sub}</span>` : '') +
+    (item.meta ? `<span class="ac-meta">${item.meta}</span>` : '') + `</div>` +
+    `</div>`
+  ).join('');
+  acEl.querySelectorAll('.ac-item').forEach((el, i) =>
+    el.addEventListener('mousedown', e => { e.preventDefault(); _acSelect(i); })
+  );
+  acEl.classList.add('open');
+  acOpen = true;
+}
+
+function _acSelect(idx) {
+  if (idx < 0 || idx >= acItems.length) return;
+  input.value = acItems[idx].insert + ' ';
+  hideAutocomplete();
+  resizeComposer();
+  input.focus();
+}
+
+async function updateAutocomplete() {
+  const val    = input.value;
+  const mTopic = val.match(/^#(\w*)$/);
+  const mAlias = val.match(/^#(\w+)@(\w*)$/);
+  if (mTopic) {
+    const prefix = mTopic[1].toLowerCase();
+    const topics = await _acTopics();
+    if (input.value !== val) return;
+    _acRender(
+      topics.filter(t => t.name.toLowerCase().startsWith(prefix)).slice(0, 8)
+        .map(t => ({
+          label:  '#' + t.name,
+          insert: '#' + t.name,
+          model:  t.last_model || t.last_backend || '',
+          meta:   t.active ? '● live' : t.queue_depth > 0 ? `queue ${t.queue_depth}` : '',
+          sub:    t.last_prompt ? truncate(t.last_prompt, 55) : '',
+        }))
+    );
+  } else if (mAlias) {
+    const topic  = mAlias[1];
+    const prefix = mAlias[2].toLowerCase();
+    const aliases = await _acAliases();
+    if (input.value !== val) return;
+    _acRender(
+      aliases.filter(a => a.name.toLowerCase().startsWith(prefix)).slice(0, 8)
+        .map(a => ({
+          label:  `#${topic}@${a.name}`,
+          insert: `#${topic}@${a.name}`,
+          meta:   a.model || a.backend,
+        }))
+    );
+  } else {
+    hideAutocomplete();
+  }
+}
+
+// ── pull-to-refresh (bottom overscroll) ──────────────────────────────────────
+
+function initPullToRefresh() {
+  let startY = 0;
+  let startedAtBottom = false;
+  const GESTURE_ZONE = 64; // px from bottom edge reserved for Android nav gesture
+
+  messages.addEventListener('touchstart', (e) => {
+    const y = e.touches[0].clientY;
+    // Ignore touches starting in the Android system gesture zone
+    if (y > window.innerHeight - GESTURE_ZONE) return;
+    startY = y;
+    startedAtBottom = isAtBottom();
+  }, { passive: true });
+
+  messages.addEventListener('touchend', (e) => {
+    if (!startedAtBottom || !startY) return;
+    const dy = startY - e.changedTouches[0].clientY; // positive = finger moved up
+    if (dy > 80) setTimeout(() => location.reload(), 150);
+    startY = 0;
+  }, { passive: true });
+}
+
 // ── init ─────────────────────────────────────────────────────────────────────
 
 initSettings();
+document.getElementById('cmd-panel-close').addEventListener('click', closeCommandPanel);
+document.addEventListener('click', e => { if (!acEl.contains(e.target) && e.target !== input) hideAutocomplete(); });
 initHistoryScroll();
 initStats();
 initAliases();
 initQuota();
 initCreds();
+initPullToRefresh();
