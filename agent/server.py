@@ -33,8 +33,8 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH
-from .runners import run_auto, run_claude, run_codex, run_copilot, CLINotFoundError, CLIError, list_active_procs
+from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH
+from .runners import run_auto, run_claude, run_codex, run_copilot, run_cursor, CLINotFoundError, CLIError, list_active_procs
 from .history import list_history
 from .topic_queue import TopicDispatcher
 from .stats_db import (
@@ -85,15 +85,17 @@ def _check_deps():
     elif not _claude_logged_in():
         warnings.append("claude is installed but not logged in  →  run: claude login")
     if not CODEX_PATH:
-        missing.append("codex    →  npm install -g @openai/codex")
+        missing.append("codex         →  npm install -g @openai/codex")
     if not COPILOT_PATH:
-        missing.append("copilot  →  brew install gh-copilot")
+        missing.append("copilot       →  brew install gh-copilot")
+    if not CURSOR_PATH:
+        missing.append("cursor-agent  →  install from cursor.com")
     if missing:
         log.warning("Missing CLI tools:\n  " + "\n  ".join(missing))
     if warnings:
         log.warning("Auth issues:\n  " + "\n  ".join(warnings))
     if not missing and not warnings:
-        log.info("claude=%s  codex=%s  copilot=%s", CLAUDE_PATH, CODEX_PATH, COPILOT_PATH)
+        log.info("claude=%s  codex=%s  copilot=%s  cursor=%s", CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH)
 
 _check_deps()
 
@@ -115,7 +117,7 @@ class ChatRequest(BaseModel):
 
 class AliasRequest(BaseModel):
     name: str = Field(..., min_length=1)
-    backend: Literal["auto", "claude", "codex", "copilot"] = "auto"
+    backend: Literal["auto", "claude", "cursor", "codex", "copilot"] = "auto"
     model: Optional[str] = None
     cwd: Optional[str] = None   # abs path; None = /tmp/squid (bare default)
     timeout: Optional[int] = None  # seconds; None = use global default
@@ -300,6 +302,7 @@ async def health():
         "status": "ok",
         "backends": {
             "claude":   {"available": bool(CLAUDE_PATH),   "path": CLAUDE_PATH},
+            "cursor":   {"available": bool(CURSOR_PATH),   "path": CURSOR_PATH},
             "codex":    {"available": bool(CODEX_PATH),    "path": CODEX_PATH},
             "copilot":  {"available": bool(COPILOT_PATH),  "path": COPILOT_PATH},
         },

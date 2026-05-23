@@ -11,7 +11,7 @@ import os
 import time
 from typing import AsyncGenerator, List, Optional, Union
 
-from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, FIRST_BYTE_TIMEOUT, RESPONSE_TIMEOUT
+from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, FIRST_BYTE_TIMEOUT, RESPONSE_TIMEOUT
 
 # ---------------------------------------------------------------------------
 # Process registry
@@ -366,14 +366,85 @@ async def run_copilot(
         }
 
 
+async def run_cursor(
+    prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
+    model: Optional[str] = None, topic: str = "", alias: str = "",
+    response_timeout: Optional[int] = None,
+) -> AsyncGenerator[Union[str, dict], None]:
+    """Stream text chunks from cursor-agent CLI, then yield a stats dict."""
+    if not CURSOR_PATH:
+        raise CLINotFoundError(
+            "cursor-agent CLI not found in PATH. Install from https://cursor.com"
+        )
+
+    cmd = [
+        CURSOR_PATH, "--print",
+        "--output-format", "stream-json",
+        "--stream-partial-output",
+        "--trust",
+    ]
+    if model:
+        cmd += ["--model", model]
+    cmd.append(_build_prompt(prompt, history))
+
+    session_id: Optional[str] = None
+    text_started = False
+
+    async for line in _stream_lines(cmd, cwd=cwd, backend="cursor", topic=topic, alias=alias, response_timeout=response_timeout):
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        t = event.get("type")
+
+        if t == "system":
+            session_id = event.get("session_id")
+
+        elif t == "thinking" and event.get("subtype") == "delta":
+            text = event.get("text", "")
+            if text:
+                yield {"_status": text}
+
+        elif t == "assistant" and "timestamp_ms" in event:
+            # Streaming text delta (has timestamp_ms); final full message does not
+            content = event.get("message", {}).get("content", [])
+            for block in content:
+                if block.get("type") == "text":
+                    text = block.get("text", "")
+                    if text:
+                        text_started = True
+                        yield text
+
+        elif t == "result":
+            usage = event.get("usage") or {}
+            yield {
+                "_stats": {
+                    "session_id": session_id or event.get("session_id"),
+                    "input_tokens": usage.get("inputTokens", 0),
+                    "output_tokens": usage.get("outputTokens", 0),
+                    "cache_read_tokens": usage.get("cacheReadTokens", 0),
+                    "cache_write_tokens": usage.get("cacheWriteTokens", 0),
+                    "history_input_tokens": _estimate_history_tokens(history),
+                    "cost_usd": None,
+                    "duration_ms": event.get("duration_ms"),
+                }
+            }
+
+
 async def run_auto(
     prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
     model: Optional[str] = None, topic: str = "", alias: str = "",
     response_timeout: Optional[int] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
-    """Try claude → codex → copilot in order of availability."""
+    """Try claude → cursor → codex → copilot in order of availability."""
     if CLAUDE_PATH:
         async for chunk in run_claude(prompt, cwd=cwd, history=history, model=model, topic=topic, alias=alias, response_timeout=response_timeout):
+            yield chunk
+    elif CURSOR_PATH:
+        async for chunk in run_cursor(prompt, cwd=cwd, history=history, model=model, topic=topic, alias=alias, response_timeout=response_timeout):
             yield chunk
     elif CODEX_PATH:
         async for chunk in run_codex(prompt, cwd=cwd, history=history, model=model, topic=topic, alias=alias, response_timeout=response_timeout):
@@ -382,4 +453,4 @@ async def run_auto(
         async for chunk in run_copilot(prompt, cwd=cwd, history=history, model=model, topic=topic, alias=alias, response_timeout=response_timeout):
             yield chunk
     else:
-        raise CLINotFoundError("No AI CLI found in PATH (claude, codex, or copilot)")
+        raise CLINotFoundError("No AI CLI found in PATH (claude, cursor-agent, codex, or copilot)")
