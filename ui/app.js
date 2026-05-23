@@ -8,6 +8,12 @@ const statsBtn    = document.getElementById('stats-btn');
 const statsPanel  = document.getElementById('stats-panel');
 const statsContent= document.getElementById('stats-content');
 
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
+}
+
 messages.addEventListener('scroll', () => {
   scrollBtn.classList.toggle('visible', !isAtBottom());
 });
