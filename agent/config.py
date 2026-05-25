@@ -8,6 +8,7 @@ CODEX_CLI    = "codex"
 COPILOT_CLI  = "copilot"
 CURSOR_CLI   = "cursor-agent"
 GROK_CLI     = "grok"
+AGY_CLI      = "agy"
 
 # How long to wait for a CLI to produce its first byte before giving up
 FIRST_BYTE_TIMEOUT = 30   # seconds
@@ -43,6 +44,7 @@ CODEX_PATH    = find_cli(CODEX_CLI)
 COPILOT_PATH  = find_cli(COPILOT_CLI)
 CURSOR_PATH   = find_cli(CURSOR_CLI)
 GROK_PATH     = find_cli(GROK_CLI)
+AGY_PATH      = find_cli(AGY_CLI)
 
 # Subprocess working directory — symlink created by start.sh pointing to ./context/
 SQUID_HOME = "/tmp/squid"

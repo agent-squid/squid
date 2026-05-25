@@ -106,9 +106,9 @@ class TopicWorker:
             self.q.task_done()
 
     async def _process(self, item: QueueItem):
-        from .runners import run_auto, run_claude, run_codex, run_copilot, run_cursor, run_grok
+        from .runners import run_auto, run_claude, run_codex, run_copilot, run_cursor, run_grok, run_antigravity
         from .config import SQUID_HOME
-        runner = {"auto": run_auto, "claude": run_claude, "cursor": run_cursor, "grok": run_grok, "codex": run_codex, "copilot": run_copilot}.get(
+        runner = {"auto": run_auto, "claude": run_claude, "cursor": run_cursor, "grok": run_grok, "antigravity": run_antigravity, "codex": run_codex, "copilot": run_copilot}.get(
             item.backend, run_auto
         )
         async for chunk in runner(

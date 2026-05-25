@@ -33,8 +33,8 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, GROK_PATH
-from .runners import run_auto, run_claude, run_codex, run_copilot, run_cursor, run_grok, CLINotFoundError, CLIError, list_active_procs
+from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, GROK_PATH, AGY_PATH
+from .runners import run_auto, run_claude, run_codex, run_copilot, run_cursor, run_grok, run_antigravity, CLINotFoundError, CLIError, list_active_procs
 from .history import list_history
 from .topic_queue import TopicDispatcher
 from .stats_db import (
@@ -92,12 +92,14 @@ def _check_deps():
         missing.append("cursor-agent  →  install from cursor.com")
     if not GROK_PATH:
         missing.append("grok          →  install from https://x.ai")
+    if not AGY_PATH:
+        missing.append("agy           →  install from https://antigravity.google")
     if missing:
         log.warning("Missing CLI tools:\n  " + "\n  ".join(missing))
     if warnings:
         log.warning("Auth issues:\n  " + "\n  ".join(warnings))
     if not missing and not warnings:
-        log.info("claude=%s  codex=%s  copilot=%s  cursor=%s  grok=%s", CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, GROK_PATH)
+        log.info("claude=%s  codex=%s  copilot=%s  cursor=%s  grok=%s  agy=%s", CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, GROK_PATH, AGY_PATH)
 
 _check_deps()
 
@@ -119,7 +121,7 @@ class ChatRequest(BaseModel):
 
 class AliasRequest(BaseModel):
     name: str = Field(..., min_length=1)
-    backend: Literal["auto", "claude", "cursor", "grok", "codex", "copilot"] = "auto"
+    backend: Literal["auto", "claude", "cursor", "grok", "antigravity", "codex", "copilot"] = "auto"
     model: Optional[str] = None
     cwd: Optional[str] = None   # abs path; None = /tmp/squid (bare default)
     timeout: Optional[int] = None  # seconds; None = use global default
@@ -306,6 +308,7 @@ async def health():
             "claude":   {"available": bool(CLAUDE_PATH),   "path": CLAUDE_PATH},
             "cursor":   {"available": bool(CURSOR_PATH),   "path": CURSOR_PATH},
             "grok":     {"available": bool(GROK_PATH),     "path": GROK_PATH},
+            "antigravity": {"available": bool(AGY_PATH),  "path": AGY_PATH},
             "codex":    {"available": bool(CODEX_PATH),    "path": CODEX_PATH},
             "copilot":  {"available": bool(COPILOT_PATH),  "path": COPILOT_PATH},
         },
