@@ -11,7 +11,7 @@ import os
 import time
 from typing import AsyncGenerator, List, Optional, Union
 
-from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, GROK_PATH, AGY_PATH, FIRST_BYTE_TIMEOUT, RESPONSE_TIMEOUT
+from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, FIRST_BYTE_TIMEOUT, RESPONSE_TIMEOUT
 
 # ---------------------------------------------------------------------------
 # Process registry
@@ -172,6 +172,7 @@ async def run_claude(
     prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
     model: Optional[str] = None, topic: str = "", alias: str = "",
     response_timeout: Optional[int] = None,
+    resume_session_id: Optional[str] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream text chunks from claude CLI, then yield a stats dict."""
     if not CLAUDE_PATH:
@@ -188,7 +189,12 @@ async def run_claude(
     ]
     if model:
         cmd += ["--model", model]
-    cmd.append(_build_prompt(prompt, history))
+
+    if resume_session_id:
+        cmd += ["--resume", resume_session_id]
+        cmd.append(prompt)
+    else:
+        cmd.append(_build_prompt(prompt, history))
 
     session_id: Optional[str] = None
 
@@ -238,16 +244,23 @@ async def run_codex(
     prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
     model: Optional[str] = None, topic: str = "", alias: str = "",
     response_timeout: Optional[int] = None,
+    resume_session_id: Optional[str] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream a response from codex CLI using non-interactive exec mode."""
     if not CODEX_PATH:
         raise CLINotFoundError(
             "codex CLI not found in PATH. Install with: npm install -g @openai/codex"
         )
-    cmd = [CODEX_PATH, "exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"]
-    if model:
-        cmd += ["--model", model]
-    cmd.append(_build_prompt(prompt, history))
+    if resume_session_id:
+        cmd = [CODEX_PATH, "exec", "resume", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"]
+        if model:
+            cmd += ["--model", model]
+        cmd += [resume_session_id, prompt]
+    else:
+        cmd = [CODEX_PATH, "exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"]
+        if model:
+            cmd += ["--model", model]
+        cmd.append(_build_prompt(prompt, history))
 
     start_ms = time.monotonic() * 1000
     thread_id: Optional[str] = None
@@ -291,6 +304,7 @@ async def run_copilot(
     prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
     model: Optional[str] = None, topic: str = "", alias: str = "",
     response_timeout: Optional[int] = None,
+    resume_session_id: Optional[str] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream a response from GitHub Copilot CLI using one-shot -p mode with JSONL output."""
     if not COPILOT_PATH:
@@ -299,10 +313,12 @@ async def run_copilot(
         )
     cmd = [
         COPILOT_PATH,
-        "-p", _build_prompt(prompt, history),
+        "-p", prompt if resume_session_id else _build_prompt(prompt, history),
         "--allow-all-tools",
         "--output-format", "json",
     ]
+    if resume_session_id:
+        cmd.append(f"--resume={resume_session_id}")
     if model:
         cmd += ["--model", model]
 
@@ -311,6 +327,7 @@ async def run_copilot(
     response_text: Optional[str] = None
     output_tokens: int = 0
     stats_yielded = False
+    session_error: Optional[str] = None
 
     async for line in _stream_lines(cmd, cwd=cwd, backend="copilot", topic=topic, alias=alias, response_timeout=response_timeout):
         if not line:
@@ -328,7 +345,13 @@ async def run_copilot(
             response_text = data.get("content", "")
             output_tokens = data.get("outputTokens", 0)
 
+        elif t == "session.error":
+            session_error = data.get("message") or data.get("errorType") or "Unknown error"
+
         elif t == "result":
+            exit_code = ev.get("exitCode", 0)
+            if exit_code != 0 and not response_text:
+                raise CLIError(f"copilot: {session_error or 'CLI exited with no output'}")
             # Final event — yield response + stats
             if response_text:
                 yield response_text
@@ -370,6 +393,7 @@ async def run_cursor(
     prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
     model: Optional[str] = None, topic: str = "", alias: str = "",
     response_timeout: Optional[int] = None,
+    resume_session_id: Optional[str] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream text chunks from cursor-agent CLI, then yield a stats dict."""
     if not CURSOR_PATH:
@@ -383,9 +407,11 @@ async def run_cursor(
         "--stream-partial-output",
         "--trust",
     ]
+    if resume_session_id:
+        cmd += ["--resume", resume_session_id]
     if model:
         cmd += ["--model", model]
-    cmd.append(_build_prompt(prompt, history))
+    cmd.append(prompt if resume_session_id else _build_prompt(prompt, history))
 
     session_id: Optional[str] = None
     text_started = False
@@ -434,91 +460,11 @@ async def run_cursor(
             }
 
 
-async def run_grok(
-    prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
-    model: Optional[str] = None, topic: str = "", alias: str = "",
-    response_timeout: Optional[int] = None,
-) -> AsyncGenerator[Union[str, dict], None]:
-    """Stream text from grok CLI, then yield a stats dict."""
-    if not GROK_PATH:
-        raise CLINotFoundError(
-            "grok CLI not found in PATH. Install from https://x.ai"
-        )
-
-    cmd = [GROK_PATH, "--print", "--output-format", "stream-json"]
-    if model:
-        cmd += ["--model", model]
-    cmd.append(_build_prompt(prompt, history))
-
-    start_ms = time.monotonic() * 1000
-    session_id: Optional[str] = None
-    response_text: Optional[str] = None
-    stats_yielded = False
-
-    async for line in _stream_lines(cmd, cwd=cwd, backend="grok", topic=topic, alias=alias, response_timeout=response_timeout):
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            # Plain-text output — yield as-is
-            yield line
-            continue
-
-        t = event.get("type", "")
-
-        if t == "system":
-            session_id = event.get("session_id")
-
-        elif t == "stream_event":
-            inner = event.get("event", {})
-            if (
-                inner.get("type") == "content_block_delta"
-                and inner.get("delta", {}).get("type") == "text_delta"
-            ):
-                text = inner["delta"].get("text", "")
-                if text:
-                    yield {"_status": text}
-
-        elif t == "result":
-            final_text = event.get("result", "")
-            if final_text:
-                yield final_text
-            usage = event.get("usage", {})
-            yield {
-                "_stats": {
-                    "session_id": session_id or event.get("session_id"),
-                    "input_tokens": usage.get("input_tokens", 0),
-                    "output_tokens": usage.get("output_tokens", 0),
-                    "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
-                    "cache_write_tokens": usage.get("cache_creation_input_tokens", 0),
-                    "history_input_tokens": _estimate_history_tokens(history),
-                    "cost_usd": event.get("total_cost_usd"),
-                    "duration_ms": event.get("duration_ms") or int(time.monotonic() * 1000 - start_ms),
-                }
-            }
-            stats_yielded = True
-            return
-
-    if not stats_yielded:
-        yield {
-            "_stats": {
-                "session_id": session_id,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "cache_read_tokens": 0,
-                "cache_write_tokens": 0,
-                "history_input_tokens": _estimate_history_tokens(history),
-                "cost_usd": None,
-                "duration_ms": int(time.monotonic() * 1000 - start_ms),
-            }
-        }
-
-
 async def run_antigravity(
     prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
     model: Optional[str] = None, topic: str = "", alias: str = "",
     response_timeout: Optional[int] = None,
+    resume_session_id: Optional[str] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream text chunks from agy (Google Antigravity) CLI, then yield a stats dict."""
     if not AGY_PATH:
@@ -527,9 +473,11 @@ async def run_antigravity(
         )
 
     cmd = [AGY_PATH, "--output-format", "stream-json"]
+    if resume_session_id:
+        cmd += ["--conversation", resume_session_id]
     if model:
         cmd += ["-m", model]
-    cmd += ["-p", _build_prompt(prompt, history)]
+    cmd += ["-p", prompt if resume_session_id else _build_prompt(prompt, history)]
 
     start_ms = time.monotonic() * 1000
     session_id: Optional[str] = None
@@ -599,15 +547,12 @@ async def run_auto(
     model: Optional[str] = None, topic: str = "", alias: str = "",
     response_timeout: Optional[int] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
-    """Try claude → cursor → grok → antigravity → codex → copilot in order of availability."""
+    """Try claude → cursor → antigravity → codex → copilot in order of availability."""
     if CLAUDE_PATH:
         async for chunk in run_claude(prompt, cwd=cwd, history=history, model=model, topic=topic, alias=alias, response_timeout=response_timeout):
             yield chunk
     elif CURSOR_PATH:
         async for chunk in run_cursor(prompt, cwd=cwd, history=history, model=model, topic=topic, alias=alias, response_timeout=response_timeout):
-            yield chunk
-    elif GROK_PATH:
-        async for chunk in run_grok(prompt, cwd=cwd, history=history, model=model, topic=topic, alias=alias, response_timeout=response_timeout):
             yield chunk
     elif AGY_PATH:
         async for chunk in run_antigravity(prompt, cwd=cwd, history=history, model=model, topic=topic, alias=alias, response_timeout=response_timeout):
@@ -619,4 +564,4 @@ async def run_auto(
         async for chunk in run_copilot(prompt, cwd=cwd, history=history, model=model, topic=topic, alias=alias, response_timeout=response_timeout):
             yield chunk
     else:
-        raise CLINotFoundError("No AI CLI found in PATH (claude, cursor-agent, grok, agy, codex, or copilot)")
+        raise CLINotFoundError("No AI CLI found in PATH (claude, cursor-agent, agy, codex, or copilot)")

@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
 from pathlib import Path
 from typing import AsyncGenerator, Literal, Optional, Union
@@ -33,18 +34,21 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, GROK_PATH, AGY_PATH
-from .runners import run_auto, run_claude, run_codex, run_copilot, run_cursor, run_grok, run_antigravity, CLINotFoundError, CLIError, list_active_procs
+from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, SQUID_HOME
+from .runners import run_auto, run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError, CLIError, list_active_procs
 from .history import list_history
 from .topic_queue import TopicDispatcher
 from .stats_db import (
     init_db, save_stats, get_aggregated_stats, save_quota_delta, get_stats_by_topic, get_stats_by_model,
     get_topics_summary,
-    pin_message, reset_pins,
+    pin_message, reset_pins, reset_topic_pins,
     get_alias, upsert_alias, delete_alias, list_aliases,
     get_topic, upsert_topic, list_topics,
     insert_user_message, insert_assistant_message, update_assistant_message,
     get_context_history, mark_orphaned_pending, get_message,
+    get_topic_session, set_topic_session, clear_topic_session,
+    get_pending_injections, mark_injected, get_session_context_log,
+    delete_topic, get_topic_aliases,
 )
 from . import creds
 
@@ -57,6 +61,7 @@ if orphaned:
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 log = logging.getLogger(__name__)
 
+BOOT_TIME = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 dispatcher = TopicDispatcher()
 
 # ---------------------------------------------------------------------------
@@ -90,8 +95,6 @@ def _check_deps():
         missing.append("copilot       →  brew install gh-copilot")
     if not CURSOR_PATH:
         missing.append("cursor-agent  →  install from cursor.com")
-    if not GROK_PATH:
-        missing.append("grok          →  install from https://x.ai")
     if not AGY_PATH:
         missing.append("agy           →  install from https://antigravity.google")
     if missing:
@@ -99,7 +102,7 @@ def _check_deps():
     if warnings:
         log.warning("Auth issues:\n  " + "\n  ".join(warnings))
     if not missing and not warnings:
-        log.info("claude=%s  codex=%s  copilot=%s  cursor=%s  grok=%s  agy=%s", CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, GROK_PATH, AGY_PATH)
+        log.info("claude=%s  codex=%s  copilot=%s  cursor=%s  agy=%s", CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH)
 
 _check_deps()
 
@@ -116,12 +119,13 @@ class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
     topic: str = Field("default")
     alias: Optional[str] = None
-    lookback: Union[int, Literal["all"]] = Field(5)
+    lookback: int = Field(0)
+    adhoc: bool = Field(False)
 
 
 class AliasRequest(BaseModel):
     name: str = Field(..., min_length=1)
-    backend: Literal["auto", "claude", "cursor", "grok", "antigravity", "codex", "copilot"] = "auto"
+    backend: Literal["auto", "claude", "cursor", "antigravity", "codex", "copilot"] = "auto"
     model: Optional[str] = None
     cwd: Optional[str] = None   # abs path; None = /tmp/squid (bare default)
     timeout: Optional[int] = None  # seconds; None = use global default
@@ -138,7 +142,7 @@ class QuotaDeltaRequest(BaseModel):
     after: float
 
 class CmdRequest(BaseModel):
-    command: Literal["stop", "stopall", "deq", "list"]
+    command: Literal["stop", "stopall", "deq", "list", "restart"]
     topic: str = "default"
     pos: Optional[int] = None  # deq only: None=all, 1=first, -1=last, 2=second, …
 
@@ -166,19 +170,30 @@ async def stream_response(
     context_history: list[dict],
     asst_msg_id: int,
     response_timeout: Optional[int] = None,
+    resume_session_id: Optional[str] = None,
+    inject_history: Optional[list[dict]] = None,
+    pending_inject_ids: Optional[list[int]] = None,
+    adhoc: bool = False,
+    lookback: int = 0,
+    pin_count: int = 0,
 ) -> AsyncGenerator[str, None]:
-    yield sse_event("meta", json.dumps({"alias": alias, "backend": backend, "msg_id": asst_msg_id}))
+    yield sse_event("meta", json.dumps({"alias": alias, "backend": backend, "msg_id": asst_msg_id, "adhoc": adhoc}))
 
+    effective_cwd = cwd or SQUID_HOME  # matches what topic_queue._process uses
     out_q, seq, worker = await dispatcher.dispatch(
         topic=topic, prompt=message, context_history=context_history,
-        backend=backend, model=model, alias=alias, cwd=cwd,
+        backend=backend, model=model, alias=alias, cwd=effective_cwd,
         response_timeout=response_timeout,
+        resume_session_id=resume_session_id,
+        inject_history=inject_history or [],
+        adhoc=adhoc,
     )
 
     raw = ""
     status_raw = ""
     session_id: Optional[str] = None
     last_partial_save = time.monotonic()
+    _completed = False  # tracks whether we reached the normal done path
 
     try:
         while True:
@@ -198,15 +213,26 @@ async def stream_response(
                 err_text = chunk["_error"]
                 yield sse_event("error", err_text)
                 update_assistant_message(asst_msg_id, raw or err_text, session_id, "error")
+                _completed = True
                 return
 
             if isinstance(chunk, dict) and "_stats" in chunk:
                 stats = chunk["_stats"]
                 session_id = stats.pop("session_id", None)
+                stats["adhoc"] = adhoc
+                stats["lookback"] = lookback
+                stats["pin_count"] = pin_count
                 if session_id:
-                    save_stats(session_id, stats, topic=topic, alias=alias, backend=backend, model=model, cwd=cwd)
+                    save_stats(session_id, stats, topic=topic, alias=alias, backend=backend, model=model, cwd=effective_cwd, lookback=lookback, pin_count=pin_count)
                     stats["session_id"] = session_id
+                    stats["cwd"] = effective_cwd
+                    if alias and not adhoc:
+                        set_topic_session(topic, alias, session_id, effective_cwd)
+                        if pending_inject_ids:
+                            mark_injected(topic, alias, pending_inject_ids)
                 yield sse_event("stats", json.dumps(stats))
+                if adhoc and pin_count > 0:
+                    reset_topic_pins(topic)
 
             elif isinstance(chunk, dict) and "_status" in chunk:
                 status_raw += chunk["_status"]
@@ -229,12 +255,24 @@ async def stream_response(
             yield sse_chunk(raw)
         update_assistant_message(asst_msg_id, raw, session_id, "done")
         yield sse_event("done")
+        _completed = True
 
     except Exception as exc:
         log.exception("Unexpected error in stream_response")
         err_text = f"Internal error: {exc}"
         yield sse_event("error", err_text)
         update_assistant_message(asst_msg_id, raw or err_text, session_id, "error")
+        _completed = True
+
+    finally:
+        # Runs on client disconnect (CancelledError) — flush whatever we have
+        if not _completed:
+            content = raw or status_raw or ""
+            status = "done" if content else "error"
+            try:
+                update_assistant_message(asst_msg_id, content, session_id, status)
+            except Exception:
+                pass
 
 # ---------------------------------------------------------------------------
 # Routes
@@ -242,13 +280,18 @@ async def stream_response(
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
-    # Resolve alias config: explicit alias wins, else use topic's stored alias
+    # 1. Resolve alias — explicit wins, else use topic sticky
     resolved_alias: Optional[str] = req.alias
     alias_config: dict = {}
 
     if req.alias:
         alias_config = get_alias(req.alias) or {}
-        upsert_topic(req.topic, req.alias)
+        if not alias_config:
+            return JSONResponse(
+                {"error": f"Alias '{req.alias}' not found. Create it first via /config/aliases."},
+                status_code=400,
+            )
+        upsert_topic(req.topic, req.alias)  # update sticky immediately
     else:
         topic_row = get_topic(req.topic)
         if topic_row:
@@ -259,21 +302,61 @@ async def chat(req: ChatRequest):
 
     backend = alias_config.get("backend") or "auto"
     model: Optional[str] = alias_config.get("model") or None
-    cwd: Optional[str] = alias_config.get("cwd") or None
+    alias_cwd: Optional[str] = alias_config.get("cwd") or None
     response_timeout: Optional[int] = alias_config.get("timeout")
 
-    lookback = 10_000 if req.lookback == "all" else int(req.lookback)
-    context_history = get_context_history(req.topic, lookback)
+    # 2. Resumable session lookup (skipped for adhoc turns)
+    resume_session_id: Optional[str] = None
+    cwd: Optional[str] = alias_cwd
+    inject_history: list[dict] = []
+    pending_inject_ids: list[int] = []
+
+    if not req.adhoc and resolved_alias:
+        stored = get_topic_session(req.topic, resolved_alias)
+        if stored:
+            resume_session_id = stored["session_id"]
+            cwd = stored["cwd"]  # locked cwd takes precedence
+        # For resumed sessions, exclude pins already in that session (--resume carries them).
+        pending = get_pending_injections(req.topic, resolved_alias,
+                                         exclude_session_id=resume_session_id)
+        if pending:
+            inject_history = [{"role": p["role"], "content": p["content"]} for p in pending]
+            pending_inject_ids = [p["id"] for p in pending]
+
+    # 3. Context history + pin counts
+    lookback = int(req.lookback) if req.lookback else 0
+    pin_count = 0
+    if req.adhoc:
+        # Pinned topic-wide. Recent-N scoped to resolved alias when active.
+        context_history, pin_count = get_context_history(req.topic, lookback,
+                                                          alias=resolved_alias if lookback > 0 else None)
+    elif not resume_session_id and not resolved_alias:
+        # No alias — inject_history won't run, so use context_history for pinned messages.
+        context_history, pin_count = get_context_history(req.topic, 0)
+    else:
+        # Aliased: inject_history carries pins. Resumed: CLI owns all context.
+        context_history = []
+        pin_count = sum(1 for p in pending if p["role"] == "assistant") if pending_inject_ids else 0
 
     user_msg_id = insert_user_message(req.topic, resolved_alias, backend, model, req.message)
-    asst_msg_id = insert_assistant_message(req.topic, resolved_alias, backend, model, user_msg_id)
+    asst_msg_id = insert_assistant_message(req.topic, resolved_alias, backend, model, user_msg_id, adhoc=req.adhoc)
 
     log.info(
-        "chat  topic=%s  alias=%s  backend=%s  model=%s  lookback=%d  msg=%.80r",
-        req.topic, resolved_alias, backend, model, lookback, req.message,
+        "chat  topic=%s  alias=%s  backend=%s  model=%s  adhoc=%s  resume=%s  injections=%d  msg=%.80r",
+        req.topic, resolved_alias, backend, model, req.adhoc,
+        bool(resume_session_id), len(pending_inject_ids), req.message,
     )
     return StreamingResponse(
-        stream_response(req.message, req.topic, resolved_alias, backend, model, cwd, context_history, asst_msg_id, response_timeout),
+        stream_response(
+            req.message, req.topic, resolved_alias, backend, model, cwd,
+            context_history, asst_msg_id, response_timeout,
+            resume_session_id=resume_session_id,
+            inject_history=inject_history,
+            pending_inject_ids=pending_inject_ids,
+            adhoc=req.adhoc,
+            lookback=lookback,
+            pin_count=pin_count,
+        ),
         media_type="text/event-stream",
         headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
     )
@@ -292,6 +375,12 @@ async def run_cmd(req: CmdRequest):
         return JSONResponse({"ok": True, "drained": drained})
     if req.command == "list":
         return JSONResponse({"ok": True, "topics": get_topics_summary()})
+    if req.command == "restart":
+        async def _restart():
+            await asyncio.sleep(0.4)
+            os.execv(sys.argv[0], sys.argv)
+        asyncio.create_task(_restart())
+        return JSONResponse({"ok": True})
     return JSONResponse({"ok": False, "error": "unknown command"}, status_code=400)
 
 
@@ -304,10 +393,10 @@ async def processes():
 async def health():
     return JSONResponse({
         "status": "ok",
+        "boot_time": BOOT_TIME,
         "backends": {
             "claude":   {"available": bool(CLAUDE_PATH),   "path": CLAUDE_PATH},
             "cursor":   {"available": bool(CURSOR_PATH),   "path": CURSOR_PATH},
-            "grok":     {"available": bool(GROK_PATH),     "path": GROK_PATH},
             "antigravity": {"available": bool(AGY_PATH),  "path": AGY_PATH},
             "codex":    {"available": bool(CODEX_PATH),    "path": CODEX_PATH},
             "copilot":  {"available": bool(COPILOT_PATH),  "path": COPILOT_PATH},
@@ -316,8 +405,8 @@ async def health():
 
 
 @app.get("/history")
-async def history(offset: int = 0, limit: int = 5, topic: Optional[str] = None):
-    return JSONResponse(list_history(topic=topic, offset=offset, limit=limit))
+async def history(offset: int = 0, limit: int = 5, topic: Optional[str] = None, alias: Optional[str] = None):
+    return JSONResponse(list_history(topic=topic, alias=alias, offset=offset, limit=limit))
 
 
 class PinRequest(BaseModel):
@@ -351,6 +440,52 @@ async def topics_list():
         t["queue_depth"] = info.get("queue_depth", 0)
         t["active"] = info.get("active", False)
     return JSONResponse(db_topics)
+
+
+@app.delete("/topics/{topic}")
+async def remove_topic(topic: str):
+    deleted = delete_topic(topic)
+    return JSONResponse({"ok": deleted})
+
+
+@app.get("/topics/{topic}/sessions")
+async def list_topic_sessions(topic: str):
+    aliases = get_topic_aliases(topic)
+    return JSONResponse({"aliases": aliases})
+
+
+@app.get("/topics/{topic}/session")
+async def get_session(topic: str, alias: str):
+    stored = get_topic_session(topic, alias)
+    if not stored:
+        return JSONResponse({"session_id": None, "cwd": None, "pending_injections": [], "already_injected": []})
+    pending = get_pending_injections(topic, alias)
+    absorbed = get_session_context_log(topic, alias)
+    return JSONResponse({
+        "session_id": stored["session_id"],
+        "cwd": stored["cwd"],
+        "pending_injections": pending,
+        "already_injected": absorbed,
+    })
+
+
+@app.delete("/topics/{topic}/session")
+async def clear_session(topic: str, alias: str):
+    clear_topic_session(topic, alias)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/context/{topic}")
+async def context_view(topic: str, alias: str):
+    stored = get_topic_session(topic, alias)
+    pending = get_pending_injections(topic, alias)
+    absorbed = get_session_context_log(topic, alias)
+    return JSONResponse({
+        "session_id": stored["session_id"] if stored else None,
+        "cwd": stored["cwd"] if stored else None,
+        "pending_injections": pending,
+        "already_injected": absorbed,
+    })
 
 
 @app.get("/config/aliases")

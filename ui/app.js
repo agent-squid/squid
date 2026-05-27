@@ -7,8 +7,8 @@ const settingsBar = document.getElementById('settings-bar');
 const statsBtn    = document.getElementById('stats-btn');
 const statsPanel  = document.getElementById('stats-panel');
 const statsContent= document.getElementById('stats-content');
-const cmdPanel    = document.getElementById('cmd-panel');
-const cmdPanelContent = document.getElementById('cmd-panel-content');
+const helpBtn     = document.getElementById('help-btn');
+const helpPanel   = document.getElementById('help-panel');
 const acEl        = document.getElementById('autocomplete');
 
 window.scrollTo(0, 0);
@@ -48,80 +48,190 @@ scrollBtn.addEventListener('mouseleave', () => {
 
 marked.setOptions({ breaks: true });
 
-// ── settings / lookback ───────────────────────────────────────────────────────
-
-let lookback = localStorage.getItem('lookback') === 'all' ? 'all'
-             : localStorage.getItem('lookback') != null ? (parseInt(localStorage.getItem('lookback'), 10) || 0)
-             : 5;
+// ── settings ──────────────────────────────────────────────────────────────────
 
 function initSettings() {
-  document.querySelectorAll('.lb').forEach(btn => {
-    const val = btn.dataset.val === 'all' ? 'all' : parseInt(btn.dataset.val);
-    btn.classList.toggle('active', val === lookback);
-    btn.addEventListener('click', () => {
-      lookback = val;
-      localStorage.setItem('lookback', val);
-      document.querySelectorAll('.lb').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      updatePinBtnStates();
-    });
-  });
-
-  document.getElementById('reset-pins-btn').addEventListener('click', async (e) => {
-    const resetBtn = e.currentTarget;
-    resetBtn.disabled = true;
-    try {
-      await fetch('/chat/reset-pins', { method: 'POST' });
-      document.querySelectorAll('.pin-btn.pinned, .pin-btn.excluded').forEach(b => {
-        b.classList.remove('pinned', 'excluded');
-      });
-      updatePinBtnStates();
-    } finally {
-      resetBtn.disabled = false;
-    }
-  });
+  // no-op — settings panel wiring is handled inline
 }
 
 settingsBtn.addEventListener('click', () => {
   const open = settingsBar.classList.toggle('open');
   settingsBtn.classList.toggle('active', open);
-  if (open) closeCommandPanel();
   if (open) loadAliases();
 });
+
+function openHelp() {
+  helpPanel.classList.add('open');
+  helpBtn.classList.add('active');
+  // position below topbar (same pattern as stats panel)
+  helpPanel.style.top = (document.getElementById('topbar').offsetHeight + 4) + 'px';
+}
+
+function closeHelp() {
+  helpPanel.classList.remove('open');
+  helpBtn.classList.remove('active');
+}
+
+helpBtn.addEventListener('click', () => {
+  if (helpPanel.classList.contains('open')) { closeHelp(); } else { openHelp(); }
+});
+document.getElementById('help-close').addEventListener('click', closeHelp);
 
 // ── prompt parsing ────────────────────────────────────────────────────────────
 
 // ── topic chip ────────────────────────────────────────────────────────────────
 
 const topicChipEl = document.getElementById('topic-chip');
-let stickyChip = null; // { topic, alias } | null
+let stickyChip = null; // { topic, alias, adhoc } | null
 
-function setTopicChip(topic, alias) {
-  if (topic === 'default' && !alias) { clearTopicChip(); return; }
-  stickyChip = { topic, alias };
-  topicChipEl.textContent = alias ? `#${topic}@${alias}` : `#${topic}`;
+function setTopicChip(topic, alias, adhoc = false, lookback = 0) {
+  stickyChip = { topic, alias, adhoc, lookback };
+
+  topicChipEl.innerHTML = '';
+  const tSpan = document.createElement('span');
+  tSpan.className = 'chip-topic';
+  tSpan.textContent = '#' + topic;
+  topicChipEl.appendChild(tSpan);
+  if (alias) {
+    const aSpan = document.createElement('span');
+    aSpan.className = 'chip-alias';
+    aSpan.textContent = '@' + alias;
+    topicChipEl.appendChild(aSpan);
+  }
+  if (adhoc) {
+    const adSpan = document.createElement('span');
+    adSpan.className = 'chip-adhoc';
+    adSpan.textContent = lookback > 0 ? `!${lookback}` : '!';
+    topicChipEl.appendChild(adSpan);
+  }
   topicChipEl.classList.add('visible');
+  topicChipEl.classList.remove('needs-alias');
   input.placeholder = 'message…';
 }
 
 function clearTopicChip() {
   stickyChip = null;
-  topicChipEl.classList.remove('visible');
+  topicChipEl.classList.remove('visible', 'needs-alias');
   input.placeholder = '#topic or #topic@alias message…';
+  document.querySelectorAll('.history-item.ctx-highlight').forEach(el => el.classList.remove('ctx-highlight'));
 }
 
-topicChipEl.addEventListener('click', () => { clearTopicChip(); input.focus(); });
+topicChipEl.addEventListener('click', () => {
+  const hadFilter = historyFilter.topic || historyFilter.alias;
+  clearTopicChip();
+  if (hadFilter) reloadHistory({});
+  input.focus();
+});
 
 function parseInput(text) {
-  // If chip is active and textarea has no #-prefix, use chip context
   if (stickyChip && !text.startsWith('#')) {
-    return { topic: stickyChip.topic, alias: stickyChip.alias, message: text.trim() || text };
+    const adhoc = !!stickyChip.adhoc;
+    return { topic: stickyChip.topic, alias: stickyChip.alias, adhoc, lookback: stickyChip.lookback || 0, message: text.trim() || text };
   }
-  const m = text.match(/^#(\w+)(?:@(\w+))?\s+([\s\S]*)$/);
-  if (m && m[3].trim()) {
-    return { topic: m[1], alias: m[2] || null, message: m[3].trim() };
+  // adhoc: #topic!N or #topic@alias!N (N optional, defaults to 0 = pinned only)
+  const ma = text.match(/^#(\w+)(?:@(\w+))?!(\d*)\s+([\s\S]*)$/);
+  if (ma && ma[4].trim()) {
+    return { topic: ma[1], alias: ma[2] || null, adhoc: true, lookback: ma[3] ? parseInt(ma[3]) : 0, message: ma[4].trim() };
   }
-  return { topic: 'default', alias: null, message: text };
+  // session: #topic or #topic@alias
+  const ms = text.match(/^#(\w+)(?:@(\w+))?\s+([\s\S]*)$/);
+  if (ms && ms[3].trim()) {
+    return { topic: ms[1], alias: ms[2] || null, adhoc: false, lookback: 0, message: ms[3].trim() };
+  }
+  return { topic: 'default', alias: null, adhoc: false, lookback: 0, message: text };
+}
+
+// ── topic tag helper (colored, clickable) ──────────────────────────────────────
+
+function makeTopicTag(topic, alias, { clickable = false, adhoc = false, lookback = 0 } = {}) {
+  const wrap = document.createElement('span');
+  wrap.className = 'topic-tag';
+
+  const tSpan = document.createElement('span');
+  tSpan.className = 'tag-topic' + (clickable ? ' clickable' : '');
+  tSpan.textContent = '#' + topic;
+  wrap.appendChild(tSpan);
+
+  if (alias) {
+    const aSpan = document.createElement('span');
+    aSpan.className = 'tag-alias' + (clickable ? ' clickable' : '');
+    aSpan.textContent = '@' + alias;
+    wrap.appendChild(aSpan);
+  }
+
+  if (adhoc) {
+    const adSpan = document.createElement('span');
+    adSpan.className = 'tag-adhoc';
+    adSpan.textContent = '!' + (lookback > 0 ? lookback : '');
+    wrap.appendChild(adSpan);
+  }
+
+  if (clickable) {
+    wrap.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (alias && e.target.classList.contains('tag-alias')) filterByAlias(topic, alias, adhoc, lookback);
+      else filterByTopic(topic);
+    });
+  }
+
+  return wrap;
+}
+
+// ── history filter ─────────────────────────────────────────────────────────────
+
+let historyFilter = { topic: null, alias: null };
+
+function filterByTopic(topic) {
+  setTopicChip(topic, null);
+  reloadHistory({ topic, alias: null });
+}
+
+function filterByAlias(topic, alias, adhoc = false, lookback = 0) {
+  setTopicChip(topic, alias, adhoc, lookback);
+  reloadHistory({ topic, alias });
+}
+
+function clearFilter() {
+  reloadHistory({});
+}
+
+function reloadHistory(filter = {}) {
+  historyFilter = filter;
+  historyOffset = 0;
+  historyExhausted = false;
+  historyLoading = false;
+  if (topSentinel) { topSentinel.remove(); topSentinel = null; }
+  document.querySelectorAll('.history-item, .boot-banner').forEach(el => el.remove());
+  // Remove live (non-history) messages too — completed ones are in the DB and will reload
+  document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats').forEach(el => el.remove());
+  _updateFilterBadge();
+  initHistoryScroll();
+}
+
+function _updateFilterBadge() {
+  const badge = document.getElementById('filter-badge');
+  const labelEl = document.getElementById('filter-badge-label');
+  const { topic, alias } = historyFilter;
+
+  if (!topic && !alias) {
+    badge.classList.remove('active');
+    return;
+  }
+
+  labelEl.innerHTML = '';
+  if (topic) {
+    const t = document.createElement('span');
+    t.className = 'tag-topic';
+    t.textContent = '#' + topic;
+    labelEl.appendChild(t);
+  }
+  if (alias) {
+    const a = document.createElement('span');
+    a.className = 'tag-alias';
+    a.textContent = '@' + alias;
+    labelEl.appendChild(a);
+  }
+  badge.classList.add('active');
 }
 
 // ── history pagination (display) ─────────────────────────────────────────────
@@ -130,7 +240,6 @@ let historyOffset = 0;
 let historyExhausted = false;
 let historyLoading = false;
 let topSentinel = null;
-let historyGlobalCount = 0;  // newest-first global position across all paginated loads
 
 function createTopSentinel() {
   const el = document.createElement('div');
@@ -144,7 +253,10 @@ async function loadHistory() {
 
   let data;
   try {
-    const res = await fetch(`/history?offset=${historyOffset}&limit=5`);
+    let url = `/history?offset=${historyOffset}&limit=5`;
+    if (historyFilter.topic) url += `&topic=${encodeURIComponent(historyFilter.topic)}`;
+    if (historyFilter.alias) url += `&alias=${encodeURIComponent(historyFilter.alias)}`;
+    const res = await fetch(url);
     data = await res.json();
   } catch {
     historyLoading = false;
@@ -155,59 +267,75 @@ async function loadHistory() {
   const prevHeight = messages.scrollHeight;
   const fragment = document.createDocumentFragment();
 
-  // Assign newest-first global position (items arrive newest-first from server)
-  const itemsWithPos = items.map(item => {
-    return { ...item, _topicPos: ++historyGlobalCount };
-  });
-
-  for (const item of [...itemsWithPos].reverse()) {
-    if (!item.prompt && !item.response) continue;
-
-    const group = document.createElement('div');
-    group.className = 'history-group';
-
-    const userBubble = makeUserBubble(item.prompt || '', item.topic, item.alias, item.backend);
-    group.appendChild(userBubble);
-    const userTs = item.user_timestamp || item.timestamp;
-    if (userTs) {
-      const uts = document.createElement('div');
-      uts.className = 'msg-time right';
-      uts.textContent = fmtTime(userTs);
-      group.appendChild(uts);
+  // Build lookup: user msg id → assistant stats (for ctx label on user rows)
+  const statsByUserMsgId = {};
+  for (const item of items) {
+    if (item.role === 'assistant' && item.reply_to && item.stats) {
+      statsByUserMsgId[item.reply_to] = item.stats;
     }
+  }
 
-    const asstBubble = document.createElement('div');
-    asstBubble.className = 'msg assistant';
-    const asstHeader = document.createElement('div');
-    asstHeader.className = 'response-header';
-    const asstTag = document.createElement('span');
-    asstTag.className = 'topic-tag';
-    const asstLabel = item.alias || item.backend;
-    asstTag.textContent = asstLabel ? `#${item.topic}@${asstLabel}` : `#${item.topic}`;
-    const asstHeaderText = document.createElement('span');
-    asstHeaderText.className = 'response-header-text';
-    asstHeaderText.appendChild(asstTag);
-    asstHeaderText.appendChild(document.createTextNode('  ' + truncate(item.prompt || '', 55)));
-    asstHeader.appendChild(asstHeaderText);
-    const inLookback = _inLookbackWindow(item._topicPos);
-    asstHeader.appendChild(makePinBtn(item.id, item.pinned || 0, inLookback, item._topicPos));
-    asstBubble.appendChild(asstHeader);
-    const asstContent = document.createElement('div');
-    if (item.status === 'pending') {
-      addLoader(asstContent);
-      pollMessageStatus(item.id, asstContent, asstBubble);
-    } else if (item.status === 'error') {
-      const raw = (item.response || '').split('\n')[0].replace(/^CLI exited \d+:\s*/, '').trim();
-      asstContent.innerHTML = `<span class="msg-error">${raw || 'Response interrupted.'}</span>`;
-    } else {
-      asstContent.innerHTML = marked.parse(item.response || '');
+  for (const item of [...items].reverse()) {
+    if (item.role === 'user' && !item.content) continue;
+    if (item.role === 'assistant' && !item.content && item.status !== 'pending') continue;
+
+    if (item.role === 'user') {
+      const userStats = statsByUserMsgId[item.id];
+      const lb = userStats?.lookback ?? 0;
+      const pc = userStats?.pin_count ?? 0;
+      const histCtxLabel = (item.alias || item.adhoc) ? fmtCtxLabel(!!item.adhoc, lb, pc) : null;
+      const userBubble = makeUserBubble(item.content, item.topic, item.alias, item.backend, !!item.adhoc, lb);
+      userBubble.classList.add('history-item');
+      fragment.appendChild(userBubble);
+      if (item.timestamp) {
+        const ts = document.createElement('div');
+        ts.className = 'msg-time right history-item';
+        ts.textContent = fmtTime(item.timestamp);
+        if (histCtxLabel) {
+          const ctxSpan = document.createElement('span');
+          ctxSpan.className = 'user-ctx';
+          ctxSpan.textContent = '  · ctx:' + histCtxLabel;
+          if (userStats?.session_id) ctxSpan.dataset.sessionId = userStats.session_id;
+          if (userStats?.cwd) ctxSpan.dataset.cwd = userStats.cwd;
+          ts.appendChild(ctxSpan);
+        }
+        fragment.appendChild(ts);
+      }
+    } else if (item.role === 'assistant') {
+      const lb = item.stats?.lookback ?? 0;
+      const asstBubble = document.createElement('div');
+      asstBubble.className = 'msg assistant history-item';
+
+      const asstHeader = document.createElement('div');
+      asstHeader.className = 'response-header';
+      const asstLabel = item.alias || item.backend;
+      const asstTag = makeTopicTag(item.topic || 'default', asstLabel, { clickable: true, adhoc: !!item.adhoc, lookback: lb });
+      const asstHeaderText = document.createElement('span');
+      asstHeaderText.className = 'response-header-text';
+      asstHeaderText.appendChild(asstTag);
+      asstHeaderText.appendChild(document.createTextNode('  ' + truncate(item.prompt || '', 55)));
+      asstHeader.appendChild(asstHeaderText);
+      asstHeader.appendChild(makePinBtn(item.id, item.pinned || 0));
+      asstBubble.appendChild(asstHeader);
+
+      const asstContent = document.createElement('div');
+      if (item.status === 'pending') {
+        addLoader(asstContent);
+        pollMessageStatus(item.id, asstContent, asstBubble);
+      } else if (item.status === 'error') {
+        const raw = (item.content || '').split('\n')[0].replace(/^CLI exited \d+:\s*/, '').trim();
+        asstContent.innerHTML = `<span class="msg-error">${raw || 'Response interrupted.'}</span>`;
+      } else {
+        asstContent.innerHTML = marked.parse(item.content || '');
+      }
+      asstBubble.appendChild(asstContent);
+      fragment.appendChild(asstBubble);
+
+      if (item.stats) {
+        const statsEl = addStats(asstBubble, item.stats, item.timestamp);
+        statsEl.classList.add('history-item');
+      }
     }
-    asstBubble.appendChild(asstContent);
-    group.appendChild(asstBubble);
-
-    if (item.stats) addStats(asstBubble, item.stats, null, item.timestamp);
-
-    fragment.appendChild(group);
   }
 
   const anchor = topSentinel ? topSentinel.nextSibling : messages.firstChild;
@@ -217,6 +345,7 @@ async function loadHistory() {
   historyOffset += items.length;
   historyExhausted = !has_more;
   historyLoading = false;
+  updateCtxHighlight();
 
   if (historyExhausted && topSentinel) {
     topSentinel.remove();
@@ -239,15 +368,32 @@ function initHistoryScroll() {
 
 function parseCommand(message) {
   const t = message.trim();
-  if (/^stop$/i.test(t))    return { command: 'stop' };
-  if (/^stopall$/i.test(t)) return { command: 'stopall' };
-  if (/^list$/i.test(t))    return { command: 'list' };
+  if (/^restart$/i.test(t))      return { command: 'restart' };
+  if (/^stop$/i.test(t))         return { command: 'stop' };
+  if (/^stopall$/i.test(t))      return { command: 'stopall' };
+  if (/^help$/i.test(t))         return { command: 'help' };
+  if (/^filter reset$/i.test(t)) return { command: 'filter_reset' };
+  if (/^filter$/i.test(t))       return { command: 'filter' };
   const m = t.match(/^deq(?:\s+(-?\d+))?$/i);
   if (m) return { command: 'deq', pos: m[1] != null ? parseInt(m[1]) : null };
   return null;
 }
 
-async function handleCommand(cmd, topic) {
+async function handleCommand(cmd, topic, alias) {
+  if (cmd.command === 'help') {
+    openHelp();
+    return;
+  }
+  if (cmd.command === 'filter') {
+    if (alias) filterByAlias(topic, alias);
+    else filterByTopic(topic);
+    return;
+  }
+  if (cmd.command === 'filter_reset') {
+    clearFilter();
+    return;
+  }
+
   const label = cmd.command === 'deq'
     ? `deq${cmd.pos != null ? ' ' + cmd.pos : ''}`
     : cmd.command;
@@ -264,65 +410,27 @@ async function handleCommand(cmd, topic) {
     const data = await res.json();
     if (!data.ok) { feedbackEl.textContent = `${label} failed`; return; }
 
-    if (cmd.command === 'list') {
-      feedbackEl.remove();
-      renderTopicList(data.topics);
-    } else {
-      const detail = cmd.command === 'stop'    ? `#${topic} — killed ${data.killed}`
-                   : cmd.command === 'stopall' ? `#${topic} — killed ${data.killed}, drained ${data.drained}`
-                   : `#${topic} — drained ${data.drained}`;
-      feedbackEl.textContent = `${label} ${detail}`;
+    if (cmd.command === 'restart') {
+      feedbackEl.textContent = 'restarting…';
+      // Poll /health until server is back up, then reload
+      const poll = async () => {
+        try {
+          const r = await fetch('/health');
+          if (r.ok) { location.reload(); return; }
+        } catch {}
+        setTimeout(poll, 500);
+      };
+      setTimeout(poll, 800);
+      return;
     }
+
+    const detail = cmd.command === 'stop'    ? `#${topic} — killed ${data.killed}`
+                 : cmd.command === 'stopall' ? `#${topic} — killed ${data.killed}, drained ${data.drained}`
+                 : `#${topic} — drained ${data.drained}`;
+    feedbackEl.textContent = `${label} ${detail}`;
   } catch {
     feedbackEl.textContent = `${label} — request failed`;
   }
-}
-
-function renderTopicList(topics) {
-  cmdPanelContent.innerHTML = '';
-  const el = document.createElement('div');
-  el.className = 'cmd-topic-list';
-  if (!topics.length) {
-    el.textContent = 'no topics yet';
-    cmdPanelContent.appendChild(el);
-    openCommandPanel();
-    return;
-  }
-  topics.forEach(t => {
-    const row = document.createElement('div');
-    row.className = 'ctl-row';
-    const modelLabel = t.last_model || t.last_backend || t.alias;
-    const tagText = modelLabel ? `#${t.name}@${modelLabel}` : `#${t.name}`;
-    const main = document.createElement('span');
-    main.className = 'ctl-main';
-    const tag = document.createElement('span');
-    tag.className = 'ctl-tag';
-    tag.textContent = tagText;
-    const prompt = document.createElement('span');
-    prompt.className = 'ctl-prompt';
-    prompt.textContent = t.last_prompt ? truncate(t.last_prompt, 60) : '—';
-    main.append(tag, document.createTextNode(' '), prompt);
-    if (t.last_at) row.title = `Last used ${fmtTime(t.last_at)}`;
-    row.append(main);
-    row.addEventListener('click', () => {
-      setTopicChip(t.name, null);
-      closeCommandPanel();
-      input.focus();
-    });
-    el.appendChild(row);
-  });
-  cmdPanelContent.appendChild(el);
-  openCommandPanel();
-}
-
-function openCommandPanel() {
-  settingsBar.classList.remove('open');
-  settingsBtn.classList.remove('active');
-  cmdPanel.classList.add('open');
-}
-
-function closeCommandPanel() {
-  cmdPanel.classList.remove('open');
 }
 
 function showCmdFeedback(text) {
@@ -349,17 +457,41 @@ form.addEventListener('submit', async (e) => {
     input.value = '';
     resizeComposer();
     hideAutocomplete();
-    await handleCommand(cmd, topic);
+    await handleCommand(cmd, topic, alias);
     return;
   }
   input.value = '';
   resizeComposer();
   hideAutocomplete();
   invalidateTopicsCache();
+  ctxHighlightEnabled = false;
   sendMessage(text);
+  document.querySelectorAll('.history-item.ctx-highlight').forEach(el => el.classList.remove('ctx-highlight'));
 });
 
-input.addEventListener('input', () => { resizeComposer(); updateAutocomplete(); });
+function fmtCtxLabel(adhoc, lookback, pinCount) {
+  const p = pinCount > 0 ? `${pinCount} pin${pinCount !== 1 ? 's' : ''}` : '';
+  if (!adhoc) {
+    return p ? `sess, ${p}` : 'sess';
+  }
+  const b = lookback > 0 ? `${lookback} back${lookback !== 1 ? 's' : ''}` : '';
+  if (b && p) return `${b}, ${p}`;
+  return b || p || 'none';
+}
+
+let ctxHighlightEnabled = false;
+
+function updateCtxHighlight() {
+  document.querySelectorAll('.history-item.ctx-highlight').forEach(el => el.classList.remove('ctx-highlight'));
+  if (!ctxHighlightEnabled) return;
+  const { adhoc, lookback } = parseInput(input.value);
+  if (!adhoc || lookback <= 0) return;
+  // Highlight the last N turns (user + assistant pairs) as context
+  const msgItems = [...document.querySelectorAll('.history-item.msg')];
+  msgItems.slice(-lookback * 2).forEach(el => el.classList.add('ctx-highlight'));
+}
+
+input.addEventListener('input', () => { ctxHighlightEnabled = true; resizeComposer(); updateAutocomplete(); updateCtxHighlight(); });
 
 input.addEventListener('keydown', (e) => {
   if (acOpen) {
@@ -368,6 +500,7 @@ input.addEventListener('keydown', (e) => {
     if (e.key === 'Tab' || (e.key === 'Enter' && acSel >= 0)) { e.preventDefault(); _acSelect(acSel >= 0 ? acSel : 0); return; }
     if (e.key === 'Escape') { hideAutocomplete(); return; }
   }
+  if (e.key === 'Escape' && helpPanel.classList.contains('open')) { closeHelp(); return; }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     form.requestSubmit();
@@ -379,15 +512,26 @@ input.addEventListener('keydown', (e) => {
 });
 
 async function sendMessage(text) {
-  const { topic, alias, message } = parseInput(text);
-  setTopicChip(topic, alias);
+  const { topic, alias, adhoc, lookback, message } = parseInput(text);
+  setTopicChip(topic, alias, adhoc, lookback);
   const sendTime = new Date().toISOString();
 
-  // User bubble
-  const userBubble = makeUserBubble(message, topic, alias);
+  // User bubble — compute ctx label immediately; pins are consumed by this send
+  const visiblePins = document.querySelectorAll('.pin-btn.pinned').length;
+  const ctxLabel = fmtCtxLabel(adhoc, lookback, visiblePins);
+  const userBubble = makeUserBubble(message, topic, alias, null, adhoc, lookback);
   const userTopicTag = userBubble.querySelector('.topic-tag');
   messages.appendChild(userBubble);
-  addTimestamp(userBubble, sendTime, true);
+  const userTsEl = addTimestamp(userBubble, sendTime, true);
+  let userCtxSpan = null;
+  if (userTsEl) {
+    userCtxSpan = document.createElement('span');
+    userCtxSpan.className = 'user-ctx';
+    userCtxSpan.textContent = '  · ctx:' + ctxLabel;
+    userTsEl.appendChild(userCtxSpan);
+  }
+  // Reset pinned buttons immediately — pins are one-shot, consumed by this send
+  document.querySelectorAll('.pin-btn.pinned').forEach(btn => btn.classList.remove('pinned'));
   requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
 
   // ── Thinking bubble (visible immediately, shows status/queue/loader) ──────────
@@ -404,6 +548,7 @@ async function sendMessage(text) {
     if (thinkingFrozen) return;
     if (thinkingLoader.parentNode) thinkingLoader.remove();
     thinkingContent.textContent = text;
+    thinkingBubble.style.display = '';  // unhide if it was hidden when response started
     scrollToBottom();
   }
   function freezeThinking() {
@@ -412,6 +557,8 @@ async function sendMessage(text) {
     if (statusBuf.trim()) {
       if (thinkingLoader.parentNode) thinkingLoader.remove();
       thinkingContent.textContent = statusBuf.replace(/\s+/g, ' ').trim();
+      thinkingBubble.style.display = '';
+      thinkingBubble.classList.add('msg-thinking-done');
     } else {
       thinkingBubble.remove();
     }
@@ -424,15 +571,13 @@ async function sendMessage(text) {
   bubble.className = 'msg assistant';
   const responseHeader = document.createElement('div');
   responseHeader.className = 'response-header';
-  const responseHeaderTag = document.createElement('span');
-  responseHeaderTag.className = 'topic-tag';
-  responseHeaderTag.textContent = alias ? `#${topic}@${alias}` : `#${topic}`;
+  const responseHeaderTag = makeTopicTag(topic, alias, { adhoc, lookback });
   const headerText = document.createElement('span');
   headerText.className = 'response-header-text';
   headerText.appendChild(responseHeaderTag);
   headerText.appendChild(document.createTextNode('  ' + truncate(message, 55)));
   responseHeader.appendChild(headerText);
-  const pinBtn = makePinBtn(null, 0, lookback > 0 || lookback === 'all');
+  const pinBtn = makePinBtn(null, 0);
   responseHeader.appendChild(pinBtn);
   bubble.appendChild(responseHeader);
   const contentDiv = document.createElement('div');
@@ -447,15 +592,19 @@ async function sendMessage(text) {
   let statusTimer = null;
   let completedFromStatus = false;
   let raw = '';
+  let resolvedAlias = alias;  // updated by meta event
   const controller = new AbortController();
 
-  const ctxLabel = lookback === 0 ? 'off' : lookback === 'all' ? 'all' : String(lookback);
+
 
   function revealResponseBubble() {
     if (firstDataReceived) return;
     firstDataReceived = true;
-    freezeThinking();
-    messages.appendChild(bubble);
+    thinkingBubble.after(bubble);
+    // Don't freeze yet — status events may still arrive during streaming.
+    // Remove the spinner; if no status yet, hide the bubble (will show if status arrives).
+    if (thinkingLoader.parentNode) thinkingLoader.remove();
+    if (!statusBuf.trim()) thinkingBubble.style.display = 'none';
     requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
   }
 
@@ -509,9 +658,19 @@ async function sendMessage(text) {
     const res = await fetch('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, topic, alias, lookback }),
+      body: JSON.stringify({ message, topic, alias, lookback, adhoc }),
+      // lookback: 0 for session mode (CLI owns context), N for adhoc #topic!N
       signal: controller.signal,
     });
+    if (res.status === 400) {
+      const err = await res.json().catch(() => ({}));
+      if (err.error && err.error.includes('not found')) {
+        freezeThinking();
+        showAliasCreatePrompt(alias, () => sendMessage(text));
+        return;
+      }
+      throw new Error(err.error || `HTTP 400`);
+    }
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
 
     const reader  = res.body.getReader();
@@ -539,10 +698,28 @@ async function sendMessage(text) {
           if (eventName === 'meta') {
             try {
               const meta = JSON.parse(data);
-              const label = meta.alias || meta.backend;
-              const fullTag = `#${topic}@${label}`;
-              responseHeaderTag.textContent = fullTag;
-              if (userTopicTag) userTopicTag.textContent = fullTag + ' ';
+              resolvedAlias = meta.alias || (meta.backend !== 'auto' ? meta.backend : null);
+              const resolvedAdhoc = adhoc; // server echoes back what we sent; use closure as reliable source
+              const newTag = makeTopicTag(topic, resolvedAlias, { adhoc: resolvedAdhoc, clickable: true, lookback });
+              responseHeaderTag.replaceWith(newTag);
+              const newUserTag = makeTopicTag(topic, resolvedAlias, { adhoc: resolvedAdhoc, clickable: true, lookback });
+              if (userTopicTag) {
+                userTopicTag.replaceWith(newUserTag);
+              } else if (resolvedAlias || topic !== 'default') {
+                const content = userBubble.firstElementChild;
+                if (content) {
+                  content.insertBefore(document.createTextNode(' '), content.firstChild);
+                  content.insertBefore(newUserTag, content.firstChild);
+                }
+              }
+              setTopicChip(topic, resolvedAlias, resolvedAdhoc, lookback);
+              // If no ctx span yet but resolved alias found, add ctx to the timestamp footer
+              if (!userCtxSpan && resolvedAlias && !resolvedAdhoc && userTsEl) {
+                userCtxSpan = document.createElement('span');
+                userCtxSpan.className = 'user-ctx';
+                userCtxSpan.textContent = '  · ctx:session';
+                userTsEl.appendChild(userCtxSpan);
+              }
               if (meta.msg_id) {
                 msgId = meta.msg_id;
                 pinBtn.dataset.msgId = msgId;
@@ -562,7 +739,26 @@ async function sendMessage(text) {
             try {
               const stats = JSON.parse(data);
               lastSessionId = stats.session_id ?? null;
-              statsEl = addStats(bubble, stats, ctxLabel, new Date().toISOString());
+              statsEl = addStats(bubble, stats, new Date().toISOString());
+              // Update user timestamp ctx with real compound label from stats
+              const finalCtxLabel = fmtCtxLabel(!!stats.adhoc, stats.lookback ?? 0, stats.pin_count ?? 0);
+              if (userTsEl) {
+                if (!userCtxSpan && finalCtxLabel) {
+                  userCtxSpan = document.createElement('span');
+                  userCtxSpan.className = 'user-ctx';
+                  userTsEl.appendChild(userCtxSpan);
+                }
+                if (userCtxSpan) {
+                  if (finalCtxLabel) {
+                    userCtxSpan.textContent = '  · ctx:' + finalCtxLabel;
+                    if (stats.session_id) userCtxSpan.dataset.sessionId = stats.session_id;
+                    if (stats.cwd) userCtxSpan.dataset.cwd = stats.cwd;
+                  } else {
+                    userCtxSpan.remove();
+                    userCtxSpan = null;
+                  }
+                }
+              }
             } catch {}
             eventName = null;
 
@@ -576,15 +772,13 @@ async function sendMessage(text) {
             stopStatusFallback();
             freezeThinking();
             doneTime = new Date().toISOString();
+            // Surface completed response at the bottom regardless of where it streamed
+            if (firstDataReceived) {
+              messages.appendChild(bubble);
+              if (statsEl) messages.appendChild(statsEl);
+              scrollToBottom();
+            }
             eventName = null;
-            // Assign proper topicPos now that this exchange is complete:
-            // it becomes position 1; all previously loaded exchanges shift by 1.
-            historyGlobalCount++;
-            document.querySelectorAll('.pin-btn[data-topic-pos]').forEach(pb => {
-              pb.dataset.topicPos = String(parseInt(pb.dataset.topicPos) + 1);
-            });
-            pinBtn.dataset.topicPos = '1';
-            updatePinBtnStates();
 
           } else if (eventName === 'error') {
             stopStatusFallback();
@@ -594,12 +788,7 @@ async function sendMessage(text) {
 
           } else {
             // Actual response content — reveal the response bubble on first chunk
-            if (!firstDataReceived) {
-              firstDataReceived = true;
-              freezeThinking();
-              messages.appendChild(bubble);
-              requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
-            }
+            if (!firstDataReceived) revealResponseBubble();
             if (dataLineCount > 1) raw += '\n';
             raw += data;
             contentDiv.innerHTML = marked.parse(raw);
@@ -639,15 +828,15 @@ async function sendMessage(text) {
         const content = document.createElement('span');
         content.className = 'msg-error';
         content.textContent = 'Response is still running. Reopen the page or history to pick it up.';
-        if (!firstDataReceived) {
-          firstDataReceived = true;
-          freezeThinking();
-          messages.appendChild(bubble);
-          contentDiv.appendChild(content);
-        }
+        if (!firstDataReceived) revealResponseBubble();
+        contentDiv.appendChild(content);
       } else {
         freezeThinking();
       }
+    }
+    if (!firstDataReceived && !completedFromStatus) {
+      revealResponseBubble();
+      contentDiv.innerHTML = '<span class="msg-error">No response — backend may be rate-limited or unavailable.</span>';
     }
     if (!statsEl && doneTime && firstDataReceived) addTimestamp(bubble, doneTime, false);
   }
@@ -668,42 +857,19 @@ async function sendMessage(text) {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-function makePinBtn(msgId, pinnedState, inLookback = false, topicPos = null) {
-  // pinnedState: 1 = pinned (always include), 0 = default, -1 = excluded (always skip)
+function makePinBtn(msgId, pinnedState) {
+  // pinnedState: 1 = pinned (selected), 0 = default (unselected)
   const btn = document.createElement('button');
   btn.className = 'pin-btn';
   if (pinnedState === 1) btn.classList.add('pinned');
-  else if (pinnedState === -1) btn.classList.add('excluded');
-  else if (inLookback) btn.classList.add('active');
   btn.type = 'button';
   btn.title = 'ctx';
   btn.textContent = 'ctx';
   if (msgId) btn.dataset.msgId = msgId;
-  if (topicPos !== null) btn.dataset.topicPos = String(topicPos);
   btn.addEventListener('click', async () => {
     if (!btn.dataset.msgId) return;
-    const pos = btn.dataset.topicPos ? parseInt(btn.dataset.topicPos) : null;
-    let newPinned;
-    if (btn.classList.contains('pinned')) {
-      // pinned → default
-      newPinned = 0;
-      btn.classList.remove('pinned');
-      btn.classList.toggle('active', _inLookbackWindow(pos));
-    } else if (btn.classList.contains('active')) {
-      // in-window → excluded
-      newPinned = -1;
-      btn.classList.remove('active');
-      btn.classList.add('excluded');
-    } else if (btn.classList.contains('excluded')) {
-      // excluded → default (restore window state)
-      newPinned = 0;
-      btn.classList.remove('excluded');
-      btn.classList.toggle('active', _inLookbackWindow(pos));
-    } else {
-      // dim (outside window) → pinned
-      newPinned = 1;
-      btn.classList.add('pinned');
-    }
+    const newPinned = btn.classList.contains('pinned') ? 0 : 1;
+    btn.classList.toggle('pinned', newPinned === 1);
     await fetch(`/chat/${btn.dataset.msgId}/pin`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -711,21 +877,6 @@ function makePinBtn(msgId, pinnedState, inLookback = false, topicPos = null) {
     });
   });
   return btn;
-}
-
-function _inLookbackWindow(topicPos) {
-  if (lookback === 'all') return true;
-  if (lookback === 0) return false;
-  if (topicPos === null) return lookback > 0;
-  return topicPos <= lookback;
-}
-
-function updatePinBtnStates() {
-  document.querySelectorAll('.pin-btn').forEach(pb => {
-    if (pb.classList.contains('pinned') || pb.classList.contains('excluded')) return;
-    const pos = pb.dataset.topicPos ? parseInt(pb.dataset.topicPos) : null;
-    pb.classList.toggle('active', _inLookbackWindow(pos));
-  });
 }
 
 async function pollMessageStatus(msgId, contentEl, bubbleEl) {
@@ -757,16 +908,16 @@ async function pollMessageStatus(msgId, contentEl, bubbleEl) {
   }, 2000);
 }
 
-function makeUserBubble(text, topic, alias, backendFallback = null) {
+function makeUserBubble(text, topic, alias, backendFallback = null, adhoc = false, lookback = 0) {
   const div = document.createElement('div');
   div.className = 'msg user';
   const content = document.createElement('div');
-  if (topic && topic !== 'default') {
+  const showTag = topic && (topic !== 'default' || alias || adhoc);
+  if (showTag) {
     const label = alias || backendFallback;
-    const tag = document.createElement('span');
-    tag.className = 'topic-tag';
-    tag.textContent = (label ? `#${topic}@${label}` : `#${topic}`) + ' ';
+    const tag = makeTopicTag(topic, label, { clickable: true, adhoc, lookback });
     content.appendChild(tag);
+    content.appendChild(document.createTextNode(' '));
   }
   content.appendChild(document.createTextNode(text));
   div.appendChild(content);
@@ -790,7 +941,7 @@ function addLoader(bubble) {
   return el;
 }
 
-function addStats(bubble, stats, ctxLabel, timestamp) {
+function addStats(bubble, stats, timestamp) {
   const el = document.createElement('div');
   el.className = 'stats';
 
@@ -805,25 +956,15 @@ function addStats(bubble, stats, ctxLabel, timestamp) {
   const cache      = cacheRead ? ` · ${fmtNum(cacheRead)} cached` : '';
   const reason     = reasoning ? ` · ${fmtNum(reasoning)} reasoning` : '';
   const dur        = stats.duration_ms ? ` · ${(stats.duration_ms / 1000).toFixed(1)}s` : '';
-  const ctx        = ctxLabel != null ? `  · ctx:${ctxLabel}` : '';
   const timePrefix = timestamp ? fmtTime(timestamp) + '  ·  ' : '';
 
   el.appendChild(document.createTextNode(
-    `${timePrefix}↑ ${fmtNum(inp)}${cache}  ↓ ${fmtNum(out)}${reason} tokens${cost ? '  ·  ' + cost : ''}${dur}${ctx}`
+    `${timePrefix}↑ ${fmtNum(inp)}${cache}  ↓ ${fmtNum(out)}${reason} tokens${dur}`
   ));
 
   const qdSpan = document.createElement('span');
   qdSpan.className = 'stats-quota-delta';
   el.appendChild(qdSpan);
-
-  const ctxColspan = hasCost ? '4' : '2';
-  const ctxRow = ctxLabel != null
-    ? `<tr class="ctx-row"><td colspan="${ctxColspan}">Context lookback: <b>${
-        ctxLabel === 'off' ? 'off (no history)'
-        : ctxLabel === 'all' ? 'all exchanges'
-        : `${ctxLabel} exchange${ctxLabel !== '1' ? 's' : ''}`
-      }</b></td></tr>`
-    : '';
 
   let rows, thead, tfoot;
   if (hasCost) {
@@ -860,10 +1001,16 @@ function addStats(bubble, stats, ctxLabel, timestamp) {
   tooltip.className = 'stats-tooltip';
   tooltip.innerHTML = `<table>
     <thead>${thead}</thead>
-    <tbody>${rows}${ctxRow}</tbody>
+    <tbody>${rows}</tbody>
     ${tfoot}
   </table>`;
   el.appendChild(tooltip);
+
+  el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    el.classList.toggle('stats-locked');
+  });
+  document.addEventListener('click', () => el.classList.remove('stats-locked'), { capture: true });
 
   bubble.after(el);
   return el;
@@ -1230,14 +1377,13 @@ async function loadAliases() {
   }
   const rows = aliases.map(a => `
     <tr>
-      <td>${a.name}</td>
+      <td><span class="alias-name">${a.name}</span></td>
       <td>${a.backend}</td>
       <td class="col-model">${a.model || '<span class="col-default">—</span>'}</td>
       <td>${a.cwd || '<span class="col-default">/tmp/squid</span>'}</td>
       <td class="col-timeout">${a.timeout ? a.timeout + 's' : '<span class="col-default">30m</span>'}</td>
       <td>
-        <button class="edit-btn" data-name="${a.name}" data-backend="${a.backend}" data-model="${a.model || ''}" data-cwd="${a.cwd || ''}" data-timeout="${a.timeout || ''}">✎</button>
-        <button class="del-btn" data-name="${a.name}">✕</button>
+        <button class="del-btn" data-name="${a.name}" title="Delete alias (does not affect existing messages)">✕</button>
       </td>
     </tr>`).join('');
   listEl.innerHTML = `<table>
@@ -1245,20 +1391,10 @@ async function loadAliases() {
     <tbody>${rows}</tbody>
   </table>`;
 
-  listEl.querySelectorAll('.edit-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.getElementById('af-name').value    = btn.dataset.name;
-      document.getElementById('af-backend').value = btn.dataset.backend;
-      document.getElementById('af-model').value   = btn.dataset.model;
-      document.getElementById('af-cwd').value     = btn.dataset.cwd;
-      document.getElementById('af-timeout').value = btn.dataset.timeout;
-      document.getElementById('af-name').focus();
-    });
-  });
-
   listEl.querySelectorAll('.del-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
       await fetch(`/config/aliases/${btn.dataset.name}`, { method: 'DELETE' });
+      _aliasesCache = null;
       loadAliases();
     });
   });
@@ -1295,6 +1431,57 @@ function initAliases() {
       }
     } catch { statusEl.textContent = 'error'; }
     setTimeout(() => { statusEl.textContent = ''; }, 3000);
+  });
+}
+
+// ── inline alias creation prompt ─────────────────────────────────────────────
+
+function showAliasCreatePrompt(aliasName, onSaved) {
+  const existing = document.getElementById('alias-create-prompt');
+  if (existing) existing.remove();
+
+  const prompt = document.createElement('div');
+  prompt.id = 'alias-create-prompt';
+  prompt.className = 'alias-create-prompt';
+  prompt.innerHTML = `
+    <div class="acp-title">Alias <strong>${aliasName}</strong> not found — create it?</div>
+    <div class="acp-row">
+      <select id="acp-backend">
+        <option value="auto">auto</option>
+        <option value="claude">claude</option>
+        <option value="cursor">cursor</option>
+        <option value="antigravity">antigravity</option>
+        <option value="codex">codex</option>
+        <option value="copilot">copilot</option>
+      </select>
+      <input id="acp-model" placeholder="model (optional)" />
+      <input id="acp-cwd" placeholder="cwd (default: /tmp/squid)" />
+    </div>
+    <div class="acp-actions">
+      <button id="acp-save">Create &amp; send</button>
+      <button id="acp-cancel">Cancel</button>
+    </div>`;
+
+  messages.appendChild(prompt);
+  messages.scrollTop = messages.scrollHeight;
+
+  prompt.querySelector('#acp-cancel').addEventListener('click', () => prompt.remove());
+  prompt.querySelector('#acp-save').addEventListener('click', async () => {
+    const backend = prompt.querySelector('#acp-backend').value;
+    const model   = prompt.querySelector('#acp-model').value.trim() || null;
+    const cwd     = prompt.querySelector('#acp-cwd').value.trim()   || null;
+    const res = await fetch('/config/aliases', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: aliasName, backend, model, cwd }),
+    });
+    if (res.ok) {
+      _aliasesCache = null;  // invalidate autocomplete cache
+      prompt.remove();
+      onSaved();
+    } else {
+      prompt.querySelector('.acp-title').textContent = 'Failed to create alias.';
+    }
   });
 }
 
@@ -1335,14 +1522,29 @@ function _acRender(items) {
   acItems = items; acSel = -1;
   acEl.innerHTML = items.map((item, i) =>
     `<div class="ac-item" data-i="${i}">` +
-    `<div class="ac-row"><span class="ac-name">${item.label}</span>` +
-    (item.model ? `<span class="ac-model">@${item.model}</span>` : '') +
+    `<div class="ac-row"><span class="ac-label">${item.label}</span>` +
     (item.sub ? `<span class="ac-sub">${item.sub}</span>` : '') +
-    (item.meta ? `<span class="ac-meta">${item.meta}</span>` : '') + `</div>` +
+    (item.meta ? `<span class="ac-meta">${item.meta}</span>` : '') +
+    (item.deleteTopic ? `<button class="ac-del-btn" data-topic="${item.deleteTopic}" type="button" title="Delete #${item.deleteTopic} sessions">✕</button>` : '') +
+    `</div>` +
     `</div>`
   ).join('');
   acEl.querySelectorAll('.ac-item').forEach((el, i) =>
-    el.addEventListener('mousedown', e => { e.preventDefault(); _acSelect(i); })
+    el.addEventListener('mousedown', e => {
+      if (e.target.classList.contains('ac-del-btn')) return;
+      e.preventDefault(); _acSelect(i);
+    })
+  );
+  acEl.querySelectorAll('.ac-del-btn').forEach(btn =>
+    btn.addEventListener('mousedown', async e => {
+      e.preventDefault(); e.stopPropagation();
+      const name = btn.dataset.topic;
+      await fetch(`/topics/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      invalidateTopicsCache();
+      acItems = acItems.filter(it => it.deleteTopic !== name);
+      btn.closest('.ac-item').remove();
+      if (!acEl.querySelector('.ac-item')) hideAutocomplete();
+    })
   );
   acEl.classList.add('open');
   acOpen = true;
@@ -1356,10 +1558,19 @@ function _acSelect(idx) {
   input.focus();
 }
 
+function _acTopicLabel(topicName, modelLabel) {
+  return `<span class="ac-topic">#${topicName}</span>` +
+         (modelLabel ? `<span class="ac-alias">@${modelLabel}</span>` : '');
+}
+
+function _acAliasLabel(topicName, aliasName) {
+  return `<span class="ac-topic">#${topicName}</span><span class="ac-alias">@${aliasName}</span>`;
+}
+
 async function updateAutocomplete() {
   const val    = input.value;
-  const mTopic = val.match(/^#(\w*)$/);
-  const mAlias = val.match(/^#(\w+)@(\w*)$/);
+  const mTopic = val.match(/^#(\w*)[!]?$/);
+  const mAlias = val.match(/^#(\w+)@(\w*)[!]?$/);
   if (mTopic) {
     const prefix = mTopic[1].toLowerCase();
     const topics = await _acTopics();
@@ -1367,11 +1578,11 @@ async function updateAutocomplete() {
     _acRender(
       topics.filter(t => t.name.toLowerCase().startsWith(prefix)).slice(0, 8)
         .map(t => ({
-          label:  '#' + t.name,
-          insert: '#' + t.name,
-          model:  t.last_model || t.last_backend || '',
-          meta:   t.active ? '● live' : t.queue_depth > 0 ? `queue ${t.queue_depth}` : '',
-          sub:    t.last_prompt ? truncate(t.last_prompt, 55) : '',
+          label:       _acTopicLabel(t.name, t.last_model || t.last_backend || ''),
+          insert:      '#' + t.name,
+          deleteTopic: t.name,
+          meta:        t.active ? '● live' : t.queue_depth > 0 ? `queue ${t.queue_depth}` : '',
+          sub:         t.last_prompt ? truncate(t.last_prompt, 55) : '',
         }))
     );
   } else if (mAlias) {
@@ -1382,7 +1593,7 @@ async function updateAutocomplete() {
     _acRender(
       aliases.filter(a => a.name.toLowerCase().startsWith(prefix)).slice(0, 8)
         .map(a => ({
-          label:  `#${topic}@${a.name}`,
+          label:  _acAliasLabel(topic, a.name),
           insert: `#${topic}@${a.name}`,
           meta:   a.model || a.backend,
         }))
@@ -1415,10 +1626,35 @@ function initPullToRefresh() {
   }, { passive: true });
 }
 
+// ── boot banner ──────────────────────────────────────────────────────────────
+
+async function showBootBanner() {
+  try {
+    const res = await fetch('/health');
+    if (!res.ok) return;
+    const data = await res.json();
+    const bootTime = data.boot_time ? fmtTime(data.boot_time) : '';
+    const art = `\
+    🦑 AGENT
+    ██████╗ ██████╗ ██╗   ██╗██╗██████╗
+   ██╔════╝██╔═══██╗██║   ██║██║██╔══██╗
+   ╚█████╗ ██║   ██║██║   ██║██║██║  ██║
+    ╚═══██╗██║▄▄ ██║██║   ██║██║██║  ██║
+   ██████╔╝╚██████╔╝╚██████╔╝██║██████╔╝
+   ╚═════╝  ╚══▀▀═╝  ╚═════╝ ╚═╝╚═════╝`;
+    const el = document.createElement('div');
+    el.className = 'boot-banner';
+    el.innerHTML = `<pre class="boot-art">${art}</pre>` +
+      `<div class="boot-meta">agent squid${bootTime ? `  ·  started ${bootTime}` : ''}</div>`;
+    messages.appendChild(el);
+    messages.scrollTop = messages.scrollHeight;
+  } catch {}
+}
+
 // ── init ─────────────────────────────────────────────────────────────────────
 
 initSettings();
-document.getElementById('cmd-panel-close').addEventListener('click', closeCommandPanel);
+document.getElementById('filter-badge-clear').addEventListener('click', clearFilter);
 document.addEventListener('click', e => { if (!acEl.contains(e.target) && e.target !== input) hideAutocomplete(); });
 initHistoryScroll();
 initStats();
@@ -1426,3 +1662,5 @@ initAliases();
 initQuota();
 initCreds();
 initPullToRefresh();
+showBootBanner();
+fetch('/chat/reset-pins', { method: 'POST' }).catch(() => {});

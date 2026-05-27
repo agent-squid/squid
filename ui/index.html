@@ -12,7 +12,7 @@
   <link rel="manifest" href="/manifest.webmanifest?v=20260523-1" />
   <link rel="icon" href="/icons/icon-192.png" sizes="192x192" type="image/png" />
   <link rel="apple-touch-icon" href="/icons/icon-192.png" />
-  <link rel="stylesheet" href="style.css?v=20260523-15" />
+  <link rel="stylesheet" href="style.css?v=20260527-58" />
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
@@ -28,6 +28,7 @@
           <rect x="10" y="1" width="3" height="12" rx="0.5"/>
         </svg>
       </button>
+      <button id="help-btn" type="button" title="Help">?</button>
       <div id="quota-creds-popup">
         <span class="settings-label">Claude.ai session</span>
         <input id="creds-org" type="text" placeholder="Org ID" spellcheck="false" />
@@ -52,16 +53,47 @@
       <div id="stats-content"></div>
     </div>
 
+    <div id="help-panel">
+      <div id="help-header">
+        <span class="settings-label">Help</span>
+        <button id="help-close" type="button">✕</button>
+      </div>
+      <div id="help-content">
+        <div class="help-section">
+          <div class="help-title">Input syntax</div>
+          <div class="help-row"><code>#topic@alias message</code><span>session — FIFO queued per alias</span></div>
+          <div class="help-row"><code>#topic@alias!N message</code><span>adhoc — parallel, last N exchanges as context</span></div>
+          <div class="help-row"><code>#topic@alias! message</code><span>adhoc — default 5 exchanges</span></div>
+          <div class="help-row"><code>#topic message</code><span>uses sticky alias (last used)</span></div>
+          <div class="help-row"><code>#topic</code><span>type <kbd>#</kbd> to browse &amp; search topics</span></div>
+          <div class="help-row"><code>#topic@</code><span>type <kbd>@</kbd> to browse aliases</span></div>
+        </div>
+        <div class="help-section">
+          <div class="help-title">In-chat commands</div>
+          <div class="help-row"><code>stop</code><span>kill running process for current topic</span></div>
+          <div class="help-row"><code>stopall</code><span>kill + drain queue for current topic</span></div>
+          <div class="help-row"><code>deq</code><span>drain entire pending queue</span></div>
+          <div class="help-row"><code>deq N</code><span>remove Nth item (1=first, -1=last)</span></div>
+          <div class="help-row"><code>filter</code><span>filter history by current #topic or #topic@model</span></div>
+          <div class="help-row"><code>filter reset</code><span>clear the active filter</span></div>
+        </div>
+        <div class="help-section">
+          <div class="help-title">Context curation</div>
+          <div class="help-row"><code>pin</code><span>pin a message — injected into every session on next turn</span></div>
+          <div class="help-row"><code>✕ session</code><span>clear session state; next message starts fresh</span></div>
+        </div>
+        <div class="help-section">
+          <div class="help-title">Keyboard</div>
+          <div class="help-row"><kbd>↑</kbd><kbd>↓</kbd><span>navigate autocomplete</span></div>
+          <div class="help-row"><kbd>Enter</kbd><span>select autocomplete item</span></div>
+          <div class="help-row"><kbd>Esc</kbd><span>close autocomplete / help</span></div>
+          <div class="help-row"><kbd>Shift+Enter</kbd><span>newline in input</span></div>
+        </div>
+      </div>
+    </div>
+
     <div id="messages"></div>
     <div id="scroll-btn" role="button" aria-label="Scroll to bottom">↓</div>
-
-    <div id="cmd-panel">
-      <div id="cmd-panel-header">
-        <span class="settings-label">Topics</span>
-        <button id="cmd-panel-close" type="button" aria-label="Close topic list">✕</button>
-      </div>
-      <div id="cmd-panel-content"></div>
-    </div>
 
     <div id="settings-bar">
       <div id="settings-aliases">
@@ -74,7 +106,6 @@
               <option value="auto">auto</option>
               <option value="claude">claude</option>
               <option value="cursor">cursor</option>
-              <option value="grok">grok</option>
               <option value="antigravity">antigravity</option>
               <option value="codex">codex</option>
               <option value="copilot">copilot</option>
@@ -87,23 +118,15 @@
           </div>
         </form>
       </div>
-      <div id="settings-lookback">
-        <span class="settings-label">Lookback</span>
-        <div id="lookback-control">
-          <button class="lb" data-val="0">Off</button>
-          <button class="lb" data-val="1">1</button>
-          <button class="lb" data-val="2">2</button>
-          <button class="lb" data-val="3">3</button>
-          <button class="lb active" data-val="5">5</button>
-          <button class="lb" data-val="10">10</button>
-          <button class="lb" data-val="all">All</button>
-        </div>
-        <span class="settings-hint">exchanges per topic sent as context</span>
-        <button id="reset-pins-btn" type="button">Reset pins</button>
-      </div>
     </div>
 
     <div id="autocomplete"></div>
+    <div id="tag-bar">
+      <div id="filter-badge">
+        <span id="filter-badge-label"></span>
+        <button id="filter-badge-clear" type="button">×</button>
+      </div>
+    </div>
     <form id="form">
       <div id="input-area">
         <div id="topic-chip"></div>
@@ -118,6 +141,6 @@
       </button>
     </form>
   </div>
-  <script src="app.js?v=20260523-21"></script>
+  <script src="app.js?v=20260527-58"></script>
 </body>
 </html>

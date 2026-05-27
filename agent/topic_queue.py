@@ -20,6 +20,8 @@ class QueueItem:
     model: Optional[str]
     cwd: Optional[str] = None
     timeout: Optional[int] = None
+    resume_session_id: Optional[str] = None
+    inject_history: list[dict] = field(default_factory=list)
     out_q: asyncio.Queue = field(default_factory=asyncio.Queue)
 
 
@@ -106,30 +108,39 @@ class TopicWorker:
             self.q.task_done()
 
     async def _process(self, item: QueueItem):
-        from .runners import run_auto, run_claude, run_codex, run_copilot, run_cursor, run_grok, run_antigravity
+        from .runners import run_auto, run_claude, run_codex, run_copilot, run_cursor, run_antigravity
         from .config import SQUID_HOME
-        runner = {"auto": run_auto, "claude": run_claude, "cursor": run_cursor, "grok": run_grok, "antigravity": run_antigravity, "codex": run_codex, "copilot": run_copilot}.get(
+        runner = {"auto": run_auto, "claude": run_claude, "cursor": run_cursor, "antigravity": run_antigravity, "codex": run_codex, "copilot": run_copilot}.get(
             item.backend, run_auto
         )
-        async for chunk in runner(
-            item.prompt, history=item.context_history, model=item.model,
+        # One-time injections are prepended to context_history for non-resumable path,
+        # or passed separately for the resumable path (runner handles the distinction).
+        history = item.inject_history + item.context_history if item.inject_history else item.context_history
+
+        kwargs: dict = dict(
+            history=history, model=item.model,
             cwd=item.cwd or SQUID_HOME,
             topic=item.topic, alias=item.alias or "",
             response_timeout=item.timeout,
-        ):
+        )
+        if item.backend in ("claude", "codex", "cursor", "copilot", "antigravity") and item.resume_session_id:
+            kwargs["resume_session_id"] = item.resume_session_id
+
+        async for chunk in runner(item.prompt, **kwargs):
             await item.out_q.put(chunk)
 
 
 class TopicDispatcher:
     def __init__(self):
         self._workers: dict[str, TopicWorker] = {}
+        self._adhoc_counter: int = 0
 
-    def _get_or_create(self, topic: str) -> TopicWorker:
-        if topic not in self._workers:
+    def _get_or_create(self, key: str, topic: str) -> TopicWorker:
+        if key not in self._workers:
             worker = TopicWorker(topic)
             worker.start()
-            self._workers[topic] = worker
-        return self._workers[topic]
+            self._workers[key] = worker
+        return self._workers[key]
 
     async def dispatch(
         self,
@@ -141,15 +152,30 @@ class TopicDispatcher:
         alias: Optional[str] = None,
         cwd: Optional[str] = None,
         response_timeout: Optional[int] = None,
+        resume_session_id: Optional[str] = None,
+        inject_history: Optional[list[dict]] = None,
+        adhoc: bool = False,
     ) -> tuple[asyncio.Queue, int, TopicWorker]:
-        worker = self._get_or_create(topic)
+        if adhoc:
+            # Each adhoc message gets its own ephemeral worker — never queued, always parallel.
+            self._adhoc_counter += 1
+            queue_key = f"__adhoc_{self._adhoc_counter}"
+        else:
+            queue_key = f"{topic}@{alias}" if alias else topic
+        worker = self._get_or_create(queue_key, topic)
         item = QueueItem(
             seq=0, topic=topic, alias=alias,
             prompt=prompt, context_history=context_history,
             backend=backend, model=model, cwd=cwd, timeout=response_timeout,
+            resume_session_id=resume_session_id,
+            inject_history=inject_history or [],
         )
         seq = await worker.enqueue(item)
         return item.out_q, seq, worker
+
+    def _workers_for_topic(self, topic: str) -> list[TopicWorker]:
+        """Return all workers whose queue key starts with this topic."""
+        return [w for k, w in self._workers.items() if k == topic or k.startswith(f"{topic}@")]
 
     def stop_topic(self, topic: str) -> int:
         """Kill only the running process for topic; leave queue intact."""
@@ -157,24 +183,23 @@ class TopicDispatcher:
         return kill_procs_by_topic(topic)
 
     def stopall_topic(self, topic: str) -> dict:
-        """Kill running process + drain entire queue for topic."""
+        """Kill running process + drain entire queue for topic (all alias lanes)."""
         from .runners import kill_procs_by_topic
         killed = kill_procs_by_topic(topic)
-        worker = self._workers.get(topic)
-        drained = worker.drain() if worker else 0
+        drained = sum(w.drain() for w in self._workers_for_topic(topic))
         return {"killed": killed, "drained": drained}
 
     def drain_topic(self, topic: str, pos: Optional[int] = None) -> int:
-        """Drain pending items for topic (leaves current process running)."""
-        worker = self._workers.get(topic)
-        return worker.drain(pos) if worker else 0
+        """Drain pending items for topic across all alias lanes."""
+        return sum(w.drain(pos) for w in self._workers_for_topic(topic))
 
     def topics_info(self) -> list[dict]:
         return [
             {
-                "name": t,
+                "name": w.topic,
+                "queue_key": k,
                 "queue_depth": w.queue_depth(),
                 "active": w._processing_seq is not None,
             }
-            for t, w in self._workers.items()
+            for k, w in self._workers.items()
         ]
