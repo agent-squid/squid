@@ -166,10 +166,12 @@ async def _drain_to_completion(
     raw: str,
     status_raw: str,
     session_id: Optional[str],
+    tool_events: Optional[list] = None,
 ) -> None:
     """Drain the worker queue after client disconnect; save final content to DB."""
     loop = asyncio.get_event_loop()
     deadline = loop.time() + 300.0  # 5-minute hard cap
+    tool_events = list(tool_events or [])
     try:
         while True:
             left = deadline - loop.time()
@@ -183,6 +185,8 @@ async def _drain_to_completion(
             if chunk is None:  # sentinel — worker finished
                 break
             if isinstance(chunk, dict):
+                if "_tool" in chunk:
+                    tool_events.append(chunk["_tool"])
                 if "_status" in chunk:
                     status_raw += chunk["_status"]
                 if "_error" in chunk:
@@ -194,9 +198,10 @@ async def _drain_to_completion(
         log.exception("drain error msg_id=%s", msg_id)
 
     content = raw or status_raw or ""
+    tools_json = json.dumps(tool_events) if tool_events else None
     try:
-        update_assistant_message(msg_id, content, session_id, "done" if content else "error")
-        log.info("drain complete msg_id=%s len=%d", msg_id, len(content))
+        update_assistant_message(msg_id, content, session_id, "done" if content else "error", tools=tools_json)
+        log.info("drain complete msg_id=%s len=%d tools=%d", msg_id, len(content), len(tool_events))
     except Exception:
         log.exception("drain save failed msg_id=%s", msg_id)
 
@@ -235,6 +240,7 @@ async def stream_response(
 
     raw = ""
     status_raw = ""
+    tool_events: list[dict] = []
     session_id: Optional[str] = None
     last_partial_save = time.monotonic()
     _completed = False  # tracks whether we reached the normal done path
@@ -279,6 +285,7 @@ async def stream_response(
                     reset_topic_pins(topic)
 
             elif isinstance(chunk, dict) and "_tool" in chunk:
+                tool_events.append(chunk["_tool"])
                 yield sse_event("tool", json.dumps(chunk["_tool"]))
 
             elif isinstance(chunk, dict) and "_status" in chunk:
@@ -300,7 +307,8 @@ async def stream_response(
         if not raw and status_raw:
             raw = status_raw
             yield sse_chunk(raw)
-        update_assistant_message(asst_msg_id, raw, session_id, "done")
+        tools_json = json.dumps(tool_events) if tool_events else None
+        update_assistant_message(asst_msg_id, raw, session_id, "done", tools=tools_json)
         yield sse_event("done")
         _completed = True
 
@@ -308,7 +316,8 @@ async def stream_response(
         log.exception("Unexpected error in stream_response")
         err_text = f"Internal error: {exc}"
         yield sse_event("error", err_text)
-        update_assistant_message(asst_msg_id, raw or err_text, session_id, "error")
+        tools_json = json.dumps(tool_events) if tool_events else None
+        update_assistant_message(asst_msg_id, raw or err_text, session_id, "error", tools=tools_json)
         _completed = True
 
     finally:
@@ -321,7 +330,7 @@ async def stream_response(
                 pass
             # Background task drains the worker and saves final content when done
             asyncio.create_task(
-                _drain_to_completion(out_q, asst_msg_id, raw, status_raw, session_id),
+                _drain_to_completion(out_q, asst_msg_id, raw, status_raw, session_id, tool_events),
                 name=f"squid-drain-{asst_msg_id}",
             )
 

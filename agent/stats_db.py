@@ -84,6 +84,7 @@ _MIGRATIONS = [
     "ALTER TABLE chat_messages ADD COLUMN pinned INTEGER DEFAULT 0",
     "ALTER TABLE session_stats ADD COLUMN lookback INTEGER DEFAULT 0",
     "ALTER TABLE session_stats ADD COLUMN pin_count INTEGER DEFAULT 0",
+    "ALTER TABLE chat_messages ADD COLUMN tools TEXT",
 ]
 
 
@@ -225,12 +226,13 @@ def insert_assistant_message(
 
 
 def update_assistant_message(
-    msg_id: int, content: str, session_id: Optional[str], status: str = "done"
+    msg_id: int, content: str, session_id: Optional[str], status: str = "done",
+    tools: Optional[str] = None,
 ) -> None:
     with _connect() as conn:
         conn.execute(
-            "UPDATE chat_messages SET content=?, session_id=?, status=? WHERE id=?",
-            (content, session_id, status, msg_id),
+            "UPDATE chat_messages SET content=?, session_id=?, status=?, tools=? WHERE id=?",
+            (content, session_id, status, tools, msg_id),
         )
 
 
@@ -416,7 +418,7 @@ def get_messages_flat(topic: Optional[str] = None, alias: Optional[str] = None, 
         rows = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.alias, m.backend, m.model,
                        m.content, m.status, m.pinned, m.adhoc, m.session_id,
-                       m.created_at AS timestamp, m.reply_to,
+                       m.tools, m.created_at AS timestamp, m.reply_to,
                        u.content AS prompt
                 FROM chat_messages m
                 LEFT JOIN chat_messages u ON m.reply_to = u.id

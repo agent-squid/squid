@@ -318,6 +318,18 @@ async function loadHistory() {
       asstHeader.appendChild(makePinBtn(item.id, item.pinned || 0));
       asstBubble.appendChild(asstHeader);
 
+      if (item.tools) {
+        try {
+          const tools = typeof item.tools === 'string' ? JSON.parse(item.tools) : item.tools;
+          if (tools.length > 0) {
+            const asstTools = document.createElement('div');
+            asstTools.className = 'tool-calls';
+            for (const tool of tools) asstTools.appendChild(makeToolBlock(tool));
+            asstBubble.appendChild(asstTools);
+          }
+        } catch {}
+      }
+
       const asstContent = document.createElement('div');
       if (item.status === 'pending') {
         addLoader(asstContent);
