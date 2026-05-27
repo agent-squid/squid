@@ -318,18 +318,6 @@ async function loadHistory() {
       asstHeader.appendChild(makePinBtn(item.id, item.pinned || 0));
       asstBubble.appendChild(asstHeader);
 
-      if (item.tools) {
-        try {
-          const tools = typeof item.tools === 'string' ? JSON.parse(item.tools) : item.tools;
-          if (tools.length > 0) {
-            const asstTools = document.createElement('div');
-            asstTools.className = 'tool-calls';
-            for (const tool of tools) asstTools.appendChild(makeToolBlock(tool));
-            asstBubble.appendChild(asstTools);
-          }
-        } catch {}
-      }
-
       const asstContent = document.createElement('div');
       if (item.status === 'pending') {
         addLoader(asstContent);
@@ -341,6 +329,16 @@ async function loadHistory() {
         asstContent.innerHTML = marked.parse(item.content || '');
       }
       asstBubble.appendChild(asstContent);
+      if (item.tools) {
+        try {
+          const tools = typeof item.tools === 'string' ? JSON.parse(item.tools) : item.tools;
+          if (tools.length > 0) {
+            const summaryEl = makeToolSummary(tools);
+            summaryEl.classList.add('history-item');
+            fragment.appendChild(summaryEl);
+          }
+        } catch {}
+      }
       fragment.appendChild(asstBubble);
 
       if (item.stats) {
@@ -604,9 +602,6 @@ async function sendMessage(text) {
   const pinBtn = makePinBtn(null, 0);
   responseHeader.appendChild(pinBtn);
   bubble.appendChild(responseHeader);
-  const toolsDiv = document.createElement('div');
-  toolsDiv.className = 'tool-calls';
-  bubble.appendChild(toolsDiv);
   const contentDiv = document.createElement('div');
   bubble.appendChild(contentDiv);
 
@@ -792,9 +787,9 @@ async function sendMessage(text) {
           } else if (eventName === 'tool') {
             try {
               const tool = JSON.parse(data);
-              if (!firstDataReceived) revealResponseBubble();
-              toolsDiv.appendChild(makeToolBlock(tool));
-              scrollToBottom();
+              const label = toolLabel(tool);
+              statusBuf += label + '\n';
+              setThinkingText(label);
             } catch {}
             eventName = null;
 
@@ -892,6 +887,40 @@ async function sendMessage(text) {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+function toolLabel(tool) {
+  const name = tool.name || '';
+  if (name === 'Read' || name === 'Edit' || name === 'Write' || name === 'MultiEdit')
+    return `${name}: ${tool.file || ''}`;
+  if (name === 'Bash') return `Bash: ${truncate(tool.command || '', 70)}`;
+  if (name === 'Agent') return `Agent: ${truncate(tool.description || '', 70)}`;
+  if (name === 'WebFetch' || name === 'WebSearch') return `${name}: ${truncate(tool.query || '', 70)}`;
+  if (name === 'TodoWrite') { const n = (tool.todos || []).length; return `TodoWrite: ${n} item${n !== 1 ? 's' : ''}`; }
+  return name + (tool.key ? ': ' + truncate(tool.value || '', 50) : '');
+}
+
+function makeToolSummary(tools) {
+  const el = document.createElement('div');
+  el.className = 'msg assistant msg-thinking msg-thinking-done';
+  const inner = document.createElement('div');
+  const last = toolLabel(tools[tools.length - 1]);
+  const summary = last.length > 80 ? '…' + last.slice(-77) : last;
+  const toggle = document.createElement('button');
+  toggle.className = 'thinking-toggle';
+  toggle.textContent = summary;
+  const body = document.createElement('div');
+  body.className = 'thinking-body';
+  const list = document.createElement('div');
+  list.className = 'tool-calls';
+  list.style.padding = '0.4em 0.2em';
+  for (const tool of tools) list.appendChild(makeToolBlock(tool));
+  body.appendChild(list);
+  toggle.addEventListener('click', () => el.classList.toggle('thinking-expanded'));
+  inner.appendChild(toggle);
+  inner.appendChild(body);
+  el.appendChild(inner);
+  return el;
+}
 
 function renderDiffLines(container, oldStr, newStr) {
   for (const line of (oldStr || '').split('\n')) {
