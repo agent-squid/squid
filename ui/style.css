@@ -204,6 +204,15 @@ body {
   background: #18181f;
 }
 .msg.assistant.msg-thinking .loader span { background: #555; }
+.thinking-toggle {
+  background: none; border: none; cursor: pointer;
+  color: inherit; font: inherit; padding: 0;
+  text-align: left; width: 100%; opacity: 0.75;
+}
+.thinking-toggle::before { content: '▸ '; }
+.thinking-expanded .thinking-toggle::before { content: '▾ '; }
+.thinking-body { display: none; margin-top: 0.5em; white-space: pre-wrap; }
+.thinking-expanded .thinking-body { display: block; }
 .boot-banner {
   align-self: center;
   text-align: center;

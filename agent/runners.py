@@ -197,6 +197,7 @@ async def run_claude(
         cmd.append(_build_prompt(prompt, history))
 
     session_id: Optional[str] = None
+    streamed_text = False  # track whether any text chunks were streamed as content
 
     async for line in _stream_lines(cmd, cwd=cwd, backend="claude", topic=topic, alias=alias, response_timeout=response_timeout):
         if not line:
@@ -219,12 +220,15 @@ async def run_claude(
             ):
                 text = inner["delta"].get("text", "")
                 if text:
-                    yield {"_status": text}
+                    streamed_text = True
+                    yield text  # stream directly as response content, not status
 
         elif t == "result":
-            final_text = event.get("result", "")
-            if final_text:
-                yield final_text
+            # Skip final_text if we already streamed it chunk by chunk above
+            if not streamed_text:
+                final_text = event.get("result", "")
+                if final_text:
+                    yield final_text
             usage = event.get("usage", {})
             yield {
                 "_stats": {
@@ -482,6 +486,7 @@ async def run_antigravity(
     start_ms = time.monotonic() * 1000
     session_id: Optional[str] = None
     stats_yielded = False
+    streamed_text = False
 
     async for line in _stream_lines(cmd, cwd=cwd, backend="antigravity", topic=topic, alias=alias, response_timeout=response_timeout):
         if not line:
@@ -505,12 +510,14 @@ async def run_antigravity(
             ):
                 text = inner["delta"].get("text", "")
                 if text:
-                    yield {"_status": text}
+                    streamed_text = True
+                    yield text  # stream directly as response content, not status
 
         elif t == "result":
-            final_text = event.get("result", "")
-            if final_text:
-                yield final_text
+            if not streamed_text:
+                final_text = event.get("result", "")
+                if final_text:
+                    yield final_text
             usage = event.get("usage", {})
             yield {
                 "_stats": {

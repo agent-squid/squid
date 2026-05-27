@@ -556,7 +556,19 @@ async function sendMessage(text) {
     thinkingFrozen = true;
     if (statusBuf.trim()) {
       if (thinkingLoader.parentNode) thinkingLoader.remove();
-      thinkingContent.textContent = statusBuf.replace(/\s+/g, ' ').trim();
+      const fullText = statusBuf.replace(/\s+/g, ' ').trim();
+      // Collapsed by default: show last ~80 chars as summary, full text on expand
+      const summary = fullText.length > 80 ? '…' + fullText.slice(-77) : fullText;
+      thinkingContent.innerHTML = '';
+      const toggle = document.createElement('button');
+      toggle.className = 'thinking-toggle';
+      toggle.textContent = summary;
+      const body = document.createElement('div');
+      body.className = 'thinking-body';
+      body.textContent = fullText;
+      thinkingContent.appendChild(toggle);
+      thinkingContent.appendChild(body);
+      toggle.addEventListener('click', () => thinkingBubble.classList.toggle('thinking-expanded'));
       thinkingBubble.style.display = '';
       thinkingBubble.classList.add('msg-thinking-done');
     } else {
