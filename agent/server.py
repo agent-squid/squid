@@ -278,6 +278,9 @@ async def stream_response(
                 if adhoc and pin_count > 0:
                     reset_topic_pins(topic)
 
+            elif isinstance(chunk, dict) and "_tool" in chunk:
+                yield sse_event("tool", json.dumps(chunk["_tool"]))
+
             elif isinstance(chunk, dict) and "_status" in chunk:
                 status_raw += chunk["_status"]
                 text = chunk["_status"].replace("\n", " ")

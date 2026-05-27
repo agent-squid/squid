@@ -213,6 +213,31 @@ body {
 .thinking-expanded .thinking-toggle::before { content: '▾ '; }
 .thinking-body { display: none; margin-top: 0.5em; white-space: pre-wrap; }
 .thinking-expanded .thinking-body { display: block; }
+
+/* tool call blocks inside response bubble */
+.tool-calls { display: flex; flex-direction: column; gap: 1px; margin-bottom: 0.4em; }
+.tool-block { font-size: 0.78em; font-family: ui-monospace, monospace; }
+.tool-label {
+  display: block; padding: 0.15em 0; color: #555566;
+  font-style: italic; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tool-toggle {
+  display: block; width: 100%; background: #161620; border: none; border-radius: 3px;
+  cursor: pointer; color: #7070a0; font: inherit; padding: 0.3em 0.6em; text-align: left;
+}
+.tool-toggle::before { content: '▸ '; }
+.tool-expanded .tool-toggle::before { content: '▾ '; }
+.tool-toggle:hover { color: #a0a0cc; background: #1c1c2a; }
+.tool-body { display: none; border-radius: 0 0 3px 3px; overflow: hidden; }
+.tool-expanded .tool-body { display: block; }
+.diff-scroll { max-height: 280px; overflow-y: auto; background: #0d0d14; }
+.diff-line {
+  display: block; padding: 0.06em 0.8em;
+  white-space: pre; overflow-x: visible; font-size: 0.92em; line-height: 1.5;
+}
+.diff-remove { background: rgba(180, 40, 40, 0.18); color: #d07070; }
+.diff-add    { background: rgba(40, 150, 70, 0.13); color: #70b870; }
+.diff-sep    { height: 1px; background: #222; margin: 2px 0; }
 .boot-banner {
   align-self: center;
   text-align: center;

@@ -168,34 +168,34 @@ def _estimate_history_tokens(history: Optional[List[dict]]) -> int:
     return total_chars // 4
 
 
-def _format_tool_call(name: str, input_json: str) -> str:
-    """Format a completed tool call into a single status line."""
+def _tool_data(name: str, input_json: str) -> dict:
+    """Parse a completed tool call into structured data for the client to render."""
     try:
         inp = json.loads(input_json) if input_json.strip() else {}
     except json.JSONDecodeError:
         inp = {}
-
-    def trunc(s: str, n: int = 60) -> str:
-        s = str(s)
-        return s[:n] + "…" if len(s) > n else s
-
-    if name in ("Edit", "Write", "Read", "MultiEdit"):
-        return f"{name}: {inp.get('file_path', '?')}"
+    base: dict = {"name": name}
+    if name == "Edit":
+        return {**base, "file": inp.get("file_path", ""),
+                "old": inp.get("old_string", ""), "new": inp.get("new_string", "")}
+    if name == "MultiEdit":
+        return {**base, "file": inp.get("file_path", ""), "edits": inp.get("edits", [])}
+    if name == "Write":
+        return {**base, "file": inp.get("file_path", ""), "content": inp.get("content", "")}
+    if name == "Read":
+        return {**base, "file": inp.get("file_path", "")}
     if name == "Bash":
-        cmd = inp.get("command", "")
-        return f"Bash: {trunc(cmd)}"
+        return {**base, "command": inp.get("command", "")}
     if name == "Agent":
-        return f"Agent: {trunc(inp.get('description', inp.get('prompt', '?')))}"
+        return {**base, "description": (inp.get("description") or inp.get("prompt") or "")[:300]}
     if name in ("WebFetch", "WebSearch"):
-        return f"{name}: {trunc(inp.get('url', inp.get('query', '?')))}"
+        return {**base, "query": inp.get("url", inp.get("query", ""))}
     if name == "TodoWrite":
-        tasks = inp.get("todos", [])
-        return f"TodoWrite: {len(tasks)} item{'s' if len(tasks) != 1 else ''}"
-    # Generic fallback
+        return {**base, "todos": inp.get("todos", [])}
     if inp:
         k, v = next(iter(inp.items()))
-        return f"{name}: {trunc(v)}"
-    return name
+        return {**base, "key": k, "value": str(v)[:300]}
+    return base
 
 
 async def run_claude(
@@ -266,9 +266,7 @@ async def run_claude(
 
             elif inner_type == "content_block_stop" and idx in tool_blocks:
                 block = tool_blocks.pop(idx)
-                label = _format_tool_call(block["name"], block["input_json"])
-                if label:
-                    yield {"_status": label + "\n"}
+                yield {"_tool": _tool_data(block["name"], block["input_json"])}
 
         elif t == "result":
             # Skip final_text if we already streamed it chunk by chunk above
@@ -573,9 +571,7 @@ async def run_antigravity(
 
             elif inner_type == "content_block_stop" and idx in tool_blocks:
                 block = tool_blocks.pop(idx)
-                label = _format_tool_call(block["name"], block["input_json"])
-                if label:
-                    yield {"_status": label + "\n"}
+                yield {"_tool": _tool_data(block["name"], block["input_json"])}
 
         elif t == "result":
             if not streamed_text:

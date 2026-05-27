@@ -592,6 +592,9 @@ async function sendMessage(text) {
   const pinBtn = makePinBtn(null, 0);
   responseHeader.appendChild(pinBtn);
   bubble.appendChild(responseHeader);
+  const toolsDiv = document.createElement('div');
+  toolsDiv.className = 'tool-calls';
+  bubble.appendChild(toolsDiv);
   const contentDiv = document.createElement('div');
   bubble.appendChild(contentDiv);
 
@@ -774,6 +777,15 @@ async function sendMessage(text) {
             } catch {}
             eventName = null;
 
+          } else if (eventName === 'tool') {
+            try {
+              const tool = JSON.parse(data);
+              if (!firstDataReceived) revealResponseBubble();
+              toolsDiv.appendChild(makeToolBlock(tool));
+              scrollToBottom();
+            } catch {}
+            eventName = null;
+
           } else if (eventName === 'status') {
             statusBuf += data;
             const trimmed = statusBuf.replace(/\s+/g, ' ').trim();
@@ -868,6 +880,76 @@ async function sendMessage(text) {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+function renderDiffLines(container, oldStr, newStr) {
+  for (const line of (oldStr || '').split('\n')) {
+    const el = document.createElement('span');
+    el.className = 'diff-line diff-remove';
+    el.textContent = '- ' + line;
+    container.appendChild(el);
+  }
+  for (const line of (newStr || '').split('\n')) {
+    const el = document.createElement('span');
+    el.className = 'diff-line diff-add';
+    el.textContent = '+ ' + line;
+    container.appendChild(el);
+  }
+}
+
+function makeToolBlock(tool) {
+  const name = tool.name || '';
+  const block = document.createElement('div');
+  block.className = 'tool-block';
+
+  const hasDiff = name === 'Edit' || name === 'MultiEdit' || name === 'Write';
+  if (!hasDiff) {
+    const label = document.createElement('span');
+    label.className = 'tool-label';
+    if (name === 'Read')   label.textContent = 'Read: ' + (tool.file || '');
+    else if (name === 'Bash')  label.textContent = 'Bash: ' + truncate(tool.command || '', 100);
+    else if (name === 'Agent') label.textContent = 'Agent: ' + truncate(tool.description || '', 80);
+    else if (name === 'WebFetch' || name === 'WebSearch')
+      label.textContent = name + ': ' + truncate(tool.query || '', 80);
+    else if (name === 'TodoWrite') {
+      const n = (tool.todos || []).length;
+      label.textContent = `TodoWrite: ${n} item${n !== 1 ? 's' : ''}`;
+    } else label.textContent = name + (tool.key ? ': ' + truncate(tool.value || '', 60) : '');
+    block.appendChild(label);
+    return block;
+  }
+
+  const toggle = document.createElement('button');
+  toggle.className = 'tool-toggle';
+  const body = document.createElement('div');
+  body.className = 'tool-body';
+  const scroll = document.createElement('div');
+  scroll.className = 'diff-scroll';
+  body.appendChild(scroll);
+
+  if (name === 'Edit') {
+    toggle.textContent = 'Edit: ' + (tool.file || '');
+    renderDiffLines(scroll, tool.old || '', tool.new || '');
+  } else if (name === 'MultiEdit') {
+    toggle.textContent = 'MultiEdit: ' + (tool.file || '');
+    (tool.edits || []).forEach((edit, i) => {
+      if (i > 0) { const sep = document.createElement('div'); sep.className = 'diff-sep'; scroll.appendChild(sep); }
+      renderDiffLines(scroll, edit.old_string || '', edit.new_string || '');
+    });
+  } else if (name === 'Write') {
+    toggle.textContent = 'Write: ' + (tool.file || '');
+    for (const line of (tool.content || '').split('\n')) {
+      const el = document.createElement('span');
+      el.className = 'diff-line diff-add';
+      el.textContent = '+ ' + line;
+      scroll.appendChild(el);
+    }
+  }
+
+  toggle.addEventListener('click', () => block.classList.toggle('tool-expanded'));
+  block.appendChild(toggle);
+  block.appendChild(body);
+  return block;
+}
 
 function makePinBtn(msgId, pinnedState) {
   // pinnedState: 1 = pinned (selected), 0 = default (unselected)
