@@ -49,6 +49,19 @@ def kill_procs_by_topic(topic: str) -> int:
     return killed
 
 
+def kill_all_procs() -> int:
+    """Send SIGTERM to all tracked subprocesses. Returns kill count."""
+    import signal
+    killed = 0
+    for pid in list(_proc_registry):
+        try:
+            os.kill(pid, signal.SIGTERM)
+            killed += 1
+        except (ProcessLookupError, PermissionError):
+            pass
+    return killed
+
+
 def list_active_procs() -> list[dict]:
     now = time.monotonic()
     return [
@@ -330,14 +343,29 @@ async def run_codex(
                 text = item.get("text", "")
                 if text:
                     yield str(text)
+            elif item.get("type") == "command_execution":
+                cmd_str = item.get("command", "")
+                # Strip /bin/zsh -lc "..." or /bin/bash -lc "..." wrapper
+                if cmd_str and " -lc " in cmd_str:
+                    inner = cmd_str.split(" -lc ", 1)[-1].strip()
+                    if len(inner) >= 2 and inner[0] == inner[-1] == '"':
+                        cmd_str = inner[1:-1].replace('\\"', '"')
+                if cmd_str:
+                    yield {"_tool": {"name": "Bash", "command": cmd_str}}
         elif t == "turn.completed":
             usage = event.get("usage", {})
+            # Codex usage reports input_tokens as total input (including cached input).
+            # Normalize to "uncached input + cache_read" so UI/server aggregation can
+            # safely sum fields without double counting.
+            total_in = int(usage.get("input_tokens", 0) or 0)
+            cached_in = int(usage.get("cached_input_tokens", 0) or 0)
+            uncached_in = max(total_in - cached_in, 0)
             yield {
                 "_stats": {
                     "session_id": thread_id,
-                    "input_tokens": usage.get("input_tokens", 0),
+                    "input_tokens": uncached_in,
                     "output_tokens": usage.get("output_tokens", 0),
-                    "cache_read_tokens": usage.get("cached_input_tokens", 0),
+                    "cache_read_tokens": cached_in,
                     "cache_write_tokens": 0,
                     "reasoning_tokens": usage.get("reasoning_output_tokens", 0),
                     "history_input_tokens": _estimate_history_tokens(history),

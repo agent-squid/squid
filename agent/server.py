@@ -35,9 +35,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, SQUID_HOME
-from .runners import run_auto, run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError, CLIError, list_active_procs
+from .runners import run_auto, run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError, CLIError, list_active_procs, kill_all_procs
 from .history import list_history
 from .topic_queue import TopicDispatcher
+from .context_sync import sync_now, maybe_sync
 from .stats_db import (
     init_db, save_stats, get_aggregated_stats, save_quota_delta, get_stats_by_topic, get_stats_by_model,
     get_topics_summary,
@@ -105,6 +106,7 @@ def _check_deps():
         log.info("claude=%s  codex=%s  copilot=%s  cursor=%s  agy=%s", CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH)
 
 _check_deps()
+sync_now()
 
 app = FastAPI(title="Squid", version="0.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -406,6 +408,7 @@ async def chat(req: ChatRequest):
         req.topic, resolved_alias, backend, model, req.adhoc,
         bool(resume_session_id), len(pending_inject_ids), req.message,
     )
+    await maybe_sync()
     return StreamingResponse(
         stream_response(
             req.message, req.topic, resolved_alias, backend, model, cwd,
@@ -438,7 +441,14 @@ async def run_cmd(req: CmdRequest):
     if req.command == "restart":
         async def _restart():
             await asyncio.sleep(0.4)
-            os.execv(sys.argv[0], sys.argv)
+            kill_all_procs()
+            if "--reload" in sys.argv:
+                # In reload mode, touch a watched file — watchfiles detects
+                # the change and gracefully cycles the worker. Sending SIGTERM
+                # to the worker instead causes the reloader parent to exit too.
+                Path(__file__).touch()
+            else:
+                os.execv(sys.argv[0], sys.argv)
         asyncio.create_task(_restart())
         return JSONResponse({"ok": True})
     return JSONResponse({"ok": False, "error": "unknown command"}, status_code=400)
