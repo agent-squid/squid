@@ -168,6 +168,36 @@ def _estimate_history_tokens(history: Optional[List[dict]]) -> int:
     return total_chars // 4
 
 
+def _format_tool_call(name: str, input_json: str) -> str:
+    """Format a completed tool call into a single status line."""
+    try:
+        inp = json.loads(input_json) if input_json.strip() else {}
+    except json.JSONDecodeError:
+        inp = {}
+
+    def trunc(s: str, n: int = 60) -> str:
+        s = str(s)
+        return s[:n] + "…" if len(s) > n else s
+
+    if name in ("Edit", "Write", "Read", "MultiEdit"):
+        return f"{name}: {inp.get('file_path', '?')}"
+    if name == "Bash":
+        cmd = inp.get("command", "")
+        return f"Bash: {trunc(cmd)}"
+    if name == "Agent":
+        return f"Agent: {trunc(inp.get('description', inp.get('prompt', '?')))}"
+    if name in ("WebFetch", "WebSearch"):
+        return f"{name}: {trunc(inp.get('url', inp.get('query', '?')))}"
+    if name == "TodoWrite":
+        tasks = inp.get("todos", [])
+        return f"TodoWrite: {len(tasks)} item{'s' if len(tasks) != 1 else ''}"
+    # Generic fallback
+    if inp:
+        k, v = next(iter(inp.items()))
+        return f"{name}: {trunc(v)}"
+    return name
+
+
 async def run_claude(
     prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
     model: Optional[str] = None, topic: str = "", alias: str = "",
@@ -198,6 +228,7 @@ async def run_claude(
 
     session_id: Optional[str] = None
     streamed_text = False  # track whether any text chunks were streamed as content
+    tool_blocks: dict[int, dict] = {}  # index -> {name, input_json}
 
     async for line in _stream_lines(cmd, cwd=cwd, backend="claude", topic=topic, alias=alias, response_timeout=response_timeout):
         if not line:
@@ -214,14 +245,30 @@ async def run_claude(
 
         elif t == "stream_event":
             inner = event.get("event", {})
-            if (
-                inner.get("type") == "content_block_delta"
-                and inner.get("delta", {}).get("type") == "text_delta"
-            ):
-                text = inner["delta"].get("text", "")
-                if text:
-                    streamed_text = True
-                    yield text  # stream directly as response content, not status
+            inner_type = inner.get("type", "")
+            idx = inner.get("index", 0)
+
+            if inner_type == "content_block_start":
+                block = inner.get("content_block", {})
+                if block.get("type") == "tool_use":
+                    tool_blocks[idx] = {"name": block.get("name", ""), "input_json": ""}
+
+            elif inner_type == "content_block_delta":
+                delta = inner.get("delta", {})
+                dtype = delta.get("type", "")
+                if dtype == "text_delta":
+                    text = delta.get("text", "")
+                    if text:
+                        streamed_text = True
+                        yield text  # stream directly as response content, not status
+                elif dtype == "input_json_delta" and idx in tool_blocks:
+                    tool_blocks[idx]["input_json"] += delta.get("partial_json", "")
+
+            elif inner_type == "content_block_stop" and idx in tool_blocks:
+                block = tool_blocks.pop(idx)
+                label = _format_tool_call(block["name"], block["input_json"])
+                if label:
+                    yield {"_status": label + "\n"}
 
         elif t == "result":
             # Skip final_text if we already streamed it chunk by chunk above
@@ -487,6 +534,7 @@ async def run_antigravity(
     session_id: Optional[str] = None
     stats_yielded = False
     streamed_text = False
+    tool_blocks: dict[int, dict] = {}
 
     async for line in _stream_lines(cmd, cwd=cwd, backend="antigravity", topic=topic, alias=alias, response_timeout=response_timeout):
         if not line:
@@ -504,14 +552,30 @@ async def run_antigravity(
 
         elif t == "stream_event":
             inner = event.get("event", {})
-            if (
-                inner.get("type") == "content_block_delta"
-                and inner.get("delta", {}).get("type") == "text_delta"
-            ):
-                text = inner["delta"].get("text", "")
-                if text:
-                    streamed_text = True
-                    yield text  # stream directly as response content, not status
+            inner_type = inner.get("type", "")
+            idx = inner.get("index", 0)
+
+            if inner_type == "content_block_start":
+                block = inner.get("content_block", {})
+                if block.get("type") == "tool_use":
+                    tool_blocks[idx] = {"name": block.get("name", ""), "input_json": ""}
+
+            elif inner_type == "content_block_delta":
+                delta = inner.get("delta", {})
+                dtype = delta.get("type", "")
+                if dtype == "text_delta":
+                    text = delta.get("text", "")
+                    if text:
+                        streamed_text = True
+                        yield text
+                elif dtype == "input_json_delta" and idx in tool_blocks:
+                    tool_blocks[idx]["input_json"] += delta.get("partial_json", "")
+
+            elif inner_type == "content_block_stop" and idx in tool_blocks:
+                block = tool_blocks.pop(idx)
+                label = _format_tool_call(block["name"], block["input_json"])
+                if label:
+                    yield {"_status": label + "\n"}
 
         elif t == "result":
             if not streamed_text:

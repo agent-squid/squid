@@ -556,16 +556,16 @@ async function sendMessage(text) {
     thinkingFrozen = true;
     if (statusBuf.trim()) {
       if (thinkingLoader.parentNode) thinkingLoader.remove();
-      const fullText = statusBuf.replace(/\s+/g, ' ').trim();
-      // Collapsed by default: show last ~80 chars as summary, full text on expand
-      const summary = fullText.length > 80 ? '…' + fullText.slice(-77) : fullText;
+      const lines = statusBuf.split('\n').map(l => l.trim()).filter(Boolean);
+      const summary = lines[lines.length - 1] || '';
+      const summaryTrunc = summary.length > 80 ? '…' + summary.slice(-77) : summary;
       thinkingContent.innerHTML = '';
       const toggle = document.createElement('button');
       toggle.className = 'thinking-toggle';
-      toggle.textContent = summary;
+      toggle.textContent = summaryTrunc;
       const body = document.createElement('div');
       body.className = 'thinking-body';
-      body.textContent = fullText;
+      body.textContent = lines.join('\n');
       thinkingContent.appendChild(toggle);
       thinkingContent.appendChild(body);
       toggle.addEventListener('click', () => thinkingBubble.classList.toggle('thinking-expanded'));
