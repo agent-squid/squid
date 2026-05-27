@@ -238,6 +238,7 @@ body {
 .diff-remove { background: rgba(180, 40, 40, 0.18); color: #d07070; }
 .diff-add    { background: rgba(40, 150, 70, 0.13); color: #70b870; }
 .diff-sep    { height: 1px; background: #222; margin: 2px 0; }
+.tool-block-history { align-self: flex-start; max-width: 90%; width: 90%; }
 .boot-banner {
   align-self: center;
   text-align: center;

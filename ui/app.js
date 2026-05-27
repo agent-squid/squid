@@ -329,21 +329,23 @@ async function loadHistory() {
         asstContent.innerHTML = marked.parse(item.content || '');
       }
       asstBubble.appendChild(asstContent);
-      if (item.tools) {
-        try {
-          const tools = typeof item.tools === 'string' ? JSON.parse(item.tools) : item.tools;
-          if (tools.length > 0) {
-            const summaryEl = makeToolSummary(tools);
-            summaryEl.classList.add('history-item');
-            fragment.appendChild(summaryEl);
-          }
-        } catch {}
-      }
       fragment.appendChild(asstBubble);
 
       if (item.stats) {
         const statsEl = addStats(asstBubble, item.stats, item.timestamp);
         statsEl.classList.add('history-item');
+      }
+
+      if (item.tools) {
+        try {
+          const tools = typeof item.tools === 'string' ? JSON.parse(item.tools) : item.tools;
+          const diffTools = tools.filter(t => t.name === 'Edit' || t.name === 'Write' || t.name === 'MultiEdit');
+          for (const tool of diffTools) {
+            const block = makeToolBlock(tool);
+            block.classList.add('history-item', 'tool-block-history');
+            fragment.appendChild(block);
+          }
+        } catch {}
       }
     }
   }
@@ -615,6 +617,7 @@ async function sendMessage(text) {
   let completedFromStatus = false;
   let raw = '';
   let resolvedAlias = alias;  // updated by meta event
+  const liveToolEvents = [];
   const controller = new AbortController();
 
 
@@ -787,6 +790,7 @@ async function sendMessage(text) {
           } else if (eventName === 'tool') {
             try {
               const tool = JSON.parse(data);
+              liveToolEvents.push(tool);
               const label = toolLabel(tool);
               statusBuf += label + '\n';
               setThinkingText(label);
@@ -807,6 +811,12 @@ async function sendMessage(text) {
             if (firstDataReceived) {
               messages.appendChild(bubble);
               if (statsEl) messages.appendChild(statsEl);
+              const diffTools = liveToolEvents.filter(t => t.name === 'Edit' || t.name === 'Write' || t.name === 'MultiEdit');
+              for (const tool of diffTools) {
+                const block = makeToolBlock(tool);
+                block.classList.add('tool-block-history');
+                messages.appendChild(block);
+              }
               scrollToBottom();
             }
             eventName = null;
@@ -899,28 +909,6 @@ function toolLabel(tool) {
   return name + (tool.key ? ': ' + truncate(tool.value || '', 50) : '');
 }
 
-function makeToolSummary(tools) {
-  const el = document.createElement('div');
-  el.className = 'msg assistant msg-thinking msg-thinking-done';
-  const inner = document.createElement('div');
-  const last = toolLabel(tools[tools.length - 1]);
-  const summary = last.length > 80 ? '…' + last.slice(-77) : last;
-  const toggle = document.createElement('button');
-  toggle.className = 'thinking-toggle';
-  toggle.textContent = summary;
-  const body = document.createElement('div');
-  body.className = 'thinking-body';
-  const list = document.createElement('div');
-  list.className = 'tool-calls';
-  list.style.padding = '0.4em 0.2em';
-  for (const tool of tools) list.appendChild(makeToolBlock(tool));
-  body.appendChild(list);
-  toggle.addEventListener('click', () => el.classList.toggle('thinking-expanded'));
-  inner.appendChild(toggle);
-  inner.appendChild(body);
-  el.appendChild(inner);
-  return el;
-}
 
 function renderDiffLines(container, oldStr, newStr) {
   for (const line of (oldStr || '').split('\n')) {
