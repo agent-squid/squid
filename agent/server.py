@@ -157,6 +157,50 @@ def sse_event(event: str, data: str = "") -> str:
     return f"event: {event}\ndata: {data}\n\n"
 
 # ---------------------------------------------------------------------------
+# Background drain — runs after client disconnects mid-stream
+# ---------------------------------------------------------------------------
+
+async def _drain_to_completion(
+    out_q: asyncio.Queue,
+    msg_id: int,
+    raw: str,
+    status_raw: str,
+    session_id: Optional[str],
+) -> None:
+    """Drain the worker queue after client disconnect; save final content to DB."""
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + 300.0  # 5-minute hard cap
+    try:
+        while True:
+            left = deadline - loop.time()
+            if left <= 0:
+                log.warning("drain timeout msg_id=%s, saving partial", msg_id)
+                break
+            try:
+                chunk = await asyncio.wait_for(out_q.get(), timeout=min(left, 30.0))
+            except asyncio.TimeoutError:
+                break
+            if chunk is None:  # sentinel — worker finished
+                break
+            if isinstance(chunk, dict):
+                if "_status" in chunk:
+                    status_raw += chunk["_status"]
+                if "_error" in chunk:
+                    break
+                # _stats already irrelevant — skip
+            else:
+                raw += chunk
+    except Exception:
+        log.exception("drain error msg_id=%s", msg_id)
+
+    content = raw or status_raw or ""
+    try:
+        update_assistant_message(msg_id, content, session_id, "done" if content else "error")
+        log.info("drain complete msg_id=%s len=%d", msg_id, len(content))
+    except Exception:
+        log.exception("drain save failed msg_id=%s", msg_id)
+
+# ---------------------------------------------------------------------------
 # Streaming response generator
 # ---------------------------------------------------------------------------
 
@@ -265,14 +309,18 @@ async def stream_response(
         _completed = True
 
     finally:
-        # Runs on client disconnect (CancelledError) — flush whatever we have
+        # Runs on client disconnect (CancelledError mid-stream)
         if not _completed:
-            content = raw or status_raw or ""
-            status = "done" if content else "error"
+            # Mark as pending immediately so a page reload shows in-progress state
             try:
-                update_assistant_message(asst_msg_id, content, session_id, status)
+                update_assistant_message(asst_msg_id, raw or status_raw or "", session_id, "pending")
             except Exception:
                 pass
+            # Background task drains the worker and saves final content when done
+            asyncio.create_task(
+                _drain_to_completion(out_q, asst_msg_id, raw, status_raw, session_id),
+                name=f"squid-drain-{asst_msg_id}",
+            )
 
 # ---------------------------------------------------------------------------
 # Routes
