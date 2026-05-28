@@ -637,26 +637,3 @@ async def run_antigravity(
         }
 
 
-async def run_auto(
-    prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
-    model: Optional[str] = None, topic: str = "", agent: str = "",
-    response_timeout: Optional[int] = None,
-) -> AsyncGenerator[Union[str, dict], None]:
-    """Try claude → cursor → antigravity → codex → copilot in order of availability."""
-    if CLAUDE_PATH:
-        async for chunk in run_claude(prompt, cwd=cwd, history=history, model=model, topic=topic, agent=agent, response_timeout=response_timeout):
-            yield chunk
-    elif CURSOR_PATH:
-        async for chunk in run_cursor(prompt, cwd=cwd, history=history, model=model, topic=topic, agent=agent, response_timeout=response_timeout):
-            yield chunk
-    elif AGY_PATH:
-        async for chunk in run_antigravity(prompt, cwd=cwd, history=history, model=model, topic=topic, agent=agent, response_timeout=response_timeout):
-            yield chunk
-    elif CODEX_PATH:
-        async for chunk in run_codex(prompt, cwd=cwd, history=history, model=model, topic=topic, agent=agent, response_timeout=response_timeout):
-            yield chunk
-    elif COPILOT_PATH:
-        async for chunk in run_copilot(prompt, cwd=cwd, history=history, model=model, topic=topic, agent=agent, response_timeout=response_timeout):
-            yield chunk
-    else:
-        raise CLINotFoundError("No AI CLI found in PATH (claude, cursor-agent, agy, codex, or copilot)")

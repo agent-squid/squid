@@ -5,7 +5,7 @@
 | Term | Meaning |
 |---|---|
 | **agent** | A named configuration: backend, model, cwd, timeout. Defined by the user and stored in the `agents` table. Referenced by name in the `@agent` input syntax. |
-| **backend** | The CLI used to run a turn: `claude`, `codex`, `cursor`, `agy` (Antigravity), `copilot`, or `auto`. |
+| **backend** | The CLI used to run a turn: `claude`, `codex`, `cursor`, `antigravity`, or `copilot`. Must be explicitly set on each agent. |
 | **topic** | A named conversation channel (e.g. `oncall`, `backend`). Each topic has a sticky agent you can switch dynamically and zero or more sessions and adhoc turns from multiple agents. Topic = *sessions(*agents) + *adhocs(*agents) |
 | **session** | A resumable CLI process context identified by a `session_id` (from `claude --resume`) or `thread_id` (Codex). Scoped to `(topic, agent)`. |)
 | **adhoc** | A one-off parallel turn that uses a `lookback` window of recent history as inline context instead of a persistent session. |
@@ -22,7 +22,7 @@ SQLite database at `squid.db` (project root).
 
 ```
 name       TEXT  PK          user-defined short name (e.g. "clawd", "code")
-backend    TEXT  NOT NULL    auto | claude | cursor | agy | codex | copilot
+backend    TEXT  NOT NULL    claude | cursor | antigravity | codex | copilot
 model      TEXT              model string (e.g. claude-opus-4-5); null = backend default
 cwd        TEXT              working directory; null = /tmp/squid
 timeout    INTEGER           per-agent response timeout in seconds; null = global default
@@ -47,8 +47,6 @@ created_at TEXT              ISO8601
 id         INTEGER  PK  AUTOINCREMENT
 topic      TEXT     NOT NULL   default: "default"
 agent      TEXT                agent name at time of message
-backend    TEXT                backend used
-model      TEXT                model string (from _stats or agent config)
 session_id TEXT                CLI session_id (set after stats arrive)
 role       TEXT     NOT NULL   user | assistant
 content    TEXT                message body (null while pending)
@@ -218,8 +216,6 @@ Run a topic-scoped control command.
       "role":       "user | assistant",
       "topic":      "string",
       "agent":      "string | null",
-      "backend":    "string | null",
-      "model":      "string | null",
       "session_id": "string | null",
       "content":    "string | null",
       "status":     "done | pending | error",

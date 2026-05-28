@@ -1539,6 +1539,24 @@ function initAliases() {
       timeout: Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : null,
     };
     if (!body.name) return;
+
+    // Warn if key attributes changed on an existing agent with active sessions
+    const existing = (_agentsCache || []).find(a => a.name === body.name);
+    if (existing) {
+      const keyChanged = existing.backend !== body.backend ||
+                         (existing.model || null) !== body.model ||
+                         (existing.cwd || null) !== body.cwd;
+      if (keyChanged) {
+        const sessions = await fetch(`/config/agents/${encodeURIComponent(body.name)}/sessions`).then(r => r.ok ? r.json() : null).catch(() => null);
+        const activeTopics = sessions?.topics?.map(s => s.topic) ?? [];
+        if (activeTopics.length > 0) {
+          const topicList = activeTopics.join(', ');
+          const ok = confirm(`Changing backend, model, or cwd for "${body.name}" will clear active sessions in: ${topicList}.\n\nContinue?`);
+          if (!ok) return;
+        }
+      }
+    }
+
     try {
       const res = await fetch('/config/agents', {
         method: 'POST',
@@ -1546,17 +1564,20 @@ function initAliases() {
         body: JSON.stringify(body),
       });
       if (res.ok) {
-        statusEl.textContent = 'saved ✓';
+        const data = await res.json();
+        const cleared = data.sessions_cleared || [];
+        statusEl.textContent = cleared.length ? `saved ✓ (cleared sessions: ${cleared.join(', ')})` : 'saved ✓';
         document.getElementById('af-name').value    = '';
         document.getElementById('af-model').value   = '';
         document.getElementById('af-cwd').value     = '';
         document.getElementById('af-timeout').value = '';
+        _agentsCache = null;
         loadAgents();
       } else {
         statusEl.textContent = 'failed';
       }
     } catch { statusEl.textContent = 'error'; }
-    setTimeout(() => { statusEl.textContent = ''; }, 3000);
+    setTimeout(() => { statusEl.textContent = ''; }, 5000);
   });
 }
 
@@ -1573,7 +1594,6 @@ function showAgentCreatePrompt(agentName, onSaved) {
     <div class="acp-title">Agent <strong>${agentName}</strong> not found — create it?</div>
     <div class="acp-row">
       <select id="acp-backend">
-        <option value="auto">auto</option>
         <option value="claude">claude</option>
         <option value="cursor">cursor</option>
         <option value="antigravity">antigravity</option>

@@ -47,7 +47,7 @@ from .stats_db import (
     insert_user_message, insert_assistant_message, update_assistant_message,
     get_context_history, mark_orphaned_pending, get_message,
     get_topic_session, set_topic_session, clear_topic_session,
-    delete_topic, get_topic_agents,
+    delete_topic, get_topic_agents, clear_agent_sessions, get_agent_sessions,
 )
 from . import creds
 
@@ -374,7 +374,7 @@ async def chat(req: ChatRequest):
                 agent_config = get_agent(resolved_agent) or {}
         upsert_topic(req.topic)
 
-    backend = agent_config.get("backend") or "auto"
+    backend = agent_config.get("backend") or "claude"
     model: Optional[str] = agent_config.get("model") or None
     agent_cwd: Optional[str] = agent_config.get("cwd") or None
     response_timeout: Optional[int] = agent_config.get("timeout")
@@ -399,8 +399,8 @@ async def chat(req: ChatRequest):
             req.topic, lookback, agent=resolved_agent
         )
 
-    user_msg_id = insert_user_message(req.topic, resolved_agent, backend, model, req.message, context_ids=context_ids)
-    asst_msg_id = insert_assistant_message(req.topic, resolved_agent, backend, model, user_msg_id, adhoc=req.adhoc)
+    user_msg_id = insert_user_message(req.topic, resolved_agent, req.message, context_ids=context_ids)
+    asst_msg_id = insert_assistant_message(req.topic, resolved_agent, user_msg_id, adhoc=req.adhoc)
 
     log.info(
         "chat  topic=%s  agent=%s  backend=%s  model=%s  adhoc=%s  resume=%s  ctx=%d  msg=%.80r",
@@ -538,6 +538,12 @@ async def context_view(topic: str, agent: str):
     })
 
 
+@app.get("/config/agents/{name}/sessions")
+async def agent_sessions(name: str):
+    """Return all active topic sessions for a named agent."""
+    return JSONResponse({"topics": get_agent_sessions(name)})
+
+
 @app.get("/config/agents")
 async def get_agents():
     return JSONResponse(list_agents())
@@ -545,8 +551,9 @@ async def get_agents():
 
 @app.post("/config/agents")
 async def create_agent(req: AgentRequest):
-    upsert_agent(req.name, req.backend, req.model, req.cwd, req.timeout)
-    return JSONResponse({"ok": True})
+    key_changed = upsert_agent(req.name, req.backend, req.model, req.cwd, req.timeout)
+    sessions_cleared = clear_agent_sessions(req.name) if key_changed else []
+    return JSONResponse({"ok": True, "sessions_cleared": sessions_cleared})
 
 
 @app.delete("/config/agents/{name}")

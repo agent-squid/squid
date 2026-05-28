@@ -30,7 +30,7 @@ _TABLES = [
     )""",
     """CREATE TABLE IF NOT EXISTS agents (
         name       TEXT PRIMARY KEY,
-        backend    TEXT NOT NULL DEFAULT 'auto',
+        backend    TEXT NOT NULL,
         model      TEXT,
         cwd        TEXT,
         timeout    INTEGER,
@@ -45,8 +45,6 @@ _TABLES = [
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
         topic      TEXT NOT NULL DEFAULT 'default',
         agent      TEXT,
-        backend    TEXT,
-        model      TEXT,
         session_id TEXT,
         role       TEXT NOT NULL,
         content    TEXT,
@@ -91,6 +89,9 @@ _MIGRATIONS = [
     "ALTER TABLE chat_messages RENAME COLUMN tools TO context",
     "ALTER TABLE chat_messages DROP COLUMN pinned",
     "ALTER TABLE session_stats DROP COLUMN pin_count",
+    # drop backend/model from chat_messages — ground truth is in session_stats (2026-05-28)
+    "ALTER TABLE chat_messages DROP COLUMN backend",
+    "ALTER TABLE chat_messages DROP COLUMN model",
 ]
 
 
@@ -138,8 +139,15 @@ def get_agent(name: str) -> Optional[dict]:
 
 
 def upsert_agent(name: str, backend: str, model: Optional[str],
-                 cwd: Optional[str] = None, timeout: Optional[int] = None) -> None:
+                 cwd: Optional[str] = None, timeout: Optional[int] = None) -> bool:
+    """Upsert agent config. Returns True if key attributes (backend/model/cwd) changed."""
     with _connect() as conn:
+        existing = conn.execute("SELECT backend, model, cwd FROM agents WHERE name = ?", (name,)).fetchone()
+        key_changed = existing and (
+            existing["backend"] != backend or
+            existing["model"] != model or
+            existing["cwd"] != cwd
+        )
         conn.execute(
             """INSERT INTO agents (name, backend, model, cwd, timeout) VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(name) DO UPDATE SET
@@ -149,6 +157,28 @@ def upsert_agent(name: str, backend: str, model: Optional[str],
                  timeout = excluded.timeout""",
             (name, backend, model, cwd, timeout),
         )
+    return bool(key_changed)
+
+
+def get_agent_sessions(name: str) -> list[dict]:
+    """Return all active topic_sessions for a named agent."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT topic, session_id, cwd FROM topic_sessions WHERE agent = ?", (name,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def clear_agent_sessions(name: str) -> list[str]:
+    """Clear all topic_sessions for an agent. Returns list of affected topic names."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT topic FROM topic_sessions WHERE agent = ?", (name,)
+        ).fetchall()
+        topics = [r["topic"] for r in rows]
+        if topics:
+            conn.execute("DELETE FROM topic_sessions WHERE agent = ?", (name,))
+    return topics
 
 
 def delete_agent(name: str) -> bool:
@@ -212,28 +242,28 @@ def delete_topic(name: str) -> bool:
 # ── chat messages ─────────────────────────────────────────────────────────────
 
 def insert_user_message(
-    topic: str, agent: Optional[str], backend: Optional[str], model: Optional[str],
+    topic: str, agent: Optional[str],
     content: str, context_ids: Optional[list[int]] = None,
 ) -> int:
     context_json = json.dumps(context_ids) if context_ids else None
     with _connect() as conn:
         cur = conn.execute(
-            """INSERT INTO chat_messages (topic, agent, backend, model, role, content, status, context)
-               VALUES (?, ?, ?, ?, 'user', ?, 'done', ?)""",
-            (topic, agent, backend, model, content, context_json),
+            """INSERT INTO chat_messages (topic, agent, role, content, status, context)
+               VALUES (?, ?, 'user', ?, 'done', ?)""",
+            (topic, agent, content, context_json),
         )
         return cur.lastrowid
 
 
 def insert_assistant_message(
-    topic: str, agent: Optional[str], backend: Optional[str], model: Optional[str],
+    topic: str, agent: Optional[str],
     reply_to: int, adhoc: bool = False,
 ) -> int:
     with _connect() as conn:
         cur = conn.execute(
-            """INSERT INTO chat_messages (topic, agent, backend, model, role, reply_to, status, adhoc)
-               VALUES (?, ?, ?, ?, 'assistant', ?, 'pending', ?)""",
-            (topic, agent, backend, model, reply_to, 1 if adhoc else 0),
+            """INSERT INTO chat_messages (topic, agent, role, reply_to, status, adhoc)
+               VALUES (?, ?, 'assistant', ?, 'pending', ?)""",
+            (topic, agent, reply_to, 1 if adhoc else 0),
         )
         return cur.lastrowid
 
@@ -295,8 +325,7 @@ def get_context_history(topic: str, limit: int, agent: Optional[str] = None) -> 
                WHERE a.topic = ? AND a.role = 'assistant' AND a.status = 'done'
                  AND COALESCE(a.adhoc, 0) = 0
                  AND u.content IS NOT NULL AND a.content IS NOT NULL"""
-    sel = ("SELECT a.id, u.content AS user_content, a.content AS asst_content,"
-           " a.model AS asst_model, a.backend AS asst_backend ")
+    sel = "SELECT a.id, u.content AS user_content, a.content AS asst_content "
     agent_clause = " AND a.agent = ?" if agent else ""
     params: tuple = (topic, agent, limit) if agent else (topic, limit)
     with _connect() as conn:
@@ -310,8 +339,7 @@ def get_context_history(topic: str, limit: int, agent: Optional[str] = None) -> 
         ids.append(row["id"])
         result.extend([
             {"role": "user",      "content": row["user_content"]},
-            {"role": "assistant", "content": row["asst_content"],
-             "model": row["asst_model"], "backend": row["asst_backend"]},
+            {"role": "assistant", "content": row["asst_content"]},
         ])
     return result, ids
 
@@ -346,7 +374,7 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
             f"SELECT COUNT(*) FROM chat_messages m {where}", params
         ).fetchone()[0]
         rows = conn.execute(
-            f"""SELECT m.id, m.role, m.topic, m.agent, m.backend, m.model,
+            f"""SELECT m.id, m.role, m.topic, m.agent,
                        m.content, m.status, m.adhoc, m.session_id,
                        m.context, m.created_at AS timestamp, m.reply_to,
                        u.content AS prompt

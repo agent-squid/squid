@@ -107,11 +107,11 @@ class TopicWorker:
             self.q.task_done()
 
     async def _process(self, item: QueueItem):
-        from .runners import run_auto, run_claude, run_codex, run_copilot, run_cursor, run_antigravity
+        from .runners import run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError
         from .config import SQUID_HOME
-        runner = {"auto": run_auto, "claude": run_claude, "cursor": run_cursor, "antigravity": run_antigravity, "codex": run_codex, "copilot": run_copilot}.get(
-            item.backend, run_auto
-        )
+        runner = {"claude": run_claude, "cursor": run_cursor, "antigravity": run_antigravity, "codex": run_codex, "copilot": run_copilot}.get(item.backend)
+        if runner is None:
+            raise CLINotFoundError(f"Unknown backend: {item.backend!r}")
         kwargs: dict = dict(
             history=item.context_history, model=item.model,
             cwd=item.cwd or SQUID_HOME,
