@@ -183,6 +183,21 @@ def init_db() -> None:
                 )
             WHERE last_prompt IS NULL
         """)
+        # Backfill last_backend/last_model from session_stats for topics that predate the denormalization
+        conn.execute("""
+            UPDATE topics SET
+                last_backend = (
+                    SELECT backend FROM session_stats
+                    WHERE topic = topics.topic AND backend IS NOT NULL
+                    ORDER BY created_at DESC LIMIT 1
+                ),
+                last_model = (
+                    SELECT model FROM session_stats
+                    WHERE topic = topics.topic AND model IS NOT NULL
+                    ORDER BY created_at DESC LIMIT 1
+                )
+            WHERE last_backend IS NULL
+        """)
         conn.commit()
     finally:
         conn.close()
