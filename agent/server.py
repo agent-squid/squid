@@ -366,7 +366,6 @@ async def chat(req: ChatRequest):
                 {"error": f"Agent '{req.agent}' not found. Create it first via /config/agents."},
                 status_code=400,
             )
-        upsert_topic(req.topic, req.agent, last_prompt=req.message)
     else:
         topic_row = get_topic(req.topic)
         if topic_row:
@@ -378,10 +377,12 @@ async def chat(req: ChatRequest):
             if default:
                 resolved_agent = default["name"]
                 agent_config = default
-        upsert_topic(req.topic, resolved_agent, last_prompt=req.message)
 
     backend = agent_config.get("backend") or "claude"
     model: Optional[str] = agent_config.get("model") or None
+
+    upsert_topic(req.topic, resolved_agent, last_prompt=req.message,
+                 last_backend=backend, last_model=model)
     agent_cwd: Optional[str] = agent_config.get("cwd") or None
     response_timeout: Optional[int] = agent_config.get("timeout")
 

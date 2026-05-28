@@ -53,6 +53,8 @@ _TABLES = [
         sticky_agent TEXT,
         last_prompt  TEXT,
         last_at      TEXT,
+        last_model   TEXT,
+        last_backend TEXT,
         hidden       INTEGER DEFAULT 0,
         created_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         PRIMARY KEY (topic, agent)
@@ -110,6 +112,9 @@ _MIGRATIONS = [
     "ALTER TABLE chat_messages DROP COLUMN model",
     # hide support for topics (2026-05-28)
     "ALTER TABLE topics ADD COLUMN hidden INTEGER DEFAULT 0",
+    # denormalize last_model/last_backend into topics to avoid JOIN in get_topics_summary (2026-05-28)
+    "ALTER TABLE topics ADD COLUMN last_model TEXT",
+    "ALTER TABLE topics ADD COLUMN last_backend TEXT",
 ]
 
 
@@ -248,17 +253,11 @@ def delete_agent(name: str) -> bool:
 def get_topics_summary() -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
-            """SELECT t.topic AS name, t.sticky_agent AS agent,
-                      s.model AS last_model, s.backend AS last_backend,
-                      t.last_prompt, t.last_at
-               FROM topics t
-               LEFT JOIN session_stats s ON s.session_id = (
-                   SELECT session_id FROM session_stats
-                   WHERE topic = t.topic
-                   ORDER BY created_at DESC LIMIT 1
-               )
-               WHERE t.agent = '' AND t.hidden = 0
-               ORDER BY t.last_at DESC NULLS LAST"""
+            """SELECT topic AS name, sticky_agent AS agent,
+                      last_model, last_backend, last_prompt, last_at
+               FROM topics
+               WHERE agent = '' AND hidden = 0
+               ORDER BY last_at DESC NULLS LAST"""
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -279,27 +278,40 @@ def get_topic(name: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
-def upsert_topic(name: str, agent: Optional[str] = None, last_prompt: Optional[str] = None) -> None:
+def upsert_topic(
+    name: str,
+    agent: Optional[str] = None,
+    last_prompt: Optional[str] = None,
+    last_model: Optional[str] = None,
+    last_backend: Optional[str] = None,
+) -> None:
     now = __import__('time').strftime("%Y-%m-%dT%H:%M:%SZ", __import__('time').gmtime())
+    at = now if last_prompt else None
     with _connect() as conn:
         # Topic-level row
         conn.execute(
-            """INSERT INTO topics (topic, agent, sticky_agent, last_prompt, last_at) VALUES (?, '', ?, ?, ?)
+            """INSERT INTO topics (topic, agent, sticky_agent, last_prompt, last_at, last_model, last_backend)
+               VALUES (?, '', ?, ?, ?, ?, ?)
                ON CONFLICT(topic, agent) DO UPDATE SET
                  hidden       = 0,
                  sticky_agent = CASE WHEN excluded.sticky_agent IS NOT NULL THEN excluded.sticky_agent ELSE sticky_agent END,
                  last_prompt  = COALESCE(excluded.last_prompt, last_prompt),
-                 last_at      = COALESCE(excluded.last_at, last_at)""",
-            (name, agent, last_prompt, now if last_prompt else None),
+                 last_at      = COALESCE(excluded.last_at, last_at),
+                 last_model   = COALESCE(excluded.last_model, last_model),
+                 last_backend = COALESCE(excluded.last_backend, last_backend)""",
+            (name, agent, last_prompt, at, last_model, last_backend),
         )
         # Agent-level row
         if agent:
             conn.execute(
-                """INSERT INTO topics (topic, agent, last_prompt, last_at) VALUES (?, ?, ?, ?)
+                """INSERT INTO topics (topic, agent, last_prompt, last_at, last_model, last_backend)
+                   VALUES (?, ?, ?, ?, ?, ?)
                    ON CONFLICT(topic, agent) DO UPDATE SET
-                     last_prompt = COALESCE(excluded.last_prompt, last_prompt),
-                     last_at     = COALESCE(excluded.last_at, last_at)""",
-                (name, agent, last_prompt, now if last_prompt else None),
+                     last_prompt  = COALESCE(excluded.last_prompt, last_prompt),
+                     last_at      = COALESCE(excluded.last_at, last_at),
+                     last_model   = COALESCE(excluded.last_model, last_model),
+                     last_backend = COALESCE(excluded.last_backend, last_backend)""",
+                (name, agent, last_prompt, at, last_model, last_backend),
             )
 
 
