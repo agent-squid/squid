@@ -168,6 +168,21 @@ def init_db() -> None:
                     "INSERT OR IGNORE INTO agents (name, backend) VALUES (?, ?)",
                     (backend, backend),
                 )
+        # Backfill last_prompt/last_at for topic rows that predate the denormalization
+        conn.execute("""
+            UPDATE topics SET
+                last_prompt = (
+                    SELECT content FROM chat_messages
+                    WHERE topic = topics.topic AND role = 'user' AND content IS NOT NULL
+                    ORDER BY id DESC LIMIT 1
+                ),
+                last_at = (
+                    SELECT created_at FROM chat_messages
+                    WHERE topic = topics.topic AND role = 'user' AND content IS NOT NULL
+                    ORDER BY id DESC LIMIT 1
+                )
+            WHERE last_prompt IS NULL
+        """)
         conn.commit()
     finally:
         conn.close()
