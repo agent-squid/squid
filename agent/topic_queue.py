@@ -13,7 +13,7 @@ log = logging.getLogger(__name__)
 class QueueItem:
     seq: int
     topic: str
-    alias: Optional[str]
+    agent: Optional[str]
     prompt: str
     context_history: list[dict]
     backend: str
@@ -113,14 +113,12 @@ class TopicWorker:
         runner = {"auto": run_auto, "claude": run_claude, "cursor": run_cursor, "antigravity": run_antigravity, "codex": run_codex, "copilot": run_copilot}.get(
             item.backend, run_auto
         )
-        # One-time injections are prepended to context_history for non-resumable path,
-        # or passed separately for the resumable path (runner handles the distinction).
         history = item.inject_history + item.context_history if item.inject_history else item.context_history
 
         kwargs: dict = dict(
             history=history, model=item.model,
             cwd=item.cwd or SQUID_HOME,
-            topic=item.topic, alias=item.alias or "",
+            topic=item.topic, agent=item.agent or "",
             response_timeout=item.timeout,
         )
         if item.backend in ("claude", "codex", "cursor", "copilot", "antigravity") and item.resume_session_id:
@@ -149,7 +147,7 @@ class TopicDispatcher:
         context_history: list[dict],
         backend: str,
         model: Optional[str],
-        alias: Optional[str] = None,
+        agent: Optional[str] = None,
         cwd: Optional[str] = None,
         response_timeout: Optional[int] = None,
         resume_session_id: Optional[str] = None,
@@ -161,10 +159,10 @@ class TopicDispatcher:
             self._adhoc_counter += 1
             queue_key = f"__adhoc_{self._adhoc_counter}"
         else:
-            queue_key = f"{topic}@{alias}" if alias else topic
+            queue_key = f"{topic}@{agent}" if agent else topic
         worker = self._get_or_create(queue_key, topic)
         item = QueueItem(
-            seq=0, topic=topic, alias=alias,
+            seq=0, topic=topic, agent=agent,
             prompt=prompt, context_history=context_history,
             backend=backend, model=model, cwd=cwd, timeout=response_timeout,
             resume_session_id=resume_session_id,
@@ -183,14 +181,14 @@ class TopicDispatcher:
         return kill_procs_by_topic(topic)
 
     def stopall_topic(self, topic: str) -> dict:
-        """Kill running process + drain entire queue for topic (all alias lanes)."""
+        """Kill running process + drain entire queue for topic (all agent lanes)."""
         from .runners import kill_procs_by_topic
         killed = kill_procs_by_topic(topic)
         drained = sum(w.drain() for w in self._workers_for_topic(topic))
         return {"killed": killed, "drained": drained}
 
     def drain_topic(self, topic: str, pos: Optional[int] = None) -> int:
-        """Drain pending items for topic across all alias lanes."""
+        """Drain pending items for topic across all agent lanes."""
         return sum(w.drain(pos) for w in self._workers_for_topic(topic))
 
     def topics_info(self) -> list[dict]:

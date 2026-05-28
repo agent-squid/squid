@@ -49,7 +49,7 @@ from .stats_db import (
     get_context_history, mark_orphaned_pending, get_message,
     get_topic_session, set_topic_session, clear_topic_session,
     get_pending_injections, mark_injected, get_session_context_log,
-    delete_topic, get_topic_aliases,
+    delete_topic, get_topic_agents,
 )
 from . import creds
 
@@ -210,7 +210,7 @@ async def _drain_to_completion(
                         stats["adhoc"] = adhoc
                         stats["lookback"] = lookback
                         stats["pin_count"] = pin_count
-                        save_stats(session_id, stats, topic=topic, alias=agent,
+                        save_stats(session_id, stats, topic=topic, agent=agent,
                                    backend=backend, model=model, cwd=cwd,
                                    lookback=lookback, pin_count=pin_count)
                         if agent and not adhoc:
@@ -254,7 +254,7 @@ async def stream_response(
     effective_cwd = cwd or SQUID_HOME  # matches what topic_queue._process uses
     out_q, seq, worker = await dispatcher.dispatch(
         topic=topic, prompt=message, context_history=context_history,
-        backend=backend, model=model, alias=agent, cwd=effective_cwd,
+        backend=backend, model=model, agent=agent, cwd=effective_cwd,
         response_timeout=response_timeout,
         resume_session_id=resume_session_id,
         inject_history=inject_history or [],
@@ -304,7 +304,7 @@ async def stream_response(
                 stats["lookback"] = lookback
                 stats["pin_count"] = pin_count
                 if session_id:
-                    save_stats(session_id, stats, topic=topic, alias=agent, backend=backend, model=model, cwd=effective_cwd, lookback=lookback, pin_count=pin_count)
+                    save_stats(session_id, stats, topic=topic, agent=agent, backend=backend, model=model, cwd=effective_cwd, lookback=lookback, pin_count=pin_count)
                     stats["session_id"] = session_id
                     stats["cwd"] = effective_cwd
                     if agent and not adhoc:
@@ -390,7 +390,7 @@ async def chat(req: ChatRequest):
     else:
         topic_row = get_topic(req.topic)
         if topic_row:
-            resolved_agent = topic_row.get("alias")
+            resolved_agent = topic_row.get("agent")
             if resolved_agent:
                 agent_config = get_agent(resolved_agent) or {}
         upsert_topic(req.topic)
@@ -422,14 +422,14 @@ async def chat(req: ChatRequest):
     lookback = int(req.lookback) if req.lookback else 0
     pin_count = 0
     if req.adhoc:
-        # Pinned topic-wide. Recent-N scoped to resolved alias when active.
+        # Pinned topic-wide. Recent-N scoped to resolved agent when active.
         context_history, pin_count = get_context_history(req.topic, lookback,
-                                                          alias=resolved_agent if lookback > 0 else None)
+                                                          agent=resolved_agent if lookback > 0 else None)
     elif not resume_session_id and not resolved_agent:
-        # No alias — inject_history won't run, so use context_history for pinned messages.
+        # No agent — inject_history won't run, so use context_history for pinned messages.
         context_history, pin_count = get_context_history(req.topic, 0)
     else:
-        # Aliased: inject_history carries pins. Resumed: CLI owns all context.
+        # Agent session: inject_history carries pins. Resumed: CLI owns all context.
         context_history = []
         pin_count = sum(1 for p in pending if p["role"] == "assistant") if pending_inject_ids else 0
 
@@ -437,7 +437,7 @@ async def chat(req: ChatRequest):
     asst_msg_id = insert_assistant_message(req.topic, resolved_agent, backend, model, user_msg_id, adhoc=req.adhoc)
 
     log.info(
-        "chat  topic=%s  alias=%s  backend=%s  model=%s  adhoc=%s  resume=%s  injections=%d  msg=%.80r",
+        "chat  topic=%s  agent=%s  backend=%s  model=%s  adhoc=%s  resume=%s  injections=%d  msg=%.80r",
         req.topic, resolved_agent, backend, model, req.adhoc,
         bool(resume_session_id), len(pending_inject_ids), req.message,
     )
@@ -489,7 +489,7 @@ async def run_cmd(req: CmdRequest):
         agent = req.agent
         if not agent:
             topic_row = get_topic(req.topic)
-            agent = topic_row.get("alias") if topic_row else None
+            agent = topic_row.get("agent") if topic_row else None
         if not agent:
             return JSONResponse({"ok": False, "error": "no active session"}, status_code=400)
         kill_procs_by_topic(req.topic)
@@ -520,8 +520,8 @@ async def health():
 
 
 @app.get("/history")
-async def history(offset: int = 0, limit: int = 5, topic: Optional[str] = None, alias: Optional[str] = None):
-    return JSONResponse(list_history(topic=topic, alias=alias, offset=offset, limit=limit))
+async def history(offset: int = 0, limit: int = 5, topic: Optional[str] = None, agent: Optional[str] = None):
+    return JSONResponse(list_history(topic=topic, agent=agent, offset=offset, limit=limit))
 
 
 class PinRequest(BaseModel):
@@ -565,17 +565,17 @@ async def remove_topic(topic: str):
 
 @app.get("/topics/{topic}/sessions")
 async def list_topic_sessions(topic: str):
-    aliases = get_topic_aliases(topic)
-    return JSONResponse({"aliases": aliases})
+    agents = get_topic_agents(topic)
+    return JSONResponse({"agents": agents})
 
 
 @app.get("/topics/{topic}/session")
-async def get_session(topic: str, alias: str):
-    stored = get_topic_session(topic, alias)
+async def get_session(topic: str, agent: str):
+    stored = get_topic_session(topic, agent)
     if not stored:
         return JSONResponse({"session_id": None, "cwd": None, "pending_injections": [], "already_injected": []})
-    pending = get_pending_injections(topic, alias)
-    absorbed = get_session_context_log(topic, alias)
+    pending = get_pending_injections(topic, agent)
+    absorbed = get_session_context_log(topic, agent)
     return JSONResponse({
         "session_id": stored["session_id"],
         "cwd": stored["cwd"],
@@ -585,16 +585,16 @@ async def get_session(topic: str, alias: str):
 
 
 @app.delete("/topics/{topic}/session")
-async def clear_session(topic: str, alias: str):
-    clear_topic_session(topic, alias)
+async def clear_session(topic: str, agent: str):
+    clear_topic_session(topic, agent)
     return JSONResponse({"ok": True})
 
 
 @app.get("/context/{topic}")
-async def context_view(topic: str, alias: str):
-    stored = get_topic_session(topic, alias)
-    pending = get_pending_injections(topic, alias)
-    absorbed = get_session_context_log(topic, alias)
+async def context_view(topic: str, agent: str):
+    stored = get_topic_session(topic, agent)
+    pending = get_pending_injections(topic, agent)
+    absorbed = get_session_context_log(topic, agent)
     return JSONResponse({
         "session_id": stored["session_id"] if stored else None,
         "cwd": stored["cwd"] if stored else None,

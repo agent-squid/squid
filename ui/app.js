@@ -255,7 +255,7 @@ async function loadHistory() {
   try {
     let url = `/history?offset=${historyOffset}&limit=5`;
     if (historyFilter.topic) url += `&topic=${encodeURIComponent(historyFilter.topic)}`;
-    if (historyFilter.agent) url += `&alias=${encodeURIComponent(historyFilter.agent)}`;
+    if (historyFilter.agent) url += `&agent=${encodeURIComponent(historyFilter.agent)}`;
     const res = await fetch(url);
     data = await res.json();
   } catch {
@@ -283,8 +283,8 @@ async function loadHistory() {
       const userStats = statsByUserMsgId[item.id];
       const lb = userStats?.lookback ?? 0;
       const pc = userStats?.pin_count ?? 0;
-      const histCtxLabel = (item.alias || item.adhoc) ? fmtCtxLabel(!!item.adhoc, lb, pc) : null;
-      const userBubble = makeUserBubble(item.content, item.topic, item.alias, item.backend, !!item.adhoc, lb);
+      const histCtxLabel = (item.agent || item.adhoc) ? fmtCtxLabel(!!item.adhoc, lb, pc) : null;
+      const userBubble = makeUserBubble(item.content, item.topic, item.agent, item.backend, !!item.adhoc, lb);
       userBubble.classList.add('history-item');
       fragment.appendChild(userBubble);
       if (item.timestamp) {
@@ -308,7 +308,7 @@ async function loadHistory() {
 
       const asstHeader = document.createElement('div');
       asstHeader.className = 'response-header';
-      const asstLabel = item.alias || item.backend;
+      const asstLabel = item.agent || item.backend;
       const asstTag = makeTopicTag(item.topic || 'default', asstLabel, { clickable: true, adhoc: !!item.adhoc, lookback: lb });
       const asstHeaderText = document.createElement('span');
       asstHeaderText.className = 'response-header-text';
@@ -1477,7 +1477,7 @@ function renderProcStats(rows) {
       <td><span class="proc-dot"></span>${r.pid}</td>
       <td>${r.backend || '—'}</td>
       <td>${r.topic ? '#' + r.topic : '—'}</td>
-      <td>${r.alias || '—'}</td>
+      <td>${r.agent || '—'}</td>
       <td>${r.duration_s}s</td>
       <td>${r.started_iso ? fmtTime(r.started_iso) : '—'}</td>
     </tr>`).join('');
@@ -1519,24 +1519,24 @@ function initStats() {
   });
 }
 
-// ── alias manager ─────────────────────────────────────────────────────────────
+// ── agent manager ─────────────────────────────────────────────────────────────
 
 async function loadAgents() {
   const listEl = document.getElementById('agents-list');
   listEl.innerHTML = '<div class="empty">Loading…</div>';
-  let aliases;
+  let agents;
   try {
     const res = await fetch('/config/agents');
-    aliases = await res.json();
+    agents = await res.json();
   } catch {
     listEl.innerHTML = '<div class="empty">Failed to load.</div>';
     return;
   }
-  if (!aliases.length) {
+  if (!agents.length) {
     listEl.innerHTML = '<div class="empty">No agents yet. Add one below.</div>';
     return;
   }
-  const rows = aliases.map(a => `
+  const rows = agents.map(a => `
     <tr>
       <td><span class="agent-name">${a.name}</span></td>
       <td>${a.backend}</td>
@@ -1595,9 +1595,9 @@ function initAliases() {
   });
 }
 
-// ── inline alias creation prompt ─────────────────────────────────────────────
+// ── inline agent creation prompt ─────────────────────────────────────────────
 
-function showAgentCreatePrompt(aliasName, onSaved) {
+function showAgentCreatePrompt(agentName, onSaved) {
   const existing = document.getElementById('agent-create-prompt');
   if (existing) existing.remove();
 
@@ -1605,7 +1605,7 @@ function showAgentCreatePrompt(aliasName, onSaved) {
   prompt.id = 'agent-create-prompt';
   prompt.className = 'agent-create-prompt';
   prompt.innerHTML = `
-    <div class="acp-title">Agent <strong>${aliasName}</strong> not found — create it?</div>
+    <div class="acp-title">Agent <strong>${agentName}</strong> not found — create it?</div>
     <div class="acp-row">
       <select id="acp-backend">
         <option value="auto">auto</option>
@@ -1634,7 +1634,7 @@ function showAgentCreatePrompt(aliasName, onSaved) {
     const res = await fetch('/config/agents', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: aliasName, backend, model, cwd }),
+      body: JSON.stringify({ name: agentName, backend, model, cwd }),
     });
     if (res.ok) {
       _agentsCache = null;  // invalidate autocomplete cache
@@ -1646,7 +1646,7 @@ function showAgentCreatePrompt(aliasName, onSaved) {
   });
 }
 
-// ── topic / alias autocomplete ───────────────────────────────────────────────
+// ── topic / agent autocomplete ───────────────────────────────────────────────
 
 let _topicsCache  = null;
 let _agentsCache = null;
@@ -1778,10 +1778,10 @@ async function updateAutocomplete() {
   } else if (mAlias) {
     const topic  = mAlias[1];
     const prefix = mAlias[2].toLowerCase();
-    const aliases = await _acAgents();
+    const agents = await _acAgents();
     if (input.value !== val) return;
     _acRender(
-      aliases.filter(a => a.name.toLowerCase().startsWith(prefix)).slice(0, 8)
+      agents.filter(a => a.name.toLowerCase().startsWith(prefix)).slice(0, 8)
         .map(a => ({
           label:  _acAgentLabel(topic, a.name),
           insert: `#${topic}@${a.name}`,

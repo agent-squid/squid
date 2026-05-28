@@ -20,12 +20,12 @@ from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH
 _proc_registry: dict[int, dict] = {}
 
 
-def _register_proc(pid: int, backend: str, topic: str, alias: str) -> None:
+def _register_proc(pid: int, backend: str, topic: str, agent: str) -> None:
     _proc_registry[pid] = {
         "pid": pid,
         "backend": backend,
         "topic": topic,
-        "alias": alias,
+        "agent": agent,
         "started_at": time.monotonic(),
         "started_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -84,7 +84,7 @@ async def _stream_lines(
     *,
     backend: str = "",
     topic: str = "",
-    alias: str = "",
+    agent: str = "",
     response_timeout: Optional[int] = None,
 ) -> AsyncGenerator[str, None]:
     """Run cmd and yield stdout line by line.
@@ -106,7 +106,7 @@ async def _stream_lines(
     assert proc.stdout is not None
     assert proc.stderr is not None
     pid = proc.pid
-    _register_proc(pid, backend=backend, topic=topic, alias=alias)
+    _register_proc(pid, backend=backend, topic=topic, agent=agent)
 
     # Drain stderr concurrently — prevents buffer-full deadlock if the
     # subprocess writes > 64KB of diagnostics before exiting.
@@ -213,7 +213,7 @@ def _tool_data(name: str, input_json: str) -> dict:
 
 async def run_claude(
     prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
-    model: Optional[str] = None, topic: str = "", alias: str = "",
+    model: Optional[str] = None, topic: str = "", agent: str = "",
     response_timeout: Optional[int] = None,
     resume_session_id: Optional[str] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
@@ -243,7 +243,7 @@ async def run_claude(
     streamed_text = False  # track whether any text chunks were streamed as content
     tool_blocks: dict[int, dict] = {}  # index -> {name, input_json}
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend="claude", topic=topic, alias=alias, response_timeout=response_timeout):
+    async for line in _stream_lines(cmd, cwd=cwd, backend="claude", topic=topic, agent=agent, response_timeout=response_timeout):
         if not line:
             continue
         try:
@@ -304,7 +304,7 @@ async def run_claude(
 
 async def run_codex(
     prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
-    model: Optional[str] = None, topic: str = "", alias: str = "",
+    model: Optional[str] = None, topic: str = "", agent: str = "",
     response_timeout: Optional[int] = None,
     resume_session_id: Optional[str] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
@@ -327,7 +327,7 @@ async def run_codex(
     start_ms = time.monotonic() * 1000
     thread_id: Optional[str] = None
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend="codex", topic=topic, alias=alias, response_timeout=response_timeout):
+    async for line in _stream_lines(cmd, cwd=cwd, backend="codex", topic=topic, agent=agent, response_timeout=response_timeout):
         if not line:
             continue
         try:
@@ -379,7 +379,7 @@ async def run_codex(
 
 async def run_copilot(
     prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
-    model: Optional[str] = None, topic: str = "", alias: str = "",
+    model: Optional[str] = None, topic: str = "", agent: str = "",
     response_timeout: Optional[int] = None,
     resume_session_id: Optional[str] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
@@ -406,7 +406,7 @@ async def run_copilot(
     stats_yielded = False
     session_error: Optional[str] = None
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend="copilot", topic=topic, alias=alias, response_timeout=response_timeout):
+    async for line in _stream_lines(cmd, cwd=cwd, backend="copilot", topic=topic, agent=agent, response_timeout=response_timeout):
         if not line:
             continue
         try:
@@ -468,7 +468,7 @@ async def run_copilot(
 
 async def run_cursor(
     prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
-    model: Optional[str] = None, topic: str = "", alias: str = "",
+    model: Optional[str] = None, topic: str = "", agent: str = "",
     response_timeout: Optional[int] = None,
     resume_session_id: Optional[str] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
@@ -493,7 +493,7 @@ async def run_cursor(
     session_id: Optional[str] = None
     text_started = False
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend="cursor", topic=topic, alias=alias, response_timeout=response_timeout):
+    async for line in _stream_lines(cmd, cwd=cwd, backend="cursor", topic=topic, agent=agent, response_timeout=response_timeout):
         if not line:
             continue
         try:
@@ -539,7 +539,7 @@ async def run_cursor(
 
 async def run_antigravity(
     prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
-    model: Optional[str] = None, topic: str = "", alias: str = "",
+    model: Optional[str] = None, topic: str = "", agent: str = "",
     response_timeout: Optional[int] = None,
     resume_session_id: Optional[str] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
@@ -562,7 +562,7 @@ async def run_antigravity(
     streamed_text = False
     tool_blocks: dict[int, dict] = {}
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend="antigravity", topic=topic, alias=alias, response_timeout=response_timeout):
+    async for line in _stream_lines(cmd, cwd=cwd, backend="antigravity", topic=topic, agent=agent, response_timeout=response_timeout):
         if not line:
             continue
         try:
@@ -639,24 +639,24 @@ async def run_antigravity(
 
 async def run_auto(
     prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
-    model: Optional[str] = None, topic: str = "", alias: str = "",
+    model: Optional[str] = None, topic: str = "", agent: str = "",
     response_timeout: Optional[int] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Try claude → cursor → antigravity → codex → copilot in order of availability."""
     if CLAUDE_PATH:
-        async for chunk in run_claude(prompt, cwd=cwd, history=history, model=model, topic=topic, alias=alias, response_timeout=response_timeout):
+        async for chunk in run_claude(prompt, cwd=cwd, history=history, model=model, topic=topic, agent=agent, response_timeout=response_timeout):
             yield chunk
     elif CURSOR_PATH:
-        async for chunk in run_cursor(prompt, cwd=cwd, history=history, model=model, topic=topic, alias=alias, response_timeout=response_timeout):
+        async for chunk in run_cursor(prompt, cwd=cwd, history=history, model=model, topic=topic, agent=agent, response_timeout=response_timeout):
             yield chunk
     elif AGY_PATH:
-        async for chunk in run_antigravity(prompt, cwd=cwd, history=history, model=model, topic=topic, alias=alias, response_timeout=response_timeout):
+        async for chunk in run_antigravity(prompt, cwd=cwd, history=history, model=model, topic=topic, agent=agent, response_timeout=response_timeout):
             yield chunk
     elif CODEX_PATH:
-        async for chunk in run_codex(prompt, cwd=cwd, history=history, model=model, topic=topic, alias=alias, response_timeout=response_timeout):
+        async for chunk in run_codex(prompt, cwd=cwd, history=history, model=model, topic=topic, agent=agent, response_timeout=response_timeout):
             yield chunk
     elif COPILOT_PATH:
-        async for chunk in run_copilot(prompt, cwd=cwd, history=history, model=model, topic=topic, alias=alias, response_timeout=response_timeout):
+        async for chunk in run_copilot(prompt, cwd=cwd, history=history, model=model, topic=topic, agent=agent, response_timeout=response_timeout):
             yield chunk
     else:
         raise CLINotFoundError("No AI CLI found in PATH (claude, cursor-agent, agy, codex, or copilot)")
