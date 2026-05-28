@@ -40,7 +40,7 @@ from .history import list_history
 from .topic_queue import TopicDispatcher
 from .context_sync import sync_now, maybe_sync
 from .stats_db import (
-    init_db, save_stats, get_aggregated_stats, save_quota_delta, get_stats_by_topic, get_stats_by_model,
+    init_db, save_stats, get_aggregated_stats, save_quota_delta, get_stats_by_topic, get_stats_by_agent,
     get_topics_summary,
     pin_message, reset_pins, reset_topic_pins,
     get_agent, upsert_agent, delete_agent, list_agents,
@@ -624,8 +624,8 @@ async def remove_agent(name: str):
 async def usage_stats(period: str = "daily", group: str = "time"):
     if group == "topic":
         return JSONResponse(get_stats_by_topic())
-    if group == "model":
-        return JSONResponse(get_stats_by_model())
+    if group == "agent":
+        return JSONResponse(get_stats_by_agent())
     return JSONResponse(get_aggregated_stats(period))
 
 

@@ -529,11 +529,11 @@ def get_aggregated_stats(period: str = "daily") -> list:
         return []
 
 
-def get_stats_by_model() -> list:
+def get_stats_by_agent() -> list:
     try:
         with _connect() as conn:
             rows = conn.execute(
-                """SELECT COALESCE(model, backend, 'unknown') AS model,
+                """SELECT COALESCE(alias, backend, 'unknown') AS agent,
                           COUNT(*) AS sessions,
                           SUM(input_tokens) AS input_tokens,
                           SUM(output_tokens) AS output_tokens,
@@ -541,7 +541,7 @@ def get_stats_by_model() -> list:
                           SUM(cache_write_tokens) AS cache_write_tokens,
                           SUM(cost_usd) AS cost_usd
                    FROM session_stats
-                   GROUP BY model ORDER BY sessions DESC"""
+                   GROUP BY agent ORDER BY sessions DESC"""
             ).fetchall()
         return [dict(r) for r in rows]
     except sqlite3.OperationalError:

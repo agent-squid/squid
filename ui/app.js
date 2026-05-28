@@ -1339,7 +1339,7 @@ async function loadStats() {
   let rows;
   try {
     const url = statsGroup === 'topic' ? '/stats?group=topic'
-              : statsGroup === 'model' ? '/stats?group=model'
+              : statsGroup === 'model' ? '/stats?group=agent'
               : statsGroup === 'proc'  ? '/processes'
               : `/stats?period=${statsPeriod}`;
     const res = await fetch(url);
@@ -1360,7 +1360,7 @@ async function loadStats() {
   if (statsGroup === 'topic') {
     renderTopicStats(rows);
   } else if (statsGroup === 'model') {
-    renderModelStats(rows);
+    renderAgentStats(rows);
   } else {
     renderTimeStats(rows);
   }
@@ -1435,7 +1435,7 @@ function renderTopicStats(rows) {
   </table>`;
 }
 
-function renderModelStats(rows) {
+function renderAgentStats(rows) {
   let totalSessions = 0, totalIn = 0, totalOut = 0, totalCost = 0;
   const bodyRows = rows.map(r => {
     const inp  = (r.input_tokens || 0) + (r.cache_read_tokens || 0) + (r.cache_write_tokens || 0);
@@ -1446,7 +1446,7 @@ function renderModelStats(rows) {
     totalOut += out;
     totalCost += cost;
     return `<tr>
-      <td>${r.model}</td>
+      <td>${r.agent}</td>
       <td>${r.sessions}</td>
       <td>${fmtNum(inp)}</td>
       <td>${fmtNum(out)}</td>
@@ -1456,7 +1456,7 @@ function renderModelStats(rows) {
 
   statsContent.innerHTML = `<table>
     <thead><tr>
-      <th>Model</th><th>Sessions</th><th>Tokens In</th><th>Tokens Out</th><th>Cost</th>
+      <th>Agent</th><th>Sessions</th><th>Tokens In</th><th>Tokens Out</th><th>Cost</th>
     </tr></thead>
     <tbody>${bodyRows}</tbody>
     <tfoot><tr>
