@@ -4,6 +4,10 @@ This is the intended clean schema for the pre-launch DB collapse.
 When ready: delete `_MIGRATIONS`, replace `_TABLES` with this, rewrite `init_db()` to
 create-only + seed defaults. No migration logic needed.
 
+The seeding logic (`INSERT OR IGNORE` per installed CLI) is already implemented in `init_db()`
+and can be kept as-is. The `_MIGRATIONS` list and the table-recreation block for the old
+topics schema are the only things to remove.
+
 ---
 
 ## Tables
@@ -28,6 +32,8 @@ CREATE TABLE topics (
     sticky_agent TEXT,                     -- topic-level only: last used agent
     last_prompt  TEXT,                     -- last user prompt sent to this topic/agent
     last_at      TEXT,                     -- timestamp of last_prompt
+    last_model   TEXT,                     -- model from agent config at dispatch time
+    last_backend TEXT,                     -- backend from agent config at dispatch time
     hidden       INTEGER DEFAULT 0,        -- 1 = soft-deleted (excluded from autocomplete)
     created_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     PRIMARY KEY (topic, agent)
@@ -35,8 +41,8 @@ CREATE TABLE topics (
 ```
 
 Two row types per topic:
-- `(topic, '')` — topic-level: holds `sticky_agent`, `hidden`, `last_prompt` from any agent
-- `(topic, 'agentname')` — agent-level: holds `last_prompt` for that specific agent (drives `#topic@agent` autocomplete)
+- `(topic, '')` — topic-level: holds `sticky_agent`, `hidden`, `last_prompt`, `last_model`, `last_backend` across all agents
+- `(topic, 'agentname')` — agent-level: holds `last_prompt`, `last_model`, `last_backend` for that specific agent (drives `#topic@agent` autocomplete)
 
 ### `chat_messages`
 ```sql

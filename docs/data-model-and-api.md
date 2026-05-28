@@ -41,8 +41,10 @@ Two row types share this table:
 topic        TEXT  PK (composite with agent)
 agent        TEXT  PK  '' = topic-level; agent name = agent-level
 sticky_agent TEXT       topic-level only: last-used agent name
-last_prompt  TEXT       last user prompt sent (truncated for display)
+last_prompt  TEXT       last user prompt sent
 last_at      TEXT       ISO8601 — timestamp of last_prompt
+last_model   TEXT       model from agent config at dispatch time
+last_backend TEXT       backend from agent config at dispatch time
 hidden       INTEGER    1 = soft-deleted (excluded from autocomplete); default 0
 created_at   TEXT       ISO8601
 ```
