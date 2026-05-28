@@ -31,12 +31,20 @@ created_at TEXT              ISO8601
 
 ---
 
-### `topics` — topic registry
+### `topics` — topic and agent-level autocomplete summary
+
+Two row types share this table:
+- `(topic, '')` — topic-level row: holds `sticky_agent`, `hidden`, `last_prompt` across all agents
+- `(topic, 'agentname')` — agent-level row: holds `last_prompt`/`last_at` for that specific agent
 
 ```
-name       TEXT  PK          topic name
-agent      TEXT              sticky agent (last-used agent name for this topic)
-created_at TEXT              ISO8601
+topic        TEXT  PK (composite with agent)
+agent        TEXT  PK  '' = topic-level; agent name = agent-level
+sticky_agent TEXT       topic-level only: last-used agent name
+last_prompt  TEXT       last user prompt sent (truncated for display)
+last_at      TEXT       ISO8601 — timestamp of last_prompt
+hidden       INTEGER    1 = soft-deleted (excluded from autocomplete); default 0
+created_at   TEXT       ISO8601
 ```
 
 ---
@@ -260,11 +268,30 @@ Run a topic-scoped control command.
 
 ---
 
-### DELETE /topics/{topic}
+### POST /topics/{topic}/hide
 
-Removes topic and all active session state. Chat history preserved.
+Soft-delete a topic — hides it from autocomplete (`hidden=1`). Topic reappears automatically if a new message is sent to it.
 
 **Response**: `{ "ok": true | false }`
+
+---
+
+### DELETE /topics/{topic}
+
+Hard-delete a topic. Removes all topic rows, topic sessions, chat messages, and session stats. Irreversible.
+
+**Response**: `{ "ok": true | false }`
+
+---
+
+### GET /topics/{topic}/agents/history
+
+Returns agents previously used in a topic, ordered by most recent use. Used to populate `#topic@agent` autocomplete.
+
+**Response**:
+```json
+[{ "agent": "clawd", "last_prompt": "fix the auth bug", "last_at": "ISO8601" }]
+```
 
 ---
 
@@ -319,7 +346,7 @@ Poll a single message for status (used when client reconnects mid-stream).
 [
   {
     "name":       "string",
-    "backend":    "auto | claude | cursor | antigravity | codex | copilot",
+    "backend":    "claude | cursor | antigravity | codex | copilot",
     "model":      "string | null",
     "cwd":        "string | null",
     "timeout":    300,
@@ -338,14 +365,20 @@ Create or update an agent (upsert by name).
 ```json
 {
   "name":    "string (required)",
-  "backend": "auto | claude | cursor | antigravity | codex | copilot",
+  "backend": "claude | cursor | antigravity | codex | copilot",
   "model":   "string | null",
   "cwd":     "string | null  — abs path; null = /tmp/squid",
   "timeout": "integer | null  — seconds"
 }
 ```
 
-**Response**: `{ "ok": true }`
+**Response**:
+```json
+{ "ok": true }
+{ "ok": true, "sessions_cleared": ["topic1", "topic2"] }  // if key attrs changed
+```
+
+Key attributes: `backend`, `model`, `cwd`. Changing any of these clears existing topic sessions so the next turn starts a fresh CLI session.
 
 ---
 
