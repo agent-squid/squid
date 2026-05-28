@@ -360,6 +360,14 @@ async function loadHistory() {
   if (historyExhausted && topSentinel) {
     topSentinel.remove();
     topSentinel = null;
+  } else if (!historyExhausted && topSentinel) {
+    // If sentinel is still visible after inserting items, load next page immediately
+    // (IntersectionObserver only fires on state changes, not continuously)
+    const sr = topSentinel.getBoundingClientRect();
+    const mr = messages.getBoundingClientRect();
+    if (sr.bottom >= mr.top && sr.top <= mr.bottom) {
+      loadHistory();
+    }
   }
 }
 
@@ -1685,7 +1693,7 @@ function _acRender(items) {
     btn.addEventListener('mousedown', async e => {
       e.preventDefault(); e.stopPropagation();
       const name = btn.dataset.topic;
-      await fetch(`/topics/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      await fetch(`/topics/${encodeURIComponent(name)}/hide`, { method: 'POST' });
       invalidateTopicsCache();
       acItems = acItems.filter(it => it.deleteTopic !== name);
       btn.closest('.ac-item').remove();
@@ -1763,16 +1771,44 @@ async function updateAutocomplete() {
   } else if (mAlias) {
     const topic  = mAlias[1];
     const prefix = mAlias[2].toLowerCase();
-    const agents = await _acAgents();
+    const [agents, history] = await Promise.all([
+      _acAgents(),
+      fetch(`/topics/${encodeURIComponent(topic)}/agents/history`).then(r => r.ok ? r.json() : []).catch(() => []),
+    ]);
     if (input.value !== val) return;
-    _acRender(
-      agents.filter(a => a.name.toLowerCase().startsWith(prefix)).slice(0, 8)
-        .map(a => ({
-          label:  _acAgentLabel(topic, a.name),
-          insert: `#${topic}@${a.name}`,
-          meta:   a.model || a.backend,
-        }))
-    );
+
+    const usedNames = new Set(history.map(h => h.agent));
+    const items = [];
+
+    // Used agents — with last prompt
+    for (const h of history) {
+      if (!h.agent.toLowerCase().startsWith(prefix)) continue;
+      items.push({
+        label:  _acAgentLabel(topic, h.agent),
+        insert: `#${topic}@${h.agent}`,
+        sub:    h.last_prompt ? truncate(h.last_prompt, 55) : '',
+      });
+      // Also offer adhoc variant
+      items.push({
+        label:  _acAgentLabel(topic, h.agent + '!'),
+        insert: `#${topic}@${h.agent}!`,
+        sub:    h.last_prompt ? truncate(h.last_prompt, 55) : '',
+        meta:   'adhoc',
+      });
+    }
+
+    // Other available agents — no prompt
+    for (const a of agents) {
+      if (usedNames.has(a.name)) continue;
+      if (!a.name.toLowerCase().startsWith(prefix)) continue;
+      items.push({
+        label:  _acAgentLabel(topic, a.name),
+        insert: `#${topic}@${a.name}`,
+        meta:   a.model || a.backend,
+      });
+    }
+
+    _acRender(items.slice(0, 10));
   } else {
     hideAutocomplete();
   }

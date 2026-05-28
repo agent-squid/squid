@@ -35,7 +35,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, SQUID_HOME
-from .runners import run_auto, run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError, CLIError, list_active_procs, kill_all_procs, kill_procs_by_topic
+from .runners import run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError, CLIError, list_active_procs, kill_all_procs, kill_procs_by_topic
 from .history import list_history
 from .topic_queue import TopicDispatcher
 from .context_sync import sync_now, maybe_sync
@@ -47,7 +47,8 @@ from .stats_db import (
     insert_user_message, insert_assistant_message, update_assistant_message,
     get_context_history, mark_orphaned_pending, get_message,
     get_topic_session, set_topic_session, clear_topic_session,
-    delete_topic, get_topic_agents, clear_agent_sessions, get_agent_sessions,
+    delete_topic, hide_topic, get_topic_agents, get_topic_agent_history,
+    clear_agent_sessions, get_agent_sessions,
 )
 from . import creds
 
@@ -365,14 +366,14 @@ async def chat(req: ChatRequest):
                 {"error": f"Agent '{req.agent}' not found. Create it first via /config/agents."},
                 status_code=400,
             )
-        upsert_topic(req.topic, req.agent)
+        upsert_topic(req.topic, req.agent, last_prompt=req.message)
     else:
         topic_row = get_topic(req.topic)
         if topic_row:
             resolved_agent = topic_row.get("agent")
             if resolved_agent:
                 agent_config = get_agent(resolved_agent) or {}
-        upsert_topic(req.topic)
+        upsert_topic(req.topic, resolved_agent, last_prompt=req.message)
 
     backend = agent_config.get("backend") or "claude"
     model: Optional[str] = agent_config.get("model") or None
@@ -501,6 +502,16 @@ async def topics_list():
         t["queue_depth"] = info.get("queue_depth", 0)
         t["active"] = info.get("active", False)
     return JSONResponse(db_topics)
+
+
+@app.get("/topics/{topic}/agents/history")
+async def topic_agent_history(topic: str):
+    return JSONResponse(get_topic_agent_history(topic))
+
+
+@app.post("/topics/{topic}/hide")
+async def hide_topic_route(topic: str):
+    return JSONResponse({"ok": hide_topic(topic)})
 
 
 @app.delete("/topics/{topic}")

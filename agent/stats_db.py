@@ -37,9 +37,14 @@ _TABLES = [
         created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )""",
     """CREATE TABLE IF NOT EXISTS topics (
-        name       TEXT PRIMARY KEY,
-        agent      TEXT,
-        created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        topic        TEXT NOT NULL,
+        agent        TEXT NOT NULL DEFAULT '',
+        sticky_agent TEXT,
+        last_prompt  TEXT,
+        last_at      TEXT,
+        hidden       INTEGER DEFAULT 0,
+        created_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        PRIMARY KEY (topic, agent)
     )""",
     """CREATE TABLE IF NOT EXISTS chat_messages (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,6 +97,8 @@ _MIGRATIONS = [
     # drop backend/model from chat_messages — ground truth is in session_stats (2026-05-28)
     "ALTER TABLE chat_messages DROP COLUMN backend",
     "ALTER TABLE chat_messages DROP COLUMN model",
+    # hide support for topics (2026-05-28)
+    "ALTER TABLE topics ADD COLUMN hidden INTEGER DEFAULT 0",
 ]
 
 
@@ -112,6 +119,24 @@ def init_db() -> None:
             conn.execute("ALTER TABLE aliases RENAME TO agents")
         # Drop legacy table no longer needed
         conn.execute("DROP TABLE IF EXISTS session_context_log")
+
+        # Recreate topics table with composite PK (topic, agent) if still on old schema
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(topics)").fetchall()} if "topics" in tables else set()
+        if "topics" in tables and "last_at" not in cols:
+            conn.execute("""CREATE TABLE topics_new (
+                topic        TEXT NOT NULL,
+                agent        TEXT NOT NULL DEFAULT '',
+                sticky_agent TEXT,
+                last_prompt  TEXT,
+                last_at      TEXT,
+                hidden       INTEGER DEFAULT 0,
+                created_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                PRIMARY KEY (topic, agent)
+            )""")
+            conn.execute("""INSERT INTO topics_new (topic, agent, sticky_agent, hidden, created_at)
+                           SELECT name, '', agent, COALESCE(hidden, 0), created_at FROM topics""")
+            conn.execute("DROP TABLE topics")
+            conn.execute("ALTER TABLE topics_new RENAME TO topics")
 
         for ddl in _TABLES:
             conn.execute(ddl)
@@ -194,49 +219,87 @@ def delete_agent(name: str) -> bool:
 def get_topics_summary() -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
-            """SELECT t.name, t.agent,
-                      a.model AS last_model,
-                      a.backend AS last_backend,
-                      u.content  AS last_prompt,
-                      a.created_at AS last_at
+            """SELECT t.topic AS name, t.sticky_agent AS agent,
+                      s.model AS last_model, s.backend AS last_backend,
+                      t.last_prompt, t.last_at
                FROM topics t
-               LEFT JOIN chat_messages a ON a.id = (
-                   SELECT id FROM chat_messages
-                   WHERE topic = t.name AND role = 'assistant' AND status IN ('done', 'error')
-                   ORDER BY id DESC LIMIT 1
+               LEFT JOIN session_stats s ON s.session_id = (
+                   SELECT session_id FROM session_stats
+                   WHERE topic = t.topic
+                   ORDER BY created_at DESC LIMIT 1
                )
-               LEFT JOIN chat_messages u ON u.id = a.reply_to
-               ORDER BY COALESCE(a.created_at, t.created_at) DESC"""
+               WHERE t.agent = '' AND t.hidden = 0
+               ORDER BY t.last_at DESC NULLS LAST"""
         ).fetchall()
     return [dict(r) for r in rows]
 
 
 def list_topics() -> list[dict]:
     with _connect() as conn:
-        return [dict(r) for r in conn.execute("SELECT * FROM topics ORDER BY name").fetchall()]
+        return [dict(r) for r in conn.execute(
+            "SELECT topic AS name, sticky_agent AS agent FROM topics WHERE agent = '' ORDER BY topic"
+        ).fetchall()]
 
 
 def get_topic(name: str) -> Optional[dict]:
     with _connect() as conn:
-        row = conn.execute("SELECT * FROM topics WHERE name = ?", (name,)).fetchone()
+        row = conn.execute(
+            "SELECT topic AS name, sticky_agent AS agent, hidden FROM topics WHERE topic = ? AND agent = ''",
+            (name,),
+        ).fetchone()
     return dict(row) if row else None
 
 
-def upsert_topic(name: str, agent: Optional[str] = None) -> None:
+def upsert_topic(name: str, agent: Optional[str] = None, last_prompt: Optional[str] = None) -> None:
+    now = __import__('time').strftime("%Y-%m-%dT%H:%M:%SZ", __import__('time').gmtime())
     with _connect() as conn:
+        # Topic-level row
         conn.execute(
-            """INSERT INTO topics (name, agent) VALUES (?, ?)
-               ON CONFLICT(name) DO UPDATE SET
-                 agent = CASE WHEN excluded.agent IS NOT NULL THEN excluded.agent ELSE agent END""",
-            (name, agent),
+            """INSERT INTO topics (topic, agent, sticky_agent, last_prompt, last_at) VALUES (?, '', ?, ?, ?)
+               ON CONFLICT(topic, agent) DO UPDATE SET
+                 hidden       = 0,
+                 sticky_agent = CASE WHEN excluded.sticky_agent IS NOT NULL THEN excluded.sticky_agent ELSE sticky_agent END,
+                 last_prompt  = COALESCE(excluded.last_prompt, last_prompt),
+                 last_at      = COALESCE(excluded.last_at, last_at)""",
+            (name, agent, last_prompt, now if last_prompt else None),
         )
+        # Agent-level row
+        if agent:
+            conn.execute(
+                """INSERT INTO topics (topic, agent, last_prompt, last_at) VALUES (?, ?, ?, ?)
+                   ON CONFLICT(topic, agent) DO UPDATE SET
+                     last_prompt = COALESCE(excluded.last_prompt, last_prompt),
+                     last_at     = COALESCE(excluded.last_at, last_at)""",
+                (name, agent, last_prompt, now if last_prompt else None),
+            )
+
+
+def hide_topic(name: str) -> bool:
+    with _connect() as conn:
+        cur = conn.execute("UPDATE topics SET hidden = 1 WHERE topic = ? AND agent = ''", (name,))
+    return cur.rowcount > 0
 
 
 def delete_topic(name: str) -> bool:
     with _connect() as conn:
         conn.execute("DELETE FROM topic_sessions WHERE topic = ?", (name,))
-        cur = conn.execute("DELETE FROM topics WHERE name = ?", (name,))
+        conn.execute("DELETE FROM session_stats WHERE topic = ?", (name,))
+        conn.execute("DELETE FROM chat_messages WHERE topic = ?", (name,))
+        cur = conn.execute("DELETE FROM topics WHERE topic = ?", (name,))
     return cur.rowcount > 0
+
+
+def get_topic_agent_history(topic: str) -> list[dict]:
+    """Return agents used in a topic with their last prompt, ordered by most recent."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT agent, last_prompt, last_at
+               FROM topics
+               WHERE topic = ? AND agent != ''
+               ORDER BY last_at DESC""",
+            (topic,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ── chat messages ─────────────────────────────────────────────────────────────
@@ -377,15 +440,33 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
             f"""SELECT m.id, m.role, m.topic, m.agent,
                        m.content, m.status, m.adhoc, m.session_id,
                        m.context, m.created_at AS timestamp, m.reply_to,
-                       u.content AS prompt
+                       u.content AS prompt,
+                       s.input_tokens, s.output_tokens, s.cache_read_tokens,
+                       s.cache_write_tokens, s.history_input_tokens,
+                       s.cost_usd, s.duration_ms, s.lookback,
+                       s.quota_before, s.quota_after, s.backend, s.model, s.cwd
                 FROM chat_messages m
                 LEFT JOIN chat_messages u ON m.reply_to = u.id
+                LEFT JOIN session_stats s ON m.session_id = s.session_id
                 {where}
                 ORDER BY m.id DESC LIMIT ? OFFSET ?""",
             params + [limit, offset],
         ).fetchall()
+
+    stat_keys = {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
+                 "history_input_tokens", "cost_usd", "duration_ms", "lookback",
+                 "quota_before", "quota_after", "backend", "model", "cwd"}
+    items = []
+    for r in rows:
+        row = dict(r)
+        stats = {k: row.pop(k) for k in stat_keys}
+        if row.get("session_id") and any(v is not None for v in stats.values()):
+            stats["session_id"] = row["session_id"]
+            row["stats"] = stats
+        items.append(row)
+
     return {
-        "items": [dict(r) for r in rows],
+        "items": items,
         "total": total,
         "has_more": (offset + limit) < total,
     }
