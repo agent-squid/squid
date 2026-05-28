@@ -4,11 +4,138 @@
 
 | Term | Meaning |
 |---|---|
-| **alias** | The short user-defined name for an agent config (e.g. `clawd`, `code`). Stored as `alias` in the DB. Called `agent` in the HTTP API and UI layer. |
-| **agent** | An alias + its configuration: backend, model, cwd, timeout. One row in the `aliases` table. |
-| **topic** | A named conversation channel (e.g. `work`, `personal`). Each topic has a sticky alias and zero or more active sessions. |
-| **session** | A resumable CLI process context identified by a `session_id` (from `claude --resume`) or `thread_id` (Codex). Scoped to `(topic, alias)`. |
-| **adhoc** | A one-off parallel turn. Uses `lookback` exchanges as context instead of a persistent session. |
+| **agent** | A named configuration: backend, model, cwd, timeout. Defined by the user and stored in the `agents` table. Referenced by name in the `@agent` input syntax. |
+| **backend** | The CLI used to run a turn: `claude`, `codex`, `cursor`, `antigravity`, `copilot`, or `auto`. |
+| **topic** | A named conversation channel (e.g. `work`, `personal`). Each topic has a sticky agent and zero or more active sessions. |
+| **session** | A resumable CLI process context identified by a `session_id` (from `claude --resume`) or `thread_id` (Codex). Scoped to `(topic, agent)`. |
+| **adhoc** | A one-off parallel turn that uses `lookback` exchanges as context instead of a persistent session. |
+
+---
+
+## Data Model
+
+SQLite database at `squid.db` (project root).
+
+---
+
+### `agents` — agent configurations
+
+```
+name       TEXT  PK          user-defined short name (e.g. "clawd", "code")
+backend    TEXT  NOT NULL    auto | claude | cursor | antigravity | codex | copilot
+model      TEXT              model string (e.g. claude-opus-4-5); null = backend default
+cwd        TEXT              working directory; null = /tmp/squid
+timeout    INTEGER           per-agent response timeout in seconds; null = global default
+created_at TEXT              ISO8601
+```
+
+---
+
+### `topics` — topic registry
+
+```
+name       TEXT  PK          topic name
+agent      TEXT              sticky agent (last-used agent name for this topic)
+created_at TEXT              ISO8601
+```
+
+---
+
+### `chat_messages` — full message history
+
+```
+id         INTEGER  PK  AUTOINCREMENT
+topic      TEXT     NOT NULL   default: "default"
+agent      TEXT                agent name at time of message
+backend    TEXT                backend used
+model      TEXT                model string (from _stats or agent config)
+session_id TEXT                CLI session_id (set after stats arrive)
+role       TEXT     NOT NULL   user | assistant
+content    TEXT                message body (null while pending)
+reply_to   INTEGER  FK → id    assistant rows point to their user message
+status     TEXT     NOT NULL   pending | done | error
+pinned     INTEGER  DEFAULT 0  1=always inject, 0=default, -1=always exclude
+adhoc      INTEGER  DEFAULT 0  1=adhoc turn, 0=session turn
+tools      TEXT                JSON array of tool_use events (assistant rows only)
+created_at TEXT                ISO8601
+```
+
+---
+
+### `topic_sessions` — active resumable sessions
+
+One row per `(topic, agent)` pair. Cleared by `/clear` or `DELETE /topics/{topic}/session`.
+
+```
+topic       TEXT  PK (composite with agent)
+agent       TEXT  PK
+session_id  TEXT  NOT NULL    passed to CLI as --resume
+cwd         TEXT  NOT NULL    locked at session creation; does not change with agent config updates
+created_at  TEXT              ISO8601
+```
+
+---
+
+### `session_stats` — per-session token usage
+
+```
+session_id           TEXT  PK
+topic                TEXT
+agent                TEXT    agent name at time of run
+backend              TEXT    resolved backend (claude, codex, …)
+model                TEXT    model string reported by CLI
+cwd                  TEXT    working directory used
+input_tokens         INTEGER
+output_tokens        INTEGER
+cache_read_tokens    INTEGER
+cache_write_tokens   INTEGER
+history_input_tokens INTEGER DEFAULT 0   tokens from injected context history
+cost_usd             REAL
+duration_ms          INTEGER
+quota_before         REAL    claude.ai quota at turn start
+quota_after          REAL    claude.ai quota at turn end
+lookback             INTEGER DEFAULT 0   adhoc lookback window used
+pin_count            INTEGER DEFAULT 0   pinned messages injected this turn
+created_at           TEXT    ISO8601 — set on INSERT, never updated (used for date bucketing)
+```
+
+---
+
+### `session_context_log` — injection tracking
+
+Records which pinned messages have been injected into each `(topic, agent)` session,
+preventing double-injection on `--resume`.
+
+```
+topic       TEXT  PK (composite)
+agent       TEXT  PK
+msg_id      INTEGER  PK  FK → chat_messages(id)
+injected_at TEXT         ISO8601
+```
+
+---
+
+## Key Data Flows
+
+### Session turn (non-adhoc)
+1. `POST /chat` resolves agent name → looks up agent config → looks up `topic_sessions` for `session_id`
+2. `insert_user_message` + `insert_assistant_message` (status=`pending`)
+3. CLI spawned via `TopicDispatcher` (FIFO per topic) with `--resume session_id` if present
+4. `_stats` chunk arrives → `save_stats()` → `set_topic_session()` → `mark_injected()`
+5. `update_assistant_message(status="done")`
+
+### Adhoc turn
+Same as above but no `--resume`. Uses `get_context_history(lookback=N)` as inline context.
+Session state in `topic_sessions` is not written. `reset_topic_pins()` runs after stats if pins were injected.
+
+### Client disconnect mid-stream
+`stream_response` finalizer spawns `_drain_to_completion` as a background task.
+The drain processes the remaining queue, captures `_stats` if not yet seen, writes final content, and sets `status="done"`.
+
+### Pin injection
+Pinned messages (`pinned=1`) from `chat_messages` are fetched via `get_pending_injections()` and
+prepended to the prompt as `inject_history`. After delivery, `mark_injected()` records them in
+`session_context_log` so they are not resent on `--resume`.
 
 ---
 
@@ -27,7 +154,7 @@ Stream an AI response. Returns `text/event-stream`.
 {
   "message":  "string (required)",
   "topic":    "string (default: \"default\")",
-  "agent":    "string | null  — alias name; null = use topic sticky",
+  "agent":    "string | null  — agent name; null = use topic sticky",
   "lookback": "integer (default: 0) — adhoc context window",
   "adhoc":    "boolean (default: false)"
 }
@@ -88,19 +215,19 @@ Run a topic-scoped control command.
 **Response**
 ```json
 { "ok": true }
-{ "ok": true, "killed": true }           // stop
+{ "ok": true, "killed": true }                 // stop
 { "ok": true, "killed": int, "drained": int }  // stopall
-{ "ok": true, "drained": int }           // deq
-{ "ok": true, "agent": "alias-name" }    // clear / compact
-{ "ok": true, "topics": [...] }          // list
-{ "ok": false, "error": "..." }          // 400
+{ "ok": true, "drained": int }                 // deq
+{ "ok": true, "agent": "agent-name" }          // clear / compact
+{ "ok": true, "topics": [...] }                // list
+{ "ok": false, "error": "..." }                // 400
 ```
 
 ---
 
 ### GET /history
 
-**Query params**: `topic`, `alias`, `offset` (default 0), `limit` (default 5)
+**Query params**: `topic`, `agent`, `offset` (default 0), `limit` (default 5)
 
 **Response**
 ```json
@@ -110,7 +237,7 @@ Run a topic-scoped control command.
       "id":         1,
       "role":       "user | assistant",
       "topic":      "string",
-      "alias":      "string | null",
+      "agent":      "string | null",
       "backend":    "string | null",
       "model":      "string | null",
       "session_id": "string | null",
@@ -145,7 +272,7 @@ Run a topic-scoped control command.
 [
   {
     "name":         "string",
-    "alias":        "string | null  — sticky agent",
+    "agent":        "string | null  — sticky agent",
     "last_model":   "string | null",
     "last_backend": "string | null",
     "last_prompt":  "string | null",
@@ -168,37 +295,37 @@ Removes topic and all active session state. Chat history preserved.
 
 ### GET /topics/{topic}/sessions
 
-Returns all aliases with active sessions for a topic.
+Returns all agents with active sessions for a topic.
 
-**Response**: `{ "aliases": [{ "alias": str, "session_id": str, "cwd": str, "created_at": str }] }`
+**Response**: `{ "agents": [{ "agent": str, "session_id": str, "cwd": str, "created_at": str }] }`
 
 ---
 
-### GET /topics/{topic}/session?alias={alias}
+### GET /topics/{topic}/session?agent={agent}
 
-Returns the active session state for a `(topic, alias)` pair.
+Returns the active session state for a `(topic, agent)` pair.
 
 **Response**
 ```json
 {
-  "session_id":        "string | null",
-  "cwd":               "string | null",
-  "pending_injections": [{ "id": int, "role": str, "content": str, "source_alias": str, "adhoc": int }],
+  "session_id":         "string | null",
+  "cwd":                "string | null",
+  "pending_injections": [{ "id": int, "role": str, "content": str, "source_agent": str, "adhoc": int }],
   "already_injected":   [{ "msg_id": int, "injected_at": str }]
 }
 ```
 
 ---
 
-### DELETE /topics/{topic}/session?alias={alias}
+### DELETE /topics/{topic}/session?agent={agent}
 
-Clears the active session for `(topic, alias)`. Next message starts fresh.
+Clears the active session for `(topic, agent)`. Next message starts fresh.
 
 **Response**: `{ "ok": true }`
 
 ---
 
-### GET /context/{topic}?alias={alias}
+### GET /context/{topic}?agent={agent}
 
 Alias for `GET /topics/{topic}/session`. Returns session state + injection log.
 
@@ -280,19 +407,19 @@ Delete an agent and its topic sessions.
 
 **Query params**: `period` (`daily` | `hourly`, default `daily`), `group` (`time` | `topic` | `agent`, default `time`)
 
-**Response — group=time (daily/hourly)**
+**Response — group=time**
 ```json
 [
   {
-    "period":            "2026-05-28",
-    "sessions":          12,
-    "input_tokens":      48000,
-    "new_input_tokens":  10000,
-    "output_tokens":     6000,
-    "cache_read_tokens": 30000,
+    "period":             "2026-05-28",
+    "sessions":           12,
+    "input_tokens":       48000,
+    "new_input_tokens":   10000,
+    "output_tokens":      6000,
+    "cache_read_tokens":  30000,
     "cache_write_tokens": 8000,
-    "cost_usd":          0.42,
-    "quota_delta":       -0.05
+    "cost_usd":           0.42,
+    "quota_delta":        -0.05
   }
 ]
 ```
@@ -307,7 +434,7 @@ Delete an agent and its topic sessions.
 [{ "agent": "clawd", "sessions": 8, "input_tokens": 32000, "output_tokens": 5000, "cache_read_tokens": 20000, "cache_write_tokens": 5000, "cost_usd": 0.30 }]
 ```
 
-Note: `agent` is `COALESCE(alias, backend, 'unknown')`. See [open issue](#open-issues) for per-(alias, backend, model) breakdown.
+Note: `agent` is `COALESCE(agent, backend, 'unknown')` — groups all sessions under the same agent name regardless of which backend/model was active at the time.
 
 ---
 
@@ -333,7 +460,7 @@ Save claude.ai session credentials (org ID + session key).
 
 ### GET /quota
 
-Fetch current claude.ai usage from `claude.ai/api/organizations/{org_id}/usage`. Requires saved credentials.
+Fetch current claude.ai usage. Requires saved credentials.
 
 **Response**: proxied JSON from claude.ai, or `{ "error": "..." }` (400/502).
 
@@ -343,7 +470,7 @@ Fetch current claude.ai usage from `claude.ai/api/organizations/{org_id}/usage`.
 
 **Response** — array of active CLI processes:
 ```json
-[{ "topic": "work", "alias": "clawd", "pid": 1234, "backend": "claude", "started_at": "ISO8601" }]
+[{ "pid": 1234, "backend": "claude", "topic": "work", "agent": "clawd", "duration_s": 4.2, "started_iso": "ISO8601" }]
 ```
 
 ---
@@ -367,135 +494,7 @@ Fetch current claude.ai usage from `claude.ai/api/organizations/{org_id}/usage`.
 
 ---
 
-## Data Model
-
-SQLite database at `squid.db` (project root).
-
----
-
-### `aliases` — agent configurations
-
-```
-name       TEXT  PK          user-defined short name
-backend    TEXT  NOT NULL    auto | claude | cursor | antigravity | codex | copilot
-model      TEXT              model string (e.g. claude-opus-4-5); null = backend default
-cwd        TEXT              working directory; null = /tmp/squid
-timeout    INTEGER           per-agent response timeout in seconds; null = global default
-created_at TEXT              ISO8601
-```
-
----
-
-### `topics` — topic registry
-
-```
-name       TEXT  PK          topic name
-alias      TEXT              sticky agent (last-used alias for this topic)
-created_at TEXT              ISO8601
-```
-
----
-
-### `chat_messages` — full message history
-
-```
-id         INTEGER  PK  AUTOINCREMENT
-topic      TEXT     NOT NULL   default: "default"
-alias      TEXT                agent alias at time of message
-backend    TEXT                backend used
-model      TEXT                model used (from _stats or agent config)
-session_id TEXT                CLI session_id (set after stats arrive)
-role       TEXT     NOT NULL   user | assistant
-content    TEXT                message body (may be null while pending)
-reply_to   INTEGER  FK → id    assistant rows point to their user message
-status     TEXT     NOT NULL   pending | done | error
-pinned     INTEGER  DEFAULT 0  1=always inject, 0=default, -1=always exclude
-adhoc      INTEGER  DEFAULT 0  1=adhoc turn, 0=session turn
-tools      TEXT                JSON array of tool_use events (assistant rows only)
-created_at TEXT                ISO8601
-```
-
----
-
-### `topic_sessions` — active resumable sessions
-
-One row per `(topic, alias)` pair. Cleared by `/clear` or `DELETE /topics/{topic}/session`.
-
-```
-topic       TEXT  PK (composite with alias)
-alias       TEXT  PK
-session_id  TEXT  NOT NULL    passed to CLI as --resume
-cwd         TEXT  NOT NULL    locked at session creation; does not change with agent config updates
-created_at  TEXT              ISO8601
-```
-
----
-
-### `session_stats` — per-session token usage
-
-```
-session_id           TEXT  PK
-topic                TEXT
-alias                TEXT    agent alias at time of run
-backend              TEXT    resolved backend (claude, codex, …)
-model                TEXT    model string reported by CLI
-cwd                  TEXT    working directory used
-input_tokens         INTEGER
-output_tokens        INTEGER
-cache_read_tokens    INTEGER
-cache_write_tokens   INTEGER
-history_input_tokens INTEGER DEFAULT 0   tokens from injected context history
-cost_usd             REAL
-duration_ms          INTEGER
-quota_before         REAL    claude.ai quota at turn start
-quota_after          REAL    claude.ai quota at turn end
-lookback             INTEGER DEFAULT 0   adhoc lookback window used
-pin_count            INTEGER DEFAULT 0   pinned messages injected this turn
-created_at           TEXT    ISO8601 — set on INSERT, never updated (use for date bucketing)
-```
-
----
-
-### `session_context_log` — injection tracking
-
-Records which pinned messages have been injected into each `(topic, alias)` session,
-preventing double-injection on `--resume`.
-
-```
-topic       TEXT  PK (composite)
-alias       TEXT  PK
-msg_id      INTEGER  PK  FK → chat_messages(id)
-injected_at TEXT         ISO8601
-```
-
----
-
-## Key Data Flows
-
-### Session turn (non-adhoc)
-1. `POST /chat` resolves alias → looks up agent config → looks up `topic_sessions` for `session_id`
-2. `insert_user_message` + `insert_assistant_message` (status=`pending`)
-3. CLI spawned via `TopicDispatcher` (FIFO per topic) with `--resume session_id` if present
-4. `_stats` chunk arrives → `save_stats()` → `set_topic_session()` → `mark_injected()`
-5. `update_assistant_message(status="done")`
-
-### Adhoc turn
-Same as above but no `--resume`. Uses `get_context_history(lookback=N)` as inline context.
-Session state in `topic_sessions` is not written. `reset_topic_pins()` runs after stats if pins were injected.
-
-### Client disconnect mid-stream
-`stream_response` finalizer spawns `_drain_to_completion` as a background task.
-The drain processes the remaining queue, captures `_stats` if not yet seen, writes final content, and sets `status="done"`.
-
-### Pin injection
-Pinned messages (`pinned=1`) from `chat_messages` are fetched via `get_pending_injections()` and
-prepended to the prompt as `inject_history`. After delivery, `mark_injected()` records them in
-`session_context_log` so they are not resent on `--resume`.
-
----
-
 ## Open Issues
 
-- **`get_stats_by_agent` collapses all runs under the same alias** even when backend/model changed. Should group by `(alias, backend, model)` and show as separate rows.
-- **`alias` vs `agent` naming split**: DB and internal Python use `alias`; HTTP API and UI use `agent`. This is intentional for now — a future pass will rename DB columns.
-- **`session_stats.model`** is populated from the `_stats` chunk (reported by CLI). May differ from `aliases.model` if CLI auto-selects a model.
+- **`get_stats_by_agent` collapses all runs under the same agent name** even when backend/model changed. Should group by `(agent, backend, model)` and show as separate rows.
+- **`session_stats.model`** is populated from the `_stats` chunk (reported by CLI). May differ from `agents.model` if the CLI auto-selects a model.
