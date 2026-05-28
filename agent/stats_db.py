@@ -6,6 +6,17 @@ import json
 from pathlib import Path
 from typing import Optional
 
+from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH
+
+_BACKEND_FALLBACK_ORDER = ["claude", "codex", "cursor", "antigravity", "copilot"]
+_BACKEND_PATHS = {
+    "claude":       CLAUDE_PATH,
+    "codex":        CODEX_PATH,
+    "cursor":       CURSOR_PATH,
+    "antigravity":  AGY_PATH,
+    "copilot":      COPILOT_PATH,
+}
+
 _DB_PATH = Path(__file__).parent.parent / "squid.db"
 
 _TABLES = [
@@ -145,6 +156,13 @@ def init_db() -> None:
                 conn.execute(sql)
             except sqlite3.OperationalError:
                 pass
+        # Seed one default agent per installed CLI (INSERT OR IGNORE — never overwrites user edits)
+        for backend, path in _BACKEND_PATHS.items():
+            if path:
+                conn.execute(
+                    "INSERT OR IGNORE INTO agents (name, backend) VALUES (?, ?)",
+                    (backend, backend),
+                )
         conn.commit()
     finally:
         conn.close()
@@ -155,6 +173,17 @@ def init_db() -> None:
 def list_agents() -> list[dict]:
     with _connect() as conn:
         return [dict(r) for r in conn.execute("SELECT * FROM agents ORDER BY name").fetchall()]
+
+
+def get_default_agent() -> Optional[dict]:
+    """Return the first available agent in fallback order: claude → codex → cursor → antigravity → copilot."""
+    with _connect() as conn:
+        rows = {r["name"]: dict(r) for r in conn.execute("SELECT * FROM agents").fetchall()}
+    for backend in _BACKEND_FALLBACK_ORDER:
+        if backend in rows:
+            return rows[backend]
+    # Any agent at all
+    return next(iter(rows.values()), None) if rows else None
 
 
 def get_agent(name: str) -> Optional[dict]:

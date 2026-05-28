@@ -42,7 +42,7 @@ from .context_sync import sync_now, maybe_sync
 from .stats_db import (
     init_db, save_stats, get_aggregated_stats, save_quota_delta, get_stats_by_topic, get_stats_by_agent,
     get_topics_summary,
-    get_agent, upsert_agent, delete_agent, list_agents,
+    get_agent, upsert_agent, delete_agent, list_agents, get_default_agent,
     get_topic, upsert_topic, list_topics,
     insert_user_message, insert_assistant_message, update_assistant_message,
     get_context_history, mark_orphaned_pending, get_message,
@@ -373,6 +373,11 @@ async def chat(req: ChatRequest):
             resolved_agent = topic_row.get("agent")
             if resolved_agent:
                 agent_config = get_agent(resolved_agent) or {}
+        if not agent_config:
+            default = get_default_agent()
+            if default:
+                resolved_agent = default["name"]
+                agent_config = default
         upsert_topic(req.topic, resolved_agent, last_prompt=req.message)
 
     backend = agent_config.get("backend") or "claude"
