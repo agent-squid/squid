@@ -12,7 +12,7 @@
   <link rel="manifest" href="/manifest.webmanifest?v=20260523-1" />
   <link rel="icon" href="/icons/icon-192.png" sizes="192x192" type="image/png" />
   <link rel="apple-touch-icon" href="/icons/icon-192.png" />
-  <link rel="stylesheet" href="style.css?v=20260527-65" />
+  <link rel="stylesheet" href="style.css?v=20260528-70" />
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
@@ -61,21 +61,25 @@
       <div id="help-content">
         <div class="help-section">
           <div class="help-title">Input syntax</div>
-          <div class="help-row"><code>#topic@alias message</code><span>session — FIFO queued per alias</span></div>
-          <div class="help-row"><code>#topic@alias!N message</code><span>adhoc — parallel, last N exchanges as context</span></div>
-          <div class="help-row"><code>#topic@alias! message</code><span>adhoc — default 5 exchanges</span></div>
-          <div class="help-row"><code>#topic message</code><span>uses sticky alias (last used)</span></div>
+          <div class="help-row"><code>#topic@agent message</code><span>session — FIFO queued per agent</span></div>
+          <div class="help-row"><code>#topic@agent!N message</code><span>adhoc — parallel, last N exchanges as context</span></div>
+          <div class="help-row"><code>#topic@agent! message</code><span>adhoc — default 5 exchanges</span></div>
+          <div class="help-row"><code>#topic message</code><span>uses sticky agent (last used)</span></div>
           <div class="help-row"><code>#topic</code><span>type <kbd>#</kbd> to browse &amp; search topics</span></div>
-          <div class="help-row"><code>#topic@</code><span>type <kbd>@</kbd> to browse aliases</span></div>
+          <div class="help-row"><code>#topic@</code><span>type <kbd>@</kbd> to browse agents</span></div>
         </div>
         <div class="help-section">
-          <div class="help-title">In-chat commands</div>
-          <div class="help-row"><code>stop</code><span>kill running process for current topic</span></div>
-          <div class="help-row"><code>stopall</code><span>kill + drain queue for current topic</span></div>
-          <div class="help-row"><code>deq</code><span>drain entire pending queue</span></div>
-          <div class="help-row"><code>deq N</code><span>remove Nth item (1=first, -1=last)</span></div>
-          <div class="help-row"><code>filter</code><span>filter history by current #topic or #topic@model</span></div>
-          <div class="help-row"><code>filter reset</code><span>clear the active filter</span></div>
+          <div class="help-title">Commands — type <kbd>/</kbd> to browse</div>
+          <div class="help-row"><code>/clear</code><span>clear session — next message starts fresh (all backends)</span></div>
+          <div class="help-row"><code>/compact</code><span>compact session context (resets for Codex; native for Claude)</span></div>
+          <div class="help-row"><code>/stop</code><span>kill running process for current topic</span></div>
+          <div class="help-row"><code>/stopall</code><span>kill + drain queue for current topic</span></div>
+          <div class="help-row"><code>/deq</code><span>drain entire pending queue</span></div>
+          <div class="help-row"><code>/deq N</code><span>remove Nth item (1=first, -1=last)</span></div>
+          <div class="help-row"><code>/filter</code><span>filter history by current #topic or #topic@agent</span></div>
+          <div class="help-row"><code>/filter reset</code><span>clear the active filter</span></div>
+          <div class="help-row"><code>/restart</code><span>restart the server</span></div>
+          <div class="help-row" style="color:#555;font-size:0.85em">Commands also work without <kbd>/</kbd> as exact bare words.</div>
         </div>
         <div class="help-section">
           <div class="help-title">Context curation</div>
@@ -96,11 +100,11 @@
     <div id="scroll-btn" role="button" aria-label="Scroll to bottom">↓</div>
 
     <div id="settings-bar">
-      <div id="settings-aliases">
-        <span class="settings-label">Model Aliases</span>
-        <div id="aliases-list"></div>
-        <form id="alias-form">
-          <div class="alias-form-row">
+      <div id="settings-agents">
+        <span class="settings-label">Agents</span>
+        <div id="agents-list"></div>
+        <form id="agent-form">
+          <div class="agent-form-row">
             <input id="af-name"    type="text" placeholder="name" spellcheck="false" required />
             <select id="af-backend">
               <option value="auto">auto</option>
@@ -114,7 +118,7 @@
             <input id="af-cwd"     type="text"   placeholder="/tmp/squid/…" spellcheck="false" />
             <input id="af-timeout" type="number" placeholder="timeout (s)" min="10" />
             <button type="submit">Save</button>
-            <span id="alias-form-status"></span>
+            <span id="agent-form-status"></span>
           </div>
         </form>
       </div>
@@ -130,7 +134,7 @@
     <form id="form">
       <div id="input-area">
         <div id="topic-chip"></div>
-        <textarea id="input" placeholder="#topic or #topic@alias message…" rows="1"></textarea>
+        <textarea id="input" placeholder="#topic or #topic@agent message…" rows="1"></textarea>
       </div>
       <button id="settings-btn" type="button" title="Settings">⚙</button>
       <button id="send-btn" type="submit" aria-label="Send message">
@@ -141,6 +145,6 @@
       </button>
     </form>
   </div>
-  <script src="app.js?v=20260527-65"></script>
+  <script src="app.js?v=20260528-70"></script>
 </body>
 </html>

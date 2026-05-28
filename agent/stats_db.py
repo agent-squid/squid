@@ -111,18 +111,18 @@ def init_db() -> None:
 
 # ── aliases ───────────────────────────────────────────────────────────────────
 
-def list_aliases() -> list[dict]:
+def list_agents() -> list[dict]:
     with _connect() as conn:
         return [dict(r) for r in conn.execute("SELECT * FROM aliases ORDER BY name").fetchall()]
 
 
-def get_alias(name: str) -> Optional[dict]:
+def get_agent(name: str) -> Optional[dict]:
     with _connect() as conn:
         row = conn.execute("SELECT * FROM aliases WHERE name = ?", (name,)).fetchone()
     return dict(row) if row else None
 
 
-def upsert_alias(name: str, backend: str, model: Optional[str],
+def upsert_agent(name: str, backend: str, model: Optional[str],
                  cwd: Optional[str] = None, timeout: Optional[int] = None) -> None:
     with _connect() as conn:
         conn.execute(
@@ -136,7 +136,7 @@ def upsert_alias(name: str, backend: str, model: Optional[str],
         )
 
 
-def delete_alias(name: str) -> bool:
+def delete_agent(name: str) -> bool:
     with _connect() as conn:
         cur = conn.execute("DELETE FROM aliases WHERE name = ?", (name,))
         if cur.rowcount:
@@ -452,8 +452,8 @@ def save_stats(
                    (session_id, topic, alias, backend, model, cwd,
                     input_tokens, output_tokens,
                     cache_read_tokens, cache_write_tokens, history_input_tokens,
-                    cost_usd, duration_ms, lookback, pin_count)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    cost_usd, duration_ms, lookback, pin_count, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                ON CONFLICT(session_id) DO UPDATE SET
                    topic                = COALESCE(excluded.topic, topic),
                    alias                = COALESCE(excluded.alias, alias),

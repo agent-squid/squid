@@ -4,14 +4,14 @@ server.py — Chat relay server.
 Endpoints
 ---------
 POST /chat
-    Body: { message, topic?, alias?, lookback? }
+    Body: { message, topic?, agent?, lookback? }
     Response: text/event-stream
 
 GET /history?topic=X&offset=0&limit=10
 GET /topics
-GET /config/aliases
-POST /config/aliases
-DELETE /config/aliases/{name}
+GET /config/agents
+POST /config/agents
+DELETE /config/agents/{name}
 GET /stats?period=daily|hourly  or  ?group=topic
 POST /stats/quota-delta
 POST /config/creds
@@ -35,7 +35,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, SQUID_HOME
-from .runners import run_auto, run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError, CLIError, list_active_procs, kill_all_procs
+from .runners import run_auto, run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError, CLIError, list_active_procs, kill_all_procs, kill_procs_by_topic
 from .history import list_history
 from .topic_queue import TopicDispatcher
 from .context_sync import sync_now, maybe_sync
@@ -43,7 +43,7 @@ from .stats_db import (
     init_db, save_stats, get_aggregated_stats, save_quota_delta, get_stats_by_topic, get_stats_by_model,
     get_topics_summary,
     pin_message, reset_pins, reset_topic_pins,
-    get_alias, upsert_alias, delete_alias, list_aliases,
+    get_agent, upsert_agent, delete_agent, list_agents,
     get_topic, upsert_topic, list_topics,
     insert_user_message, insert_assistant_message, update_assistant_message,
     get_context_history, mark_orphaned_pending, get_message,
@@ -120,12 +120,12 @@ UI_DIR = Path(__file__).parent.parent / "ui"
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
     topic: str = Field("default")
-    alias: Optional[str] = None
+    agent: Optional[str] = None
     lookback: int = Field(0)
     adhoc: bool = Field(False)
 
 
-class AliasRequest(BaseModel):
+class AgentRequest(BaseModel):
     name: str = Field(..., min_length=1)
     backend: Literal["auto", "claude", "cursor", "antigravity", "codex", "copilot"] = "auto"
     model: Optional[str] = None
@@ -144,9 +144,10 @@ class QuotaDeltaRequest(BaseModel):
     after: float
 
 class CmdRequest(BaseModel):
-    command: Literal["stop", "stopall", "deq", "list", "restart"]
+    command: Literal["stop", "stopall", "deq", "list", "restart", "clear", "compact"]
     topic: str = "default"
-    pos: Optional[int] = None  # deq only: None=all, 1=first, -1=last, 2=second, …
+    agent: Optional[str] = None  # clear/compact: target agent (falls back to sticky)
+    pos: Optional[int] = None    # deq only: None=all, 1=first, -1=last, 2=second, …
 
 # ---------------------------------------------------------------------------
 # SSE helpers
@@ -169,6 +170,14 @@ async def _drain_to_completion(
     status_raw: str,
     session_id: Optional[str],
     tool_events: Optional[list] = None,
+    topic: Optional[str] = None,
+    agent: Optional[str] = None,
+    backend: Optional[str] = None,
+    model: Optional[str] = None,
+    cwd: Optional[str] = None,
+    adhoc: bool = False,
+    lookback: int = 0,
+    pin_count: int = 0,
 ) -> None:
     """Drain the worker queue after client disconnect; save final content to DB."""
     loop = asyncio.get_event_loop()
@@ -193,7 +202,19 @@ async def _drain_to_completion(
                     status_raw += chunk["_status"]
                 if "_error" in chunk:
                     break
-                # _stats already irrelevant — skip
+                if "_stats" in chunk and not session_id:
+                    # Client disconnected before stats arrived — capture now
+                    stats = dict(chunk["_stats"])
+                    session_id = stats.pop("session_id", None)
+                    if session_id:
+                        stats["adhoc"] = adhoc
+                        stats["lookback"] = lookback
+                        stats["pin_count"] = pin_count
+                        save_stats(session_id, stats, topic=topic, alias=agent,
+                                   backend=backend, model=model, cwd=cwd,
+                                   lookback=lookback, pin_count=pin_count)
+                        if agent and not adhoc:
+                            set_topic_session(topic, agent, session_id, cwd or SQUID_HOME)
             else:
                 raw += chunk
     except Exception:
@@ -203,7 +224,7 @@ async def _drain_to_completion(
     tools_json = json.dumps(tool_events) if tool_events else None
     try:
         update_assistant_message(msg_id, content, session_id, "done" if content else "error", tools=tools_json)
-        log.info("drain complete msg_id=%s len=%d tools=%d", msg_id, len(content), len(tool_events))
+        log.info("drain complete msg_id=%s len=%d tools=%d sid=%s", msg_id, len(content), len(tool_events), session_id)
     except Exception:
         log.exception("drain save failed msg_id=%s", msg_id)
 
@@ -214,7 +235,7 @@ async def _drain_to_completion(
 async def stream_response(
     message: str,
     topic: str,
-    alias: Optional[str],
+    agent: Optional[str],
     backend: str,
     model: Optional[str],
     cwd: Optional[str],
@@ -228,12 +249,12 @@ async def stream_response(
     lookback: int = 0,
     pin_count: int = 0,
 ) -> AsyncGenerator[str, None]:
-    yield sse_event("meta", json.dumps({"alias": alias, "backend": backend, "msg_id": asst_msg_id, "adhoc": adhoc}))
+    yield sse_event("meta", json.dumps({"agent": agent, "backend": backend, "msg_id": asst_msg_id, "adhoc": adhoc}))
 
     effective_cwd = cwd or SQUID_HOME  # matches what topic_queue._process uses
     out_q, seq, worker = await dispatcher.dispatch(
         topic=topic, prompt=message, context_history=context_history,
-        backend=backend, model=model, alias=alias, cwd=effective_cwd,
+        backend=backend, model=model, alias=agent, cwd=effective_cwd,
         response_timeout=response_timeout,
         resume_session_id=resume_session_id,
         inject_history=inject_history or [],
@@ -263,8 +284,16 @@ async def stream_response(
 
             if isinstance(chunk, dict) and "_error" in chunk:
                 err_text = chunk["_error"]
-                yield sse_event("error", err_text)
-                update_assistant_message(asst_msg_id, raw or err_text, session_id, "error")
+                if raw:
+                    # Content already streamed — CLI exited non-zero after delivering the
+                    # response (e.g. quota message). Treat as done so the content isn't
+                    # replaced by a generic error on the client.
+                    tools_json = json.dumps(tool_events) if tool_events else None
+                    update_assistant_message(asst_msg_id, raw, session_id, "done", tools=tools_json)
+                    yield sse_event("done")
+                else:
+                    yield sse_event("error", err_text)
+                    update_assistant_message(asst_msg_id, err_text, session_id, "error")
                 _completed = True
                 return
 
@@ -275,13 +304,13 @@ async def stream_response(
                 stats["lookback"] = lookback
                 stats["pin_count"] = pin_count
                 if session_id:
-                    save_stats(session_id, stats, topic=topic, alias=alias, backend=backend, model=model, cwd=effective_cwd, lookback=lookback, pin_count=pin_count)
+                    save_stats(session_id, stats, topic=topic, alias=agent, backend=backend, model=model, cwd=effective_cwd, lookback=lookback, pin_count=pin_count)
                     stats["session_id"] = session_id
                     stats["cwd"] = effective_cwd
-                    if alias and not adhoc:
-                        set_topic_session(topic, alias, session_id, effective_cwd)
+                    if agent and not adhoc:
+                        set_topic_session(topic, agent, session_id, effective_cwd)
                         if pending_inject_ids:
-                            mark_injected(topic, alias, pending_inject_ids)
+                            mark_injected(topic, agent, pending_inject_ids)
                 yield sse_event("stats", json.dumps(stats))
                 if adhoc and pin_count > 0:
                     reset_topic_pins(topic)
@@ -332,7 +361,11 @@ async def stream_response(
                 pass
             # Background task drains the worker and saves final content when done
             asyncio.create_task(
-                _drain_to_completion(out_q, asst_msg_id, raw, status_raw, session_id, tool_events),
+                _drain_to_completion(
+                    out_q, asst_msg_id, raw, status_raw, session_id, tool_events,
+                    topic=topic, agent=agent, backend=backend, model=model,
+                    cwd=effective_cwd, adhoc=adhoc, lookback=lookback, pin_count=pin_count,
+                ),
                 name=f"squid-drain-{asst_msg_id}",
             )
 
@@ -342,44 +375,44 @@ async def stream_response(
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
-    # 1. Resolve alias — explicit wins, else use topic sticky
-    resolved_alias: Optional[str] = req.alias
-    alias_config: dict = {}
+    # 1. Resolve agent — explicit wins, else use topic sticky
+    resolved_agent: Optional[str] = req.agent
+    agent_config: dict = {}
 
-    if req.alias:
-        alias_config = get_alias(req.alias) or {}
-        if not alias_config:
+    if req.agent:
+        agent_config = get_agent(req.agent) or {}
+        if not agent_config:
             return JSONResponse(
-                {"error": f"Alias '{req.alias}' not found. Create it first via /config/aliases."},
+                {"error": f"Agent '{req.agent}' not found. Create it first via /config/agents."},
                 status_code=400,
             )
-        upsert_topic(req.topic, req.alias)  # update sticky immediately
+        upsert_topic(req.topic, req.agent)  # update sticky immediately
     else:
         topic_row = get_topic(req.topic)
         if topic_row:
-            resolved_alias = topic_row.get("alias")
-            if resolved_alias:
-                alias_config = get_alias(resolved_alias) or {}
+            resolved_agent = topic_row.get("alias")
+            if resolved_agent:
+                agent_config = get_agent(resolved_agent) or {}
         upsert_topic(req.topic)
 
-    backend = alias_config.get("backend") or "auto"
-    model: Optional[str] = alias_config.get("model") or None
-    alias_cwd: Optional[str] = alias_config.get("cwd") or None
-    response_timeout: Optional[int] = alias_config.get("timeout")
+    backend = agent_config.get("backend") or "auto"
+    model: Optional[str] = agent_config.get("model") or None
+    agent_cwd: Optional[str] = agent_config.get("cwd") or None
+    response_timeout: Optional[int] = agent_config.get("timeout")
 
     # 2. Resumable session lookup (skipped for adhoc turns)
     resume_session_id: Optional[str] = None
-    cwd: Optional[str] = alias_cwd
+    cwd: Optional[str] = agent_cwd
     inject_history: list[dict] = []
     pending_inject_ids: list[int] = []
 
-    if not req.adhoc and resolved_alias:
-        stored = get_topic_session(req.topic, resolved_alias)
+    if not req.adhoc and resolved_agent:
+        stored = get_topic_session(req.topic, resolved_agent)
         if stored:
             resume_session_id = stored["session_id"]
             cwd = stored["cwd"]  # locked cwd takes precedence
         # For resumed sessions, exclude pins already in that session (--resume carries them).
-        pending = get_pending_injections(req.topic, resolved_alias,
+        pending = get_pending_injections(req.topic, resolved_agent,
                                          exclude_session_id=resume_session_id)
         if pending:
             inject_history = [{"role": p["role"], "content": p["content"]} for p in pending]
@@ -391,8 +424,8 @@ async def chat(req: ChatRequest):
     if req.adhoc:
         # Pinned topic-wide. Recent-N scoped to resolved alias when active.
         context_history, pin_count = get_context_history(req.topic, lookback,
-                                                          alias=resolved_alias if lookback > 0 else None)
-    elif not resume_session_id and not resolved_alias:
+                                                          alias=resolved_agent if lookback > 0 else None)
+    elif not resume_session_id and not resolved_agent:
         # No alias — inject_history won't run, so use context_history for pinned messages.
         context_history, pin_count = get_context_history(req.topic, 0)
     else:
@@ -400,18 +433,18 @@ async def chat(req: ChatRequest):
         context_history = []
         pin_count = sum(1 for p in pending if p["role"] == "assistant") if pending_inject_ids else 0
 
-    user_msg_id = insert_user_message(req.topic, resolved_alias, backend, model, req.message)
-    asst_msg_id = insert_assistant_message(req.topic, resolved_alias, backend, model, user_msg_id, adhoc=req.adhoc)
+    user_msg_id = insert_user_message(req.topic, resolved_agent, backend, model, req.message)
+    asst_msg_id = insert_assistant_message(req.topic, resolved_agent, backend, model, user_msg_id, adhoc=req.adhoc)
 
     log.info(
         "chat  topic=%s  alias=%s  backend=%s  model=%s  adhoc=%s  resume=%s  injections=%d  msg=%.80r",
-        req.topic, resolved_alias, backend, model, req.adhoc,
+        req.topic, resolved_agent, backend, model, req.adhoc,
         bool(resume_session_id), len(pending_inject_ids), req.message,
     )
     await maybe_sync()
     return StreamingResponse(
         stream_response(
-            req.message, req.topic, resolved_alias, backend, model, cwd,
+            req.message, req.topic, resolved_agent, backend, model, cwd,
             context_history, asst_msg_id, response_timeout,
             resume_session_id=resume_session_id,
             inject_history=inject_history,
@@ -451,6 +484,18 @@ async def run_cmd(req: CmdRequest):
                 os.execv(sys.argv[0], sys.argv)
         asyncio.create_task(_restart())
         return JSONResponse({"ok": True})
+
+    if req.command in ("clear", "compact"):
+        agent = req.agent
+        if not agent:
+            topic_row = get_topic(req.topic)
+            agent = topic_row.get("alias") if topic_row else None
+        if not agent:
+            return JSONResponse({"ok": False, "error": "no active session"}, status_code=400)
+        kill_procs_by_topic(req.topic)
+        clear_topic_session(req.topic, agent)
+        return JSONResponse({"ok": True, "agent": agent})
+
     return JSONResponse({"ok": False, "error": "unknown command"}, status_code=400)
 
 
@@ -558,20 +603,20 @@ async def context_view(topic: str, alias: str):
     })
 
 
-@app.get("/config/aliases")
-async def get_aliases():
-    return JSONResponse(list_aliases())
+@app.get("/config/agents")
+async def get_agents():
+    return JSONResponse(list_agents())
 
 
-@app.post("/config/aliases")
-async def create_alias(req: AliasRequest):
-    upsert_alias(req.name, req.backend, req.model, req.cwd, req.timeout)
+@app.post("/config/agents")
+async def create_agent(req: AgentRequest):
+    upsert_agent(req.name, req.backend, req.model, req.cwd, req.timeout)
     return JSONResponse({"ok": True})
 
 
-@app.delete("/config/aliases/{name}")
-async def remove_alias(name: str):
-    deleted = delete_alias(name)
+@app.delete("/config/agents/{name}")
+async def remove_agent(name: str):
+    deleted = delete_agent(name)
     return JSONResponse({"ok": deleted})
 
 

@@ -57,7 +57,7 @@ function initSettings() {
 settingsBtn.addEventListener('click', () => {
   const open = settingsBar.classList.toggle('open');
   settingsBtn.classList.toggle('active', open);
-  if (open) loadAliases();
+  if (open) loadAgents();
 });
 
 function openHelp() {
@@ -82,20 +82,20 @@ document.getElementById('help-close').addEventListener('click', closeHelp);
 // ── topic chip ────────────────────────────────────────────────────────────────
 
 const topicChipEl = document.getElementById('topic-chip');
-let stickyChip = null; // { topic, alias, adhoc } | null
+let stickyChip = null; // { topic, agent, adhoc } | null
 
-function setTopicChip(topic, alias, adhoc = false, lookback = 0) {
-  stickyChip = { topic, alias, adhoc, lookback };
+function setTopicChip(topic, agent, adhoc = false, lookback = 0) {
+  stickyChip = { topic, agent, adhoc, lookback };
 
   topicChipEl.innerHTML = '';
   const tSpan = document.createElement('span');
   tSpan.className = 'chip-topic';
   tSpan.textContent = '#' + topic;
   topicChipEl.appendChild(tSpan);
-  if (alias) {
+  if (agent) {
     const aSpan = document.createElement('span');
-    aSpan.className = 'chip-alias';
-    aSpan.textContent = '@' + alias;
+    aSpan.className = 'chip-agent';
+    aSpan.textContent = '@' + agent;
     topicChipEl.appendChild(aSpan);
   }
   if (adhoc) {
@@ -105,19 +105,19 @@ function setTopicChip(topic, alias, adhoc = false, lookback = 0) {
     topicChipEl.appendChild(adSpan);
   }
   topicChipEl.classList.add('visible');
-  topicChipEl.classList.remove('needs-alias');
+  topicChipEl.classList.remove('needs-agent');
   input.placeholder = 'message…';
 }
 
 function clearTopicChip() {
   stickyChip = null;
-  topicChipEl.classList.remove('visible', 'needs-alias');
-  input.placeholder = '#topic or #topic@alias message…';
+  topicChipEl.classList.remove('visible', 'needs-agent');
+  input.placeholder = '#topic or #topic@agent message…';
   document.querySelectorAll('.history-item.ctx-highlight').forEach(el => el.classList.remove('ctx-highlight'));
 }
 
 topicChipEl.addEventListener('click', () => {
-  const hadFilter = historyFilter.topic || historyFilter.alias;
+  const hadFilter = historyFilter.topic || historyFilter.agent;
   clearTopicChip();
   if (hadFilter) reloadHistory({});
   input.focus();
@@ -126,24 +126,24 @@ topicChipEl.addEventListener('click', () => {
 function parseInput(text) {
   if (stickyChip && !text.startsWith('#')) {
     const adhoc = !!stickyChip.adhoc;
-    return { topic: stickyChip.topic, alias: stickyChip.alias, adhoc, lookback: stickyChip.lookback || 0, message: text.trim() || text };
+    return { topic: stickyChip.topic, agent: stickyChip.agent, adhoc, lookback: stickyChip.lookback || 0, message: text.trim() || text };
   }
-  // adhoc: #topic!N or #topic@alias!N (N optional, defaults to 0 = pinned only)
+  // adhoc: #topic!N or #topic@agent!N (N optional, defaults to 0 = pinned only)
   const ma = text.match(/^#(\w+)(?:@(\w+))?!(\d*)\s+([\s\S]*)$/);
   if (ma && ma[4].trim()) {
-    return { topic: ma[1], alias: ma[2] || null, adhoc: true, lookback: ma[3] ? parseInt(ma[3]) : 0, message: ma[4].trim() };
+    return { topic: ma[1], agent: ma[2] || null, adhoc: true, lookback: ma[3] ? parseInt(ma[3]) : 0, message: ma[4].trim() };
   }
-  // session: #topic or #topic@alias
+  // session: #topic or #topic@agent
   const ms = text.match(/^#(\w+)(?:@(\w+))?\s+([\s\S]*)$/);
   if (ms && ms[3].trim()) {
-    return { topic: ms[1], alias: ms[2] || null, adhoc: false, lookback: 0, message: ms[3].trim() };
+    return { topic: ms[1], agent: ms[2] || null, adhoc: false, lookback: 0, message: ms[3].trim() };
   }
-  return { topic: 'default', alias: null, adhoc: false, lookback: 0, message: text };
+  return { topic: 'default', agent: null, adhoc: false, lookback: 0, message: text };
 }
 
 // ── topic tag helper (colored, clickable) ──────────────────────────────────────
 
-function makeTopicTag(topic, alias, { clickable = false, adhoc = false, lookback = 0 } = {}) {
+function makeTopicTag(topic, agent, { clickable = false, adhoc = false, lookback = 0 } = {}) {
   const wrap = document.createElement('span');
   wrap.className = 'topic-tag';
 
@@ -152,10 +152,10 @@ function makeTopicTag(topic, alias, { clickable = false, adhoc = false, lookback
   tSpan.textContent = '#' + topic;
   wrap.appendChild(tSpan);
 
-  if (alias) {
+  if (agent) {
     const aSpan = document.createElement('span');
-    aSpan.className = 'tag-alias' + (clickable ? ' clickable' : '');
-    aSpan.textContent = '@' + alias;
+    aSpan.className = 'tag-agent' + (clickable ? ' clickable' : '');
+    aSpan.textContent = '@' + agent;
     wrap.appendChild(aSpan);
   }
 
@@ -169,7 +169,7 @@ function makeTopicTag(topic, alias, { clickable = false, adhoc = false, lookback
   if (clickable) {
     wrap.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (alias && e.target.classList.contains('tag-alias')) filterByAlias(topic, alias, adhoc, lookback);
+      if (agent && e.target.classList.contains('tag-agent')) filterByAgent(topic, agent, adhoc, lookback);
       else filterByTopic(topic);
     });
   }
@@ -179,16 +179,16 @@ function makeTopicTag(topic, alias, { clickable = false, adhoc = false, lookback
 
 // ── history filter ─────────────────────────────────────────────────────────────
 
-let historyFilter = { topic: null, alias: null };
+let historyFilter = { topic: null, agent: null };
 
 function filterByTopic(topic) {
   setTopicChip(topic, null);
-  reloadHistory({ topic, alias: null });
+  reloadHistory({ topic, agent: null });
 }
 
-function filterByAlias(topic, alias, adhoc = false, lookback = 0) {
-  setTopicChip(topic, alias, adhoc, lookback);
-  reloadHistory({ topic, alias });
+function filterByAgent(topic, agent, adhoc = false, lookback = 0) {
+  setTopicChip(topic, agent, adhoc, lookback);
+  reloadHistory({ topic, agent });
 }
 
 function clearFilter() {
@@ -211,9 +211,9 @@ function reloadHistory(filter = {}) {
 function _updateFilterBadge() {
   const badge = document.getElementById('filter-badge');
   const labelEl = document.getElementById('filter-badge-label');
-  const { topic, alias } = historyFilter;
+  const { topic, agent } = historyFilter;
 
-  if (!topic && !alias) {
+  if (!topic && !agent) {
     badge.classList.remove('active');
     return;
   }
@@ -225,10 +225,10 @@ function _updateFilterBadge() {
     t.textContent = '#' + topic;
     labelEl.appendChild(t);
   }
-  if (alias) {
+  if (agent) {
     const a = document.createElement('span');
-    a.className = 'tag-alias';
-    a.textContent = '@' + alias;
+    a.className = 'tag-agent';
+    a.textContent = '@' + agent;
     labelEl.appendChild(a);
   }
   badge.classList.add('active');
@@ -255,7 +255,7 @@ async function loadHistory() {
   try {
     let url = `/history?offset=${historyOffset}&limit=5`;
     if (historyFilter.topic) url += `&topic=${encodeURIComponent(historyFilter.topic)}`;
-    if (historyFilter.alias) url += `&alias=${encodeURIComponent(historyFilter.alias)}`;
+    if (historyFilter.agent) url += `&alias=${encodeURIComponent(historyFilter.agent)}`;
     const res = await fetch(url);
     data = await res.json();
   } catch {
@@ -378,11 +378,27 @@ function initHistoryScroll() {
 
 // ── live chat ────────────────────────────────────────────────────────────────
 
+// All Squid-owned commands. Shown in the / autocomplete popup.
+// args:true = takes optional args (insert into input); args:false = execute directly on select.
+const SQUID_COMMANDS = [
+  { name: 'clear',        desc: 'clear session — next message starts fresh',   args: false },
+  { name: 'compact',      desc: 'compact session (resets context for Codex)',   args: false },
+  { name: 'stop',         desc: 'kill running process for current topic',       args: false },
+  { name: 'stopall',      desc: 'kill + drain queue for current topic',         args: false },
+  { name: 'deq',          desc: 'drain queue (deq N removes Nth item)',         args: true  },
+  { name: 'restart',      desc: 'restart the server',                           args: false },
+  { name: 'filter',       desc: 'filter history by current topic or agent',     args: false },
+  { name: 'filter reset', desc: 'clear the active filter',                      args: false },
+  { name: 'help',         desc: 'show help panel',                              args: false },
+];
+
 function parseCommand(message) {
-  const t = message.trim();
+  const t = message.trim().replace(/^\//, ''); // strip optional leading /
   if (/^restart$/i.test(t))      return { command: 'restart' };
   if (/^stop$/i.test(t))         return { command: 'stop' };
   if (/^stopall$/i.test(t))      return { command: 'stopall' };
+  if (/^clear$/i.test(t))        return { command: 'clear' };
+  if (/^compact$/i.test(t))      return { command: 'compact' };
   if (/^help$/i.test(t))         return { command: 'help' };
   if (/^filter reset$/i.test(t)) return { command: 'filter_reset' };
   if (/^filter$/i.test(t))       return { command: 'filter' };
@@ -391,18 +407,34 @@ function parseCommand(message) {
   return null;
 }
 
-async function handleCommand(cmd, topic, alias) {
+async function handleCommand(cmd, topic, agent) {
   if (cmd.command === 'help') {
     openHelp();
     return;
   }
   if (cmd.command === 'filter') {
-    if (alias) filterByAlias(topic, alias);
+    if (agent) filterByAgent(topic, agent);
     else filterByTopic(topic);
     return;
   }
   if (cmd.command === 'filter_reset') {
     clearFilter();
+    return;
+  }
+
+  if (cmd.command === 'clear' || cmd.command === 'compact') {
+    const feedbackEl = showCmdFeedback(`${cmd.command}…`);
+    try {
+      const body = { command: cmd.command, topic };
+      if (agent) body.agent = agent;
+      const res = await fetch('/cmd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const data = await res.json();
+      if (!data.ok) { feedbackEl.textContent = `${cmd.command} failed: ${data.error || ''}`; return; }
+      const tag = agent ? `#${topic}@${agent}` : `#${topic}`;
+      feedbackEl.textContent = `${tag} — session cleared`;
+    } catch {
+      feedbackEl.textContent = `${cmd.command} — request failed`;
+    }
     return;
   }
 
@@ -463,13 +495,17 @@ form.addEventListener('submit', async (e) => {
   e.preventDefault();
   const text = input.value.trim();
   if (!text) return;
-  const { topic, alias, message } = parseInput(text);
+  const { topic, agent, message } = parseInput(text);
   const cmd = parseCommand(message);
   if (cmd) {
     input.value = '';
     resizeComposer();
     hideAutocomplete();
-    await handleCommand(cmd, topic, alias);
+    await handleCommand(cmd, topic, agent);
+    // Re-set chip after topic-scoped commands so next message stays in context
+    if (['clear', 'compact', 'stop', 'stopall', 'deq'].includes(cmd.command) && (topic !== 'default' || agent)) {
+      setTopicChip(topic, agent);
+    }
     return;
   }
   input.value = '';
@@ -496,7 +532,7 @@ let ctxHighlightEnabled = false;
 function updateCtxHighlight() {
   document.querySelectorAll('.history-item.ctx-highlight').forEach(el => el.classList.remove('ctx-highlight'));
   if (!ctxHighlightEnabled) return;
-  const { adhoc, lookback } = parseInput(input.value);
+  const { adhoc, lookback } = parseInput(input.value); // agent not needed here
   if (!adhoc || lookback <= 0) return;
   // Highlight the last N turns (user + assistant pairs) as context
   const msgItems = [...document.querySelectorAll('.history-item.msg')];
@@ -524,14 +560,14 @@ input.addEventListener('keydown', (e) => {
 });
 
 async function sendMessage(text) {
-  const { topic, alias, adhoc, lookback, message } = parseInput(text);
-  setTopicChip(topic, alias, adhoc, lookback);
+  const { topic, agent, adhoc, lookback, message } = parseInput(text);
+  setTopicChip(topic, agent, adhoc, lookback);
   const sendTime = new Date().toISOString();
 
   // User bubble — compute ctx label immediately; pins are consumed by this send
   const visiblePins = document.querySelectorAll('.pin-btn.pinned').length;
   const ctxLabel = fmtCtxLabel(adhoc, lookback, visiblePins);
-  const userBubble = makeUserBubble(message, topic, alias, null, adhoc, lookback);
+  const userBubble = makeUserBubble(message, topic, agent, null, adhoc, lookback);
   const userTopicTag = userBubble.querySelector('.topic-tag');
   messages.appendChild(userBubble);
   const userTsEl = addTimestamp(userBubble, sendTime, true);
@@ -595,7 +631,7 @@ async function sendMessage(text) {
   bubble.className = 'msg assistant';
   const responseHeader = document.createElement('div');
   responseHeader.className = 'response-header';
-  const responseHeaderTag = makeTopicTag(topic, alias, { adhoc, lookback });
+  const responseHeaderTag = makeTopicTag(topic, agent, { adhoc, lookback });
   const headerText = document.createElement('span');
   headerText.className = 'response-header-text';
   headerText.appendChild(responseHeaderTag);
@@ -616,7 +652,7 @@ async function sendMessage(text) {
   let statusTimer = null;
   let completedFromStatus = false;
   let raw = '';
-  let resolvedAlias = alias;  // updated by meta event
+  let resolvedAgent = agent;  // updated by meta event
   const liveToolEvents = [];
   const controller = new AbortController();
 
@@ -645,6 +681,8 @@ async function sendMessage(text) {
       .split('\n')[0]
       .replace(/^CLI exited \d+:\s*/, '')
       .trim();
+    // Don't wipe streamed content with a generic fallback message
+    if (!errDisplay && raw) return;
     contentDiv.innerHTML = `<span class="msg-error">${errDisplay || 'Response interrupted.'}</span>`;
     scrollToBottom();
   }
@@ -683,7 +721,7 @@ async function sendMessage(text) {
     const res = await fetch('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, topic, alias, lookback, adhoc }),
+      body: JSON.stringify({ message, topic, agent, lookback, adhoc }),
       // lookback: 0 for session mode (CLI owns context), N for adhoc #topic!N
       signal: controller.signal,
     });
@@ -691,7 +729,7 @@ async function sendMessage(text) {
       const err = await res.json().catch(() => ({}));
       if (err.error && err.error.includes('not found')) {
         freezeThinking();
-        showAliasCreatePrompt(alias, () => sendMessage(text));
+        showAgentCreatePrompt(agent, () => sendMessage(text));
         return;
       }
       throw new Error(err.error || `HTTP 400`);
@@ -723,23 +761,23 @@ async function sendMessage(text) {
           if (eventName === 'meta') {
             try {
               const meta = JSON.parse(data);
-              resolvedAlias = meta.alias || (meta.backend !== 'auto' ? meta.backend : null);
+              resolvedAgent = meta.agent || (meta.backend !== 'auto' ? meta.backend : null);
               const resolvedAdhoc = adhoc; // server echoes back what we sent; use closure as reliable source
-              const newTag = makeTopicTag(topic, resolvedAlias, { adhoc: resolvedAdhoc, clickable: true, lookback });
+              const newTag = makeTopicTag(topic, resolvedAgent, { adhoc: resolvedAdhoc, clickable: true, lookback });
               responseHeaderTag.replaceWith(newTag);
-              const newUserTag = makeTopicTag(topic, resolvedAlias, { adhoc: resolvedAdhoc, clickable: true, lookback });
+              const newUserTag = makeTopicTag(topic, resolvedAgent, { adhoc: resolvedAdhoc, clickable: true, lookback });
               if (userTopicTag) {
                 userTopicTag.replaceWith(newUserTag);
-              } else if (resolvedAlias || topic !== 'default') {
+              } else if (resolvedAgent || topic !== 'default') {
                 const content = userBubble.firstElementChild;
                 if (content) {
                   content.insertBefore(document.createTextNode(' '), content.firstChild);
                   content.insertBefore(newUserTag, content.firstChild);
                 }
               }
-              setTopicChip(topic, resolvedAlias, resolvedAdhoc, lookback);
-              // If no ctx span yet but resolved alias found, add ctx to the timestamp footer
-              if (!userCtxSpan && resolvedAlias && !resolvedAdhoc && userTsEl) {
+              setTopicChip(topic, resolvedAgent, resolvedAdhoc, lookback);
+              // If no ctx span yet but resolved agent found, add ctx to the timestamp footer
+              if (!userCtxSpan && resolvedAgent && !resolvedAdhoc && userTsEl) {
                 userCtxSpan = document.createElement('span');
                 userCtxSpan.className = 'user-ctx';
                 userCtxSpan.textContent = '  · ctx:session';
@@ -1031,13 +1069,13 @@ async function pollMessageStatus(msgId, contentEl, bubbleEl) {
   }, 2000);
 }
 
-function makeUserBubble(text, topic, alias, backendFallback = null, adhoc = false, lookback = 0) {
+function makeUserBubble(text, topic, agent, backendFallback = null, adhoc = false, lookback = 0) {
   const div = document.createElement('div');
   div.className = 'msg user';
   const content = document.createElement('div');
-  const showTag = topic && (topic !== 'default' || alias || adhoc);
+  const showTag = topic && (topic !== 'default' || agent || adhoc);
   if (showTag) {
-    const label = alias || backendFallback;
+    const label = agent || backendFallback;
     const tag = makeTopicTag(topic, label, { clickable: true, adhoc, lookback });
     content.appendChild(tag);
     content.appendChild(document.createTextNode(' '));
@@ -1444,7 +1482,7 @@ function renderProcStats(rows) {
       <td>${r.started_iso ? fmtTime(r.started_iso) : '—'}</td>
     </tr>`).join('');
   statsContent.innerHTML = `<table>
-    <thead><tr><th>PID</th><th>Backend</th><th>Topic</th><th>Alias</th><th>Duration</th><th>Started</th></tr></thead>
+    <thead><tr><th>PID</th><th>Backend</th><th>Topic</th><th>Agent</th><th>Duration</th><th>Started</th></tr></thead>
     <tbody>${bodyRows}</tbody>
   </table>`;
 }
@@ -1483,30 +1521,30 @@ function initStats() {
 
 // ── alias manager ─────────────────────────────────────────────────────────────
 
-async function loadAliases() {
-  const listEl = document.getElementById('aliases-list');
+async function loadAgents() {
+  const listEl = document.getElementById('agents-list');
   listEl.innerHTML = '<div class="empty">Loading…</div>';
   let aliases;
   try {
-    const res = await fetch('/config/aliases');
+    const res = await fetch('/config/agents');
     aliases = await res.json();
   } catch {
     listEl.innerHTML = '<div class="empty">Failed to load.</div>';
     return;
   }
   if (!aliases.length) {
-    listEl.innerHTML = '<div class="empty">No aliases yet. Add one below.</div>';
+    listEl.innerHTML = '<div class="empty">No agents yet. Add one below.</div>';
     return;
   }
   const rows = aliases.map(a => `
     <tr>
-      <td><span class="alias-name">${a.name}</span></td>
+      <td><span class="agent-name">${a.name}</span></td>
       <td>${a.backend}</td>
       <td class="col-model">${a.model || '<span class="col-default">—</span>'}</td>
       <td>${a.cwd || '<span class="col-default">/tmp/squid</span>'}</td>
       <td class="col-timeout">${a.timeout ? a.timeout + 's' : '<span class="col-default">30m</span>'}</td>
       <td>
-        <button class="del-btn" data-name="${a.name}" title="Delete alias (does not affect existing messages)">✕</button>
+        <button class="del-btn" data-name="${a.name}" title="Delete agent (does not affect existing messages)">✕</button>
       </td>
     </tr>`).join('');
   listEl.innerHTML = `<table>
@@ -1516,16 +1554,16 @@ async function loadAliases() {
 
   listEl.querySelectorAll('.del-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
-      await fetch(`/config/aliases/${btn.dataset.name}`, { method: 'DELETE' });
-      _aliasesCache = null;
-      loadAliases();
+      await fetch(`/config/agents/${btn.dataset.name}`, { method: 'DELETE' });
+      _agentsCache = null;
+      loadAgents();
     });
   });
 }
 
 function initAliases() {
-  const statusEl = document.getElementById('alias-form-status');
-  document.getElementById('alias-form').addEventListener('submit', async (e) => {
+  const statusEl = document.getElementById('agent-form-status');
+  document.getElementById('agent-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const rawTimeout = parseInt(document.getElementById('af-timeout').value, 10);
     const body = {
@@ -1537,7 +1575,7 @@ function initAliases() {
     };
     if (!body.name) return;
     try {
-      const res = await fetch('/config/aliases', {
+      const res = await fetch('/config/agents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -1548,7 +1586,7 @@ function initAliases() {
         document.getElementById('af-model').value   = '';
         document.getElementById('af-cwd').value     = '';
         document.getElementById('af-timeout').value = '';
-        loadAliases();
+        loadAgents();
       } else {
         statusEl.textContent = 'failed';
       }
@@ -1559,15 +1597,15 @@ function initAliases() {
 
 // ── inline alias creation prompt ─────────────────────────────────────────────
 
-function showAliasCreatePrompt(aliasName, onSaved) {
-  const existing = document.getElementById('alias-create-prompt');
+function showAgentCreatePrompt(aliasName, onSaved) {
+  const existing = document.getElementById('agent-create-prompt');
   if (existing) existing.remove();
 
   const prompt = document.createElement('div');
-  prompt.id = 'alias-create-prompt';
-  prompt.className = 'alias-create-prompt';
+  prompt.id = 'agent-create-prompt';
+  prompt.className = 'agent-create-prompt';
   prompt.innerHTML = `
-    <div class="acp-title">Alias <strong>${aliasName}</strong> not found — create it?</div>
+    <div class="acp-title">Agent <strong>${aliasName}</strong> not found — create it?</div>
     <div class="acp-row">
       <select id="acp-backend">
         <option value="auto">auto</option>
@@ -1593,17 +1631,17 @@ function showAliasCreatePrompt(aliasName, onSaved) {
     const backend = prompt.querySelector('#acp-backend').value;
     const model   = prompt.querySelector('#acp-model').value.trim() || null;
     const cwd     = prompt.querySelector('#acp-cwd').value.trim()   || null;
-    const res = await fetch('/config/aliases', {
+    const res = await fetch('/config/agents', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: aliasName, backend, model, cwd }),
     });
     if (res.ok) {
-      _aliasesCache = null;  // invalidate autocomplete cache
+      _agentsCache = null;  // invalidate autocomplete cache
       prompt.remove();
       onSaved();
     } else {
-      prompt.querySelector('.acp-title').textContent = 'Failed to create alias.';
+      prompt.querySelector('.acp-title').textContent = 'Failed to create agent.';
     }
   });
 }
@@ -1611,7 +1649,7 @@ function showAliasCreatePrompt(aliasName, onSaved) {
 // ── topic / alias autocomplete ───────────────────────────────────────────────
 
 let _topicsCache  = null;
-let _aliasesCache = null;
+let _agentsCache = null;
 let acOpen  = false;
 let acItems = [];
 let acSel   = -1;
@@ -1624,10 +1662,10 @@ async function _acTopics() {
   return _topicsCache;
 }
 
-async function _acAliases() {
-  if (_aliasesCache) return _aliasesCache;
-  try { _aliasesCache = await (await fetch('/config/aliases')).json(); } catch { _aliasesCache = []; }
-  return _aliasesCache;
+async function _acAgents() {
+  if (_agentsCache) return _agentsCache;
+  try { _agentsCache = await (await fetch('/config/agents')).json(); } catch { _agentsCache = []; }
+  return _agentsCache;
 }
 
 function hideAutocomplete() {
@@ -1644,7 +1682,7 @@ function _acRender(items) {
   if (!items.length) { hideAutocomplete(); return; }
   acItems = items; acSel = -1;
   acEl.innerHTML = items.map((item, i) =>
-    `<div class="ac-item" data-i="${i}">` +
+    `<div class="ac-item" data-i="${i}"${item.execute != null ? ' data-cmd' : ''}>` +
     `<div class="ac-row"><span class="ac-label">${item.label}</span>` +
     (item.sub ? `<span class="ac-sub">${item.sub}</span>` : '') +
     (item.meta ? `<span class="ac-meta">${item.meta}</span>` : '') +
@@ -1675,23 +1713,52 @@ function _acRender(items) {
 
 function _acSelect(idx) {
   if (idx < 0 || idx >= acItems.length) return;
-  input.value = acItems[idx].insert + ' ';
+  const item = acItems[idx];
   hideAutocomplete();
+  if (item.execute) {
+    input.value = item.insert;
+    resizeComposer();
+    form.requestSubmit();
+    return;
+  }
+  input.value = item.insert + ' ';
   resizeComposer();
   input.focus();
 }
 
 function _acTopicLabel(topicName, modelLabel) {
   return `<span class="ac-topic">#${topicName}</span>` +
-         (modelLabel ? `<span class="ac-alias">@${modelLabel}</span>` : '');
+         (modelLabel ? `<span class="ac-agent">@${modelLabel}</span>` : '');
 }
 
-function _acAliasLabel(topicName, aliasName) {
-  return `<span class="ac-topic">#${topicName}</span><span class="ac-alias">@${aliasName}</span>`;
+function _acAgentLabel(topicName, agentName) {
+  return `<span class="ac-topic">#${topicName}</span><span class="ac-agent">@${agentName}</span>`;
 }
 
 async function updateAutocomplete() {
-  const val    = input.value;
+  const val = input.value;
+
+  // Command popup: message portion starts with /
+  const { message: msgPart } = parseInput(val);
+  if (msgPart.startsWith('/')) {
+    const slashIdx = val.lastIndexOf('/');
+    const before   = val.slice(0, slashIdx);           // prefix to preserve (#topic@alias )
+    const partial  = msgPart.slice(1).toLowerCase();   // typed after /
+    const matched  = SQUID_COMMANDS.filter(c => c.name.toLowerCase().startsWith(partial));
+    if (matched.length) {
+      _acRender(matched.map(c => ({
+        label:   `<span class="ac-cmd">/${c.name}</span>`,
+        sub:     c.desc,
+        meta:    'squid',
+        insert:  before + '/' + c.name,
+        execute: !c.args,
+      })));
+    } else {
+      hideAutocomplete();
+    }
+    return;
+  }
+
   const mTopic = val.match(/^#(\w*)[!]?$/);
   const mAlias = val.match(/^#(\w+)@(\w*)[!]?$/);
   if (mTopic) {
@@ -1711,12 +1778,12 @@ async function updateAutocomplete() {
   } else if (mAlias) {
     const topic  = mAlias[1];
     const prefix = mAlias[2].toLowerCase();
-    const aliases = await _acAliases();
+    const aliases = await _acAgents();
     if (input.value !== val) return;
     _acRender(
       aliases.filter(a => a.name.toLowerCase().startsWith(prefix)).slice(0, 8)
         .map(a => ({
-          label:  _acAliasLabel(topic, a.name),
+          label:  _acAgentLabel(topic, a.name),
           insert: `#${topic}@${a.name}`,
           meta:   a.model || a.backend,
         }))
