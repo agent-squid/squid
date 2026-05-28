@@ -1,4 +1,4 @@
-# Squid — API & Data Model
+# Squid — Data Model & API
 
 ## Terminology
 
@@ -327,7 +327,7 @@ Clears the active session for `(topic, agent)`. Next message starts fresh.
 
 ### GET /context/{topic}?agent={agent}
 
-Alias for `GET /topics/{topic}/session`. Returns session state + injection log.
+Same as `GET /topics/{topic}/session`. Returns session state + injection log.
 
 ---
 
