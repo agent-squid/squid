@@ -517,7 +517,6 @@ form.addEventListener('submit', async (e) => {
   input.value = '';
   resizeComposer();
   hideAutocomplete();
-  invalidateTopicsCache();
   ctxHighlightEnabled = false;
   sendMessage(text);
   document.querySelectorAll('.history-item.ctx-highlight').forEach(el => el.classList.remove('ctx-highlight'));
@@ -838,6 +837,7 @@ async function sendMessage(text) {
           } else if (eventName === 'done') {
             stopStatusFallback();
             freezeThinking();
+            invalidateTopicsCache();
             doneTime = new Date().toISOString();
             // Surface completed response at the bottom regardless of where it streamed
             if (firstDataReceived) {
