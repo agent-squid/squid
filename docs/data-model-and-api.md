@@ -8,7 +8,7 @@
 | **backend** | The CLI used to run a turn: `claude`, `codex`, `cursor`, `agy` (Antigravity), `copilot`, or `auto`. |
 | **topic** | A named conversation channel (e.g. `oncall`, `backend`). Each topic has a sticky agent you can switch dynamically and zero or more sessions and adhoc turns from multiple agents. Topic = *sessions(*agents) + *adhocs(*agents) |
 | **session** | A resumable CLI process context identified by a `session_id` (from `claude --resume`) or `thread_id` (Codex). Scoped to `(topic, agent)`. |)
-| **adhoc** | A one-off parallel turn that uses `lookback` or pinned responses as context instead of a persistent session. |
+| **adhoc** | A one-off parallel turn that uses a `lookback` window of recent history as inline context instead of a persistent session. |
 
 ---
 

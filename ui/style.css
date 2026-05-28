@@ -112,18 +112,18 @@ body {
 #creds-save:hover { color: #f07040; border-color: #f07040; }
 #creds-status { font-size: 0.68em; color: #555; }
 
-#logo {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  object-fit: cover;
+.text-logo {
+  display: flex;
+  align-items: center;
+  gap: 0.3em;
+  font-size: 0.78em;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: #f07040;
 }
-
-#logo-name {
-  font-size: 0.9em;
-  font-weight: 600;
-  color: #888;
-  letter-spacing: 0.04em;
+.logo-icon {
+  height: 1.4em;
+  width: auto;
 }
 
 #messages {
@@ -640,15 +640,6 @@ button {
     margin: 0;
     padding: calc(0.55rem + env(safe-area-inset-top)) 0.75rem 0.55rem;
     box-shadow: 0 8px 18px rgba(15, 15, 19, 0.84);
-  }
-
-  #logo {
-    width: 26px;
-    height: 26px;
-  }
-
-  #logo-name {
-    font-size: 0.82em;
   }
 
   #quota-display {
