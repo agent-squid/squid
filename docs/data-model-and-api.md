@@ -5,10 +5,10 @@
 | Term | Meaning |
 |---|---|
 | **agent** | A named configuration: backend, model, cwd, timeout. Defined by the user and stored in the `agents` table. Referenced by name in the `@agent` input syntax. |
-| **backend** | The CLI used to run a turn: `claude`, `codex`, `cursor`, `antigravity`, `copilot`, or `auto`. |
-| **topic** | A named conversation channel (e.g. `work`, `personal`). Each topic has a sticky agent and zero or more active sessions. |
-| **session** | A resumable CLI process context identified by a `session_id` (from `claude --resume`) or `thread_id` (Codex). Scoped to `(topic, agent)`. |
-| **adhoc** | A one-off parallel turn that uses `lookback` exchanges as context instead of a persistent session. |
+| **backend** | The CLI used to run a turn: `claude`, `codex`, `cursor`, `agy` (Antigravity), `copilot`, or `auto`. |
+| **topic** | A named conversation channel (e.g. `oncall`, `backend`). Each topic has a sticky agent you can switch dynamically and zero or more sessions and adhoc turns from multiple agents. Topic = *sessions(*agents) + *adhocs(*agents) |
+| **session** | A resumable CLI process context identified by a `session_id` (from `claude --resume`) or `thread_id` (Codex). Scoped to `(topic, agent)`. |)
+| **adhoc** | A one-off parallel turn that uses `lookback` or pinned responses as context instead of a persistent session. |
 
 ---
 
@@ -22,7 +22,7 @@ SQLite database at `squid.db` (project root).
 
 ```
 name       TEXT  PK          user-defined short name (e.g. "clawd", "code")
-backend    TEXT  NOT NULL    auto | claude | cursor | antigravity | codex | copilot
+backend    TEXT  NOT NULL    auto | claude | cursor | agy | codex | copilot
 model      TEXT              model string (e.g. claude-opus-4-5); null = backend default
 cwd        TEXT              working directory; null = /tmp/squid
 timeout    INTEGER           per-agent response timeout in seconds; null = global default
@@ -54,9 +54,9 @@ role       TEXT     NOT NULL   user | assistant
 content    TEXT                message body (null while pending)
 reply_to   INTEGER  FK → id    assistant rows point to their user message
 status     TEXT     NOT NULL   pending | done | error
-pinned     INTEGER  DEFAULT 0  1=always inject, 0=default, -1=always exclude
 adhoc      INTEGER  DEFAULT 0  1=adhoc turn, 0=session turn
-tools      TEXT                JSON array of tool_use events (assistant rows only)
+context    TEXT                user rows: JSON array of context message IDs [id, …]
+                               assistant rows: JSON array of tool_use events
 created_at TEXT                ISO8601
 ```
 
@@ -95,22 +95,7 @@ duration_ms          INTEGER
 quota_before         REAL    claude.ai quota at turn start
 quota_after          REAL    claude.ai quota at turn end
 lookback             INTEGER DEFAULT 0   adhoc lookback window used
-pin_count            INTEGER DEFAULT 0   pinned messages injected this turn
 created_at           TEXT    ISO8601 — set on INSERT, never updated (used for date bucketing)
-```
-
----
-
-### `session_context_log` — injection tracking
-
-Records which pinned messages have been injected into each `(topic, agent)` session,
-preventing double-injection on `--resume`.
-
-```
-topic       TEXT  PK (composite)
-agent       TEXT  PK
-msg_id      INTEGER  PK  FK → chat_messages(id)
-injected_at TEXT         ISO8601
 ```
 
 ---
@@ -119,23 +104,19 @@ injected_at TEXT         ISO8601
 
 ### Session turn (non-adhoc)
 1. `POST /chat` resolves agent name → looks up agent config → looks up `topic_sessions` for `session_id`
-2. `insert_user_message` + `insert_assistant_message` (status=`pending`)
+2. `insert_user_message` (with `context=[]`) + `insert_assistant_message` (status=`pending`)
 3. CLI spawned via `TopicDispatcher` (FIFO per topic) with `--resume session_id` if present
-4. `_stats` chunk arrives → `save_stats()` → `set_topic_session()` → `mark_injected()`
-5. `update_assistant_message(status="done")`
+4. `_stats` chunk arrives → `save_stats()` → `set_topic_session()`
+5. `update_assistant_message(status="done", context=<tool_events_json>)`
 
 ### Adhoc turn
 Same as above but no `--resume`. Uses `get_context_history(lookback=N)` as inline context.
-Session state in `topic_sessions` is not written. `reset_topic_pins()` runs after stats if pins were injected.
+The returned message IDs are stored in the user message's `context` column.
+Session state in `topic_sessions` is not written.
 
 ### Client disconnect mid-stream
 `stream_response` finalizer spawns `_drain_to_completion` as a background task.
 The drain processes the remaining queue, captures `_stats` if not yet seen, writes final content, and sets `status="done"`.
-
-### Pin injection
-Pinned messages (`pinned=1`) from `chat_messages` are fetched via `get_pending_injections()` and
-prepended to the prompt as `inject_history`. After delivery, `mark_injected()` records them in
-`session_context_log` so they are not resent on `--resume`.
 
 ---
 
@@ -186,7 +167,6 @@ Stream an AI response. Returns `text/event-stream`.
   "duration_ms":           0,
   "adhoc":                 false,
   "lookback":              0,
-  "pin_count":             0,
   "cwd":                   "/path/to/cwd"
 }
 ```
@@ -243,9 +223,8 @@ Run a topic-scoped control command.
       "session_id": "string | null",
       "content":    "string | null",
       "status":     "done | pending | error",
-      "pinned":     0,
       "adhoc":      0,
-      "tools":      "json string | null",
+      "context":    "json string | null",
       "timestamp":  "ISO8601",
       "reply_to":   1,
       "prompt":     "user message text (for assistant rows)",
@@ -308,10 +287,8 @@ Returns the active session state for a `(topic, agent)` pair.
 **Response**
 ```json
 {
-  "session_id":         "string | null",
-  "cwd":                "string | null",
-  "pending_injections": [{ "id": int, "role": str, "content": str, "source_agent": str, "adhoc": int }],
-  "already_injected":   [{ "msg_id": int, "injected_at": str }]
+  "session_id": "string | null",
+  "cwd":        "string | null"
 }
 ```
 
@@ -327,7 +304,7 @@ Clears the active session for `(topic, agent)`. Next message starts fresh.
 
 ### GET /context/{topic}?agent={agent}
 
-Same as `GET /topics/{topic}/session`. Returns session state + injection log.
+Same as `GET /topics/{topic}/session`.
 
 ---
 
@@ -336,25 +313,6 @@ Same as `GET /topics/{topic}/session`. Returns session state + injection log.
 Poll a single message for status (used when client reconnects mid-stream).
 
 **Response**: `{ "id": int, "status": "pending | done | error", "content": str | null }`
-
----
-
-### POST /chat/{msg_id}/pin
-
-Set pin state for a message.
-
-**Request body**: `{ "pinned": 1 | 0 | -1 }`  
-`1` = always inject into future sessions, `0` = default, `-1` = always exclude.
-
-**Response**: `{ "ok": true }`
-
----
-
-### POST /chat/reset-pins
-
-Clear all pins (set `pinned=0` everywhere).
-
-**Response**: `{ "ok": true }`
 
 ---
 

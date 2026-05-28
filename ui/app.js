@@ -128,7 +128,7 @@ function parseInput(text) {
     const adhoc = !!stickyChip.adhoc;
     return { topic: stickyChip.topic, agent: stickyChip.agent, adhoc, lookback: stickyChip.lookback || 0, message: text.trim() || text };
   }
-  // adhoc: #topic!N or #topic@agent!N (N optional, defaults to 0 = pinned only)
+  // adhoc: #topic!N or #topic@agent!N (N optional, defaults to 0 = no lookback)
   const ma = text.match(/^#(\w+)(?:@(\w+))?!(\d*)\s+([\s\S]*)$/);
   if (ma && ma[4].trim()) {
     return { topic: ma[1], agent: ma[2] || null, adhoc: true, lookback: ma[3] ? parseInt(ma[3]) : 0, message: ma[4].trim() };
@@ -282,8 +282,7 @@ async function loadHistory() {
     if (item.role === 'user') {
       const userStats = statsByUserMsgId[item.id];
       const lb = userStats?.lookback ?? 0;
-      const pc = userStats?.pin_count ?? 0;
-      const histCtxLabel = (item.agent || item.adhoc) ? fmtCtxLabel(!!item.adhoc, lb, pc) : null;
+      const histCtxLabel = (item.agent || item.adhoc) ? fmtCtxLabel(!!item.adhoc, lb) : null;
       const userBubble = makeUserBubble(item.content, item.topic, item.agent, item.backend, !!item.adhoc, lb);
       userBubble.classList.add('history-item');
       fragment.appendChild(userBubble);
@@ -315,7 +314,6 @@ async function loadHistory() {
       asstHeaderText.appendChild(asstTag);
       asstHeaderText.appendChild(document.createTextNode('  ' + truncate(item.prompt || '', 55)));
       asstHeader.appendChild(asstHeaderText);
-      asstHeader.appendChild(makePinBtn(item.id, item.pinned || 0));
       asstBubble.appendChild(asstHeader);
 
       const asstContent = document.createElement('div');
@@ -336,9 +334,9 @@ async function loadHistory() {
         statsEl.classList.add('history-item');
       }
 
-      if (item.tools) {
+      if (item.context) {
         try {
-          const tools = typeof item.tools === 'string' ? JSON.parse(item.tools) : item.tools;
+          const tools = typeof item.context === 'string' ? JSON.parse(item.context) : item.context;
           const diffTools = tools.filter(t => t.name === 'Edit' || t.name === 'Write' || t.name === 'MultiEdit');
           for (const tool of diffTools) {
             const block = makeToolBlock(tool);
@@ -517,14 +515,9 @@ form.addEventListener('submit', async (e) => {
   document.querySelectorAll('.history-item.ctx-highlight').forEach(el => el.classList.remove('ctx-highlight'));
 });
 
-function fmtCtxLabel(adhoc, lookback, pinCount) {
-  const p = pinCount > 0 ? `${pinCount} pin${pinCount !== 1 ? 's' : ''}` : '';
-  if (!adhoc) {
-    return p ? `sess, ${p}` : 'sess';
-  }
-  const b = lookback > 0 ? `${lookback} back${lookback !== 1 ? 's' : ''}` : '';
-  if (b && p) return `${b}, ${p}`;
-  return b || p || 'none';
+function fmtCtxLabel(adhoc, lookback) {
+  if (!adhoc) return 'sess';
+  return lookback > 0 ? `${lookback} back${lookback !== 1 ? 's' : ''}` : 'none';
 }
 
 let ctxHighlightEnabled = false;
@@ -564,9 +557,7 @@ async function sendMessage(text) {
   setTopicChip(topic, agent, adhoc, lookback);
   const sendTime = new Date().toISOString();
 
-  // User bubble — compute ctx label immediately; pins are consumed by this send
-  const visiblePins = document.querySelectorAll('.pin-btn.pinned').length;
-  const ctxLabel = fmtCtxLabel(adhoc, lookback, visiblePins);
+  const ctxLabel = fmtCtxLabel(adhoc, lookback);
   const userBubble = makeUserBubble(message, topic, agent, null, adhoc, lookback);
   const userTopicTag = userBubble.querySelector('.topic-tag');
   messages.appendChild(userBubble);
@@ -578,8 +569,6 @@ async function sendMessage(text) {
     userCtxSpan.textContent = '  · ctx:' + ctxLabel;
     userTsEl.appendChild(userCtxSpan);
   }
-  // Reset pinned buttons immediately — pins are one-shot, consumed by this send
-  document.querySelectorAll('.pin-btn.pinned').forEach(btn => btn.classList.remove('pinned'));
   requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
 
   // ── Thinking bubble (visible immediately, shows status/queue/loader) ──────────
@@ -637,8 +626,6 @@ async function sendMessage(text) {
   headerText.appendChild(responseHeaderTag);
   headerText.appendChild(document.createTextNode('  ' + truncate(message, 55)));
   responseHeader.appendChild(headerText);
-  const pinBtn = makePinBtn(null, 0);
-  responseHeader.appendChild(pinBtn);
   bubble.appendChild(responseHeader);
   const contentDiv = document.createElement('div');
   bubble.appendChild(contentDiv);
@@ -785,7 +772,6 @@ async function sendMessage(text) {
               }
               if (meta.msg_id) {
                 msgId = meta.msg_id;
-                pinBtn.dataset.msgId = msgId;
                 startStatusFallback(msgId);
               }
             } catch {}
@@ -804,7 +790,7 @@ async function sendMessage(text) {
               lastSessionId = stats.session_id ?? null;
               statsEl = addStats(bubble, stats, new Date().toISOString());
               // Update user timestamp ctx with real compound label from stats
-              const finalCtxLabel = fmtCtxLabel(!!stats.adhoc, stats.lookback ?? 0, stats.pin_count ?? 0);
+              const finalCtxLabel = fmtCtxLabel(!!stats.adhoc, stats.lookback ?? 0);
               if (userTsEl) {
                 if (!userCtxSpan && finalCtxLabel) {
                   userCtxSpan = document.createElement('span');
@@ -1018,27 +1004,6 @@ function makeToolBlock(tool) {
   return block;
 }
 
-function makePinBtn(msgId, pinnedState) {
-  // pinnedState: 1 = pinned (selected), 0 = default (unselected)
-  const btn = document.createElement('button');
-  btn.className = 'pin-btn';
-  if (pinnedState === 1) btn.classList.add('pinned');
-  btn.type = 'button';
-  btn.title = 'ctx';
-  btn.textContent = 'ctx';
-  if (msgId) btn.dataset.msgId = msgId;
-  btn.addEventListener('click', async () => {
-    if (!btn.dataset.msgId) return;
-    const newPinned = btn.classList.contains('pinned') ? 0 : 1;
-    btn.classList.toggle('pinned', newPinned === 1);
-    await fetch(`/chat/${btn.dataset.msgId}/pin`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pinned: newPinned }),
-    });
-  });
-  return btn;
-}
 
 async function pollMessageStatus(msgId, contentEl, bubbleEl) {
   const MAX_POLLS = 960;  // 32 min at 2s intervals — covers 30 min default timeout
@@ -1853,4 +1818,3 @@ initQuota();
 initCreds();
 initPullToRefresh();
 showBootBanner();
-fetch('/chat/reset-pins', { method: 'POST' }).catch(() => {});

@@ -13,7 +13,7 @@ AGY_CLI      = "agy"
 FIRST_BYTE_TIMEOUT = 30   # seconds
 
 # Hard cap on total response time per request
-RESPONSE_TIMEOUT = 1800   # seconds (30 min default; overridable per alias)
+RESPONSE_TIMEOUT = 1800   # seconds (30 min default; overridable per agent)
 
 # Common install locations not always in subprocess PATH
 _EXTRA_PATHS = [

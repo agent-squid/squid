@@ -4,15 +4,15 @@ server.py — Chat relay server.
 Endpoints
 ---------
 POST /chat
-    Body: { message, topic?, agent?, lookback? }
+    Body: { message, topic?, agent?, lookback?, adhoc? }
     Response: text/event-stream
 
-GET /history?topic=X&offset=0&limit=10
+GET /history?topic=X&agent=Y&offset=0&limit=10
 GET /topics
 GET /config/agents
 POST /config/agents
 DELETE /config/agents/{name}
-GET /stats?period=daily|hourly  or  ?group=topic
+GET /stats?period=daily|hourly  or  ?group=topic|agent
 POST /stats/quota-delta
 POST /config/creds
 GET /quota
@@ -42,13 +42,11 @@ from .context_sync import sync_now, maybe_sync
 from .stats_db import (
     init_db, save_stats, get_aggregated_stats, save_quota_delta, get_stats_by_topic, get_stats_by_agent,
     get_topics_summary,
-    pin_message, reset_pins, reset_topic_pins,
     get_agent, upsert_agent, delete_agent, list_agents,
     get_topic, upsert_topic, list_topics,
     insert_user_message, insert_assistant_message, update_assistant_message,
     get_context_history, mark_orphaned_pending, get_message,
     get_topic_session, set_topic_session, clear_topic_session,
-    get_pending_injections, mark_injected, get_session_context_log,
     delete_topic, get_topic_agents,
 )
 from . import creds
@@ -129,8 +127,8 @@ class AgentRequest(BaseModel):
     name: str = Field(..., min_length=1)
     backend: Literal["auto", "claude", "cursor", "antigravity", "codex", "copilot"] = "auto"
     model: Optional[str] = None
-    cwd: Optional[str] = None   # abs path; None = /tmp/squid (bare default)
-    timeout: Optional[int] = None  # seconds; None = use global default
+    cwd: Optional[str] = None
+    timeout: Optional[int] = None
 
 
 class CredsRequest(BaseModel):
@@ -143,11 +141,13 @@ class QuotaDeltaRequest(BaseModel):
     before: float
     after: float
 
+
 class CmdRequest(BaseModel):
     command: Literal["stop", "stopall", "deq", "list", "restart", "clear", "compact"]
     topic: str = "default"
-    agent: Optional[str] = None  # clear/compact: target agent (falls back to sticky)
-    pos: Optional[int] = None    # deq only: None=all, 1=first, -1=last, 2=second, …
+    agent: Optional[str] = None
+    pos: Optional[int] = None
+
 
 # ---------------------------------------------------------------------------
 # SSE helpers
@@ -177,11 +177,10 @@ async def _drain_to_completion(
     cwd: Optional[str] = None,
     adhoc: bool = False,
     lookback: int = 0,
-    pin_count: int = 0,
 ) -> None:
     """Drain the worker queue after client disconnect; save final content to DB."""
     loop = asyncio.get_event_loop()
-    deadline = loop.time() + 300.0  # 5-minute hard cap
+    deadline = loop.time() + 300.0
     tool_events = list(tool_events or [])
     try:
         while True:
@@ -193,7 +192,7 @@ async def _drain_to_completion(
                 chunk = await asyncio.wait_for(out_q.get(), timeout=min(left, 30.0))
             except asyncio.TimeoutError:
                 break
-            if chunk is None:  # sentinel — worker finished
+            if chunk is None:
                 break
             if isinstance(chunk, dict):
                 if "_tool" in chunk:
@@ -203,16 +202,11 @@ async def _drain_to_completion(
                 if "_error" in chunk:
                     break
                 if "_stats" in chunk and not session_id:
-                    # Client disconnected before stats arrived — capture now
                     stats = dict(chunk["_stats"])
                     session_id = stats.pop("session_id", None)
                     if session_id:
-                        stats["adhoc"] = adhoc
-                        stats["lookback"] = lookback
-                        stats["pin_count"] = pin_count
                         save_stats(session_id, stats, topic=topic, agent=agent,
-                                   backend=backend, model=model, cwd=cwd,
-                                   lookback=lookback, pin_count=pin_count)
+                                   backend=backend, model=model, cwd=cwd, lookback=lookback)
                         if agent and not adhoc:
                             set_topic_session(topic, agent, session_id, cwd or SQUID_HOME)
             else:
@@ -221,9 +215,9 @@ async def _drain_to_completion(
         log.exception("drain error msg_id=%s", msg_id)
 
     content = raw or status_raw or ""
-    tools_json = json.dumps(tool_events) if tool_events else None
+    context_json = json.dumps(tool_events) if tool_events else None
     try:
-        update_assistant_message(msg_id, content, session_id, "done" if content else "error", tools=tools_json)
+        update_assistant_message(msg_id, content, session_id, "done" if content else "error", context=context_json)
         log.info("drain complete msg_id=%s len=%d tools=%d sid=%s", msg_id, len(content), len(tool_events), session_id)
     except Exception:
         log.exception("drain save failed msg_id=%s", msg_id)
@@ -243,21 +237,17 @@ async def stream_response(
     asst_msg_id: int,
     response_timeout: Optional[int] = None,
     resume_session_id: Optional[str] = None,
-    inject_history: Optional[list[dict]] = None,
-    pending_inject_ids: Optional[list[int]] = None,
     adhoc: bool = False,
     lookback: int = 0,
-    pin_count: int = 0,
 ) -> AsyncGenerator[str, None]:
     yield sse_event("meta", json.dumps({"agent": agent, "backend": backend, "msg_id": asst_msg_id, "adhoc": adhoc}))
 
-    effective_cwd = cwd or SQUID_HOME  # matches what topic_queue._process uses
+    effective_cwd = cwd or SQUID_HOME
     out_q, seq, worker = await dispatcher.dispatch(
         topic=topic, prompt=message, context_history=context_history,
         backend=backend, model=model, agent=agent, cwd=effective_cwd,
         response_timeout=response_timeout,
         resume_session_id=resume_session_id,
-        inject_history=inject_history or [],
         adhoc=adhoc,
     )
 
@@ -266,7 +256,7 @@ async def stream_response(
     tool_events: list[dict] = []
     session_id: Optional[str] = None
     last_partial_save = time.monotonic()
-    _completed = False  # tracks whether we reached the normal done path
+    _completed = False
 
     try:
         while True:
@@ -279,17 +269,14 @@ async def stream_response(
             except asyncio.TimeoutError:
                 continue
 
-            if chunk is None:  # sentinel — worker finished
+            if chunk is None:
                 break
 
             if isinstance(chunk, dict) and "_error" in chunk:
                 err_text = chunk["_error"]
                 if raw:
-                    # Content already streamed — CLI exited non-zero after delivering the
-                    # response (e.g. quota message). Treat as done so the content isn't
-                    # replaced by a generic error on the client.
-                    tools_json = json.dumps(tool_events) if tool_events else None
-                    update_assistant_message(asst_msg_id, raw, session_id, "done", tools=tools_json)
+                    context_json = json.dumps(tool_events) if tool_events else None
+                    update_assistant_message(asst_msg_id, raw, session_id, "done", context=context_json)
                     yield sse_event("done")
                 else:
                     yield sse_event("error", err_text)
@@ -302,18 +289,13 @@ async def stream_response(
                 session_id = stats.pop("session_id", None)
                 stats["adhoc"] = adhoc
                 stats["lookback"] = lookback
-                stats["pin_count"] = pin_count
                 if session_id:
-                    save_stats(session_id, stats, topic=topic, agent=agent, backend=backend, model=model, cwd=effective_cwd, lookback=lookback, pin_count=pin_count)
+                    save_stats(session_id, stats, topic=topic, agent=agent, backend=backend, model=model, cwd=effective_cwd, lookback=lookback)
                     stats["session_id"] = session_id
                     stats["cwd"] = effective_cwd
                     if agent and not adhoc:
                         set_topic_session(topic, agent, session_id, effective_cwd)
-                        if pending_inject_ids:
-                            mark_injected(topic, agent, pending_inject_ids)
                 yield sse_event("stats", json.dumps(stats))
-                if adhoc and pin_count > 0:
-                    reset_topic_pins(topic)
 
             elif isinstance(chunk, dict) and "_tool" in chunk:
                 tool_events.append(chunk["_tool"])
@@ -338,8 +320,8 @@ async def stream_response(
         if not raw and status_raw:
             raw = status_raw
             yield sse_chunk(raw)
-        tools_json = json.dumps(tool_events) if tool_events else None
-        update_assistant_message(asst_msg_id, raw, session_id, "done", tools=tools_json)
+        context_json = json.dumps(tool_events) if tool_events else None
+        update_assistant_message(asst_msg_id, raw, session_id, "done", context=context_json)
         yield sse_event("done")
         _completed = True
 
@@ -347,24 +329,21 @@ async def stream_response(
         log.exception("Unexpected error in stream_response")
         err_text = f"Internal error: {exc}"
         yield sse_event("error", err_text)
-        tools_json = json.dumps(tool_events) if tool_events else None
-        update_assistant_message(asst_msg_id, raw or err_text, session_id, "error", tools=tools_json)
+        context_json = json.dumps(tool_events) if tool_events else None
+        update_assistant_message(asst_msg_id, raw or err_text, session_id, "error", context=context_json)
         _completed = True
 
     finally:
-        # Runs on client disconnect (CancelledError mid-stream)
         if not _completed:
-            # Mark as pending immediately so a page reload shows in-progress state
             try:
                 update_assistant_message(asst_msg_id, raw or status_raw or "", session_id, "pending")
             except Exception:
                 pass
-            # Background task drains the worker and saves final content when done
             asyncio.create_task(
                 _drain_to_completion(
                     out_q, asst_msg_id, raw, status_raw, session_id, tool_events,
                     topic=topic, agent=agent, backend=backend, model=model,
-                    cwd=effective_cwd, adhoc=adhoc, lookback=lookback, pin_count=pin_count,
+                    cwd=effective_cwd, adhoc=adhoc, lookback=lookback,
                 ),
                 name=f"squid-drain-{asst_msg_id}",
             )
@@ -386,7 +365,7 @@ async def chat(req: ChatRequest):
                 {"error": f"Agent '{req.agent}' not found. Create it first via /config/agents."},
                 status_code=400,
             )
-        upsert_topic(req.topic, req.agent)  # update sticky immediately
+        upsert_topic(req.topic, req.agent)
     else:
         topic_row = get_topic(req.topic)
         if topic_row:
@@ -403,43 +382,30 @@ async def chat(req: ChatRequest):
     # 2. Resumable session lookup (skipped for adhoc turns)
     resume_session_id: Optional[str] = None
     cwd: Optional[str] = agent_cwd
-    inject_history: list[dict] = []
-    pending_inject_ids: list[int] = []
 
     if not req.adhoc and resolved_agent:
         stored = get_topic_session(req.topic, resolved_agent)
         if stored:
             resume_session_id = stored["session_id"]
-            cwd = stored["cwd"]  # locked cwd takes precedence
-        # For resumed sessions, exclude pins already in that session (--resume carries them).
-        pending = get_pending_injections(req.topic, resolved_agent,
-                                         exclude_session_id=resume_session_id)
-        if pending:
-            inject_history = [{"role": p["role"], "content": p["content"]} for p in pending]
-            pending_inject_ids = [p["id"] for p in pending]
+            cwd = stored["cwd"]
 
-    # 3. Context history + pin counts
+    # 3. Context history for adhoc turns
     lookback = int(req.lookback) if req.lookback else 0
-    pin_count = 0
-    if req.adhoc:
-        # Pinned topic-wide. Recent-N scoped to resolved agent when active.
-        context_history, pin_count = get_context_history(req.topic, lookback,
-                                                          agent=resolved_agent if lookback > 0 else None)
-    elif not resume_session_id and not resolved_agent:
-        # No agent — inject_history won't run, so use context_history for pinned messages.
-        context_history, pin_count = get_context_history(req.topic, 0)
-    else:
-        # Agent session: inject_history carries pins. Resumed: CLI owns all context.
-        context_history = []
-        pin_count = sum(1 for p in pending if p["role"] == "assistant") if pending_inject_ids else 0
+    context_history: list[dict] = []
+    context_ids: Optional[list[int]] = None
 
-    user_msg_id = insert_user_message(req.topic, resolved_agent, backend, model, req.message)
+    if req.adhoc and lookback > 0:
+        context_history, context_ids = get_context_history(
+            req.topic, lookback, agent=resolved_agent
+        )
+
+    user_msg_id = insert_user_message(req.topic, resolved_agent, backend, model, req.message, context_ids=context_ids)
     asst_msg_id = insert_assistant_message(req.topic, resolved_agent, backend, model, user_msg_id, adhoc=req.adhoc)
 
     log.info(
-        "chat  topic=%s  agent=%s  backend=%s  model=%s  adhoc=%s  resume=%s  injections=%d  msg=%.80r",
+        "chat  topic=%s  agent=%s  backend=%s  model=%s  adhoc=%s  resume=%s  ctx=%d  msg=%.80r",
         req.topic, resolved_agent, backend, model, req.adhoc,
-        bool(resume_session_id), len(pending_inject_ids), req.message,
+        bool(resume_session_id), len(context_history) // 2, req.message,
     )
     await maybe_sync()
     return StreamingResponse(
@@ -447,11 +413,8 @@ async def chat(req: ChatRequest):
             req.message, req.topic, resolved_agent, backend, model, cwd,
             context_history, asst_msg_id, response_timeout,
             resume_session_id=resume_session_id,
-            inject_history=inject_history,
-            pending_inject_ids=pending_inject_ids,
             adhoc=req.adhoc,
             lookback=lookback,
-            pin_count=pin_count,
         ),
         media_type="text/event-stream",
         headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
@@ -476,9 +439,6 @@ async def run_cmd(req: CmdRequest):
             await asyncio.sleep(0.4)
             kill_all_procs()
             if "--reload" in sys.argv:
-                # In reload mode, touch a watched file — watchfiles detects
-                # the change and gracefully cycles the worker. Sending SIGTERM
-                # to the worker instead causes the reloader parent to exit too.
                 Path(__file__).touch()
             else:
                 os.execv(sys.argv[0], sys.argv)
@@ -510,11 +470,11 @@ async def health():
         "status": "ok",
         "boot_time": BOOT_TIME,
         "backends": {
-            "claude":   {"available": bool(CLAUDE_PATH),   "path": CLAUDE_PATH},
-            "cursor":   {"available": bool(CURSOR_PATH),   "path": CURSOR_PATH},
-            "antigravity": {"available": bool(AGY_PATH),  "path": AGY_PATH},
-            "codex":    {"available": bool(CODEX_PATH),    "path": CODEX_PATH},
-            "copilot":  {"available": bool(COPILOT_PATH),  "path": COPILOT_PATH},
+            "claude":      {"available": bool(CLAUDE_PATH),   "path": CLAUDE_PATH},
+            "cursor":      {"available": bool(CURSOR_PATH),   "path": CURSOR_PATH},
+            "antigravity": {"available": bool(AGY_PATH),      "path": AGY_PATH},
+            "codex":       {"available": bool(CODEX_PATH),    "path": CODEX_PATH},
+            "copilot":     {"available": bool(COPILOT_PATH),  "path": COPILOT_PATH},
         },
     })
 
@@ -524,9 +484,6 @@ async def history(offset: int = 0, limit: int = 5, topic: Optional[str] = None, 
     return JSONResponse(list_history(topic=topic, agent=agent, offset=offset, limit=limit))
 
 
-class PinRequest(BaseModel):
-    pinned: int  # 1 = pinned, 0 = default, -1 = excluded
-
 @app.get("/chat/{msg_id}/status")
 async def message_status(msg_id: int):
     row = get_message(msg_id)
@@ -535,20 +492,9 @@ async def message_status(msg_id: int):
     return JSONResponse(row)
 
 
-@app.post("/chat/reset-pins")
-async def reset_all_pins():
-    reset_pins()
-    return JSONResponse({"ok": True})
-
-@app.post("/chat/{msg_id}/pin")
-async def toggle_pin(msg_id: int, req: PinRequest):
-    pin_message(msg_id, req.pinned)
-    return JSONResponse({"ok": True})
-
-
 @app.get("/topics")
 async def topics_list():
-    db_topics = get_topics_summary()  # ordered by recency, includes last_prompt
+    db_topics = get_topics_summary()
     queue_map = {t["name"]: t for t in dispatcher.topics_info()}
     for t in db_topics:
         info = queue_map.get(t["name"], {})
@@ -573,15 +519,8 @@ async def list_topic_sessions(topic: str):
 async def get_session(topic: str, agent: str):
     stored = get_topic_session(topic, agent)
     if not stored:
-        return JSONResponse({"session_id": None, "cwd": None, "pending_injections": [], "already_injected": []})
-    pending = get_pending_injections(topic, agent)
-    absorbed = get_session_context_log(topic, agent)
-    return JSONResponse({
-        "session_id": stored["session_id"],
-        "cwd": stored["cwd"],
-        "pending_injections": pending,
-        "already_injected": absorbed,
-    })
+        return JSONResponse({"session_id": None, "cwd": None})
+    return JSONResponse({"session_id": stored["session_id"], "cwd": stored["cwd"]})
 
 
 @app.delete("/topics/{topic}/session")
@@ -593,13 +532,9 @@ async def clear_session(topic: str, agent: str):
 @app.get("/context/{topic}")
 async def context_view(topic: str, agent: str):
     stored = get_topic_session(topic, agent)
-    pending = get_pending_injections(topic, agent)
-    absorbed = get_session_context_log(topic, agent)
     return JSONResponse({
         "session_id": stored["session_id"] if stored else None,
         "cwd": stored["cwd"] if stored else None,
-        "pending_injections": pending,
-        "already_injected": absorbed,
     })
 
 

@@ -21,7 +21,6 @@ class QueueItem:
     cwd: Optional[str] = None
     timeout: Optional[int] = None
     resume_session_id: Optional[str] = None
-    inject_history: list[dict] = field(default_factory=list)
     out_q: asyncio.Queue = field(default_factory=asyncio.Queue)
 
 
@@ -113,10 +112,8 @@ class TopicWorker:
         runner = {"auto": run_auto, "claude": run_claude, "cursor": run_cursor, "antigravity": run_antigravity, "codex": run_codex, "copilot": run_copilot}.get(
             item.backend, run_auto
         )
-        history = item.inject_history + item.context_history if item.inject_history else item.context_history
-
         kwargs: dict = dict(
-            history=history, model=item.model,
+            history=item.context_history, model=item.model,
             cwd=item.cwd or SQUID_HOME,
             topic=item.topic, agent=item.agent or "",
             response_timeout=item.timeout,
@@ -151,7 +148,6 @@ class TopicDispatcher:
         cwd: Optional[str] = None,
         response_timeout: Optional[int] = None,
         resume_session_id: Optional[str] = None,
-        inject_history: Optional[list[dict]] = None,
         adhoc: bool = False,
     ) -> tuple[asyncio.Queue, int, TopicWorker]:
         if adhoc:
@@ -166,7 +162,6 @@ class TopicDispatcher:
             prompt=prompt, context_history=context_history,
             backend=backend, model=model, cwd=cwd, timeout=response_timeout,
             resume_session_id=resume_session_id,
-            inject_history=inject_history or [],
         )
         seq = await worker.enqueue(item)
         return item.out_q, seq, worker

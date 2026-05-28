@@ -1025,21 +1025,6 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.pin-btn {
-  flex-shrink: 0;
-  background: transparent;
-  border: 1px solid #2a2a35;
-  border-radius: 3px;
-  color: #3a3a4a;
-  cursor: pointer;
-  font-size: 0.85em;
-  padding: 0 0.3rem;
-  line-height: 1.4;
-}
-.pin-btn:hover { color: #666; border-color: #444; }
-.pin-btn.active { color: #7a4828; border-color: #4a3020; }
-.pin-btn.pinned { color: #f07040; border-color: #f07040; }
-
 /* error state inside assistant bubble */
 .msg-error {
   font-size: 0.85em;
@@ -1131,29 +1116,5 @@ button {
     line-height: 1;
   }
 
-  .pin-btn {
-    min-width: 44px;
-    min-height: 28px;
-    border-radius: 999px;
-    border-color: #3a3a45;
-    color: #777782;
-    font-size: 0.72rem;
-    font-weight: 700;
-    line-height: 1;
-    padding: 0 0.55rem;
-    text-decoration: none;
-  }
-
-  .pin-btn.active {
-    background: rgba(240, 112, 64, 0.14);
-    border-color: #9a5538;
-    color: #d66b3f;
-  }
-
-  .pin-btn.pinned {
-    background: #ff6a2a;
-    border-color: #ff6a2a;
-    color: #fff;
-  }
 
 }

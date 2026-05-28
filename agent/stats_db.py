@@ -2,27 +2,13 @@
 stats_db.py — SQLite for stats, chat history, agents, and topics.
 """
 import sqlite3
+import json
 from pathlib import Path
 from typing import Optional
 
 _DB_PATH = Path(__file__).parent.parent / "squid.db"
 
 _TABLES = [
-    """CREATE TABLE IF NOT EXISTS topic_sessions (
-        topic       TEXT NOT NULL,
-        agent       TEXT NOT NULL,
-        session_id  TEXT NOT NULL,
-        cwd         TEXT NOT NULL,
-        created_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-        PRIMARY KEY (topic, agent)
-    )""",
-    """CREATE TABLE IF NOT EXISTS session_context_log (
-        topic       TEXT NOT NULL,
-        agent       TEXT NOT NULL,
-        msg_id      INTEGER NOT NULL REFERENCES chat_messages(id),
-        injected_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-        PRIMARY KEY (topic, agent, msg_id)
-    )""",
     """CREATE TABLE IF NOT EXISTS session_stats (
         session_id           TEXT PRIMARY KEY,
         topic                TEXT,
@@ -40,7 +26,6 @@ _TABLES = [
         quota_before         REAL,
         quota_after          REAL,
         lookback             INTEGER DEFAULT 0,
-        pin_count            INTEGER DEFAULT 0,
         created_at           TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )""",
     """CREATE TABLE IF NOT EXISTS agents (
@@ -67,10 +52,17 @@ _TABLES = [
         content    TEXT,
         reply_to   INTEGER REFERENCES chat_messages(id),
         status     TEXT NOT NULL DEFAULT 'pending',
-        pinned     INTEGER DEFAULT 0,
         adhoc      INTEGER DEFAULT 0,
-        tools      TEXT,
+        context    TEXT,
         created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )""",
+    """CREATE TABLE IF NOT EXISTS topic_sessions (
+        topic       TEXT NOT NULL,
+        agent       TEXT NOT NULL,
+        session_id  TEXT NOT NULL,
+        cwd         TEXT NOT NULL,
+        created_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        PRIMARY KEY (topic, agent)
     )""",
 ]
 
@@ -95,6 +87,10 @@ _MIGRATIONS = [
     "ALTER TABLE topic_sessions RENAME COLUMN alias TO agent",
     "ALTER TABLE session_context_log RENAME COLUMN alias TO agent",
     "ALTER TABLE session_stats RENAME COLUMN alias TO agent",
+    # tools → context, drop pinned/pin_count (2026-05-28)
+    "ALTER TABLE chat_messages RENAME COLUMN tools TO context",
+    "ALTER TABLE chat_messages DROP COLUMN pinned",
+    "ALTER TABLE session_stats DROP COLUMN pin_count",
 ]
 
 
@@ -113,6 +109,8 @@ def init_db() -> None:
         ).fetchall()}
         if "aliases" in tables and "agents" not in tables:
             conn.execute("ALTER TABLE aliases RENAME TO agents")
+        # Drop legacy table no longer needed
+        conn.execute("DROP TABLE IF EXISTS session_context_log")
 
         for ddl in _TABLES:
             conn.execute(ddl)
@@ -120,7 +118,7 @@ def init_db() -> None:
             try:
                 conn.execute(sql)
             except sqlite3.OperationalError:
-                pass  # column/table already exists or migration already applied
+                pass
         conn.commit()
     finally:
         conn.close()
@@ -157,7 +155,6 @@ def delete_agent(name: str) -> bool:
     with _connect() as conn:
         cur = conn.execute("DELETE FROM agents WHERE name = ?", (name,))
         if cur.rowcount:
-            conn.execute("DELETE FROM session_context_log WHERE agent = ?", (name,))
             conn.execute("DELETE FROM topic_sessions WHERE agent = ?", (name,))
     return cur.rowcount > 0
 
@@ -165,7 +162,6 @@ def delete_agent(name: str) -> bool:
 # ── topics ────────────────────────────────────────────────────────────────────
 
 def get_topics_summary() -> list[dict]:
-    """Return all topics with their most recent prompt and timestamp."""
     with _connect() as conn:
         rows = conn.execute(
             """SELECT t.name, t.agent,
@@ -207,9 +203,7 @@ def upsert_topic(name: str, agent: Optional[str] = None) -> None:
 
 
 def delete_topic(name: str) -> bool:
-    """Remove topic and all its active session state. Chat history is preserved."""
     with _connect() as conn:
-        conn.execute("DELETE FROM session_context_log WHERE topic = ?", (name,))
         conn.execute("DELETE FROM topic_sessions WHERE topic = ?", (name,))
         cur = conn.execute("DELETE FROM topics WHERE name = ?", (name,))
     return cur.rowcount > 0
@@ -218,13 +212,15 @@ def delete_topic(name: str) -> bool:
 # ── chat messages ─────────────────────────────────────────────────────────────
 
 def insert_user_message(
-    topic: str, agent: Optional[str], backend: Optional[str], model: Optional[str], content: str
+    topic: str, agent: Optional[str], backend: Optional[str], model: Optional[str],
+    content: str, context_ids: Optional[list[int]] = None,
 ) -> int:
+    context_json = json.dumps(context_ids) if context_ids else None
     with _connect() as conn:
         cur = conn.execute(
-            """INSERT INTO chat_messages (topic, agent, backend, model, role, content, status)
-               VALUES (?, ?, ?, ?, 'user', ?, 'done')""",
-            (topic, agent, backend, model, content),
+            """INSERT INTO chat_messages (topic, agent, backend, model, role, content, status, context)
+               VALUES (?, ?, ?, ?, 'user', ?, 'done', ?)""",
+            (topic, agent, backend, model, content, context_json),
         )
         return cur.lastrowid
 
@@ -244,36 +240,18 @@ def insert_assistant_message(
 
 def update_assistant_message(
     msg_id: int, content: str, session_id: Optional[str], status: str = "done",
-    tools: Optional[str] = None,
+    context: Optional[str] = None,
 ) -> None:
     with _connect() as conn:
         conn.execute(
-            "UPDATE chat_messages SET content=?, session_id=?, status=?, tools=? WHERE id=?",
-            (content, session_id, status, tools, msg_id),
+            "UPDATE chat_messages SET content=?, session_id=?, status=?, context=? WHERE id=?",
+            (content, session_id, status, context, msg_id),
         )
-
-
-def pin_message(msg_id: int, pinned: int) -> None:
-    """pinned: 1 = always include, 0 = default, -1 = always exclude."""
-    with _connect() as conn:
-        conn.execute("UPDATE chat_messages SET pinned=? WHERE id=?", (pinned, msg_id))
-
-
-def reset_pins() -> None:
-    with _connect() as conn:
-        conn.execute("UPDATE chat_messages SET pinned=0 WHERE pinned != 0")
-
-
-def reset_topic_pins(topic: str) -> None:
-    """Clear pinned=1 for a topic after they've been consumed as adhoc context."""
-    with _connect() as conn:
-        conn.execute("UPDATE chat_messages SET pinned=0 WHERE topic=? AND pinned=1", (topic,))
 
 
 # ── topic sessions ────────────────────────────────────────────────────────────
 
 def get_topic_agents(topic: str) -> list[dict]:
-    """Return all agents that have active sessions for a topic."""
     with _connect() as conn:
         rows = conn.execute(
             "SELECT agent, session_id, cwd, created_at FROM topic_sessions WHERE topic=? ORDER BY agent",
@@ -303,107 +281,42 @@ def set_topic_session(topic: str, agent: str, session_id: str, cwd: Optional[str
 def clear_topic_session(topic: str, agent: str) -> None:
     with _connect() as conn:
         conn.execute("DELETE FROM topic_sessions WHERE topic=? AND agent=?", (topic, agent))
-        conn.execute("DELETE FROM session_context_log WHERE topic=? AND agent=?", (topic, agent))
-
-
-def get_pending_injections(topic: str, agent: str,
-                           exclude_session_id: Optional[str] = None) -> list[dict]:
-    """Return pinned messages not yet injected into this (topic, agent) session.
-    exclude_session_id: skip messages produced in this session — already in --resume context."""
-    excl = " AND (m.session_id IS NULL OR m.session_id != ?)" if exclude_session_id else ""
-    params: tuple = (topic, agent)
-    if exclude_session_id:
-        params += (exclude_session_id,)
-    with _connect() as conn:
-        rows = conn.execute(
-            f"""SELECT m.id, m.role, m.content, m.agent AS source_agent, m.adhoc
-               FROM chat_messages m
-               WHERE m.pinned = 1
-                 AND m.content IS NOT NULL
-                 AND m.id NOT IN (
-                     SELECT msg_id FROM session_context_log
-                     WHERE topic=? AND agent=?
-                 ){excl}
-               ORDER BY m.id ASC""",
-            params,
-        ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def mark_injected(topic: str, agent: str, msg_ids: list[int]) -> None:
-    if not msg_ids:
-        return
-    with _connect() as conn:
-        conn.executemany(
-            "INSERT OR IGNORE INTO session_context_log (topic, agent, msg_id) VALUES (?, ?, ?)",
-            [(topic, agent, mid) for mid in msg_ids],
-        )
-
-
-def get_session_context_log(topic: str, agent: str) -> list[dict]:
-    with _connect() as conn:
-        rows = conn.execute(
-            "SELECT msg_id, injected_at FROM session_context_log WHERE topic=? AND agent=? ORDER BY injected_at ASC",
-            (topic, agent),
-        ).fetchall()
-    return [dict(r) for r in rows]
 
 
 # ── context history ────────────────────────────────────────────────────────────
 
-def get_context_history(topic: str, limit: int, agent: Optional[str] = None) -> tuple[list[dict], int]:
-    """Return curated context exchanges for a topic.
-    Pinned messages are always included topic-wide (no agent filter), including adhoc ones.
-    If limit > 0, also includes up to `limit` most-recent non-adhoc exchanges,
-    scoped to agent when provided. Recent rows are deduped against pinned."""
+def get_context_history(topic: str, limit: int, agent: Optional[str] = None) -> tuple[list[dict], list[int]]:
+    """Return up to `limit` recent non-adhoc exchanges for a topic as context.
+    Returns (formatted_history, message_ids) where message_ids are the assistant row IDs included."""
+    if limit <= 0:
+        return [], []
     _join = """FROM chat_messages a
                JOIN chat_messages u ON u.id = a.reply_to
                WHERE a.topic = ? AND a.role = 'assistant' AND a.status = 'done'
+                 AND COALESCE(a.adhoc, 0) = 0
                  AND u.content IS NOT NULL AND a.content IS NOT NULL"""
-    # Pinned can be adhoc or non-adhoc — user explicitly chose them
-    pinned_base = _join
-    # Recent lookback only pulls non-adhoc session turns
-    recent_base = _join + " AND COALESCE(a.adhoc, 0) = 0"
     sel = ("SELECT a.id, u.content AS user_content, a.content AS asst_content,"
            " a.model AS asst_model, a.backend AS asst_backend ")
+    agent_clause = " AND a.agent = ?" if agent else ""
+    params: tuple = (topic, agent, limit) if agent else (topic, limit)
     with _connect() as conn:
-        pinned = conn.execute(
-            f"{sel}{pinned_base} AND a.pinned = 1 ORDER BY a.id ASC", (topic,),
+        rows = conn.execute(
+            f"{sel}{_join}{agent_clause} ORDER BY a.id DESC LIMIT ?", params,
         ).fetchall()
-        if limit > 0:
-            agent_clause = " AND a.agent = ?" if agent else ""
-            recent_params: tuple = (topic, agent, limit) if agent else (topic, limit)
-            recent = conn.execute(
-                f"{sel}{recent_base}{agent_clause} ORDER BY a.id DESC LIMIT ?", recent_params,
-            ).fetchall()
-        else:
-            recent = []
 
-    def _pair(row):
-        return [
+    result = []
+    ids = []
+    for row in reversed(rows):
+        ids.append(row["id"])
+        result.extend([
             {"role": "user",      "content": row["user_content"]},
             {"role": "assistant", "content": row["asst_content"],
              "model": row["asst_model"], "backend": row["asst_backend"]},
-        ]
-
-    pinned_ids = {r["id"] for r in pinned}
-    result = []
-    for row in pinned:
-        result.extend(_pair(row))
-    for row in reversed(recent):
-        if row["id"] not in pinned_ids:
-            result.extend(_pair(row))
-    # Count directly — INNER JOIN above may miss pins with NULL reply_to or user content
-    with _connect() as conn:
-        pin_count = conn.execute(
-            "SELECT COUNT(*) FROM chat_messages WHERE topic=? AND role='assistant' AND pinned=1",
-            (topic,),
-        ).fetchone()[0]
-    return result, pin_count
+        ])
+    return result, ids
 
 
 def mark_orphaned_pending() -> int:
-    """On server start, any pending message from a previous run will never complete."""
     with _connect() as conn:
         cur = conn.execute("UPDATE chat_messages SET status='error' WHERE status='pending'")
         return cur.rowcount
@@ -417,8 +330,8 @@ def get_message(msg_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
-def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None, offset: int = 0, limit: int = 20) -> dict:
-    """Return individual messages (user + assistant) in chronological order for the /history endpoint."""
+def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
+                      offset: int = 0, limit: int = 20) -> dict:
     where = "WHERE 1=1"
     params: list = []
     if topic:
@@ -434,8 +347,8 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None, 
         ).fetchone()[0]
         rows = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent, m.backend, m.model,
-                       m.content, m.status, m.pinned, m.adhoc, m.session_id,
-                       m.tools, m.created_at AS timestamp, m.reply_to,
+                       m.content, m.status, m.adhoc, m.session_id,
+                       m.context, m.created_at AS timestamp, m.reply_to,
                        u.content AS prompt
                 FROM chat_messages m
                 LEFT JOIN chat_messages u ON m.reply_to = u.id
@@ -461,7 +374,6 @@ def save_stats(
     model: Optional[str] = None,
     cwd: Optional[str] = None,
     lookback: int = 0,
-    pin_count: int = 0,
 ) -> None:
     with _connect() as conn:
         conn.execute(
@@ -469,8 +381,8 @@ def save_stats(
                    (session_id, topic, agent, backend, model, cwd,
                     input_tokens, output_tokens,
                     cache_read_tokens, cache_write_tokens, history_input_tokens,
-                    cost_usd, duration_ms, lookback, pin_count, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    cost_usd, duration_ms, lookback, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                ON CONFLICT(session_id) DO UPDATE SET
                    topic                = COALESCE(excluded.topic, topic),
                    agent                = COALESCE(excluded.agent, agent),
@@ -484,15 +396,14 @@ def save_stats(
                    history_input_tokens = excluded.history_input_tokens,
                    cost_usd             = excluded.cost_usd,
                    duration_ms          = excluded.duration_ms,
-                   lookback             = excluded.lookback,
-                   pin_count            = excluded.pin_count""",
+                   lookback             = excluded.lookback""",
             (
                 session_id, topic, agent, backend, model, cwd,
                 stats.get("input_tokens", 0), stats.get("output_tokens", 0),
                 stats.get("cache_read_tokens", 0), stats.get("cache_write_tokens", 0),
                 stats.get("history_input_tokens", 0),
                 stats.get("cost_usd"), stats.get("duration_ms"),
-                lookback, pin_count,
+                lookback,
             ),
         )
 
