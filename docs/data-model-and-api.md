@@ -175,7 +175,7 @@ During streaming, content is shown as a live plain-text preview inside the think
 Clients building their own UI should expect all `data:` chunks before `done`, then render the
 full response once. See ADR-0011.
 
-**Stats object** (sent in the `stats` event and stored in `session_stats`)
+**Stats object** (sent in the `stats` event; most fields are stored in `session_stats`)
 ```json
 {
   "session_id":            "string",
@@ -194,7 +194,7 @@ full response once. See ADR-0011.
 ```
 
 `reasoning_tokens` — Codex only; reflects `reasoning_output_tokens` from the Codex response.
-Zero for all other backends.
+Zero for all other backends. **Not stored in `session_stats`** — SSE event only.
 
 **Error responses**
 ```json
@@ -210,10 +210,12 @@ Run a topic-scoped control command.
 **Request body**
 ```json
 {
-  "command": "stop | stopall | deq | list | restart | clear | compact",
+  "command": "stop | stopall | deq | list | restart | clear | compact | stop_msg",
   "topic":   "string (default: \"default\")",
-  "agent":   "string | null  — required for clear/compact if no sticky",
-  "pos":     "integer | null  — deq only: null=all, 1=first, -1=last"
+  "agent":   "string | null  — scopes stop/stopall to one agent lane; required for clear/compact if no sticky",
+  "adhoc":   "boolean | null — scopes stop/stopall to adhoc-only turns",
+  "pos":     "integer | null  — deq only: null=all, 1=first, -1=last",
+  "msg_id":  "integer | null  — stop_msg only: kill the process running this message"
 }
 ```
 
@@ -225,6 +227,7 @@ Run a topic-scoped control command.
 { "ok": true, "drained": int }                 // deq
 { "ok": true, "agent": "agent-name" }          // clear / compact
 { "ok": true, "topics": [...] }                // list
+{ "ok": true, "killed": int }                  // stop_msg
 { "ok": false, "error": "..." }                // 400
 ```
 
