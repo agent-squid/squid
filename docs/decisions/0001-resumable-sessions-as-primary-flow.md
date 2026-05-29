@@ -27,8 +27,10 @@ Each `(topic, alias)` pair maps to a stored `session_id` and locked `cwd` in
 - **Stored session** → `--resume <session_id>` passed to the CLI; the CLI
   continues the conversation natively
 
-The `cwd` is locked at session creation (see ADR-0003). Changing an alias's
-`cwd` after a session starts has no effect until the session is cleared.
+The `cwd` is locked at session creation (see ADR-0003). Changing an agent's
+`cwd` (or `backend`/`model`) via `POST /config/agents` forces an immediate
+session reset — all `topic_sessions` rows for that agent are deleted and the
+next message starts fresh with the new config.
 
 Session clearing — via `/clear` command or `DELETE /topics/{topic}/session` —
 wipes both `session_id` and `cwd`, allowing the next message to start fresh.
@@ -39,9 +41,15 @@ wipes both `session_id` and `cwd`, allowing the next message to start fresh.
 Adhoc turns (`!`) bypass session resumption entirely. Each turn is independent:
 
 - `_build_prompt` injects the last N non-adhoc session turns as a `<conversation_history>` block
+- Bookmarked responses (`pinned_ids` from the client) are prepended to the context, deduplicated against the lookback window
 - No `session_id` is stored or used
 
 Adhoc turns run in parallel on the same topic without queuing constraints.
+
+The UI shows which messages will be included before sending:
+- Typing `!N` pre-highlights the last N messages in the bookmark panel and lights up their bookmark icons
+- Persistent bookmarks (from clicking 🔖 on a response) are listed separately with status labels
+- The `ctx:` label on sent messages shows both lookback count and bookmark count (e.g. `ctx: 3 backs · 2 bookmarked`); clicking it shows a detail popup
 
 ## Backend Support
 
@@ -75,9 +83,10 @@ replay of the original message.
 
 ## Token Cost of Resumable Sessions
 
-Resumable sessions are **not token-efficient for long conversations**. The CLI
-re-sends the full conversation history on every `--resume` call. Context grows
-unboundedly until the user manually runs `/compact` or `/clear`.
+Resumable sessions are **not token-efficient for long conversations** — just
+like a regular long session on a local CLI agent. The CLI re-sends the full
+conversation history on every `--resume` call. Context grows unboundedly until
+the user manually runs `/compact` or `/clear`.
 
 Claude Code has a native `/compact` that summarises the conversation and
 resets the context window, but it requires explicit user invocation. There is

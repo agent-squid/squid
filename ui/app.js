@@ -333,6 +333,7 @@ async function loadHistory() {
           ctxSpan.textContent = '  · ctx:' + histCtxLabel;
           if (userStats?.session_id) ctxSpan.dataset.sessionId = userStats.session_id;
           if (userStats?.cwd) ctxSpan.dataset.cwd = userStats.cwd;
+          ctxSpan.addEventListener('click', e => { e.stopPropagation(); showCtxPopup(ctxSpan); });
           ts.appendChild(ctxSpan);
         }
         fragment.appendChild(ts);
@@ -561,21 +562,30 @@ form.addEventListener('submit', async (e) => {
   document.querySelectorAll('.history-item.ctx-highlight').forEach(el => el.classList.remove('ctx-highlight'));
 });
 
-function fmtCtxLabel(adhoc, lookback) {
-  if (!adhoc) return 'sess';
-  return lookback > 0 ? `${lookback} back${lookback !== 1 ? 's' : ''}` : 'none';
+function fmtCtxLabel(adhoc, lookback, pinCount = 0) {
+  let base;
+  if (!adhoc) base = 'sess';
+  else base = lookback > 0 ? `${lookback} back${lookback !== 1 ? 's' : ''}` : 'none';
+  return pinCount > 0 ? `${base} · ${pinCount} bookmarked` : base;
 }
 
 let ctxHighlightEnabled = false;
 
 function updateCtxHighlight() {
   document.querySelectorAll('.history-item.ctx-highlight').forEach(el => el.classList.remove('ctx-highlight'));
+  document.querySelectorAll('.msg-pin-btn.dynamic-sel').forEach(b => b.classList.remove('dynamic-sel'));
   if (!ctxHighlightEnabled) return;
-  const { adhoc, lookback } = parseInput(input.value); // agent not needed here
+  const { adhoc, lookback } = parseInput(input.value);
   if (!adhoc || lookback <= 0) return;
-  // Highlight the last N turns (user + assistant pairs) as context
   const msgItems = [...document.querySelectorAll('.history-item.msg')];
   msgItems.slice(-lookback * 2).forEach(el => el.classList.add('ctx-highlight'));
+  // Pre-highlight bookmark icons on the last N assistant messages
+  const asstItems = [...document.querySelectorAll('#messages .history-item.msg.assistant')];
+  asstItems.slice(-lookback).forEach(el => {
+    const btn = el.querySelector('.msg-pin-btn');
+    if (btn && !btn.classList.contains('pinned')) btn.classList.add('dynamic-sel');
+  });
+  if (pinPanel.classList.contains('open')) renderPinPanel();
 }
 
 input.addEventListener('input', () => { ctxHighlightEnabled = true; resizeComposer(); updateAutocomplete(); updateCtxHighlight(); });
@@ -614,6 +624,7 @@ async function sendMessage(text) {
     userCtxSpan = document.createElement('span');
     userCtxSpan.className = 'user-ctx';
     userCtxSpan.textContent = '  · ctx:' + ctxLabel;
+    userCtxSpan.addEventListener('click', e => { e.stopPropagation(); showCtxPopup(userCtxSpan); });
     userTsEl.appendChild(userCtxSpan);
   }
   requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
@@ -908,6 +919,12 @@ async function sendMessage(text) {
                 messages.appendChild(block);
               }
               scrollToBottom();
+            }
+            // Update ctx label with pin count and store IDs for popup
+            if (adhoc && _pinnedIds.length && userCtxSpan) {
+              const finalCtx = fmtCtxLabel(adhoc, lookback, _pinnedIds.length);
+              userCtxSpan.textContent = '  · ctx:' + finalCtx;
+              userCtxSpan.dataset.pinnedIds = JSON.stringify(_pinnedIds);
             }
             // Record injected pinned IDs so they're not re-injected into this session
             if (adhoc && _pinnedIds.length) {
@@ -1910,6 +1927,54 @@ async function showBootBanner() {
   } catch {}
 }
 
+// ── ctx popup ─────────────────────────────────────────────────────────────────
+
+function showCtxPopup(spanEl) {
+  let popup = document.getElementById('ctx-popup');
+  if (!popup) {
+    popup = document.createElement('div');
+    popup.id = 'ctx-popup';
+    document.getElementById('app').appendChild(popup);
+  }
+  // Toggle off if already showing for this span
+  if (popup.dataset.forSpan === String(spanEl) && popup.classList.contains('open')) {
+    popup.classList.remove('open');
+    return;
+  }
+  popup.dataset.forSpan = String(spanEl);
+
+  const sid    = spanEl.dataset.sessionId || '';
+  const cwd    = spanEl.dataset.cwd || '';
+  const pinIds = JSON.parse(spanEl.dataset.pinnedIds || '[]');
+  const pins   = getPinnedItems().filter(i => pinIds.includes(i.id));
+
+  let html = '';
+  if (sid || cwd) {
+    html += `<div class="ctx-popup-row"><span class="ctx-popup-key">session</span><span class="ctx-popup-val">${sid}</span></div>`;
+    if (cwd) html += `<div class="ctx-popup-row"><span class="ctx-popup-key">cwd</span><span class="ctx-popup-val">${cwd}</span></div>`;
+  }
+  if (pins.length) {
+    if (html) html += `<div class="ctx-popup-divider"></div>`;
+    html += `<div class="ctx-popup-row"><span class="ctx-popup-key">bookmarked</span></div>`;
+    pins.forEach(item => {
+      html += `<div class="ctx-popup-pin">
+        <span class="ctx-popup-tag">${_pinTagStr(item)}</span>
+        <span class="ctx-popup-preview">${(item.content || '').replace(/</g,'&lt;').slice(0,70)}</span>
+      </div>`;
+    });
+  }
+  if (!html) html = `<div class="ctx-popup-row"><span class="ctx-popup-key">${spanEl.textContent.trim()}</span></div>`;
+
+  popup.innerHTML = html;
+  popup.classList.add('open');
+
+  // Position above the span
+  const rect = spanEl.getBoundingClientRect();
+  const appRect = document.getElementById('app').getBoundingClientRect();
+  popup.style.bottom = (appRect.bottom - rect.top + 6) + 'px';
+  popup.style.right  = (appRect.right  - rect.right + 0) + 'px';
+}
+
 // ── pin basket ────────────────────────────────────────────────────────────────
 
 function getPinnedItems() {
@@ -1948,21 +2013,46 @@ function _pinStatus(item) {
 function renderPinPanel() {
   const items = getPinnedItems();
   const listEl = document.getElementById('pin-panel-list');
-  if (!items.length) {
-    listEl.innerHTML = '<div style="padding:0.5rem 0.8rem;color:#484858;font-size:0.78em">No pinned responses yet.<br>Click 📌 on any response to add it.</div>';
-    return;
+  let html = '';
+
+  // Lookback section — shown when !N is active in input
+  const { adhoc, lookback } = parseInput(input.value);
+  if (ctxHighlightEnabled && adhoc && lookback > 0) {
+    const asstItems = [...document.querySelectorAll('#messages .history-item.msg.assistant')];
+    const lbItems = asstItems.slice(-lookback);
+    if (lbItems.length) {
+      html += `<div class="pin-section-label">Lookback · last ${lookback}</div>`;
+      lbItems.forEach(el => {
+        const btn = el.querySelector('.msg-pin-btn');
+        const preview = (el.querySelector(':scope > div:nth-child(2)')?.innerText || '').slice(0, 80);
+        html += `<div class="pin-item pin-item-lookback">
+          <span class="pin-item-preview">${preview.replace(/</g,'&lt;')}</span>
+          <span class="pin-item-status pin-status-inject">will inject</span>
+        </div>`;
+      });
+    }
   }
-  listEl.innerHTML = items.map(item => {
-    const st = _pinStatus(item);
-    const tag = _pinTagStr(item);
-    const preview = (item.content || '').replace(/</g, '&lt;').slice(0, 90);
-    return `<div class="pin-item">
-      <span class="pin-item-tag">${tag}</span>
-      <span class="pin-item-preview">${preview}</span>
-      <span class="pin-item-status ${st.cls}">${st.text}</span>
-      <button class="pin-item-remove" data-id="${item.id}" type="button">✕</button>
-    </div>`;
-  }).join('');
+
+  if (items.length) {
+    if (html) html += `<div class="pin-section-label">Bookmarked</div>`;
+    html += items.map(item => {
+      const st = _pinStatus(item);
+      const tag = _pinTagStr(item);
+      const preview = (item.content || '').replace(/</g, '&lt;').slice(0, 90);
+      return `<div class="pin-item">
+        <span class="pin-item-tag">${tag}</span>
+        <span class="pin-item-preview">${preview}</span>
+        <span class="pin-item-status ${st.cls}">${st.text}</span>
+        <button class="pin-item-remove" data-id="${item.id}" type="button">✕</button>
+      </div>`;
+    }).join('');
+  }
+
+  if (!html) {
+    html = '<div style="padding:0.5rem 0.8rem;color:#484858;font-size:0.78em">No bookmarks yet.<br>Click 🔖 on any response to add it.</div>';
+  }
+
+  listEl.innerHTML = html;
   listEl.querySelectorAll('.pin-item-remove').forEach(btn => {
     btn.addEventListener('mousedown', e => {
       e.preventDefault();
@@ -2029,6 +2119,10 @@ document.getElementById('filter-badge-clear').addEventListener('click', clearFil
 document.addEventListener('click', e => {
   if (!acEl.contains(e.target) && e.target !== input) hideAutocomplete();
   if (!pinPanel.contains(e.target) && !pinBtn.contains(e.target)) closePinPanel();
+  const ctxPopup = document.getElementById('ctx-popup');
+  if (ctxPopup && !ctxPopup.contains(e.target) && !e.target.closest('.user-ctx')) {
+    ctxPopup.classList.remove('open');
+  }
 });
 initHistoryScroll();
 initStats();
