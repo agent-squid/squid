@@ -1,63 +1,79 @@
 ---
 status: accepted
 date: 2026-05-26
+superseded-section: 2026-05-29
 ---
 # ADR-0009: Pinned Message Injection Scoping by Mode
 
-## Context and Problem Statement
+## Original Design (Superseded)
 
-Pinned messages are the curated context primitive: a user marks a turn as worth carrying
-forward into other sessions or as a reference for ad-hoc queries. Three distinct dispatch
-modes exist — resumed session, first session turn, and adhoc (`!`) — and each has different
-needs for how pinned messages should enter context.
+The original design used a server-side `get_pending_injections` / `inject_history` mechanism
+to push pinned messages into sessions automatically. Exclusion was performed server-side using
+`exclude_session_id=resume_session_id` against `chat_messages.session_id`. This was removed
+along with the `session_context_log` table (see [[0007-cross-session-injection-tracking]]).
 
-The key tension: a resumed session already owns its full history via `--resume`. Injecting a
-pinned message that originated in that same session would duplicate it in the context window.
-But for adhoc turns (one-shot, no `--resume`) and for cross-session injection, the pin is
-the only mechanism to bring that context in.
+## Current Design
 
-## Considered Options
+Injection is now **explicitly client-driven**. The client selects which bookmarks to send and
+the server injects them. Same-session exclusion happens on the client before the request is made.
 
-**A. Inject all pinned messages unconditionally in all modes**
-Simple, but causes duplicate content for resumed sessions (same message appears twice).
+### Scoping by mode
 
-**B. Inject pinned messages only from other sessions**
-Exclude pins whose `session_id` matches the current `resume_session_id`. Deduplication is
-handled at the source using the existing `session_id` column on `chat_messages`.
-
-**C. Inject all pinned messages and rely on the model to de-duplicate**
-No extra logic, but wasteful and potentially confusing for the model.
-
-## Decision Outcome
-
-**Option B** — scoped injection using existing `session_id`.
-
-Each mode behaves as follows:
-
-| Mode | Context source | Same-session pins |
+| Mode | How pinned content enters | Same-session exclusion |
 |---|---|---|
-| Resumed session | `--resume` + new pending injections | Excluded — already in `--resume` context |
-| First session turn (no resume) | All pending pinned via `inject_history` | Included — no active session yet |
-| Adhoc (`!`) | All pinned for topic via `context_history` | Included — adhoc has no session of its own |
+| Session turn (`--resume`) | Prepended as `<referenced_context>` block in `effective_message` | Client skips bookmarks whose `session_id` matches `_sessionIds[topic@agent]` |
+| Adhoc turn (`!`) | Prepended to `context_history` for `_build_prompt`, deduped against lookback window | Client skips same-session bookmarks |
 
-Implementation: `get_pending_injections(topic, agent, exclude_session_id=resume_session_id)`.
-The `exclude_session_id` filter uses the existing `chat_messages.session_id` column — no new
-column or table needed.
+### Client-side exclusion
 
-Adhoc uses `get_context_history(topic, limit=0)` (no agent filter, no session exclusion),
-meaning it can receive curated context from any agent or session in the topic. The `!` modifier
-disables automatic history (N-turn lookback), not curated context.
+Bookmarks store `{ id, topic, agent, session_id, content }` in localStorage. The client
+tracks the most recent `session_id` per `topic@agent` in a `_sessionIds` map (populated from
+the `stats` SSE event on each response). At send time, a bookmark is skipped if:
 
-If a user explicitly pins a message from the active session, it is silently skipped for that
-session's own resumed turns — it is already present via `--resume`. The pin remains visible
-to other sessions and adhoc turns in the same topic.
+```
+item.session_id && currentSessionId && item.session_id === currentSessionId
+```
+
+This means same-`topic@agent` bookmarks from a **prior** session are still eligible for
+injection — only the exact current session is excluded. Same-`topic@agent` ≠ same session.
+
+### Server-side injection
+
+The server receives `pinned_ids: [id, ...]` in `POST /chat` and:
+
+1. Fetches the rows via `get_messages_by_ids(filtered)` — assistant messages only, `status='done'`
+2. Deduplicates against the adhoc lookback window (`context_ids`) to avoid double-injecting
+   content already in `context_history`
+3. For **session turns**: builds `effective_message` with a `<referenced_context>` prefix so
+   the CLI receives the supplementary context that `--resume` does not carry
+4. For **adhoc turns**: prepends the fetched pairs to `context_history`, which `_build_prompt`
+   incorporates into the prompt
+
+### Re-injection prevention
+
+After a successful injection, the client records the injected IDs in an `injectedInto`
+localStorage map keyed by `topic@agent`. Subsequent turns skip those IDs (`already added · skip`).
+This prevents the same bookmark from being sent on every turn.
+
+### UI status labels (bookmark panel)
+
+| Status | Meaning |
+|---|---|
+| `will inject` | Will be sent in `pinned_ids` on next turn |
+| `in session · skip` | `session_id` matches current session — already in `--resume` context |
+| `already added · skip` | Previously injected into this `topic@agent`; in `injectedInto` map |
+
+**Contract tests**: `tests/e2e/pin.spec.js`
 
 ## Consequences
 
-- Good: no duplicate content in resumed sessions
-- Good: uses `chat_messages.session_id` already on every row — zero schema changes
-- Good: adhoc gets the broadest curated context (any source in the topic)
-- Neutral: same-session pins are "silently excluded" for the owning session, but the content
-  is always in context via `--resume` — the effect is identical from the model's perspective
-- Bad: slightly surprising if a user pins from the current session and expects a visible
-  injection event; the pin takes effect only for other sessions and adhoc turns
+- Good: no server-side pending queue or cleanup logic
+- Good: same-session exclusion is session-id–precise — a prior session under the same
+  `topic@agent` is correctly treated as cross-session and injected
+- Good: session turns get supplementary context via `<referenced_context>` without
+  disrupting `--resume` history
+- Neutral: bookmarks are device-local (localStorage); cross-device sync not supported
+  (see [[0007-cross-session-injection-tracking]] — ephemerality section)
+- Neutral: if `_sessionIds` has no entry for the current `topic@agent` (first turn of a new
+  browser session), same-`topic@agent` bookmarks are not excluded — they inject, which may
+  be redundant but is not harmful
