@@ -219,16 +219,16 @@ function makeTopicTag(topic, agent, { clickable = false, adhoc = false, lookback
 
 // ── history filter ─────────────────────────────────────────────────────────────
 
-let historyFilter = { topic: null, agent: null };
+let historyFilter = { topic: null, agent: null, adhoc: null };
 
 function filterByTopic(topic) {
   setTopicChip(topic, null);
-  reloadHistory({ topic, agent: null });
+  reloadHistory({ topic, agent: null, adhoc: null });
 }
 
 function filterByAgent(topic, agent, adhoc = false, lookback = 0) {
   setTopicChip(topic, agent, adhoc, lookback);
-  reloadHistory({ topic, agent });
+  reloadHistory({ topic, agent, adhoc });
 }
 
 function clearFilter() {
@@ -251,7 +251,7 @@ function reloadHistory(filter = {}) {
 function _updateFilterBadge() {
   const badge = document.getElementById('filter-badge');
   const labelEl = document.getElementById('filter-badge-label');
-  const { topic, agent } = historyFilter;
+  const { topic, agent, adhoc } = historyFilter;
 
   if (!topic && !agent) {
     badge.classList.remove('active');
@@ -270,6 +270,12 @@ function _updateFilterBadge() {
     a.className = 'tag-agent';
     a.textContent = '@' + agent;
     labelEl.appendChild(a);
+  }
+  if (adhoc != null) {
+    const ad = document.createElement('span');
+    ad.className = 'tag-adhoc';
+    ad.textContent = adhoc ? '!' : 'sess';
+    labelEl.appendChild(ad);
   }
   badge.classList.add('active');
 }
@@ -296,6 +302,7 @@ async function loadHistory() {
     let url = `/history?offset=${historyOffset}&limit=5`;
     if (historyFilter.topic) url += `&topic=${encodeURIComponent(historyFilter.topic)}`;
     if (historyFilter.agent) url += `&agent=${encodeURIComponent(historyFilter.agent)}`;
+    if (historyFilter.adhoc != null) url += `&adhoc=${historyFilter.adhoc}`;
     const res = await fetch(url);
     data = await res.json();
   } catch {
@@ -455,13 +462,13 @@ function parseCommand(message) {
   return null;
 }
 
-async function handleCommand(cmd, topic, agent) {
+async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
   if (cmd.command === 'help') {
     openHelp();
     return;
   }
   if (cmd.command === 'filter') {
-    if (agent) filterByAgent(topic, agent);
+    if (agent) filterByAgent(topic, agent, adhoc, lookback);
     else filterByTopic(topic);
     return;
   }
@@ -543,13 +550,13 @@ form.addEventListener('submit', async (e) => {
   e.preventDefault();
   const text = input.value.trim();
   if (!text) return;
-  const { topic, agent, message } = parseInput(text);
+  const { topic, agent, adhoc, lookback, message } = parseInput(text);
   const cmd = parseCommand(message);
   if (cmd) {
     input.value = '';
     resizeComposer();
     hideAutocomplete();
-    await handleCommand(cmd, topic, agent);
+    await handleCommand(cmd, topic, agent, adhoc, lookback);
     // Re-set chip after topic-scoped commands so next message stays in context
     if (['clear', 'compact', 'stop', 'stopall', 'deq'].includes(cmd.command) && (topic !== 'default' || agent)) {
       setTopicChip(topic, agent);

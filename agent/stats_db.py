@@ -519,7 +519,7 @@ def get_message(msg_id: int) -> Optional[dict]:
 
 
 def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
-                      offset: int = 0, limit: int = 20) -> dict:
+                      adhoc: Optional[bool] = None, offset: int = 0, limit: int = 20) -> dict:
     where = "WHERE 1=1"
     params: list = []
     if topic:
@@ -528,6 +528,9 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
     if agent:
         where += " AND m.agent = ?"
         params.append(agent)
+    if adhoc is not None:
+        where += " AND COALESCE(m.adhoc, 0) = ?"
+        params.append(1 if adhoc else 0)
 
     with _connect() as conn:
         total = conn.execute(

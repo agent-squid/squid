@@ -510,8 +510,9 @@ async def health():
 
 
 @app.get("/history")
-async def history(offset: int = 0, limit: int = 5, topic: Optional[str] = None, agent: Optional[str] = None):
-    return JSONResponse(list_history(topic=topic, agent=agent, offset=offset, limit=limit))
+async def history(offset: int = 0, limit: int = 5, topic: Optional[str] = None,
+                  agent: Optional[str] = None, adhoc: Optional[bool] = None):
+    return JSONResponse(list_history(topic=topic, agent=agent, adhoc=adhoc, offset=offset, limit=limit))
 
 
 @app.get("/chat/{msg_id}/status")

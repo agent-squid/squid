@@ -38,14 +38,22 @@ are the same object — no separate filter UI is needed.
 | `/filter` | Apply the current input's `#topic` / `@agent` as the history filter |
 | `/filter reset` | Clear the active filter and reload full history |
 
-`/filter` reads whatever is explicitly in the input — no agent auto-resolution. This means:
+`/filter` reads whatever is explicitly in the input — no agent auto-resolution. The `!`
+adhoc flag is part of the filter tuple; the lookback count `N` in `!N` is ignored (only
+`!` matters for filtering). This means:
 
-- `#work` → `/filter` filters by topic only (all agents in that topic)
-- `#work@claude-opus` → `/filter` filters to that exact `(topic, agent)` pair
+| Input | History filter |
+|---|---|
+| `#work /filter` | `topic=work` — all agents, all turn types |
+| `#work@claude-opus /filter` | `topic=work&agent=claude-opus&adhoc=false` — session turns only |
+| `#work@claude-opus! /filter` | `topic=work&agent=claude-opus&adhoc=true` — adhoc turns only |
+| `/filter reset` | no params — full history |
 
 For sent messages the server resolves a null agent from the topic's sticky agent or the
 default agent, and the chip updates post-response. But `/filter` is processed before any
 server round-trip, so `#topic`-only remains topic-only.
+
+**Contract tests**: `tests/e2e/filter.spec.js`
 
 ## Consequences
 
