@@ -49,22 +49,27 @@ For a local single-user tool the overhead is negligible.
 |---|---|
 | `#topic /stop` | All processes under topic — session and adhoc, all agents |
 | `#topic@agent /stop` | Session processes for that agent only (`adhoc=false`) |
-| `#topic@agent! /stop` | Adhoc processes for that agent only (`adhoc=true`) |
+| `#topic@agent! /stop` | Most recently started adhoc process for that agent (LIFO) |
 
 `stopall` follows the same scoping and also drains the session queue.
 
-## Why not LIFO stop for adhoc
+## LIFO stop for adhoc
 
-An alternative considered: `/stop` on `#topic@agent!` kills only the most-recently-started
-adhoc process (LIFO), repeated presses walk back through older ones. Rejected because:
+`#topic@agent! /stop` uses **LIFO**: it kills only the most recently started adhoc process
+for that agent (highest `started_at` in `_proc_registry`). Repeat to walk back through
+older ones.
 
-- **Blind** — the user has no visible ordering to reason about; which turn is "most recent"
-  depends on timing, not on what's shown on screen.
-- **Wrong surface** — the thinking bubble IS the visual handle for each running process.
-  Click-to-kill on the bubble is zero cognitive overhead; LIFO requires mental bookkeeping.
+Rationale:
+- **Single adhoc (common case)**: LIFO = kill that one process. Same result as "kill all",
+  zero downside.
+- **Multiple parallel adhoc (rare)**: LIFO kills only the most recent. If the latest query
+  is going haywire, LIFO lets you cancel it without disturbing the others still running.
+- **Typing is faster than clicking**: `/stop` from the keyboard beats hunting for the `×`
+  button when a process needs to be killed quickly.
+- **Click-to-kill still exists** for when you need to pick a specific process by sight.
 
-`#topic@agent! /stop` therefore kills **all** in-flight adhoc processes for that agent at
-once (nuclear for adhoc). Individual cancel is via the `×` button.
+"Kill all adhoc" is not exposed as a command — the nuclear option (`#topic /stop`) covers
+the case where you want everything stopped regardless of mode.
 
 ## Click-to-kill for individual adhoc processes
 

@@ -194,9 +194,10 @@ class TopicDispatcher:
 
     def stop_topic(self, topic: str, agent: Optional[str] = None,
                    adhoc: Optional[bool] = None) -> int:
-        """Kill running processes matching topic + optional agent/adhoc filters."""
+        """Kill running processes matching topic + optional agent/adhoc filters.
+        Adhoc stop is LIFO — kills only the most recently started adhoc process."""
         from .runners import kill_procs_by_topic
-        return kill_procs_by_topic(topic, agent=agent, adhoc=adhoc)
+        return kill_procs_by_topic(topic, agent=agent, adhoc=adhoc, lifo=(adhoc is True))
 
     def stopall_topic(self, topic: str, agent: Optional[str] = None,
                       adhoc: Optional[bool] = None) -> dict:

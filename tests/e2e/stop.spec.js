@@ -76,7 +76,7 @@ test('#topic@agent /stop sends agent — scoped to session processes', async ({ 
   expect(cmdBody.adhoc).toBeFalsy();
 });
 
-test('#topic@agent! /stop sends agent + adhoc=true — scoped to adhoc processes', async ({ page }) => {
+test('#topic@agent! /stop sends agent + adhoc=true — LIFO kill of most recent adhoc', async ({ page }) => {
   await mockBackend(page);
 
   let cmdBody = null;

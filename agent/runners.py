@@ -39,17 +39,25 @@ def _deregister_proc(pid: int) -> None:
 
 
 def kill_procs_by_topic(topic: str, agent: Optional[str] = None,
-                        adhoc: Optional[bool] = None) -> int:
-    """Send SIGTERM to subprocesses matching topic + optional agent/adhoc filters."""
+                        adhoc: Optional[bool] = None, lifo: bool = False) -> int:
+    """Send SIGTERM to subprocesses matching topic + optional agent/adhoc filters.
+
+    lifo=True: kill only the most recently started matching process (for adhoc stop).
+    lifo=False: kill all matching processes.
+    """
     import signal
+    matching = [
+        (pid, info) for pid, info in list(_proc_registry.items())
+        if info.get("topic") == topic
+        and (agent is None or info.get("agent") == agent)
+        and (adhoc is None or bool(info.get("adhoc")) == adhoc)
+    ]
+    if not matching:
+        return 0
+    if lifo:
+        matching = [max(matching, key=lambda x: x[1]["started_at"])]
     killed = 0
-    for pid, info in list(_proc_registry.items()):
-        if info.get("topic") != topic:
-            continue
-        if agent is not None and info.get("agent") != agent:
-            continue
-        if adhoc is not None and bool(info.get("adhoc")) != adhoc:
-            continue
+    for pid, _ in matching:
         try:
             os.kill(pid, signal.SIGTERM)
             killed += 1
