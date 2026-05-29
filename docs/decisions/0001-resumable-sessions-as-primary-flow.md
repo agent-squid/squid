@@ -48,8 +48,13 @@ Adhoc turns run in parallel on the same topic without queuing constraints.
 
 The UI shows which messages will be included before sending:
 - Typing `!N` pre-highlights the last N messages in the bookmark panel and lights up their bookmark icons
-- Persistent bookmarks (from clicking 🔖 on a response) are listed separately with status labels
+- Persistent bookmarks (from clicking 🔖 on a response) are listed separately with status labels:
+  - `will inject` — will be prepended to `_build_prompt` context
+  - `in session · #topic@agent · skip` — same topic@agent as current session turn; `--resume` already covers it. Agent is resolved from the topics cache (sticky agent from `topic_sessions`) when only `#topic` is typed without an explicit `@agent`
+  - `already added · skip` — previously injected into this topic@agent session
 - The `ctx:` label on sent messages shows both lookback count and bookmark count (e.g. `ctx: 3 backs · 2 bookmarked`); clicking it shows a detail popup
+
+**Contract tests**: `tests/e2e/pin.spec.js`
 
 ## Backend Support
 

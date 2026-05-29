@@ -1998,20 +1998,30 @@ function _pinTagStr(item) {
 }
 
 function _pinStatus(item) {
-  const injected = getInjectedInto();
-  // Use parsed current input for most up-to-date topic/agent/adhoc state
-  const parsed   = parseInput(input.value);
+  const injected  = getInjectedInto();
+  const parsed    = parseInput(input.value);
   const chipTopic = parsed.topic || stickyChip?.topic || 'default';
-  const chipAgent = parsed.agent || stickyChip?.agent || null;
   const isAdhoc   = parsed.adhoc || (stickyChip?.adhoc ?? false);
 
-  // Same topic + agent match (or no explicit agent on chip = any agent on topic)
+  // Resolve effective agent: explicit in input > stickyChip > topics cache (sticky agent)
+  let chipAgent = parsed.agent || stickyChip?.agent || null;
+  if (!chipAgent) {
+    if (_topicsCache) {
+      chipAgent = _topicsCache.find(t => t.name === chipTopic)?.agent || null;
+    } else {
+      // Cache cold — load async and re-render panel when ready
+      _acTopics().then(() => { if (pinPanel.classList.contains('open')) renderPinPanel(); });
+    }
+  }
+
   const sameTopic  = item.topic === chipTopic;
   const agentMatch = !chipAgent || (item.agent || null) === chipAgent;
 
   // "in session" only skips for session turns — --resume already covers it
-  if (sameTopic && agentMatch && !isAdhoc)
-    return { text: 'in session · skip', cls: 'pin-status-session' };
+  if (sameTopic && agentMatch && !isAdhoc) {
+    const qual = chipAgent ? ` · #${chipTopic}@${chipAgent}` : '';
+    return { text: `in session${qual} · skip`, cls: 'pin-status-session' };
+  }
 
   // Already injected into this topic@agent via a previous adhoc turn
   const taKey = `${chipTopic}@${chipAgent || '_'}`;
