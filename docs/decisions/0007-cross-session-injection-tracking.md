@@ -1,43 +1,58 @@
 ---
-status: accepted
+status: superseded
 date: 2026-05-25
+superseded: 2026-05-29
 ---
-# ADR-0007: One-shot Cross-session Injection via `session_context_log`
+# ADR-0007: Cross-session Context Injection
 
-## Context and Problem Statement
+## Original Design (Superseded)
 
-With resumable sessions, each `(topic, agent)` lane owns its own CLI context. To share a useful
-turn from one lane into another (e.g. a pinned claude response shared into a codex session on
-the same topic), we need to inject it exactly once — at the moment of the next message to the
-target session. Without tracking, every subsequent message would re-inject the same content.
+The original design used a server-side `session_context_log` table to track one-shot
+cross-session injections. Pinning a message server-side queued it for injection into any
+`(topic, agent)` session that hadn't absorbed it yet. `get_pending_injections` returned
+outstanding messages on each dispatch, and `GET /context/{topic}?agent=X` exposed pending
+vs absorbed state.
 
-The same problem applies to adhoc (`!`) turns: they run outside the session and are not in
-context by default, but a user may want to promote one into a session.
+**This mechanism was removed.** `session_context_log` is explicitly dropped in `init_db()`
+(`DROP TABLE IF EXISTS session_context_log`). The `pinned` column and `pin_count` were also
+dropped from `chat_messages` and `session_stats` respectively. `get_pending_injections`
+does not exist in the codebase.
 
-## Considered Options
+## Current Design
 
-1. Track injected messages per session in a dedicated log table
-2. Use a timestamp watermark per session (inject everything pinned before timestamp X)
-3. Re-inject all pinned messages on every message (idempotent but wasteful)
+Context injection is now **client-side** via the bookmark feature:
 
-## Decision Outcome
+- Users click 🔖 on any assistant response to bookmark it. Bookmarks are stored in
+  `localStorage` as `{ id, topic, agent, content }` and persist across page reloads.
+- For **adhoc turns only**, the client sends `pinned_ids: [id, ...]` in `POST /chat`.
+  The server fetches those rows by ID from `chat_messages` via `get_messages_by_ids()`
+  and prepends them to the `_build_prompt` context, deduplicated against the lookback window.
+- The client tracks which IDs have already been injected per `(topic, agent)` in an
+  `injectedInto` localStorage map, preventing re-injection on subsequent turns.
+- The UI shows injection status in the bookmark panel: `will inject`, `in session · skip`,
+  or `already added · skip`.
 
-**Option 1.** A `session_context_log` table records which `msg_id` values have been injected
-into each `(topic, agent)` session. On each message dispatch, `get_pending_injections` returns
-pinned messages not yet in the log. They are prepended to the current message as a one-time
-injection, then recorded.
+**Key differences from the original design:**
 
-**The pin mechanic is the cross-session sharing primitive.** Pinning a message (from any source:
-adhoc turn, other model, other topic) queues it for one-time injection into any `(topic, agent)`
-session that hasn't absorbed it yet.
+| | Original | Current |
+|---|---|---|
+| Storage | Server DB (`session_context_log`) | Client `localStorage` |
+| Scope | Session turns + adhoc | Adhoc turns only |
+| Tracking | Per-session DB rows | Per-`(topic, agent)` localStorage map |
+| Trigger | Automatic on each dispatch | Explicit client-side selection |
 
-Clearing a session also clears its `session_context_log` rows — a fresh session re-absorbs all
-currently-pinned messages on its first message.
+`GET /context/{topic}` still exists but now returns the same data as
+`GET /topics/{topic}/session` — just the active `session_id` and `cwd`. It no longer
+shows pending/absorbed injection state.
 
-## Consequences
+**Contract tests**: `tests/e2e/pin.spec.js`
 
-- Good: no duplicate injection; efficient for long-running sessions
-- Good: pin mechanic is already in place; no new user-facing concept needed
-- Good: injection is transparent — `GET /context/{topic}?agent=X` shows pending and absorbed
-- Bad: log table grows over time; needs periodic cleanup for inactive sessions
-- Bad: injected messages may conflict with what the CLI session already knows (edge case)
+## Why the Server-side Approach Was Removed
+
+The `session_context_log` table added schema complexity and required cleanup logic for
+inactive sessions. The client-side approach is simpler: the user explicitly selects what
+to inject, the tracking lives in localStorage where it belongs (it is UI state, not
+conversation state), and there is no server cleanup burden.
+
+The trade-off: bookmarked context is only available on the device where it was bookmarked.
+Cross-device sync would require re-introducing server-side storage.
