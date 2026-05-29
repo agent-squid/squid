@@ -58,6 +58,7 @@ def kill_procs_by_topic(topic: str, agent: Optional[str] = None,
         matching = [max(matching, key=lambda x: x[1]["started_at"])]
     killed = 0
     for pid, _ in matching:
+        _deregister_proc(pid)  # remove immediately so a second LIFO call skips it
         try:
             os.kill(pid, signal.SIGTERM)
             killed += 1
@@ -71,6 +72,7 @@ def kill_proc_by_msg_id(msg_id: int) -> int:
     import signal
     for pid, info in list(_proc_registry.items()):
         if info.get("msg_id") == msg_id:
+            _deregister_proc(pid)
             try:
                 os.kill(pid, signal.SIGTERM)
                 return 1
