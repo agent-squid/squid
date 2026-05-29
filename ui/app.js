@@ -1999,14 +1999,25 @@ function _pinTagStr(item) {
 
 function _pinStatus(item) {
   const injected = getInjectedInto();
-  // Compute effective topicAgent from current stickyChip
-  const chipTopic = stickyChip ? stickyChip.topic : 'default';
-  const chipAgent = stickyChip ? stickyChip.agent : null;
-  const sameSession = item.topic === chipTopic && (item.agent || null) === chipAgent;
-  if (sameSession) return { text: 'in session · skip', cls: 'pin-status-session' };
-  const key = `${item.topic}@${item.agent || '_'}`;
-  if ((injected[key] || []).includes(item.id))
-    return { text: `already added · skip`, cls: 'pin-status-done' };
+  // Use parsed current input for most up-to-date topic/agent/adhoc state
+  const parsed   = parseInput(input.value);
+  const chipTopic = parsed.topic || stickyChip?.topic || 'default';
+  const chipAgent = parsed.agent || stickyChip?.agent || null;
+  const isAdhoc   = parsed.adhoc || (stickyChip?.adhoc ?? false);
+
+  // Same topic + agent match (or no explicit agent on chip = any agent on topic)
+  const sameTopic  = item.topic === chipTopic;
+  const agentMatch = !chipAgent || (item.agent || null) === chipAgent;
+
+  // "in session" only skips for session turns — --resume already covers it
+  if (sameTopic && agentMatch && !isAdhoc)
+    return { text: 'in session · skip', cls: 'pin-status-session' };
+
+  // Already injected into this topic@agent via a previous adhoc turn
+  const taKey = `${chipTopic}@${chipAgent || '_'}`;
+  if ((injected[taKey] || []).includes(item.id))
+    return { text: 'already added · skip', cls: 'pin-status-done' };
+
   return { text: 'will inject', cls: 'pin-status-inject' };
 }
 
