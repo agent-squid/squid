@@ -38,8 +38,14 @@ are the same object — no separate filter UI is needed.
 | `/filter` | Apply the current input's `#topic` / `@agent` as the history filter |
 | `/filter reset` | Clear the active filter and reload full history |
 
-`/filter` reads the topic and agent already in the input context, so the workflow is: type
-`#work@claude-opus`, then type `/filter` — equivalent to clicking the tags in a bubble.
+`/filter` reads whatever is explicitly in the input — no agent auto-resolution. This means:
+
+- `#work` → `/filter` filters by topic only (all agents in that topic)
+- `#work@claude-opus` → `/filter` filters to that exact `(topic, agent)` pair
+
+For sent messages the server resolves a null agent from the topic's sticky agent or the
+default agent, and the chip updates post-response. But `/filter` is processed before any
+server round-trip, so `#topic`-only remains topic-only.
 
 ## Consequences
 
