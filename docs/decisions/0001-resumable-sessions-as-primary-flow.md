@@ -58,6 +58,22 @@ All backends emit a session/thread identifier in their first event. Squid
 captures this and stores it after every response, so a `/clear` followed by a
 new message immediately establishes a fresh session_id for the next turn.
 
+## Stale Session Recovery
+
+When `--resume <session_id>` fails with "No conversation found" — most
+commonly after a reboot changes the resolved `cwd` (e.g. `/tmp/squid` was
+previously a symlink to a different path) — Squid recovers automatically:
+
+1. A `_status` event is emitted with the stale session details (session_id,
+   cwd, backend, model) so the user sees what was lost.
+2. The prompt is retried immediately as a fresh invocation (no `--resume`).
+3. The new `session_id` from the fresh run is stored via `set_topic_session`,
+   replacing the stale record. Subsequent turns resume normally.
+
+This recovery is handled in `topic_queue._process` and requires no user
+action. It is semantically equivalent to an implicit `/clear` followed by a
+replay of the original message.
+
 ## Consequences
 
 - Good: resumable path is token-efficient; CLI owns context natively
