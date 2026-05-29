@@ -107,22 +107,39 @@ class TopicWorker:
             self.q.task_done()
 
     async def _process(self, item: QueueItem):
-        from .runners import run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError
+        from .runners import run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError, CLIError
         from .config import SQUID_HOME
         runner = {"claude": run_claude, "cursor": run_cursor, "antigravity": run_antigravity, "codex": run_codex, "copilot": run_copilot}.get(item.backend)
         if runner is None:
             raise CLINotFoundError(f"Unknown backend: {item.backend!r}")
+        effective_cwd = item.cwd or SQUID_HOME
         kwargs: dict = dict(
             history=item.context_history, model=item.model,
-            cwd=item.cwd or SQUID_HOME,
+            cwd=effective_cwd,
             topic=item.topic, agent=item.agent or "",
             response_timeout=item.timeout,
         )
         if item.backend in ("claude", "codex", "cursor", "copilot", "antigravity") and item.resume_session_id:
             kwargs["resume_session_id"] = item.resume_session_id
 
-        async for chunk in runner(item.prompt, **kwargs):
-            await item.out_q.put(chunk)
+        try:
+            async for chunk in runner(item.prompt, **kwargs):
+                await item.out_q.put(chunk)
+        except CLIError as exc:
+            if item.resume_session_id and "No conversation found" in str(exc):
+                status = (
+                    f"Session not found — starting fresh\n"
+                    f"  session: {item.resume_session_id}\n"
+                    f"  cwd: {effective_cwd}\n"
+                    f"  backend: {item.backend}"
+                    + (f"  model: {item.model}" if item.model else "")
+                )
+                await item.out_q.put({"_status": status})
+                kwargs.pop("resume_session_id", None)
+                async for chunk in runner(item.prompt, **kwargs):
+                    await item.out_q.put(chunk)
+            else:
+                raise
 
 
 class TopicDispatcher:
