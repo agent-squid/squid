@@ -53,6 +53,19 @@ For a local single-user tool the overhead is negligible.
 
 `stopall` follows the same scoping and also drains the session queue.
 
+## Why not LIFO stop for adhoc
+
+An alternative considered: `/stop` on `#topic@agent!` kills only the most-recently-started
+adhoc process (LIFO), repeated presses walk back through older ones. Rejected because:
+
+- **Blind** — the user has no visible ordering to reason about; which turn is "most recent"
+  depends on timing, not on what's shown on screen.
+- **Wrong surface** — the thinking bubble IS the visual handle for each running process.
+  Click-to-kill on the bubble is zero cognitive overhead; LIFO requires mental bookkeeping.
+
+`#topic@agent! /stop` therefore kills **all** in-flight adhoc processes for that agent at
+once (nuclear for adhoc). Individual cancel is via the `×` button.
+
 ## Click-to-kill for individual adhoc processes
 
 Each thinking bubble shows a `×` button once the `msg_id` arrives from the `meta` SSE
