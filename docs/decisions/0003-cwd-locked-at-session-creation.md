@@ -32,15 +32,17 @@ used when the session was created.
 ## Changing `cwd` mid-flight
 
 Changing an agent's `cwd` (or `backend`/`model`) via `POST /config/agents` is detected as
-a key attribute change. Squid immediately clears all active sessions for that agent
-(`clear_agent_sessions`), so the next message starts a fresh CLI invocation with the new
-`cwd`. The old session is abandoned.
+a key attribute change. Squid immediately deletes all `topic_sessions` rows for that agent
+(`clear_agent_sessions` → `DELETE FROM topic_sessions WHERE agent = ?`). The stored `cwd`
+is not updated in-place — the row is gone.
 
-This means updating an agent's `cwd` is effectively a forced `/clear` across all topics
-that agent is active in.
+The next message finds no stored session, reads the new `cwd` from the `agents` table, and
+creates a fresh `topic_sessions` row with the new value. This is equivalent to a forced
+`/clear` across all topics that agent is active in.
 
-Clearing a session manually (`DELETE /topics/{topic}/session?agent=X`) wipes both
-`session_id` and stored `cwd`, achieving the same result for a single topic.
+Clearing a single session manually (`/clear` or `DELETE /topics/{topic}/session?agent=X`)
+deletes the `topic_sessions` row for that `(topic, agent)` pair — the same outcome scoped
+to one topic.
 
 ## Consequences
 
