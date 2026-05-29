@@ -31,10 +31,21 @@ independently clickable spans:
 `@claude-opus` sets it to `#work@claude-opus`. The active filter and the active input context
 are the same object — no separate filter UI is needed.
 
+**Slash command surface.** The same filter can be applied via commands typed into the input:
+
+| Command | Behavior |
+|---|---|
+| `/filter` | Apply the current input's `#topic` / `@agent` as the history filter |
+| `/filter reset` | Clear the active filter and reload full history |
+
+`/filter` reads the topic and agent already in the input context, so the workflow is: type
+`#work@claude-opus`, then type `/filter` — equivalent to clicking the tags in a bubble.
+
 ## Consequences
 
 - Good: no additional filter UI to build; chip already exists
 - Good: intuitive drill-down — topic first, then model within topic
 - Good: clicking a response naturally "enters" that lane for the next message
+- Good: keyboard-driven filtering via `/filter` for users who prefer not to click
 - Bad: clicking `@agent` without a `#topic` context active needs a defined behavior
   (resolved as: clicking `@agent` alone sets `topic = <message's topic> AND agent = Y`)
