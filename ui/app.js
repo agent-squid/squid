@@ -116,6 +116,9 @@ document.getElementById('help-close').addEventListener('click', closeHelp);
 
 // ── prompt parsing ────────────────────────────────────────────────────────────
 
+// ── per-topic session tracking ────────────────────────────────────────────────
+const _sessionIds = {}; // `${topic}@${agent|_}` → most recent session_id
+
 // ── topic chip ────────────────────────────────────────────────────────────────
 
 const topicChipEl = document.getElementById('topic-chip');
@@ -365,7 +368,7 @@ async function loadHistory() {
         asstContent.innerHTML = marked.parse(item.content || '');
       }
       asstBubble.appendChild(asstContent);
-      if (item.id) addPinButton(asstBubble, item.id, item.topic || 'default', item.agent || null);
+      if (item.id) addPinButton(asstBubble, item.id, item.topic || 'default', item.agent || null, item.session_id || null);
       fragment.appendChild(asstBubble);
 
       if (item.stats) {
@@ -768,10 +771,11 @@ async function sendMessage(text) {
   const _effectiveAgent = agent || stickyChip?.agent || null;
   const _taKey = `${topic}@${_effectiveAgent || '_'}`;
   const _injected = getInjectedInto();
+  const _currentSid = _sessionIds[_taKey] || null;
   const _pinnedIds = getPinnedItems()
     .filter(item => {
-      // Skip bookmarks from the same session — --resume already has that context
-      const sameSession = item.topic === topic && (item.agent || null) === _effectiveAgent;
+      // Skip bookmarks from the current session — --resume already has that context
+      const sameSession = item.session_id && _currentSid && item.session_id === _currentSid;
       if (sameSession && !adhoc) return false;
       // Skip already-injected items
       if ((_injected[_taKey] || []).includes(item.id)) return false;
@@ -864,6 +868,10 @@ async function sendMessage(text) {
             try {
               const stats = JSON.parse(data);
               lastSessionId = stats.session_id ?? null;
+              if (stats.session_id && !adhoc) {
+                _sessionIds[`${topic}@${resolvedAgent || '_'}`] = stats.session_id;
+                bubble.dataset.sessionId = stats.session_id;
+              }
               statsEl = addStats(bubble, stats, new Date().toISOString());
               // Update user timestamp ctx with real compound label from stats
               const finalCtxLabel = fmtCtxLabel(!!stats.adhoc, stats.lookback ?? 0);
@@ -2013,11 +2021,12 @@ function _pinStatus(item) {
     }
   }
 
-  const sameTopic  = item.topic === chipTopic;
-  const agentMatch = !chipAgent || (item.agent || null) === chipAgent;
+  const chipTaKey = `${chipTopic}@${chipAgent || '_'}`;
+  const currentSid = _sessionIds[chipTaKey] || null;
+  const sameSession = item.session_id && currentSid && item.session_id === currentSid;
 
-  // "in session" only skips for session turns — --resume already covers it
-  if (sameTopic && agentMatch && !isAdhoc) {
+  // Skip only if the bookmark is from the exact current session — --resume already covers it
+  if (sameSession && !isAdhoc) {
     const qual = chipAgent ? ` · #${chipTopic}@${chipAgent}` : '';
     return { text: `in session${qual} · skip`, cls: 'pin-status-session' };
   }
@@ -2094,7 +2103,7 @@ function closePinPanel() {
   pinPanel.classList.remove('open');
 }
 
-function addPinButton(bubbleEl, msgId, topic, agent) {
+function addPinButton(bubbleEl, msgId, topic, agent, sessionId = null) {
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'msg-pin-btn';
@@ -2103,6 +2112,7 @@ function addPinButton(bubbleEl, msgId, topic, agent) {
   btn.innerHTML = `<svg width="10" height="12" viewBox="0 0 12 14" fill="currentColor" aria-hidden="true">
     <path d="M2 0h8a1 1 0 0 1 1 1v12.8l-5-2.9-5 2.9V1a1 1 0 0 1 1-1z"/>
   </svg>`;
+  if (sessionId) bubbleEl.dataset.sessionId = sessionId;
   if (getPinnedItems().find(i => i.id === msgId)) btn.classList.add('pinned');
   btn.addEventListener('click', e => {
     e.stopPropagation();
@@ -2113,7 +2123,8 @@ function addPinButton(bubbleEl, msgId, topic, agent) {
     } else {
       const contentEl = bubbleEl.querySelector(':scope > div:nth-child(2)');
       const text = (contentEl?.innerText || '').slice(0, 300);
-      setPinnedItems([...pinned, { id: msgId, topic, agent: agent || null, content: text }]);
+      const sid = bubbleEl.dataset.sessionId || null;
+      setPinnedItems([...pinned, { id: msgId, topic, agent: agent || null, session_id: sid, content: text }]);
       btn.classList.add('pinned');
     }
     updatePinCount();

@@ -17,8 +17,9 @@ function sse(...events) {
   }).join('');
 }
 
-const META = { event: 'meta', data: { agent: 'claude', backend: 'claude', msg_id: 1, adhoc: false } };
-const DONE = { event: 'done', data: '' };
+const META  = { event: 'meta',  data: { agent: 'claude', backend: 'claude', msg_id: 1, adhoc: false } };
+const STATS = { event: 'stats', data: { session_id: 'test-sess-abc', input_tokens: 10, output_tokens: 5 } };
+const DONE  = { event: 'done',  data: '' };
 
 async function mockBackend(page, { agent = 'claude', topic = 'squid' } = {}) {
   await page.route('**/health',        r => r.fulfill({ json: { status: 'ok' } }));
@@ -68,17 +69,22 @@ test('bookmark button on bubble adds item to pin panel', async ({ page }) => {
   await expect(page.locator('.pin-item-preview')).toContainText('Hello from agent');
 });
 
-test('pinned item from same session topic@agent shows in-session skip', async ({ page }) => {
+test('pinned item from current session shows in-session skip', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/chat', r => r.fulfill({
+    status: 200, headers: SSE_HEADERS,
+    body: sse(META, { data: 'Hello from agent' }, STATS, DONE),
+  }));
 
   await page.goto('/');
-  await seedPin(page, { id: 42, topic: 'squid', agent: 'claude', content: 'cached response' });
+  await page.fill('#input', '#squid@claude hello');
+  await page.keyboard.press('Enter');
 
-  // Type '#squid' to warm the topics cache (triggers _acTopics fetch)
-  const topicsLoaded = page.waitForResponse(r => r.url().includes('/topics') && r.status() === 200);
-  await page.fill('#input', '#squid');
-  await topicsLoaded;
-  await page.fill('#input', '#squid hello');
+  // Bookmark the response — session_id from STATS gets stored in the bookmark
+  const bubble = page.locator('.msg.assistant:not(.msg-thinking)');
+  await expect(bubble).toBeVisible();
+  await bubble.hover();
+  await bubble.locator('.msg-pin-btn').click();
 
   await page.click('#pin-btn');
   await expect(page.locator('#pin-panel.open')).toBeVisible();

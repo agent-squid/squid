@@ -25,8 +25,9 @@ Context injection is now **client-side** via the bookmark feature:
 - Users click 🔖 on any assistant response to bookmark it. Bookmarks are stored in
   `localStorage` as `{ id, topic, agent, content }` and persist across page reloads.
 - The client sends `pinned_ids: [id, ...]` in `POST /chat` for **both session and adhoc turns**,
-  filtered to cross-session bookmarks (same-`topic@agent` bookmarks are skipped for session
-  turns since `--resume` already carries that history).
+  filtered to exclude bookmarks from the **same session_id** (not merely same `topic@agent` —
+  the same topic can run different sessions, and a bookmark from a prior session under the
+  same `topic@agent` is still cross-session context worth injecting).
   The server fetches those rows by ID from `chat_messages` via `get_messages_by_ids()`.
   - **Adhoc turns**: pinned content is prepended to `context_history` for `_build_prompt`,
     deduplicated against the lookback window.
