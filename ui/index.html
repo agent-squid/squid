@@ -13,7 +13,7 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="icon" href="/icons/icon-192.png" sizes="192x192" type="image/png" />
   <link rel="apple-touch-icon" href="/icons/icon-192.png" />
-  <link rel="stylesheet" href="style.css?v=20260528-77" />
+  <link rel="stylesheet" href="style.css?v=20260528-78" />
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
@@ -62,8 +62,8 @@
         <div class="help-section">
           <div class="help-title">Input syntax</div>
           <div class="help-row"><code>#topic@agent message</code><span>session — FIFO queued per agent</span></div>
-          <div class="help-row"><code>#topic@agent!N message</code><span>adhoc — parallel, last N exchanges as context</span></div>
-          <div class="help-row"><code>#topic@agent! message</code><span>adhoc — default 5 exchanges</span></div>
+          <div class="help-row"><code>#topic@agent!N message</code><span>adhoc — parallel, last N exchanges + pinned</span></div>
+          <div class="help-row"><code>#topic@agent! message</code><span>adhoc — parallel, no context + pinned</span></div>
           <div class="help-row"><code>#topic message</code><span>uses sticky agent (last used)</span></div>
           <div class="help-row"><code>#topic</code><span>type <kbd>#</kbd> to browse &amp; search topics</span></div>
           <div class="help-row"><code>#topic@</code><span>type <kbd>@</kbd> to browse agents</span></div>
@@ -143,6 +143,6 @@
       </button>
     </form>
   </div>
-  <script src="app.js?v=20260528-77"></script>
+  <script src="app.js?v=20260528-78"></script>
 </body>
 </html>

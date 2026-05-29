@@ -204,6 +204,14 @@ body {
   background: #18181f;
 }
 .msg.assistant.msg-thinking .loader span { background: #555; }
+.thinking-live {
+  max-height: 6em;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  scrollbar-width: thin;
+  scrollbar-color: #2a2a40 transparent;
+}
 .thinking-toggle {
   background: none; border: none; cursor: pointer;
   color: inherit; font: inherit; padding: 0;

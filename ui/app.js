@@ -583,17 +583,20 @@ async function sendMessage(text) {
   const thinkingBubble = document.createElement('div');
   thinkingBubble.className = 'msg assistant msg-thinking';
   const thinkingContent = document.createElement('div');
+  thinkingContent.className = 'thinking-live';
   thinkingBubble.appendChild(thinkingContent);
   messages.appendChild(thinkingBubble);
   const thinkingLoader = addLoader(thinkingContent);
   let thinkingFrozen = false;
   let statusBuf = '';
 
-  function setThinkingText(text) {
+  function updateThinkingPreview() {
     if (thinkingFrozen) return;
     if (thinkingLoader.parentNode) thinkingLoader.remove();
-    thinkingContent.textContent = text;
-    thinkingBubble.style.display = '';  // unhide if it was hidden when response started
+    const text = (statusBuf ? statusBuf.trimEnd() + (raw ? '\n\n' : '') : '') + raw;
+    thinkingContent.textContent = text.trim();
+    thinkingContent.scrollTop = thinkingContent.scrollHeight;
+    thinkingBubble.style.display = '';
     scrollToBottom();
   }
   function freezeThinking() {
@@ -605,6 +608,7 @@ async function sendMessage(text) {
       const summary = lines[lines.length - 1] || '';
       const summaryTrunc = summary.length > 80 ? '…' + summary.slice(-77) : summary;
       thinkingContent.innerHTML = '';
+      thinkingContent.className = '';  // remove scrollable class before freezing
       const toggle = document.createElement('button');
       toggle.className = 'thinking-toggle';
       toggle.textContent = summaryTrunc;
@@ -656,11 +660,8 @@ async function sendMessage(text) {
   function revealResponseBubble() {
     if (firstDataReceived) return;
     firstDataReceived = true;
-    thinkingBubble.after(bubble);
-    // Don't freeze yet — status events may still arrive during streaming.
-    // Remove the spinner; if no status yet, hide the bubble (will show if status arrives).
+    // Bubble stays out of DOM until done — content streams into thinkingBubble as preview
     if (thinkingLoader.parentNode) thinkingLoader.remove();
-    if (!statusBuf.trim()) thinkingBubble.style.display = 'none';
     requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
   }
 
@@ -671,7 +672,8 @@ async function sendMessage(text) {
   }
 
   function showError(text) {
-    revealResponseBubble();
+    revealResponseBubble();  // sets firstDataReceived, suppresses finally fallback
+    if (!bubble.parentNode) messages.appendChild(bubble);
     const errDisplay = (text || 'Response interrupted.')
       .split('\n')[0]
       .replace(/^CLI exited \d+:\s*/, '')
@@ -683,7 +685,7 @@ async function sendMessage(text) {
   }
 
   function showStoredResponse(content) {
-    revealResponseBubble();
+    if (!bubble.parentNode) messages.appendChild(bubble);
     raw = content || '';
     contentDiv.innerHTML = marked.parse(raw);
     scrollToBottom();
@@ -825,14 +827,13 @@ async function sendMessage(text) {
               liveToolEvents.push(tool);
               const label = toolLabel(tool);
               statusBuf += label + '\n';
-              setThinkingText(label);
+              updateThinkingPreview();
             } catch {}
             eventName = null;
 
           } else if (eventName === 'status') {
             statusBuf += data;
-            const trimmed = statusBuf.replace(/\s+/g, ' ').trim();
-            setThinkingText(trimmed.length > 120 ? '…' + trimmed.slice(-117) : trimmed);
+            updateThinkingPreview();
             // no eventName reset — allow multi-line accumulation
 
           } else if (eventName === 'done') {
@@ -840,8 +841,8 @@ async function sendMessage(text) {
             freezeThinking();
             invalidateTopicsCache();
             doneTime = new Date().toISOString();
-            // Surface completed response at the bottom regardless of where it streamed
             if (firstDataReceived) {
+              contentDiv.innerHTML = marked.parse(raw);
               messages.appendChild(bubble);
               if (statsEl) messages.appendChild(statsEl);
               const diffTools = liveToolEvents.filter(t => t.name === 'Edit' || t.name === 'Write' || t.name === 'MultiEdit');
@@ -861,12 +862,11 @@ async function sendMessage(text) {
             eventName = null;
 
           } else {
-            // Actual response content — reveal the response bubble on first chunk
+            // Actual response content — accumulate and show in thinking preview
             if (!firstDataReceived) revealResponseBubble();
             if (dataLineCount > 1) raw += '\n';
             raw += data;
-            contentDiv.innerHTML = marked.parse(raw);
-            scrollToBottom();
+            updateThinkingPreview();
           }
 
         } else if (line === '') {
@@ -902,14 +902,14 @@ async function sendMessage(text) {
         const content = document.createElement('span');
         content.className = 'msg-error';
         content.textContent = 'Response is still running. Reopen the page or history to pick it up.';
-        if (!firstDataReceived) revealResponseBubble();
+        if (!bubble.parentNode) messages.appendChild(bubble);
         contentDiv.appendChild(content);
       } else {
         freezeThinking();
       }
     }
     if (!firstDataReceived && !completedFromStatus) {
-      revealResponseBubble();
+      if (!bubble.parentNode) messages.appendChild(bubble);
       contentDiv.innerHTML = '<span class="msg-error">No response — backend may be rate-limited or unavailable.</span>';
     }
     if (!statsEl && doneTime && firstDataReceived) addTimestamp(bubble, doneTime, false);
