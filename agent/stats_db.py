@@ -520,7 +520,7 @@ def get_message(msg_id: int) -> Optional[dict]:
 
 def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
                       adhoc: Optional[bool] = None, offset: int = 0, limit: int = 20) -> dict:
-    where = "WHERE 1=1"
+    where = "WHERE m.role = 'assistant'"
     params: list = []
     if topic:
         where += " AND m.topic = ?"

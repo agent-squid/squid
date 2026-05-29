@@ -314,41 +314,10 @@ async function loadHistory() {
   const prevHeight = messages.scrollHeight;
   const fragment = document.createDocumentFragment();
 
-  // Build lookup: user msg id → assistant stats (for ctx label on user rows)
-  const statsByUserMsgId = {};
-  for (const item of items) {
-    if (item.role === 'assistant' && item.reply_to && item.stats) {
-      statsByUserMsgId[item.reply_to] = item.stats;
-    }
-  }
-
   for (const item of [...items].reverse()) {
-    if (item.role === 'user' && !item.content) continue;
-    if (item.role === 'assistant' && !item.content && item.status !== 'pending') continue;
+    if (!item.content && item.status !== 'pending') continue;
 
-    if (item.role === 'user') {
-      const userStats = statsByUserMsgId[item.id];
-      const lb = userStats?.lookback ?? 0;
-      const histCtxLabel = (item.agent || item.adhoc) ? fmtCtxLabel(!!item.adhoc, lb) : null;
-      const userBubble = makeUserBubble(item.content, item.topic, item.agent, item.backend, !!item.adhoc, lb);
-      userBubble.classList.add('history-item');
-      fragment.appendChild(userBubble);
-      if (item.timestamp) {
-        const ts = document.createElement('div');
-        ts.className = 'msg-time right history-item';
-        ts.textContent = fmtTime(item.timestamp);
-        if (histCtxLabel) {
-          const ctxSpan = document.createElement('span');
-          ctxSpan.className = 'user-ctx';
-          ctxSpan.textContent = '  · ctx:' + histCtxLabel;
-          if (userStats?.session_id) ctxSpan.dataset.sessionId = userStats.session_id;
-          if (userStats?.cwd) ctxSpan.dataset.cwd = userStats.cwd;
-          ctxSpan.addEventListener('click', e => { e.stopPropagation(); showCtxPopup(ctxSpan); });
-          ts.appendChild(ctxSpan);
-        }
-        fragment.appendChild(ts);
-      }
-    } else if (item.role === 'assistant') {
+    {
       const lb = item.stats?.lookback ?? 0;
       const asstBubble = document.createElement('div');
       asstBubble.className = 'msg assistant history-item';

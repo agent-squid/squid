@@ -55,11 +55,29 @@ server round-trip, so `#topic`-only remains topic-only.
 
 **Contract tests**: `tests/e2e/filter.spec.js`
 
+## History display: responses only
+
+The history panel shows **only assistant responses** — user prompts are not rendered as
+separate bubbles. `GET /history` (backed by `get_messages_flat`) filters to
+`role = 'assistant'` before returning rows. Each assistant bubble includes a 55-character
+prompt snippet in its header (from the `reply_to` join), giving enough context without
+a separate user turn row.
+
+**Rationale:** History is a cross-topic, cross-agent feed — not a single conversation
+thread. User prompts interleaved from different sessions have no coherent order and would
+add noise. The prompt snippet in the response header is sufficient to anchor each response
+to its question. Showing full pairs only makes sense in a single-thread chat view.
+
+**Live turns are unaffected.** Real-time messages (the current send) render both the user
+bubble and the streaming assistant response as they arrive, since they come through the SSE
+path, not `GET /history`. Only the scroll-back history feed is responses-only.
+
 ## Consequences
 
 - Good: no additional filter UI to build; chip already exists
 - Good: intuitive drill-down — topic first, then model within topic
 - Good: clicking a response naturally "enters" that lane for the next message
 - Good: keyboard-driven filtering via `/filter` for users who prefer not to click
+- Good: history panel is a clean response feed — prompt snippets give enough context
 - Bad: clicking `@agent` without a `#topic` context active needs a defined behavior
   (resolved as: clicking `@agent` alone sets `topic = <message's topic> AND agent = Y`)

@@ -1,6 +1,7 @@
 /**
- * Filter command contract tests.
- * Verifies that /filter honours topic, agent, and adhoc (!) flag.
+ * Filter command and history display contract tests.
+ * Verifies that /filter honours topic, agent, and adhoc (!) flag,
+ * and that history shows only assistant responses (no user bubbles).
  */
 const { test, expect } = require('@playwright/test');
 
@@ -96,4 +97,28 @@ test('/filter reset clears filter and reloads history without params', async ({ 
   expect(last).not.toMatch(/topic=/);
   expect(last).not.toMatch(/agent=/);
   expect(last).not.toMatch(/adhoc=/);
+});
+
+test('history renders only assistant bubbles — no user bubbles', async ({ page }) => {
+  await mockBackend(page);
+
+  // Server returns only assistant rows — prompt snippet comes from the reply_to join
+  await page.route('**/history**', r => r.fulfill({ json: {
+    items: [
+      { id: 2, role: 'assistant', topic: 'squid', agent: 'claude', content: 'Here is the answer.',
+        status: 'done', adhoc: false, session_id: null, prompt: 'What is 2+2?',
+        context: null, timestamp: new Date().toISOString(), reply_to: 1, stats: null },
+    ],
+    has_more: false,
+  }}));
+
+  await page.goto('/');
+  await page.waitForTimeout(400);
+
+  // Only the assistant bubble should be in the DOM
+  await expect(page.locator('.msg.assistant.history-item')).toHaveCount(1);
+  await expect(page.locator('.msg.user.history-item')).toHaveCount(0);
+
+  // Prompt snippet is visible in the response header
+  await expect(page.locator('.response-header-text')).toContainText('What is 2+2?');
 });
