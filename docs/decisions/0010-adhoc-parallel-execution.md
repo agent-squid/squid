@@ -39,22 +39,39 @@ immediately and the item runs without delay.
 Ephemeral workers accumulate in `_workers` but remain idle after their single item completes.
 For a local single-user tool the overhead is negligible.
 
-## Stop behavior
+## Stop scoping
 
-`/stop #topic` and `/stopall #topic` call `kill_procs_by_topic(topic)`, which sends SIGTERM
-to **all** subprocesses registered under that topic — session and adhoc alike. Processes are
-registered with their `topic` value in `_proc_registry`; the `__adhoc_N` dispatch key is
-internal to `TopicDispatcher` and is not reflected in the process registry.
+`_proc_registry` stores `topic`, `agent`, `adhoc`, and `msg_id` per process.
+`kill_procs_by_topic` accepts optional `agent` and `adhoc` filters. The client sends
+`agent` and `adhoc` in the `/cmd` body, giving three scopes:
 
-Consequence: `/stop #topic` while multiple adhoc queries are running kills all of them, not
-just the session worker. There is currently no way to stop individual adhoc processes or to
-stop only the session worker without also terminating in-flight adhoc turns for the same topic.
+| Input | Kills |
+|---|---|
+| `#topic /stop` | All processes under topic — session and adhoc, all agents |
+| `#topic@agent /stop` | Session processes for that agent only (`adhoc=false`) |
+| `#topic@agent! /stop` | Adhoc processes for that agent only (`adhoc=true`) |
+
+`stopall` follows the same scoping and also drains the session queue.
+
+## Click-to-kill for individual adhoc processes
+
+Each thinking bubble shows a `×` button once the `msg_id` arrives from the `meta` SSE
+event. Clicking it:
+
+1. Aborts the client-side SSE fetch (`controller.abort()`)
+2. Posts `POST /cmd { command: "stop_msg", msg_id }` to the server
+3. Server calls `kill_proc_by_msg_id(msg_id)` → SIGTERM on the exact process
+
+This gives per-process precision for parallel adhoc turns without requiring the user to know
+which agent or topic key to target.
+
+**Contract tests**: `tests/e2e/stop.spec.js`
 
 ## Consequences
 
 - Good: adhoc turns are truly parallel — multiple `#topic@agent!` prompts run concurrently
 - Good: a long-running session turn on `topic@agent` does not block adhoc queries to the same agent
 - Good: no change to session queue behavior
+- Good: scoped stop — `#topic@agent /stop` kills session only, `#topic@agent! /stop` kills adhoc only
+- Good: click-to-kill `×` on each thinking bubble for surgical per-process cancel
 - Neutral: idle `TopicWorker` tasks accumulate per session; acceptable for local use
-- Bad: `/stop #topic` kills all adhoc processes for that topic, not just the session worker —
-  no surgical per-process cancel is available

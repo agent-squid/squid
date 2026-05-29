@@ -1,0 +1,146 @@
+/**
+ * Stop command and click-to-kill contract tests.
+ * Verifies scoped stop (topic / topic@agent / topic@agent!) and
+ * per-process kill via the thinking bubble × button.
+ */
+const { test, expect } = require('@playwright/test');
+
+const SSE_HEADERS = {
+  'Content-Type': 'text/event-stream',
+  'Cache-Control': 'no-cache',
+  'X-Accel-Buffering': 'no',
+};
+
+function sse(...events) {
+  return events.map(({ event, data }) => {
+    const str = typeof data === 'string' ? data : JSON.stringify(data);
+    return event ? `event: ${event}\ndata: ${str}\n\n` : `data: ${str}\n\n`;
+  }).join('');
+}
+
+const META = { event: 'meta', data: { agent: 'claude', backend: 'claude', msg_id: 42, adhoc: false } };
+const DONE = { event: 'done', data: '' };
+
+async function mockBackend(page, { topic = 'squid', agent = 'claude' } = {}) {
+  await page.route('**/health',        r => r.fulfill({ json: { status: 'ok' } }));
+  await page.route('**/history**',     r => r.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/quota',         r => r.fulfill({ json: {} }));
+  await page.route('**/topics',        r => r.fulfill({ json: [
+    { name: topic, agent, last_model: null, last_backend: 'claude', queue_depth: 0, active: false, last_prompt: 'hi' }
+  ]}));
+  await page.route('**/topics/**',     r => r.fulfill({ json: [] }));
+  await page.route('**/config/agents', r => r.fulfill({ json: [] }));
+  await page.route('**/chat/*/status', r => r.fulfill({ json: { status: 'pending', content: '' } }));
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+test('#topic /stop sends topic only — kills all agents', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/cmd', r => r.fulfill({ json: { ok: true, killed: 1 } }));
+
+  let cmdBody = null;
+  await page.route('**/cmd', async route => {
+    cmdBody = route.request().postDataJSON();
+    await route.fulfill({ json: { ok: true, killed: 1 } });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '#squid /stop');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(300);
+
+  expect(cmdBody.command).toBe('stop');
+  expect(cmdBody.topic).toBe('squid');
+  expect(cmdBody.agent).toBeFalsy();
+  expect(cmdBody.adhoc == null || cmdBody.adhoc === false).toBeTruthy();
+});
+
+test('#topic@agent /stop sends agent — scoped to session processes', async ({ page }) => {
+  await mockBackend(page);
+
+  let cmdBody = null;
+  await page.route('**/cmd', async route => {
+    cmdBody = route.request().postDataJSON();
+    await route.fulfill({ json: { ok: true, killed: 1 } });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '#squid@claude /stop');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(300);
+
+  expect(cmdBody.command).toBe('stop');
+  expect(cmdBody.topic).toBe('squid');
+  expect(cmdBody.agent).toBe('claude');
+  expect(cmdBody.adhoc).toBeFalsy();
+});
+
+test('#topic@agent! /stop sends agent + adhoc=true — scoped to adhoc processes', async ({ page }) => {
+  await mockBackend(page);
+
+  let cmdBody = null;
+  await page.route('**/cmd', async route => {
+    cmdBody = route.request().postDataJSON();
+    await route.fulfill({ json: { ok: true, killed: 1 } });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '#squid@claude! /stop');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(300);
+
+  expect(cmdBody.command).toBe('stop');
+  expect(cmdBody.topic).toBe('squid');
+  expect(cmdBody.agent).toBe('claude');
+  expect(cmdBody.adhoc).toBe(true);
+});
+
+test('kill button appears on thinking bubble and sends stop_msg with msg_id', async ({ page }) => {
+  await mockBackend(page);
+
+  let cmdBody = null;
+  await page.route('**/cmd', async route => {
+    cmdBody = route.request().postDataJSON();
+    await route.fulfill({ json: { ok: true, killed: 1 } });
+  });
+
+  await page.goto('/');
+
+  // Mock fetch at the JS level so we control a real ReadableStream — Playwright's
+  // route.fulfill sends the full body at once, which closes the stream immediately
+  // and lets freezeThinking hide the button before we can assert.
+  await page.evaluate(() => {
+    const orig = window.fetch;
+    window.fetch = async (url, opts) => {
+      if (!url.includes('/chat')) return orig(url, opts);
+      const { readable, writable } = new TransformStream();
+      const writer = writable.getWriter();
+      const enc = new TextEncoder();
+      writer.write(enc.encode(
+        'event: meta\ndata: {"agent":"claude","backend":"claude","msg_id":42,"adhoc":false}\n\n'
+      ));
+      window._testSseWriter = writer; // kept open — freezeThinking never runs
+      return new Response(readable, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+      });
+    };
+  });
+
+  await page.fill('#input', '#squid@claude hello');
+  await page.keyboard.press('Enter');
+
+  // Kill button is shown after the meta event while stream stays open
+  const killBtn = page.locator('.thinking-kill-btn');
+  await expect(killBtn).toBeVisible({ timeout: 5000 });
+
+  await killBtn.click();
+  await page.waitForTimeout(300);
+
+  expect(cmdBody?.command).toBe('stop_msg');
+  expect(cmdBody?.msg_id).toBe(42);
+
+  // Close the held stream so the page can clean up
+  await page.evaluate(() => window._testSseWriter?.close().catch(() => {}));
+});
