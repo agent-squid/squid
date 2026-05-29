@@ -1990,10 +1990,8 @@ function addPinButton(bubbleEl, msgId, topic, agent) {
   btn.className = 'msg-pin-btn';
   btn.dataset.msgId = String(msgId);
   btn.title = 'Pin as context';
-  btn.innerHTML = `<svg width="11" height="12" viewBox="0 0 13 14" fill="currentColor" aria-hidden="true">
-    <circle cx="6.5" cy="4.5" r="3.5"/>
-    <rect x="5.75" y="8" width="1.5" height="4" rx="0.75"/>
-    <rect x="3.25" y="11" width="6.5" height="1.5" rx="0.75"/>
+  btn.innerHTML = `<svg width="10" height="12" viewBox="0 0 12 14" fill="currentColor" aria-hidden="true">
+    <path d="M2 0h8a1 1 0 0 1 1 1v12.8l-5-2.9-5 2.9V1a1 1 0 0 1 1-1z"/>
   </svg>`;
   if (getPinnedItems().find(i => i.id === msgId)) btn.classList.add('pinned');
   btn.addEventListener('click', e => {
