@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-05-25
+updated: 2026-05-28
 ---
 # ADR-0003: `cwd` Locked at Session Creation
 
@@ -11,29 +12,39 @@ the working directory the CLI was launched from. If `--resume <session_id>` is c
 different `cwd`, the CLI cannot find the session files and the resume fails.
 
 This means the `cwd` used at session creation must be used for all subsequent messages in that
-session. It cannot be changed mid-session.
+session. It cannot be changed mid-session without starting a new session.
 
 ## Considered Options
 
 1. Lock `cwd` at session creation; store it alongside `session_id`
 2. Always use a single fixed `cwd` (e.g. `SQUID_HOME`) for all sessions
-3. Re-detect `cwd` from alias config on every message
+3. Re-detect `cwd` from agent config on every message
 
 ## Decision Outcome
 
 **Option 1.** The `cwd` is stored in `topic_sessions` at first message and used for all
-subsequent `--resume` calls for that `(topic, alias)` session.
+subsequent `--resume` calls for that `(topic, agent)` session.
 
-Changing an alias's `cwd` after a session has started has no effect on that session. To use a
-different `cwd` on the same topic, create a new alias — this naturally produces a separate
-`(topic, alias)` lane that runs in parallel.
+On each message, Squid uses `stored["cwd"]` from `topic_sessions` — not the agent config's
+current `cwd`. This ensures `--resume` always points to the same project directory the CLI
+used when the session was created.
 
-Clearing a session (`DELETE /topics/{topic}/session?alias=X`) wipes both `session_id` and
-stored `cwd`, allowing the next message to start fresh with the current alias config.
+## Changing `cwd` mid-flight
+
+Changing an agent's `cwd` (or `backend`/`model`) via `POST /config/agents` is detected as
+a key attribute change. Squid immediately clears all active sessions for that agent
+(`clear_agent_sessions`), so the next message starts a fresh CLI invocation with the new
+`cwd`. The old session is abandoned.
+
+This means updating an agent's `cwd` is effectively a forced `/clear` across all topics
+that agent is active in.
+
+Clearing a session manually (`DELETE /topics/{topic}/session?agent=X`) wipes both
+`session_id` and stored `cwd`, achieving the same result for a single topic.
 
 ## Consequences
 
-- Good: `--resume` always succeeds; no cwd mismatch
-- Good: alias cwd changes are safe; they only affect new sessions
-- Bad: users cannot change cwd for an existing session without resetting it
-- Bad: `cwd` must be stored in a new `topic_sessions` table (not just in the alias config)
+- Good: `--resume` always succeeds within a session; no cwd mismatch
+- Good: changing agent cwd is safe — sessions are auto-cleared, no stale resume attempts
+- Bad: changing any key agent attribute (backend/model/cwd) clears all active sessions for that agent
+- Bad: `cwd` must be stored in `topic_sessions` (not derivable from agent config alone)
