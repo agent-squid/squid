@@ -548,6 +548,24 @@ body {
 .pin-item-remove:hover { color: #e06060; }
 
 /* pin button on assistant bubbles */
+.thinking-kill-btn {
+  position: absolute;
+  top: 0.25rem;
+  right: 0.3rem;
+  background: none;
+  border: none;
+  color: #666;
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0.1rem 0.25rem;
+  border-radius: 3px;
+  opacity: 0.6;
+  transition: opacity 0.15s, color 0.15s;
+}
+.thinking-kill-btn:hover { opacity: 1; color: #e05050; }
+.thinking-kill-btn:disabled { opacity: 0.3; cursor: default; }
+
 .msg-pin-btn {
   position: absolute;
   top: 0.3rem;

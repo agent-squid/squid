@@ -21,6 +21,8 @@ class QueueItem:
     cwd: Optional[str] = None
     timeout: Optional[int] = None
     resume_session_id: Optional[str] = None
+    adhoc: bool = False
+    msg_id: Optional[int] = None
     out_q: asyncio.Queue = field(default_factory=asyncio.Queue)
 
 
@@ -118,6 +120,7 @@ class TopicWorker:
             cwd=effective_cwd,
             topic=item.topic, agent=item.agent or "",
             response_timeout=item.timeout,
+            adhoc=item.adhoc, msg_id=item.msg_id,
         )
         if item.backend in ("claude", "codex", "cursor", "copilot", "antigravity") and item.resume_session_id:
             kwargs["resume_session_id"] = item.resume_session_id
@@ -166,6 +169,7 @@ class TopicDispatcher:
         response_timeout: Optional[int] = None,
         resume_session_id: Optional[str] = None,
         adhoc: bool = False,
+        msg_id: Optional[int] = None,
     ) -> tuple[asyncio.Queue, int, TopicWorker]:
         if adhoc:
             # Each adhoc message gets its own ephemeral worker — never queued, always parallel.
@@ -179,6 +183,7 @@ class TopicDispatcher:
             prompt=prompt, context_history=context_history,
             backend=backend, model=model, cwd=cwd, timeout=response_timeout,
             resume_session_id=resume_session_id,
+            adhoc=adhoc, msg_id=msg_id,
         )
         seq = await worker.enqueue(item)
         return item.out_q, seq, worker
@@ -187,15 +192,17 @@ class TopicDispatcher:
         """Return all workers whose queue key starts with this topic."""
         return [w for k, w in self._workers.items() if k == topic or k.startswith(f"{topic}@")]
 
-    def stop_topic(self, topic: str) -> int:
-        """Kill only the running process for topic; leave queue intact."""
+    def stop_topic(self, topic: str, agent: Optional[str] = None,
+                   adhoc: Optional[bool] = None) -> int:
+        """Kill running processes matching topic + optional agent/adhoc filters."""
         from .runners import kill_procs_by_topic
-        return kill_procs_by_topic(topic)
+        return kill_procs_by_topic(topic, agent=agent, adhoc=adhoc)
 
-    def stopall_topic(self, topic: str) -> dict:
-        """Kill running process + drain entire queue for topic (all agent lanes)."""
+    def stopall_topic(self, topic: str, agent: Optional[str] = None,
+                      adhoc: Optional[bool] = None) -> dict:
+        """Kill running processes + drain queues for topic (scoped by agent/adhoc)."""
         from .runners import kill_procs_by_topic
-        killed = kill_procs_by_topic(topic)
+        killed = kill_procs_by_topic(topic, agent=agent, adhoc=adhoc)
         drained = sum(w.drain() for w in self._workers_for_topic(topic))
         return {"killed": killed, "drained": drained}
 

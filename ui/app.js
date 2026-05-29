@@ -469,6 +469,8 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
 
   try {
     const body = { command: cmd.command, topic };
+    if (agent && (cmd.command === 'stop' || cmd.command === 'stopall')) body.agent = agent;
+    if (cmd.command === 'stop' || cmd.command === 'stopall') body.adhoc = adhoc || null;
     if (cmd.pos != null) body.pos = cmd.pos;
     const res = await fetch('/cmd', {
       method: 'POST',
@@ -619,6 +621,26 @@ async function sendMessage(text) {
   let thinkingFrozen = false;
   let statusBuf = '';
 
+  // Kill button — shown once msg_id is known, hidden when done
+  const killBtn = document.createElement('button');
+  killBtn.type = 'button';
+  killBtn.className = 'thinking-kill-btn';
+  killBtn.title = 'Stop this process';
+  killBtn.textContent = '×';
+  killBtn.style.display = 'none';
+  killBtn.addEventListener('click', async () => {
+    killBtn.disabled = true;
+    controller.abort();
+    if (msgId) {
+      await fetch('/cmd', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: 'stop_msg', topic, msg_id: msgId }),
+      }).catch(() => {});
+    }
+  });
+  thinkingBubble.appendChild(killBtn);
+
   function updateThinkingPreview() {
     if (thinkingFrozen) return;
     if (thinkingLoader.parentNode) thinkingLoader.remove();
@@ -631,6 +653,7 @@ async function sendMessage(text) {
   function freezeThinking() {
     if (thinkingFrozen) return;
     thinkingFrozen = true;
+    killBtn.style.display = 'none';
     if (statusBuf.trim()) {
       if (thinkingLoader.parentNode) thinkingLoader.remove();
       const lines = statusBuf.split('\n').map(l => l.trim()).filter(Boolean);
@@ -829,6 +852,7 @@ async function sendMessage(text) {
                 msgId = meta.msg_id;
                 startStatusFallback(msgId);
                 addPinButton(bubble, msgId, topic, resolvedAgent);
+                killBtn.style.display = '';
               }
             } catch {}
             eventName = null;

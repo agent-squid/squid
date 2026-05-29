@@ -35,7 +35,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, SQUID_HOME
-from .runners import run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError, CLIError, list_active_procs, kill_all_procs, kill_procs_by_topic
+from .runners import run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError, CLIError, list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id
 from .history import list_history
 from .topic_queue import TopicDispatcher
 from .context_sync import sync_now, maybe_sync
@@ -145,10 +145,12 @@ class QuotaDeltaRequest(BaseModel):
 
 
 class CmdRequest(BaseModel):
-    command: Literal["stop", "stopall", "deq", "list", "restart", "clear", "compact"]
+    command: Literal["stop", "stopall", "deq", "list", "restart", "clear", "compact", "stop_msg"]
     topic: str = "default"
     agent: Optional[str] = None
+    adhoc: Optional[bool] = None
     pos: Optional[int] = None
+    msg_id: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +252,7 @@ async def stream_response(
         backend=backend, model=model, agent=agent, cwd=effective_cwd,
         response_timeout=response_timeout,
         resume_session_id=resume_session_id,
-        adhoc=adhoc,
+        adhoc=adhoc, msg_id=asst_msg_id,
     )
 
     raw = ""
@@ -453,11 +455,14 @@ async def chat(req: ChatRequest):
 
 @app.post("/cmd")
 async def run_cmd(req: CmdRequest):
+    if req.command == "stop_msg":
+        killed = kill_proc_by_msg_id(req.msg_id) if req.msg_id else 0
+        return JSONResponse({"ok": True, "killed": killed})
     if req.command == "stop":
-        killed = dispatcher.stop_topic(req.topic)
+        killed = dispatcher.stop_topic(req.topic, agent=req.agent, adhoc=req.adhoc)
         return JSONResponse({"ok": True, "killed": killed})
     if req.command == "stopall":
-        result = dispatcher.stopall_topic(req.topic)
+        result = dispatcher.stopall_topic(req.topic, agent=req.agent, adhoc=req.adhoc)
         return JSONResponse({"ok": True, **result})
     if req.command == "deq":
         drained = dispatcher.drain_topic(req.topic, req.pos)

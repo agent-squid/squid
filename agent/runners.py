@@ -20,12 +20,15 @@ from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH
 _proc_registry: dict[int, dict] = {}
 
 
-def _register_proc(pid: int, backend: str, topic: str, agent: str) -> None:
+def _register_proc(pid: int, backend: str, topic: str, agent: str,
+                   adhoc: bool = False, msg_id: Optional[int] = None) -> None:
     _proc_registry[pid] = {
         "pid": pid,
         "backend": backend,
         "topic": topic,
         "agent": agent,
+        "adhoc": adhoc,
+        "msg_id": msg_id,
         "started_at": time.monotonic(),
         "started_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -35,18 +38,37 @@ def _deregister_proc(pid: int) -> None:
     _proc_registry.pop(pid, None)
 
 
-def kill_procs_by_topic(topic: str) -> int:
-    """Send SIGTERM to all subprocesses registered under topic. Returns kill count."""
+def kill_procs_by_topic(topic: str, agent: Optional[str] = None,
+                        adhoc: Optional[bool] = None) -> int:
+    """Send SIGTERM to subprocesses matching topic + optional agent/adhoc filters."""
     import signal
     killed = 0
     for pid, info in list(_proc_registry.items()):
-        if info.get("topic") == topic:
+        if info.get("topic") != topic:
+            continue
+        if agent is not None and info.get("agent") != agent:
+            continue
+        if adhoc is not None and bool(info.get("adhoc")) != adhoc:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            killed += 1
+        except (ProcessLookupError, PermissionError):
+            pass
+    return killed
+
+
+def kill_proc_by_msg_id(msg_id: int) -> int:
+    """Send SIGTERM to the process registered with msg_id. Returns 1 if killed, 0 if not found."""
+    import signal
+    for pid, info in list(_proc_registry.items()):
+        if info.get("msg_id") == msg_id:
             try:
                 os.kill(pid, signal.SIGTERM)
-                killed += 1
+                return 1
             except (ProcessLookupError, PermissionError):
-                pass
-    return killed
+                return 0
+    return 0
 
 
 def kill_all_procs() -> int:
@@ -85,6 +107,8 @@ async def _stream_lines(
     backend: str = "",
     topic: str = "",
     agent: str = "",
+    adhoc: bool = False,
+    msg_id: Optional[int] = None,
     response_timeout: Optional[int] = None,
 ) -> AsyncGenerator[str, None]:
     """Run cmd and yield stdout line by line.
@@ -106,7 +130,7 @@ async def _stream_lines(
     assert proc.stdout is not None
     assert proc.stderr is not None
     pid = proc.pid
-    _register_proc(pid, backend=backend, topic=topic, agent=agent)
+    _register_proc(pid, backend=backend, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id)
 
     # Drain stderr concurrently — prevents buffer-full deadlock if the
     # subprocess writes > 64KB of diagnostics before exiting.
@@ -216,6 +240,7 @@ async def run_claude(
     model: Optional[str] = None, topic: str = "", agent: str = "",
     response_timeout: Optional[int] = None,
     resume_session_id: Optional[str] = None,
+    adhoc: bool = False, msg_id: Optional[int] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream text chunks from claude CLI, then yield a stats dict."""
     if not CLAUDE_PATH:
@@ -243,7 +268,7 @@ async def run_claude(
     streamed_text = False  # track whether any text chunks were streamed as content
     tool_blocks: dict[int, dict] = {}  # index -> {name, input_json}
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend="claude", topic=topic, agent=agent, response_timeout=response_timeout):
+    async for line in _stream_lines(cmd, cwd=cwd, backend="claude", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout):
         if not line:
             continue
         try:
@@ -307,6 +332,7 @@ async def run_codex(
     model: Optional[str] = None, topic: str = "", agent: str = "",
     response_timeout: Optional[int] = None,
     resume_session_id: Optional[str] = None,
+    adhoc: bool = False, msg_id: Optional[int] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream a response from codex CLI using non-interactive exec mode."""
     if not CODEX_PATH:
@@ -327,7 +353,7 @@ async def run_codex(
     start_ms = time.monotonic() * 1000
     thread_id: Optional[str] = None
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend="codex", topic=topic, agent=agent, response_timeout=response_timeout):
+    async for line in _stream_lines(cmd, cwd=cwd, backend="codex", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout):
         if not line:
             continue
         try:
@@ -382,6 +408,7 @@ async def run_copilot(
     model: Optional[str] = None, topic: str = "", agent: str = "",
     response_timeout: Optional[int] = None,
     resume_session_id: Optional[str] = None,
+    adhoc: bool = False, msg_id: Optional[int] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream a response from GitHub Copilot CLI using one-shot -p mode with JSONL output."""
     if not COPILOT_PATH:
@@ -406,7 +433,7 @@ async def run_copilot(
     stats_yielded = False
     session_error: Optional[str] = None
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend="copilot", topic=topic, agent=agent, response_timeout=response_timeout):
+    async for line in _stream_lines(cmd, cwd=cwd, backend="copilot", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout):
         if not line:
             continue
         try:
@@ -471,6 +498,7 @@ async def run_cursor(
     model: Optional[str] = None, topic: str = "", agent: str = "",
     response_timeout: Optional[int] = None,
     resume_session_id: Optional[str] = None,
+    adhoc: bool = False, msg_id: Optional[int] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream text chunks from cursor-agent CLI, then yield a stats dict."""
     if not CURSOR_PATH:
@@ -493,7 +521,7 @@ async def run_cursor(
     session_id: Optional[str] = None
     text_started = False
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend="cursor", topic=topic, agent=agent, response_timeout=response_timeout):
+    async for line in _stream_lines(cmd, cwd=cwd, backend="cursor", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout):
         if not line:
             continue
         try:
@@ -542,6 +570,7 @@ async def run_antigravity(
     model: Optional[str] = None, topic: str = "", agent: str = "",
     response_timeout: Optional[int] = None,
     resume_session_id: Optional[str] = None,
+    adhoc: bool = False, msg_id: Optional[int] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream text chunks from agy (Google Antigravity) CLI, then yield a stats dict."""
     if not AGY_PATH:
@@ -562,7 +591,7 @@ async def run_antigravity(
     streamed_text = False
     tool_blocks: dict[int, dict] = {}
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend="antigravity", topic=topic, agent=agent, response_timeout=response_timeout):
+    async for line in _stream_lines(cmd, cwd=cwd, backend="antigravity", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout):
         if not line:
             continue
         try:
