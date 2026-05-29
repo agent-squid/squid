@@ -478,6 +478,32 @@ def get_context_history(topic: str, limit: int, agent: Optional[str] = None) -> 
     return result, ids
 
 
+def get_messages_by_ids(ids: list[int]) -> list[dict]:
+    """Fetch specific assistant messages by ID as context history pairs.
+    Returns [user, asst, ...] dicts in ascending ID order. Only done rows with content."""
+    if not ids:
+        return []
+    placeholders = ",".join("?" * len(ids))
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""SELECT a.id, u.content AS user_content, a.content AS asst_content
+                FROM chat_messages a
+                JOIN chat_messages u ON u.id = a.reply_to
+                WHERE a.id IN ({placeholders})
+                  AND a.role = 'assistant' AND a.status = 'done'
+                  AND a.content IS NOT NULL AND u.content IS NOT NULL
+                ORDER BY a.id ASC""",
+            ids,
+        ).fetchall()
+    result = []
+    for row in rows:
+        result.extend([
+            {"role": "user",      "content": row["user_content"]},
+            {"role": "assistant", "content": row["asst_content"]},
+        ])
+    return result
+
+
 def mark_orphaned_pending() -> int:
     with _connect() as conn:
         cur = conn.execute("UPDATE chat_messages SET status='error' WHERE status='pending'")

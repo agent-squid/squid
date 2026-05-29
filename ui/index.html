@@ -13,22 +13,47 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="icon" href="/icons/icon-192.png" sizes="192x192" type="image/png" />
   <link rel="apple-touch-icon" href="/icons/icon-192.png" />
-  <link rel="stylesheet" href="style.css?v=20260528-78" />
+  <link rel="stylesheet" href="style.css?v=20260529-80" />
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
   <div id="app">
     <header id="topbar">
       <div class="text-logo"><img src="/favicon.svg" class="logo-icon" alt="" />AGENT-SQUID</div>
+
+      <!-- Desktop nav tabs -->
+      <nav id="nav-tabs">
+        <button class="nav-tab active" data-view="chat">Chat</button>
+        <button class="nav-tab" data-view="analytics">Analytics</button>
+        <button class="nav-tab" data-view="agents">Agents</button>
+      </nav>
+
       <div id="quota-display" title="Session usage · click for credentials"></div>
-      <button id="stats-btn" type="button" title="Usage stats">
-        <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor" aria-hidden="true">
-          <rect x="1" y="7" width="3" height="6" rx="0.5"/>
-          <rect x="5.5" y="3.5" width="3" height="9.5" rx="0.5"/>
-          <rect x="10" y="1" width="3" height="12" rx="0.5"/>
+
+      <button id="help-btn" type="button" title="Help">
+        <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+          <circle cx="7.5" cy="7.5" r="6.5"/>
+          <path d="M5.8 5.8a1.7 1.7 0 0 1 3.4 0c0 1.1-1.7 1.7-1.7 2.9"/>
+          <circle cx="7.5" cy="11" r="0.6" fill="currentColor" stroke="none"/>
         </svg>
       </button>
-      <button id="help-btn" type="button" title="Help">?</button>
+
+      <!-- Mobile only -->
+      <button id="hamburger-btn" type="button" aria-label="Menu">
+        <svg width="15" height="13" viewBox="0 0 15 13" fill="currentColor" aria-hidden="true">
+          <rect x="0" y="0"   width="15" height="1.8" rx="0.9"/>
+          <rect x="0" y="5.6" width="15" height="1.8" rx="0.9"/>
+          <rect x="0" y="11.2" width="15" height="1.8" rx="0.9"/>
+        </svg>
+      </button>
+
+      <!-- Hamburger dropdown (mobile) -->
+      <div id="hamburger-menu">
+        <button class="hmenu-item active" data-view="chat">Chat</button>
+        <button class="hmenu-item" data-view="analytics">Analytics</button>
+        <button class="hmenu-item" data-view="agents">Agents</button>
+      </div>
+
       <div id="quota-creds-popup">
         <span class="settings-label">Claude.ai session</span>
         <input id="creds-org" type="text" placeholder="Org ID" spellcheck="false" />
@@ -38,21 +63,7 @@
       </div>
     </header>
 
-    <!-- Stats panel -->
-    <div id="stats-panel">
-      <div id="stats-header">
-        <div id="stats-tabs">
-          <button class="st active" data-period="daily" data-group="time">Daily</button>
-          <button class="st" data-period="hourly" data-group="time">Hourly</button>
-          <button class="st" data-period="" data-group="topic">By Topic</button>
-          <button class="st" data-period="" data-group="model">By Agent</button>
-          <button class="st" data-period="" data-group="proc">Live</button>
-        </div>
-        <button id="stats-close" type="button">✕</button>
-      </div>
-      <div id="stats-content"></div>
-    </div>
-
+    <!-- Help panel (floating overlay, always available) -->
     <div id="help-panel">
       <div id="help-header">
         <span class="settings-label">Help</span>
@@ -71,7 +82,7 @@
         <div class="help-section">
           <div class="help-title">Commands — type <kbd>/</kbd> to browse</div>
           <div class="help-row"><code>/clear</code><span>clear session — next message starts fresh (all backends)</span></div>
-          <div class="help-row"><code>/compact</code><span>compact session context (resets for Codex; native for Claude)</span></div>
+          <div class="help-row"><code>/compact</code><span>compact session context (resets context for Codex; native for Claude)</span></div>
           <div class="help-row"><code>/stop</code><span>kill running process for current topic</span></div>
           <div class="help-row"><code>/stopall</code><span>kill + drain queue for current topic</span></div>
           <div class="help-row"><code>/deq</code><span>drain entire pending queue</span></div>
@@ -84,6 +95,7 @@
         <div class="help-section">
           <div class="help-title">Context curation</div>
           <div class="help-row"><code>✕ session</code><span>clear session state; next message starts fresh</span></div>
+          <div class="help-row"><code>📌 response</code><span>pin a response to inject as context in future adhoc turns</span></div>
         </div>
         <div class="help-section">
           <div class="help-title">Keyboard</div>
@@ -95,10 +107,65 @@
       </div>
     </div>
 
-    <div id="messages"></div>
-    <div id="scroll-btn" role="button" aria-label="Scroll to bottom">↓</div>
+    <!-- ── CHAT VIEW ─────────────────────────────────────────────────────── -->
+    <div id="view-chat" class="view active">
+      <div id="messages"></div>
+      <div id="scroll-btn" role="button" aria-label="Scroll to bottom">↓</div>
 
-    <div id="settings-bar">
+      <!-- Pin basket panel (opens above form) -->
+      <div id="pin-panel">
+        <div id="pin-panel-header">
+          <span class="settings-label">Pinned context</span>
+          <button id="pin-panel-close" type="button">✕</button>
+        </div>
+        <div id="pin-panel-list"></div>
+      </div>
+
+      <div id="autocomplete"></div>
+      <div id="tag-bar">
+        <div id="filter-badge">
+          <span id="filter-badge-label"></span>
+          <button id="filter-badge-clear" type="button">×</button>
+        </div>
+      </div>
+      <form id="form">
+        <div id="input-area">
+          <div id="topic-chip"></div>
+          <textarea id="input" placeholder="#topic or #topic@agent message…" rows="1"></textarea>
+        </div>
+        <button id="pin-btn" type="button" title="Pinned context">
+          <svg width="13" height="14" viewBox="0 0 13 14" fill="currentColor" aria-hidden="true">
+            <circle cx="6.5" cy="4.5" r="3.5"/>
+            <rect x="5.75" y="8" width="1.5" height="4" rx="0.75"/>
+            <rect x="3.25" y="11" width="6.5" height="1.5" rx="0.75"/>
+          </svg>
+          <span id="pin-count"></span>
+        </button>
+        <button id="send-btn" type="submit" aria-label="Send message">
+          <span class="send-label">Send</span>
+          <svg class="send-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+            <path d="M3 9h11M10 5l4 4-4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </form>
+    </div>
+
+    <!-- ── ANALYTICS VIEW ────────────────────────────────────────────────── -->
+    <div id="view-analytics" class="view">
+      <div id="stats-header">
+        <div id="stats-tabs">
+          <button class="st active" data-period="daily" data-group="time">Daily</button>
+          <button class="st" data-period="hourly" data-group="time">Hourly</button>
+          <button class="st" data-period="" data-group="topic">By Topic</button>
+          <button class="st" data-period="" data-group="model">By Agent</button>
+          <button class="st" data-period="" data-group="proc">Live</button>
+        </div>
+      </div>
+      <div id="stats-content"></div>
+    </div>
+
+    <!-- ── AGENTS VIEW ───────────────────────────────────────────────────── -->
+    <div id="view-agents" class="view">
       <div id="settings-agents">
         <span class="settings-label">Agents</span>
         <div id="agents-list"></div>
@@ -122,27 +189,8 @@
       </div>
     </div>
 
-    <div id="autocomplete"></div>
-    <div id="tag-bar">
-      <div id="filter-badge">
-        <span id="filter-badge-label"></span>
-        <button id="filter-badge-clear" type="button">×</button>
-      </div>
-    </div>
-    <form id="form">
-      <div id="input-area">
-        <div id="topic-chip"></div>
-        <textarea id="input" placeholder="#topic or #topic@agent message…" rows="1"></textarea>
-      </div>
-      <button id="settings-btn" type="button" title="Settings">⚙</button>
-      <button id="send-btn" type="submit" aria-label="Send message">
-        <span class="send-label">Send</span>
-        <svg class="send-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
-          <path d="M3 9h11M10 5l4 4-4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </button>
-    </form>
+    <!-- Inline agent creation prompt (appended to #messages dynamically) -->
   </div>
-  <script src="app.js?v=20260528-78"></script>
+  <script src="app.js?v=20260529-80"></script>
 </body>
 </html>

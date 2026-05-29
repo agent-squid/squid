@@ -1,15 +1,14 @@
-const messages    = document.getElementById('messages');
-const form        = document.getElementById('form');
-const input       = document.getElementById('input');
-const scrollBtn   = document.getElementById('scroll-btn');
-const settingsBtn = document.getElementById('settings-btn');
-const settingsBar = document.getElementById('settings-bar');
-const statsBtn    = document.getElementById('stats-btn');
-const statsPanel  = document.getElementById('stats-panel');
-const statsContent= document.getElementById('stats-content');
-const helpBtn     = document.getElementById('help-btn');
-const helpPanel   = document.getElementById('help-panel');
-const acEl        = document.getElementById('autocomplete');
+const messages     = document.getElementById('messages');
+const form         = document.getElementById('form');
+const input        = document.getElementById('input');
+const scrollBtn    = document.getElementById('scroll-btn');
+const statsContent = document.getElementById('stats-content');
+const helpBtn      = document.getElementById('help-btn');
+const helpPanel    = document.getElementById('help-panel');
+const acEl         = document.getElementById('autocomplete');
+const pinBtn       = document.getElementById('pin-btn');
+const pinPanel     = document.getElementById('pin-panel');
+const pinCountEl   = document.getElementById('pin-count');
 
 window.scrollTo(0, 0);
 
@@ -48,17 +47,55 @@ scrollBtn.addEventListener('mouseleave', () => {
 
 marked.setOptions({ breaks: true });
 
-// ── settings ──────────────────────────────────────────────────────────────────
+// ── navigation ────────────────────────────────────────────────────────────────
 
-function initSettings() {
-  // no-op — settings panel wiring is handled inline
+let currentView = 'chat';
+
+function switchView(name) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.getElementById('view-' + name).classList.add('active');
+  document.querySelectorAll('.nav-tab, .hmenu-item').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.view === name);
+  });
+  currentView = name;
+  if (name === 'analytics') {
+    loadStats();
+    if (statsGroup === 'proc') startLivePoll(); else stopLivePoll();
+  } else {
+    stopLivePoll();
+  }
+  if (name === 'agents') loadAgents();
 }
 
-settingsBtn.addEventListener('click', () => {
-  const open = settingsBar.classList.toggle('open');
-  settingsBtn.classList.toggle('active', open);
-  if (open) loadAgents();
-});
+function initSettings() {
+  document.querySelectorAll('.nav-tab').forEach(btn =>
+    btn.addEventListener('click', () => {
+      hamburgerMenu.classList.remove('open');
+      hamburgerBtn.classList.remove('active');
+      switchView(btn.dataset.view);
+    })
+  );
+  const hamburgerBtn  = document.getElementById('hamburger-btn');
+  const hamburgerMenu = document.getElementById('hamburger-menu');
+  hamburgerBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    const open = hamburgerMenu.classList.toggle('open');
+    hamburgerBtn.classList.toggle('active', open);
+  });
+  document.querySelectorAll('.hmenu-item').forEach(btn =>
+    btn.addEventListener('click', () => {
+      hamburgerMenu.classList.remove('open');
+      hamburgerBtn.classList.remove('active');
+      switchView(btn.dataset.view);
+    })
+  );
+  document.addEventListener('click', e => {
+    if (!hamburgerMenu.contains(e.target) && e.target !== hamburgerBtn) {
+      hamburgerMenu.classList.remove('open');
+      hamburgerBtn.classList.remove('active');
+    }
+  });
+}
 
 function openHelp() {
   helpPanel.classList.add('open');
@@ -327,6 +364,7 @@ async function loadHistory() {
         asstContent.innerHTML = marked.parse(item.content || '');
       }
       asstBubble.appendChild(asstContent);
+      if (item.id) addPinButton(asstBubble, item.id, item.topic || 'default', item.agent || null);
       fragment.appendChild(asstBubble);
 
       if (item.stats) {
@@ -549,6 +587,7 @@ input.addEventListener('keydown', (e) => {
     if (e.key === 'Tab' || (e.key === 'Enter' && acSel >= 0)) { e.preventDefault(); _acSelect(acSel >= 0 ? acSel : 0); return; }
     if (e.key === 'Escape') { hideAutocomplete(); return; }
   }
+  if (e.key === 'Escape' && pinPanel.classList.contains('open')) { closePinPanel(); return; }
   if (e.key === 'Escape' && helpPanel.classList.contains('open')) { closeHelp(); return; }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
@@ -714,11 +753,27 @@ async function sendMessage(text) {
     }, 2000);
   }
 
+  // Compute pinned IDs to inject (adhoc only, exclude in-session + already-injected)
+  let _pinnedIds = [];
+  if (adhoc) {
+    const _effectiveAgent = agent || stickyChip?.agent || null;
+    const _taKey = `${topic}@${_effectiveAgent || '_'}`;
+    const _injected = getInjectedInto();
+    _pinnedIds = getPinnedItems()
+      .filter(item => {
+        const sameSession = item.topic === topic && (item.agent || null) === _effectiveAgent;
+        if (sameSession) return false;
+        if ((_injected[_taKey] || []).includes(item.id)) return false;
+        return true;
+      })
+      .map(item => item.id);
+  }
+
   try {
     const res = await fetch('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, topic, agent, lookback, adhoc }),
+      body: JSON.stringify({ message, topic, agent, lookback, adhoc, ...(_pinnedIds.length ? { pinned_ids: _pinnedIds } : {}) }),
       // lookback: 0 for session mode (CLI owns context), N for adhoc #topic!N
       signal: controller.signal,
     });
@@ -783,6 +838,7 @@ async function sendMessage(text) {
               if (meta.msg_id) {
                 msgId = meta.msg_id;
                 startStatusFallback(msgId);
+                addPinButton(bubble, msgId, topic, resolvedAgent);
               }
             } catch {}
             eventName = null;
@@ -852,6 +908,15 @@ async function sendMessage(text) {
                 messages.appendChild(block);
               }
               scrollToBottom();
+            }
+            // Record injected pinned IDs so they're not re-injected into this session
+            if (adhoc && _pinnedIds.length) {
+              const _finalAgent = resolvedAgent || agent || null;
+              const _taKey = `${topic}@${_finalAgent || '_'}`;
+              const _inj = getInjectedInto();
+              _inj[_taKey] = [...new Set([...(_inj[_taKey] || []), ..._pinnedIds])];
+              setInjectedInto(_inj);
+              if (pinPanel.classList.contains('open')) renderPinPanel();
             }
             eventName = null;
 
@@ -1298,7 +1363,7 @@ let liveInterval = null;
 function startLivePoll() {
   if (liveInterval) return;
   liveInterval = setInterval(() => {
-    if (statsGroup === 'proc' && statsPanel.classList.contains('open')) loadStats();
+    if (statsGroup === 'proc' && currentView === 'analytics') loadStats();
   }, 2000);
 }
 
@@ -1462,24 +1527,6 @@ function renderProcStats(rows) {
 }
 
 function initStats() {
-  statsBtn.addEventListener('click', () => {
-    const open = statsPanel.classList.toggle('open');
-    statsBtn.classList.toggle('active', open);
-    if (open) {
-      statsPanel.style.top = (document.getElementById('topbar').offsetHeight + 4) + 'px';
-      loadStats();
-      if (statsGroup === 'proc') startLivePoll();
-    } else {
-      stopLivePoll();
-    }
-  });
-
-  document.getElementById('stats-close').addEventListener('click', () => {
-    statsPanel.classList.remove('open');
-    statsBtn.classList.remove('active');
-    stopLivePoll();
-  });
-
   document.querySelectorAll('.st').forEach(btn => {
     btn.addEventListener('click', () => {
       statsPeriod = btn.dataset.period;
@@ -1863,11 +1910,128 @@ async function showBootBanner() {
   } catch {}
 }
 
+// ── pin basket ────────────────────────────────────────────────────────────────
+
+function getPinnedItems() {
+  try { return JSON.parse(localStorage.getItem('pinnedItems') || '[]'); } catch { return []; }
+}
+function setPinnedItems(items) { localStorage.setItem('pinnedItems', JSON.stringify(items)); }
+function getInjectedInto() {
+  try { return JSON.parse(localStorage.getItem('injectedInto') || '{}'); } catch { return {}; }
+}
+function setInjectedInto(map) { localStorage.setItem('injectedInto', JSON.stringify(map)); }
+
+function updatePinCount() {
+  const n = getPinnedItems().length;
+  pinCountEl.textContent = n || '';
+  pinCountEl.classList.toggle('visible', n > 0);
+  pinBtn.classList.toggle('has-pins', n > 0);
+}
+
+function _pinTagStr(item) {
+  return item.agent ? `#${item.topic}@${item.agent}` : `#${item.topic}`;
+}
+
+function _pinStatus(item) {
+  const injected = getInjectedInto();
+  // Compute effective topicAgent from current stickyChip
+  const chipTopic = stickyChip ? stickyChip.topic : 'default';
+  const chipAgent = stickyChip ? stickyChip.agent : null;
+  const sameSession = item.topic === chipTopic && (item.agent || null) === chipAgent;
+  if (sameSession) return { text: 'in session · skip', cls: 'pin-status-session' };
+  const key = `${item.topic}@${item.agent || '_'}`;
+  if ((injected[key] || []).includes(item.id))
+    return { text: `already added · skip`, cls: 'pin-status-done' };
+  return { text: 'will inject', cls: 'pin-status-inject' };
+}
+
+function renderPinPanel() {
+  const items = getPinnedItems();
+  const listEl = document.getElementById('pin-panel-list');
+  if (!items.length) {
+    listEl.innerHTML = '<div style="padding:0.5rem 0.8rem;color:#484858;font-size:0.78em">No pinned responses yet.<br>Click 📌 on any response to add it.</div>';
+    return;
+  }
+  listEl.innerHTML = items.map(item => {
+    const st = _pinStatus(item);
+    const tag = _pinTagStr(item);
+    const preview = (item.content || '').replace(/</g, '&lt;').slice(0, 90);
+    return `<div class="pin-item">
+      <span class="pin-item-tag">${tag}</span>
+      <span class="pin-item-preview">${preview}</span>
+      <span class="pin-item-status ${st.cls}">${st.text}</span>
+      <button class="pin-item-remove" data-id="${item.id}" type="button">✕</button>
+    </div>`;
+  }).join('');
+  listEl.querySelectorAll('.pin-item-remove').forEach(btn => {
+    btn.addEventListener('mousedown', e => {
+      e.preventDefault();
+      const id = parseInt(btn.dataset.id);
+      setPinnedItems(getPinnedItems().filter(i => i.id !== id));
+      document.querySelectorAll(`.msg-pin-btn[data-msg-id="${id}"]`)
+        .forEach(b => b.classList.remove('pinned'));
+      updatePinCount();
+      renderPinPanel();
+    });
+  });
+}
+
+function openPinPanel() {
+  renderPinPanel();
+  pinPanel.classList.add('open');
+}
+function closePinPanel() {
+  pinPanel.classList.remove('open');
+}
+
+function addPinButton(bubbleEl, msgId, topic, agent) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'msg-pin-btn';
+  btn.dataset.msgId = String(msgId);
+  btn.title = 'Pin as context';
+  btn.innerHTML = `<svg width="11" height="12" viewBox="0 0 13 14" fill="currentColor" aria-hidden="true">
+    <circle cx="6.5" cy="4.5" r="3.5"/>
+    <rect x="5.75" y="8" width="1.5" height="4" rx="0.75"/>
+    <rect x="3.25" y="11" width="6.5" height="1.5" rx="0.75"/>
+  </svg>`;
+  if (getPinnedItems().find(i => i.id === msgId)) btn.classList.add('pinned');
+  btn.addEventListener('click', e => {
+    e.stopPropagation();
+    const pinned = getPinnedItems();
+    if (pinned.find(i => i.id === msgId)) {
+      setPinnedItems(pinned.filter(i => i.id !== msgId));
+      btn.classList.remove('pinned');
+    } else {
+      const contentEl = bubbleEl.querySelector(':scope > div:nth-child(2)');
+      const text = (contentEl?.innerText || '').slice(0, 300);
+      setPinnedItems([...pinned, { id: msgId, topic, agent: agent || null, content: text }]);
+      btn.classList.add('pinned');
+    }
+    updatePinCount();
+    if (pinPanel.classList.contains('open')) renderPinPanel();
+  });
+  bubbleEl.appendChild(btn);
+}
+
+function initPin() {
+  pinBtn.addEventListener('click', () => {
+    if (pinPanel.classList.contains('open')) closePinPanel();
+    else openPinPanel();
+  });
+  document.getElementById('pin-panel-close').addEventListener('click', closePinPanel);
+  updatePinCount();
+}
+
 // ── init ─────────────────────────────────────────────────────────────────────
 
 initSettings();
+initPin();
 document.getElementById('filter-badge-clear').addEventListener('click', clearFilter);
-document.addEventListener('click', e => { if (!acEl.contains(e.target) && e.target !== input) hideAutocomplete(); });
+document.addEventListener('click', e => {
+  if (!acEl.contains(e.target) && e.target !== input) hideAutocomplete();
+  if (!pinPanel.contains(e.target) && e.target !== pinBtn) closePinPanel();
+});
 initHistoryScroll();
 initStats();
 initAliases();

@@ -38,9 +38,76 @@ body {
   background: #0f0f13;
 }
 
-#topbar #stats-btn {
-  margin-left: 0;
+/* nav tabs (desktop) */
+#nav-tabs {
+  display: flex;
+  gap: 2px;
+  margin-left: 0.5rem;
 }
+.nav-tab {
+  background: transparent;
+  border: 1px solid #222;
+  border-radius: 6px;
+  color: #555;
+  cursor: pointer;
+  font-size: 0.78em;
+  font-weight: 600;
+  padding: 0.2rem 0.65rem;
+}
+.nav-tab.active { background: #f07040; border-color: #f07040; color: #fff; }
+.nav-tab:hover:not(.active) { color: #888; border-color: #333; }
+
+/* hamburger (mobile only) */
+#hamburger-btn {
+  display: none;
+  background: transparent;
+  border: 1px solid #222;
+  border-radius: 8px;
+  color: #555;
+  cursor: pointer;
+  font-size: 1em;
+  padding: 0 0.6rem;
+  align-items: center;
+  justify-content: center;
+}
+#hamburger-btn.active { color: #f07040; border-color: #f07040; }
+
+#hamburger-menu {
+  display: none;
+  position: absolute;
+  top: calc(100% + 2px);
+  right: 0;
+  background: #13131c;
+  border: 1px solid #2e2e3e;
+  border-radius: 8px;
+  padding: 0.3rem;
+  z-index: 40;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 130px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+#hamburger-menu.open { display: flex; }
+.hmenu-item {
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  color: #888;
+  cursor: pointer;
+  font-size: 0.85em;
+  font-weight: 600;
+  padding: 0.45rem 0.75rem;
+  text-align: left;
+}
+.hmenu-item.active { background: #1e1e28; color: #f07040; }
+.hmenu-item:hover:not(.active) { background: #1a1a24; color: #aaa; }
+
+/* views */
+.view { display: none; flex-direction: column; flex: 1; min-height: 0; gap: 1rem; }
+.view.active { display: flex; }
+#view-chat { position: relative; }
+#view-analytics { gap: 0; }
+#view-agents { overflow-y: auto; padding-bottom: 1rem; gap: 0.75rem; }
 
 /* quota display */
 #quota-display {
@@ -361,15 +428,13 @@ body {
 }
 #scroll-btn.visible { display: block; }
 
-/* settings bar */
-#settings-bar {
-  display: none;
+/* agents view */
+#settings-agents {
+  display: flex;
   flex-direction: column;
-  gap: 0.6rem;
+  gap: 0.4rem;
   padding: 0.5rem 0.2rem;
-  border-top: 1px solid #1e1e28;
 }
-#settings-bar.open { display: flex; }
 #settings-agents {
   display: flex;
   flex-direction: column;
@@ -378,7 +443,8 @@ body {
 .settings-label { font-size: 0.75em; color: #666; }
 .settings-hint { font-size: 0.68em; color: #444; }
 
-#settings-btn {
+/* pin basket button */
+#pin-btn {
   background: transparent;
   border: 1px solid #333;
   border-radius: 8px;
@@ -386,33 +452,122 @@ body {
   cursor: pointer;
   font-size: 1em;
   padding: 0 0.6rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
 }
-#settings-btn.active { color: #f07040; border-color: #f07040; }
-
-
-/* stats panel — floats over messages, does not push them down */
-#stats-panel {
+#pin-btn.has-pins { color: #f07040; border-color: #f07040; }
+#pin-count {
+  font-size: 0.72em;
+  font-weight: 700;
+  color: #f07040;
   display: none;
-  position: absolute;
-  left: 0;
-  right: 0;
-  z-index: 20;
+}
+#pin-count.visible { display: inline; }
+
+/* pin panel (opens above form) */
+#pin-panel {
+  display: none;
   flex-direction: column;
   background: #13131c;
   border: 1px solid #2e2e3e;
   border-radius: 8px;
-  max-height: 280px;
   overflow: hidden;
-  /* top set dynamically by JS */
+  max-height: 220px;
+  flex-shrink: 0;
 }
-#stats-panel.open { display: flex; }
+#pin-panel.open { display: flex; }
+#pin-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.3rem 0.7rem;
+  border-bottom: 1px solid #1e1e28;
+  flex-shrink: 0;
+}
+#pin-panel-close {
+  background: transparent;
+  border: none;
+  color: #444;
+  cursor: pointer;
+  font-size: 0.85em;
+  padding: 0.1rem 0.3rem;
+}
+#pin-panel-close:hover { color: #888; }
+#pin-panel-list {
+  overflow-y: auto;
+  flex: 1;
+  font-size: 0.78em;
+  padding: 0.2rem 0;
+  scrollbar-width: thin;
+}
+.pin-item {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.25rem 0.7rem;
+}
+.pin-item:hover { background: #1a1a24; }
+.pin-item-tag {
+  font-family: ui-monospace, monospace;
+  font-size: 0.85em;
+  color: #d07840;
+  flex-shrink: 0;
+}
+.pin-item-preview {
+  color: #666;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.pin-item-status { font-size: 0.8em; flex-shrink: 0; white-space: nowrap; }
+.pin-status-inject   { color: #70b870; }
+.pin-status-session  { color: #484858; }
+.pin-status-done     { color: #484858; }
+.pin-item-remove {
+  background: none;
+  border: none;
+  color: #484858;
+  cursor: pointer;
+  font-size: 0.85em;
+  padding: 0 0.15rem;
+  line-height: 1;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.pin-item-remove:hover { color: #e06060; }
+
+/* pin button on assistant bubbles */
+.msg-pin-btn {
+  position: absolute;
+  top: 0.3rem;
+  right: 0.3rem;
+  background: none;
+  border: none;
+  color: #444;
+  cursor: pointer;
+  padding: 0.15rem 0.2rem;
+  border-radius: 4px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.msg.assistant { position: relative; }
+.msg.assistant:hover .msg-pin-btn,
+.msg-pin-btn.pinned { opacity: 1; }
+.msg-pin-btn.pinned { color: #f07040; }
+
+
+/* analytics view header */
 
 #stats-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 0.4rem 0.6rem;
+  padding: 0.5rem 0.6rem;
   border-bottom: 1px solid #1e1e28;
+  flex-shrink: 0;
 }
 #stats-tabs { display: flex; gap: 2px; }
 .st {
@@ -469,17 +624,6 @@ body {
 }
 #stats-content .empty { padding: 1rem; text-align: center; color: #444; }
 
-#stats-btn {
-  background: transparent;
-  border: 1px solid #222;
-  border-radius: 8px;
-  color: #3a3a3a;
-  cursor: pointer;
-  font-size: 1em;
-  padding: 0 0.6rem;
-}
-#stats-btn:hover { color: #555; border-color: #333; }
-#stats-btn.active { color: #f07040; border-color: #f07040; }
 
 #help-btn {
   background: transparent;
@@ -487,10 +631,11 @@ body {
   border-radius: 8px;
   color: #3a3a3a;
   cursor: pointer;
-  font-size: 0.85em;
-  font-weight: 700;
-  padding: 0 0.55rem;
-  line-height: 1;
+  font-size: 1em;
+  padding: 0 0.6rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 #help-btn:hover { color: #555; border-color: #333; }
 #help-btn.active { color: #f07040; border-color: #f07040; }
@@ -687,13 +832,8 @@ button {
     font-size: 0.9rem;
   }
 
-  #stats-panel {
-    position: fixed;
-    top: calc(48px + env(safe-area-inset-top)) !important;
-    left: 0.75rem;
-    right: 0.75rem;
-    max-height: min(70dvh, 420px);
-  }
+  #nav-tabs { display: none; }
+  #hamburger-btn { display: inline-flex; flex: 0 0 40px; min-height: 40px; }
 
   #help-panel {
     position: fixed;
@@ -751,7 +891,7 @@ button {
     overflow-wrap: anywhere;
   }
 
-  #settings-btn,
+  #pin-btn,
   #send-btn {
     flex: 0 0 40px;
     display: inline-flex;
@@ -760,6 +900,7 @@ button {
     min-height: 40px;
     padding: 0;
   }
+  #pin-count { display: none !important; }
 
   .send-label {
     display: none;
@@ -786,13 +927,8 @@ button {
     bottom: calc(4.5rem + env(safe-area-inset-bottom));
   }
 
-  #settings-bar {
-    max-height: none;
-    overflow: visible;
-    -webkit-overflow-scrolling: touch;
-    padding: 0.45rem 0;
-    gap: 0.45rem;
-  }
+  #view-analytics, #view-agents { padding-top: 0.25rem; }
+  .msg-pin-btn { opacity: 1; }
 
   .settings-hint {
     display: none;

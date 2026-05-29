@@ -45,7 +45,7 @@ from .stats_db import (
     get_agent, upsert_agent, delete_agent, list_agents, get_default_agent,
     get_topic, upsert_topic, list_topics,
     insert_user_message, insert_assistant_message, update_assistant_message,
-    get_context_history, mark_orphaned_pending, get_message,
+    get_context_history, get_messages_by_ids, mark_orphaned_pending, get_message,
     get_topic_session, set_topic_session, clear_topic_session,
     delete_topic, hide_topic, get_topic_agents, get_topic_agent_history,
     clear_agent_sessions, get_agent_sessions,
@@ -122,6 +122,7 @@ class ChatRequest(BaseModel):
     agent: Optional[str] = None
     lookback: int = Field(0)
     adhoc: bool = Field(False)
+    pinned_ids: Optional[list[int]] = None
 
 
 class AgentRequest(BaseModel):
@@ -406,13 +407,21 @@ async def chat(req: ChatRequest):
             req.topic, lookback, agent=resolved_agent
         )
 
+    # Prepend pinned messages (adhoc only, deduplicated against lookback)
+    if req.adhoc and req.pinned_ids:
+        lookback_id_set = set(context_ids or [])
+        filtered = [pid for pid in req.pinned_ids if pid not in lookback_id_set]
+        if filtered:
+            context_history = get_messages_by_ids(filtered) + context_history
+
     user_msg_id = insert_user_message(req.topic, resolved_agent, req.message, context_ids=context_ids)
     asst_msg_id = insert_assistant_message(req.topic, resolved_agent, user_msg_id, adhoc=req.adhoc)
 
     log.info(
-        "chat  topic=%s  agent=%s  backend=%s  model=%s  adhoc=%s  resume=%s  ctx=%d  msg=%.80r",
+        "chat  topic=%s  agent=%s  backend=%s  model=%s  adhoc=%s  resume=%s  ctx=%d  pinned=%d  msg=%.80r",
         req.topic, resolved_agent, backend, model, req.adhoc,
-        bool(resume_session_id), len(context_history) // 2, req.message,
+        bool(resume_session_id), len(context_history) // 2,
+        len(req.pinned_ids) if req.pinned_ids else 0, req.message,
     )
     await maybe_sync()
     return StreamingResponse(
