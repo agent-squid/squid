@@ -16,9 +16,9 @@ session. It cannot be changed mid-session without starting a new session.
 
 ## Considered Options
 
-1. Lock `cwd` at session creation; store it alongside `session_id`
+1. Lock `cwd` at session creation; store it alongside `session_id` in `topic_sessions`
 2. Always use a single fixed `cwd` (e.g. `SQUID_HOME`) for all sessions
-3. Re-detect `cwd` from agent config on every message
+3. Always use the agent config's current `cwd` on every message, ignoring any stored value — this would cause `--resume` to fail whenever the agent config's `cwd` had changed since the session was created
 
 ## Decision Outcome
 
