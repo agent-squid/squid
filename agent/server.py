@@ -407,12 +407,26 @@ async def chat(req: ChatRequest):
             req.topic, lookback, agent=resolved_agent
         )
 
-    # Prepend pinned messages (adhoc only, deduplicated against lookback)
-    if req.adhoc and req.pinned_ids:
+    # Inject pinned messages — works for both adhoc and session turns
+    effective_message = req.message
+    if req.pinned_ids:
         lookback_id_set = set(context_ids or [])
         filtered = [pid for pid in req.pinned_ids if pid not in lookback_id_set]
         if filtered:
-            context_history = get_messages_by_ids(filtered) + context_history
+            pinned_context = get_messages_by_ids(filtered)
+            if pinned_context:
+                if req.adhoc:
+                    # Adhoc: prepend to context_history for _build_prompt
+                    context_history = pinned_context + context_history
+                else:
+                    # Session: prepend as referenced_context block in the prompt
+                    lines = ["Relevant context from other sessions:\n<referenced_context>"]
+                    for msg in pinned_context:
+                        role = "User" if msg["role"] == "user" else "Assistant"
+                        lines.append(f"{role}: {msg['content'].strip()}")
+                    lines.append("</referenced_context>\n")
+                    lines.append(req.message)
+                    effective_message = "\n".join(lines)
 
     user_msg_id = insert_user_message(req.topic, resolved_agent, req.message, context_ids=context_ids)
     asst_msg_id = insert_assistant_message(req.topic, resolved_agent, user_msg_id, adhoc=req.adhoc)
@@ -426,7 +440,7 @@ async def chat(req: ChatRequest):
     await maybe_sync()
     return StreamingResponse(
         stream_response(
-            req.message, req.topic, resolved_agent, backend, model, cwd,
+            effective_message, req.topic, resolved_agent, backend, model, cwd,
             context_history, asst_msg_id, response_timeout,
             resume_session_id=resume_session_id,
             adhoc=req.adhoc,

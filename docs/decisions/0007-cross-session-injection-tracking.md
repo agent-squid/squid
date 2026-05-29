@@ -24,9 +24,15 @@ Context injection is now **client-side** via the bookmark feature:
 
 - Users click 🔖 on any assistant response to bookmark it. Bookmarks are stored in
   `localStorage` as `{ id, topic, agent, content }` and persist across page reloads.
-- For **adhoc turns only**, the client sends `pinned_ids: [id, ...]` in `POST /chat`.
-  The server fetches those rows by ID from `chat_messages` via `get_messages_by_ids()`
-  and prepends them to the `_build_prompt` context, deduplicated against the lookback window.
+- The client sends `pinned_ids: [id, ...]` in `POST /chat` for **both session and adhoc turns**,
+  filtered to cross-session bookmarks (same-`topic@agent` bookmarks are skipped for session
+  turns since `--resume` already carries that history).
+  The server fetches those rows by ID from `chat_messages` via `get_messages_by_ids()`.
+  - **Adhoc turns**: pinned content is prepended to `context_history` for `_build_prompt`,
+    deduplicated against the lookback window.
+  - **Session turns**: pinned content is prepended to the prompt as a
+    `<referenced_context>` block (`effective_message`), giving the CLI the supplementary
+    context that `--resume` does not provide.
 - The client tracks which IDs have already been injected per `(topic, agent)` in an
   `injectedInto` localStorage map, preventing re-injection on subsequent turns.
 - The UI shows injection status in the bookmark panel: `will inject`, `in session · skip`,
@@ -37,7 +43,7 @@ Context injection is now **client-side** via the bookmark feature:
 | | Original | Current |
 |---|---|---|
 | Storage | Server DB (`session_context_log`) | Client `localStorage` |
-| Scope | Session turns + adhoc | Adhoc turns only |
+| Scope | Session turns + adhoc | Session turns + adhoc |
 | Tracking | Per-session DB rows | Per-`(topic, agent)` localStorage map |
 | Trigger | Automatic on each dispatch | Explicit client-side selection |
 

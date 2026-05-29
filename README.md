@@ -15,8 +15,8 @@ Via Tailscale, access your local CLI agents from anywhere safely — phone, tabl
 * `#topic@agent` — named sessions with FIFO queuing per topic and agent
 * `#topic@agent!` — adhoc flag: run in parallel, step-independent, not in session context
 * Different agents, different topics run in parallel automatically
-* Resumable sessions — the CLI owns its context; no history re-injection on every turn
-* Curate context across models — pin a message once, it gets injected into any session that hasn't seen it yet
+* Resumable sessions — the CLI owns its context; resume it after a week like it happened just before.
+* Curate context across models — setup auto lookback or pin any responses, it gets injected into any session that hasn't seen it yet
 * Full visibility into what each session sees and what it costs
 
 ## Setup

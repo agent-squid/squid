@@ -764,21 +764,20 @@ async function sendMessage(text) {
     }, 2000);
   }
 
-  // Compute pinned IDs to inject (adhoc only, exclude in-session + already-injected)
-  let _pinnedIds = [];
-  if (adhoc) {
-    const _effectiveAgent = agent || stickyChip?.agent || null;
-    const _taKey = `${topic}@${_effectiveAgent || '_'}`;
-    const _injected = getInjectedInto();
-    _pinnedIds = getPinnedItems()
-      .filter(item => {
-        const sameSession = item.topic === topic && (item.agent || null) === _effectiveAgent;
-        if (sameSession) return false;
-        if ((_injected[_taKey] || []).includes(item.id)) return false;
-        return true;
-      })
-      .map(item => item.id);
-  }
+  // Compute pinned IDs to inject — works for both session and adhoc turns
+  const _effectiveAgent = agent || stickyChip?.agent || null;
+  const _taKey = `${topic}@${_effectiveAgent || '_'}`;
+  const _injected = getInjectedInto();
+  const _pinnedIds = getPinnedItems()
+    .filter(item => {
+      // Skip bookmarks from the same session — --resume already has that context
+      const sameSession = item.topic === topic && (item.agent || null) === _effectiveAgent;
+      if (sameSession && !adhoc) return false;
+      // Skip already-injected items
+      if ((_injected[_taKey] || []).includes(item.id)) return false;
+      return true;
+    })
+    .map(item => item.id);
 
   try {
     const res = await fetch('/chat', {
@@ -921,13 +920,13 @@ async function sendMessage(text) {
               scrollToBottom();
             }
             // Update ctx label with pin count and store IDs for popup
-            if (adhoc && _pinnedIds.length && userCtxSpan) {
+            if (_pinnedIds.length && userCtxSpan) {
               const finalCtx = fmtCtxLabel(adhoc, lookback, _pinnedIds.length);
               userCtxSpan.textContent = '  · ctx:' + finalCtx;
               userCtxSpan.dataset.pinnedIds = JSON.stringify(_pinnedIds);
             }
             // Record injected pinned IDs so they're not re-injected into this session
-            if (adhoc && _pinnedIds.length) {
+            if (_pinnedIds.length) {
               const _finalAgent = resolvedAgent || agent || null;
               const _taKey = `${topic}@${_finalAgent || '_'}`;
               const _inj = getInjectedInto();

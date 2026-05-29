@@ -101,6 +101,30 @@ test('pinned item from same topic@agent shows will-inject for adhoc turn', async
   await expect(page.locator('.pin-item-status')).toContainText('will inject');
 });
 
+test('session send includes pinned_ids for cross-topic bookmarks', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+
+  let capturedBody = null;
+  await page.route('**/chat', async route => {
+    capturedBody = route.request().postDataJSON();
+    await route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(META, { data: 'session response' }, DONE),
+    });
+  });
+
+  await page.goto('/');
+  // Bookmark from a different topic — should be injected into session turn
+  await seedPin(page, { id: 77, topic: 'other', agent: 'codex', content: 'cross-topic context' });
+
+  await page.fill('#input', '#squid@claude hello');
+  await page.keyboard.press('Enter');
+
+  await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toBeVisible();
+  expect(capturedBody?.pinned_ids).toContain(77);
+  expect(capturedBody?.adhoc).toBeFalsy();
+});
+
 test('adhoc send includes pinned_ids in POST /chat body', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
 
