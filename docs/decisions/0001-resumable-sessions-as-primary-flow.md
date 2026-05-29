@@ -10,8 +10,8 @@ updated: 2026-05-28
 Squid supports two session modes, selected per-message via input syntax:
 
 - **Resumable** (`#topic@alias message`) — CLI owns the conversation state via
-  `--resume <session_id>`. Token-efficient; native conversation format. Used for
-  ongoing sessions where continuity matters.
+  `--resume <session_id>`. Native conversation format; context grows with every
+  turn. Used for ongoing sessions where continuity matters.
 - **Adhoc** (`#topic@alias! message` or `#topic@alias!N message`) — stateless
   oneshot invocation. History is injected as a synthetic text block via
   `_build_prompt`. Used for parallel, context-scoped turns where the user
@@ -73,11 +73,36 @@ This recovery is handled in `topic_queue._process` and requires no user
 action. It is semantically equivalent to an implicit `/clear` followed by a
 replay of the original message.
 
+## Token Cost of Resumable Sessions
+
+Resumable sessions are **not token-efficient for long conversations**. The CLI
+re-sends the full conversation history on every `--resume` call. Context grows
+unboundedly until the user manually runs `/compact` or `/clear`.
+
+Claude Code has a native `/compact` that summarises the conversation and
+resets the context window, but it requires explicit user invocation. There is
+no automatic compaction for resumed sessions.
+
+**Open: Squid-side auto-compaction** — Squid should track turn count per
+`(topic, agent)` session and automatically trigger compaction every N turns
+(e.g. every 20 session turns). This would be Squid's own compaction policy,
+independent of the CLI's native `/compact`. Design questions to resolve:
+
+- What triggers the count: user messages, assistant messages, or pairs?
+- Should N be configurable per agent?
+- Compaction for Claude: issue `--resume SESSION_ID` with a compact prompt; for
+  Codex the session must be reset since `exec resume` has no compact equivalent.
+- Should the user be notified via a `status` event when auto-compaction fires?
+
+Until auto-compaction is implemented, long resumed sessions accumulate context
+silently and become increasingly expensive per turn.
+
 ## Consequences
 
-- Good: resumable path is token-efficient; CLI owns context natively
+- Good: CLI owns context natively; no synthetic history injection overhead
 - Good: adhoc path gives precise control over injected context
 - Good: both modes coexist on the same topic via `!` syntax
+- Bad: context grows with every turn — no auto-compaction yet
 - Bad: two code paths (`_build_prompt` + resume logic) to maintain
 - Bad: Codex `exec resume` does not support `/clear` or `/compact` natively —
   session reset must be handled by Squid (see ADR-0013)
