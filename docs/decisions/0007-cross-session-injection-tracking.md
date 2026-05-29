@@ -63,3 +63,23 @@ conversation state), and there is no server cleanup burden.
 
 The trade-off: bookmarked context is only available on the device where it was bookmarked.
 Cross-device sync would require re-introducing server-side storage.
+
+## Ephemerality of Pinned Context
+
+Pinned context is intentionally ephemeral, and the design accepts this for two reasons:
+
+**Session turns — injection is one-shot by nature.** Once a bookmark is injected into a
+resumable session, that content becomes part of the session history and is carried forward
+by `--resume` on every subsequent turn. The `injectedInto` localStorage map records this
+so the client never sends the same `pinned_id` to the same `(topic, agent)` twice. After
+the first injection the bookmark has done its job; re-injecting it would be redundant noise.
+
+**Adhoc turns — cross-device sync has no practical payoff.** Adhoc turns are stateless by
+design: each one runs independently with no persistent session. A bookmark injected into an
+adhoc turn disappears with that turn's context window; there is no accumulated history for
+a second device to build on. Syncing bookmarks across devices would cost server-side
+storage and a sync protocol for a scenario where the value gained is marginal.
+
+The localStorage-only approach therefore matches the actual lifecycle: bookmarks are
+UI-state that bridges a gap until the first injection, then become inert (for session turns)
+or remain available for repeated one-off enrichment on the same device (for adhoc turns).
