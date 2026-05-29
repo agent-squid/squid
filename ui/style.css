@@ -627,18 +627,17 @@ body {
 
 #help-btn {
   background: transparent;
-  border: 1px solid #222;
-  border-radius: 8px;
+  border: none;
   color: #3a3a3a;
   cursor: pointer;
   font-size: 1em;
-  padding: 0 0.6rem;
+  padding: 0 0.3rem;
   display: inline-flex;
   align-items: center;
   justify-content: center;
 }
-#help-btn:hover { color: #555; border-color: #333; }
-#help-btn.active { color: #f07040; border-color: #f07040; }
+#help-btn:hover { color: #666; }
+#help-btn.active { color: #f07040; }
 
 /* help panel */
 #help-panel {
