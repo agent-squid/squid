@@ -40,16 +40,16 @@ compatibility.
 | `/stopall`     | SIGTERM + drain queue                            | uniform                |
 | `/deq [N]`     | drain queue or remove Nth item                   | uniform                |
 | `/restart`     | kill all procs + restart server                  | uniform                |
-| `/filter`      | filter history by topic/alias                    | client-only            |
+| `/filter`      | filter history by topic/agent                    | client-only            |
 | `/filter reset`| clear filter                                     | client-only            |
 | `/help`        | open help panel                                  | client-only            |
 
 ### `/clear` and `/compact` implementation
 
-`POST /cmd { command: "clear", topic, alias? }`:
-- Resolves alias from request or falls back to topic's sticky alias
+`POST /cmd { command: "clear", topic, agent? }`:
+- Resolves agent from request or falls back to topic's sticky agent
 - Calls `kill_procs_by_topic(topic)` — stops any in-flight CLI process
-- Calls `clear_topic_session(topic, alias)` — wipes session_id and cwd lock
+- Calls `clear_topic_session(topic, agent)` — wipes session_id and cwd lock
 - Next message starts a fresh CLI invocation from `SQUID_HOME` (`/tmp/squid`)
 
 `compact` is implemented identically to `clear`. True context compaction

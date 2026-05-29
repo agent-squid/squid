@@ -9,17 +9,17 @@ updated: 2026-05-28
 
 Squid supports two session modes, selected per-message via input syntax:
 
-- **Resumable** (`#topic@alias message`) — CLI owns the conversation state via
+- **Resumable** (`#topic@agent message`) — CLI owns the conversation state via
   `--resume <session_id>`. Native conversation format; context grows with every
   turn. Used for ongoing sessions where continuity matters.
-- **Adhoc** (`#topic@alias! message` or `#topic@alias!N message`) — stateless
+- **Adhoc** (`#topic@agent! message` or `#topic@agent!N message`) — stateless
   oneshot invocation. History is injected as a synthetic text block via
   `_build_prompt`. Used for parallel, context-scoped turns where the user
   explicitly selects how much history to include.
 
 ## How Resumable Sessions Work
 
-Each `(topic, alias)` pair maps to a stored `session_id` and locked `cwd` in
+Each `(topic, agent)` pair maps to a stored `session_id` and locked `cwd` in
 `topic_sessions`. On every message, Squid looks up the stored record:
 
 - **No stored session** → fresh CLI invocation; session_id captured from the

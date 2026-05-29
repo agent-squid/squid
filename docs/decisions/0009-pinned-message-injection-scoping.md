@@ -40,12 +40,12 @@ Each mode behaves as follows:
 | First session turn (no resume) | All pending pinned via `inject_history` | Included — no active session yet |
 | Adhoc (`!`) | All pinned for topic via `context_history` | Included — adhoc has no session of its own |
 
-Implementation: `get_pending_injections(topic, alias, exclude_session_id=resume_session_id)`.
+Implementation: `get_pending_injections(topic, agent, exclude_session_id=resume_session_id)`.
 The `exclude_session_id` filter uses the existing `chat_messages.session_id` column — no new
 column or table needed.
 
-Adhoc uses `get_context_history(topic, limit=0)` (no alias filter, no session exclusion),
-meaning it can receive curated context from any alias or session in the topic. The `!` modifier
+Adhoc uses `get_context_history(topic, limit=0)` (no agent filter, no session exclusion),
+meaning it can receive curated context from any agent or session in the topic. The `!` modifier
 disables automatic history (N-turn lookback), not curated context.
 
 If a user explicitly pins a message from the active session, it is silently skipped for that

@@ -19,13 +19,13 @@ Works for synchronous use. Fails for async: the user must manually hunt for the 
 response.
 
 **B. Keep response in place; show a "ready" chip at the bottom**
-A dismissible notification (`↑ Response from #topic@alias ready`) scrolls to the response.
+A dismissible notification (`↑ Response from #topic@agent ready`) scrolls to the response.
 Preserves positional pairing of prompt and response.
 
 **C. Move the completed response bubble to the bottom on `done`**
 The response bubble is withheld from the DOM entirely during streaming. When the server
 signals `done`, the bubble is appended to `#messages` with fully rendered markdown,
-surfacing it as the newest item at the bottom. The response header (`#topic@alias  prompt…`)
+surfacing it as the newest item at the bottom. The response header (`#topic@agent  prompt…`)
 makes it self-contained without positional proximity to the user bubble.
 
 During streaming, content is shown as a live plain-text preview inside the thinking bubble
