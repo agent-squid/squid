@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-05-25
-updated: 2026-05-27
+updated: 2026-05-28
 ---
 # ADR-0001: Session Management — Resumable and Adhoc Modes
 
@@ -38,8 +38,7 @@ wipes both `session_id` and `cwd`, allowing the next message to start fresh.
 
 Adhoc turns (`!`) bypass session resumption entirely. Each turn is independent:
 
-- `_build_prompt` injects the last N message pairs as a `<conversation_history>` block
-- Pinned messages are included regardless of N
+- `_build_prompt` injects the last N non-adhoc session turns as a `<conversation_history>` block
 - No `session_id` is stored or used
 
 Adhoc turns run in parallel on the same topic without queuing constraints.

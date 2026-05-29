@@ -114,11 +114,13 @@ created_at           TEXT    ISO8601 — set on INSERT, never updated (used for 
 1. `POST /chat` resolves agent name → looks up agent config → looks up `topic_sessions` for `session_id`
 2. `insert_user_message` (with `context=[]`) + `insert_assistant_message` (status=`pending`)
 3. CLI spawned via `TopicDispatcher` (FIFO per topic) with `--resume session_id` if present
-4. `_stats` chunk arrives → `save_stats()` → `set_topic_session()`
-5. `update_assistant_message(status="done", context=<tool_events_json>)`
+4. If `--resume` fails with "No conversation found": emit `status` event with stale session details, retry as fresh (see ADR-0001 — Stale Session Recovery)
+5. `_stats` chunk arrives → `save_stats()` → `set_topic_session()`
+6. `update_assistant_message(status="done", context=<tool_events_json>)`
 
 ### Adhoc turn
-Same as above but no `--resume`. Uses `get_context_history(lookback=N)` as inline context.
+Same as above but no `--resume`. Uses `get_context_history(lookback=N)` as inline context
+(last N non-adhoc session turns for the topic/agent pair).
 The returned message IDs are stored in the user message's `context` column.
 Session state in `topic_sessions` is not written.
 
@@ -155,12 +157,23 @@ Stream an AI response. Returns `text/event-stream`.
 |---|---|---|
 | `meta` | `{"agent": str\|null, "backend": str, "msg_id": int, "adhoc": bool}` | First, always |
 | `queued` | `{"topic": str, "position": int}` | When behind another turn in the topic queue |
-| `data:` (chunk) | raw text fragment | During streaming |
-| `status` | status line text (one line) | When CLI emits non-content output |
+| `status` | status line text | When CLI emits non-content output; also emitted for stale session recovery (see below) |
 | `tool` | `{"type": str, "name": str, ...}` | When backend calls a tool |
+| `data:` (chunk) | raw text fragment | During content streaming |
 | `stats` | see Stats object below | On session completion |
 | `done` | _(empty)_ | Normal completion |
-| `error` | error message string | On CLI error with no prior content |
+| `error` | error message string | On CLI error |
+
+**Stale session recovery**: If `--resume` fails with "No conversation found" (e.g. after a
+reboot changes the resolved `cwd`), Squid emits a `status` event describing the lost session
+(`session_id`, `cwd`, `backend`, `model`) then retries the prompt as a fresh turn. The client
+receives a normal `done`/`stats` at the end. See ADR-0001.
+
+**Client note — deferred response bubble**: The built-in UI withholds the response bubble
+from the DOM until the `done` event fires, then appends it at the bottom of the message list.
+During streaming, content is shown as a live plain-text preview inside the thinking bubble.
+Clients building their own UI should expect all `data:` chunks before `done`, then render the
+full response once. See ADR-0011.
 
 **Stats object** (sent in the `stats` event and stored in `session_stats`)
 ```json
@@ -171,6 +184,7 @@ Stream an AI response. Returns `text/event-stream`.
   "cache_read_tokens":     0,
   "cache_write_tokens":    0,
   "history_input_tokens":  0,
+  "reasoning_tokens":      0,
   "cost_usd":              0.0,
   "duration_ms":           0,
   "adhoc":                 false,
@@ -178,6 +192,9 @@ Stream an AI response. Returns `text/event-stream`.
   "cwd":                   "/path/to/cwd"
 }
 ```
+
+`reasoning_tokens` — Codex only; reflects `reasoning_output_tokens` from the Codex response.
+Zero for all other backends.
 
 **Error responses**
 ```json
@@ -412,6 +429,9 @@ Delete an agent and its topic sessions.
   }
 ]
 ```
+
+`new_input_tokens` = `input_tokens - history_input_tokens` — net new tokens excluding
+injected adhoc context history. Useful for understanding actual prompt cost vs. re-injected context cost.
 
 **Response — group=topic**
 ```json

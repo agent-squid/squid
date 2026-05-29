@@ -1,14 +1,11 @@
 ---
 status: accepted
 date: 2026-05-26
+updated: 2026-05-28
 ---
 # ADR-0011: Completed Response Bubbles Surface at the Bottom of the Chat
 
 ## Context and Problem Statement
-
-When a response is sent to the server, a response bubble is created and inserted immediately
-after the corresponding user bubble in the message list. For fast responses this is fine —
-the user is watching and the response appears in context.
 
 With parallel adhoc (`!`) execution (ADR-0010) the user can fire multiple queries and
 continue chatting while they run. A response that takes minutes to complete ends up deep
@@ -26,34 +23,38 @@ A dismissible notification (`↑ Response from #topic@alias ready`) scrolls to t
 Preserves positional pairing of prompt and response.
 
 **C. Move the completed response bubble to the bottom on `done`**
-Streaming still happens in the original position (progress is visible if the user happens to
-be watching). When the server signals `done`, the bubble (and its stats row) are re-appended
-to `#messages`, surfacing it as the newest item. The response header already contains the
-topic tag and a truncated prompt, making it self-contained.
+The response bubble is withheld from the DOM entirely during streaming. When the server
+signals `done`, the bubble is appended to `#messages` with fully rendered markdown,
+surfacing it as the newest item at the bottom. The response header (`#topic@alias  prompt…`)
+makes it self-contained without positional proximity to the user bubble.
+
+During streaming, content is shown as a live plain-text preview inside the thinking bubble
+(a scrollable `max-height` area), giving the user progress visibility without a jumping
+bubble. The thinking bubble collapses to a toggle on `done` if status/tool events were
+present, or is removed entirely if not.
 
 ## Decision Outcome
 
-**Option C** — move on `done`.
+**Option C** — bubble deferred to `done`.
 
-The response bubble header (`#topic@alias  prompt…`) identifies its origin without needing
-positional proximity to the user bubble. The frozen thinking bubble (status text) remains
-at the original position as a breadcrumb showing where the request was initiated.
+The response bubble (`const bubble`) is created immediately on send but not inserted into
+the DOM until `done`. All content chunks are accumulated in `raw` and shown as a live
+preview in the thinking bubble via `updateThinkingPreview()`. At `done`:
 
-At `done`, `messages.appendChild(bubble)` and `messages.appendChild(statsEl)` (if present)
-relocate both elements. `scrollToBottom()` scrolls the view only if the user is already
-near the bottom, avoiding interrupting active reading.
+1. `freezeThinking()` — collapses or removes the thinking bubble
+2. `contentDiv.innerHTML = marked.parse(raw)` — renders final markdown
+3. `messages.appendChild(bubble)` + `messages.appendChild(statsEl)` — surfaces at bottom
+4. `scrollToBottom()` — scrolls only if user is already near the bottom
 
-The `finally` block's `addTimestamp(bubble, doneTime)` naturally appends after `bubble` in
-its new position.
+Error and reconnect paths (`showError`, `showStoredResponse`) explicitly append the bubble
+to the DOM before populating content.
 
 ## Consequences
 
-- Good: async responses always surface where the user is looking
-- Good: no new UI component needed (notification chip, badge, etc.)
-- Good: self-contained response header makes positional decoupling legible
-- Neutral: during streaming the bubble is in its original (possibly off-screen) position;
-  only the completed result moves — streaming progress is not visible for long-running queries
-- Neutral: the frozen thinking bubble remains as a positional breadcrumb, which may look
-  like an orphaned element without its paired response
-- Bad: breaks the traditional prompt-response visual pairing for synchronous use; the response
-  always moves to the bottom even when the user was watching it stream in place
+- Good: async responses always surface where the user is looking — no jumping
+- Good: parallel responses complete in completion order at the bottom, never mid-stream
+- Good: thinking bubble provides live progress for long-running queries without a displaced bubble
+- Good: no new UI component needed
+- Neutral: the frozen thinking bubble remains as a positional breadcrumb at the prompt site
+- Bad: breaks traditional prompt-response visual pairing; response always moves to bottom
+- Bad: full markdown rendering deferred to `done` — no incremental markdown during streaming
