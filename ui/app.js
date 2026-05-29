@@ -2028,7 +2028,7 @@ initPin();
 document.getElementById('filter-badge-clear').addEventListener('click', clearFilter);
 document.addEventListener('click', e => {
   if (!acEl.contains(e.target) && e.target !== input) hideAutocomplete();
-  if (!pinPanel.contains(e.target) && e.target !== pinBtn) closePinPanel();
+  if (!pinPanel.contains(e.target) && !pinBtn.contains(e.target)) closePinPanel();
 });
 initHistoryScroll();
 initStats();
