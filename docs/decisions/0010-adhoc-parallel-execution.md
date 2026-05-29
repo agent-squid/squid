@@ -39,10 +39,22 @@ immediately and the item runs without delay.
 Ephemeral workers accumulate in `_workers` but remain idle after their single item completes.
 For a local single-user tool the overhead is negligible.
 
+## Stop behavior
+
+`/stop #topic` and `/stopall #topic` call `kill_procs_by_topic(topic)`, which sends SIGTERM
+to **all** subprocesses registered under that topic — session and adhoc alike. Processes are
+registered with their `topic` value in `_proc_registry`; the `__adhoc_N` dispatch key is
+internal to `TopicDispatcher` and is not reflected in the process registry.
+
+Consequence: `/stop #topic` while multiple adhoc queries are running kills all of them, not
+just the session worker. There is currently no way to stop individual adhoc processes or to
+stop only the session worker without also terminating in-flight adhoc turns for the same topic.
+
 ## Consequences
 
 - Good: adhoc turns are truly parallel — multiple `#topic@agent!` prompts run concurrently
 - Good: a long-running session turn on `topic@agent` does not block adhoc queries to the same agent
 - Good: no change to session queue behavior
 - Neutral: idle `TopicWorker` tasks accumulate per session; acceptable for local use
-- Neutral: `stop` / `stopall` commands target session workers; adhoc workers are ephemeral and not cancelable by topic key
+- Bad: `/stop #topic` kills all adhoc processes for that topic, not just the session worker —
+  no surgical per-process cancel is available
