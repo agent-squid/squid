@@ -96,6 +96,32 @@ test('#topic@agent! /stop sends agent + adhoc=true — LIFO kill of most recent 
   expect(cmdBody.adhoc).toBe(true);
 });
 
+test('consecutive #topic@agent! /stop walks LIFO — chip preserves adhoc flag', async ({ page }) => {
+  await mockBackend(page);
+
+  const cmdBodies = [];
+  await page.route('**/cmd', async route => {
+    cmdBodies.push(route.request().postDataJSON());
+    await route.fulfill({ json: { ok: true, killed: 1 } });
+  });
+
+  await page.goto('/');
+
+  // First stop
+  await page.fill('#input', '#squid@claude! /stop');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(200);
+
+  // Second stop — chip should still have adhoc=true so this also targets adhoc
+  await page.fill('#input', '/stop');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(200);
+
+  expect(cmdBodies).toHaveLength(2);
+  expect(cmdBodies[0].adhoc).toBe(true);
+  expect(cmdBodies[1].adhoc).toBe(true);
+});
+
 test('kill button appears on thinking bubble and sends stop_msg with msg_id', async ({ page }) => {
   await mockBackend(page);
 

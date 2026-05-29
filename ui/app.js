@@ -530,7 +530,7 @@ form.addEventListener('submit', async (e) => {
     await handleCommand(cmd, topic, agent, adhoc, lookback);
     // Re-set chip after topic-scoped commands so next message stays in context
     if (['clear', 'compact', 'stop', 'stopall', 'deq'].includes(cmd.command) && (topic !== 'default' || agent)) {
-      setTopicChip(topic, agent);
+      setTopicChip(topic, agent, adhoc, lookback);
     }
     return;
   }
