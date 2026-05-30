@@ -47,6 +47,33 @@ scrollBtn.addEventListener('mouseleave', () => {
 
 marked.setOptions({ breaks: true });
 
+// Rewrite file:// links and images to /localfile?path= so local paths are served.
+(function () {
+  function fileToLocal(url) {
+    if (!url) return url;
+    if (url.startsWith('file://')) {
+      const p = decodeURIComponent(url.replace(/^file:\/\//, ''));
+      return '/localfile?path=' + encodeURIComponent(p);
+    }
+    // bare absolute paths like /Users/... or ~/...
+    if (/^(\/|~\/)/.test(url) && /\.\w{1,6}$/.test(url)) {
+      return '/localfile?path=' + encodeURIComponent(url);
+    }
+    return url;
+  }
+  // marked v5+ passes a token object; override href while forwarding everything else.
+  marked.use({
+    renderer: {
+      link({ href, title, tokens }) {
+        return marked.Renderer.prototype.link.call(this, { href: fileToLocal(href), title, tokens });
+      },
+      image({ href, title, text }) {
+        return marked.Renderer.prototype.image.call(this, { href: fileToLocal(href), title, text });
+      },
+    },
+  });
+})();
+
 // ── navigation ────────────────────────────────────────────────────────────────
 
 let currentView = 'chat';
@@ -350,6 +377,9 @@ async function loadHistory() {
       if (item.stats) {
         const statsEl = addStats(asstBubble, item.stats, item.timestamp);
         statsEl.classList.add('history-item');
+      } else if (item.timestamp) {
+        const tsEl = addTimestamp(asstBubble, item.timestamp);
+        if (tsEl) tsEl.classList.add('history-item');
       }
 
       if (item.context) {
@@ -906,7 +936,8 @@ async function sendMessage(text) {
             eventName = null;
 
           } else if (eventName === 'status') {
-            statusBuf += data;
+            if (statusBuf && !statusBuf.endsWith('\n')) statusBuf += ' ';
+            statusBuf += data.trimStart();
             updateThinkingPreview();
             // no eventName reset — allow multi-line accumulation
 

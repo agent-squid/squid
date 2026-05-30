@@ -678,6 +678,22 @@ async def get_journal(topic: str, week: str, agent: Optional[str] = None):
     return PlainTextResponse(content, media_type="text/markdown")
 
 
+@app.get("/localfile")
+async def serve_local_file(path: str):
+    """Serve a local file by absolute path (local dev only)."""
+    import mimetypes
+    from fastapi.responses import FileResponse, PlainTextResponse
+    p = Path(path).expanduser().resolve()
+    if not p.exists():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if not p.is_file():
+        return JSONResponse({"error": "not a file"}, status_code=400)
+    mime, _ = mimetypes.guess_type(str(p))
+    if mime and mime.startswith("text/"):
+        return PlainTextResponse(p.read_text(errors="replace"), media_type=mime)
+    return FileResponse(str(p), media_type=mime or "application/octet-stream")
+
+
 if UI_DIR.exists():
     app.mount("/", StaticFiles(directory=UI_DIR, html=True), name="ui")
 
