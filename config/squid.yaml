@@ -1,6 +1,6 @@
 server:
   host: "127.0.0.1"
-  port: 8899
+  port: 8000
 
 agent:
   first_byte_timeout: 30

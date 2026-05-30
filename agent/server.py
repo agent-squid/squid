@@ -34,7 +34,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, SQUID_HOME
+from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, SQUID_HOME, _cfg
 from .runners import run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError, CLIError, list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id
 from .history import list_history
 from .topic_queue import TopicDispatcher
@@ -680,3 +680,20 @@ async def get_journal(topic: str, week: str, agent: Optional[str] = None):
 
 if UI_DIR.exists():
     app.mount("/", StaticFiles(directory=UI_DIR, html=True), name="ui")
+
+
+def main():
+    import uvicorn
+    host = _cfg["server"]["host"]
+    port = _cfg["server"]["port"]
+    print(f"Starting squid on http://{host}:{port}")
+    uvicorn.run(
+        "agent.server:app",
+        host=host,
+        port=port,
+        reload="--reload" in sys.argv,
+    )
+
+
+if __name__ == "__main__":
+    main()
