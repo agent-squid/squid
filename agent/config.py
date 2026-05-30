@@ -1,6 +1,15 @@
 import os
 import shutil
+from pathlib import Path
 from typing import Optional
+import yaml
+
+_ROOT = Path(__file__).parent.parent
+
+def _load_config() -> dict:
+    return yaml.safe_load((_ROOT / "config" / "squid.yaml").read_text())
+
+_cfg = _load_config()
 
 # CLI executable names — override via env if installed elsewhere
 CLAUDE_CLI   = "claude"
@@ -10,10 +19,10 @@ CURSOR_CLI   = "cursor-agent"
 AGY_CLI      = "agy"
 
 # How long to wait for a CLI to produce its first byte before giving up
-FIRST_BYTE_TIMEOUT = 30   # seconds
+FIRST_BYTE_TIMEOUT: int = _cfg["agent"]["first_byte_timeout"]
 
 # Hard cap on total response time per request
-RESPONSE_TIMEOUT = 1800   # seconds (30 min default; overridable per agent)
+RESPONSE_TIMEOUT: int = _cfg["agent"]["response_timeout"]
 
 # Common install locations not always in subprocess PATH
 _EXTRA_PATHS = [

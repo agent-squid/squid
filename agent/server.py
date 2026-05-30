@@ -50,6 +50,7 @@ from .stats_db import (
     delete_topic, hide_topic, get_topic_agents, get_topic_agent_history,
     clear_agent_sessions, get_agent_sessions,
 )
+from .journal import maybe_trigger_journals, _generate_journal, _current_week, list_topic_journals, read_journal
 from . import creds
 
 init_db()
@@ -145,7 +146,7 @@ class QuotaDeltaRequest(BaseModel):
 
 
 class CmdRequest(BaseModel):
-    command: Literal["stop", "stopall", "deq", "list", "restart", "clear", "compact", "stop_msg"]
+    command: Literal["stop", "stopall", "deq", "list", "restart", "clear", "compact", "stop_msg", "journal"]
     topic: str = "default"
     agent: Optional[str] = None
     adhoc: Optional[bool] = None
@@ -386,6 +387,11 @@ async def chat(req: ChatRequest):
 
     upsert_topic(req.topic, resolved_agent, last_prompt=req.message,
                  last_backend=backend, last_model=model)
+    if not req.adhoc:
+        asyncio.create_task(
+            maybe_trigger_journals(req.topic, resolved_agent),
+            name=f"squid-journal-{req.topic}",
+        )
     agent_cwd: Optional[str] = agent_config.get("cwd") or None
     response_timeout: Optional[int] = agent_config.get("timeout")
 
@@ -490,6 +496,13 @@ async def run_cmd(req: CmdRequest):
         kill_procs_by_topic(req.topic)
         clear_topic_session(req.topic, agent)
         return JSONResponse({"ok": True, "agent": agent})
+
+    if req.command == "journal":
+        week_key, week_start, week_end = _current_week()
+        path = await _generate_journal(req.topic, req.agent, week_key, week_start, week_end)
+        if path:
+            return JSONResponse({"ok": True, "file": str(path)})
+        return JSONResponse({"ok": False, "error": "generation failed or no turns"}, status_code=500)
 
     return JSONResponse({"ok": False, "error": "unknown command"}, status_code=400)
 
@@ -649,6 +662,20 @@ async def quota():
     except Exception as exc:
         log.error("quota fetch failed: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=502)
+
+
+@app.get("/journals/{topic}")
+async def list_journals(topic: str):
+    return JSONResponse(list_topic_journals(topic))
+
+
+@app.get("/journals/{topic}/{week}")
+async def get_journal(topic: str, week: str, agent: Optional[str] = None):
+    from fastapi.responses import PlainTextResponse
+    content = read_journal(topic, week, agent=agent)
+    if content is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return PlainTextResponse(content, media_type="text/markdown")
 
 
 if UI_DIR.exists():

@@ -504,6 +504,37 @@ def get_messages_by_ids(ids: list[int]) -> list[dict]:
     return result
 
 
+def get_topic_messages_for_period(
+    topic: str, since_iso: str, until_iso: str,
+    agent: Optional[str] = None,
+) -> list[dict]:
+    """Return [user, asst, ...] pairs for a topic within [since_iso, until_iso).
+    Pass agent= to scope to a single agent's turns; omit for all agents."""
+    clause = "AND a.agent = ?" if agent else ""
+    params: list = [topic, since_iso, until_iso] + ([agent] if agent else [])
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""SELECT u.content AS user_content, a.content AS asst_content
+               FROM chat_messages a
+               JOIN chat_messages u ON u.id = a.reply_to
+               WHERE a.topic = ?
+                 AND a.role = 'assistant'
+                 AND a.status = 'done'
+                 AND COALESCE(a.adhoc, 0) = 0
+                 AND a.content IS NOT NULL
+                 AND a.created_at >= ?
+                 AND a.created_at < ?
+                 {clause}
+               ORDER BY a.id ASC""",
+            params,
+        ).fetchall()
+    result = []
+    for r in rows:
+        result.append({"role": "user",      "content": r["user_content"] or ""})
+        result.append({"role": "assistant", "content": r["asst_content"] or ""})
+    return result
+
+
 def mark_orphaned_pending() -> int:
     with _connect() as conn:
         cur = conn.execute("UPDATE chat_messages SET status='error' WHERE status='pending'")
