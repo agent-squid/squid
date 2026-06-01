@@ -707,13 +707,17 @@ async def get_remote_url():
             ["tailscale", "status", "--json"],
             capture_output=True, text=True, timeout=5,
         )
+        if result.returncode != 0:
+            return JSONResponse({"url": None, "reason": "not_running"})
         data = json.loads(result.stdout)
         dns = data.get("Self", {}).get("DNSName", "").rstrip(".")
         if dns:
             return JSONResponse({"url": f"https://{dns}/"})
+        return JSONResponse({"url": None, "reason": "no_dns"})
+    except FileNotFoundError:
+        return JSONResponse({"url": None, "reason": "not_installed"})
     except Exception:
-        pass
-    return JSONResponse({"url": None})
+        return JSONResponse({"url": None, "reason": "error"})
 
 
 _LOCALFILE_ROOTS: list[Path] = [

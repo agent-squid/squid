@@ -63,9 +63,11 @@ bin/start.sh     # starts the server in the background (PID saved to .squid.pid)
 bin/stop.sh      # stops the server
 ```
 
-The server auto-runs `install.sh` on first launch if the venv is missing.
-Host and port are set in `config/squid.yaml` (copy from `config/squid.yaml.example`).
+Copy `config/squid.yaml.example` to `config/squid.yaml` and edit for your environment.
 All config changes require a full restart (`bin/stop.sh && bin/start.sh`).
+
+**Local access:** `http://127.0.0.1:8000`
+**Remote access (Tailscale):** `https://<machine-name>/` — `bin/start.sh` configures this automatically if Tailscale is installed. Type `/remote` in the chat to get a QR code.
 
 ## Backends
 
@@ -103,7 +105,7 @@ Agents are **immutable** — they cannot be edited after creation. If you need a
 Create an agent via the UI settings panel, or directly:
 
 ```bash
-curl -X POST http://localhost:8000/config/agents \
+curl -X POST http://127.0.0.1:8000/config/agents \
   -H 'Content-Type: application/json' \
   -d '{"name": "opus", "backend": "claude", "model": "claude-opus-4-7", "cwd": "/tmp/squid/work"}'
 ```
@@ -143,13 +145,13 @@ Each `(topic, agent)` pair maintains a resumable CLI session. The `cwd` used at 
 Clear a session to start fresh (picks up current agent config):
 
 ```bash
-curl -X DELETE 'http://localhost:8000/topics/work/session?agent=opus'
+curl -X DELETE 'http://127.0.0.1:8000/topics/work/session?agent=opus'
 ```
 
 Inspect what a session has seen and what's pending injection:
 
 ```bash
-curl 'http://localhost:8000/context/work?agent=opus'
+curl 'http://127.0.0.1:8000/context/work?agent=opus'
 ```
 
 ```json
@@ -265,7 +267,8 @@ Use the agent directly when one terminal is enough. Use Squid when you want seve
 | `adhoc`    | bool           | `false`     | Run as oneshot, parallel, outside session queue  |
 
 ```bash
-curl -N -X POST http://localhost:8000/chat \
+# If server.token is set, add: -H 'Authorization: Bearer <token>'
+curl -N -X POST http://127.0.0.1:8000/chat \
   -H 'Content-Type: application/json' \
   -d '{"message": "summarise this", "topic": "work", "agent": "opus"}'
 ```

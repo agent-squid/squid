@@ -168,11 +168,12 @@ async function openRemoteQR() {
   if (document.getElementById('remote-modal')) return;
 
   const token = localStorage.getItem('squid_token') || '';
-  let remoteUrl = null;
+  let remoteUrl = null, remoteReason = 'error';
   try {
     const res = await fetch('/remote');
     const data = await res.json();
     remoteUrl = data.url || null;
+    remoteReason = data.reason || null;
   } catch {}
 
   const authUrl = remoteUrl
@@ -216,9 +217,15 @@ async function openRemoteQR() {
     new QRCode(qrDiv, { text: authUrl, width: 220, height: 220,
                          colorDark: '#0f0f13', colorLight: '#f5f0e8' });
   } else {
-    urlEl.textContent = remoteUrl === null
-      ? 'Tailscale not available — connect via Tailscale to use remote access.'
-      : `${remoteUrl}  (set server.token in squid.yaml for authenticated access)`;
+    const reason = remoteReason;
+    const msgs = {
+      not_installed: 'Tailscale is not installed.\nInstall from tailscale.com, then restart squid — bin/start.sh will configure remote access automatically.',
+      not_running:   'Tailscale is installed but not running.\nStart the Tailscale app, then run bin/start.sh again.',
+      no_dns:        'Tailscale is running but has no DNS name.\nEnable MagicDNS in your Tailscale admin console (tailscale.com/kb/1081).',
+      error:         'Could not reach Tailscale. Check that the Tailscale app is running.',
+    };
+    urlEl.style.whiteSpace = 'pre-line';
+    urlEl.textContent = msgs[reason] || 'Tailscale unavailable — remote access requires Tailscale (tailscale.com).';
     box.appendChild(closeBtn);
     box.appendChild(title);
     box.appendChild(urlEl);
