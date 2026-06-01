@@ -91,6 +91,9 @@ def _build_prompt(topic: str, agent: Optional[str], week_key: str,
     return f"""You are generating a weekly journal entry for an AI coding assistant conversation log.
 
 Analyze the following conversation from topic {scope_label} and produce a structured Markdown journal entry.
+The journal output will be passed directly into a future agent's input as context.
+Make it useful for handoff: write concrete facts, name files and commands when known,
+separate completed work from unresolved work, and avoid vague narrative.
 
 <conversation>
 {conversation}
@@ -102,6 +105,9 @@ Produce ONLY the following Markdown, with no preamble:
 
 ## Summary
 2–3 sentences describing what was worked on this week.
+
+## How to use this
+Brief instructions for the next agent: what context to trust, what to verify before acting, and which open threads are most relevant if the user resumes this topic.
 
 ## File edits
 Bullet list of files modified and what changed. Infer from the conversation. If none, write "None noted."
@@ -197,6 +203,8 @@ async def _generate_all_journal(week_key: str) -> Optional[Path]:
     prompt = f"""You are generating a cross-topic weekly summary for an AI coding assistant.
 
 Below are individual topic journals for Week {week_num}, {year}. Synthesize them into a single high-level summary.
+The output will be passed directly into a future agent's input as context.
+Make it useful for handoff: preserve concrete project state, distinguish completed work from open threads, and explain how the next agent should use the summary.
 
 <topic_journals>
 {sections}
@@ -208,6 +216,9 @@ Produce ONLY the following Markdown, with no preamble:
 
 ## Overview
 2–4 sentences summarizing the week across all topics.
+
+## How to use this
+Brief instructions for the next agent: which topic journals to consult first, what assumptions to verify, and which open threads are most likely to need follow-up.
 
 ## By topic
 One bullet per topic with its key focus.

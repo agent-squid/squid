@@ -107,7 +107,7 @@ if [[ -z "$PYTHON" ]]; then
 else
   ok "$PYTHON ($($PYTHON --version))"
 
-  VENV_DIR="$(dirname "$0")/.venv"
+  VENV_DIR="$(cd "$(dirname "$0")/.." && pwd)/.venv"
 
   if [[ -d "$VENV_DIR" ]]; then
     ok "virtualenv already exists (.venv)"

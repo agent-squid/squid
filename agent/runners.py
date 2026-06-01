@@ -156,6 +156,7 @@ async def _stream_lines(
     drain_task = asyncio.create_task(_drain(), name=f"stderr-drain-{pid}")
     timeout = response_timeout if response_timeout is not None else RESPONSE_TIMEOUT
     deadline = asyncio.get_event_loop().time() + timeout
+    first_byte = True
 
     try:
         while True:
@@ -163,16 +164,21 @@ async def _stream_lines(
             if remaining <= 0:
                 proc.kill()
                 raise CLIError("Response timeout exceeded")
+            # FIRST_BYTE_TIMEOUT guards only the initial response; subsequent lines
+            # use the full remaining deadline so agentic multi-turn runs aren't cut
+            # off mid-stream while the CLI is processing a slow tool call.
+            per_line = min(FIRST_BYTE_TIMEOUT if first_byte else remaining, remaining)
             try:
                 line = await asyncio.wait_for(
                     proc.stdout.readline(),
-                    timeout=min(FIRST_BYTE_TIMEOUT, remaining),
+                    timeout=per_line,
                 )
             except asyncio.TimeoutError:
                 proc.kill()
                 raise CLIError("Timed out waiting for CLI response")
             if not line:
                 break
+            first_byte = False
             yield line.decode(errors="replace").rstrip("\n")
     finally:
         _deregister_proc(pid)
@@ -390,16 +396,15 @@ async def run_codex(
                     yield {"_tool": {"name": "Bash", "command": cmd_str}}
         elif t == "turn.completed":
             usage = event.get("usage", {})
-            # Codex usage reports input_tokens as total input (including cached input).
-            # Normalize to "uncached input + cache_read" so UI/server aggregation can
-            # safely sum fields without double counting.
+            # Codex usage reports input_tokens as total input, including cached input.
+            # Keep cache_read_tokens as a breakdown field only; callers must not add it
+            # back into input totals.
             total_in = int(usage.get("input_tokens", 0) or 0)
             cached_in = int(usage.get("cached_input_tokens", 0) or 0)
-            uncached_in = max(total_in - cached_in, 0)
             yield {
                 "_stats": {
                     "session_id": thread_id,
-                    "input_tokens": uncached_in,
+                    "input_tokens": total_in,
                     "output_tokens": usage.get("output_tokens", 0),
                     "cache_read_tokens": cached_in,
                     "cache_write_tokens": 0,
@@ -674,5 +679,4 @@ async def run_antigravity(
                 "duration_ms": int(time.monotonic() * 1000 - start_ms),
             }
         }
-
 

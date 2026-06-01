@@ -1,7 +1,7 @@
 server:
-  host: "127.0.0.1"
+  host: "100.86.247.127"
   port: 8000
 
 agent:
-  first_byte_timeout: 30
+  first_byte_timeout: 60
   response_timeout: 1800

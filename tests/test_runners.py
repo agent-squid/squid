@@ -1,6 +1,7 @@
 """
 Unit tests for runners.py process registry and kill functions.
 """
+import asyncio
 import time
 from unittest.mock import patch, call
 import pytest
@@ -11,6 +12,7 @@ from agent.runners import (
     _deregister_proc,
     kill_procs_by_topic,
     kill_proc_by_msg_id,
+    run_codex,
 )
 
 
@@ -112,3 +114,21 @@ def test_kill_by_msg_id_returns_zero_when_not_found():
     _clear()
     with patch("agent.runners.os.kill"):
         assert kill_proc_by_msg_id(9999) == 0
+
+
+def test_codex_stats_keep_cached_tokens_as_breakdown_only():
+    async def fake_stream_lines(*args, **kwargs):
+        yield '{"type":"thread.started","thread_id":"thread-1"}'
+        yield '{"type":"turn.completed","usage":{"input_tokens":900000,"cached_input_tokens":300000,"output_tokens":1200,"reasoning_output_tokens":50}}'
+
+    async def collect():
+        return [chunk async for chunk in run_codex("hello", cwd="/tmp")]
+
+    with patch("agent.runners.CODEX_PATH", "codex"), patch("agent.runners._stream_lines", fake_stream_lines):
+        chunks = asyncio.run(collect())
+
+    stats = chunks[-1]["_stats"]
+    assert stats["session_id"] == "thread-1"
+    assert stats["input_tokens"] == 900000
+    assert stats["cache_read_tokens"] == 300000
+    assert stats["output_tokens"] == 1200

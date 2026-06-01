@@ -298,10 +298,10 @@ function _updateFilterBadge() {
     a.textContent = '@' + agent;
     labelEl.appendChild(a);
   }
-  if (adhoc != null) {
+  if (adhoc) { // only show '!' for adhoc — 'sess' was removed because it concatenated visually with the agent name
     const ad = document.createElement('span');
     ad.className = 'tag-adhoc';
-    ad.textContent = adhoc ? '!' : 'sess';
+    ad.textContent = '!';
     labelEl.appendChild(ad);
   }
   badge.classList.add('active');
@@ -949,7 +949,7 @@ async function sendMessage(text) {
             if (firstDataReceived) {
               contentDiv.innerHTML = marked.parse(raw);
               messages.appendChild(bubble);
-              if (statsEl) messages.appendChild(statsEl);
+              if (statsEl) messages.appendChild(statsEl); // stats goes between bubble and diffs, not after
               const diffTools = liveToolEvents.filter(t => t.name === 'Edit' || t.name === 'Write' || t.name === 'MultiEdit');
               for (const tool of diffTools) {
                 const block = makeToolBlock(tool);
@@ -1205,7 +1205,9 @@ function addStats(bubble, stats, timestamp) {
   const input      = stats.input_tokens       || 0;
   const out        = stats.output_tokens      || 0;
   const reasoning  = stats.reasoning_tokens   || 0;
-  const inp        = input + cacheRead + cacheWrite;
+  // inp = input only — do NOT add cacheRead/cacheWrite. Codex reports input_tokens
+  // as the total already including cached input, so adding cache fields would double-count.
+  const inp        = input;
   const hasCost    = stats.cost_usd != null;
   const cost       = hasCost ? `$${stats.cost_usd.toFixed(4)}` : '';
   const cache      = cacheRead ? ` · ${fmtNum(cacheRead)} cached` : '';
@@ -1223,20 +1225,19 @@ function addStats(bubble, stats, timestamp) {
 
   let rows, thead, tfoot;
   if (hasCost) {
-    const RATES = {
-      'Cache read':  [cacheRead,  0.30],
-      'Cache write': [cacheWrite, 3.75],
-      'Input':       [input,      3.00],
-      'Output':      [out,       15.00],
-    };
-    rows = Object.entries(RATES)
-      .filter(([, [n]]) => n > 0)
-      .map(([label, [n, rate]]) => {
-        const lineCost = (n / 1e6) * rate;
-        return `<tr><td>${label}</td><td>${fmtNum(n)}</td><td>$${rate.toFixed(2)}/M</td><td>$${lineCost.toFixed(4)}</td></tr>`;
-      }).join('');
-    thead = '<tr><th>Type</th><th>Tokens</th><th>Rate</th><th>Cost</th></tr>';
-    tfoot = `<tfoot><tr><td colspan="3">Total</td><td>${cost}</td></tr></tfoot>`;
+    const TOKEN_ROWS = [
+      ['Input total', input],
+      ['Cache read',  cacheRead],
+      ['Cache write', cacheWrite],
+      ['Output',      out],
+      ['Reasoning',   reasoning],
+    ];
+    rows = TOKEN_ROWS
+      .filter(([, n]) => n > 0)
+      .map(([label, n]) => `<tr><td>${label}</td><td>${fmtNum(n)}</td></tr>`)
+      .join('');
+    thead = '<tr><th>Type</th><th>Tokens</th></tr>';
+    tfoot = `<tfoot><tr><td>Total cost</td><td>${cost}</td></tr></tfoot>`;
   } else {
     const TOKEN_ROWS = [
       ['Cache read', cacheRead],
@@ -1463,7 +1464,7 @@ async function loadStats() {
 function renderTimeStats(rows) {
   let totalSessions = 0, totalIn = 0, totalOut = 0, totalCost = 0, totalQuotaDelta = 0;
   const bodyRows = rows.map(r => {
-    const inp  = (r.input_tokens || 0) + (r.cache_read_tokens || 0) + (r.cache_write_tokens || 0);
+    const inp  = r.input_tokens || 0; // cache already included in input_tokens (Codex) — don't add cache fields
     const out  = r.output_tokens || 0;
     const cost = r.cost_usd || 0;
     const qd   = r.quota_delta;
@@ -1532,7 +1533,7 @@ function renderTopicStats(rows) {
 function renderAgentStats(rows) {
   let totalSessions = 0, totalIn = 0, totalOut = 0, totalCost = 0;
   const bodyRows = rows.map(r => {
-    const inp  = (r.input_tokens || 0) + (r.cache_read_tokens || 0) + (r.cache_write_tokens || 0);
+    const inp  = r.input_tokens || 0; // cache already included in input_tokens (Codex) — don't add cache fields
     const out  = r.output_tokens || 0;
     const cost = r.cost_usd || 0;
     totalSessions += r.sessions || 0;
