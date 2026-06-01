@@ -1330,9 +1330,15 @@ function addStats(bubble, stats, timestamp) {
   const input      = stats.input_tokens       || 0;
   const out        = stats.output_tokens      || 0;
   const reasoning  = stats.reasoning_tokens   || 0;
-  // For Claude, input_tokens is only new (non-cached) tokens; cache_read_tokens is separate.
-  // For Codex, input_tokens already includes cached input — don't add cache fields.
-  // Heuristic: if input < cacheRead, this is the Claude split format.
+  // Token semantics differ by backend (see runners.py for the authoritative comment):
+  //   Claude (Anthropic API): input_tokens = NEW non-cached tokens only (can be 3–4 on a
+  //     large session); cache_read_tokens is separate. Effective total = input + cacheRead.
+  //     This has been true since the API launched — it only becomes visible once the session
+  //     is large enough that cache hits dominate and input_tokens collapses to near-zero.
+  //   Codex: input_tokens = TOTAL already including cache; cache_read_tokens is a breakdown.
+  //     Adding them would double-count.
+  // Heuristic to distinguish: if input < cacheRead the stats are in Claude split format.
+  // (Codex always has input >= cache_read since cache is a subset of total.)
   const isSplit    = cacheRead > 0 && input < cacheRead;
   const inp        = isSplit ? input + cacheRead : input;
   const newLabel   = isSplit ? ` (${fmtNum(input)} new)` : '';
@@ -1592,6 +1598,8 @@ async function loadStats() {
 function renderTimeStats(rows) {
   let totalSessions = 0, totalIn = 0, totalOut = 0, totalCost = 0, totalQuotaDelta = 0;
   const bodyRows = rows.map(r => {
+    // Claude: raw=new-only, cr=cached separately → effective = raw+cr.
+    // Codex:  raw=total-including-cache, cr=breakdown → use raw only.
     const raw  = r.input_tokens || 0;
     const cr   = r.cache_read_tokens || 0;
     const inp  = (cr > 0 && raw < cr) ? raw + cr : raw;
@@ -1631,6 +1639,8 @@ function renderTimeStats(rows) {
 function renderTopicStats(rows) {
   let totalSessions = 0, totalIn = 0, totalOut = 0, totalCost = 0;
   const bodyRows = rows.map(r => {
+    // Claude: raw=new-only, cr=cached separately → effective = raw+cr.
+    // Codex:  raw=total-including-cache, cr=breakdown → use raw only.
     const raw  = r.input_tokens  || 0;
     const cr   = r.cache_read_tokens || 0;
     const inp  = (cr > 0 && raw < cr) ? raw + cr : raw;
@@ -1665,6 +1675,8 @@ function renderTopicStats(rows) {
 function renderAgentStats(rows) {
   let totalSessions = 0, totalIn = 0, totalOut = 0, totalCost = 0;
   const bodyRows = rows.map(r => {
+    // Claude: raw=new-only, cr=cached separately → effective = raw+cr.
+    // Codex:  raw=total-including-cache, cr=breakdown → use raw only.
     const raw  = r.input_tokens || 0;
     const cr   = r.cache_read_tokens || 0;
     const inp  = (cr > 0 && raw < cr) ? raw + cr : raw;

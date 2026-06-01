@@ -329,6 +329,13 @@ async def run_claude(
                 if final_text:
                     yield final_text
             usage = event.get("usage", {})
+            # Anthropic API token semantics (unchanged since launch):
+            #   input_tokens           = NEW non-cached tokens only (can be as low as 3–4
+            #                            when the session history is fully cached)
+            #   cache_read_input_tokens  = tokens served from the prompt cache
+            #   cache_creation_input_tokens = tokens written to the prompt cache this turn
+            # Effective total processed = input_tokens + cache_read_input_tokens
+            # DO NOT conflate with Codex, where input_tokens is already the full total.
             yield {
                 "_stats": {
                     "session_id": session_id,
@@ -396,9 +403,10 @@ async def run_codex(
                     yield {"_tool": {"name": "Bash", "command": cmd_str}}
         elif t == "turn.completed":
             usage = event.get("usage", {})
-            # Codex usage reports input_tokens as total input, including cached input.
-            # Keep cache_read_tokens as a breakdown field only; callers must not add it
-            # back into input totals.
+            # Codex reports input_tokens as the TOTAL including cached input — opposite
+            # of the Anthropic API where input_tokens is new-only.
+            # cache_read_tokens is a breakdown of what's already inside input_tokens;
+            # callers must NOT add it again or they will double-count.
             total_in = int(usage.get("input_tokens", 0) or 0)
             cached_in = int(usage.get("cached_input_tokens", 0) or 0)
             yield {
