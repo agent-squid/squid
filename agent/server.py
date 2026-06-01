@@ -728,16 +728,32 @@ if UI_DIR.exists():
 
 
 def main():
+    import ipaddress
     import uvicorn
+
     host = _cfg["server"]["host"]
     port = _cfg["server"]["port"]
-    if host == "0.0.0.0":
+
+    # Only loopback (127.0.0.0/8) and Tailscale (100.64.0.0/10, RFC 6598 CGNAT)
+    # are permitted. Public IPs and 0.0.0.0 are blocked — /localfile and the
+    # agent API must never be reachable from the open internet.
+    _SAFE_NETS = [
+        ipaddress.ip_network("127.0.0.0/8"),
+        ipaddress.ip_network("100.64.0.0/10"),  # Tailscale CGNAT range
+    ]
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        sys.exit(f"ERROR: server.host must be an IP address, got: {host!r}")
+    if not any(ip in net for net in _SAFE_NETS):
         sys.exit(
-            "ERROR: server.host is set to 0.0.0.0 in squid.yaml.\n"
-            "Binding to all interfaces exposes /localfile and all API endpoints to\n"
-            "every network the machine is on. Set a specific IP (e.g. 127.0.0.1\n"
-            "for local-only, or your Tailscale IP for private mesh access)."
+            f"ERROR: server.host {host!r} is not a permitted address.\n"
+            "Allowed ranges:\n"
+            "  127.0.0.0/8      — loopback (local only)\n"
+            "  100.64.0.0/10    — Tailscale CGNAT (private mesh only)\n"
+            "Public IPs and 0.0.0.0 are blocked to protect /localfile and the agent API."
         )
+
     print(f"Starting squid on http://{host}:{port}")
     uvicorn.run(
         "agent.server:app",
