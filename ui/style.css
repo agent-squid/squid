@@ -1234,6 +1234,21 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.response-header-text.expanded {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+.history-prompt {
+  cursor: pointer;
+  opacity: 0.75;
+}
+.history-prompt:hover {
+  opacity: 1;
+}
+.history-prompt.expanded {
+  opacity: 1;
+}
 /* error state inside assistant bubble */
 .msg-error {
   font-size: 0.85em;

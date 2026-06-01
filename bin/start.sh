@@ -43,11 +43,19 @@ fi
 
 # ── start ────────────────────────────────────────────────────────────────────
 PID_FILE="$ROOT/.squid.pid"
-LOG_FILE="/tmp/squid-server.log"
+LOG_FILE="/tmp/squid/server.log"
+
+FORCE=0
+for arg in "$@"; do [[ "$arg" == "--force" || "$arg" == "--restart" ]] && FORCE=1; done
 
 if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-  echo "squid is already running (PID $(cat "$PID_FILE"))"
-  exit 0
+  if [[ "$FORCE" == "1" ]]; then
+    echo "stopping squid (PID $(cat "$PID_FILE"))..."
+    kill "$(cat "$PID_FILE")" && sleep 1
+  else
+    echo "squid is already running (PID $(cat "$PID_FILE")). Use --force to restart."
+    exit 0
+  fi
 fi
 
 RELOAD=""

@@ -466,7 +466,16 @@ async function loadHistory() {
       const asstHeaderText = document.createElement('span');
       asstHeaderText.className = 'response-header-text';
       asstHeaderText.appendChild(asstTag);
-      asstHeaderText.appendChild(document.createTextNode('  ' + truncate(item.prompt || '', 55)));
+      const promptSpan = document.createElement('span');
+      promptSpan.className = 'history-prompt';
+      promptSpan.textContent = '  ' + truncate(item.prompt || '', 55);
+      promptSpan.dataset.full = item.prompt || '';
+      promptSpan.addEventListener('click', () => {
+        const expanded = promptSpan.classList.toggle('expanded');
+        promptSpan.textContent = expanded ? promptSpan.dataset.full : '  ' + truncate(promptSpan.dataset.full, 55);
+        asstHeaderText.classList.toggle('expanded', expanded);
+      });
+      asstHeaderText.appendChild(promptSpan);
       asstHeader.appendChild(asstHeaderText);
       asstBubble.appendChild(asstHeader);
 
