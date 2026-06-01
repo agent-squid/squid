@@ -9,15 +9,33 @@
     window.history.replaceState({}, '', window.location.pathname);
   }
   const token = localStorage.getItem('squid_token');
-  if (token) {
-    const _orig = window.fetch.bind(window);
-    window.fetch = (url, opts = {}) => {
-      if (typeof url === 'string' && !url.startsWith('http')) {
-        opts = { ...opts, headers: { 'Authorization': `Bearer ${token}`, ...(opts.headers || {}) } };
-      }
-      return _orig(url, opts);
-    };
+
+  function showAuthBanner() {
+    if (document.getElementById('auth-banner')) return;
+    const el = document.createElement('div');
+    el.id = 'auth-banner';
+    el.innerHTML = `
+      <div id="auth-banner-box">
+        <div id="auth-banner-title">Authentication required</div>
+        <div id="auth-banner-body">
+          Open this page with your token to sign in:<br>
+          <code>${location.origin}/?token=<em>your-token</em></code><br><br>
+          Your token is the <code>server.token</code> value in <code>squid.yaml</code>.
+        </div>
+      </div>`;
+    document.body.appendChild(el);
   }
+
+  const _orig = window.fetch.bind(window);
+  window.fetch = (url, opts = {}) => {
+    if (typeof url === 'string' && !url.startsWith('http')) {
+      if (token) opts = { ...opts, headers: { 'Authorization': `Bearer ${token}`, ...(opts.headers || {}) } };
+    }
+    return _orig(url, opts).then(res => {
+      if (res.status === 401) showAuthBanner();
+      return res;
+    });
+  };
 })();
 
 const messages     = document.getElementById('messages');

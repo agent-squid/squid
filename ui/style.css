@@ -1,5 +1,18 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+#auth-banner {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.85);
+  display: flex; align-items: center; justify-content: center; z-index: 9999;
+}
+#auth-banner-box {
+  background: #1a1a24; border: 1px solid #3a3a50; border-radius: 8px;
+  padding: 2rem 2.5rem; max-width: 480px; width: 90%;
+}
+#auth-banner-title { font-size: 1.1em; font-weight: 600; margin-bottom: 1rem; color: #e8e4dc; }
+#auth-banner-body  { font-size: 0.85em; color: #aaa; line-height: 1.7; }
+#auth-banner-body code { color: #c8c0f0; background: #252535; padding: 0.1em 0.35em; border-radius: 3px; }
+#auth-banner-body em  { color: #888; font-style: normal; }
+
 body {
   font-family: system-ui, sans-serif;
   font-size: 14px;
