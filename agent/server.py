@@ -502,7 +502,7 @@ async def run_cmd(req: CmdRequest):
             if "--reload" in sys.argv:
                 Path(__file__).touch()
             else:
-                os.execv(sys.argv[0], sys.argv)
+                os.execv(sys.executable, [sys.executable, "-m", "agent.server"])
         asyncio.create_task(_restart())
         return JSONResponse({"ok": True})
 
