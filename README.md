@@ -215,12 +215,20 @@ locally. Run the following manually when ready:
 tailscale serve --bg 127.0.0.1:8000
 ```
 
-Access from any enrolled device at `https://<machine-name>/`. Tailscale
-auto-provisions a valid TLS cert — browsers show the padlock. First visit,
-authenticate with your token:
+Access from any enrolled device using the full Tailscale domain:
 
 ```
-https://<machine-name>/?token=<your-token>
+https://<machine-name>.<tailnet>.ts.net/
+```
+
+Tailscale auto-provisions a TLS cert for the full domain — browsers show the
+padlock. The short hostname alone (`https://<machine-name>/`) does not work
+because the cert is scoped to `*.ts.net` and browsers enforce an exact match.
+
+First visit from a new device, authenticate with your token:
+
+```
+https://<machine-name>.<tailnet>.ts.net/?token=<your-token>
 ```
 
 Rename your machine in Tailscale admin for a clean URL (e.g. `agent-squid`).
