@@ -164,6 +164,69 @@ function initSettings() {
   });
 }
 
+async function openRemoteQR() {
+  if (document.getElementById('remote-modal')) return;
+
+  const token = localStorage.getItem('squid_token') || '';
+  let remoteUrl = null;
+  try {
+    const res = await fetch('/remote');
+    const data = await res.json();
+    remoteUrl = data.url || null;
+  } catch {}
+
+  const authUrl = remoteUrl
+    ? (token ? `${remoteUrl}?token=${token}` : remoteUrl)
+    : null;
+
+  const modal = document.createElement('div');
+  modal.id = 'remote-modal';
+
+  const box = document.createElement('div');
+  box.id = 'remote-modal-box';
+
+  const title = document.createElement('div');
+  title.id = 'remote-modal-title';
+  title.textContent = 'Remote Access';
+
+  const qrDiv = document.createElement('div');
+  qrDiv.id = 'remote-qr';
+
+  const urlEl = document.createElement('div');
+  urlEl.id = 'remote-url';
+
+  const closeBtn = document.createElement('button');
+  closeBtn.id = 'remote-modal-close';
+  closeBtn.textContent = '✕';
+  closeBtn.addEventListener('click', () => modal.remove());
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+  document.addEventListener('keydown', function esc(e) {
+    if (e.key === 'Escape') { modal.remove(); document.removeEventListener('keydown', esc); }
+  });
+
+  if (authUrl) {
+    urlEl.textContent = authUrl;
+    box.appendChild(closeBtn);
+    box.appendChild(title);
+    box.appendChild(qrDiv);
+    box.appendChild(urlEl);
+    modal.appendChild(box);
+    document.body.appendChild(modal);
+    // Render QR after insertion so the div has dimensions
+    new QRCode(qrDiv, { text: authUrl, width: 220, height: 220,
+                         colorDark: '#0f0f13', colorLight: '#f5f0e8' });
+  } else {
+    urlEl.textContent = remoteUrl === null
+      ? 'Tailscale not available — connect via Tailscale to use remote access.'
+      : `${remoteUrl}  (set server.token in squid.yaml for authenticated access)`;
+    box.appendChild(closeBtn);
+    box.appendChild(title);
+    box.appendChild(urlEl);
+    modal.appendChild(box);
+    document.body.appendChild(modal);
+  }
+}
+
 function openHelp() {
   helpPanel.classList.add('open');
   helpBtn.classList.add('active');
@@ -484,6 +547,7 @@ const SQUID_COMMANDS = [
   { name: 'filter',       desc: 'filter history by current topic or agent',     args: false },
   { name: 'filter reset', desc: 'clear the active filter',                      args: false },
   { name: 'help',         desc: 'show help panel',                              args: false },
+  { name: 'remote',       desc: 'show QR code for mobile / tablet access',      args: false },
 ];
 
 function parseCommand(message) {
@@ -494,6 +558,7 @@ function parseCommand(message) {
   if (/^clear$/i.test(t))        return { command: 'clear' };
   if (/^compact$/i.test(t))      return { command: 'compact' };
   if (/^help$/i.test(t))         return { command: 'help' };
+  if (/^remote$/i.test(t))       return { command: 'remote' };
   if (/^filter reset$/i.test(t)) return { command: 'filter_reset' };
   if (/^filter$/i.test(t))       return { command: 'filter' };
   const m = t.match(/^deq(?:\s+(-?\d+))?$/i);
@@ -504,6 +569,10 @@ function parseCommand(message) {
 async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
   if (cmd.command === 'help') {
     openHelp();
+    return;
+  }
+  if (cmd.command === 'remote') {
+    openRemoteQR();
     return;
   }
   if (cmd.command === 'filter') {

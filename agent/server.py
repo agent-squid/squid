@@ -698,6 +698,24 @@ async def get_journal(topic: str, week: str, agent: Optional[str] = None):
     return PlainTextResponse(content, media_type="text/markdown")
 
 
+@app.get("/remote")
+async def get_remote_url():
+    """Return the Tailscale HTTPS URL for remote access QR generation."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True, text=True, timeout=5,
+        )
+        data = json.loads(result.stdout)
+        dns = data.get("Self", {}).get("DNSName", "").rstrip(".")
+        if dns:
+            return JSONResponse({"url": f"https://{dns}/"})
+    except Exception:
+        pass
+    return JSONResponse({"url": None})
+
+
 _LOCALFILE_ROOTS: list[Path] = [
     Path(r).expanduser().resolve()
     for r in ((_cfg.get("server") or {}).get("localfile_roots") or [])

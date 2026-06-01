@@ -1,5 +1,31 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+#remote-modal {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.75);
+  display: flex; align-items: center; justify-content: center; z-index: 9999;
+}
+#remote-modal-box {
+  background: #f5f0e8; border-radius: 12px;
+  padding: 1.5rem; text-align: center; position: relative;
+  max-width: 320px; width: 90%;
+}
+#remote-modal-title {
+  font-size: 1em; font-weight: 600; color: #1a1a2e;
+  margin-bottom: 1rem;
+}
+#remote-qr { display: flex; justify-content: center; margin-bottom: 0.75rem; }
+#remote-qr img, #remote-qr canvas { border-radius: 6px; }
+#remote-url {
+  font-size: 0.68em; color: #555; word-break: break-all;
+  background: #e8e3d8; border-radius: 4px; padding: 0.4rem 0.5rem;
+  user-select: all; cursor: text;
+}
+#remote-modal-close {
+  position: absolute; top: 0.6rem; right: 0.75rem;
+  background: none; border: none; cursor: pointer;
+  color: #888; font-size: 1rem; line-height: 1;
+}
+
 #auth-banner {
   position: fixed; inset: 0; background: rgba(0,0,0,0.85);
   display: flex; align-items: center; justify-content: center; z-index: 9999;
