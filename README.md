@@ -66,8 +66,8 @@ bin/stop.sh      # stops the server
 Copy `config/squid.yaml.example` to `config/squid.yaml` and edit for your environment.
 All config changes require a full restart (`bin/stop.sh && bin/start.sh`).
 
-**Local access:** `http://127.0.0.1:8000`
-**Remote access (Tailscale):** `https://<machine-name>/` — `bin/start.sh` configures this automatically if Tailscale is installed. Type `/remote` in the chat to get a QR code.
+**Local access:** `http://127.0.0.1:8000` (port set in `config/squid.yaml`)
+**Remote access (Tailscale):** type `/remote` in the chat — it returns a QR code with the full HTTPS URL and your token included. Point your phone camera at it to open squid in one tap.
 
 ## Backends
 
@@ -204,7 +204,7 @@ Squid is most useful when your local machine can keep working while you are away
 
 Tailscale is a good fit for this. Its Personal plan is free for non-commercial personal use, and it creates a private WireGuard-based network across your own devices. Your phone, tablet, laptop, Mac mini, and workstation can talk inside the tailnet without opening a public port.
 
-squid always binds to `127.0.0.1` — it never touches a network interface directly.
+Squid always binds to `127.0.0.1` — it never touches a network interface directly.
 `bin/start.sh` automatically configures `tailscale serve` if Tailscale is installed,
 so remote access is set up on first start with no extra steps.
 
@@ -215,21 +215,17 @@ locally. Run the following manually when ready:
 tailscale serve --bg 127.0.0.1:8000
 ```
 
-Access from any enrolled device using the full Tailscale domain:
-
-```
-https://<machine-name>.<tailnet>.ts.net/
-```
-
-Tailscale auto-provisions a TLS cert for the full domain — browsers show the
-padlock. The short hostname alone (`https://<machine-name>/`) does not work
-because the cert is scoped to `*.ts.net` and browsers enforce an exact match.
-
-First visit from a new device, authenticate with your token:
+Type `/remote` in the chat to get a QR code with the full URL. The URL includes
+your token so the first visit from a new device authenticates automatically:
 
 ```
 https://<machine-name>.<tailnet>.ts.net/?token=<your-token>
 ```
+
+Tailscale auto-provisions a TLS cert for the full domain — browsers show the
+padlock. The full domain is required; the short hostname alone
+(`https://<machine-name>/`) does not work because the cert is scoped to
+`*.ts.net` and browsers enforce an exact match.
 
 Rename your machine in Tailscale admin for a clean URL (e.g. `agent-squid`).
 
@@ -364,6 +360,7 @@ Type these directly in the message box (no `#topic` prefix needed):
 | `/clear`   | Clear the current session                                     |
 | `/compact` | Compact or reset context                                      |
 | `/filter`  | Filter history to the current topic/agent lane                |
+| `/remote`  | Show QR code with full HTTPS URL + token for mobile access    |
 | `deq`      | Drain entire pending queue                                    |
 | `deq N`    | Remove Nth queued item (1=first, -1=last)                     |
 

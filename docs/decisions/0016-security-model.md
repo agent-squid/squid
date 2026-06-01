@@ -21,18 +21,19 @@ personal, single-user tool.
 
 Three complementary layers, each enforced at startup or in middleware:
 
-### Layer 1 — Host binding restricted to loopback or Tailscale
+### Layer 1 — Host binding restricted to loopback
 
-`main()` validates `server.host` against two permitted IP ranges at startup and
-exits with an error if the address is outside them:
+`main()` validates `server.host` at startup and exits with an error if the
+address is not in `127.0.0.0/8`:
 
 | Range | Purpose |
 |---|---|
 | `127.0.0.0/8` | Loopback — local machine only |
-| `100.64.0.0/10` | Tailscale CGNAT (RFC 6598) — private mesh only |
 
-Any other address — public IPs, LAN IPs, `0.0.0.0` — is rejected. This
-prevents accidental internet or LAN exposure regardless of what token is set.
+Public IPs, LAN IPs, Tailscale IPs, and `0.0.0.0` are all rejected. Squid
+never binds directly to a network interface. Remote access is handled
+exclusively by `tailscale serve`, which proxies HTTPS traffic from the
+Tailscale network to `127.0.0.1:<port>`.
 
 ### Layer 2 — Bearer token (optional but recommended)
 
@@ -41,7 +42,13 @@ If `server.token` is set in `squid.yaml`, an HTTP middleware requires
 (`.js`, `.css`, `.html`, fonts, etc.) are exempt so the UI page can load before
 the browser has a token.
 
-**First-visit flow:** navigate to `http://<host>:<port>/?token=<value>` once.
+**First-visit flow:** type `/remote` in the chat to get a QR code. The URL
+embeds the token:
+
+```
+https://<machine-name>.<tailnet>.ts.net/?token=<value>
+```
+
 The UI reads the token from the URL, stores it in `localStorage`, strips it
 from the URL bar, and injects it into every subsequent `fetch()` call via a
 `window.fetch` interceptor. No further token entry is needed on that device.
@@ -73,14 +80,15 @@ an authenticated client.
 Tailscale's MagicDNS assigns stable hostnames within your mesh without touching
 public DNS.
 
-**Laptop setup:**
+**Host setup:**
 1. In Tailscale admin, rename the machine (e.g. `agent-squid`).
-2. Set `server.host` to the machine's Tailscale IP (`tailscale ip -4`).
-3. Start squid — it binds to that IP only.
+2. Keep `server.host: "127.0.0.1"` — squid always binds to loopback.
+3. Run `bin/start.sh` — it auto-configures `tailscale serve` as the HTTPS proxy.
 
 **Phone/tablet access:**
 - Connect the device to the same Tailscale network.
-- Open `http://agent-squid:8000/?token=<value>` once to authenticate.
+- Type `/remote` in the chat on the host machine to get a QR code.
+- The QR code URL is `https://<machine-name>.<tailnet>.ts.net/?token=<value>` — scan it to authenticate in one tap.
 - MagicDNS resolves the hostname automatically — no port-forwarding needed.
 
 ### `squid.yaml` configuration
@@ -88,7 +96,7 @@ public DNS.
 ```yaml
 # All values require a full server restart to take effect.
 server:
-  host: "100.x.x.x"   # Tailscale IP or 127.0.0.1
+  host: "127.0.0.1"   # must be loopback; use tailscale serve for remote access
   port: 8000
   token: ""             # set to openssl rand -hex 32 output; empty = no auth
   localfile_roots:
