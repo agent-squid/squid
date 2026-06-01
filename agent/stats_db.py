@@ -723,6 +723,7 @@ def get_stats_by_topic() -> list:
                 """SELECT topic, COUNT(*) AS sessions,
                           SUM(input_tokens) AS input_tokens,
                           SUM(output_tokens) AS output_tokens,
+                          SUM(cache_read_tokens) AS cache_read_tokens,
                           SUM(cost_usd) AS cost_usd
                    FROM session_stats WHERE topic IS NOT NULL
                    GROUP BY topic ORDER BY sessions DESC"""

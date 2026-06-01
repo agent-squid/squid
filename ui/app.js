@@ -1330,18 +1330,21 @@ function addStats(bubble, stats, timestamp) {
   const input      = stats.input_tokens       || 0;
   const out        = stats.output_tokens      || 0;
   const reasoning  = stats.reasoning_tokens   || 0;
-  // inp = input only — do NOT add cacheRead/cacheWrite. Codex reports input_tokens
-  // as the total already including cached input, so adding cache fields would double-count.
-  const inp        = input;
+  // For Claude, input_tokens is only new (non-cached) tokens; cache_read_tokens is separate.
+  // For Codex, input_tokens already includes cached input — don't add cache fields.
+  // Heuristic: if input < cacheRead, this is the Claude split format.
+  const isSplit    = cacheRead > 0 && input < cacheRead;
+  const inp        = isSplit ? input + cacheRead : input;
+  const newLabel   = isSplit ? ` (${fmtNum(input)} new)` : '';
   const hasCost    = stats.cost_usd != null;
   const cost       = hasCost ? `$${stats.cost_usd.toFixed(4)}` : '';
-  const cache      = cacheRead ? ` · ${fmtNum(cacheRead)} cached` : '';
+  const cacheStr   = isSplit ? ` · ${fmtNum(cacheRead)} cached` : (cacheRead ? ` · ${fmtNum(cacheRead)} cached` : '');
   const reason     = reasoning ? ` · ${fmtNum(reasoning)} reasoning` : '';
   const dur        = stats.duration_ms ? ` · ${(stats.duration_ms / 1000).toFixed(1)}s` : '';
   const timePrefix = timestamp ? fmtTime(timestamp) + '  ·  ' : '';
 
   el.appendChild(document.createTextNode(
-    `${timePrefix}↑ ${fmtNum(inp)}${cache}  ↓ ${fmtNum(out)}${reason} tokens${dur}`
+    `${timePrefix}↑ ${fmtNum(inp)}${newLabel}${cacheStr}  ↓ ${fmtNum(out)}${reason} tokens${dur}`
   ));
 
   const qdSpan = document.createElement('span');
@@ -1589,7 +1592,9 @@ async function loadStats() {
 function renderTimeStats(rows) {
   let totalSessions = 0, totalIn = 0, totalOut = 0, totalCost = 0, totalQuotaDelta = 0;
   const bodyRows = rows.map(r => {
-    const inp  = r.input_tokens || 0; // cache already included in input_tokens (Codex) — don't add cache fields
+    const raw  = r.input_tokens || 0;
+    const cr   = r.cache_read_tokens || 0;
+    const inp  = (cr > 0 && raw < cr) ? raw + cr : raw;
     const out  = r.output_tokens || 0;
     const cost = r.cost_usd || 0;
     const qd   = r.quota_delta;
@@ -1626,7 +1631,9 @@ function renderTimeStats(rows) {
 function renderTopicStats(rows) {
   let totalSessions = 0, totalIn = 0, totalOut = 0, totalCost = 0;
   const bodyRows = rows.map(r => {
-    const inp  = r.input_tokens  || 0;
+    const raw  = r.input_tokens  || 0;
+    const cr   = r.cache_read_tokens || 0;
+    const inp  = (cr > 0 && raw < cr) ? raw + cr : raw;
     const out  = r.output_tokens || 0;
     const cost = r.cost_usd      || 0;
     totalSessions += r.sessions || 0;
@@ -1658,7 +1665,9 @@ function renderTopicStats(rows) {
 function renderAgentStats(rows) {
   let totalSessions = 0, totalIn = 0, totalOut = 0, totalCost = 0;
   const bodyRows = rows.map(r => {
-    const inp  = r.input_tokens || 0; // cache already included in input_tokens (Codex) — don't add cache fields
+    const raw  = r.input_tokens || 0;
+    const cr   = r.cache_read_tokens || 0;
+    const inp  = (cr > 0 && raw < cr) ? raw + cr : raw;
     const out  = r.output_tokens || 0;
     const cost = r.cost_usd || 0;
     totalSessions += r.sessions || 0;
