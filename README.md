@@ -210,14 +210,15 @@ If Tailscale is not installed or not logged in, squid still starts and is access
 locally. Run the following manually when ready:
 
 ```bash
-tailscale serve --bg --http=8000 127.0.0.1:8000
+tailscale serve --bg 127.0.0.1:8000
 ```
 
-Access from any enrolled device at `http://<machine-name>:8000/`. First visit,
+Access from any enrolled device at `https://<machine-name>/`. Tailscale
+auto-provisions a valid TLS cert — browsers show the padlock. First visit,
 authenticate with your token:
 
 ```
-http://<machine-name>:8000/?token=<your-token>
+https://<machine-name>/?token=<your-token>
 ```
 
 Rename your machine in Tailscale admin for a clean URL (e.g. `agent-squid`).

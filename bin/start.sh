@@ -25,15 +25,18 @@ if command -v tailscale &>/dev/null; then
   PORT=$("$VENV/bin/python3" -c \
     "import yaml; c=yaml.safe_load(open('$ROOT/config/squid.yaml')); print(c['server']['port'])" \
     2>/dev/null || echo "8000")
-  if tailscale serve status 2>/dev/null | grep -q "http://127.0.0.1:${PORT}"; then
-    echo "tailscale serve: already configured (port ${PORT})"
+  # Check if HTTPS serve is already proxying to our local port.
+  # tailscale serve (no --http flag) uses HTTPS on 443 with a Tailscale-issued
+  # cert — browsers show the padlock. Access via https://<machine-name>/
+  if tailscale serve status 2>/dev/null | grep -q "127.0.0.1:${PORT}"; then
+    echo "tailscale serve: already configured → https://$(tailscale status --json 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("Self",{}).get("DNSName","<machine-name>").rstrip("."))' 2>/dev/null || echo '<machine-name>')/"
   else
-    if tailscale serve --bg --http="${PORT}" "127.0.0.1:${PORT}" 2>/dev/null; then
-      echo "tailscale serve: configured (port ${PORT})"
+    if tailscale serve --bg "127.0.0.1:${PORT}" 2>/dev/null; then
+      echo "tailscale serve: configured → https://$(tailscale status --json 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("Self",{}).get("DNSName","<machine-name>").rstrip("."))' 2>/dev/null || echo '<machine-name>')/"
     else
-      echo "warning: tailscale serve failed — squid will run locally only."
-      echo "  To enable remote access, run:"
-      echo "    tailscale serve --bg --http=${PORT} 127.0.0.1:${PORT}"
+      echo "warning: tailscale serve failed — squid will run locally only (127.0.0.1:${PORT})."
+      echo "  To enable remote access later, run:"
+      echo "    tailscale serve --bg 127.0.0.1:${PORT}"
     fi
   fi
 fi
