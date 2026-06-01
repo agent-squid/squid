@@ -8,6 +8,7 @@ dist/
 squid.db
 squid-creds.json
 config/squid.yaml
+.squid.pid
 tests/e2e/node_modules/
 tests/e2e/playwright-report/
 tests/e2e/test-results/
