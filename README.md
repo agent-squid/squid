@@ -58,12 +58,14 @@ Topics and agents are not a rigid setup step. You can create a new `#topic` the 
 ## Setup
 
 ```bash
-bash install.sh   # installs Python venv + checks for claude/codex/copilot CLIs
-bash start.sh     # starts the server on http://127.0.0.1:8000
+bin/install.sh   # installs Python venv + checks for claude/codex/copilot CLIs
+bin/start.sh     # starts the server in the background (PID saved to .squid.pid)
+bin/stop.sh      # stops the server
 ```
 
 The server auto-runs `install.sh` on first launch if the venv is missing.
-Set `HOST=0.0.0.0` to listen on all interfaces, `PORT=8899` to change the port.
+Host and port are set in `config/squid.yaml` (copy from `config/squid.yaml.example`).
+All config changes require a full restart (`bin/stop.sh && bin/start.sh`).
 
 ## Backends
 
@@ -167,33 +169,46 @@ This means you curate context once — pin a useful response from one model, and
 
 Clearing a session also clears its injection log — a fresh session re-absorbs all currently-pinned messages on its first message.
 
+## Security
+
+Squid has three security layers. All are configured in `config/squid.yaml`.
+
+**Layer 1 — Host binding** (enforced at startup): `server.host` must be
+`127.0.0.1` (local only) or a Tailscale IP in `100.64.0.0/10`. Public IPs and
+`0.0.0.0` are blocked — the server refuses to start.
+
+**Layer 2 — Bearer token** (optional, recommended for Tailscale use):
+```yaml
+server:
+  token: "paste-output-of-openssl-rand-hex-32-here"
+```
+Set this to require authentication on all API endpoints. On first visit, open
+`http://<host>:<port>/?token=<value>` — the token is saved to `localStorage`
+and injected automatically into every API call from then on. If you open the UI
+without a token, a banner explains what to do.
+
+**Layer 3 — `/localfile` path allowlist**: the endpoint that serves local files
+to the browser is restricted to explicit directories:
+```yaml
+server:
+  localfile_roots:
+    - "/tmp/squid"
+```
+Add other directories as needed. An empty list disables the endpoint entirely.
+
 ## Couch Coding With Tailscale
 
 Squid is most useful when your local machine can keep working while you are away from the desk.
 
 Tailscale is a good fit for this. Its Personal plan is free for non-commercial personal use, and it creates a private WireGuard-based network across your own devices. Your phone, tablet, laptop, Mac mini, and workstation can talk inside the tailnet without opening a public port.
 
-Recommended setup:
+**Setup:**
+1. Find your Tailscale IP: `tailscale ip -4`
+2. In Tailscale admin, rename the machine to a friendly name (e.g. `agent-squid`)
+3. Set `server.host` to your Tailscale IP in `config/squid.yaml`, restart squid
+4. On each device, open `http://agent-squid:8000/?token=<your-token>` once to authenticate
 
-```bash
-# Keep Squid bound to localhost.
-HOST=127.0.0.1 PORT=8000 bash start.sh
-
-# Expose that localhost service only inside your Tailscale tailnet.
-tailscale serve --bg --http=8000 127.0.0.1:8000
-```
-
-Then open Squid from your phone or tablet using the machine's MagicDNS name or Tailscale address:
-
-```text
-http://mac-mini:8000
-```
-
-Important detail: `127.0.0.1` is local to the machine running Squid. Another device cannot directly reach a localhost-only Squid server by browsing to `http://<tailscale-ip>:8000`. `tailscale serve` is the bridge: it accepts tailnet traffic and proxies it to Squid's localhost listener.
-
-With this setup, Squid's own web server is not listening on your normal LAN or the public internet. Access is gated by your Tailscale account, device membership, and tailnet policy. In practical personal use, your phone becomes a secure remote control for the local CLIs as long as the phone itself is secured.
-
-If you run `HOST=0.0.0.0`, Squid may be reachable on normal LAN interfaces too. That can be useful, but it is broader exposure than localhost plus `tailscale serve`.
+MagicDNS resolves `agent-squid` to the Tailscale IP on all enrolled devices automatically — no DNS changes or port-forwarding needed. From then on, `http://agent-squid:8000` just works from your phone or tablet.
 
 ## How Squid Is Different
 
