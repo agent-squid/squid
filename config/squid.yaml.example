@@ -1,6 +1,20 @@
+# All values in this file take effect only after a full server restart
+# (bin/stop.sh && bin/start.sh). No hot-reload.
+
 server:
   host: "127.0.0.1"  # use 127.0.0.1 for local-only or your Tailscale IP for mesh; 0.0.0.0 is blocked
   port: 8000
+  # Set a random string (e.g. openssl rand -hex 32) to require
+  # Authorization: Bearer <token> on all API calls.
+  # Access the UI for the first time via http://<host>:<port>/?token=<value>
+  # — it will be saved to localStorage and sent automatically from then on.
+  # Empty string = no auth (only safe on 127.0.0.1).
+  token: ""
+  # Directories that /localfile is permitted to serve from.
+  # Requests for paths outside these roots are rejected with 403.
+  # Empty list = /localfile endpoint is disabled entirely.
+  localfile_roots:
+    - "/tmp/squid"
 
 agent:
   first_byte_timeout: 60

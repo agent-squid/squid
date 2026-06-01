@@ -1,3 +1,25 @@
+// ── bearer token auth ────────────────────────────────────────────────────────
+// First visit: open http://<host>:<port>/?token=<value> — stored to localStorage,
+// then stripped from the URL. All subsequent relative fetch() calls send it
+// automatically via the interceptor below.
+(function () {
+  const param = new URLSearchParams(window.location.search).get('token');
+  if (param) {
+    localStorage.setItem('squid_token', param);
+    window.history.replaceState({}, '', window.location.pathname);
+  }
+  const token = localStorage.getItem('squid_token');
+  if (token) {
+    const _orig = window.fetch.bind(window);
+    window.fetch = (url, opts = {}) => {
+      if (typeof url === 'string' && !url.startsWith('http')) {
+        opts = { ...opts, headers: { 'Authorization': `Bearer ${token}`, ...(opts.headers || {}) } };
+      }
+      return _orig(url, opts);
+    };
+  }
+})();
+
 const messages     = document.getElementById('messages');
 const form         = document.getElementById('form');
 const input        = document.getElementById('input');

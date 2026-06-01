@@ -113,6 +113,26 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 UI_DIR = Path(__file__).parent.parent / "ui"
 
+# Static file extensions served by the UI — exempt from bearer-token auth so
+# the page loads before the browser has a token in localStorage.
+_STATIC_EXTS = {".js", ".css", ".html", ".ico", ".png", ".svg",
+                ".woff", ".woff2", ".ttf", ".map", ".json", ".webmanifest"}
+
+_AUTH_TOKEN: str = (_cfg.get("server") or {}).get("token") or ""
+
+@app.middleware("http")
+async def bearer_auth(request: Request, call_next):
+    if not _AUTH_TOKEN:
+        return await call_next(request)
+    path = request.url.path
+    # Let the UI shell and its static assets through unauthenticated so the
+    # page can load and read the token from localStorage / URL param.
+    if path == "/" or Path(path).suffix in _STATIC_EXTS:
+        return await call_next(request)
+    if request.headers.get("Authorization") == f"Bearer {_AUTH_TOKEN}":
+        return await call_next(request)
+    return JSONResponse({"error": "unauthorized"}, status_code=401)
+
 # ---------------------------------------------------------------------------
 # Request schemas
 # ---------------------------------------------------------------------------
@@ -678,12 +698,21 @@ async def get_journal(topic: str, week: str, agent: Optional[str] = None):
     return PlainTextResponse(content, media_type="text/markdown")
 
 
+_LOCALFILE_ROOTS: list[Path] = [
+    Path(r).expanduser().resolve()
+    for r in ((_cfg.get("server") or {}).get("localfile_roots") or [])
+]
+
 @app.get("/localfile")
 async def serve_local_file(path: str):
-    """Serve a local file by absolute path (local dev only)."""
+    """Serve a local file — only paths under server.localfile_roots are allowed."""
     import mimetypes
     from fastapi.responses import FileResponse, PlainTextResponse
+    if not _LOCALFILE_ROOTS:
+        return JSONResponse({"error": "localfile not enabled (set server.localfile_roots in squid.yaml)"}, status_code=403)
     p = Path(path).expanduser().resolve()
+    if not any(p.is_relative_to(root) for root in _LOCALFILE_ROOTS):
+        return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
     if not p.exists():
         return JSONResponse({"error": "not found"}, status_code=404)
     if not p.is_file():
