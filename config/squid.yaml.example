@@ -2,20 +2,33 @@
 # (bin/stop.sh && bin/start.sh). No hot-reload.
 
 server:
-  host: "127.0.0.1"  # use 127.0.0.1 for local-only or your Tailscale IP for mesh; 0.0.0.0 is blocked
+  # IP address to bind to. Two options are permitted:
+  #   127.0.0.1   — local machine only. Use with `tailscale serve` to expose
+  #                 via Tailscale without squid itself being on the network.
+  #                 Run once: tailscale serve --bg / proxy http://127.0.0.1:8000
+  #                 Access via: https://<machine-name>/ (Tailscale handles TLS)
+  #   100.x.x.x   — bind directly to your Tailscale IP (tailscale ip -4).
+  #                 Simpler but squid is directly on the Tailscale network.
+  # 0.0.0.0 and public IPs are blocked — server will refuse to start.
+  host: "127.0.0.1"
   port: 8000
-  # Set a random string (e.g. openssl rand -hex 32) to require
-  # Authorization: Bearer <token> on all API calls.
-  # Access the UI for the first time via http://<host>:<port>/?token=<value>
-  # — it will be saved to localStorage and sent automatically from then on.
-  # Empty string = no auth (only safe on 127.0.0.1).
+
+  # Bearer token for API authentication. Set to a random string (e.g. the
+  # output of `openssl rand -hex 32`). Empty string = no auth required.
+  # First visit on a new device: http://<host>:<port>/?token=<value>
+  # The token is saved to localStorage and sent automatically after that.
   token: ""
-  # Directories that /localfile is permitted to serve from.
-  # Requests for paths outside these roots are rejected with 403.
-  # Empty list = /localfile endpoint is disabled entirely.
+
+  # Directories that the /localfile endpoint is allowed to serve from.
+  # When an LLM response contains a local file path (e.g. /tmp/squid/image.png),
+  # the UI rewrites it to /localfile?path=... and the server serves the file
+  # directly in the chat. Only paths under these roots are permitted — requests
+  # for anything outside return 403. Empty list = endpoint disabled entirely.
   localfile_roots:
     - "/tmp/squid"
 
 agent:
+  # How long to wait for the first byte from a CLI before giving up (seconds).
   first_byte_timeout: 60
+  # Hard cap on total response time per request (seconds).
   response_timeout: 1800

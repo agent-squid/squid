@@ -202,13 +202,29 @@ Squid is most useful when your local machine can keep working while you are away
 
 Tailscale is a good fit for this. Its Personal plan is free for non-commercial personal use, and it creates a private WireGuard-based network across your own devices. Your phone, tablet, laptop, Mac mini, and workstation can talk inside the tailnet without opening a public port.
 
-**Setup:**
-1. Find your Tailscale IP: `tailscale ip -4`
-2. In Tailscale admin, rename the machine to a friendly name (e.g. `agent-squid`)
-3. Set `server.host` to your Tailscale IP in `config/squid.yaml`, restart squid
-4. On each device, open `http://agent-squid:8000/?token=<your-token>` once to authenticate
+There are two ways to expose squid on your tailnet:
 
-MagicDNS resolves `agent-squid` to the Tailscale IP on all enrolled devices automatically — no DNS changes or port-forwarding needed. From then on, `http://agent-squid:8000` just works from your phone or tablet.
+**Option A — `tailscale serve` (recommended):** squid stays bound to `127.0.0.1`
+and Tailscale proxies tailnet traffic to it. Tailscale handles TLS automatically.
+Run this **once** — the config persists across reboots, no need to repeat it:
+
+```bash
+tailscale serve --bg / proxy http://127.0.0.1:8000
+```
+
+Access from any enrolled device at `https://<machine-name>/` — Tailscale's
+MagicDNS resolves the hostname and the cert is valid. First visit, add your token:
+
+```
+https://<machine-name>/?token=<your-token>
+```
+
+**Option B — bind directly to Tailscale IP:** set `server.host` to your
+Tailscale IP (`tailscale ip -4`) in `squid.yaml`. Simpler, no extra step,
+but squid is directly on the Tailscale network on plain HTTP.
+
+In both cases, rename your machine in Tailscale admin for a clean URL
+(`https://agent-squid/` instead of `https://haebins-macbook-pro.tail185374.ts.net/`).
 
 ## How Squid Is Different
 
