@@ -734,24 +734,18 @@ def main():
     host = _cfg["server"]["host"]
     port = _cfg["server"]["port"]
 
-    # Only loopback (127.0.0.0/8) and Tailscale (100.64.0.0/10, RFC 6598 CGNAT)
-    # are permitted. Public IPs and 0.0.0.0 are blocked — /localfile and the
-    # agent API must never be reachable from the open internet.
-    _SAFE_NETS = [
-        ipaddress.ip_network("127.0.0.0/8"),
-        ipaddress.ip_network("100.64.0.0/10"),  # Tailscale CGNAT range
-    ]
+    # Only loopback (127.0.0.0/8) is permitted. squid must never bind directly
+    # to a network interface — use `tailscale serve` to expose it on your mesh.
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
         sys.exit(f"ERROR: server.host must be an IP address, got: {host!r}")
-    if not any(ip in net for net in _SAFE_NETS):
+    if ip not in ipaddress.ip_network("127.0.0.0/8"):
         sys.exit(
-            f"ERROR: server.host {host!r} is not a permitted address.\n"
-            "Allowed ranges:\n"
-            "  127.0.0.0/8      — loopback (local only)\n"
-            "  100.64.0.0/10    — Tailscale CGNAT (private mesh only)\n"
-            "Public IPs and 0.0.0.0 are blocked to protect /localfile and the agent API."
+            f"ERROR: server.host {host!r} is not a loopback address.\n"
+            "squid must bind to 127.0.0.1 (or another 127.x.x.x address).\n"
+            "For remote access via Tailscale, use:\n"
+            f"  tailscale serve --bg --http={port} 127.0.0.1:{port}"
         )
 
     print(f"Starting squid on http://{host}:{port}")

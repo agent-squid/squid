@@ -17,6 +17,27 @@ if [[ ! -f "$VENV/bin/uvicorn" ]]; then
   bash "$SCRIPT_DIR/install.sh"  # install.sh is in the same bin/ dir
 fi
 
+# ── tailscale serve ──────────────────────────────────────────────────────────
+# Expose squid on the Tailscale network via a plain-HTTP serve on the same port.
+# This is a one-time persistent config — Tailscale remembers it across reboots.
+# squid itself always binds to 127.0.0.1; tailscale serve is the bridge.
+if command -v tailscale &>/dev/null; then
+  PORT=$("$VENV/bin/python3" -c \
+    "import yaml; c=yaml.safe_load(open('$ROOT/config/squid.yaml')); print(c['server']['port'])" \
+    2>/dev/null || echo "8000")
+  if tailscale serve status 2>/dev/null | grep -q "http://127.0.0.1:${PORT}"; then
+    echo "tailscale serve: already configured (port ${PORT})"
+  else
+    if tailscale serve --bg --http="${PORT}" "127.0.0.1:${PORT}" 2>/dev/null; then
+      echo "tailscale serve: configured (port ${PORT})"
+    else
+      echo "warning: tailscale serve failed — squid will run locally only."
+      echo "  To enable remote access, run:"
+      echo "    tailscale serve --bg --http=${PORT} 127.0.0.1:${PORT}"
+    fi
+  fi
+fi
+
 # ── start ────────────────────────────────────────────────────────────────────
 PID_FILE="$ROOT/.squid.pid"
 LOG_FILE="/tmp/squid-server.log"

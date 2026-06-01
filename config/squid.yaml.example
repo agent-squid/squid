@@ -2,14 +2,9 @@
 # (bin/stop.sh && bin/start.sh). No hot-reload.
 
 server:
-  # IP address to bind to. Two options are permitted:
-  #   127.0.0.1   — local machine only. Use with `tailscale serve` to expose
-  #                 via Tailscale without squid itself being on the network.
-  #                 Run once: tailscale serve --bg / proxy http://127.0.0.1:8000
-  #                 Access via: https://<machine-name>/ (Tailscale handles TLS)
-  #   100.x.x.x   — bind directly to your Tailscale IP (tailscale ip -4).
-  #                 Simpler but squid is directly on the Tailscale network.
-  # 0.0.0.0 and public IPs are blocked — server will refuse to start.
+  # Must be a loopback address (127.x.x.x). squid never binds to a network
+  # interface directly. For remote access, use tailscale serve — bin/start.sh
+  # configures it automatically if tailscale is installed.
   host: "127.0.0.1"
   port: 8000
 

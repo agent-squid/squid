@@ -202,29 +202,25 @@ Squid is most useful when your local machine can keep working while you are away
 
 Tailscale is a good fit for this. Its Personal plan is free for non-commercial personal use, and it creates a private WireGuard-based network across your own devices. Your phone, tablet, laptop, Mac mini, and workstation can talk inside the tailnet without opening a public port.
 
-There are two ways to expose squid on your tailnet:
+squid always binds to `127.0.0.1` — it never touches a network interface directly.
+`bin/start.sh` automatically configures `tailscale serve` if Tailscale is installed,
+so remote access is set up on first start with no extra steps.
 
-**Option A — `tailscale serve` (recommended):** squid stays bound to `127.0.0.1`
-and Tailscale proxies tailnet traffic to it. Tailscale handles TLS automatically.
-Run this **once** — the config persists across reboots, no need to repeat it:
+If Tailscale is not installed or not logged in, squid still starts and is accessible
+locally. Run the following manually when ready:
 
 ```bash
-tailscale serve --bg / proxy http://127.0.0.1:8000
+tailscale serve --bg --http=8000 127.0.0.1:8000
 ```
 
-Access from any enrolled device at `https://<machine-name>/` — Tailscale's
-MagicDNS resolves the hostname and the cert is valid. First visit, add your token:
+Access from any enrolled device at `http://<machine-name>:8000/`. First visit,
+authenticate with your token:
 
 ```
-https://<machine-name>/?token=<your-token>
+http://<machine-name>:8000/?token=<your-token>
 ```
 
-**Option B — bind directly to Tailscale IP:** set `server.host` to your
-Tailscale IP (`tailscale ip -4`) in `squid.yaml`. Simpler, no extra step,
-but squid is directly on the Tailscale network on plain HTTP.
-
-In both cases, rename your machine in Tailscale admin for a clean URL
-(`https://agent-squid/` instead of `https://haebins-macbook-pro.tail185374.ts.net/`).
+Rename your machine in Tailscale admin for a clean URL (e.g. `agent-squid`).
 
 ## How Squid Is Different
 
