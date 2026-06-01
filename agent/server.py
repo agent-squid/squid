@@ -702,6 +702,13 @@ def main():
     import uvicorn
     host = _cfg["server"]["host"]
     port = _cfg["server"]["port"]
+    if host == "0.0.0.0":
+        sys.exit(
+            "ERROR: server.host is set to 0.0.0.0 in squid.yaml.\n"
+            "Binding to all interfaces exposes /localfile and all API endpoints to\n"
+            "every network the machine is on. Set a specific IP (e.g. 127.0.0.1\n"
+            "for local-only, or your Tailscale IP for private mesh access)."
+        )
     print(f"Starting squid on http://{host}:{port}")
     uvicorn.run(
         "agent.server:app",
