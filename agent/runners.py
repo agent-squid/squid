@@ -256,6 +256,33 @@ def _tool_data(name: str, input_json: str) -> dict:
     return base
 
 
+def _codex_diff_tool(payload: dict) -> Optional[dict]:
+    """Extract a Codex file-change event into a UI diff tool when possible."""
+    item = payload.get("item") if isinstance(payload.get("item"), dict) else payload
+    diff = (
+        item.get("unified_diff")
+        or item.get("unifiedDiff")
+        or item.get("diff")
+        or payload.get("unified_diff")
+        or payload.get("unifiedDiff")
+        or payload.get("diff")
+    )
+    if not diff:
+        return None
+    file_path = (
+        item.get("path")
+        or item.get("file")
+        or item.get("file_path")
+        or item.get("filePath")
+        or payload.get("path")
+        or payload.get("file")
+        or payload.get("file_path")
+        or payload.get("filePath")
+        or ""
+    )
+    return {"name": "Diff", "file": file_path, "diff": str(diff)}
+
+
 async def run_claude(
     prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
     model: Optional[str] = None, topic: str = "", agent: str = "",
@@ -401,10 +428,14 @@ async def run_codex(
         except json.JSONDecodeError:
             continue
         t = event.get("type", "")
+        method = event.get("method", "")
+        params = event.get("params") if isinstance(event.get("params"), dict) else {}
         if t == "thread.started":
             thread_id = event.get("thread_id")
-        elif t == "item.completed":
-            item = event.get("item", {})
+        elif t == "item.completed" or method == "item/completed":
+            item = event.get("item") or params.get("item") or {}
+            if not isinstance(item, dict):
+                item = {}
             if item.get("type") == "agent_message":
                 text = item.get("text", "")
                 if text:
@@ -418,8 +449,15 @@ async def run_codex(
                         cmd_str = inner[1:-1].replace('\\"', '"')
                 if cmd_str:
                     yield {"_tool": {"name": "Bash", "command": cmd_str}}
-        elif t == "turn.completed":
-            usage = event.get("usage", {})
+            diff_tool = _codex_diff_tool(item)
+            if diff_tool:
+                yield {"_tool": diff_tool}
+        elif method in ("item/fileChange/patchUpdated", "turn/diff/updated"):
+            diff_tool = _codex_diff_tool(params)
+            if diff_tool:
+                yield {"_tool": diff_tool}
+        elif t == "turn.completed" or method == "turn/completed":
+            usage = event.get("usage") or params.get("usage") or {}
             # ── Codex token semantics (opposite of Claude — do not conflate) ───────────────
             # Codex reports input_tokens as the FULL total, cache already included.
             # cached_input_tokens is a subset breakdown of input_tokens, not additive.

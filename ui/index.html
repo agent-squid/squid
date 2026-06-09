@@ -13,7 +13,7 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="icon" href="/icons/icon-192.png" sizes="192x192" type="image/png" />
   <link rel="apple-touch-icon" href="/icons/icon-192.png" />
-  <link rel="stylesheet" href="style.css?v=20260529-80" />
+  <link rel="stylesheet" href="style.css?v=20260609-86" />
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 </head>
@@ -28,6 +28,9 @@
         <button class="nav-tab" data-view="analytics">Analytics</button>
         <button class="nav-tab" data-view="agents">Agents</button>
       </nav>
+
+      <!-- Process status dot -->
+      <button id="proc-status" type="button" title="Processes · click to view"></button>
 
       <div id="quota-display" title="Session usage · click for credentials"></div>
 
@@ -54,6 +57,9 @@
         <button class="hmenu-item" data-view="analytics">Analytics</button>
         <button class="hmenu-item" data-view="agents">Agents</button>
       </div>
+
+      <!-- Process status popup -->
+      <div id="proc-status-popup"></div>
 
       <div id="quota-creds-popup">
         <span class="settings-label">Claude.ai session</span>
@@ -190,6 +196,6 @@
 
     <!-- Inline agent creation prompt (appended to #messages dynamically) -->
   </div>
-  <script src="app.js?v=20260609-85"></script>
+  <script src="app.js?v=20260609-92"></script>
 </body>
 </html>

@@ -521,7 +521,7 @@ async function loadHistory() {
       if (item.context) {
         try {
           const tools = typeof item.context === 'string' ? JSON.parse(item.context) : item.context;
-          const diffTools = tools.filter(t => t.name === 'Edit' || t.name === 'Write' || t.name === 'MultiEdit');
+          const diffTools = tools.filter(t => t.name === 'Edit' || t.name === 'Write' || t.name === 'MultiEdit' || t.name === 'Diff');
           for (const tool of diffTools) {
             const block = makeToolBlock(tool);
             block.classList.add('history-item', 'tool-block-history');
@@ -579,6 +579,7 @@ const SQUID_COMMANDS = [
   { name: 'restart',      desc: 'restart the server',                           args: false },
   { name: 'filter',       desc: 'filter history by current topic or agent',     args: false },
   { name: 'filter reset', desc: 'clear the active filter',                      args: false },
+  { name: 'status',       desc: 'show active processes panel',                  args: false },
   { name: 'help',         desc: 'show help panel',                              args: false },
   { name: 'remote',       desc: 'show QR code for mobile / tablet access',      args: false },
 ];
@@ -590,6 +591,7 @@ function parseCommand(message) {
   if (/^stopall$/i.test(t))      return { command: 'stopall' };
   if (/^clear$/i.test(t))        return { command: 'clear' };
   if (/^compact$/i.test(t))      return { command: 'compact' };
+  if (/^status$/i.test(t))       return { command: 'status' };
   if (/^help$/i.test(t))         return { command: 'help' };
   if (/^remote$/i.test(t))       return { command: 'remote' };
   if (/^filter reset$/i.test(t)) return { command: 'filter_reset' };
@@ -600,6 +602,10 @@ function parseCommand(message) {
 }
 
 async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
+  if (cmd.command === 'status') {
+    toggleProcPopup();
+    return;
+  }
   if (cmd.command === 'help') {
     openHelp();
     return;
@@ -1092,7 +1098,7 @@ async function sendMessage(text) {
               contentDiv.innerHTML = marked.parse(raw);
               messages.appendChild(bubble);
               if (statsEl) messages.appendChild(statsEl); // stats goes between bubble and diffs, not after
-              const diffTools = liveToolEvents.filter(t => t.name === 'Edit' || t.name === 'Write' || t.name === 'MultiEdit');
+              const diffTools = liveToolEvents.filter(t => t.name === 'Edit' || t.name === 'Write' || t.name === 'MultiEdit' || t.name === 'Diff');
               for (const tool of diffTools) {
                 const block = makeToolBlock(tool);
                 block.classList.add('tool-block-history');
@@ -1203,7 +1209,7 @@ async function sendMessage(text) {
 
 function toolLabel(tool) {
   const name = tool.name || '';
-  if (name === 'Read' || name === 'Edit' || name === 'Write' || name === 'MultiEdit')
+  if (name === 'Read' || name === 'Edit' || name === 'Write' || name === 'MultiEdit' || name === 'Diff')
     return `${name}: ${tool.file || ''}`;
   if (name === 'Bash') return `Bash: ${truncate(tool.command || '', 70)}`;
   if (name === 'Agent') return `Agent: ${truncate(tool.description || '', 70)}`;
@@ -1228,12 +1234,29 @@ function renderDiffLines(container, oldStr, newStr) {
   }
 }
 
+function renderUnifiedDiffLines(container, diff) {
+  for (const line of (diff || '').split('\n')) {
+    const el = document.createElement('span');
+    if (line.startsWith('+') && !line.startsWith('+++')) {
+      el.className = 'diff-line diff-add';
+    } else if (line.startsWith('-') && !line.startsWith('---')) {
+      el.className = 'diff-line diff-remove';
+    } else if (line.startsWith('@@')) {
+      el.className = 'diff-line diff-hunk';
+    } else {
+      el.className = 'diff-line';
+    }
+    el.textContent = line;
+    container.appendChild(el);
+  }
+}
+
 function makeToolBlock(tool) {
   const name = tool.name || '';
   const block = document.createElement('div');
   block.className = 'tool-block';
 
-  const hasDiff = name === 'Edit' || name === 'MultiEdit' || name === 'Write';
+  const hasDiff = name === 'Edit' || name === 'MultiEdit' || name === 'Write' || name === 'Diff';
   if (!hasDiff) {
     const label = document.createElement('span');
     label.className = 'tool-label';
@@ -1275,6 +1298,9 @@ function makeToolBlock(tool) {
       el.textContent = '+ ' + line;
       scroll.appendChild(el);
     }
+  } else if (name === 'Diff') {
+    toggle.textContent = 'Diff: ' + (tool.file || 'working tree');
+    renderUnifiedDiffLines(scroll, tool.diff || '');
   }
 
   toggle.addEventListener('click', () => block.classList.toggle('tool-expanded'));
@@ -1366,18 +1392,23 @@ function addStats(bubble, stats, timestamp) {
   const isSplit    = (cacheRead + cacheWrite) > 0 && input < (cacheRead + cacheWrite);
   const inp        = isSplit ? input + cacheRead + cacheWrite : input;
   const newThis    = isSplit ? input + cacheWrite : (cacheRead > 0 ? input - cacheRead : 0);
-  const newLabel   = isSplit ? ` (${fmtNum(newThis)} new)`
-                   : cacheRead > 0 ? ` (${fmtNum(newThis)} uncached)`
-                   : '';
+  const detailLabel = isSplit ? ` (${fmtNum(newThis)} new)`
+                    : cacheRead > 0 ? ` (${fmtNum(newThis)} uncached)`
+                    : '';
   const hasCost    = stats.cost_usd != null;
   const cost       = hasCost ? `$${stats.cost_usd.toFixed(4)}` : '';
   const cacheStr   = cacheRead ? ` · ${fmtNum(cacheRead)} cached` : '';
   const dur        = stats.duration_ms ? ` · ${(stats.duration_ms / 1000).toFixed(1)}s` : '';
   const timePrefix = timestamp ? fmtTime(timestamp) + '  ·  ' : '';
 
-  el.appendChild(document.createTextNode(
-    `${timePrefix}↑ ${fmtNum(inp)}${newLabel}${cacheStr}  ↓ ${fmtNum(out)} tokens${dur}`
-  ));
+  el.appendChild(document.createTextNode(`${timePrefix}↑ ${fmtNum(inp)}`));
+  if (detailLabel) {
+    const detailSpan = document.createElement('span');
+    detailSpan.className = 'stats-token-detail';
+    detailSpan.textContent = detailLabel;
+    el.appendChild(detailSpan);
+  }
+  el.appendChild(document.createTextNode(`${cacheStr}  ↓ ${fmtNum(out)} tokens${dur}`));
 
   const qdSpan = document.createElement('span');
   qdSpan.className = 'stats-quota-delta';
@@ -1512,11 +1543,6 @@ async function fetchQuota(trackDelta = false) {
     quotaPct    = pct;
     quotaResetAt = new Date(session.resets_at).getTime();
 
-    const bar = document.getElementById('quota-bar');
-    if (bar) {
-      bar.style.width = `${pct}%`;
-      bar.classList.toggle('warn', pct >= 80);
-    }
     quotaDisplay.classList.add('loaded');
     updateQuotaLabel(pct);
 
@@ -1532,16 +1558,15 @@ function updateQuotaLabel(pct) {
   if (!quotaResetAt) { label.textContent = `${pct}%${delta}`; return; }
   const diff = quotaResetAt - Date.now();
   if (diff <= 0) { label.textContent = `${pct}%${delta} · resetting`; return; }
-  const m = Math.floor(diff / 60000);
-  const h = Math.floor(m / 60);
-  const timeStr = h > 0 ? `${h}h ${m % 60}m` : `${m}m`;
-  label.textContent = `${pct}%${delta} · resets in ${timeStr}`;
+  const totalMin = Math.floor(diff / 60000);
+  const h = Math.floor(totalMin / 60);
+  const m = String(totalMin % 60).padStart(2, '0');
+  const timeStr = h > 0 ? `${h}:${m}` : `${m}m`;
+  label.textContent = `${pct}%${delta} in ${timeStr}`;
 }
 
 function initQuota() {
-  quotaDisplay.innerHTML = `
-    <div id="quota-bar-wrap"><div id="quota-bar"></div></div>
-    <span id="quota-label"></span>`;
+  quotaDisplay.innerHTML = `<span id="quota-label"></span>`;
 
   const credsPopup = document.getElementById('quota-creds-popup');
   quotaDisplay.addEventListener('click', () => {
@@ -1587,18 +1612,87 @@ function initCreds() {
 
 let statsPeriod = 'daily';
 let statsGroup  = 'time';
-let liveInterval = null;
 
-function startLivePoll() {
-  if (liveInterval) return;
-  liveInterval = setInterval(() => {
-    if (statsGroup === 'proc' && currentView === 'analytics') loadStats();
-  }, 2000);
+// ── process status dot + popup ────────────────────────────────────────────────
+
+const procStatusBtn   = document.getElementById('proc-status');
+const procStatusPopup = document.getElementById('proc-status-popup');
+let procPollInterval  = null;
+
+function updateProcStatusDot(rows) {
+  procStatusBtn.classList.toggle('has-procs', rows.length > 0);
 }
 
-function stopLivePoll() {
-  if (liveInterval) { clearInterval(liveInterval); liveInterval = null; }
+function renderProcPopup(rows) {
+  const header = `<div class="proc-popup-header">
+    <span class="settings-label">Processes</span>
+    <button id="proc-popup-close" type="button">✕</button>
+  </div>`;
+  if (!rows.length) {
+    procStatusPopup.innerHTML = header + '<div class="proc-status-empty">No active processes.</div>';
+  } else {
+    const bodyRows = rows.map(r => `
+      <tr>
+        <td><span class="proc-dot"></span>#${r.topic || '—'}</td>
+        <td>@${r.agent || '—'}</td>
+        <td>${r.duration_s}s</td>
+        <td><button class="proc-stop-btn" data-msgid="${r.msg_id || ''}" data-topic="${r.topic || ''}" data-agent="${r.agent || ''}">Stop</button></td>
+      </tr>`).join('');
+    procStatusPopup.innerHTML = header + `<table>
+      <thead><tr><th>Topic</th><th>Agent</th><th>Duration</th><th></th></tr></thead>
+      <tbody>${bodyRows}</tbody>
+    </table>`;
+    procStatusPopup.querySelectorAll('.proc-stop-btn').forEach(btn => {
+      btn.addEventListener('click', async e => {
+        e.stopPropagation();
+        btn.disabled = true;
+        btn.textContent = '…';
+        const body = btn.dataset.msgid
+          ? { command: 'stop_msg', msg_id: parseInt(btn.dataset.msgid) }
+          : { command: 'stop', topic: btn.dataset.topic, agent: btn.dataset.agent };
+        await fetch('/cmd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        await pollProcs();
+      });
+    });
+  }
+  document.getElementById('proc-popup-close').addEventListener('click', e => {
+    e.stopPropagation();
+    procStatusPopup.classList.remove('open');
+  });
 }
+
+function toggleProcPopup() {
+  const open = procStatusPopup.classList.toggle('open');
+  if (open) renderProcPopup(cachedProcRows);
+}
+
+let cachedProcRows = [];
+
+async function pollProcs() {
+  try {
+    const res = await fetch('/processes');
+    const rows = await res.json();
+    cachedProcRows = rows;
+    updateProcStatusDot(rows);
+    if (procStatusPopup.classList.contains('open')) renderProcPopup(rows);
+    if (statsGroup === 'proc' && currentView === 'analytics') renderProcStats(rows);
+  } catch { /* ignore */ }
+}
+
+function startProcPoll() {
+  if (procPollInterval) return;
+  pollProcs();
+  procPollInterval = setInterval(pollProcs, 3000);
+}
+
+procStatusBtn.addEventListener('click', e => {
+  e.stopPropagation();
+  toggleProcPopup();
+});
+
+// keep legacy aliases so switchView / initStats still work
+function startLivePoll() { /* noop — procPollInterval always runs */ }
+function stopLivePoll()  { /* noop */ }
 
 async function loadStats() {
   if (statsGroup !== 'proc') {
@@ -2121,7 +2215,7 @@ function initPullToRefresh() {
   messages.addEventListener('touchend', (e) => {
     if (!startedAtBottom || !startY) return;
     const dy = startY - e.changedTouches[0].clientY; // positive = finger moved up
-    if (dy > 80) setTimeout(() => location.reload(), 150);
+    if (dy > 160) setTimeout(() => location.reload(), 150);
     startY = 0;
   }, { passive: true });
 }
@@ -2371,6 +2465,9 @@ document.addEventListener('click', e => {
   if (ctxPopup && !ctxPopup.contains(e.target) && !e.target.closest('.user-ctx')) {
     ctxPopup.classList.remove('open');
   }
+  if (!procStatusPopup.contains(e.target) && e.target !== procStatusBtn && !procStatusBtn.contains(e.target)) {
+    procStatusPopup.classList.remove('open');
+  }
 });
 initHistoryScroll();
 initStats();
@@ -2378,4 +2475,5 @@ initAliases();
 initQuota();
 initCreds();
 initPullToRefresh();
+startProcPoll();
 showBootBanner();
