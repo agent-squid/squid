@@ -329,13 +329,25 @@ async def run_claude(
                 if final_text:
                     yield final_text
             usage = event.get("usage", {})
-            # Anthropic API token semantics (unchanged since launch):
-            #   input_tokens           = NEW non-cached tokens only (can be as low as 3–4
-            #                            when the session history is fully cached)
-            #   cache_read_input_tokens  = tokens served from the prompt cache
-            #   cache_creation_input_tokens = tokens written to the prompt cache this turn
-            # Effective total processed = input_tokens + cache_read_input_tokens
-            # DO NOT conflate with Codex, where input_tokens is already the full total.
+            # ── Claude token semantics (verified via stream-json output, 2026-06) ──────────
+            # The Anthropic API / Claude Code CLI splits input into THREE buckets:
+            #
+            #   input_tokens               → tiny uncacheable residual (~2–4 tokens).
+            #                                The user's actual message is NOT here.
+            #   cache_creation_input_tokens → tokens written to the prompt cache this turn,
+            #                                INCLUDING the user message. This is where the
+            #                                bulk of "new" content lives.
+            #   cache_read_input_tokens     → tokens served from a previous cache entry.
+            #
+            # True total processed this turn = input + cache_creation + cache_read.
+            #
+            # This is counter-intuitive: input_tokens alone (2–4) looks like a bug but it
+            # is correct. We have gone back and forth on this — do not "fix" it by treating
+            # input_tokens as the full user message count.
+            #
+            # Codex is the OPPOSITE: input_tokens = full total (cache already included);
+            # cache_read_tokens is a subset breakdown. See run_codex() for that path.
+            # ─────────────────────────────────────────────────────────────────────────────
             yield {
                 "_stats": {
                     "session_id": session_id,
@@ -403,10 +415,11 @@ async def run_codex(
                     yield {"_tool": {"name": "Bash", "command": cmd_str}}
         elif t == "turn.completed":
             usage = event.get("usage", {})
-            # Codex reports input_tokens as the TOTAL including cached input — opposite
-            # of the Anthropic API where input_tokens is new-only.
-            # cache_read_tokens is a breakdown of what's already inside input_tokens;
-            # callers must NOT add it again or they will double-count.
+            # ── Codex token semantics (opposite of Claude — do not conflate) ───────────────
+            # Codex reports input_tokens as the FULL total, cache already included.
+            # cached_input_tokens is a subset breakdown of input_tokens, not additive.
+            # True total = input_tokens (do NOT add cache_read on top).
+            # ─────────────────────────────────────────────────────────────────────────────
             total_in = int(usage.get("input_tokens", 0) or 0)
             cached_in = int(usage.get("cached_input_tokens", 0) or 0)
             yield {

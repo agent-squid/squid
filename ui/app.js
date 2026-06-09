@@ -1330,18 +1330,19 @@ function addStats(bubble, stats, timestamp) {
   const input      = stats.input_tokens       || 0;
   const out        = stats.output_tokens      || 0;
   const reasoning  = stats.reasoning_tokens   || 0;
-  // Token semantics differ by backend (see runners.py for the authoritative comment):
-  //   Claude (Anthropic API): input_tokens = NEW non-cached tokens only (can be 3–4 on a
-  //     large session); cache_read_tokens is separate. Effective total = input + cacheRead.
-  //     This has been true since the API launched — it only becomes visible once the session
-  //     is large enough that cache hits dominate and input_tokens collapses to near-zero.
-  //   Codex: input_tokens = TOTAL already including cache; cache_read_tokens is a breakdown.
-  //     Adding them would double-count.
-  // Heuristic to distinguish: if input < cacheRead the stats are in Claude split format.
-  // (Codex always has input >= cache_read since cache is a subset of total.)
-  const isSplit    = cacheRead > 0 && input < cacheRead;
-  const inp        = isSplit ? input + cacheRead : input;
-  const newLabel   = isSplit ? ` (${fmtNum(input)} new)` : '';
+  // ── Token semantics differ by backend (authoritative source: runners.py) ────────────
+  // Claude: input_tokens is a ~2–4 token uncacheable residual. The user's actual message
+  //   lands in cache_write (cache_creation_input_tokens). True total = input + cacheWrite
+  //   + cacheRead. Seeing "3 new tokens" is correct, not a bug.
+  // Codex: input_tokens is the FULL total; cache_read is a subset already inside it.
+  //   Adding cache_read would double-count.
+  // We have gone back and forth on this — do not "fix" by treating input alone as total.
+  // Heuristic to tell them apart: Claude has input < (cacheRead + cacheWrite).
+  // ─────────────────────────────────────────────────────────────────────────────────────
+  const isSplit    = (cacheRead + cacheWrite) > 0 && input < (cacheRead + cacheWrite);
+  const inp        = isSplit ? input + cacheRead + cacheWrite : input;
+  const newThis    = isSplit ? input + cacheWrite : 0;
+  const newLabel   = isSplit ? ` (${fmtNum(newThis)} new)` : '';
   const hasCost    = stats.cost_usd != null;
   const cost       = hasCost ? `$${stats.cost_usd.toFixed(4)}` : '';
   const cacheStr   = isSplit ? ` · ${fmtNum(cacheRead)} cached` : (cacheRead ? ` · ${fmtNum(cacheRead)} cached` : '');
@@ -1360,9 +1361,9 @@ function addStats(bubble, stats, timestamp) {
   let rows, thead, tfoot;
   if (hasCost) {
     const TOKEN_ROWS = [
-      ['Input total', input],
-      ['Cache read',  cacheRead],
+      ['New input',   input],
       ['Cache write', cacheWrite],
+      ['Cache read',  cacheRead],
       ['Output',      out],
       ['Reasoning',   reasoning],
     ];
