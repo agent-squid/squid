@@ -139,6 +139,7 @@ async def _stream_lines(
         env=env,
         cwd=cwd,
         start_new_session=True,
+        limit=8 * 1024 * 1024,  # 8 MB — default 64 KB overflows on long Claude responses
     )
 
     assert proc.stdout is not None

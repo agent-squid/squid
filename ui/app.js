@@ -1551,6 +1551,8 @@ async function fetchQuota(trackDelta = false) {
   } catch {}
 }
 
+const QUOTA_PIE_C = 2 * Math.PI * 6; // circumference for r=6
+
 function updateQuotaLabel(pct) {
   const label = document.getElementById('quota-label');
   if (!label) return;
@@ -1563,10 +1565,24 @@ function updateQuotaLabel(pct) {
   const m = String(totalMin % 60).padStart(2, '0');
   const timeStr = h > 0 ? `${h}:${m}` : `${m}m`;
   label.textContent = `${pct}%${delta} in ${timeStr}`;
+
+  const arc = document.getElementById('quota-pie-arc');
+  if (arc) {
+    const filled = (pct / 100) * QUOTA_PIE_C;
+    arc.setAttribute('stroke-dasharray', `${filled} ${QUOTA_PIE_C}`);
+    arc.setAttribute('stroke', pct >= 80 ? '#e05030' : '#f07040');
+  }
 }
 
 function initQuota() {
-  quotaDisplay.innerHTML = `<span id="quota-label"></span>`;
+  quotaDisplay.innerHTML = `
+    <svg id="quota-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
+      <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
+      <circle id="quota-pie-arc" cx="9" cy="9" r="6" fill="none" stroke="#f07040"
+              stroke-width="4" stroke-dasharray="0 ${QUOTA_PIE_C}" stroke-linecap="round"
+              transform="rotate(-90 9 9)"/>
+    </svg>
+    <span id="quota-label"></span>`;
 
   const credsPopup = document.getElementById('quota-creds-popup');
   quotaDisplay.addEventListener('click', () => {
@@ -2215,7 +2231,7 @@ function initPullToRefresh() {
   messages.addEventListener('touchend', (e) => {
     if (!startedAtBottom || !startY) return;
     const dy = startY - e.changedTouches[0].clientY; // positive = finger moved up
-    if (dy > 160) setTimeout(() => location.reload(), 150);
+    if (dy > 240) setTimeout(() => location.reload(), 150);
     startY = 0;
   }, { passive: true });
 }
