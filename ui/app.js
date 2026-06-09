@@ -1160,10 +1160,18 @@ async function sendMessage(text) {
     if (!statsEl && doneTime && firstDataReceived) addTimestamp(bubble, doneTime, false);
   }
 
-  // Quota delta
+  // Quota delta — wait briefly for claude.ai API to reflect the just-completed turn
+  await new Promise(r => setTimeout(r, 3000));
   await fetchQuota(true);
   if (statsEl && quotaDelta != null) {
     statsEl.querySelector('.stats-quota-delta').textContent = `  ·  quota +${quotaDelta}%`;
+  }
+  if (msgId && quotaDelta != null) {
+    fetch(`/chat/${msgId}/quota-delta`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ delta: quotaDelta }),
+    }).catch(() => {});
   }
   if (lastSessionId && quotaBefore !== null && quotaRaw !== null) {
     fetch('/stats/quota-delta', {
@@ -1329,33 +1337,32 @@ function addStats(bubble, stats, timestamp) {
   const cacheWrite = stats.cache_write_tokens || 0;
   const input      = stats.input_tokens       || 0;
   const out        = stats.output_tokens      || 0;
-  const reasoning  = stats.reasoning_tokens   || 0;
   // ── Token semantics differ by backend (authoritative source: runners.py) ────────────
   // Claude: input_tokens is a ~2–4 token uncacheable residual. The user's actual message
   //   lands in cache_write (cache_creation_input_tokens). True total = input + cacheWrite
   //   + cacheRead. Seeing "3 new tokens" is correct, not a bug.
   // Codex: input_tokens is the FULL total; cache_read is a subset already inside it.
-  //   Adding cache_read would double-count.
+  //   Adding cache_read would double-count. output_tokens already includes reasoning.
   // We have gone back and forth on this — do not "fix" by treating input alone as total.
   // Heuristic to tell them apart: Claude has input < (cacheRead + cacheWrite).
   // ─────────────────────────────────────────────────────────────────────────────────────
   const isSplit    = (cacheRead + cacheWrite) > 0 && input < (cacheRead + cacheWrite);
   const inp        = isSplit ? input + cacheRead + cacheWrite : input;
-  const newThis    = isSplit ? input + cacheWrite : 0;
-  const newLabel   = isSplit ? ` (${fmtNum(newThis)} new)` : '';
+  const newThis    = isSplit ? input + cacheWrite : (cacheRead > 0 ? input - cacheRead : 0);
+  const newLabel   = (isSplit || cacheRead > 0) ? ` (${fmtNum(newThis)} new)` : '';
   const hasCost    = stats.cost_usd != null;
   const cost       = hasCost ? `$${stats.cost_usd.toFixed(4)}` : '';
-  const cacheStr   = isSplit ? ` · ${fmtNum(cacheRead)} cached` : (cacheRead ? ` · ${fmtNum(cacheRead)} cached` : '');
-  const reason     = reasoning ? ` · ${fmtNum(reasoning)} reasoning` : '';
+  const cacheStr   = cacheRead ? ` · ${fmtNum(cacheRead)} cached` : '';
   const dur        = stats.duration_ms ? ` · ${(stats.duration_ms / 1000).toFixed(1)}s` : '';
   const timePrefix = timestamp ? fmtTime(timestamp) + '  ·  ' : '';
 
   el.appendChild(document.createTextNode(
-    `${timePrefix}↑ ${fmtNum(inp)}${newLabel}${cacheStr}  ↓ ${fmtNum(out)}${reason} tokens${dur}`
+    `${timePrefix}↑ ${fmtNum(inp)}${newLabel}${cacheStr}  ↓ ${fmtNum(out)} tokens${dur}`
   ));
 
   const qdSpan = document.createElement('span');
   qdSpan.className = 'stats-quota-delta';
+  if (stats.quota_delta != null) qdSpan.textContent = `  ·  quota +${stats.quota_delta}%`;
   el.appendChild(qdSpan);
 
   let rows, thead, tfoot;
@@ -1365,7 +1372,6 @@ function addStats(bubble, stats, timestamp) {
       ['Cache write', cacheWrite],
       ['Cache read',  cacheRead],
       ['Output',      out],
-      ['Reasoning',   reasoning],
     ];
     rows = TOKEN_ROWS
       .filter(([, n]) => n > 0)
@@ -1378,7 +1384,6 @@ function addStats(bubble, stats, timestamp) {
       ['Cache read', cacheRead],
       ['Input',      input],
       ['Output',     out],
-      ['Reasoning',  reasoning],
     ];
     rows = TOKEN_ROWS
       .filter(([, n]) => n > 0)
@@ -1466,9 +1471,9 @@ async function fetchQuota(trackDelta = false) {
     const raw = session.utilization ?? 0;
     const pct = Math.round(raw);
 
-    if (trackDelta && quotaPct !== null) {
-      const d = pct - quotaPct;
-      quotaDelta = d > 0 ? d : null;
+    if (trackDelta && quotaRaw !== null) {
+      const d = raw - quotaRaw;
+      quotaDelta = d > 0.05 ? Math.round(d * 10) / 10 : null;
     }
     quotaRaw    = raw;
     quotaPct    = pct;

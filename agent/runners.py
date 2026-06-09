@@ -8,6 +8,7 @@ as the last item when usage data is available (claude only).
 import asyncio
 import json
 import os
+import signal
 import time
 from typing import AsyncGenerator, List, Optional, Union
 
@@ -45,7 +46,6 @@ def kill_procs_by_topic(topic: str, agent: Optional[str] = None,
     lifo=True: kill only the most recently started matching process (for adhoc stop).
     lifo=False: kill all matching processes.
     """
-    import signal
     matching = [
         (pid, info) for pid, info in list(_proc_registry.items())
         if info.get("topic") == topic
@@ -60,16 +60,19 @@ def kill_procs_by_topic(topic: str, agent: Optional[str] = None,
     for pid, _ in matching:
         _deregister_proc(pid)  # remove immediately so a second LIFO call skips it
         try:
-            os.kill(pid, signal.SIGTERM)
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
             killed += 1
         except (ProcessLookupError, PermissionError):
-            pass
+            try:
+                os.kill(pid, signal.SIGTERM)
+                killed += 1
+            except (ProcessLookupError, PermissionError):
+                pass
     return killed
 
 
 def kill_proc_by_msg_id(msg_id: int) -> int:
     """Send SIGTERM to the process registered with msg_id. Returns 1 if killed, 0 if not found."""
-    import signal
     for pid, info in list(_proc_registry.items()):
         if info.get("msg_id") == msg_id:
             _deregister_proc(pid)
@@ -83,7 +86,6 @@ def kill_proc_by_msg_id(msg_id: int) -> int:
 
 def kill_all_procs() -> int:
     """Send SIGTERM to all tracked subprocesses. Returns kill count."""
-    import signal
     killed = 0
     for pid in list(_proc_registry):
         try:
@@ -135,6 +137,7 @@ async def _stream_lines(
         stderr=asyncio.subprocess.PIPE,
         env=env,
         cwd=cwd,
+        start_new_session=True,
     )
 
     assert proc.stdout is not None
@@ -183,9 +186,12 @@ async def _stream_lines(
     finally:
         _deregister_proc(pid)
         try:
-            await asyncio.wait_for(proc.wait(), timeout=5)
+            await asyncio.wait_for(proc.wait(), timeout=30)
         except asyncio.TimeoutError:
-            proc.kill()
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
             await proc.wait()
         drain_task.cancel()
 
@@ -422,14 +428,14 @@ async def run_codex(
             # ─────────────────────────────────────────────────────────────────────────────
             total_in = int(usage.get("input_tokens", 0) or 0)
             cached_in = int(usage.get("cached_input_tokens", 0) or 0)
+            # output_tokens already includes reasoning_output_tokens — no need to track separately.
             yield {
                 "_stats": {
                     "session_id": thread_id,
                     "input_tokens": total_in,
-                    "output_tokens": usage.get("output_tokens", 0),
+                    "output_tokens": int(usage.get("output_tokens", 0) or 0),
                     "cache_read_tokens": cached_in,
                     "cache_write_tokens": 0,
-                    "reasoning_tokens": usage.get("reasoning_output_tokens", 0),
                     "history_input_tokens": _estimate_history_tokens(history),
                     "cost_usd": None,
                     "duration_ms": int(time.monotonic() * 1000 - start_ms),

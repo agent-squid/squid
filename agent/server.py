@@ -45,6 +45,7 @@ from .stats_db import (
     get_agent, upsert_agent, delete_agent, list_agents, get_default_agent,
     get_topic, upsert_topic, list_topics,
     insert_user_message, insert_assistant_message, update_assistant_message,
+    update_message_quota_delta,
     get_context_history, get_messages_by_ids, mark_orphaned_pending, get_message,
     get_topic_session, set_topic_session, clear_topic_session,
     delete_topic, hide_topic, get_topic_agents, get_topic_agent_history,
@@ -653,6 +654,16 @@ async def usage_stats(period: str = "daily", group: str = "time"):
 @app.post("/stats/quota-delta")
 async def record_quota_delta(req: QuotaDeltaRequest):
     save_quota_delta(req.session_id, req.before, req.after)
+    return JSONResponse({"ok": True})
+
+
+class MsgQuotaDeltaRequest(BaseModel):
+    delta: float
+
+
+@app.post("/chat/{msg_id}/quota-delta")
+async def record_msg_quota_delta(msg_id: int, req: MsgQuotaDeltaRequest):
+    update_message_quota_delta(msg_id, req.delta)
     return JSONResponse({"ok": True})
 
 

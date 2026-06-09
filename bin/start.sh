@@ -43,7 +43,9 @@ fi
 
 # ── start ────────────────────────────────────────────────────────────────────
 PID_FILE="$ROOT/.squid.pid"
-LOG_FILE="/tmp/squid/server.log"
+LOG_DIR="$ROOT/logs"
+LOG_FILE="$LOG_DIR/server.log"
+mkdir -p "$LOG_DIR"
 
 FORCE=0
 for arg in "$@"; do [[ "$arg" == "--force" || "$arg" == "--restart" ]] && FORCE=1; done

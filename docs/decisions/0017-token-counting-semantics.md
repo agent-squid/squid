@@ -61,12 +61,20 @@ new     = input + cacheWrite               // tokens new this turn
 
 The `turn.completed` event's `usage` object works the opposite way:
 
-| Field                  | Meaning                                              |
-|------------------------|------------------------------------------------------|
-| `input_tokens`         | **Full total**, cache already included.              |
-| `cached_input_tokens`  | Subset breakdown of `input_tokens` — not additive.  |
+| Field                      | Meaning                                                        |
+|----------------------------|----------------------------------------------------------------|
+| `input_tokens`             | **Full total**, cache already included.                        |
+| `cached_input_tokens`      | Subset breakdown of `input_tokens` — not additive.            |
+| `output_tokens`            | **Full output total**, reasoning already included.             |
+| `reasoning_output_tokens`  | Subset of `output_tokens` consumed by internal chain-of-thought — not additive. |
 
-**True total = `input_tokens` (do not add `cached_input_tokens` on top).**
+**True total input = `input_tokens` (do not add `cached_input_tokens` on top).**
+
+**True total output = `output_tokens` (do not add `reasoning_output_tokens` on top).**
+
+Reasoning tokens are an internal detail of o-series models (o1, o3). They are
+already billed and counted within `output_tokens`. Tracking them separately adds
+no useful information and was removed (June 2026).
 
 In `_stats`, Codex stores `input_tokens` = total and `cache_read_tokens` =
 cached subset. The `isSplit` heuristic in app.js correctly identifies Codex
@@ -78,13 +86,14 @@ because `input >= cacheRead` (cache is always ≤ total).
 - Display formula uses `input + cacheWrite + cacheRead` for Claude (isSplit path).
 - Never treat `input_tokens` alone as the full count for Claude.
 - Never add `cache_read_tokens` on top of `input_tokens` for Codex.
+- Never add `reasoning_output_tokens` on top of `output_tokens` for Codex — it is already included.
 - The `isSplit` heuristic (`input < cacheRead + cacheWrite`) is the runtime
   gate; it correctly routes Claude and Codex without a backend type flag.
 
 ## Consequences
 
 - Correct total token counts and cost estimates for both backends.
-- The stats bubble shows `↑ N (M new) · K cached` for Claude sessions, where N
-  is the true total, M is new-this-turn (input + cacheWrite), and K is cached.
+- The stats bubble shows `↑ N (M new) · K cached  ↓ Y tokens` for Claude sessions,
+  where N is the true total, M is new-this-turn (input + cacheWrite), and K is cached.
 - Analytics aggregations in `stats_db.py` store raw fields; callers must apply
   the correct formula per backend when computing effective totals.

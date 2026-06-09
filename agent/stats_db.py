@@ -60,17 +60,18 @@ _TABLES = [
         PRIMARY KEY (topic, agent)
     )""",
     """CREATE TABLE IF NOT EXISTS chat_messages (
-        id         INTEGER PRIMARY KEY AUTOINCREMENT,
-        topic      TEXT NOT NULL DEFAULT 'default',
-        agent      TEXT,
-        session_id TEXT,
-        role       TEXT NOT NULL,
-        content    TEXT,
-        reply_to   INTEGER REFERENCES chat_messages(id),
-        status     TEXT NOT NULL DEFAULT 'pending',
-        adhoc      INTEGER DEFAULT 0,
-        context    TEXT,
-        created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        topic       TEXT NOT NULL DEFAULT 'default',
+        agent       TEXT,
+        session_id  TEXT,
+        role        TEXT NOT NULL,
+        content     TEXT,
+        reply_to    INTEGER REFERENCES chat_messages(id),
+        status      TEXT NOT NULL DEFAULT 'pending',
+        adhoc       INTEGER DEFAULT 0,
+        context     TEXT,
+        quota_delta REAL,
+        created_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )""",
     """CREATE TABLE IF NOT EXISTS topic_sessions (
         topic       TEXT NOT NULL,
@@ -112,6 +113,8 @@ _MIGRATIONS = [
     "ALTER TABLE chat_messages DROP COLUMN model",
     # hide support for topics (2026-05-28)
     "ALTER TABLE topics ADD COLUMN hidden INTEGER DEFAULT 0",
+    # per-message quota delta (2026-06-09)
+    "ALTER TABLE chat_messages ADD COLUMN quota_delta REAL",
     # denormalize last_model/last_backend into topics to avoid JOIN in get_topics_summary (2026-05-28)
     "ALTER TABLE topics ADD COLUMN last_model TEXT",
     "ALTER TABLE topics ADD COLUMN last_backend TEXT",
@@ -413,6 +416,14 @@ def update_assistant_message(
         )
 
 
+def update_message_quota_delta(msg_id: int, delta: float) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE chat_messages SET quota_delta=? WHERE id=? AND role='assistant'",
+            (delta, msg_id),
+        )
+
+
 # ── topic sessions ────────────────────────────────────────────────────────────
 
 def get_topic_agents(topic: str) -> list[dict]:
@@ -571,6 +582,7 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
             f"""SELECT m.id, m.role, m.topic, m.agent,
                        m.content, m.status, m.adhoc, m.session_id,
                        m.context, m.created_at AS timestamp, m.reply_to,
+                       m.quota_delta,
                        u.content AS prompt,
                        s.input_tokens, s.output_tokens, s.cache_read_tokens,
                        s.cache_write_tokens, s.history_input_tokens,
@@ -586,7 +598,7 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
 
     stat_keys = {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
                  "history_input_tokens", "cost_usd", "duration_ms", "lookback",
-                 "quota_before", "quota_after", "backend", "model", "cwd"}
+                 "quota_before", "quota_after", "quota_delta", "backend", "model", "cwd"}
     items = []
     for r in rows:
         row = dict(r)

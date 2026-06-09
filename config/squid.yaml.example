@@ -24,6 +24,8 @@ server:
 
 agent:
   # How long to wait for the first byte from a CLI before giving up (seconds).
-  first_byte_timeout: 60
+  # Needs to be long enough for large-context sessions where API TTFT is slow,
+  # but short enough to still catch true hangs (auth failure, bad flags, etc.).
+  first_byte_timeout: 300
   # Hard cap on total response time per request (seconds).
   response_timeout: 1800
