@@ -1,5 +1,5 @@
 """
-creds.py — Store and retrieve claude.ai credentials (org_id + session_key).
+creds.py — Store and retrieve service credentials.
 Saved to squid-creds.json next to squid.db — add to .gitignore.
 """
 
@@ -17,8 +17,18 @@ def load() -> dict:
         return {}
 
 
+def _save(data: dict) -> None:
+    existing = load()
+    existing.update(data)
+    _CREDS_PATH.write_text(json.dumps(existing, indent=2))
+
+
 def save(org_id: str, session_key: str) -> None:
-    _CREDS_PATH.write_text(json.dumps({"org_id": org_id, "session_key": session_key}, indent=2))
+    _save({"org_id": org_id, "session_key": session_key})
+
+
+def save_codex(token: str) -> None:
+    _save({"codex_token": token})
 
 
 def get_org_id() -> Optional[str]:
@@ -27,3 +37,7 @@ def get_org_id() -> Optional[str]:
 
 def get_session_key() -> Optional[str]:
     return load().get("session_key")
+
+
+def get_codex_token() -> Optional[str]:
+    return load().get("codex_token")

@@ -162,6 +162,10 @@ class CredsRequest(BaseModel):
     session_key: str = Field(..., min_length=1)
 
 
+class CodexCredsRequest(BaseModel):
+    token: str = Field(..., min_length=1)
+
+
 class QuotaDeltaRequest(BaseModel):
     session_id: str = Field(..., min_length=1)
     before: float
@@ -681,6 +685,12 @@ async def save_creds(req: CredsRequest):
     return JSONResponse({"ok": True})
 
 
+@app.post("/config/creds/codex")
+async def save_codex_creds(req: CodexCredsRequest):
+    creds.save_codex(req.token.strip())
+    return JSONResponse({"ok": True})
+
+
 @app.get("/quota")
 async def quota():
     org_id = creds.get_org_id()
@@ -700,6 +710,27 @@ async def quota():
         return JSONResponse(r.json())
     except Exception as exc:
         log.error("quota fetch failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+
+@app.get("/quota/codex")
+async def quota_codex():
+    token = creds.get_codex_token()
+    if not token:
+        return JSONResponse({"error": "credentials not configured"}, status_code=400)
+    try:
+        from curl_cffi.requests import AsyncSession
+        async with AsyncSession() as session:
+            r = await session.get(
+                "https://chatgpt.com/backend-api/wham/usage",
+                headers={"Cookie": f"__Secure-next-auth.session-token={token}"},
+                impersonate="chrome",
+            )
+        if r.status_code != 200:
+            return JSONResponse({"error": f"chatgpt.com returned {r.status_code}"}, status_code=502)
+        return JSONResponse(r.json())
+    except Exception as exc:
+        log.error("codex quota fetch failed: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=502)
 
 

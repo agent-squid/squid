@@ -1669,6 +1669,99 @@ function initQuota() {
   fetchQuota();
 }
 
+// ── Codex (ChatGPT) quota ──────────────────────────────────────────────────────
+
+const codexQuotaDisplay = document.getElementById('codex-quota-display');
+let codexResetAt  = null;
+let codexTimer    = null;
+const CODEX_PIE_C = 2 * Math.PI * 6;
+
+async function fetchCodexQuota() {
+  try {
+    const res = await fetch('/quota/codex');
+    if (!res.ok) return;
+    const data = await res.json();
+    const win = data?.rate_limit?.primary_window;
+    if (!win) return;
+
+    const pct = win.used_percent ?? 0;
+    codexResetAt = win.reset_after_seconds != null
+      ? Date.now() + win.reset_after_seconds * 1000 : null;
+
+    codexQuotaDisplay.classList.add('loaded');
+    updateCodexLabel(pct);
+
+    if (codexTimer) clearInterval(codexTimer);
+    codexTimer = setInterval(() => updateCodexLabel(pct), 10000);
+  } catch {}
+}
+
+function updateCodexLabel(pct) {
+  const label = document.getElementById('codex-quota-label');
+  if (!label) return;
+  const diff = codexResetAt ? codexResetAt - Date.now() : null;
+  let timeStr = '';
+  if (diff != null && diff > 0) {
+    const totalMin = Math.floor(diff / 60000);
+    const h = Math.floor(totalMin / 60);
+    const m = String(totalMin % 60).padStart(2, '0');
+    timeStr = ' in ' + (h > 0 ? `${h}:${m}` : `${m}m`);
+  }
+  label.textContent = `${pct}%${timeStr}`;
+
+  const arc = document.getElementById('codex-pie-arc');
+  if (arc) {
+    const filled = (pct / 100) * CODEX_PIE_C;
+    arc.setAttribute('stroke-dasharray', `${filled} ${CODEX_PIE_C}`);
+    arc.setAttribute('stroke', pct >= 80 ? '#e05030' : '#10a37f');
+  }
+}
+
+function initCodexQuota() {
+  codexQuotaDisplay.innerHTML = `
+    <svg id="codex-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
+      <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
+      <circle id="codex-pie-arc" cx="9" cy="9" r="6" fill="none" stroke="#10a37f"
+              stroke-width="4" stroke-dasharray="0 ${CODEX_PIE_C}" stroke-linecap="round"
+              transform="rotate(-90 9 9)"/>
+    </svg>
+    <span id="codex-quota-label"></span>`;
+
+  const credsPopup = document.getElementById('codex-creds-popup');
+  codexQuotaDisplay.addEventListener('click', () => credsPopup.classList.toggle('open'));
+  document.addEventListener('click', (e) => {
+    if (!codexQuotaDisplay.contains(e.target) && !credsPopup.contains(e.target))
+      credsPopup.classList.remove('open');
+  });
+  fetchCodexQuota();
+}
+
+function initCodexCreds() {
+  const tokenInput = document.getElementById('codex-creds-token');
+  const saveBtn    = document.getElementById('codex-creds-save');
+  const status     = document.getElementById('codex-creds-status');
+
+  saveBtn.addEventListener('click', async () => {
+    const token = tokenInput.value.trim();
+    if (!token) { status.textContent = 'token required'; return; }
+    try {
+      const res = await fetch('/config/creds/codex', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token }),
+      });
+      if (res.ok) {
+        status.textContent = 'saved ✓';
+        tokenInput.value = '';
+        fetchCodexQuota();
+      } else {
+        status.textContent = 'failed';
+      }
+    } catch { status.textContent = 'error'; }
+    setTimeout(() => { status.textContent = ''; }, 3000);
+  });
+}
+
 function initCreds() {
   const orgInput = document.getElementById('creds-org');
   const keyInput = document.getElementById('creds-key');
@@ -2563,6 +2656,8 @@ initStats();
 initAliases();
 initQuota();
 initCreds();
+initCodexQuota();
+initCodexCreds();
 initPullToRefresh();
 startProcPoll();
 showBootBanner();

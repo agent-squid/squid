@@ -204,6 +204,57 @@ body {
 #creds-save:hover { color: #f07040; border-color: #f07040; }
 #creds-status { font-size: 0.68em; color: #555; }
 
+/* codex quota gauge */
+#codex-quota-display {
+  display: none;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.7em;
+  color: #555;
+  cursor: pointer;
+  margin-right: 0.5rem;
+}
+#codex-quota-display:hover { color: #888; }
+#codex-quota-display.loaded { display: flex; color: #666; }
+
+#codex-creds-popup {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  background: #13131c;
+  border: 1px solid #2e2e3e;
+  border-radius: 8px;
+  padding: 0.5rem 0.7rem;
+  z-index: 30;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  align-items: center;
+  gap: 0.4rem;
+  white-space: nowrap;
+}
+#codex-creds-popup.open { display: flex; }
+#codex-creds-token {
+  background: #1e1e28;
+  border: 1px solid #2e2e3e;
+  border-radius: 4px;
+  color: #aaa;
+  font-size: 0.72em;
+  padding: 0.2rem 0.5rem;
+  width: 260px;
+}
+#codex-creds-save {
+  background: #2a2a35;
+  border: 1px solid #3a3a4a;
+  border-radius: 4px;
+  color: #888;
+  cursor: pointer;
+  font-size: 0.72em;
+  font-weight: normal;
+  padding: 0.2rem 0.6rem;
+}
+#codex-creds-save:hover { color: #10a37f; border-color: #10a37f; }
+#codex-creds-status { font-size: 0.68em; color: #555; }
+
 /* process status dot (topbar) */
 #proc-status {
   display: inline-flex;

@@ -13,7 +13,7 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="icon" href="/icons/icon-192.png" sizes="192x192" type="image/png" />
   <link rel="apple-touch-icon" href="/icons/icon-192.png" />
-  <link rel="stylesheet" href="style.css?v=20260609-95" />
+  <link rel="stylesheet" href="style.css?v=20260609-96" />
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 </head>
@@ -31,6 +31,8 @@
 
       <!-- Process status dot -->
       <button id="proc-status" type="button" title="Processes · click to view"></button>
+
+      <div id="codex-quota-display" title="Codex usage · click for credentials"></div>
 
       <div id="quota-display" title="Session usage · click for credentials"></div>
 
@@ -60,6 +62,13 @@
 
       <!-- Process status popup -->
       <div id="proc-status-popup"></div>
+
+      <div id="codex-creds-popup">
+        <span class="settings-label">ChatGPT session</span>
+        <input id="codex-creds-token" type="password" placeholder="__Secure-next-auth.session-token" />
+        <button id="codex-creds-save" type="button">Save</button>
+        <span id="codex-creds-status"></span>
+      </div>
 
       <div id="quota-creds-popup">
         <span class="settings-label">Claude.ai session</span>
@@ -196,6 +205,6 @@
 
     <!-- Inline agent creation prompt (appended to #messages dynamically) -->
   </div>
-  <script src="app.js?v=20260609-103"></script>
+  <script src="app.js?v=20260609-104"></script>
 </body>
 </html>
