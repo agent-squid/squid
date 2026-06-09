@@ -130,6 +130,8 @@ async def bearer_auth(request: Request, call_next):
     # page can load and read the token from localStorage / URL param.
     if path == "/" or Path(path).suffix in _STATIC_EXTS:
         return await call_next(request)
+    if path == "/localfile" and request.query_params.get("token") == _AUTH_TOKEN:
+        return await call_next(request)
     if request.headers.get("Authorization") == f"Bearer {_AUTH_TOKEN}":
         return await call_next(request)
     return JSONResponse({"error": "unauthorized"}, status_code=401)

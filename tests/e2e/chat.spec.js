@@ -110,6 +110,22 @@ test.describe('response bubble', () => {
     await look(page);  // pause — observe: bold and inline code rendered in bubble
   });
 
+  test('local file links with line suffix route through /localfile', async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem('squid_token', 'test-token'));
+    await page.goto('/');
+    await page.route('**/chat', r => r.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(META, { data: '[app.js](/Users/haebin/Work/squid/ui/app.js:470)' }, DONE),
+    }));
+
+    await sendMsg(page);
+    const href = await page.locator(`${RESPONSE} a`).getAttribute('href');
+    expect(href).toContain('/localfile?path=');
+    expect(decodeURIComponent(href)).toContain('/Users/haebin/Work/squid/ui/app.js');
+    expect(decodeURIComponent(href)).not.toContain('app.js:470');
+    expect(href).toContain('token=test-token');
+  });
+
   test('thinking bubble collapses to toggle when status events present', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200, headers: SSE_HEADERS,

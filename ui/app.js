@@ -89,15 +89,31 @@ marked.setOptions({ breaks: true });
 
 // Rewrite file:// links and images to /localfile?path= so local paths are served.
 (function () {
+  function stripLineSuffix(path) {
+    return path.replace(/:\d+(?::\d+)?$/, '');
+  }
+
+  function isLocalFilePath(path) {
+    return /^(\/|~\/)/.test(path) && /\.\w{1,16}$/.test(path);
+  }
+
+  function localFileUrl(path) {
+    const params = new URLSearchParams({ path });
+    const token = localStorage.getItem('squid_token');
+    if (token) params.set('token', token);
+    return '/localfile?' + params.toString();
+  }
+
   function fileToLocal(url) {
     if (!url) return url;
     if (url.startsWith('file://')) {
-      const p = decodeURIComponent(url.replace(/^file:\/\//, ''));
-      return '/localfile?path=' + encodeURIComponent(p);
+      const p = stripLineSuffix(decodeURIComponent(url.replace(/^file:\/\//, '')));
+      return localFileUrl(p);
     }
-    // bare absolute paths like /Users/... or ~/...
-    if (/^(\/|~\/)/.test(url) && /\.\w{1,6}$/.test(url)) {
-      return '/localfile?path=' + encodeURIComponent(url);
+    // bare absolute paths like /Users/... or ~/..., optionally with :line suffix
+    const p = stripLineSuffix(url);
+    if (isLocalFilePath(p)) {
+      return localFileUrl(p);
     }
     return url;
   }
@@ -466,13 +482,14 @@ async function loadHistory() {
       const asstHeaderText = document.createElement('span');
       asstHeaderText.className = 'response-header-text';
       asstHeaderText.appendChild(asstTag);
+      asstHeaderText.appendChild(document.createTextNode('\u00a0\u00a0'));
       const promptSpan = document.createElement('span');
       promptSpan.className = 'history-prompt';
-      promptSpan.textContent = '  ' + truncate(item.prompt || '', 55);
+      promptSpan.textContent = truncate(item.prompt || '', 55);
       promptSpan.dataset.full = item.prompt || '';
       promptSpan.addEventListener('click', () => {
         const expanded = promptSpan.classList.toggle('expanded');
-        promptSpan.textContent = expanded ? promptSpan.dataset.full : '  ' + truncate(promptSpan.dataset.full, 55);
+        promptSpan.textContent = expanded ? promptSpan.dataset.full : truncate(promptSpan.dataset.full, 55);
         asstHeaderText.classList.toggle('expanded', expanded);
       });
       asstHeaderText.appendChild(promptSpan);
@@ -1349,7 +1366,9 @@ function addStats(bubble, stats, timestamp) {
   const isSplit    = (cacheRead + cacheWrite) > 0 && input < (cacheRead + cacheWrite);
   const inp        = isSplit ? input + cacheRead + cacheWrite : input;
   const newThis    = isSplit ? input + cacheWrite : (cacheRead > 0 ? input - cacheRead : 0);
-  const newLabel   = (isSplit || cacheRead > 0) ? ` (${fmtNum(newThis)} new)` : '';
+  const newLabel   = isSplit ? ` (${fmtNum(newThis)} new)`
+                   : cacheRead > 0 ? ` (${fmtNum(newThis)} uncached)`
+                   : '';
   const hasCost    = stats.cost_usd != null;
   const cost       = hasCost ? `$${stats.cost_usd.toFixed(4)}` : '';
   const cacheStr   = cacheRead ? ` · ${fmtNum(cacheRead)} cached` : '';
@@ -1413,7 +1432,21 @@ function addStats(bubble, stats, timestamp) {
 }
 
 function fmtNum(n) {
-  return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
+  const value = Number(n) || 0;
+  const abs = Math.abs(value);
+  if (abs >= 1_000_000) {
+    return (value / 1_000_000).toLocaleString(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }) + 'M';
+  }
+  if (abs >= 1000) {
+    return (value / 1000).toLocaleString(undefined, {
+      minimumFractionDigits: 1,
+      maximumFractionDigits: 1,
+    }) + 'K';
+  }
+  return Math.round(value).toLocaleString();
 }
 
 function fmtTime(iso) {

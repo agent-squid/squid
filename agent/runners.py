@@ -39,6 +39,19 @@ def _deregister_proc(pid: int) -> None:
     _proc_registry.pop(pid, None)
 
 
+def _signal_process_group(pid: int, sig: signal.Signals) -> bool:
+    """Signal the CLI process group; fall back to the parent PID if needed."""
+    try:
+        os.killpg(os.getpgid(pid), sig)
+        return True
+    except (ProcessLookupError, PermissionError):
+        try:
+            os.kill(pid, sig)
+            return True
+        except (ProcessLookupError, PermissionError):
+            return False
+
+
 def kill_procs_by_topic(topic: str, agent: Optional[str] = None,
                         adhoc: Optional[bool] = None, lifo: bool = False) -> int:
     """Send SIGTERM to subprocesses matching topic + optional agent/adhoc filters.
@@ -59,15 +72,8 @@ def kill_procs_by_topic(topic: str, agent: Optional[str] = None,
     killed = 0
     for pid, _ in matching:
         _deregister_proc(pid)  # remove immediately so a second LIFO call skips it
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        if _signal_process_group(pid, signal.SIGTERM):
             killed += 1
-        except (ProcessLookupError, PermissionError):
-            try:
-                os.kill(pid, signal.SIGTERM)
-                killed += 1
-            except (ProcessLookupError, PermissionError):
-                pass
     return killed
 
 
@@ -76,11 +82,9 @@ def kill_proc_by_msg_id(msg_id: int) -> int:
     for pid, info in list(_proc_registry.items()):
         if info.get("msg_id") == msg_id:
             _deregister_proc(pid)
-            try:
-                os.kill(pid, signal.SIGTERM)
+            if _signal_process_group(pid, signal.SIGTERM):
                 return 1
-            except (ProcessLookupError, PermissionError):
-                return 0
+            return 0
     return 0
 
 
@@ -88,11 +92,8 @@ def kill_all_procs() -> int:
     """Send SIGTERM to all tracked subprocesses. Returns kill count."""
     killed = 0
     for pid in list(_proc_registry):
-        try:
-            os.kill(pid, signal.SIGTERM)
+        if _signal_process_group(pid, signal.SIGTERM):
             killed += 1
-        except (ProcessLookupError, PermissionError):
-            pass
     return killed
 
 
@@ -188,9 +189,7 @@ async def _stream_lines(
         try:
             await asyncio.wait_for(proc.wait(), timeout=30)
         except asyncio.TimeoutError:
-            try:
-                os.killpg(os.getpgid(pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
+            if not _signal_process_group(pid, signal.SIGKILL):
                 proc.kill()
             await proc.wait()
         drain_task.cancel()
@@ -706,4 +705,3 @@ async def run_antigravity(
                 "duration_ms": int(time.monotonic() * 1000 - start_ms),
             }
         }
-
