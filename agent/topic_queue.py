@@ -45,6 +45,20 @@ class TopicWorker:
     def queue_depth(self) -> int:
         return self.q.qsize()
 
+    def queue_items(self) -> list[dict]:
+        """Peek at pending items without consuming them."""
+        items = list(self.q._queue)  # deque peek — non-destructive
+        return [
+            {
+                "topic": it.topic,
+                "agent": it.agent,
+                "msg_id": it.msg_id,
+                "position": idx + 1,
+                "prompt_preview": (it.prompt[:80] + "…") if len(it.prompt) > 80 else it.prompt,
+            }
+            for idx, it in enumerate(items) if it is not None
+        ]
+
     async def enqueue(self, item: QueueItem) -> int:
         item.seq = self._next_seq
         self._next_seq += 1
@@ -210,6 +224,13 @@ class TopicDispatcher:
     def drain_topic(self, topic: str, pos: Optional[int] = None) -> int:
         """Drain pending items for topic across all agent lanes."""
         return sum(w.drain(pos) for w in self._workers_for_topic(topic))
+
+    def all_queued_items(self) -> list[dict]:
+        """Return pending (not yet running) items across all topic workers."""
+        result = []
+        for w in self._workers.values():
+            result.extend(w.queue_items())
+        return result
 
     def topics_info(self) -> list[dict]:
         return [

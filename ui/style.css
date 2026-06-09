@@ -278,6 +278,33 @@ body {
   padding: 0.15rem 0.45rem;
 }
 .proc-stop-btn:hover { border-color: #e05030; color: #e05030; }
+.proc-section-label {
+  font-size: 0.65em;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: #444;
+  text-transform: uppercase;
+  padding: 0.4rem 0.4rem 0.15rem;
+}
+.proc-queue-preview {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #555;
+  font-style: italic;
+}
+.proc-deq-btn {
+  background: transparent;
+  border: 1px solid #2e2e3e;
+  border-radius: 4px;
+  color: #555;
+  cursor: pointer;
+  font-size: 0.8em;
+  line-height: 1;
+  padding: 0.15rem 0.45rem;
+}
+.proc-deq-btn:hover { border-color: #e05030; color: #e05030; }
 .proc-status-empty {
   color: #444;
   font-size: 0.75em;
@@ -940,7 +967,8 @@ button {
     font-size: 16px;
   }
 
-  .stats-token-detail {
+  .stats-token-detail,
+  .stats-cache-str {
     display: none;
   }
 
@@ -1094,7 +1122,7 @@ button {
     bottom: calc(4.5rem + env(safe-area-inset-bottom));
   }
 
-  #view-analytics, #view-agents { padding-top: 0.25rem; }
+  #view-analytics, #view-agents { padding-top: 0.75rem; }
   .msg-pin-btn { opacity: 1; }
 
   .settings-hint {

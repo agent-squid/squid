@@ -22,7 +22,9 @@ _proc_registry: dict[int, dict] = {}
 
 
 def _register_proc(pid: int, backend: str, topic: str, agent: str,
-                   adhoc: bool = False, msg_id: Optional[int] = None) -> None:
+                   adhoc: bool = False, msg_id: Optional[int] = None,
+                   prompt: str = "") -> None:
+    preview = (prompt[:80] + "…") if len(prompt) > 80 else prompt
     _proc_registry[pid] = {
         "pid": pid,
         "backend": backend,
@@ -30,6 +32,7 @@ def _register_proc(pid: int, backend: str, topic: str, agent: str,
         "agent": agent,
         "adhoc": adhoc,
         "msg_id": msg_id,
+        "prompt_preview": preview,
         "started_at": time.monotonic(),
         "started_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -123,6 +126,7 @@ async def _stream_lines(
     adhoc: bool = False,
     msg_id: Optional[int] = None,
     response_timeout: Optional[int] = None,
+    prompt: str = "",
 ) -> AsyncGenerator[str, None]:
     """Run cmd and yield stdout line by line.
 
@@ -145,7 +149,7 @@ async def _stream_lines(
     assert proc.stdout is not None
     assert proc.stderr is not None
     pid = proc.pid
-    _register_proc(pid, backend=backend, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id)
+    _register_proc(pid, backend=backend, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, prompt=prompt)
 
     # Drain stderr concurrently — prevents buffer-full deadlock if the
     # subprocess writes > 64KB of diagnostics before exiting.
@@ -317,7 +321,7 @@ async def run_claude(
     streamed_text = False  # track whether any text chunks were streamed as content
     tool_blocks: dict[int, dict] = {}  # index -> {name, input_json}
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend="claude", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout):
+    async for line in _stream_lines(cmd, cwd=cwd, backend="claude", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt):
         if not line:
             continue
         try:
@@ -421,7 +425,7 @@ async def run_codex(
     start_ms = time.monotonic() * 1000
     thread_id: Optional[str] = None
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend="codex", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout):
+    async for line in _stream_lines(cmd, cwd=cwd, backend="codex", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt):
         if not line:
             continue
         try:
@@ -513,7 +517,7 @@ async def run_copilot(
     stats_yielded = False
     session_error: Optional[str] = None
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend="copilot", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout):
+    async for line in _stream_lines(cmd, cwd=cwd, backend="copilot", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt):
         if not line:
             continue
         try:
@@ -601,7 +605,7 @@ async def run_cursor(
     session_id: Optional[str] = None
     text_started = False
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend="cursor", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout):
+    async for line in _stream_lines(cmd, cwd=cwd, backend="cursor", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt):
         if not line:
             continue
         try:
@@ -671,7 +675,7 @@ async def run_antigravity(
     streamed_text = False
     tool_blocks: dict[int, dict] = {}
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend="antigravity", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout):
+    async for line in _stream_lines(cmd, cwd=cwd, backend="antigravity", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt):
         if not line:
             continue
         try:

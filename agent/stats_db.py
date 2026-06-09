@@ -70,8 +70,10 @@ _TABLES = [
         status      TEXT NOT NULL DEFAULT 'pending',
         adhoc       INTEGER DEFAULT 0,
         context     TEXT,
-        quota_delta REAL,
-        created_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        quota_delta  REAL,
+        quota_before REAL,
+        quota_after  REAL,
+        created_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )""",
     """CREATE TABLE IF NOT EXISTS topic_sessions (
         topic       TEXT NOT NULL,
@@ -115,6 +117,9 @@ _MIGRATIONS = [
     "ALTER TABLE topics ADD COLUMN hidden INTEGER DEFAULT 0",
     # per-message quota delta (2026-06-09)
     "ALTER TABLE chat_messages ADD COLUMN quota_delta REAL",
+    # per-message raw quota snapshot (2026-06-09)
+    "ALTER TABLE chat_messages ADD COLUMN quota_before REAL",
+    "ALTER TABLE chat_messages ADD COLUMN quota_after REAL",
     # denormalize last_model/last_backend into topics to avoid JOIN in get_topics_summary (2026-05-28)
     "ALTER TABLE topics ADD COLUMN last_model TEXT",
     "ALTER TABLE topics ADD COLUMN last_backend TEXT",
@@ -416,11 +421,13 @@ def update_assistant_message(
         )
 
 
-def update_message_quota_delta(msg_id: int, delta: float) -> None:
+def update_message_quota_snapshot(msg_id: int, before: float, after: float) -> None:
+    delta = round(after - before, 4)
     with _connect() as conn:
         conn.execute(
-            "UPDATE chat_messages SET quota_delta=? WHERE id=? AND role='assistant'",
-            (delta, msg_id),
+            "UPDATE chat_messages SET quota_before=?, quota_after=?, quota_delta=?"
+            " WHERE id=? AND role='assistant'",
+            (before, after, delta, msg_id),
         )
 
 
@@ -553,11 +560,35 @@ def mark_orphaned_pending() -> int:
 
 
 def get_message(msg_id: int) -> Optional[dict]:
+    stat_keys = {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
+                 "history_input_tokens", "cost_usd", "duration_ms", "lookback",
+                 "quota_before", "quota_after", "quota_delta",
+                 "msg_quota_before", "msg_quota_after", "backend", "model", "cwd"}
     with _connect() as conn:
         row = conn.execute(
-            "SELECT id, status, content FROM chat_messages WHERE id=?", (msg_id,)
+            """SELECT m.id, m.role, m.topic, m.agent,
+                      m.content, m.status, m.adhoc, m.session_id,
+                      m.context, m.created_at AS timestamp, m.reply_to,
+                      m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
+                      u.content AS prompt,
+                      s.input_tokens, s.output_tokens, s.cache_read_tokens,
+                      s.cache_write_tokens, s.history_input_tokens,
+                      s.cost_usd, s.duration_ms, s.lookback,
+                      s.quota_before, s.quota_after, s.backend, s.model, s.cwd
+               FROM chat_messages m
+               LEFT JOIN chat_messages u ON m.reply_to = u.id
+               LEFT JOIN session_stats s ON m.session_id = s.session_id
+               WHERE m.id=?""",
+            (msg_id,)
         ).fetchone()
-    return dict(row) if row else None
+    if not row:
+        return None
+    result = dict(row)
+    stats = {k: result.pop(k) for k in stat_keys}
+    if result.get("session_id") and any(v is not None for v in stats.values()):
+        stats["session_id"] = result["session_id"]
+        result["stats"] = stats
+    return result
 
 
 def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
@@ -582,7 +613,7 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
             f"""SELECT m.id, m.role, m.topic, m.agent,
                        m.content, m.status, m.adhoc, m.session_id,
                        m.context, m.created_at AS timestamp, m.reply_to,
-                       m.quota_delta,
+                       m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
                        u.content AS prompt,
                        s.input_tokens, s.output_tokens, s.cache_read_tokens,
                        s.cache_write_tokens, s.history_input_tokens,
@@ -598,7 +629,8 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
 
     stat_keys = {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
                  "history_input_tokens", "cost_usd", "duration_ms", "lookback",
-                 "quota_before", "quota_after", "quota_delta", "backend", "model", "cwd"}
+                 "quota_before", "quota_after", "quota_delta",
+                 "msg_quota_before", "msg_quota_after", "backend", "model", "cwd"}
     items = []
     for r in rows:
         row = dict(r)

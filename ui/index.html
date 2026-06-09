@@ -13,7 +13,7 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="icon" href="/icons/icon-192.png" sizes="192x192" type="image/png" />
   <link rel="apple-touch-icon" href="/icons/icon-192.png" />
-  <link rel="stylesheet" href="style.css?v=20260609-86" />
+  <link rel="stylesheet" href="style.css?v=20260609-95" />
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 </head>
@@ -96,6 +96,7 @@
           <div class="help-row"><code>/deq N</code><span>remove Nth item (1=first, -1=last)</span></div>
           <div class="help-row"><code>/filter</code><span>filter history by current #topic or #topic@agent</span></div>
           <div class="help-row"><code>/filter reset</code><span>clear the active filter</span></div>
+          <div class="help-row"><code>/status</code><span>open process status popup</span></div>
           <div class="help-row"><code>/restart</code><span>restart the server</span></div>
           <div class="help-row" style="color:#555;font-size:0.85em">Commands also work without <kbd>/</kbd> as exact bare words.</div>
         </div>
@@ -163,7 +164,6 @@
           <button class="st" data-period="hourly" data-group="time">Hourly</button>
           <button class="st" data-period="" data-group="topic">By Topic</button>
           <button class="st" data-period="" data-group="model">By Agent</button>
-          <button class="st" data-period="" data-group="proc">Live</button>
         </div>
       </div>
       <div id="stats-content"></div>
@@ -196,6 +196,6 @@
 
     <!-- Inline agent creation prompt (appended to #messages dynamically) -->
   </div>
-  <script src="app.js?v=20260609-94"></script>
+  <script src="app.js?v=20260609-103"></script>
 </body>
 </html>

@@ -141,12 +141,7 @@ function switchView(name) {
     btn.classList.toggle('active', btn.dataset.view === name);
   });
   currentView = name;
-  if (name === 'analytics') {
-    loadStats();
-    if (statsGroup === 'proc') startLivePoll(); else stopLivePoll();
-  } else {
-    stopLivePoll();
-  }
+  if (name === 'analytics') loadStats();
   if (name === 'agents') loadAgents();
 }
 
@@ -470,66 +465,14 @@ async function loadHistory() {
   for (const item of [...items].reverse()) {
     if (!item.content && item.status !== 'pending') continue;
 
-    {
-      const lb = item.stats?.lookback ?? 0;
-      const asstBubble = document.createElement('div');
-      asstBubble.className = 'msg assistant history-item';
-
-      const asstHeader = document.createElement('div');
-      asstHeader.className = 'response-header';
-      const asstLabel = item.agent || item.backend;
-      const asstTag = makeTopicTag(item.topic || 'default', asstLabel, { clickable: true, adhoc: !!item.adhoc, lookback: lb });
-      const asstHeaderText = document.createElement('span');
-      asstHeaderText.className = 'response-header-text';
-      asstHeaderText.appendChild(asstTag);
-      asstHeaderText.appendChild(document.createTextNode('\u00a0\u00a0'));
-      const promptSpan = document.createElement('span');
-      promptSpan.className = 'history-prompt';
-      promptSpan.textContent = truncate(item.prompt || '', 55);
-      promptSpan.dataset.full = item.prompt || '';
-      promptSpan.addEventListener('click', () => {
-        const expanded = promptSpan.classList.toggle('expanded');
-        promptSpan.textContent = expanded ? promptSpan.dataset.full : truncate(promptSpan.dataset.full, 55);
-        asstHeaderText.classList.toggle('expanded', expanded);
-      });
-      asstHeaderText.appendChild(promptSpan);
-      asstHeader.appendChild(asstHeaderText);
-      asstBubble.appendChild(asstHeader);
-
-      const asstContent = document.createElement('div');
-      if (item.status === 'pending') {
-        addLoader(asstContent);
-        pollMessageStatus(item.id, asstContent, asstBubble);
-      } else if (item.status === 'error') {
-        const raw = (item.content || '').split('\n')[0].replace(/^CLI exited \d+:\s*/, '').trim();
-        asstContent.innerHTML = `<span class="msg-error">${raw || 'Response interrupted.'}</span>`;
-      } else {
-        asstContent.innerHTML = marked.parse(item.content || '');
-      }
-      asstBubble.appendChild(asstContent);
-      if (item.id) addPinButton(asstBubble, item.id, item.topic || 'default', item.agent || null, item.session_id || null);
-      fragment.appendChild(asstBubble);
-
-      if (item.stats) {
-        const statsEl = addStats(asstBubble, item.stats, item.timestamp);
-        statsEl.classList.add('history-item');
-      } else if (item.timestamp) {
-        const tsEl = addTimestamp(asstBubble, item.timestamp);
-        if (tsEl) tsEl.classList.add('history-item');
-      }
-
-      if (item.context) {
-        try {
-          const tools = typeof item.context === 'string' ? JSON.parse(item.context) : item.context;
-          const diffTools = tools.filter(t => t.name === 'Edit' || t.name === 'Write' || t.name === 'MultiEdit' || t.name === 'Diff');
-          for (const tool of diffTools) {
-            const block = makeToolBlock(tool);
-            block.classList.add('history-item', 'tool-block-history');
-            fragment.appendChild(block);
-          }
-        } catch {}
-      }
+    if (item.status === 'pending') {
+      const wipBubble = makeWipBubble(item);
+      fragment.appendChild(wipBubble);
+      pollPendingItem(item, wipBubble);
+      continue;
     }
+
+    appendHistoryItem(item, fragment);
   }
 
   const anchor = topSentinel ? topSentinel.nextSibling : messages.firstChild;
@@ -1040,6 +983,7 @@ async function sendMessage(text) {
               const info = JSON.parse(data);
               setThinkingText(`#${info.topic} · queued — position ${info.position}`);
             } catch {}
+            pollProcs();
             eventName = null;
 
           } else if (eventName === 'stats') {
@@ -1183,18 +1127,22 @@ async function sendMessage(text) {
     if (!statsEl && doneTime && firstDataReceived) addTimestamp(bubble, doneTime, false);
   }
 
-  // Quota delta — wait briefly for claude.ai API to reflect the just-completed turn
+  // Quota snapshot — wait briefly for claude.ai API to reflect the just-completed turn
   await new Promise(r => setTimeout(r, 3000));
   await fetchQuota(true);
-  if (statsEl && quotaDelta != null) {
-    statsEl.querySelector('.stats-quota-delta').textContent = `  ·  quota +${quotaDelta}%`;
-  }
-  if (msgId && quotaDelta != null) {
-    fetch(`/chat/${msgId}/quota-delta`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ delta: quotaDelta }),
-    }).catch(() => {});
+  const quotaAfter = quotaRaw;
+  if (quotaBefore !== null && quotaAfter !== null && quotaAfter !== quotaBefore) {
+    const d = Math.round((quotaAfter - quotaBefore) * 10) / 10;
+    if (statsEl && d > 0) {
+      statsEl.querySelector('.stats-quota-delta').textContent = `  ·  +${d}%`;
+    }
+    if (msgId) {
+      fetch(`/chat/${msgId}/quota-delta`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ before: quotaBefore, after: quotaAfter }),
+      }).catch(() => {});
+    }
   }
   if (lastSessionId && quotaBefore !== null && quotaRaw !== null) {
     fetch('/stats/quota-delta', {
@@ -1310,7 +1258,118 @@ function makeToolBlock(tool) {
 }
 
 
-async function pollMessageStatus(msgId, contentEl, bubbleEl) {
+function appendHistoryItem(item, container) {
+  const lb = item.stats?.lookback ?? 0;
+  const asstBubble = document.createElement('div');
+  asstBubble.className = 'msg assistant history-item';
+
+  const asstHeader = document.createElement('div');
+  asstHeader.className = 'response-header';
+  const asstLabel = item.agent || item.backend;
+  const asstTag = makeTopicTag(item.topic || 'default', asstLabel, { clickable: true, adhoc: !!item.adhoc, lookback: lb });
+  const asstHeaderText = document.createElement('span');
+  asstHeaderText.className = 'response-header-text';
+  asstHeaderText.appendChild(asstTag);
+  asstHeaderText.appendChild(document.createTextNode('  '));
+  const promptSpan = document.createElement('span');
+  promptSpan.className = 'history-prompt';
+  promptSpan.textContent = truncate(item.prompt || '', 55);
+  promptSpan.dataset.full = item.prompt || '';
+  promptSpan.addEventListener('click', () => {
+    const expanded = promptSpan.classList.toggle('expanded');
+    promptSpan.textContent = expanded ? promptSpan.dataset.full : truncate(promptSpan.dataset.full, 55);
+    asstHeaderText.classList.toggle('expanded', expanded);
+  });
+  asstHeaderText.appendChild(promptSpan);
+  asstHeader.appendChild(asstHeaderText);
+  asstBubble.appendChild(asstHeader);
+
+  const asstContent = document.createElement('div');
+  if (item.status === 'error') {
+    const raw = (item.content || '').split('\n')[0].replace(/^CLI exited \d+:\s*/, '').trim();
+    asstContent.innerHTML = `<span class="msg-error">${raw || 'Response interrupted.'}</span>`;
+  } else {
+    asstContent.innerHTML = marked.parse(item.content || '');
+  }
+  asstBubble.appendChild(asstContent);
+  if (item.id) addPinButton(asstBubble, item.id, item.topic || 'default', item.agent || null, item.session_id || null);
+
+  if (container) container.appendChild(asstBubble);
+
+  if (item.stats) {
+    const statsEl = addStats(asstBubble, item.stats, item.timestamp);
+    statsEl.classList.add('history-item');
+  } else if (item.timestamp) {
+    const tsEl = addTimestamp(asstBubble, item.timestamp);
+    if (tsEl) tsEl.classList.add('history-item');
+  }
+
+  if (item.context) {
+    try {
+      const tools = typeof item.context === 'string' ? JSON.parse(item.context) : item.context;
+      const diffTools = tools.filter(t => t.name === 'Edit' || t.name === 'Write' || t.name === 'MultiEdit' || t.name === 'Diff');
+      let lastEl = asstBubble;
+      for (const tool of diffTools) {
+        const block = makeToolBlock(tool);
+        block.classList.add('history-item', 'tool-block-history');
+        if (container) container.appendChild(block);
+        else { lastEl.after(block); lastEl = block; }
+      }
+    } catch {}
+  }
+
+  return asstBubble;
+}
+
+function makeWipBubble(item) {
+  const bubble = document.createElement('div');
+  bubble.className = 'msg assistant msg-thinking history-item';
+  const content = document.createElement('div');
+  content.className = 'thinking-live';
+  const asstLabel = item.agent || item.backend || '';
+  const statusLine = document.createElement('span');
+  statusLine.textContent = `#${item.topic || 'default'}${asstLabel ? ' @' + asstLabel : ''} · ${truncate(item.prompt || '', 55)}`;
+  content.appendChild(statusLine);
+  addLoader(content);
+  bubble.appendChild(content);
+  const killBtn = document.createElement('button');
+  killBtn.type = 'button';
+  killBtn.className = 'thinking-kill-btn';
+  killBtn.title = 'Stop this process';
+  killBtn.textContent = '×';
+  killBtn.addEventListener('click', async () => {
+    killBtn.disabled = true;
+    await fetch('/cmd', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'stop_msg', msg_id: item.id }) }).catch(() => {});
+  });
+  bubble.appendChild(killBtn);
+  return bubble;
+}
+
+async function pollPendingItem(item, wipBubble) {
+  const MAX_POLLS = 960;
+  let count = 0;
+  const timer = setInterval(async () => {
+    count++;
+    try {
+      const res = await fetch(`/chat/${item.id}/status`);
+      if (!res.ok) { clearInterval(timer); return; }
+      const data = await res.json();
+      if (data.status === 'done' || data.status === 'error') {
+        clearInterval(timer);
+        if (!wipBubble.parentNode) return;
+        const finalBubble = appendHistoryItem(data, null);
+        wipBubble.replaceWith(finalBubble);
+      } else if (count >= MAX_POLLS) {
+        clearInterval(timer);
+        const content = wipBubble.querySelector('.thinking-live');
+        if (content) content.innerHTML += '<br><span class="msg-error">Timed out.</span>';
+      }
+    } catch { clearInterval(timer); }
+  }, 2000);
+}
+
+async function pollMessageStatus(msgId, contentEl, bubbleEl, stopBtn = null) {
   const MAX_POLLS = 960;  // 32 min at 2s intervals — covers 30 min default timeout
   let count = 0;
   const timer = setInterval(async () => {
@@ -1321,13 +1380,18 @@ async function pollMessageStatus(msgId, contentEl, bubbleEl) {
       const data = await res.json();
       if (data.status === 'done') {
         clearInterval(timer);
+        if (stopBtn) stopBtn.remove();
+        contentEl.style.paddingRight = '';
         contentEl.innerHTML = marked.parse(data.content || '');
       } else if (data.status === 'error') {
         clearInterval(timer);
+        if (stopBtn) stopBtn.remove();
+        contentEl.style.paddingRight = '';
         const raw = (data.content || '').split('\n')[0].replace(/^CLI exited \d+:\s*/, '').trim();
         contentEl.innerHTML = `<span class="msg-error">${raw || 'Response interrupted.'}</span>`;
       } else if (count >= MAX_POLLS) {
         clearInterval(timer);
+        if (stopBtn) stopBtn.remove();
         contentEl.innerHTML = '<span class="msg-error">Response timed out.</span>';
       } else if (data.content) {
         contentEl.innerHTML = marked.parse(data.content);
@@ -1408,11 +1472,20 @@ function addStats(bubble, stats, timestamp) {
     detailSpan.textContent = detailLabel;
     el.appendChild(detailSpan);
   }
-  el.appendChild(document.createTextNode(`${cacheStr}  ↓ ${fmtNum(out)} tokens${dur}`));
+  if (cacheStr) {
+    const cacheSpan = document.createElement('span');
+    cacheSpan.className = 'stats-cache-str';
+    cacheSpan.textContent = cacheStr;
+    el.appendChild(cacheSpan);
+  }
+  el.appendChild(document.createTextNode(`  ↓ ${fmtNum(out)} tokens${dur}`));
 
   const qdSpan = document.createElement('span');
   qdSpan.className = 'stats-quota-delta';
-  if (stats.quota_delta != null) qdSpan.textContent = `  ·  quota +${stats.quota_delta}%`;
+  const msgQd = (stats.msg_quota_before != null && stats.msg_quota_after != null)
+    ? Math.round((stats.msg_quota_after - stats.msg_quota_before) * 10) / 10
+    : stats.quota_delta;
+  if (msgQd != null && msgQd > 0) qdSpan.textContent = `  ·  +${msgQd}%`;
   el.appendChild(qdSpan);
 
   let rows, thead, tfoot;
@@ -1635,42 +1708,73 @@ const procStatusBtn   = document.getElementById('proc-status');
 const procStatusPopup = document.getElementById('proc-status-popup');
 let procPollInterval  = null;
 
-function updateProcStatusDot(rows) {
-  procStatusBtn.classList.toggle('has-procs', rows.length > 0);
+function updateProcStatusDot(running, queued) {
+  procStatusBtn.classList.toggle('has-procs', running.length > 0 || queued.length > 0);
 }
 
-function renderProcPopup(rows) {
+function renderProcPopup(running, queued) {
   const header = `<div class="proc-popup-header">
     <span class="settings-label">Processes</span>
     <button id="proc-popup-close" type="button">✕</button>
   </div>`;
-  if (!rows.length) {
-    procStatusPopup.innerHTML = header + '<div class="proc-status-empty">No active processes.</div>';
+
+  let body = '';
+  if (!running.length && !queued.length) {
+    body = '<div class="proc-status-empty">No active processes or queued prompts.</div>';
   } else {
-    const bodyRows = rows.map(r => `
-      <tr>
-        <td><span class="proc-dot"></span>#${r.topic || '—'}</td>
-        <td>@${r.agent || '—'}</td>
-        <td>${r.duration_s}s</td>
-        <td><button class="proc-stop-btn" data-msgid="${r.msg_id || ''}" data-topic="${r.topic || ''}" data-agent="${r.agent || ''}">Stop</button></td>
-      </tr>`).join('');
-    procStatusPopup.innerHTML = header + `<table>
-      <thead><tr><th>Topic</th><th>Agent</th><th>Duration</th><th></th></tr></thead>
-      <tbody>${bodyRows}</tbody>
-    </table>`;
-    procStatusPopup.querySelectorAll('.proc-stop-btn').forEach(btn => {
-      btn.addEventListener('click', async e => {
-        e.stopPropagation();
-        btn.disabled = true;
-        btn.textContent = '…';
-        const body = btn.dataset.msgid
-          ? { command: 'stop_msg', msg_id: parseInt(btn.dataset.msgid) }
-          : { command: 'stop', topic: btn.dataset.topic, agent: btn.dataset.agent };
-        await fetch('/cmd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-        await pollProcs();
-      });
-    });
+    if (running.length) {
+      const rows = running.map(r => `
+        <tr>
+          <td><span class="proc-dot"></span>#${r.topic || '—'}</td>
+          <td>@${r.agent || '—'}</td>
+          <td class="proc-queue-preview">${r.prompt_preview || '—'}</td>
+          <td>${r.duration_s}s</td>
+          <td><button class="proc-stop-btn" data-msgid="${r.msg_id || ''}" data-topic="${r.topic || ''}" data-agent="${r.agent || ''}">Stop</button></td>
+        </tr>`).join('');
+      body += `<div class="proc-section-label">Running</div>
+        <table><thead><tr><th>Topic</th><th>Agent</th><th>Prompt</th><th>Time</th><th></th></tr></thead>
+        <tbody>${rows}</tbody></table>`;
+    }
+    if (queued.length) {
+      const rows = queued.map(r => `
+        <tr>
+          <td>#${r.topic || '—'}</td>
+          <td>@${r.agent || '—'}</td>
+          <td class="proc-queue-preview">${r.prompt_preview || '—'}</td>
+          <td><button class="proc-deq-btn" data-topic="${r.topic || ''}" data-pos="${r.position}">✕</button></td>
+        </tr>`).join('');
+      body += `<div class="proc-section-label">Queued</div>
+        <table><thead><tr><th>Topic</th><th>Agent</th><th>Prompt</th><th></th></tr></thead>
+        <tbody>${rows}</tbody></table>`;
+    }
   }
+
+  procStatusPopup.innerHTML = header + body;
+
+  procStatusPopup.querySelectorAll('.proc-stop-btn').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      btn.disabled = true; btn.textContent = '…';
+      const b = btn.dataset.msgid
+        ? { command: 'stop_msg', msg_id: parseInt(btn.dataset.msgid) }
+        : { command: 'stop', topic: btn.dataset.topic, agent: btn.dataset.agent };
+      await fetch('/cmd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
+      await pollProcs();
+    });
+  });
+
+  procStatusPopup.querySelectorAll('.proc-deq-btn').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      btn.disabled = true; btn.textContent = '…';
+      await fetch('/cmd', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: 'deq', topic: btn.dataset.topic, pos: parseInt(btn.dataset.pos) }),
+      });
+      await pollProcs();
+    });
+  });
+
   document.getElementById('proc-popup-close').addEventListener('click', e => {
     e.stopPropagation();
     procStatusPopup.classList.remove('open');
@@ -1679,19 +1783,19 @@ function renderProcPopup(rows) {
 
 function toggleProcPopup() {
   const open = procStatusPopup.classList.toggle('open');
-  if (open) renderProcPopup(cachedProcRows);
+  if (open) { renderProcPopup(cachedProcRows, cachedQueueRows); pollProcs(); }
 }
 
-let cachedProcRows = [];
+let cachedProcRows  = [];
+let cachedQueueRows = [];
 
 async function pollProcs() {
   try {
-    const res = await fetch('/processes');
-    const rows = await res.json();
-    cachedProcRows = rows;
-    updateProcStatusDot(rows);
-    if (procStatusPopup.classList.contains('open')) renderProcPopup(rows);
-    if (statsGroup === 'proc' && currentView === 'analytics') renderProcStats(rows);
+    const [procRes, queueRes] = await Promise.all([fetch('/processes'), fetch('/queue')]);
+    cachedProcRows  = await procRes.json();
+    cachedQueueRows = await queueRes.json();
+    updateProcStatusDot(cachedProcRows, cachedQueueRows);
+    if (procStatusPopup.classList.contains('open')) renderProcPopup(cachedProcRows, cachedQueueRows);
   } catch { /* ignore */ }
 }
 
@@ -1707,18 +1811,12 @@ procStatusBtn.addEventListener('click', e => {
 });
 
 // keep legacy aliases so switchView / initStats still work
-function startLivePoll() { /* noop — procPollInterval always runs */ }
-function stopLivePoll()  { /* noop */ }
-
 async function loadStats() {
-  if (statsGroup !== 'proc') {
-    statsContent.innerHTML = '<div class="empty">Loading…</div>';
-  }
+  statsContent.innerHTML = '<div class="empty">Loading…</div>';
   let rows;
   try {
     const url = statsGroup === 'topic' ? '/stats?group=topic'
               : statsGroup === 'model' ? '/stats?group=agent'
-              : statsGroup === 'proc'  ? '/processes'
               : `/stats?period=${statsPeriod}`;
     const res = await fetch(url);
     rows = await res.json();
@@ -1727,10 +1825,6 @@ async function loadStats() {
     return;
   }
 
-  if (statsGroup === 'proc') {
-    renderProcStats(rows);
-    return;
-  }
   if (!rows.length) {
     statsContent.innerHTML = '<div class="empty">No data yet.</div>';
     return;
@@ -1857,25 +1951,6 @@ function renderAgentStats(rows) {
   </table>`;
 }
 
-function renderProcStats(rows) {
-  if (!rows.length) {
-    statsContent.innerHTML = '<div class="empty">No active processes.</div>';
-    return;
-  }
-  const bodyRows = rows.map(r => `
-    <tr>
-      <td><span class="proc-dot"></span>${r.pid}</td>
-      <td>${r.backend || '—'}</td>
-      <td>${r.topic ? '#' + r.topic : '—'}</td>
-      <td>${r.agent || '—'}</td>
-      <td>${r.duration_s}s</td>
-      <td>${r.started_iso ? fmtTime(r.started_iso) : '—'}</td>
-    </tr>`).join('');
-  statsContent.innerHTML = `<table>
-    <thead><tr><th>PID</th><th>Backend</th><th>Topic</th><th>Agent</th><th>Duration</th><th>Started</th></tr></thead>
-    <tbody>${bodyRows}</tbody>
-  </table>`;
-}
 
 function initStats() {
   document.querySelectorAll('.st').forEach(btn => {
@@ -1885,8 +1960,6 @@ function initStats() {
       document.querySelectorAll('.st').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       loadStats();
-      if (statsGroup === 'proc') startLivePoll();
-      else stopLivePoll();
     });
   });
 }

@@ -166,3 +166,18 @@ def test_codex_stats_keep_cached_tokens_as_breakdown_only():
     assert stats["input_tokens"] == 900000
     assert stats["cache_read_tokens"] == 300000
     assert stats["output_tokens"] == 1200
+
+
+def test_codex_file_change_event_yields_diff_tool():
+    async def fake_stream_lines(*args, **kwargs):
+        yield '{"type":"thread.started","thread_id":"thread-1"}'
+        yield '{"method":"item/fileChange/patchUpdated","params":{"path":"ui/app.js","unified_diff":"@@ -1 +1 @@\\n-old\\n+new"}}'
+        yield '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":1}}'
+
+    async def collect():
+        return [chunk async for chunk in run_codex("edit", cwd="/tmp")]
+
+    with patch("agent.runners.CODEX_PATH", "codex"), patch("agent.runners._stream_lines", fake_stream_lines):
+        chunks = asyncio.run(collect())
+
+    assert chunks[0] == {"_tool": {"name": "Diff", "file": "ui/app.js", "diff": "@@ -1 +1 @@\n-old\n+new"}}

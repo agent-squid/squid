@@ -126,6 +126,26 @@ test.describe('response bubble', () => {
     expect(href).toContain('token=test-token');
   });
 
+  test('renders Codex unified diff tool blocks', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        META,
+        { event: 'tool', data: { name: 'Diff', file: 'ui/app.js', diff: '@@ -1 +1 @@\n-old\n+new' } },
+        { data: 'Done' },
+        DONE,
+      ),
+    }));
+
+    await sendMsg(page);
+    const block = page.locator('.tool-block-history').first();
+    await expect(block.locator('.tool-toggle')).toContainText('Diff: ui/app.js');
+    await block.locator('.tool-toggle').click();
+    await expect(block.locator('.diff-hunk')).toContainText('@@ -1 +1 @@');
+    await expect(block.locator('.diff-remove')).toContainText('-old');
+    await expect(block.locator('.diff-add')).toContainText('+new');
+  });
+
   test('thinking bubble collapses to toggle when status events present', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200, headers: SSE_HEADERS,
