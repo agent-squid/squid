@@ -729,6 +729,30 @@ function updateCtxHighlight() {
   if (pinPanel.classList.contains('open')) renderPinPanel();
 }
 
+async function _maybePromoteSlug(val) {
+  const m = val.match(/^#(\w+)(?:@(\w+))?(!\d*)? $/);
+  if (!m) return;
+  const topic = m[1].toLowerCase();
+  const explicitAgent = m[2] || null;
+  const adhocStr = m[3] || null;
+  const adhoc = !!adhocStr;
+  const lookback = adhocStr ? parseInt(adhocStr.slice(1)) || 0 : 0;
+
+  let agent = explicitAgent;
+  if (!agent) {
+    const topics = await _acTopics();
+    if (input.value !== val) return;
+    agent = topics.find(t => t.name === topic)?.agent || null;
+  }
+
+  setTopicChip(topic, agent, adhoc, lookback);
+  input.value = '';
+  hideAutocomplete();
+  resizeComposer();
+  updateCtxHighlight();
+  updatePinCount();
+}
+
 input.addEventListener('input', () => {
   ctxHighlightEnabled = true;
   resizeComposer();
@@ -736,6 +760,7 @@ input.addEventListener('input', () => {
   updateCtxHighlight();
   updatePinCount();
   updateActiveQuotaGauge();
+  _maybePromoteSlug(input.value);
 });
 
 input.addEventListener('keydown', (e) => {
@@ -756,7 +781,6 @@ input.addEventListener('keydown', (e) => {
     let tag = `#${stickyChip.topic}`;
     if (stickyChip.agent) tag += `@${stickyChip.agent}`;
     if (stickyChip.adhoc) tag += `!${stickyChip.lookback || ''}`;
-    tag += ' ';
     clearTopicChip();
     input.value = tag;
     input.dispatchEvent(new Event('input'));
@@ -2475,7 +2499,7 @@ function _acSelect(idx) {
   input.value = item.insert + ' ';
   resizeComposer();
   input.focus();
-  updateActiveQuotaGauge();
+  input.dispatchEvent(new Event('input'));
 }
 
 function _acTopicLabel(topicName, modelLabel) {
