@@ -1728,7 +1728,7 @@ function updateQuotaLabel(pct) {
   if (!label) return;
   const delta = quotaDelta != null ? ` +${quotaDelta}%` : '';
   const timeStr = quotaTimeText(quotaResetAt);
-  label.textContent = `${backendDisplayName('claude')} ${pct}%${delta}` + (timeStr ? ` in ${timeStr}` : '');
+  label.textContent = `${pct}%${delta}` + (timeStr ? ` in ${timeStr}` : '');
 
   const arc = document.getElementById('quota-pie-arc');
   if (arc) {
@@ -1809,7 +1809,7 @@ function updateCodexLabel(pct) {
   const label = document.getElementById('codex-quota-label');
   if (!label) return;
   const timeStr = quotaTimeText(codexResetAt);
-  label.textContent = `${backendDisplayName('codex')} ${pct}%` + (timeStr ? ` in ${timeStr}` : '');
+  label.textContent = `${pct}%` + (timeStr ? ` in ${timeStr}` : '');
 
   const arc = document.getElementById('codex-pie-arc');
   if (arc) {
