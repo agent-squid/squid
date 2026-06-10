@@ -88,13 +88,12 @@ scrollBtn.addEventListener('mouseleave', () => {
 marked.setOptions({ breaks: true });
 
 const AGENT_THEME_COLORS = Object.freeze({
-  claude: '#9b6a3a',
-  codex: '#f5f5f2',
+  claude: '#AE5332',
+  codex: '#e8e4dc',
   antigravity: '#4ea1ff',
   copilot: '#ff5db1',
   cursor: '#9aa0a6',
   default: '#888888',
-  quotaHigh: '#e05030',
 });
 
 function agentThemeColor(backend) {
@@ -119,8 +118,8 @@ function refreshAgentSlugColors() {
   });
 }
 
-function quotaGaugeColor(backend, pct) {
-  return pct >= 80 ? AGENT_THEME_COLORS.quotaHigh : agentThemeColor(backend);
+function quotaGaugeColor(backend) {
+  return agentThemeColor(backend);
 }
 
 function backendDisplayName(backend) {
