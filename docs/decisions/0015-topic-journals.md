@@ -1,8 +1,16 @@
 ---
 status: accepted
 date: 2026-05-30
+updated: 2026-06-10
 ---
 # ADR-0015: Topic Journals as Weekly Markdown Snapshots
+
+## 2026-06-10 Update
+
+Automatic journal generation is disabled for now because it can make real CLI
+calls and consume significant tokens. The manual `/journal` command and journal
+read/list API remain available so the feature can be revisited without removing
+the implementation.
 
 ## Context and Problem Statement
 

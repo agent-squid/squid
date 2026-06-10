@@ -52,7 +52,7 @@ from .stats_db import (
     delete_topic, hide_topic, get_topic_agents, get_topic_agent_history,
     clear_agent_sessions, get_agent_sessions,
 )
-from .journal import maybe_trigger_journals, _generate_journal, _current_week, list_topic_journals, read_journal
+from .journal import _generate_journal, _current_week, list_topic_journals, read_journal
 from . import creds
 
 init_db()
@@ -436,11 +436,6 @@ async def chat(req: ChatRequest):
 
     upsert_topic(req.topic, resolved_agent, last_prompt=req.message,
                  last_backend=backend, last_model=model)
-    if not req.adhoc:
-        asyncio.create_task(
-            maybe_trigger_journals(req.topic, resolved_agent),
-            name=f"squid-journal-{req.topic}",
-        )
     agent_cwd: Optional[str] = agent_config.get("cwd") or None
     response_timeout: Optional[int] = agent_config.get("timeout")
 
