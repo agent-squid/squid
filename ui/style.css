@@ -1426,7 +1426,7 @@ button {
 .ac-row { display: flex; align-items: center; gap: 0; overflow: hidden; }
 .ac-label { font-family: ui-monospace, monospace; font-weight: 600; flex-shrink: 0; }
 .ac-label .ac-topic { color: #d07840; }
-.ac-label .ac-agent { color: #848899; }
+.ac-label .ac-agent { color: var(--agent-color, #848899); }
 .ac-meta  { color: #444; font-size: 0.88em; margin-left: auto; padding-left: 0.5rem; white-space: nowrap; flex-shrink: 0; }
 .ac-sub   { color: #888; font-size: 0.9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; margin-left: 0.5rem; }
 .ac-cmd   { color: #7ec8a0; font-family: ui-monospace, monospace; font-weight: 600; }
@@ -1460,16 +1460,16 @@ button {
   font-weight: 600;
 }
 .tag-topic { color: #d07840; }
-.tag-agent { color: #848899; margin-left: 0.05em; }
+.tag-agent { color: var(--agent-color, #848899); margin-left: 0.05em; }
 .tag-adhoc { color: #a05858; }
 .tag-topic.clickable { cursor: pointer; }
 .tag-agent.clickable { cursor: pointer; }
 .tag-topic.clickable:hover { color: #e8a060; }
-.tag-agent.clickable:hover { color: #a8aabb; }
+.tag-agent.clickable:hover { color: var(--agent-color, #a8aabb); filter: brightness(1.18); }
 
 /* Chip sub-spans */
 .chip-topic { color: #d07840; }
-.chip-agent { color: #848899; margin-left: 0.05em; }
+.chip-agent { color: var(--agent-color, #848899); margin-left: 0.05em; }
 .chip-adhoc { color: #a05858; margin-left: 0.05em; }
 #topic-chip.needs-agent .chip-topic { color: #b07830; }
 #topic-chip.needs-agent { border-color: #5a3a10; }

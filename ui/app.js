@@ -88,7 +88,7 @@ scrollBtn.addEventListener('mouseleave', () => {
 marked.setOptions({ breaks: true });
 
 const AGENT_THEME_COLORS = Object.freeze({
-  claude: '#cc6b3d',
+  claude: '#9b6a3a',
   codex: '#f5f5f2',
   antigravity: '#4ea1ff',
   copilot: '#ff5db1',
@@ -99,6 +99,24 @@ const AGENT_THEME_COLORS = Object.freeze({
 
 function agentThemeColor(backend) {
   return AGENT_THEME_COLORS[(backend || '').toLowerCase()] || AGENT_THEME_COLORS.default;
+}
+
+function agentSlugColor(agent, backendFallback = null) {
+  const config = (_agentsCache || []).find(a => a.name === agent);
+  return agentThemeColor(config?.backend || backendFallback || agent);
+}
+
+function setAgentSlugColor(el, agent, backendFallback = null) {
+  el.dataset.agentName = agent || '';
+  if (backendFallback) el.dataset.backendFallback = backendFallback;
+  el.style.setProperty('--agent-color', agentSlugColor(agent, backendFallback));
+  if (agent && !backendFallback && !_agentsCache) _acAgents().catch(() => {});
+}
+
+function refreshAgentSlugColors() {
+  document.querySelectorAll('[data-agent-name]').forEach(el => {
+    setAgentSlugColor(el, el.dataset.agentName, el.dataset.backendFallback || null);
+  });
 }
 
 function quotaGaugeColor(backend, pct) {
@@ -295,6 +313,8 @@ document.getElementById('help-close').addEventListener('click', closeHelp);
 
 // ── per-topic session tracking ────────────────────────────────────────────────
 const _sessionIds = {}; // `${topic}@${agent|_}` → most recent session_id
+let _agentsCache = null;
+let _agentsCachePromise = null;
 
 function clearCachedSessionId(topic, agent) {
   delete _sessionIds[`${topic}@${agent || '_'}`];
@@ -320,6 +340,7 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0) {
     const aSpan = document.createElement('span');
     aSpan.className = 'chip-agent';
     aSpan.textContent = '@' + agent;
+    setAgentSlugColor(aSpan, agent);
     topicChipEl.appendChild(aSpan);
   }
   if (adhoc) {
@@ -370,7 +391,7 @@ function parseInput(text) {
 
 // ── topic tag helper (colored, clickable) ──────────────────────────────────────
 
-function makeTopicTag(topic, agent, { clickable = false, adhoc = false, lookback = 0 } = {}) {
+function makeTopicTag(topic, agent, { clickable = false, adhoc = false, lookback = 0, backend = null } = {}) {
   const wrap = document.createElement('span');
   wrap.className = 'topic-tag';
 
@@ -383,6 +404,7 @@ function makeTopicTag(topic, agent, { clickable = false, adhoc = false, lookback
     const aSpan = document.createElement('span');
     aSpan.className = 'tag-agent' + (clickable ? ' clickable' : '');
     aSpan.textContent = '@' + agent;
+    setAgentSlugColor(aSpan, agent, backend);
     wrap.appendChild(aSpan);
   }
 
@@ -456,6 +478,7 @@ function _updateFilterBadge() {
     const a = document.createElement('span');
     a.className = 'tag-agent';
     a.textContent = '@' + agent;
+    setAgentSlugColor(a, agent);
     labelEl.appendChild(a);
   }
   if (adhoc) { // only show '!' for adhoc — 'sess' was removed because it concatenated visually with the agent name
@@ -1040,9 +1063,9 @@ async function sendMessage(text) {
               const meta = JSON.parse(data);
               resolvedAgent = meta.agent || (meta.backend !== 'auto' ? meta.backend : null);
               const resolvedAdhoc = adhoc; // server echoes back what we sent; use closure as reliable source
-              const newTag = makeTopicTag(topic, resolvedAgent, { adhoc: resolvedAdhoc, clickable: true, lookback });
+              const newTag = makeTopicTag(topic, resolvedAgent, { adhoc: resolvedAdhoc, clickable: true, lookback, backend: meta.backend || null });
               responseHeaderTag.replaceWith(newTag);
-              const newUserTag = makeTopicTag(topic, resolvedAgent, { adhoc: resolvedAdhoc, clickable: true, lookback });
+              const newUserTag = makeTopicTag(topic, resolvedAgent, { adhoc: resolvedAdhoc, clickable: true, lookback, backend: meta.backend || null });
               if (userTopicTag) {
                 userTopicTag.replaceWith(newUserTag);
               } else if (resolvedAgent || topic !== 'default') {
@@ -1358,7 +1381,7 @@ function appendHistoryItem(item, container) {
   const asstHeader = document.createElement('div');
   asstHeader.className = 'response-header';
   const asstLabel = item.agent || item.backend;
-  const asstTag = makeTopicTag(item.topic || 'default', asstLabel, { clickable: true, adhoc: !!item.adhoc, lookback: lb });
+  const asstTag = makeTopicTag(item.topic || 'default', asstLabel, { clickable: true, adhoc: !!item.adhoc, lookback: lb, backend: item.backend || null });
   const asstHeaderText = document.createElement('span');
   asstHeaderText.className = 'response-header-text';
   asstHeaderText.appendChild(asstTag);
@@ -2428,7 +2451,6 @@ function showAgentCreatePrompt(agentName, onSaved) {
 // ── topic / agent autocomplete ───────────────────────────────────────────────
 
 let _topicsCache  = null;
-let _agentsCache = null;
 let acOpen  = false;
 let acItems = [];
 let acSel   = -1;
@@ -2443,7 +2465,19 @@ async function _acTopics() {
 
 async function _acAgents() {
   if (_agentsCache) return _agentsCache;
-  try { _agentsCache = await (await fetch('/config/agents')).json(); } catch { _agentsCache = []; }
+  if (!_agentsCachePromise) {
+    _agentsCachePromise = fetch('/config/agents')
+      .then(res => res.json())
+      .catch(() => [])
+      .then(agents => {
+        _agentsCache = agents;
+        refreshAgentSlugColors();
+        return _agentsCache;
+      })
+      .finally(() => { _agentsCachePromise = null; });
+  }
+  await _agentsCachePromise;
+  refreshAgentSlugColors();
   return _agentsCache;
 }
 
@@ -2506,13 +2540,17 @@ function _acSelect(idx) {
   input.dispatchEvent(new Event('input'));
 }
 
-function _acTopicLabel(topicName, modelLabel) {
-  return `<span class="ac-topic">#${topicName}</span>` +
-         (modelLabel ? `<span class="ac-agent">@${modelLabel}</span>` : '');
+function _agentStyleAttr(agentName, backendFallback = null) {
+  return ` style="--agent-color:${agentSlugColor(agentName, backendFallback)}" data-agent-name="${escapeHtml(agentName || '')}"${backendFallback ? ` data-backend-fallback="${escapeHtml(backendFallback)}"` : ''}`;
 }
 
-function _acAgentLabel(topicName, agentName) {
-  return `<span class="ac-topic">#${topicName}</span><span class="ac-agent">@${agentName}</span>`;
+function _acTopicLabel(topicName, modelLabel, backendFallback = null) {
+  return `<span class="ac-topic">#${escapeHtml(topicName)}</span>` +
+         (modelLabel ? `<span class="ac-agent"${_agentStyleAttr(modelLabel, backendFallback)}>@${escapeHtml(modelLabel)}</span>` : '');
+}
+
+function _acAgentLabel(topicName, agentName, backendFallback = null) {
+  return `<span class="ac-topic">#${escapeHtml(topicName)}</span><span class="ac-agent"${_agentStyleAttr(agentName.replace(/!$/, ''), backendFallback)}>@${escapeHtml(agentName)}</span>`;
 }
 
 async function updateAutocomplete() {
@@ -2548,7 +2586,7 @@ async function updateAutocomplete() {
     _acRender(
       topics.filter(t => t.name.toLowerCase().startsWith(prefix)).slice(0, 8)
         .map(t => ({
-          label:       _acTopicLabel(t.name, t.last_model || t.last_backend || ''),
+          label:       _acTopicLabel(t.name, t.last_model || t.last_backend || '', t.last_backend || null),
           insert:      '#' + t.name,
           deleteTopic: t.name,
           meta:        t.active ? '● live' : t.queue_depth > 0 ? `queue ${t.queue_depth}` : '',
@@ -2565,19 +2603,20 @@ async function updateAutocomplete() {
     if (input.value !== val) return;
 
     const usedNames = new Set(history.map(h => h.agent));
+    const backendByAgent = new Map(agents.map(a => [a.name, a.backend]));
     const items = [];
 
     // Used agents — with last prompt
     for (const h of history) {
       if (!h.agent.toLowerCase().startsWith(prefix)) continue;
       items.push({
-        label:  _acAgentLabel(topic, h.agent),
+        label:  _acAgentLabel(topic, h.agent, backendByAgent.get(h.agent) || null),
         insert: `#${topic}@${h.agent}`,
         sub:    h.last_prompt ? truncate(h.last_prompt, 55) : '',
       });
       // Also offer adhoc variant
       items.push({
-        label:  _acAgentLabel(topic, h.agent + '!'),
+        label:  _acAgentLabel(topic, h.agent + '!', backendByAgent.get(h.agent) || null),
         insert: `#${topic}@${h.agent}!`,
         sub:    h.last_prompt ? truncate(h.last_prompt, 55) : '',
         meta:   'adhoc',
@@ -2589,7 +2628,7 @@ async function updateAutocomplete() {
       if (usedNames.has(a.name)) continue;
       if (!a.name.toLowerCase().startsWith(prefix)) continue;
       items.push({
-        label:  _acAgentLabel(topic, a.name),
+        label:  _acAgentLabel(topic, a.name, a.backend),
         insert: `#${topic}@${a.name}`,
         meta:   a.model || a.backend,
       });
