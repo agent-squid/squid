@@ -296,6 +296,10 @@ document.getElementById('help-close').addEventListener('click', closeHelp);
 // ── per-topic session tracking ────────────────────────────────────────────────
 const _sessionIds = {}; // `${topic}@${agent|_}` → most recent session_id
 
+function clearCachedSessionId(topic, agent) {
+  delete _sessionIds[`${topic}@${agent || '_'}`];
+}
+
 // ── topic chip ────────────────────────────────────────────────────────────────
 
 const topicChipEl = document.getElementById('topic-chip');
@@ -606,6 +610,8 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
       const res = await fetch('/cmd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const data = await res.json();
       if (!data.ok) { feedbackEl.textContent = `${cmd.command} failed: ${data.error || ''}`; return; }
+      clearCachedSessionId(topic, data.agent || agent || null);
+      if (pinPanel.classList.contains('open')) renderPinPanel();
       const tag = agent ? `#${topic}@${agent}` : `#${topic}`;
       feedbackEl.textContent = `${tag} — session cleared`;
     } catch {

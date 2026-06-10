@@ -93,6 +93,32 @@ test('pinned item from current session shows in-session skip', async ({ page }) 
   await expect(page.locator('.pin-item-status')).toContainText('claude');
 });
 
+test('/clear invalidates cached session id so same-session bookmark can inject', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/chat', r => r.fulfill({
+    status: 200, headers: SSE_HEADERS,
+    body: sse(META, { data: 'Hello from agent' }, STATS, DONE),
+  }));
+  await page.route('**/cmd', r => r.fulfill({ json: { ok: true, agent: 'claude' } }));
+
+  await page.goto('/');
+  await page.fill('#input', '#squid@claude hello');
+  await page.keyboard.press('Enter');
+
+  const bubble = page.locator('.msg.assistant:not(.msg-thinking)');
+  await expect(bubble).toBeVisible();
+  await bubble.hover();
+  await bubble.locator('.msg-pin-btn').click();
+
+  await page.click('#pin-btn');
+  await expect(page.locator('.pin-item-status')).toContainText('in session');
+
+  await page.fill('#input', '#squid@claude /clear');
+  await page.keyboard.press('Enter');
+
+  await expect(page.locator('.pin-item-status')).toContainText('will inject');
+});
+
 test('pinned item from same topic@agent shows will-inject for adhoc turn', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
 
