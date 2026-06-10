@@ -309,6 +309,7 @@ let stickyChip = null; // { topic, agent, adhoc } | null
 
 function setTopicChip(topic, agent, adhoc = false, lookback = 0) {
   stickyChip = { topic, agent, adhoc, lookback };
+  if (!adhoc) localStorage.setItem('squid_sticky_chip', JSON.stringify({ topic, agent }));
 
   topicChipEl.innerHTML = '';
   const tSpan = document.createElement('span');
@@ -335,6 +336,7 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0) {
 
 function clearTopicChip() {
   stickyChip = null;
+  localStorage.removeItem('squid_sticky_chip');
   topicChipEl.classList.remove('visible', 'needs-agent');
   input.placeholder = '#topic or #topic@agent message…';
   document.querySelectorAll('.history-item.ctx-highlight').forEach(el => el.classList.remove('ctx-highlight'));
@@ -3082,3 +3084,7 @@ updateActiveQuotaGauge();
 initPullToRefresh();
 startProcPoll();
 showBootBanner();
+try {
+  const saved = JSON.parse(localStorage.getItem('squid_sticky_chip') || 'null');
+  if (saved?.topic) setTopicChip(saved.topic, saved.agent || null);
+} catch { /* ignore */ }
