@@ -36,10 +36,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, SQUID_HOME, _cfg
-from .runners import run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError, CLIError, list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id
+from .runners import run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError, CLIError, list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic
 from .history import list_history
 from .topic_queue import TopicDispatcher
 from .context_sync import sync_now, maybe_sync
+from .topics import normalize_topic_slug
+from .memory import read_topic_memory, write_topic_memory, topic_memory_prompt_block
 from .stats_db import (
     init_db, get_aggregated_stats, save_quota_delta, get_stats_by_topic, get_stats_by_agent,
     get_topics_summary,
@@ -148,6 +150,11 @@ class ChatRequest(BaseModel):
     lookback: int = Field(0)
     adhoc: bool = Field(False)
     pinned_ids: Optional[list[int]] = None
+    include_topic_memory: bool = Field(False)
+
+
+class TopicMemoryRequest(BaseModel):
+    content: str = ""
 
 
 class AgentRequest(BaseModel):
@@ -225,6 +232,13 @@ def sse_chunk(data: str) -> str:
 
 def sse_event(event: str, data: str = "") -> str:
     return f"event: {event}\ndata: {data}\n\n"
+
+
+def _normalize_topic_response(topic: str) -> Union[str, JSONResponse]:
+    try:
+        return normalize_topic_slug(topic)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
 # ---------------------------------------------------------------------------
 # Background drain — runs after client disconnects mid-stream
@@ -408,6 +422,10 @@ async def stream_response(
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
+    topic = _normalize_topic_response(req.topic)
+    if isinstance(topic, JSONResponse):
+        return topic
+
     # 1. Resolve agent — explicit wins, else use topic sticky
     resolved_agent: Optional[str] = req.agent
     agent_config: dict = {}
@@ -420,7 +438,7 @@ async def chat(req: ChatRequest):
                 status_code=400,
             )
     else:
-        topic_row = get_topic(req.topic)
+        topic_row = get_topic(topic)
         if topic_row:
             resolved_agent = topic_row.get("agent")
             if resolved_agent:
@@ -434,7 +452,7 @@ async def chat(req: ChatRequest):
     backend = agent_config.get("backend") or "claude"
     model: Optional[str] = agent_config.get("model") or None
 
-    upsert_topic(req.topic, resolved_agent, last_prompt=req.message,
+    upsert_topic(topic, resolved_agent, last_prompt=req.message,
                  last_backend=backend, last_model=model)
     agent_cwd: Optional[str] = agent_config.get("cwd") or None
     response_timeout: Optional[int] = agent_config.get("timeout")
@@ -444,7 +462,7 @@ async def chat(req: ChatRequest):
     cwd: Optional[str] = agent_cwd
 
     if not req.adhoc and resolved_agent:
-        stored = get_topic_session(req.topic, resolved_agent)
+        stored = get_topic_session(topic, resolved_agent)
         if stored:
             resume_session_id = stored["session_id"]
             cwd = stored["cwd"]
@@ -456,11 +474,17 @@ async def chat(req: ChatRequest):
 
     if req.adhoc and lookback > 0:
         context_history, context_ids = get_context_history(
-            req.topic, lookback, agent=resolved_agent
+            topic, lookback, agent=resolved_agent
         )
 
     # Inject pinned messages — works for both adhoc and session turns
     effective_message = req.message
+    prefix_blocks: list[str] = []
+    if req.include_topic_memory:
+        memory_block = topic_memory_prompt_block(topic)
+        if memory_block:
+            prefix_blocks.append(memory_block)
+
     if req.pinned_ids:
         lookback_id_set = set(context_ids or [])
         filtered = [pid for pid in req.pinned_ids if pid not in lookback_id_set]
@@ -477,22 +501,24 @@ async def chat(req: ChatRequest):
                         role = "User" if msg["role"] == "user" else "Assistant"
                         lines.append(f"{role}: {msg['content'].strip()}")
                     lines.append("</referenced_context>\n")
-                    lines.append(req.message)
-                    effective_message = "\n".join(lines)
+                    prefix_blocks.append("\n".join(lines))
 
-    user_msg_id = insert_user_message(req.topic, resolved_agent, req.message, context_ids=context_ids)
-    asst_msg_id = insert_assistant_message(req.topic, resolved_agent, user_msg_id, adhoc=req.adhoc)
+    if prefix_blocks:
+        effective_message = "\n\n".join(prefix_blocks + [req.message])
+
+    user_msg_id = insert_user_message(topic, resolved_agent, req.message, context_ids=context_ids)
+    asst_msg_id = insert_assistant_message(topic, resolved_agent, user_msg_id, adhoc=req.adhoc)
 
     log.info(
-        "chat  topic=%s  agent=%s  backend=%s  model=%s  adhoc=%s  resume=%s  ctx=%d  pinned=%d  msg=%.80r",
-        req.topic, resolved_agent, backend, model, req.adhoc,
+        "chat  topic=%s  agent=%s  backend=%s  model=%s  adhoc=%s  resume=%s  ctx=%d  pinned=%d  memory=%s  msg=%.80r",
+        topic, resolved_agent, backend, model, req.adhoc,
         bool(resume_session_id), len(context_history) // 2,
-        len(req.pinned_ids) if req.pinned_ids else 0, req.message,
+        len(req.pinned_ids) if req.pinned_ids else 0, req.include_topic_memory, req.message,
     )
     await maybe_sync()
     return StreamingResponse(
         stream_response(
-            effective_message, req.topic, resolved_agent, backend, model, cwd,
+            effective_message, topic, resolved_agent, backend, model, cwd,
             context_history, asst_msg_id, response_timeout,
             resume_session_id=resume_session_id,
             adhoc=req.adhoc,
@@ -505,17 +531,21 @@ async def chat(req: ChatRequest):
 
 @app.post("/cmd")
 async def run_cmd(req: CmdRequest):
+    topic = _normalize_topic_response(req.topic)
+    if isinstance(topic, JSONResponse):
+        return topic
+
     if req.command == "stop_msg":
         killed = kill_proc_by_msg_id(req.msg_id) if req.msg_id else 0
         return JSONResponse({"ok": True, "killed": killed})
     if req.command == "stop":
-        killed = dispatcher.stop_topic(req.topic, agent=req.agent, adhoc=req.adhoc)
+        killed = dispatcher.stop_topic(topic, agent=req.agent, adhoc=req.adhoc)
         return JSONResponse({"ok": True, "killed": killed})
     if req.command == "stopall":
-        result = dispatcher.stopall_topic(req.topic, agent=req.agent, adhoc=req.adhoc)
+        result = dispatcher.stopall_topic(topic, agent=req.agent, adhoc=req.adhoc)
         return JSONResponse({"ok": True, **result})
     if req.command == "deq":
-        drained = dispatcher.drain_topic(req.topic, req.pos)
+        drained = dispatcher.drain_topic(topic, req.pos)
         return JSONResponse({"ok": True, "drained": drained})
     if req.command == "list":
         return JSONResponse({"ok": True, "topics": get_topics_summary()})
@@ -531,19 +561,19 @@ async def run_cmd(req: CmdRequest):
         return JSONResponse({"ok": True})
 
     if req.command in ("clear", "compact"):
-        agent = req.agent
+        agent = req.agent or get_active_agent_for_topic(topic)
         if not agent:
-            topic_row = get_topic(req.topic)
+            topic_row = get_topic(topic)
             agent = topic_row.get("agent") if topic_row else None
         if not agent:
             return JSONResponse({"ok": False, "error": "no active session"}, status_code=400)
-        kill_procs_by_topic(req.topic)
-        clear_topic_session(req.topic, agent)
+        kill_procs_by_topic(topic, agent=agent)
+        clear_topic_session(topic, agent)
         return JSONResponse({"ok": True, "agent": agent})
 
     if req.command == "journal":
         week_key, week_start, week_end = _current_week()
-        path = await _generate_journal(req.topic, req.agent, week_key, week_start, week_end)
+        path = await _generate_journal(topic, req.agent, week_key, week_start, week_end)
         if path:
             return JSONResponse({"ok": True, "file": str(path)})
         return JSONResponse({"ok": False, "error": "generation failed or no turns"}, status_code=500)
@@ -579,6 +609,11 @@ async def health():
 @app.get("/history")
 async def history(offset: int = 0, limit: int = 5, topic: Optional[str] = None,
                   agent: Optional[str] = None, adhoc: Optional[bool] = None):
+    if topic is not None:
+        normalized = _normalize_topic_response(topic)
+        if isinstance(normalized, JSONResponse):
+            return normalized
+        topic = normalized
     return JSONResponse(list_history(topic=topic, agent=agent, adhoc=adhoc, offset=offset, limit=limit))
 
 
@@ -603,28 +638,59 @@ async def topics_list():
 
 @app.get("/topics/{topic}/agents/history")
 async def topic_agent_history(topic: str):
+    topic = _normalize_topic_response(topic)
+    if isinstance(topic, JSONResponse):
+        return topic
     return JSONResponse(get_topic_agent_history(topic))
+
+
+@app.get("/topics/{topic}/memory")
+async def get_topic_memory_route(topic: str):
+    topic = _normalize_topic_response(topic)
+    if isinstance(topic, JSONResponse):
+        return topic
+    return JSONResponse(read_topic_memory(topic))
+
+
+@app.put("/topics/{topic}/memory")
+async def put_topic_memory_route(topic: str, req: TopicMemoryRequest):
+    topic = _normalize_topic_response(topic)
+    if isinstance(topic, JSONResponse):
+        return topic
+    return JSONResponse(write_topic_memory(topic, req.content))
 
 
 @app.post("/topics/{topic}/hide")
 async def hide_topic_route(topic: str):
+    topic = _normalize_topic_response(topic)
+    if isinstance(topic, JSONResponse):
+        return topic
     return JSONResponse({"ok": hide_topic(topic)})
 
 
 @app.delete("/topics/{topic}")
 async def remove_topic(topic: str):
+    topic = _normalize_topic_response(topic)
+    if isinstance(topic, JSONResponse):
+        return topic
     deleted = delete_topic(topic)
     return JSONResponse({"ok": deleted})
 
 
 @app.get("/topics/{topic}/sessions")
 async def list_topic_sessions(topic: str):
+    topic = _normalize_topic_response(topic)
+    if isinstance(topic, JSONResponse):
+        return topic
     agents = get_topic_agents(topic)
     return JSONResponse({"agents": agents})
 
 
 @app.get("/topics/{topic}/session")
 async def get_session(topic: str, agent: str):
+    topic = _normalize_topic_response(topic)
+    if isinstance(topic, JSONResponse):
+        return topic
     stored = get_topic_session(topic, agent)
     if not stored:
         return JSONResponse({"session_id": None, "cwd": None})
@@ -633,12 +699,18 @@ async def get_session(topic: str, agent: str):
 
 @app.delete("/topics/{topic}/session")
 async def clear_session(topic: str, agent: str):
+    topic = _normalize_topic_response(topic)
+    if isinstance(topic, JSONResponse):
+        return topic
     clear_topic_session(topic, agent)
     return JSONResponse({"ok": True})
 
 
 @app.get("/context/{topic}")
 async def context_view(topic: str, agent: str):
+    topic = _normalize_topic_response(topic)
+    if isinstance(topic, JSONResponse):
+        return topic
     stored = get_topic_session(topic, agent)
     return JSONResponse({
         "session_id": stored["session_id"] if stored else None,
@@ -762,12 +834,18 @@ async def quota_codex():
 
 @app.get("/journals/{topic}")
 async def list_journals(topic: str):
+    topic = _normalize_topic_response(topic)
+    if isinstance(topic, JSONResponse):
+        return topic
     return JSONResponse(list_topic_journals(topic))
 
 
 @app.get("/journals/{topic}/{week}")
 async def get_journal(topic: str, week: str, agent: Optional[str] = None):
     from fastapi.responses import PlainTextResponse
+    topic = _normalize_topic_response(topic)
+    if isinstance(topic, JSONResponse):
+        return topic
     content = read_journal(topic, week, agent=agent)
     if content is None:
         return JSONResponse({"error": "not found"}, status_code=404)

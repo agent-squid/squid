@@ -100,6 +100,14 @@ def kill_all_procs() -> int:
     return killed
 
 
+def get_active_agent_for_topic(topic: str) -> Optional[str]:
+    """Return the agent of an active non-adhoc process for the topic, or None."""
+    for info in _proc_registry.values():
+        if info.get("topic") == topic and not info.get("adhoc"):
+            return info.get("agent")
+    return None
+
+
 def list_active_procs() -> list[dict]:
     now = time.monotonic()
     return [

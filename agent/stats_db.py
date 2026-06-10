@@ -468,7 +468,13 @@ def get_topic_session(topic: str, agent: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
+_invalidated_session_ids: set[str] = set()
+
+
 def set_topic_session(topic: str, agent: str, session_id: str, cwd: Optional[str]) -> None:
+    if session_id in _invalidated_session_ids:
+        _invalidated_session_ids.discard(session_id)
+        return
     with _connect() as conn:
         conn.execute(
             """INSERT INTO topic_sessions (topic, agent, session_id, cwd) VALUES (?, ?, ?, ?)
@@ -479,6 +485,11 @@ def set_topic_session(topic: str, agent: str, session_id: str, cwd: Optional[str
 
 def clear_topic_session(topic: str, agent: str) -> None:
     with _connect() as conn:
+        row = conn.execute(
+            "SELECT session_id FROM topic_sessions WHERE topic=? AND agent=?", (topic, agent)
+        ).fetchone()
+        if row:
+            _invalidated_session_ids.add(row["session_id"])
         conn.execute("DELETE FROM topic_sessions WHERE topic=? AND agent=?", (topic, agent))
 
 

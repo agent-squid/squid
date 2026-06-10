@@ -183,3 +183,94 @@ test('adhoc send includes pinned_ids in POST /chat body', async ({ page }) => {
   await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toBeVisible();
   expect(capturedBody?.pinned_ids).toContain(99);
 });
+
+test('fresh session send includes topic memory when memory exists', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/topics/squid/memory', r => r.fulfill({
+    json: { topic: 'squid', exists: true, content: 'Prefer transparent context.', path: 'context/topics/squid/memory.md' },
+  }));
+  await page.route('**/topics/squid/session?agent=claude', r => r.fulfill({
+    json: { session_id: null, cwd: null },
+  }));
+
+  let capturedBody = null;
+  await page.route('**/chat', async route => {
+    capturedBody = route.request().postDataJSON();
+    await route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(META, { data: 'session response' }, DONE),
+    });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '#Squid@claude hello');
+  await page.keyboard.press('Enter');
+
+  await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toBeVisible();
+  expect(capturedBody?.topic).toBe('squid');
+  expect(capturedBody?.include_topic_memory).toBe(true);
+});
+
+test('topic memory editor saves and refreshes preview', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/topics/squid/session?agent=claude', r => r.fulfill({
+    json: { session_id: null, cwd: null },
+  }));
+
+  let savedContent = '';
+  await page.route('**/topics/squid/memory', async route => {
+    if (route.request().method() === 'PUT') {
+      savedContent = route.request().postDataJSON().content;
+      await route.fulfill({
+        json: { topic: 'squid', exists: true, content: savedContent, path: 'context/topics/squid/memory.md' },
+      });
+      return;
+    }
+    await route.fulfill({
+      json: { topic: 'squid', exists: !!savedContent, content: savedContent, path: 'context/topics/squid/memory.md' },
+    });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '#squid@claude hello');
+  await page.click('#pin-btn');
+  await page.locator('[data-memory-toggle]').click();
+
+  await expect(page.locator('#memory-modal.open')).toBeVisible();
+  await page.fill('#memory-editor', 'Prefer transparent context.');
+  await page.click('#memory-save');
+
+  await expect(page.locator('#memory-save')).toHaveText('Saved');
+  await expect(page.locator('#memory-path')).toContainText('saved');
+  expect(savedContent).toBe('Prefer transparent context.');
+
+  await page.click('#memory-modal-close');
+  await page.click('#pin-btn');
+  await expect(page.locator('.memory-item-preview')).toContainText('Prefer transparent context.');
+});
+
+test('active session skips topic memory by default', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/topics/squid/memory', r => r.fulfill({
+    json: { topic: 'squid', exists: true, content: 'Prefer transparent context.', path: 'context/topics/squid/memory.md' },
+  }));
+  await page.route('**/topics/squid/session?agent=claude', r => r.fulfill({
+    json: { session_id: 'active-session', cwd: '/tmp/squid' },
+  }));
+
+  let capturedBody = null;
+  await page.route('**/chat', async route => {
+    capturedBody = route.request().postDataJSON();
+    await route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(META, { data: 'session response' }, DONE),
+    });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '#squid@claude hello');
+  await page.keyboard.press('Enter');
+
+  await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toBeVisible();
+  expect(capturedBody?.include_topic_memory).toBeUndefined();
+});

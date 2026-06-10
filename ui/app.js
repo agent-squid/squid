@@ -88,7 +88,7 @@ scrollBtn.addEventListener('mouseleave', () => {
 marked.setOptions({ breaks: true });
 
 const AGENT_THEME_COLORS = Object.freeze({
-  claude: '#f07040',
+  claude: '#cc6b3d',
   codex: '#f5f5f2',
   antigravity: '#4ea1ff',
   copilot: '#ff5db1',
@@ -298,6 +298,8 @@ const _sessionIds = {}; // `${topic}@${agent|_}` → most recent session_id
 
 function clearCachedSessionId(topic, agent) {
   delete _sessionIds[`${topic}@${agent || '_'}`];
+  delete _sessionLookupCache[`${topic}@${agent || '_'}`];
+  if (agent) delete _sessionLookupCache[`${topic}@${agent}`];
 }
 
 // ── topic chip ────────────────────────────────────────────────────────────────
@@ -354,12 +356,12 @@ function parseInput(text) {
   // adhoc: #topic!N or #topic@agent!N (N optional, defaults to 0 = no lookback)
   const ma = text.match(/^#(\w+)(?:@(\w+))?!(\d*)\s+([\s\S]*)$/);
   if (ma && ma[4].trim()) {
-    return { topic: ma[1], agent: ma[2] || null, adhoc: true, lookback: ma[3] ? parseInt(ma[3]) : 0, message: ma[4].trim() };
+    return { topic: ma[1].toLowerCase(), agent: ma[2] || null, adhoc: true, lookback: ma[3] ? parseInt(ma[3]) : 0, message: ma[4].trim() };
   }
   // session: #topic or #topic@agent
   const ms = text.match(/^#(\w+)(?:@(\w+))?\s+([\s\S]*)$/);
   if (ms && ms[3].trim()) {
-    return { topic: ms[1], agent: ms[2] || null, adhoc: false, lookback: 0, message: ms[3].trim() };
+    return { topic: ms[1].toLowerCase(), agent: ms[2] || null, adhoc: false, lookback: 0, message: ms[3].trim() };
   }
   return { topic: 'default', agent: null, adhoc: false, lookback: 0, message: text };
 }
@@ -732,6 +734,7 @@ input.addEventListener('input', () => {
   resizeComposer();
   updateAutocomplete();
   updateCtxHighlight();
+  updatePinCount();
   updateActiveQuotaGauge();
 });
 
@@ -750,7 +753,13 @@ input.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Backspace' && input.value === '' && stickyChip) {
     e.preventDefault();
+    let tag = `#${stickyChip.topic}`;
+    if (stickyChip.agent) tag += `@${stickyChip.agent}`;
+    if (stickyChip.adhoc) tag += `!${stickyChip.lookback || ''}`;
+    tag += ' ';
     clearTopicChip();
+    input.value = tag;
+    input.dispatchEvent(new Event('input'));
   }
 });
 
@@ -931,10 +940,17 @@ async function sendMessage(text) {
   }
 
   // Compute pinned IDs to inject — works for both session and adhoc turns
-  const _effectiveAgent = agent || stickyChip?.agent || null;
+  let _effectiveAgent = agent || stickyChip?.agent || null;
+  if (!_effectiveAgent) {
+    try {
+      const topics = await _acTopics();
+      _effectiveAgent = topics.find(t => t.name === topic)?.agent || null;
+    } catch {}
+  }
   const _taKey = `${topic}@${_effectiveAgent || '_'}`;
   const _injected = getInjectedInto();
   const _currentSid = _sessionIds[_taKey] || null;
+  const _includeTopicMemory = (await _topicMemoryStateForSend(topic, _effectiveAgent, adhoc)).selected;
   const _pinnedIds = getPinnedItems()
     .filter(item => {
       // Skip bookmarks from the current session — --resume already has that context
@@ -950,7 +966,11 @@ async function sendMessage(text) {
     const res = await fetch('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, topic, agent, lookback, adhoc, ...(_pinnedIds.length ? { pinned_ids: _pinnedIds } : {}) }),
+      body: JSON.stringify({
+        message, topic, agent, lookback, adhoc,
+        ...(_includeTopicMemory ? { include_topic_memory: true } : {}),
+        ...(_pinnedIds.length ? { pinned_ids: _pinnedIds } : {}),
+      }),
       // lookback: 0 for session mode (CLI owns context), N for adhoc #topic!N
       signal: controller.signal,
     });
@@ -2651,6 +2671,23 @@ function showCtxPopup(spanEl) {
 
 // ── pin basket ────────────────────────────────────────────────────────────────
 
+const memoryModal = document.getElementById('memory-modal');
+const memoryEditor = document.getElementById('memory-editor');
+const memoryTitle = document.getElementById('memory-modal-title');
+const memoryPath = document.getElementById('memory-path');
+const memorySaveBtn = document.getElementById('memory-save');
+const memoryCloseBtn = document.getElementById('memory-modal-close');
+const _memoryCache = {};
+const _sessionLookupCache = {};
+const _memorySelectionOverrides = {};
+let _editingMemoryTopic = null;
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[ch]));
+}
+
 function getPinnedItems() {
   try { return JSON.parse(localStorage.getItem('pinnedItems') || '[]'); } catch { return []; }
 }
@@ -2660,11 +2697,98 @@ function getInjectedInto() {
 }
 function setInjectedInto(map) { localStorage.setItem('injectedInto', JSON.stringify(map)); }
 
+function _currentContextTarget() {
+  const parsed = parseInput(input.value);
+  const topic = parsed.topic || stickyChip?.topic || 'default';
+  const adhoc = parsed.adhoc || (stickyChip?.adhoc ?? false);
+  let agent = parsed.agent || stickyChip?.agent || null;
+  if (!agent && _topicsCache) {
+    agent = _topicsCache.find(t => t.name === topic)?.agent || null;
+  } else if (!agent) {
+    _acTopics().then(() => {
+      updatePinCount();
+      if (pinPanel.classList.contains('open')) renderPinPanel();
+    });
+  }
+  return { topic, agent, adhoc };
+}
+
+function _memoryOverrideKey(topic, agent, adhoc) {
+  return `${topic}@${agent || '_'}:${adhoc ? 'adhoc' : 'session'}`;
+}
+
+function _getMemoryMeta(topic) {
+  if (_memoryCache[topic]) return _memoryCache[topic];
+  _memoryCache[topic] = { topic, exists: false, content: '', path: `context/topics/${topic}/memory.md`, loading: true };
+  fetch(`/topics/${encodeURIComponent(topic)}/memory`)
+    .then(r => r.ok ? r.json() : null)
+    .then(data => {
+      if (data) _memoryCache[topic] = { ...data, loading: false };
+      updatePinCount();
+      if (pinPanel.classList.contains('open')) renderPinPanel();
+    })
+    .catch(() => { _memoryCache[topic].loading = false; });
+  return _memoryCache[topic];
+}
+
+function _getSessionMeta(topic, agent) {
+  if (!agent) return { session_id: null, cwd: null, loading: false };
+  const key = `${topic}@${agent}`;
+  if (_sessionIds[`${topic}@${agent}`]) {
+    return { session_id: _sessionIds[`${topic}@${agent}`], cwd: null, loading: false };
+  }
+  if (_sessionLookupCache[key]) return _sessionLookupCache[key];
+  _sessionLookupCache[key] = { session_id: null, cwd: null, loading: true };
+  fetch(`/topics/${encodeURIComponent(topic)}/session?agent=${encodeURIComponent(agent)}`)
+    .then(r => r.ok ? r.json() : null)
+    .then(data => {
+      _sessionLookupCache[key] = { ...(data || { session_id: null, cwd: null }), loading: false };
+      if (data?.session_id) _sessionIds[`${topic}@${agent}`] = data.session_id;
+      updatePinCount();
+      if (pinPanel.classList.contains('open')) renderPinPanel();
+    })
+    .catch(() => { _sessionLookupCache[key].loading = false; });
+  return _sessionLookupCache[key];
+}
+
+function _topicMemoryState() {
+  const { topic, agent, adhoc } = _currentContextTarget();
+  const meta = _getMemoryMeta(topic);
+  const session = _getSessionMeta(topic, agent);
+  const exists = !!(meta.exists && (meta.content || '').trim());
+  const key = _memoryOverrideKey(topic, agent, adhoc);
+  const defaultSelected = exists && (adhoc || (!session.loading && !session.session_id));
+  const selected = exists && (_memorySelectionOverrides[key] ?? defaultSelected);
+  return { topic, agent, adhoc, meta, session, exists, selected, key };
+}
+
+async function _topicMemoryStateForSend(topic, agent, adhoc) {
+  const meta = await fetch(`/topics/${encodeURIComponent(topic)}/memory`)
+    .then(r => r.ok ? r.json() : null)
+    .catch(() => null);
+  if (meta) _memoryCache[topic] = { ...meta, loading: false };
+  const exists = !!(meta?.exists && (meta.content || '').trim());
+  if (!exists) return { selected: false };
+
+  let session = { session_id: null };
+  if (agent && !adhoc) {
+    session = await fetch(`/topics/${encodeURIComponent(topic)}/session?agent=${encodeURIComponent(agent)}`)
+      .then(r => r.ok ? r.json() : { session_id: null })
+      .catch(() => ({ session_id: null }));
+    if (session.session_id) _sessionIds[`${topic}@${agent}`] = session.session_id;
+  }
+  const key = _memoryOverrideKey(topic, agent, adhoc);
+  const defaultSelected = adhoc || !session.session_id;
+  return { selected: _memorySelectionOverrides[key] ?? defaultSelected };
+}
+
 function updatePinCount() {
   const n = getPinnedItems().length;
-  pinCountEl.textContent = n || '';
-  pinCountEl.classList.toggle('visible', n > 0);
-  pinBtn.classList.toggle('has-pins', n > 0);
+  const memorySelected = _topicMemoryState().selected;
+  const total = n + (memorySelected ? 1 : 0);
+  pinCountEl.textContent = total || '';
+  pinCountEl.classList.toggle('visible', total > 0);
+  pinBtn.classList.toggle('has-pins', total > 0);
 }
 
 function _pinTagStr(item) {
@@ -2706,10 +2830,29 @@ function _pinStatus(item) {
   return { text: 'will inject', cls: 'pin-status-inject' };
 }
 
+function _memoryStatus(state) {
+  if (state.meta.loading || state.session.loading) return { text: 'checking', cls: 'pin-status-session' };
+  if (!state.exists) return { text: 'no memory', cls: 'pin-status-empty' };
+  if (state.selected) return { text: 'will inject', cls: 'pin-status-inject' };
+  if (!state.adhoc && state.session.session_id) return { text: 'in session · skip', cls: 'pin-status-session' };
+  return { text: 'skipped', cls: 'pin-status-done' };
+}
+
 function renderPinPanel() {
   const items = getPinnedItems();
   const listEl = document.getElementById('pin-panel-list');
   let html = '';
+  const memoryState = _topicMemoryState();
+  const memoryStatus = _memoryStatus(memoryState);
+  const preview = memoryState.exists
+    ? (memoryState.meta.content || '').trim().replace(/\s+/g, ' ').slice(0, 90)
+    : 'No memory yet';
+  html += `<div class="memory-item">
+    <span class="pin-item-tag">#${escapeHtml(memoryState.topic)}</span>
+    <span class="memory-item-preview" data-memory-edit="1">Topic memory · ${escapeHtml(preview)}</span>
+    <span class="memory-item-status ${memoryStatus.cls}">${memoryStatus.text}</span>
+    <button class="pin-item-toggle${memoryState.selected ? ' active' : ''}" data-memory-toggle="1" type="button">${memoryState.selected ? 'On' : (memoryState.exists ? 'Off' : 'Add')}</button>
+  </div>`;
 
   // Lookback section — shown when !N is active in input
   const { adhoc, lookback } = parseInput(input.value);
@@ -2730,7 +2873,7 @@ function renderPinPanel() {
   }
 
   if (items.length) {
-    if (html) html += `<div class="pin-section-label">Bookmarked</div>`;
+    html += `<div class="pin-section-label">Bookmarked</div>`;
     html += items.map(item => {
       const st = _pinStatus(item);
       const tag = _pinTagStr(item);
@@ -2744,11 +2887,29 @@ function renderPinPanel() {
     }).join('');
   }
 
-  if (!html) {
-    html = '<div style="padding:0.5rem 0.8rem;color:#484858;font-size:0.78em">No bookmarks yet.<br>Click 🔖 on any response to add it.</div>';
+  if (!items.length) {
+    html += '<div style="padding:0.5rem 0.8rem;color:#484858;font-size:0.78em">No bookmarks yet.<br>Click 🔖 on any response to add it.</div>';
   }
 
   listEl.innerHTML = html;
+  listEl.querySelectorAll('[data-memory-edit]').forEach(el => {
+    el.addEventListener('mousedown', e => {
+      e.preventDefault();
+      openMemoryEditor(memoryState.topic);
+    });
+  });
+  listEl.querySelectorAll('[data-memory-toggle]').forEach(btn => {
+    btn.addEventListener('mousedown', e => {
+      e.preventDefault();
+      if (!memoryState.exists) {
+        openMemoryEditor(memoryState.topic);
+        return;
+      }
+      _memorySelectionOverrides[memoryState.key] = !memoryState.selected;
+      updatePinCount();
+      renderPinPanel();
+    });
+  });
   listEl.querySelectorAll('.pin-item-remove').forEach(btn => {
     btn.addEventListener('mousedown', e => {
       e.preventDefault();
@@ -2760,6 +2921,62 @@ function renderPinPanel() {
       renderPinPanel();
     });
   });
+}
+
+async function openMemoryEditor(topic) {
+  _editingMemoryTopic = topic;
+  closePinPanel();
+  memoryTitle.textContent = `Topic memory · #${topic}`;
+  memoryEditor.value = 'Loading...';
+  memoryPath.textContent = `context/topics/${topic}/memory.md`;
+  memoryModal.classList.add('open');
+  try {
+    const data = await fetch(`/topics/${encodeURIComponent(topic)}/memory`).then(r => r.json());
+    _memoryCache[topic] = { ...data, loading: false };
+    memoryEditor.value = data.content || '';
+    memoryPath.textContent = data.path || `context/topics/${topic}/memory.md`;
+    memoryEditor.focus();
+  } catch {
+    memoryEditor.value = '';
+  }
+}
+
+function closeMemoryEditor() {
+  memoryModal.classList.remove('open');
+  _editingMemoryTopic = null;
+}
+
+async function saveMemoryEditor() {
+  if (!_editingMemoryTopic) return;
+  const topic = _editingMemoryTopic;
+  const idleLabel = 'Save';
+  memorySaveBtn.disabled = true;
+  memorySaveBtn.textContent = 'Saving...';
+  memoryPath.textContent = `context/topics/${topic}/memory.md`;
+  try {
+    const res = await fetch(`/topics/${encodeURIComponent(topic)}/memory`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: memoryEditor.value }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Save failed (${res.status})`);
+    _memoryCache[topic] = { ...data, loading: false };
+    memoryPath.textContent = `${data.path || `context/topics/${topic}/memory.md`} · saved`;
+    memorySaveBtn.textContent = 'Saved';
+    updatePinCount();
+    if (pinPanel.classList.contains('open')) renderPinPanel();
+  } catch (err) {
+    memoryPath.textContent = err?.message || 'Save failed';
+    memorySaveBtn.textContent = idleLabel;
+  } finally {
+    memorySaveBtn.disabled = false;
+    if (memorySaveBtn.textContent === 'Saved') {
+      setTimeout(() => {
+        if (!memorySaveBtn.disabled) memorySaveBtn.textContent = idleLabel;
+      }, 1200);
+    }
+  }
 }
 
 function openPinPanel() {
@@ -2806,6 +3023,11 @@ function initPin() {
     else openPinPanel();
   });
   document.getElementById('pin-panel-close').addEventListener('click', closePinPanel);
+  memoryCloseBtn.addEventListener('click', closeMemoryEditor);
+  memorySaveBtn.addEventListener('click', saveMemoryEditor);
+  memoryModal.addEventListener('mousedown', e => {
+    if (e.target === memoryModal) closeMemoryEditor();
+  });
   updatePinCount();
 }
 

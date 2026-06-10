@@ -794,6 +794,106 @@ body {
   flex-shrink: 0;
 }
 .pin-item-remove:hover { color: #e06060; }
+.memory-item {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.25rem 0.7rem;
+  cursor: default;
+  border-bottom: 1px solid #1e1e28;
+}
+.memory-item:hover { background: #1a1a24; }
+.memory-item-preview {
+  color: #666;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.memory-item .memory-item-preview {
+  cursor: pointer;
+}
+.memory-item-status { font-size: 0.8em; flex-shrink: 0; white-space: nowrap; }
+.pin-item-toggle {
+  background: transparent;
+  border: 1px solid #333;
+  color: #777;
+  font-size: 0.78em;
+  padding: 0.12rem 0.4rem;
+  border-radius: 5px;
+  flex-shrink: 0;
+}
+.pin-item-toggle.active {
+  color: #70b870;
+  border-color: #3c6a3c;
+}
+.pin-status-empty { color: #555; }
+
+#memory-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: rgba(0, 0, 0, 0.45);
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+#memory-modal.open { display: flex; }
+#memory-modal-box {
+  width: min(760px, 100%);
+  height: min(620px, 80vh);
+  background: #13131c;
+  border: 1px solid #2e2e3e;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#memory-modal-header,
+#memory-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid #1e1e28;
+}
+#memory-modal-footer {
+  border-top: 1px solid #1e1e28;
+  border-bottom: 0;
+}
+#memory-modal-close {
+  background: transparent;
+  border: none;
+  color: #555;
+  padding: 0.1rem 0.3rem;
+}
+#memory-modal-close:hover { color: #999; }
+#memory-editor {
+  flex: 1;
+  resize: none;
+  border: 0;
+  outline: none;
+  background: #101018;
+  color: #d8d8dc;
+  padding: 0.85rem;
+  font: 0.9rem/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+#memory-path {
+  color: #555;
+  font-family: ui-monospace, monospace;
+  font-size: 0.75em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#memory-save {
+  padding: 0.35rem 0.8rem;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
 
 /* pin button on assistant bubbles */
 .thinking-kill-btn {
