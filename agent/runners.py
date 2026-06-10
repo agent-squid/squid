@@ -197,7 +197,12 @@ async def _stream_lines(
             if not _signal_process_group(pid, signal.SIGKILL):
                 proc.kill()
             await proc.wait()
-        drain_task.cancel()
+        # Wait for stderr drain to complete now that the process has exited;
+        # cancel only if it somehow stalls.
+        try:
+            await asyncio.wait_for(drain_task, timeout=3)
+        except Exception:
+            drain_task.cancel()
 
     if proc.returncode != 0:
         err = b"".join(stderr_buf).decode(errors="replace").strip()

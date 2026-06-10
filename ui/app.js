@@ -1077,6 +1077,7 @@ async function sendMessage(text) {
             // Actual response content — accumulate and show in thinking preview
             if (!firstDataReceived) revealResponseBubble();
             if (dataLineCount > 1) raw += '\n';
+            else if (raw.length && data.length && !/\s$/.test(raw) && !/^\s/.test(data)) raw += '\n';
             raw += data;
             updateThinkingPreview();
           }
@@ -1679,21 +1680,31 @@ const CODEX_PIE_C = 2 * Math.PI * 6;
 async function fetchCodexQuota() {
   try {
     const res = await fetch('/quota/codex');
-    if (!res.ok) return;
+    if (!res.ok) {
+      showCodexQuotaError(res.status === 400 ? 'Codex auth' : 'Codex error');
+      return;
+    }
     const data = await res.json();
-    const win = data?.rate_limit?.primary_window;
-    if (!win) return;
+    const primary = data?.rate_limit?.primary_window;
+    if (!primary) {
+      showCodexQuotaError('Codex n/a');
+      return;
+    }
+    const pct = Math.max(0, Math.min(100, Math.round(primary.used_percent ?? 0)));
+    codexResetAt = primary.reset_after_seconds != null
+      ? Date.now() + primary.reset_after_seconds * 1000
+      : (primary.reset_at != null ? primary.reset_at * 1000 : null);
 
-    const pct = win.used_percent ?? 0;
-    codexResetAt = win.reset_after_seconds != null
-      ? Date.now() + win.reset_after_seconds * 1000 : null;
-
+    codexQuotaDisplay.classList.remove('error');
     codexQuotaDisplay.classList.add('loaded');
+    codexQuotaDisplay.title = buildCodexQuotaTitle(data);
     updateCodexLabel(pct);
 
     if (codexTimer) clearInterval(codexTimer);
     codexTimer = setInterval(() => updateCodexLabel(pct), 10000);
-  } catch {}
+  } catch {
+    showCodexQuotaError('Codex error');
+  }
 }
 
 function updateCodexLabel(pct) {
@@ -1717,6 +1728,40 @@ function updateCodexLabel(pct) {
   }
 }
 
+function showCodexQuotaError(text) {
+  codexResetAt = null;
+  codexQuotaDisplay.classList.remove('loaded');
+  codexQuotaDisplay.classList.add('error');
+  codexQuotaDisplay.title = 'Codex usage unavailable · click for credentials';
+
+  const label = document.getElementById('codex-quota-label');
+  if (label) label.textContent = text;
+
+  const arc = document.getElementById('codex-pie-arc');
+  if (arc) arc.setAttribute('stroke-dasharray', `0 ${CODEX_PIE_C}`);
+
+  if (codexTimer) {
+    clearInterval(codexTimer);
+    codexTimer = null;
+  }
+}
+
+function buildCodexQuotaTitle(data) {
+  const primary = data?.rate_limit?.primary_window;
+  const secondary = data?.rate_limit?.secondary_window;
+  const parts = ['Codex usage'];
+  if (primary?.used_percent != null) {
+    parts.push(`5h ${Math.round(primary.used_percent)}%`);
+  }
+  if (secondary?.used_percent != null) {
+    parts.push(`weekly ${Math.round(secondary.used_percent)}%`);
+  }
+  if (data?.rate_limit?.limit_reached) {
+    parts.push('limit reached');
+  }
+  return parts.join(' · ') + ' · click for credentials';
+}
+
 function initCodexQuota() {
   codexQuotaDisplay.innerHTML = `
     <svg id="codex-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
@@ -1726,6 +1771,7 @@ function initCodexQuota() {
               transform="rotate(-90 9 9)"/>
     </svg>
     <span id="codex-quota-label"></span>`;
+  showCodexQuotaError('Codex auth');
 
   const credsPopup = document.getElementById('codex-creds-popup');
   codexQuotaDisplay.addEventListener('click', () => credsPopup.classList.toggle('open'));

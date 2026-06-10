@@ -720,14 +720,35 @@ async def quota_codex():
         return JSONResponse({"error": "credentials not configured"}, status_code=400)
     try:
         from curl_cffi.requests import AsyncSession
+        cookie_header = f"__Secure-next-auth.session-token={token}"
+        common_headers = {
+            "Accept": "application/json",
+            "Origin": "https://chatgpt.com",
+            "Referer": "https://chatgpt.com/",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        }
         async with AsyncSession() as session:
+            # Exchange session cookie for a short-lived access token
+            auth_r = await session.get(
+                "https://chatgpt.com/api/auth/session",
+                headers={**common_headers, "Cookie": cookie_header},
+                impersonate="chrome",
+            )
+            if auth_r.status_code != 200:
+                return JSONResponse({"error": f"auth/session returned {auth_r.status_code}"}, status_code=502)
+            auth_data = auth_r.json()
+            access_token = auth_data.get("accessToken")
+            if not access_token:
+                return JSONResponse({"error": "no accessToken in session response", "detail": auth_data}, status_code=502)
+
+            # Fetch usage with the Bearer token
             r = await session.get(
                 "https://chatgpt.com/backend-api/wham/usage",
-                headers={"Cookie": f"__Secure-next-auth.session-token={token}"},
+                headers={**common_headers, "Authorization": f"Bearer {access_token}"},
                 impersonate="chrome",
             )
         if r.status_code != 200:
-            return JSONResponse({"error": f"chatgpt.com returned {r.status_code}"}, status_code=502)
+            return JSONResponse({"error": f"wham/usage returned {r.status_code}"}, status_code=502)
         return JSONResponse(r.json())
     except Exception as exc:
         log.error("codex quota fetch failed: %s", exc)
