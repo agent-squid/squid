@@ -819,6 +819,7 @@ async function sendMessage(text) {
   const thinkingLoader = addLoader(thinkingContent);
   let thinkingFrozen = false;
   let statusBuf = '';
+  let userAborted = false;
 
   // Kill button — shown once msg_id is known, hidden when done
   const killBtn = document.createElement('button');
@@ -829,6 +830,7 @@ async function sendMessage(text) {
   killBtn.style.display = 'none';
   killBtn.addEventListener('click', async () => {
     killBtn.disabled = true;
+    userAborted = true;
     controller.abort();
     if (msgId) {
       await fetch('/cmd', {
@@ -1200,7 +1202,7 @@ async function sendMessage(text) {
   } finally {
     stopStatusFallback();
     if (!thinkingFrozen) {
-      if (msgId && !firstDataReceived && !completedFromStatus) {
+      if (!userAborted && msgId && !firstDataReceived && !completedFromStatus) {
         const content = document.createElement('span');
         content.className = 'msg-error';
         content.textContent = 'Response is still running. Reopen the page or history to pick it up.';
@@ -1210,7 +1212,7 @@ async function sendMessage(text) {
         freezeThinking();
       }
     }
-    if (!firstDataReceived && !completedFromStatus) {
+    if (!userAborted && !firstDataReceived && !completedFromStatus) {
       if (!bubble.parentNode) messages.appendChild(bubble);
       contentDiv.innerHTML = '<span class="msg-error">No response — backend may be rate-limited or unavailable.</span>';
     }
