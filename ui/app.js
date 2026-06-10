@@ -87,6 +87,35 @@ scrollBtn.addEventListener('mouseleave', () => {
 
 marked.setOptions({ breaks: true });
 
+const AGENT_THEME_COLORS = Object.freeze({
+  claude: '#f07040',
+  codex: '#f5f5f2',
+  antigravity: '#4ea1ff',
+  copilot: '#ff5db1',
+  cursor: '#9aa0a6',
+  default: '#888888',
+  quotaHigh: '#e05030',
+});
+
+function agentThemeColor(backend) {
+  return AGENT_THEME_COLORS[(backend || '').toLowerCase()] || AGENT_THEME_COLORS.default;
+}
+
+function quotaGaugeColor(backend, pct) {
+  return pct >= 80 ? AGENT_THEME_COLORS.quotaHigh : agentThemeColor(backend);
+}
+
+function backendDisplayName(backend) {
+  const names = {
+    claude: 'Claude',
+    codex: 'Codex',
+    antigravity: 'Antigravity',
+    copilot: 'Copilot',
+    cursor: 'Cursor',
+  };
+  return names[(backend || '').toLowerCase()] || (backend || 'Agent');
+}
+
 // Rewrite file:// links and images to /localfile?path= so local paths are served.
 (function () {
   function stripLineSuffix(path) {
@@ -295,6 +324,7 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0) {
   topicChipEl.classList.add('visible');
   topicChipEl.classList.remove('needs-agent');
   input.placeholder = 'message…';
+  updateActiveQuotaGauge();
 }
 
 function clearTopicChip() {
@@ -302,6 +332,7 @@ function clearTopicChip() {
   topicChipEl.classList.remove('visible', 'needs-agent');
   input.placeholder = '#topic or #topic@agent message…';
   document.querySelectorAll('.history-item.ctx-highlight').forEach(el => el.classList.remove('ctx-highlight'));
+  updateActiveQuotaGauge();
 }
 
 topicChipEl.addEventListener('click', () => {
@@ -690,7 +721,13 @@ function updateCtxHighlight() {
   if (pinPanel.classList.contains('open')) renderPinPanel();
 }
 
-input.addEventListener('input', () => { ctxHighlightEnabled = true; resizeComposer(); updateAutocomplete(); updateCtxHighlight(); });
+input.addEventListener('input', () => {
+  ctxHighlightEnabled = true;
+  resizeComposer();
+  updateAutocomplete();
+  updateCtxHighlight();
+  updateActiveQuotaGauge();
+});
 
 input.addEventListener('keydown', (e) => {
   if (acOpen) {
@@ -1592,11 +1629,64 @@ function addMessage(role, content) {
 // ── credentials + quota ───────────────────────────────────────────────────────
 
 const quotaDisplay = document.getElementById('quota-display');
+const QUOTA_BACKENDS = ['claude', 'codex', 'antigravity', 'copilot', 'cursor'];
+const quotaSnapshots = {
+  claude: { backend: 'claude', status: 'unknown' },
+  codex: { backend: 'codex', status: 'unknown' },
+};
+let activeQuotaBackend = null;
+let quotaResolveSeq = 0;
 let quotaResetAt = null;
 let quotaTimer   = null;
 let quotaPct     = null;
 let quotaRaw     = null;
 let quotaDelta   = null;
+
+function setQuotaSnapshot(backend, snapshot) {
+  quotaSnapshots[backend] = { backend, ...snapshot };
+  if (procStatusPopup?.classList.contains('open')) {
+    renderProcPopup(cachedProcRows, cachedQueueRows);
+  }
+}
+
+function quotaTimeText(resetAt) {
+  if (!resetAt) return '';
+  const diff = resetAt - Date.now();
+  if (diff <= 0) return 'resetting';
+  const totalMin = Math.floor(diff / 60000);
+  const h = Math.floor(totalMin / 60);
+  const m = String(totalMin % 60).padStart(2, '0');
+  return h > 0 ? `${h}:${m}` : `${m}m`;
+}
+
+function setVisibleQuotaBackend(backend) {
+  const supported = backend === 'claude' || backend === 'codex';
+  activeQuotaBackend = supported ? backend : null;
+  quotaDisplay.classList.toggle('quota-hidden', activeQuotaBackend !== 'claude');
+  codexQuotaDisplay.classList.toggle('quota-hidden', activeQuotaBackend !== 'codex');
+}
+
+async function resolveActiveQuotaBackend() {
+  const parsed = parseInput(input.value.trim());
+  const topicName = parsed.topic || stickyChip?.topic || null;
+  let agentName = parsed.agent || stickyChip?.agent || null;
+
+  if (!agentName && topicName) {
+    const topics = await _acTopics();
+    agentName = topics.find(t => t.name === topicName)?.agent || null;
+  }
+  if (!agentName) return 'claude';
+
+  const agents = await _acAgents();
+  return agents.find(a => a.name === agentName)?.backend || null;
+}
+
+async function updateActiveQuotaGauge() {
+  const seq = ++quotaResolveSeq;
+  const backend = await resolveActiveQuotaBackend();
+  if (seq !== quotaResolveSeq) return;
+  setVisibleQuotaBackend(backend);
+}
 
 async function fetchQuota(trackDelta = false) {
   try {
@@ -1619,6 +1709,12 @@ async function fetchQuota(trackDelta = false) {
 
     quotaDisplay.classList.add('loaded');
     updateQuotaLabel(pct);
+    setQuotaSnapshot('claude', {
+      status: 'loaded',
+      pct,
+      resetAt: quotaResetAt,
+      title: 'Claude session usage',
+    });
 
     if (quotaTimer) clearInterval(quotaTimer);
     quotaTimer = setInterval(() => updateQuotaLabel(pct), 10000);
@@ -1631,28 +1727,24 @@ function updateQuotaLabel(pct) {
   const label = document.getElementById('quota-label');
   if (!label) return;
   const delta = quotaDelta != null ? ` +${quotaDelta}%` : '';
-  if (!quotaResetAt) { label.textContent = `${pct}%${delta}`; return; }
-  const diff = quotaResetAt - Date.now();
-  if (diff <= 0) { label.textContent = `${pct}%${delta} · resetting`; return; }
-  const totalMin = Math.floor(diff / 60000);
-  const h = Math.floor(totalMin / 60);
-  const m = String(totalMin % 60).padStart(2, '0');
-  const timeStr = h > 0 ? `${h}:${m}` : `${m}m`;
-  label.textContent = `${pct}%${delta} in ${timeStr}`;
+  const timeStr = quotaTimeText(quotaResetAt);
+  label.textContent = `${backendDisplayName('claude')} ${pct}%${delta}` + (timeStr ? ` in ${timeStr}` : '');
 
   const arc = document.getElementById('quota-pie-arc');
   if (arc) {
     const filled = (pct / 100) * QUOTA_PIE_C;
     arc.setAttribute('stroke-dasharray', `${filled} ${QUOTA_PIE_C}`);
-    arc.setAttribute('stroke', pct >= 80 ? '#e05030' : '#f07040');
+    arc.setAttribute('stroke', quotaGaugeColor('claude', pct));
   }
 }
 
 function initQuota() {
+  quotaDisplay.style.setProperty('--quota-accent', agentThemeColor('claude'));
+  setVisibleQuotaBackend('claude');
   quotaDisplay.innerHTML = `
     <svg id="quota-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
       <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
-      <circle id="quota-pie-arc" cx="9" cy="9" r="6" fill="none" stroke="#f07040"
+      <circle id="quota-pie-arc" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('claude')}"
               stroke-width="4" stroke-dasharray="0 ${QUOTA_PIE_C}" stroke-linecap="round"
               transform="rotate(-90 9 9)"/>
     </svg>
@@ -1699,6 +1791,12 @@ async function fetchCodexQuota() {
     codexQuotaDisplay.classList.add('loaded');
     codexQuotaDisplay.title = buildCodexQuotaTitle(data);
     updateCodexLabel(pct);
+    setQuotaSnapshot('codex', {
+      status: 'loaded',
+      pct,
+      resetAt: codexResetAt,
+      title: buildCodexQuotaTitle(data),
+    });
 
     if (codexTimer) clearInterval(codexTimer);
     codexTimer = setInterval(() => updateCodexLabel(pct), 10000);
@@ -1710,21 +1808,14 @@ async function fetchCodexQuota() {
 function updateCodexLabel(pct) {
   const label = document.getElementById('codex-quota-label');
   if (!label) return;
-  const diff = codexResetAt ? codexResetAt - Date.now() : null;
-  let timeStr = '';
-  if (diff != null && diff > 0) {
-    const totalMin = Math.floor(diff / 60000);
-    const h = Math.floor(totalMin / 60);
-    const m = String(totalMin % 60).padStart(2, '0');
-    timeStr = ' in ' + (h > 0 ? `${h}:${m}` : `${m}m`);
-  }
-  label.textContent = `${pct}%${timeStr}`;
+  const timeStr = quotaTimeText(codexResetAt);
+  label.textContent = `${backendDisplayName('codex')} ${pct}%` + (timeStr ? ` in ${timeStr}` : '');
 
   const arc = document.getElementById('codex-pie-arc');
   if (arc) {
     const filled = (pct / 100) * CODEX_PIE_C;
     arc.setAttribute('stroke-dasharray', `${filled} ${CODEX_PIE_C}`);
-    arc.setAttribute('stroke', pct >= 80 ? '#e05030' : '#10a37f');
+    arc.setAttribute('stroke', quotaGaugeColor('codex', pct));
   }
 }
 
@@ -1733,6 +1824,7 @@ function showCodexQuotaError(text) {
   codexQuotaDisplay.classList.remove('loaded');
   codexQuotaDisplay.classList.add('error');
   codexQuotaDisplay.title = 'Codex usage unavailable · click for credentials';
+  setQuotaSnapshot('codex', { status: 'error', text });
 
   const label = document.getElementById('codex-quota-label');
   if (label) label.textContent = text;
@@ -1763,10 +1855,11 @@ function buildCodexQuotaTitle(data) {
 }
 
 function initCodexQuota() {
+  codexQuotaDisplay.style.setProperty('--quota-accent', agentThemeColor('codex'));
   codexQuotaDisplay.innerHTML = `
     <svg id="codex-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
       <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
-      <circle id="codex-pie-arc" cx="9" cy="9" r="6" fill="none" stroke="#10a37f"
+      <circle id="codex-pie-arc" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('codex')}"
               stroke-width="4" stroke-dasharray="0 ${CODEX_PIE_C}" stroke-linecap="round"
               transform="rotate(-90 9 9)"/>
     </svg>
@@ -1851,15 +1944,43 @@ function updateProcStatusDot(running, queued) {
   procStatusBtn.classList.toggle('has-procs', running.length > 0 || queued.length > 0);
 }
 
+function renderQuotaStatus() {
+  const rows = QUOTA_BACKENDS.map(backend => {
+    const q = quotaSnapshots[backend] || { backend, status: 'unsupported' };
+    const accent = agentThemeColor(backend);
+    let value = 'n/a';
+    let detail = 'no quota integration';
+    if (q.status === 'loaded') {
+      value = `${q.pct}%`;
+      const reset = quotaTimeText(q.resetAt);
+      detail = reset ? `resets in ${reset}` : 'reset time unavailable';
+    } else if (q.status === 'error') {
+      value = 'error';
+      detail = q.text || 'unavailable';
+    } else if (q.status === 'unknown') {
+      value = '...';
+      detail = 'loading';
+    }
+    return `<div class="quota-status-row">
+      <span class="quota-status-name"><span class="quota-status-dot" style="background:${accent}"></span>${backendDisplayName(backend)}</span>
+      <span class="quota-status-value">${value}</span>
+      <span class="quota-status-detail">${detail}</span>
+    </div>`;
+  }).join('');
+
+  return `<div class="proc-section-label">Quotas</div>
+    <div class="quota-status-list">${rows}</div>`;
+}
+
 function renderProcPopup(running, queued) {
   const header = `<div class="proc-popup-header">
-    <span class="settings-label">Processes</span>
+    <span class="settings-label">Status</span>
     <button id="proc-popup-close" type="button">✕</button>
   </div>`;
 
-  let body = '';
+  let body = renderQuotaStatus();
   if (!running.length && !queued.length) {
-    body = '<div class="proc-status-empty">No active processes or queued prompts.</div>';
+    body += '<div class="proc-status-empty">No active processes or queued prompts.</div>';
   } else {
     if (running.length) {
       const rows = running.map(r => `
@@ -2328,6 +2449,7 @@ function _acSelect(idx) {
   input.value = item.insert + ' ';
   resizeComposer();
   input.focus();
+  updateActiveQuotaGauge();
 }
 
 function _acTopicLabel(topicName, modelLabel) {
@@ -2704,6 +2826,7 @@ initQuota();
 initCreds();
 initCodexQuota();
 initCodexCreds();
+updateActiveQuotaGauge();
 initPullToRefresh();
 startProcPoll();
 showBootBanner();

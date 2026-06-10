@@ -13,7 +13,7 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="icon" href="/icons/icon-192.png" sizes="192x192" type="image/png" />
   <link rel="apple-touch-icon" href="/icons/icon-192.png" />
-  <link rel="stylesheet" href="style.css?v=20260609-97" />
+  <link rel="stylesheet" href="style.css?v=20260610-108" />
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 </head>
@@ -30,7 +30,7 @@
       </nav>
 
       <!-- Process status dot -->
-      <button id="proc-status" type="button" title="Processes · click to view"></button>
+      <button id="proc-status" type="button" title="Status · click to view"></button>
 
       <div id="codex-quota-display" title="Codex usage · click for credentials"></div>
 
@@ -64,8 +64,8 @@
       <div id="proc-status-popup"></div>
 
       <div id="codex-creds-popup">
-        <span class="settings-label">ChatGPT session</span>
-        <input id="codex-creds-token" type="password" placeholder="__Secure-next-auth.session-token" />
+        <span class="settings-label">ChatGPT bearer</span>
+        <input id="codex-creds-token" type="password" placeholder="Bearer eyJ..." />
         <button id="codex-creds-save" type="button">Save</button>
         <span id="codex-creds-status"></span>
       </div>
@@ -105,7 +105,7 @@
           <div class="help-row"><code>/deq N</code><span>remove Nth item (1=first, -1=last)</span></div>
           <div class="help-row"><code>/filter</code><span>filter history by current #topic or #topic@agent</span></div>
           <div class="help-row"><code>/filter reset</code><span>clear the active filter</span></div>
-          <div class="help-row"><code>/status</code><span>open process status popup</span></div>
+          <div class="help-row"><code>/status</code><span>open status popup</span></div>
           <div class="help-row"><code>/restart</code><span>restart the server</span></div>
           <div class="help-row" style="color:#555;font-size:0.85em">Commands also work without <kbd>/</kbd> as exact bare words.</div>
         </div>
@@ -205,6 +205,6 @@
 
     <!-- Inline agent creation prompt (appended to #messages dynamically) -->
   </div>
-  <script src="app.js?v=20260610-106"></script>
+  <script src="app.js?v=20260610-108"></script>
 </body>
 </html>

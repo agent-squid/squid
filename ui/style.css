@@ -150,6 +150,8 @@ body {
 
 /* quota display */
 #quota-display {
+  --quota-accent: #f07040;
+  margin-left: auto;
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -205,6 +207,7 @@ body {
 
 /* codex quota gauge */
 #codex-quota-display {
+  --quota-accent: #f5f5f2;
   margin-left: auto;
   display: flex;
   align-items: center;
@@ -218,6 +221,7 @@ body {
 #codex-quota-display.loaded { color: #666; }
 #codex-quota-display.error { color: #a06655; }
 #codex-quota-display.error #codex-pie-arc { stroke: #a06655; }
+.quota-hidden { display: none !important; }
 
 #codex-creds-popup {
   display: none;
@@ -338,6 +342,45 @@ body {
   color: #444;
   text-transform: uppercase;
   padding: 0.4rem 0.4rem 0.15rem;
+}
+.quota-status-list {
+  display: grid;
+  gap: 0.15rem;
+  margin-bottom: 0.5rem;
+  padding: 0 0.4rem;
+}
+.quota-status-row {
+  display: grid;
+  grid-template-columns: minmax(96px, 1fr) 48px minmax(110px, 1.4fr);
+  gap: 0.6rem;
+  align-items: center;
+  color: #777;
+  font-size: 0.76em;
+  padding: 0.18rem 0;
+}
+.quota-status-name {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: #aaa;
+}
+.quota-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.quota-status-value {
+  color: #888;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.quota-status-detail {
+  color: #555;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .proc-queue-preview {
   max-width: 160px;
