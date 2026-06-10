@@ -2,6 +2,7 @@
 topic_queue.py — Per-topic FIFO queues with parallel execution across topics.
 """
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Optional
@@ -22,6 +23,7 @@ class QueueItem:
     timeout: Optional[int] = None
     resume_session_id: Optional[str] = None
     adhoc: bool = False
+    lookback: int = 0
     msg_id: Optional[int] = None
     out_q: asyncio.Queue = field(default_factory=asyncio.Queue)
 
@@ -115,19 +117,25 @@ class TopicWorker:
             try:
                 await self._process(item)
             except Exception as exc:
-                log.exception("Worker error (topic=%s)", self.topic)
+                log.exception("Worker bug (topic=%s)", self.topic)
                 await item.out_q.put({"_error": str(exc)})
+                await item.out_q.put(None)
             finally:
-                await item.out_q.put(None)  # sentinel
                 self._processing_seq = None
             self.q.task_done()
 
     async def _process(self, item: QueueItem):
         from .runners import run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError, CLIError
         from .config import SQUID_HOME
-        runner = {"claude": run_claude, "cursor": run_cursor, "antigravity": run_antigravity, "codex": run_codex, "copilot": run_copilot}.get(item.backend)
+        from .stats_db import insert_run_event, update_assistant_message, save_stats, set_topic_session
+
+        runner = {"claude": run_claude, "cursor": run_cursor, "antigravity": run_antigravity,
+                  "codex": run_codex, "copilot": run_copilot}.get(item.backend)
         if runner is None:
-            raise CLINotFoundError(f"Unknown backend: {item.backend!r}")
+            await item.out_q.put({"_error": f"Unknown backend: {item.backend!r}"})
+            await item.out_q.put(None)
+            return
+
         effective_cwd = item.cwd or SQUID_HOME
         kwargs: dict = dict(
             history=item.context_history, model=item.model,
@@ -139,24 +147,91 @@ class TopicWorker:
         if item.backend in ("claude", "codex", "cursor", "copilot", "antigravity") and item.resume_session_id:
             kwargs["resume_session_id"] = item.resume_session_id
 
-        try:
-            async for chunk in runner(item.prompt, **kwargs):
-                await item.out_q.put(chunk)
-        except CLIError as exc:
-            if item.resume_session_id and "No conversation found" in str(exc):
-                status = (
-                    f"Session not found — starting fresh\n"
-                    f"  session: {item.resume_session_id}\n"
-                    f"  cwd: {effective_cwd}\n"
-                    f"  backend: {item.backend}"
-                    + (f"  model: {item.model}" if item.model else "")
-                )
-                await item.out_q.put({"_status": status})
-                kwargs.pop("resume_session_id", None)
-                async for chunk in runner(item.prompt, **kwargs):
+        run_seq = 0
+        raw = ""
+        status_raw = ""
+        tool_events: list[dict] = []
+        session_id: Optional[str] = None
+
+        async def _stream(prompt, **kw):
+            nonlocal run_seq, session_id, raw, status_raw
+            async for chunk in runner(prompt, **kw):
+                if isinstance(chunk, dict):
+                    if "_stats" in chunk:
+                        inner = chunk["_stats"]
+                        session_id = inner.get("session_id")
+                        enriched = {k: v for k, v in inner.items() if k != "session_id"}
+                        enriched["adhoc"] = item.adhoc
+                        enriched["lookback"] = item.lookback
+                        if session_id:
+                            save_stats(session_id, enriched, topic=item.topic, agent=item.agent,
+                                       backend=item.backend, model=item.model, cwd=effective_cwd,
+                                       lookback=item.lookback)
+                            if item.agent and not item.adhoc:
+                                set_topic_session(item.topic, item.agent, session_id, effective_cwd)
+                            enriched["session_id"] = session_id
+                            enriched["cwd"] = effective_cwd
+                        insert_run_event(item.msg_id, run_seq, "stats", json.dumps(enriched))
+                        await item.out_q.put({"_stats": enriched})
+                    elif "_tool" in chunk:
+                        tool_events.append(chunk["_tool"])
+                        insert_run_event(item.msg_id, run_seq, "tool", json.dumps(chunk["_tool"]))
+                        await item.out_q.put(chunk)
+                    elif "_status" in chunk:
+                        status_raw += chunk["_status"]
+                        insert_run_event(item.msg_id, run_seq, "status", chunk["_status"])
+                        await item.out_q.put(chunk)
+                    elif "_error" in chunk:
+                        insert_run_event(item.msg_id, run_seq, "error", chunk["_error"])
+                        await item.out_q.put(chunk)
+                else:
+                    raw += chunk
+                    insert_run_event(item.msg_id, run_seq, "text", chunk)
                     await item.out_q.put(chunk)
-            else:
-                raise
+                run_seq += 1
+
+        try:
+            try:
+                await _stream(item.prompt, **kwargs)
+            except CLIError as exc:
+                if item.resume_session_id and "No conversation found" in str(exc):
+                    status = (
+                        f"Session not found — starting fresh\n"
+                        f"  session: {item.resume_session_id}\n"
+                        f"  cwd: {effective_cwd}\n"
+                        f"  backend: {item.backend}"
+                        + (f"  model: {item.model}" if item.model else "")
+                    )
+                    insert_run_event(item.msg_id, run_seq, "status", status)
+                    run_seq += 1
+                    await item.out_q.put({"_status": status})
+                    kwargs.pop("resume_session_id", None)
+                    await _stream(item.prompt, **kwargs)
+                else:
+                    raise
+
+            content = raw or status_raw or ""
+            context_json = json.dumps(tool_events) if tool_events else None
+            update_assistant_message(item.msg_id, content, session_id,
+                                     "done" if content else "error", context=context_json)
+            insert_run_event(item.msg_id, run_seq, "done", None)
+
+        except Exception as exc:
+            err_text = str(exc)
+            if not isinstance(exc, CLIError):
+                log.exception("Unexpected error processing msg_id=%s", item.msg_id)
+            content = raw or err_text
+            context_json = json.dumps(tool_events) if tool_events else None
+            try:
+                update_assistant_message(item.msg_id, content, session_id,
+                                         "done" if raw else "error", context=context_json)
+                insert_run_event(item.msg_id, run_seq, "error", err_text)
+            except Exception:
+                pass
+            await item.out_q.put({"_error": err_text})
+
+        finally:
+            await item.out_q.put(None)
 
 
 class TopicDispatcher:
@@ -183,6 +258,7 @@ class TopicDispatcher:
         response_timeout: Optional[int] = None,
         resume_session_id: Optional[str] = None,
         adhoc: bool = False,
+        lookback: int = 0,
         msg_id: Optional[int] = None,
     ) -> tuple[asyncio.Queue, int, TopicWorker]:
         if adhoc:
@@ -197,7 +273,7 @@ class TopicDispatcher:
             prompt=prompt, context_history=context_history,
             backend=backend, model=model, cwd=cwd, timeout=response_timeout,
             resume_session_id=resume_session_id,
-            adhoc=adhoc, msg_id=msg_id,
+            adhoc=adhoc, lookback=lookback, msg_id=msg_id,
         )
         seq = await worker.enqueue(item)
         return item.out_q, seq, worker

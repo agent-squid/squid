@@ -20,6 +20,7 @@ GET /health
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -40,14 +41,14 @@ from .history import list_history
 from .topic_queue import TopicDispatcher
 from .context_sync import sync_now, maybe_sync
 from .stats_db import (
-    init_db, save_stats, get_aggregated_stats, save_quota_delta, get_stats_by_topic, get_stats_by_agent,
+    init_db, get_aggregated_stats, save_quota_delta, get_stats_by_topic, get_stats_by_agent,
     get_topics_summary,
     get_agent, upsert_agent, delete_agent, list_agents, get_default_agent,
     get_topic, upsert_topic, list_topics,
     insert_user_message, insert_assistant_message, update_assistant_message,
     update_message_quota_snapshot,
     get_context_history, get_messages_by_ids, mark_orphaned_pending, get_message,
-    get_topic_session, set_topic_session, clear_topic_session,
+    get_topic_session, clear_topic_session,
     delete_topic, hide_topic, get_topic_agents, get_topic_agent_history,
     clear_agent_sessions, get_agent_sessions,
 )
@@ -172,6 +173,40 @@ class QuotaDeltaRequest(BaseModel):
     after: float
 
 
+def _decode_jwt_payload(token: str) -> Optional[dict]:
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        padded = parts[1] + "=" * (-len(parts[1]) % 4)
+        payload = base64.urlsafe_b64decode(padded.encode("ascii"))
+        data = json.loads(payload)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _codex_bearer_header(token: str) -> Optional[str]:
+    token = token.strip()
+    if token.lower().startswith("bearer "):
+        return token
+
+    payload = _decode_jwt_payload(token)
+    if not payload:
+        return None
+
+    aud = payload.get("aud")
+    audiences = aud if isinstance(aud, list) else [aud]
+    scopes = payload.get("scp") or []
+    if (
+        "https://api.openai.com/v1" in audiences
+        or "model.request" in scopes
+        or "https://api.openai.com/auth" in payload
+    ):
+        return f"Bearer {token}"
+    return None
+
+
 class CmdRequest(BaseModel):
     command: Literal["stop", "stopall", "deq", "list", "restart", "clear", "compact", "stop_msg", "journal"]
     topic: str = "default"
@@ -235,12 +270,7 @@ async def _drain_to_completion(
                     break
                 if "_stats" in chunk and not session_id:
                     stats = dict(chunk["_stats"])
-                    session_id = stats.pop("session_id", None)
-                    if session_id:
-                        save_stats(session_id, stats, topic=topic, agent=agent,
-                                   backend=backend, model=model, cwd=cwd, lookback=lookback)
-                        if agent and not adhoc:
-                            set_topic_session(topic, agent, session_id, cwd or SQUID_HOME)
+                    session_id = stats.get("session_id")
             else:
                 raw += chunk
     except Exception:
@@ -249,7 +279,7 @@ async def _drain_to_completion(
     content = raw or status_raw or ""
     context_json = json.dumps(tool_events) if tool_events else None
     try:
-        update_assistant_message(msg_id, content, session_id, "done" if content else "error", context=context_json)
+        update_assistant_message(msg_id, content, session_id, "done" if content else "error", context=context_json, only_if_pending=True)
         log.info("drain complete msg_id=%s len=%d tools=%d sid=%s", msg_id, len(content), len(tool_events), session_id)
     except Exception:
         log.exception("drain save failed msg_id=%s", msg_id)
@@ -280,7 +310,7 @@ async def stream_response(
         backend=backend, model=model, agent=agent, cwd=effective_cwd,
         response_timeout=response_timeout,
         resume_session_id=resume_session_id,
-        adhoc=adhoc, msg_id=asst_msg_id,
+        adhoc=adhoc, lookback=lookback, msg_id=asst_msg_id,
     )
 
     raw = ""
@@ -308,25 +338,17 @@ async def stream_response(
                 err_text = chunk["_error"]
                 if raw:
                     context_json = json.dumps(tool_events) if tool_events else None
-                    update_assistant_message(asst_msg_id, raw, session_id, "done", context=context_json)
+                    update_assistant_message(asst_msg_id, raw, session_id, "done", context=context_json, only_if_pending=True)
                     yield sse_event("done")
                 else:
                     yield sse_event("error", err_text)
-                    update_assistant_message(asst_msg_id, err_text, session_id, "error")
+                    update_assistant_message(asst_msg_id, err_text, session_id, "error", only_if_pending=True)
                 _completed = True
                 return
 
             if isinstance(chunk, dict) and "_stats" in chunk:
-                stats = chunk["_stats"]
-                session_id = stats.pop("session_id", None)
-                stats["adhoc"] = adhoc
-                stats["lookback"] = lookback
-                if session_id:
-                    save_stats(session_id, stats, topic=topic, agent=agent, backend=backend, model=model, cwd=effective_cwd, lookback=lookback)
-                    stats["session_id"] = session_id
-                    stats["cwd"] = effective_cwd
-                    if agent and not adhoc:
-                        set_topic_session(topic, agent, session_id, effective_cwd)
+                stats = dict(chunk["_stats"])
+                session_id = stats.get("session_id")
                 yield sse_event("stats", json.dumps(stats))
 
             elif isinstance(chunk, dict) and "_tool" in chunk:
@@ -353,7 +375,7 @@ async def stream_response(
             raw = status_raw
             yield sse_chunk(raw)
         context_json = json.dumps(tool_events) if tool_events else None
-        update_assistant_message(asst_msg_id, raw, session_id, "done", context=context_json)
+        update_assistant_message(asst_msg_id, raw, session_id, "done", context=context_json, only_if_pending=True)
         yield sse_event("done")
         _completed = True
 
@@ -368,7 +390,7 @@ async def stream_response(
     finally:
         if not _completed:
             try:
-                update_assistant_message(asst_msg_id, raw or status_raw or "", session_id, "pending")
+                update_assistant_message(asst_msg_id, raw or status_raw or "", session_id, "pending", only_if_pending=True)
             except Exception:
                 pass
             asyncio.create_task(
@@ -718,9 +740,11 @@ async def quota_codex():
     token = creds.get_codex_token()
     if not token:
         return JSONResponse({"error": "credentials not configured"}, status_code=400)
+    authorization = _codex_bearer_header(token)
+    if not authorization:
+        return JSONResponse({"error": "Codex bearer token required"}, status_code=400)
     try:
         from curl_cffi.requests import AsyncSession
-        cookie_header = f"__Secure-next-auth.session-token={token}"
         common_headers = {
             "Accept": "application/json",
             "Origin": "https://chatgpt.com",
@@ -728,23 +752,9 @@ async def quota_codex():
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         }
         async with AsyncSession() as session:
-            # Exchange session cookie for a short-lived access token
-            auth_r = await session.get(
-                "https://chatgpt.com/api/auth/session",
-                headers={**common_headers, "Cookie": cookie_header},
-                impersonate="chrome",
-            )
-            if auth_r.status_code != 200:
-                return JSONResponse({"error": f"auth/session returned {auth_r.status_code}"}, status_code=502)
-            auth_data = auth_r.json()
-            access_token = auth_data.get("accessToken")
-            if not access_token:
-                return JSONResponse({"error": "no accessToken in session response", "detail": auth_data}, status_code=502)
-
-            # Fetch usage with the Bearer token
             r = await session.get(
                 "https://chatgpt.com/backend-api/wham/usage",
-                headers={**common_headers, "Authorization": f"Bearer {access_token}"},
+                headers={**common_headers, "Authorization": authorization},
                 impersonate="chrome",
             )
         if r.status_code != 200:

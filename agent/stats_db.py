@@ -83,6 +83,15 @@ _TABLES = [
         created_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         PRIMARY KEY (topic, agent)
     )""",
+    """CREATE TABLE IF NOT EXISTS run_events (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        msg_id     INTEGER NOT NULL,
+        seq        INTEGER NOT NULL,
+        event_type TEXT NOT NULL,
+        payload    TEXT,
+        created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        UNIQUE(msg_id, seq)
+    )""",
 ]
 
 _MIGRATIONS = [
@@ -413,12 +422,20 @@ def insert_assistant_message(
 def update_assistant_message(
     msg_id: int, content: str, session_id: Optional[str], status: str = "done",
     context: Optional[str] = None,
+    only_if_pending: bool = False,
 ) -> None:
     with _connect() as conn:
-        conn.execute(
-            "UPDATE chat_messages SET content=?, session_id=?, status=?, context=? WHERE id=?",
-            (content, session_id, status, context, msg_id),
-        )
+        if only_if_pending:
+            conn.execute(
+                "UPDATE chat_messages SET content=?, session_id=?, status=?, context=?"
+                " WHERE id=? AND status='pending'",
+                (content, session_id, status, context, msg_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE chat_messages SET content=?, session_id=?, status=?, context=? WHERE id=?",
+                (content, session_id, status, context, msg_id),
+            )
 
 
 def update_message_quota_snapshot(msg_id: int, before: float, after: float) -> None:
@@ -775,3 +792,22 @@ def get_stats_by_topic() -> list:
         return [dict(r) for r in rows]
     except sqlite3.OperationalError:
         return []
+
+
+# ── run events ─────────────────────────────────────────────────────────────────
+
+def insert_run_event(msg_id: int, seq: int, event_type: str, payload: Optional[str]) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO run_events (msg_id, seq, event_type, payload) VALUES (?, ?, ?, ?)",
+            (msg_id, seq, event_type, payload),
+        )
+
+
+def get_run_events(msg_id: int, after_seq: int = -1) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT seq, event_type, payload FROM run_events WHERE msg_id=? AND seq>? ORDER BY seq",
+            (msg_id, after_seq),
+        ).fetchall()
+    return [dict(r) for r in rows]
