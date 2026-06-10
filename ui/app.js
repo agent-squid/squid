@@ -1140,7 +1140,7 @@ async function sendMessage(text) {
             // Actual response content — accumulate and show in thinking preview
             if (!firstDataReceived) revealResponseBubble();
             if (dataLineCount > 1) raw += '\n';
-            else if (raw.length && data.length && !/\s$/.test(raw) && !/^\s/.test(data)) raw += '\n';
+            else if (raw.length && data.length && /[.!?]$/.test(raw) && /^[A-Z]/.test(data)) raw += ' ';
             raw += data;
             updateThinkingPreview();
           }
