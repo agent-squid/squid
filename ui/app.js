@@ -1012,7 +1012,9 @@ async function sendMessage(text) {
       // Skip bookmarks from the current session — --resume already has that context
       const sameSession = item.session_id && _currentSid && item.session_id === _currentSid;
       if (sameSession && !adhoc) return false;
-      // Skip already-injected items
+      // Fresh adhoc turn (no lookback) — no accumulated context, always inject
+      if (adhoc && lookback === 0) return true;
+      // Skip already-injected items (only meaningful when model has prior context via !N lookback)
       if ((_injected[_taKey] || []).includes(item.id)) return false;
       return true;
     })
@@ -1175,13 +1177,16 @@ async function sendMessage(text) {
               userCtxSpan.textContent = '  · ctx:' + finalCtx;
               userCtxSpan.dataset.pinnedIds = JSON.stringify(_pinnedIds);
             }
-            // Record injected pinned IDs so they're not re-injected into this session
+            // Record injected pinned IDs so they're not re-injected when model has prior context (!N lookback)
+            // Skip recording for lookback=0 adhoc turns — each is a fresh context, pins always re-inject
             if (_pinnedIds.length) {
-              const _finalAgent = resolvedAgent || agent || null;
-              const _taKey = `${topic}@${_finalAgent || '_'}`;
-              const _inj = getInjectedInto();
-              _inj[_taKey] = [...new Set([...(_inj[_taKey] || []), ..._pinnedIds])];
-              setInjectedInto(_inj);
+              if (!(adhoc && lookback === 0)) {
+                const _finalAgent = resolvedAgent || agent || null;
+                const _taKey = `${topic}@${_finalAgent || '_'}`;
+                const _inj = getInjectedInto();
+                _inj[_taKey] = [...new Set([...(_inj[_taKey] || []), ..._pinnedIds])];
+                setInjectedInto(_inj);
+              }
               if (pinPanel.classList.contains('open')) renderPinPanel();
             }
             eventName = null;
@@ -2948,8 +2953,10 @@ function _pinStatus(item) {
   }
 
   // Already injected into this topic@agent via a previous adhoc turn
+  // Only meaningful for !N lookback where model retains prior context; !0 is always fresh
+  const chipLookback = parsed.adhoc ? parsed.lookback : (stickyChip?.lookback ?? 0);
   const taKey = `${chipTopic}@${chipAgent || '_'}`;
-  if ((injected[taKey] || []).includes(item.id))
+  if ((injected[taKey] || []).includes(item.id) && !(isAdhoc && chipLookback === 0))
     return { text: 'already added · skip', cls: 'pin-status-done' };
 
   return { text: 'will inject', cls: 'pin-status-inject' };
