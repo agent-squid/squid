@@ -1273,6 +1273,51 @@ async function sendMessage(text) {
   }
 }
 
+// ── tooltip ───────────────────────────────────────────────────────────────────
+const _ttEl = document.getElementById('app-tooltip');
+let _ttAnchor = null;
+
+function _ttPosition(anchor) {
+  const r = anchor.getBoundingClientRect();
+  const tw = _ttEl.offsetWidth, th = _ttEl.offsetHeight;
+  const GAP = 8, MARGIN = 10;
+  const top = r.top - th - GAP >= MARGIN ? r.top - th - GAP : r.bottom + GAP;
+  const left = Math.max(MARGIN, Math.min(r.left + r.width / 2 - tw / 2, window.innerWidth - tw - MARGIN));
+  _ttEl.style.top = top + 'px';
+  _ttEl.style.left = left + 'px';
+}
+
+function showTooltip(anchor, text) {
+  _ttAnchor = anchor;
+  _ttEl.textContent = text;
+  _ttEl.classList.add('show');
+  _ttPosition(anchor);
+}
+
+function hideTooltip() {
+  _ttEl.classList.remove('show');
+  _ttAnchor = null;
+}
+
+document.addEventListener('mouseover', e => {
+  const el = e.target.closest('[data-tooltip]');
+  if (el) showTooltip(el, el.dataset.tooltip);
+});
+document.addEventListener('mouseout', e => {
+  const el = e.target.closest('[data-tooltip]');
+  if (el && !el.contains(e.relatedTarget)) hideTooltip();
+});
+document.addEventListener('touchstart', e => {
+  const el = e.target.closest('[data-tooltip]');
+  if (el) {
+    if (_ttAnchor === el) { hideTooltip(); return; }
+    e.preventDefault();
+    showTooltip(el, el.dataset.tooltip);
+  } else if (_ttAnchor) {
+    hideTooltip();
+  }
+}, { passive: false });
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 function toolLabel(tool) {
@@ -2747,12 +2792,20 @@ const memoryModal = document.getElementById('memory-modal');
 const memoryEditor = document.getElementById('memory-editor');
 const memoryTitle = document.getElementById('memory-modal-title');
 const memoryPath = document.getElementById('memory-path');
+const memoryTokenCount = document.getElementById('memory-token-count');
+const memoryTokenHelp = document.getElementById('memory-token-help');
 const memorySaveBtn = document.getElementById('memory-save');
 const memoryCloseBtn = document.getElementById('memory-modal-close');
 const _memoryCache = {};
 const _sessionLookupCache = {};
 const _memorySelectionOverrides = {};
 let _editingMemoryTopic = null;
+
+function updateMemoryTokenCount() {
+  const n = Math.ceil((memoryEditor.value || '').length / 4);
+  memoryTokenCount.textContent = n > 0 ? ` · ~${fmtNum(n)} tokens` : '';
+}
+memoryEditor.addEventListener('input', updateMemoryTokenCount);
 
 function escapeHtml(s) {
   return String(s || '').replace(/[&<>"']/g, ch => ({
@@ -3001,15 +3054,18 @@ async function openMemoryEditor(topic) {
   memoryTitle.textContent = `Topic memory · #${topic}`;
   memoryEditor.value = 'Loading...';
   memoryPath.textContent = `context/topics/${topic}/memory.md`;
+  memoryTokenCount.textContent = '';
   memoryModal.classList.add('open');
   try {
     const data = await fetch(`/topics/${encodeURIComponent(topic)}/memory`).then(r => r.json());
     _memoryCache[topic] = { ...data, loading: false };
     memoryEditor.value = data.content || '';
     memoryPath.textContent = data.path || `context/topics/${topic}/memory.md`;
+    updateMemoryTokenCount();
     memoryEditor.focus();
   } catch {
     memoryEditor.value = '';
+    updateMemoryTokenCount();
   }
 }
 

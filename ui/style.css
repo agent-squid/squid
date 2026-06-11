@@ -881,6 +881,13 @@ body {
   padding: 0.85rem;
   font: 0.9rem/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
+#memory-path-group {
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  min-width: 0;
+  flex: 1 1 0;
+}
 #memory-path {
   color: #555;
   font-family: ui-monospace, monospace;
@@ -888,7 +895,45 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
+  flex: 1;
 }
+#memory-token-count {
+  color: #555;
+  font-family: ui-monospace, monospace;
+  font-size: 0.75em;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+#memory-token-help {
+  display: inline-flex;
+  align-items: center;
+  color: #444;
+  margin-left: 0.3rem;
+  cursor: default;
+  flex-shrink: 0;
+}
+#memory-token-help:hover { color: #888; }
+#app-tooltip {
+  position: fixed;
+  z-index: 1000;
+  max-width: 260px;
+  background: #1a1a24;
+  border: 1px solid #2e2e3e;
+  border-radius: 6px;
+  padding: 0.45rem 0.7rem;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  color: #888;
+  font-size: 0.82rem;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  line-height: 1.45;
+  white-space: normal;
+  word-break: break-word;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+#app-tooltip.show { opacity: 1; }
 #memory-save {
   padding: 0.35rem 0.8rem;
   border-radius: 6px;
