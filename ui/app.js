@@ -3020,7 +3020,7 @@ function renderPinPanel() {
   }
 
   if (!items.length) {
-    html += '<div style="padding:0.5rem 0.8rem;color:#484858;font-size:0.78em">No bookmarks yet.<br>Click 🔖 on any response to add it.</div>';
+    html += '<div style="padding:0.5rem 0.8rem;color:#484858;font-size:0.78em">No bookmarks yet.<br>Click <svg width="9" height="11" viewBox="0 0 12 14" fill="currentColor" aria-hidden="true" style="vertical-align:-0.1em"><path d="M2 0h8a1 1 0 0 1 1 1v12.8l-5-2.9-5 2.9V1a1 1 0 0 1 1-1z"/></svg> on any response to add it.</div>';
   }
 
   listEl.innerHTML = html;
