@@ -211,6 +211,50 @@ test('fresh session send includes topic memory when memory exists', async ({ pag
   expect(capturedBody?.include_topic_memory).toBe(true);
 });
 
+test('/clear memory injects once and is unselected immediately after send', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/topics/squid/memory', r => r.fulfill({
+    json: { topic: 'squid', exists: true, content: 'Prefer transparent context.', path: 'context/topics/squid/memory.md' },
+  }));
+  await page.route('**/topics/squid/session?agent=claude', r => r.fulfill({
+    json: { session_id: null, cwd: null },
+  }));
+  await page.route('**/cmd', r => r.fulfill({ json: { ok: true, agent: 'claude' } }));
+
+  let capturedBody = null;
+  await page.route('**/chat', async route => {
+    capturedBody = route.request().postDataJSON();
+    await route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(META, { data: 'session response' }, DONE),
+    });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '#squid@claude /clear');
+  await page.keyboard.press('Enter');
+
+  await page.click('#pin-btn');
+  await expect(page.locator('.memory-item-status')).toContainText('will inject');
+  await page.click('#pin-btn');
+
+  await page.fill('#input', '#squid@claude hello');
+  await page.keyboard.press('Enter');
+
+  await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toBeVisible();
+  expect(capturedBody?.include_topic_memory).toBe(true);
+
+  await page.click('#pin-btn');
+  await expect(page.locator('.memory-item-status')).toContainText('in session');
+  await expect(page.locator('[data-memory-toggle]')).toHaveText('Off');
+
+  await page.click('#pin-btn');
+  await page.fill('#input', '#squid@claude next');
+  await page.click('#pin-btn');
+  await expect(page.locator('.memory-item-status')).toContainText('in session');
+  await expect(page.locator('[data-memory-toggle]')).toHaveText('Off');
+});
+
 test('topic memory editor saves and refreshes preview', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
   await page.route('**/topics/squid/session?agent=claude', r => r.fulfill({

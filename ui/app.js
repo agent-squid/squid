@@ -312,11 +312,13 @@ document.getElementById('help-close').addEventListener('click', closeHelp);
 
 // ── per-topic session tracking ────────────────────────────────────────────────
 const _sessionIds = {}; // `${topic}@${agent|_}` → most recent session_id
+const _memoryInjectedInto = {}; // `${topic}@${agent|_}` → topic memory already sent to the current session
 let _agentsCache = null;
 let _agentsCachePromise = null;
 
 function clearCachedSessionId(topic, agent) {
   delete _sessionIds[`${topic}@${agent || '_'}`];
+  delete _memoryInjectedInto[`${topic}@${agent || '_'}`];
   delete _sessionLookupCache[`${topic}@${agent || '_'}`];
   if (agent) delete _sessionLookupCache[`${topic}@${agent}`];
 }
@@ -353,6 +355,7 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0) {
   topicChipEl.classList.remove('needs-agent');
   input.placeholder = 'message…';
   updateActiveQuotaGauge();
+  updatePinCount();
 }
 
 function clearTopicChip() {
@@ -1042,6 +1045,13 @@ async function sendMessage(text) {
       throw new Error(err.error || `HTTP 400`);
     }
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+    if (_includeTopicMemory && !adhoc) {
+      const memoryKey = _memoryInjectedKey(topic, _effectiveAgent);
+      _memoryInjectedInto[memoryKey] = true;
+      _memorySelectionOverrides[_memoryOverrideKey(topic, _effectiveAgent, false)] = false;
+      updatePinCount();
+      if (pinPanel.classList.contains('open')) renderPinPanel();
+    }
 
     const reader  = res.body.getReader();
     const decoder = new TextDecoder();
@@ -2847,6 +2857,10 @@ function _memoryOverrideKey(topic, agent, adhoc) {
   return `${topic}@${agent || '_'}:${adhoc ? 'adhoc' : 'session'}`;
 }
 
+function _memoryInjectedKey(topic, agent) {
+  return `${topic}@${agent || '_'}`;
+}
+
 function _getMemoryMeta(topic) {
   if (_memoryCache[topic]) return _memoryCache[topic];
   _memoryCache[topic] = { topic, exists: false, content: '', path: `context/topics/${topic}/memory.md`, loading: true };
@@ -2887,9 +2901,10 @@ function _topicMemoryState() {
   const session = _getSessionMeta(topic, agent);
   const exists = !!(meta.exists && (meta.content || '').trim());
   const key = _memoryOverrideKey(topic, agent, adhoc);
-  const defaultSelected = exists && (adhoc || (!session.loading && !session.session_id));
+  const injected = !adhoc && !!_memoryInjectedInto[_memoryInjectedKey(topic, agent)];
+  const defaultSelected = exists && (adhoc || (!injected && !session.loading && !session.session_id));
   const selected = exists && (_memorySelectionOverrides[key] ?? defaultSelected);
-  return { topic, agent, adhoc, meta, session, exists, selected, key };
+  return { topic, agent, adhoc, meta, session, exists, selected, key, injected };
 }
 
 async function _topicMemoryStateForSend(topic, agent, adhoc) {
@@ -2908,7 +2923,8 @@ async function _topicMemoryStateForSend(topic, agent, adhoc) {
     if (session.session_id) _sessionIds[`${topic}@${agent}`] = session.session_id;
   }
   const key = _memoryOverrideKey(topic, agent, adhoc);
-  const defaultSelected = adhoc || !session.session_id;
+  const injected = !adhoc && !!_memoryInjectedInto[_memoryInjectedKey(topic, agent)];
+  const defaultSelected = adhoc || (!injected && !session.session_id);
   return { selected: _memorySelectionOverrides[key] ?? defaultSelected };
 }
 
@@ -2966,6 +2982,7 @@ function _memoryStatus(state) {
   if (state.meta.loading || state.session.loading) return { text: 'checking', cls: 'pin-status-session' };
   if (!state.exists) return { text: 'no memory', cls: 'pin-status-empty' };
   if (state.selected) return { text: 'will inject', cls: 'pin-status-inject' };
+  if (state.injected) return { text: 'in session · skip', cls: 'pin-status-session' };
   if (!state.adhoc && state.session.session_id) return { text: 'in session · skip', cls: 'pin-status-session' };
   return { text: 'skipped', cls: 'pin-status-done' };
 }
