@@ -20,6 +20,7 @@ function sse(...events) {
 const META  = { event: 'meta',  data: { agent: 'claude', backend: 'claude', msg_id: 1, adhoc: false } };
 const STATS = { event: 'stats', data: { session_id: 'test-sess-abc', input_tokens: 10, output_tokens: 5 } };
 const DONE  = { event: 'done',  data: '' };
+const MEMORY_WITH_SKIP = '---\nsquid:\n  code_roots_skipped: true\n---\nPrefer transparent context.';
 
 async function mockBackend(page, { agent = 'claude', topic = 'squid' } = {}) {
   await page.route('**/health',        r => r.fulfill({ json: { status: 'ok' } }));
@@ -28,6 +29,10 @@ async function mockBackend(page, { agent = 'claude', topic = 'squid' } = {}) {
   await page.route('**/topics',        r => r.fulfill({ json: [
     { name: topic, agent, last_model: null, last_backend: 'claude', queue_depth: 0, active: false, last_prompt: 'hi' }
   ]}));
+  await page.route('**/topics/*/memory', r => r.fulfill({ json: {
+    topic, exists: true, content: '---\nsquid:\n  code_roots_skipped: true\n---\n', path: `context/topics/${topic}/memory.md`,
+    squid: { code_roots: [], code_roots_skipped: true, code_roots_missing: false },
+  }}));
   await page.route('**/topics/**',     r => r.fulfill({ json: [] }));
   await page.route('**/config/agents', r => r.fulfill({ json: [] }));
   await page.route('**/chat/*/status', r => r.fulfill({ json: { status: 'pending', content: '' } }));
@@ -187,7 +192,10 @@ test('adhoc send includes pinned_ids in POST /chat body', async ({ page }) => {
 test('fresh session send includes topic memory when memory exists', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
   await page.route('**/topics/squid/memory', r => r.fulfill({
-    json: { topic: 'squid', exists: true, content: 'Prefer transparent context.', path: 'context/topics/squid/memory.md' },
+    json: {
+      topic: 'squid', exists: true, content: MEMORY_WITH_SKIP, path: 'context/topics/squid/memory.md',
+      squid: { code_roots: [], code_roots_skipped: true, code_roots_missing: false },
+    },
   }));
   await page.route('**/topics/squid/session?agent=claude', r => r.fulfill({
     json: { session_id: null, cwd: null },
@@ -214,7 +222,10 @@ test('fresh session send includes topic memory when memory exists', async ({ pag
 test('/clear memory injects once and is unselected immediately after send', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
   await page.route('**/topics/squid/memory', r => r.fulfill({
-    json: { topic: 'squid', exists: true, content: 'Prefer transparent context.', path: 'context/topics/squid/memory.md' },
+    json: {
+      topic: 'squid', exists: true, content: MEMORY_WITH_SKIP, path: 'context/topics/squid/memory.md',
+      squid: { code_roots: [], code_roots_skipped: true, code_roots_missing: false },
+    },
   }));
   await page.route('**/topics/squid/session?agent=claude', r => r.fulfill({
     json: { session_id: null, cwd: null },
@@ -296,7 +307,10 @@ test('topic memory editor saves and refreshes preview', async ({ page }) => {
 test('active session skips topic memory by default', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
   await page.route('**/topics/squid/memory', r => r.fulfill({
-    json: { topic: 'squid', exists: true, content: 'Prefer transparent context.', path: 'context/topics/squid/memory.md' },
+    json: {
+      topic: 'squid', exists: true, content: MEMORY_WITH_SKIP, path: 'context/topics/squid/memory.md',
+      squid: { code_roots: [], code_roots_skipped: true, code_roots_missing: false },
+    },
   }));
   await page.route('**/topics/squid/session?agent=claude', r => r.fulfill({
     json: { session_id: 'active-session', cwd: '/tmp/squid' },

@@ -26,6 +26,10 @@ async function mockBackend(page) {
   await page.route('**/history**',     r => r.fulfill({ json: { items: [], has_more: false } }));
   await page.route('**/quota',         r => r.fulfill({ json: {} }));
   await page.route('**/topics',        r => r.fulfill({ json: [] }));
+  await page.route('**/topics/*/memory', r => r.fulfill({ json: {
+    topic: 'squid', exists: true, content: '---\nsquid:\n  code_roots_skipped: true\n---\n', path: 'context/topics/squid/memory.md',
+    squid: { code_roots: [], code_roots_skipped: true, code_roots_missing: false },
+  }}));
   await page.route('**/topics/**',     r => r.fulfill({ json: [] }));
   await page.route('**/config/agents', r => r.fulfill({ json: [] }));
   await page.route('**/chat/*/status', r => r.fulfill({ json: { status: 'pending', content: '' } }));
@@ -144,6 +148,35 @@ test.describe('response bubble', () => {
     await expect(block.locator('.diff-hunk')).toContainText('@@ -1 +1 @@');
     await expect(block.locator('.diff-remove')).toContainText('-old');
     await expect(block.locator('.diff-add')).toContainText('+new');
+  });
+
+  test('renders GitDiff changed files before legacy edit tools', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        META,
+        { event: 'tool', data: { name: 'Edit', file: 'ui/app.js', old: 'old', new: 'new' } },
+        { event: 'tool', data: {
+          name: 'GitDiff',
+          file_count: 1,
+          additions: 1,
+          deletions: 1,
+          files: [{ status: 'M', path: 'ui/app.js' }],
+          diff: 'diff --git a/ui/app.js b/ui/app.js\n@@ -1 +1 @@\n-old\n+new',
+        } },
+        { data: 'Done' },
+        DONE,
+      ),
+    }));
+
+    await sendMsg(page);
+    const blocks = page.locator('.tool-block-history');
+    await expect(blocks).toHaveCount(1);
+    const block = blocks.first();
+    await expect(block.locator('.tool-toggle')).toContainText('Changed files: 1 file, +1 -1');
+    await block.locator('.tool-toggle').click();
+    await expect(block.locator('.diff-file')).toContainText('M ui/app.js');
+    await expect(block.locator('.diff-hunk')).toContainText('@@ -1 +1 @@');
   });
 
   test('thinking bubble collapses to toggle when status events present', async ({ page }) => {

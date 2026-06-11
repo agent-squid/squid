@@ -41,7 +41,14 @@ from .history import list_history
 from .topic_queue import TopicDispatcher
 from .context_sync import sync_now, maybe_sync
 from .topics import normalize_topic_slug
-from .memory import read_topic_memory, write_topic_memory, topic_memory_prompt_block
+from .memory import (
+    code_roots_prompt_block,
+    read_topic_memory,
+    topic_memory_prompt_block,
+    topic_memory_squid_config,
+    write_topic_memory_squid_code_roots,
+    write_topic_memory,
+)
 from .stats_db import (
     init_db, get_aggregated_stats, save_quota_delta, get_stats_by_topic, get_stats_by_agent,
     get_topics_summary,
@@ -155,6 +162,11 @@ class ChatRequest(BaseModel):
 
 class TopicMemoryRequest(BaseModel):
     content: str = ""
+
+
+class TopicMemoryCodeRootsRequest(BaseModel):
+    code_roots: Optional[list[str]] = None
+    code_roots_skipped: bool = False
 
 
 class AgentRequest(BaseModel):
@@ -315,6 +327,7 @@ async def stream_response(
     resume_session_id: Optional[str] = None,
     adhoc: bool = False,
     lookback: int = 0,
+    code_roots: Optional[list[str]] = None,
 ) -> AsyncGenerator[str, None]:
     yield sse_event("meta", json.dumps({"agent": agent, "backend": backend, "msg_id": asst_msg_id, "adhoc": adhoc}))
 
@@ -325,6 +338,7 @@ async def stream_response(
         response_timeout=response_timeout,
         resume_session_id=resume_session_id,
         adhoc=adhoc, lookback=lookback, msg_id=asst_msg_id,
+        code_roots=code_roots,
     )
 
     raw = ""
@@ -480,6 +494,13 @@ async def chat(req: ChatRequest):
     # Inject pinned messages — works for both adhoc and session turns
     effective_message = req.message
     prefix_blocks: list[str] = []
+    memory_config = topic_memory_squid_config(topic)
+    code_roots = memory_config.get("code_roots") or []
+    if code_roots:
+        code_roots_block = code_roots_prompt_block(code_roots)
+        if code_roots_block:
+            prefix_blocks.append(code_roots_block)
+    tracking_roots: list[str] = code_roots
     if req.include_topic_memory:
         memory_block = topic_memory_prompt_block(topic)
         if memory_block:
@@ -523,6 +544,7 @@ async def chat(req: ChatRequest):
             resume_session_id=resume_session_id,
             adhoc=req.adhoc,
             lookback=lookback,
+            code_roots=tracking_roots,
         ),
         media_type="text/event-stream",
         headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
@@ -658,6 +680,18 @@ async def put_topic_memory_route(topic: str, req: TopicMemoryRequest):
     if isinstance(topic, JSONResponse):
         return topic
     return JSONResponse(write_topic_memory(topic, req.content))
+
+
+@app.put("/topics/{topic}/memory/squid/code-roots")
+async def put_topic_memory_code_roots_route(topic: str, req: TopicMemoryCodeRootsRequest):
+    topic = _normalize_topic_response(topic)
+    if isinstance(topic, JSONResponse):
+        return topic
+    return JSONResponse(write_topic_memory_squid_code_roots(
+        topic,
+        code_roots=req.code_roots,
+        code_roots_skipped=req.code_roots_skipped,
+    ))
 
 
 @app.post("/topics/{topic}/hide")

@@ -20,6 +20,7 @@ class QueueItem:
     backend: str
     model: Optional[str]
     cwd: Optional[str] = None
+    code_roots: Optional[list[str]] = None
     timeout: Optional[int] = None
     resume_session_id: Optional[str] = None
     adhoc: bool = False
@@ -128,6 +129,7 @@ class TopicWorker:
         from .runners import run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError, CLIError
         from .config import SQUID_HOME
         from .stats_db import insert_run_event, update_assistant_message, save_stats, set_topic_session
+        from .git_changes import prepare_trackers
 
         runner = {"claude": run_claude, "cursor": run_cursor, "antigravity": run_antigravity,
                   "codex": run_codex, "copilot": run_copilot}.get(item.backend)
@@ -136,7 +138,18 @@ class TopicWorker:
             await item.out_q.put(None)
             return
 
-        effective_cwd = item.cwd or SQUID_HOME
+        source_cwd = item.cwd or SQUID_HOME
+        tracking_roots = item.code_roots or []
+        git_trackers = await asyncio.to_thread(
+            prepare_trackers,
+            tracking_roots,
+            topic=item.topic,
+            agent=item.agent,
+            adhoc=item.adhoc,
+            msg_id=item.msg_id,
+        )
+        effective_cwd = source_cwd
+        effective_prompt = item.prompt
         kwargs: dict = dict(
             history=item.context_history, model=item.model,
             cwd=effective_cwd,
@@ -152,6 +165,28 @@ class TopicWorker:
         status_raw = ""
         tool_events: list[dict] = []
         session_id: Optional[str] = None
+
+        async def _emit_tool(tool: dict):
+            nonlocal run_seq
+            tool_events.append(tool)
+            insert_run_event(item.msg_id, run_seq, "tool", json.dumps(tool))
+            await item.out_q.put({"_tool": tool})
+            run_seq += 1
+
+        async def _emit_git_diff():
+            if not git_trackers:
+                return
+            for tracker in git_trackers:
+                try:
+                    try:
+                        tool = await asyncio.to_thread(tracker.build_event)
+                    finally:
+                        await asyncio.to_thread(tracker.cleanup)
+                except Exception:
+                    log.exception("Failed to build git diff for msg_id=%s", item.msg_id)
+                    continue
+                if tool:
+                    await _emit_tool(tool)
 
         async def _stream(prompt, **kw):
             nonlocal run_seq, session_id, raw, status_raw
@@ -174,9 +209,8 @@ class TopicWorker:
                         insert_run_event(item.msg_id, run_seq, "stats", json.dumps(enriched))
                         await item.out_q.put({"_stats": enriched})
                     elif "_tool" in chunk:
-                        tool_events.append(chunk["_tool"])
-                        insert_run_event(item.msg_id, run_seq, "tool", json.dumps(chunk["_tool"]))
-                        await item.out_q.put(chunk)
+                        await _emit_tool(chunk["_tool"])
+                        continue
                     elif "_status" in chunk:
                         status_raw += chunk["_status"]
                         insert_run_event(item.msg_id, run_seq, "status", chunk["_status"])
@@ -192,7 +226,7 @@ class TopicWorker:
 
         try:
             try:
-                await _stream(item.prompt, **kwargs)
+                await _stream(effective_prompt, **kwargs)
             except CLIError as exc:
                 if item.resume_session_id and "No conversation found" in str(exc):
                     status = (
@@ -206,10 +240,11 @@ class TopicWorker:
                     run_seq += 1
                     await item.out_q.put({"_status": status})
                     kwargs.pop("resume_session_id", None)
-                    await _stream(item.prompt, **kwargs)
+                    await _stream(effective_prompt, **kwargs)
                 else:
                     raise
 
+            await _emit_git_diff()
             content = raw or status_raw or ""
             context_json = json.dumps(tool_events) if tool_events else None
             update_assistant_message(item.msg_id, content, session_id,
@@ -221,6 +256,10 @@ class TopicWorker:
             if not isinstance(exc, CLIError):
                 log.exception("Unexpected error processing msg_id=%s", item.msg_id)
             content = raw or err_text
+            try:
+                await _emit_git_diff()
+            except Exception:
+                log.exception("Failed to emit git diff for msg_id=%s", item.msg_id)
             context_json = json.dumps(tool_events) if tool_events else None
             try:
                 update_assistant_message(item.msg_id, content, session_id,
@@ -260,6 +299,7 @@ class TopicDispatcher:
         adhoc: bool = False,
         lookback: int = 0,
         msg_id: Optional[int] = None,
+        code_roots: Optional[list[str]] = None,
     ) -> tuple[asyncio.Queue, int, TopicWorker]:
         if adhoc:
             # Each adhoc message gets its own ephemeral worker — never queued, always parallel.
@@ -271,7 +311,7 @@ class TopicDispatcher:
         item = QueueItem(
             seq=0, topic=topic, agent=agent,
             prompt=prompt, context_history=context_history,
-            backend=backend, model=model, cwd=cwd, timeout=response_timeout,
+            backend=backend, model=model, cwd=cwd, code_roots=code_roots, timeout=response_timeout,
             resume_session_id=resume_session_id,
             adhoc=adhoc, lookback=lookback, msg_id=msg_id,
         )

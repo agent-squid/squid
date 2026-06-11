@@ -568,7 +568,21 @@ body {
 .diff-remove { background: rgba(180, 40, 40, 0.18); color: #d07070; }
 .diff-add    { background: rgba(40, 150, 70, 0.13); color: #70b870; }
 .diff-hunk   { background: rgba(80, 80, 150, 0.16); color: #8080c8; }
+.diff-file   { background: rgba(255, 255, 255, 0.035); color: #aaaabb; }
 .diff-sep    { height: 1px; background: #222; margin: 2px 0; }
+.gitdiff-file-row { border-top: 1px solid #1a1a22; }
+.gitdiff-file-row:first-child { border-top: none; }
+.gitdiff-file-toggle {
+  display: block; width: 100%; background: none; border: none;
+  cursor: pointer; color: #aaaabb; font: inherit; padding: 0.2em 0.6em; text-align: left;
+}
+.gitdiff-file-toggle::before { content: '▸ '; }
+.gitdiff-file-expanded .gitdiff-file-toggle::before { content: '▾ '; }
+.gitdiff-file-toggle:hover { background: #1a1a25; color: #c0c0dd; }
+.gitdiff-file-toggle--no-diff { cursor: default; }
+.gitdiff-file-toggle--no-diff::before { content: '  '; }
+.gitdiff-file-body { display: none; }
+.gitdiff-file-expanded .gitdiff-file-body { display: block; }
 .tool-block-history { align-self: flex-start; max-width: 90%; width: 90%; }
 .boot-banner {
   align-self: center;
@@ -863,6 +877,18 @@ body {
 #memory-modal-footer {
   border-top: 1px solid #1e1e28;
   border-bottom: 0;
+}
+#memory-help {
+  border-bottom: 1px solid #1e1e28;
+  padding: 0.45rem 0.75rem;
+  color: #777;
+  background: #101018;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+#memory-help code {
+  color: #aaaabb;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 #memory-modal-close {
   background: transparent;
@@ -1579,7 +1605,7 @@ button {
   padding: 0.25rem 0.75rem;
   border-radius: 5px;
 }
-#acp-cancel {
+#acp-cancel, #crp-cancel, #crp-skip {
   background: #2a2a35;
   color: #888;
 }

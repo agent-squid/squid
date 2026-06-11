@@ -822,6 +822,13 @@ input.addEventListener('keydown', (e) => {
 
 async function sendMessage(text) {
   const { topic, agent, adhoc, lookback, message } = parseInput(text);
+  const codeRootDecision = await ensureCodeRootsDecision(topic);
+  if (!codeRootDecision) {
+    input.value = text;
+    resizeComposer();
+    input.focus();
+    return false;
+  }
   setTopicChip(topic, agent, adhoc, lookback);
   const sendTime = new Date().toISOString();
 
@@ -1173,7 +1180,7 @@ async function sendMessage(text) {
               contentDiv.innerHTML = marked.parse(raw);
               messages.appendChild(bubble);
               if (statsEl) messages.appendChild(statsEl); // stats goes between bubble and diffs, not after
-              const diffTools = liveToolEvents.filter(t => t.name === 'Edit' || t.name === 'Write' || t.name === 'MultiEdit' || t.name === 'Diff');
+              const diffTools = changeTools(liveToolEvents);
               for (const tool of diffTools) {
                 const block = makeToolBlock(tool);
                 block.classList.add('tool-block-history');
@@ -1337,6 +1344,10 @@ document.addEventListener('touchstart', e => {
 
 function toolLabel(tool) {
   const name = tool.name || '';
+  if (name === 'GitDiff') {
+    const n = tool.file_count ?? (tool.files || []).length;
+    return `Changed files: ${n} file${n !== 1 ? 's' : ''}`;
+  }
   if (name === 'Read' || name === 'Edit' || name === 'Write' || name === 'MultiEdit' || name === 'Diff')
     return `${name}: ${tool.file || ''}`;
   if (name === 'Bash') return `Bash: ${truncate(tool.command || '', 70)}`;
@@ -1344,6 +1355,12 @@ function toolLabel(tool) {
   if (name === 'WebFetch' || name === 'WebSearch') return `${name}: ${truncate(tool.query || '', 70)}`;
   if (name === 'TodoWrite') { const n = (tool.todos || []).length; return `TodoWrite: ${n} item${n !== 1 ? 's' : ''}`; }
   return name + (tool.key ? ': ' + truncate(tool.value || '', 50) : '');
+}
+
+function changeTools(tools) {
+  const gitTools = tools.filter(t => t.name === 'GitDiff');
+  if (gitTools.length) return gitTools;
+  return tools.filter(t => t.name === 'Edit' || t.name === 'Write' || t.name === 'MultiEdit' || t.name === 'Diff');
 }
 
 
@@ -1360,6 +1377,34 @@ function renderDiffLines(container, oldStr, newStr) {
     el.textContent = '+ ' + line;
     container.appendChild(el);
   }
+}
+
+function splitUnifiedDiff(diff) {
+  const map = new Map();
+  if (!diff) return map;
+  const lines = diff.split('\n');
+  let path = null, chunk = [];
+  for (const line of lines) {
+    if (line.startsWith('diff --git ')) {
+      if (path !== null) map.set(path, chunk.join('\n'));
+      const m = line.match(/^diff --git a\/.+ b\/(.+)$/);
+      path = m ? m[1] : line;
+      chunk = [line];
+    } else if (path !== null) {
+      chunk.push(line);
+    }
+  }
+  if (path !== null) map.set(path, chunk.join('\n'));
+  return map;
+}
+
+function _countDiffStats(chunk) {
+  let add = 0, del = 0;
+  for (const line of chunk.split('\n')) {
+    if (line.startsWith('+') && !line.startsWith('+++')) add++;
+    else if (line.startsWith('-') && !line.startsWith('---')) del++;
+  }
+  return { add, del };
 }
 
 function renderUnifiedDiffLines(container, diff) {
@@ -1384,7 +1429,7 @@ function makeToolBlock(tool) {
   const block = document.createElement('div');
   block.className = 'tool-block';
 
-  const hasDiff = name === 'Edit' || name === 'MultiEdit' || name === 'Write' || name === 'Diff';
+  const hasDiff = name === 'Edit' || name === 'MultiEdit' || name === 'Write' || name === 'Diff' || name === 'GitDiff';
   if (!hasDiff) {
     const label = document.createElement('span');
     label.className = 'tool-label';
@@ -1407,7 +1452,7 @@ function makeToolBlock(tool) {
   body.className = 'tool-body';
   const scroll = document.createElement('div');
   scroll.className = 'diff-scroll';
-  body.appendChild(scroll);
+  if (name !== 'GitDiff') body.appendChild(scroll);
 
   if (name === 'Edit') {
     toggle.textContent = 'Edit: ' + (tool.file || '');
@@ -1429,6 +1474,54 @@ function makeToolBlock(tool) {
   } else if (name === 'Diff') {
     toggle.textContent = 'Diff: ' + (tool.file || 'working tree');
     renderUnifiedDiffLines(scroll, tool.diff || '');
+  } else if (name === 'GitDiff') {
+    const count = tool.file_count ?? (tool.files || []).length;
+    const additions = tool.additions ?? 0;
+    const deletions = tool.deletions ?? 0;
+    toggle.textContent = `Changed files: ${count} file${count !== 1 ? 's' : ''}, +${additions} -${deletions}`;
+
+    const fileDiffs = splitUnifiedDiff(tool.diff || '');
+    for (const file of (tool.files || [])) {
+      const status = file.status || '?';
+      const displayPath = file.old_path ? `${file.old_path} → ${file.path}` : file.path;
+      const chunk = fileDiffs.get(file.path) || fileDiffs.get(file.old_path) || '';
+
+      const row = document.createElement('div');
+      row.className = 'gitdiff-file-row';
+
+      const fileToggle = document.createElement('button');
+      fileToggle.className = 'gitdiff-file-toggle';
+
+      if (chunk) {
+        const { add, del } = _countDiffStats(chunk);
+        fileToggle.textContent = `${status} ${displayPath}  +${add} -${del}`;
+        const fileBody = document.createElement('div');
+        fileBody.className = 'gitdiff-file-body';
+        const fileScroll = document.createElement('div');
+        fileScroll.className = 'diff-scroll';
+        renderUnifiedDiffLines(fileScroll, chunk);
+        fileBody.appendChild(fileScroll);
+        row.appendChild(fileToggle);
+        row.appendChild(fileBody);
+        fileToggle.addEventListener('click', () => row.classList.toggle('gitdiff-file-expanded'));
+      } else {
+        fileToggle.textContent = `${status} ${displayPath}`;
+        fileToggle.classList.add('gitdiff-file-toggle--no-diff');
+        row.appendChild(fileToggle);
+      }
+
+      body.appendChild(row);
+    }
+
+    if (tool.truncated) {
+      const el = document.createElement('span');
+      el.className = 'diff-line diff-hunk';
+      el.style.display = 'block';
+      el.textContent = '[diff truncated]';
+      body.appendChild(el);
+    }
+
+    block.classList.add('tool-expanded');
   }
 
   toggle.addEventListener('click', () => block.classList.toggle('tool-expanded'));
@@ -1487,7 +1580,7 @@ function appendHistoryItem(item, container) {
   if (item.context) {
     try {
       const tools = typeof item.context === 'string' ? JSON.parse(item.context) : item.context;
-      const diffTools = tools.filter(t => t.name === 'Edit' || t.name === 'Write' || t.name === 'MultiEdit' || t.name === 'Diff');
+      const diffTools = changeTools(tools);
       let lastEl = asstBubble;
       for (const tool of diffTools) {
         const block = makeToolBlock(tool);
@@ -2465,6 +2558,61 @@ function initAliases() {
 
 // ── inline agent creation prompt ─────────────────────────────────────────────
 
+function showCodeRootsPrompt(topic) {
+  return new Promise(resolve => {
+    const existing = document.getElementById('code-roots-prompt');
+    if (existing) existing.remove();
+
+    const panel = document.createElement('div');
+    panel.id = 'code-roots-prompt';
+    panel.className = 'agent-create-prompt';
+    panel.innerHTML = `
+      <div class="acp-title">Where does <strong>${topic}</strong>'s code live? Squid tracks git diffs to show changed files after each agent run.</div>
+      <div class="acp-row">
+        <input id="crp-paths" placeholder="/Users/me/Work/myproject  (comma-separate for multiple)" />
+      </div>
+      <div class="acp-actions">
+        <button id="crp-save">Save &amp; send</button>
+        <button id="crp-skip">Skip diff tracking</button>
+        <button id="crp-cancel">Cancel</button>
+      </div>`;
+
+    messages.appendChild(panel);
+    messages.scrollTop = messages.scrollHeight;
+    panel.querySelector('#crp-paths').focus();
+
+    panel.querySelector('#crp-cancel').addEventListener('click', () => {
+      panel.remove();
+      resolve(false);
+    });
+
+    panel.querySelector('#crp-skip').addEventListener('click', async () => {
+      try {
+        await saveCodeRootsDecision(topic, { code_roots_skipped: true });
+        panel.remove();
+        resolve(true);
+      } catch (err) {
+        panel.querySelector('.acp-title').textContent = err?.message || 'Failed to save.';
+      }
+    });
+
+    panel.querySelector('#crp-save').addEventListener('click', async () => {
+      const roots = parseCodeRootsInput(panel.querySelector('#crp-paths').value);
+      if (!roots.length) {
+        panel.querySelector('.acp-title').textContent = 'Enter at least one path, or click "Skip diff tracking".';
+        return;
+      }
+      try {
+        await saveCodeRootsDecision(topic, { code_roots: roots });
+        panel.remove();
+        resolve(true);
+      } catch (err) {
+        panel.querySelector('.acp-title').textContent = err?.message || 'Failed to save.';
+      }
+    });
+  });
+}
+
 function showAgentCreatePrompt(agentName, onSaved) {
   const existing = document.getElementById('agent-create-prompt');
   if (existing) existing.remove();
@@ -2873,6 +3021,51 @@ function _getMemoryMeta(topic) {
     })
     .catch(() => { _memoryCache[topic].loading = false; });
   return _memoryCache[topic];
+}
+
+async function fetchMemoryMeta(topic) {
+  const data = await fetch(`/topics/${encodeURIComponent(topic)}/memory`).then(r => r.json());
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
+  _memoryCache[topic] = { ...data, loading: false };
+  return _memoryCache[topic];
+}
+
+function hasCodeRootsDecision(meta) {
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return true;
+  const squid = meta?.squid || {};
+  return !!(squid.code_roots && squid.code_roots.length) || !!squid.code_roots_skipped;
+}
+
+function parseCodeRootsInput(value) {
+  return (value || '')
+    .split(/[\n,]/)
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+async function saveCodeRootsDecision(topic, payload) {
+  const res = await fetch(`/topics/${encodeURIComponent(topic)}/memory/squid/code-roots`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Save failed (${res.status})`);
+  _memoryCache[topic] = { ...data, loading: false };
+  updatePinCount();
+  if (pinPanel.classList.contains('open')) renderPinPanel();
+  return data;
+}
+
+async function ensureCodeRootsDecision(topic) {
+  let meta;
+  try {
+    meta = await fetchMemoryMeta(topic);
+  } catch {
+    return true;
+  }
+  if (hasCodeRootsDecision(meta)) return true;
+  return showCodeRootsPrompt(topic);
 }
 
 function _getSessionMeta(topic, agent) {

@@ -1,11 +1,67 @@
 from pathlib import Path
 from typing import Optional
 
+import yaml
+
 from .topics import normalize_topic_slug
 
 
 _ROOT = Path(__file__).parent.parent
 TOPICS_CONTEXT_DIR = _ROOT / "context" / "topics"
+
+
+def _split_frontmatter(content: str) -> tuple[Optional[str], str]:
+    if not content.startswith("---"):
+        return None, content
+    lines = content.splitlines(keepends=True)
+    if not lines:
+        return None, content
+    if lines[0].strip() != "---":
+        return None, content
+
+    offset = len(lines[0])
+    for line in lines[1:]:
+        if line.strip() == "---":
+            yaml_text = content[len(lines[0]):offset]
+            body_start = offset + len(line)
+            return yaml_text, content[body_start:]
+        offset += len(line)
+    return None, content
+
+
+def _load_frontmatter(content: str) -> dict:
+    yaml_text, _body = _split_frontmatter(content)
+    if yaml_text is None:
+        return {}
+    try:
+        data = yaml.safe_load(yaml_text) or {}
+    except yaml.YAMLError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _dump_memory(frontmatter: dict, body: str) -> str:
+    yaml_text = yaml.safe_dump(frontmatter, sort_keys=False, default_flow_style=False).strip()
+    if body:
+        return f"---\n{yaml_text}\n---\n{body}"
+    return f"---\n{yaml_text}\n---\n"
+
+
+def _normalize_code_roots(value) -> list[str]:
+    if isinstance(value, str):
+        raw = [value]
+    elif isinstance(value, list):
+        raw = value
+    else:
+        raw = []
+    roots: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if text:
+            roots.append(text)
+    return roots
 
 
 def _display_path(path: Path) -> str:
@@ -29,6 +85,7 @@ def read_topic_memory(topic: str) -> dict:
             "exists": False,
             "content": "",
             "path": _display_path(path),
+            "squid": topic_memory_squid_config_from_content(""),
         }
     content = path.read_text(encoding="utf-8")
     return {
@@ -36,6 +93,7 @@ def read_topic_memory(topic: str) -> dict:
         "exists": True,
         "content": content,
         "path": _display_path(path),
+        "squid": topic_memory_squid_config_from_content(content),
     }
 
 
@@ -44,6 +102,39 @@ def write_topic_memory(topic: str, content: str) -> dict:
     path = topic_memory_path(slug)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+    return read_topic_memory(slug)
+
+
+def write_topic_memory_squid_code_roots(
+    topic: str,
+    *,
+    code_roots: Optional[list[str]] = None,
+    code_roots_skipped: bool = False,
+) -> dict:
+    slug = normalize_topic_slug(topic)
+    path = topic_memory_path(slug)
+    content = path.read_text(encoding="utf-8") if path.exists() else ""
+    yaml_text, body = _split_frontmatter(content)
+    frontmatter = _load_frontmatter(content) if yaml_text is not None else {}
+    squid = frontmatter.get("squid")
+    if not isinstance(squid, dict):
+        squid = {}
+    roots = _normalize_code_roots(code_roots or [])
+    if roots:
+        squid["code_roots"] = roots
+        squid.pop("code_roots_skipped", None)
+    elif code_roots_skipped:
+        squid.pop("code_roots", None)
+        squid["code_roots_skipped"] = True
+    else:
+        squid.pop("code_roots", None)
+        squid.pop("code_roots_skipped", None)
+    if squid:
+        frontmatter["squid"] = squid
+    else:
+        frontmatter.pop("squid", None)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_dump_memory(frontmatter, body if yaml_text is not None else content), encoding="utf-8")
     return read_topic_memory(slug)
 
 
@@ -59,3 +150,35 @@ def topic_memory_prompt_block(topic: str) -> Optional[str]:
         content,
         "</topic_memory>",
     ])
+
+
+def topic_memory_squid_config_from_content(content: str) -> dict:
+    frontmatter = _load_frontmatter(content)
+    squid = frontmatter.get("squid")
+    if not isinstance(squid, dict):
+        squid = {}
+    code_roots = _normalize_code_roots(squid.get("code_roots"))
+    skipped = bool(squid.get("code_roots_skipped"))
+    return {
+        "code_roots": code_roots,
+        "code_roots_skipped": skipped and not code_roots,
+        "code_roots_missing": not code_roots and not skipped,
+    }
+
+
+def topic_memory_squid_config(topic: str) -> dict:
+    return topic_memory_squid_config_from_content(read_topic_memory(topic)["content"])
+
+
+def code_roots_prompt_block(code_roots: list[str]) -> Optional[str]:
+    roots = _normalize_code_roots(code_roots)
+    if not roots:
+        return None
+    lines = [
+        "Topic code roots:",
+        "<squid_code_roots>",
+        *roots,
+        "</squid_code_roots>",
+        "Treat these paths as the primary codebase roots for this topic. Prefer working in them over the process working directory.",
+    ]
+    return "\n".join(lines)
