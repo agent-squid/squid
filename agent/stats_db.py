@@ -48,15 +48,17 @@ _TABLES = [
         created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )""",
     """CREATE TABLE IF NOT EXISTS topics (
-        topic        TEXT NOT NULL,
-        agent        TEXT NOT NULL DEFAULT '',
-        sticky_agent TEXT,
-        last_prompt  TEXT,
-        last_at      TEXT,
-        last_model   TEXT,
-        last_backend TEXT,
-        hidden       INTEGER DEFAULT 0,
-        created_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        topic              TEXT NOT NULL,
+        agent              TEXT NOT NULL DEFAULT '',
+        sticky_agent       TEXT,
+        sticky_adhoc       INTEGER DEFAULT 0,
+        last_prompt        TEXT,
+        last_adhoc_prompt  TEXT,
+        last_at            TEXT,
+        last_model         TEXT,
+        last_backend       TEXT,
+        hidden             INTEGER DEFAULT 0,
+        created_at         TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         PRIMARY KEY (topic, agent)
     )""",
     """CREATE TABLE IF NOT EXISTS chat_messages (
@@ -124,6 +126,10 @@ _MIGRATIONS = [
     "ALTER TABLE chat_messages DROP COLUMN model",
     # hide support for topics (2026-05-28)
     "ALTER TABLE topics ADD COLUMN hidden INTEGER DEFAULT 0",
+    # sticky_adhoc tracks whether the sticky agent was set via adhoc (!) mode (2026-06-11)
+    "ALTER TABLE topics ADD COLUMN sticky_adhoc INTEGER DEFAULT 0",
+    # last_adhoc_prompt stores the most recent adhoc prompt per agent row (2026-06-11)
+    "ALTER TABLE topics ADD COLUMN last_adhoc_prompt TEXT",
     # per-message quota delta (2026-06-09)
     "ALTER TABLE chat_messages ADD COLUMN quota_delta REAL",
     # per-message raw quota snapshot (2026-06-09)
@@ -300,7 +306,7 @@ def delete_agent(name: str) -> bool:
 def get_topics_summary() -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
-            """SELECT topic AS name, sticky_agent AS agent,
+            """SELECT topic AS name, sticky_agent AS agent, sticky_adhoc,
                       last_model, last_backend, last_prompt, last_at
                FROM topics
                WHERE agent = '' AND hidden = 0
@@ -331,34 +337,39 @@ def upsert_topic(
     last_prompt: Optional[str] = None,
     last_model: Optional[str] = None,
     last_backend: Optional[str] = None,
+    adhoc: bool = False,
 ) -> None:
     now = __import__('time').strftime("%Y-%m-%dT%H:%M:%SZ", __import__('time').gmtime())
     at = now if last_prompt else None
     with _connect() as conn:
         # Topic-level row
         conn.execute(
-            """INSERT INTO topics (topic, agent, sticky_agent, last_prompt, last_at, last_model, last_backend)
-               VALUES (?, '', ?, ?, ?, ?, ?)
+            """INSERT INTO topics (topic, agent, sticky_agent, sticky_adhoc, last_prompt, last_at, last_model, last_backend)
+               VALUES (?, '', ?, ?, ?, ?, ?, ?)
                ON CONFLICT(topic, agent) DO UPDATE SET
                  hidden       = 0,
                  sticky_agent = CASE WHEN excluded.sticky_agent IS NOT NULL THEN excluded.sticky_agent ELSE sticky_agent END,
+                 sticky_adhoc = CASE WHEN excluded.sticky_agent IS NOT NULL THEN excluded.sticky_adhoc ELSE sticky_adhoc END,
                  last_prompt  = COALESCE(excluded.last_prompt, last_prompt),
                  last_at      = COALESCE(excluded.last_at, last_at),
                  last_model   = COALESCE(excluded.last_model, last_model),
                  last_backend = COALESCE(excluded.last_backend, last_backend)""",
-            (name, agent, last_prompt, at, last_model, last_backend),
+            (name, agent, 1 if adhoc else 0, last_prompt, at, last_model, last_backend),
         )
         # Agent-level row
         if agent:
+            session_prompt = None if adhoc else last_prompt
+            adhoc_prompt   = last_prompt if adhoc else None
             conn.execute(
-                """INSERT INTO topics (topic, agent, last_prompt, last_at, last_model, last_backend)
-                   VALUES (?, ?, ?, ?, ?, ?)
+                """INSERT INTO topics (topic, agent, last_prompt, last_adhoc_prompt, last_at, last_model, last_backend)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(topic, agent) DO UPDATE SET
-                     last_prompt  = COALESCE(excluded.last_prompt, last_prompt),
-                     last_at      = COALESCE(excluded.last_at, last_at),
-                     last_model   = COALESCE(excluded.last_model, last_model),
-                     last_backend = COALESCE(excluded.last_backend, last_backend)""",
-                (name, agent, last_prompt, at, last_model, last_backend),
+                     last_prompt        = COALESCE(excluded.last_prompt, last_prompt),
+                     last_adhoc_prompt  = COALESCE(excluded.last_adhoc_prompt, last_adhoc_prompt),
+                     last_at            = COALESCE(excluded.last_at, last_at),
+                     last_model         = COALESCE(excluded.last_model, last_model),
+                     last_backend       = COALESCE(excluded.last_backend, last_backend)""",
+                (name, agent, session_prompt, adhoc_prompt, at, last_model, last_backend),
             )
 
 
@@ -378,10 +389,10 @@ def delete_topic(name: str) -> bool:
 
 
 def get_topic_agent_history(topic: str) -> list[dict]:
-    """Return agents used in a topic with their last prompt, ordered by most recent."""
+    """Return agents used in a topic with mode-specific last prompts."""
     with _connect() as conn:
         rows = conn.execute(
-            """SELECT agent, last_prompt, last_at
+            """SELECT agent, last_prompt, last_adhoc_prompt
                FROM topics
                WHERE topic = ? AND agent != ''
                ORDER BY last_at DESC""",

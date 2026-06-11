@@ -1461,7 +1461,7 @@ button {
 }
 .tag-topic { color: #d07840; }
 .tag-agent { color: var(--agent-color, #848899); margin-left: 0.05em; }
-.tag-adhoc { color: #a05858; }
+.tag-adhoc { color: var(--agent-color, #848899); }
 .tag-topic.clickable { cursor: pointer; }
 .tag-agent.clickable { cursor: pointer; }
 .tag-topic.clickable:hover { color: #e8a060; }
@@ -1470,7 +1470,7 @@ button {
 /* Chip sub-spans */
 .chip-topic { color: #d07840; }
 .chip-agent { color: var(--agent-color, #848899); margin-left: 0.05em; }
-.chip-adhoc { color: #a05858; margin-left: 0.05em; }
+.chip-adhoc { color: var(--agent-color, #848899); margin-left: 0.05em; }
 #topic-chip.needs-agent .chip-topic { color: #b07830; }
 #topic-chip.needs-agent { border-color: #5a3a10; }
 

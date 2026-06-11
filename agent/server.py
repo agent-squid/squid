@@ -453,7 +453,7 @@ async def chat(req: ChatRequest):
     model: Optional[str] = agent_config.get("model") or None
 
     upsert_topic(topic, resolved_agent, last_prompt=req.message,
-                 last_backend=backend, last_model=model)
+                 last_backend=backend, last_model=model, adhoc=req.adhoc)
     agent_cwd: Optional[str] = agent_config.get("cwd") or None
     response_timeout: Optional[int] = agent_config.get("timeout")
 

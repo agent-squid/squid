@@ -328,7 +328,7 @@ let stickyChip = null; // { topic, agent, adhoc } | null
 
 function setTopicChip(topic, agent, adhoc = false, lookback = 0) {
   stickyChip = { topic, agent, adhoc, lookback };
-  if (!adhoc) localStorage.setItem('squid_sticky_chip', JSON.stringify({ topic, agent }));
+  localStorage.setItem('squid_sticky_chip', JSON.stringify({ topic, agent, adhoc }));
 
   topicChipEl.innerHTML = '';
   const tSpan = document.createElement('span');
@@ -346,6 +346,7 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0) {
     const adSpan = document.createElement('span');
     adSpan.className = 'chip-adhoc';
     adSpan.textContent = lookback > 0 ? `!${lookback}` : '!';
+    if (agent) setAgentSlugColor(adSpan, agent);
     topicChipEl.appendChild(adSpan);
   }
   topicChipEl.classList.add('visible');
@@ -411,6 +412,7 @@ function makeTopicTag(topic, agent, { clickable = false, adhoc = false, lookback
     const adSpan = document.createElement('span');
     adSpan.className = 'tag-adhoc';
     adSpan.textContent = '!' + (lookback > 0 ? lookback : '');
+    if (agent) setAgentSlugColor(adSpan, agent, backend);
     wrap.appendChild(adSpan);
   }
 
@@ -484,6 +486,7 @@ function _updateFilterBadge() {
     const ad = document.createElement('span');
     ad.className = 'tag-adhoc';
     ad.textContent = '!';
+    if (agent) setAgentSlugColor(ad, agent);
     labelEl.appendChild(ad);
   }
   badge.classList.add('active');
@@ -763,13 +766,16 @@ async function _maybePromoteSlug(val) {
   const lookback = adhocStr ? parseInt(adhocStr.slice(1)) || 0 : 0;
 
   let agent = explicitAgent;
+  let resolvedAdhoc = adhoc;
   if (!agent) {
     const topics = await _acTopics();
     if (input.value !== val) return;
-    agent = topics.find(t => t.name === topic)?.agent || null;
+    const topicData = topics.find(t => t.name === topic);
+    agent = topicData?.agent || null;
+    if (!adhocStr) resolvedAdhoc = !!(topicData?.sticky_adhoc);
   }
 
-  setTopicChip(topic, agent, adhoc, lookback);
+  setTopicChip(topic, agent, resolvedAdhoc, lookback);
   input.value = '';
   hideAutocomplete();
   resizeComposer();
@@ -2617,7 +2623,7 @@ async function updateAutocomplete() {
       items.push({
         label:  _acAgentLabel(topic, h.agent + '!', backendByAgent.get(h.agent) || null),
         insert: `#${topic}@${h.agent}!`,
-        sub:    h.last_prompt ? truncate(h.last_prompt, 55) : '',
+        sub:    h.last_adhoc_prompt ? truncate(h.last_adhoc_prompt, 55) : '',
         meta:   'adhoc',
       });
     }
@@ -3126,5 +3132,5 @@ startProcPoll();
 showBootBanner();
 try {
   const saved = JSON.parse(localStorage.getItem('squid_sticky_chip') || 'null');
-  if (saved?.topic) setTopicChip(saved.topic, saved.agent || null);
+  if (saved?.topic) setTopicChip(saved.topic, saved.agent || null, saved.adhoc || false);
 } catch { /* ignore */ }
