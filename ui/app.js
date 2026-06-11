@@ -934,7 +934,8 @@ async function sendMessage(text) {
   bubble.appendChild(contentDiv);
 
   let firstDataReceived = false;
-  const quotaBefore = quotaRaw;
+  let quotaBackend = await resolveQuotaBackend(topic, agent);
+  let quotaBeforeSnapshot = await fetchQuotaForBackend(quotaBackend);
   let lastSessionId = null;
   let statsEl = null;
   let doneTime = null;
@@ -1086,6 +1087,12 @@ async function sendMessage(text) {
             try {
               const meta = JSON.parse(data);
               resolvedAgent = meta.agent || (meta.backend !== 'auto' ? meta.backend : null);
+              if (meta.backend === 'claude' || meta.backend === 'codex') {
+                quotaBackend = meta.backend;
+                if (quotaBeforeSnapshot?.backend && quotaBeforeSnapshot.backend !== quotaBackend) {
+                  quotaBeforeSnapshot = null;
+                }
+              }
               const resolvedAdhoc = adhoc; // server echoes back what we sent; use closure as reliable source
               const newTag = makeTopicTag(topic, resolvedAgent, { adhoc: resolvedAdhoc, clickable: true, lookback, backend: meta.backend || null });
               responseHeaderTag.replaceWith(newTag);
@@ -1269,10 +1276,12 @@ async function sendMessage(text) {
     if (!statsEl && doneTime && firstDataReceived) addTimestamp(bubble, doneTime, false);
   }
 
-  // Quota snapshot — wait briefly for claude.ai API to reflect the just-completed turn
+  // Quota snapshot — wait briefly for provider APIs to reflect the just-completed turn.
   await new Promise(r => setTimeout(r, 3000));
-  await fetchQuota(true);
-  const quotaAfter = quotaRaw;
+  const hasQuotaBefore = quotaBeforeSnapshot?.backend === quotaBackend && quotaBeforeSnapshot.raw !== null;
+  const quotaAfterSnapshot = await fetchQuotaForBackend(quotaBackend, { trackDelta: hasQuotaBefore });
+  const quotaBefore = quotaBeforeSnapshot?.raw ?? null;
+  const quotaAfter = quotaAfterSnapshot?.raw ?? null;
   if (quotaBefore !== null && quotaAfter !== null && quotaAfter !== quotaBefore) {
     const d = Math.round((quotaAfter - quotaBefore) * 10) / 10;
     if (statsEl && d > 0) {
@@ -1286,11 +1295,11 @@ async function sendMessage(text) {
       }).catch(() => {});
     }
   }
-  if (lastSessionId && quotaBefore !== null && quotaRaw !== null) {
+  if (lastSessionId && quotaBefore !== null && quotaAfter !== null) {
     fetch('/stats/quota-delta', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: lastSessionId, before: quotaBefore, after: quotaRaw }),
+      body: JSON.stringify({ session_id: lastSessionId, before: quotaBefore, after: quotaAfter }),
     }).catch(() => {});
   }
 }
@@ -1869,6 +1878,14 @@ const quotaSnapshots = {
   claude: { backend: 'claude', status: 'unknown' },
   codex: { backend: 'codex', status: 'unknown' },
 };
+const quotaState = {
+  claude: { raw: null, pct: null, resetAt: null, delta: null, inFlight: false },
+  codex: { raw: null, pct: null, resetAt: null, delta: null, inFlight: false },
+};
+const QUOTA_ENDPOINTS = {
+  claude: '/quota/claude',
+  codex: '/quota/codex',
+};
 let activeQuotaBackend = null;
 let quotaResolveSeq = 0;
 let quotaResetAt = null;
@@ -1906,6 +1923,10 @@ async function resolveActiveQuotaBackend() {
   const topicName = parsed.topic || stickyChip?.topic || null;
   let agentName = parsed.agent || stickyChip?.agent || null;
 
+  return resolveQuotaBackend(topicName, agentName);
+}
+
+async function resolveQuotaBackend(topicName, agentName) {
   if (!agentName && topicName) {
     const topics = await _acTopics();
     agentName = topics.find(t => t.name === topicName)?.agent || null;
@@ -1923,37 +1944,113 @@ async function updateActiveQuotaGauge() {
   setVisibleQuotaBackend(backend);
 }
 
-async function fetchQuota(trackDelta = false) {
-  try {
-    const res = await fetch('/quota');
-    if (!res.ok) return;
-    const data = await res.json();
-    const session = data.five_hour;
-    if (!session) return;
+function parseClaudeQuota(data) {
+  const session = data?.five_hour;
+  if (!session) return null;
+  const raw = session.utilization ?? 0;
+  return {
+    raw,
+    pct: Math.round(raw),
+    resetAt: new Date(session.resets_at).getTime(),
+    title: 'Claude session usage',
+  };
+}
 
-    const raw = session.utilization ?? 0;
-    const pct = Math.round(raw);
+function parseCodexQuota(data) {
+  const primary = data?.rate_limit?.primary_window;
+  if (!primary) return null;
+  const raw = primary.used_percent ?? 0;
+  const resetAt = primary.reset_after_seconds != null
+    ? Date.now() + primary.reset_after_seconds * 1000
+    : (primary.reset_at != null ? primary.reset_at * 1000 : null);
+  return {
+    raw,
+    pct: Math.max(0, Math.min(100, Math.round(raw))),
+    resetAt,
+    title: buildCodexQuotaTitle(data),
+  };
+}
 
-    if (trackDelta && quotaRaw !== null) {
-      const d = raw - quotaRaw;
-      quotaDelta = d > 0.05 ? Math.round(d * 10) / 10 : null;
-    }
-    quotaRaw    = raw;
-    quotaPct    = pct;
-    quotaResetAt = new Date(session.resets_at).getTime();
+function syncLegacyClaudeQuotaState(state) {
+  quotaRaw = state.raw;
+  quotaPct = state.pct;
+  quotaResetAt = state.resetAt;
+  quotaDelta = state.delta;
+}
 
+function renderQuotaLoaded(backend, snapshot) {
+  const state = quotaState[backend];
+  state.raw = snapshot.raw;
+  state.pct = snapshot.pct;
+  state.resetAt = snapshot.resetAt;
+
+  if (backend === 'claude') {
+    syncLegacyClaudeQuotaState(state);
     quotaDisplay.classList.add('loaded');
-    updateQuotaLabel(pct);
-    setQuotaSnapshot('claude', {
-      status: 'loaded',
-      pct,
-      resetAt: quotaResetAt,
-      title: 'Claude session usage',
-    });
-
+    updateQuotaLabel(snapshot.pct);
     if (quotaTimer) clearInterval(quotaTimer);
-    quotaTimer = setInterval(() => updateQuotaLabel(pct), 10000);
-  } catch {}
+    quotaTimer = setInterval(() => updateQuotaLabel(snapshot.pct), 10000);
+  } else if (backend === 'codex') {
+    codexResetAt = snapshot.resetAt;
+    codexQuotaDisplay.classList.remove('error');
+    codexQuotaDisplay.classList.add('loaded');
+    codexQuotaDisplay.title = snapshot.title;
+    updateCodexLabel(snapshot.pct);
+    if (codexTimer) clearInterval(codexTimer);
+    codexTimer = setInterval(() => updateCodexLabel(snapshot.pct), 10000);
+  }
+
+  setQuotaSnapshot(backend, {
+    status: 'loaded',
+    pct: snapshot.pct,
+    resetAt: snapshot.resetAt,
+    title: snapshot.title,
+  });
+}
+
+function showQuotaError(backend, text) {
+  if (backend === 'codex') {
+    showCodexQuotaError(text);
+  }
+}
+
+async function fetchQuotaForBackend(backend, { trackDelta = false } = {}) {
+  const endpoint = QUOTA_ENDPOINTS[backend];
+  if (!endpoint) return null;
+  const state = quotaState[backend];
+  if (state.inFlight) return state.raw == null ? null : { backend, ...state };
+  state.inFlight = true;
+  try {
+    const res = await fetch(endpoint);
+    if (!res.ok) {
+      if (backend === 'codex') showQuotaError(backend, res.status === 400 ? 'Codex auth' : 'Codex error');
+      return null;
+    }
+    const data = await res.json();
+    const snapshot = backend === 'codex' ? parseCodexQuota(data) : parseClaudeQuota(data);
+    if (!snapshot) {
+      if (backend === 'codex') showQuotaError(backend, 'Codex n/a');
+      return null;
+    }
+
+    if (trackDelta && state.raw !== null) {
+      const d = snapshot.raw - state.raw;
+      state.delta = d > 0.05 ? Math.round(d * 10) / 10 : null;
+    } else {
+      state.delta = null;
+    }
+    renderQuotaLoaded(backend, snapshot);
+    return { backend, ...state };
+  } catch {
+    if (backend === 'codex') showQuotaError(backend, 'Codex error');
+    return null;
+  } finally {
+    state.inFlight = false;
+  }
+}
+
+async function fetchQuota(trackDelta = false) {
+  return fetchQuotaForBackend('claude', { trackDelta });
 }
 
 const QUOTA_PIE_C = 2 * Math.PI * 6; // circumference for r=6
@@ -2005,46 +2102,15 @@ let codexTimer    = null;
 const CODEX_PIE_C = 2 * Math.PI * 6;
 
 async function fetchCodexQuota() {
-  try {
-    const res = await fetch('/quota/codex');
-    if (!res.ok) {
-      showCodexQuotaError(res.status === 400 ? 'Codex auth' : 'Codex error');
-      return;
-    }
-    const data = await res.json();
-    const primary = data?.rate_limit?.primary_window;
-    if (!primary) {
-      showCodexQuotaError('Codex n/a');
-      return;
-    }
-    const pct = Math.max(0, Math.min(100, Math.round(primary.used_percent ?? 0)));
-    codexResetAt = primary.reset_after_seconds != null
-      ? Date.now() + primary.reset_after_seconds * 1000
-      : (primary.reset_at != null ? primary.reset_at * 1000 : null);
-
-    codexQuotaDisplay.classList.remove('error');
-    codexQuotaDisplay.classList.add('loaded');
-    codexQuotaDisplay.title = buildCodexQuotaTitle(data);
-    updateCodexLabel(pct);
-    setQuotaSnapshot('codex', {
-      status: 'loaded',
-      pct,
-      resetAt: codexResetAt,
-      title: buildCodexQuotaTitle(data),
-    });
-
-    if (codexTimer) clearInterval(codexTimer);
-    codexTimer = setInterval(() => updateCodexLabel(pct), 10000);
-  } catch {
-    showCodexQuotaError('Codex error');
-  }
+  return fetchQuotaForBackend('codex');
 }
 
 function updateCodexLabel(pct) {
   const label = document.getElementById('codex-quota-label');
   if (!label) return;
+  const delta = quotaState.codex.delta != null ? ` +${quotaState.codex.delta}%` : '';
   const timeStr = quotaTimeText(codexResetAt);
-  label.textContent = `${pct}%` + (timeStr ? ` in ${timeStr}` : '');
+  label.textContent = `${pct}%${delta}` + (timeStr ? ` in ${timeStr}` : '');
 
   const arc = document.getElementById('codex-pie-arc');
   if (arc) {

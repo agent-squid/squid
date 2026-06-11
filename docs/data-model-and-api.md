@@ -100,8 +100,8 @@ cache_write_tokens   INTEGER
 history_input_tokens INTEGER DEFAULT 0   tokens from injected context history
 cost_usd             REAL
 duration_ms          INTEGER
-quota_before         REAL    claude.ai quota at turn start
-quota_after          REAL    claude.ai quota at turn end
+quota_before         REAL    backend quota percentage at turn start, when exposed
+quota_after          REAL    backend quota percentage at turn end, when exposed
 lookback             INTEGER DEFAULT 0   adhoc lookback window used
 created_at           TEXT    ISO8601 — set on INSERT, never updated (used for date bucketing)
 ```
@@ -452,7 +452,7 @@ Note: `agent` is `COALESCE(agent, backend, 'unknown')` — groups all sessions u
 
 ### POST /stats/quota-delta
 
-Record the before/after claude.ai quota usage for a session.
+Record the before/after backend quota percentage for a session. The UI records this only for backends with quota integrations, currently Claude and Codex.
 
 **Request body**: `{ "session_id": "string", "before": 0.0, "after": 0.0 }`
 
@@ -470,11 +470,21 @@ Save claude.ai session credentials (org ID + session key).
 
 ---
 
-### GET /quota
+### GET /quota/claude
 
 Fetch current claude.ai usage. Requires saved credentials.
 
 **Response**: proxied JSON from claude.ai, or `{ "error": "..." }` (400/502).
+
+### GET /quota
+
+Legacy alias for `GET /quota/claude`.
+
+### GET /quota/codex
+
+Fetch current Codex usage. Requires a saved Codex bearer token.
+
+**Response**: proxied Codex account usage JSON, or `{ "error": "..." }` (400/502).
 
 ---
 

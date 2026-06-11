@@ -24,7 +24,7 @@ const DONE  = { event: 'done',  data: '' };
 async function mockBackend(page) {
   await page.route('**/health',        r => r.fulfill({ json: { status: 'ok', boot_time: new Date().toISOString() } }));
   await page.route('**/history**',     r => r.fulfill({ json: { items: [], has_more: false } }));
-  await page.route('**/quota',         r => r.fulfill({ json: {} }));
+  await page.route('**/quota**',       r => r.fulfill({ json: {} }));
   await page.route('**/topics',        r => r.fulfill({ json: [] }));
   await page.route('**/topics/*/memory', r => r.fulfill({ json: {
     topic: 'squid', exists: true, content: '---\nsquid:\n  code_roots_skipped: true\n---\n', path: 'context/topics/squid/memory.md',

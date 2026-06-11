@@ -16,6 +16,8 @@ GET /stats?period=daily|hourly  or  ?group=topic|agent
 POST /stats/quota-delta
 POST /config/creds
 GET /quota
+GET /quota/claude
+GET /quota/codex
 GET /health
 """
 
@@ -815,7 +817,8 @@ async def save_codex_creds(req: CodexCredsRequest):
 
 
 @app.get("/quota")
-async def quota():
+@app.get("/quota/claude")
+async def quota_claude():
     org_id = creds.get_org_id()
     session_key = creds.get_session_key()
     if not org_id or not session_key:

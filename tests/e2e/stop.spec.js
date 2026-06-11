@@ -24,7 +24,7 @@ const DONE = { event: 'done', data: '' };
 async function mockBackend(page, { topic = 'squid', agent = 'claude' } = {}) {
   await page.route('**/health',        r => r.fulfill({ json: { status: 'ok' } }));
   await page.route('**/history**',     r => r.fulfill({ json: { items: [], has_more: false } }));
-  await page.route('**/quota',         r => r.fulfill({ json: {} }));
+  await page.route('**/quota**',       r => r.fulfill({ json: {} }));
   await page.route('**/topics',        r => r.fulfill({ json: [
     { name: topic, agent, last_model: null, last_backend: 'claude', queue_depth: 0, active: false, last_prompt: 'hi' }
   ]}));
