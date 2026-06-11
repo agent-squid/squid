@@ -1358,6 +1358,11 @@ button {
     overflow-wrap: anywhere;
   }
 
+  .msg.assistant:not(.msg-thinking) {
+    box-sizing: border-box;
+    max-width: 100%;
+  }
+
   #pin-btn,
   #send-btn {
     flex: 0 0 40px;
