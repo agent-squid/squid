@@ -1595,11 +1595,15 @@ function appendHistoryItem(item, container) {
   promptSpan.className = 'history-prompt';
   promptSpan.textContent = truncate(item.prompt || '', 55);
   promptSpan.dataset.full = item.prompt || '';
-  promptSpan.addEventListener('click', () => {
+  const promptFullDiv = document.createElement('div');
+  promptFullDiv.className = 'history-prompt-full';
+  promptFullDiv.textContent = item.prompt || '';
+  const togglePrompt = () => {
     const expanded = promptSpan.classList.toggle('expanded');
-    promptSpan.textContent = expanded ? promptSpan.dataset.full : truncate(promptSpan.dataset.full, 55);
-    asstHeaderText.classList.toggle('expanded', expanded);
-  });
+    promptFullDiv.classList.toggle('visible', expanded);
+  };
+  promptSpan.addEventListener('click', togglePrompt);
+  promptFullDiv.addEventListener('click', togglePrompt);
   asstHeaderText.appendChild(promptSpan);
   asstHeader.appendChild(asstHeaderText);
 
@@ -1623,6 +1627,7 @@ function appendHistoryItem(item, container) {
   asstHeader.appendChild(ctxSpan);
 
   asstBubble.appendChild(asstHeader);
+  asstBubble.appendChild(promptFullDiv);
 
   const asstContent = document.createElement('div');
   if (item.status === 'error') {

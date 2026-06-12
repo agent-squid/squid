@@ -1694,11 +1694,6 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.response-header-text.expanded {
-  white-space: normal;
-  overflow: visible;
-  text-overflow: clip;
-}
 .history-prompt {
   cursor: pointer;
   opacity: 0.75;
@@ -1707,7 +1702,23 @@ button {
   opacity: 1;
 }
 .history-prompt.expanded {
-  opacity: 1;
+  opacity: 0;
+  pointer-events: none;
+}
+.history-prompt-full {
+  display: none;
+  font-size: 0.72em;
+  color: #888;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 0.3rem 0 0.4rem;
+  border-bottom: 1px solid #2a2a35;
+  margin-bottom: 0.35rem;
+  cursor: default;
+}
+.history-prompt-full.visible {
+  display: block;
+  cursor: pointer;
 }
 /* error state inside assistant bubble */
 .msg-error {
