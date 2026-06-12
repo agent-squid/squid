@@ -872,7 +872,7 @@ body {
   display: none;
   position: fixed;
   inset: 0;
-  z-index: 80;
+  z-index: 110;
   background: rgba(0, 0, 0, 0.45);
   align-items: center;
   justify-content: center;

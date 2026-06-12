@@ -3077,8 +3077,6 @@ function showCtxPopup(spanEl) {
   const memRow = popup.querySelector('.ctx-popup-mem-row');
   if (memRow) {
     memRow.addEventListener('click', () => {
-      popup.classList.remove('open');
-      popup._forSpanEl = null;
       openMemoryEditor(memRow.dataset.topic);
     });
   }
@@ -3107,8 +3105,6 @@ function showCtxPopup(spanEl) {
 }
 
 async function openMsgModal(msgId) {
-  const ctxPopup = document.getElementById('ctx-popup');
-  if (ctxPopup) { ctxPopup.classList.remove('open'); ctxPopup._forSpanEl = null; }
   const modal = document.getElementById('msg-modal');
   const title = document.getElementById('msg-modal-title');
   const body  = document.getElementById('msg-modal-body');
@@ -3593,7 +3589,10 @@ document.addEventListener('click', e => {
   if (!acEl.contains(e.target) && e.target !== input) hideAutocomplete();
   if (!pinPanel.contains(e.target) && !pinBtn.contains(e.target)) closePinPanel();
   const ctxPopup = document.getElementById('ctx-popup');
-  if (ctxPopup && !ctxPopup.contains(e.target) && !e.target.closest('.user-ctx')) {
+  const inSecondary = e.target.closest('#msg-modal, #memory-modal');
+  const secondaryOpen = document.getElementById('msg-modal')?.classList.contains('open')
+    || document.getElementById('memory-modal')?.classList.contains('open');
+  if (ctxPopup && !ctxPopup.contains(e.target) && !e.target.closest('.user-ctx') && !inSecondary && !secondaryOpen) {
     ctxPopup.classList.remove('open');
   }
   if (!procStatusPopup.contains(e.target) && e.target !== procStatusBtn && !procStatusBtn.contains(e.target)) {
