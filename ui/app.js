@@ -737,7 +737,7 @@ function fmtCtxLabel(adhoc, lookback, pinCount = 0) {
   let base;
   if (!adhoc) base = 'sess';
   else base = lookback > 0 ? `${lookback} back${lookback !== 1 ? 's' : ''}` : 'none';
-  return pinCount > 0 ? `${base} · ${pinCount} bookmarked` : base;
+  return pinCount > 0 ? `${base} · ${pinCount} pin${pinCount !== 1 ? 's' : ''}` : base;
 }
 
 let ctxHighlightEnabled = false;
@@ -750,7 +750,7 @@ function updateCtxHighlight() {
   if (!adhoc || lookback <= 0) return;
   const msgItems = [...document.querySelectorAll('.history-item.msg')];
   msgItems.slice(-lookback * 2).forEach(el => el.classList.add('ctx-highlight'));
-  // Pre-highlight bookmark icons on the last N assistant messages
+  // Pre-highlight pin icons on the last N assistant messages
   const asstItems = [...document.querySelectorAll('#messages .history-item.msg.assistant')];
   asstItems.slice(-lookback).forEach(el => {
     const btn = el.querySelector('.msg-pin-btn');
@@ -1020,7 +1020,7 @@ async function sendMessage(text) {
   const _includeTopicMemory = (await _topicMemoryStateForSend(topic, _effectiveAgent, adhoc)).selected;
   const _pinnedIds = getPinnedItems()
     .filter(item => {
-      // Skip bookmarks from the current session — --resume already has that context
+      // Skip pins from the current session — --resume already has that context
       const sameSession = item.session_id && _currentSid && item.session_id === _currentSid;
       if (sameSession && !adhoc) return false;
       // Fresh adhoc turn (no lookback) — no accumulated context, always inject
@@ -2995,7 +2995,7 @@ function showCtxPopup(spanEl) {
   }
   if (pins.length) {
     if (html) html += `<div class="ctx-popup-divider"></div>`;
-    html += `<div class="ctx-popup-row"><span class="ctx-popup-key">bookmarked</span></div>`;
+    html += `<div class="ctx-popup-row"><span class="ctx-popup-key">pins</span></div>`;
     pins.forEach(item => {
       html += `<div class="ctx-popup-pin">
         <span class="ctx-popup-tag">${_pinTagStr(item)}</span>
@@ -3228,7 +3228,7 @@ function _pinStatus(item) {
   const currentSid = _sessionIds[chipTaKey] || null;
   const sameSession = item.session_id && currentSid && item.session_id === currentSid;
 
-  // Skip only if the bookmark is from the exact current session — --resume already covers it
+  // Skip only if the pin is from the exact current session — --resume already covers it
   if (sameSession && !isAdhoc) {
     const qual = chipAgent ? ` · #${chipTopic}@${chipAgent}` : '';
     return { text: `in session${qual} · skip`, cls: 'pin-status-session' };
@@ -3290,7 +3290,7 @@ function renderPinPanel() {
   }
 
   if (items.length) {
-    html += `<div class="pin-section-label">Bookmarked</div>`;
+    html += `<div class="pin-section-label">Pinned</div>`;
     html += items.map(item => {
       const st = _pinStatus(item);
       const tag = _pinTagStr(item);
@@ -3305,7 +3305,7 @@ function renderPinPanel() {
   }
 
   if (!items.length) {
-    html += '<div style="padding:0.5rem 0.8rem;color:#484858;font-size:0.78em">No bookmarks yet.<br>Click <svg width="9" height="11" viewBox="0 0 12 14" fill="currentColor" aria-hidden="true" style="vertical-align:-0.1em"><path d="M2 0h8a1 1 0 0 1 1 1v12.8l-5-2.9-5 2.9V1a1 1 0 0 1 1-1z"/></svg> on any response to add it.</div>';
+    html += '<div style="padding:0.5rem 0.8rem;color:#484858;font-size:0.78em">No pins yet.<br>Click <svg width="9" height="11" viewBox="0 0 12 14" fill="currentColor" aria-hidden="true" style="vertical-align:-0.1em"><path d="M2 0h8a1 1 0 0 1 1 1v12.8l-5-2.9-5 2.9V1a1 1 0 0 1 1-1z"/></svg> on any response to add it.</div>';
   }
 
   listEl.innerHTML = html;

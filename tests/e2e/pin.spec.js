@@ -48,7 +48,7 @@ async function seedPin(page, item) {
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
-test('bookmark button on bubble adds item to pin panel', async ({ page }) => {
+test('pin button on bubble adds item to pin panel', async ({ page }) => {
   await mockBackend(page);
   await page.route('**/chat', r => r.fulfill({
     status: 200, headers: SSE_HEADERS,
@@ -62,19 +62,19 @@ test('bookmark button on bubble adds item to pin panel', async ({ page }) => {
   // Wait for response bubble
   await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toBeVisible();
 
-  // Click the bookmark button on the bubble
+  // Click the pin button on the bubble
   const bubble = page.locator('.msg.assistant:not(.msg-thinking)');
   await bubble.hover();
   await bubble.locator('.msg-pin-btn').click();
 
-  // Open pin panel — should show the bookmarked item
+  // Open pin panel — should show the pinned item
   await page.click('#pin-btn');
   await expect(page.locator('#pin-panel.open')).toBeVisible();
   await expect(page.locator('.pin-item')).toHaveCount(1);
   await expect(page.locator('.pin-item-preview')).toContainText('Hello from agent');
 });
 
-test('clear pins unselects bookmarked responses from pin panel', async ({ page }) => {
+test('clear pins unselects pinned responses from pin panel', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
 
   let capturedBody = null;
@@ -119,7 +119,7 @@ test('pinned item from current session shows in-session skip', async ({ page }) 
   await page.fill('#input', '#squid@claude hello');
   await page.keyboard.press('Enter');
 
-  // Bookmark the response — session_id from STATS gets stored in the bookmark
+  // Pin the response — session_id from STATS gets stored in the pin
   const bubble = page.locator('.msg.assistant:not(.msg-thinking)');
   await expect(bubble).toBeVisible();
   await bubble.hover();
@@ -132,7 +132,7 @@ test('pinned item from current session shows in-session skip', async ({ page }) 
   await expect(page.locator('.pin-item-status')).toContainText('claude');
 });
 
-test('/clear invalidates cached session id so same-session bookmark can inject', async ({ page }) => {
+test('/clear invalidates cached session id so same-session pin can inject', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
   await page.route('**/chat', r => r.fulfill({
     status: 200, headers: SSE_HEADERS,
@@ -172,7 +172,7 @@ test('pinned item from same topic@agent shows will-inject for adhoc turn', async
   await expect(page.locator('.pin-item-status')).toContainText('will inject');
 });
 
-test('session send includes pinned_ids for cross-topic bookmarks', async ({ page }) => {
+test('session send includes pinned_ids for cross-topic pins', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
 
   let capturedBody = null;
@@ -185,7 +185,7 @@ test('session send includes pinned_ids for cross-topic bookmarks', async ({ page
   });
 
   await page.goto('/');
-  // Bookmark from a different topic — should be injected into session turn
+  // Pin from a different topic — should be injected into session turn
   await seedPin(page, { id: 77, topic: 'other', agent: 'codex', content: 'cross-topic context' });
 
   await page.fill('#input', '#squid@claude hello');

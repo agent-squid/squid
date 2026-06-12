@@ -14,27 +14,27 @@ along with the `session_context_log` table (see [[0007-cross-session-injection-t
 
 ## Current Design
 
-Injection is now **explicitly client-driven**. The client selects which bookmarks to send and
+Injection is now **explicitly client-driven**. The client selects which pins to send and
 the server injects them. Same-session exclusion happens on the client before the request is made.
 
 ### Scoping by mode
 
 | Mode | How pinned content enters | Same-session exclusion |
 |---|---|---|
-| Session turn (`--resume`) | Prepended as `<referenced_context>` block in `effective_message` | Client skips bookmarks whose `session_id` matches `_sessionIds[topic@agent]` |
-| Adhoc turn (`!`) | Prepended to `context_history` for `_build_prompt`, deduped against lookback window | Client skips same-session bookmarks |
+| Session turn (`--resume`) | Prepended as `<referenced_context>` block in `effective_message` | Client skips pins whose `session_id` matches `_sessionIds[topic@agent]` |
+| Adhoc turn (`!`) | Prepended to `context_history` for `_build_prompt`, deduped against lookback window | Client skips same-session pins |
 
 ### Client-side exclusion
 
-Bookmarks store `{ id, topic, agent, session_id, content }` in localStorage. The client
+Pins store `{ id, topic, agent, session_id, content }` in localStorage. The client
 tracks the most recent `session_id` per `topic@agent` in a `_sessionIds` map (populated from
-the `stats` SSE event on each response). At send time, a bookmark is skipped if:
+the `stats` SSE event on each response). At send time, a pin is skipped if:
 
 ```
 item.session_id && currentSessionId && item.session_id === currentSessionId
 ```
 
-This means same-`topic@agent` bookmarks from a **prior** session are still eligible for
+This means same-`topic@agent` pins from a **prior** session are still eligible for
 injection — only the exact current session is excluded. Same-`topic@agent` ≠ same session.
 
 ### Server-side injection
@@ -53,9 +53,9 @@ The server receives `pinned_ids: [id, ...]` in `POST /chat` and:
 
 After a successful injection, the client records the injected IDs in an `injectedInto`
 localStorage map keyed by `topic@agent`. Subsequent turns skip those IDs (`already added · skip`).
-This prevents the same bookmark from being sent on every turn.
+This prevents the same pin from being sent on every turn.
 
-### UI status labels (bookmark panel)
+### UI status labels (pin panel)
 
 | Status | Meaning |
 |---|---|
@@ -72,8 +72,8 @@ This prevents the same bookmark from being sent on every turn.
   `topic@agent` is correctly treated as cross-session and injected
 - Good: session turns get supplementary context via `<referenced_context>` without
   disrupting `--resume` history
-- Neutral: bookmarks are device-local (localStorage); cross-device sync not supported
+- Neutral: pins are device-local (localStorage); cross-device sync not supported
   (see [[0007-cross-session-injection-tracking]] — ephemerality section)
 - Neutral: if `_sessionIds` has no entry for the current `topic@agent` (first turn of a new
-  browser session), same-`topic@agent` bookmarks are not excluded — they inject, which may
+  browser session), same-`topic@agent` pins are not excluded — they inject, which may
   be redundant but is not harmful

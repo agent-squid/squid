@@ -41,18 +41,18 @@ wipes both `session_id` and `cwd`, allowing the next message to start fresh.
 Adhoc turns (`!`) bypass session resumption entirely. Each turn is independent:
 
 - `_build_prompt` injects the last N non-adhoc session turns as a `<conversation_history>` block
-- Bookmarked responses (`pinned_ids` from the client) are prepended to the context, deduplicated against the lookback window
+- Pinned responses (`pinned_ids` from the client) are prepended to the context, deduplicated against the lookback window
 - No `session_id` is stored or used
 
 Adhoc turns run in parallel on the same topic without queuing constraints.
 
 The UI shows which messages will be included before sending:
-- Typing `!N` pre-highlights the last N messages in the bookmark panel and lights up their bookmark icons
-- Persistent bookmarks (from clicking 🔖 on a response) are listed separately with status labels:
+- Typing `!N` pre-highlights the last N messages in the pin panel and lights up their pin icons
+- Persistent pins (from clicking 🔖 on a response) are listed separately with status labels:
   - `will inject` — will be prepended to `_build_prompt` context
   - `in session · #topic@agent · skip` — same topic@agent as current session turn; `--resume` already covers it. Agent is resolved from the topics cache (sticky agent from `topic_sessions`) when only `#topic` is typed without an explicit `@agent`
   - `already added · skip` — previously injected into this topic@agent session
-- The `ctx:` label on sent messages shows both lookback count and bookmark count (e.g. `ctx: 3 backs · 2 bookmarked`); clicking it shows a detail popup
+- The `ctx:` label on sent messages shows both lookback count and pin count (e.g. `ctx: 3 backs · 2 pins`); clicking it shows a detail popup
 
 **Contract tests**: `tests/e2e/pin.spec.js`
 

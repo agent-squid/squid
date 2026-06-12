@@ -48,7 +48,7 @@ Topics and agents are not a rigid setup step. You can create a new `#topic` the 
 - **Session vs. limited-context comparison:** compare a fully resumed lane against an adhoc prompt that includes only the last N exchanges.
 - **Live progress bubble:** watch queued state, tool/status output, and partial response progress while the CLI is working.
 - **Auto-compaction settings:** keep long-running lanes useful without manually babysitting context forever.
-- **Context bookmarks:** pin a useful answer and inject it into another session or adhoc turn.
+- **Context pins:** pin a useful answer and inject it into another session or adhoc turn.
 - **Process controls:** stop one process from the UI, stop by command, stop a topic, drain queues, clear sessions, and compact/reset context.
 - **History and filtering:** scan past work by topic, agent, or adhoc lane.
 - **Analytics:** review usage by time, topic, or agent, plus live process state.
