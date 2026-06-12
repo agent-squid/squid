@@ -755,6 +755,29 @@ body {
   border-bottom: 1px solid #1e1e28;
   flex-shrink: 0;
 }
+#pin-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+#pin-panel-clear {
+  background: transparent;
+  border: 1px solid #333;
+  color: #777;
+  cursor: pointer;
+  font-size: 0.72em;
+  padding: 0.12rem 0.45rem;
+  border-radius: 5px;
+}
+#pin-panel-clear:hover:not(:disabled) {
+  color: #aaa;
+  border-color: #555;
+}
+#pin-panel-clear:disabled {
+  color: #3f3f4a;
+  border-color: #25252f;
+  cursor: default;
+}
 #pin-panel-close {
   background: transparent;
   border: none;

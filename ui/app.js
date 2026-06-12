@@ -3046,6 +3046,13 @@ function getPinnedItems() {
   try { return JSON.parse(localStorage.getItem('pinnedItems') || '[]'); } catch { return []; }
 }
 function setPinnedItems(items) { localStorage.setItem('pinnedItems', JSON.stringify(items)); }
+function clearPinnedItems() {
+  setPinnedItems([]);
+  document.querySelectorAll('.msg-pin-btn.pinned')
+    .forEach(b => b.classList.remove('pinned'));
+  updatePinCount();
+  if (pinPanel.classList.contains('open')) renderPinPanel();
+}
 function getInjectedInto() {
   try { return JSON.parse(localStorage.getItem('injectedInto') || '{}'); } catch { return {}; }
 }
@@ -3249,6 +3256,8 @@ function _memoryStatus(state) {
 function renderPinPanel() {
   const items = getPinnedItems();
   const listEl = document.getElementById('pin-panel-list');
+  const clearBtn = document.getElementById('pin-panel-clear');
+  if (clearBtn) clearBtn.disabled = items.length === 0;
   let html = '';
   const memoryState = _topicMemoryState();
   const memoryStatus = _memoryStatus(memoryState);
@@ -3434,6 +3443,7 @@ function initPin() {
     else openPinPanel();
   });
   document.getElementById('pin-panel-close').addEventListener('click', closePinPanel);
+  document.getElementById('pin-panel-clear').addEventListener('click', clearPinnedItems);
   memoryCloseBtn.addEventListener('click', closeMemoryEditor);
   memorySaveBtn.addEventListener('click', saveMemoryEditor);
   memoryModal.addEventListener('mousedown', e => {

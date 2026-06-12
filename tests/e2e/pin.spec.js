@@ -74,6 +74,40 @@ test('bookmark button on bubble adds item to pin panel', async ({ page }) => {
   await expect(page.locator('.pin-item-preview')).toContainText('Hello from agent');
 });
 
+test('clear pins unselects bookmarked responses from pin panel', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+
+  let capturedBody = null;
+  await page.route('**/chat', async route => {
+    capturedBody = route.request().postDataJSON();
+    await route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(META, { data: 'session response' }, DONE),
+    });
+  });
+
+  await page.goto('/');
+  await seedPin(page, { id: 42, topic: 'other', agent: 'claude', content: 'first selected response' });
+  await seedPin(page, { id: 43, topic: 'notes', agent: 'codex', content: 'second selected response' });
+
+  await page.click('#pin-btn');
+  await expect(page.locator('#pin-panel-clear')).toBeEnabled();
+  await expect(page.locator('.pin-item')).toHaveCount(2);
+
+  await page.click('#pin-panel-clear');
+  await expect(page.locator('.pin-item')).toHaveCount(0);
+  await expect(page.locator('#pin-panel-clear')).toBeDisabled();
+  await expect(page.locator('.memory-item')).toBeVisible();
+  const storedPins = await page.evaluate(() => JSON.parse(localStorage.getItem('pinnedItems') || '[]'));
+  expect(storedPins).toEqual([]);
+
+  await page.fill('#input', '#squid@claude hello');
+  await page.keyboard.press('Enter');
+
+  await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toBeVisible();
+  expect(capturedBody?.pinned_ids).toBeUndefined();
+});
+
 test('pinned item from current session shows in-session skip', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
   await page.route('**/chat', r => r.fulfill({
