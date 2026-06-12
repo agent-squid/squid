@@ -406,8 +406,9 @@ def get_topic_agent_history(topic: str) -> list[dict]:
 def insert_user_message(
     topic: str, agent: Optional[str],
     content: str, context_ids: Optional[list[int]] = None,
+    mem: bool = False,
 ) -> int:
-    context_json = json.dumps(context_ids) if context_ids else None
+    context_json = json.dumps({"pins": context_ids or [], "mem": mem}) if (context_ids or mem) else None
     with _connect() as conn:
         cur = conn.execute(
             """INSERT INTO chat_messages (topic, agent, role, content, status, context)
@@ -502,6 +503,26 @@ def clear_topic_session(topic: str, agent: str) -> None:
         if row:
             _invalidated_session_ids.add(row["session_id"])
         conn.execute("DELETE FROM topic_sessions WHERE topic=? AND agent=?", (topic, agent))
+
+
+def get_session_injected_ids(session_id: str) -> list[int]:
+    """Return all pin IDs that were injected in user messages belonging to this session."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT context FROM chat_messages WHERE session_id=? AND role='user' AND context IS NOT NULL",
+            (session_id,),
+        ).fetchall()
+    ids: list[int] = []
+    for row in rows:
+        try:
+            v = json.loads(row["context"])
+            if isinstance(v, list):
+                ids.extend(v)
+            elif isinstance(v, dict):
+                ids.extend(v.get("pins") or [])
+        except Exception:
+            pass
+    return list(dict.fromkeys(ids))  # dedupe preserving order
 
 
 # ── context history ────────────────────────────────────────────────────────────
@@ -609,7 +630,7 @@ def get_message(msg_id: int) -> Optional[dict]:
                       m.content, m.status, m.adhoc, m.session_id,
                       m.context, m.created_at AS timestamp, m.reply_to,
                       m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
-                      u.content AS prompt,
+                      u.content AS prompt, u.context AS prompt_context,
                       s.input_tokens, s.output_tokens, s.cache_read_tokens,
                       s.cache_write_tokens, s.history_input_tokens,
                       s.cost_usd, s.duration_ms, s.lookback,
@@ -653,7 +674,7 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
                        m.content, m.status, m.adhoc, m.session_id,
                        m.context, m.created_at AS timestamp, m.reply_to,
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
-                       u.content AS prompt,
+                       u.content AS prompt, u.context AS prompt_context,
                        s.input_tokens, s.output_tokens, s.cache_read_tokens,
                        s.cache_write_tokens, s.history_input_tokens,
                        s.cost_usd, s.duration_ms, s.lookback,

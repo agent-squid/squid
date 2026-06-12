@@ -59,6 +59,7 @@ from .stats_db import (
     insert_user_message, insert_assistant_message, update_assistant_message,
     update_message_quota_snapshot,
     get_context_history, get_messages_by_ids, mark_orphaned_pending, get_message,
+    get_session_injected_ids,
     get_topic_session, clear_topic_session,
     delete_topic, hide_topic, get_topic_agents, get_topic_agent_history,
     clear_agent_sessions, get_agent_sessions,
@@ -157,6 +158,7 @@ class ChatRequest(BaseModel):
     topic: str = Field("default")
     agent: Optional[str] = None
     lookback: int = Field(0)
+    lookback_via_pins: bool = Field(False)
     adhoc: bool = Field(False)
     pinned_ids: Optional[list[int]] = None
     include_topic_memory: bool = Field(False)
@@ -488,7 +490,7 @@ async def chat(req: ChatRequest):
     context_history: list[dict] = []
     context_ids: Optional[list[int]] = None
 
-    if req.adhoc and lookback > 0:
+    if req.adhoc and lookback > 0 and not req.lookback_via_pins:
         context_history, context_ids = get_context_history(
             topic, lookback, agent=resolved_agent
         )
@@ -529,7 +531,9 @@ async def chat(req: ChatRequest):
     if prefix_blocks:
         effective_message = "\n\n".join(prefix_blocks + [req.message])
 
-    user_msg_id = insert_user_message(topic, resolved_agent, req.message, context_ids=context_ids)
+    stored_context_ids = list({*(context_ids or []), *(req.pinned_ids or [])}) or None
+    user_msg_id = insert_user_message(topic, resolved_agent, req.message,
+                                      context_ids=stored_context_ids, mem=req.include_topic_memory)
     asst_msg_id = insert_assistant_message(topic, resolved_agent, user_msg_id, adhoc=req.adhoc)
 
     log.info(
@@ -730,7 +734,9 @@ async def get_session(topic: str, agent: str):
     stored = get_topic_session(topic, agent)
     if not stored:
         return JSONResponse({"session_id": None, "cwd": None})
-    return JSONResponse({"session_id": stored["session_id"], "cwd": stored["cwd"]})
+    injected_ids = get_session_injected_ids(stored["session_id"])
+    return JSONResponse({"session_id": stored["session_id"], "cwd": stored["cwd"],
+                         "injected_ids": injected_ids})
 
 
 @app.delete("/topics/{topic}/session")

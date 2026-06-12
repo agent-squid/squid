@@ -317,9 +317,16 @@ let _agentsCache = null;
 let _agentsCachePromise = null;
 
 function clearCachedSessionId(topic, agent) {
-  delete _sessionIds[`${topic}@${agent || '_'}`];
-  delete _memoryInjectedInto[`${topic}@${agent || '_'}`];
-  delete _sessionLookupCache[`${topic}@${agent || '_'}`];
+  const taKey = `${topic}@${agent || '_'}`;
+  const sid = _sessionIds[taKey];
+  if (sid) {
+    const inj = getInjectedInto();
+    delete inj[sid];
+    setInjectedInto(inj);
+  }
+  delete _sessionIds[taKey];
+  delete _memoryInjectedInto[taKey];
+  delete _sessionLookupCache[taKey];
   if (agent) delete _sessionLookupCache[`${topic}@${agent}`];
 }
 
@@ -356,6 +363,7 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0) {
   input.placeholder = 'message…';
   updateActiveQuotaGauge();
   updatePinCount();
+  updateInContextMarkers();
 }
 
 function clearTopicChip() {
@@ -363,7 +371,6 @@ function clearTopicChip() {
   localStorage.removeItem('squid_sticky_chip');
   topicChipEl.classList.remove('visible', 'needs-agent');
   input.placeholder = '#topic or #topic@agent message…';
-  document.querySelectorAll('.history-item.ctx-highlight').forEach(el => el.classList.remove('ctx-highlight'));
   updateActiveQuotaGauge();
 }
 
@@ -382,7 +389,7 @@ function parseInput(text) {
   // adhoc: #topic!N or #topic@agent!N (N optional, defaults to 0 = no lookback)
   const ma = text.match(/^#(\w+)(?:@(\w+))?!(\d*)\s+([\s\S]*)$/);
   if (ma && ma[4].trim()) {
-    return { topic: ma[1].toLowerCase(), agent: ma[2] || null, adhoc: true, lookback: ma[3] ? parseInt(ma[3]) : 0, message: ma[4].trim() };
+    return { topic: ma[1].toLowerCase(), agent: ma[2] || null, adhoc: true, lookback: ma[3] ? Math.min(parseInt(ma[3]), 20) : 0, message: ma[4].trim() };
   }
   // session: #topic or #topic@agent
   const ms = text.match(/^#(\w+)(?:@(\w+))?\s+([\s\S]*)$/);
@@ -549,7 +556,7 @@ async function loadHistory() {
   historyOffset += items.length;
   historyExhausted = !has_more;
   historyLoading = false;
-  updateCtxHighlight();
+  updateInContextMarkers();
 
   if (historyExhausted && topSentinel) {
     topSentinel.remove();
@@ -728,35 +735,81 @@ form.addEventListener('submit', async (e) => {
   resizeComposer();
   hideAutocomplete();
   invalidateTopicsCache();
-  ctxHighlightEnabled = false;
   sendMessage(text);
-  document.querySelectorAll('.history-item.ctx-highlight').forEach(el => el.classList.remove('ctx-highlight'));
 });
 
-function fmtCtxLabel(adhoc, lookback, pinCount = 0) {
-  let base;
-  if (!adhoc) base = 'sess';
-  else base = lookback > 0 ? `${lookback} back${lookback !== 1 ? 's' : ''}` : 'none';
-  return pinCount > 0 ? `${base} · ${pinCount} pin${pinCount !== 1 ? 's' : ''}` : base;
+function fmtCtxLabel(adhoc, pinCount = 0, mem = false) {
+  const parts = [adhoc ? 'adhoc' : 'sess'];
+  if (mem) parts.push('mem');
+  if (pinCount > 0) parts.push(`${pinCount} pin${pinCount !== 1 ? 's' : ''}`);
+  return parts.join(' · ');
 }
 
-let ctxHighlightEnabled = false;
+const _lookbackUnselected = new Set(); // cleared on N change or after send; never persisted
+let _lastLookbackN = 0;
 
-function updateCtxHighlight() {
-  document.querySelectorAll('.history-item.ctx-highlight').forEach(el => el.classList.remove('ctx-highlight'));
-  document.querySelectorAll('.msg-pin-btn.dynamic-sel').forEach(b => b.classList.remove('dynamic-sel'));
-  if (!ctxHighlightEnabled) return;
-  const { adhoc, lookback } = parseInput(input.value);
-  if (!adhoc || lookback <= 0) return;
-  const msgItems = [...document.querySelectorAll('.history-item.msg')];
-  msgItems.slice(-lookback * 2).forEach(el => el.classList.add('ctx-highlight'));
-  // Pre-highlight pin icons on the last N assistant messages
-  const asstItems = [...document.querySelectorAll('#messages .history-item.msg.assistant')];
-  asstItems.slice(-lookback).forEach(el => {
-    const btn = el.querySelector('.msg-pin-btn');
-    if (btn && !btn.classList.contains('pinned')) btn.classList.add('dynamic-sel');
+function _allLookbackItems(adhoc, lookback) {
+  if (!adhoc || lookback <= 0) return [];
+  return [...document.querySelectorAll('#messages .history-item.assistant')]
+    .filter(el => el.dataset.msgId)
+    .map(el => {
+      const id = parseInt(el.dataset.msgId);
+      const contentEl = el.querySelector(':scope > div:nth-child(2)');
+      return { id, el, topic: el.dataset.topic || 'default', agent: el.dataset.agent || null, session_id: el.dataset.sessionId || null, content: contentEl?.innerText || '' };
+    })
+    .sort((a, b) => a.id - b.id)
+    .slice(-lookback);
+}
+
+function _activeLookbackItems(adhoc, lookback) {
+  return _allLookbackItems(adhoc, lookback).filter(item => !_lookbackUnselected.has(item.id));
+}
+
+function updateInContextMarkers() {
+  const { topic, agent, adhoc, lookback } = _currentContextTarget();
+
+  if (lookback !== _lastLookbackN) {
+    _lookbackUnselected.clear();
+    _lastLookbackN = lookback;
+    // Strip all stale lookback-sel classes before re-applying the new selection
+    document.querySelectorAll('.msg-pin-btn.lookback-sel')
+      .forEach(btn => btn.classList.remove('lookback-sel'));
+  }
+
+  const taKey   = `${topic}@${agent || '_'}`;
+  const sid     = (!adhoc && agent) ? (_sessionIds[taKey] || null) : null;
+  const injected = sid ? (getInjectedInto()[sid] || []) : [];
+
+  const activeItems = adhoc && lookback > 0 ? _activeLookbackItems(adhoc, lookback) : [];
+  const activeIdSet = new Set(activeItems.map(i => i.id));
+
+  document.querySelectorAll('#messages .history-item.assistant').forEach(el => {
+    const ctxSpan = el.querySelector('.user-ctx');
+    const msgId = el.dataset.msgId ? parseInt(el.dataset.msgId) : null;
+    const wasInjected = msgId && injected.includes(msgId);
+
+    // Orange dot = already in context (session continuity or prior injection), not "will inject"
+    let inCtx = false;
+    if (!adhoc) {
+      inCtx = !!(sid && el.dataset.sessionId === sid);
+    }
+    inCtx = inCtx || !!wasInjected;
+
+    if (ctxSpan) {
+      ctxSpan.classList.toggle('ctx-live', inCtx);
+      ctxSpan.classList.remove('ctx-injected');
+    }
+
+    // Reflect lookback selection state on the pin button
+    const pinBtn = el.querySelector('.msg-pin-btn');
+    if (pinBtn) pinBtn.classList.toggle('lookback-sel', !!(adhoc && activeIdSet.has(msgId)));
   });
-  if (pinPanel.classList.contains('open')) renderPinPanel();
+
+  // Clear lookback-sel on any bubbles no longer in active set (e.g. after N shrinks)
+  document.querySelectorAll('.msg-pin-btn.lookback-sel').forEach(btn => {
+    const id = parseInt(btn.dataset.msgId);
+    if (!activeIdSet.has(id)) btn.classList.remove('lookback-sel');
+  });
 }
 
 async function _maybePromoteSlug(val) {
@@ -782,15 +835,13 @@ async function _maybePromoteSlug(val) {
   input.value = '';
   hideAutocomplete();
   resizeComposer();
-  updateCtxHighlight();
   updatePinCount();
 }
 
 input.addEventListener('input', () => {
-  ctxHighlightEnabled = true;
   resizeComposer();
   updateAutocomplete();
-  updateCtxHighlight();
+  updateInContextMarkers();
   updatePinCount();
   updateActiveQuotaGauge();
   _maybePromoteSlug(input.value);
@@ -805,6 +856,7 @@ input.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Escape' && pinPanel.classList.contains('open')) { closePinPanel(); return; }
   if (e.key === 'Escape' && helpPanel.classList.contains('open')) { closeHelp(); return; }
+  if (e.key === 'Escape' && document.getElementById('msg-modal')?.classList.contains('open')) { document.getElementById('msg-modal').classList.remove('open'); return; }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     form.requestSubmit();
@@ -832,19 +884,10 @@ async function sendMessage(text) {
   setTopicChip(topic, agent, adhoc, lookback);
   const sendTime = new Date().toISOString();
 
-  const ctxLabel = fmtCtxLabel(adhoc, lookback);
   const userBubble = makeUserBubble(message, topic, agent, null, adhoc, lookback);
   const userTopicTag = userBubble.querySelector('.topic-tag');
   messages.appendChild(userBubble);
-  const userTsEl = addTimestamp(userBubble, sendTime, true);
-  let userCtxSpan = null;
-  if (userTsEl) {
-    userCtxSpan = document.createElement('span');
-    userCtxSpan.className = 'user-ctx';
-    userCtxSpan.textContent = '  · ctx:' + ctxLabel;
-    userCtxSpan.addEventListener('click', e => { e.stopPropagation(); showCtxPopup(userCtxSpan); });
-    userTsEl.appendChild(userCtxSpan);
-  }
+  addTimestamp(userBubble, sendTime, true);
   requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
 
   // ── Thinking bubble (visible immediately, shows status/queue/loader) ──────────
@@ -921,6 +964,8 @@ async function sendMessage(text) {
   // ── Response bubble (not yet in DOM — appended on first content chunk) ────────
   const bubble = document.createElement('div');
   bubble.className = 'msg assistant';
+  bubble.dataset.topic = topic;
+  if (agent) bubble.dataset.agent = agent;
   const responseHeader = document.createElement('div');
   responseHeader.className = 'response-header';
   const responseHeaderTag = makeTopicTag(topic, agent, { adhoc, lookback });
@@ -929,6 +974,12 @@ async function sendMessage(text) {
   headerText.appendChild(responseHeaderTag);
   headerText.appendChild(document.createTextNode('  ' + truncate(message, 55)));
   responseHeader.appendChild(headerText);
+  const liveCtxSpan = document.createElement('span');
+  liveCtxSpan.className = 'user-ctx';
+  liveCtxSpan.textContent = 'ctx:' + fmtCtxLabel(adhoc);
+  liveCtxSpan.dataset.topic = topic;
+  liveCtxSpan.addEventListener('click', e => { e.stopPropagation(); showCtxPopup(liveCtxSpan); });
+  responseHeader.appendChild(liveCtxSpan);
   bubble.appendChild(responseHeader);
   const contentDiv = document.createElement('div');
   bubble.appendChild(contentDiv);
@@ -1018,6 +1069,8 @@ async function sendMessage(text) {
   const _injected = getInjectedInto();
   const _currentSid = _sessionIds[_taKey] || null;
   const _includeTopicMemory = (await _topicMemoryStateForSend(topic, _effectiveAgent, adhoc)).selected;
+  const _lookbackItems = _activeLookbackItems(adhoc, lookback);
+  const _lookbackIds = _lookbackItems.map(item => item.id);
   const _pinnedIds = getPinnedItems()
     .filter(item => {
       // Skip pins from the current session — --resume already has that context
@@ -1025,11 +1078,12 @@ async function sendMessage(text) {
       if (sameSession && !adhoc) return false;
       // Fresh adhoc turn (no lookback) — no accumulated context, always inject
       if (adhoc && lookback === 0) return true;
-      // Skip already-injected items (only meaningful when model has prior context via !N lookback)
-      if ((_injected[_taKey] || []).includes(item.id)) return false;
+      // Skip already-injected items (keyed by session_id for cross-device correctness)
+      if (_currentSid && (_injected[_currentSid] || []).includes(item.id)) return false;
       return true;
     })
     .map(item => item.id);
+  const _contextIds = [...new Set([..._lookbackIds, ..._pinnedIds])];
 
   try {
     const res = await fetch('/chat', {
@@ -1037,10 +1091,11 @@ async function sendMessage(text) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         message, topic, agent, lookback, adhoc,
+        ...(adhoc && lookback > 0 ? { lookback_via_pins: true } : {}),
         ...(_includeTopicMemory ? { include_topic_memory: true } : {}),
-        ...(_pinnedIds.length ? { pinned_ids: _pinnedIds } : {}),
+        ...(_contextIds.length ? { pinned_ids: _contextIds } : {}),
       }),
-      // lookback: 0 for session mode (CLI owns context), N for adhoc #topic!N
+      // For UI sends, !N is resolved into explicit pinned_ids from the current list.
       signal: controller.signal,
     });
     if (res.status === 400) {
@@ -1053,6 +1108,8 @@ async function sendMessage(text) {
       throw new Error(err.error || `HTTP 400`);
     }
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+    _lookbackUnselected.clear();
+    _lastLookbackN = 0;
     if (_includeTopicMemory && !adhoc) {
       const memoryKey = _memoryInjectedKey(topic, _effectiveAgent);
       _memoryInjectedInto[memoryKey] = true;
@@ -1107,15 +1164,11 @@ async function sendMessage(text) {
                 }
               }
               setTopicChip(topic, resolvedAgent, resolvedAdhoc, lookback);
-              // If no ctx span yet but resolved agent found, add ctx to the timestamp footer
-              if (!userCtxSpan && resolvedAgent && !resolvedAdhoc && userTsEl) {
-                userCtxSpan = document.createElement('span');
-                userCtxSpan.className = 'user-ctx';
-                userCtxSpan.textContent = '  · ctx:session';
-                userTsEl.appendChild(userCtxSpan);
-              }
               if (meta.msg_id) {
                 msgId = meta.msg_id;
+                bubble.dataset.msgId = String(msgId);
+                bubble.dataset.topic = topic;
+                if (resolvedAgent) bubble.dataset.agent = resolvedAgent;
                 startStatusFallback(msgId);
                 addPinButton(bubble, msgId, topic, resolvedAgent);
                 killBtn.style.display = '';
@@ -1140,25 +1193,9 @@ async function sendMessage(text) {
                 bubble.dataset.sessionId = stats.session_id;
               }
               statsEl = addStats(bubble, stats, new Date().toISOString());
-              // Update user timestamp ctx with real compound label from stats
-              const finalCtxLabel = fmtCtxLabel(!!stats.adhoc, stats.lookback ?? 0);
-              if (userTsEl) {
-                if (!userCtxSpan && finalCtxLabel) {
-                  userCtxSpan = document.createElement('span');
-                  userCtxSpan.className = 'user-ctx';
-                  userTsEl.appendChild(userCtxSpan);
-                }
-                if (userCtxSpan) {
-                  if (finalCtxLabel) {
-                    userCtxSpan.textContent = '  · ctx:' + finalCtxLabel;
-                    if (stats.session_id) userCtxSpan.dataset.sessionId = stats.session_id;
-                    if (stats.cwd) userCtxSpan.dataset.cwd = stats.cwd;
-                  } else {
-                    userCtxSpan.remove();
-                    userCtxSpan = null;
-                  }
-                }
-              }
+              liveCtxSpan.textContent = 'ctx:' + fmtCtxLabel(!!stats.adhoc);
+              if (stats.session_id) liveCtxSpan.dataset.sessionId = stats.session_id;
+              if (stats.cwd) liveCtxSpan.dataset.cwd = stats.cwd;
             } catch {}
             eventName = null;
 
@@ -1196,23 +1233,20 @@ async function sendMessage(text) {
               scrollToBottom();
             }
             // Update ctx label with pin count and store IDs for popup
-            if (_pinnedIds.length && userCtxSpan) {
-              const finalCtx = fmtCtxLabel(adhoc, lookback, _pinnedIds.length);
-              userCtxSpan.textContent = '  · ctx:' + finalCtx;
-              userCtxSpan.dataset.pinnedIds = JSON.stringify(_pinnedIds);
-            }
-            // Record injected pinned IDs so they're not re-injected when model has prior context (!N lookback)
+            liveCtxSpan.textContent = 'ctx:' + fmtCtxLabel(adhoc, _contextIds.length, _includeTopicMemory);
+            liveCtxSpan.dataset.pinnedIds = JSON.stringify(_contextIds);
+            liveCtxSpan.dataset.mem = _includeTopicMemory ? 'true' : 'false';
+            // Record injected pinned IDs keyed by session_id for cross-device correctness
             // Skip recording for lookback=0 adhoc turns — each is a fresh context, pins always re-inject
-            if (_pinnedIds.length) {
-              if (!(adhoc && lookback === 0)) {
-                const _finalAgent = resolvedAgent || agent || null;
-                const _taKey = `${topic}@${_finalAgent || '_'}`;
+            if (_contextIds.length) {
+              if (!(adhoc && lookback === 0) && lastSessionId) {
                 const _inj = getInjectedInto();
-                _inj[_taKey] = [...new Set([...(_inj[_taKey] || []), ..._pinnedIds])];
+                _inj[lastSessionId] = [...new Set([...(_inj[lastSessionId] || []), ..._contextIds])];
                 setInjectedInto(_inj);
               }
               if (pinPanel.classList.contains('open')) renderPinPanel();
             }
+            updateInContextMarkers();
             eventName = null;
 
           } else if (eventName === 'error') {
@@ -1544,6 +1578,10 @@ function appendHistoryItem(item, container) {
   const lb = item.stats?.lookback ?? 0;
   const asstBubble = document.createElement('div');
   asstBubble.className = 'msg assistant history-item';
+  if (item.id) asstBubble.dataset.msgId = String(item.id);
+  asstBubble.dataset.topic = item.topic || 'default';
+  if (item.agent) asstBubble.dataset.agent = item.agent;
+  if (item.session_id) asstBubble.dataset.sessionId = item.session_id;
 
   const asstHeader = document.createElement('div');
   asstHeader.className = 'response-header';
@@ -1564,6 +1602,26 @@ function appendHistoryItem(item, container) {
   });
   asstHeaderText.appendChild(promptSpan);
   asstHeader.appendChild(asstHeaderText);
+
+  const _pc = (() => {
+    try {
+      const v = JSON.parse(item.prompt_context || 'null');
+      if (!v) return { pins: [], mem: false };
+      if (Array.isArray(v)) return { pins: v, mem: false };
+      return { pins: v.pins || [], mem: !!v.mem };
+    } catch { return { pins: [], mem: false }; }
+  })();
+  const ctxSpan = document.createElement('span');
+  ctxSpan.className = 'user-ctx';
+  ctxSpan.textContent = 'ctx:' + fmtCtxLabel(!!item.adhoc, _pc.pins.length, _pc.mem);
+  ctxSpan.dataset.sessionId = item.session_id || '';
+  ctxSpan.dataset.cwd = item.stats?.cwd || '';
+  ctxSpan.dataset.topic = item.topic || '';
+  ctxSpan.dataset.pinnedIds = JSON.stringify(_pc.pins);
+  ctxSpan.dataset.mem = _pc.mem ? 'true' : 'false';
+  ctxSpan.addEventListener('click', e => { e.stopPropagation(); showCtxPopup(ctxSpan); });
+  asstHeader.appendChild(ctxSpan);
+
   asstBubble.appendChild(asstHeader);
 
   const asstContent = document.createElement('div');
@@ -2976,30 +3034,38 @@ function showCtxPopup(spanEl) {
     popup.id = 'ctx-popup';
     document.getElementById('app').appendChild(popup);
   }
-  // Toggle off if already showing for this span
-  if (popup.dataset.forSpan === String(spanEl) && popup.classList.contains('open')) {
+  if (popup._forSpanEl === spanEl && popup.classList.contains('open')) {
     popup.classList.remove('open');
+    popup._forSpanEl = null;
     return;
   }
-  popup.dataset.forSpan = String(spanEl);
+  popup._forSpanEl = spanEl;
 
   const sid    = spanEl.dataset.sessionId || '';
   const cwd    = spanEl.dataset.cwd || '';
+  const mem    = spanEl.dataset.mem === 'true';
+  const topic  = spanEl.dataset.topic || '';
   const pinIds = JSON.parse(spanEl.dataset.pinnedIds || '[]');
-  const pins   = getPinnedItems().filter(i => pinIds.includes(i.id));
 
   let html = '';
   if (sid || cwd) {
     html += `<div class="ctx-popup-row"><span class="ctx-popup-key">session</span><span class="ctx-popup-val">${sid}</span></div>`;
     if (cwd) html += `<div class="ctx-popup-row"><span class="ctx-popup-key">cwd</span><span class="ctx-popup-val">${cwd}</span></div>`;
   }
-  if (pins.length) {
+  if (mem && topic) {
+    if (html) html += `<div class="ctx-popup-divider"></div>`;
+    html += `<div class="ctx-popup-pin ctx-popup-mem-row" data-topic="${topic}">
+      <span class="ctx-popup-tag">mem</span>
+      <span class="ctx-popup-preview">#${topic} memory</span>
+    </div>`;
+  }
+  if (pinIds.length) {
     if (html) html += `<div class="ctx-popup-divider"></div>`;
     html += `<div class="ctx-popup-row"><span class="ctx-popup-key">pins</span></div>`;
-    pins.forEach(item => {
-      html += `<div class="ctx-popup-pin">
-        <span class="ctx-popup-tag">${_pinTagStr(item)}</span>
-        <span class="ctx-popup-preview">${(item.content || '').replace(/</g,'&lt;').slice(0,70)}</span>
+    pinIds.forEach(id => {
+      html += `<div class="ctx-popup-pin" data-pin-id="${id}">
+        <span class="ctx-popup-tag">#${id}</span>
+        <span class="ctx-popup-preview" id="ctx-pin-preview-${id}">loading…</span>
       </div>`;
     });
   }
@@ -3008,11 +3074,55 @@ function showCtxPopup(spanEl) {
   popup.innerHTML = html;
   popup.classList.add('open');
 
-  // Position above the span
+  const memRow = popup.querySelector('.ctx-popup-mem-row');
+  if (memRow) {
+    memRow.addEventListener('click', () => {
+      popup.classList.remove('open');
+      popup._forSpanEl = null;
+      openMemoryEditor(memRow.dataset.topic);
+    });
+  }
+
+  popup.querySelectorAll('.ctx-popup-pin[data-pin-id]').forEach(row => {
+    row.addEventListener('click', () => openMsgModal(parseInt(row.dataset.pinId)));
+  });
+
+  pinIds.forEach(id => {
+    fetch(`/chat/${id}/status`)
+      .then(r => r.json())
+      .then(msg => {
+        const el = document.getElementById(`ctx-pin-preview-${id}`);
+        if (el) el.textContent = (msg.content || msg.prompt || '(empty)').slice(0, 80);
+      })
+      .catch(() => {
+        const el = document.getElementById(`ctx-pin-preview-${id}`);
+        if (el) el.textContent = 'failed to load';
+      });
+  });
+
   const rect = spanEl.getBoundingClientRect();
   const appRect = document.getElementById('app').getBoundingClientRect();
   popup.style.bottom = (appRect.bottom - rect.top + 6) + 'px';
   popup.style.right  = (appRect.right  - rect.right + 0) + 'px';
+}
+
+async function openMsgModal(msgId) {
+  const ctxPopup = document.getElementById('ctx-popup');
+  if (ctxPopup) { ctxPopup.classList.remove('open'); ctxPopup._forSpanEl = null; }
+  const modal = document.getElementById('msg-modal');
+  const title = document.getElementById('msg-modal-title');
+  const body  = document.getElementById('msg-modal-body');
+  title.textContent = `Message #${msgId}`;
+  body.innerHTML = '<div class="ctx-popup-row" style="padding:1rem"><span class="ctx-popup-key">Loading…</span></div>';
+  modal.classList.add('open');
+  try {
+    const msg = await fetch(`/chat/${msgId}/status`).then(r => r.json());
+    title.textContent = `Message #${msgId} · #${msg.topic || ''}${msg.agent ? ' @' + msg.agent : ''}`;
+    body.innerHTML = '';
+    appendHistoryItem(msg, body);
+  } catch {
+    body.innerHTML = '<div class="ctx-popup-row" style="padding:1rem"><span class="ctx-popup-key">Failed to load</span></div>';
+  }
 }
 
 // ── pin basket ────────────────────────────────────────────────────────────────
@@ -3048,8 +3158,10 @@ function getPinnedItems() {
 function setPinnedItems(items) { localStorage.setItem('pinnedItems', JSON.stringify(items)); }
 function clearPinnedItems() {
   setPinnedItems([]);
-  document.querySelectorAll('.msg-pin-btn.pinned')
-    .forEach(b => b.classList.remove('pinned'));
+  document.querySelectorAll('.msg-pin-btn.pinned').forEach(b => b.classList.remove('pinned'));
+  const { adhoc, lookback } = _currentContextTarget();
+  _allLookbackItems(adhoc, lookback).forEach(item => _lookbackUnselected.add(item.id));
+  updateInContextMarkers();
   updatePinCount();
   if (pinPanel.classList.contains('open')) renderPinPanel();
 }
@@ -3062,6 +3174,12 @@ function _currentContextTarget() {
   const parsed = parseInput(input.value);
   const topic = parsed.topic || stickyChip?.topic || 'default';
   const adhoc = parsed.adhoc || (stickyChip?.adhoc ?? false);
+  // parsed.lookback is 0 both for "explicit !0" and "regex didn't match" (default path).
+  // Use chip's lookback when the adhoc regex didn't match (parsed.adhoc is false but chip is adhoc).
+  const fromChip = !!(stickyChip && !input.value.startsWith('#'));
+  const lookback = adhoc
+    ? (fromChip || !parsed.adhoc ? (stickyChip?.lookback || 0) : parsed.lookback)
+    : 0;
   let agent = parsed.agent || stickyChip?.agent || null;
   if (!agent && _topicsCache) {
     agent = _topicsCache.find(t => t.name === topic)?.agent || null;
@@ -3069,9 +3187,10 @@ function _currentContextTarget() {
     _acTopics().then(() => {
       updatePinCount();
       if (pinPanel.classList.contains('open')) renderPinPanel();
+      updateInContextMarkers();
     });
   }
-  return { topic, agent, adhoc };
+  return { topic, agent, adhoc, lookback };
 }
 
 function _memoryOverrideKey(topic, agent, adhoc) {
@@ -3153,9 +3272,17 @@ function _getSessionMeta(topic, agent) {
     .then(r => r.ok ? r.json() : null)
     .then(data => {
       _sessionLookupCache[key] = { ...(data || { session_id: null, cwd: null }), loading: false };
-      if (data?.session_id) _sessionIds[`${topic}@${agent}`] = data.session_id;
+      if (data?.session_id) {
+        _sessionIds[`${topic}@${agent}`] = data.session_id;
+        if (data.injected_ids?.length) {
+          const inj = getInjectedInto();
+          inj[data.session_id] = [...new Set([...(inj[data.session_id] || []), ...data.injected_ids])];
+          setInjectedInto(inj);
+        }
+      }
       updatePinCount();
       if (pinPanel.classList.contains('open')) renderPinPanel();
+      updateInContextMarkers();
     })
     .catch(() => { _sessionLookupCache[key].loading = false; });
   return _sessionLookupCache[key];
@@ -3195,7 +3322,8 @@ async function _topicMemoryStateForSend(topic, agent, adhoc) {
 }
 
 function updatePinCount() {
-  const n = getPinnedItems().length;
+  const { topic, agent, adhoc, lookback } = _currentContextTarget();
+  const n = getPinnedItems().length + _activeLookbackItems(adhoc, lookback).length;
   const memorySelected = _topicMemoryState().selected;
   const total = n + (memorySelected ? 1 : 0);
   pinCountEl.textContent = total || '';
@@ -3237,9 +3365,8 @@ function _pinStatus(item) {
   // Already injected into this topic@agent via a previous adhoc turn
   // Only meaningful for !N lookback where model retains prior context; !0 is always fresh
   const chipLookback = parsed.adhoc ? parsed.lookback : (stickyChip?.lookback ?? 0);
-  const taKey = `${chipTopic}@${chipAgent || '_'}`;
-  if ((injected[taKey] || []).includes(item.id) && !(isAdhoc && chipLookback === 0))
-    return { text: 'already added · skip', cls: 'pin-status-done' };
+  if (currentSid && (injected[currentSid] || []).includes(item.id) && !(isAdhoc && chipLookback === 0))
+    return { text: 'injected · skip', cls: 'pin-status-done' };
 
   return { text: 'will inject', cls: 'pin-status-inject' };
 }
@@ -3257,7 +3384,16 @@ function renderPinPanel() {
   const items = getPinnedItems();
   const listEl = document.getElementById('pin-panel-list');
   const clearBtn = document.getElementById('pin-panel-clear');
-  if (clearBtn) clearBtn.disabled = items.length === 0;
+  const { topic: ctxTopic, agent: ctxAgent, adhoc, lookback } = _currentContextTarget();
+  const activeLbItems = _activeLookbackItems(adhoc, lookback);
+  const activeLbIds = new Set(activeLbItems.map(i => i.id));
+  const manualPinIds = new Set(items.map(i => i.id));
+  // Merge: lookback items first, then manual pins not already covered by lookback
+  const mergedItems = [
+    ...activeLbItems.map(i => ({ ...i, isLookback: true, isManual: manualPinIds.has(i.id) })),
+    ...items.filter(i => !activeLbIds.has(i.id)).map(i => ({ ...i, isLookback: false, isManual: true })),
+  ];
+  if (clearBtn) clearBtn.disabled = mergedItems.length === 0;
   let html = '';
   const memoryState = _topicMemoryState();
   const memoryStatus = _memoryStatus(memoryState);
@@ -3271,40 +3407,21 @@ function renderPinPanel() {
     <button class="pin-item-toggle${memoryState.selected ? ' active' : ''}" data-memory-toggle="1" type="button">${memoryState.selected ? 'On' : (memoryState.exists ? 'Off' : 'Add')}</button>
   </div>`;
 
-  // Lookback section — shown when !N is active in input
-  const { adhoc, lookback } = parseInput(input.value);
-  if (ctxHighlightEnabled && adhoc && lookback > 0) {
-    const asstItems = [...document.querySelectorAll('#messages .history-item.msg.assistant')];
-    const lbItems = asstItems.slice(-lookback);
-    if (lbItems.length) {
-      html += `<div class="pin-section-label">Lookback · last ${lookback}</div>`;
-      lbItems.forEach(el => {
-        const btn = el.querySelector('.msg-pin-btn');
-        const preview = (el.querySelector(':scope > div:nth-child(2)')?.innerText || '').slice(0, 80);
-        html += `<div class="pin-item pin-item-lookback">
-          <span class="pin-item-preview">${preview.replace(/</g,'&lt;')}</span>
-          <span class="pin-item-status pin-status-inject">will inject</span>
-        </div>`;
-      });
-    }
-  }
-
-  if (items.length) {
+  if (mergedItems.length) {
     html += `<div class="pin-section-label">Pinned</div>`;
-    html += items.map(item => {
+    mergedItems.forEach(item => {
       const st = _pinStatus(item);
       const tag = _pinTagStr(item);
-      const preview = (item.content || '').replace(/</g, '&lt;').slice(0, 90);
-      return `<div class="pin-item">
-        <span class="pin-item-tag">${tag}</span>
-        <span class="pin-item-preview">${preview}</span>
+      const preview = (item.content || '').replace(/\s+/g, ' ').slice(0, 90);
+      const lbAttr = item.isManual ? '' : ' data-lb="1"';
+      html += `<div class="pin-item">
+        <span class="pin-item-tag">${escapeHtml(tag)}</span>
+        <span class="pin-item-preview">${escapeHtml(preview)}</span>
         <span class="pin-item-status ${st.cls}">${st.text}</span>
-        <button class="pin-item-remove" data-id="${item.id}" type="button">✕</button>
+        <button class="pin-item-remove" data-id="${item.id}"${lbAttr} type="button">✕</button>
       </div>`;
-    }).join('');
-  }
-
-  if (!items.length) {
+    });
+  } else {
     html += '<div style="padding:0.5rem 0.8rem;color:#484858;font-size:0.78em">No pins yet.<br>Click <svg width="9" height="11" viewBox="0 0 12 14" fill="currentColor" aria-hidden="true" style="vertical-align:-0.1em"><path d="M2 0h8a1 1 0 0 1 1 1v12.8l-5-2.9-5 2.9V1a1 1 0 0 1 1-1z"/></svg> on any response to add it.</div>';
   }
 
@@ -3331,9 +3448,14 @@ function renderPinPanel() {
     btn.addEventListener('mousedown', e => {
       e.preventDefault();
       const id = parseInt(btn.dataset.id);
-      setPinnedItems(getPinnedItems().filter(i => i.id !== id));
-      document.querySelectorAll(`.msg-pin-btn[data-msg-id="${id}"]`)
-        .forEach(b => b.classList.remove('pinned'));
+      if (btn.dataset.lb) {
+        _lookbackUnselected.add(id);
+        updateInContextMarkers();
+      } else {
+        setPinnedItems(getPinnedItems().filter(i => i.id !== id));
+        document.querySelectorAll(`.msg-pin-btn[data-msg-id="${id}"]`)
+          .forEach(b => b.classList.remove('pinned'));
+      }
       updatePinCount();
       renderPinPanel();
     });
@@ -3424,6 +3546,9 @@ function addPinButton(bubbleEl, msgId, topic, agent, sessionId = null) {
     if (pinned.find(i => i.id === msgId)) {
       setPinnedItems(pinned.filter(i => i.id !== msgId));
       btn.classList.remove('pinned');
+    } else if (btn.classList.contains('lookback-sel')) {
+      _lookbackUnselected.add(msgId);
+      updateInContextMarkers();
     } else {
       const contentEl = bubbleEl.querySelector(':scope > div:nth-child(2)');
       const text = (contentEl?.innerText || '').slice(0, 300);
@@ -3434,7 +3559,8 @@ function addPinButton(bubbleEl, msgId, topic, agent, sessionId = null) {
     updatePinCount();
     if (pinPanel.classList.contains('open')) renderPinPanel();
   });
-  bubbleEl.appendChild(btn);
+  const header = bubbleEl.querySelector('.response-header');
+  (header || bubbleEl).appendChild(btn);
 }
 
 function initPin() {
@@ -3448,6 +3574,12 @@ function initPin() {
   memorySaveBtn.addEventListener('click', saveMemoryEditor);
   memoryModal.addEventListener('mousedown', e => {
     if (e.target === memoryModal) closeMemoryEditor();
+  });
+  document.getElementById('msg-modal-close').addEventListener('click', () => {
+    document.getElementById('msg-modal').classList.remove('open');
+  });
+  document.getElementById('msg-modal').addEventListener('mousedown', e => {
+    if (e.target === document.getElementById('msg-modal')) document.getElementById('msg-modal').classList.remove('open');
   });
   updatePinCount();
 }

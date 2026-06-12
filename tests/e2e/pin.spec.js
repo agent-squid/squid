@@ -223,6 +223,52 @@ test('adhoc send includes pinned_ids in POST /chat body', async ({ page }) => {
   expect(capturedBody?.pinned_ids).toContain(99);
 });
 
+test('adhoc lookback selects recent visible responses as toggleable context pins', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/history**', r => r.fulfill({ json: {
+    has_more: false,
+    items: [
+      { id: 10, topic: 'squid', agent: 'claude', role: 'assistant', status: 'done', prompt: 'p1', content: 'first response', adhoc: false },
+      { id: 11, topic: 'squid', agent: 'claude', role: 'assistant', status: 'done', prompt: 'p2', content: 'second response', adhoc: false },
+      { id: 12, topic: 'squid', agent: 'claude', role: 'assistant', status: 'done', prompt: 'p3', content: 'third response', adhoc: false },
+    ],
+  }}));
+
+  let capturedBody = null;
+  await page.route('**/chat', async route => {
+    capturedBody = route.request().postDataJSON();
+    await route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        { event: 'meta', data: { agent: 'claude', backend: 'claude', msg_id: 20, adhoc: true } },
+        { data: 'response' },
+        DONE,
+      ),
+    });
+  });
+
+  await page.goto('/');
+  await expect(page.locator('.history-item.msg.assistant')).toHaveCount(3);
+  await page.fill('#input', '#squid@claude!2 compare');
+
+  await page.click('#pin-btn');
+  await expect(page.locator('.pin-item-lookback')).toHaveCount(2);
+  await expect(page.locator('.pin-item-lookback')).toContainText(['second response', 'third response']);
+
+  await page.locator('[data-lookback-id="11"]').click();
+  await expect(page.locator('[data-lookback-id="11"]')).toHaveText('Off');
+  await page.click('#pin-btn');
+
+  await page.focus('#input');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.msg.assistant:not(.msg-thinking)').last()).toBeVisible();
+
+  expect(capturedBody?.adhoc).toBe(true);
+  expect(capturedBody?.lookback).toBe(2);
+  expect(capturedBody?.lookback_via_pins).toBe(true);
+  expect(capturedBody?.pinned_ids).toEqual([12]);
+});
+
 test('fresh session send includes topic memory when memory exists', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
   await page.route('**/topics/squid/memory', r => r.fulfill({

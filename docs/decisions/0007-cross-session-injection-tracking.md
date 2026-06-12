@@ -2,10 +2,11 @@
 status: superseded
 date: 2026-05-25
 superseded: 2026-05-29
+updated: 2026-06-12
 ---
 # ADR-0007: Cross-session Context Injection
 
-## Original Design (Superseded)
+## Original Design (Superseded 2026-05-29)
 
 The original design used a server-side `session_context_log` table to track one-shot
 cross-session injections. Pinning a message server-side queued it for injection into any
@@ -18,68 +19,62 @@ vs absorbed state.
 dropped from `chat_messages` and `session_stats` respectively. `get_pending_injections`
 does not exist in the codebase.
 
-## Current Design
+## Current Design (Updated 2026-06-12)
 
-Context injection is now **client-side** via the pins feature:
+Context injection is **client-driven** via the pins feature, with injection state backed by
+the server DB for cross-device correctness.
 
-- Users click 🔖 on any assistant response to pin it. Pins are stored in
-  `localStorage` as `{ id, topic, agent, content }` and persist across page reloads.
-- The client sends `pinned_ids: [id, ...]` in `POST /chat` for **both session and adhoc turns**,
-  filtered to exclude pins from the **same session_id** (not merely same `topic@agent` —
-  the same topic can run different sessions, and a pin from a prior session under the
-  same `topic@agent` is still cross-session context worth injecting).
-  The server fetches those rows by ID from `chat_messages` via `get_messages_by_ids()`.
-  - **Adhoc turns**: pinned content is prepended to `context_history` for `_build_prompt`,
-    deduplicated against the lookback window.
-  - **Session turns**: pinned content is prepended to the prompt as a
-    `<referenced_context>` block (`effective_message`), giving the CLI the supplementary
-    context that `--resume` does not provide.
-- The client tracks which IDs have already been injected per `(topic, agent)` in an
-  `injectedInto` localStorage map, preventing re-injection on subsequent turns.
-- The UI shows injection status in the pin panel: `will inject`, `in session · skip`,
-  or `already added · skip`.
+### Storage
 
-**Key differences from the original design:**
+- **Pins**: stored in `localStorage` as `{ id, topic, agent, session_id, content }`.
+  Persist across page reloads and survive refreshes.
+- **Injection tracking**: `injectedInto` localStorage map keyed by **`session_id`**
+  (previously keyed by `topic@agent` — see below). Records which pin IDs have been sent
+  to a given session. Seeded from the server on session load.
+- **DB record**: `chat_messages.context` on user rows stores `{"pins": [...], "mem": bool}` —
+  the pin IDs and topic-memory flag that were active at send time. This is the ground truth
+  for cross-device seeding.
 
-| | Original | Current |
-|---|---|---|
-| Storage | Server DB (`session_context_log`) | Client `localStorage` |
-| Scope | Session turns + adhoc | Session turns + adhoc |
-| Tracking | Per-session DB rows | Per-`(topic, agent)` localStorage map |
-| Trigger | Automatic on each dispatch | Explicit client-side selection |
+### Cross-device Correctness
+
+On session load, `GET /topics/{topic}/session` returns `injected_ids` — the union of all
+pin IDs from `chat_messages.context` for that session. The client seeds
+`injectedInto[session_id]` from this, so any device resuming the session immediately knows
+what has already been injected, without needing to have sent those turns itself.
+
+The flow:
+1. `GET /topics/{topic}/session` → `{ session_id, cwd, injected_ids }`
+2. Client: `injectedInto[session_id] = union(local, injected_ids)`
+3. At send time: skip pins in `injectedInto[_currentSid]`
+4. After completion: `injectedInto[lastSessionId] |= _pinnedIds` (written locally,
+   durable via the DB on the next load)
+
+### Why `session_id` as Key (Changed from `topic@agent`)
+
+The old `topic@agent` key never expired. If session A for `squid@claude` injected pin #47,
+`injectedInto['squid@claude']` persisted indefinitely. When session B started, pin #47 still
+showed `injected · skip` even though session B had never seen it — silently dropping context.
+
+Keying by `session_id` is correct: each session is independent, tracking resets naturally
+when a new session starts, and the key is cleared explicitly when the session is deleted
+(`clearCachedSessionId`).
+
+### Key Differences from Prior Designs
+
+| | Original (removed) | 2026-05-29 design | Current (2026-06-12) |
+|---|---|---|---|
+| Storage | Server DB (`session_context_log`) | Client `localStorage` only | `localStorage` + DB record |
+| Tracking key | Per-session DB rows | `topic@agent` in localStorage | `session_id` in localStorage |
+| Cross-device | Full server sync | Not supported | Seeded from DB on session load |
+| Trigger | Automatic on dispatch | Explicit client selection | Explicit client selection |
 
 `GET /context/{topic}` still exists but now returns the same data as
-`GET /topics/{topic}/session` — just the active `session_id` and `cwd`. It no longer
-shows pending/absorbed injection state.
+`GET /topics/{topic}/session` — just the active `session_id` and `cwd`.
 
 **Contract tests**: `tests/e2e/pin.spec.js`
 
-## Why the Server-side Approach Was Removed
+## Why the Original Server-side Approach Was Removed
 
 The `session_context_log` table added schema complexity and required cleanup logic for
 inactive sessions. The client-side approach is simpler: the user explicitly selects what
-to inject, the tracking lives in localStorage where it belongs (it is UI state, not
-conversation state), and there is no server cleanup burden.
-
-The trade-off: pinned context is only available on the device where it was pinned.
-Cross-device sync would require re-introducing server-side storage.
-
-## Ephemerality of Pinned Context
-
-Pinned context is intentionally ephemeral, and the design accepts this for two reasons:
-
-**Session turns — injection is one-shot by nature.** Once a pin is injected into a
-resumable session, that content becomes part of the session history and is carried forward
-by `--resume` on every subsequent turn. The `injectedInto` localStorage map records this
-so the client never sends the same `pinned_id` to the same `(topic, agent)` twice. After
-the first injection the pin has done its job; re-injecting it would be redundant noise.
-
-**Adhoc turns — cross-device sync has no practical payoff.** Adhoc turns are stateless by
-design: each one runs independently with no persistent session. A pin injected into an
-adhoc turn disappears with that turn's context window; there is no accumulated history for
-a second device to build on. Syncing pins across devices would cost server-side
-storage and a sync protocol for a scenario where the value gained is marginal.
-
-The localStorage-only approach therefore matches the actual lifecycle: pins are
-UI-state that bridges a gap until the first injection, then become inert (for session turns)
-or remain available for repeated one-off enrichment on the same device (for adhoc turns).
+to inject, and there is no server cleanup burden.
