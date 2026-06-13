@@ -1613,7 +1613,7 @@ button {
     overflow-wrap: anywhere;
   }
 
-  .msg.assistant:not(.msg-thinking) {
+  .msg.assistant {
     box-sizing: border-box;
     max-width: 100%;
   }
