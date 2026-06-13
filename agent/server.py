@@ -599,7 +599,7 @@ async def run_cmd(req: CmdRequest):
             agent = topic_row.get("agent") if topic_row else None
         if not agent:
             return JSONResponse({"ok": False, "error": "no active session"}, status_code=400)
-        kill_procs_by_topic(topic, agent=agent)
+        kill_procs_by_topic(topic, agent=agent, adhoc=False)
         clear_topic_session(topic, agent)
         return JSONResponse({"ok": True, "agent": agent})
 

@@ -126,6 +126,37 @@ test('consecutive #topic@agent! /stop walks LIFO — chip preserves adhoc flag',
   expect(cmdBodies[1].adhoc).toBe(true);
 });
 
+test('#topic@agent! /clear preserves adhoc chip without sending adhoc to clear', async ({ page }) => {
+  await mockBackend(page);
+
+  const cmdBodies = [];
+  await page.route('**/cmd', async route => {
+    cmdBodies.push(route.request().postDataJSON());
+    const body = cmdBodies[cmdBodies.length - 1];
+    await route.fulfill({ json: body.command === 'clear' ? { ok: true, agent: 'claude' } : { ok: true, killed: 1 } });
+  });
+
+  await page.goto('/');
+
+  await page.fill('#input', '#squid@claude! /clear');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(200);
+
+  await page.fill('#input', '/stop');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(200);
+
+  expect(cmdBodies).toHaveLength(2);
+  expect(cmdBodies[0].command).toBe('clear');
+  expect(cmdBodies[0].topic).toBe('squid');
+  expect(cmdBodies[0].agent).toBe('claude');
+  expect(cmdBodies[0].adhoc).toBeFalsy();
+  expect(cmdBodies[1].command).toBe('stop');
+  expect(cmdBodies[1].topic).toBe('squid');
+  expect(cmdBodies[1].agent).toBe('claude');
+  expect(cmdBodies[1].adhoc).toBe(true);
+});
+
 test('kill button appears on thinking bubble and sends stop_msg with msg_id', async ({ page }) => {
   await mockBackend(page);
 
