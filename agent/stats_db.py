@@ -94,6 +94,13 @@ _TABLES = [
         created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         UNIQUE(msg_id, seq)
     )""",
+    """CREATE TABLE IF NOT EXISTS git_diff_reverts (
+        msg_id      INTEGER NOT NULL,
+        repo        TEXT NOT NULL,
+        file_path   TEXT NOT NULL,
+        reverted_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        PRIMARY KEY (msg_id, repo, file_path)
+    )""",
 ]
 
 _MIGRATIONS = [
@@ -135,6 +142,14 @@ _MIGRATIONS = [
     # per-message raw quota snapshot (2026-06-09)
     "ALTER TABLE chat_messages ADD COLUMN quota_before REAL",
     "ALTER TABLE chat_messages ADD COLUMN quota_after REAL",
+    # git diff revert tracking (2026-06-12)
+    """CREATE TABLE IF NOT EXISTS git_diff_reverts (
+        msg_id      INTEGER NOT NULL,
+        repo        TEXT NOT NULL,
+        file_path   TEXT NOT NULL,
+        reverted_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        PRIMARY KEY (msg_id, repo, file_path)
+    )""",
     # denormalize last_model/last_backend into topics to avoid JOIN in get_topics_summary (2026-05-28)
     "ALTER TABLE topics ADD COLUMN last_model TEXT",
     "ALTER TABLE topics ADD COLUMN last_backend TEXT",
@@ -880,6 +895,114 @@ def get_stats_by_topic() -> list:
 
 
 # ── run events ─────────────────────────────────────────────────────────────────
+
+# ── git diff reverts ───────────────────────────────────────────────────────────
+
+def record_git_diff_revert(msg_id: int, repo: str, file_paths: list[str]) -> None:
+    with _connect() as conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO git_diff_reverts (msg_id, repo, file_path) VALUES (?, ?, ?)",
+            [(msg_id, repo, fp) for fp in file_paths],
+        )
+
+
+def get_diff_revert_eligibility(msg_id: int, repo: str) -> dict[str, str]:
+    """Return {file_path: 'revertable'|'conflicting'|'reverted'} for a GitDiff event.
+
+    A file is revertable when no non-reverted GitDiff with a higher msg_id
+    in the same topic and repo has also touched that file.
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT topic, context FROM chat_messages WHERE id = ? AND role = 'assistant'",
+            (msg_id,),
+        ).fetchone()
+        if not row or not row['context']:
+            return {}
+
+        topic = row['topic']
+        try:
+            tools = json.loads(row['context'])
+        except Exception:
+            return {}
+
+        this_diff = next(
+            (t for t in tools if t.get('name') == 'GitDiff' and t.get('repo') == repo),
+            None,
+        )
+        if not this_diff:
+            return {}
+
+        this_files = {f['path'] for f in this_diff.get('files', [])}
+        if not this_files:
+            return {}
+
+        already_reverted = {
+            r['file_path'] for r in conn.execute(
+                "SELECT file_path FROM git_diff_reverts WHERE msg_id = ? AND repo = ?",
+                (msg_id, repo),
+            ).fetchall()
+        }
+
+        later_rows = conn.execute(
+            """SELECT id, context FROM chat_messages
+               WHERE topic = ? AND role = 'assistant' AND id > ? AND context IS NOT NULL""",
+            (topic, msg_id),
+        ).fetchall()
+
+        later_ids = [r['id'] for r in later_rows]
+        later_reverted_map: dict[int, set[str]] = {}
+        if later_ids:
+            placeholders = ','.join('?' * len(later_ids))
+            for r in conn.execute(
+                f"SELECT msg_id, file_path FROM git_diff_reverts"
+                f" WHERE msg_id IN ({placeholders}) AND repo = ?",
+                [*later_ids, repo],
+            ).fetchall():
+                later_reverted_map.setdefault(r['msg_id'], set()).add(r['file_path'])
+
+    later_touched: set[str] = set()
+    for later_row in later_rows:
+        try:
+            later_tools = json.loads(later_row['context'])
+        except Exception:
+            continue
+        for t in later_tools:
+            if t.get('name') == 'GitDiff' and t.get('repo') == repo:
+                lr = later_reverted_map.get(later_row['id'], set())
+                for f in t.get('files', []):
+                    fpath = f['path']
+                    if fpath not in lr:
+                        later_touched.add(fpath)
+
+    return {
+        fpath: (
+            'reverted' if fpath in already_reverted
+            else 'conflicting' if fpath in later_touched
+            else 'revertable'
+        )
+        for fpath in this_files
+    }
+
+
+def get_message_gitdiff(msg_id: int, repo: str) -> Optional[dict]:
+    """Return the GitDiff tool event for a given message and repo, or None."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT context FROM chat_messages WHERE id = ? AND role = 'assistant'",
+            (msg_id,),
+        ).fetchone()
+    if not row or not row['context']:
+        return None
+    try:
+        tools = json.loads(row['context'])
+    except Exception:
+        return None
+    return next(
+        (t for t in tools if t.get('name') == 'GitDiff' and t.get('repo') == repo),
+        None,
+    )
+
 
 def insert_run_event(msg_id: int, seq: int, event_type: str, payload: Optional[str]) -> None:
     with _connect() as conn:

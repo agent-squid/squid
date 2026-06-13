@@ -558,6 +558,7 @@ async function loadHistory() {
   historyExhausted = !has_more;
   historyLoading = false;
   updateInContextMarkers();
+  refreshAllRevertButtons();
 
   if (historyExhausted && topSentinel) {
     topSentinel.remove();
@@ -1233,10 +1234,11 @@ async function sendMessage(text) {
               if (statsEl) messages.appendChild(statsEl); // stats goes between bubble and diffs, not after
               const diffTools = changeTools(liveToolEvents);
               for (const tool of diffTools) {
-                const block = makeToolBlock(tool);
+                const block = makeToolBlock(tool, msgId);
                 block.classList.add('tool-block-history');
                 messages.appendChild(block);
               }
+              refreshAllRevertButtons();
               scrollToBottom();
             }
             // Update ctx label with pin count and store IDs for popup
@@ -1468,7 +1470,7 @@ function renderUnifiedDiffLines(container, diff) {
   }
 }
 
-function makeToolBlock(tool) {
+function makeToolBlock(tool, msgId) {
   const name = tool.name || '';
   const block = document.createElement('div');
   block.className = 'tool-block';
@@ -1524,6 +1526,14 @@ function makeToolBlock(tool) {
     const deletions = tool.deletions ?? 0;
     toggle.textContent = `Changed files: ${count} file${count !== 1 ? 's' : ''}, +${additions} -${deletions}`;
 
+    if (msgId && tool.repo) {
+      block.dataset.msgId = String(msgId);
+      block.dataset.repo = tool.repo;
+      const revertBar = document.createElement('div');
+      revertBar.className = 'gitdiff-revert-bar';
+      body.appendChild(revertBar);
+    }
+
     const fileDiffs = splitUnifiedDiff(tool.diff || '');
     for (const file of (tool.files || [])) {
       const status = file.status || '?';
@@ -1532,6 +1542,7 @@ function makeToolBlock(tool) {
 
       const row = document.createElement('div');
       row.className = 'gitdiff-file-row';
+      if (msgId && tool.repo) row.dataset.file = file.path;
 
       const fileToggle = document.createElement('button');
       fileToggle.className = 'gitdiff-file-toggle';
@@ -1572,6 +1583,82 @@ function makeToolBlock(tool) {
   block.appendChild(toggle);
   block.appendChild(body);
   return block;
+}
+
+async function _doRevert(msgId, repo, filePath) {
+  const body = filePath ? { repo, file_path: filePath } : { repo };
+  const res = await fetch(`/chat/${msgId}/revert`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return res.json();
+}
+
+async function fetchRevertEligibility(block) {
+  const msgId = block.dataset.msgId;
+  const repo = block.dataset.repo;
+  if (!msgId || !repo) return;
+
+  let eligibility;
+  try {
+    const res = await fetch(`/chat/${msgId}/diff-revert-status?repo=${encodeURIComponent(repo)}`);
+    if (!res.ok) return;
+    eligibility = await res.json();
+  } catch { return; }
+
+  // Update per-file rows
+  for (const row of block.querySelectorAll('.gitdiff-file-row[data-file]')) {
+    const fpath = row.dataset.file;
+    const status = eligibility[fpath];
+    row.querySelector('.gitdiff-revert-btn')?.remove();
+    row.classList.toggle('gitdiff-file-row--reverted', status === 'reverted');
+
+    if (status === 'revertable') {
+      const btn = document.createElement('button');
+      btn.className = 'gitdiff-revert-btn';
+      btn.textContent = 'revert';
+      btn.addEventListener('click', async e => {
+        e.stopPropagation();
+        btn.disabled = true; btn.textContent = '…';
+        try {
+          const data = await _doRevert(msgId, repo, fpath);
+          if (data.ok && data.reverted?.length) {
+            refreshAllRevertButtons();
+          } else {
+            btn.disabled = false; btn.textContent = 'revert';
+            btn.title = data.failed?.[0]?.error || data.error || 'failed';
+          }
+        } catch { btn.disabled = false; btn.textContent = 'revert'; }
+      });
+      row.appendChild(btn);
+    }
+  }
+
+  // Update collection-level revert bar
+  const bar = block.querySelector('.gitdiff-revert-bar');
+  if (!bar) return;
+  bar.innerHTML = '';
+  const revertableFiles = Object.entries(eligibility).filter(([, s]) => s === 'revertable');
+  if (revertableFiles.length > 1) {
+    const btn = document.createElement('button');
+    btn.className = 'gitdiff-revert-all-btn';
+    btn.textContent = `Revert all ${revertableFiles.length} files`;
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      btn.disabled = true; btn.textContent = '…';
+      try {
+        const data = await _doRevert(msgId, repo, null);
+        if (data.ok) { refreshAllRevertButtons(); }
+        else { btn.disabled = false; btn.textContent = `Revert all`; btn.title = data.error || 'failed'; }
+      } catch { btn.disabled = false; }
+    });
+    bar.appendChild(btn);
+  }
+}
+
+function refreshAllRevertButtons() {
+  document.querySelectorAll('.tool-block[data-msg-id][data-repo]').forEach(fetchRevertEligibility);
 }
 
 
@@ -1656,7 +1743,7 @@ function appendHistoryItem(item, container) {
       const diffTools = changeTools(tools);
       let lastEl = asstBubble;
       for (const tool of diffTools) {
-        const block = makeToolBlock(tool);
+        const block = makeToolBlock(tool, item.id);
         block.classList.add('history-item', 'tool-block-history');
         if (container) container.appendChild(block);
         else { lastEl.after(block); lastEl = block; }

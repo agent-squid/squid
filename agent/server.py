@@ -64,6 +64,7 @@ from .stats_db import (
     get_topic_session, clear_topic_session,
     delete_topic, hide_topic, set_topic_hidden, get_topic_agents, get_topic_agent_history,
     clear_agent_sessions, get_agent_sessions,
+    get_diff_revert_eligibility, record_git_diff_revert, get_message_gitdiff,
 )
 from .journal import _generate_journal, _current_week, list_topic_journals, read_journal
 from . import creds
@@ -837,10 +838,72 @@ class MsgQuotaSnapshotRequest(BaseModel):
     after: float
 
 
+class RevertRequest(BaseModel):
+    repo: str = Field(..., min_length=1)
+    file_path: Optional[str] = None
+
+
 @app.post("/chat/{msg_id}/quota-delta")
 async def record_msg_quota_delta(msg_id: int, req: MsgQuotaSnapshotRequest):
     update_message_quota_snapshot(msg_id, req.before, req.after)
     return JSONResponse({"ok": True})
+
+
+@app.get("/chat/{msg_id}/diff-revert-status")
+async def diff_revert_status(msg_id: int, repo: str):
+    eligibility = await asyncio.to_thread(get_diff_revert_eligibility, msg_id, repo)
+    if not eligibility:
+        return JSONResponse({"error": "diff not found"}, status_code=404)
+    return JSONResponse(eligibility)
+
+
+@app.post("/chat/{msg_id}/revert")
+async def revert_diff(msg_id: int, req: RevertRequest):
+    from .git_changes import extract_file_diff, apply_reverse_patch
+
+    eligibility = await asyncio.to_thread(get_diff_revert_eligibility, msg_id, req.repo)
+    if not eligibility:
+        return JSONResponse({"error": "diff not found"}, status_code=404)
+
+    if req.file_path:
+        status = eligibility.get(req.file_path)
+        if status != 'revertable':
+            return JSONResponse(
+                {"error": f"{req.file_path!r} is {status or 'not in diff'}"},
+                status_code=400,
+            )
+        files_to_revert = [req.file_path]
+    else:
+        files_to_revert = [f for f, s in eligibility.items() if s == 'revertable']
+
+    if not files_to_revert:
+        return JSONResponse({"error": "no revertable files"}, status_code=400)
+
+    this_diff = await asyncio.to_thread(get_message_gitdiff, msg_id, req.repo)
+    if not this_diff:
+        return JSONResponse({"error": "GitDiff not found"}, status_code=404)
+
+    full_diff = this_diff.get('diff', '')
+    repo_root = Path(req.repo)
+
+    reverted: list[str] = []
+    failed: list[dict] = []
+
+    for fpath in files_to_revert:
+        file_diff = extract_file_diff(full_diff, fpath)
+        if not file_diff:
+            failed.append({'file': fpath, 'error': 'no diff text found'})
+            continue
+        ok, err = await asyncio.to_thread(apply_reverse_patch, repo_root, file_diff)
+        if ok:
+            reverted.append(fpath)
+        else:
+            failed.append({'file': fpath, 'error': err})
+
+    if reverted:
+        await asyncio.to_thread(record_git_diff_revert, msg_id, req.repo, reverted)
+
+    return JSONResponse({"ok": True, "reverted": reverted, "failed": failed})
 
 
 @app.post("/config/creds")

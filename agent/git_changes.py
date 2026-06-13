@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -154,6 +155,46 @@ class GitChangeTracker:
 
     def cleanup(self) -> None:
         return None
+
+
+def extract_file_diff(full_diff: str, file_path: str) -> str:
+    """Extract the unified diff chunk for a single file from a full diff."""
+    current_path: Optional[str] = None
+    current_lines: list[str] = []
+
+    for line in full_diff.split('\n'):
+        if line.startswith('diff --git '):
+            if current_path == file_path:
+                return '\n'.join(current_lines)
+            m = re.match(r'^diff --git a/.+ b/(.+)$', line)
+            current_path = m.group(1) if m else None
+            current_lines = [line]
+        elif current_path is not None:
+            current_lines.append(line)
+
+    if current_path == file_path:
+        return '\n'.join(current_lines)
+    return ''
+
+
+def apply_reverse_patch(repo_root: Path, patch_text: str) -> tuple[bool, str]:
+    """Apply the reverse of patch_text in repo_root. Returns (success, error_message)."""
+    fd, patch_path = tempfile.mkstemp(suffix='.patch')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(patch_text)
+        check = _run_git(repo_root, 'apply', '--reverse', '--check', patch_path, check=False)
+        if check.returncode != 0:
+            return False, check.stderr.strip()
+        result = _run_git(repo_root, 'apply', '--reverse', patch_path, check=False)
+        if result.returncode != 0:
+            return False, result.stderr.strip()
+        return True, ''
+    finally:
+        try:
+            os.unlink(patch_path)
+        except FileNotFoundError:
+            pass
 
 
 def prepare_tracker(*args, **kwargs) -> Optional[GitChangeTracker]:
