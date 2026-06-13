@@ -420,7 +420,7 @@ async def stream_response(
         err_text = f"Internal error: {exc}"
         yield sse_event("error", err_text)
         context_json = json.dumps(tool_events) if tool_events else None
-        update_assistant_message(asst_msg_id, raw or err_text, session_id, "error", context=context_json)
+        update_assistant_message(asst_msg_id, err_text, session_id, "error", context=context_json)
         _completed = True
 
     finally:

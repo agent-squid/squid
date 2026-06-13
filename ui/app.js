@@ -995,6 +995,7 @@ async function sendMessage(text) {
   let msgId = null;
   let statusTimer = null;
   let completedFromStatus = false;
+  let detachedPolling = false;
   let raw = '';
   let resolvedAgent = agent;  // updated by meta event
   const liveToolEvents = [];
@@ -1047,11 +1048,14 @@ async function sendMessage(text) {
           completedFromStatus = true;
           stopStatusFallback();
           doneTime = new Date().toISOString();
+          freezeThinking();
           showStoredResponse(data.content || '');
+          if (!statsEl) addTimestamp(bubble, doneTime, false);
           controller.abort();
         } else if (data.status === 'error') {
           completedFromStatus = true;
           stopStatusFallback();
+          freezeThinking();
           showError(data.content || 'Response interrupted.');
           controller.abort();
         }
@@ -1275,37 +1279,31 @@ async function sendMessage(text) {
   } catch (err) {
     if (!completedFromStatus && err.name !== 'AbortError') {
       if (msgId) {
-        try {
-          const statusRes = await fetch(`/chat/${msgId}/status`);
-          if (statusRes.ok) {
-            const data = await statusRes.json();
-            if (data.status === 'done') showStoredResponse(data.content || '');
-            else if (data.status === 'error') showError(data.content || 'Response interrupted.');
-            else showError('Connection interrupted before the response finished.');
-          } else {
-            showError('Connection interrupted before the response finished.');
-          }
-        } catch {
-          showError('Connection interrupted before the response finished.');
-        }
+        detachedPolling = true;
+        statusBuf += (statusBuf ? '\n' : '') + 'Still running — waiting for saved response…';
+        raw = '';
+        updateThinkingPreview();
+        startStatusFallback(msgId);
       } else {
         showError('Unable to start response stream.');
       }
     }
   } finally {
-    stopStatusFallback();
+    if (!detachedPolling) stopStatusFallback();
     if (!thinkingFrozen) {
-      if (!userAborted && msgId && !firstDataReceived && !completedFromStatus) {
-        const content = document.createElement('span');
-        content.className = 'msg-error';
-        content.textContent = 'Response is still running. Reopen the page or history to pick it up.';
-        if (!bubble.parentNode) messages.appendChild(bubble);
-        contentDiv.appendChild(content);
-      } else {
-        freezeThinking();
+      if (!detachedPolling) {
+        if (!userAborted && msgId && !firstDataReceived && !completedFromStatus) {
+          const content = document.createElement('span');
+          content.className = 'msg-error';
+          content.textContent = 'Response is still running. Reopen the page or history to pick it up.';
+          if (!bubble.parentNode) messages.appendChild(bubble);
+          contentDiv.appendChild(content);
+        } else {
+          freezeThinking();
+        }
       }
     }
-    if (!userAborted && !firstDataReceived && !completedFromStatus) {
+    if (!detachedPolling && !userAborted && !firstDataReceived && !completedFromStatus) {
       if (!bubble.parentNode) messages.appendChild(bubble);
       contentDiv.innerHTML = '<span class="msg-error">No response — backend may be rate-limited or unavailable.</span>';
     }
