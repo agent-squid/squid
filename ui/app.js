@@ -187,6 +187,7 @@ function switchView(name) {
     btn.classList.toggle('active', btn.dataset.view === name);
   });
   currentView = name;
+  if (name === 'topics') loadTopicsView();
   if (name === 'analytics') loadStats();
   if (name === 'agents') loadAgents();
 }
@@ -857,6 +858,7 @@ input.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && pinPanel.classList.contains('open')) { closePinPanel(); return; }
   if (e.key === 'Escape' && helpPanel.classList.contains('open')) { closeHelp(); return; }
   if (e.key === 'Escape' && document.getElementById('msg-modal')?.classList.contains('open')) { document.getElementById('msg-modal').classList.remove('open'); return; }
+  if (e.key === 'Escape' && document.getElementById('topic-delete-modal')?.classList.contains('open')) { closeTopicDeleteModal(); return; }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     form.requestSubmit();
@@ -2588,6 +2590,208 @@ function initStats() {
   });
 }
 
+// ── topic manager ─────────────────────────────────────────────────────────────
+
+let _topicsManageCache = null;
+const _topicsExpanded = new Set();
+let _topicDeleteTarget = null;
+
+function invalidateTopicsManageCache() {
+  _topicsManageCache = null;
+}
+
+async function _managedTopics() {
+  if (_topicsManageCache) return _topicsManageCache;
+  const res = await fetch('/topics/manage?include_hidden=true');
+  _topicsManageCache = await res.json();
+  return _topicsManageCache;
+}
+
+function _topicStatusBadges(topic) {
+  const badges = [];
+  if (topic.last_at) badges.push(`<span class="topic-badge time">${escapeHtml(fmtTime(topic.last_at))}</span>`);
+  if (topic.active) badges.push('<span class="topic-badge live">live</span>');
+  if (topic.queue_depth > 0) badges.push(`<span class="topic-badge">queue ${topic.queue_depth}</span>`);
+  if (topic.hidden) badges.push('<span class="topic-badge hidden">hidden</span>');
+  return badges.join('');
+}
+
+function _topicAgentDisplay(agentName, backendFallback = null) {
+  if (!agentName) return '<span class="col-default">no agent</span>';
+  return `<span class="ac-agent"${_agentStyleAttr(agentName, backendFallback)}>@${escapeHtml(agentName)}</span>`;
+}
+
+function _renderTopicRows(topic) {
+  const expanded = _topicsExpanded.has(topic.name);
+  const agentLabel = _topicAgentDisplay(topic.agent, topic.last_backend || null);
+  const prompt = topic.last_prompt ? escapeHtml(truncate(topic.last_prompt, 120)) : '<span class="col-default">No prompt yet</span>';
+  const memoryLabel = topic.memory?.exists ? 'Memory' : 'Add memory';
+  const hideLabel = topic.hidden ? 'Show' : 'Hide';
+  let html = `
+    <div class="topic-row${topic.hidden ? ' hidden' : ''}" data-topic="${escapeHtml(topic.name)}">
+      <div class="topic-main">
+        <span class="topic-caret">${expanded ? '▾' : '▸'}</span>
+        <span class="topic-name">#${escapeHtml(topic.name)}</span>
+        ${agentLabel}
+      </div>
+      <div class="topic-prompt">${prompt}</div>
+      <div class="topic-meta">
+        ${_topicStatusBadges(topic)}
+        <button class="topic-btn" data-topic-open="${escapeHtml(topic.name)}" type="button">Open</button>
+        <button class="topic-btn" data-topic-memory="${escapeHtml(topic.name)}" type="button">${memoryLabel}</button>
+        <button class="topic-btn" data-topic-hide="${escapeHtml(topic.name)}" data-hidden="${topic.hidden ? '1' : '0'}" type="button">${hideLabel}</button>
+        <button class="topic-btn danger" data-topic-delete="${escapeHtml(topic.name)}" type="button">Delete</button>
+      </div>
+    </div>`;
+
+  if (expanded) {
+    const agents = topic.agents || [];
+    if (!agents.length) {
+      html += `<div class="topic-agent-row"><div class="topic-agent-main"><span class="col-default">No agent lanes yet</span></div></div>`;
+    }
+    for (const lane of agents) {
+      const backend = lane.last_backend || topic.last_backend || null;
+      const sessionPrompt = lane.last_prompt ? escapeHtml(truncate(lane.last_prompt, 120)) : '<span class="col-default">No session prompt</span>';
+      const laneTime = lane.last_at ? `<span class="topic-badge time">${escapeHtml(fmtTime(lane.last_at))}</span>` : '';
+      html += `
+        <div class="topic-agent-row" data-topic="${escapeHtml(topic.name)}" data-agent="${escapeHtml(lane.agent)}" data-adhoc="0">
+          <div class="topic-agent-main">
+            <span class="topic-agent-label">#${escapeHtml(topic.name)}${_topicAgentDisplay(lane.agent, backend)}</span>
+          </div>
+          <div class="topic-prompt">${sessionPrompt}</div>
+          <div class="topic-meta">
+            ${laneTime}
+            <button class="topic-btn" data-topic-open="${escapeHtml(topic.name)}" data-agent-open="${escapeHtml(lane.agent)}" data-adhoc-open="0" type="button">Open</button>
+          </div>
+        </div>`;
+      if (lane.last_adhoc_prompt) {
+        html += `
+          <div class="topic-agent-row adhoc" data-topic="${escapeHtml(topic.name)}" data-agent="${escapeHtml(lane.agent)}" data-adhoc="1">
+            <div class="topic-agent-main">
+              <span class="topic-agent-label">#${escapeHtml(topic.name)}${_topicAgentDisplay(lane.agent, backend)}!</span>
+            </div>
+            <div class="topic-prompt">${escapeHtml(truncate(lane.last_adhoc_prompt, 120))}</div>
+            <div class="topic-meta">
+              <span class="topic-badge">adhoc</span>
+              ${laneTime}
+              <button class="topic-btn" data-topic-open="${escapeHtml(topic.name)}" data-agent-open="${escapeHtml(lane.agent)}" data-adhoc-open="1" type="button">Open</button>
+            </div>
+          </div>`;
+      }
+    }
+  }
+  return html;
+}
+
+async function loadTopicsView() {
+  const listEl = document.getElementById('topics-list');
+  const countEl = document.getElementById('topics-count');
+  const searchEl = document.getElementById('topics-search');
+  if (!listEl) return;
+  listEl.innerHTML = '<div class="topics-empty">Loading…</div>';
+  let topics;
+  try {
+    topics = await _managedTopics();
+  } catch {
+    listEl.innerHTML = '<div class="topics-empty">Failed to load.</div>';
+    if (countEl) countEl.textContent = '';
+    return;
+  }
+
+  const q = (searchEl?.value || '').trim().toLowerCase();
+  const filtered = q ? topics.filter(t => t.name.toLowerCase().includes(q)) : topics;
+  if (countEl) countEl.textContent = `${filtered.length} / ${topics.length}`;
+  if (!filtered.length) {
+    listEl.innerHTML = '<div class="topics-empty">No topics found.</div>';
+    return;
+  }
+  listEl.innerHTML = filtered.map(_renderTopicRows).join('');
+  bindTopicsView();
+}
+
+function bindTopicsView() {
+  const listEl = document.getElementById('topics-list');
+  listEl.querySelectorAll('.topic-row').forEach(row => {
+    row.addEventListener('click', e => {
+      if (e.target.closest('button')) return;
+      const topic = row.dataset.topic;
+      if (_topicsExpanded.has(topic)) _topicsExpanded.delete(topic);
+      else _topicsExpanded.add(topic);
+      loadTopicsView();
+    });
+  });
+  listEl.querySelectorAll('[data-topic-open]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const topic = btn.dataset.topicOpen;
+      const agent = btn.dataset.agentOpen || null;
+      const adhoc = btn.dataset.adhocOpen === '1';
+      if (agent) filterByAgent(topic, agent, adhoc);
+      else filterByTopic(topic);
+      switchView('chat');
+    });
+  });
+  listEl.querySelectorAll('[data-topic-memory]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      openMemoryEditor(btn.dataset.topicMemory);
+    });
+  });
+  listEl.querySelectorAll('[data-topic-hide]').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const topic = btn.dataset.topicHide;
+      const nextHidden = btn.dataset.hidden !== '1';
+      btn.disabled = true;
+      await fetch(`/topics/${encodeURIComponent(topic)}/hidden`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hidden: nextHidden }),
+      });
+      invalidateTopicsCache();
+      invalidateTopicsManageCache();
+      loadTopicsView();
+    });
+  });
+  listEl.querySelectorAll('[data-topic-delete]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      openTopicDeleteModal(btn.dataset.topicDelete);
+    });
+  });
+}
+
+function initTopicsView() {
+  const searchEl = document.getElementById('topics-search');
+  if (!searchEl) return;
+  searchEl.addEventListener('input', () => loadTopicsView());
+}
+
+function openTopicDeleteModal(topic) {
+  _topicDeleteTarget = topic;
+  document.getElementById('topic-delete-modal-title').textContent = `#${topic}`;
+  document.getElementById('topic-delete-confirm').disabled = false;
+  document.getElementById('topic-delete-modal').classList.add('open');
+}
+
+function closeTopicDeleteModal() {
+  _topicDeleteTarget = null;
+  document.getElementById('topic-delete-modal').classList.remove('open');
+}
+
+async function confirmTopicDelete() {
+  if (!_topicDeleteTarget) return;
+  const topic = _topicDeleteTarget;
+  const btn = document.getElementById('topic-delete-confirm');
+  btn.disabled = true;
+  await fetch(`/topics/${encodeURIComponent(topic)}`, { method: 'DELETE' });
+  _topicsExpanded.delete(topic);
+  closeTopicDeleteModal();
+  invalidateTopicsCache();
+  invalidateTopicsManageCache();
+  loadTopicsView();
+}
+
 // ── agent manager ─────────────────────────────────────────────────────────────
 
 async function loadAgents() {
@@ -3582,6 +3786,12 @@ function initPin() {
   document.getElementById('msg-modal').addEventListener('mousedown', e => {
     if (e.target === document.getElementById('msg-modal')) document.getElementById('msg-modal').classList.remove('open');
   });
+  document.getElementById('topic-delete-modal-close').addEventListener('click', closeTopicDeleteModal);
+  document.getElementById('topic-delete-cancel').addEventListener('click', closeTopicDeleteModal);
+  document.getElementById('topic-delete-confirm').addEventListener('click', confirmTopicDelete);
+  document.getElementById('topic-delete-modal').addEventListener('mousedown', e => {
+    if (e.target === document.getElementById('topic-delete-modal')) closeTopicDeleteModal();
+  });
   updatePinCount();
 }
 
@@ -3590,13 +3800,19 @@ function initPin() {
 initSettings();
 initPin();
 document.getElementById('filter-badge-clear').addEventListener('click', clearFilter);
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && document.getElementById('topic-delete-modal')?.classList.contains('open')) {
+    closeTopicDeleteModal();
+  }
+});
 document.addEventListener('click', e => {
   if (!acEl.contains(e.target) && e.target !== input) hideAutocomplete();
   if (!pinPanel.contains(e.target) && !pinBtn.contains(e.target)) closePinPanel();
   const ctxPopup = document.getElementById('ctx-popup');
-  const inSecondary = e.target.closest('#msg-modal, #memory-modal');
+  const inSecondary = e.target.closest('#msg-modal, #memory-modal, #topic-delete-modal');
   const secondaryOpen = document.getElementById('msg-modal')?.classList.contains('open')
-    || document.getElementById('memory-modal')?.classList.contains('open');
+    || document.getElementById('memory-modal')?.classList.contains('open')
+    || document.getElementById('topic-delete-modal')?.classList.contains('open');
   if (ctxPopup && !ctxPopup.contains(e.target) && !e.target.closest('.user-ctx') && !inSecondary && !secondaryOpen) {
     ctxPopup.classList.remove('open');
   }
@@ -3606,6 +3822,7 @@ document.addEventListener('click', e => {
 });
 initHistoryScroll();
 initStats();
+initTopicsView();
 initAliases();
 initQuota();
 initCreds();

@@ -290,11 +290,51 @@ Run a topic-scoped control command.
 
 ---
 
+### GET /topics/manage
+
+Returns topic management data for the Topics tab. Unlike `GET /topics`, this includes hidden topics by default and nests the agent/adhoc lane summary under each topic.
+
+**Query params**: `include_hidden` (default `true`)
+
+**Response**:
+```json
+[
+  {
+    "name": "squid",
+    "agent": "codex",
+    "hidden": false,
+    "last_prompt": "implement the topic manager",
+    "queue_depth": 0,
+    "active": false,
+    "memory": { "exists": true, "path": "context/topics/squid/memory.md" },
+    "agents": [
+      {
+        "agent": "codex",
+        "last_prompt": "session prompt",
+        "last_adhoc_prompt": "adhoc prompt"
+      }
+    ]
+  }
+]
+```
+
+---
+
 ### POST /topics/{topic}/hide
 
 Soft-delete a topic — hides it from autocomplete (`hidden=1`). Topic reappears automatically if a new message is sent to it.
 
 **Response**: `{ "ok": true | false }`
+
+---
+
+### PUT /topics/{topic}/hidden
+
+Sets whether a topic is hidden from autocomplete without deleting its messages or sessions.
+
+**Request body**: `{ "hidden": true | false }`
+
+**Response**: `{ "ok": true | false, "hidden": true | false }`
 
 ---
 

@@ -53,7 +53,7 @@ from .memory import (
 )
 from .stats_db import (
     init_db, get_aggregated_stats, save_quota_delta, get_stats_by_topic, get_stats_by_agent,
-    get_topics_summary,
+    get_topics_summary, get_topics_management_summary,
     get_agent, upsert_agent, delete_agent, list_agents, get_default_agent,
     get_topic, upsert_topic, list_topics,
     insert_user_message, insert_assistant_message, update_assistant_message,
@@ -61,7 +61,7 @@ from .stats_db import (
     get_context_history, get_messages_by_ids, mark_orphaned_pending, get_message,
     get_session_injected_ids,
     get_topic_session, clear_topic_session,
-    delete_topic, hide_topic, get_topic_agents, get_topic_agent_history,
+    delete_topic, hide_topic, set_topic_hidden, get_topic_agents, get_topic_agent_history,
     clear_agent_sessions, get_agent_sessions,
 )
 from .journal import _generate_journal, _current_week, list_topic_journals, read_journal
@@ -171,6 +171,10 @@ class TopicMemoryRequest(BaseModel):
 class TopicMemoryCodeRootsRequest(BaseModel):
     code_roots: Optional[list[str]] = None
     code_roots_skipped: bool = False
+
+
+class TopicHiddenRequest(BaseModel):
+    hidden: bool = Field(False)
 
 
 class AgentRequest(BaseModel):
@@ -664,6 +668,22 @@ async def topics_list():
     return JSONResponse(db_topics)
 
 
+@app.get("/topics/manage")
+async def topics_manage(include_hidden: bool = True):
+    db_topics = get_topics_management_summary(include_hidden=include_hidden)
+    queue_map = {t["name"]: t for t in dispatcher.topics_info()}
+    for t in db_topics:
+        info = queue_map.get(t["name"], {})
+        t["queue_depth"] = info.get("queue_depth", 0)
+        t["active"] = info.get("active", False)
+        memory = read_topic_memory(t["name"])
+        t["memory"] = {
+            "exists": bool(memory.get("exists")),
+            "path": memory.get("path"),
+        }
+    return JSONResponse(db_topics)
+
+
 @app.get("/topics/{topic}/agents/history")
 async def topic_agent_history(topic: str):
     topic = _normalize_topic_response(topic)
@@ -706,6 +726,14 @@ async def hide_topic_route(topic: str):
     if isinstance(topic, JSONResponse):
         return topic
     return JSONResponse({"ok": hide_topic(topic)})
+
+
+@app.put("/topics/{topic}/hidden")
+async def set_topic_hidden_route(topic: str, req: TopicHiddenRequest):
+    topic = _normalize_topic_response(topic)
+    if isinstance(topic, JSONResponse):
+        return topic
+    return JSONResponse({"ok": set_topic_hidden(topic, req.hidden), "hidden": req.hidden})
 
 
 @app.delete("/topics/{topic}")

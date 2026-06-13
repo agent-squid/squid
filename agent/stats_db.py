@@ -315,6 +315,39 @@ def get_topics_summary() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_topics_management_summary(include_hidden: bool = True) -> list[dict]:
+    where_hidden = "" if include_hidden else "AND hidden = 0"
+    with _connect() as conn:
+        topic_rows = conn.execute(
+            f"""SELECT topic AS name, sticky_agent AS agent, sticky_adhoc,
+                       last_model, last_backend, last_prompt, last_at, hidden
+                FROM topics
+                WHERE agent = '' {where_hidden}
+                ORDER BY last_at DESC NULLS LAST, topic ASC"""
+        ).fetchall()
+        agent_rows = conn.execute(
+            """SELECT topic, agent, last_prompt, last_adhoc_prompt, last_at,
+                      last_model, last_backend
+               FROM topics
+               WHERE agent != ''
+               ORDER BY last_at DESC NULLS LAST, agent ASC"""
+        ).fetchall()
+
+    agents_by_topic: dict[str, list[dict]] = {}
+    for row in agent_rows:
+        item = dict(row)
+        topic = item.pop("topic")
+        agents_by_topic.setdefault(topic, []).append(item)
+
+    result = []
+    for row in topic_rows:
+        item = dict(row)
+        item["hidden"] = bool(item.get("hidden"))
+        item["agents"] = agents_by_topic.get(item["name"], [])
+        result.append(item)
+    return result
+
+
 def list_topics() -> list[dict]:
     with _connect() as conn:
         return [dict(r) for r in conn.execute(
@@ -376,6 +409,15 @@ def upsert_topic(
 def hide_topic(name: str) -> bool:
     with _connect() as conn:
         cur = conn.execute("UPDATE topics SET hidden = 1 WHERE topic = ? AND agent = ''", (name,))
+    return cur.rowcount > 0
+
+
+def set_topic_hidden(name: str, hidden: bool) -> bool:
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE topics SET hidden = ? WHERE topic = ? AND agent = ''",
+            (1 if hidden else 0, name),
+        )
     return cur.rowcount > 0
 
 

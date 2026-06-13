@@ -25,6 +25,7 @@
       <!-- Desktop nav tabs -->
       <nav id="nav-tabs">
         <button class="nav-tab active" data-view="chat">Chat</button>
+        <button class="nav-tab" data-view="topics">Topics</button>
         <button class="nav-tab" data-view="analytics">Analytics</button>
         <button class="nav-tab" data-view="agents">Agents</button>
       </nav>
@@ -56,6 +57,7 @@
       <!-- Hamburger dropdown (mobile) -->
       <div id="hamburger-menu">
         <button class="hmenu-item active" data-view="chat">Chat</button>
+        <button class="hmenu-item" data-view="topics">Topics</button>
         <button class="hmenu-item" data-view="analytics">Analytics</button>
         <button class="hmenu-item" data-view="agents">Agents</button>
       </div>
@@ -141,23 +143,6 @@
         <div id="pin-panel-list"></div>
       </div>
 
-      <div id="memory-modal">
-        <div id="memory-modal-box">
-          <div id="memory-modal-header">
-            <span id="memory-modal-title" class="settings-label">Topic memory</span>
-            <button id="memory-modal-close" type="button">✕</button>
-          </div>
-          <div id="memory-help">
-            YAML frontmatter under <code>squid</code> stores Squid settings. Markdown below it is durable topic memory and may be used as agent context.
-          </div>
-          <textarea id="memory-editor" spellcheck="false"></textarea>
-          <div id="memory-modal-footer">
-            <div id="memory-path-group"><span id="memory-path"></span><span id="memory-token-count"></span><span id="memory-token-help" data-tooltip="Tokens are chunks of text a model reads — roughly 1 token ≈ 4 characters or ¾ of a word. Code and punctuation tokenize differently from prose, so this is an estimate."><svg width="12" height="12" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7.5" cy="7.5" r="6.5"/><path d="M5.8 5.8a1.7 1.7 0 0 1 3.4 0c0 1.1-1.7 1.7-1.7 2.9"/><circle cx="7.5" cy="11" r="0.6" fill="currentColor" stroke="none"/></svg></span></div>
-            <button id="memory-save" type="button">Save</button>
-          </div>
-        </div>
-      </div>
-
       <div id="msg-modal">
         <div id="msg-modal-box">
           <div id="msg-modal-header">
@@ -193,6 +178,51 @@
           </svg>
         </button>
       </form>
+    </div>
+
+    <div id="memory-modal">
+      <div id="memory-modal-box">
+        <div id="memory-modal-header">
+          <span id="memory-modal-title" class="settings-label">Topic memory</span>
+          <button id="memory-modal-close" type="button">✕</button>
+        </div>
+        <div id="memory-help">
+          YAML frontmatter under <code>squid</code> stores Squid settings. Markdown below it is durable topic memory and may be used as agent context.
+        </div>
+        <textarea id="memory-editor" spellcheck="false"></textarea>
+        <div id="memory-modal-footer">
+          <div id="memory-path-group"><span id="memory-path"></span><span id="memory-token-count"></span><span id="memory-token-help" data-tooltip="Tokens are chunks of text a model reads — roughly 1 token ≈ 4 characters or ¾ of a word. Code and punctuation tokenize differently from prose, so this is an estimate."><svg width="12" height="12" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7.5" cy="7.5" r="6.5"/><path d="M5.8 5.8a1.7 1.7 0 0 1 3.4 0c0 1.1-1.7 1.7-1.7 2.9"/><circle cx="7.5" cy="11" r="0.6" fill="currentColor" stroke="none"/></svg></span></div>
+          <button id="memory-save" type="button">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="topic-delete-modal">
+      <div id="topic-delete-modal-box">
+        <div id="topic-delete-modal-header">
+          <span class="settings-label">Delete topic</span>
+          <button id="topic-delete-modal-close" type="button">✕</button>
+        </div>
+        <div id="topic-delete-modal-body">
+          <div id="topic-delete-modal-title"></div>
+          <div id="topic-delete-modal-copy">
+            This removes the topic, messages, sessions, and stats. This cannot be undone.
+          </div>
+        </div>
+        <div id="topic-delete-modal-footer">
+          <button id="topic-delete-cancel" type="button">Cancel</button>
+          <button id="topic-delete-confirm" type="button">Delete</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── TOPICS VIEW ───────────────────────────────────────────────────── -->
+    <div id="view-topics" class="view">
+      <div id="topics-header">
+        <input id="topics-search" type="search" placeholder="Search topics" spellcheck="false" />
+        <span id="topics-count"></span>
+      </div>
+      <div id="topics-list"></div>
     </div>
 
     <!-- ── ANALYTICS VIEW ────────────────────────────────────────────────── -->
@@ -236,6 +266,6 @@
     <!-- Inline agent creation prompt (appended to #messages dynamically) -->
   </div>
   <div id="app-tooltip"></div>
-  <script src="app.js?v=20260611-115"></script>
+  <script src="app.js?v=20260612-001"></script>
 </body>
 </html>
