@@ -46,6 +46,7 @@ from .topics import normalize_topic_slug
 from .memory import (
     code_roots_prompt_block,
     read_topic_memory,
+    topic_memory_path,
     topic_memory_prompt_block,
     topic_memory_squid_config,
     write_topic_memory_squid_code_roots,
@@ -676,10 +677,14 @@ async def topics_manage(include_hidden: bool = True):
         info = queue_map.get(t["name"], {})
         t["queue_depth"] = info.get("queue_depth", 0)
         t["active"] = info.get("active", False)
-        memory = read_topic_memory(t["name"])
+        mem_path = topic_memory_path(t["name"])
+        try:
+            mem_display = str(mem_path.relative_to(mem_path.parent.parent.parent.parent))
+        except ValueError:
+            mem_display = str(mem_path)
         t["memory"] = {
-            "exists": bool(memory.get("exists")),
-            "path": memory.get("path"),
+            "exists": mem_path.exists(),
+            "path": mem_display,
         }
     return JSONResponse(db_topics)
 

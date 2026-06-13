@@ -858,6 +858,7 @@ input.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && pinPanel.classList.contains('open')) { closePinPanel(); return; }
   if (e.key === 'Escape' && helpPanel.classList.contains('open')) { closeHelp(); return; }
   if (e.key === 'Escape' && document.getElementById('msg-modal')?.classList.contains('open')) { document.getElementById('msg-modal').classList.remove('open'); return; }
+  if (e.key === 'Escape' && document.getElementById('memory-modal')?.classList.contains('open')) { closeMemoryEditor(); return; }
   if (e.key === 'Escape' && document.getElementById('topic-delete-modal')?.classList.contains('open')) { closeTopicDeleteModal(); return; }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
@@ -2591,6 +2592,7 @@ function initStats() {
 // ── topic manager ─────────────────────────────────────────────────────────────
 
 let _topicsManageCache = null;
+let _topicsManageCachePromise = null;
 const _topicsExpanded = new Set();
 let _topicDeleteTarget = null;
 
@@ -2600,9 +2602,13 @@ function invalidateTopicsManageCache() {
 
 async function _managedTopics() {
   if (_topicsManageCache) return _topicsManageCache;
-  const res = await fetch('/topics/manage?include_hidden=true');
-  _topicsManageCache = await res.json();
-  return _topicsManageCache;
+  if (!_topicsManageCachePromise) {
+    _topicsManageCachePromise = fetch('/topics/manage?include_hidden=true')
+      .then(r => r.json())
+      .then(data => { _topicsManageCache = data; return data; })
+      .finally(() => { _topicsManageCachePromise = null; });
+  }
+  return _topicsManageCachePromise;
 }
 
 function _topicStatusBadges(topic) {
@@ -2619,14 +2625,53 @@ function _topicAgentDisplay(agentName, backendFallback = null) {
   return `<span class="ac-agent"${_agentStyleAttr(agentName, backendFallback)}>@${escapeHtml(agentName)}</span>`;
 }
 
+function _renderTopicAgents(topic) {
+  const agents = topic.agents || [];
+  if (!agents.length) {
+    return `<div class="topic-agent-row"><div class="topic-agent-main"><span class="col-default">No agent lanes yet</span></div></div>`;
+  }
+  let html = '';
+  for (const lane of agents) {
+    const backend = lane.last_backend || topic.last_backend || null;
+    const sessionPrompt = lane.last_prompt ? escapeHtml(truncate(lane.last_prompt, 120)) : '<span class="col-default">No session prompt</span>';
+    const laneTime = lane.last_at ? `<span class="topic-badge time">${escapeHtml(fmtTime(lane.last_at))}</span>` : '';
+    html += `
+      <div class="topic-agent-row" data-topic="${escapeHtml(topic.name)}" data-agent="${escapeHtml(lane.agent)}" data-adhoc="0">
+        <div class="topic-agent-main">
+          <span class="topic-agent-label">#${escapeHtml(topic.name)}${_topicAgentDisplay(lane.agent, backend)}</span>
+        </div>
+        <div class="topic-prompt">${sessionPrompt}</div>
+        <div class="topic-meta">
+          ${laneTime}
+          <button class="topic-btn" data-topic-open="${escapeHtml(topic.name)}" data-agent-open="${escapeHtml(lane.agent)}" data-adhoc-open="0" type="button">Open</button>
+        </div>
+      </div>`;
+    if (lane.last_adhoc_prompt) {
+      html += `
+        <div class="topic-agent-row adhoc" data-topic="${escapeHtml(topic.name)}" data-agent="${escapeHtml(lane.agent)}" data-adhoc="1">
+          <div class="topic-agent-main">
+            <span class="topic-agent-label">#${escapeHtml(topic.name)}${_topicAgentDisplay(lane.agent, backend)}!</span>
+          </div>
+          <div class="topic-prompt">${escapeHtml(truncate(lane.last_adhoc_prompt, 120))}</div>
+          <div class="topic-meta">
+            <span class="topic-badge">adhoc</span>
+            ${laneTime}
+            <button class="topic-btn" data-topic-open="${escapeHtml(topic.name)}" data-agent-open="${escapeHtml(lane.agent)}" data-adhoc-open="1" type="button">Open</button>
+          </div>
+        </div>`;
+    }
+  }
+  return html;
+}
+
 function _renderTopicRows(topic) {
   const expanded = _topicsExpanded.has(topic.name);
   const agentLabel = _topicAgentDisplay(topic.agent, topic.last_backend || null);
   const prompt = topic.last_prompt ? escapeHtml(truncate(topic.last_prompt, 120)) : '<span class="col-default">No prompt yet</span>';
   const memoryLabel = topic.memory?.exists ? 'Memory' : 'Add memory';
   const hideLabel = topic.hidden ? 'Show' : 'Hide';
-  let html = `
-    <div class="topic-row${topic.hidden ? ' hidden' : ''}" data-topic="${escapeHtml(topic.name)}">
+  return `
+    <div class="topic-row${topic.hidden ? ' hidden' : ''}${expanded ? ' expanded' : ''}" data-topic="${escapeHtml(topic.name)}">
       <div class="topic-main">
         <span class="topic-caret">${expanded ? '▾' : '▸'}</span>
         <span class="topic-name">#${escapeHtml(topic.name)}</span>
@@ -2640,45 +2685,8 @@ function _renderTopicRows(topic) {
         <button class="topic-btn" data-topic-hide="${escapeHtml(topic.name)}" data-hidden="${topic.hidden ? '1' : '0'}" type="button">${hideLabel}</button>
         <button class="topic-btn danger" data-topic-delete="${escapeHtml(topic.name)}" type="button">Delete</button>
       </div>
-    </div>`;
-
-  if (expanded) {
-    const agents = topic.agents || [];
-    if (!agents.length) {
-      html += `<div class="topic-agent-row"><div class="topic-agent-main"><span class="col-default">No agent lanes yet</span></div></div>`;
-    }
-    for (const lane of agents) {
-      const backend = lane.last_backend || topic.last_backend || null;
-      const sessionPrompt = lane.last_prompt ? escapeHtml(truncate(lane.last_prompt, 120)) : '<span class="col-default">No session prompt</span>';
-      const laneTime = lane.last_at ? `<span class="topic-badge time">${escapeHtml(fmtTime(lane.last_at))}</span>` : '';
-      html += `
-        <div class="topic-agent-row" data-topic="${escapeHtml(topic.name)}" data-agent="${escapeHtml(lane.agent)}" data-adhoc="0">
-          <div class="topic-agent-main">
-            <span class="topic-agent-label">#${escapeHtml(topic.name)}${_topicAgentDisplay(lane.agent, backend)}</span>
-          </div>
-          <div class="topic-prompt">${sessionPrompt}</div>
-          <div class="topic-meta">
-            ${laneTime}
-            <button class="topic-btn" data-topic-open="${escapeHtml(topic.name)}" data-agent-open="${escapeHtml(lane.agent)}" data-adhoc-open="0" type="button">Open</button>
-          </div>
-        </div>`;
-      if (lane.last_adhoc_prompt) {
-        html += `
-          <div class="topic-agent-row adhoc" data-topic="${escapeHtml(topic.name)}" data-agent="${escapeHtml(lane.agent)}" data-adhoc="1">
-            <div class="topic-agent-main">
-              <span class="topic-agent-label">#${escapeHtml(topic.name)}${_topicAgentDisplay(lane.agent, backend)}!</span>
-            </div>
-            <div class="topic-prompt">${escapeHtml(truncate(lane.last_adhoc_prompt, 120))}</div>
-            <div class="topic-meta">
-              <span class="topic-badge">adhoc</span>
-              ${laneTime}
-              <button class="topic-btn" data-topic-open="${escapeHtml(topic.name)}" data-agent-open="${escapeHtml(lane.agent)}" data-adhoc-open="1" type="button">Open</button>
-            </div>
-          </div>`;
-      }
-    }
-  }
-  return html;
+    </div>
+    <div class="topic-agents"${expanded ? '' : ' hidden'}>${_renderTopicAgents(topic)}</div>`;
 }
 
 async function loadTopicsView() {
@@ -2686,7 +2694,7 @@ async function loadTopicsView() {
   const countEl = document.getElementById('topics-count');
   const searchEl = document.getElementById('topics-search');
   if (!listEl) return;
-  listEl.innerHTML = '<div class="topics-empty">Loading…</div>';
+  if (!_topicsManageCache) listEl.innerHTML = '<div class="topics-empty">Loading…</div>';
   let topics;
   try {
     topics = await _managedTopics();
@@ -2713,9 +2721,13 @@ function bindTopicsView() {
     row.addEventListener('click', e => {
       if (e.target.closest('button')) return;
       const topic = row.dataset.topic;
-      if (_topicsExpanded.has(topic)) _topicsExpanded.delete(topic);
-      else _topicsExpanded.add(topic);
-      loadTopicsView();
+      const expanded = row.classList.toggle('expanded');
+      const caret = row.querySelector('.topic-caret');
+      if (caret) caret.textContent = expanded ? '▾' : '▸';
+      if (expanded) _topicsExpanded.add(topic);
+      else _topicsExpanded.delete(topic);
+      const agentsEl = row.nextElementSibling;
+      if (agentsEl?.classList.contains('topic-agents')) agentsEl.hidden = !expanded;
     });
   });
   listEl.querySelectorAll('[data-topic-open]').forEach(btn => {
@@ -2741,14 +2753,18 @@ function bindTopicsView() {
       const topic = btn.dataset.topicHide;
       const nextHidden = btn.dataset.hidden !== '1';
       btn.disabled = true;
-      await fetch(`/topics/${encodeURIComponent(topic)}/hidden`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ hidden: nextHidden }),
-      });
-      invalidateTopicsCache();
-      invalidateTopicsManageCache();
-      loadTopicsView();
+      try {
+        await fetch(`/topics/${encodeURIComponent(topic)}/hidden`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hidden: nextHidden }),
+        });
+        invalidateTopicsCache();
+        invalidateTopicsManageCache();
+        loadTopicsView();
+      } finally {
+        btn.disabled = false;
+      }
     });
   });
   listEl.querySelectorAll('[data-topic-delete]').forEach(btn => {
@@ -2782,12 +2798,17 @@ async function confirmTopicDelete() {
   const topic = _topicDeleteTarget;
   const btn = document.getElementById('topic-delete-confirm');
   btn.disabled = true;
-  await fetch(`/topics/${encodeURIComponent(topic)}`, { method: 'DELETE' });
-  _topicsExpanded.delete(topic);
-  closeTopicDeleteModal();
-  invalidateTopicsCache();
-  invalidateTopicsManageCache();
-  loadTopicsView();
+  try {
+    const res = await fetch(`/topics/${encodeURIComponent(topic)}`, { method: 'DELETE' });
+    if (!res.ok) return;
+    _topicsExpanded.delete(topic);
+    closeTopicDeleteModal();
+    invalidateTopicsCache();
+    invalidateTopicsManageCache();
+    loadTopicsView();
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ── agent manager ─────────────────────────────────────────────────────────────
@@ -3057,7 +3078,11 @@ function _acRender(items) {
     btn.addEventListener('mousedown', async e => {
       e.preventDefault(); e.stopPropagation();
       const name = btn.dataset.topic;
-      await fetch(`/topics/${encodeURIComponent(name)}/hide`, { method: 'POST' });
+      await fetch(`/topics/${encodeURIComponent(name)}/hidden`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hidden: true }),
+      });
       invalidateTopicsCache();
       acItems = acItems.filter(it => it.deleteTopic !== name);
       btn.closest('.ac-item').remove();
