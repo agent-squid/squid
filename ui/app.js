@@ -135,32 +135,36 @@ function backendDisplayName(backend) {
 
 // Rewrite file:// links and images to /localfile?path= so local paths are served.
 (function () {
+  function extractLine(path) {
+    const m = path.match(/:(\d+)(?:-(\d+))?(?::\d+)?$/);
+    if (!m) return { line: null, endLine: null };
+    return { line: parseInt(m[1], 10), endLine: m[2] ? parseInt(m[2], 10) : null };
+  }
+
   function stripLineSuffix(path) {
-    return path.replace(/:\d+(?::\d+)?$/, '');
+    return path.replace(/:\d+(?:-\d+)?(?::\d+)?$/, '');
   }
 
   function isLocalFilePath(path) {
     return /^(\/|~\/)/.test(path) && /\.\w{1,16}$/.test(path);
   }
 
-  function localFileUrl(path) {
+  function localFileUrl(path, line, endLine) {
     const params = new URLSearchParams({ path });
     const token = localStorage.getItem('squid_token');
     if (token) params.set('token', token);
-    return '/localfile?' + params.toString();
+    const base = '/localfile?' + params.toString();
+    if (!line) return base;
+    return base + '#L' + line + (endLine && endLine !== line ? '-L' + endLine : '');
   }
 
   function fileToLocal(url) {
     if (!url) return url;
-    if (url.startsWith('file://')) {
-      const p = stripLineSuffix(decodeURIComponent(url.replace(/^file:\/\//, '')));
-      return localFileUrl(p);
-    }
-    // bare absolute paths like /Users/... or ~/..., optionally with :line suffix
-    const p = stripLineSuffix(url);
-    if (isLocalFilePath(p)) {
-      return localFileUrl(p);
-    }
+    let rawPath = url;
+    if (url.startsWith('file://')) rawPath = decodeURIComponent(url.replace(/^file:\/\//, ''));
+    const { line, endLine } = extractLine(rawPath);
+    const path = stripLineSuffix(rawPath);
+    if (isLocalFilePath(path)) return localFileUrl(path, line, endLine);
     return url;
   }
   // marked v5+ passes a token object; override href while forwarding everything else.
@@ -1575,6 +1579,21 @@ function makeToolBlock(tool, msgId) {
         fileToggle.textContent = `${status} ${displayPath}`;
         fileToggle.classList.add('gitdiff-file-toggle--no-diff');
         row.appendChild(fileToggle);
+      }
+
+      const _absPath = file.path
+        ? (file.path.startsWith('/') ? file.path : tool.repo ? tool.repo + '/' + file.path : null)
+        : null;
+      if (status !== 'D' && _absPath && _isTextPath(_absPath)) {
+        const openBtn = document.createElement('button');
+        openBtn.className = 'gitdiff-file-open';
+        openBtn.title = 'Open file';
+        openBtn.textContent = '↗';
+        openBtn.addEventListener('click', e => {
+          e.stopPropagation();
+          openFileViewer(_absPath);
+        });
+        row.appendChild(openBtn);
       }
 
       body.appendChild(row);
@@ -3942,6 +3961,122 @@ document.addEventListener('click', e => {
     procStatusPopup.classList.remove('open');
   }
 });
+// ── file viewer ───────────────────────────────────────────────────────────────
+
+const _TEXT_EXTS = new Set(['txt','md','py','js','ts','jsx','tsx','json','yaml','yml',
+  'toml','ini','cfg','conf','sh','bash','zsh','fish','rb','go','rs','java','c','cpp',
+  'h','hpp','cs','php','swift','kt','kts','lua','r','sql','html','css','xml','svg',
+  'log','env','gitignore','dockerfile','makefile','lock','csv','tsv']);
+
+function _isTextPath(path) {
+  const ext = (path.split('.').pop() || '').toLowerCase();
+  return _TEXT_EXTS.has(ext) || !path.includes('.');
+}
+
+function openFileViewer(path, line, endLine) {
+  document.getElementById('file-modal')?.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'file-modal';
+
+  const box = document.createElement('div');
+  box.id = 'file-modal-box';
+
+  const header = document.createElement('div');
+  header.id = 'file-modal-header';
+
+  const pathEl = document.createElement('span');
+  pathEl.id = 'file-modal-path';
+  pathEl.textContent = path + (line ? ':' + line + (endLine && endLine !== line ? '-' + endLine : '') : '');
+
+  const closeBtn = document.createElement('button');
+  closeBtn.id = 'file-modal-close';
+  closeBtn.textContent = '×';
+  const closeModal = () => modal.remove();
+  closeBtn.addEventListener('click', closeModal);
+  modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
+  const escHandler = e => { if (e.key === 'Escape') { closeModal(); document.removeEventListener('keydown', escHandler); } };
+  document.addEventListener('keydown', escHandler);
+
+  header.appendChild(pathEl);
+  header.appendChild(closeBtn);
+
+  const body = document.createElement('div');
+  body.id = 'file-modal-body';
+  body.textContent = 'Loading…';
+
+  box.appendChild(header);
+  box.appendChild(body);
+  modal.appendChild(box);
+  document.body.appendChild(modal);
+
+  const token = localStorage.getItem('squid_token');
+  const params = new URLSearchParams({ path });
+  if (token) params.set('token', token);
+  fetch('/localfile?' + params)
+    .then(async res => {
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        body.textContent = d.error || `Error ${res.status}`;
+        return;
+      }
+      const text = await res.text();
+      _renderFileViewer(body, text, line, endLine);
+    })
+    .catch(() => { body.textContent = 'Failed to load file.'; });
+}
+
+function _renderFileViewer(container, text, targetLine, endLine) {
+  const lines = text.split('\n');
+  if (lines.length && lines[lines.length - 1] === '') lines.pop();
+  const numWidth = String(lines.length).length;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'fv-lines';
+
+  lines.forEach((content, i) => {
+    const n = i + 1;
+    const inRange = targetLine && n >= targetLine && n <= (endLine || targetLine);
+    const row = document.createElement('div');
+    row.className = 'fv-line' + (inRange ? ' fv-target' : '');
+    if (n === targetLine) row.id = 'fv-target';
+
+    const num = document.createElement('span');
+    num.className = 'fv-num';
+    num.textContent = String(n).padStart(numWidth, ' ');
+
+    const code = document.createElement('span');
+    code.className = 'fv-code';
+    code.textContent = content;
+
+    row.appendChild(num);
+    row.appendChild(code);
+    wrap.appendChild(row);
+  });
+
+  container.innerHTML = '';
+  container.appendChild(wrap);
+
+  if (targetLine) requestAnimationFrame(() => {
+    document.getElementById('fv-target')?.scrollIntoView({ block: 'center' });
+  });
+}
+
+document.addEventListener('click', e => {
+  const a = e.target.closest('a');
+  if (!a) return;
+  const href = a.getAttribute('href') || '';
+  if (!href.startsWith('/localfile')) return;
+  const url = new URL(a.href);
+  const path = url.searchParams.get('path') || '';
+  if (!_isTextPath(path)) return;
+  e.preventDefault();
+  const hm = url.hash.match(/^#L(\d+)(?:-L(\d+))?$/);
+  const line = hm ? parseInt(hm[1], 10) : null;
+  const endLine = hm?.[2] ? parseInt(hm[2], 10) : null;
+  openFileViewer(path, line, endLine);
+});
+
 initHistoryScroll();
 initStats();
 initTopicsView();

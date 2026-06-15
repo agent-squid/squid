@@ -591,6 +591,12 @@ body {
 .gitdiff-file-body { display: none; width: 100%; }
 .gitdiff-file-expanded .gitdiff-file-body { display: block; }
 .gitdiff-file-row--reverted .gitdiff-file-toggle { opacity: 0.4; text-decoration: line-through; }
+.gitdiff-file-open {
+  background: none; border: none; cursor: pointer;
+  color: #3a3a50; font: inherit; font-size: 0.85em;
+  padding: 0.2em 0.55em; flex-shrink: 0; line-height: 1;
+}
+.gitdiff-file-open:hover { color: #888; }
 .gitdiff-revert-btn {
   flex-shrink: 0; margin-right: 0.4em;
   background: none; border: 1px solid #3a3a55; border-radius: 3px;
@@ -1059,6 +1065,93 @@ body {
   border-color: #e05030;
   color: #ff704c;
 }
+/* ── file viewer modal ─────────────────────────────────────────────────────── */
+#file-modal {
+  display: flex;
+  position: fixed;
+  inset: 0;
+  z-index: 125;
+  background: rgba(0, 0, 0, 0.65);
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+#file-modal-box {
+  width: min(960px, 98%);
+  height: min(88vh, 900px);
+  background: #0d0d14;
+  border: 1px solid #2a2a3a;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#file-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid #1a1a26;
+  flex-shrink: 0;
+  background: #111119;
+}
+#file-modal-path {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 0.72em;
+  color: #777;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+#file-modal-close {
+  background: transparent;
+  border: none;
+  color: #555;
+  font-size: 1.1rem;
+  cursor: pointer;
+  padding: 0.1rem 0.35rem;
+  flex-shrink: 0;
+  line-height: 1;
+}
+#file-modal-close:hover { color: #999; }
+#file-modal-body {
+  flex: 1;
+  overflow: auto;
+  padding: 0.6rem 0;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 0.8em;
+  color: #aaa;
+}
+.fv-lines { display: table; min-width: 100%; }
+.fv-line {
+  display: table-row;
+  line-height: 1.65;
+  white-space: pre;
+}
+.fv-line:hover > * { background: rgba(255, 255, 255, 0.025); }
+.fv-target > * { background: rgba(240, 112, 64, 0.12) !important; }
+.fv-num {
+  display: table-cell;
+  text-align: right;
+  padding: 0 1.2em 0 1em;
+  color: #333345;
+  user-select: none;
+  white-space: pre;
+  position: relative;
+}
+.fv-target .fv-num {
+  color: #f07040;
+  box-shadow: inset 2px 0 0 #f07040;
+}
+.fv-code {
+  display: table-cell;
+  padding-right: 2em;
+  color: #c0c0d0;
+  white-space: pre;
+}
+
 #memory-editor {
   flex: 1;
   resize: none;
