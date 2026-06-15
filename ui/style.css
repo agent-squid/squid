@@ -618,7 +618,7 @@ body {
 }
 .boot-art {
   display: inline-block;
-  font-family: ui-monospace, monospace;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
   font-size: 0.62em;
   line-height: 1.3;
   color: #d07840;
