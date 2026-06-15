@@ -4021,20 +4021,73 @@ function openFileViewer(path, line, endLine) {
         return;
       }
       const text = await res.text();
-      _renderFileViewer(body, text, line, endLine);
+      _renderFileViewer(body, text, line, endLine, path);
     })
     .catch(() => { body.textContent = 'Failed to load file.'; });
 }
 
-function _renderFileViewer(container, text, targetLine, endLine) {
-  const lines = text.split('\n');
-  if (lines.length && lines[lines.length - 1] === '') lines.pop();
-  const numWidth = String(lines.length).length;
+const _EXT_LANG = {
+  py:'python', js:'javascript', ts:'typescript', jsx:'javascript', tsx:'typescript',
+  json:'json', yaml:'yaml', yml:'yaml', toml:'toml', sh:'bash', bash:'bash',
+  zsh:'bash', fish:'bash', rb:'ruby', go:'go', rs:'rust', java:'java',
+  c:'c', cpp:'cpp', h:'c', hpp:'cpp', cs:'csharp', php:'php', swift:'swift',
+  kt:'kotlin', lua:'lua', r:'r', sql:'sql', html:'html', css:'css',
+  xml:'xml', svg:'xml', md:'markdown',
+};
+
+function _splitHighlightedLines(html) {
+  const lines = [];
+  let line = '';
+  let open = [];
+  let i = 0;
+  while (i < html.length) {
+    if (html[i] === '\n') {
+      lines.push(line + '</span>'.repeat(open.length));
+      line = open.join('');
+      i++;
+    } else if (html[i] === '<') {
+      if (html.startsWith('</span>', i)) {
+        open.pop();
+        line += '</span>';
+        i += 7;
+      } else if (html.startsWith('<span', i)) {
+        const end = html.indexOf('>', i);
+        const tag = html.slice(i, end + 1);
+        open.push(tag);
+        line += tag;
+        i = end + 1;
+      } else {
+        line += html[i++];
+      }
+    } else {
+      line += html[i++];
+    }
+  }
+  if (line || open.length) lines.push(line + '</span>'.repeat(open.length));
+  return lines;
+}
+
+function _renderFileViewer(container, text, targetLine, endLine, path) {
+  const rawLines = text.split('\n');
+  if (rawLines.length && rawLines[rawLines.length - 1] === '') rawLines.pop();
+  const numWidth = String(rawLines.length).length;
+
+  let hlLines = null;
+  if (typeof hljs !== 'undefined') {
+    try {
+      const ext = (path || '').split('.').pop().toLowerCase();
+      const lang = _EXT_LANG[ext];
+      const result = lang && hljs.getLanguage(lang)
+        ? hljs.highlight(text, { language: lang })
+        : hljs.highlightAuto(text);
+      hlLines = _splitHighlightedLines(result.value);
+    } catch {}
+  }
 
   const wrap = document.createElement('div');
   wrap.className = 'fv-lines';
 
-  lines.forEach((content, i) => {
+  rawLines.forEach((content, i) => {
     const n = i + 1;
     const inRange = targetLine && n >= targetLine && n <= (endLine || targetLine);
     const row = document.createElement('div');
@@ -4047,7 +4100,11 @@ function _renderFileViewer(container, text, targetLine, endLine) {
 
     const code = document.createElement('span');
     code.className = 'fv-code';
-    code.textContent = content;
+    if (hlLines?.[i] != null) {
+      code.innerHTML = hlLines[i] || '​';
+    } else {
+      code.textContent = content;
+    }
 
     row.appendChild(num);
     row.appendChild(code);

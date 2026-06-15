@@ -1151,6 +1151,8 @@ body {
   color: #c0c0d0;
   white-space: pre;
 }
+.fv-code .hljs-comment,
+.fv-code .hljs-quote { font-style: italic; }
 
 #memory-editor {
   flex: 1;
