@@ -2725,7 +2725,7 @@ function _renderTopicAgents(topic) {
     html += `
       <div class="topic-agent-row" data-topic="${escapeHtml(topic.name)}" data-agent="${escapeHtml(lane.agent)}" data-adhoc="0">
         <div class="topic-agent-main">
-          <span class="topic-agent-label">#${escapeHtml(topic.name)}${_topicAgentDisplay(lane.agent, backend)}</span>
+          <span class="topic-agent-label"><span class="topic-name">#${escapeHtml(topic.name)}</span>${_topicAgentDisplay(lane.agent, backend)}</span>
         </div>
         <div class="topic-prompt">${sessionPrompt}</div>
         <div class="topic-meta">
@@ -2737,7 +2737,7 @@ function _renderTopicAgents(topic) {
       html += `
         <div class="topic-agent-row adhoc" data-topic="${escapeHtml(topic.name)}" data-agent="${escapeHtml(lane.agent)}" data-adhoc="1">
           <div class="topic-agent-main">
-            <span class="topic-agent-label">#${escapeHtml(topic.name)}${_topicAgentDisplay(lane.agent, backend)}!</span>
+            <span class="topic-agent-label"><span class="topic-name">#${escapeHtml(topic.name)}</span>${_topicAgentDisplay(lane.agent, backend)}!</span>
           </div>
           <div class="topic-prompt">${escapeHtml(truncate(lane.last_adhoc_prompt, 120))}</div>
           <div class="topic-meta">
@@ -2761,8 +2761,7 @@ function _renderTopicRows(topic) {
     <div class="topic-row${topic.hidden ? ' hidden' : ''}${expanded ? ' expanded' : ''}" data-topic="${escapeHtml(topic.name)}">
       <div class="topic-main">
         <span class="topic-caret">${expanded ? '▾' : '▸'}</span>
-        <span class="topic-name">#${escapeHtml(topic.name)}</span>
-        ${agentLabel}
+        <span class="topic-identity"><span class="topic-name">#${escapeHtml(topic.name)}</span>${agentLabel}</span>
       </div>
       <div class="topic-prompt">${prompt}</div>
       <div class="topic-meta">
@@ -3328,13 +3327,13 @@ async function showBootBanner() {
     const data = await res.json();
     const bootTime = data.boot_time ? fmtTime(data.boot_time) : '';
     const art = `\
-    🦑 AGENT
-    ██████╗ ██████╗ ██╗   ██╗██╗██████╗
-   ██╔════╝██╔═══██╗██║   ██║██║██╔══██╗
-   ╚█████╗ ██║   ██║██║   ██║██║██║  ██║
-    ╚═══██╗██║▄▄ ██║██║   ██║██║██║  ██║
-   ██████╔╝╚██████╔╝╚██████╔╝██║██████╔╝
-   ╚═════╝  ╚══▀▀═╝  ╚═════╝ ╚═╝╚═════╝`;
+ 🦑 AGENT
+ ██████╗ ██████╗ ██╗   ██╗██╗██████╗
+██╔════╝██╔═══██╗██║   ██║██║██╔══██╗
+╚█████╗ ██║   ██║██║   ██║██║██║  ██║
+ ╚═══██╗██║▄▄ ██║██║   ██║██║██║  ██║
+██████╔╝╚██████╔╝╚██████╔╝██║██████╔╝
+╚═════╝  ╚══▀▀═╝  ╚═════╝ ╚═╝╚═════╝`;
     const el = document.createElement('div');
     el.className = 'boot-banner';
     el.innerHTML = `<pre class="boot-art">${art}</pre>` +
