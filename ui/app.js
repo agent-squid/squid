@@ -4150,3 +4150,59 @@ try {
   const saved = JSON.parse(localStorage.getItem('squid_sticky_chip') || 'null');
   if (saved?.topic) setTopicChip(saved.topic, saved.agent || null, saved.adhoc || false);
 } catch { /* ignore */ }
+
+// Patch bookmarklet hrefs with the actual origin (avoids hardcoding the port).
+document.querySelectorAll('.creds-bookmarklet').forEach(a => {
+  a.href = a.href.replace('SQUID_ORIGIN', location.origin);
+});
+
+// ── bookmarklet credential import ─────────────────────────────────────────────
+(function () {
+  const hash = location.hash;
+  if (!hash.startsWith('#squid-import/')) return;
+  history.replaceState(null, '', location.pathname);
+  const parts = hash.slice('#squid-import/'.length).split('/');
+  const type = parts[0];
+
+  function _showImportResult(popupId, statusId, ok) {
+    const popup = document.getElementById(popupId);
+    const status = document.getElementById(statusId);
+    if (popup) popup.classList.add('open');
+    if (status) {
+      status.textContent = ok ? 'Imported!' : 'Import failed';
+      status.style.color = ok ? '#69a875' : '#a06655';
+    }
+  }
+
+  if (type === 'claude' && parts.length >= 3) {
+    const org_id = decodeURIComponent(parts[1]);
+    const session_key = decodeURIComponent(parts[2]);
+    fetch('/config/creds', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ org_id, session_key }),
+    })
+      .then(r => r.json())
+      .then(d => _showImportResult('quota-creds-popup', 'creds-status', !!d.ok))
+      .catch(() => _showImportResult('quota-creds-popup', 'creds-status', false));
+  } else if (type === 'claude-org' && parts.length >= 2) {
+    const org_id = decodeURIComponent(parts[1]);
+    const orgInput = document.getElementById('creds-org');
+    const popup = document.getElementById('quota-creds-popup');
+    const status = document.getElementById('creds-status');
+    if (orgInput) orgInput.value = org_id;
+    if (popup) popup.classList.add('open');
+    if (status) { status.textContent = 'Org ID filled — paste session key below'; status.style.color = '#888'; }
+    document.getElementById('creds-key')?.focus();
+  } else if (type === 'codex' && parts.length >= 2) {
+    const token = decodeURIComponent(parts[1]);
+    fetch('/config/creds/codex', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    })
+      .then(r => r.json())
+      .then(d => _showImportResult('codex-creds-popup', 'codex-creds-status', !!d.ok))
+      .catch(() => _showImportResult('codex-creds-popup', 'codex-creds-status', false));
+  }
+})();

@@ -178,9 +178,10 @@ body {
   padding: 0.5rem 0.7rem;
   z-index: 30;
   box-shadow: 0 4px 16px rgba(0,0,0,0.5);
-  align-items: center;
-  gap: 0.4rem;
-  white-space: nowrap;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.45rem;
+  min-width: 340px;
 }
 #quota-creds-popup.open { display: flex; }
 #creds-org, #creds-key {
@@ -235,9 +236,10 @@ body {
   padding: 0.5rem 0.7rem;
   z-index: 30;
   box-shadow: 0 4px 16px rgba(0,0,0,0.5);
-  align-items: center;
-  gap: 0.4rem;
-  white-space: nowrap;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.45rem;
+  min-width: 340px;
 }
 #codex-creds-popup.open { display: flex; }
 #codex-creds-token {
@@ -261,6 +263,56 @@ body {
 }
 #codex-creds-save:hover { color: #10a37f; border-color: #10a37f; }
 #codex-creds-status { font-size: 0.68em; color: #555; }
+.creds-help {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid #1c1c26;
+}
+.creds-bookmarklet {
+  display: inline-block;
+  background: #1a1a26;
+  border: 1px solid #35354a;
+  border-radius: 4px;
+  color: #999;
+  font-size: 0.7em;
+  padding: 0.2rem 0.55rem;
+  text-decoration: none;
+  cursor: grab;
+  white-space: nowrap;
+  flex-shrink: 0;
+  user-select: none;
+}
+.creds-bookmarklet:hover { border-color: #f07040; color: #f07040; }
+.creds-help-hint {
+  font-size: 0.62em;
+  color: #3a3a52;
+  line-height: 1.35;
+}
+.creds-inputs {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  white-space: nowrap;
+  flex-wrap: wrap;
+}
+.creds-key-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.creds-key-hint {
+  font-size: 0.6em;
+  color: #3a3a52;
+  white-space: normal;
+}
+.creds-key-hint code {
+  color: #555570;
+  background: #1a1a28;
+  padding: 0 0.3em;
+  border-radius: 3px;
+}
 
 /* process status dot (topbar) */
 #proc-status {

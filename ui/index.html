@@ -71,18 +71,31 @@
       <div id="proc-status-popup"></div>
 
       <div id="codex-creds-popup">
-        <span class="settings-label">ChatGPT bearer</span>
-        <input id="codex-creds-token" type="password" placeholder="Bearer eyJ..." />
-        <button id="codex-creds-save" type="button">Save</button>
-        <span id="codex-creds-status"></span>
+        <div class="creds-help">
+          <a class="creds-bookmarklet" href="javascript:(async function(){try{const r=await fetch('https://chatgpt.com/api/auth/session',{credentials:'include'});const d=await r.json();const t=d.accessToken;if(!t)return alert('Not found. Make sure you are logged into ChatGPT.');window.open('SQUID_ORIGIN/#squid-import/codex/'+encodeURIComponent(t),'_blank');}catch(e){alert('Error: '+e.message);}})();">🔖 Codex Key → Squid</a>
+          <span class="creds-help-hint">drag to bookmarks bar → open chatgpt.com → click</span>
+        </div>
+        <div class="creds-inputs">
+          <input id="codex-creds-token" type="password" placeholder="Bearer eyJ… (or use bookmarklet)" />
+          <button id="codex-creds-save" type="button">Save</button>
+          <span id="codex-creds-status"></span>
+        </div>
       </div>
 
       <div id="quota-creds-popup">
-        <span class="settings-label">Claude.ai session</span>
-        <input id="creds-org" type="text" placeholder="Org ID" spellcheck="false" />
-        <input id="creds-key" type="password" placeholder="Session key" />
-        <button id="creds-save" type="button">Save</button>
-        <span id="creds-status"></span>
+        <div class="creds-help">
+          <a class="creds-bookmarklet" href="javascript:(function(){const ck=document.cookie.split(';').map(s=>s.trim()).find(s=>s.startsWith('lastActiveOrg='));const id=ck?decodeURIComponent(ck.split('=').slice(1).join('=')):null;if(!id)return alert('Org ID not found. Make sure you are logged into Claude.ai.');window.open('SQUID_ORIGIN/#squid-import/claude-org/'+encodeURIComponent(id),'_blank');})();">🔖 Claude Org ID → Squid</a>
+          <span class="creds-help-hint">drag to bookmarks bar → open claude.ai → click</span>
+        </div>
+        <div class="creds-inputs">
+          <input id="creds-org" type="text" placeholder="Org ID" spellcheck="false" />
+          <div class="creds-key-wrap">
+            <input id="creds-key" type="password" placeholder="Session key" />
+            <span class="creds-key-hint">DevTools → Application → Cookies → claude.ai → <code>sessionKey</code></span>
+          </div>
+          <button id="creds-save" type="button">Save</button>
+          <span id="creds-status"></span>
+        </div>
       </div>
     </header>
 
