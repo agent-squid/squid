@@ -103,57 +103,9 @@ _TABLES = [
     )""",
 ]
 
-_MIGRATIONS = [
-    "ALTER TABLE chat_messages ADD COLUMN adhoc INTEGER DEFAULT 0",
-    "ALTER TABLE aliases ADD COLUMN timeout INTEGER",
-    "ALTER TABLE session_stats ADD COLUMN model TEXT",
-    "ALTER TABLE session_stats ADD COLUMN cwd TEXT",
-    "ALTER TABLE session_stats ADD COLUMN created_at TEXT",
-    "ALTER TABLE session_stats ADD COLUMN history_input_tokens INTEGER DEFAULT 0",
-    "ALTER TABLE session_stats ADD COLUMN quota_before REAL",
-    "ALTER TABLE session_stats ADD COLUMN quota_after REAL",
-    "ALTER TABLE session_stats ADD COLUMN topic TEXT",
-    "ALTER TABLE session_stats ADD COLUMN backend TEXT",
-    "ALTER TABLE chat_messages ADD COLUMN pinned INTEGER DEFAULT 0",
-    "ALTER TABLE session_stats ADD COLUMN lookback INTEGER DEFAULT 0",
-    "ALTER TABLE session_stats ADD COLUMN pin_count INTEGER DEFAULT 0",
-    "ALTER TABLE chat_messages ADD COLUMN tools TEXT",
-    # alias → agent column renames (2026-05-28)
-    "ALTER TABLE topics RENAME COLUMN alias TO agent",
-    "ALTER TABLE chat_messages RENAME COLUMN alias TO agent",
-    "ALTER TABLE topic_sessions RENAME COLUMN alias TO agent",
-    "ALTER TABLE session_context_log RENAME COLUMN alias TO agent",
-    "ALTER TABLE session_stats RENAME COLUMN alias TO agent",
-    # tools → context, drop pinned/pin_count (2026-05-28)
-    "ALTER TABLE chat_messages RENAME COLUMN tools TO context",
-    "ALTER TABLE chat_messages DROP COLUMN pinned",
-    "ALTER TABLE session_stats DROP COLUMN pin_count",
-    # drop backend/model from chat_messages — ground truth is in session_stats (2026-05-28)
-    "ALTER TABLE chat_messages DROP COLUMN backend",
-    "ALTER TABLE chat_messages DROP COLUMN model",
-    # hide support for topics (2026-05-28)
-    "ALTER TABLE topics ADD COLUMN hidden INTEGER DEFAULT 0",
-    # sticky_adhoc tracks whether the sticky agent was set via adhoc (!) mode (2026-06-11)
-    "ALTER TABLE topics ADD COLUMN sticky_adhoc INTEGER DEFAULT 0",
-    # last_adhoc_prompt stores the most recent adhoc prompt per agent row (2026-06-11)
-    "ALTER TABLE topics ADD COLUMN last_adhoc_prompt TEXT",
-    # per-message quota delta (2026-06-09)
-    "ALTER TABLE chat_messages ADD COLUMN quota_delta REAL",
-    # per-message raw quota snapshot (2026-06-09)
-    "ALTER TABLE chat_messages ADD COLUMN quota_before REAL",
-    "ALTER TABLE chat_messages ADD COLUMN quota_after REAL",
-    # git diff revert tracking (2026-06-12)
-    """CREATE TABLE IF NOT EXISTS git_diff_reverts (
-        msg_id      INTEGER NOT NULL,
-        repo        TEXT NOT NULL,
-        file_path   TEXT NOT NULL,
-        reverted_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-        PRIMARY KEY (msg_id, repo, file_path)
-    )""",
-    # denormalize last_model/last_backend into topics to avoid JOIN in get_topics_summary (2026-05-28)
-    "ALTER TABLE topics ADD COLUMN last_model TEXT",
-    "ALTER TABLE topics ADD COLUMN last_backend TEXT",
-]
+# v0.1 baseline — _TABLES above reflects the complete schema.
+# Add future schema changes here as new entries after each release.
+_MIGRATIONS: list[str] = []
 
 
 def _connect() -> sqlite3.Connection:
@@ -165,33 +117,6 @@ def _connect() -> sqlite3.Connection:
 def init_db() -> None:
     conn = _connect()
     try:
-        # One-time table rename: aliases → agents
-        tables = {r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()}
-        if "aliases" in tables and "agents" not in tables:
-            conn.execute("ALTER TABLE aliases RENAME TO agents")
-        # Drop legacy table no longer needed
-        conn.execute("DROP TABLE IF EXISTS session_context_log")
-
-        # Recreate topics table with composite PK (topic, agent) if still on old schema
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(topics)").fetchall()} if "topics" in tables else set()
-        if "topics" in tables and "last_at" not in cols:
-            conn.execute("""CREATE TABLE topics_new (
-                topic        TEXT NOT NULL,
-                agent        TEXT NOT NULL DEFAULT '',
-                sticky_agent TEXT,
-                last_prompt  TEXT,
-                last_at      TEXT,
-                hidden       INTEGER DEFAULT 0,
-                created_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                PRIMARY KEY (topic, agent)
-            )""")
-            conn.execute("""INSERT INTO topics_new (topic, agent, sticky_agent, hidden, created_at)
-                           SELECT name, '', agent, COALESCE(hidden, 0), created_at FROM topics""")
-            conn.execute("DROP TABLE topics")
-            conn.execute("ALTER TABLE topics_new RENAME TO topics")
-
         for ddl in _TABLES:
             conn.execute(ddl)
         for sql in _MIGRATIONS:
@@ -206,36 +131,6 @@ def init_db() -> None:
                     "INSERT OR IGNORE INTO agents (name, backend) VALUES (?, ?)",
                     (backend, backend),
                 )
-        # Backfill last_prompt/last_at for topic rows that predate the denormalization
-        conn.execute("""
-            UPDATE topics SET
-                last_prompt = (
-                    SELECT content FROM chat_messages
-                    WHERE topic = topics.topic AND role = 'user' AND content IS NOT NULL
-                    ORDER BY id DESC LIMIT 1
-                ),
-                last_at = (
-                    SELECT created_at FROM chat_messages
-                    WHERE topic = topics.topic AND role = 'user' AND content IS NOT NULL
-                    ORDER BY id DESC LIMIT 1
-                )
-            WHERE last_prompt IS NULL
-        """)
-        # Backfill last_backend/last_model from session_stats for topics that predate the denormalization
-        conn.execute("""
-            UPDATE topics SET
-                last_backend = (
-                    SELECT backend FROM session_stats
-                    WHERE topic = topics.topic AND backend IS NOT NULL
-                    ORDER BY created_at DESC LIMIT 1
-                ),
-                last_model = (
-                    SELECT model FROM session_stats
-                    WHERE topic = topics.topic AND model IS NOT NULL
-                    ORDER BY created_at DESC LIMIT 1
-                )
-            WHERE last_backend IS NULL
-        """)
         conn.commit()
     finally:
         conn.close()

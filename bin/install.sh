@@ -31,7 +31,7 @@ echo -e "\n${BOLD}squid — install${RESET}"
 echo    "  Sets up all runtime dependencies for the squid chat server."
 
 # ════════════════════════════════════════════════════════════════════════════
-step "1 / 4  Node.js & npm"
+step "1 / 3  Node.js & npm"
 # ════════════════════════════════════════════════════════════════════════════
 
 if need_version node 18 0; then
@@ -53,41 +53,31 @@ else
 fi
 
 # ════════════════════════════════════════════════════════════════════════════
-step "2 / 4  Claude Code CLI"
+step "2 / 3  Coding agents (at least one required)"
 # ════════════════════════════════════════════════════════════════════════════
 
+AGENTS_FOUND=0
 if command -v claude &>/dev/null; then
-  ok "claude already installed ($(claude --version 2>/dev/null || echo 'unknown version'))"
+  ok "claude $(claude --version 2>/dev/null || echo '(unknown version)')"
+  AGENTS_FOUND=$((AGENTS_FOUND + 1))
 else
-  if command -v npm &>/dev/null; then
-    echo "     Installing @anthropic-ai/claude-code …"
-    npm install -g @anthropic-ai/claude-code
-    ok "claude installed"
-  else
-    fail "Cannot install claude — npm missing."
-    mark_error
-  fi
+  warn "claude not found — install with: npm install -g @anthropic-ai/claude-code"
 fi
-
-# ════════════════════════════════════════════════════════════════════════════
-step "3 / 4  Codex CLI"
-# ════════════════════════════════════════════════════════════════════════════
 
 if command -v codex &>/dev/null; then
-  ok "codex already installed"
+  ok "codex found"
+  AGENTS_FOUND=$((AGENTS_FOUND + 1))
 else
-  if command -v npm &>/dev/null; then
-    echo "     Installing @openai/codex …"
-    npm install -g @openai/codex
-    ok "codex installed"
-  else
-    fail "Cannot install codex — npm missing."
-    mark_error
-  fi
+  warn "codex not found  — install with: npm install -g @openai/codex"
+fi
+
+if [[ $AGENTS_FOUND -eq 0 ]]; then
+  fail "No coding agents found. Install at least one (claude or codex) before starting squid."
+  mark_error
 fi
 
 # ════════════════════════════════════════════════════════════════════════════
-step "4 / 4  Python environment"
+step "3 / 3  Python environment"
 # ════════════════════════════════════════════════════════════════════════════
 
 # Find a suitable python (3.11+)
@@ -131,9 +121,9 @@ if [[ $ERRORS -gt 0 ]]; then
 else
   ok "All dependencies ready."
   echo ""
-  echo -e "  ${BOLD}Run the server:${RESET}"
-  echo "    .venv/bin/uvicorn agent.server:app --port 8000"
+  echo -e "  ${BOLD}Start squid:${RESET}"
+  echo "    bin/start.sh"
   echo ""
-  echo -e "  ${BOLD}Then open:${RESET}  http://localhost:8000"
+  echo -e "  ${BOLD}Then open:${RESET}  http://127.0.0.1:8000"
   echo ""
 fi

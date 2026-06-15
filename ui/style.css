@@ -697,6 +697,76 @@ body {
   color: #555566;
   letter-spacing: 0.08em;
 }
+.no-agent-setup {
+  align-self: center;
+  background: #0e0e18;
+  border: 1px solid #2a2a40;
+  border-radius: 8px;
+  padding: 1.2rem 1.6rem;
+  margin: 0.5rem 0 1rem;
+  max-width: 480px;
+  width: 100%;
+}
+.no-agent-title {
+  font-size: 0.85em;
+  font-weight: 600;
+  color: #e07040;
+  margin-bottom: 0.3rem;
+}
+.no-agent-sub {
+  font-size: 0.72em;
+  color: #555570;
+  margin-bottom: 1rem;
+}
+.no-agent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 0.9rem;
+}
+.no-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.no-agent-name {
+  font-size: 0.72em;
+  color: #7070a0;
+  min-width: 80px;
+  flex-shrink: 0;
+}
+.no-agent-cmd {
+  font-size: 0.7em;
+  color: #a0a0c0;
+  background: #1a1a2c;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.no-agent-copy {
+  background: none;
+  border: 1px solid #2a2a40;
+  border-radius: 4px;
+  color: #555570;
+  font-size: 0.65em;
+  padding: 0.15rem 0.5rem;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.no-agent-copy:hover { border-color: #f07040; color: #f07040; }
+.no-agent-restart {
+  font-size: 0.68em;
+  color: #44445a;
+}
+.no-agent-restart code {
+  color: #666680;
+  background: #1a1a2c;
+  padding: 0 0.35em;
+  border-radius: 3px;
+}
 .msg-status-echo {
   font-size: 0.78em;
   font-style: italic;

@@ -3380,6 +3380,39 @@ async function showBootBanner() {
       `<div class="boot-art-mobile">🦑 AGENT-SQUID</div>` +
       `<div class="boot-meta">agent squid${bootTime ? `  ·  started ${bootTime}` : ''}</div>`;
     messages.appendChild(el);
+
+    const backends = data.backends || {};
+    const anyAvailable = Object.values(backends).some(b => b.available);
+    if (!anyAvailable) {
+      const setup = document.createElement('div');
+      setup.className = 'no-agent-setup';
+      const agents = [
+        { name: 'Claude Code', cmd: 'npm install -g @anthropic-ai/claude-code' },
+        { name: 'Codex',       cmd: 'npm install -g @openai/codex' },
+      ];
+      setup.innerHTML = `
+        <div class="no-agent-title">No coding agents found</div>
+        <div class="no-agent-sub">Install at least one to get started, then restart Squid.</div>
+        <div class="no-agent-list">
+          ${agents.map(a => `
+            <div class="no-agent-row">
+              <span class="no-agent-name">${a.name}</span>
+              <code class="no-agent-cmd">${a.cmd}</code>
+              <button class="no-agent-copy" data-cmd="${a.cmd}">copy</button>
+            </div>`).join('')}
+        </div>
+        <div class="no-agent-restart">Then restart: <code>bin/start.sh --restart</code></div>`;
+      setup.querySelectorAll('.no-agent-copy').forEach(btn => {
+        btn.addEventListener('click', () => {
+          navigator.clipboard.writeText(btn.dataset.cmd).then(() => {
+            btn.textContent = 'copied';
+            setTimeout(() => { btn.textContent = 'copy'; }, 1500);
+          });
+        });
+      });
+      messages.appendChild(setup);
+    }
+
     messages.scrollTop = messages.scrollHeight;
   } catch {}
 }

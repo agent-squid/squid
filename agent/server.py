@@ -124,7 +124,7 @@ def _check_deps():
 _check_deps()
 sync_now()
 
-app = FastAPI(title="Squid", version="0.2.0")
+app = FastAPI(title="Squid", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 UI_DIR = Path(__file__).parent.parent / "ui"
