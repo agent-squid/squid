@@ -2081,17 +2081,29 @@ const QUOTA_CONFIG = {
     errorTitle:   'Codex usage unavailable · click for credentials',
     parse:        parseCodexQuota,
   },
+  cursor: {
+    endpoint:     '/quota/cursor',
+    displayId:    'cursor-quota-display',
+    pieArcId:     'cursor-pie-arc',
+    labelId:      'cursor-quota-label',
+    pieC:         2 * Math.PI * 6,
+    credsPopupId: null,
+    errorTitle:   'Cursor usage unavailable — run cursor-agent to log in',
+    parse:        parseCursorQuota,
+  },
 };
 
 const quotaSnapshots = {
   claude: { backend: 'claude', status: 'unknown' },
   codex:  { backend: 'codex',  status: 'unknown' },
+  cursor: { backend: 'cursor', status: 'unknown' },
 };
 // Per-backend runtime state. timer is the label-refresh interval handle.
 // activeCount tracks in-flight messages; drives the 30s quota poll interval.
 const quotaState = {
   claude: { raw: null, pct: null, resetAt: null, delta: null, inFlight: false, timer: null, activeCount: 0 },
   codex:  { raw: null, pct: null, resetAt: null, delta: null, inFlight: false, timer: null, activeCount: 0 },
+  cursor: { raw: null, pct: null, resetAt: null, delta: null, inFlight: false, timer: null, activeCount: 0 },
 };
 
 let activeQuotaBackend = null;
@@ -2329,6 +2341,17 @@ async function fetchCodexQuota() {
   return fetchQuotaForBackend('codex');
 }
 
+function parseCursorQuota(data) {
+  if (data.isUnlimited) return { raw: 0, pct: 0, resetAt: null, title: 'Cursor (unlimited)' };
+  const plan = data?.individualUsage?.plan;
+  if (!plan) return null;
+  const raw = plan.totalPercentUsed ?? 0;
+  const pct = Math.max(0, Math.min(100, Math.round(raw)));
+  const resetAt = data.billingCycleEnd ? new Date(data.billingCycleEnd).getTime() : null;
+  const title = data.autoModelSelectedDisplayMessage || 'Cursor usage';
+  return { raw, pct, resetAt, title };
+}
+
 function buildCodexQuotaTitle(data) {
   const primary = data?.rate_limit?.primary_window;
   const secondary = data?.rate_limit?.secondary_window;
@@ -2419,6 +2442,28 @@ function initCreds() {
     } catch { status.textContent = 'error'; }
     setTimeout(() => { status.textContent = ''; }, 3000);
   });
+}
+
+// ── Cursor quota ──────────────────────────────────────────────────────────────
+
+const cursorQuotaDisplay = document.getElementById('cursor-quota-display');
+
+async function fetchCursorQuota() {
+  return fetchQuotaForBackend('cursor');
+}
+
+function initCursorQuota() {
+  const cfg = QUOTA_CONFIG.cursor;
+  cursorQuotaDisplay.style.setProperty('--quota-accent', agentThemeColor('cursor'));
+  cursorQuotaDisplay.innerHTML = `
+    <svg id="cursor-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
+      <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
+      <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('cursor')}"
+              stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
+              transform="rotate(-90 9 9)"/>
+    </svg>
+    <span id="${cfg.labelId}"></span>`;
+  fetchCursorQuota();
 }
 
 // ── usage stats panel ─────────────────────────────────────────────────────────
@@ -4184,6 +4229,7 @@ initQuota();
 initCreds();
 initCodexQuota();
 initCodexCreds();
+initCursorQuota();
 updateActiveQuotaGauge();
 initPullToRefresh();
 startProcPoll();

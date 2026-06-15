@@ -41,3 +41,17 @@ def get_session_key() -> Optional[str]:
 
 def get_codex_token() -> Optional[str]:
     return load().get("codex_token")
+
+
+def get_cursor_token() -> Optional[str]:
+    """Read Cursor access token from macOS Keychain (where cursor-agent stores it)."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", "cursor-access-token", "-w"],
+            capture_output=True, text=True, timeout=5,
+        )
+        token = result.stdout.strip()
+        return token or None
+    except Exception:
+        return None

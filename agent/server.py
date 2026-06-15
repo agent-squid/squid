@@ -971,6 +971,27 @@ async def quota_codex():
         return JSONResponse({"error": str(exc)}, status_code=502)
 
 
+@app.get("/quota/cursor")
+async def quota_cursor():
+    token = creds.get_cursor_token()
+    if not token:
+        return JSONResponse({"error": "Cursor not logged in — run cursor-agent to authenticate"}, status_code=400)
+    try:
+        from curl_cffi.requests import AsyncSession
+        async with AsyncSession() as session:
+            r = await session.get(
+                "https://api2.cursor.sh/auth/usage-summary",
+                headers={"Authorization": f"Bearer {token}"},
+                impersonate="chrome",
+            )
+        if r.status_code != 200:
+            return JSONResponse({"error": f"cursor.sh returned {r.status_code}"}, status_code=502)
+        return JSONResponse(r.json())
+    except Exception as exc:
+        log.error("cursor quota fetch failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+
 @app.get("/journals/{topic}")
 async def list_journals(topic: str):
     topic = _normalize_topic_response(topic)
