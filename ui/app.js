@@ -1007,6 +1007,7 @@ async function sendMessage(text) {
   let firstDataReceived = false;
   let quotaBackend = await resolveQuotaBackend(topic, agent);
   let quotaBeforeSnapshot = await fetchQuotaForBackend(quotaBackend);
+  quotaTrackStart(quotaBackend);
   let lastSessionId = null;
   let statsEl = null;
   let doneTime = null;
@@ -1355,6 +1356,7 @@ async function sendMessage(text) {
       body: JSON.stringify({ session_id: lastSessionId, before: quotaBefore, after: quotaAfter }),
     }).catch(() => {});
   }
+  quotaTrackEnd(quotaBackend);
 }
 
 // ── tooltip ───────────────────────────────────────────────────────────────────
@@ -2056,25 +2058,72 @@ function addMessage(role, content) {
 
 const quotaDisplay = document.getElementById('quota-display');
 const QUOTA_BACKENDS = ['claude', 'codex', 'antigravity', 'copilot', 'cursor'];
+
+// Per-backend config — add an entry here to support a new quota backend.
+const QUOTA_CONFIG = {
+  claude: {
+    endpoint:     '/quota/claude',
+    displayId:    'quota-display',
+    pieArcId:     'quota-pie-arc',
+    labelId:      'quota-label',
+    pieC:         2 * Math.PI * 6,
+    credsPopupId: 'quota-creds-popup',
+    errorTitle:   'Claude usage unavailable · click for credentials',
+    parse:        parseClaudeQuota,
+  },
+  codex: {
+    endpoint:     '/quota/codex',
+    displayId:    'codex-quota-display',
+    pieArcId:     'codex-pie-arc',
+    labelId:      'codex-quota-label',
+    pieC:         2 * Math.PI * 6,
+    credsPopupId: 'codex-creds-popup',
+    errorTitle:   'Codex usage unavailable · click for credentials',
+    parse:        parseCodexQuota,
+  },
+};
+
 const quotaSnapshots = {
   claude: { backend: 'claude', status: 'unknown' },
-  codex: { backend: 'codex', status: 'unknown' },
+  codex:  { backend: 'codex',  status: 'unknown' },
 };
+// Per-backend runtime state. timer is the label-refresh interval handle.
+// activeCount tracks in-flight messages; drives the 30s quota poll interval.
 const quotaState = {
-  claude: { raw: null, pct: null, resetAt: null, delta: null, inFlight: false },
-  codex: { raw: null, pct: null, resetAt: null, delta: null, inFlight: false },
+  claude: { raw: null, pct: null, resetAt: null, delta: null, inFlight: false, timer: null, activeCount: 0 },
+  codex:  { raw: null, pct: null, resetAt: null, delta: null, inFlight: false, timer: null, activeCount: 0 },
 };
-const QUOTA_ENDPOINTS = {
-  claude: '/quota/claude',
-  codex: '/quota/codex',
-};
+
 let activeQuotaBackend = null;
 let quotaResolveSeq = 0;
-let quotaResetAt = null;
-let quotaTimer   = null;
-let quotaPct     = null;
-let quotaRaw     = null;
-let quotaDelta   = null;
+let quotaPollInterval = null;
+
+function _startQuotaPoll() {
+  if (quotaPollInterval) return;
+  quotaPollInterval = setInterval(() => {
+    for (const [backend, state] of Object.entries(quotaState)) {
+      if (state.activeCount > 0) fetchQuotaForBackend(backend);
+    }
+  }, 30000);
+}
+
+function _stopQuotaPoll() {
+  if (Object.values(quotaState).some(s => s.activeCount > 0)) return;
+  clearInterval(quotaPollInterval);
+  quotaPollInterval = null;
+}
+
+function quotaTrackStart(backend) {
+  if (!quotaState[backend]) return;
+  quotaState[backend].activeCount++;
+  _startQuotaPoll();
+}
+
+function quotaTrackEnd(backend) {
+  if (!quotaState[backend]) return;
+  quotaState[backend].activeCount = Math.max(0, quotaState[backend].activeCount - 1);
+  _stopQuotaPoll();
+}
 
 function setQuotaSnapshot(backend, snapshot) {
   quotaSnapshots[backend] = { backend, ...snapshot };
@@ -2094,10 +2143,10 @@ function quotaTimeText(resetAt) {
 }
 
 function setVisibleQuotaBackend(backend) {
-  const supported = backend === 'claude' || backend === 'codex';
-  activeQuotaBackend = supported ? backend : null;
-  quotaDisplay.classList.toggle('quota-hidden', activeQuotaBackend !== 'claude');
-  codexQuotaDisplay.classList.toggle('quota-hidden', activeQuotaBackend !== 'codex');
+  activeQuotaBackend = (backend in QUOTA_CONFIG) ? backend : null;
+  for (const [b, cfg] of Object.entries(QUOTA_CONFIG)) {
+    document.getElementById(cfg.displayId)?.classList.toggle('quota-hidden', activeQuotaBackend !== b);
+  }
 }
 
 async function resolveActiveQuotaBackend() {
@@ -2153,34 +2202,37 @@ function parseCodexQuota(data) {
   };
 }
 
-function syncLegacyClaudeQuotaState(state) {
-  quotaRaw = state.raw;
-  quotaPct = state.pct;
-  quotaResetAt = state.resetAt;
-  quotaDelta = state.delta;
+function updateGaugeLabel(backend) {
+  const cfg = QUOTA_CONFIG[backend];
+  const state = quotaState[backend];
+  if (!cfg || state.pct == null) return;
+  const label = document.getElementById(cfg.labelId);
+  if (!label) return;
+  const delta = state.delta != null ? ` +${state.delta}%` : '';
+  const timeStr = quotaTimeText(state.resetAt);
+  label.textContent = `${state.pct}%${delta}` + (timeStr ? ` in ${timeStr}` : '');
+  const arc = document.getElementById(cfg.pieArcId);
+  if (arc) {
+    const filled = (state.pct / 100) * cfg.pieC;
+    arc.setAttribute('stroke-dasharray', `${filled} ${cfg.pieC}`);
+    arc.setAttribute('stroke', quotaGaugeColor(backend, state.pct));
+  }
 }
 
 function renderQuotaLoaded(backend, snapshot) {
+  const cfg = QUOTA_CONFIG[backend];
   const state = quotaState[backend];
   state.raw = snapshot.raw;
   state.pct = snapshot.pct;
   state.resetAt = snapshot.resetAt;
 
-  if (backend === 'claude') {
-    syncLegacyClaudeQuotaState(state);
-    quotaDisplay.classList.add('loaded');
-    updateQuotaLabel(snapshot.pct);
-    if (quotaTimer) clearInterval(quotaTimer);
-    quotaTimer = setInterval(() => updateQuotaLabel(snapshot.pct), 10000);
-  } else if (backend === 'codex') {
-    codexResetAt = snapshot.resetAt;
-    codexQuotaDisplay.classList.remove('error');
-    codexQuotaDisplay.classList.add('loaded');
-    codexQuotaDisplay.title = snapshot.title;
-    updateCodexLabel(snapshot.pct);
-    if (codexTimer) clearInterval(codexTimer);
-    codexTimer = setInterval(() => updateCodexLabel(snapshot.pct), 10000);
-  }
+  const displayEl = document.getElementById(cfg.displayId);
+  displayEl.classList.remove('error');
+  displayEl.classList.add('loaded');
+  displayEl.title = snapshot.title ?? '';
+  updateGaugeLabel(backend);
+  if (state.timer) clearInterval(state.timer);
+  state.timer = setInterval(() => updateGaugeLabel(backend), 10000);
 
   setQuotaSnapshot(backend, {
     status: 'loaded',
@@ -2191,30 +2243,42 @@ function renderQuotaLoaded(backend, snapshot) {
 }
 
 function showQuotaError(backend, text) {
-  if (backend === 'codex') {
-    showCodexQuotaError(text);
-  }
+  const cfg = QUOTA_CONFIG[backend];
+  const state = quotaState[backend];
+  state.resetAt = null;
+  if (state.timer) { clearInterval(state.timer); state.timer = null; }
+
+  const displayEl = document.getElementById(cfg.displayId);
+  displayEl.classList.remove('loaded');
+  displayEl.classList.add('error');
+  displayEl.title = cfg.errorTitle;
+  setQuotaSnapshot(backend, { status: 'error', text });
+
+  const label = document.getElementById(cfg.labelId);
+  if (label) label.textContent = text;
+  const arc = document.getElementById(cfg.pieArcId);
+  if (arc) arc.setAttribute('stroke-dasharray', `0 ${cfg.pieC}`);
 }
 
 async function fetchQuotaForBackend(backend, { trackDelta = false } = {}) {
-  const endpoint = QUOTA_ENDPOINTS[backend];
-  if (!endpoint) return null;
+  const cfg = QUOTA_CONFIG[backend];
+  if (!cfg) return null;
   const state = quotaState[backend];
   if (state.inFlight) return state.raw == null ? null : { backend, ...state };
   state.inFlight = true;
+  const label = backend[0].toUpperCase() + backend.slice(1);
   try {
-    const res = await fetch(endpoint);
+    const res = await fetch(cfg.endpoint);
     if (!res.ok) {
-      if (backend === 'codex') showQuotaError(backend, res.status === 400 ? 'Codex auth' : 'Codex error');
+      showQuotaError(backend, res.status === 400 ? `${label} auth` : `${label} error`);
       return null;
     }
     const data = await res.json();
-    const snapshot = backend === 'codex' ? parseCodexQuota(data) : parseClaudeQuota(data);
+    const snapshot = cfg.parse(data);
     if (!snapshot) {
-      if (backend === 'codex') showQuotaError(backend, 'Codex n/a');
+      showQuotaError(backend, `${label} n/a`);
       return null;
     }
-
     if (trackDelta && state.raw !== null) {
       const d = snapshot.raw - state.raw;
       state.delta = d > 0.05 ? Math.round(d * 10) / 10 : null;
@@ -2224,7 +2288,7 @@ async function fetchQuotaForBackend(backend, { trackDelta = false } = {}) {
     renderQuotaLoaded(backend, snapshot);
     return { backend, ...state };
   } catch {
-    if (backend === 'codex') showQuotaError(backend, 'Codex error');
+    showQuotaError(backend, `${label} error`);
     return null;
   } finally {
     state.inFlight = false;
@@ -2235,43 +2299,24 @@ async function fetchQuota(trackDelta = false) {
   return fetchQuotaForBackend('claude', { trackDelta });
 }
 
-const QUOTA_PIE_C = 2 * Math.PI * 6; // circumference for r=6
-
-function updateQuotaLabel(pct) {
-  const label = document.getElementById('quota-label');
-  if (!label) return;
-  const delta = quotaDelta != null ? ` +${quotaDelta}%` : '';
-  const timeStr = quotaTimeText(quotaResetAt);
-  label.textContent = `${pct}%${delta}` + (timeStr ? ` in ${timeStr}` : '');
-
-  const arc = document.getElementById('quota-pie-arc');
-  if (arc) {
-    const filled = (pct / 100) * QUOTA_PIE_C;
-    arc.setAttribute('stroke-dasharray', `${filled} ${QUOTA_PIE_C}`);
-    arc.setAttribute('stroke', quotaGaugeColor('claude', pct));
-  }
-}
-
 function initQuota() {
+  const cfg = QUOTA_CONFIG.claude;
   quotaDisplay.style.setProperty('--quota-accent', agentThemeColor('claude'));
   setVisibleQuotaBackend('claude');
   quotaDisplay.innerHTML = `
     <svg id="quota-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
       <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
-      <circle id="quota-pie-arc" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('claude')}"
-              stroke-width="4" stroke-dasharray="0 ${QUOTA_PIE_C}" stroke-linecap="round"
+      <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('claude')}"
+              stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
               transform="rotate(-90 9 9)"/>
     </svg>
-    <span id="quota-label"></span>`;
+    <span id="${cfg.labelId}"></span>`;
 
-  const credsPopup = document.getElementById('quota-creds-popup');
-  quotaDisplay.addEventListener('click', () => {
-    credsPopup.classList.toggle('open');
-  });
+  const credsPopup = document.getElementById(cfg.credsPopupId);
+  quotaDisplay.addEventListener('click', () => credsPopup.classList.toggle('open'));
   document.addEventListener('click', (e) => {
-    if (!quotaDisplay.contains(e.target) && !credsPopup.contains(e.target)) {
+    if (!quotaDisplay.contains(e.target) && !credsPopup.contains(e.target))
       credsPopup.classList.remove('open');
-    }
   });
   fetchQuota();
 }
@@ -2279,46 +2324,9 @@ function initQuota() {
 // ── Codex (ChatGPT) quota ──────────────────────────────────────────────────────
 
 const codexQuotaDisplay = document.getElementById('codex-quota-display');
-let codexResetAt  = null;
-let codexTimer    = null;
-const CODEX_PIE_C = 2 * Math.PI * 6;
 
 async function fetchCodexQuota() {
   return fetchQuotaForBackend('codex');
-}
-
-function updateCodexLabel(pct) {
-  const label = document.getElementById('codex-quota-label');
-  if (!label) return;
-  const delta = quotaState.codex.delta != null ? ` +${quotaState.codex.delta}%` : '';
-  const timeStr = quotaTimeText(codexResetAt);
-  label.textContent = `${pct}%${delta}` + (timeStr ? ` in ${timeStr}` : '');
-
-  const arc = document.getElementById('codex-pie-arc');
-  if (arc) {
-    const filled = (pct / 100) * CODEX_PIE_C;
-    arc.setAttribute('stroke-dasharray', `${filled} ${CODEX_PIE_C}`);
-    arc.setAttribute('stroke', quotaGaugeColor('codex', pct));
-  }
-}
-
-function showCodexQuotaError(text) {
-  codexResetAt = null;
-  codexQuotaDisplay.classList.remove('loaded');
-  codexQuotaDisplay.classList.add('error');
-  codexQuotaDisplay.title = 'Codex usage unavailable · click for credentials';
-  setQuotaSnapshot('codex', { status: 'error', text });
-
-  const label = document.getElementById('codex-quota-label');
-  if (label) label.textContent = text;
-
-  const arc = document.getElementById('codex-pie-arc');
-  if (arc) arc.setAttribute('stroke-dasharray', `0 ${CODEX_PIE_C}`);
-
-  if (codexTimer) {
-    clearInterval(codexTimer);
-    codexTimer = null;
-  }
 }
 
 function buildCodexQuotaTitle(data) {
@@ -2338,18 +2346,19 @@ function buildCodexQuotaTitle(data) {
 }
 
 function initCodexQuota() {
+  const cfg = QUOTA_CONFIG.codex;
   codexQuotaDisplay.style.setProperty('--quota-accent', agentThemeColor('codex'));
   codexQuotaDisplay.innerHTML = `
     <svg id="codex-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
       <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
-      <circle id="codex-pie-arc" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('codex')}"
-              stroke-width="4" stroke-dasharray="0 ${CODEX_PIE_C}" stroke-linecap="round"
+      <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('codex')}"
+              stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
               transform="rotate(-90 9 9)"/>
     </svg>
-    <span id="codex-quota-label"></span>`;
-  showCodexQuotaError('Codex auth');
+    <span id="${cfg.labelId}"></span>`;
+  showQuotaError('codex', 'Codex auth');
 
-  const credsPopup = document.getElementById('codex-creds-popup');
+  const credsPopup = document.getElementById(cfg.credsPopupId);
   codexQuotaDisplay.addEventListener('click', () => credsPopup.classList.toggle('open'));
   document.addEventListener('click', (e) => {
     if (!codexQuotaDisplay.contains(e.target) && !credsPopup.contains(e.target))
