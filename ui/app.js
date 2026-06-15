@@ -397,6 +397,11 @@ function parseInput(text) {
   if (ms && ms[3].trim()) {
     return { topic: ms[1].toLowerCase(), agent: ms[2] || null, adhoc: false, lookback: 0, message: ms[3].trim() };
   }
+  // bare topic switch: #topic or #topic@agent with no message — switches chip only
+  const mb = text.match(/^#(\w+)(?:@(\w+))?(!)?$/);
+  if (mb) {
+    return { topic: mb[1].toLowerCase(), agent: mb[2] || null, adhoc: !!mb[3], lookback: 0, message: '' };
+  }
   return { topic: 'default', agent: null, adhoc: false, lookback: 0, message: text };
 }
 
@@ -721,6 +726,13 @@ form.addEventListener('submit', async (e) => {
   const text = input.value.trim();
   if (!text) return;
   const { topic, agent, adhoc, lookback, message } = parseInput(text);
+  if (!message) {
+    input.value = '';
+    resizeComposer();
+    hideAutocomplete();
+    setTopicChip(topic, agent, adhoc, lookback);
+    return;
+  }
   const cmd = parseCommand(message);
   if (cmd) {
     input.value = '';
