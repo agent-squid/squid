@@ -3337,6 +3337,7 @@ async function showBootBanner() {
     const el = document.createElement('div');
     el.className = 'boot-banner';
     el.innerHTML = `<pre class="boot-art">${art}</pre>` +
+      `<div class="boot-art-mobile">🦑 AGENT-SQUID</div>` +
       `<div class="boot-meta">agent squid${bootTime ? `  ·  started ${bootTime}` : ''}</div>`;
     messages.appendChild(el);
     messages.scrollTop = messages.scrollHeight;

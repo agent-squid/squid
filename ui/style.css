@@ -626,6 +626,13 @@ body {
   white-space: pre;
   text-align: left;
 }
+.boot-art-mobile {
+  display: none;
+  font-size: 1.1em;
+  letter-spacing: 0.05em;
+  color: #d07840;
+  margin-bottom: 0.5rem;
+}
 .boot-meta {
   font-family: ui-monospace, monospace;
   font-size: 0.68em;
@@ -1646,14 +1653,12 @@ button {
   }
 
   .boot-banner {
-    align-self: flex-start;
-    text-align: left;
+    align-self: center;
+    text-align: center;
   }
 
-  .boot-art {
-    margin-left: 0;
-    margin-right: 0;
-  }
+  .boot-art { display: none; }
+  .boot-art-mobile { display: block; }
 
   #pin-btn,
   #send-btn {
