@@ -525,6 +525,14 @@ let historyExhausted = false;
 let historyLoading = false;
 let topSentinel = null;
 
+// ── search state ──────────────────────────────────────────────────────────────
+let searchActive = false;
+let searchState = null;  // { topic, agent, adhoc, keywords }
+let searchOffset = 0;
+let searchExhausted = false;
+let searchLoading = false;
+let searchSentinel = null;
+
 function createTopSentinel() {
   const el = document.createElement('div');
   el.id = 'history-sentinel';
@@ -600,22 +608,272 @@ function initHistoryScroll() {
   observer.observe(topSentinel);
 }
 
+// ── keyword search ────────────────────────────────────────────────────────────
+
+function parseSearchInput(text) {
+  let rest = text.trim();
+  let topic = null;        // null = use current chip, 'all' = all topics
+  let agent = null;
+  let agentWildcard = false;
+  let adhocAll = false;    // false = session only, true = include adhoc
+
+  const scopeMatch = rest.match(/^#(\w+)(?:@(\w+)(\*)?)?(!)?[ \t]*([\s\S]*)/);
+  if (scopeMatch) {
+    topic = scopeMatch[1].toLowerCase();
+    agent = scopeMatch[2] || null;
+    agentWildcard = !!scopeMatch[3];
+    adhocAll = !!scopeMatch[4];
+    rest = scopeMatch[5].trim();
+  }
+
+  return { topic, agent, agentWildcard, adhocAll, keywords: rest };
+}
+
+function _updateSearchBar() {
+  const bar = document.getElementById('search-bar');
+  const kwEl = document.getElementById('search-bar-keywords');
+  const scopeEl = document.getElementById('search-bar-scope');
+  const badge = document.getElementById('filter-badge');
+
+  if (!searchActive || !searchState) {
+    bar.classList.remove('active');
+    badge.style.display = '';
+    return;
+  }
+
+  scopeEl.textContent = searchState.topic ? ('#' + searchState.topic + (searchState.agent ? '@' + searchState.agent : '')) : '#all';
+  kwEl.textContent = searchState.keywords;
+  bar.classList.add('active');
+  badge.style.display = 'none';
+}
+
+function startSearch(rawArgs) {
+  const parsed = parseSearchInput(rawArgs);
+
+  if (!parsed.keywords) {
+    showCmdFeedback('Usage: /s [#topic[@agent[*]][!]] keywords…');
+    return;
+  }
+
+  let topic = parsed.topic;
+  let agent = parsed.agent;
+
+  if (topic === null) {
+    topic = stickyChip?.topic || null;
+    if (!parsed.agent) agent = stickyChip?.agent || null;
+  } else if (topic === 'all') {
+    topic = null;
+  }
+
+  const agentParam = agent ? (agent + (parsed.agentWildcard ? '*' : '')) : null;
+  const adhoc = parsed.adhocAll ? null : false;
+
+  searchState = { topic, agent: agentParam, adhoc, keywords: parsed.keywords };
+  searchActive = true;
+  searchOffset = 0;
+  searchExhausted = false;
+  searchLoading = false;
+
+  // Stop history scroll
+  if (topSentinel) { topSentinel.remove(); topSentinel = null; }
+  historyLoading = false;
+  if (searchSentinel) { searchSentinel.remove(); searchSentinel = null; }
+
+  // Clear pane
+  document.querySelectorAll('.history-item, .boot-banner, .search-result-item').forEach(el => el.remove());
+  document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .cmd-feedback').forEach(el => el.remove());
+
+  _updateSearchBar();
+  initSearchScroll();
+}
+
+function clearSearch() {
+  searchActive = false;
+  searchState = null;
+  searchOffset = 0;
+  searchExhausted = false;
+  searchLoading = false;
+  if (searchSentinel) { searchSentinel.remove(); searchSentinel = null; }
+  document.getElementById('search-bar').classList.remove('active');
+  document.getElementById('filter-badge').style.display = '';
+
+  // Clear search results and reload history
+  document.querySelectorAll('.search-result-item').forEach(el => el.remove());
+  document.querySelectorAll('#messages > .cmd-feedback.search-no-results').forEach(el => el.remove());
+  if (topSentinel) { topSentinel.remove(); topSentinel = null; }
+  historyOffset = 0;
+  historyExhausted = false;
+  historyLoading = false;
+  _updateFilterBadge();
+  initHistoryScroll();
+}
+
+function initSearchScroll() {
+  searchSentinel = document.createElement('div');
+  searchSentinel.id = 'search-sentinel';
+  messages.insertBefore(searchSentinel, messages.firstChild);
+
+  const observer = new IntersectionObserver(
+    (entries) => { if (entries[0].isIntersecting) loadSearchResults(); },
+    { root: messages, threshold: 0 },
+  );
+  observer.observe(searchSentinel);
+}
+
+async function loadSearchResults() {
+  if (searchExhausted || searchLoading || !searchState) return;
+  searchLoading = true;
+
+  let url = `/search?offset=${searchOffset}&limit=10&q=${encodeURIComponent(searchState.keywords)}`;
+  if (searchState.topic) url += `&topic=${encodeURIComponent(searchState.topic)}`;
+  if (searchState.agent) url += `&agent=${encodeURIComponent(searchState.agent)}`;
+  if (searchState.adhoc !== null && searchState.adhoc !== undefined) url += `&adhoc=${searchState.adhoc}`;
+
+  let data;
+  try {
+    const res = await fetch(url);
+    data = await res.json();
+  } catch {
+    searchLoading = false;
+    return;
+  }
+
+  const { items, has_more } = data;
+  const firstBatch = searchOffset === 0;
+  const prevHeight = messages.scrollHeight;
+  const fragment = document.createDocumentFragment();
+
+  for (const item of [...items].reverse()) {
+    if (!item.content) continue;
+    appendSearchResult(item, fragment, searchState.keywords);
+  }
+
+  const anchor = searchSentinel ? searchSentinel.nextSibling : messages.firstChild;
+  messages.insertBefore(fragment, anchor);
+  messages.scrollTop += messages.scrollHeight - prevHeight;
+
+  searchOffset += items.length;
+  searchExhausted = !has_more;
+  searchLoading = false;
+
+  if (searchExhausted && searchSentinel) {
+    searchSentinel.remove();
+    searchSentinel = null;
+  }
+
+  if (firstBatch && items.length === 0) {
+    const noResult = document.createElement('div');
+    noResult.className = 'cmd-feedback search-no-results';
+    noResult.textContent = `No results for "${searchState.keywords}"`;
+    messages.appendChild(noResult);
+    messages.scrollTop = messages.scrollHeight;
+  } else if (!searchExhausted && searchSentinel) {
+    const sr = searchSentinel.getBoundingClientRect();
+    const mr = messages.getBoundingClientRect();
+    if (sr.bottom >= mr.top && sr.top <= mr.bottom) loadSearchResults();
+  }
+}
+
+function parseKeywords(keywords) {
+  return keywords.trim().toLowerCase().split(/\s+/).filter(Boolean);
+}
+
+function extractSnippet(content, keywords, maxLen = 220) {
+  const lower = content.toLowerCase();
+  let bestPos = Infinity;
+  for (const kw of keywords) {
+    const idx = lower.indexOf(kw);
+    if (idx !== -1 && idx < bestPos) bestPos = idx;
+  }
+  if (bestPos === Infinity) {
+    return content.slice(0, maxLen) + (content.length > maxLen ? '…' : '');
+  }
+  const start = Math.max(0, bestPos - 60);
+  const end = Math.min(content.length, start + maxLen);
+  const prefix = start > 0 ? '…' : '';
+  const suffix = end < content.length ? '…' : '';
+  return prefix + content.slice(start, end) + suffix;
+}
+
+function highlightKeywords(text, keywords) {
+  let escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  for (const kw of keywords) {
+    const re = new RegExp(`(${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+    escaped = escaped.replace(re, '<mark>$1</mark>');
+  }
+  return escaped;
+}
+
+function appendSearchResult(item, container, keywords) {
+  const lb = item.stats?.lookback ?? 0;
+  const el = document.createElement('div');
+  el.className = 'msg assistant history-item search-result-item';
+  if (item.id) el.dataset.msgId = String(item.id);
+  el.dataset.topic = item.topic || 'default';
+  if (item.agent) el.dataset.agent = item.agent;
+
+  const header = document.createElement('div');
+  header.className = 'response-header';
+  const tag = makeTopicTag(item.topic || 'default', item.agent || null, { clickable: true, adhoc: !!item.adhoc, lookback: lb, backend: item.stats?.backend || null });
+  const headerText = document.createElement('span');
+  headerText.className = 'response-header-text';
+  headerText.appendChild(tag);
+  headerText.appendChild(document.createTextNode('  '));
+  const promptSpan = document.createElement('span');
+  promptSpan.className = 'history-prompt';
+  promptSpan.textContent = truncate(item.prompt || '', 55);
+  headerText.appendChild(promptSpan);
+  header.appendChild(headerText);
+  el.appendChild(header);
+
+  const kws = parseKeywords(keywords);
+  const snippet = extractSnippet(item.content || '', kws);
+  const snippetEl = document.createElement('div');
+  snippetEl.className = 'search-snippet';
+  snippetEl.innerHTML = highlightKeywords(snippet, kws);
+  el.appendChild(snippetEl);
+
+  const expandBtn = document.createElement('button');
+  expandBtn.type = 'button';
+  expandBtn.className = 'search-expand-btn';
+  expandBtn.textContent = 'show full response';
+  const fullContent = document.createElement('div');
+  fullContent.className = 'search-full-content hidden';
+  fullContent.innerHTML = marked.parse(item.content || '');
+  expandBtn.addEventListener('click', () => {
+    const isHidden = fullContent.classList.toggle('hidden');
+    expandBtn.textContent = isHidden ? 'show full response' : 'hide';
+  });
+  el.appendChild(expandBtn);
+  el.appendChild(fullContent);
+
+  if (item.timestamp) {
+    const tsEl = addTimestamp(el, item.timestamp);
+    if (tsEl) tsEl.classList.add('history-item');
+  }
+
+  if (container) container.appendChild(el);
+  return el;
+}
+
 // ── live chat ────────────────────────────────────────────────────────────────
 
 // All Squid-owned commands. Shown in the / autocomplete popup.
 // args:true = takes optional args (insert into input); args:false = execute directly on select.
 const SQUID_COMMANDS = [
-  { name: 'clear',        desc: 'clear session — next message starts fresh',   args: false },
-  { name: 'compact',      desc: 'compact session (resets context for Codex)',   args: false },
-  { name: 'stop',         desc: 'kill running process for current topic',       args: false },
-  { name: 'stopall',      desc: 'kill + drain queue for current topic',         args: false },
-  { name: 'deq',          desc: 'drain queue (deq N removes Nth item)',         args: true  },
-  { name: 'restart',      desc: 'restart the server',                           args: false },
-  { name: 'filter',       desc: 'filter history by current topic or agent',     args: false },
-  { name: 'filter reset', desc: 'clear the active filter',                      args: false },
-  { name: 'status',       desc: 'show active processes panel',                  args: false },
-  { name: 'help',         desc: 'show help panel',                              args: false },
-  { name: 'remote',       desc: 'show QR code for mobile / tablet access',      args: false },
+  { name: 'clear',        desc: 'clear session — next message starts fresh',         args: false },
+  { name: 'compact',      desc: 'compact session (resets context for Codex)',         args: false },
+  { name: 'stop',         desc: 'kill running process for current topic',             args: false },
+  { name: 'stopall',      desc: 'kill + drain queue for current topic',               args: false },
+  { name: 'deq',          desc: 'drain queue (deq N removes Nth item)',               args: true  },
+  { name: 'restart',      desc: 'restart the server',                                 args: false },
+  { name: 'filter',       desc: 'filter history by current topic or agent',           args: false },
+  { name: 'filter reset', desc: 'clear the active filter',                            args: false },
+  { name: 's',            desc: 'search: /s [#topic[@agent[*]][!]] keywords…',        args: true  },
+  { name: 'search',       desc: 'search history (alias for /s)',                      args: true  },
+  { name: 'status',       desc: 'show active processes panel',                        args: false },
+  { name: 'help',         desc: 'show help panel',                                    args: false },
+  { name: 'remote',       desc: 'show QR code for mobile / tablet access',            args: false },
 ];
 
 function parseCommand(message) {
@@ -632,6 +890,8 @@ function parseCommand(message) {
   if (/^filter$/i.test(t))       return { command: 'filter' };
   const m = t.match(/^deq(?:\s+(-?\d+))?$/i);
   if (m) return { command: 'deq', pos: m[1] != null ? parseInt(m[1]) : null };
+  const ms = t.match(/^s(?:earch)?(?:\s+([\s\S]*))?$/i);
+  if (ms) return { command: 'search', args: (ms[1] || '').trim() };
   return null;
 }
 
@@ -655,6 +915,15 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
   }
   if (cmd.command === 'filter_reset') {
     clearFilter();
+    return;
+  }
+
+  if (cmd.command === 'search') {
+    if (!cmd.args) {
+      showCmdFeedback('Usage: /s [#topic[@agent[*]][!]] keywords…');
+      return;
+    }
+    startSearch(cmd.args);
     return;
   }
 
@@ -758,6 +1027,7 @@ form.addEventListener('submit', async (e) => {
   input.value = '';
   resizeComposer();
   hideAutocomplete();
+  if (searchActive) clearSearch();
   invalidateTopicsCache();
   sendMessage(text);
 });
@@ -878,6 +1148,7 @@ input.addEventListener('keydown', (e) => {
     if (e.key === 'Tab' || (e.key === 'Enter' && acSel >= 0)) { e.preventDefault(); _acSelect(acSel >= 0 ? acSel : 0); return; }
     if (e.key === 'Escape') { hideAutocomplete(); return; }
   }
+  if (e.key === 'Escape' && searchActive) { clearSearch(); return; }
   if (e.key === 'Escape' && pinPanel.classList.contains('open')) { closePinPanel(); return; }
   if (e.key === 'Escape' && helpPanel.classList.contains('open')) { closeHelp(); return; }
   if (e.key === 'Escape' && document.getElementById('msg-modal')?.classList.contains('open')) { document.getElementById('msg-modal').classList.remove('open'); return; }
@@ -4053,6 +4324,7 @@ function initPin() {
 initSettings();
 initPin();
 document.getElementById('filter-badge-clear').addEventListener('click', clearFilter);
+document.getElementById('search-bar-clear').addEventListener('click', clearSearch);
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && document.getElementById('topic-delete-modal')?.classList.contains('open')) {
     closeTopicDeleteModal();
