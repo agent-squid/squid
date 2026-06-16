@@ -775,8 +775,7 @@ async function loadSearchResults() {
 }
 
 function parseKeywords(keywords) {
-  // Split on non-word chars so ui/app.js highlights 'ui', 'app', 'js' individually
-  return keywords.trim().toLowerCase().split(/[^\w]+/).filter(Boolean);
+  return keywords.trim().toLowerCase().split(/\s+/).filter(Boolean);
 }
 
 function extractSnippet(content, keywords, maxLen = 220) {
