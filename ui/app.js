@@ -834,7 +834,7 @@ const SQUID_COMMANDS = [
   { name: 'restart',      desc: 'restart the server',                                 args: false },
   { name: 'filter',       desc: 'filter history by current topic or agent',           args: false },
   { name: 'filter reset', desc: 'clear the active filter',                            args: false },
-  { name: 's',            desc: 'search history (/search) — [#topic[@agent[*]][!]] keywords…', args: true },
+  { name: 's', alias: 'search', desc: 'search — e.g. /s fix bug  ·  /s #topic kw  ·  /s #topic@agent! kw', args: true },
   { name: 'status',       desc: 'show active processes panel',                        args: false },
   { name: 'help',         desc: 'show help panel',                                    args: false },
   { name: 'remote',       desc: 'show QR code for mobile / tablet access',            args: false },
@@ -3588,10 +3588,13 @@ async function updateAutocomplete() {
     const slashIdx = val.lastIndexOf('/');
     const before   = val.slice(0, slashIdx);           // prefix to preserve (#topic@alias )
     const partial  = msgPart.slice(1).toLowerCase();   // typed after /
-    const matched  = SQUID_COMMANDS.filter(c => c.name.toLowerCase().startsWith(partial));
+    const matched  = SQUID_COMMANDS.filter(c =>
+      c.name.toLowerCase().startsWith(partial) ||
+      (c.alias && c.alias.toLowerCase().startsWith(partial))
+    );
     if (matched.length) {
       _acRender(matched.map(c => ({
-        label:   `<span class="ac-cmd">/${c.name}</span>`,
+        label:   `<span class="ac-cmd">/${c.name}${c.alias ? ', /' + c.alias : ''}</span>`,
         sub:     c.desc,
         meta:    'squid',
         insert:  before + '/' + c.name,
