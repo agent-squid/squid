@@ -108,11 +108,12 @@ _TABLES = [
         reverted_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         PRIMARY KEY (msg_id, repo, file_path)
     )""",
+    # FTS5 index — dropped and recreated each startup so the standalone table
+    # always replaces any old external-content variant without a separate migration.
+    "DROP TABLE IF EXISTS messages_fts",
+    "DROP TRIGGER IF EXISTS messages_fts_sync",
     """CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-        content,
-        content='chat_messages',
-        content_rowid='id',
-        tokenize='unicode61'
+        content, tokenize='unicode61'
     )""",
     """CREATE TRIGGER IF NOT EXISTS messages_fts_sync
        AFTER UPDATE OF content ON chat_messages
@@ -156,13 +157,11 @@ def init_db() -> None:
                 "INSERT OR IGNORE INTO agents (name, backend, model) VALUES (?, ?, ?)",
                 ("haiku", "claude", "claude-haiku-4-5"),
             )
-        # Populate FTS index for any existing messages not yet indexed
+        # Populate FTS from all existing assistant messages (table was just recreated empty)
         conn.execute("""
             INSERT INTO messages_fts(rowid, content)
-            SELECT m.id, m.content
-            FROM chat_messages m
-            WHERE m.role = 'assistant' AND m.content IS NOT NULL
-            AND m.id NOT IN (SELECT rowid FROM messages_fts)
+            SELECT id, content FROM chat_messages
+            WHERE role='assistant' AND content IS NOT NULL
         """)
         conn.commit()
     finally:
