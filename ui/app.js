@@ -90,9 +90,9 @@ marked.setOptions({ breaks: true });
 const AGENT_THEME_COLORS = Object.freeze({
   claude: '#AE5332',
   codex: '#e8e4dc',
+  cursor: '#9aa0a6',
   antigravity: '#4ea1ff',
   copilot: '#ff5db1',
-  cursor: '#9aa0a6',
   default: '#888888',
 });
 
@@ -126,9 +126,9 @@ function backendDisplayName(backend) {
   const names = {
     claude: 'Claude',
     codex: 'Codex',
+    cursor: 'Cursor',
     antigravity: 'Antigravity',
     copilot: 'Copilot',
-    cursor: 'Cursor',
   };
   return names[(backend || '').toLowerCase()] || (backend || 'Agent');
 }
@@ -2053,7 +2053,7 @@ function addMessage(role, content) {
 // ── credentials + quota ───────────────────────────────────────────────────────
 
 const quotaDisplay = document.getElementById('quota-display');
-const QUOTA_BACKENDS = ['claude', 'codex', 'antigravity', 'copilot', 'cursor'];
+const QUOTA_BACKENDS = ['claude', 'codex', 'cursor'];
 
 // Per-backend config — add an entry here to support a new quota backend.
 const QUOTA_CONFIG = {
@@ -3148,10 +3148,8 @@ function showAgentCreatePrompt(agentName, onSaved) {
     <div class="acp-row">
       <select id="acp-backend">
         <option value="claude">claude</option>
-        <option value="cursor">cursor</option>
-        <option value="antigravity">antigravity</option>
         <option value="codex">codex</option>
-        <option value="copilot">copilot</option>
+        <option value="cursor">cursor</option>
       </select>
       <input id="acp-model" placeholder="model (optional)" />
       <input id="acp-cwd" placeholder="cwd (default: /tmp/squid)" />

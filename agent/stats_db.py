@@ -9,7 +9,7 @@ from typing import Optional
 
 from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH
 
-_BACKEND_FALLBACK_ORDER = ["claude", "codex", "cursor", "antigravity", "copilot"]
+_BACKEND_FALLBACK_ORDER = ["claude", "codex", "cursor"]  # only enabled backends
 _BACKEND_PATHS = {
     "claude":       CLAUDE_PATH,
     "codex":        CODEX_PATH,
@@ -151,7 +151,7 @@ def list_agents() -> list[dict]:
 
 
 def get_default_agent() -> Optional[dict]:
-    """Return the first available agent in fallback order: claude → codex → cursor → antigravity → copilot."""
+    """Return the first available agent in fallback order: claude → codex → cursor."""
     with _connect() as conn:
         rows = {r["name"]: dict(r) for r in conn.execute("SELECT * FROM agents").fetchall()}
     for backend in _BACKEND_FALLBACK_ORDER:

@@ -14,9 +14,14 @@ _cfg = _load_config()
 # CLI executable names — override via env if installed elsewhere
 CLAUDE_CLI   = "claude"
 CODEX_CLI    = "codex"
-COPILOT_CLI  = "copilot"
 CURSOR_CLI   = "cursor-agent"
+
+# Not yet supported — runners exist but are gated by ENABLED_BACKENDS
+COPILOT_CLI  = "copilot"
 AGY_CLI      = "agy"
+
+# Only these backends are exposed via the API and UI
+ENABLED_BACKENDS = frozenset({"claude", "codex", "cursor"})
 
 # How long to wait for a CLI to produce its first byte before giving up
 FIRST_BYTE_TIMEOUT: int = _cfg["agent"]["first_byte_timeout"]

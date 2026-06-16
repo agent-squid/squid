@@ -71,8 +71,15 @@ else
   warn "codex not found  — install with: npm install -g @openai/codex"
 fi
 
+if command -v cursor-agent &>/dev/null; then
+  ok "cursor-agent found"
+  AGENTS_FOUND=$((AGENTS_FOUND + 1))
+else
+  warn "cursor-agent not found — install from cursor.com"
+fi
+
 if [[ $AGENTS_FOUND -eq 0 ]]; then
-  fail "No coding agents found. Install at least one (claude or codex) before starting squid."
+  fail "No coding agents found. Install at least one (claude, codex, or cursor-agent) before starting squid."
   mark_error
 fi
 

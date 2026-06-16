@@ -103,23 +103,19 @@ def _claude_logged_in() -> bool:
 def _check_deps():
     missing, warnings = [], []
     if not CLAUDE_PATH:
-        missing.append("claude   →  npm install -g @anthropic-ai/claude-code")
+        missing.append("claude        →  npm install -g @anthropic-ai/claude-code")
     elif not _claude_logged_in():
         warnings.append("claude is installed but not logged in  →  run: claude login")
     if not CODEX_PATH:
         missing.append("codex         →  npm install -g @openai/codex")
-    if not COPILOT_PATH:
-        missing.append("copilot       →  brew install gh-copilot")
     if not CURSOR_PATH:
         missing.append("cursor-agent  →  install from cursor.com")
-    if not AGY_PATH:
-        missing.append("agy           →  install from https://antigravity.google")
     if missing:
         log.warning("Missing CLI tools:\n  " + "\n  ".join(missing))
     if warnings:
         log.warning("Auth issues:\n  " + "\n  ".join(warnings))
     if not missing and not warnings:
-        log.info("claude=%s  codex=%s  copilot=%s  cursor=%s  agy=%s", CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH)
+        log.info("claude=%s  codex=%s  cursor=%s", CLAUDE_PATH, CODEX_PATH, CURSOR_PATH)
 
 _check_deps()
 sync_now()
@@ -181,7 +177,7 @@ class TopicHiddenRequest(BaseModel):
 
 class AgentRequest(BaseModel):
     name: str = Field(..., min_length=1)
-    backend: Literal["auto", "claude", "cursor", "antigravity", "codex", "copilot"] = "auto"
+    backend: Literal["auto", "claude", "cursor", "codex"] = "auto"
     model: Optional[str] = None
     cwd: Optional[str] = None
     timeout: Optional[int] = None
@@ -631,11 +627,11 @@ async def health():
         "status": "ok",
         "boot_time": BOOT_TIME,
         "backends": {
-            "claude":      {"available": bool(CLAUDE_PATH),   "path": CLAUDE_PATH},
-            "cursor":      {"available": bool(CURSOR_PATH),   "path": CURSOR_PATH},
-            "antigravity": {"available": bool(AGY_PATH),      "path": AGY_PATH},
-            "codex":       {"available": bool(CODEX_PATH),    "path": CODEX_PATH},
-            "copilot":     {"available": bool(COPILOT_PATH),  "path": COPILOT_PATH},
+            "claude":       {"available": bool(CLAUDE_PATH),   "path": CLAUDE_PATH},
+            "codex":        {"available": bool(CODEX_PATH),    "path": CODEX_PATH},
+            "cursor":       {"available": bool(CURSOR_PATH),   "path": CURSOR_PATH},
+            "copilot":      {"available": bool(COPILOT_PATH),  "path": COPILOT_PATH,  "enabled": False},
+            "antigravity":  {"available": bool(AGY_PATH),      "path": AGY_PATH,      "enabled": False},
         },
     })
 

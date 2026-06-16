@@ -127,14 +127,14 @@ class TopicWorker:
 
     async def _process(self, item: QueueItem):
         from .runners import run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError, CLIError
-        from .config import SQUID_HOME
+        from .config import SQUID_HOME, ENABLED_BACKENDS
         from .stats_db import insert_run_event, update_assistant_message, save_stats, set_topic_session
         from .git_changes import prepare_trackers
 
-        runner = {"claude": run_claude, "cursor": run_cursor, "antigravity": run_antigravity,
-                  "codex": run_codex, "copilot": run_copilot}.get(item.backend)
-        if runner is None:
-            await item.out_q.put({"_error": f"Unknown backend: {item.backend!r}"})
+        runner = {"claude": run_claude, "codex": run_codex, "cursor": run_cursor,
+                  "copilot": run_copilot, "antigravity": run_antigravity}.get(item.backend)
+        if runner is None or item.backend not in ENABLED_BACKENDS:
+            await item.out_q.put({"_error": f"Backend {item.backend!r} is not yet supported"})
             await item.out_q.put(None)
             return
 
@@ -157,7 +157,7 @@ class TopicWorker:
             response_timeout=item.timeout,
             adhoc=item.adhoc, msg_id=item.msg_id,
         )
-        if item.backend in ("claude", "codex", "cursor", "copilot", "antigravity") and item.resume_session_id:
+        if item.resume_session_id:
             kwargs["resume_session_id"] = item.resume_session_id
 
         run_seq = 0

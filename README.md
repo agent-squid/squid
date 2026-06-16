@@ -47,7 +47,6 @@ Topics and agents are not a rigid setup step. You can create a new `#topic` the 
 - **Adhoc mode:** `#topic@agent!` runs a fresh one-off job immediately without polluting the main session.
 - **Session vs. limited-context comparison:** compare a fully resumed lane against an adhoc prompt that includes only the last N exchanges.
 - **Live progress bubble:** watch queued state, tool/status output, and partial response progress while the CLI is working.
-- **Auto-compaction settings:** keep long-running lanes useful without manually babysitting context forever.
 - **Context pins:** pin a useful answer and inject it into another session or adhoc turn.
 - **Process controls:** stop one process from the UI, stop by command, stop a topic, drain queues, clear sessions, and compact/reset context.
 - **History and filtering:** scan past work by topic, agent, or adhoc lane.
@@ -76,9 +75,9 @@ All config changes require a full restart (`bin/stop.sh && bin/start.sh`).
 | `claude`      | `claude` (Claude Code)                           | `npm install -g @anthropic-ai/claude-code`     | resumable     |
 | `codex`       | `codex` (OpenAI Codex)                           | `npm install -g @openai/codex`                 | resumable     |
 | `cursor`      | `cursor-agent` (Cursor)                          | install from cursor.com                        | resumable     |
-| `copilot`     | `copilot` (GitHub Copilot)                       | `gh extension install github/gh-copilot`       | resumable     |
-| `antigravity` | `agy` (Google Antigravity)                       | install from https://antigravity.google        | resumable     |
-| `auto`        | tries claude → cursor → agy → codex → copilot | —                                              | —             |
+| `auto`        | tries claude → codex → cursor                   | —                                              | —             |
+| `copilot`     | `copilot` (GitHub Copilot)                       | —                                              | to be supported |
+| `antigravity` | `agy` (Google Antigravity)                       | —                                              | to be supported |
 
 ## Input syntax
 
@@ -94,7 +93,7 @@ All config changes require a full restart (`bin/stop.sh && bin/start.sh`).
 
 **`!` adhoc mode** runs the prompt immediately in parallel using the oneshot approach (selected context injected as text). The result is saved in history but excluded from the session's context unless explicitly pinned. This lets you compare responses between the resumable session and a fresh oneshot call.
 
-This makes comparison easy. Ask the fully resumed session with `#topic@agent`, then ask a limited-context version with `#topic@agent!3`, `#topic@agent!1`, or `#topic@agent!`. You can see whether the long session is helping, whether stale context is hurting, and how much token usage each path costs.
+This makes comparison easy. Ask the fully resumed session with `#topic@agent`, then ask a limited-context version with `#topic@agent!3`, `#topic@agent!1`, or `#topic@agent!`. Each response shows its own token stats, so you can see whether the long session is helping or whether stale context is hurting.
 
 ## Agents
 
@@ -246,7 +245,7 @@ That difference matters:
 - **Progress while work happens:** the thought bubble surfaces status, queued state, tool activity, and partial output before the final answer lands.
 - **UI plus command control:** click to stop a specific run, or type commands like `/stop`, `/stopall`, `/clear`, `/compact`, and `/filter`.
 - **Analytics attached to real work:** token usage is tied to each prompt and can be rolled up by topic, agent, or time.
-- **Built-in context experiments:** compare a native resumed session against an adhoc turn with only selected recent context.
+- **Built-in context experiments:** compare a native resumed session against an adhoc turn with only selected recent context (side-by-side quota comparison: TBD).
 - **Local machine as the backend:** your Mac mini or workstation stays the execution environment, so the agent has the same filesystem, shell, credentials, and installed tools it would have in a terminal.
 
 | Category | Examples | Squid's difference |
@@ -358,7 +357,7 @@ Type these directly in the message box (no `#topic` prefix needed):
 | `/stop`    | Kill running process for the current topic (all agent lanes)  |
 | `/stopall` | Kill + drain queue for the current topic                      |
 | `/clear`   | Clear the current session                                     |
-| `/compact` | Compact or reset context                                      |
+| `/compact` | Compact or reset context (auto and cross-agent compaction: TBD) |
 | `/filter`  | Filter history to the current topic/agent lane                |
 | `/remote`  | Show QR code with full HTTPS URL + token for mobile access    |
 | `deq`      | Drain entire pending queue                                    |
