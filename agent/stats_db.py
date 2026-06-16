@@ -138,6 +138,12 @@ def init_db() -> None:
                     "INSERT OR IGNORE INTO agents (name, backend) VALUES (?, ?)",
                     (backend, backend),
                 )
+        # Seed haiku as a cost-comparison agent alongside the default claude agent
+        if CLAUDE_PATH and "claude" in ENABLED_BACKENDS:
+            conn.execute(
+                "INSERT OR IGNORE INTO agents (name, backend, model) VALUES (?, ?, ?)",
+                ("haiku", "claude", "claude-haiku-4-5"),
+            )
         conn.commit()
     finally:
         conn.close()
