@@ -1560,6 +1560,8 @@ body {
 .topic-badge.live { border-color: #3f6f50; color: #69a875; }
 .topic-badge.hidden { border-color: #5a3b34; color: #b26b55; }
 .topic-badge.time { border-color: transparent; color: #555; padding-left: 0; padding-right: 0.1rem; }
+.topic-turn-count { color: #4a4a6a; font-size: 0.8em; margin-left: 0.35rem; }
+.topic-turn-count.live { color: #5a7a5a; font-style: italic; }
 .topic-btn {
   background: transparent;
   border: 1px solid #333;

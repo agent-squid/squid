@@ -277,11 +277,57 @@ def get_topics_management_summary(include_hidden: bool = True) -> list[dict]:
                WHERE agent != ''
                ORDER BY last_at DESC NULLS LAST, agent ASC"""
         ).fetchall()
+        # Count completed turns via assistant messages — adhoc flag is only
+        # reliably set on assistant rows, not user rows.
+        session_turn_rows = conn.execute(
+            """SELECT topic, agent, COUNT(*) AS session_turns
+               FROM chat_messages
+               WHERE role = 'assistant' AND (adhoc = 0 OR adhoc IS NULL)
+               GROUP BY topic, agent"""
+        ).fetchall()
+        adhoc_turn_rows = conn.execute(
+            """SELECT topic, agent, COUNT(*) AS adhoc_turns
+               FROM chat_messages
+               WHERE role = 'assistant' AND adhoc = 1
+               GROUP BY topic, agent"""
+        ).fetchall()
+        agent_turn_rows = conn.execute(
+            """SELECT topic, agent, COUNT(*) AS agent_turns
+               FROM chat_messages
+               WHERE role = 'assistant'
+               GROUP BY topic, agent"""
+        ).fetchall()
+        # Turns in the current live session only (since last /clear or session start)
+        live_turn_rows = conn.execute(
+            """SELECT cm.topic, cm.agent, COUNT(*) AS live_turns
+               FROM chat_messages cm
+               JOIN topic_sessions ts
+                 ON cm.topic = ts.topic AND cm.agent = ts.agent AND cm.session_id = ts.session_id
+               WHERE cm.role = 'assistant' AND (cm.adhoc = 0 OR cm.adhoc IS NULL)
+               GROUP BY cm.topic, cm.agent"""
+        ).fetchall()
+
+    session_turns_by_key: dict[tuple, int] = {
+        (r["topic"], r["agent"]): r["session_turns"] for r in session_turn_rows
+    }
+    agent_turns_by_key: dict[tuple, int] = {
+        (r["topic"], r["agent"]): r["agent_turns"] for r in agent_turn_rows
+    }
+    adhoc_turns_by_key: dict[tuple, int] = {
+        (r["topic"], r["agent"]): r["adhoc_turns"] for r in adhoc_turn_rows
+    }
+    live_turns_by_key: dict[tuple, int] = {
+        (r["topic"], r["agent"]): r["live_turns"] for r in live_turn_rows
+    }
 
     agents_by_topic: dict[str, list[dict]] = {}
     for row in agent_rows:
         item = dict(row)
         topic = item.pop("topic")
+        item["session_turns"] = session_turns_by_key.get((topic, item["agent"]), 0)
+        item["adhoc_turns"] = adhoc_turns_by_key.get((topic, item["agent"]), 0)
+        item["agent_turns"] = agent_turns_by_key.get((topic, item["agent"]), 0)
+        item["live_turns"] = live_turns_by_key.get((topic, item["agent"]), 0)
         agents_by_topic.setdefault(topic, []).append(item)
 
     result = []
@@ -289,6 +335,7 @@ def get_topics_management_summary(include_hidden: bool = True) -> list[dict]:
         item = dict(row)
         item["hidden"] = bool(item.get("hidden"))
         item["agents"] = agents_by_topic.get(item["name"], [])
+        item["total_turns"] = sum(a["agent_turns"] for a in item["agents"])
         result.append(item)
     return result
 

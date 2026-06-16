@@ -3099,7 +3099,7 @@ function _renderTopicAgents(topic) {
         html += `
         <div class="topic-agent-row adhoc" data-topic="${escapeHtml(topic.name)}" data-agent="${escapeHtml(lane.agent)}" data-adhoc="1">
           <div class="topic-agent-main">
-            <span class="topic-agent-label"><span class="topic-name">#${escapeHtml(topic.name)}</span>${_topicAgentDisplay(lane.agent, backend)}!</span>
+            <span class="topic-agent-label"><span class="topic-name">#${escapeHtml(topic.name)}</span>${_topicAgentDisplay(lane.agent, backend)}!${lane.adhoc_turns > 0 ? ` <span class="topic-turn-count">${lane.adhoc_turns}</span>` : ''}</span>
           </div>
           <div class="topic-prompt">${escapeHtml(truncate(lane.last_adhoc_prompt, 120))}</div>
           <div class="topic-meta">
@@ -3112,10 +3112,14 @@ function _renderTopicAgents(topic) {
       continue;
     }
     // Session lane: always show, but Delete only if there's actual session history
+    const sessionTurns = lane.session_turns || 0;
+    const liveTurns = lane.live_turns || 0;
+    const liveBadge = liveTurns > 0 ? ` <span class="topic-turn-count live" title="turns in current session">${liveTurns} now</span>` : '';
+    const turnCount = sessionTurns > 0 ? ` <span class="topic-turn-count">${sessionTurns}</span>${liveBadge}` : liveBadge;
     html += `
       <div class="topic-agent-row" data-topic="${escapeHtml(topic.name)}" data-agent="${escapeHtml(lane.agent)}" data-adhoc="0">
         <div class="topic-agent-main">
-          <span class="topic-agent-label"><span class="topic-name">#${escapeHtml(topic.name)}</span>${_topicAgentDisplay(lane.agent, backend)}</span>
+          <span class="topic-agent-label"><span class="topic-name">#${escapeHtml(topic.name)}</span>${_topicAgentDisplay(lane.agent, backend)}${turnCount}</span>
         </div>
         <div class="topic-prompt">${sessionPrompt}</div>
         <div class="topic-meta">
@@ -3129,7 +3133,7 @@ function _renderTopicAgents(topic) {
       html += `
         <div class="topic-agent-row adhoc" data-topic="${escapeHtml(topic.name)}" data-agent="${escapeHtml(lane.agent)}" data-adhoc="1">
           <div class="topic-agent-main">
-            <span class="topic-agent-label"><span class="topic-name">#${escapeHtml(topic.name)}</span>${_topicAgentDisplay(lane.agent, backend)}!</span>
+            <span class="topic-agent-label"><span class="topic-name">#${escapeHtml(topic.name)}</span>${_topicAgentDisplay(lane.agent, backend)}!${lane.adhoc_turns > 0 ? ` <span class="topic-turn-count">${lane.adhoc_turns}</span>` : ''}</span>
           </div>
           <div class="topic-prompt">${escapeHtml(truncate(lane.last_adhoc_prompt, 120))}</div>
           <div class="topic-meta">
@@ -3154,7 +3158,7 @@ function _renderTopicRows(topic) {
     <div class="topic-row${topic.hidden ? ' hidden' : ''}${expanded ? ' expanded' : ''}" data-topic="${escapeHtml(topic.name)}">
       <div class="topic-main">
         <span class="topic-caret">${expanded ? '▾' : '▸'}</span>
-        <span class="topic-identity"><span class="topic-name">#${escapeHtml(topic.name)}</span>${agentLabel}</span>
+        <span class="topic-identity"><span class="topic-name">#${escapeHtml(topic.name)}</span>${agentLabel}${topic.total_turns > 0 ? `<span class="topic-turn-count">${topic.total_turns}</span>` : ''}</span>
       </div>
       <div class="topic-prompt">${prompt}</div>
       <div class="topic-meta">
@@ -3195,6 +3199,8 @@ async function loadTopicsView() {
     let cmp;
     if (_topicsSort.col === 'name') {
       cmp = a.name.localeCompare(b.name);
+    } else if (_topicsSort.col === 'turns') {
+      cmp = (a.total_turns || 0) - (b.total_turns || 0);
     } else {
       const ta = a.last_at || '';
       const tb = b.last_at || '';
@@ -3295,7 +3301,7 @@ function initTopicsView() {
       if (_topicsSort.col === col) {
         _topicsSort.dir = _topicsSort.dir === 'asc' ? 'desc' : 'asc';
       } else {
-        _topicsSort = { col, dir: col === 'name' ? 'asc' : 'desc' };
+        _topicsSort = { col, dir: col === 'name' ? 'asc' : 'desc' };  // name→asc, last_at/turns→desc
       }
       loadTopicsView();
     });
