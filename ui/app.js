@@ -3143,6 +3143,12 @@ function showAgentCreatePrompt(agentName, onSaved) {
   const prompt = document.createElement('div');
   prompt.id = 'agent-create-prompt';
   prompt.className = 'agent-create-prompt';
+  const MODEL_HINTS = {
+    claude: 'e.g. claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7',
+    codex:  'e.g. o4-mini, o3',
+    cursor: 'model (optional)',
+  };
+
   prompt.innerHTML = `
     <div class="acp-title">Agent <strong>${agentName}</strong> not found — create it?</div>
     <div class="acp-row">
@@ -3151,7 +3157,7 @@ function showAgentCreatePrompt(agentName, onSaved) {
         <option value="codex">codex</option>
         <option value="cursor">cursor</option>
       </select>
-      <input id="acp-model" placeholder="model (optional)" />
+      <input id="acp-model" placeholder="${MODEL_HINTS.claude}" />
       <input id="acp-cwd" placeholder="cwd (default: /tmp/squid)" />
     </div>
     <div class="acp-actions">
@@ -3161,6 +3167,11 @@ function showAgentCreatePrompt(agentName, onSaved) {
 
   messages.appendChild(prompt);
   messages.scrollTop = messages.scrollHeight;
+
+  const modelInput = prompt.querySelector('#acp-model');
+  prompt.querySelector('#acp-backend').addEventListener('change', e => {
+    modelInput.placeholder = MODEL_HINTS[e.target.value] || 'model (optional)';
+  });
 
   prompt.querySelector('#acp-cancel').addEventListener('click', () => prompt.remove());
   prompt.querySelector('#acp-save').addEventListener('click', async () => {
