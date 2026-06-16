@@ -1,4 +1,4 @@
-const CACHE_NAME = 'squid-pwa-v20260616-020';
+const CACHE_NAME = 'squid-pwa-v20260616-021';
 const APP_SHELL = [
   '/',
   '/index.html',
@@ -9,7 +9,7 @@ const APP_SHELL = [
   '/vendor/marked.min.js',
   '/vendor/qrcode.min.js',
   '/squid.jpg',
-  '/manifest.webmanifest?v=20260523-1',
+  '/manifest.webmanifest?v=20260616-1',
   '/icons/icon-192.png',
   '/icons/icon-512.png',
   '/icons/maskable-192.png',
