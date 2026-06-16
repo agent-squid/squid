@@ -3022,6 +3022,17 @@ async function loadAgents() {
 
 function initAliases() {
   const statusEl = document.getElementById('agent-form-status');
+  const afBackend = document.getElementById('af-backend');
+  const afModel   = document.getElementById('af-model');
+  const AF_MODEL_HINTS = {
+    claude: 'e.g. claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7',
+    codex:  'e.g. o4-mini, o3',
+    cursor: 'model (optional)',
+  };
+  afBackend.addEventListener('change', () => {
+    afModel.placeholder = AF_MODEL_HINTS[afBackend.value] || 'model (optional)';
+  });
+
   document.getElementById('agent-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const rawTimeout = parseInt(document.getElementById('af-timeout').value, 10);
