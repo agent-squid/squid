@@ -108,18 +108,6 @@ _TABLES = [
         reverted_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         PRIMARY KEY (msg_id, repo, file_path)
     )""",
-    """CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-        content,
-        content='chat_messages',
-        content_rowid='id',
-        tokenize='unicode61'
-    )""",
-    """CREATE TRIGGER IF NOT EXISTS messages_fts_sync
-       AFTER UPDATE OF content ON chat_messages
-       WHEN NEW.role = 'assistant' AND NEW.content IS NOT NULL AND OLD.content IS NULL
-       BEGIN
-           INSERT INTO messages_fts(rowid, content) VALUES (NEW.id, NEW.content);
-       END""",
 ]
 
 # v0.1 baseline — _TABLES above reflects the complete schema.
@@ -156,14 +144,6 @@ def init_db() -> None:
                 "INSERT OR IGNORE INTO agents (name, backend, model) VALUES (?, ?, ?)",
                 ("haiku", "claude", "claude-haiku-4-5"),
             )
-        # Populate FTS index for any existing messages not yet indexed
-        conn.execute("""
-            INSERT INTO messages_fts(rowid, content)
-            SELECT m.id, m.content
-            FROM chat_messages m
-            WHERE m.role = 'assistant' AND m.content IS NOT NULL
-            AND m.id NOT IN (SELECT rowid FROM messages_fts)
-        """)
         conn.commit()
     finally:
         conn.close()
@@ -690,81 +670,6 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
         "total": total,
         "has_more": (offset + limit) < total,
     }
-
-
-def _build_fts_match(q: str) -> str:
-    """Convert space-separated keywords into an FTS5 AND expression."""
-    tokens = q.strip().split()
-    if not tokens:
-        return ''
-    return ' AND '.join(f'"{t}"' for t in tokens)
-
-
-def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = None,
-                    adhoc: Optional[bool] = None, offset: int = 0, limit: int = 10) -> dict:
-    terms = _build_fts_match(q)
-    if not terms:
-        return {"items": [], "total": 0, "has_more": False}
-
-    where_parts = [
-        "m.role = 'assistant'",
-        "m.status = 'done'",
-        "m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)",
-    ]
-    params: list = [terms]
-
-    if topic:
-        where_parts.append("m.topic = ?")
-        params.append(topic)
-    if agent:
-        if agent.endswith('*'):
-            where_parts.append("m.agent LIKE ?")
-            params.append(agent[:-1] + '%')
-        else:
-            where_parts.append("m.agent = ?")
-            params.append(agent)
-    if adhoc is not None:
-        where_parts.append("COALESCE(m.adhoc, 0) = ?")
-        params.append(1 if adhoc else 0)
-
-    where = "WHERE " + " AND ".join(where_parts)
-
-    with _connect() as conn:
-        total = conn.execute(
-            f"SELECT COUNT(*) FROM chat_messages m {where}", params
-        ).fetchone()[0]
-        rows = conn.execute(
-            f"""SELECT m.id, m.role, m.topic, m.agent,
-                       m.content, m.status, m.adhoc, m.session_id,
-                       m.context, m.created_at AS timestamp, m.reply_to,
-                       m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
-                       u.content AS prompt, u.context AS prompt_context,
-                       s.input_tokens, s.output_tokens, s.cache_read_tokens,
-                       s.cache_write_tokens, s.history_input_tokens,
-                       s.cost_usd, s.duration_ms, s.lookback,
-                       s.quota_before, s.quota_after, s.backend, s.model, s.cwd
-                FROM chat_messages m
-                LEFT JOIN chat_messages u ON m.reply_to = u.id
-                LEFT JOIN session_stats s ON m.session_id = s.session_id
-                {where}
-                ORDER BY m.id DESC LIMIT ? OFFSET ?""",
-            params + [limit, offset],
-        ).fetchall()
-
-    stat_keys = {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
-                 "history_input_tokens", "cost_usd", "duration_ms", "lookback",
-                 "quota_before", "quota_after", "quota_delta",
-                 "msg_quota_before", "msg_quota_after", "backend", "model", "cwd"}
-    items = []
-    for r in rows:
-        row = dict(r)
-        stats = {k: row.pop(k) for k in stat_keys}
-        if row.get("session_id") and any(v is not None for v in stats.values()):
-            stats["session_id"] = row["session_id"]
-            row["stats"] = stats
-        items.append(row)
-
-    return {"items": items, "total": total, "has_more": (offset + limit) < total}
 
 
 # ── session stats ─────────────────────────────────────────────────────────────

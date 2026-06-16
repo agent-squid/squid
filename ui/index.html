@@ -18,7 +18,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono&display=swap" />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono&display=swap&text=%E2%96%88%E2%96%84%E2%96%80%E2%95%94%E2%95%90%E2%95%97%E2%95%91%E2%95%9A%E2%95%9D" />
   <link rel="stylesheet" href="/vendor/atom-one-dark.min.css" />
-  <link rel="stylesheet" href="style.css?v=20260616-001" />
+  <link rel="stylesheet" href="style.css?v=20260611-111" />
   <script src="/vendor/highlight.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/vendor/qrcode.min.js"></script>
@@ -130,12 +130,6 @@
           <div class="help-row"><code>/filter reset</code><span>clear the active filter</span></div>
           <div class="help-row"><code>/status</code><span>open status popup</span></div>
           <div class="help-row"><code>/restart</code><span>restart the server</span></div>
-          <div class="help-row"><code>/s keywords…</code><span>search history in current topic/agent (session only)</span></div>
-          <div class="help-row"><code>/s #topic keywords…</code><span>search across a topic</span></div>
-          <div class="help-row"><code>/s #topic@agent keywords…</code><span>search topic + agent</span></div>
-          <div class="help-row"><code>/s #topic@agent* keywords…</code><span>search topic + agents with prefix</span></div>
-          <div class="help-row"><code>/s #topic@agent! keywords…</code><span>include adhoc results</span></div>
-          <div class="help-row"><code>/s #all keywords…</code><span>search all topics</span></div>
           <div class="help-row" style="color:#555;font-size:0.85em">Commands also work without <kbd>/</kbd> as exact bare words.</div>
         </div>
         <div class="help-section">
@@ -185,13 +179,6 @@
         <div id="filter-badge">
           <span id="filter-badge-label"></span>
           <button id="filter-badge-clear" type="button">×</button>
-        </div>
-        <div id="search-bar">
-          <span class="search-icon">⌕</span>
-          <span id="search-bar-scope"></span>
-          <span class="search-bar-sep">›</span>
-          <span id="search-bar-keywords"></span>
-          <button id="search-bar-clear" type="button">×</button>
         </div>
       </div>
       <form id="form">
@@ -298,6 +285,6 @@
     <!-- Inline agent creation prompt (appended to #messages dynamically) -->
   </div>
   <div id="app-tooltip"></div>
-  <script src="app.js?v=20260616-001"></script>
+  <script src="app.js?v=20260612-001"></script>
 </body>
 </html>

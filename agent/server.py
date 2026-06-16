@@ -65,7 +65,6 @@ from .stats_db import (
     delete_topic, hide_topic, set_topic_hidden, get_topic_agents, get_topic_agent_history,
     clear_agent_sessions, get_agent_sessions,
     get_diff_revert_eligibility, record_git_diff_revert, get_message_gitdiff,
-    search_messages,
 )
 from .journal import _generate_journal, _current_week, list_topic_journals, read_journal
 from . import creds
@@ -646,17 +645,6 @@ async def history(offset: int = 0, limit: int = 5, topic: Optional[str] = None,
             return normalized
         topic = normalized
     return JSONResponse(list_history(topic=topic, agent=agent, adhoc=adhoc, offset=offset, limit=limit))
-
-
-@app.get("/search")
-async def search(q: str, offset: int = 0, limit: int = 10, topic: Optional[str] = None,
-                 agent: Optional[str] = None, adhoc: Optional[bool] = None):
-    if topic is not None:
-        normalized = _normalize_topic_response(topic)
-        if isinstance(normalized, JSONResponse):
-            return normalized
-        topic = normalized
-    return JSONResponse(search_messages(q=q, topic=topic, agent=agent, adhoc=adhoc, offset=offset, limit=limit))
 
 
 @app.get("/chat/{msg_id}/status")
