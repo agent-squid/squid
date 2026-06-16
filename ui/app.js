@@ -348,7 +348,10 @@ let stickyChip = null; // { topic, agent, adhoc } | null
 
 function setTopicChip(topic, agent, adhoc = false, lookback = 0) {
   stickyChip = { topic, agent, adhoc, lookback };
-  localStorage.setItem('squid_sticky_chip', JSON.stringify({ topic, agent, adhoc }));
+  // Don't persist a sessioned default chip — #default is adhoc-first; session there is ephemeral
+  if (topic !== 'default' || adhoc) {
+    localStorage.setItem('squid_sticky_chip', JSON.stringify({ topic, agent, adhoc, lookback }));
+  }
 
   topicChipEl.innerHTML = '';
   const tSpan = document.createElement('span');
@@ -412,7 +415,7 @@ function parseInput(text) {
   if (mb) {
     return { topic: mb[1].toLowerCase(), agent: mb[2] || null, adhoc: !!mb[3], lookback: 0, message: '' };
   }
-  return { topic: 'default', agent: null, adhoc: false, lookback: 0, message: text };
+  return { topic: 'default', agent: null, adhoc: true, lookback: 0, message: text };
 }
 
 // ── topic tag helper (colored, clickable) ──────────────────────────────────────
@@ -3048,6 +3051,7 @@ let _topicsManageCache = null;
 let _topicsManageCachePromise = null;
 const _topicsExpanded = new Set();
 let _topicDeleteTarget = null;
+let _topicsSort = { col: 'last_at', dir: 'desc' };
 
 function invalidateTopicsManageCache() {
   _topicsManageCache = null;
@@ -3086,8 +3090,28 @@ function _renderTopicAgents(topic) {
   let html = '';
   for (const lane of agents) {
     const backend = lane.last_backend || topic.last_backend || null;
+    const isDefaultTopic = topic.name === 'default';
     const sessionPrompt = lane.last_prompt ? escapeHtml(truncate(lane.last_prompt, 120)) : '<span class="col-default">No session prompt</span>';
     const laneTime = lane.last_at ? `<span class="topic-badge time">${escapeHtml(fmtTime(lane.last_at))}</span>` : '';
+    // Default topic: skip session lane if no session history — adhoc is the normal mode there
+    if (isDefaultTopic && !lane.last_prompt) {
+      if (lane.last_adhoc_prompt) {
+        html += `
+        <div class="topic-agent-row adhoc" data-topic="${escapeHtml(topic.name)}" data-agent="${escapeHtml(lane.agent)}" data-adhoc="1">
+          <div class="topic-agent-main">
+            <span class="topic-agent-label"><span class="topic-name">#${escapeHtml(topic.name)}</span>${_topicAgentDisplay(lane.agent, backend)}!</span>
+          </div>
+          <div class="topic-prompt">${escapeHtml(truncate(lane.last_adhoc_prompt, 120))}</div>
+          <div class="topic-meta">
+            <span class="topic-badge">adhoc</span>
+            ${laneTime}
+            <button class="topic-btn" data-topic-open="${escapeHtml(topic.name)}" data-agent-open="${escapeHtml(lane.agent)}" data-adhoc-open="1" type="button">Open</button>
+          </div>
+        </div>`;
+      }
+      continue;
+    }
+    // Session lane: always show, but Delete only if there's actual session history
     html += `
       <div class="topic-agent-row" data-topic="${escapeHtml(topic.name)}" data-agent="${escapeHtml(lane.agent)}" data-adhoc="0">
         <div class="topic-agent-main">
@@ -3097,10 +3121,11 @@ function _renderTopicAgents(topic) {
         <div class="topic-meta">
           ${laneTime}
           <button class="topic-btn" data-topic-open="${escapeHtml(topic.name)}" data-agent-open="${escapeHtml(lane.agent)}" data-adhoc-open="0" type="button">Open</button>
-          <button class="topic-btn danger" data-agent-del-topic="${escapeHtml(topic.name)}" data-agent-del-agent="${escapeHtml(lane.agent)}" data-agent-del-adhoc="0" type="button">Delete</button>
+          ${lane.last_prompt ? `<button class="topic-btn danger" data-agent-del-topic="${escapeHtml(topic.name)}" data-agent-del-agent="${escapeHtml(lane.agent)}" data-agent-del-adhoc="0" type="button">Delete</button>` : ''}
         </div>
       </div>`;
     if (lane.last_adhoc_prompt) {
+      // Adhoc lane on default topic: no Delete — use topic-level Clear instead
       html += `
         <div class="topic-agent-row adhoc" data-topic="${escapeHtml(topic.name)}" data-agent="${escapeHtml(lane.agent)}" data-adhoc="1">
           <div class="topic-agent-main">
@@ -3111,7 +3136,7 @@ function _renderTopicAgents(topic) {
             <span class="topic-badge">adhoc</span>
             ${laneTime}
             <button class="topic-btn" data-topic-open="${escapeHtml(topic.name)}" data-agent-open="${escapeHtml(lane.agent)}" data-adhoc-open="1" type="button">Open</button>
-            <button class="topic-btn danger" data-agent-del-topic="${escapeHtml(topic.name)}" data-agent-del-agent="${escapeHtml(lane.agent)}" data-agent-del-adhoc="1" type="button">Delete</button>
+            ${!isDefaultTopic ? `<button class="topic-btn danger" data-agent-del-topic="${escapeHtml(topic.name)}" data-agent-del-agent="${escapeHtml(lane.agent)}" data-agent-del-adhoc="1" type="button">Delete</button>` : ''}
           </div>
         </div>`;
     }
@@ -3124,7 +3149,7 @@ function _renderTopicRows(topic) {
   const agentLabel = _topicAgentDisplay(topic.agent, topic.last_backend || null);
   const prompt = topic.last_prompt ? escapeHtml(truncate(topic.last_prompt, 120)) : '<span class="col-default">No prompt yet</span>';
   const memoryLabel = topic.memory?.exists ? 'Memory' : 'Add memory';
-  const hideLabel = topic.hidden ? 'Show' : 'Hide';
+  const hideLabel = topic.name !== 'default' ? (topic.hidden ? 'Show' : 'Hide') : '';
   return `
     <div class="topic-row${topic.hidden ? ' hidden' : ''}${expanded ? ' expanded' : ''}" data-topic="${escapeHtml(topic.name)}">
       <div class="topic-main">
@@ -3136,8 +3161,8 @@ function _renderTopicRows(topic) {
         ${_topicStatusBadges(topic)}
         <button class="topic-btn" data-topic-open="${escapeHtml(topic.name)}" type="button">Open</button>
         <button class="topic-btn" data-topic-memory="${escapeHtml(topic.name)}" type="button">${memoryLabel}</button>
-        <button class="topic-btn" data-topic-hide="${escapeHtml(topic.name)}" data-hidden="${topic.hidden ? '1' : '0'}" type="button">${hideLabel}</button>
-        <button class="topic-btn danger" data-topic-delete="${escapeHtml(topic.name)}" type="button">Delete</button>
+        ${topic.name !== 'default' ? `<button class="topic-btn" data-topic-hide="${escapeHtml(topic.name)}" data-hidden="${topic.hidden ? '1' : '0'}" type="button">${hideLabel}</button>` : ''}
+        <button class="topic-btn danger" data-topic-delete="${escapeHtml(topic.name)}" type="button">${topic.name === 'default' ? 'Clear' : 'Delete'}</button>
       </div>
     </div>
     <div class="topic-agents"${expanded ? '' : ' hidden'}>${_renderTopicAgents(topic)}</div>`;
@@ -3165,7 +3190,21 @@ async function loadTopicsView() {
     listEl.innerHTML = '<div class="topics-empty">No topics found.</div>';
     return;
   }
-  listEl.innerHTML = filtered.map(_renderTopicRows).join('');
+
+  const sorted = [...filtered].sort((a, b) => {
+    let cmp;
+    if (_topicsSort.col === 'name') {
+      cmp = a.name.localeCompare(b.name);
+    } else {
+      const ta = a.last_at || '';
+      const tb = b.last_at || '';
+      cmp = ta < tb ? -1 : ta > tb ? 1 : 0;
+    }
+    return _topicsSort.dir === 'asc' ? cmp : -cmp;
+  });
+
+  listEl.innerHTML = sorted.map(_renderTopicRows).join('');
+  _updateTopicsSortBar();
   bindTopicsView();
 }
 
@@ -3208,11 +3247,12 @@ function bindTopicsView() {
       const nextHidden = btn.dataset.hidden !== '1';
       btn.disabled = true;
       try {
-        await fetch(`/topics/${encodeURIComponent(topic)}/hidden`, {
+        const res = await fetch(`/topics/${encodeURIComponent(topic)}/hidden`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ hidden: nextHidden }),
         });
+        if (!res.ok) return;
         invalidateTopicsCache();
         invalidateTopicsManageCache();
         loadTopicsView();
@@ -3235,10 +3275,31 @@ function bindTopicsView() {
   });
 }
 
+function _updateTopicsSortBar() {
+  document.querySelectorAll('[data-topics-sort]').forEach(btn => {
+    const col = btn.dataset.topicsSort;
+    const arrow = btn.querySelector('.sort-arrow');
+    const active = _topicsSort.col === col;
+    btn.classList.toggle('active', active);
+    if (arrow) arrow.textContent = active ? (_topicsSort.dir === 'asc' ? '↑' : '↓') : '↕';
+  });
+}
+
 function initTopicsView() {
   const searchEl = document.getElementById('topics-search');
-  if (!searchEl) return;
-  searchEl.addEventListener('input', () => loadTopicsView());
+  if (searchEl) searchEl.addEventListener('input', () => loadTopicsView());
+
+  document.querySelectorAll('[data-topics-sort]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const col = btn.dataset.topicsSort;
+      if (_topicsSort.col === col) {
+        _topicsSort.dir = _topicsSort.dir === 'asc' ? 'desc' : 'asc';
+      } else {
+        _topicsSort = { col, dir: col === 'name' ? 'asc' : 'desc' };
+      }
+      loadTopicsView();
+    });
+  });
 }
 
 let _agentDeleteTarget = null; // { topic, agent, adhoc }
@@ -3246,9 +3307,13 @@ let _agentDeleteTarget = null; // { topic, agent, adhoc }
 function openTopicDeleteModal(topic) {
   _topicDeleteTarget = topic;
   _agentDeleteTarget = null;
-  document.getElementById('topic-delete-modal-heading').textContent = 'Delete topic';
+  const isDefault = topic === 'default';
+  document.getElementById('topic-delete-modal-heading').textContent = isDefault ? 'Clear default' : 'Delete topic';
   document.getElementById('topic-delete-modal-title').textContent = `#${topic}`;
-  document.getElementById('topic-delete-modal-copy').textContent = 'Removes all messages, sessions, and stats for this topic. Cannot be undone.';
+  document.getElementById('topic-delete-modal-copy').textContent = isDefault
+    ? 'Clears all messages in the default topic. The topic itself is not removed. Cannot be undone.'
+    : 'Removes all messages, sessions, and stats for this topic. Cannot be undone.';
+  document.getElementById('topic-delete-confirm').textContent = isDefault ? 'Clear' : 'Delete';
   document.getElementById('topic-delete-confirm').disabled = false;
   document.getElementById('topic-delete-modal').classList.add('open');
 }
@@ -3257,6 +3322,7 @@ function openAgentDeleteModal(topic, agent, adhoc) {
   _topicDeleteTarget = null;
   _agentDeleteTarget = { topic, agent, adhoc };
   const scope = adhoc ? `#${topic}@${agent}!` : `#${topic}@${agent}`;
+  document.getElementById('topic-delete-confirm').textContent = 'Delete';
   document.getElementById('topic-delete-modal-heading').textContent = 'Delete agent lane';
   document.getElementById('topic-delete-modal-title').textContent = scope;
   document.getElementById('topic-delete-modal-copy').textContent = adhoc
@@ -3681,15 +3747,18 @@ async function updateAutocomplete() {
     const backendByAgent = new Map(agents.map(a => [a.name, a.backend]));
     const items = [];
 
+    const isDefault = topic.toLowerCase() === 'default';
     // Used agents — with last prompt
     for (const h of history) {
       if (!h.agent.toLowerCase().startsWith(prefix)) continue;
-      items.push({
-        label:  _acAgentLabel(topic, h.agent, backendByAgent.get(h.agent) || null),
-        insert: `#${topic}@${h.agent}`,
-        sub:    h.last_prompt ? truncate(h.last_prompt, 55) : '',
-      });
-      // Also offer adhoc variant
+      // Default topic: suppress session variant — adhoc only
+      if (!isDefault) {
+        items.push({
+          label:  _acAgentLabel(topic, h.agent, backendByAgent.get(h.agent) || null),
+          insert: `#${topic}@${h.agent}`,
+          sub:    h.last_prompt ? truncate(h.last_prompt, 55) : '',
+        });
+      }
       items.push({
         label:  _acAgentLabel(topic, h.agent + '!', backendByAgent.get(h.agent) || null),
         insert: `#${topic}@${h.agent}!`,
@@ -3702,9 +3771,10 @@ async function updateAutocomplete() {
     for (const a of agents) {
       if (usedNames.has(a.name)) continue;
       if (!a.name.toLowerCase().startsWith(prefix)) continue;
+      // Default topic: only offer adhoc variant
       items.push({
-        label:  _acAgentLabel(topic, a.name, a.backend),
-        insert: `#${topic}@${a.name}`,
+        label:  _acAgentLabel(topic, isDefault ? a.name + '!' : a.name, a.backend),
+        insert: `#${topic}@${a.name}${isDefault ? '!' : ''}`,
         meta:   a.model || a.backend,
       });
     }
@@ -4620,7 +4690,15 @@ startProcPoll();
 showBootBanner();
 try {
   const saved = JSON.parse(localStorage.getItem('squid_sticky_chip') || 'null');
-  if (saved?.topic) setTopicChip(saved.topic, saved.agent || null, saved.adhoc || false);
+  if (saved?.topic) {
+    setTopicChip(saved.topic, saved.agent || null, saved.adhoc || false, saved.lookback || 0);
+  } else {
+    _acAgents().then(agents => {
+      if (stickyChip) return;
+      const first = agents[0];
+      if (first) setTopicChip('default', first.name, true, 0);
+    }).catch(() => {});
+  }
 } catch { /* ignore */ }
 
 // Patch bookmarklet hrefs with the actual origin (avoids hardcoding the port).

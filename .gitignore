@@ -13,5 +13,9 @@ tests/e2e/node_modules/
 tests/e2e/playwright-report/
 tests/e2e/test-results/
 context/journals/
-context/topics/
+context/topics/*
+!context/topics/default
+context/topics/default/*
+!context/topics/default/memory.md
 logs/
+.claude/

@@ -14,27 +14,70 @@ and mobile.
 
 ## Decisions
 
-### 1. FTS5 standalone table, populated on startup
+### 1. FTS5 standalone table with incremental boot population
 
 Search is backed by a SQLite FTS5 virtual table (`messages_fts`) using the
 `unicode61` tokenizer. The table is **standalone** (no `content=` option) and
 stores a copy of assistant content in its own shadow tables.
 
-The table is **dropped and recreated on every server startup**. This guarantees
-clean migration from any previous table variant and avoids `NOT IN` guard
-complexity. The FTS population INSERT runs immediately after recreation:
+An `AFTER UPDATE OF content` trigger is the **primary indexing path** — it
+inserts each assistant response into `messages_fts` when the content column
+transitions from NULL to a value (i.e. when a streaming response completes).
+
+On startup, an **incremental population** INSERT runs as error correction:
 
 ```sql
 INSERT INTO messages_fts(rowid, content)
 SELECT id, content FROM chat_messages
 WHERE role = 'assistant' AND content IS NOT NULL
+  AND id NOT IN (SELECT rowid FROM messages_fts)
 ```
 
-An `AFTER UPDATE OF content` trigger keeps the index current for responses
-that complete after startup.
+This fills any gaps left by prior crashes, deletes that ran before FTS cleanup
+was wired up, or other edge cases. Because the standalone table's rowid scan
+is real (unlike external-content tables), the `NOT IN` guard is safe and
+efficient. On a fully-indexed database it scans the FTS rowids and inserts
+zero rows — cost is O(index size), not O(table size).
+
+The original DROP+RECREATE approach (full rebuild on every startup) was
+replaced for two reasons:
+1. It added startup latency proportional to total assistant message count.
+2. It was never logically necessary — the trigger handles real-time indexing,
+   so the full rebuild was redundant on every boot after the first.
+
+**TBD:** The remaining `DROP TRIGGER IF EXISTS` guard in the DDL list could
+be moved to a proper schema migration step. It exists only to handle the
+one-time re-creation of the trigger when upgrading from external-content to
+standalone; once all installs have gone through that upgrade it's dead code.
 
 Only assistant responses are indexed. User prompts are not indexed and are
 never highlighted in search results.
+
+### 1a. FTS cleanup on bulk delete
+
+When a topic or topic+agent lane is deleted, the FTS index is cleaned up in
+the same transaction before the `chat_messages` rows are removed:
+
+```sql
+DELETE FROM messages_fts
+WHERE rowid IN (
+    SELECT id FROM chat_messages
+    WHERE topic=? AND role='assistant'
+    -- plus any agent/adhoc filter for per-agent deletes
+)
+```
+
+This is one statement per delete operation (not one per row). Without explicit
+cleanup, FTS rows become orphaned — the rowid exists in `messages_fts` but the
+corresponding `chat_messages` row is gone. Orphaned rows are harmless in
+practice (search queries JOIN back to `chat_messages`, so deleted messages
+never appear in results), but they waste storage and accumulate indefinitely.
+
+The incremental boot population does not re-add orphaned FTS rows because it
+guards on `id NOT IN (SELECT rowid FROM messages_fts)` — the guard checks
+whether the FTS row exists, not whether the base row still exists. Orphans are
+therefore invisible to boot correction and would persist forever without
+explicit cleanup on delete.
 
 ### 2. AND-expression matching
 
@@ -139,8 +182,8 @@ The service worker excludes `/search` from caching.
 
 - Good: FTS5 inverted index makes multi-keyword search fast even over thousands
   of messages.
-- Good: DROP+RECREATE on startup eliminates migration complexity and guarantees
-  a fresh standalone index regardless of what was stored previously.
+- Good: incremental boot population adds near-zero startup latency on a
+  fully-indexed database; only truly missing rows are inserted.
 - Good: unified scope with `/filter` means users learn one mental model for
   both history filtering and search scoping.
 - Good: agent wildcard (`@agent*`) handles model-variant naming without
@@ -149,11 +192,11 @@ The service worker excludes `/search` from caching.
   (pin, copy, read in context).
 - Good: single-fetch with a 100-item cap eliminates repeated FTS index scans
   and removes scroll-triggered pagination state from the client entirely.
+- Good: explicit FTS cleanup on delete keeps the index tight — no orphaned rows
+  accumulating over time.
 - Bad: standalone FTS table duplicates assistant content. For large deployments
   this doubles storage for the indexed columns. External-content tables avoid
   this but require careful population logic (see root bug below).
-- Bad: FTS index is rebuilt from scratch on every startup. For very large
-  databases this adds startup latency.
 - Bad: `unicode61` tokenizer treats `/`, `.`, `-` as separators, so searching
   `ui/app.js` tokenizes to `[ui, app, js]` and matches documents containing
   those tokens anywhere, not just in the slash-delimited form.

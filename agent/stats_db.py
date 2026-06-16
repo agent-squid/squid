@@ -108,9 +108,8 @@ _TABLES = [
         reverted_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         PRIMARY KEY (msg_id, repo, file_path)
     )""",
-    # FTS5 index — dropped and recreated each startup so the standalone table
-    # always replaces any old external-content variant without a separate migration.
-    "DROP TABLE IF EXISTS messages_fts",
+    # FTS5 index — standalone table (not external-content). See ADR-0021.
+    # Trigger is the primary indexing path; boot does incremental error correction only.
     "DROP TRIGGER IF EXISTS messages_fts_sync",
     """CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
         content, tokenize='unicode61'
@@ -157,11 +156,15 @@ def init_db() -> None:
                 "INSERT OR IGNORE INTO agents (name, backend, model) VALUES (?, ?, ?)",
                 ("haiku", "claude", "claude-haiku-4-5"),
             )
-        # Populate FTS from all existing assistant messages (table was just recreated empty)
+        # Incremental FTS population — only rows not already in the index.
+        # Error correction for any orphaned gaps (missed rows from prior deletes
+        # or crashes). The trigger handles new rows in real time; this is a
+        # safety net, not the primary population path.
         conn.execute("""
             INSERT INTO messages_fts(rowid, content)
             SELECT id, content FROM chat_messages
             WHERE role='assistant' AND content IS NOT NULL
+              AND id NOT IN (SELECT rowid FROM messages_fts)
         """)
         conn.commit()
     finally:
@@ -365,6 +368,10 @@ def set_topic_hidden(name: str, hidden: bool) -> bool:
 
 def delete_topic(name: str) -> bool:
     with _connect() as conn:
+        conn.execute(
+            "DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM chat_messages WHERE topic=? AND role='assistant')",
+            (name,),
+        )
         conn.execute("DELETE FROM topic_sessions WHERE topic = ?", (name,))
         conn.execute("DELETE FROM session_stats WHERE topic = ?", (name,))
         conn.execute("DELETE FROM chat_messages WHERE topic = ?", (name,))
@@ -375,11 +382,19 @@ def delete_topic(name: str) -> bool:
 def delete_topic_agent(topic: str, agent: str, adhoc: Optional[bool] = None) -> None:
     with _connect() as conn:
         if adhoc is None:
+            conn.execute(
+                "DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM chat_messages WHERE topic=? AND agent=? AND role='assistant')",
+                (topic, agent),
+            )
             conn.execute("DELETE FROM chat_messages WHERE topic=? AND agent=?", (topic, agent))
             conn.execute("DELETE FROM topic_sessions WHERE topic=? AND agent=?", (topic, agent))
             conn.execute("DELETE FROM session_stats WHERE topic=? AND agent=?", (topic, agent))
             conn.execute("DELETE FROM topics WHERE topic=? AND agent=?", (topic, agent))
         elif adhoc:
+            conn.execute(
+                "DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM chat_messages WHERE topic=? AND agent=? AND adhoc=1 AND role='assistant')",
+                (topic, agent),
+            )
             conn.execute(
                 "DELETE FROM chat_messages WHERE topic=? AND agent=? AND adhoc=1",
                 (topic, agent),
@@ -388,7 +403,15 @@ def delete_topic_agent(topic: str, agent: str, adhoc: Optional[bool] = None) -> 
                 "UPDATE topics SET last_adhoc_prompt=NULL WHERE topic=? AND agent=?",
                 (topic, agent),
             )
+            conn.execute(
+                "DELETE FROM topics WHERE topic=? AND agent=? AND NOT EXISTS (SELECT 1 FROM chat_messages WHERE topic=? AND agent=?)",
+                (topic, agent, topic, agent),
+            )
         else:
+            conn.execute(
+                "DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM chat_messages WHERE topic=? AND agent=? AND (adhoc=0 OR adhoc IS NULL) AND role='assistant')",
+                (topic, agent),
+            )
             conn.execute(
                 "DELETE FROM chat_messages WHERE topic=? AND agent=? AND (adhoc=0 OR adhoc IS NULL)",
                 (topic, agent),
@@ -398,6 +421,10 @@ def delete_topic_agent(topic: str, agent: str, adhoc: Optional[bool] = None) -> 
             conn.execute(
                 "UPDATE topics SET last_prompt=NULL WHERE topic=? AND agent=?",
                 (topic, agent),
+            )
+            conn.execute(
+                "DELETE FROM topics WHERE topic=? AND agent=? AND NOT EXISTS (SELECT 1 FROM chat_messages WHERE topic=? AND agent=?)",
+                (topic, agent, topic, agent),
             )
 
 

@@ -1211,12 +1211,19 @@ body {
   padding: 0.28rem 0.75rem;
 }
 #topic-delete-confirm {
-  border-color: #6d2f25;
-  color: #e05030;
+  background: #7a2020;
+  border-color: #7a2020;
+  color: #fff;
 }
 #topic-delete-confirm:hover {
-  border-color: #e05030;
-  color: #ff704c;
+  background: #a02828;
+  border-color: #a02828;
+  color: #fff;
+}
+#topic-delete-confirm:disabled {
+  background: #3a1818;
+  border-color: #3a1818;
+  color: #666;
 }
 /* ── file viewer modal ─────────────────────────────────────────────────────── */
 #file-modal {
@@ -1424,11 +1431,15 @@ body {
 
 #topics-header {
   display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid #1e1e28;
+  flex-shrink: 0;
+}
+#topics-header-top {
+  display: flex;
   align-items: center;
   gap: 0.6rem;
   padding: 0.5rem 0.6rem;
-  border-bottom: 1px solid #1e1e28;
-  flex-shrink: 0;
 }
 #topics-search {
   flex: 1;
@@ -1446,6 +1457,30 @@ body {
   font-size: 0.75em;
   white-space: nowrap;
 }
+#topics-sort-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.2rem 0.6rem 0.35rem;
+}
+.sort-label {
+  color: #444;
+  font-size: 0.72em;
+  margin-right: 0.15rem;
+}
+.sort-btn {
+  background: none;
+  border: none;
+  color: #555;
+  font-size: 0.72em;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.sort-btn:hover { color: #999; background: #1a1a26; }
+.sort-btn.active { color: #a0a0c0; }
+.sort-arrow { font-size: 0.85em; margin-left: 0.15rem; }
 #topics-list {
   flex: 1;
   min-height: 0;
