@@ -130,17 +130,23 @@
           <div class="help-row"><code>/filter reset</code><span>clear the active filter</span></div>
           <div class="help-row"><code>/status</code><span>open status popup</span></div>
           <div class="help-row"><code>/restart</code><span>restart the server</span></div>
-          <div class="help-row"><code>/s keywords…</code><span>search in current filter context</span></div>
-          <div class="help-row"><code>/s #topic keywords…</code><span>all messages in a topic (session + adhoc)</span></div>
-          <div class="help-row"><code>/s #topic! keywords…</code><span>adhoc-only in a topic</span></div>
-          <div class="help-row"><code>/s #topic@agent keywords…</code><span>topic + exact agent</span></div>
-          <div class="help-row"><code>/s #topic@agent* keywords…</code><span>topic + agents with prefix</span></div>
-          <div class="help-row"><code>/s #topic@agent! keywords…</code><span>topic + agent, adhoc-only</span></div>
-          <div class="help-row"><code>/s @agent keywords…</code><span>all topics, specific agent</span></div>
-          <div class="help-row"><code>/s @agent* keywords…</code><span>all topics, agents with prefix</span></div>
-          <div class="help-row"><code>/s @agent! keywords…</code><span>all topics, agent, adhoc-only</span></div>
-          <div class="help-row"><code>/s #all keywords…</code><span>search everything</span></div>
+          <div class="help-row"><code>/s, /search keywords…</code><span>search history — see Search how-to below for scope syntax</span></div>
           <div class="help-row" style="color:#555;font-size:0.85em">Commands also work without <kbd>/</kbd> as exact bare words.</div>
+        </div>
+        <div class="help-section">
+          <div class="help-title">Search how-to</div>
+          <div class="help-row"><span>Type <code>/s keywords</code> to search. Results replace the history list; press <kbd>Esc</kbd> or ✕ to exit.</span></div>
+          <div class="help-row"><span>Scope is inherited from the active filter or sticky chip — or set it explicitly in the command:</span></div>
+          <div class="help-row"><code>/s fix bug</code><span>search in current scope</span></div>
+          <div class="help-row"><code>/s #topic kw</code><span>all agents in topic (session + adhoc)</span></div>
+          <div class="help-row"><code>/s #topic! kw</code><span>adhoc-only in topic</span></div>
+          <div class="help-row"><code>/s #topic@agent kw</code><span>exact agent in topic</span></div>
+          <div class="help-row"><code>/s #topic@agent* kw</code><span>agent prefix match (e.g. claude, claude-opus…)</span></div>
+          <div class="help-row"><code>/s #topic@agent! kw</code><span>exact agent, adhoc-only</span></div>
+          <div class="help-row"><code>/s @agent kw</code><span>agent across all topics</span></div>
+          <div class="help-row"><code>/s #all kw</code><span>search everything</span></div>
+          <div class="help-row"><span>Click the <b>⌕ keyword tag</b> to pull the search back into the input for editing. If the input had content, it is stashed — press <kbd>↑</kbd> to restore it.</span></div>
+          <div class="help-row"><span>Click <b>✕ on the scope badge</b> to widen scope without exiting search. Click <b>✕ on the search bar</b> to exit search entirely.</span></div>
         </div>
         <div class="help-section">
           <div class="help-title">Context curation</div>
@@ -149,10 +155,13 @@
         </div>
         <div class="help-section">
           <div class="help-title">Keyboard</div>
-          <div class="help-row"><kbd>↑</kbd><kbd>↓</kbd><span>navigate autocomplete</span></div>
-          <div class="help-row"><kbd>Enter</kbd><span>select autocomplete item</span></div>
-          <div class="help-row"><kbd>Esc</kbd><span>close autocomplete / help</span></div>
+          <div class="help-row"><kbd>↑</kbd><kbd>↓</kbd><span>navigate autocomplete — or prompt history when input is single-line</span></div>
+          <div class="help-row"><kbd>↑</kbd><span>in empty input: open recent prompts panel (type a char then backspace on mobile)</span></div>
+          <div class="help-row"><kbd>↓</kbd><span>while in prompt history: return toward draft; restores stashed input and topic chip</span></div>
+          <div class="help-row"><kbd>Enter</kbd><span>select autocomplete item / send message</span></div>
+          <div class="help-row"><kbd>Esc</kbd><span>exit search · close autocomplete / panels</span></div>
           <div class="help-row"><kbd>Shift+Enter</kbd><span>newline in input</span></div>
+          <div class="help-row"><kbd>Backspace</kbd><span>on empty input: expand topic chip back into text for editing</span></div>
         </div>
       </div>
     </div>
