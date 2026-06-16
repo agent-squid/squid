@@ -1837,7 +1837,16 @@ function makeToolBlock(tool, msgId) {
       const fileToggle = document.createElement('button');
       fileToggle.className = 'gitdiff-file-toggle';
 
-      if (chunk) {
+      const isBinary = chunk.includes('Binary files') || !_isTextPath(file.path || '');
+      if (isBinary) {
+        fileToggle.textContent = `${status} ${displayPath}`;
+        fileToggle.classList.add('gitdiff-file-toggle--no-diff');
+        const badge = document.createElement('span');
+        badge.className = 'gitdiff-binary-badge';
+        badge.textContent = 'binary';
+        fileToggle.appendChild(badge);
+        row.appendChild(fileToggle);
+      } else if (chunk) {
         const { add, del } = _countDiffStats(chunk);
         fileToggle.textContent = `${status} ${displayPath}  +${add} -${del}`;
         const fileBody = document.createElement('div');

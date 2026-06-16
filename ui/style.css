@@ -656,6 +656,15 @@ body {
 .gitdiff-file-toggle:hover { background: #1a1a25; color: #c0c0dd; }
 .gitdiff-file-toggle--no-diff { cursor: default; }
 .gitdiff-file-toggle--no-diff::before { content: '  '; }
+.gitdiff-binary-badge {
+  margin-left: 0.5em;
+  font-size: 0.75em;
+  color: #555;
+  border: 1px solid #333;
+  border-radius: 3px;
+  padding: 0 0.3em;
+  vertical-align: middle;
+}
 .gitdiff-file-body { display: none; width: 100%; }
 .gitdiff-file-expanded .gitdiff-file-body { display: block; }
 .gitdiff-file-row--reverted .gitdiff-file-toggle { opacity: 0.4; text-decoration: line-through; }
