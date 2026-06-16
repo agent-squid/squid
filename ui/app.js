@@ -894,13 +894,6 @@ input.addEventListener('keydown', (e) => {
 
 async function sendMessage(text) {
   const { topic, agent, adhoc, lookback, message } = parseInput(text);
-  const codeRootDecision = await ensureCodeRootsDecision(topic);
-  if (!codeRootDecision) {
-    input.value = text;
-    resizeComposer();
-    input.focus();
-    return false;
-  }
   setTopicChip(topic, agent, adhoc, lookback);
   const sendTime = new Date().toISOString();
 
@@ -909,6 +902,9 @@ async function sendMessage(text) {
   messages.appendChild(userBubble);
   addTimestamp(userBubble, sendTime, true);
   requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
+
+  // Non-blocking nudge — fires async after the message is already in flight
+  maybeShowCodeRootsNudge(topic, userBubble);
 
   // ── Thinking bubble (visible immediately, shows status/queue/loader) ──────────
   const thinkingBubble = document.createElement('div');
@@ -3081,58 +3077,62 @@ function initAliases() {
 
 // ── inline agent creation prompt ─────────────────────────────────────────────
 
-function showCodeRootsPrompt(topic) {
-  return new Promise(resolve => {
-    const existing = document.getElementById('code-roots-prompt');
-    if (existing) existing.remove();
+async function maybeShowCodeRootsNudge(topic, anchor) {
+  let meta;
+  try { meta = await fetchMemoryMeta(topic); } catch { return; }
+  if (hasCodeRootsDecision(meta)) return;
+  if (document.getElementById('code-roots-prompt')) return;
+  showCodeRootsNudge(topic, anchor);
+}
 
-    const panel = document.createElement('div');
-    panel.id = 'code-roots-prompt';
-    panel.className = 'agent-create-prompt';
-    panel.innerHTML = `
-      <div class="acp-title">Where does <strong>${topic}</strong>'s code live? Squid tracks git diffs to show changed files after each agent run.</div>
-      <div class="acp-row">
-        <input id="crp-paths" placeholder="/Users/me/Work/myproject  (comma-separate for multiple)" />
-      </div>
-      <div class="acp-actions">
-        <button id="crp-save">Save &amp; send</button>
-        <button id="crp-skip">Skip diff tracking</button>
-        <button id="crp-cancel">Cancel</button>
-      </div>`;
+function showCodeRootsNudge(topic, anchor) {
+  const existing = document.getElementById('code-roots-prompt');
+  if (existing) existing.remove();
 
+  const panel = document.createElement('div');
+  panel.id = 'code-roots-prompt';
+  panel.className = 'agent-create-prompt';
+  panel.innerHTML = `
+    <div class="acp-title">Set up diff tracking for <strong>#${topic}</strong>? Squid shows changed files after each agent run. <span style="color:#666">(optional — dismiss to skip)</span></div>
+    <div class="acp-row">
+      <input id="crp-paths" placeholder="/path/to/repo  (comma-separate for multiple)" />
+    </div>
+    <div class="acp-actions">
+      <button id="crp-save">Save</button>
+      <button id="crp-skip">Not a code project</button>
+      <button id="crp-cancel">Dismiss</button>
+    </div>`;
+
+  if (anchor.nextSibling) {
+    messages.insertBefore(panel, anchor.nextSibling);
+  } else {
     messages.appendChild(panel);
-    messages.scrollTop = messages.scrollHeight;
-    panel.querySelector('#crp-paths').focus();
+  }
+  messages.scrollTop = messages.scrollHeight;
 
-    panel.querySelector('#crp-cancel').addEventListener('click', () => {
+  panel.querySelector('#crp-cancel').addEventListener('click', () => panel.remove());
+
+  panel.querySelector('#crp-skip').addEventListener('click', async () => {
+    try {
+      await saveCodeRootsDecision(topic, { code_roots_skipped: true });
       panel.remove();
-      resolve(false);
-    });
+    } catch (err) {
+      panel.querySelector('.acp-title').textContent = err?.message || 'Failed to save.';
+    }
+  });
 
-    panel.querySelector('#crp-skip').addEventListener('click', async () => {
-      try {
-        await saveCodeRootsDecision(topic, { code_roots_skipped: true });
-        panel.remove();
-        resolve(true);
-      } catch (err) {
-        panel.querySelector('.acp-title').textContent = err?.message || 'Failed to save.';
-      }
-    });
-
-    panel.querySelector('#crp-save').addEventListener('click', async () => {
-      const roots = parseCodeRootsInput(panel.querySelector('#crp-paths').value);
-      if (!roots.length) {
-        panel.querySelector('.acp-title').textContent = 'Enter at least one path, or click "Skip diff tracking".';
-        return;
-      }
-      try {
-        await saveCodeRootsDecision(topic, { code_roots: roots });
-        panel.remove();
-        resolve(true);
-      } catch (err) {
-        panel.querySelector('.acp-title').textContent = err?.message || 'Failed to save.';
-      }
-    });
+  panel.querySelector('#crp-save').addEventListener('click', async () => {
+    const roots = parseCodeRootsInput(panel.querySelector('#crp-paths').value);
+    if (!roots.length) {
+      panel.querySelector('.acp-title').textContent = 'Enter at least one path, or click "Not a code project".';
+      return;
+    }
+    try {
+      await saveCodeRootsDecision(topic, { code_roots: roots });
+      panel.remove();
+    } catch (err) {
+      panel.querySelector('.acp-title').textContent = err?.message || 'Failed to save.';
+    }
   });
 }
 
@@ -3682,16 +3682,6 @@ async function saveCodeRootsDecision(topic, payload) {
   return data;
 }
 
-async function ensureCodeRootsDecision(topic) {
-  let meta;
-  try {
-    meta = await fetchMemoryMeta(topic);
-  } catch {
-    return true;
-  }
-  if (hasCodeRootsDecision(meta)) return true;
-  return showCodeRootsPrompt(topic);
-}
 
 function _getSessionMeta(topic, agent) {
   if (!agent) return { session_id: null, cwd: null, loading: false };
