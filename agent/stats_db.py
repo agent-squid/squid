@@ -3,6 +3,7 @@ stats_db.py — SQLite for stats, chat history, agents, and topics.
 """
 import sqlite3
 import json
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -17,7 +18,13 @@ _BACKEND_PATHS = {
     "copilot":      COPILOT_PATH,
 }
 
-_DB_PATH = Path(__file__).parent.parent / "squid.db"
+# Store database in the project root by default. Containers can set SQUID_DB_PATH
+# to point at a mounted volume, e.g. /app/.squid-data/squid.db.
+_DB_PATH = Path(os.environ.get("SQUID_DB_PATH", Path(__file__).parent.parent / "squid.db"))
+try:
+    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+except Exception:
+    pass
 
 _TABLES = [
     """CREATE TABLE IF NOT EXISTS session_stats (

@@ -524,9 +524,8 @@ async def run_copilot(
         cmd += ["--model", model]
 
     start_ms = time.monotonic() * 1000
-    session_id: Optional[str] = None
-    response_text: Optional[str] = None
     output_tokens: int = 0
+    streamed_text: bool = False
     stats_yielded = False
     session_error: Optional[str] = None
 
@@ -541,22 +540,37 @@ async def run_copilot(
         t = ev.get("type", "")
         data = ev.get("data", {}) if isinstance(ev.get("data"), dict) else {}
 
-        if t == "assistant.message":
-            # Full response text (non-ephemeral, arrives after deltas)
-            response_text = data.get("content", "")
+        if t == "assistant.reasoning_delta":
+            text = data.get("deltaContent", "")
+            if text:
+                yield {"_status": text}
+
+        elif t == "assistant.message_delta":
+            text = data.get("deltaContent", "")
+            if text:
+                streamed_text = True
+                yield text
+
+        elif t == "assistant.message":
+            # Non-ephemeral summary — carries outputTokens and the canonical content.
+            # Only yield content here if deltas were not streamed (shouldn't happen but safe).
             output_tokens = data.get("outputTokens", 0)
+            if not streamed_text:
+                content = data.get("content", "")
+                if content:
+                    streamed_text = True
+                    yield content
 
         elif t == "session.error":
             session_error = data.get("message") or data.get("errorType") or "Unknown error"
 
         elif t == "result":
             exit_code = ev.get("exitCode", 0)
-            if exit_code != 0 and not response_text:
+            if exit_code != 0 and not streamed_text:
                 raise CLIError(f"copilot: {session_error or 'CLI exited with no output'}")
-            # Final event — yield response + stats
-            if response_text:
-                yield response_text
             usage = ev.get("usage", {}) or {}
+            # premiumRequests is the only cost signal copilot exposes (input tokens not available)
+            premium = usage.get("premiumRequests")
             yield {
                 "_stats": {
                     "session_id": ev.get("sessionId"),
@@ -565,20 +579,17 @@ async def run_copilot(
                     "cache_read_tokens": 0,
                     "cache_write_tokens": 0,
                     "history_input_tokens": _estimate_history_tokens(history),
-                    "cost_usd": None,
+                    "cost_usd": premium,  # fractional premium request count used as cost proxy
                     "duration_ms": usage.get("totalApiDurationMs") or int(time.monotonic() * 1000 - start_ms),
                 }
             }
             stats_yielded = True
             return
 
-    # Stream ended without a result event
-    if response_text:
-        yield response_text
     if not stats_yielded:
         yield {
             "_stats": {
-                "session_id": session_id,
+                "session_id": None,
                 "input_tokens": 0,
                 "output_tokens": output_tokens,
                 "cache_read_tokens": 0,
