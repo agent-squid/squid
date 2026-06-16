@@ -3088,6 +3088,7 @@ function _renderTopicAgents(topic) {
         <div class="topic-meta">
           ${laneTime}
           <button class="topic-btn" data-topic-open="${escapeHtml(topic.name)}" data-agent-open="${escapeHtml(lane.agent)}" data-adhoc-open="0" type="button">Open</button>
+          <button class="topic-btn danger" data-agent-clear-topic="${escapeHtml(topic.name)}" data-agent-clear-agent="${escapeHtml(lane.agent)}" type="button">Clear</button>
         </div>
       </div>`;
     if (lane.last_adhoc_prompt) {
@@ -3101,6 +3102,7 @@ function _renderTopicAgents(topic) {
             <span class="topic-badge">adhoc</span>
             ${laneTime}
             <button class="topic-btn" data-topic-open="${escapeHtml(topic.name)}" data-agent-open="${escapeHtml(lane.agent)}" data-adhoc-open="1" type="button">Open</button>
+            <button class="topic-btn danger" data-agent-clear-topic="${escapeHtml(topic.name)}" data-agent-clear-agent="${escapeHtml(lane.agent)}" type="button">Clear</button>
           </div>
         </div>`;
     }
@@ -3214,6 +3216,22 @@ function bindTopicsView() {
     btn.addEventListener('click', e => {
       e.stopPropagation();
       openTopicDeleteModal(btn.dataset.topicDelete);
+    });
+  });
+  listEl.querySelectorAll('[data-agent-clear-topic]').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const topic = btn.dataset.agentClearTopic;
+      const agent = btn.dataset.agentClearAgent;
+      btn.disabled = true;
+      try {
+        await fetch(`/topics/${encodeURIComponent(topic)}/session?agent=${encodeURIComponent(agent)}`, { method: 'DELETE' });
+        invalidateTopicsCache();
+        invalidateTopicsManageCache();
+        loadTopicsView();
+      } finally {
+        btn.disabled = false;
+      }
     });
   });
 }

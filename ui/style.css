@@ -1956,7 +1956,7 @@ button {
     align-items: start;
     gap: 0.25rem;
   }
-  .topic-meta { justify-content: flex-start; flex-wrap: wrap; }
+  .topic-meta { justify-content: flex-end; flex-wrap: wrap; }
   .topic-agent-row .topic-agent-main { padding-left: 0.8rem; }
   .msg-pin-btn { flex-shrink: 0; }
 
