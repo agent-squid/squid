@@ -3420,25 +3420,32 @@ function initPullToRefresh() {
 
 // ── boot banner ──────────────────────────────────────────────────────────────
 
-async function showBootBanner() {
-  try {
-    const res = await fetch('/health');
-    if (!res.ok) return;
-    const data = await res.json();
-    const bootTime = data.boot_time ? fmtTime(data.boot_time) : '';
-    const art = `\
- 🦑 AGENT
+const BOOT_LOGO_ART = ` 🦑 AGENT
  ██████╗ ██████╗ ██╗   ██╗██╗██████╗
 ██╔════╝██╔═══██╗██║   ██║██║██╔══██╗
 ╚█████╗ ██║   ██║██║   ██║██║██║  ██║
  ╚═══██╗██║▄▄ ██║██║   ██║██║██║  ██║
 ██████╔╝╚██████╔╝╚██████╔╝██║██████╔╝
 ╚═════╝  ╚══▀▀═╝  ╚═════╝ ╚═╝╚═════╝`;
+
+const BOOT_LOGO_MOBILE = '🦑 AGENT-SQUID';
+
+function bootLogoHtml() {
+  return `<pre class="boot-art">${BOOT_LOGO_ART}</pre>` +
+    `<div class="boot-art-mobile">${BOOT_LOGO_MOBILE}</div>`;
+}
+
+async function showBootBanner() {
+  try {
+    const res = await fetch('/health');
+    if (!res.ok) return;
+    const data = await res.json();
+    const bootTime = data.boot_time ? fmtTime(data.boot_time) : '';
     const el = document.createElement('div');
     el.className = 'boot-banner';
-    el.innerHTML = `<pre class="boot-art">${art}</pre>` +
-      `<div class="boot-art-mobile">🦑 AGENT-SQUID</div>` +
-      `<div class="boot-meta">agent squid${bootTime ? `  ·  started ${bootTime}` : ''}</div>`;
+    el.innerHTML = bootLogoHtml() +
+      `<div class="boot-meta">agent squid${bootTime ? `  ·  started ${bootTime}` : ''}</div>` +
+      (!navigator.onLine ? `<div class="boot-offline">no internet — LLM calls will fail</div>` : '');
     messages.appendChild(el);
 
     const backends = data.backends || {};
@@ -3474,7 +3481,20 @@ async function showBootBanner() {
     }
 
     messages.scrollTop = messages.scrollHeight;
-  } catch {}
+  } catch {
+    const isLocal = ['127.0.0.1', 'localhost', '::1'].includes(location.hostname);
+    const msg = !navigator.onLine
+      ? 'no network connection'
+      : isLocal
+        ? 'squid server is not running'
+        : 'server unreachable — check Tailscale';
+    const el = document.createElement('div');
+    el.className = 'boot-banner';
+    el.innerHTML = bootLogoHtml() +
+      `<div class="boot-offline">${msg}</div>`;
+    messages.appendChild(el);
+    messages.scrollTop = messages.scrollHeight;
+  }
 }
 
 // ── ctx popup ─────────────────────────────────────────────────────────────────

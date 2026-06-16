@@ -686,7 +686,6 @@ body {
   align-self: center;
   text-align: center;
   padding: 1.2rem 0 1.6rem;
-  opacity: 0.55;
   user-select: none;
   pointer-events: none;
 }
@@ -712,6 +711,13 @@ body {
   font-size: 0.68em;
   color: #555566;
   letter-spacing: 0.08em;
+}
+.boot-offline {
+  font-family: ui-monospace, monospace;
+  font-size: 0.8em;
+  color: #d07840;
+  letter-spacing: 0.1em;
+  margin-top: 0.6rem;
 }
 .no-agent-setup {
   align-self: center;
@@ -1892,8 +1898,7 @@ button {
     text-align: center;
   }
 
-  .boot-art { display: none; }
-  .boot-art-mobile { display: block; }
+  .boot-art-mobile { display: none; }
 
   #pin-btn,
   #send-btn {
