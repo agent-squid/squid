@@ -1,9 +1,9 @@
-const CACHE_NAME = 'squid-pwa-v20260616-013';
+const CACHE_NAME = 'squid-pwa-v20260616-014';
 const APP_SHELL = [
   '/',
   '/index.html',
   '/style.css?v=20260616-003',
-  '/app.js?v=20260616-012',
+  '/app.js?v=20260616-013',
   '/vendor/highlight.min.js',
   '/vendor/atom-one-dark.min.css',
   '/vendor/marked.min.js',
@@ -46,6 +46,7 @@ self.addEventListener('fetch', (event) => {
     || url.pathname.startsWith('/health')
     || url.pathname.startsWith('/history')
     || url.pathname.startsWith('/search')
+    || url.pathname.startsWith('/prompts')
     || url.pathname.startsWith('/processes')
     || url.pathname.startsWith('/queue')
     || url.pathname.startsWith('/quota')

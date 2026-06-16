@@ -539,6 +539,11 @@ let searchActive = false;
 let searchState = null;  // { topic, agent, adhoc, keywords }
 let searchLoading = false;
 
+let promptHistory = [];   // newest first, in-memory, seeded from DB
+let promptHistoryPos = -1; // -1 = editing draft; 0..N = navigating history
+let promptDraft = '';      // stashed current input while navigating
+let _draftSaveTimer = null;
+
 function createTopSentinel() {
   const el = document.createElement('div');
   el.id = 'history-sentinel';
@@ -746,6 +751,25 @@ function clearSearch() {
   historyLoading = false;
   _updateFilterBadge();
   initHistoryScroll();
+}
+
+function recordPrompt(text) {
+  const t = text.trim();
+  if (!t) return;
+  promptHistory = [t, ...promptHistory.filter(x => x !== t)].slice(0, 200);
+  promptHistoryPos = -1;
+  promptDraft = '';
+}
+
+async function initPromptHistory() {
+  const draft = localStorage.getItem('squid_draft');
+  if (draft) { input.value = draft; resizeComposer(); }
+  try {
+    const res = await fetch('/prompts/recent?limit=50');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (Array.isArray(data.items)) promptHistory = data.items;
+  } catch { /* ignore */ }
 }
 
 async function loadSearchResults() {
@@ -968,6 +992,8 @@ form.addEventListener('submit', async (e) => {
   hideAutocomplete();
   if (searchActive) clearSearch();
   invalidateTopicsCache();
+  recordPrompt(text);
+  localStorage.removeItem('squid_draft');
   sendMessage(text);
 });
 
@@ -1078,6 +1104,11 @@ input.addEventListener('input', () => {
   updatePinCount();
   updateActiveQuotaGauge();
   _maybePromoteSlug(input.value);
+  clearTimeout(_draftSaveTimer);
+  _draftSaveTimer = setTimeout(() => localStorage.setItem('squid_draft', input.value), 300);
+  if (promptHistoryPos !== -1 && input.value !== promptHistory[promptHistoryPos]) {
+    promptHistoryPos = -1;
+  }
 });
 
 input.addEventListener('keydown', (e) => {
@@ -1086,6 +1117,21 @@ input.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowUp')   { e.preventDefault(); acSel = Math.max(acSel - 1, -1); _acHighlight(); return; }
     if (e.key === 'Tab' || (e.key === 'Enter' && acSel >= 0)) { e.preventDefault(); _acSelect(acSel >= 0 ? acSel : 0); return; }
     if (e.key === 'Escape') { hideAutocomplete(); return; }
+  }
+  if (!acOpen && e.key === 'ArrowUp' && promptHistory.length && !input.value.includes('\n')) {
+    e.preventDefault();
+    if (promptHistoryPos === -1) promptDraft = input.value;
+    promptHistoryPos = Math.min(promptHistoryPos + 1, promptHistory.length - 1);
+    input.value = promptHistory[promptHistoryPos];
+    resizeComposer();
+    return;
+  }
+  if (!acOpen && e.key === 'ArrowDown' && promptHistoryPos >= 0) {
+    e.preventDefault();
+    promptHistoryPos--;
+    input.value = promptHistoryPos >= 0 ? promptHistory[promptHistoryPos] : promptDraft;
+    resizeComposer();
+    return;
   }
   if (e.key === 'Escape' && searchActive) { clearSearch(); return; }
   if (e.key === 'Escape' && pinPanel.classList.contains('open')) { closePinPanel(); return; }
@@ -3499,7 +3545,7 @@ function _acSelect(idx) {
     form.requestSubmit();
     return;
   }
-  input.value = item.insert + ' ';
+  input.value = item.trail === false ? item.insert : item.insert + ' ';
   resizeComposer();
   input.focus();
   input.dispatchEvent(new Event('input'));
@@ -3600,6 +3646,12 @@ async function updateAutocomplete() {
     }
 
     _acRender(items.slice(0, 10));
+  } else if (!val && promptHistory.length) {
+    _acRender(promptHistory.slice(0, 8).map(ph => ({
+      label: escapeHtml(truncate(ph, 70)),
+      insert: ph,
+      trail: false,
+    })));
   } else {
     hideAutocomplete();
   }
@@ -4264,6 +4316,24 @@ initSettings();
 initPin();
 document.getElementById('filter-badge-clear').addEventListener('click', clearFilter);
 document.getElementById('search-bar-clear').addEventListener('click', clearSearch);
+document.getElementById('search-bar-keywords').addEventListener('click', () => {
+  if (!searchActive || !searchState) return;
+  let cmd = '/s ';
+  if (searchState.topic) {
+    cmd += '#' + searchState.topic;
+    if (searchState.agent) cmd += '@' + searchState.agent;
+    if (searchState.adhoc) cmd += '!';
+    cmd += ' ';
+  } else if (searchState.agent) {
+    cmd += '@' + searchState.agent;
+    if (searchState.adhoc) cmd += '!';
+    cmd += ' ';
+  }
+  cmd += searchState.keywords;
+  input.value = cmd.trim();
+  input.focus();
+  resizeComposer();
+});
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && document.getElementById('topic-delete-modal')?.classList.contains('open')) {
     closeTopicDeleteModal();
@@ -4458,6 +4528,7 @@ document.addEventListener('click', e => {
 });
 
 initHistoryScroll();
+initPromptHistory();
 initStats();
 initTopicsView();
 initAliases();

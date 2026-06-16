@@ -763,6 +763,40 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
     return {"items": items}
 
 
+def get_recent_prompts(limit: int = 50) -> list:
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT content, topic, agent, adhoc FROM chat_messages
+               WHERE role = 'user' AND content IS NOT NULL AND content != ''
+               ORDER BY id DESC LIMIT ?""",
+            [limit],
+        ).fetchall()
+
+    results = []
+    seen: set = set()
+    for r in rows:
+        row = dict(r)
+        content = (row['content'] or '').strip()
+        if not content:
+            continue
+        topic = row.get('topic') or ''
+        agent = row.get('agent') or ''
+        adhoc = bool(row.get('adhoc'))
+        prefix = ''
+        if topic and topic != 'default':
+            prefix = f'#{topic}'
+            if agent:
+                prefix += f'@{agent}'
+            if adhoc:
+                prefix += '!'
+            prefix += ' '
+        full = prefix + content
+        if full not in seen:
+            seen.add(full)
+            results.append(full)
+    return results
+
+
 # ── session stats ─────────────────────────────────────────────────────────────
 
 def save_stats(

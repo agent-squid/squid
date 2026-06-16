@@ -66,6 +66,7 @@ from .stats_db import (
     clear_agent_sessions, get_agent_sessions,
     get_diff_revert_eligibility, record_git_diff_revert, get_message_gitdiff,
     search_messages,
+    get_recent_prompts,
 )
 from .journal import _generate_journal, _current_week, list_topic_journals, read_journal
 from . import creds
@@ -658,6 +659,12 @@ async def search(q: str, limit: int = 100, topic: Optional[str] = None,
         topic = normalized
     limit = min(limit, 100)
     return JSONResponse(search_messages(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit))
+
+
+@app.get("/prompts/recent")
+async def prompts_recent(limit: int = 50):
+    limit = min(limit, 200)
+    return JSONResponse({"items": get_recent_prompts(limit=limit)})
 
 
 @app.get("/chat/{msg_id}/status")
