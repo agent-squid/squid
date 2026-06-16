@@ -542,6 +542,7 @@ let searchLoading = false;
 let promptHistory = [];   // newest first, in-memory, seeded from DB
 let promptHistoryPos = -1; // -1 = editing draft; 0..N = navigating history
 let promptDraft = '';      // stashed current input while navigating
+let promptDraftChip = null; // stashed chip state while navigating history
 let _draftSaveTimer = null;
 
 function createTopSentinel() {
@@ -759,6 +760,7 @@ function recordPrompt(text) {
   promptHistory = [t, ...promptHistory.filter(x => x !== t)].slice(0, 200);
   promptHistoryPos = -1;
   promptDraft = '';
+  promptDraftChip = null;
 }
 
 async function initPromptHistory() {
@@ -1120,16 +1122,29 @@ input.addEventListener('keydown', (e) => {
   }
   if (!acOpen && e.key === 'ArrowUp' && promptHistory.length && !input.value.includes('\n')) {
     e.preventDefault();
-    if (promptHistoryPos === -1) promptDraft = input.value;
+    if (promptHistoryPos === -1) {
+      promptDraft = input.value;
+      promptDraftChip = stickyChip ? { ...stickyChip } : null;
+    }
     promptHistoryPos = Math.min(promptHistoryPos + 1, promptHistory.length - 1);
-    input.value = promptHistory[promptHistoryPos];
+    const _ph = promptHistory[promptHistoryPos];
+    if (/^[#@]/.test(_ph) && stickyChip) clearTopicChip();
+    input.value = _ph;
     resizeComposer();
     return;
   }
   if (!acOpen && e.key === 'ArrowDown' && promptHistoryPos >= 0) {
     e.preventDefault();
     promptHistoryPos--;
-    input.value = promptHistoryPos >= 0 ? promptHistory[promptHistoryPos] : promptDraft;
+    if (promptHistoryPos < 0) {
+      input.value = promptDraft;
+      if (promptDraftChip) setTopicChip(promptDraftChip.topic, promptDraftChip.agent, promptDraftChip.adhoc, promptDraftChip.lookback || 0);
+      promptDraftChip = null;
+    } else {
+      const _ph = promptHistory[promptHistoryPos];
+      if (/^[#@]/.test(_ph) && stickyChip) clearTopicChip();
+      input.value = _ph;
+    }
     resizeComposer();
     return;
   }
@@ -3545,6 +3560,7 @@ function _acSelect(idx) {
     form.requestSubmit();
     return;
   }
+  if (item.clearChip && stickyChip) clearTopicChip();
   input.value = item.trail === false ? item.insert : item.insert + ' ';
   resizeComposer();
   input.focus();
@@ -3651,6 +3667,7 @@ async function updateAutocomplete() {
       label: escapeHtml(truncate(ph, 70)),
       insert: ph,
       trail: false,
+      clearChip: /^[#@]/.test(ph),
     })));
   } else {
     hideAutocomplete();
