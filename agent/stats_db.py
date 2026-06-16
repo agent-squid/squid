@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH
+from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, ENABLED_BACKENDS
 
 _BACKEND_FALLBACK_ORDER = ["claude", "codex", "cursor"]  # only enabled backends
 _BACKEND_PATHS = {
@@ -131,9 +131,9 @@ def init_db() -> None:
                 conn.execute(sql)
             except sqlite3.OperationalError:
                 pass
-        # Seed one default agent per installed CLI (INSERT OR IGNORE — never overwrites user edits)
+        # Seed one default agent per installed enabled CLI (INSERT OR IGNORE — never overwrites user edits)
         for backend, path in _BACKEND_PATHS.items():
-            if path:
+            if path and backend in ENABLED_BACKENDS:
                 conn.execute(
                     "INSERT OR IGNORE INTO agents (name, backend) VALUES (?, ?)",
                     (backend, backend),
