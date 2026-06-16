@@ -692,18 +692,18 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
 
 
 def _build_fts_match(q: str) -> str:
-    """Convert space-separated keywords into an FTS5 AND expression."""
-    tokens = q.strip().split()
+    tokens = [t.replace('"', '') for t in q.strip().split()]
+    tokens = [t for t in tokens if t]
     if not tokens:
         return ''
     return ' AND '.join(f'"{t}"' for t in tokens)
 
 
 def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = None,
-                    adhoc: Optional[bool] = None, offset: int = 0, limit: int = 10) -> dict:
+                    adhoc: Optional[bool] = None, limit: int = 100) -> dict:
     terms = _build_fts_match(q)
     if not terms:
-        return {"items": [], "total": 0, "has_more": False}
+        return {"items": []}
 
     where_parts = [
         "m.role = 'assistant'",
@@ -729,9 +729,6 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
     where = "WHERE " + " AND ".join(where_parts)
 
     with _connect() as conn:
-        total = conn.execute(
-            f"SELECT COUNT(*) FROM chat_messages m {where}", params
-        ).fetchone()[0]
         rows = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
                        m.content, m.status, m.adhoc, m.session_id,
@@ -746,8 +743,8 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
                 LEFT JOIN chat_messages u ON m.reply_to = u.id
                 LEFT JOIN session_stats s ON m.session_id = s.session_id
                 {where}
-                ORDER BY m.id DESC LIMIT ? OFFSET ?""",
-            params + [limit, offset],
+                ORDER BY m.id DESC LIMIT ?""",
+            params + [limit],
         ).fetchall()
 
     stat_keys = {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
@@ -763,7 +760,7 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
             row["stats"] = stats
         items.append(row)
 
-    return {"items": items, "total": total, "has_more": (offset + limit) < total}
+    return {"items": items}
 
 
 # ── session stats ─────────────────────────────────────────────────────────────

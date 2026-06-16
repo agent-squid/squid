@@ -649,14 +649,15 @@ async def history(offset: int = 0, limit: int = 5, topic: Optional[str] = None,
 
 
 @app.get("/search")
-async def search(q: str, offset: int = 0, limit: int = 10, topic: Optional[str] = None,
+async def search(q: str, limit: int = 100, topic: Optional[str] = None,
                  agent: Optional[str] = None, adhoc: Optional[bool] = None):
     if topic is not None:
         normalized = _normalize_topic_response(topic)
         if isinstance(normalized, JSONResponse):
             return normalized
         topic = normalized
-    return JSONResponse(search_messages(q=q, topic=topic, agent=agent, adhoc=adhoc, offset=offset, limit=limit))
+    limit = min(limit, 100)
+    return JSONResponse(search_messages(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit))
 
 
 @app.get("/chat/{msg_id}/status")

@@ -2141,10 +2141,8 @@ button {
   font-weight: 600;
 }
 #search-bar.active { display: flex; }
-.search-icon { color: #808090; font-size: 1.1em; }
-#search-bar-scope { color: #d07840; }
-.search-bar-sep { color: #505060; }
-#search-bar-keywords { color: #e8e4dc; }
+.search-icon { color: #808090; font-size: 1.5em; line-height: 1; }
+#search-bar-keywords { color: #e8e4dc; flex: 1; }
 #search-bar-clear {
   background: none;
   border: none;
@@ -2154,43 +2152,15 @@ button {
   padding: 0 0.15rem;
   line-height: 1;
   border-radius: 3px;
-  margin-left: 0.1rem;
 }
 #search-bar-clear:hover { color: #aaa; background: #2a2828; }
-
-/* Search result snippet */
-.search-snippet {
-  font-size: 0.87em;
-  color: #b0aca4;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  word-break: break-word;
-  margin: 0.4rem 0 0.25rem;
-}
-.search-snippet mark {
+mark.search-kw-highlight {
   background: #5a4010;
   color: #f0b060;
   border-radius: 2px;
   padding: 0 0.1em;
   font-style: normal;
 }
-.search-expand-btn {
-  background: none;
-  border: none;
-  color: #606078;
-  cursor: pointer;
-  font-size: 0.75em;
-  padding: 0.1rem 0;
-  font-family: ui-monospace, monospace;
-  font-weight: 400;
-  text-decoration: underline;
-  border-radius: 0;
-  display: block;
-  margin-bottom: 0.25rem;
-}
-.search-expand-btn:hover { color: #9090a8; background: none; }
-.search-full-content { margin-top: 0.5rem; }
-.search-full-content.hidden { display: none; }
 
 /* Inline alias creation prompt */
 .agent-create-prompt {

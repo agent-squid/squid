@@ -468,6 +468,15 @@ function filterByAgent(topic, agent, adhoc = false, lookback = 0) {
 }
 
 function clearFilter() {
+  if (searchActive && searchState) {
+    searchState = { ...searchState, topic: null, agent: null, adhoc: null };
+    searchLoading = false;
+    document.querySelectorAll('.search-result-item').forEach(el => el.remove());
+    document.querySelectorAll('#messages > .cmd-feedback.search-no-results').forEach(el => el.remove());
+    _updateFilterBadge();
+    loadSearchResults();
+    return;
+  }
   reloadHistory({});
 }
 
@@ -487,7 +496,7 @@ function reloadHistory(filter = {}) {
 function _updateFilterBadge() {
   const badge = document.getElementById('filter-badge');
   const labelEl = document.getElementById('filter-badge-label');
-  const { topic, agent, adhoc } = historyFilter;
+  const { topic, agent, adhoc } = (searchActive && searchState) ? searchState : historyFilter;
 
   if (!topic && !agent) {
     badge.classList.remove('active');
@@ -528,10 +537,7 @@ let topSentinel = null;
 // ── search state ──────────────────────────────────────────────────────────────
 let searchActive = false;
 let searchState = null;  // { topic, agent, adhoc, keywords }
-let searchOffset = 0;
-let searchExhausted = false;
 let searchLoading = false;
-let searchSentinel = null;
 
 function createTopSentinel() {
   const el = document.createElement('div');
@@ -612,18 +618,29 @@ function initHistoryScroll() {
 
 function parseSearchInput(text) {
   let rest = text.trim();
-  let topic = null;        // null = use current chip, 'all' = all topics
+  let topic = null;
   let agent = null;
   let agentWildcard = false;
-  let adhocAll = false;    // false = session only, true = include adhoc
+  let adhocAll = false;
 
-  const scopeMatch = rest.match(/^#(\w+)(?:@(\w+)(\*)?)?(!)?[ \t]*([\s\S]*)/);
-  if (scopeMatch) {
-    topic = scopeMatch[1].toLowerCase();
-    agent = scopeMatch[2] || null;
-    agentWildcard = !!scopeMatch[3];
-    adhocAll = !!scopeMatch[4];
-    rest = scopeMatch[5].trim();
+  // #topic[@agent[*]][!] keywords
+  const topicMatch = rest.match(/^#(\w+)(?:@(\w+)(\*)?)?(!)?[ \t]*([\s\S]*)/);
+  if (topicMatch) {
+    topic = topicMatch[1].toLowerCase();
+    agent = topicMatch[2] || null;
+    agentWildcard = !!topicMatch[3];
+    adhocAll = !!topicMatch[4];
+    rest = topicMatch[5].trim();
+  } else {
+    // @agent[*][!] keywords — agent scope across all topics
+    const agentMatch = rest.match(/^@(\w+)(\*)?(!)?[ \t]+([\s\S]*)/);
+    if (agentMatch) {
+      topic = 'all';
+      agent = agentMatch[1];
+      agentWildcard = !!agentMatch[2];
+      adhocAll = !!agentMatch[3];
+      rest = agentMatch[4].trim();
+    }
   }
 
   return { topic, agent, agentWildcard, adhocAll, keywords: rest };
@@ -632,19 +649,45 @@ function parseSearchInput(text) {
 function _updateSearchBar() {
   const bar = document.getElementById('search-bar');
   const kwEl = document.getElementById('search-bar-keywords');
-  const scopeEl = document.getElementById('search-bar-scope');
-  const badge = document.getElementById('filter-badge');
 
   if (!searchActive || !searchState) {
     bar.classList.remove('active');
-    badge.style.display = '';
     return;
   }
 
-  scopeEl.textContent = searchState.topic ? ('#' + searchState.topic + (searchState.agent ? '@' + searchState.agent : '')) : '#all';
   kwEl.textContent = searchState.keywords;
   bar.classList.add('active');
-  badge.style.display = 'none';
+  _updateFilterBadge();
+}
+
+function highlightTextNodes(root, keywords) {
+  if (!keywords.length) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const p = node.parentElement;
+      if (!p) return NodeFilter.FILTER_REJECT;
+      if (p.closest('code, pre, script, style')) return NodeFilter.FILTER_REJECT;
+      if (p.closest('.response-header, .history-prompt-full, .user-ctx')) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    }
+  });
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const node of nodes) {
+    const text = node.textContent;
+    let html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    let replaced = false;
+    for (const kw of keywords) {
+      const re = new RegExp(`(${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+      const next = html.replace(re, '<mark class="search-kw-highlight">$1</mark>');
+      if (next !== html) { html = next; replaced = true; }
+    }
+    if (replaced) {
+      const span = document.createElement('span');
+      span.innerHTML = html;
+      node.parentNode.replaceChild(span, node);
+    }
+  }
 }
 
 function startSearch(rawArgs) {
@@ -655,49 +698,46 @@ function startSearch(rawArgs) {
     return;
   }
 
-  let topic = parsed.topic;
-  let agent = parsed.agent;
-
-  if (topic === null) {
+  let topic, agent, adhoc;
+  if (parsed.topic !== null) {
+    // explicit scope typed in command overrides the active filter
+    topic = parsed.topic === 'all' ? null : parsed.topic;
+    agent = parsed.agent ? (parsed.agent + (parsed.agentWildcard ? '*' : '')) : null;
+    adhoc = parsed.adhocAll ? true : null;  // no ! → no adhoc filter; ! → adhoc-only
+  } else if (historyFilter.topic || historyFilter.agent) {
+    // active history filter (set by /filter or tag click)
+    topic = historyFilter.topic || null;
+    agent = historyFilter.agent || null;
+    adhoc = historyFilter.adhoc ?? null;
+  } else {
+    // fall back to sticky chip (current chat context)
     topic = stickyChip?.topic || null;
-    if (!parsed.agent) agent = stickyChip?.agent || null;
-  } else if (topic === 'all') {
-    topic = null;
+    agent = stickyChip?.agent || null;
+    adhoc = stickyChip?.adhoc ? true : false;
   }
 
-  const agentParam = agent ? (agent + (parsed.agentWildcard ? '*' : '')) : null;
-  const adhoc = parsed.adhocAll ? null : false;
-
-  searchState = { topic, agent: agentParam, adhoc, keywords: parsed.keywords };
+  searchState = { topic, agent, adhoc, keywords: parsed.keywords };
   searchActive = true;
-  searchOffset = 0;
-  searchExhausted = false;
   searchLoading = false;
 
   // Stop history scroll
   if (topSentinel) { topSentinel.remove(); topSentinel = null; }
   historyLoading = false;
-  if (searchSentinel) { searchSentinel.remove(); searchSentinel = null; }
 
   // Clear pane
   document.querySelectorAll('.history-item, .boot-banner, .search-result-item').forEach(el => el.remove());
   document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .cmd-feedback').forEach(el => el.remove());
 
   _updateSearchBar();
-  initSearchScroll();
+  loadSearchResults();
 }
 
 function clearSearch() {
   searchActive = false;
   searchState = null;
-  searchOffset = 0;
-  searchExhausted = false;
   searchLoading = false;
-  if (searchSentinel) { searchSentinel.remove(); searchSentinel = null; }
   document.getElementById('search-bar').classList.remove('active');
-  document.getElementById('filter-badge').style.display = '';
 
-  // Clear search results and reload history
   document.querySelectorAll('.search-result-item').forEach(el => el.remove());
   document.querySelectorAll('#messages > .cmd-feedback.search-no-results').forEach(el => el.remove());
   if (topSentinel) { topSentinel.remove(); topSentinel = null; }
@@ -708,23 +748,11 @@ function clearSearch() {
   initHistoryScroll();
 }
 
-function initSearchScroll() {
-  searchSentinel = document.createElement('div');
-  searchSentinel.id = 'search-sentinel';
-  messages.insertBefore(searchSentinel, messages.firstChild);
-
-  const observer = new IntersectionObserver(
-    (entries) => { if (entries[0].isIntersecting) loadSearchResults(); },
-    { root: messages, threshold: 0 },
-  );
-  observer.observe(searchSentinel);
-}
-
 async function loadSearchResults() {
-  if (searchExhausted || searchLoading || !searchState) return;
+  if (searchLoading || !searchState) return;
   searchLoading = true;
 
-  let url = `/search?offset=${searchOffset}&limit=10&q=${encodeURIComponent(searchState.keywords)}`;
+  let url = `/search?limit=100&q=${encodeURIComponent(searchState.keywords)}`;
   if (searchState.topic) url += `&topic=${encodeURIComponent(searchState.topic)}`;
   if (searchState.agent) url += `&agent=${encodeURIComponent(searchState.agent)}`;
   if (searchState.adhoc !== null && searchState.adhoc !== undefined) url += `&adhoc=${searchState.adhoc}`;
@@ -732,128 +760,39 @@ async function loadSearchResults() {
   let data;
   try {
     const res = await fetch(url);
+    if (!res.ok) { searchLoading = false; return; }
     data = await res.json();
   } catch {
     searchLoading = false;
     return;
   }
 
-  const { items, has_more } = data;
-  const firstBatch = searchOffset === 0;
-  const prevHeight = messages.scrollHeight;
-  const fragment = document.createDocumentFragment();
+  const { items } = data;
+  if (!Array.isArray(items)) { searchLoading = false; return; }
 
+  const kws = searchState.keywords.trim().split(/\s+/).filter(Boolean);
+  const fragment = document.createDocumentFragment();
   for (const item of [...items].reverse()) {
     if (!item.content) continue;
-    appendSearchResult(item, fragment, searchState.keywords);
+    const el = appendHistoryItem(item, fragment);
+    if (el) highlightTextNodes(el, kws);
   }
-
-  const anchor = searchSentinel ? searchSentinel.nextSibling : messages.firstChild;
-  messages.insertBefore(fragment, anchor);
-  messages.scrollTop += messages.scrollHeight - prevHeight;
-
-  searchOffset += items.length;
-  searchExhausted = !has_more;
+  [...fragment.children].forEach(el => el.classList.add('search-result-item'));
+  messages.appendChild(fragment);
   searchLoading = false;
 
-  if (searchExhausted && searchSentinel) {
-    searchSentinel.remove();
-    searchSentinel = null;
-  }
-
-  if (firstBatch && items.length === 0) {
+  if (items.length === 0) {
     const noResult = document.createElement('div');
     noResult.className = 'cmd-feedback search-no-results';
     noResult.textContent = `No results for "${searchState.keywords}"`;
     messages.appendChild(noResult);
-    messages.scrollTop = messages.scrollHeight;
-  } else if (!searchExhausted && searchSentinel) {
-    const sr = searchSentinel.getBoundingClientRect();
-    const mr = messages.getBoundingClientRect();
-    if (sr.bottom >= mr.top && sr.top <= mr.bottom) loadSearchResults();
+  } else if (items.length >= 100) {
+    const cap = document.createElement('div');
+    cap.className = 'cmd-feedback search-no-results';
+    cap.textContent = 'Showing top 100 results — add keywords to narrow.';
+    messages.appendChild(cap);
   }
-}
-
-function parseKeywords(keywords) {
-  return keywords.trim().toLowerCase().split(/\s+/).filter(Boolean);
-}
-
-function extractSnippet(content, keywords, maxLen = 220) {
-  const lower = content.toLowerCase();
-  let bestPos = Infinity;
-  for (const kw of keywords) {
-    const idx = lower.indexOf(kw);
-    if (idx !== -1 && idx < bestPos) bestPos = idx;
-  }
-  if (bestPos === Infinity) {
-    return content.slice(0, maxLen) + (content.length > maxLen ? '…' : '');
-  }
-  const start = Math.max(0, bestPos - 60);
-  const end = Math.min(content.length, start + maxLen);
-  const prefix = start > 0 ? '…' : '';
-  const suffix = end < content.length ? '…' : '';
-  return prefix + content.slice(start, end) + suffix;
-}
-
-function highlightKeywords(text, keywords) {
-  let escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  for (const kw of keywords) {
-    const re = new RegExp(`(${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
-    escaped = escaped.replace(re, '<mark>$1</mark>');
-  }
-  return escaped;
-}
-
-function appendSearchResult(item, container, keywords) {
-  const lb = item.stats?.lookback ?? 0;
-  const el = document.createElement('div');
-  el.className = 'msg assistant history-item search-result-item';
-  if (item.id) el.dataset.msgId = String(item.id);
-  el.dataset.topic = item.topic || 'default';
-  if (item.agent) el.dataset.agent = item.agent;
-
-  const header = document.createElement('div');
-  header.className = 'response-header';
-  const tag = makeTopicTag(item.topic || 'default', item.agent || null, { clickable: true, adhoc: !!item.adhoc, lookback: lb, backend: item.stats?.backend || null });
-  const headerText = document.createElement('span');
-  headerText.className = 'response-header-text';
-  headerText.appendChild(tag);
-  headerText.appendChild(document.createTextNode('  '));
-  const promptSpan = document.createElement('span');
-  promptSpan.className = 'history-prompt';
-  promptSpan.textContent = truncate(item.prompt || '', 55);
-  headerText.appendChild(promptSpan);
-  header.appendChild(headerText);
-  el.appendChild(header);
-
-  const kws = parseKeywords(keywords);
-  const snippet = extractSnippet(item.content || '', kws);
-  const snippetEl = document.createElement('div');
-  snippetEl.className = 'search-snippet';
-  snippetEl.innerHTML = highlightKeywords(snippet, kws);
-  el.appendChild(snippetEl);
-
-  const expandBtn = document.createElement('button');
-  expandBtn.type = 'button';
-  expandBtn.className = 'search-expand-btn';
-  expandBtn.textContent = 'show full response';
-  const fullContent = document.createElement('div');
-  fullContent.className = 'search-full-content hidden';
-  fullContent.innerHTML = marked.parse(item.content || '');
-  expandBtn.addEventListener('click', () => {
-    const isHidden = fullContent.classList.toggle('hidden');
-    expandBtn.textContent = isHidden ? 'show full response' : 'hide';
-  });
-  el.appendChild(expandBtn);
-  el.appendChild(fullContent);
-
-  if (item.timestamp) {
-    const tsEl = addTimestamp(el, item.timestamp);
-    if (tsEl) tsEl.classList.add('history-item');
-  }
-
-  if (container) container.appendChild(el);
-  return el;
+  messages.scrollTop = messages.scrollHeight;
 }
 
 // ── live chat ────────────────────────────────────────────────────────────────
