@@ -693,8 +693,11 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
 
 
 def _build_fts_match(q: str) -> str:
-    """Convert space-separated keywords into an FTS5 AND expression."""
-    tokens = q.strip().split()
+    """Convert keywords into an FTS5 AND expression.
+    Each keyword is split on non-word chars so that paths like ui/app.js
+    become 'ui' AND 'app' AND 'js', matching the unicode61 tokenizer."""
+    import re
+    tokens = [t for t in re.split(r'[^\w]+', q.strip()) if t]
     if not tokens:
         return ''
     return ' AND '.join(f'"{t}"' for t in tokens)
