@@ -62,7 +62,7 @@ from .stats_db import (
     get_context_history, get_messages_by_ids, mark_orphaned_pending, get_message,
     get_session_injected_ids,
     get_topic_session, clear_topic_session,
-    delete_topic, hide_topic, set_topic_hidden, get_topic_agents, get_topic_agent_history,
+    delete_topic, delete_topic_agent, hide_topic, set_topic_hidden, get_topic_agents, get_topic_agent_history,
     clear_agent_sessions, get_agent_sessions,
     get_diff_revert_eligibility, record_git_diff_revert, get_message_gitdiff,
     search_messages,
@@ -787,6 +787,15 @@ async def get_session(topic: str, agent: str):
     injected_ids = get_session_injected_ids(stored["session_id"])
     return JSONResponse({"session_id": stored["session_id"], "cwd": stored["cwd"],
                          "injected_ids": injected_ids})
+
+
+@app.delete("/topics/{topic}/agent")
+async def remove_topic_agent(topic: str, agent: str, adhoc: Optional[bool] = None):
+    topic = _normalize_topic_response(topic)
+    if isinstance(topic, JSONResponse):
+        return topic
+    delete_topic_agent(topic, agent, adhoc=adhoc)
+    return JSONResponse({"ok": True})
 
 
 @app.delete("/topics/{topic}/session")

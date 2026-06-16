@@ -3097,7 +3097,7 @@ function _renderTopicAgents(topic) {
         <div class="topic-meta">
           ${laneTime}
           <button class="topic-btn" data-topic-open="${escapeHtml(topic.name)}" data-agent-open="${escapeHtml(lane.agent)}" data-adhoc-open="0" type="button">Open</button>
-          <button class="topic-btn danger" data-agent-clear-topic="${escapeHtml(topic.name)}" data-agent-clear-agent="${escapeHtml(lane.agent)}" type="button">Clear</button>
+          <button class="topic-btn danger" data-agent-del-topic="${escapeHtml(topic.name)}" data-agent-del-agent="${escapeHtml(lane.agent)}" data-agent-del-adhoc="0" type="button">Delete</button>
         </div>
       </div>`;
     if (lane.last_adhoc_prompt) {
@@ -3111,7 +3111,7 @@ function _renderTopicAgents(topic) {
             <span class="topic-badge">adhoc</span>
             ${laneTime}
             <button class="topic-btn" data-topic-open="${escapeHtml(topic.name)}" data-agent-open="${escapeHtml(lane.agent)}" data-adhoc-open="1" type="button">Open</button>
-            <button class="topic-btn danger" data-agent-clear-topic="${escapeHtml(topic.name)}" data-agent-clear-agent="${escapeHtml(lane.agent)}" type="button">Clear</button>
+            <button class="topic-btn danger" data-agent-del-topic="${escapeHtml(topic.name)}" data-agent-del-agent="${escapeHtml(lane.agent)}" data-agent-del-adhoc="1" type="button">Delete</button>
           </div>
         </div>`;
     }
@@ -3227,20 +3227,10 @@ function bindTopicsView() {
       openTopicDeleteModal(btn.dataset.topicDelete);
     });
   });
-  listEl.querySelectorAll('[data-agent-clear-topic]').forEach(btn => {
-    btn.addEventListener('click', async e => {
+  listEl.querySelectorAll('[data-agent-del-topic]').forEach(btn => {
+    btn.addEventListener('click', e => {
       e.stopPropagation();
-      const topic = btn.dataset.agentClearTopic;
-      const agent = btn.dataset.agentClearAgent;
-      btn.disabled = true;
-      try {
-        await fetch(`/topics/${encodeURIComponent(topic)}/session?agent=${encodeURIComponent(agent)}`, { method: 'DELETE' });
-        invalidateTopicsCache();
-        invalidateTopicsManageCache();
-        loadTopicsView();
-      } finally {
-        btn.disabled = false;
-      }
+      openAgentDeleteModal(btn.dataset.agentDelTopic, btn.dataset.agentDelAgent, btn.dataset.agentDelAdhoc === '1');
     });
   });
 }
@@ -3251,31 +3241,60 @@ function initTopicsView() {
   searchEl.addEventListener('input', () => loadTopicsView());
 }
 
+let _agentDeleteTarget = null; // { topic, agent, adhoc }
+
 function openTopicDeleteModal(topic) {
   _topicDeleteTarget = topic;
+  _agentDeleteTarget = null;
+  document.getElementById('topic-delete-modal-heading').textContent = 'Delete topic';
   document.getElementById('topic-delete-modal-title').textContent = `#${topic}`;
+  document.getElementById('topic-delete-modal-copy').textContent = 'Removes all messages, sessions, and stats for this topic. Cannot be undone.';
+  document.getElementById('topic-delete-confirm').disabled = false;
+  document.getElementById('topic-delete-modal').classList.add('open');
+}
+
+function openAgentDeleteModal(topic, agent, adhoc) {
+  _topicDeleteTarget = null;
+  _agentDeleteTarget = { topic, agent, adhoc };
+  const scope = adhoc ? `#${topic}@${agent}!` : `#${topic}@${agent}`;
+  document.getElementById('topic-delete-modal-heading').textContent = 'Delete agent lane';
+  document.getElementById('topic-delete-modal-title').textContent = scope;
+  document.getElementById('topic-delete-modal-copy').textContent = adhoc
+    ? 'Removes all adhoc messages for this agent in this topic. Cannot be undone.'
+    : 'Removes all session messages and session state for this agent in this topic. Cannot be undone.';
   document.getElementById('topic-delete-confirm').disabled = false;
   document.getElementById('topic-delete-modal').classList.add('open');
 }
 
 function closeTopicDeleteModal() {
   _topicDeleteTarget = null;
+  _agentDeleteTarget = null;
   document.getElementById('topic-delete-modal').classList.remove('open');
 }
 
 async function confirmTopicDelete() {
-  if (!_topicDeleteTarget) return;
-  const topic = _topicDeleteTarget;
   const btn = document.getElementById('topic-delete-confirm');
   btn.disabled = true;
   try {
-    const res = await fetch(`/topics/${encodeURIComponent(topic)}`, { method: 'DELETE' });
-    if (!res.ok) return;
-    _topicsExpanded.delete(topic);
-    closeTopicDeleteModal();
-    invalidateTopicsCache();
-    invalidateTopicsManageCache();
-    loadTopicsView();
+    if (_agentDeleteTarget) {
+      const { topic, agent, adhoc } = _agentDeleteTarget;
+      const url = `/topics/${encodeURIComponent(topic)}/agent?agent=${encodeURIComponent(agent)}&adhoc=${adhoc}`;
+      const res = await fetch(url, { method: 'DELETE' });
+      if (!res.ok) return;
+      closeTopicDeleteModal();
+      invalidateTopicsCache();
+      invalidateTopicsManageCache();
+      loadTopicsView();
+    } else if (_topicDeleteTarget) {
+      const topic = _topicDeleteTarget;
+      const res = await fetch(`/topics/${encodeURIComponent(topic)}`, { method: 'DELETE' });
+      if (!res.ok) return;
+      _topicsExpanded.delete(topic);
+      closeTopicDeleteModal();
+      invalidateTopicsCache();
+      invalidateTopicsManageCache();
+      loadTopicsView();
+    }
   } finally {
     btn.disabled = false;
   }

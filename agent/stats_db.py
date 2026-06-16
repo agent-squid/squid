@@ -372,6 +372,35 @@ def delete_topic(name: str) -> bool:
     return cur.rowcount > 0
 
 
+def delete_topic_agent(topic: str, agent: str, adhoc: Optional[bool] = None) -> None:
+    with _connect() as conn:
+        if adhoc is None:
+            conn.execute("DELETE FROM chat_messages WHERE topic=? AND agent=?", (topic, agent))
+            conn.execute("DELETE FROM topic_sessions WHERE topic=? AND agent=?", (topic, agent))
+            conn.execute("DELETE FROM session_stats WHERE topic=? AND agent=?", (topic, agent))
+            conn.execute("DELETE FROM topics WHERE topic=? AND agent=?", (topic, agent))
+        elif adhoc:
+            conn.execute(
+                "DELETE FROM chat_messages WHERE topic=? AND agent=? AND adhoc=1",
+                (topic, agent),
+            )
+            conn.execute(
+                "UPDATE topics SET last_adhoc_prompt=NULL WHERE topic=? AND agent=?",
+                (topic, agent),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM chat_messages WHERE topic=? AND agent=? AND (adhoc=0 OR adhoc IS NULL)",
+                (topic, agent),
+            )
+            conn.execute("DELETE FROM topic_sessions WHERE topic=? AND agent=?", (topic, agent))
+            conn.execute("DELETE FROM session_stats WHERE topic=? AND agent=?", (topic, agent))
+            conn.execute(
+                "UPDATE topics SET last_prompt=NULL WHERE topic=? AND agent=?",
+                (topic, agent),
+            )
+
+
 def get_topic_agent_history(topic: str) -> list[dict]:
     """Return agents used in a topic with mode-specific last prompts."""
     with _connect() as conn:
