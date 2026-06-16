@@ -4347,6 +4347,18 @@ document.getElementById('search-bar-keywords').addEventListener('click', () => {
     cmd += ' ';
   }
   cmd += searchState.keywords;
+  const prev = input.value.trim();
+  if (prev) {
+    recordPrompt(prev);
+    const hint = document.createElement('span');
+    hint.className = 'restore-hint';
+    hint.textContent = '↑ restore';
+    document.getElementById('tag-bar').appendChild(hint);
+    setTimeout(() => {
+      hint.classList.add('fade');
+      hint.addEventListener('transitionend', () => hint.remove(), { once: true });
+    }, 1800);
+  }
   input.value = cmd.trim();
   input.focus();
   resizeComposer();

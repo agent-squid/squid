@@ -1716,6 +1716,15 @@ body {
   gap: 0.4rem;
   min-height: 0;
 }
+.restore-hint {
+  font-size: 0.72rem;
+  color: #555;
+  opacity: 1;
+  transition: opacity 0.6s ease;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.restore-hint.fade { opacity: 0; }
 #topic-chip {
   display: none;
   background: #1c1a18;
