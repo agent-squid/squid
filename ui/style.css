@@ -1497,7 +1497,6 @@ body {
   min-height: 0;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
-  font-size: 0.78em;
 }
 .topic-row,
 .topic-agent-row {
@@ -1700,7 +1699,6 @@ body {
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   flex: 1;
-  font-size: 0.75em;
 }
 #stats-content table {
   width: 100%;
@@ -2173,7 +2171,6 @@ button {
 #af-backend { width: 80px; }
 #af-model   { width: 130px; }
 #af-cwd     { width: 130px; }
-#af-timeout { width: 80px; }
 .agent-form-row button[type=submit] {
   background: #2a2a35;
   border: 1px solid #3a3a4a;
