@@ -1,40 +1,20 @@
-# All values in this file take effect only after a full server restart
-# (bin/stop.sh && bin/start.sh). No hot-reload.
+# Restart required for all changes: bin/start.sh --restart
 
 server:
-  # Must be a loopback address (127.x.x.x). squid never binds to a network
-  # interface directly. For remote access, use tailscale serve — bin/start.sh
-  # configures it automatically if tailscale is installed.
   host: "127.0.0.1"
   port: 8000
-
-  # Bearer token for API authentication. Set to a random string (e.g. the
-  # output of `openssl rand -hex 32`). Empty string = no auth required.
-  # First visit on a new device: http://<host>:<port>/?token=<value>
-  # The token is saved to localStorage and sent automatically after that.
+  # Bearer token — set to `openssl rand -hex 32`. Empty = no auth.
   token: ""
-
-  # Directories that the /localfile endpoint is allowed to serve from.
-  # When an LLM response contains a local file path (e.g. /tmp/squid/image.png),
-  # the UI rewrites it to /localfile?path=... and the server serves the file
-  # directly in the chat. Only paths under these roots are permitted — requests
-  # for anything outside return 403. Empty list = endpoint disabled entirely.
+  # Directories the file viewer may serve from. Empty = disabled.
   localfile_roots:
     - "/tmp/squid"
 
 agent:
-  # How long to wait for the first byte from a CLI before giving up (seconds).
-  # Needs to be long enough for large-context sessions where API TTFT is slow,
-  # but short enough to still catch true hangs (auth failure, bad flags, etc.).
   first_byte_timeout: 300
-  # Hard cap on total response time per request (seconds).
   response_timeout: 1800
 
-proxy:
-  # Route all CLI subprocess traffic through an HTTP proxy (e.g. mitmproxy).
-  # When enabled, HTTP_PROXY, HTTPS_PROXY, and SSL_CERT_FILE are injected into
-  # every spawned process (claude, codex, cursor-agent, etc.).
-  enabled: false
-  url: "http://127.0.0.1:8080"
-  # Path to the proxy's CA cert — required if the proxy does TLS interception.
-  ssl_cert_file: "~/.mitmproxy/mitmproxy-ca-cert.pem"
+# proxy:
+#   # Route CLI subprocesses through an HTTP proxy (e.g. mitmproxy).
+#   enabled: true
+#   url: "http://127.0.0.1:8080"
+#   ssl_cert_file: "~/.mitmproxy/mitmproxy-ca-cert.pem"
