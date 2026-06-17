@@ -29,3 +29,12 @@ agent:
   first_byte_timeout: 300
   # Hard cap on total response time per request (seconds).
   response_timeout: 1800
+
+proxy:
+  # Route all CLI subprocess traffic through an HTTP proxy (e.g. mitmproxy).
+  # When enabled, HTTP_PROXY, HTTPS_PROXY, and SSL_CERT_FILE are injected into
+  # every spawned process (claude, codex, cursor-agent, etc.).
+  enabled: false
+  url: "http://127.0.0.1:8080"
+  # Path to the proxy's CA cert — required if the proxy does TLS interception.
+  ssl_cert_file: "~/.mitmproxy/mitmproxy-ca-cert.pem"
