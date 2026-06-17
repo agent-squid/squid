@@ -1122,17 +1122,28 @@ input.addEventListener('keydown', (e) => {
     if (e.key === 'Tab' || (e.key === 'Enter' && acSel >= 0)) { e.preventDefault(); _acSelect(acSel >= 0 ? acSel : 0); return; }
     if (e.key === 'Escape') { hideAutocomplete(); return; }
   }
-  if (!acOpen && e.key === 'ArrowUp' && promptHistory.length && !input.value.includes('\n')) {
-    e.preventDefault();
-    if (promptHistoryPos === -1) {
-      promptDraft = input.value;
-      promptDraftChip = stickyChip ? { ...stickyChip } : null;
+  if (!acOpen && e.key === 'ArrowUp' && promptHistory.length) {
+    if (promptHistoryPos >= 0) {
+      e.preventDefault();
+      promptHistoryPos = Math.min(promptHistoryPos + 1, promptHistory.length - 1);
+      const _ph = promptHistory[promptHistoryPos];
+      if (/^[#@]/.test(_ph) && stickyChip) clearTopicChip();
+      input.value = _ph;
+      resizeComposer();
+      return;
     }
-    promptHistoryPos = Math.min(promptHistoryPos + 1, promptHistory.length - 1);
-    const _ph = promptHistory[promptHistoryPos];
-    if (/^[#@]/.test(_ph) && stickyChip) clearTopicChip();
-    input.value = _ph;
-    resizeComposer();
+    const _posBefore = input.selectionStart;
+    requestAnimationFrame(() => {
+      if (input.selectionStart === _posBefore) {
+        promptDraft = input.value;
+        promptDraftChip = stickyChip ? { ...stickyChip } : null;
+        promptHistoryPos = 0;
+        const _ph = promptHistory[0];
+        if (/^[#@]/.test(_ph) && stickyChip) clearTopicChip();
+        input.value = _ph;
+        resizeComposer();
+      }
+    });
     return;
   }
   if (!acOpen && e.key === 'ArrowDown' && promptHistoryPos >= 0) {
@@ -1280,6 +1291,21 @@ async function sendMessage(text) {
   bubble.appendChild(contentDiv);
 
   let firstDataReceived = false;
+
+  // Proactively switch to status polling when the page is hidden (tab switch / PWA background).
+  // Mobile browsers kill background fetch streams unpredictably; aborting early is cleaner.
+  function _onVisibilityChange() {
+    if (!document.hidden || completedFromStatus || detachedPolling || userAborted) return;
+    if (!msgId) return;
+    detachedPolling = true;
+    controller.abort();
+    statusBuf += (statusBuf ? '\n' : '') + 'Tab hidden — waiting for saved response…';
+    raw = '';
+    updateThinkingPreview();
+    startStatusFallback(msgId);
+  }
+  document.addEventListener('visibilitychange', _onVisibilityChange);
+
   let quotaBackend = await resolveQuotaBackend(topic, agent);
   let quotaBeforeSnapshot = await fetchQuotaForBackend(quotaBackend);
   quotaTrackStart(quotaBackend);
@@ -1352,6 +1378,10 @@ async function sendMessage(text) {
           freezeThinking();
           showError(data.content || 'Response interrupted.');
           controller.abort();
+        } else if (data.status === 'pending' && data.content && !thinkingFrozen) {
+          // Show partial DB content as live preview while agent is still writing
+          raw = data.content;
+          updateThinkingPreview();
         }
       } catch {}
     }, 2000);
@@ -1584,16 +1614,18 @@ async function sendMessage(text) {
       }
     }
   } finally {
+    document.removeEventListener('visibilitychange', _onVisibilityChange);
     if (!detachedPolling) stopStatusFallback();
     if (!thinkingFrozen) {
       if (!detachedPolling) {
-        if (!userAborted && msgId && !firstDataReceived && !completedFromStatus) {
-          const content = document.createElement('span');
-          content.className = 'msg-error';
-          content.textContent = 'Response is still running. Reopen the page or history to pick it up.';
-          if (!bubble.parentNode) messages.appendChild(bubble);
-          contentDiv.appendChild(content);
-        } else {
+        // Stream ended without a 'done' event — switch to polling if we have a msgId
+        if (!completedFromStatus && msgId && !userAborted) {
+          detachedPolling = true;
+          statusBuf += (statusBuf ? '\n' : '') + 'Still running — waiting for saved response…';
+          raw = '';
+          updateThinkingPreview();
+          startStatusFallback(msgId);
+        } else if (!completedFromStatus) {
           freezeThinking();
         }
       }
@@ -1996,20 +2028,26 @@ function appendHistoryItem(item, container) {
   asstHeaderText.className = 'response-header-text';
   asstHeaderText.appendChild(asstTag);
   asstHeaderText.appendChild(document.createTextNode('  '));
-  const promptSpan = document.createElement('span');
-  promptSpan.className = 'history-prompt';
-  promptSpan.textContent = truncate(item.prompt || '', 55);
-  promptSpan.dataset.full = item.prompt || '';
+  const promptToggle = document.createElement('span');
+  promptToggle.className = 'history-prompt';
+  const promptToggleText = document.createElement('span');
+  promptToggleText.className = 'history-prompt-truncated';
+  promptToggleText.textContent = truncate(item.prompt || '', 55);
+  const promptCaret = document.createElement('span');
+  promptCaret.className = 'history-prompt-caret';
+  promptCaret.textContent = '▼';
+  promptToggle.appendChild(promptToggleText);
+  promptToggle.appendChild(promptCaret);
   const promptFullDiv = document.createElement('div');
   promptFullDiv.className = 'history-prompt-full';
   promptFullDiv.textContent = item.prompt || '';
   const togglePrompt = () => {
-    const expanded = promptSpan.classList.toggle('expanded');
+    const expanded = promptToggle.classList.toggle('expanded');
+    promptCaret.textContent = expanded ? '▲' : '▼';
     promptFullDiv.classList.toggle('visible', expanded);
   };
-  promptSpan.addEventListener('click', togglePrompt);
-  promptFullDiv.addEventListener('click', togglePrompt);
-  asstHeaderText.appendChild(promptSpan);
+  promptToggle.addEventListener('click', togglePrompt);
+  asstHeaderText.appendChild(promptToggle);
   asstHeader.appendChild(asstHeaderText);
 
   const _pc = (() => {

@@ -2361,13 +2361,19 @@ mark.search-kw-highlight {
 .history-prompt {
   cursor: pointer;
   opacity: 0.75;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3em;
 }
 .history-prompt:hover {
   opacity: 1;
 }
-.history-prompt.expanded {
-  opacity: 0;
-  pointer-events: none;
+.history-prompt-truncated {
+  opacity: 0.85;
+}
+.history-prompt-caret {
+  font-size: 1em;
+  flex-shrink: 0;
 }
 .history-prompt-full {
   display: none;
@@ -2375,14 +2381,14 @@ mark.search-kw-highlight {
   color: #888;
   white-space: pre-wrap;
   word-break: break-word;
+  user-select: text;
   padding: 0.3rem 0 0.4rem;
   border-bottom: 1px solid #2a2a35;
   margin-bottom: 0.35rem;
-  cursor: default;
+  cursor: text;
 }
 .history-prompt-full.visible {
   display: block;
-  cursor: pointer;
 }
 /* error state inside assistant bubble */
 .msg-error {
