@@ -196,7 +196,7 @@ def get_agent(name: str) -> Optional[dict]:
 
 
 def upsert_agent(name: str, backend: str, model: Optional[str],
-                 cwd: Optional[str] = None, timeout: Optional[int] = None) -> bool:
+                 cwd: Optional[str] = None) -> bool:
     """Upsert agent config. Returns True if key attributes (backend/model/cwd) changed."""
     with _connect() as conn:
         existing = conn.execute("SELECT backend, model, cwd FROM agents WHERE name = ?", (name,)).fetchone()
@@ -206,13 +206,12 @@ def upsert_agent(name: str, backend: str, model: Optional[str],
             existing["cwd"] != cwd
         )
         conn.execute(
-            """INSERT INTO agents (name, backend, model, cwd, timeout) VALUES (?, ?, ?, ?, ?)
+            """INSERT INTO agents (name, backend, model, cwd) VALUES (?, ?, ?, ?)
                ON CONFLICT(name) DO UPDATE SET
                  backend = excluded.backend,
                  model   = excluded.model,
-                 cwd     = excluded.cwd,
-                 timeout = excluded.timeout""",
-            (name, backend, model, cwd, timeout),
+                 cwd     = excluded.cwd""",
+            (name, backend, model, cwd),
         )
     return bool(key_changed)
 

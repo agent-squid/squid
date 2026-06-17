@@ -37,7 +37,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, SQUID_HOME, _cfg
+from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, SQUID_HOME, RESPONSE_TIMEOUT, _cfg
 from .runners import run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError, CLIError, list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic
 from .history import list_history
 from .topic_queue import TopicDispatcher
@@ -183,7 +183,6 @@ class AgentRequest(BaseModel):
     backend: Literal["auto", "claude", "cursor", "codex"] = "auto"
     model: Optional[str] = None
     cwd: Optional[str] = None
-    timeout: Optional[int] = None
 
 
 class CredsRequest(BaseModel):
@@ -478,7 +477,7 @@ async def chat(req: ChatRequest):
     upsert_topic(topic, resolved_agent, last_prompt=req.message,
                  last_backend=backend, last_model=model, adhoc=req.adhoc)
     agent_cwd: Optional[str] = agent_config.get("cwd") or None
-    response_timeout: Optional[int] = agent_config.get("timeout")
+    response_timeout: int = RESPONSE_TIMEOUT
 
     # 2. Resumable session lookup (skipped for adhoc turns)
     resume_session_id: Optional[str] = None
@@ -833,7 +832,7 @@ async def get_agents():
 
 @app.post("/config/agents")
 async def create_agent(req: AgentRequest):
-    key_changed = upsert_agent(req.name, req.backend, req.model, req.cwd, req.timeout)
+    key_changed = upsert_agent(req.name, req.backend, req.model, req.cwd)
     sessions_cleared = clear_agent_sessions(req.name) if key_changed else []
     return JSONResponse({"ok": True, "sessions_cleared": sessions_cleared})
 

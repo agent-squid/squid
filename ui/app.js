@@ -3602,13 +3602,12 @@ async function loadAgents() {
       <td>${a.backend}</td>
       <td class="col-model">${a.model || '<span class="col-default">—</span>'}</td>
       <td>${a.cwd || '<span class="col-default">/tmp/squid</span>'}</td>
-      <td class="col-timeout">${a.timeout ? a.timeout + 's' : '<span class="col-default">30m</span>'}</td>
       <td>
         <button class="del-btn" data-name="${a.name}" title="Delete agent (does not affect existing messages)">✕</button>
       </td>
     </tr>`).join('');
   listEl.innerHTML = `<table>
-    <thead><tr><th>Name</th><th>Backend</th><th class="col-model">Model</th><th>CWD</th><th class="col-timeout">Timeout</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Backend</th><th class="col-model">Model</th><th>CWD</th><th></th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
 
@@ -3631,13 +3630,11 @@ function initAliases() {
 
   document.getElementById('agent-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const rawTimeout = parseInt(document.getElementById('af-timeout').value, 10);
     const body = {
       name:    document.getElementById('af-name').value.trim(),
       backend: document.getElementById('af-backend').value,
       model:   document.getElementById('af-model').value.trim() || null,
       cwd:     document.getElementById('af-cwd').value.trim()   || null,
-      timeout: Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : null,
     };
     if (!body.name) return;
 
@@ -3668,10 +3665,9 @@ function initAliases() {
         const data = await res.json();
         const cleared = data.sessions_cleared || [];
         statusEl.textContent = cleared.length ? `saved ✓ (cleared sessions: ${cleared.join(', ')})` : 'saved ✓';
-        document.getElementById('af-name').value    = '';
-        document.getElementById('af-model').value   = '';
-        document.getElementById('af-cwd').value     = '';
-        document.getElementById('af-timeout').value = '';
+        document.getElementById('af-name').value  = '';
+        document.getElementById('af-model').value = '';
+        document.getElementById('af-cwd').value   = '';
         _agentsCache = null;
         loadAgents();
       } else {

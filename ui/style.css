@@ -2462,7 +2462,7 @@ mark.search-kw-highlight {
     padding: 0.3rem 0 0;
   }
 
-  .col-model, .col-timeout { display: none; }
+  .col-model { display: none; }
   #af-model, #af-timeout { display: none; }
 
   .agent-form-row {
