@@ -1292,20 +1292,6 @@ async function sendMessage(text) {
 
   let firstDataReceived = false;
 
-  // Proactively switch to status polling when the page is hidden (tab switch / PWA background).
-  // Mobile browsers kill background fetch streams unpredictably; aborting early is cleaner.
-  function _onVisibilityChange() {
-    if (!document.hidden || completedFromStatus || detachedPolling || userAborted) return;
-    if (!msgId) return;
-    detachedPolling = true;
-    controller.abort();
-    statusBuf += (statusBuf ? '\n' : '') + 'Tab hidden — waiting for saved response…';
-    raw = '';
-    updateThinkingPreview();
-    startStatusFallback(msgId);
-  }
-  document.addEventListener('visibilitychange', _onVisibilityChange);
-
   let quotaBackend = await resolveQuotaBackend(topic, agent);
   let quotaBeforeSnapshot = await fetchQuotaForBackend(quotaBackend);
   quotaTrackStart(quotaBackend);
@@ -1614,7 +1600,6 @@ async function sendMessage(text) {
       }
     }
   } finally {
-    document.removeEventListener('visibilitychange', _onVisibilityChange);
     if (!detachedPolling) stopStatusFallback();
     if (!thinkingFrozen) {
       if (!detachedPolling) {
