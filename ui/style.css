@@ -1497,6 +1497,7 @@ body {
   min-height: 0;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
+  font-size: 13px;
 }
 .topic-row,
 .topic-agent-row {
@@ -1699,6 +1700,7 @@ body {
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   flex: 1;
+  font-size: 13px;
 }
 #stats-content table {
   width: 100%;
@@ -2112,7 +2114,7 @@ button {
 #agents-list {
   overflow-y: auto;
   flex: 1;
-  font-size: 0.75em;
+  font-size: 13px;
 }
 #agents-list table {
   width: 100%;
@@ -2164,7 +2166,7 @@ button {
   border: 1px solid #2e2e3e;
   border-radius: 4px;
   color: #aaa;
-  font-size: 0.72em;
+  font-size: 12px;
   padding: 0.25rem 0.5rem;
 }
 #af-name    { width: 80px; }
@@ -2177,7 +2179,7 @@ button {
   border-radius: 4px;
   color: #888;
   cursor: pointer;
-  font-size: 0.72em;
+  font-size: 12px;
   font-weight: normal;
   padding: 0.25rem 0.7rem;
 }
@@ -2452,7 +2454,6 @@ mark.search-kw-highlight {
   #agents-list {
     max-height: none;
     overflow: visible;
-    font-size: 0.68rem;
   }
 
   #agent-form {
@@ -2460,7 +2461,7 @@ mark.search-kw-highlight {
   }
 
   .col-model { display: none; }
-  #af-model, #af-timeout { display: none; }
+  #af-model { display: none; }
 
   .agent-form-row {
     align-items: center;
@@ -2475,7 +2476,6 @@ mark.search-kw-highlight {
     min-width: 0;
     width: 100%;
     min-height: 30px;
-    font-size: 0.75rem;
     padding: 0.18rem 0.35rem;
   }
 
