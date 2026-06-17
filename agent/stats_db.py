@@ -443,6 +443,13 @@ def delete_topic_agent(topic: str, agent: str, adhoc: Optional[bool] = None) -> 
                 (topic, agent),
             )
             conn.execute(
+                """DELETE FROM session_stats WHERE session_id IN (
+                       SELECT DISTINCT session_id FROM chat_messages
+                       WHERE topic=? AND agent=? AND adhoc=1 AND session_id IS NOT NULL
+                   )""",
+                (topic, agent),
+            )
+            conn.execute(
                 "DELETE FROM chat_messages WHERE topic=? AND agent=? AND adhoc=1",
                 (topic, agent),
             )
@@ -464,7 +471,13 @@ def delete_topic_agent(topic: str, agent: str, adhoc: Optional[bool] = None) -> 
                 (topic, agent),
             )
             conn.execute("DELETE FROM topic_sessions WHERE topic=? AND agent=?", (topic, agent))
-            conn.execute("DELETE FROM session_stats WHERE topic=? AND agent=?", (topic, agent))
+            conn.execute(
+                """DELETE FROM session_stats WHERE session_id IN (
+                       SELECT DISTINCT session_id FROM chat_messages
+                       WHERE topic=? AND agent=? AND (adhoc=0 OR adhoc IS NULL) AND session_id IS NOT NULL
+                   )""",
+                (topic, agent),
+            )
             conn.execute(
                 "UPDATE topics SET last_prompt=NULL WHERE topic=? AND agent=?",
                 (topic, agent),
@@ -964,70 +977,285 @@ def get_stats(session_id: str) -> Optional[dict]:
         return None
 
 
-def get_aggregated_stats(period: str = "daily") -> list:
-    bucket = (
-        "strftime('%Y-%m-%d %H:00', created_at)"
+def _stats_cutoff(days: int) -> Optional[str]:
+    if not days:
+        return None
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def get_aggregated_stats(
+    period: str = "daily",
+    days: int = 30,
+    agent: str = "",
+    topic: str = "",
+    adhoc: str = "all",
+) -> list:
+    ss_bucket = (
+        "strftime('%Y-%m-%d %H:00', ss_inner.created_at)"
         if period == "hourly"
-        else "strftime('%Y-%m-%d', created_at)"
+        else "strftime('%Y-%m-%d', ss_inner.created_at)"
     )
-    limit = 48 if period == "hourly" else 30
+    cm_bucket = (
+        "strftime('%Y-%m-%d %H:00', cm.created_at)"
+        if period == "hourly"
+        else "strftime('%Y-%m-%d', cm.created_at)"
+    )
+    limit = (days * (24 if period == "hourly" else 1) + 1) if days else 5000
+    cutoff = _stats_cutoff(days)
+
+    ss_clauses: list[str] = ["ss_inner.created_at IS NOT NULL"]
+    ss_params: list = []
+    if cutoff:
+        ss_clauses.append("ss_inner.created_at >= ?")
+        ss_params.append(cutoff)
+    if agent:
+        ss_clauses.append("COALESCE(ss_inner.agent, ss_inner.backend) = ?")
+        ss_params.append(agent)
+    if topic:
+        ss_clauses.append("ss_inner.topic = ?")
+        ss_params.append(topic)
+
+    cm_clauses: list[str] = ["cm.role = 'assistant'"]
+    cm_params: list = []
+    if cutoff:
+        cm_clauses.append("cm.created_at >= ?")
+        cm_params.append(cutoff)
+    if agent:
+        cm_clauses.append("cm.agent = ?")
+        cm_params.append(agent)
+    if topic:
+        cm_clauses.append("cm.topic = ?")
+        cm_params.append(topic)
+
+    if adhoc == "session":
+        s_expr = "COUNT(CASE WHEN cm.adhoc = 0 OR cm.adhoc IS NULL THEN 1 END)"
+        a_expr = "0"
+    elif adhoc == "adhoc":
+        s_expr = "0"
+        a_expr = "COUNT(CASE WHEN cm.adhoc = 1 THEN 1 END)"
+    else:
+        s_expr = "COUNT(CASE WHEN cm.adhoc = 0 OR cm.adhoc IS NULL THEN 1 END)"
+        a_expr = "COUNT(CASE WHEN cm.adhoc = 1 THEN 1 END)"
+
+    ss_where = " AND ".join(ss_clauses)
+    cm_where = " AND ".join(cm_clauses)
+
     try:
         with _connect() as conn:
             rows = conn.execute(
                 f"""SELECT
-                        {bucket} AS period,
-                        COUNT(*) AS sessions,
-                        SUM(input_tokens) AS input_tokens,
-                        SUM(input_tokens - COALESCE(history_input_tokens, 0)) AS new_input_tokens,
-                        SUM(output_tokens) AS output_tokens,
-                        SUM(cache_read_tokens) AS cache_read_tokens,
-                        SUM(cache_write_tokens) AS cache_write_tokens,
-                        SUM(cost_usd) AS cost_usd,
-                        SUM(CASE WHEN quota_before IS NOT NULL AND quota_after IS NOT NULL
-                                 THEN quota_after - quota_before ELSE NULL END) AS quota_delta
-                    FROM session_stats WHERE created_at IS NOT NULL
-                    GROUP BY period ORDER BY period DESC LIMIT ?""",
-                (limit,),
+                        ss.period,
+                        ss.sessions,
+                        ss.input_tokens,
+                        ss.new_input_tokens,
+                        ss.output_tokens,
+                        ss.cache_read_tokens,
+                        ss.cache_write_tokens,
+                        ss.cost_usd,
+                        ss.quota_delta,
+                        COALESCE(cm.session_turns, 0) AS session_turns,
+                        COALESCE(cm.adhoc_turns, 0) AS adhoc_turns,
+                        COALESCE(cm.session_turns, 0) + COALESCE(cm.adhoc_turns, 0) AS total_turns
+                    FROM (
+                        SELECT
+                            {ss_bucket} AS period,
+                            COUNT(*) AS sessions,
+                            SUM(input_tokens) AS input_tokens,
+                            SUM(input_tokens - COALESCE(history_input_tokens, 0)) AS new_input_tokens,
+                            SUM(output_tokens) AS output_tokens,
+                            SUM(cache_read_tokens) AS cache_read_tokens,
+                            SUM(cache_write_tokens) AS cache_write_tokens,
+                            SUM(cost_usd) AS cost_usd,
+                            SUM(CASE WHEN quota_before IS NOT NULL AND quota_after IS NOT NULL
+                                     THEN quota_after - quota_before ELSE NULL END) AS quota_delta
+                        FROM session_stats ss_inner
+                        WHERE {ss_where}
+                        GROUP BY period ORDER BY period DESC LIMIT ?
+                    ) ss
+                    LEFT JOIN (
+                        SELECT {cm_bucket} AS period,
+                               {s_expr} AS session_turns,
+                               {a_expr} AS adhoc_turns
+                        FROM chat_messages cm
+                        WHERE {cm_where}
+                        GROUP BY period
+                    ) cm ON ss.period = cm.period
+                    ORDER BY ss.period DESC""",
+                (*ss_params, limit, *cm_params),
             ).fetchall()
         return [dict(r) for r in rows]
     except sqlite3.OperationalError:
         return []
 
 
-def get_stats_by_agent() -> list:
+def get_stats_by_agent(
+    days: int = 30, agent: str = "", topic: str = "", adhoc: str = "all"
+) -> list:
+    cutoff = _stats_cutoff(days)
+
+    ss_clauses: list[str] = ["1=1"]
+    ss_params: list = []
+    if cutoff:
+        ss_clauses.append("created_at >= ?")
+        ss_params.append(cutoff)
+    if topic:
+        ss_clauses.append("topic = ?")
+        ss_params.append(topic)
+    if agent:
+        ss_clauses.append("COALESCE(agent, backend) = ?")
+        ss_params.append(agent)
+
+    cm_clauses: list[str] = ["role = 'assistant'"]
+    cm_params: list = []
+    if cutoff:
+        cm_clauses.append("created_at >= ?")
+        cm_params.append(cutoff)
+    if topic:
+        cm_clauses.append("topic = ?")
+        cm_params.append(topic)
+    if agent:
+        cm_clauses.append("agent = ?")
+        cm_params.append(agent)
+
+    if adhoc == "session":
+        turn_expr = "COUNT(CASE WHEN adhoc = 0 OR adhoc IS NULL THEN 1 END)"
+    elif adhoc == "adhoc":
+        turn_expr = "COUNT(CASE WHEN adhoc = 1 THEN 1 END)"
+    else:
+        turn_expr = "COUNT(*)"
+
+    ss_where = " AND ".join(ss_clauses)
+    cm_where = " AND ".join(cm_clauses)
+
     try:
         with _connect() as conn:
             rows = conn.execute(
-                """SELECT COALESCE(agent, backend, 'unknown') AS agent,
-                          COUNT(*) AS sessions,
-                          SUM(input_tokens) AS input_tokens,
-                          SUM(output_tokens) AS output_tokens,
-                          SUM(cache_read_tokens) AS cache_read_tokens,
-                          SUM(cache_write_tokens) AS cache_write_tokens,
-                          SUM(cost_usd) AS cost_usd
-                   FROM session_stats
-                   GROUP BY agent ORDER BY sessions DESC"""
+                f"""SELECT ss.agent,
+                          ss.sessions,
+                          ss.input_tokens,
+                          ss.output_tokens,
+                          ss.cache_read_tokens,
+                          ss.cache_write_tokens,
+                          ss.cost_usd,
+                          COALESCE(cm.turns, 0) AS total_turns
+                   FROM (
+                       SELECT COALESCE(agent, backend, 'unknown') AS agent,
+                              COUNT(*) AS sessions,
+                              SUM(input_tokens) AS input_tokens,
+                              SUM(output_tokens) AS output_tokens,
+                              SUM(cache_read_tokens) AS cache_read_tokens,
+                              SUM(cache_write_tokens) AS cache_write_tokens,
+                              SUM(cost_usd) AS cost_usd
+                       FROM session_stats
+                       WHERE {ss_where}
+                       GROUP BY agent
+                   ) ss
+                   LEFT JOIN (
+                       SELECT agent, {turn_expr} AS turns
+                       FROM chat_messages
+                       WHERE {cm_where}
+                       GROUP BY agent
+                   ) cm ON ss.agent = cm.agent
+                   ORDER BY ss.sessions DESC""",
+                (*ss_params, *cm_params),
             ).fetchall()
         return [dict(r) for r in rows]
     except sqlite3.OperationalError:
         return []
 
 
-def get_stats_by_topic() -> list:
+def get_stats_by_topic(
+    days: int = 30, agent: str = "", topic: str = "", adhoc: str = "all"
+) -> list:
+    cutoff = _stats_cutoff(days)
+
+    ss_clauses: list[str] = ["topic IS NOT NULL"]
+    ss_params: list = []
+    if cutoff:
+        ss_clauses.append("created_at >= ?")
+        ss_params.append(cutoff)
+    if agent:
+        ss_clauses.append("COALESCE(agent, backend) = ?")
+        ss_params.append(agent)
+    if topic:
+        ss_clauses.append("topic = ?")
+        ss_params.append(topic)
+
+    cm_clauses: list[str] = ["role = 'assistant'"]
+    cm_params: list = []
+    if cutoff:
+        cm_clauses.append("created_at >= ?")
+        cm_params.append(cutoff)
+    if agent:
+        cm_clauses.append("agent = ?")
+        cm_params.append(agent)
+    if topic:
+        cm_clauses.append("topic = ?")
+        cm_params.append(topic)
+
+    if adhoc == "session":
+        turn_expr = "COUNT(CASE WHEN adhoc = 0 OR adhoc IS NULL THEN 1 END)"
+    elif adhoc == "adhoc":
+        turn_expr = "COUNT(CASE WHEN adhoc = 1 THEN 1 END)"
+    else:
+        turn_expr = "COUNT(*)"
+
+    ss_where = " AND ".join(ss_clauses)
+    cm_where = " AND ".join(cm_clauses)
+
     try:
         with _connect() as conn:
             rows = conn.execute(
-                """SELECT topic, COUNT(*) AS sessions,
-                          SUM(input_tokens) AS input_tokens,
-                          SUM(output_tokens) AS output_tokens,
-                          SUM(cache_read_tokens) AS cache_read_tokens,
-                          SUM(cost_usd) AS cost_usd
-                   FROM session_stats WHERE topic IS NOT NULL
-                   GROUP BY topic ORDER BY sessions DESC"""
+                f"""SELECT ss.topic,
+                          ss.sessions,
+                          ss.input_tokens,
+                          ss.output_tokens,
+                          ss.cache_read_tokens,
+                          ss.cost_usd,
+                          COALESCE(cm.turns, 0) AS total_turns
+                   FROM (
+                       SELECT topic,
+                              COUNT(*) AS sessions,
+                              SUM(input_tokens) AS input_tokens,
+                              SUM(output_tokens) AS output_tokens,
+                              SUM(cache_read_tokens) AS cache_read_tokens,
+                              SUM(cost_usd) AS cost_usd
+                       FROM session_stats
+                       WHERE {ss_where}
+                       GROUP BY topic
+                   ) ss
+                   LEFT JOIN (
+                       SELECT topic, {turn_expr} AS turns
+                       FROM chat_messages
+                       WHERE {cm_where}
+                       GROUP BY topic
+                   ) cm ON ss.topic = cm.topic
+                   ORDER BY ss.sessions DESC""",
+                (*ss_params, *cm_params),
             ).fetchall()
         return [dict(r) for r in rows]
     except sqlite3.OperationalError:
         return []
+
+
+def get_stats_filter_options() -> dict:
+    try:
+        with _connect() as conn:
+            agents = [
+                r[0] for r in conn.execute(
+                    "SELECT DISTINCT COALESCE(agent, backend) FROM session_stats"
+                    " WHERE agent IS NOT NULL OR backend IS NOT NULL ORDER BY 1"
+                ).fetchall() if r[0]
+            ]
+            topics = [
+                r[0] for r in conn.execute(
+                    "SELECT DISTINCT topic FROM session_stats WHERE topic IS NOT NULL ORDER BY 1"
+                ).fetchall()
+            ]
+        return {"agents": agents, "topics": topics}
+    except sqlite3.OperationalError:
+        return {"agents": [], "topics": []}
 
 
 # ── run events ─────────────────────────────────────────────────────────────────
