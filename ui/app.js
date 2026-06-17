@@ -4770,7 +4770,27 @@ function openFileViewer(path, line, endLine) {
     .then(async res => {
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
-        body.textContent = d.error || `Error ${res.status}`;
+        const err = d.error || '';
+        if (res.status === 403 && err.includes('localfile_roots')) {
+          body.innerHTML =
+            '<div class="fv-config-hint">' +
+            '<strong>File viewer not configured</strong>' +
+            '<p>Add <code>server.localfile_roots</code> to <code>config/squid.yaml</code>:</p>' +
+            '<pre>server:\n  localfile_roots:\n    - "' + (path.split('/').slice(0, 3).join('/') || '/tmp/squid') + '"</pre>' +
+            '<p>Then do a hard restart: <code>bin/start.sh --restart</code></p>' +
+            '</div>';
+        } else if (res.status === 403 && err.includes('outside allowed roots')) {
+          const hint = path.split('/').slice(0, -1).join('/') || '/';
+          body.innerHTML =
+            '<div class="fv-config-hint">' +
+            '<strong>Path not in allowed roots</strong>' +
+            '<p>Add this directory to <code>server.localfile_roots</code> in <code>config/squid.yaml</code>:</p>' +
+            '<pre>server:\n  localfile_roots:\n    - "' + hint + '"</pre>' +
+            '<p>Then do a hard restart: <code>bin/start.sh --restart</code></p>' +
+            '</div>';
+        } else {
+          body.textContent = err || `Error ${res.status}`;
+        }
         return;
       }
       const text = await res.text();

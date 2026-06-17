@@ -1284,6 +1284,17 @@ body {
   font-size: 0.8em;
   color: #aaa;
 }
+.fv-config-hint {
+  padding: 1.2rem 1.4rem;
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  font-size: 14px;
+  color: #ccc;
+  line-height: 1.5;
+}
+.fv-config-hint strong { color: #fff; display: block; margin-bottom: 0.5rem; }
+.fv-config-hint p { margin: 0 0 0.6rem; }
+.fv-config-hint code { background: rgba(255,255,255,0.1); padding: 0.1em 0.35em; border-radius: 4px; font-family: inherit; }
+.fv-config-hint pre { margin: 0; background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 0.7rem 1rem; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 13px; color: #f07040; white-space: pre; }
 .fv-lines { display: table; min-width: 100%; }
 .fv-line {
   display: table-row;
