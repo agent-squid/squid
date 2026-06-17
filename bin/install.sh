@@ -31,29 +31,7 @@ echo -e "\n${BOLD}squid — install${RESET}"
 echo    "  Sets up all runtime dependencies for the squid chat server."
 
 # ════════════════════════════════════════════════════════════════════════════
-step "1 / 3  Node.js & npm"
-# ════════════════════════════════════════════════════════════════════════════
-
-if need_version node 18 0; then
-  NODE_VER=$(node --version)
-  ok "node $NODE_VER"
-else
-  fail "node >= 18 not found."
-  echo "     Install via https://nodejs.org or your version manager (nvm, fnm, brew):"
-  echo "       brew install node          # Homebrew"
-  echo "       nvm install --lts          # nvm"
-  mark_error
-fi
-
-if command -v npm &>/dev/null; then
-  ok "npm $(npm --version)"
-else
-  fail "npm not found (usually bundled with node)."
-  mark_error
-fi
-
-# ════════════════════════════════════════════════════════════════════════════
-step "2 / 3  Coding agents (at least one required)"
+step "1 / 2  Coding agents (at least one required)"
 # ════════════════════════════════════════════════════════════════════════════
 
 AGENTS_FOUND=0
@@ -75,7 +53,7 @@ if command -v cursor-agent &>/dev/null; then
   ok "cursor-agent found"
   AGENTS_FOUND=$((AGENTS_FOUND + 1))
 else
-  warn "cursor-agent not found — install from cursor.com"
+  warn "cursor-agent not found — install with: curl https://cursor.com/install -fsS | bash"
 fi
 
 if [[ $AGENTS_FOUND -eq 0 ]]; then
@@ -84,7 +62,7 @@ if [[ $AGENTS_FOUND -eq 0 ]]; then
 fi
 
 # ════════════════════════════════════════════════════════════════════════════
-step "3 / 3  Python environment"
+step "2 / 2  Python environment"
 # ════════════════════════════════════════════════════════════════════════════
 
 # Find a suitable python (3.11+)
