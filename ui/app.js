@@ -1485,7 +1485,6 @@ async function sendMessage(text) {
                 bubble.dataset.msgId = String(msgId);
                 bubble.dataset.topic = topic;
                 if (resolvedAgent) bubble.dataset.agent = resolvedAgent;
-                startStatusFallback(msgId);
                 addPinButton(bubble, msgId, topic, resolvedAgent);
                 killBtn.style.display = '';
               }
