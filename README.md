@@ -66,7 +66,7 @@ Copy `config/squid.yaml.example` to `config/squid.yaml` and edit for your enviro
 All config changes require a full restart (`bin/stop.sh && bin/start.sh`).
 
 **Local access:** `http://127.0.0.1:8000` (port set in `config/squid.yaml`)
-**Remote access (Tailscale):** type `/remote` in the chat — it returns a QR code with the full HTTPS URL and your token included. Point your phone camera at it to open squid in one tap.
+**Remote access (Tailscale):** type `/remote` in the chat — it returns a QR code with the full HTTPS URL. Point your phone camera at it to open squid in one tap.
 
 ## Backends
 
@@ -172,23 +172,14 @@ Clearing a session also clears its injection log — a fresh session re-absorbs 
 
 ## Security
 
-Squid has three security layers. All are configured in `config/squid.yaml`.
+Squid has two security layers, both configured in `config/squid.yaml`.
 
 **Layer 1 — Host binding** (enforced at startup): `server.host` must be
-`127.0.0.1` (local only) or a Tailscale IP in `100.64.0.0/10`. Public IPs and
-`0.0.0.0` are blocked — the server refuses to start.
+`127.0.0.1`. Public IPs, LAN IPs, and `0.0.0.0` are blocked — the server
+refuses to start. Remote access is handled exclusively by `tailscale serve`,
+which provides its own device-level authentication.
 
-**Layer 2 — Bearer token** (optional, recommended for Tailscale use):
-```yaml
-server:
-  token: "paste-output-of-openssl-rand-hex-32-here"
-```
-Set this to require authentication on all API endpoints. On first visit, open
-`http://<host>:<port>/?token=<value>` — the token is saved to `localStorage`
-and injected automatically into every API call from then on. If you open the UI
-without a token, a banner explains what to do.
-
-**Layer 3 — `/localfile` path allowlist**: the endpoint that serves local files
+**Layer 2 — `/localfile` path allowlist**: the endpoint that serves local files
 to the browser is restricted to explicit directories:
 ```yaml
 server:
@@ -214,11 +205,10 @@ locally. Run the following manually when ready:
 tailscale serve --bg 127.0.0.1:8000
 ```
 
-Type `/remote` in the chat to get a QR code with the full URL. The URL includes
-your token so the first visit from a new device authenticates automatically:
+Type `/remote` in the chat to get a QR code with the full URL:
 
 ```
-https://<machine-name>.<tailnet>.ts.net/?token=<your-token>
+https://<machine-name>.<tailnet>.ts.net/
 ```
 
 Tailscale auto-provisions a TLS cert for the full domain — browsers show the
@@ -270,7 +260,6 @@ Use the agent directly when one terminal is enough. Use Squid when you want seve
 | `adhoc`    | bool           | `false`     | Run as oneshot, parallel, outside session queue  |
 
 ```bash
-# If server.token is set, add: -H 'Authorization: Bearer <token>'
 curl -N -X POST http://127.0.0.1:8000/chat \
   -H 'Content-Type: application/json' \
   -d '{"message": "summarise this", "topic": "work", "agent": "opus"}'
@@ -329,9 +318,9 @@ Clears the stored session ID, cwd, and injection log for this `(topic, agent)`. 
 {
   "status": "ok",
   "backends": {
-    "claude":       { "available": true,  "path": "/usr/local/bin/claude" },
-    "codex":        { "available": true,  "path": "/usr/local/bin/codex"  },
-    "copilot":      { "available": false, "path": null }
+    "claude":  { "available": true,  "path": "/usr/local/bin/claude", "gauge_authed": true  },
+    "codex":   { "available": true,  "path": "/usr/local/bin/codex",  "gauge_authed": false },
+    "cursor":  { "available": false, "path": null,                    "gauge_authed": false }
   }
 }
 ```
@@ -359,7 +348,7 @@ Type these directly in the message box (no `#topic` prefix needed):
 | `/clear`   | Clear the current session                                     |
 | `/compact` | Compact or reset context (auto and cross-agent compaction: TBD) |
 | `/filter`  | Filter history to the current topic/agent lane                |
-| `/remote`  | Show QR code with full HTTPS URL + token for mobile access    |
+| `/remote`  | Show QR code with full HTTPS URL for mobile access            |
 | `deq`      | Drain entire pending queue                                    |
 | `deq N`    | Remove Nth queued item (1=first, -1=last)                     |
 
