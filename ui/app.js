@@ -2754,6 +2754,96 @@ function initCursorQuota() {
 
 let statsPeriod = 'daily';
 let statsGroup  = 'time';
+let statsFilters = { days: 30, agent: '', topic: '', adhoc: 'all' };
+let statsChartY1 = 'turns';
+let statsChartY2 = '';
+let statsChartInstance = null;
+let _lastStatsRows = null;
+let _statsFiltersLoaded = false;
+let _statsPage = 0;
+const _STATS_PAGE_SIZE = 10;
+let _statsShowExtra = false;
+
+function _rerenderStats() {
+  if (!_lastStatsRows) return;
+  if (statsGroup === 'topic') renderTopicStats(_lastStatsRows);
+  else if (statsGroup === 'model') renderAgentStats(_lastStatsRows);
+  else { renderTimeStats(_lastStatsRows); _renderChart(_lastStatsRows); }
+}
+
+function _statsPageSlice(rows) {
+  const start = _statsPage * _STATS_PAGE_SIZE;
+  return rows.slice(start, start + _STATS_PAGE_SIZE);
+}
+
+function _statsAppendPager(totalRows) {
+  const totalPages = Math.ceil(totalRows / _STATS_PAGE_SIZE);
+  if (totalPages <= 1) return;
+  const div = document.createElement('div');
+  div.className = 'stats-pager';
+  div.innerHTML = `<button class="stats-pager-btn" id="sp-prev" type="button" ${_statsPage === 0 ? 'disabled' : ''}>‹ Prev</button>
+    <span class="stats-pager-info">${_statsPage + 1} / ${totalPages}</span>
+    <button class="stats-pager-btn" id="sp-next" type="button" ${_statsPage >= totalPages - 1 ? 'disabled' : ''}>Next ›</button>`;
+  statsContent.appendChild(div);
+  div.querySelector('#sp-prev')?.addEventListener('click', () => { _statsPage--; _rerenderStats(); });
+  div.querySelector('#sp-next')?.addEventListener('click', () => { _statsPage++; _rerenderStats(); });
+}
+
+const CHART_METRICS = {
+  turns:      { label: 'Turns',      fn: r => (r.total_turns || 0),                                                     color: 'rgba(100,160,255,1)',  fill: 'rgba(100,160,255,0.08)' },
+  cost:       { label: 'Cost ($)',   fn: r => (r.cost_usd || 0),                                                        color: 'rgba(255,160,80,1)',   fill: 'rgba(255,160,80,0.08)'  },
+  tokens_in:  { label: 'Tokens In', fn: r => { const raw = r.input_tokens||0, cr = r.cache_read_tokens||0; return (cr>0&&raw<cr)?raw+cr:raw; }, color: 'rgba(80,200,120,1)',   fill: 'rgba(80,200,120,0.08)'  },
+  tokens_out: { label: 'Tokens Out',fn: r => (r.output_tokens || 0),                                                   color: 'rgba(200,100,200,1)',  fill: 'rgba(200,100,200,0.08)' },
+  sessions:   { label: 'Sessions',  fn: r => (r.sessions || 0),                                                        color: 'rgba(200,200,60,1)',   fill: 'rgba(200,200,60,0.08)'  },
+};
+
+function _destroyChart() {
+  if (statsChartInstance) { statsChartInstance.destroy(); statsChartInstance = null; }
+}
+
+function _renderChart(rows) {
+  if (!rows || !rows.length || typeof Chart === 'undefined') { _destroyChart(); return; }
+  const chronological = [...rows].reverse();
+  const labels = chronological.map(r => r.period);
+  const m1 = CHART_METRICS[statsChartY1] || CHART_METRICS.turns;
+  const datasets = [{
+    label: m1.label, data: chronological.map(m1.fn),
+    borderColor: m1.color, backgroundColor: m1.fill,
+    yAxisID: 'y1', tension: 0.3, fill: true,
+    pointRadius: labels.length > 60 ? 1 : labels.length > 20 ? 2 : 4,
+    pointHoverRadius: 5,
+  }];
+  const scales = {
+    x: { ticks: { color: '#555', font: { size: 10 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 12 }, grid: { color: '#1a1a24' } },
+    y1: { type: 'linear', position: 'left', ticks: { color: '#555', font: { size: 10 } }, grid: { color: '#1a1a24' } },
+  };
+  if (statsChartY2) {
+    const m2 = CHART_METRICS[statsChartY2];
+    if (m2) {
+      datasets.push({
+        label: m2.label, data: chronological.map(m2.fn),
+        borderColor: m2.color, backgroundColor: 'transparent',
+        yAxisID: 'y2', tension: 0.3, fill: false,
+        pointRadius: labels.length > 60 ? 1 : labels.length > 20 ? 2 : 4,
+        pointHoverRadius: 5,
+      });
+      scales.y2 = { type: 'linear', position: 'right', ticks: { color: '#555', font: { size: 10 } }, grid: { display: false } };
+    }
+  }
+  _destroyChart();
+  statsChartInstance = new Chart(document.getElementById('stats-chart'), {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: {
+        legend: { labels: { color: '#888', font: { size: 11 }, boxWidth: 12, padding: 12 } },
+        tooltip: { backgroundColor: '#1a1a24', borderColor: '#2e2e3e', borderWidth: 1, titleColor: '#aaa', bodyColor: '#888' },
+      },
+      scales,
+    },
+  });
+}
 
 // ── process status dot + popup ────────────────────────────────────────────────
 
@@ -2891,145 +2981,182 @@ procStatusBtn.addEventListener('click', e => {
   toggleProcPopup();
 });
 
-// keep legacy aliases so switchView / initStats still work
 async function loadStats() {
   statsContent.innerHTML = '<div class="empty">Loading…</div>';
+
+  if (!_statsFiltersLoaded) {
+    _statsFiltersLoaded = true;
+    fetch('/stats/filters').then(r => r.json()).then(data => {
+      const agentSel = document.getElementById('sf-agent');
+      const topicSel = document.getElementById('sf-topic');
+      const curAgent = agentSel.value, curTopic = topicSel.value;
+      agentSel.innerHTML = '<option value="">All</option>' +
+        data.agents.map(a => `<option value="${escapeHtml(a)}"${a === curAgent ? ' selected' : ''}>${escapeHtml(a)}</option>`).join('');
+      topicSel.innerHTML = '<option value="">All</option>' +
+        data.topics.map(t => `<option value="${escapeHtml(t)}"${t === curTopic ? ' selected' : ''}>#${escapeHtml(t)}</option>`).join('');
+    }).catch(() => {});
+  }
+
+  const params = new URLSearchParams();
+  if (statsGroup !== 'time') {
+    params.set('group', statsGroup === 'model' ? 'agent' : statsGroup);
+  } else {
+    params.set('period', statsPeriod);
+  }
+  params.set('days', statsFilters.days);
+  if (statsFilters.agent) params.set('agent', statsFilters.agent);
+  if (statsFilters.topic) params.set('topic', statsFilters.topic);
+  if (statsFilters.adhoc !== 'all') params.set('adhoc', statsFilters.adhoc);
+
   let rows;
   try {
-    const url = statsGroup === 'topic' ? '/stats?group=topic'
-              : statsGroup === 'model' ? '/stats?group=agent'
-              : `/stats?period=${statsPeriod}`;
-    const res = await fetch(url);
-    rows = await res.json();
+    rows = await fetch(`/stats?${params}`).then(r => r.json());
   } catch {
     statsContent.innerHTML = '<div class="empty">Failed to load.</div>';
     return;
   }
 
+  const chartWrap = document.getElementById('stats-chart-wrap');
   if (!rows.length) {
     statsContent.innerHTML = '<div class="empty">No data yet.</div>';
+    _destroyChart();
+    if (chartWrap) chartWrap.hidden = true;
     return;
   }
+
+  const isTime = statsGroup !== 'topic' && statsGroup !== 'model';
+  if (chartWrap) chartWrap.hidden = !isTime;
+
+  _lastStatsRows = rows;
+  _statsPage = 0;
   if (statsGroup === 'topic') {
     renderTopicStats(rows);
   } else if (statsGroup === 'model') {
     renderAgentStats(rows);
   } else {
     renderTimeStats(rows);
+    _renderChart(rows);
   }
 }
 
 function renderTimeStats(rows) {
-  let totalSessions = 0, totalIn = 0, totalOut = 0, totalCost = 0, totalQuotaDelta = 0;
-  const bodyRows = rows.map(r => {
-    // Claude: raw=new-only, cr=cached separately → effective = raw+cr.
-    // Codex:  raw=total-including-cache, cr=breakdown → use raw only.
-    const raw  = r.input_tokens || 0;
-    const cr   = r.cache_read_tokens || 0;
-    const inp  = (cr > 0 && raw < cr) ? raw + cr : raw;
-    const out  = r.output_tokens || 0;
-    const cost = r.cost_usd || 0;
-    const qd   = r.quota_delta;
+  let totalSessions = 0, totalIn = 0, totalOut = 0, totalCost = 0, totalQuotaDelta = 0, totalTurns = 0;
+  for (const r of rows) {
+    const raw = r.input_tokens || 0, cr = r.cache_read_tokens || 0;
     totalSessions += r.sessions || 0;
-    totalIn  += inp;
-    totalOut += out;
-    totalCost += cost;
-    if (qd != null) totalQuotaDelta += qd;
+    totalIn  += (cr > 0 && raw < cr) ? raw + cr : raw;
+    totalOut += r.output_tokens || 0;
+    totalCost += r.cost_usd || 0;
+    totalTurns += r.total_turns || 0;
+    if (r.quota_delta != null) totalQuotaDelta += r.quota_delta;
+  }
+  const ex = _statsShowExtra;
+  const bodyRows = _statsPageSlice(rows).map(r => {
+    const raw = r.input_tokens || 0, cr = r.cache_read_tokens || 0;
+    const inp = (cr > 0 && raw < cr) ? raw + cr : raw;
+    const qd  = r.quota_delta;
     return `<tr>
       <td>${r.period || '—'}</td>
       <td>${r.sessions}</td>
+      <td>${r.total_turns || '—'}</td>
       <td>${fmtNum(inp)}</td>
-      <td>${fmtNum(out)}</td>
-      <td>$${cost.toFixed(4)}</td>
-      <td>${qd != null ? '+' + qd.toFixed(1) + '%' : '—'}</td>
+      <td>${fmtNum(r.output_tokens || 0)}</td>
+      ${ex ? `<td>$${(r.cost_usd || 0).toFixed(4)}</td><td>${qd != null ? '+' + qd.toFixed(1) + '%' : '—'}</td>` : ''}
     </tr>`;
   }).join('');
 
   statsContent.innerHTML = `<table>
     <thead><tr>
       <th>${statsPeriod === 'hourly' ? 'Hour' : 'Date'}</th>
-      <th>Sessions</th><th>Tokens In</th><th>Tokens Out</th><th>Cost</th><th>Quota Δ</th>
+      <th>Sessions</th><th>Turns</th><th>Tokens In</th><th>Tokens Out</th>
+      ${ex ? '<th>Cost</th><th>Quota Δ</th>' : ''}
     </tr></thead>
     <tbody>${bodyRows}</tbody>
     <tfoot><tr>
-      <td>Total</td><td>${totalSessions}</td>
+      <td>Total</td><td>${totalSessions}</td><td>${totalTurns || '—'}</td>
       <td>${fmtNum(totalIn)}</td><td>${fmtNum(totalOut)}</td>
-      <td>$${totalCost.toFixed(4)}</td>
-      <td>${totalQuotaDelta > 0 ? '+' + totalQuotaDelta.toFixed(1) + '%' : '—'}</td>
+      ${ex ? `<td>$${totalCost.toFixed(4)}</td><td>${totalQuotaDelta > 0 ? '+' + totalQuotaDelta.toFixed(1) + '%' : '—'}</td>` : ''}
     </tr></tfoot>
   </table>`;
+  _statsAppendPager(rows.length);
 }
 
 function renderTopicStats(rows) {
-  let totalSessions = 0, totalIn = 0, totalOut = 0, totalCost = 0;
-  const bodyRows = rows.map(r => {
-    // Claude: raw=new-only, cr=cached separately → effective = raw+cr.
-    // Codex:  raw=total-including-cache, cr=breakdown → use raw only.
-    const raw  = r.input_tokens  || 0;
-    const cr   = r.cache_read_tokens || 0;
-    const inp  = (cr > 0 && raw < cr) ? raw + cr : raw;
-    const out  = r.output_tokens || 0;
-    const cost = r.cost_usd      || 0;
+  let totalSessions = 0, totalIn = 0, totalOut = 0, totalCost = 0, totalTurns = 0;
+  for (const r of rows) {
+    const raw = r.input_tokens || 0, cr = r.cache_read_tokens || 0;
     totalSessions += r.sessions || 0;
-    totalIn  += inp;
-    totalOut += out;
-    totalCost += cost;
+    totalIn  += (cr > 0 && raw < cr) ? raw + cr : raw;
+    totalOut += r.output_tokens || 0;
+    totalCost += r.cost_usd || 0;
+    totalTurns += r.total_turns || 0;
+  }
+  const ex = _statsShowExtra;
+  const bodyRows = _statsPageSlice(rows).map(r => {
+    const raw = r.input_tokens || 0, cr = r.cache_read_tokens || 0;
+    const inp = (cr > 0 && raw < cr) ? raw + cr : raw;
     return `<tr>
-      <td>#${r.topic}</td>
+      <td>#${escapeHtml(r.topic)}</td>
       <td>${r.sessions}</td>
+      <td>${r.total_turns || '—'}</td>
       <td>${fmtNum(inp)}</td>
-      <td>${fmtNum(out)}</td>
-      <td>$${cost.toFixed(4)}</td>
+      <td>${fmtNum(r.output_tokens || 0)}</td>
+      ${ex ? `<td>$${(r.cost_usd || 0).toFixed(4)}</td>` : ''}
     </tr>`;
   }).join('');
 
   statsContent.innerHTML = `<table>
     <thead><tr>
-      <th>Topic</th><th>Sessions</th><th>Tokens In</th><th>Tokens Out</th><th>Cost</th>
+      <th>Topic</th><th>Sessions</th><th>Turns</th><th>Tokens In</th><th>Tokens Out</th>
+      ${ex ? '<th>Cost</th>' : ''}
     </tr></thead>
     <tbody>${bodyRows}</tbody>
     <tfoot><tr>
-      <td>Total</td><td>${totalSessions}</td>
+      <td>Total</td><td>${totalSessions}</td><td>${totalTurns || '—'}</td>
       <td>${fmtNum(totalIn)}</td><td>${fmtNum(totalOut)}</td>
-      <td>$${totalCost.toFixed(4)}</td>
+      ${ex ? `<td>$${totalCost.toFixed(4)}</td>` : ''}
     </tr></tfoot>
   </table>`;
+  _statsAppendPager(rows.length);
 }
 
 function renderAgentStats(rows) {
-  let totalSessions = 0, totalIn = 0, totalOut = 0, totalCost = 0;
-  const bodyRows = rows.map(r => {
-    // Claude: raw=new-only, cr=cached separately → effective = raw+cr.
-    // Codex:  raw=total-including-cache, cr=breakdown → use raw only.
-    const raw  = r.input_tokens || 0;
-    const cr   = r.cache_read_tokens || 0;
-    const inp  = (cr > 0 && raw < cr) ? raw + cr : raw;
-    const out  = r.output_tokens || 0;
-    const cost = r.cost_usd || 0;
+  let totalSessions = 0, totalIn = 0, totalOut = 0, totalCost = 0, totalTurns = 0;
+  for (const r of rows) {
+    const raw = r.input_tokens || 0, cr = r.cache_read_tokens || 0;
     totalSessions += r.sessions || 0;
-    totalIn  += inp;
-    totalOut += out;
-    totalCost += cost;
+    totalIn  += (cr > 0 && raw < cr) ? raw + cr : raw;
+    totalOut += r.output_tokens || 0;
+    totalCost += r.cost_usd || 0;
+    totalTurns += r.total_turns || 0;
+  }
+  const ex = _statsShowExtra;
+  const bodyRows = _statsPageSlice(rows).map(r => {
+    const raw = r.input_tokens || 0, cr = r.cache_read_tokens || 0;
+    const inp = (cr > 0 && raw < cr) ? raw + cr : raw;
     return `<tr>
-      <td>${r.agent}</td>
+      <td>${escapeHtml(r.agent)}</td>
       <td>${r.sessions}</td>
+      <td>${r.total_turns || '—'}</td>
       <td>${fmtNum(inp)}</td>
-      <td>${fmtNum(out)}</td>
-      <td>$${cost.toFixed(4)}</td>
+      <td>${fmtNum(r.output_tokens || 0)}</td>
+      ${ex ? `<td>$${(r.cost_usd || 0).toFixed(4)}</td>` : ''}
     </tr>`;
   }).join('');
 
   statsContent.innerHTML = `<table>
     <thead><tr>
-      <th>Agent</th><th>Sessions</th><th>Tokens In</th><th>Tokens Out</th><th>Cost</th>
+      <th>Agent</th><th>Sessions</th><th>Turns</th><th>Tokens In</th><th>Tokens Out</th>
+      ${ex ? '<th>Cost</th>' : ''}
     </tr></thead>
     <tbody>${bodyRows}</tbody>
     <tfoot><tr>
-      <td>Total</td><td>${totalSessions}</td>
+      <td>Total</td><td>${totalSessions}</td><td>${totalTurns || '—'}</td>
       <td>${fmtNum(totalIn)}</td><td>${fmtNum(totalOut)}</td>
-      <td>$${totalCost.toFixed(4)}</td>
+      ${ex ? `<td>$${totalCost.toFixed(4)}</td>` : ''}
     </tr></tfoot>
   </table>`;
+  _statsAppendPager(rows.length);
 }
 
 
@@ -3042,6 +3169,62 @@ function initStats() {
       btn.classList.add('active');
       loadStats();
     });
+  });
+
+  document.querySelectorAll('#sf-days .sf-chip').forEach(btn => {
+    btn.addEventListener('click', () => {
+      statsFilters.days = parseInt(btn.dataset.days);
+      document.querySelectorAll('#sf-days .sf-chip').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      loadStats();
+    });
+  });
+
+  document.querySelectorAll('#sf-adhoc .sf-chip').forEach(btn => {
+    btn.addEventListener('click', () => {
+      statsFilters.adhoc = btn.dataset.adhoc;
+      document.querySelectorAll('#sf-adhoc .sf-chip').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      loadStats();
+    });
+  });
+
+  document.getElementById('sf-agent').addEventListener('change', e => {
+    statsFilters.agent = e.target.value;
+    loadStats();
+  });
+
+  document.getElementById('sf-topic').addEventListener('change', e => {
+    statsFilters.topic = e.target.value;
+    loadStats();
+  });
+
+  document.getElementById('sf-extra-toggle').addEventListener('click', function() {
+    _statsShowExtra = !_statsShowExtra;
+    this.classList.toggle('active', _statsShowExtra);
+    _rerenderStats();
+  });
+
+  document.getElementById('sc-y1').addEventListener('change', e => {
+    statsChartY1 = e.target.value;
+    if (_lastStatsRows) _renderChart(_lastStatsRows);
+  });
+
+  const y2Sel = document.getElementById('sc-y2');
+  y2Sel.addEventListener('change', e => {
+    statsChartY2 = e.target.value;
+    if (!statsChartY2) {
+      y2Sel.hidden = true;
+      document.getElementById('sc-compare-btn').textContent = '+ Y2';
+    }
+    if (_lastStatsRows) _renderChart(_lastStatsRows);
+  });
+
+  document.getElementById('sc-compare-btn').addEventListener('click', () => {
+    const hidden = y2Sel.hidden;
+    y2Sel.hidden = !hidden;
+    document.getElementById('sc-compare-btn').textContent = hidden ? '− Y2' : '+ Y2';
+    if (!hidden) { statsChartY2 = ''; if (_lastStatsRows) _renderChart(_lastStatsRows); }
   });
 }
 

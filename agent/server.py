@@ -54,6 +54,7 @@ from .memory import (
 )
 from .stats_db import (
     init_db, get_aggregated_stats, save_quota_delta, get_stats_by_topic, get_stats_by_agent,
+    get_stats_filter_options,
     get_topics_summary, get_topics_management_summary,
     get_agent, upsert_agent, delete_agent, list_agents, get_default_agent,
     get_topic, upsert_topic, list_topics,
@@ -843,13 +844,25 @@ async def remove_agent(name: str):
     return JSONResponse({"ok": deleted})
 
 
+@app.get("/stats/filters")
+async def stats_filter_options():
+    return JSONResponse(get_stats_filter_options())
+
+
 @app.get("/stats")
-async def usage_stats(period: str = "daily", group: str = "time"):
+async def usage_stats(
+    period: str = "daily",
+    group: str = "time",
+    days: int = 30,
+    agent: str = "",
+    topic: str = "",
+    adhoc: str = "all",
+):
     if group == "topic":
-        return JSONResponse(get_stats_by_topic())
+        return JSONResponse(get_stats_by_topic(days=days, agent=agent, topic=topic, adhoc=adhoc))
     if group == "agent":
-        return JSONResponse(get_stats_by_agent())
-    return JSONResponse(get_aggregated_stats(period))
+        return JSONResponse(get_stats_by_agent(days=days, agent=agent, topic=topic, adhoc=adhoc))
+    return JSONResponse(get_aggregated_stats(period=period, days=days, agent=agent, topic=topic, adhoc=adhoc))
 
 
 @app.post("/stats/quota-delta")

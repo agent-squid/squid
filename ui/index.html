@@ -18,7 +18,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono&display=swap" />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono&display=swap&text=%E2%96%88%E2%96%84%E2%96%80%E2%95%94%E2%95%90%E2%95%97%E2%95%91%E2%95%9A%E2%95%9D" />
   <link rel="stylesheet" href="/vendor/atom-one-dark.min.css" />
-  <link rel="stylesheet" href="style.css?v=20260616-011" />
+  <link rel="stylesheet" href="style.css?v=20260616-016" />
   <script src="/vendor/highlight.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/vendor/qrcode.min.js"></script>
@@ -286,6 +286,50 @@
           <button class="st" data-period="" data-group="model">By Agent</button>
         </div>
       </div>
+      <div id="stats-filters">
+        <span class="sf-label">Range</span>
+        <div class="sf-chips" id="sf-days">
+          <button class="sf-chip" data-days="7" type="button">7d</button>
+          <button class="sf-chip active" data-days="30" type="button">30d</button>
+          <button class="sf-chip" data-days="90" type="button">90d</button>
+          <button class="sf-chip" data-days="0" type="button">All</button>
+        </div>
+        <span class="sf-sep"></span>
+        <span class="sf-label">Agent</span>
+        <select id="sf-agent"><option value="">All</option></select>
+        <span class="sf-label">Topic</span>
+        <select id="sf-topic"><option value="">All</option></select>
+        <span class="sf-sep"></span>
+        <span class="sf-label">Turns</span>
+        <div class="sf-chips" id="sf-adhoc">
+          <button class="sf-chip active" data-adhoc="all" type="button">All</button>
+          <button class="sf-chip" data-adhoc="session" type="button">Session</button>
+          <button class="sf-chip" data-adhoc="adhoc" type="button">Adhoc</button>
+        </div>
+        <span class="sf-sep"></span>
+        <button id="sf-extra-toggle" class="sf-chip" type="button">Cost &amp; Quota</button>
+      </div>
+      <div id="stats-chart-wrap">
+        <div id="stats-chart-controls">
+          <select id="sc-y1">
+            <option value="turns">Turns</option>
+            <option value="cost">Cost ($)</option>
+            <option value="tokens_in">Tokens In</option>
+            <option value="tokens_out">Tokens Out</option>
+            <option value="sessions">Sessions</option>
+          </select>
+          <button id="sc-compare-btn" type="button">+ Y2</button>
+          <select id="sc-y2" hidden>
+            <option value="">— remove —</option>
+            <option value="turns">Turns</option>
+            <option value="cost">Cost ($)</option>
+            <option value="tokens_in">Tokens In</option>
+            <option value="tokens_out">Tokens Out</option>
+            <option value="sessions">Sessions</option>
+          </select>
+        </div>
+        <div id="stats-chart-box"><canvas id="stats-chart"></canvas></div>
+      </div>
       <div id="stats-content"></div>
     </div>
 
@@ -315,6 +359,7 @@
     <!-- Inline agent creation prompt (appended to #messages dynamically) -->
   </div>
   <div id="app-tooltip"></div>
-  <script src="app.js?v=20260616-035"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script src="app.js?v=20260616-039"></script>
 </body>
 </html>
