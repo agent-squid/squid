@@ -866,8 +866,6 @@ body {
   flex-shrink: 0;
 }
 .bcat-copy:hover { border-color: #f07040; color: #f07040; }
-.bcat-link { color: #50608a; text-decoration: none; }
-.bcat-link:hover { color: #7090c0; }
 .bcat-gauge {
   display: flex;
   align-items: flex-start;

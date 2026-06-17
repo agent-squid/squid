@@ -74,7 +74,7 @@ All config changes require a full restart (`bin/stop.sh && bin/start.sh`).
 |---------------|--------------------------------------------------|------------------------------------------------|---------------|
 | `claude`      | `claude` (Claude Code)                           | `npm install -g @anthropic-ai/claude-code`     | resumable     |
 | `codex`       | `codex` (OpenAI Codex)                           | `npm install -g @openai/codex`                 | resumable     |
-| `cursor`      | `cursor-agent` (Cursor)                          | install from cursor.com                        | resumable     |
+| `cursor`      | `cursor-agent` (Cursor)                          | `curl https://cursor.com/install -fsS \| bash` | resumable     |
 | `auto`        | tries claude → codex → cursor                   | —                                              | —             |
 | `copilot`     | `copilot` (GitHub Copilot)                       | —                                              | to be supported |
 | `antigravity` | `agy` (Google Antigravity)                       | —                                              | to be supported |

@@ -112,7 +112,7 @@ def _check_deps():
     if not CODEX_PATH:
         missing.append("codex         →  npm install -g @openai/codex")
     if not CURSOR_PATH:
-        missing.append("cursor-agent  →  install from cursor.com")
+        missing.append("cursor-agent  →  curl https://cursor.com/install -fsS | bash")
     if missing:
         log.warning("Missing CLI tools:\n  " + "\n  ".join(missing))
     if warnings:

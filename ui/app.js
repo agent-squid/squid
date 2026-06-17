@@ -3562,8 +3562,7 @@ const BACKEND_CATALOG = [
   {
     id: 'cursor',
     label: 'Cursor Agent',
-    installCmd: null,
-    installUrl: 'https://cursor.com',
+    installCmd: 'curl https://cursor.com/install -fsS | bash',
     authHint: 'run cursor-agent to authenticate',
     gaugeHint: 'automatic via cursor-agent',
   },
@@ -3583,17 +3582,11 @@ function renderBackendsCatalog(backends) {
     if (available) {
       codingHtml = `<span class="bcat-status-ok">✓ detected</span>
         <span class="bcat-hint">${b.authHint}</span>`;
-    } else if (b.installCmd) {
+    } else {
       codingHtml = `<span class="bcat-status-miss">✗ not found</span>
         <div class="bcat-install">
           <code class="bcat-cmd">${b.installCmd}</code>
           <button class="bcat-copy" data-cmd="${b.installCmd}">copy</button>
-        </div>
-        <span class="bcat-hint">then ${b.authHint}</span>`;
-    } else {
-      codingHtml = `<span class="bcat-status-miss">✗ not found</span>
-        <div class="bcat-install">
-          <a class="bcat-link" href="${b.installUrl}" target="_blank" rel="noopener">install from cursor.com ↗</a>
         </div>
         <span class="bcat-hint">then ${b.authHint}</span>`;
     }
@@ -4110,7 +4103,7 @@ async function showBootBanner() {
       const agents = [
         { name: 'Claude Code',  cmd: 'npm install -g @anthropic-ai/claude-code' },
         { name: 'Codex',        cmd: 'npm install -g @openai/codex' },
-        { name: 'Cursor Agent', cmd: null, url: 'https://cursor.com' },
+        { name: 'Cursor Agent', cmd: 'curl https://cursor.com/install -fsS | bash' },
       ];
       setup.innerHTML = `
         <div class="no-agent-title">No coding agents found</div>
@@ -4119,11 +4112,8 @@ async function showBootBanner() {
           ${agents.map(a => `
             <div class="no-agent-row">
               <span class="no-agent-name">${a.name}</span>
-              ${a.cmd
-                ? `<code class="no-agent-cmd">${a.cmd}</code>
-                   <button class="no-agent-copy" data-cmd="${a.cmd}">copy</button>`
-                : `<a class="no-agent-cmd" href="${a.url}" target="_blank" rel="noopener" style="text-decoration:none;color:#9090b8">${a.url} ↗</a>`
-              }
+              <code class="no-agent-cmd">${a.cmd}</code>
+              <button class="no-agent-copy" data-cmd="${a.cmd}">copy</button>
             </div>`).join('')}
         </div>
         <div class="no-agent-restart">Then restart: <code>bin/start.sh --restart</code></div>`;

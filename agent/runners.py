@@ -613,7 +613,7 @@ async def run_cursor(
     """Stream text chunks from cursor-agent CLI, then yield a stats dict."""
     if not CURSOR_PATH:
         raise CLINotFoundError(
-            "cursor-agent CLI not found in PATH. Install from https://cursor.com"
+            "cursor-agent CLI not found in PATH. Install: curl https://cursor.com/install -fsS | bash"
         )
 
     cmd = [
