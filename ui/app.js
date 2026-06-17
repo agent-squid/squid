@@ -2458,6 +2458,7 @@ function quotaTimeText(resetAt) {
   const totalMin = Math.floor(diff / 60000);
   const h = Math.floor(totalMin / 60);
   const m = String(totalMin % 60).padStart(2, '0');
+  if (h >= 24) return `${(totalMin / 60 / 24).toFixed(1)}D`;
   return h > 0 ? `${h}:${m}` : `${m}m`;
 }
 
