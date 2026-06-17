@@ -1,42 +1,3 @@
-// ── bearer token auth ────────────────────────────────────────────────────────
-// First visit: open http://<host>:<port>/?token=<value> — stored to localStorage,
-// then stripped from the URL. All subsequent relative fetch() calls send it
-// automatically via the interceptor below.
-(function () {
-  const param = new URLSearchParams(window.location.search).get('token');
-  if (param) {
-    localStorage.setItem('squid_token', param);
-    window.history.replaceState({}, '', window.location.pathname);
-  }
-  const token = localStorage.getItem('squid_token');
-
-  function showAuthBanner() {
-    if (document.getElementById('auth-banner')) return;
-    const el = document.createElement('div');
-    el.id = 'auth-banner';
-    el.innerHTML = `
-      <div id="auth-banner-box">
-        <div id="auth-banner-title">Authentication required</div>
-        <div id="auth-banner-body">
-          Open this page with your token to sign in:<br>
-          <code>${location.origin}/?token=<em>your-token</em></code><br><br>
-          Your token is the <code>server.token</code> value in <code>squid.yaml</code>.
-        </div>
-      </div>`;
-    document.body.appendChild(el);
-  }
-
-  const _orig = window.fetch.bind(window);
-  window.fetch = (url, opts = {}) => {
-    if (typeof url === 'string' && !url.startsWith('http')) {
-      if (token) opts = { ...opts, headers: { 'Authorization': `Bearer ${token}`, ...(opts.headers || {}) } };
-    }
-    return _orig(url, opts).then(res => {
-      if (res.status === 401) showAuthBanner();
-      return res;
-    });
-  };
-})();
 
 const messages     = document.getElementById('messages');
 const form         = document.getElementById('form');
@@ -157,8 +118,6 @@ function backendDisplayName(backend) {
 
   function localFileUrl(path, line, endLine) {
     const params = new URLSearchParams({ path });
-    const token = localStorage.getItem('squid_token');
-    if (token) params.set('token', token);
     const base = '/localfile?' + params.toString();
     if (!line) return base;
     return base + '#L' + line + (endLine && endLine !== line ? '-L' + endLine : '');
@@ -235,7 +194,6 @@ function initSettings() {
 async function openRemoteQR() {
   if (document.getElementById('remote-modal')) return;
 
-  const token = localStorage.getItem('squid_token') || '';
   let remoteUrl = null, remoteReason = 'error';
   try {
     const res = await fetch('/remote');
@@ -244,9 +202,7 @@ async function openRemoteQR() {
     remoteReason = data.reason || null;
   } catch {}
 
-  const authUrl = remoteUrl
-    ? (token ? `${remoteUrl}?token=${token}` : remoteUrl)
-    : null;
+  const authUrl = remoteUrl;
 
   const modal = document.createElement('div');
   modal.id = 'remote-modal';
@@ -2394,8 +2350,8 @@ const QUOTA_CONFIG = {
     pieArcId:     'cursor-pie-arc',
     labelId:      'cursor-quota-label',
     pieC:         2 * Math.PI * 6,
-    credsPopupId: null,
-    errorTitle:   'Cursor usage unavailable — run cursor-agent to log in',
+    credsPopupId: 'cursor-creds-popup',
+    errorTitle:   'Cursor usage unavailable · click for info',
     parse:        parseCursorQuota,
   },
 };
@@ -2771,6 +2727,13 @@ function initCursorQuota() {
               transform="rotate(-90 9 9)"/>
     </svg>
     <span id="${cfg.labelId}"></span>`;
+
+  const credsPopup = document.getElementById(cfg.credsPopupId);
+  cursorQuotaDisplay.addEventListener('click', () => credsPopup.classList.toggle('open'));
+  document.addEventListener('click', (e) => {
+    if (!cursorQuotaDisplay.contains(e.target) && !credsPopup.contains(e.target))
+      credsPopup.classList.remove('open');
+  });
   fetchCursorQuota();
 }
 
@@ -3579,19 +3542,104 @@ async function confirmTopicDelete() {
   }
 }
 
+// ── backends catalog ──────────────────────────────────────────────────────────
+
+const BACKEND_CATALOG = [
+  {
+    id: 'claude',
+    label: 'Claude Code',
+    installCmd: 'npm install -g @anthropic-ai/claude-code',
+    authHint: 'run claude to authenticate',
+    gaugeHint: 'click gauge in header → paste org ID + session key',
+  },
+  {
+    id: 'codex',
+    label: 'Codex',
+    installCmd: 'npm install -g @openai/codex',
+    authHint: 'run codex to authenticate',
+    gaugeHint: 'click gauge in header → use bookmarklet or paste token',
+  },
+  {
+    id: 'cursor',
+    label: 'Cursor Agent',
+    installCmd: null,
+    installUrl: 'https://cursor.com',
+    authHint: 'run cursor-agent to authenticate',
+    gaugeHint: 'automatic via cursor-agent',
+  },
+];
+
+function renderBackendsCatalog(backends) {
+  const el = document.getElementById('backends-catalog');
+  if (!el) return;
+
+  el.innerHTML = BACKEND_CATALOG.map(b => {
+    const info = backends?.[b.id] || {};
+    const available   = info.available;
+    const gaugeAuthed = info.gauge_authed;
+    const color       = agentThemeColor(b.id);
+
+    let codingHtml;
+    if (available) {
+      codingHtml = `<span class="bcat-status-ok">✓ detected</span>
+        <span class="bcat-hint">${b.authHint}</span>`;
+    } else if (b.installCmd) {
+      codingHtml = `<span class="bcat-status-miss">✗ not found</span>
+        <div class="bcat-install">
+          <code class="bcat-cmd">${b.installCmd}</code>
+          <button class="bcat-copy" data-cmd="${b.installCmd}">copy</button>
+        </div>
+        <span class="bcat-hint">then ${b.authHint}</span>`;
+    } else {
+      codingHtml = `<span class="bcat-status-miss">✗ not found</span>
+        <div class="bcat-install">
+          <a class="bcat-link" href="${b.installUrl}" target="_blank" rel="noopener">install from cursor.com ↗</a>
+        </div>
+        <span class="bcat-hint">then ${b.authHint}</span>`;
+    }
+
+    let gaugeHtml;
+    if (!available) {
+      gaugeHtml = `<span class="bcat-gauge-na">—</span>`;
+    } else if (gaugeAuthed) {
+      gaugeHtml = `<span class="bcat-gauge-ok">gauge ✓</span>`;
+    } else {
+      gaugeHtml = `<span class="bcat-hint">${b.gaugeHint}</span>`;
+    }
+
+    return `<div class="bcat-row">
+      <div class="bcat-name"><span class="bcat-dot" style="background:${color}"></span>${b.label}</div>
+      <div class="bcat-coding">${codingHtml}</div>
+      <div class="bcat-gauge">${gaugeHtml}</div>
+    </div>`;
+  }).join('');
+
+  el.querySelectorAll('.bcat-copy').forEach(btn => {
+    btn.addEventListener('click', () => {
+      navigator.clipboard.writeText(btn.dataset.cmd).then(() => {
+        btn.textContent = 'copied';
+        setTimeout(() => { btn.textContent = 'copy'; }, 1500);
+      });
+    });
+  });
+}
+
 // ── agent manager ─────────────────────────────────────────────────────────────
 
 async function loadAgents() {
   const listEl = document.getElementById('agents-list');
   listEl.innerHTML = '<div class="empty">Loading…</div>';
-  let agents;
+  let agents, health;
   try {
-    const res = await fetch('/config/agents');
-    agents = await res.json();
+    [agents, health] = await Promise.all([
+      fetch('/config/agents').then(r => r.json()),
+      fetch('/health').then(r => r.json()).catch(() => null),
+    ]);
   } catch {
     listEl.innerHTML = '<div class="empty">Failed to load.</div>';
     return;
   }
+  renderBackendsCatalog(health?.backends);
   if (!agents.length) {
     listEl.innerHTML = '<div class="empty">No agents yet. Add one below.</div>';
     return;
@@ -4060,8 +4108,9 @@ async function showBootBanner() {
       const setup = document.createElement('div');
       setup.className = 'no-agent-setup';
       const agents = [
-        { name: 'Claude Code', cmd: 'npm install -g @anthropic-ai/claude-code' },
-        { name: 'Codex',       cmd: 'npm install -g @openai/codex' },
+        { name: 'Claude Code',  cmd: 'npm install -g @anthropic-ai/claude-code' },
+        { name: 'Codex',        cmd: 'npm install -g @openai/codex' },
+        { name: 'Cursor Agent', cmd: null, url: 'https://cursor.com' },
       ];
       setup.innerHTML = `
         <div class="no-agent-title">No coding agents found</div>
@@ -4070,8 +4119,11 @@ async function showBootBanner() {
           ${agents.map(a => `
             <div class="no-agent-row">
               <span class="no-agent-name">${a.name}</span>
-              <code class="no-agent-cmd">${a.cmd}</code>
-              <button class="no-agent-copy" data-cmd="${a.cmd}">copy</button>
+              ${a.cmd
+                ? `<code class="no-agent-cmd">${a.cmd}</code>
+                   <button class="no-agent-copy" data-cmd="${a.cmd}">copy</button>`
+                : `<a class="no-agent-cmd" href="${a.url}" target="_blank" rel="noopener" style="text-decoration:none;color:#9090b8">${a.url} ↗</a>`
+              }
             </div>`).join('')}
         </div>
         <div class="no-agent-restart">Then restart: <code>bin/start.sh --restart</code></div>`;
@@ -4759,10 +4811,7 @@ function openFileViewer(path, line, endLine) {
   modal.appendChild(box);
   document.body.appendChild(modal);
 
-  const token = localStorage.getItem('squid_token');
-  const params = new URLSearchParams({ path });
-  if (token) params.set('token', token);
-  fetch('/localfile?' + params)
+  fetch('/localfile?' + new URLSearchParams({ path }))
     .then(async res => {
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));

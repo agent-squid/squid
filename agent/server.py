@@ -133,22 +133,6 @@ UI_DIR = Path(__file__).parent.parent / "ui"
 _STATIC_EXTS = {".js", ".css", ".html", ".ico", ".png", ".svg",
                 ".woff", ".woff2", ".ttf", ".map", ".json", ".webmanifest"}
 
-_AUTH_TOKEN: str = (_cfg.get("server") or {}).get("token") or ""
-
-@app.middleware("http")
-async def bearer_auth(request: Request, call_next):
-    if not _AUTH_TOKEN:
-        return await call_next(request)
-    path = request.url.path
-    # Let the UI shell and its static assets through unauthenticated so the
-    # page can load and read the token from localStorage / URL param.
-    if path == "/" or Path(path).suffix in _STATIC_EXTS:
-        return await call_next(request)
-    if path == "/localfile" and request.query_params.get("token") == _AUTH_TOKEN:
-        return await call_next(request)
-    if request.headers.get("Authorization") == f"Bearer {_AUTH_TOKEN}":
-        return await call_next(request)
-    return JSONResponse({"error": "unauthorized"}, status_code=401)
 
 # ---------------------------------------------------------------------------
 # Request schemas
@@ -629,11 +613,11 @@ async def health():
         "status": "ok",
         "boot_time": BOOT_TIME,
         "backends": {
-            "claude":       {"available": bool(CLAUDE_PATH),   "path": CLAUDE_PATH},
-            "codex":        {"available": bool(CODEX_PATH),    "path": CODEX_PATH},
-            "cursor":       {"available": bool(CURSOR_PATH),   "path": CURSOR_PATH},
-            "copilot":      {"available": bool(COPILOT_PATH),  "path": COPILOT_PATH,  "enabled": False},
-            "antigravity":  {"available": bool(AGY_PATH),      "path": AGY_PATH,      "enabled": False},
+            "claude":       {"available": bool(CLAUDE_PATH),   "path": CLAUDE_PATH,  "gauge_authed": bool(creds.get_org_id() and creds.get_session_key())},
+            "codex":        {"available": bool(CODEX_PATH),    "path": CODEX_PATH,   "gauge_authed": bool(creds.get_codex_token())},
+            "cursor":       {"available": bool(CURSOR_PATH),   "path": CURSOR_PATH,  "gauge_authed": bool(creds.get_cursor_token())},
+            "copilot":      {"available": bool(COPILOT_PATH),  "path": COPILOT_PATH, "enabled": False},
+            "antigravity":  {"available": bool(AGY_PATH),      "path": AGY_PATH,     "enabled": False},
         },
     })
 
@@ -1014,12 +998,11 @@ async def quota_cursor():
     if not token:
         return JSONResponse({"error": "Cursor not logged in — run cursor-agent to authenticate"}, status_code=400)
     try:
-        from curl_cffi.requests import AsyncSession
-        async with AsyncSession() as session:
-            r = await session.get(
+        import httpx
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
                 "https://api2.cursor.sh/auth/usage-summary",
                 headers={"Authorization": f"Bearer {token}"},
-                impersonate="chrome",
             )
         if r.status_code != 200:
             return JSONResponse({"error": f"cursor.sh returned {r.status_code}"}, status_code=502)

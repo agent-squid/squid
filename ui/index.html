@@ -100,6 +100,12 @@
           <span id="creds-status"></span>
         </div>
       </div>
+
+      <div id="cursor-creds-popup">
+        <div class="creds-help">
+          <span class="creds-help-hint">Run <code>cursor-agent</code> in the terminal to authenticate Cursor.</span>
+        </div>
+      </div>
     </header>
 
     <!-- Help panel (floating overlay, always available) -->
@@ -336,6 +342,8 @@
     <!-- ── AGENTS VIEW ───────────────────────────────────────────────────── -->
     <div id="view-agents" class="view">
       <div id="settings-agents">
+        <span class="settings-label">Backends</span>
+        <div id="backends-catalog"></div>
         <span class="settings-label">Agents</span>
         <div id="agents-list"></div>
         <form id="agent-form">
