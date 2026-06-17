@@ -3,8 +3,6 @@
 server:
   host: "127.0.0.1"
   port: 8000
-  # Bearer token — set to `openssl rand -hex 32`. Empty = no auth.
-  token: ""
   # Directories the file viewer may serve from. Empty = disabled.
   localfile_roots:
     - "/tmp/squid"
