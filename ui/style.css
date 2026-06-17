@@ -2460,21 +2460,9 @@ mark.search-kw-highlight {
     padding: 0.3rem 0 0;
   }
 
-  .col-model { display: none; }
-  #af-model { display: none; }
-
-  .agent-form-row {
-    align-items: center;
-    display: grid;
-    gap: 0.25rem;
-    grid-template-columns: 0.75fr 0.8fr 1.5fr auto;
-  }
-
   .agent-form-row input,
   .agent-form-row select,
   .agent-form-row button[type=submit] {
-    min-width: 0;
-    width: 100%;
     min-height: 30px;
     padding: 0.18rem 0.35rem;
   }
