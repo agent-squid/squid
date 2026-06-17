@@ -1537,6 +1537,7 @@ async function sendMessage(text) {
             doneTime = new Date().toISOString();
             if (firstDataReceived) {
               contentDiv.innerHTML = marked.parse(raw);
+              bubble.classList.add('history-item');
               messages.appendChild(bubble);
               if (statsEl) messages.appendChild(statsEl); // stats goes between bubble and diffs, not after
               const diffTools = changeTools(liveToolEvents);
