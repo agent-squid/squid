@@ -73,8 +73,8 @@ new message immediately establishes a fresh session_id for the next turn.
 ## Stale Session Recovery
 
 When `--resume <session_id>` fails with "No conversation found" — most
-commonly after a reboot changes the resolved `cwd` (e.g. `/tmp/squid` was
-previously a symlink to a different path) — Squid recovers automatically:
+commonly after a reboot changes the resolved `cwd` (e.g. `/tmp/<user>/squid`
+was previously a symlink to a different path) — Squid recovers automatically:
 
 1. A `_status` event is emitted with the stale session details (session_id,
    cwd, backend, model) so the user sees what was lost.

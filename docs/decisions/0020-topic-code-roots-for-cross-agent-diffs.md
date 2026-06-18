@@ -14,7 +14,7 @@ agent turn.
 Using the agent process `cwd` as the diff root is unreliable:
 
 - some agent working directories are intentionally synthetic or isolated, such
-  as `/tmp/squid`, to control backend-specific instruction loading;
+  as `/tmp/<user>/squid`, to control backend-specific instruction loading;
 - different agents for the same topic may have different configured `cwd`
   values;
 - the real codebase may live somewhere else, such as

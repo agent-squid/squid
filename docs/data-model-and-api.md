@@ -14,7 +14,7 @@
 
 ## Data Model
 
-SQLite database at `squid.db` (project root).
+SQLite database at `~/.squid/squid.db` (persists across installs).
 
 ---
 
@@ -24,7 +24,7 @@ SQLite database at `squid.db` (project root).
 name       TEXT  PK          user-defined short name (e.g. "clawd", "code")
 backend    TEXT  NOT NULL    claude | cursor | antigravity | codex | copilot
 model      TEXT              model string (e.g. claude-opus-4-5); null = backend default
-cwd        TEXT              working directory; null = /tmp/squid
+cwd        TEXT              working directory; null = /tmp/<user>/squid
 timeout    INTEGER           per-agent response timeout in seconds; null = global default
 created_at TEXT              ISO8601
 ```
@@ -429,7 +429,7 @@ Create or update an agent (upsert by name).
   "name":    "string (required)",
   "backend": "claude | cursor | antigravity | codex | copilot",
   "model":   "string | null",
-  "cwd":     "string | null  — abs path; null = /tmp/squid",
+  "cwd":     "string | null  — abs path; null = /tmp/<user>/squid",
   "timeout": "integer | null  — seconds"
 }
 ```

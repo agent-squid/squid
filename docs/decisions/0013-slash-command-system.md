@@ -50,7 +50,7 @@ compatibility.
 - Resolves agent from request or falls back to topic's sticky agent
 - Calls `kill_procs_by_topic(topic)` — stops any in-flight CLI process
 - Calls `clear_topic_session(topic, agent)` — wipes session_id and cwd lock
-- Next message starts a fresh CLI invocation from `SQUID_HOME` (`/tmp/squid`)
+- Next message starts a fresh CLI invocation from `SQUID_HOME` (`/tmp/<user>/squid`)
 
 `compact` is implemented identically to `clear`. True context compaction
 (summarize history → inject as pin → fresh session) is deferred; native

@@ -18,7 +18,7 @@ CREATE TABLE agents (
     name       TEXT PRIMARY KEY,
     backend    TEXT NOT NULL,             -- claude | codex | cursor | antigravity | copilot
     model      TEXT,                      -- null = backend default
-    cwd        TEXT,                      -- null = /tmp/squid
+    cwd        TEXT,                      -- null = /tmp/<user>/squid
     timeout    INTEGER,                   -- null = global default (1800s)
     created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );

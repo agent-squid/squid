@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-05-30
+updated: 2026-06-18
 ---
 # ADR-0014: Single YAML Config File for Infrastructure Constants
 
@@ -32,26 +33,31 @@ Two questions arose when wiring up the YAML loader:
 
 ## Decision Outcome
 
-**Option 1.** `config/default.yaml` is renamed to `config/squid.yaml` and
-scoped to four infrastructure-level values that have no other home:
+**Option 1.** A `config/squid.yaml.example` ships with the install and is
+bootstrapped to `~/.squid/squid.yaml` by `start.sh` on first run. The file is
+scoped to infrastructure-level values that have no other home:
 
 ```yaml
 server:
   host: "127.0.0.1"
-  port: 8899
+  port: 8000
+  localfile_roots:
+    - "/tmp/<user>/squid"
 
 agent:
-  first_byte_timeout: 30
+  first_byte_timeout: 300
   response_timeout: 1800
 ```
 
-The loader in `agent/config.py` is a single `yaml.safe_load` — no merge.
-Agent-specific config (model, max_tokens, cwd, timeout) stays in the DB,
-writable at runtime without a server restart.
+The loader in `agent/config.py` tries `~/.squid/squid.yaml` first and falls
+back to `<install>/config/squid.yaml` for development convenience. No merge
+logic — one file wins entirely.
 
-The default+local split is deferred until there is an actual need to localize
-a value. If that need arises, the loader can be extended to deep-merge a
-`local.yaml` over `squid.yaml` without changing anything else.
+Agent-specific config (model, cwd, timeout) stays in the DB, writable at
+runtime without a server restart.
+
+Storing config in `~/.squid/` means it survives tarball installs/updates —
+users never need to re-edit their config after upgrading.
 
 ## Consequences
 
@@ -60,8 +66,9 @@ a value. If that need arises, the loader can be extended to deep-merge a
 - Good: loader is trivial, no merge edge cases
 - Good: `first_byte_timeout` and `response_timeout` are now tunable without
   touching source code
-- Bad: no mechanism for per-user overrides yet; requires editing `squid.yaml`
-  directly (and handling merge on update)
-- Note: if per-user overrides become necessary, add `config/local.yaml` with
-  deep merge — the current single-file loader is a deliberate deferral, not a
-  permanent constraint
+- Good: config lives in `~/.squid/` and survives squid upgrades
+- Good: `start.sh` substitutes `/tmp/<user>/squid` automatically in
+  `localfile_roots` on first bootstrap — no manual path editing needed
+- Note: if per-user overrides on top of a shared default become necessary,
+  the loader can be extended to deep-merge — the current single-file approach
+  is a deliberate deferral, not a permanent constraint

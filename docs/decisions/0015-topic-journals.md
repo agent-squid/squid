@@ -39,7 +39,7 @@ session.
 
 **Storage**
 1. **DB table** — queryable but opaque; not directly injectable as a file pin
-2. **Markdown files in `context/`** — appear in `/tmp/squid` via existing
+2. **Markdown files in `context/`** — appear in `/tmp/<user>/squid` via existing
    context sync; injectable as pins without any new infrastructure
 
 **Generation agent**
@@ -70,7 +70,7 @@ The per-agent journal is the primary artifact for session resumption: injecting
 what that specific agent did, without noise from other agents.
 
 **Storage:** Markdown files under `context/journals/`. They appear in
-`/tmp/squid/journals/` automatically via the existing `context_sync` rsync,
+`/tmp/<user>/squid/journals/` automatically via the existing `context_sync` rsync,
 making them available as file pins with no additional infrastructure.
 
 **Generation agent:** resolved via `get_default_agent()` at generation time.
@@ -97,7 +97,7 @@ history.
 
 ## Consequences
 
-- Good: journals appear in `/tmp/squid` automatically — no new sync code
+- Good: journals appear in `/tmp/<user>/squid` automatically — no new sync code
 - Good: per-agent grain enables precise context injection on agent handoff or
   session restart
 - Good: fire-and-forget trigger never delays a `/chat` response

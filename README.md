@@ -56,16 +56,38 @@ Topics and agents are not a rigid setup step. You can create a new `#topic` the 
 
 ## Setup
 
+### 1. Install at least one agent CLI
+
+Squid is a cockpit — it needs at least one coding agent to talk to. Install whichever you use:
+
 ```bash
-bin/install.sh   # installs Python venv + checks for claude/codex/copilot CLIs
-bin/start.sh     # starts the server in the background (PID saved to .squid.pid)
-bin/stop.sh      # stops the server
+npm install -g @anthropic-ai/claude-code   # Claude Code
+npm install -g @openai/codex               # OpenAI Codex
+curl https://cursor.com/install -fsS | bash  # Cursor Agent
 ```
 
-Copy `config/squid.yaml.example` to `config/squid.yaml` and edit for your environment.
-All config changes require a full restart (`bin/stop.sh && bin/start.sh`).
+### 2. Install squid
 
-**Local access:** `http://127.0.0.1:8000` (port set in `config/squid.yaml`)
+```bash
+bin/install.sh   # sets up Python venv; checks for agent CLIs
+bin/start.sh     # starts the server; bootstraps ~/.squid/ on first run
+```
+
+`install.sh` creates a `.venv` in the install directory and checks which agent CLIs are on your PATH.
+
+`start.sh` bootstraps `~/.squid/` on first run — config, database, context files, and logs all live there and survive tarball updates.
+
+### 3. Configure (optional)
+
+Edit `~/.squid/squid.yaml` to change port, `localfile_roots`, or timeouts. Apply with:
+
+```bash
+bin/start.sh --restart
+```
+
+To stop without restarting: `bin/stop.sh`
+
+**Local access:** `http://127.0.0.1:<port>` (default 8000, set in `~/.squid/squid.yaml`)
 **Remote access (Tailscale):** type `/remote` in the chat — it returns a QR code with the full HTTPS URL. Point your phone camera at it to open squid in one tap.
 
 ## Backends
@@ -172,7 +194,7 @@ Clearing a session also clears its injection log — a fresh session re-absorbs 
 
 ## Security
 
-Squid has two security layers, both configured in `config/squid.yaml`.
+Squid has two security layers, both configured in `~/.squid/squid.yaml`.
 
 **Layer 1 — Host binding** (enforced at startup): `server.host` must be
 `127.0.0.1`. Public IPs, LAN IPs, and `0.0.0.0` are blocked — the server

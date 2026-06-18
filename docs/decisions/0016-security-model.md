@@ -71,7 +71,7 @@ server:
   host: "127.0.0.1"   # must be loopback; use tailscale serve for remote access
   port: 8000
   localfile_roots:
-    - "/tmp/squid"      # add other paths as needed (e.g. ~/clawd)
+    - "/tmp/<user>/squid"   # add other paths as needed (e.g. ~/clawd)
 ```
 
 ## Why bearer token auth was removed (2026-06-17)
