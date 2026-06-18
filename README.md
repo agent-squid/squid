@@ -102,9 +102,6 @@ To stop without restarting: `bin/stop.sh`
 | `claude`      | `claude` (Claude Code)                           | `npm install -g @anthropic-ai/claude-code`     | resumable     |
 | `codex`       | `codex` (OpenAI Codex)                           | `npm install -g @openai/codex`                 | resumable     |
 | `cursor`      | `cursor-agent` (Cursor)                          | `curl https://cursor.com/install -fsS \| bash` | resumable     |
-| `auto`        | tries claude → codex → cursor                   | —                                              | —             |
-| `copilot`     | `copilot` (GitHub Copilot)                       | —                                              | to be supported |
-| `antigravity` | `agy` (Google Antigravity)                       | —                                              | to be supported |
 
 ## Input syntax
 
@@ -139,7 +136,7 @@ curl -X POST http://127.0.0.1:8000/config/agents \
 | Field     | Type    | Description                                                                      |
 |-----------|---------|----------------------------------------------------------------------------------|
 | `name`    | string  | Agent identifier — used in `#topic@agent` syntax                                 |
-| `backend` | string  | `auto` \| `claude` \| `cursor` \| `antigravity` \| `codex` \| `copilot` |
+| `backend` | string  | `claude` \| `codex` \| `cursor` |
 | `model`   | string  | Model name passed as `--model` to the CLI (optional)                             |
 | `cwd`     | string  | Absolute path for the subprocess cwd; `null` = `/tmp/<user>/squid`              |
 | `timeout` | integer | Response timeout in seconds; overrides the global 1800 s default                 |
@@ -251,7 +248,7 @@ Squid is not another general AI chat app. Open WebUI and LibreChat are broad sel
 
 Squid is narrower: it controls real local coding-agent CLIs and preserves their session behavior.
 
-Most chat UIs send messages to a model API and render text back. Even when they support tools or agents, the chat app is usually the runtime. Squid is different: the runtime is still the local CLI agent. Claude Code, Codex, Cursor Agent, Copilot CLI, or Antigravity is the process doing the work on your machine. Squid is the interactive control layer around those processes.
+Most chat UIs send messages to a model API and render text back. Even when they support tools or agents, the chat app is usually the runtime. Squid is different: the runtime is still the local CLI agent. Claude Code, Codex, or Cursor Agent is the process doing the work on your machine. Squid is the interactive control layer around those processes.
 
 That difference matters:
 
@@ -268,7 +265,7 @@ That difference matters:
 | Category | Examples | Squid's difference |
 |---|---|---|
 | Self-hosted AI chat | Open WebUI, LibreChat | Squid runs local CLI coding agents instead of replacing them with a provider chat UI. |
-| Single-agent CLIs | Claude Code, Codex CLI, Cursor Agent, Copilot CLI | Squid gives them shared browser/mobile UI, topics, queues, history, controls, and analytics. |
+| Single-agent CLIs | Claude Code, Codex CLI, Cursor Agent | Squid gives them shared browser/mobile UI, topics, queues, history, controls, and analytics. |
 | IDE agents | Cursor, Cline, VS Code Copilot | Squid is editor-agnostic and works even when the IDE is not open. |
 | Terminal pair programmers | Aider, OpenCode | Squid is an orchestration layer, not a coding engine. |
 
