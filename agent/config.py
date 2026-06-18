@@ -67,3 +67,15 @@ AGY_PATH      = find_cli(AGY_CLI)
 
 # Per-user tmp dir for context sync — avoids cross-user permission conflicts
 SQUID_HOME = f"/tmp/{os.getlogin()}/squid"
+
+# Proxy environment to inject into every CLI subprocess, or None if disabled.
+_proxy_cfg = _cfg.get("proxy", {})
+PROXY_ENV: Optional[dict] = None
+if _proxy_cfg.get("enabled"):
+    _proxy_url = _proxy_cfg.get("url", "http://127.0.0.1:8080")
+    _cert = os.path.expanduser(_proxy_cfg.get("ssl_cert_file", "~/.mitmproxy/mitmproxy-ca-cert.pem"))
+    PROXY_ENV = {
+        "HTTP_PROXY": _proxy_url,
+        "HTTPS_PROXY": _proxy_url,
+        "SSL_CERT_FILE": _cert,
+    }
