@@ -12,7 +12,7 @@ import signal
 import time
 from typing import AsyncGenerator, List, Optional, Union
 
-from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, FIRST_BYTE_TIMEOUT, RESPONSE_TIMEOUT, PROXY_ENV
+from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, FIRST_BYTE_TIMEOUT, RESPONSE_TIMEOUT
 
 # ---------------------------------------------------------------------------
 # Process registry
@@ -142,8 +142,6 @@ async def _stream_lines(
     and blocking the subprocess before it can write to stdout.
     """
     env = os.environ.copy()
-    if PROXY_ENV:
-        env.update(PROXY_ENV)
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,

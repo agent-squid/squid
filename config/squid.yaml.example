@@ -12,8 +12,3 @@ agent:
   first_byte_timeout: 300
   response_timeout: 1800
 
-# proxy:
-#   # Route CLI subprocesses through an HTTP proxy (e.g. mitmproxy).
-#   enabled: true
-#   url: "http://127.0.0.1:8080"
-#   ssl_cert_file: "~/.mitmproxy/mitmproxy-ca-cert.pem"
