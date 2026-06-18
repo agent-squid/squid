@@ -873,15 +873,32 @@ async def record_msg_quota_delta(msg_id: int, req: MsgQuotaSnapshotRequest):
 
 @app.get("/chat/{msg_id}/diff-revert-status")
 async def diff_revert_status(msg_id: int, repo: str):
+    if _validate_repo_path(repo) is None:
+        return JSONResponse({"error": "invalid repo path"}, status_code=400)
     eligibility = await asyncio.to_thread(get_diff_revert_eligibility, msg_id, repo)
     if not eligibility:
         return JSONResponse({"error": "diff not found"}, status_code=404)
     return JSONResponse(eligibility)
 
 
+def _validate_repo_path(repo: str) -> Optional[Path]:
+    """Return resolved Path if repo is an absolute path to a real git repo, else None."""
+    try:
+        p = Path(repo).resolve()
+    except Exception:
+        return None
+    if not p.is_absolute() or not (p / ".git").exists():
+        return None
+    return p
+
+
 @app.post("/chat/{msg_id}/revert")
 async def revert_diff(msg_id: int, req: RevertRequest):
     from .git_changes import extract_file_diff, apply_reverse_patch
+
+    repo_root = _validate_repo_path(req.repo)
+    if repo_root is None:
+        return JSONResponse({"error": "invalid repo path"}, status_code=400)
 
     eligibility = await asyncio.to_thread(get_diff_revert_eligibility, msg_id, req.repo)
     if not eligibility:
@@ -906,8 +923,6 @@ async def revert_diff(msg_id: int, req: RevertRequest):
         return JSONResponse({"error": "GitDiff not found"}, status_code=404)
 
     full_diff = this_diff.get('diff', '')
-    repo_root = Path(req.repo)
-
     reverted: list[str] = []
     failed: list[dict] = []
 
