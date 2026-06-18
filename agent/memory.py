@@ -6,7 +6,8 @@ import yaml
 from .topics import normalize_topic_slug
 
 
-TOPICS_CONTEXT_DIR = Path.home() / ".squid" / "context" / "topics"
+_SQUID_HOME = Path.home() / ".squid"
+TOPICS_CONTEXT_DIR = _SQUID_HOME / "context" / "topics"
 
 
 def _split_frontmatter(content: str) -> tuple[Optional[str], str]:
@@ -65,7 +66,7 @@ def _normalize_code_roots(value) -> list[str]:
 
 def _display_path(path: Path) -> str:
     try:
-        return str(path.relative_to(_ROOT))
+        return "~/.squid/" + str(path.relative_to(_SQUID_HOME))
     except ValueError:
         return str(path)
 
