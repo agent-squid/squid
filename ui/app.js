@@ -1359,6 +1359,7 @@ async function sendMessage(text) {
   const _contextIds = [...new Set([..._lookbackIds, ..._pinnedIds])];
 
   try {
+    startProcPoll();
     const res = await fetch('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2955,6 +2956,7 @@ async function pollProcs() {
     cachedQueueRows = await queueRes.json();
     updateProcStatusDot(cachedProcRows, cachedQueueRows);
     if (procStatusPopup.classList.contains('open')) renderProcPopup(cachedProcRows, cachedQueueRows);
+    if (!cachedProcRows.length && !cachedQueueRows.length) stopProcPoll();
   } catch { /* ignore */ }
 }
 
@@ -2962,6 +2964,12 @@ function startProcPoll() {
   if (procPollInterval) return;
   pollProcs();
   procPollInterval = setInterval(pollProcs, 3000);
+}
+
+function stopProcPoll() {
+  if (!procPollInterval) return;
+  clearInterval(procPollInterval);
+  procPollInterval = null;
 }
 
 procStatusBtn.addEventListener('click', e => {
@@ -4960,7 +4968,7 @@ initCodexCreds();
 initCursorQuota();
 updateActiveQuotaGauge();
 initPullToRefresh();
-startProcPoll();
+// proc polling starts on demand when a message is sent, not at startup
 showBootBanner();
 try {
   const saved = JSON.parse(localStorage.getItem('squid_sticky_chip') || 'null');
