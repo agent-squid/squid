@@ -7,8 +7,12 @@ import yaml
 
 _ROOT = Path(__file__).parent.parent
 
+_USER_CONFIG = Path.home() / ".squid" / "squid.yaml"
+_INSTALL_CONFIG = _ROOT / "config" / "squid.yaml"
+
 def _load_config() -> dict:
-    return yaml.safe_load((_ROOT / "config" / "squid.yaml").read_text())
+    path = _USER_CONFIG if _USER_CONFIG.exists() else _INSTALL_CONFIG
+    return yaml.safe_load(path.read_text())
 
 _cfg = _load_config()
 

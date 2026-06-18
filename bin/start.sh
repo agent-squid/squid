@@ -5,21 +5,27 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 VENV="$ROOT/.venv"
 
-# ── bootstrap config ─────────────────────────────────────────────────────────
-CONFIG="$ROOT/config/squid.yaml"
+# ── ~/.squid user home ───────────────────────────────────────────────────────
+SQUID_HOME="$HOME/.squid"
+mkdir -p "$SQUID_HOME/logs" "$SQUID_HOME/context"
+
+# config: bootstrap from example on first run, substituting the per-user tmp path
+CONFIG="$SQUID_HOME/squid.yaml"
 if [[ ! -f "$CONFIG" && -f "$ROOT/config/squid.yaml.example" ]]; then
   sed "s|/tmp/squid|/tmp/$(whoami)/squid|g" "$ROOT/config/squid.yaml.example" > "$CONFIG"
-  echo "Created config/squid.yaml from example — edit it to customise."
+  echo "Created ~/.squid/squid.yaml from example — edit it to customise."
+fi
+
+# context: seed from install dir on first run (user can then edit ~/.squid/context/)
+if [[ -d "$ROOT/context" && -z "$(ls -A "$SQUID_HOME/context" 2>/dev/null)" ]]; then
+  cp -r "$ROOT/context/." "$SQUID_HOME/context/"
+  echo "Seeded ~/.squid/context/ from install dir."
 fi
 
 # ── per-user tmp dir ─────────────────────────────────────────────────────────
-# /tmp/<user>/squid must be a real directory (not a symlink) so Claude Code
-# uses it as-is rather than resolving back to ~/Work/squid and loading the
-# wrong CLAUDE.md scope. Initial rsync happens in agent/context_sync.py at startup.
+# Must be a real directory (not a symlink) so Claude Code uses it as-is rather
+# than resolving back to ~/Work/squid and loading the wrong CLAUDE.md scope.
 mkdir -p "/tmp/$(whoami)/squid"
-
-# ── user data dir ────────────────────────────────────────────────────────────
-mkdir -p "$HOME/.squid"
 
 # ── check venv ───────────────────────────────────────────────────────────────
 if [[ ! -f "$VENV/bin/uvicorn" ]]; then
@@ -51,9 +57,7 @@ fi
 
 # ── start ────────────────────────────────────────────────────────────────────
 PID_FILE="$ROOT/.squid.pid"
-LOG_DIR="$ROOT/logs"
-LOG_FILE="$LOG_DIR/server.log"
-mkdir -p "$LOG_DIR"
+LOG_FILE="$SQUID_HOME/logs/server.log"
 
 FORCE=0
 for arg in "$@"; do [[ "$arg" == "--force" || "$arg" == "--restart" ]] && FORCE=1; done

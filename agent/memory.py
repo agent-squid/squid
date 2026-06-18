@@ -6,8 +6,7 @@ import yaml
 from .topics import normalize_topic_slug
 
 
-_ROOT = Path(__file__).parent.parent
-TOPICS_CONTEXT_DIR = _ROOT / "context" / "topics"
+TOPICS_CONTEXT_DIR = Path.home() / ".squid" / "context" / "topics"
 
 
 def _split_frontmatter(content: str) -> tuple[Optional[str], str]:

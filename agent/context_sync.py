@@ -21,7 +21,7 @@ from .config import SQUID_HOME
 
 log = logging.getLogger(__name__)
 
-CONTEXT_DIR = str(Path(__file__).parent.parent / "context")
+CONTEXT_DIR = str(Path.home() / ".squid" / "context")
 _last_sync_mtime: float = 0.0
 
 
