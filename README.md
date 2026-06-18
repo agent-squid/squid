@@ -9,34 +9,39 @@
    ╚═════╝  ╚══▀▀═╝  ╚═════╝ ╚═╝╚═════╝
 ```
 
-**A local web cockpit for CLI coding agents.**
+**Use your $20 plan like a $100 plan.**
 
-Agent-Squid lets you run Claude Code, OpenAI Codex, Cursor Agent, GitHub Copilot CLI, Google Antigravity, and other local agent CLIs from one browser UI. Your agents still run on your own machine, with your repo, shell tools, credentials, and native CLI sessions. Squid gives those sessions names, history, queues, controls, and phone/tablet access.
+Named sessions, parallel prompts, and goldfish mode — auto lookback or manual context selection — across Claude Code, Codex, and Cursor Agent.
 
-Use it when your workflow has become a wall of unnamed terminal tabs.
+Most developers burn tokens they never meant to spend. Long sessions drift — stale context, forgotten decisions, dead branches still in the window. The model reads all of it. You pay for all of it.
+
+Squid gives you the controls to stop that.
 
 ```text
 #launch@claude write the release notes
 #launch@codex! review the diff for regressions
 #bug@cursor reproduce the auth failure
-#ops@copilot summarize the incident notes
 ```
 
-## Why
+## Core Values
 
-CLI agents are useful, but the workflow gets messy quickly:
+**Every token should earn its place.**
+Every prompt shows exactly what it cost — input, output, cache reads, cache writes, reasoning tokens, latency, quota. You see when a long session is helping and when it's dead weight. You decide, every time.
 
-- You have ten Claude Code terminals open and cannot remember which one is doing what.
-- A terminal closes or the machine reboots, and reviving the right session becomes a hunt through resume pickers, session IDs, cwd-sensitive history, and shell scrollback.
-- Long-running sessions grow, drift, stall, and need compaction or reset.
-- It is hard to compare a fully resumed session against a fresh prompt with only limited historical context.
-- Different agent CLIs have different commands, resume flags, slash commands, output formats, and UI assumptions.
-- Token usage is usually hidden in the flow instead of attached clearly to each prompt and response.
-- The best machine for the job is often not the device in your hand. It is your Mac mini, workstation, or always-on local box with the repo and CLIs already configured.
+**Goldfish when you need fresh eyes.**
+`!` runs a clean prompt. `!3` sends only the last three exchanges. You choose the lookback window — or cut it to zero. Stale context is a cost you can eliminate.
 
-Squid turns those local agents into named, durable lanes you can control from a browser.
+**Sessions that outlive your terminal.**
+Close the tab, reboot the machine, switch to your phone. Named sessions survive all of it. Your work is `#topic@agent`, not a terminal PID nobody can find tomorrow.
 
-Topics and agents are not a rigid setup step. You can create a new `#topic` the moment you type it, switch agents with `@agent`, and clean up old workstreams when they are done. Squid treats tags as the UI for your agent work: lightweight enough to create dynamically, durable enough to recover later, and visible enough that you are not guessing which terminal was doing what.
+**Parallel without chaos.**
+Run Claude and Codex on the same problem at the same time. Compare the answers. The sessions don't interfere — each gets its own lane, its own queue, its own context.
+
+**Context you curate, not context that accumulates.**
+Pin a good answer from one agent and inject it into another. Clear a session when it's drifted too far. Add a `CLAUDE.md` scoped to a specific topic. You are the editor of what each agent knows.
+
+**Your machine. Your credentials. Any screen.**
+The agent runs where your repo lives. Squid gives that machine a browser interface — including your phone on the couch. Nothing moves to the cloud.
 
 ## What You Get
 
@@ -58,7 +63,7 @@ Topics and agents are not a rigid setup step. You can create a new `#topic` the 
 
 ### 1. Install at least one agent CLI
 
-Squid is a cockpit — it needs at least one coding agent to talk to. Install whichever you use:
+Squid needs at least one coding agent to talk to. Install whichever you use:
 
 ```bash
 npm install -g @anthropic-ai/claude-code   # Claude Code
