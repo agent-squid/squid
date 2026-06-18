@@ -1581,7 +1581,7 @@ async function sendMessage(text) {
   }
 
   // Quota snapshot — wait briefly for provider APIs to reflect the just-completed turn.
-  await new Promise(r => setTimeout(r, 3000));
+  await new Promise(r => setTimeout(r, 1000));
   const hasQuotaBefore = quotaBeforeSnapshot?.backend === quotaBackend && quotaBeforeSnapshot.raw !== null;
   const quotaAfterSnapshot = await fetchQuotaForBackend(quotaBackend, { trackDelta: hasQuotaBefore });
   const quotaBefore = quotaBeforeSnapshot?.raw ?? null;
@@ -2480,6 +2480,15 @@ function parseCodexQuota(data) {
   };
 }
 
+function scheduleGaugeTick(backend) {
+  const state = quotaState[backend];
+  if (!state.resetAt || state.resetAt <= Date.now()) return;
+  state.timer = setTimeout(() => {
+    updateGaugeLabel(backend);
+    scheduleGaugeTick(backend);
+  }, 10000);
+}
+
 function updateGaugeLabel(backend) {
   const cfg = QUOTA_CONFIG[backend];
   const state = quotaState[backend];
@@ -2509,8 +2518,9 @@ function renderQuotaLoaded(backend, snapshot) {
   displayEl.classList.add('loaded');
   displayEl.title = snapshot.title ?? '';
   updateGaugeLabel(backend);
-  if (state.timer) clearInterval(state.timer);
-  state.timer = setInterval(() => updateGaugeLabel(backend), 10000);
+  if (state.timer) clearTimeout(state.timer);
+  state.timer = null;
+  scheduleGaugeTick(backend);
 
   setQuotaSnapshot(backend, {
     status: 'loaded',
@@ -2524,7 +2534,7 @@ function showQuotaError(backend, text) {
   const cfg = QUOTA_CONFIG[backend];
   const state = quotaState[backend];
   state.resetAt = null;
-  if (state.timer) { clearInterval(state.timer); state.timer = null; }
+  if (state.timer) { clearTimeout(state.timer); state.timer = null; }
 
   const displayEl = document.getElementById(cfg.displayId);
   displayEl.classList.remove('loaded');
