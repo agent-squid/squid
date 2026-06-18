@@ -8,7 +8,7 @@ VENV="$ROOT/.venv"
 # ── bootstrap config ─────────────────────────────────────────────────────────
 CONFIG="$ROOT/config/squid.yaml"
 if [[ ! -f "$CONFIG" && -f "$ROOT/config/squid.yaml.example" ]]; then
-  cp "$ROOT/config/squid.yaml.example" "$CONFIG"
+  sed "s|/tmp/squid|/tmp/$(whoami)/squid|g" "$ROOT/config/squid.yaml.example" > "$CONFIG"
   echo "Created config/squid.yaml from example — edit it to customise."
 fi
 

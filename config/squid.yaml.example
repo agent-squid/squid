@@ -4,6 +4,7 @@ server:
   host: "127.0.0.1"
   port: 8000
   # Directories the file viewer may serve from. Empty = disabled.
+  # /tmp/squid is substituted with /tmp/<your-username>/squid by start.sh on first run.
   localfile_roots:
     - "/tmp/squid"
 

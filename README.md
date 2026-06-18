@@ -106,7 +106,7 @@ Create an agent via the UI settings panel, or directly:
 ```bash
 curl -X POST http://127.0.0.1:8000/config/agents \
   -H 'Content-Type: application/json' \
-  -d '{"name": "opus", "backend": "claude", "model": "claude-opus-4-7", "cwd": "/tmp/squid/work"}'
+  -d '{"name": "opus", "backend": "claude", "model": "claude-opus-4-7", "cwd": "/tmp/<user>/squid/work"}'
 ```
 
 | Field     | Type    | Description                                                                      |
@@ -114,7 +114,7 @@ curl -X POST http://127.0.0.1:8000/config/agents \
 | `name`    | string  | Agent identifier — used in `#topic@agent` syntax                                 |
 | `backend` | string  | `auto` \| `claude` \| `cursor` \| `antigravity` \| `codex` \| `copilot` |
 | `model`   | string  | Model name passed as `--model` to the CLI (optional)                             |
-| `cwd`     | string  | Absolute path for the subprocess cwd; `null` = `/tmp/squid`                     |
+| `cwd`     | string  | Absolute path for the subprocess cwd; `null` = `/tmp/<user>/squid`              |
 | `timeout` | integer | Response timeout in seconds; overrides the global 1800 s default                 |
 
 ### Agent required
@@ -123,18 +123,18 @@ curl -X POST http://127.0.0.1:8000/config/agents \
 
 ### Context directory and bare-run design
 
-`start.sh` creates a symlink `/tmp/squid` → `<repo>/context/` on every launch. All CLI subprocesses run from `/tmp/squid` by default.
+`start.sh` creates `/tmp/<user>/squid` (where `<user>` is the OS username running squid) and keeps it in sync with `<repo>/context/` via rsync. All CLI subprocesses run from `/tmp/<user>/squid` by default.
 
-**Why `/tmp/squid` and not the repo directory:** Claude Code scans the working directory and all parent directories for `CLAUDE.md` files. Running from anywhere under `~/` would load `~/CLAUDE.md` if it exists — injecting unintended personas, MCP tool connections, or agent config. `/tmp/` has no `CLAUDE.md` in its path, so subprocesses start clean.
+**Why `/tmp/<user>/squid` and not the repo directory:** Claude Code scans the working directory and all parent directories for `CLAUDE.md` files. Running from anywhere under `~/` would load `~/CLAUDE.md` if it exists — injecting unintended personas, MCP tool connections, or agent config. `/tmp/` has no `CLAUDE.md` in its path, so subprocesses start clean. The per-user subdirectory avoids permission conflicts when multiple OS users run squid on the same machine.
 
-**Adding context for an agent:** create a subdirectory under `context/` and put a `CLAUDE.md` there. Then set the agent `cwd` to `/tmp/squid/<subdir>`.
+**Adding context for an agent:** create a subdirectory under `context/` and put a `CLAUDE.md` there. Then set the agent `cwd` to `/tmp/<user>/squid/<subdir>`.
 
 ```
 context/
   work/
-    CLAUDE.md    ← loaded when agent cwd = /tmp/squid/work
+    CLAUDE.md    ← loaded when agent cwd = /tmp/<user>/squid/work
   coding/
-    CLAUDE.md    ← loaded when agent cwd = /tmp/squid/coding
+    CLAUDE.md    ← loaded when agent cwd = /tmp/<user>/squid/coding
 ```
 
 ## Sessions
@@ -156,7 +156,7 @@ curl 'http://127.0.0.1:8000/context/work?agent=opus'
 ```json
 {
   "session_id": "abc-123",
-  "cwd": "/tmp/squid/work",
+  "cwd": "/tmp/<user>/squid/work",
   "pending_injections": [{ "id": 42, "role": "assistant", "content": "…", "source_agent": "sonnet" }],
   "already_injected": [{ "id": 38, "injected_at": "2026-05-25T10:00:00Z" }]
 }
@@ -184,9 +184,9 @@ to the browser is restricted to explicit directories:
 ```yaml
 server:
   localfile_roots:
-    - "/tmp/squid"
+    - "/tmp/<user>/squid"
 ```
-Add other directories as needed. An empty list disables the endpoint entirely.
+Replace `<user>` with your OS username. Add other directories as needed. An empty list disables the endpoint entirely.
 
 ## Couch Coding With Tailscale
 

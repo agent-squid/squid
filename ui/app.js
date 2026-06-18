@@ -282,6 +282,7 @@ const _sessionIds = {}; // `${topic}@${agent|_}` → most recent session_id
 const _memoryInjectedInto = {}; // `${topic}@${agent|_}` → topic memory already sent to the current session
 let _agentsCache = null;
 let _agentsCachePromise = null;
+let _squidHome = '/tmp/squid'; // updated from /health on first loadAgents()
 
 function clearCachedSessionId(topic, agent) {
   const taKey = `${topic}@${agent || '_'}`;
@@ -3632,6 +3633,11 @@ async function loadAgents() {
     listEl.innerHTML = '<div class="empty">Failed to load.</div>';
     return;
   }
+  if (health?.squid_home) {
+    _squidHome = health.squid_home;
+    const cwdInput = document.getElementById('af-cwd');
+    if (cwdInput) cwdInput.placeholder = `${_squidHome}/…`;
+  }
   renderBackendsCatalog(health?.backends);
   if (!agents.length) {
     listEl.innerHTML = '<div class="empty">No agents yet. Add one below.</div>';
@@ -3642,7 +3648,7 @@ async function loadAgents() {
       <td><span class="agent-name">${a.name}</span></td>
       <td>${a.backend}</td>
       <td class="col-model">${a.model || '<span class="col-default">—</span>'}</td>
-      <td>${a.cwd || '<span class="col-default">/tmp/squid</span>'}</td>
+      <td>${a.cwd || `<span class="col-default">${_squidHome}</span>`}</td>
       <td>
         <button class="del-btn" data-name="${a.name}" title="Delete agent (does not affect existing messages)">✕</button>
       </td>
@@ -3796,7 +3802,7 @@ function showAgentCreatePrompt(agentName, onSaved) {
         <option value="cursor">cursor</option>
       </select>
       <input id="acp-model" placeholder="${BACKEND_MODEL_HINTS.claude}" />
-      <input id="acp-cwd" placeholder="cwd (default: /tmp/squid)" />
+      <input id="acp-cwd" placeholder="cwd (default: ${_squidHome})" />
     </div>
     <div class="acp-actions">
       <button id="acp-save">Create &amp; send</button>
@@ -4811,7 +4817,7 @@ function openFileViewer(path, line, endLine) {
             '<div class="fv-config-hint">' +
             '<strong>File viewer not configured</strong>' +
             '<p>Add <code>server.localfile_roots</code> to <code>config/squid.yaml</code>:</p>' +
-            '<pre>server:\n  localfile_roots:\n    - "' + (path.split('/').slice(0, 3).join('/') || '/tmp/squid') + '"</pre>' +
+            '<pre>server:\n  localfile_roots:\n    - "' + (path.split('/').slice(0, 3).join('/') || _squidHome) + '"</pre>' +
             '<p>Then do a hard restart: <code>bin/start.sh --restart</code></p>' +
             '</div>';
         } else if (res.status === 403 && err.includes('outside allowed roots')) {

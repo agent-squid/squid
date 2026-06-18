@@ -612,6 +612,7 @@ async def health():
     return JSONResponse({
         "status": "ok",
         "boot_time": BOOT_TIME,
+        "squid_home": SQUID_HOME,
         "backends": {
             "claude":       {"available": bool(CLAUDE_PATH),   "path": CLAUDE_PATH,  "gauge_authed": bool(creds.get_org_id() and creds.get_session_key())},
             "codex":        {"available": bool(CODEX_PATH),    "path": CODEX_PATH,   "gauge_authed": bool(creds.get_codex_token())},
