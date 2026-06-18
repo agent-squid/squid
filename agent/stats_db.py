@@ -18,9 +18,9 @@ _BACKEND_PATHS = {
     "copilot":      COPILOT_PATH,
 }
 
-# Store database in the project root by default. Containers can set SQUID_DB_PATH
-# to point at a mounted volume, e.g. /app/.squid-data/squid.db.
-_DB_PATH = Path(os.environ.get("SQUID_DB_PATH", Path(__file__).parent.parent / "squid.db"))
+# Store database in ~/.squid/ so it persists across installs/updates.
+# Override with SQUID_DB_PATH env var (e.g. for containers).
+_DB_PATH = Path(os.environ.get("SQUID_DB_PATH", Path.home() / ".squid" / "squid.db"))
 try:
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 except Exception:

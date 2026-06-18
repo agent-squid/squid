@@ -109,6 +109,8 @@ else
   echo -e "  ${BOLD}Start squid:${RESET}"
   echo "    bin/start.sh"
   echo ""
-  echo -e "  ${BOLD}Then open:${RESET}  http://127.0.0.1:8000"
+  CONFIG_FILE="$(cd "$(dirname "$0")/.." && pwd)/config/squid.yaml"
+  PORT=$("$VENV_DIR/bin/python3" -c "import yaml; print(yaml.safe_load(open('$CONFIG_FILE'))['server']['port'])" 2>/dev/null || echo "8000")
+  echo -e "  ${BOLD}Then open:${RESET}  http://127.0.0.1:${PORT}"
   echo ""
 fi

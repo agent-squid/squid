@@ -1,9 +1,9 @@
 """
-context_sync.py — keep /tmp/squid in sync with squid/context/.
+context_sync.py — keep /tmp/<user>/squid in sync with squid/context/.
 
-/tmp/squid cannot be a symlink to context/ because Claude Code resolves the
+The tmp dir cannot be a symlink to context/ because Claude Code resolves the
 real path, which would load CLAUDE.md and MCP config from the wrong scope.
-Instead we maintain /tmp/squid as a real directory and rsync into it.
+Instead we maintain it as a real directory and rsync into it.
 
 Strategy (Option 4):
   - sync_now()   — blocking full sync; call once at daemon startup
@@ -49,7 +49,7 @@ def _rsync() -> bool:
 
 
 def sync_now() -> None:
-    """Full blocking sync at daemon startup. Creates /tmp/squid if needed."""
+    """Full blocking sync at daemon startup. Creates SQUID_HOME if needed."""
     global _last_sync_mtime
     os.makedirs(SQUID_HOME, exist_ok=True)
     if _rsync():

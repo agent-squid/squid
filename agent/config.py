@@ -1,3 +1,4 @@
+import glob
 import os
 import shutil
 from pathlib import Path
@@ -36,6 +37,8 @@ _EXTRA_PATHS = [
     os.path.expanduser("~/.local/bin"),
     os.path.expanduser("~/.npm-global/bin"),
     os.path.expanduser("~/node_modules/.bin"),
+    # nvm-managed node versions (any installed version)
+    *glob.glob(os.path.expanduser("~/.nvm/versions/node/*/bin")),
 ]
 
 def find_cli(name: str) -> Optional[str]:
@@ -58,8 +61,8 @@ COPILOT_PATH  = find_cli(COPILOT_CLI)
 CURSOR_PATH   = find_cli(CURSOR_CLI)
 AGY_PATH      = find_cli(AGY_CLI)
 
-# Subprocess working directory — symlink created by start.sh pointing to ./context/
-SQUID_HOME = "/tmp/squid"
+# Per-user tmp dir for context sync — avoids cross-user permission conflicts
+SQUID_HOME = f"/tmp/{os.getlogin()}/squid"
 
 # Proxy environment to inject into every CLI subprocess, or None if disabled.
 _proxy_cfg = _cfg.get("proxy", {})
