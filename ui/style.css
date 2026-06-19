@@ -228,6 +228,17 @@ body {
 #cursor-quota-display.loaded { color: #666; }
 #cursor-quota-display.error { color: #a06655; }
 #cursor-quota-display.error #cursor-pie-arc { stroke: #a06655; }
+/* deepseek cost gauge */
+#deepseek-quota-display {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.7em;
+  color: #555;
+  margin-right: 0.5rem;
+}
+#deepseek-quota-display.loaded { color: #666; }
 .quota-hidden { display: none !important; }
 
 #cursor-creds-popup {
@@ -247,6 +258,46 @@ body {
   min-width: 260px;
 }
 #cursor-creds-popup.open { display: flex; }
+
+#deepseek-max-popup {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  background: #13131c;
+  border: 1px solid #2e2e3e;
+  border-radius: 8px;
+  padding: 0.5rem 0.7rem;
+  z-index: 30;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.45rem;
+  min-width: 260px;
+}
+#deepseek-max-popup.open { display: flex; }
+#deepseek-max-input {
+  background: #1e1e28;
+  border: 1px solid #2e2e3e;
+  border-radius: 4px;
+  color: #aaa;
+  font-size: 0.72em;
+  padding: 0.2rem 0.5rem;
+  width: 80px;
+}
+#deepseek-max-save, #deepseek-max-clear {
+  background: #2a2a35;
+  border: 1px solid #3a3a4a;
+  border-radius: 4px;
+  color: #888;
+  cursor: pointer;
+  font-size: 0.72em;
+  font-weight: normal;
+  padding: 0.2rem 0.6rem;
+}
+#deepseek-max-save:hover { color: #4d9de0; border-color: #4d9de0; }
+#deepseek-max-clear:hover { color: #888; border-color: #555; }
+#deepseek-max-status { font-size: 0.68em; color: #555; }
 
 #codex-creds-popup {
   display: none;
@@ -2033,6 +2084,7 @@ button {
   }
 
   #quota-creds-popup,
+  #deepseek-max-popup,
   #codex-creds-popup,
   #cursor-creds-popup {
     position: fixed;

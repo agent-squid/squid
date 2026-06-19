@@ -43,6 +43,8 @@
 
       <div id="codex-quota-display" title="Codex usage · click for credentials"></div>
 
+      <div id="deepseek-quota-display" title="DeepSeek cost"></div>
+
       <div id="quota-display" title="Session usage · click for credentials"></div>
 
       <button id="help-btn" type="button" title="Help">
@@ -72,6 +74,16 @@
 
       <!-- Process status popup -->
       <div id="proc-status-popup"></div>
+
+      <div id="deepseek-max-popup">
+        <div class="creds-inputs">
+          <span class="creds-help-hint">Set your typical top-up amount to show the usage chart</span>
+          <input id="deepseek-max-input" type="number" min="1" step="1" placeholder="e.g. 20" />
+          <button id="deepseek-max-save" type="button">Set</button>
+          <button id="deepseek-max-clear" type="button">Clear</button>
+          <span id="deepseek-max-status"></span>
+        </div>
+      </div>
 
       <div id="codex-creds-popup">
         <div class="creds-help">

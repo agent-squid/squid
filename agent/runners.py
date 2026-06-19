@@ -12,7 +12,7 @@ import signal
 import time
 from typing import AsyncGenerator, List, Optional, Union
 
-from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, FIRST_BYTE_TIMEOUT, RESPONSE_TIMEOUT, PROXY_ENV
+from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, FIRST_BYTE_TIMEOUT, RESPONSE_TIMEOUT, PROXY_ENV, DEEPSEEK_ANTHROPIC_BASE_URL, DEEPSEEK_DEFAULT_MODEL, DEEPSEEK_CLAUDE_KEY
 
 # ---------------------------------------------------------------------------
 # Process registry
@@ -135,6 +135,7 @@ async def _stream_lines(
     msg_id: Optional[int] = None,
     response_timeout: Optional[int] = None,
     prompt: str = "",
+    extra_env: Optional[dict] = None,
 ) -> AsyncGenerator[str, None]:
     """Run cmd and yield stdout line by line.
 
@@ -144,6 +145,8 @@ async def _stream_lines(
     env = os.environ.copy()
     if PROXY_ENV:
         env.update(PROXY_ENV)
+    if extra_env:
+        env.update(extra_env)
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -316,6 +319,16 @@ async def run_claude(
             "claude CLI not found in PATH. Install with: npm install -g @anthropic-ai/claude-code"
         )
 
+    extra_env: Optional[dict] = None
+    if model and model.lower().startswith("deepseek"):
+        if not DEEPSEEK_CLAUDE_KEY:
+            raise CLIError("deepseek.claude_key not set in squid.yaml")
+        extra_env = {
+            "ANTHROPIC_BASE_URL": DEEPSEEK_ANTHROPIC_BASE_URL,
+            "ANTHROPIC_AUTH_TOKEN": DEEPSEEK_CLAUDE_KEY,
+            "ANTHROPIC_MODEL": model,
+        }
+
     cmd = [
         CLAUDE_PATH, "--print",
         "--output-format", "stream-json",
@@ -336,7 +349,7 @@ async def run_claude(
     streamed_text = False  # track whether any text chunks were streamed as content
     tool_blocks: dict[int, dict] = {}  # index -> {name, input_json}
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend="claude", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt):
+    async for line in _stream_lines(cmd, cwd=cwd, backend="claude", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, extra_env=extra_env):
         if not line:
             continue
         try:
@@ -426,6 +439,7 @@ async def run_codex(
         raise CLINotFoundError(
             "codex CLI not found in PATH. Install with: npm install -g @openai/codex"
         )
+
     if resume_session_id:
         cmd = [CODEX_PATH, "exec", "resume", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"]
         if model:

@@ -37,7 +37,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, SQUID_HOME, RESPONSE_TIMEOUT, _cfg
+from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, SQUID_HOME, RESPONSE_TIMEOUT, DEEPSEEK_CLAUDE_KEY, DEEPSEEK_DEFAULT_MODEL, _cfg
 from .runners import run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError, CLIError, list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic
 from .history import list_history
 from .topic_queue import TopicDispatcher
@@ -120,7 +120,19 @@ def _check_deps():
     if not missing and not warnings:
         log.info("claude=%s  codex=%s  cursor=%s", CLAUDE_PATH, CODEX_PATH, CURSOR_PATH)
 
+def _provision_deepseek_agents():
+    """Create (or correct) deepcla agent if Claude Code CLI and key are available.
+    deepcod is intentionally omitted — Codex CLI is hardwired to ChatGPT's API and
+    does not support custom OpenAI-compatible base URLs.
+    """
+    if CLAUDE_PATH and DEEPSEEK_CLAUDE_KEY:
+        existing = get_agent("deepcla")
+        if not existing or existing.get("backend") != "claude":
+            upsert_agent("deepcla", "claude", DEEPSEEK_DEFAULT_MODEL)
+            log.info("provisioned agent: deepcla (backend=claude model=%s)", DEEPSEEK_DEFAULT_MODEL)
+
 _check_deps()
+_provision_deepseek_agents()
 sync_now()
 
 app = FastAPI(title="Squid", version="0.1.0")
@@ -321,7 +333,7 @@ async def stream_response(
     lookback: int = 0,
     code_roots: Optional[list[str]] = None,
 ) -> AsyncGenerator[str, None]:
-    yield sse_event("meta", json.dumps({"agent": agent, "backend": backend, "msg_id": asst_msg_id, "adhoc": adhoc}))
+    yield sse_event("meta", json.dumps({"agent": agent, "backend": backend, "model": model, "msg_id": asst_msg_id, "adhoc": adhoc}))
 
     effective_cwd = cwd or SQUID_HOME
     out_q, seq, worker = await dispatcher.dispatch(
@@ -955,6 +967,7 @@ async def save_codex_creds(req: CodexCredsRequest):
     return JSONResponse({"ok": True})
 
 
+
 @app.get("/quota")
 @app.get("/quota/claude")
 async def quota_claude():
@@ -1025,6 +1038,26 @@ async def quota_cursor():
         return JSONResponse(r.json())
     except Exception as exc:
         log.error("cursor quota fetch failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+
+@app.get("/quota/deepseek")
+async def quota_deepseek():
+    if not DEEPSEEK_CLAUDE_KEY:
+        return JSONResponse({"error": "deepseek key not configured"}, status_code=400)
+    try:
+        import httpx
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                "https://api.deepseek.com/user/balance",
+                headers={"Authorization": f"Bearer {DEEPSEEK_CLAUDE_KEY}"},
+                timeout=10,
+            )
+        if r.status_code != 200:
+            return JSONResponse({"error": f"DeepSeek returned {r.status_code}"}, status_code=502)
+        return JSONResponse(r.json())
+    except Exception as exc:
+        log.error("deepseek balance fetch failed: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=502)
 
 

@@ -28,6 +28,12 @@ AGY_CLI      = "agy"
 # Only these backends are exposed via the API and UI
 ENABLED_BACKENDS = frozenset({"claude", "codex", "cursor"})
 
+# DeepSeek — Anthropic-compatible endpoint only (Codex CLI does not support custom base URLs)
+DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
+DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-pro"
+_deepseek_cfg = _cfg.get("deepseek", {})
+DEEPSEEK_CLAUDE_KEY: Optional[str] = _deepseek_cfg.get("claude_key") or None
+
 # How long to wait for a CLI to produce its first byte before giving up
 FIRST_BYTE_TIMEOUT: int = _cfg["agent"]["first_byte_timeout"]
 

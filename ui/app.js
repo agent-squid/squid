@@ -58,6 +58,7 @@ const AGENT_THEME_COLORS = Object.freeze({
   claude: '#AE5332',
   codex: '#e8e4dc',
   cursor: '#9aa0a6',
+  deepseek: '#4d9de0',
   antigravity: '#4ea1ff',
   copilot: '#ff5db1',
   default: '#888888',
@@ -1419,7 +1420,8 @@ async function sendMessage(text) {
               const meta = JSON.parse(data);
               resolvedAgent = meta.agent || (meta.backend !== 'auto' ? meta.backend : null);
               if (meta.backend === 'claude' || meta.backend === 'codex') {
-                quotaBackend = meta.backend;
+                quotaBackend = (meta.backend === 'claude' && meta.model?.toLowerCase().startsWith('deepseek'))
+                  ? 'deepseek' : meta.backend;
                 if (quotaBeforeSnapshot?.backend && quotaBeforeSnapshot.backend !== quotaBackend) {
                   quotaBeforeSnapshot = null;
                 }
@@ -2322,7 +2324,7 @@ function addMessage(role, content) {
 // ── credentials + quota ───────────────────────────────────────────────────────
 
 const quotaDisplay = document.getElementById('quota-display');
-const QUOTA_BACKENDS = ['claude', 'codex', 'cursor'];
+const QUOTA_BACKENDS = ['claude', 'codex', 'cursor', 'deepseek'];
 
 // Per-backend config — add an entry here to support a new quota backend.
 const QUOTA_CONFIG = {
@@ -2356,19 +2358,32 @@ const QUOTA_CONFIG = {
     errorTitle:   'Cursor usage unavailable · click for info',
     parse:        parseCursorQuota,
   },
+  deepseek: {
+    endpoint:     '/quota/deepseek',  // returns remaining pre-paid balance
+    displayId:    'deepseek-quota-display',
+    pieArcId:     'deepseek-pie-arc',
+    labelId:      'deepseek-quota-label',
+    pieC:         2 * Math.PI * 6,
+    credsPopupId: 'deepseek-max-popup',
+    errorTitle:   'DeepSeek balance unavailable',
+    parse:        parseDeepSeekQuota,
+    formatLabel:  (state) => state.displayText || '—',
+  },
 };
 
 const quotaSnapshots = {
-  claude: { backend: 'claude', status: 'unknown' },
-  codex:  { backend: 'codex',  status: 'unknown' },
-  cursor: { backend: 'cursor', status: 'unknown' },
+  claude:   { backend: 'claude',   status: 'unknown' },
+  codex:    { backend: 'codex',    status: 'unknown' },
+  cursor:   { backend: 'cursor',   status: 'unknown' },
+  deepseek: { backend: 'deepseek', status: 'unknown' },
 };
 // Per-backend runtime state. timer is the label-refresh interval handle.
 // activeCount tracks in-flight messages; drives the 30s quota poll interval.
 const quotaState = {
-  claude: { raw: null, pct: null, resetAt: null, delta: null, inFlight: false, timer: null, activeCount: 0 },
-  codex:  { raw: null, pct: null, resetAt: null, delta: null, inFlight: false, timer: null, activeCount: 0 },
-  cursor: { raw: null, pct: null, resetAt: null, delta: null, inFlight: false, timer: null, activeCount: 0 },
+  claude:   { raw: null, pct: null, resetAt: null, delta: null, inFlight: false, timer: null, activeCount: 0 },
+  codex:    { raw: null, pct: null, resetAt: null, delta: null, inFlight: false, timer: null, activeCount: 0 },
+  cursor:   { raw: null, pct: null, resetAt: null, delta: null, inFlight: false, timer: null, activeCount: 0 },
+  deepseek: { raw: null, pct: null, resetAt: null, delta: null, inFlight: false, timer: null, activeCount: 0 },
 };
 
 let activeQuotaBackend = null;
@@ -2443,7 +2458,10 @@ async function resolveQuotaBackend(topicName, agentName) {
   if (!agentName) return 'claude';
 
   const agents = await _acAgents();
-  return agents.find(a => a.name === agentName)?.backend || null;
+  const agent = agents.find(a => a.name === agentName);
+  const backend = agent?.backend || null;
+  if (backend === 'claude' && agent?.model?.toLowerCase().startsWith('deepseek')) return 'deepseek';
+  return backend;
 }
 
 async function updateActiveQuotaGauge() {
@@ -2495,9 +2513,13 @@ function updateGaugeLabel(backend) {
   if (!cfg || state.pct == null) return;
   const label = document.getElementById(cfg.labelId);
   if (!label) return;
-  const delta = state.delta != null ? ` +${state.delta}%` : '';
-  const timeStr = quotaTimeText(state.resetAt);
-  label.textContent = `${state.pct}%${delta}` + (timeStr ? ` in ${timeStr}` : '');
+  if (cfg.formatLabel) {
+    label.textContent = cfg.formatLabel(state);
+  } else {
+    const delta = state.delta != null ? ` +${state.delta}%` : '';
+    const timeStr = quotaTimeText(state.resetAt);
+    label.textContent = `${state.pct}%${delta}` + (timeStr ? ` in ${timeStr}` : '');
+  }
   const arc = document.getElementById(cfg.pieArcId);
   if (arc) {
     const filled = (state.pct / 100) * cfg.pieC;
@@ -2512,6 +2534,7 @@ function renderQuotaLoaded(backend, snapshot) {
   state.raw = snapshot.raw;
   state.pct = snapshot.pct;
   state.resetAt = snapshot.resetAt;
+  state.displayText = snapshot.displayText ?? null;
 
   const displayEl = document.getElementById(cfg.displayId);
   displayEl.classList.remove('error');
@@ -2628,6 +2651,27 @@ function parseCursorQuota(data) {
   return { raw, pct, resetAt, title };
 }
 
+function parseDeepSeekQuota(data) {
+  const usd = data.balance_infos?.find(b => b.currency === 'USD');
+  const cny = data.balance_infos?.find(b => b.currency === 'CNY');
+  const info = usd || cny;
+  if (!info) return null;
+  const symbol = info.currency === 'USD' ? '$' : '¥';
+  const balance = parseFloat(info.total_balance);
+  const displayText = `${symbol}${balance.toFixed(2)}`;
+  const maxStr = localStorage.getItem('deepseek-max-balance');
+  const max = maxStr ? parseFloat(maxStr) : null;
+  const spent = max ? Math.max(0, max - balance) : 0;
+  const pct = (max && max > 0) ? Math.max(0, Math.min(100, Math.round((spent / max) * 100))) : 0;
+  return {
+    raw: balance,
+    pct,
+    resetAt: null,
+    title: `DeepSeek · ${symbol}${spent.toFixed(2)} spent${max ? ` of ${symbol}${parseFloat(max).toFixed(2)}` : ' · click to set max'}`,
+    displayText,
+  };
+}
+
 function buildCodexQuotaTitle(data) {
   const primary = data?.rate_limit?.primary_window;
   const secondary = data?.rate_limit?.secondary_window;
@@ -2664,6 +2708,57 @@ function initCodexQuota() {
       credsPopup.classList.remove('open');
   });
   fetchCodexQuota();
+}
+
+function initDeepSeekQuota() {
+  const cfg = QUOTA_CONFIG.deepseek;
+  const displayEl = document.getElementById(cfg.displayId);
+  if (!displayEl) return;
+  displayEl.style.setProperty('--quota-accent', agentThemeColor('deepseek'));
+  displayEl.innerHTML = `
+    <svg id="deepseek-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
+      <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
+      <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('deepseek')}"
+              stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
+              transform="rotate(-90 9 9)"/>
+    </svg>
+    <span id="${cfg.labelId}">—</span>`;
+
+  const popup = document.getElementById(cfg.credsPopupId);
+  displayEl.addEventListener('click', () => popup.classList.toggle('open'));
+  document.addEventListener('click', (e) => {
+    if (!displayEl.contains(e.target) && !popup.contains(e.target))
+      popup.classList.remove('open');
+  });
+  fetchQuotaForBackend('deepseek');
+}
+
+function initDeepSeekMaxPopup() {
+  const maxInput = document.getElementById('deepseek-max-input');
+  const saveBtn  = document.getElementById('deepseek-max-save');
+  const clearBtn = document.getElementById('deepseek-max-clear');
+  const status   = document.getElementById('deepseek-max-status');
+  if (!maxInput || !saveBtn) return;
+
+  const saved = localStorage.getItem('deepseek-max-balance');
+  if (saved) maxInput.value = saved;
+
+  saveBtn.addEventListener('click', () => {
+    const val = parseFloat(maxInput.value);
+    if (!val || val <= 0) { status.textContent = 'enter a positive amount'; return; }
+    localStorage.setItem('deepseek-max-balance', String(val));
+    status.textContent = 'saved ✓';
+    fetchQuotaForBackend('deepseek');
+    setTimeout(() => { status.textContent = ''; }, 2000);
+  });
+
+  clearBtn?.addEventListener('click', () => {
+    localStorage.removeItem('deepseek-max-balance');
+    maxInput.value = '';
+    status.textContent = 'cleared';
+    fetchQuotaForBackend('deepseek');
+    setTimeout(() => { status.textContent = ''; }, 2000);
+  });
 }
 
 function initCodexCreds() {
@@ -4972,6 +5067,8 @@ initStats();
 initTopicsView();
 initAliases();
 initQuota();
+initDeepSeekQuota();
+initDeepSeekMaxPopup();
 initCreds();
 initCodexQuota();
 initCodexCreds();
