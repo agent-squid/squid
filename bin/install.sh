@@ -94,7 +94,7 @@ else
 
   echo "     Installing Python dependencies …"
   "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-  "$VENV_DIR/bin/pip" install --quiet fastapi "uvicorn[standard]" httpx pyyaml
+  "$VENV_DIR/bin/pip" install --quiet -e "$(cd "$(dirname "$0")/.." && pwd)"
   ok "Python dependencies installed"
 fi
 
@@ -113,6 +113,11 @@ else
   INSTALL_CONFIG="$(cd "$(dirname "$0")/.." && pwd)/config/squid.yaml"
   CONFIG_FILE=$([[ -f "$USER_CONFIG" ]] && echo "$USER_CONFIG" || echo "$INSTALL_CONFIG")
   PORT=$("$VENV_DIR/bin/python3" -c "import yaml; print(yaml.safe_load(open('$CONFIG_FILE'))['server']['port'])" 2>/dev/null || echo "8000")
-  echo -e "  ${BOLD}Then open:${RESET}  http://127.0.0.1:${PORT}"
+  echo -e "  ${BOLD}Open in your browser (on this machine):${RESET}"
+  echo "    http://127.0.0.1:${PORT}"
+  echo ""
+  echo -e "  ${YELLOW}Note:${RESET} always use the 127.0.0.1 URL on this machine."
+  echo "  The Tailscale HTTPS URL shown by start.sh is for other devices only"
+  echo "  (phone, tablet, another laptop). It does not work in the local browser."
   echo ""
 fi

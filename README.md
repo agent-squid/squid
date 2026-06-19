@@ -95,6 +95,11 @@ To stop without restarting: `bin/stop.sh`
 **Local access:** `http://127.0.0.1:<port>` (default 8000, set in `~/.squid/squid.yaml`)
 **Remote access (Tailscale):** type `/remote` in the chat — it returns a QR code with the full HTTPS URL. Point your phone camera at it to open squid in one tap.
 
+> **Local vs. remote URLs**
+> Always use `http://127.0.0.1:8000` in the browser **on the machine running squid**.
+> The Tailscale HTTPS URL (`https://<machine>.ts.net/`) is for **other devices only** — phone, tablet, another laptop.
+> It does not work in the browser on the same machine where squid is running.
+
 ## Backends
 
 | Backend       | CLI                                              | Install                                        | Sessions      |
