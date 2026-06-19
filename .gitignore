@@ -6,7 +6,6 @@ dist/
 .env
 *.log
 squid.db
-squid-creds.json
 config/squid.yaml
 .squid.pid
 tests/e2e/node_modules/

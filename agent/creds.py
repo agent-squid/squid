@@ -1,13 +1,13 @@
 """
 creds.py — Store and retrieve service credentials.
-Saved to squid-creds.json next to squid.db — add to .gitignore.
+Saved to ~/.squid/squid-creds.json alongside squid.db and squid.yaml.
 """
 
 import json
 from pathlib import Path
 from typing import Optional
 
-_CREDS_PATH = Path(__file__).parent.parent / "squid-creds.json"
+_CREDS_PATH = Path.home() / ".squid" / "squid-creds.json"
 
 
 def load() -> dict:
