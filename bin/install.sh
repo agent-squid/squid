@@ -94,7 +94,7 @@ else
 
   echo "     Installing Python dependencies …"
   "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-  "$VENV_DIR/bin/pip" install --quiet -e "$(cd "$(dirname "$0")/.." && pwd)"
+  "$VENV_DIR/bin/pip" install "$(cd "$(dirname "$0")/.." && pwd)"
   ok "Python dependencies installed"
 fi
 
