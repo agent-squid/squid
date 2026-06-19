@@ -19,6 +19,9 @@ dependencies = [
 [project.scripts]
 squid = "agent.server:app"
 
+[tool.hatch.build.targets.wheel]
+packages = ["agent"]
+
 [tool.hatch.envs.default]
 dependencies = [
     "pytest",
