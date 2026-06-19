@@ -44,17 +44,22 @@ def get_codex_token() -> Optional[str]:
 
 
 def read_chrome_claude_creds() -> dict:
-    """Read sessionKey and lastActiveOrg from Chrome's cookie store (macOS only)."""
-    try:
-        import browser_cookie3
-        jar = browser_cookie3.chrome(domain_name="claude.ai")
-        result = {}
-        for cookie in jar:
-            if cookie.name in ("sessionKey", "lastActiveOrg"):
-                result[cookie.name] = cookie.value
-        return result
-    except Exception as e:
-        raise RuntimeError(f"Could not read Chrome cookies: {e}")
+    """Read sessionKey and lastActiveOrg from Chrome or Safari cookie store (macOS only)."""
+    import browser_cookie3
+
+    def _extract(jar) -> dict:
+        return {c.name: c.value for c in jar if c.name in ("sessionKey", "lastActiveOrg")}
+
+    errors = []
+    for loader, name in [(browser_cookie3.chrome, "Chrome"), (browser_cookie3.safari, "Safari")]:
+        try:
+            result = _extract(loader(domain_name="claude.ai"))
+            if result.get("sessionKey"):
+                return result
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+
+    raise RuntimeError(f"Could not read cookies from Chrome or Safari. " + " | ".join(errors))
 
 
 def get_cursor_token() -> Optional[str]:
