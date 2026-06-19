@@ -962,6 +962,21 @@ async def save_creds(req: CredsRequest):
     return JSONResponse({"ok": True})
 
 
+@app.post("/config/creds/auto")
+async def auto_detect_creds():
+    try:
+        found = await asyncio.to_thread(creds.read_chrome_claude_creds)
+    except RuntimeError as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    session_key = found.get("sessionKey")
+    org_id = found.get("lastActiveOrg")
+    if not session_key or not org_id:
+        missing = [k for k, v in {"sessionKey": session_key, "lastActiveOrg": org_id}.items() if not v]
+        return JSONResponse({"error": f"Cookies not found: {', '.join(missing)}. Make sure you are logged into claude.ai in Chrome."}, status_code=404)
+    creds.save(org_id, session_key)
+    return JSONResponse({"ok": True, "org_id": org_id})
+
+
 @app.post("/config/creds/codex")
 async def save_codex_creds(req: CodexCredsRequest):
     creds.save_codex(req.token.strip())

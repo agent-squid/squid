@@ -98,17 +98,15 @@
       </div>
 
       <div id="quota-creds-popup">
-        <div class="creds-help">
-          <a class="creds-bookmarklet" href="javascript:(function(){const ck=document.cookie.split(';').map(s=>s.trim()).find(s=>s.startsWith('lastActiveOrg='));const id=ck?decodeURIComponent(ck.split('=').slice(1).join('=')):null;if(!id)return alert('Org ID not found. Make sure you are logged into Claude.ai.');window.open('SQUID_ORIGIN/#squid-import/claude-org/'+encodeURIComponent(id),'_blank');})();">🔖 Claude Org ID → Squid</a>
-          <span class="creds-help-hint">drag to bookmarks bar → open claude.ai → click</span>
-        </div>
         <div class="creds-inputs">
-          <input id="creds-org" type="text" placeholder="Org ID" spellcheck="false" />
+          <button id="creds-auto" type="button">Auto-detect from Chrome</button>
+          <span id="creds-auto-status"></span>
+          <input id="creds-org" type="text" placeholder="Org ID (manual)" spellcheck="false" />
           <div class="creds-key-wrap">
-            <input id="creds-key" type="password" placeholder="Session key" />
+            <input id="creds-key" type="password" placeholder="Session key (manual)" />
             <span class="creds-key-hint">DevTools → Application → Cookies → claude.ai → <code>sessionKey</code></span>
           </div>
-          <button id="creds-save" type="button">Save</button>
+          <button id="creds-save" type="button">Save manually</button>
           <span id="creds-status"></span>
         </div>
       </div>

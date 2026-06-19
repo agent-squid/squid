@@ -2802,10 +2802,29 @@ function initCodexCreds() {
 }
 
 function initCreds() {
-  const orgInput = document.getElementById('creds-org');
-  const keyInput = document.getElementById('creds-key');
-  const saveBtn  = document.getElementById('creds-save');
-  const status   = document.getElementById('creds-status');
+  const orgInput   = document.getElementById('creds-org');
+  const keyInput   = document.getElementById('creds-key');
+  const saveBtn    = document.getElementById('creds-save');
+  const status     = document.getElementById('creds-status');
+  const autoBtn    = document.getElementById('creds-auto');
+  const autoStatus = document.getElementById('creds-auto-status');
+
+  autoBtn.addEventListener('click', async () => {
+    autoBtn.disabled = true;
+    autoStatus.textContent = 'detecting…';
+    try {
+      const res = await fetch('/config/creds/auto', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) {
+        autoStatus.textContent = `saved ✓ (org: ${data.org_id.slice(0, 8)}…)`;
+        fetchQuota();
+      } else {
+        autoStatus.textContent = data.error || 'failed';
+      }
+    } catch { autoStatus.textContent = 'error'; }
+    autoBtn.disabled = false;
+    setTimeout(() => { autoStatus.textContent = ''; }, 5000);
+  });
 
   saveBtn.addEventListener('click', async () => {
     const org_id      = orgInput.value.trim();
