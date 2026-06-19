@@ -397,8 +397,9 @@ async def stream_response(
                 raw += chunk
                 yield sse_chunk(chunk)
                 now = time.monotonic()
-                if raw and now - last_partial_save >= 3.0:
-                    update_assistant_message(asst_msg_id, raw, session_id, "pending")
+                if raw and now - last_partial_save >= 0.5:
+                    context_json = json.dumps(tool_events) if tool_events else None
+                    update_assistant_message(asst_msg_id, raw, session_id, "pending", context=context_json)
                     last_partial_save = now
 
             await asyncio.sleep(0)

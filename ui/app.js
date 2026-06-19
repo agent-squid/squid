@@ -284,6 +284,7 @@ const _memoryInjectedInto = {}; // `${topic}@${agent|_}` → topic memory alread
 let _agentsCache = null;
 let _agentsCachePromise = null;
 let _squidHome = '/tmp/squid'; // updated from /health on first loadAgents()
+let _activePollImmediate = null; // fn to trigger an immediate status poll for the active stream
 
 function clearCachedSessionId(topic, agent) {
   const taKey = `${topic}@${agent || '_'}`;
@@ -1279,6 +1280,7 @@ async function sendMessage(text) {
     if (!statusTimer) return;
     clearInterval(statusTimer);
     statusTimer = null;
+    _activePollImmediate = null;
   }
 
   function showError(text) {
@@ -1303,7 +1305,7 @@ async function sendMessage(text) {
 
   function startStatusFallback(id) {
     if (statusTimer || !id) return;
-    statusTimer = setInterval(async () => {
+    const doPoll = async () => {
       try {
         const statusRes = await fetch(`/chat/${id}/status`);
         if (!statusRes.ok) return;
@@ -1323,12 +1325,22 @@ async function sendMessage(text) {
           showError(data.content || 'Response interrupted.');
           controller.abort();
         } else if (data.status === 'pending' && data.content && !thinkingFrozen) {
-          // Show partial DB content as live preview while agent is still writing
           raw = data.content;
+          // If DB has tool events the SSE stream didn't deliver, surface them
+          if (data.context) {
+            try {
+              const dbTools = typeof data.context === 'string' ? JSON.parse(data.context) : data.context;
+              if (Array.isArray(dbTools) && dbTools.length > liveToolEvents.length) {
+                statusBuf = dbTools.map(toolLabel).join('\n') + '\nConnection interrupted — recovering…';
+              }
+            } catch {}
+          }
           updateThinkingPreview();
         }
       } catch {}
-    }, 2000);
+    };
+    _activePollImmediate = doPoll;
+    statusTimer = setInterval(doPoll, 2000);
   }
 
   // Compute pinned IDs to inject — works for both session and adhoc turns
@@ -1551,8 +1563,7 @@ async function sendMessage(text) {
     if (!completedFromStatus && err.name !== 'AbortError') {
       if (msgId) {
         detachedPolling = true;
-        statusBuf += (statusBuf ? '\n' : '') + 'Still running — waiting for saved response…';
-        raw = '';
+        statusBuf += (statusBuf ? '\n' : '') + 'Connection interrupted — recovering…';
         updateThinkingPreview();
         startStatusFallback(msgId);
       } else {
@@ -1566,8 +1577,7 @@ async function sendMessage(text) {
         // Stream ended without a 'done' event — switch to polling if we have a msgId
         if (!completedFromStatus && msgId && !userAborted) {
           detachedPolling = true;
-          statusBuf += (statusBuf ? '\n' : '') + 'Still running — waiting for saved response…';
-          raw = '';
+          statusBuf += (statusBuf ? '\n' : '') + 'Connection interrupted — recovering…';
           updateThinkingPreview();
           startStatusFallback(msgId);
         } else if (!completedFromStatus) {
@@ -2097,6 +2107,10 @@ async function pollPendingItem(item, wipBubble) {
         clearInterval(timer);
         const content = wipBubble.querySelector('.thinking-live');
         if (content) content.innerHTML += '<br><span class="msg-error">Timed out.</span>';
+      } else if (data.content) {
+        // Show partial content while still generating
+        const statusSpan = wipBubble.querySelector('.thinking-live > span:not(.loader)');
+        if (statusSpan) statusSpan.textContent = truncate(data.content, 120);
       }
     } catch { clearInterval(timer); }
   }, 2000);
@@ -5093,6 +5107,16 @@ try {
 // Patch bookmarklet hrefs with the actual origin (avoids hardcoding the port).
 document.querySelectorAll('.creds-bookmarklet').forEach(a => {
   a.href = a.href.replace('SQUID_ORIGIN', location.origin);
+});
+
+// ── tab visibility recovery ───────────────────────────────────────────────────
+// When the user switches away and back, scroll to show the current streaming
+// state and immediately trigger the status poll if we're in recovery mode.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    messages.scrollTop = messages.scrollHeight;
+    if (_activePollImmediate) _activePollImmediate();
+  }
 });
 
 // ── bookmarklet credential import ─────────────────────────────────────────────
