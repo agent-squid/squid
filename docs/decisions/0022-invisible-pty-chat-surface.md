@@ -65,31 +65,62 @@ deregistration on exit transitions the state to IDLE automatically.
 ### Session ID Extraction
 
 Interactive PTY mode does not emit structured JSON, so the current approach of
-reading `system.session_id` from the first JSON event does not apply.
+reading `system.session_id` from the first JSON event does not apply. Each
+backend exposes a native mechanism that avoids both JSONL polling and probe
+prompts:
 
-Instead, Squid extracts the session_id from Claude's on-disk project files
-after the first prompt is sent:
+**Claude — `--session-id <uuid>` flag (pre-set before launch)**
 
-1. Compute the project directory: `~/.claude/projects/<cwd-hash>/` where
-   `<cwd-hash>` is the absolute `cwd` with every `/` replaced by `-`
-   (e.g., `/Users/haebin/Work/squid` → `-Users-haebin-Work-squid`).
-2. After sending the first prompt, poll the project directory for the most
-   recently modified `.jsonl` file (modified within the last N seconds,
-   default 30s).
-3. Read the first line of the candidate file; it contains
-   `{"type":"mode","sessionId":"<id>"}`.
-4. Optionally verify: scan the file for the first `"role":"user"` entry and
-   confirm it contains the prompt text sent.
-5. If matched: the file stem (filename without `.jsonl`) is the session_id.
-   Store it in `topic_sessions` exactly as the batch mode does.
+Claude CLI accepts `--session-id <uuid>` to use a caller-supplied UUID as the
+session identity. Squid generates a UUID before spawning the PTY, passes it
+via this flag, stores it immediately in `topic_sessions`, and never needs to
+scan any file:
 
-This approach requires no probe prompt and no modification to the CLI invocation.
-It relies on Claude CLI's stable on-disk format: the `.jsonl` filename equals
-the session_id and the first line always contains `{"type":"mode","sessionId":"..."}`.
+```
+uuid = str(uuid.uuid4())
+cmd = ["claude", "--session-id", uuid, ...]
+store_in_topic_sessions(topic, agent, session_id=uuid, cwd=cwd)
+spawn_pty(cmd)
+```
 
-**Fallback**: if no matching file is found within the polling window, log a
-warning and continue without a session_id. The next user message will re-attempt
-extraction. Resumption is unavailable until a session_id is captured.
+The session file `~/.claude/projects/<cwd-hash>/<uuid>.jsonl` is created by
+Claude CLI on first interaction, using exactly the supplied UUID.
+
+**Cursor — `cursor-agent create-chat` (pre-create before launch)**
+
+`cursor-agent create-chat` creates an empty chat record and prints its UUID
+without starting any interactive session. Squid calls this once before
+spawning the PTY, stores the returned ID, then starts the PTY with
+`--resume <id>`:
+
+```
+chat_id = subprocess.check_output(["cursor-agent", "create-chat"]).strip()
+store_in_topic_sessions(topic, agent, session_id=chat_id, cwd=cwd)
+spawn_pty(["cursor-agent", "--resume", chat_id, ...])
+```
+
+**Codex — JSONL filesystem scan after first prompt**
+
+Codex has no pre-set flag. After the first prompt is sent, Squid scans
+`~/.codex/sessions/YYYY/MM/DD/` for the most recently modified `.jsonl`
+and reads its first line:
+`{"type":"session_meta","payload":{"id":"<uuid>","cwd":"<path>",...}}`.
+The `payload.cwd` field is matched against the agent's cwd to disambiguate
+concurrent sessions from different projects (Codex does not scope its session
+directory by cwd). The extracted `payload.id` is stored in `topic_sessions`.
+
+Note: Codex maintains two session pools — `exec` (non-interactive) and
+interactive. The `codex resume` picker filters to interactive sessions by
+default but accepts `--include-non-interactive` to show exec sessions too.
+PTY mode should use the interactive pool exclusively (`codex <prompt>`,
+`codex resume <id>`) so that `/compact` and other interactive features are
+available. Exec-pool sessions (`codex exec`) created by the current batch mode
+are a separate identity from PTY-mode sessions.
+
+**Fallback for all backends**: if extraction fails within the polling window,
+log a warning and continue without a session_id. The next user message
+re-attempts extraction. Resumption is unavailable until a session_id is
+captured.
 
 ### Text Extraction
 
@@ -187,12 +218,20 @@ is typed naturally into the interactive session.
 starts a fresh PTY with no `--resume`. The session_id extracted from the new
 session replaces the old record.
 
+## Per-Backend Session ID Summary
+
+| Backend | Method | Mechanism |
+|---------|--------|-----------|
+| Claude | `--session-id <uuid>` flag | Generate UUID before PTY launch; pass to CLI; stored immediately |
+| Cursor | `create-chat` subcommand | Pre-create empty chat; get UUID; start PTY with `--resume <id>` |
+| Codex | JSONL scan after first prompt | Scan `~/.codex/sessions/YYYY/MM/DD/`; match `payload.cwd`; extract `payload.id` |
+
 ## Comparison with Batch Mode
 
 | Property | Batch (current) | PTY (this ADR) |
 |----------|----------------|----------------|
 | Process per turn | Yes (fresh subprocess) | No (shared PTY) |
-| Session ID source | First JSON event | JSONL filesystem scan |
+| Session ID source | First JSON event | Native flag / pre-create / JSONL scan |
 | Structured events (stats, tool) | Yes | No — requires separate scraping |
 | Turn boundary | Process exit (exact) | Heuristic (layered) |
 | Idle resource usage | Zero (no process) | Zero (killed on idle) |
