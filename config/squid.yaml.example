@@ -13,5 +13,4 @@ agent:
   response_timeout: 1800
 
 deepseek:
-  claude_key: ""   # agt-squid-claude DeepSeek key (Anthropic-compatible endpoint)
-  codex_key: ""    # agt-squid-codex DeepSeek key (OpenAI-compatible endpoint)
+  claude_key: ""   # DeepSeek API key (Anthropic-compatible endpoint) — powers the deepcla agent
