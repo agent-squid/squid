@@ -2809,6 +2809,11 @@ function initCreds() {
   const autoBtn    = document.getElementById('creds-auto');
   const autoStatus = document.getElementById('creds-auto-status');
 
+  if (location.hostname !== '127.0.0.1' && location.hostname !== 'localhost') {
+    autoBtn.style.display = 'none';
+    autoStatus.style.display = 'none';
+  }
+
   autoBtn.addEventListener('click', async () => {
     autoBtn.disabled = true;
     autoStatus.textContent = 'detecting…';
