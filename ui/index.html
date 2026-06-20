@@ -86,25 +86,39 @@
       </div>
 
       <div id="codex-creds-popup">
+        <div class="creds-auto-row">
+          <div class="creds-auto-text">
+            <span class="creds-auto-label">Auto-detect from browser</span>
+            <span class="creds-auto-desc">Reads your ChatGPT session cookies from Chrome or Safari to fetch the access token.</span>
+          </div>
+          <button id="codex-creds-auto" type="button" class="creds-auto-btn">Detect</button>
+        </div>
+        <span id="codex-creds-auto-status" class="creds-auto-status"></span>
+        <div class="creds-divider"></div>
         <div class="creds-inputs">
-          <button id="codex-creds-auto" type="button">Auto-detect from Chrome</button>
-          <span id="codex-creds-auto-status"></span>
-          <input id="codex-creds-token" type="password" placeholder="Bearer eyJ… (manual)" />
-          <button id="codex-creds-save" type="button">Save manually</button>
+          <input id="codex-creds-token" type="password" placeholder="Bearer eyJ…" />
+          <button id="codex-creds-save" type="button">Save</button>
           <span id="codex-creds-status"></span>
         </div>
       </div>
 
       <div id="quota-creds-popup">
+        <div class="creds-auto-row">
+          <div class="creds-auto-text">
+            <span class="creds-auto-label">Auto-detect from browser</span>
+            <span class="creds-auto-desc">Reads your Claude session cookies from Chrome or Safari — no copy-paste needed.</span>
+          </div>
+          <button id="creds-auto" type="button" class="creds-auto-btn">Detect</button>
+        </div>
+        <span id="creds-auto-status" class="creds-auto-status"></span>
+        <div class="creds-divider"></div>
         <div class="creds-inputs">
-          <button id="creds-auto" type="button">Auto-detect from Chrome</button>
-          <span id="creds-auto-status"></span>
-          <input id="creds-org" type="text" placeholder="Org ID (manual)" spellcheck="false" />
+          <input id="creds-org" type="text" placeholder="Org ID" spellcheck="false" />
           <div class="creds-key-wrap">
-            <input id="creds-key" type="password" placeholder="Session key (manual)" />
+            <input id="creds-key" type="password" placeholder="Session key" />
             <span class="creds-key-hint">DevTools → Application → Cookies → claude.ai → <code>sessionKey</code></span>
           </div>
-          <button id="creds-save" type="button">Save manually</button>
+          <button id="creds-save" type="button">Save</button>
           <span id="creds-status"></span>
         </div>
       </div>

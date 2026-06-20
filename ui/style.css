@@ -364,6 +364,58 @@ body {
   color: #3a3a52;
   line-height: 1.35;
 }
+.creds-auto-row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.45rem 0.5rem;
+  background: #0e0e18;
+  border: 1px solid #2a2a3a;
+  border-radius: 6px;
+}
+.creds-auto-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  flex: 1;
+  min-width: 0;
+}
+.creds-auto-label {
+  font-size: 0.72em;
+  color: #aaa;
+  font-weight: 500;
+}
+.creds-auto-desc {
+  font-size: 0.62em;
+  color: #4a4a62;
+  line-height: 1.4;
+  white-space: normal;
+}
+.creds-auto-btn {
+  background: #1e1e30;
+  border: 1px solid #3a3a55;
+  border-radius: 4px;
+  color: #8888bb;
+  cursor: pointer;
+  font-size: 0.72em;
+  padding: 0.25rem 0.7rem;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: color 0.15s, border-color 0.15s;
+}
+.creds-auto-btn:hover { color: #aaaaee; border-color: #5555aa; }
+.creds-auto-btn:disabled { opacity: 0.5; cursor: default; }
+.creds-auto-status {
+  font-size: 0.65em;
+  color: #556;
+  min-height: 0.9em;
+  display: block;
+}
+.creds-divider {
+  height: 1px;
+  background: #1c1c26;
+  margin: 0.1rem 0;
+}
 .creds-inputs {
   display: flex;
   align-items: flex-start;
