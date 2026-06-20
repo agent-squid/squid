@@ -2779,6 +2779,30 @@ function initCodexCreds() {
   const tokenInput = document.getElementById('codex-creds-token');
   const saveBtn    = document.getElementById('codex-creds-save');
   const status     = document.getElementById('codex-creds-status');
+  const autoBtn    = document.getElementById('codex-creds-auto');
+  const autoStatus = document.getElementById('codex-creds-auto-status');
+
+  if (location.hostname !== '127.0.0.1' && location.hostname !== 'localhost') {
+    autoBtn.style.display = 'none';
+    autoStatus.style.display = 'none';
+  }
+
+  autoBtn.addEventListener('click', async () => {
+    autoBtn.disabled = true;
+    autoStatus.textContent = 'detecting…';
+    try {
+      const res = await fetch('/config/creds/codex/auto', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) {
+        autoStatus.textContent = 'saved ✓';
+        fetchCodexQuota();
+      } else {
+        autoStatus.textContent = data.error || 'failed';
+      }
+    } catch { autoStatus.textContent = 'error'; }
+    autoBtn.disabled = false;
+    setTimeout(() => { autoStatus.textContent = ''; }, 5000);
+  });
 
   saveBtn.addEventListener('click', async () => {
     const token = tokenInput.value.trim();

@@ -43,23 +43,46 @@ def get_codex_token() -> Optional[str]:
     return load().get("codex_token")
 
 
-def read_chrome_claude_creds() -> dict:
-    """Read sessionKey and lastActiveOrg from Chrome or Safari cookie store (macOS only)."""
+def _extract_cookies(domain: str) -> dict:
+    """Read all cookies for a domain from Chrome then Safari."""
     import browser_cookie3
-
-    def _extract(jar) -> dict:
-        return {c.name: c.value for c in jar if c.name in ("sessionKey", "lastActiveOrg")}
-
     errors = []
     for loader, name in [(browser_cookie3.chrome, "Chrome"), (browser_cookie3.safari, "Safari")]:
         try:
-            result = _extract(loader(domain_name="claude.ai"))
-            if result.get("sessionKey"):
-                return result
+            jar = loader(domain_name=domain)
+            cookies = {c.name: c.value for c in jar}
+            if cookies:
+                return cookies
         except Exception as e:
             errors.append(f"{name}: {e}")
+    raise RuntimeError(f"Could not read cookies for {domain}. " + " | ".join(errors))
 
-    raise RuntimeError(f"Could not read cookies from Chrome or Safari. " + " | ".join(errors))
+
+def read_chrome_claude_creds() -> dict:
+    """Read sessionKey and lastActiveOrg from Chrome or Safari cookie store (macOS only)."""
+    cookies = _extract_cookies("claude.ai")
+    result = {k: v for k, v in cookies.items() if k in ("sessionKey", "lastActiveOrg")}
+    if not result.get("sessionKey"):
+        raise RuntimeError("sessionKey not found in claude.ai cookies. Make sure you are logged in.")
+    return result
+
+
+def read_codex_creds() -> str:
+    """Fetch Codex access token from chatgpt.com session API using local browser cookies."""
+    import urllib.request
+    cookies = _extract_cookies("chatgpt.com")
+    cookie_header = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    req = urllib.request.Request(
+        "https://chatgpt.com/api/auth/session",
+        headers={"Cookie": cookie_header, "User-Agent": "Mozilla/5.0"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        import json
+        data = json.loads(resp.read())
+    token = data.get("accessToken")
+    if not token:
+        raise RuntimeError("accessToken not found. Make sure you are logged into ChatGPT.")
+    return token
 
 
 def get_cursor_token() -> Optional[str]:

@@ -86,13 +86,11 @@
       </div>
 
       <div id="codex-creds-popup">
-        <div class="creds-help">
-          <a class="creds-bookmarklet" href="javascript:(async function(){try{const r=await fetch('https://chatgpt.com/api/auth/session',{credentials:'include'});const d=await r.json();const t=d.accessToken;if(!t)return alert('Not found. Make sure you are logged into ChatGPT.');window.open('SQUID_ORIGIN/#squid-import/codex/'+encodeURIComponent(t),'_blank');}catch(e){alert('Error: '+e.message);}})();">🔖 Codex Key → Squid</a>
-          <span class="creds-help-hint">drag to bookmarks bar → open chatgpt.com → click</span>
-        </div>
         <div class="creds-inputs">
-          <input id="codex-creds-token" type="password" placeholder="Bearer eyJ… (or use bookmarklet)" />
-          <button id="codex-creds-save" type="button">Save</button>
+          <button id="codex-creds-auto" type="button">Auto-detect from Chrome</button>
+          <span id="codex-creds-auto-status"></span>
+          <input id="codex-creds-token" type="password" placeholder="Bearer eyJ… (manual)" />
+          <button id="codex-creds-save" type="button">Save manually</button>
           <span id="codex-creds-status"></span>
         </div>
       </div>

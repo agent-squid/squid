@@ -977,6 +977,16 @@ async def auto_detect_creds():
     return JSONResponse({"ok": True, "org_id": org_id})
 
 
+@app.post("/config/creds/codex/auto")
+async def auto_detect_codex_creds():
+    try:
+        token = await asyncio.to_thread(creds.read_codex_creds)
+    except RuntimeError as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    creds.save_codex(token)
+    return JSONResponse({"ok": True})
+
+
 @app.post("/config/creds/codex")
 async def save_codex_creds(req: CodexCredsRequest):
     creds.save_codex(req.token.strip())
