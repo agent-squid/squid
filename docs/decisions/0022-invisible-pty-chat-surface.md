@@ -168,7 +168,7 @@ When `now - last_input_at > IDLE_TIMEOUT` and the session is in WAITING state
 3. Transition state to IDLE; session_id remains in `topic_sessions`
 
 `IDLE_TIMEOUT` defaults to 3600s (1 hour). It is configurable per agent in
-`squid.yaml` under `pty_idle_timeout_sec`.
+`~/.squid/squid.yaml` under `pty_idle_timeout_sec`.
 
 No kill is issued while a turn is ACTIVE, even if `last_input_at` exceeds the
 threshold.

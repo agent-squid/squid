@@ -12,7 +12,7 @@ const TOPICS = [
     hidden: false,
     queue_depth: 0,
     active: false,
-    memory: { exists: true, path: 'context/topics/squid/memory.md' },
+    memory: { exists: true, path: '~/.squid/context/topics/squid/memory.md' },
     agents: [
       {
         agent: 'codex',
@@ -35,7 +35,7 @@ const TOPICS = [
     hidden: true,
     queue_depth: 1,
     active: true,
-    memory: { exists: false, path: 'context/topics/archive/memory.md' },
+    memory: { exists: false, path: '~/.squid/context/topics/archive/memory.md' },
     agents: [],
   },
 ];
@@ -50,7 +50,7 @@ async function mockBackend(page) {
     topic: 'squid',
     exists: true,
     content: 'Remember topic state.',
-    path: 'context/topics/squid/memory.md',
+    path: '~/.squid/context/topics/squid/memory.md',
     squid: { code_roots: [], code_roots_skipped: false, code_roots_missing: false },
   }}));
   await page.route('**/config/agents', r => r.fulfill({ json: [] }));

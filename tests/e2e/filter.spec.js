@@ -12,7 +12,7 @@ async function mockBackend(page, { topic = 'squid', agent = 'claude' } = {}) {
     { name: topic, agent, last_model: null, last_backend: 'claude', queue_depth: 0, active: false, last_prompt: 'hi' }
   ]}));
   await page.route('**/topics/*/memory', r => r.fulfill({ json: {
-    topic, exists: true, content: '---\nsquid:\n  code_roots_skipped: true\n---\n', path: `context/topics/${topic}/memory.md`,
+    topic, exists: true, content: '---\nsquid:\n  code_roots_skipped: true\n---\n', path: `~/.squid/context/topics/${topic}/memory.md`,
     squid: { code_roots: [], code_roots_skipped: true, code_roots_missing: false },
   }}));
   await page.route('**/topics/**',     r => r.fulfill({ json: [] }));

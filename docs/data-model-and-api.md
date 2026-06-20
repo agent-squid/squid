@@ -306,7 +306,7 @@ Returns topic management data for the Topics tab. Unlike `GET /topics`, this inc
     "last_prompt": "implement the topic manager",
     "queue_depth": 0,
     "active": false,
-    "memory": { "exists": true, "path": "context/topics/squid/memory.md" },
+    "memory": { "exists": true, "path": "~/.squid/context/topics/squid/memory.md" },
     "agents": [
       {
         "agent": "codex",

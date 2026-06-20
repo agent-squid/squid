@@ -4500,7 +4500,7 @@ function _memoryInjectedKey(topic, agent) {
 
 function _getMemoryMeta(topic) {
   if (_memoryCache[topic]) return _memoryCache[topic];
-  _memoryCache[topic] = { topic, exists: false, content: '', path: `context/topics/${topic}/memory.md`, loading: true };
+  _memoryCache[topic] = { topic, exists: false, content: '', path: `~/.squid/context/topics/${topic}/memory.md`, loading: true };
   fetch(`/topics/${encodeURIComponent(topic)}/memory`)
     .then(r => r.ok ? r.json() : null)
     .then(data => {
@@ -4754,14 +4754,14 @@ async function openMemoryEditor(topic) {
   closePinPanel();
   memoryTitle.textContent = `Topic memory · #${topic}`;
   memoryEditor.value = 'Loading...';
-  memoryPath.textContent = `context/topics/${topic}/memory.md`;
+  memoryPath.textContent = `~/.squid/context/topics/${topic}/memory.md`;
   memoryTokenCount.textContent = '';
   memoryModal.classList.add('open');
   try {
     const data = await fetch(`/topics/${encodeURIComponent(topic)}/memory`).then(r => r.json());
     _memoryCache[topic] = { ...data, loading: false };
     memoryEditor.value = data.content || '';
-    memoryPath.textContent = data.path || `context/topics/${topic}/memory.md`;
+    memoryPath.textContent = data.path || `~/.squid/context/topics/${topic}/memory.md`;
     updateMemoryTokenCount();
     memoryEditor.focus();
   } catch {
@@ -4781,7 +4781,7 @@ async function saveMemoryEditor() {
   const idleLabel = 'Save';
   memorySaveBtn.disabled = true;
   memorySaveBtn.textContent = 'Saving...';
-  memoryPath.textContent = `context/topics/${topic}/memory.md`;
+  memoryPath.textContent = `~/.squid/context/topics/${topic}/memory.md`;
   try {
     const res = await fetch(`/topics/${encodeURIComponent(topic)}/memory`, {
       method: 'PUT',
@@ -4791,7 +4791,7 @@ async function saveMemoryEditor() {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || `Save failed (${res.status})`);
     _memoryCache[topic] = { ...data, loading: false };
-    memoryPath.textContent = `${data.path || `context/topics/${topic}/memory.md`} · saved`;
+    memoryPath.textContent = `${data.path || `~/.squid/context/topics/${topic}/memory.md`} · saved`;
     memorySaveBtn.textContent = 'Saved';
     updatePinCount();
     if (pinPanel.classList.contains('open')) renderPinPanel();
@@ -4991,7 +4991,7 @@ function openFileViewer(path, line, endLine) {
           body.innerHTML =
             '<div class="fv-config-hint">' +
             '<strong>File viewer not configured</strong>' +
-            '<p>Add <code>server.localfile_roots</code> to <code>config/squid.yaml</code>:</p>' +
+            '<p>Add <code>server.localfile_roots</code> to <code>~/.squid/squid.yaml</code>:</p>' +
             '<pre>server:\n  localfile_roots:\n    - "' + (path.split('/').slice(0, 3).join('/') || _squidHome) + '"</pre>' +
             '<p>Then do a hard restart: <code>bin/start.sh --restart</code></p>' +
             '</div>';
@@ -5000,7 +5000,7 @@ function openFileViewer(path, line, endLine) {
           body.innerHTML =
             '<div class="fv-config-hint">' +
             '<strong>Path not in allowed roots</strong>' +
-            '<p>Add this directory to <code>server.localfile_roots</code> in <code>config/squid.yaml</code>:</p>' +
+            '<p>Add this directory to <code>server.localfile_roots</code> in <code>~/.squid/squid.yaml</code>:</p>' +
             '<pre>server:\n  localfile_roots:\n    - "' + hint + '"</pre>' +
             '<p>Then do a hard restart: <code>bin/start.sh --restart</code></p>' +
             '</div>';

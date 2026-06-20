@@ -1,6 +1,7 @@
 """
 creds.py — Store and retrieve service credentials.
-Saved to ~/.squid/squid-creds.json alongside squid.db and squid.yaml.
+Saved to ~/.squid/squid-creds.json alongside ~/.squid/squid.db and
+~/.squid/squid.yaml.
 """
 
 import json

@@ -322,7 +322,7 @@ async def run_claude(
     extra_env: Optional[dict] = None
     if model and model.lower().startswith("deepseek"):
         if not DEEPSEEK_CLAUDE_KEY:
-            raise CLIError("deepseek.claude_key not set in squid.yaml")
+            raise CLIError("deepseek.claude_key not set in ~/.squid/squid.yaml")
         extra_env = {
             "ANTHROPIC_BASE_URL": DEEPSEEK_ANTHROPIC_BASE_URL,
             "ANTHROPIC_AUTH_TOKEN": DEEPSEEK_CLAUDE_KEY,

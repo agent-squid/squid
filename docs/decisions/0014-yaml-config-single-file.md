@@ -49,9 +49,9 @@ agent:
   response_timeout: 1800
 ```
 
-The loader in `agent/config.py` tries `~/.squid/squid.yaml` first and falls
-back to `<install>/config/squid.yaml` for development convenience. No merge
-logic — one file wins entirely.
+The loader in `agent/config.py` reads `~/.squid/squid.yaml`. There is no merge
+logic or install-local fallback; `start.sh` creates the user config from the
+shipped example before starting the server.
 
 Agent-specific config (model, cwd, timeout) stays in the DB, writable at
 runtime without a server restart.

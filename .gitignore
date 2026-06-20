@@ -6,7 +6,6 @@ dist/
 .env
 *.log
 squid.db
-config/squid.yaml
 .squid.pid
 tests/e2e/node_modules/
 tests/e2e/playwright-report/

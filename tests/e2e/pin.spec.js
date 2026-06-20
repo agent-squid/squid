@@ -30,7 +30,7 @@ async function mockBackend(page, { agent = 'claude', topic = 'squid' } = {}) {
     { name: topic, agent, last_model: null, last_backend: 'claude', queue_depth: 0, active: false, last_prompt: 'hi' }
   ]}));
   await page.route('**/topics/*/memory', r => r.fulfill({ json: {
-    topic, exists: true, content: '---\nsquid:\n  code_roots_skipped: true\n---\n', path: `context/topics/${topic}/memory.md`,
+    topic, exists: true, content: '---\nsquid:\n  code_roots_skipped: true\n---\n', path: `~/.squid/context/topics/${topic}/memory.md`,
     squid: { code_roots: [], code_roots_skipped: true, code_roots_missing: false },
   }}));
   await page.route('**/topics/**',     r => r.fulfill({ json: [] }));
@@ -273,7 +273,7 @@ test('fresh session send includes topic memory when memory exists', async ({ pag
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
   await page.route('**/topics/squid/memory', r => r.fulfill({
     json: {
-      topic: 'squid', exists: true, content: MEMORY_WITH_SKIP, path: 'context/topics/squid/memory.md',
+      topic: 'squid', exists: true, content: MEMORY_WITH_SKIP, path: '~/.squid/context/topics/squid/memory.md',
       squid: { code_roots: [], code_roots_skipped: true, code_roots_missing: false },
     },
   }));
@@ -303,7 +303,7 @@ test('/clear memory injects once and is unselected immediately after send', asyn
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
   await page.route('**/topics/squid/memory', r => r.fulfill({
     json: {
-      topic: 'squid', exists: true, content: MEMORY_WITH_SKIP, path: 'context/topics/squid/memory.md',
+      topic: 'squid', exists: true, content: MEMORY_WITH_SKIP, path: '~/.squid/context/topics/squid/memory.md',
       squid: { code_roots: [], code_roots_skipped: true, code_roots_missing: false },
     },
   }));
@@ -357,12 +357,12 @@ test('topic memory editor saves and refreshes preview', async ({ page }) => {
     if (route.request().method() === 'PUT') {
       savedContent = route.request().postDataJSON().content;
       await route.fulfill({
-        json: { topic: 'squid', exists: true, content: savedContent, path: 'context/topics/squid/memory.md' },
+        json: { topic: 'squid', exists: true, content: savedContent, path: '~/.squid/context/topics/squid/memory.md' },
       });
       return;
     }
     await route.fulfill({
-      json: { topic: 'squid', exists: !!savedContent, content: savedContent, path: 'context/topics/squid/memory.md' },
+      json: { topic: 'squid', exists: !!savedContent, content: savedContent, path: '~/.squid/context/topics/squid/memory.md' },
     });
   });
 
@@ -372,6 +372,7 @@ test('topic memory editor saves and refreshes preview', async ({ page }) => {
   await page.locator('[data-memory-toggle]').click();
 
   await expect(page.locator('#memory-modal.open')).toBeVisible();
+  await expect(page.locator('#memory-path')).toHaveText('~/.squid/context/topics/squid/memory.md');
   await page.fill('#memory-editor', 'Prefer transparent context.');
   await page.click('#memory-save');
 
@@ -388,7 +389,7 @@ test('active session skips topic memory by default', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
   await page.route('**/topics/squid/memory', r => r.fulfill({
     json: {
-      topic: 'squid', exists: true, content: MEMORY_WITH_SKIP, path: 'context/topics/squid/memory.md',
+      topic: 'squid', exists: true, content: MEMORY_WITH_SKIP, path: '~/.squid/context/topics/squid/memory.md',
       squid: { code_roots: [], code_roots_skipped: true, code_roots_missing: false },
     },
   }));

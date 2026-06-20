@@ -694,7 +694,7 @@ async def topics_manage(include_hidden: bool = True):
         t["active"] = info.get("active", False)
         mem_path = topic_memory_path(t["name"])
         try:
-            mem_display = str(mem_path.relative_to(mem_path.parent.parent.parent.parent))
+            mem_display = "~/.squid/" + str(mem_path.relative_to(Path.home() / ".squid"))
         except ValueError:
             mem_display = str(mem_path)
         t["memory"] = {
@@ -1140,7 +1140,7 @@ async def serve_local_file(path: str):
     import mimetypes
     from fastapi.responses import FileResponse, PlainTextResponse
     if not _LOCALFILE_ROOTS:
-        return JSONResponse({"error": "localfile not enabled (set server.localfile_roots in squid.yaml)"}, status_code=403)
+        return JSONResponse({"error": "localfile not enabled (set server.localfile_roots in ~/.squid/squid.yaml)"}, status_code=403)
     p = Path(path).expanduser().resolve()
     if not any(p.is_relative_to(root) for root in _LOCALFILE_ROOTS):
         return JSONResponse({"error": "path outside allowed roots"}, status_code=403)

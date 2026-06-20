@@ -27,7 +27,7 @@ async function mockBackend(page) {
   await page.route('**/quota**',       r => r.fulfill({ json: {} }));
   await page.route('**/topics',        r => r.fulfill({ json: [] }));
   await page.route('**/topics/*/memory', r => r.fulfill({ json: {
-    topic: 'squid', exists: true, content: '---\nsquid:\n  code_roots_skipped: true\n---\n', path: 'context/topics/squid/memory.md',
+    topic: 'squid', exists: true, content: '---\nsquid:\n  code_roots_skipped: true\n---\n', path: '~/.squid/context/topics/squid/memory.md',
     squid: { code_roots: [], code_roots_skipped: true, code_roots_missing: false },
   }}));
   await page.route('**/topics/**',     r => r.fulfill({ json: [] }));

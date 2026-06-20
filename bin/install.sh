@@ -110,9 +110,7 @@ else
   echo "    bin/start.sh"
   echo ""
   USER_CONFIG="$HOME/.squid/squid.yaml"
-  INSTALL_CONFIG="$(cd "$(dirname "$0")/.." && pwd)/config/squid.yaml"
-  CONFIG_FILE=$([[ -f "$USER_CONFIG" ]] && echo "$USER_CONFIG" || echo "$INSTALL_CONFIG")
-  PORT=$("$VENV_DIR/bin/python3" -c "import yaml; print(yaml.safe_load(open('$CONFIG_FILE'))['server']['port'])" 2>/dev/null || echo "8000")
+  PORT=$("$VENV_DIR/bin/python3" -c "import yaml; print(yaml.safe_load(open('$USER_CONFIG'))['server']['port'])" 2>/dev/null || echo "8000")
   echo -e "  ${BOLD}Open in your browser (on this machine):${RESET}"
   echo "    http://127.0.0.1:${PORT}"
   echo ""

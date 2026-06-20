@@ -41,7 +41,7 @@ Tailscale's own device-level authentication handles who can reach the tailnet.
 
 ### Layer 2 — `/localfile` path allowlist
 
-`server.localfile_roots` in `squid.yaml` is an explicit list of directories
+`server.localfile_roots` in `~/.squid/squid.yaml` is an explicit list of directories
 that `/localfile` is permitted to serve from. Requests for paths outside the
 list return 403. An empty list disables the endpoint entirely.
 
@@ -64,7 +64,7 @@ public DNS.
 - Scan it to open squid in one tap.
 - MagicDNS resolves the hostname automatically — no port-forwarding needed.
 
-### `squid.yaml` configuration
+### `~/.squid/squid.yaml` configuration
 
 ```yaml
 server:
@@ -85,7 +85,7 @@ removed for these reasons:
 - **Local access needs no token.** When binding to `127.0.0.1`, only processes
   on the same machine can connect — token auth adds nothing there.
 - **First-run UX was brittle.** New installs required finding the token in
-  `squid.yaml` and constructing a `?token=` URL, which caused confusion on
+  `~/.squid/squid.yaml` and constructing a `?token=` URL, which caused confusion on
   fresh installs.
 
 ## Consequences
