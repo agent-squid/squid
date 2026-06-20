@@ -2101,8 +2101,10 @@ async function pollPendingItem(item, wipBubble) {
       if (data.status === 'done' || data.status === 'error') {
         clearInterval(timer);
         if (!wipBubble.parentNode) return;
-        const finalBubble = appendHistoryItem(data, null);
-        wipBubble.replaceWith(finalBubble);
+        wipBubble.remove();
+        appendHistoryItem(data, messages);
+        refreshAllRevertButtons();
+        scrollToBottom();
       } else if (count >= MAX_POLLS) {
         clearInterval(timer);
         const content = wipBubble.querySelector('.thinking-live');

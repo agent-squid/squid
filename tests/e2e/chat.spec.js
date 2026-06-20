@@ -252,3 +252,56 @@ test.describe('parallel responses', () => {
     await look(page);  // pause — observe: both bubbles at bottom in completion order
   });
 });
+
+test.describe('recovered pending responses', () => {
+  test('completed response moves to bottom instead of replacing its status bubble', async ({ page }) => {
+    await mockBackend(page);
+
+    let recovered = false;
+    await page.route('**/history**', r => r.fulfill({ json: {
+      items: [{
+        id: 41,
+        topic: 'squid',
+        agent: 'claude',
+        backend: 'claude',
+        status: 'pending',
+        prompt: 'long-running task',
+        content: 'Working...',
+        adhoc: false,
+      }],
+      has_more: false,
+    }}));
+    await page.route('**/chat/41/status', r => r.fulfill({ json: recovered ? {
+      id: 41,
+      topic: 'squid',
+      agent: 'claude',
+      backend: 'claude',
+      status: 'done',
+      prompt: 'long-running task',
+      content: 'Recovered final response',
+      adhoc: false,
+      timestamp: new Date().toISOString(),
+    } : {
+      id: 41,
+      status: 'pending',
+      content: 'Working...',
+    }}));
+    await page.route('**/chat', r => r.fulfill({
+      status: 200,
+      headers: SSE_HEADERS,
+      body: sse(META, { data: 'Newer response' }, DONE),
+    }));
+
+    await page.goto('/');
+    await expect(page.locator(THINKING)).toContainText('Working...');
+
+    await sendMsg(page, 'new request');
+    await expect(page.locator(RESPONSE).filter({ hasText: 'Newer response' })).toBeVisible();
+
+    recovered = true;
+    const recoveredBubble = page.locator(`${RESPONSE}[data-msg-id="41"]`);
+    await expect(recoveredBubble).toContainText('Recovered final response', { timeout: 5_000 });
+    await expect(page.locator(THINKING)).not.toBeAttached();
+    await expect(page.locator('#messages > .msg.assistant').last()).toContainText('Recovered final response');
+  });
+});

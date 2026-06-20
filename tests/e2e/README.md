@@ -38,6 +38,7 @@ npx playwright test --headed -g "does not appear in DOM before done"
 | `thinking bubble removed when no status events` | Pure content stream — thinking bubble is cleaned up on `done`. |
 | `error appears at bottom in bubble` | Error event puts a bubble with error text at the bottom, not mid-list. |
 | `two concurrent responses both land at bottom without early bubble insertion` | Two parallel streams held open; neither bubble appears until its own `done` fires, and they appear in completion order. |
+| `completed response moves to bottom instead of replacing its status bubble` | A pending response recovered from history completes after a newer response and is appended at the bottom rather than rendered at the old status position. |
 
 ## Architecture
 
