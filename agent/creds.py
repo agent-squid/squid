@@ -53,9 +53,15 @@ def _extract_cookies(domain: str) -> dict:
             cookies = {c.name: c.value for c in jar}
             if cookies:
                 return cookies
+        except PermissionError:
+            errors.append(
+                f"{name}: permission denied — grant Full Disk Access to Terminal in "
+                f"System Settings → Privacy & Security → Full Disk Access"
+            )
         except Exception as e:
             errors.append(f"{name}: {e}")
-    raise RuntimeError(f"Could not read cookies for {domain}. " + " | ".join(errors))
+    raise RuntimeError(" | ".join(errors) if errors else
+                       f"No cookies found for {domain} in Chrome or Safari. Make sure you are logged in.")
 
 
 def read_chrome_claude_creds() -> dict:
