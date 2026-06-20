@@ -100,8 +100,8 @@ cache_write_tokens   INTEGER
 history_input_tokens INTEGER DEFAULT 0   tokens from injected context history
 cost_usd             REAL
 duration_ms          INTEGER
-quota_before         REAL    backend quota percentage at turn start, when exposed
-quota_after          REAL    backend quota percentage at turn end, when exposed
+quota_before         REAL    observed backend-wide quota percentage at turn start
+quota_after          REAL    observed backend-wide quota percentage after turn completion
 lookback             INTEGER DEFAULT 0   adhoc lookback window used
 created_at           TEXT    ISO8601 — set on INSERT, never updated (used for date bucketing)
 ```
@@ -476,6 +476,12 @@ Delete an agent and its topic sessions.
 `new_input_tokens` = `input_tokens - history_input_tokens` — net new tokens excluding
 injected adhoc context history. Useful for understanding actual prompt cost vs. re-injected context cost.
 
+`quota_delta` is an observational estimate (`quota_after - quota_before`), not
+per-prompt attribution. Concurrent prompts on the same backend have overlapping
+measurement windows and can double-count usage when these values are summed.
+Provider reporting delay can also shift usage into a later observation. See
+[ADR-0023](decisions/0023-quota-deltas-are-observational.md).
+
 **Response — group=topic**
 ```json
 [{ "topic": "work", "sessions": 5, "input_tokens": 20000, "output_tokens": 3000, "cost_usd": 0.18 }]
@@ -492,7 +498,12 @@ Note: `agent` is `COALESCE(agent, backend, 'unknown')` — groups all sessions u
 
 ### POST /stats/quota-delta
 
-Record the before/after backend quota percentage for a session. The UI records this only for backends with quota integrations, currently Claude and Codex.
+Record observed before/after backend-wide quota percentages for a session. The
+UI records this only for backends with quota integrations. A later write for the
+same `session_id` replaces the stored pair; this endpoint does not accumulate a
+per-session ledger. Values can include other concurrent prompts and must not be
+treated as exact per-prompt consumption. See
+[ADR-0023](decisions/0023-quota-deltas-are-observational.md).
 
 **Request body**: `{ "session_id": "string", "before": 0.0, "after": 0.0 }`
 

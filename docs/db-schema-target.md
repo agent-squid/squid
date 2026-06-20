@@ -89,8 +89,8 @@ CREATE TABLE session_stats (
     history_input_tokens INTEGER DEFAULT 0,
     cost_usd             REAL,
     duration_ms          INTEGER,
-    quota_before         REAL,    -- backend quota percentage at turn start, when exposed
-    quota_after          REAL,    -- backend quota percentage at turn end, when exposed
+    quota_before         REAL,    -- observed backend-wide quota percentage at turn start
+    quota_after          REAL,    -- observed backend-wide quota percentage after turn completion
     lookback             INTEGER DEFAULT 0,
     created_at           TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );

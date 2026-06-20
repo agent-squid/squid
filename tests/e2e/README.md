@@ -39,6 +39,10 @@ npx playwright test --headed -g "does not appear in DOM before done"
 | `error appears at bottom in bubble` | Error event puts a bubble with error text at the bottom, not mid-list. |
 | `two concurrent responses both land at bottom without early bubble insertion` | Two parallel streams held open; neither bubble appears until its own `done` fires, and they appear in completion order. |
 | `completed response moves to bottom instead of replacing its status bubble` | A pending response recovered from history completes after a newer response and is appended at the bottom rather than rendered at the old status position. |
+| `tracker discovers a process after refresh and clears when it finishes` | Startup detects an already-running backend process and keeps polling until the tracker clears automatically. |
+| `opening the tracker restarts polling until an external process finishes` | Clicking an idle tracker restarts continuous polling rather than performing a one-time refresh. |
+| `an empty pre-chat poll does not stop tracking the newly started process` | The initial empty process result before `/chat` registration cannot prematurely stop the polling interval. |
+| `an older running poll cannot overwrite a newer completed state` | Out-of-order process responses cannot restore stale blinking after a newer poll reports completion. |
 
 ## Architecture
 

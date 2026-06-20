@@ -26,7 +26,7 @@ Squid gives you the controls to stop that.
 ## Core Values
 
 **Every token should earn its place.**
-Every prompt shows exactly what it cost — input, output, cache reads, cache writes, reasoning tokens, latency, quota. You see when a long session is helping and when it's dead weight. You decide, every time.
+Every prompt shows backend-reported input, output, cache reads, cache writes, reasoning tokens, cost, and latency, plus an observed quota signal when available. Quota deltas are backend-wide estimates rather than exact per-prompt attribution, especially during parallel work. You see when a long session is helping and when it's dead weight. You decide, every time.
 
 **Goldfish when you need fresh eyes.**
 `!` runs a clean prompt. `!3` sends only the last three exchanges. You choose the lookback window — or cut it to zero. Stale context is a cost you can eliminate.
@@ -56,7 +56,7 @@ The agent runs where your repo lives. Squid gives that machine a browser interfa
 - **Process controls:** stop one process from the UI, stop by command, stop a topic, drain queues, clear sessions, and compact/reset context.
 - **History and filtering:** scan past work by topic, agent, or adhoc lane.
 - **Analytics:** review usage by time, topic, or agent, plus live process state.
-- **Per-prompt usage:** every completed prompt can show input, output, cache, reasoning, cost, duration, and quota signals when the backend exposes them.
+- **Per-prompt usage:** every completed prompt can show input, output, cache, reasoning, cost, duration, and an observed backend-wide quota signal when the backend exposes them.
 - **Phone/tablet access:** lie on the couch while your local machine keeps coding.
 
 ## Setup

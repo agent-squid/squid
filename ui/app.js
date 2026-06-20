@@ -1372,7 +1372,7 @@ async function sendMessage(text) {
   const _contextIds = [...new Set([..._lookbackIds, ..._pinnedIds])];
 
   try {
-    startProcPoll();
+    startProcPoll({ hold: true });
     const res = await fetch('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1571,6 +1571,7 @@ async function sendMessage(text) {
       }
     }
   } finally {
+    releaseProcPoll();
     if (!detachedPolling) stopStatusFallback();
     if (!thinkingFrozen) {
       if (!detachedPolling) {
@@ -1592,7 +1593,11 @@ async function sendMessage(text) {
     if (!statsEl && doneTime && firstDataReceived) addTimestamp(bubble, doneTime, false);
   }
 
-  // Quota snapshot — wait briefly for provider APIs to reflect the just-completed turn.
+  // Quota is a backend-wide meter, so this before/after difference is only an
+  // observational signal. Parallel prompts have overlapping windows and can
+  // double-count each other's usage; provider reporting lag can shift usage to
+  // a later turn. Do not treat or aggregate it as exact per-prompt attribution.
+  // See ADR-0023.
   await new Promise(r => setTimeout(r, 1000));
   const hasQuotaBefore = quotaBeforeSnapshot?.backend === quotaBackend && quotaBeforeSnapshot.raw !== null;
   const quotaAfterSnapshot = await fetchQuotaForBackend(quotaBackend, { trackDelta: hasQuotaBefore });
@@ -3008,6 +3013,8 @@ function _renderChart(rows) {
 const procStatusBtn   = document.getElementById('proc-status');
 const procStatusPopup = document.getElementById('proc-status-popup');
 let procPollInterval  = null;
+let procPollHolds     = 0;
+let procPollSeq       = 0;
 
 function updateProcStatusDot(running, queued) {
   procStatusBtn.classList.toggle('has-procs', running.length > 0 || queued.length > 0);
@@ -3112,27 +3119,36 @@ function renderProcPopup(running, queued) {
 
 function toggleProcPopup() {
   const open = procStatusPopup.classList.toggle('open');
-  if (open) { renderProcPopup(cachedProcRows, cachedQueueRows); pollProcs(); }
+  if (open) { renderProcPopup(cachedProcRows, cachedQueueRows); startProcPoll(); }
 }
 
 let cachedProcRows  = [];
 let cachedQueueRows = [];
 
 async function pollProcs() {
+  const seq = ++procPollSeq;
   try {
     const [procRes, queueRes] = await Promise.all([fetch('/processes'), fetch('/queue')]);
-    cachedProcRows  = await procRes.json();
-    cachedQueueRows = await queueRes.json();
+    const [running, queued] = await Promise.all([procRes.json(), queueRes.json()]);
+    if (seq !== procPollSeq) return;
+    cachedProcRows  = running;
+    cachedQueueRows = queued;
     updateProcStatusDot(cachedProcRows, cachedQueueRows);
     if (procStatusPopup.classList.contains('open')) renderProcPopup(cachedProcRows, cachedQueueRows);
-    if (!cachedProcRows.length && !cachedQueueRows.length) stopProcPoll();
+    if (!cachedProcRows.length && !cachedQueueRows.length && procPollHolds === 0) stopProcPoll();
   } catch { /* ignore */ }
 }
 
-function startProcPoll() {
-  if (procPollInterval) return;
-  pollProcs();
+function startProcPoll({ hold = false } = {}) {
+  if (hold) procPollHolds++;
+  if (procPollInterval) return pollProcs();
   procPollInterval = setInterval(pollProcs, 3000);
+  pollProcs();
+}
+
+function releaseProcPoll() {
+  procPollHolds = Math.max(0, procPollHolds - 1);
+  pollProcs();
 }
 
 function stopProcPoll() {
@@ -5139,7 +5155,8 @@ initCodexCreds();
 initCursorQuota();
 updateActiveQuotaGauge();
 initPullToRefresh();
-// proc polling starts on demand when a message is sent, not at startup
+// Discover processes that survived a refresh; polling stops again when idle.
+startProcPoll();
 showBootBanner();
 try {
   const saved = JSON.parse(localStorage.getItem('squid_sticky_chip') || 'null');
@@ -5166,6 +5183,7 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden) {
     messages.scrollTop = messages.scrollHeight;
     if (_activePollImmediate) _activePollImmediate();
+    startProcPoll();
   }
 });
 
