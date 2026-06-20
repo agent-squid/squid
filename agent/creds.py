@@ -75,17 +75,18 @@ def read_chrome_claude_creds() -> dict:
 
 def read_codex_creds() -> str:
     """Fetch Codex access token from chatgpt.com session API using local browser cookies."""
-    import urllib.request
+    import json
+    from curl_cffi.requests import Session
     cookies = _extract_cookies("chatgpt.com")
-    cookie_header = "; ".join(f"{k}={v}" for k, v in cookies.items())
-    req = urllib.request.Request(
-        "https://chatgpt.com/api/auth/session",
-        headers={"Cookie": cookie_header, "User-Agent": "Mozilla/5.0"},
-    )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        import json
-        data = json.loads(resp.read())
-    token = data.get("accessToken")
+    with Session(impersonate="chrome") as s:
+        r = s.get(
+            "https://chatgpt.com/api/auth/session",
+            cookies=cookies,
+            timeout=10,
+        )
+    if r.status_code != 200:
+        raise RuntimeError(f"chatgpt.com returned {r.status_code}")
+    token = r.json().get("accessToken")
     if not token:
         raise RuntimeError("accessToken not found. Make sure you are logged into ChatGPT.")
     return token
