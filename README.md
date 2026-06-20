@@ -11,7 +11,7 @@
 
 **Use your $20 plan like a $100 plan.**
 
-Named sessions, parallel prompts, and goldfish mode — auto lookback or manual context selection — across Claude Code, Codex, and Cursor Agent.
+Named sessions, parallel prompts, and goldfish mode — auto lookback or manual context selection — across Claude Code, Codex, Cursor Agent, and DeepSeek via Claude Code.
 
 Most developers burn tokens they never meant to spend. Long sessions drift — stale context, forgotten decisions, dead branches still in the window. The model reads all of it. You pay for all of it.
 
@@ -71,6 +71,8 @@ npm install -g @openai/codex               # OpenAI Codex
 curl https://cursor.com/install -fsS | bash  # Cursor Agent
 ```
 
+DeepSeek uses the Claude Code CLI, so no additional CLI is required beyond `claude`.
+
 ### 2. Install squid
 
 ```bash
@@ -90,6 +92,19 @@ Edit `~/.squid/squid.yaml` to change port, `localfile_roots`, or timeouts. Apply
 bin/start.sh --restart
 ```
 
+To use DeepSeek through Claude Code's Anthropic-compatible backend, add your DeepSeek API key:
+
+```yaml
+deepseek:
+  claude_key: "<your-deepseek-api-key>"
+```
+
+After restarting, Squid automatically creates the `deepcla` agent with backend `claude` and model `deepseek-v4-pro`. Use it like any other agent:
+
+```text
+#work@deepcla implement the feature
+```
+
 To stop without restarting: `bin/stop.sh`
 
 **Local access:** `http://127.0.0.1:<port>` (default 8000, set in `~/.squid/squid.yaml`)
@@ -105,6 +120,7 @@ To stop without restarting: `bin/stop.sh`
 | Backend       | CLI                                              | Install                                        | Sessions      |
 |---------------|--------------------------------------------------|------------------------------------------------|---------------|
 | `claude`      | `claude` (Claude Code)                           | `npm install -g @anthropic-ai/claude-code`     | resumable     |
+| `claude` (`deepcla`) | `claude` + DeepSeek Anthropic-compatible API | Claude Code CLI + DeepSeek API key              | resumable     |
 | `codex`       | `codex` (OpenAI Codex)                           | `npm install -g @openai/codex`                 | resumable     |
 | `cursor`      | `cursor-agent` (Cursor)                          | `curl https://cursor.com/install -fsS \| bash` | resumable     |
 
@@ -141,7 +157,7 @@ curl -X POST http://127.0.0.1:8000/config/agents \
 | Field     | Type    | Description                                                                      |
 |-----------|---------|----------------------------------------------------------------------------------|
 | `name`    | string  | Agent identifier — used in `#topic@agent` syntax                                 |
-| `backend` | string  | `claude` \| `codex` \| `cursor` |
+| `backend` | string  | `claude` \| `codex` \| `cursor`; DeepSeek agents use `claude` |
 | `model`   | string  | Model name passed as `--model` to the CLI (optional)                             |
 | `cwd`     | string  | Absolute path for the subprocess cwd; `null` = `/tmp/<user>/squid`              |
 | `timeout` | integer | Response timeout in seconds; overrides the global 1800 s default                 |
