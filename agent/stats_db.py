@@ -110,15 +110,17 @@ _TABLES = [
         PRIMARY KEY (msg_id, repo, file_path)
     )""",
     # FTS5 index — standalone table (not external-content). See ADR-0021.
-    # Trigger is the primary indexing path; boot does incremental error correction only.
+    # Trigger fires on the status='done' update (final content), not the first
+    # partial-content save, so the index always holds the complete response.
     "DROP TRIGGER IF EXISTS messages_fts_sync",
     """CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
         content, tokenize='unicode61'
     )""",
     """CREATE TRIGGER IF NOT EXISTS messages_fts_sync
        AFTER UPDATE OF content ON chat_messages
-       WHEN NEW.role = 'assistant' AND NEW.content IS NOT NULL AND OLD.content IS NULL
+       WHEN NEW.role = 'assistant' AND NEW.content IS NOT NULL AND NEW.status = 'done'
        BEGIN
+           DELETE FROM messages_fts WHERE rowid = NEW.id;
            INSERT INTO messages_fts(rowid, content) VALUES (NEW.id, NEW.content);
        END""",
 ]
@@ -165,14 +167,23 @@ def init_db() -> None:
                 "INSERT OR IGNORE INTO agents (name, backend, model) VALUES (?, ?, ?)",
                 ("haiku", "claude", "claude-haiku-4-5"),
             )
-        # Incremental FTS population — only rows not already in the index.
-        # Error correction for any orphaned gaps (missed rows from prior deletes
-        # or crashes). The trigger handles new rows in real time; this is a
-        # safety net, not the primary population path.
+        # FTS repair: remove entries whose content was indexed mid-stream
+        # (partial saves) and now differs from the final stored content.
+        conn.execute("""
+            DELETE FROM messages_fts
+            WHERE rowid IN (
+                SELECT mf.rowid FROM messages_fts mf
+                JOIN chat_messages m ON m.id = mf.rowid
+                WHERE m.role = 'assistant' AND m.status = 'done'
+                  AND m.content IS NOT NULL AND m.content != mf.content
+            )
+        """)
+        # Incremental FTS population — adds any rows missing from the index
+        # (new since last boot, or just removed above as stale partials).
         conn.execute("""
             INSERT INTO messages_fts(rowid, content)
             SELECT id, content FROM chat_messages
-            WHERE role='assistant' AND content IS NOT NULL
+            WHERE role='assistant' AND content IS NOT NULL AND status='done'
               AND id NOT IN (SELECT rowid FROM messages_fts)
         """)
         conn.commit()
