@@ -353,9 +353,9 @@ function clearTopicChip() {
 }
 
 topicChipEl.addEventListener('click', () => {
-  const hadFilter = historyFilter.topic || historyFilter.agent;
-  clearTopicChip();
-  if (hadFilter) reloadHistory({});
+  if (!stickyChip) return;
+  if (stickyChip.agent) filterByAgent(stickyChip.topic, stickyChip.agent, stickyChip.adhoc, stickyChip.lookback || 0);
+  else filterByTopic(stickyChip.topic);
   input.focus();
 });
 
@@ -453,7 +453,7 @@ function reloadHistory(filter = {}) {
   historyExhausted = false;
   historyLoading = false;
   if (topSentinel) { topSentinel.remove(); topSentinel = null; }
-  document.querySelectorAll('.history-item, .boot-banner').forEach(el => el.remove());
+  document.querySelectorAll('.history-item, .boot-banner, .tool-block-history').forEach(el => el.remove());
   // Remove live (non-history) messages too — completed ones are in the DB and will reload
   document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats').forEach(el => el.remove());
   _updateFilterBadge();
@@ -698,7 +698,7 @@ function startSearch(rawArgs) {
   historyLoading = false;
 
   // Clear pane
-  document.querySelectorAll('.history-item, .boot-banner, .search-result-item').forEach(el => el.remove());
+  document.querySelectorAll('.history-item, .boot-banner, .search-result-item, .tool-block-history').forEach(el => el.remove());
   document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .cmd-feedback').forEach(el => el.remove());
 
   _updateSearchBar();
@@ -4307,7 +4307,7 @@ async function showBootBanner() {
     const el = document.createElement('div');
     el.className = 'boot-banner';
     el.innerHTML = bootLogoHtml() +
-      `<div class="boot-meta">agent squid${bootTime ? `  ·  started ${bootTime}` : ''}</div>` +
+      `<div class="boot-meta">AgentSquid${bootTime ? `  ·  started ${bootTime}` : ''}</div>` +
       (!navigator.onLine ? `<div class="boot-offline">no internet — LLM calls will fail</div>` : '');
     messages.appendChild(el);
 
