@@ -37,7 +37,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, SQUID_HOME, RESPONSE_TIMEOUT, DEEPSEEK_CLAUDE_KEY, DEEPSEEK_DEFAULT_MODEL, _cfg
+from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, OPENCODE_PATH, SQUID_HOME, RESPONSE_TIMEOUT, DEEPSEEK_CLAUDE_KEY, DEEPSEEK_DEFAULT_MODEL, _cfg
 from .runners import run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError, CLIError, list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic
 from .history import list_history
 from .topic_queue import TopicDispatcher
@@ -113,12 +113,14 @@ def _check_deps():
         missing.append("codex         →  npm install -g @openai/codex")
     if not CURSOR_PATH:
         missing.append("cursor-agent  →  curl https://cursor.com/install -fsS | bash")
+    if not OPENCODE_PATH:
+        missing.append("opencode      →  npm install -g opencode-ai")
     if missing:
         log.warning("Missing CLI tools:\n  " + "\n  ".join(missing))
     if warnings:
         log.warning("Auth issues:\n  " + "\n  ".join(warnings))
     if not missing and not warnings:
-        log.info("claude=%s  codex=%s  cursor=%s", CLAUDE_PATH, CODEX_PATH, CURSOR_PATH)
+        log.info("claude=%s  codex=%s  cursor=%s  opencode=%s", CLAUDE_PATH, CODEX_PATH, CURSOR_PATH, OPENCODE_PATH)
 
 def _provision_deepseek_agents():
     """Create (or correct) deepcla agent if Claude Code CLI and key are available.
@@ -176,7 +178,7 @@ class TopicHiddenRequest(BaseModel):
 
 class AgentRequest(BaseModel):
     name: str = Field(..., min_length=1)
-    backend: Literal["auto", "claude", "cursor", "codex"] = "auto"
+    backend: Literal["auto", "claude", "cursor", "codex", "opencode"] = "auto"
     model: Optional[str] = None
     cwd: Optional[str] = None
 
@@ -627,11 +629,12 @@ async def health():
         "boot_time": BOOT_TIME,
         "squid_home": SQUID_HOME,
         "backends": {
-            "claude":       {"available": bool(CLAUDE_PATH),   "path": CLAUDE_PATH,  "gauge_authed": bool(creds.get_org_id() and creds.get_session_key())},
-            "codex":        {"available": bool(CODEX_PATH),    "path": CODEX_PATH,   "gauge_authed": bool(creds.get_codex_token())},
-            "cursor":       {"available": bool(CURSOR_PATH),   "path": CURSOR_PATH,  "gauge_authed": bool(creds.get_cursor_token())},
-            "copilot":      {"available": bool(COPILOT_PATH),  "path": COPILOT_PATH, "enabled": False},
-            "antigravity":  {"available": bool(AGY_PATH),      "path": AGY_PATH,     "enabled": False},
+            "claude":       {"available": bool(CLAUDE_PATH),    "path": CLAUDE_PATH,    "gauge_authed": bool(creds.get_org_id() and creds.get_session_key())},
+            "codex":        {"available": bool(CODEX_PATH),     "path": CODEX_PATH,    "gauge_authed": bool(creds.get_codex_token())},
+            "cursor":       {"available": bool(CURSOR_PATH),    "path": CURSOR_PATH,   "gauge_authed": bool(creds.get_cursor_token())},
+            "opencode":     {"available": bool(OPENCODE_PATH),  "path": OPENCODE_PATH, "gauge_authed": None},
+            "copilot":      {"available": bool(COPILOT_PATH),   "path": COPILOT_PATH,  "enabled": False},
+            "antigravity":  {"available": bool(AGY_PATH),       "path": AGY_PATH,      "enabled": False},
         },
     })
 

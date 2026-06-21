@@ -13,16 +13,17 @@ def _load_config() -> dict:
 _cfg = _load_config()
 
 # CLI executable names — override via env if installed elsewhere
-CLAUDE_CLI   = "claude"
-CODEX_CLI    = "codex"
-CURSOR_CLI   = "cursor-agent"
+CLAUDE_CLI    = "claude"
+CODEX_CLI     = "codex"
+CURSOR_CLI    = "cursor-agent"
+OPENCODE_CLI  = "opencode"
 
 # Not yet supported — runners exist but are gated by ENABLED_BACKENDS
 COPILOT_CLI  = "copilot"
 AGY_CLI      = "agy"
 
 # Only these backends are exposed via the API and UI
-ENABLED_BACKENDS = frozenset({"claude", "codex", "cursor"})
+ENABLED_BACKENDS = frozenset({"claude", "codex", "cursor", "opencode"})
 
 # DeepSeek — Anthropic-compatible endpoint only (Codex CLI does not support custom base URLs)
 DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
@@ -61,11 +62,15 @@ def find_cli(name: str) -> Optional[str]:
         return known
     return None
 
-CLAUDE_PATH   = find_cli(CLAUDE_CLI)
-CODEX_PATH    = find_cli(CODEX_CLI)
-COPILOT_PATH  = find_cli(COPILOT_CLI)
-CURSOR_PATH   = find_cli(CURSOR_CLI)
-AGY_PATH      = find_cli(AGY_CLI)
+CLAUDE_PATH    = find_cli(CLAUDE_CLI)
+CODEX_PATH     = find_cli(CODEX_CLI)
+COPILOT_PATH   = find_cli(COPILOT_CLI)
+CURSOR_PATH    = find_cli(CURSOR_CLI)
+OPENCODE_PATH  = find_cli(OPENCODE_CLI)
+AGY_PATH       = find_cli(AGY_CLI)
+
+# OpenCode free provider — no API key required
+OPENCODE_DEFAULT_MODEL = "opencode/deepseek-v4-flash-free"
 
 # Per-user tmp dir for context sync — avoids cross-user permission conflicts
 SQUID_HOME = f"/tmp/{os.getlogin()}/squid"

@@ -79,8 +79,8 @@
         <div class="creds-inputs">
           <span class="creds-help-hint">Set your typical top-up amount to show the usage chart</span>
           <input id="deepseek-max-input" type="number" min="1" step="1" placeholder="e.g. 20" />
-          <button id="deepseek-max-save" type="button">Set</button>
-          <button id="deepseek-max-clear" type="button">Clear</button>
+          <button id="deepseek-max-save" type="button" class="btn-ghost">Set</button>
+          <button id="deepseek-max-clear" type="button" class="btn-ghost">Clear</button>
           <span id="deepseek-max-status"></span>
         </div>
       </div>
@@ -97,7 +97,7 @@
         <div class="creds-divider"></div>
         <div class="creds-inputs">
           <input id="codex-creds-token" type="password" placeholder="Bearer eyJ…" />
-          <button id="codex-creds-save" type="button">Save</button>
+          <button id="codex-creds-save" type="button" class="btn-ghost">Save</button>
           <span id="codex-creds-status"></span>
         </div>
       </div>
@@ -118,7 +118,7 @@
             <input id="creds-key" type="password" placeholder="Session key" />
             <span class="creds-key-hint">DevTools → Application → Cookies → claude.ai → <code>sessionKey</code></span>
           </div>
-          <button id="creds-save" type="button">Save</button>
+          <button id="creds-save" type="button" class="btn-ghost">Save</button>
           <span id="creds-status"></span>
         </div>
       </div>
@@ -204,7 +204,7 @@
         <div id="pin-panel-header">
           <span class="settings-label">Pinned context</span>
           <div id="pin-panel-actions">
-            <button id="pin-panel-clear" type="button">Clear pins</button>
+            <button id="pin-panel-clear" type="button" class="btn-ghost">Clear pins</button>
             <button id="pin-panel-close" type="button">✕</button>
           </div>
         </div>
@@ -364,8 +364,6 @@
     <!-- ── AGENTS VIEW ───────────────────────────────────────────────────── -->
     <div id="view-agents" class="view">
       <div id="settings-agents">
-        <span class="settings-label">Backends</span>
-        <div id="backends-catalog"></div>
         <span class="settings-label">Agents</span>
         <div id="agents-list"></div>
         <form id="agent-form">
@@ -375,6 +373,7 @@
               <option value="claude">claude</option>
               <option value="codex">codex</option>
               <option value="cursor">cursor</option>
+              <option value="opencode">opencode</option>
             </select>
             <input id="af-model"   type="text" placeholder="e.g. claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7" spellcheck="false" />
             <input id="af-cwd"     type="text"   placeholder="/tmp/<user>/squid/…" spellcheck="false" />
@@ -382,6 +381,8 @@
             <span id="agent-form-status"></span>
           </div>
         </form>
+        <span class="settings-label">Backends</span>
+        <div id="backends-catalog"></div>
       </div>
     </div>
 

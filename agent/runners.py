@@ -12,7 +12,7 @@ import signal
 import time
 from typing import AsyncGenerator, List, Optional, Union
 
-from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, FIRST_BYTE_TIMEOUT, RESPONSE_TIMEOUT, PROXY_ENV, DEEPSEEK_ANTHROPIC_BASE_URL, DEEPSEEK_DEFAULT_MODEL, DEEPSEEK_CLAUDE_KEY
+from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, OPENCODE_PATH, FIRST_BYTE_TIMEOUT, RESPONSE_TIMEOUT, PROXY_ENV, DEEPSEEK_ANTHROPIC_BASE_URL, DEEPSEEK_DEFAULT_MODEL, DEEPSEEK_CLAUDE_KEY
 
 # ---------------------------------------------------------------------------
 # Process registry
@@ -155,7 +155,7 @@ async def _stream_lines(
         stderr=asyncio.subprocess.PIPE,
         env=env,
         cwd=cwd,
-        start_new_session=True,
+        preexec_fn=os.setpgrp,  # new process group (killpg works) without new session (keychain stays accessible)
         limit=8 * 1024 * 1024,  # 8 MB — default 64 KB overflows on long Claude responses
     )
 
@@ -788,3 +788,103 @@ async def run_antigravity(
                 "duration_ms": int(time.monotonic() * 1000 - start_ms),
             }
         }
+
+
+def _opencode_tool(part: dict) -> Optional[dict]:
+    """Map an opencode tool_use part to a squid _tool dict."""
+    tool = part.get("tool", "")
+    state = part.get("state", {})
+    if state.get("status") != "completed":
+        return None
+    inp = state.get("input") or {}
+    if tool == "bash":
+        return {"name": "Bash", "command": inp.get("command", "")}
+    if tool == "read":
+        return {"name": "Read", "file": inp.get("filePath", inp.get("path", ""))}
+    if tool == "write":
+        return {"name": "Write", "file": inp.get("filePath", inp.get("path", "")),
+                "content": inp.get("content", "")}
+    if tool == "edit":
+        return {"name": "Edit", "file": inp.get("filePath", inp.get("path", "")),
+                "old": inp.get("oldString", ""), "new": inp.get("newString", "")}
+    if inp:
+        k, v = next(iter(inp.items()))
+        return {"name": tool, "key": k, "value": str(v)[:300]}
+    return {"name": tool}
+
+
+async def run_opencode(
+    prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
+    model: Optional[str] = None, topic: str = "", agent: str = "",
+    response_timeout: Optional[int] = None,
+    resume_session_id: Optional[str] = None,
+    adhoc: bool = False, msg_id: Optional[int] = None,
+) -> AsyncGenerator[Union[str, dict], None]:
+    """Stream text chunks from opencode CLI, then yield a stats dict."""
+    if not OPENCODE_PATH:
+        raise CLINotFoundError(
+            "opencode CLI not found in PATH. Install with: npm install -g opencode-ai"
+        )
+
+    cmd = [OPENCODE_PATH, "run", "--format", "json", "--dangerously-skip-permissions"]
+    if model:
+        cmd += ["-m", model]
+    if resume_session_id:
+        cmd += ["--session", resume_session_id]
+    cmd.append(prompt if resume_session_id else _build_prompt(prompt, history))
+
+    start_ms = time.monotonic() * 1000
+    session_id: Optional[str] = None
+    # Accumulate tokens across all steps (opencode emits one step_finish per tool call)
+    total_input = total_output = total_cache_read = total_cache_write = 0
+    total_cost: float = 0.0
+
+    async for line in _stream_lines(cmd, cwd=cwd, backend="opencode", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt):
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        t = event.get("type", "")
+
+        if session_id is None:
+            session_id = event.get("sessionID")
+
+        if t == "text":
+            text = event.get("part", {}).get("text", "")
+            if text:
+                yield text
+
+        elif t == "tool_use":
+            tool_dict = _opencode_tool(event.get("part", {}))
+            if tool_dict:
+                yield {"_tool": tool_dict}
+
+        elif t == "step_finish":
+            tokens = event.get("part", {}).get("tokens", {})
+            total_input       += int(tokens.get("input", 0) or 0)
+            total_output      += int(tokens.get("output", 0) or 0)
+            cache             = tokens.get("cache") or {}
+            total_cache_read  += int(cache.get("read", 0) or 0)
+            total_cache_write += int(cache.get("write", 0) or 0)
+            total_cost        += float(event.get("part", {}).get("cost", 0) or 0)
+
+        elif t == "error":
+            err = event.get("error", {})
+            msg = (err.get("data", {}) or {}).get("message") or err.get("message") or "opencode error"
+            raise CLIError(msg)
+
+    yield {
+        "_stats": {
+            "session_id": session_id,
+            "input_tokens": total_input,
+            "output_tokens": total_output,
+            "cache_read_tokens": total_cache_read,
+            "cache_write_tokens": total_cache_write,
+            "history_input_tokens": _estimate_history_tokens(history),
+            "cost_usd": total_cost if total_cost else None,
+            "duration_ms": int(time.monotonic() * 1000 - start_ms),
+        }
+    }

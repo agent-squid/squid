@@ -49,15 +49,17 @@ scrollBtn.addEventListener('mouseleave', () => {
 marked.setOptions({ breaks: true });
 
 const BACKEND_MODEL_HINTS = Object.freeze({
-  claude: 'e.g. claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7',
-  codex:  'e.g. o4-mini, o3',
-  cursor: 'model (optional)',
+  claude:   'e.g. claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7',
+  codex:    'e.g. o4-mini, o3',
+  cursor:   'model (optional)',
+  opencode: 'e.g. opencode/deepseek-v4-flash-free, anthropic/claude-sonnet-4-6',
 });
 
 const AGENT_THEME_COLORS = Object.freeze({
   claude: '#AE5332',
-  codex: '#e8e4dc',
-  cursor: '#9aa0a6',
+  codex: '#7070a0',
+  cursor: '#FFFFFF',
+  opencode: '#CFCECD',
   deepseek: '#4d9de0',
   antigravity: '#4ea1ff',
   copilot: '#ff5db1',
@@ -95,6 +97,8 @@ function backendDisplayName(backend) {
     claude: 'Claude',
     codex: 'Codex',
     cursor: 'Cursor',
+    opencode: 'OpenCode',
+    deepseek: 'DeepSeek',
     antigravity: 'Antigravity',
     copilot: 'Copilot',
   };
@@ -2345,7 +2349,7 @@ function addMessage(role, content) {
 // ── credentials + quota ───────────────────────────────────────────────────────
 
 const quotaDisplay = document.getElementById('quota-display');
-const QUOTA_BACKENDS = ['claude', 'codex', 'cursor', 'deepseek'];
+const QUOTA_BACKENDS = ['claude', 'codex', 'cursor', 'opencode', 'deepseek'];
 
 // Per-backend config — add an entry here to support a new quota backend.
 const QUOTA_CONFIG = {
@@ -3021,7 +3025,9 @@ function updateProcStatusDot(running, queued) {
 }
 
 function renderQuotaStatus() {
-  const rows = QUOTA_BACKENDS.map(backend => {
+  const rows = QUOTA_BACKENDS
+    .filter(backend => quotaSnapshots[backend]?.status === 'loaded')
+    .map(backend => {
     const q = quotaSnapshots[backend] || { backend, status: 'unsupported' };
     const accent = agentThemeColor(backend);
     let value = 'n/a';
@@ -3760,6 +3766,13 @@ const BACKEND_CATALOG = [
     authHint: 'run cursor-agent to authenticate',
     gaugeHint: 'automatic via cursor-agent',
   },
+  {
+    id: 'opencode',
+    label: 'OpenCode',
+    installCmd: 'npm install -g opencode-ai',
+    authHint: 'free tier requires no auth — run opencode to configure providers',
+    gaugeHint: 'free tier available (opencode/deepseek-v4-flash-free)',
+  },
 ];
 
 function renderBackendsCatalog(backends) {
@@ -3993,6 +4006,7 @@ function showAgentCreatePrompt(agentName, onSaved) {
         <option value="claude">claude</option>
         <option value="codex">codex</option>
         <option value="cursor">cursor</option>
+        <option value="opencode">opencode</option>
       </select>
       <input id="acp-model" placeholder="${BACKEND_MODEL_HINTS.claude}" />
       <input id="acp-cwd" placeholder="cwd (default: ${_squidHome})" />
@@ -4176,7 +4190,7 @@ async function updateAutocomplete() {
     _acRender(
       topics.filter(t => t.name.toLowerCase().startsWith(prefix)).slice(0, 8)
         .map(t => ({
-          label:       _acTopicLabel(t.name, t.last_model || t.last_backend || '', t.last_backend || null),
+          label:       _acTopicLabel(t.name, t.agent || '', t.last_backend || null),
           insert:      '#' + t.name,
           deleteTopic: t.name,
           meta:        t.active ? '● live' : t.queue_depth > 0 ? `queue ${t.queue_depth}` : '',
@@ -4224,7 +4238,7 @@ async function updateAutocomplete() {
       items.push({
         label:  _acAgentLabel(topic, isDefault ? a.name + '!' : a.name, a.backend),
         insert: `#${topic}@${a.name}${isDefault ? '!' : ''}`,
-        meta:   a.model || a.backend,
+        meta:   a.backend,
       });
     }
 

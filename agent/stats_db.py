@@ -7,13 +7,14 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, ENABLED_BACKENDS
+from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, OPENCODE_PATH, ENABLED_BACKENDS
 
-_BACKEND_FALLBACK_ORDER = ["claude", "codex", "cursor"]  # only enabled backends
+_BACKEND_FALLBACK_ORDER = ["claude", "codex", "cursor", "opencode"]  # only enabled backends
 _BACKEND_PATHS = {
     "claude":       CLAUDE_PATH,
     "codex":        CODEX_PATH,
     "cursor":       CURSOR_PATH,
+    "opencode":     OPENCODE_PATH,
     "antigravity":  AGY_PATH,
     "copilot":      COPILOT_PATH,
 }
@@ -143,6 +144,14 @@ def init_db() -> None:
                 conn.execute(sql)
             except sqlite3.OperationalError:
                 pass
+        # Seed opencode with its free default model so it works out of the box
+        # (must run before the generic loop so the model is set on first insert)
+        if OPENCODE_PATH and "opencode" in ENABLED_BACKENDS:
+            from .config import OPENCODE_DEFAULT_MODEL
+            conn.execute(
+                "INSERT OR IGNORE INTO agents (name, backend, model) VALUES (?, ?, ?)",
+                ("opencode", "opencode", OPENCODE_DEFAULT_MODEL),
+            )
         # Seed one default agent per installed enabled CLI (INSERT OR IGNORE — never overwrites user edits)
         for backend, path in _BACKEND_PATHS.items():
             if path and backend in ENABLED_BACKENDS:
