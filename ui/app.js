@@ -302,6 +302,7 @@ function clearCachedSessionId(topic, agent) {
   delete _memoryInjectedInto[taKey];
   delete _sessionLookupCache[taKey];
   if (agent) delete _sessionLookupCache[`${topic}@${agent}`];
+  delete _memorySelectionOverrides[_memoryOverrideKey(topic, agent, false)];
 }
 
 // ── topic chip ────────────────────────────────────────────────────────────────
@@ -820,8 +821,10 @@ function parseCommand(message) {
   if (/^filter$/i.test(t))       return { command: 'filter' };
   const m = t.match(/^deq(?:\s+(-?\d+))?$/i);
   if (m) return { command: 'deq', pos: m[1] != null ? parseInt(m[1]) : null };
-  const ms = t.match(/^s(?:earch)?(?:\s+([\s\S]*))?$/i);
-  if (ms) return { command: 'search', args: (ms[1] || '').trim() };
+  if (message.trim().startsWith('/')) {
+    const ms = t.match(/^s(?:earch)?(?:\s+([\s\S]*))?$/i);
+    if (ms) return { command: 'search', args: (ms[1] || '').trim() };
+  }
   return null;
 }
 
