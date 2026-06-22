@@ -102,6 +102,10 @@ def _claude_logged_in() -> bool:
     # Pre-2.1.x: ANTHROPIC_API_KEY env var (never expires, no keychain needed).
     if os.environ.get("ANTHROPIC_API_KEY"):
         return True
+    # Token cached from a previous keychain read — survives os.execv restarts when the
+    # new process can't re-read the keychain due to security session context changes.
+    if os.environ.get("SQUID_NATIVE_CLAUDE_TOKEN"):
+        return True
     # 2.1.x+: OAuth token stored in macOS keychain. A refreshToken means Claude
     # Code can silently obtain new access tokens — no network call needed here.
     try:
@@ -711,6 +715,21 @@ async def run_cmd(req: CmdRequest):
             if "--reload" in sys.argv:
                 Path(__file__).touch()
             else:
+                # Read the OAuth token now (current process still has keychain access)
+                # and preserve it across the exec boundary so the new process can use
+                # it even if the security session context doesn't survive os.execv.
+                try:
+                    r = subprocess.run(
+                        ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    if r.returncode == 0:
+                        creds = json.loads(r.stdout.strip())
+                        token = creds.get("claudeAiOauth", {}).get("accessToken")
+                        if token:
+                            os.environ["SQUID_NATIVE_CLAUDE_TOKEN"] = token
+                except Exception:
+                    pass
                 os.execv(sys.executable, [sys.executable, "-m", "agent.server"])
         asyncio.create_task(_restart())
         return JSONResponse({"ok": True})

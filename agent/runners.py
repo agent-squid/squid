@@ -308,13 +308,15 @@ def _codex_diff_tool(payload: dict) -> Optional[dict]:
 
 
 def _read_native_claude_token() -> Optional[str]:
-    """Read the current Claude OAuth access token directly from macOS keychain.
+    """Return the current Claude OAuth access token for injection as ANTHROPIC_AUTH_TOKEN.
 
-    The `security` tool is an Apple-signed system binary with elevated keychain trust,
-    so it can read the item even in daemon/background security contexts where the node
-    process (the actual claude CLI) gets its ACL check denied silently.  Injecting the
-    token as ANTHROPIC_AUTH_TOKEN bypasses the ACL check entirely for the subprocess.
-    Returns None if the keychain is inaccessible or the item doesn't exist.
+    Strategy (in order):
+    1. Read fresh from macOS keychain via the `security` system tool (Apple-signed,
+       bypasses per-app ACL checks that block the node process in daemon contexts).
+       If successful, refresh the cached env var so the next os.execv restart inherits it.
+    2. Fall back to SQUID_NATIVE_CLAUDE_TOKEN env var — set by the server just before
+       os.execv so the token survives the exec even if the new process can't access
+       the keychain (security session context is not always preserved across exec).
     """
     try:
         result = subprocess.run(
@@ -323,10 +325,13 @@ def _read_native_claude_token() -> Optional[str]:
         )
         if result.returncode == 0:
             creds = json.loads(result.stdout.strip())
-            return creds.get("claudeAiOauth", {}).get("accessToken")
+            token = creds.get("claudeAiOauth", {}).get("accessToken")
+            if token:
+                os.environ["SQUID_NATIVE_CLAUDE_TOKEN"] = token
+                return token
     except Exception:
         pass
-    return None
+    return os.environ.get("SQUID_NATIVE_CLAUDE_TOKEN") or None
 
 
 async def run_claude(
