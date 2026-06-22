@@ -29,7 +29,37 @@ SQUID_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # ── banner ──────────────────────────────────────────────────────────────────
 echo -e "\n${BOLD}squid — install${RESET}\n"
 
-# ── python + squid package ───────────────────────────────────────────────────
+# ── coding agents ────────────────────────────────────────────────────────────
+AGENTS_FOUND=0
+if command -v claude &>/dev/null; then
+  ok "claude $(claude --version 2>/dev/null || echo '')"
+  AGENTS_FOUND=$((AGENTS_FOUND + 1))
+else
+  warn "claude not found — npm install -g @anthropic-ai/claude-code"
+fi
+
+if command -v codex &>/dev/null; then
+  ok "codex"
+  AGENTS_FOUND=$((AGENTS_FOUND + 1))
+else
+  warn "codex not found  — npm install -g @openai/codex"
+fi
+
+if command -v cursor-agent &>/dev/null; then
+  ok "cursor-agent"
+  AGENTS_FOUND=$((AGENTS_FOUND + 1))
+else
+  warn "cursor-agent not found — curl https://cursor.com/install -fsS | bash"
+fi
+
+if [[ $AGENTS_FOUND -eq 0 ]]; then
+  fail "No coding agents found. Install at least one before starting squid."
+  mark_error
+fi
+
+# ── install squid ────────────────────────────────────────────────────────────
+echo ""
+
 PYTHON=""
 for candidate in python3.13 python3.12 python3.11 python3.10 python3.9 python3 python; do
   if need_version "$candidate" 3 9 "--version"; then
@@ -41,55 +71,12 @@ done
 if [[ -z "$PYTHON" ]]; then
   fail "Python >= 3.9 not found — brew install python@3.13"
   mark_error
-  echo ""
-  fail "${ERRORS} prerequisite(s) missing — fix the errors above, then re-run ./install.sh"
-  exit 1
-fi
-
-VENV_DIR="$SQUID_DIR/.venv"
-[[ -d "$VENV_DIR" ]] || "$PYTHON" -m venv "$VENV_DIR" &>/dev/null
-"$VENV_DIR/bin/pip" install --quiet --upgrade pip
-"$VENV_DIR/bin/pip" install --quiet "$SQUID_DIR"
-
-# ── coding agents (detected via squid's own finder) ──────────────────────────
-AGENTS_JSON=$(PYTHONPATH="$SQUID_DIR" "$VENV_DIR/bin/python3" -c "
-import json, sys
-from agent.config import find_cli, CLAUDE_CLI, CODEX_CLI, CURSOR_CLI
-print(json.dumps({
-    'claude':       find_cli(CLAUDE_CLI),
-    'codex':        find_cli(CODEX_CLI),
-    'cursor-agent': find_cli(CURSOR_CLI),
-}))
-")
-
-get_path() { "$VENV_DIR/bin/python3" -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get(sys.argv[2]) or '')" "$AGENTS_JSON" "$1" 2>/dev/null || true; }
-
-AGENTS_FOUND=0
-for agent_name in claude codex cursor-agent; do
-  path="$(get_path "$agent_name")"
-  if [[ -n "$path" ]]; then
-    AGENTS_FOUND=$((AGENTS_FOUND + 1))
-    if [[ "$agent_name" == "claude" ]]; then
-      ok "claude $("$path" --version 2>/dev/null || echo '')"
-    else
-      ok "$agent_name"
-    fi
-  else
-    case "$agent_name" in
-      claude)       warn "claude not found — npm install -g @anthropic-ai/claude-code" ;;
-      codex)        warn "codex not found  — npm install -g @openai/codex" ;;
-      cursor-agent) warn "cursor-agent not found — curl https://cursor.com/install -fsS | bash" ;;
-    esac
-  fi
-done
-
-echo ""
-ok "squid installed"
-
-if [[ $AGENTS_FOUND -eq 0 ]]; then
-  echo ""
-  fail "No coding agents found. Install at least one before starting squid."
-  mark_error
+else
+  VENV_DIR="$SQUID_DIR/.venv"
+  [[ -d "$VENV_DIR" ]] || "$PYTHON" -m venv "$VENV_DIR" &>/dev/null
+  "$VENV_DIR/bin/pip" install --quiet --upgrade pip
+  "$VENV_DIR/bin/pip" install --quiet "$SQUID_DIR"
+  ok "squid installed"
 fi
 
 # ── result ───────────────────────────────────────────────────────────────────

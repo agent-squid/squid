@@ -1,4 +1,3 @@
-import glob
 import hashlib
 import os
 import shutil
@@ -61,26 +60,8 @@ FIRST_BYTE_TIMEOUT: int = _cfg["agent"]["first_byte_timeout"]
 # Hard cap on total response time per request
 RESPONSE_TIMEOUT: int = _cfg["agent"]["response_timeout"]
 
-# Common install locations not always in subprocess PATH
-_EXTRA_PATHS = [
-    "/usr/local/bin",
-    "/opt/homebrew/bin",
-    os.path.expanduser("~/.local/bin"),
-    os.path.expanduser("~/.npm-global/bin"),
-    os.path.expanduser("~/node_modules/.bin"),
-    # nvm-managed node versions (any installed version)
-    *glob.glob(os.path.expanduser("~/.nvm/versions/node/*/bin")),
-]
-
 def find_cli(name: str) -> Optional[str]:
-    found = shutil.which(name)
-    if found:
-        return found
-    for base in _EXTRA_PATHS:
-        candidate = os.path.join(base, name)
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    return None
+    return shutil.which(name)
 
 CLAUDE_PATH    = find_cli(CLAUDE_CLI)
 CODEX_PATH     = find_cli(CODEX_CLI)
