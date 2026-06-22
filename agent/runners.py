@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import signal
+import subprocess
 import time
 from typing import AsyncGenerator, List, Optional, Union
 
@@ -306,6 +307,28 @@ def _codex_diff_tool(payload: dict) -> Optional[dict]:
     return {"name": "Diff", "file": file_path, "diff": str(diff)}
 
 
+def _read_native_claude_token() -> Optional[str]:
+    """Read the current Claude OAuth access token directly from macOS keychain.
+
+    The `security` tool is an Apple-signed system binary with elevated keychain trust,
+    so it can read the item even in daemon/background security contexts where the node
+    process (the actual claude CLI) gets its ACL check denied silently.  Injecting the
+    token as ANTHROPIC_AUTH_TOKEN bypasses the ACL check entirely for the subprocess.
+    Returns None if the keychain is inaccessible or the item doesn't exist.
+    """
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            creds = json.loads(result.stdout.strip())
+            return creds.get("claudeAiOauth", {}).get("accessToken")
+    except Exception:
+        pass
+    return None
+
+
 async def run_claude(
     prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
     model: Optional[str] = None, topic: str = "", agent: str = "",
@@ -342,7 +365,17 @@ async def run_claude(
     streamed_text = False  # track whether any text chunks were streamed as content
     tool_blocks: dict[int, dict] = {}  # index -> {name, input_json}
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, extra_env=backend_env):
+    # For native OAuth auth (no explicit api_key / ANTHROPIC_AUTH_TOKEN already set),
+    # read the access token via `security` (Apple system tool, always trusted in macOS
+    # keychain ACL checks) and inject it as ANTHROPIC_AUTH_TOKEN.  This bypasses the
+    # ACL failure that node gets when running in a daemon/background security context.
+    env_for_claude = dict(backend_env) if backend_env else {}
+    if not env_for_claude.get("ANTHROPIC_AUTH_TOKEN"):
+        native_token = _read_native_claude_token()
+        if native_token:
+            env_for_claude["ANTHROPIC_AUTH_TOKEN"] = native_token
+
+    async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, extra_env=env_for_claude):
         if not line:
             continue
         try:
@@ -385,6 +418,8 @@ async def run_claude(
             if not streamed_text:
                 final_text = event.get("result", "")
                 if final_text:
+                    if "Not logged in" in final_text and "/login" in final_text:
+                        raise CLIError("Claude auth failed (network down or token expired) — run: claude login")
                     yield final_text
             usage = event.get("usage", {})
             # ── Claude token semantics (verified via stream-json output, 2026-06) ──────────

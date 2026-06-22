@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -98,8 +99,24 @@ dispatcher = TopicDispatcher()
 def _claude_logged_in() -> bool:
     if not CLAUDE_PATH:
         return False
+    # Pre-2.1.x: ANTHROPIC_API_KEY env var (never expires, no keychain needed).
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return True
+    # 2.1.x+: OAuth token stored in macOS keychain. A refreshToken means Claude
+    # Code can silently obtain new access tokens — no network call needed here.
     try:
-        import subprocess
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            creds = json.loads(result.stdout.strip())
+            if creds.get("claudeAiOauth", {}).get("refreshToken"):
+                return True
+    except Exception:
+        pass
+    # Fallback: ask claude directly (covers other auth methods / older versions).
+    try:
         result = subprocess.run(
             [CLAUDE_PATH, "auth", "status"],
             capture_output=True, text=True, timeout=5,
