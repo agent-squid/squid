@@ -48,7 +48,7 @@ scrollBtn.addEventListener('mouseleave', () => {
 
 marked.setOptions({ breaks: true });
 
-const BACKEND_MODEL_HINTS = Object.freeze({
+const DRIVER_MODEL_HINTS = Object.freeze({
   claude:   'e.g. claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7',
   codex:    'e.g. o4-mini, o3',
   cursor:   'model (optional)',
@@ -66,7 +66,11 @@ const AGENT_THEME_COLORS = Object.freeze({
   default: '#888888',
 });
 
+let _backendMetadata = {};
+
 function agentThemeColor(backend) {
+  const configured = _backendMetadata[backend]?.color;
+  if (configured) return configured;
   return AGENT_THEME_COLORS[(backend || '').toLowerCase()] || AGENT_THEME_COLORS.default;
 }
 
@@ -93,6 +97,8 @@ function quotaGaugeColor(backend) {
 }
 
 function backendDisplayName(backend) {
+  const configured = _backendMetadata[backend]?.label;
+  if (configured) return configured;
   const names = {
     claude: 'Claude',
     codex: 'Codex',
@@ -103,6 +109,11 @@ function backendDisplayName(backend) {
     copilot: 'Copilot',
   };
   return names[(backend || '').toLowerCase()] || (backend || 'Agent');
+}
+
+function backendModelHint(backend) {
+  const driver = _backendMetadata[backend]?.driver || backend;
+  return DRIVER_MODEL_HINTS[driver] || 'model (optional)';
 }
 
 // Rewrite file:// links and images to /localfile?path= so local paths are served.
@@ -1438,9 +1449,8 @@ async function sendMessage(text) {
             try {
               const meta = JSON.parse(data);
               resolvedAgent = meta.agent || (meta.backend !== 'auto' ? meta.backend : null);
-              if (meta.backend === 'claude' || meta.backend === 'codex') {
-                quotaBackend = (meta.backend === 'claude' && meta.model?.toLowerCase().startsWith('deepseek'))
-                  ? 'deepseek' : meta.backend;
+              if (meta.backend) {
+                quotaBackend = meta.backend;
                 if (quotaBeforeSnapshot?.backend && quotaBeforeSnapshot.backend !== quotaBackend) {
                   quotaBeforeSnapshot = null;
                 }
@@ -2360,9 +2370,8 @@ function addMessage(role, content) {
 // ── credentials + quota ───────────────────────────────────────────────────────
 
 const quotaDisplay = document.getElementById('quota-display');
-const QUOTA_BACKENDS = ['claude', 'codex', 'cursor', 'opencode', 'deepseek'];
-
-// Per-backend config — add an entry here to support a new quota backend.
+// Presentation details for coded gauge adapters. Backend-to-gauge routing comes
+// from /health, never from backend or model naming conventions.
 const QUOTA_CONFIG = {
   claude: {
     endpoint:     '/quota/claude',
@@ -2372,7 +2381,6 @@ const QUOTA_CONFIG = {
     pieC:         2 * Math.PI * 6,
     credsPopupId: 'quota-creds-popup',
     errorTitle:   'Claude usage unavailable · click for credentials',
-    parse:        parseClaudeQuota,
   },
   codex: {
     endpoint:     '/quota/codex',
@@ -2382,7 +2390,6 @@ const QUOTA_CONFIG = {
     pieC:         2 * Math.PI * 6,
     credsPopupId: 'codex-creds-popup',
     errorTitle:   'Codex usage unavailable · click for credentials',
-    parse:        parseCodexQuota,
   },
   cursor: {
     endpoint:     '/quota/cursor',
@@ -2392,7 +2399,6 @@ const QUOTA_CONFIG = {
     pieC:         2 * Math.PI * 6,
     credsPopupId: 'cursor-creds-popup',
     errorTitle:   'Cursor usage unavailable · click for info',
-    parse:        parseCursorQuota,
   },
   deepseek: {
     endpoint:     '/quota/deepseek',  // returns remaining pre-paid balance
@@ -2402,25 +2408,35 @@ const QUOTA_CONFIG = {
     pieC:         2 * Math.PI * 6,
     credsPopupId: 'deepseek-max-popup',
     errorTitle:   'DeepSeek balance unavailable',
-    parse:        parseDeepSeekQuota,
     formatLabel:  (state) => state.displayText || '—',
+  },
+  static: {
+    displayId:    'quota-display',
+    pieArcId:     'quota-pie-arc',
+    labelId:      'quota-label',
+    pieC:         2 * Math.PI * 6,
   },
 };
 
-const quotaSnapshots = {
-  claude:   { backend: 'claude',   status: 'unknown' },
-  codex:    { backend: 'codex',    status: 'unknown' },
-  cursor:   { backend: 'cursor',   status: 'unknown' },
-  deepseek: { backend: 'deepseek', status: 'unknown' },
-};
+const quotaSnapshots = {};
 // Per-backend runtime state. timer is the label-refresh interval handle.
 // activeCount tracks in-flight messages; drives the 30s quota poll interval.
-const quotaState = {
-  claude:   { raw: null, pct: null, resetAt: null, delta: null, inFlight: false, timer: null, activeCount: 0 },
-  codex:    { raw: null, pct: null, resetAt: null, delta: null, inFlight: false, timer: null, activeCount: 0 },
-  cursor:   { raw: null, pct: null, resetAt: null, delta: null, inFlight: false, timer: null, activeCount: 0 },
-  deepseek: { raw: null, pct: null, resetAt: null, delta: null, inFlight: false, timer: null, activeCount: 0 },
-};
+const quotaState = {};
+
+function quotaStateFor(backend) {
+  return quotaState[backend] ||= {
+    raw: null, pct: null, resetAt: null, displayText: null, delta: null,
+    inFlight: false, timer: null, activeCount: 0,
+  };
+}
+
+function gaugeTypeFor(backend) {
+  return _backendMetadata[backend]?.gauge?.type || 'none';
+}
+
+function quotaConfigFor(backend) {
+  return QUOTA_CONFIG[gaugeTypeFor(backend)] || null;
+}
 
 let activeQuotaBackend = null;
 let quotaResolveSeq = 0;
@@ -2442,8 +2458,8 @@ function _stopQuotaPoll() {
 }
 
 function quotaTrackStart(backend) {
-  if (!quotaState[backend]) return;
-  quotaState[backend].activeCount++;
+  if (!quotaConfigFor(backend)) return;
+  quotaStateFor(backend).activeCount++;
   _startQuotaPoll();
 }
 
@@ -2461,9 +2477,9 @@ function setQuotaSnapshot(backend, snapshot) {
 }
 
 function quotaTimeText(resetAt) {
-  if (!resetAt) return '';
+  if (!resetAt) return '…';
   const diff = resetAt - Date.now();
-  if (diff <= 0) return 'resetting';
+  if (diff <= 0) return 'resetting…';
   const totalMin = Math.floor(diff / 60000);
   const h = Math.floor(totalMin / 60);
   const m = String(totalMin % 60).padStart(2, '0');
@@ -2472,9 +2488,12 @@ function quotaTimeText(resetAt) {
 }
 
 function setVisibleQuotaBackend(backend) {
-  activeQuotaBackend = (backend in QUOTA_CONFIG) ? backend : null;
-  for (const [b, cfg] of Object.entries(QUOTA_CONFIG)) {
-    document.getElementById(cfg.displayId)?.classList.toggle('quota-hidden', activeQuotaBackend !== b);
+  const gaugeType = gaugeTypeFor(backend);
+  activeQuotaBackend = QUOTA_CONFIG[gaugeType] ? backend : null;
+  const displayIds = new Set(Object.values(QUOTA_CONFIG).map(cfg => cfg.displayId));
+  for (const id of displayIds) document.getElementById(id)?.classList.add('quota-hidden');
+  if (activeQuotaBackend) {
+    document.getElementById(QUOTA_CONFIG[gaugeType].displayId)?.classList.remove('quota-hidden');
   }
 }
 
@@ -2487,6 +2506,12 @@ async function resolveActiveQuotaBackend() {
 }
 
 async function resolveQuotaBackend(topicName, agentName) {
+  if (!Object.keys(_backendMetadata).length) {
+    try {
+      const res = await fetch('/health');
+      if (res.ok) _backendMetadata = (await res.json()).backends || {};
+    } catch { /* gauge remains hidden until health is reachable */ }
+  }
   if (!agentName && topicName) {
     const topics = await _acTopics();
     agentName = topics.find(t => t.name === topicName)?.agent || null;
@@ -2495,9 +2520,7 @@ async function resolveQuotaBackend(topicName, agentName) {
 
   const agents = await _acAgents();
   const agent = agents.find(a => a.name === agentName);
-  const backend = agent?.backend || null;
-  if (backend === 'claude' && agent?.model?.toLowerCase().startsWith('deepseek')) return 'deepseek';
-  return backend;
+  return agent?.backend || null;
 }
 
 async function updateActiveQuotaGauge() {
@@ -2535,8 +2558,7 @@ function parseCodexQuota(data) {
 }
 
 function scheduleGaugeTick(backend) {
-  const state = quotaState[backend];
-  if (!state.resetAt || state.resetAt <= Date.now()) return;
+  const state = quotaStateFor(backend);
   state.timer = setTimeout(() => {
     updateGaugeLabel(backend);
     scheduleGaugeTick(backend);
@@ -2544,29 +2566,35 @@ function scheduleGaugeTick(backend) {
 }
 
 function updateGaugeLabel(backend) {
-  const cfg = QUOTA_CONFIG[backend];
-  const state = quotaState[backend];
-  if (!cfg || state.pct == null) return;
+  const cfg = quotaConfigFor(backend);
+  const state = quotaStateFor(backend);
+  if (!cfg) return;
   const label = document.getElementById(cfg.labelId);
   if (!label) return;
-  if (cfg.formatLabel) {
+  if (state.displayText != null) {
+    label.textContent = state.displayText;
+  } else if (cfg.formatLabel) {
     label.textContent = cfg.formatLabel(state);
+  } else if (state.pct == null) {
+    label.textContent = '—';
   } else {
     const delta = state.delta != null ? ` +${state.delta}%` : '';
     const timeStr = quotaTimeText(state.resetAt);
     label.textContent = `${state.pct}%${delta}` + (timeStr ? ` in ${timeStr}` : '');
   }
   const arc = document.getElementById(cfg.pieArcId);
-  if (arc) {
+  if (arc && state.pct != null) {
     const filled = (state.pct / 100) * cfg.pieC;
     arc.setAttribute('stroke-dasharray', `${filled} ${cfg.pieC}`);
     arc.setAttribute('stroke', quotaGaugeColor(backend, state.pct));
+  } else if (arc) {
+    arc.setAttribute('stroke-dasharray', `0 ${cfg.pieC}`);
   }
 }
 
 function renderQuotaLoaded(backend, snapshot) {
-  const cfg = QUOTA_CONFIG[backend];
-  const state = quotaState[backend];
+  const cfg = quotaConfigFor(backend);
+  const state = quotaStateFor(backend);
   state.raw = snapshot.raw;
   state.pct = snapshot.pct;
   state.resetAt = snapshot.resetAt;
@@ -2591,8 +2619,9 @@ function renderQuotaLoaded(backend, snapshot) {
 }
 
 function showQuotaError(backend, text) {
-  const cfg = QUOTA_CONFIG[backend];
-  const state = quotaState[backend];
+  const cfg = quotaConfigFor(backend);
+  if (!cfg) return;
+  const state = quotaStateFor(backend);
   state.resetAt = null;
   if (state.timer) { clearTimeout(state.timer); state.timer = null; }
 
@@ -2609,23 +2638,42 @@ function showQuotaError(backend, text) {
 }
 
 async function fetchQuotaForBackend(backend, { trackDelta = false } = {}) {
-  const cfg = QUOTA_CONFIG[backend];
+  const cfg = quotaConfigFor(backend);
   if (!cfg) return null;
-  const state = quotaState[backend];
+  const state = quotaStateFor(backend);
   if (state.inFlight) return state.raw == null ? null : { backend, ...state };
   state.inFlight = true;
   const label = backend[0].toUpperCase() + backend.slice(1);
   try {
-    const res = await fetch(cfg.endpoint);
+    const res = await fetch(`/quota/backend/${encodeURIComponent(backend)}`);
     if (!res.ok) {
       showQuotaError(backend, res.status === 400 ? `${label} auth` : `${label} error`);
       return null;
     }
     const data = await res.json();
-    const snapshot = cfg.parse(data);
-    if (!snapshot) {
+    if (data.status === 'none') return null;
+    if (!data.status) {
       showQuotaError(backend, `${label} n/a`);
       return null;
+    }
+    const resetAt = typeof data.reset_at === 'number'
+      ? data.reset_at * 1000
+      : (data.reset_at ? new Date(data.reset_at).getTime() : null);
+    const snapshot = {
+      raw: data.raw ?? null,
+      pct: data.used_percent == null ? null : Math.max(0, Math.min(100, Math.round(data.used_percent))),
+      resetAt,
+      title: data.title || '',
+      displayText: data.text ?? null,
+    };
+    if (gaugeTypeFor(backend) === 'deepseek' && snapshot.raw != null) {
+      const max = parseFloat(localStorage.getItem(`deepseek-max-balance:${backend}`)
+        || localStorage.getItem('deepseek-max-balance') || '');
+      if (max > 0) {
+        const spent = Math.max(0, max - snapshot.raw);
+        snapshot.pct = Math.max(0, Math.min(100, Math.round((spent / max) * 100)));
+        snapshot.title = `DeepSeek · ${spent.toFixed(2)} spent of ${max.toFixed(2)}`;
+      }
     }
     if (trackDelta && state.raw !== null) {
       const d = snapshot.raw - state.raw;
@@ -2661,7 +2709,9 @@ function initQuota() {
     <span id="${cfg.labelId}"></span>`;
 
   const credsPopup = document.getElementById(cfg.credsPopupId);
-  quotaDisplay.addEventListener('click', () => credsPopup.classList.toggle('open'));
+  quotaDisplay.addEventListener('click', () => {
+    if (gaugeTypeFor(activeQuotaBackend) === 'claude') credsPopup.classList.toggle('open');
+  });
   document.addEventListener('click', (e) => {
     if (!quotaDisplay.contains(e.target) && !credsPopup.contains(e.target))
       credsPopup.classList.remove('open');
@@ -2767,7 +2817,6 @@ function initDeepSeekQuota() {
     if (!displayEl.contains(e.target) && !popup.contains(e.target))
       popup.classList.remove('open');
   });
-  fetchQuotaForBackend('deepseek');
 }
 
 function initDeepSeekMaxPopup() {
@@ -2777,23 +2826,22 @@ function initDeepSeekMaxPopup() {
   const status   = document.getElementById('deepseek-max-status');
   if (!maxInput || !saveBtn) return;
 
-  const saved = localStorage.getItem('deepseek-max-balance');
-  if (saved) maxInput.value = saved;
+  const storageKey = () => `deepseek-max-balance:${activeQuotaBackend || 'deepseek'}`;
 
   saveBtn.addEventListener('click', () => {
     const val = parseFloat(maxInput.value);
     if (!val || val <= 0) { status.textContent = 'enter a positive amount'; return; }
-    localStorage.setItem('deepseek-max-balance', String(val));
+    localStorage.setItem(storageKey(), String(val));
     status.textContent = 'saved ✓';
-    fetchQuotaForBackend('deepseek');
+    if (activeQuotaBackend) fetchQuotaForBackend(activeQuotaBackend);
     setTimeout(() => { status.textContent = ''; }, 2000);
   });
 
   clearBtn?.addEventListener('click', () => {
-    localStorage.removeItem('deepseek-max-balance');
+    localStorage.removeItem(storageKey());
     maxInput.value = '';
     status.textContent = 'cleared';
-    fetchQuotaForBackend('deepseek');
+    if (activeQuotaBackend) fetchQuotaForBackend(activeQuotaBackend);
     setTimeout(() => { status.textContent = ''; }, 2000);
   });
 }
@@ -3037,7 +3085,7 @@ function updateProcStatusDot(running, queued) {
 }
 
 function renderQuotaStatus() {
-  const rows = QUOTA_BACKENDS
+  const rows = Object.keys(quotaSnapshots)
     .filter(backend => quotaSnapshots[backend]?.status === 'loaded')
     .map(backend => {
     const q = quotaSnapshots[backend] || { backend, status: 'unsupported' };
@@ -3045,9 +3093,9 @@ function renderQuotaStatus() {
     let value = 'n/a';
     let detail = 'no quota integration';
     if (q.status === 'loaded') {
-      value = `${q.pct}%`;
+      value = q.displayText || (q.pct == null ? '—' : `${q.pct}%`);
       const reset = quotaTimeText(q.resetAt);
-      detail = reset ? `resets in ${reset}` : (q.displayText ? `${q.displayText} remaining` : 'reset time unavailable');
+      detail = reset ? `resets in ${reset}` : (q.title || 'no reset');
     } else if (q.status === 'error') {
       value = 'error';
       detail = q.text || 'unavailable';
@@ -3756,71 +3804,98 @@ async function confirmTopicDelete() {
 
 // ── backends catalog ──────────────────────────────────────────────────────────
 
-const BACKEND_CATALOG = [
-  {
-    id: 'claude',
+const DRIVER_CATALOG = Object.freeze({
+  claude: {
     label: 'Claude Code',
     installCmd: 'npm install -g @anthropic-ai/claude-code',
     authHint: 'run claude to authenticate',
     gaugeHint: 'click gauge in header → paste org ID + session key',
   },
-  {
-    id: 'codex',
+  codex: {
     label: 'Codex',
     installCmd: 'npm install -g @openai/codex',
     authHint: 'run codex to authenticate',
     gaugeHint: 'click gauge in header → use bookmarklet or paste token',
   },
-  {
-    id: 'cursor',
+  cursor: {
     label: 'Cursor Agent',
     installCmd: 'curl https://cursor.com/install -fsS | bash',
     authHint: 'run cursor-agent to authenticate',
     gaugeHint: 'automatic via cursor-agent',
   },
-  {
-    id: 'opencode',
+  opencode: {
     label: 'OpenCode',
     installCmd: 'npm install -g opencode-ai',
     authHint: 'free tier requires no auth — run opencode to configure providers',
     gaugeHint: 'free tier available (opencode/deepseek-v4-flash-free)',
   },
-];
+});
+
+const GAUGE_CATALOG = Object.freeze({
+  claude: 'click gauge in header → paste org ID + session key',
+  codex: 'click gauge in header → use bookmarklet or paste token',
+  cursor: 'automatic via cursor-agent',
+  deepseek: 'uses this backend API key',
+  none: 'no gauge configured',
+});
 
 function renderBackendsCatalog(backends) {
   const el = document.getElementById('backends-catalog');
   if (!el) return;
 
-  el.innerHTML = BACKEND_CATALOG.map(b => {
-    const info = backends?.[b.id] || {};
+  _backendMetadata = backends || {};
+  const backendSelect = document.getElementById('af-backend');
+  if (backendSelect) {
+    const previous = backendSelect.value;
+    backendSelect.innerHTML = Object.keys(_backendMetadata)
+      .map(id => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join('');
+    if (_backendMetadata[previous]) backendSelect.value = previous;
+  }
+  refreshAgentSlugColors();
+
+  el.innerHTML = Object.entries(_backendMetadata).map(([id, info]) => {
+    const driverInfo = DRIVER_CATALOG[info.driver] || {};
     const available   = info.available;
     const gaugeAuthed = info.gauge_authed;
-    const color       = agentThemeColor(b.id);
+    const color       = agentThemeColor(id);
+    const label       = info.label || id;
+    const authHint    = driverInfo.authHint || `uses ${info.driver} driver`;
+    const installCmd  = driverInfo.installCmd || '';
+    const gauge       = info.gauge || { type: 'none' };
+    const gaugeHint   = gauge.type === 'static'
+      ? (gauge.text || 'static')
+      : (GAUGE_CATALOG[gauge.type] || '—');
 
     let codingHtml;
     if (available) {
       codingHtml = `<span class="bcat-status-ok">✓ detected</span>
-        <span class="bcat-hint">${b.authHint}</span>`;
+        <span class="bcat-hint">${escapeHtml(authHint)}</span>`;
     } else {
-      codingHtml = `<span class="bcat-status-miss">✗ not found</span>
-        <div class="bcat-install">
-          <code class="bcat-cmd">${b.installCmd}</code>
-          <button class="bcat-copy" data-cmd="${b.installCmd}">copy</button>
-        </div>
-        <span class="bcat-hint">then ${b.authHint}</span>`;
+      const missing = info.missing_secrets?.length
+        ? `missing: ${info.missing_secrets.join(', ')}`
+        : 'driver not found';
+      codingHtml = `<span class="bcat-status-miss">✗ ${escapeHtml(missing)}</span>` +
+        (installCmd ? `<div class="bcat-install">
+          <code class="bcat-cmd">${escapeHtml(installCmd)}</code>
+          <button class="bcat-copy" data-cmd="${escapeHtml(installCmd)}">copy</button>
+        </div>` : '');
     }
 
     let gaugeHtml;
     if (!available) {
       gaugeHtml = `<span class="bcat-gauge-na">—</span>`;
+    } else if (gauge.type === 'none') {
+      gaugeHtml = `<span class="bcat-gauge-na">—</span>`;
+    } else if (gauge.type === 'static') {
+      gaugeHtml = `<span class="bcat-hint">${escapeHtml(gauge.text || '—')}</span>`;
     } else if (gaugeAuthed) {
       gaugeHtml = `<span class="bcat-gauge-ok">gauge ✓</span>`;
     } else {
-      gaugeHtml = `<span class="bcat-hint">${b.gaugeHint}</span>`;
+      gaugeHtml = `<span class="bcat-hint">${escapeHtml(gaugeHint)}</span>`;
     }
 
     return `<div class="bcat-row">
-      <div class="bcat-name"><span class="bcat-dot" style="background:${color}"></span>${b.label}</div>
+      <div class="bcat-name"><span class="bcat-dot" style="background:${color}"></span>${escapeHtml(label)}</div>
       <div class="bcat-coding">${codingHtml}</div>
       <div class="bcat-gauge">${gaugeHtml}</div>
     </div>`;
@@ -3890,7 +3965,7 @@ function initAliases() {
   const afBackend = document.getElementById('af-backend');
   const afModel   = document.getElementById('af-model');
   afBackend.addEventListener('change', () => {
-    afModel.placeholder = BACKEND_MODEL_HINTS[afBackend.value] || 'model (optional)';
+    afModel.placeholder = backendModelHint(afBackend.value);
   });
 
   document.getElementById('agent-form').addEventListener('submit', async (e) => {
@@ -4011,16 +4086,16 @@ function showAgentCreatePrompt(agentName, onSaved) {
   const prompt = document.createElement('div');
   prompt.id = 'agent-create-prompt';
   prompt.className = 'agent-create-prompt';
+  const backendOptions = Object.keys(_backendMetadata).length
+    ? Object.keys(_backendMetadata)
+    : ['claude', 'codex', 'cursor', 'opencode'];
   prompt.innerHTML = `
     <div class="acp-title">Agent <strong>${agentName}</strong> not found — create it?</div>
     <div class="acp-row">
       <select id="acp-backend">
-        <option value="claude">claude</option>
-        <option value="codex">codex</option>
-        <option value="cursor">cursor</option>
-        <option value="opencode">opencode</option>
+        ${backendOptions.map(id => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join('')}
       </select>
-      <input id="acp-model" placeholder="${BACKEND_MODEL_HINTS.claude}" />
+      <input id="acp-model" placeholder="${backendModelHint(backendOptions[0])}" />
       <input id="acp-cwd" placeholder="cwd (default: ${_squidHome})" />
     </div>
     <div class="acp-actions">
@@ -4033,7 +4108,7 @@ function showAgentCreatePrompt(agentName, onSaved) {
 
   const modelInput = prompt.querySelector('#acp-model');
   prompt.querySelector('#acp-backend').addEventListener('change', e => {
-    modelInput.placeholder = BACKEND_MODEL_HINTS[e.target.value] || 'model (optional)';
+    modelInput.placeholder = backendModelHint(e.target.value);
   });
 
   prompt.querySelector('#acp-cancel').addEventListener('click', () => prompt.remove());
@@ -4312,6 +4387,9 @@ async function showBootBanner() {
     const res = await fetch('/health');
     if (!res.ok) return;
     const data = await res.json();
+    _backendMetadata = data.backends || {};
+    await updateActiveQuotaGauge();
+    if (activeQuotaBackend) fetchQuotaForBackend(activeQuotaBackend);
     const bootTime = data.boot_time ? fmtTime(data.boot_time) : '';
     const el = document.createElement('div');
     el.className = 'boot-banner';
@@ -5210,6 +5288,13 @@ document.addEventListener('visibilitychange', () => {
     messages.scrollTop = messages.scrollHeight;
     if (_activePollImmediate) _activePollImmediate();
     startProcPoll();
+    // If the active quota gauge has a stale reset time, refetch on return
+    if (activeQuotaBackend) {
+      const st = quotaStateFor(activeQuotaBackend);
+      if (st && (!st.resetAt || st.resetAt <= Date.now())) {
+        fetchQuotaForBackend(activeQuotaBackend);
+      }
+    }
   }
 });
 
