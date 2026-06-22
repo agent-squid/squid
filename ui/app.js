@@ -544,6 +544,12 @@ async function loadHistory() {
   for (const item of [...items].reverse()) {
     if (!item.content && item.status !== 'pending') continue;
 
+    // Skip if a bubble for this message is already in the DOM — e.g. an
+    // in-progress live (SSE) bubble that survived a search → back round-trip.
+    // Without this, loadHistory would render a second, polling-driven bubble
+    // for the same message alongside the live one.
+    if (item.id != null && messages.querySelector(`[data-msg-id="${item.id}"]`)) continue;
+
     if (item.status === 'pending') {
       const wipBubble = makeWipBubble(item);
       fragment.appendChild(wipBubble);
@@ -1499,6 +1505,7 @@ async function sendMessage(text) {
               if (meta.msg_id) {
                 msgId = meta.msg_id;
                 bubble.dataset.msgId = String(msgId);
+                thinkingBubble.dataset.msgId = String(msgId);
                 bubble.dataset.topic = topic;
                 if (resolvedAgent) bubble.dataset.agent = resolvedAgent;
                 addPinButton(bubble, msgId, topic, resolvedAgent);
@@ -2170,9 +2177,23 @@ async function pollPendingItem(item, wipBubble) {
         const content = wipBubble.querySelector('.thinking-live');
         if (content) content.innerHTML += '<br><span class="msg-error">Timed out.</span>';
       } else if (data.content) {
-        // Show partial content while still generating
-        const statusSpan = wipBubble.querySelector('.thinking-live > span:not(.loader)');
-        if (statusSpan) statusSpan.textContent = truncate(data.content, 120);
+        // Show partial content while still generating, as a growing/scrolling
+        // block (mirrors the live SSE preview) rather than a single truncated
+        // line. The header span stays on top; partial output streams below and
+        // the .thinking-live container scrolls once it exceeds its max-height.
+        const live = wipBubble.querySelector('.thinking-live');
+        if (live) {
+          const loader = live.querySelector('.loader');
+          if (loader) loader.remove();
+          let stream = live.querySelector('.thinking-stream');
+          if (!stream) {
+            stream = document.createElement('div');
+            stream.className = 'thinking-stream';
+            live.appendChild(stream);
+          }
+          stream.textContent = data.content;
+          live.scrollTop = live.scrollHeight;
+        }
       }
     } catch { clearInterval(timer); }
   }, 2000);

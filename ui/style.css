@@ -738,6 +738,7 @@ body {
 }
 .thinking-toggle::before { content: '▸ '; }
 .thinking-expanded .thinking-toggle::before { content: '▾ '; }
+.thinking-stream { margin-top: 0.4em; }
 .thinking-body { display: none; margin-top: 0.5em; white-space: pre-wrap; }
 .thinking-expanded .thinking-body { display: block; }
 
