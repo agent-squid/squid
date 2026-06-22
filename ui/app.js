@@ -453,7 +453,7 @@ function reloadHistory(filter = {}) {
   historyFilter = filter;
   historyOffset = 0;
   historyExhausted = false;
-  historyLoading = false;
+  invalidateHistoryLoad();
   if (topSentinel) { topSentinel.remove(); topSentinel = null; }
   document.querySelectorAll('.history-item, .boot-banner, .tool-block-history').forEach(el => el.remove());
   // Remove live (non-history) messages too — completed ones are in the DB and will reload
@@ -502,6 +502,33 @@ let historyOffset = 0;
 let historyExhausted = false;
 let historyLoading = false;
 let topSentinel = null;
+let historyGeneration = 0;
+let historyObserver = null;
+const pendingPollTimers = new WeakMap();
+
+function invalidateHistoryLoad() {
+  historyGeneration++;
+  historyLoading = false;
+  if (historyObserver) {
+    historyObserver.disconnect();
+    historyObserver = null;
+  }
+}
+
+function cancelPendingPoll(bubble) {
+  const timer = pendingPollTimers.get(bubble);
+  if (timer) clearInterval(timer);
+  pendingPollTimers.delete(bubble);
+}
+
+function reconcilePendingBubble(msgId, preferredBubble) {
+  if (msgId == null) return;
+  messages.querySelectorAll(`.msg-thinking[data-msg-id="${msgId}"]`).forEach(bubble => {
+    if (bubble === preferredBubble) return;
+    cancelPendingPoll(bubble);
+    bubble.remove();
+  });
+}
 
 // ── search state ──────────────────────────────────────────────────────────────
 let searchActive = false;
@@ -523,6 +550,7 @@ function createTopSentinel() {
 async function loadHistory() {
   if (historyExhausted || historyLoading) return;
   historyLoading = true;
+  const generation = historyGeneration;
 
   let data;
   try {
@@ -533,9 +561,12 @@ async function loadHistory() {
     const res = await fetch(url);
     data = await res.json();
   } catch {
-    historyLoading = false;
+    if (generation === historyGeneration) historyLoading = false;
     return;
   }
+
+  // Search/filter navigation may have superseded this request while it was in flight.
+  if (generation !== historyGeneration) return;
 
   const { items, has_more } = data;
   const prevHeight = messages.scrollHeight;
@@ -585,14 +616,15 @@ async function loadHistory() {
 }
 
 function initHistoryScroll() {
+  if (historyObserver) historyObserver.disconnect();
   topSentinel = createTopSentinel();
   messages.insertBefore(topSentinel, messages.firstChild);
 
-  const observer = new IntersectionObserver(
+  historyObserver = new IntersectionObserver(
     (entries) => { if (entries[0].isIntersecting) loadHistory(); },
     { root: messages, threshold: 0 },
   );
-  observer.observe(topSentinel);
+  historyObserver.observe(topSentinel);
 }
 
 // ── keyword search ────────────────────────────────────────────────────────────
@@ -703,7 +735,7 @@ function startSearch(rawArgs) {
 
   // Stop history scroll
   if (topSentinel) { topSentinel.remove(); topSentinel = null; }
-  historyLoading = false;
+  invalidateHistoryLoad();
 
   // Clear pane
   document.querySelectorAll('.history-item, .boot-banner, .search-result-item, .tool-block-history').forEach(el => el.remove());
@@ -724,7 +756,7 @@ function clearSearch() {
   if (topSentinel) { topSentinel.remove(); topSentinel = null; }
   historyOffset = 0;
   historyExhausted = false;
-  historyLoading = false;
+  invalidateHistoryLoad();
   _updateFilterBadge();
   initHistoryScroll();
 }
@@ -991,7 +1023,7 @@ let _lastLookbackN = 0;
 
 function _allLookbackItems(adhoc, lookback) {
   if (!adhoc || lookback <= 0) return [];
-  return [...document.querySelectorAll('#messages .history-item.assistant')]
+  return [...document.querySelectorAll('#messages .history-item.assistant:not(.msg-thinking)')]
     .filter(el => el.dataset.msgId)
     .map(el => {
       const id = parseInt(el.dataset.msgId);
@@ -1024,7 +1056,7 @@ function updateInContextMarkers() {
   const activeItems = adhoc && lookback > 0 ? _activeLookbackItems(adhoc, lookback) : [];
   const activeIdSet = new Set(activeItems.map(i => i.id));
 
-  document.querySelectorAll('#messages .history-item.assistant').forEach(el => {
+  document.querySelectorAll('#messages .history-item.assistant:not(.msg-thinking)').forEach(el => {
     const ctxSpan = el.querySelector('.user-ctx');
     const msgId = el.dataset.msgId ? parseInt(el.dataset.msgId) : null;
     const wasInjected = msgId && injected.includes(msgId);
@@ -1506,6 +1538,7 @@ async function sendMessage(text) {
                 msgId = meta.msg_id;
                 bubble.dataset.msgId = String(msgId);
                 thinkingBubble.dataset.msgId = String(msgId);
+                reconcilePendingBubble(msgId, thinkingBubble);
                 bubble.dataset.topic = topic;
                 if (resolvedAgent) bubble.dataset.agent = resolvedAgent;
                 addPinButton(bubble, msgId, topic, resolvedAgent);
@@ -2130,6 +2163,7 @@ function appendHistoryItem(item, container) {
 function makeWipBubble(item) {
   const bubble = document.createElement('div');
   bubble.className = 'msg assistant msg-thinking history-item';
+  bubble.dataset.msgId = String(item.id);
   const content = document.createElement('div');
   content.className = 'thinking-live';
   const asstLabel = item.agent || item.backend || '';
@@ -2156,6 +2190,10 @@ async function pollPendingItem(item, wipBubble) {
   const MAX_POLLS = 960;
   let count = 0;
   const timer = setInterval(async () => {
+    if (!wipBubble.isConnected) {
+      cancelPendingPoll(wipBubble);
+      return;
+    }
     count++;
     try {
       const res = await fetch(`/chat/${item.id}/status`);
@@ -2197,6 +2235,7 @@ async function pollPendingItem(item, wipBubble) {
       }
     } catch { clearInterval(timer); }
   }, 2000);
+  pendingPollTimers.set(wipBubble, timer);
 }
 
 async function pollMessageStatus(msgId, contentEl, bubbleEl, stopBtn = null) {

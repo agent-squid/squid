@@ -282,6 +282,45 @@ test.describe('parallel responses', () => {
 });
 
 test.describe('recovered pending responses', () => {
+  test('search back keeps one status bubble when live meta arrives after history', async ({ page }) => {
+    await mockBackend(page);
+
+    let exposePending = false;
+    await page.route('**/history**', r => r.fulfill({ json: {
+      items: exposePending ? [{
+        id: 1,
+        topic: 'default',
+        agent: 'claude',
+        backend: 'claude',
+        status: 'pending',
+        prompt: 'long-running task',
+        content: 'Working from history...',
+        adhoc: false,
+      }] : [],
+      has_more: false,
+    }}));
+    await page.route('**/search**', r => r.fulfill({ json: { items: [] } }));
+
+    const { intercepted, fulfill } = holdChat(page);
+    await page.goto('/');
+    await sendMsg(page, 'long-running task');
+    await intercepted;
+
+    // The pending row becomes visible to history before the held SSE sends meta.
+    exposePending = true;
+    await page.evaluate(() => startSearch('needle'));
+    await page.evaluate(() => clearSearch());
+    await expect(page.locator(`${THINKING}[data-msg-id="1"]`)).toHaveCount(1);
+    await expect(page.locator(THINKING)).toHaveCount(2); // live (unidentified) + recovered WIP
+
+    await fulfill(sse(META, { event: 'status', data: 'Still working...' }));
+
+    // meta.msg_id reconciles the recovered WIP into the live SSE bubble.
+    await expect(page.locator(THINKING)).toHaveCount(1);
+    await expect(page.locator(`${THINKING}[data-msg-id="1"]`)).toHaveCount(1);
+    await expect(page.locator(THINKING)).toContainText('Still working...');
+  });
+
   test('completed response moves to bottom instead of replacing its status bubble', async ({ page }) => {
     await mockBackend(page);
 
