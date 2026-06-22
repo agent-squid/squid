@@ -7,17 +7,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, OPENCODE_PATH, ENABLED_BACKENDS
-
-_BACKEND_FALLBACK_ORDER = ["claude", "codex", "cursor", "opencode"]  # only enabled backends
-_BACKEND_PATHS = {
-    "claude":       CLAUDE_PATH,
-    "codex":        CODEX_PATH,
-    "cursor":       CURSOR_PATH,
-    "opencode":     OPENCODE_PATH,
-    "antigravity":  AGY_PATH,
-    "copilot":      COPILOT_PATH,
-}
+from .backends import BACKENDS
 
 # Store database in ~/.squid/ so it persists across installs/updates.
 # Override with SQUID_DB_PATH env var (e.g. for containers).
@@ -90,6 +80,7 @@ _TABLES = [
         agent       TEXT NOT NULL,
         session_id  TEXT NOT NULL,
         cwd         TEXT NOT NULL,
+        backend_fingerprint TEXT,
         created_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         PRIMARY KEY (topic, agent)
     )""",
@@ -127,7 +118,9 @@ _TABLES = [
 
 # v0.1 baseline — _TABLES above reflects the complete schema.
 # Add future schema changes here as new entries after each release.
-_MIGRATIONS: list[str] = []
+_MIGRATIONS: list[str] = [
+    "ALTER TABLE topic_sessions ADD COLUMN backend_fingerprint TEXT",
+]
 
 
 def _connect() -> sqlite3.Connection:
@@ -148,21 +141,23 @@ def init_db() -> None:
                 pass
         # Seed opencode with its free default model so it works out of the box
         # (must run before the generic loop so the model is set on first insert)
-        if OPENCODE_PATH and "opencode" in ENABLED_BACKENDS:
+        opencode_backend = BACKENDS.get("opencode")
+        if opencode_backend and opencode_backend.available:
             from .config import OPENCODE_DEFAULT_MODEL
             conn.execute(
                 "INSERT OR IGNORE INTO agents (name, backend, model) VALUES (?, ?, ?)",
                 ("opencode", "opencode", OPENCODE_DEFAULT_MODEL),
             )
         # Seed one default agent per installed enabled CLI (INSERT OR IGNORE — never overwrites user edits)
-        for backend, path in _BACKEND_PATHS.items():
-            if path and backend in ENABLED_BACKENDS:
+        for backend, definition in BACKENDS.items():
+            if definition.available:
                 conn.execute(
                     "INSERT OR IGNORE INTO agents (name, backend) VALUES (?, ?)",
                     (backend, backend),
                 )
         # Seed haiku as a cost-comparison agent alongside the default claude agent
-        if CLAUDE_PATH and "claude" in ENABLED_BACKENDS:
+        claude_backend = BACKENDS.get("claude")
+        if claude_backend and claude_backend.available:
             conn.execute(
                 "INSERT OR IGNORE INTO agents (name, backend, model) VALUES (?, ?, ?)",
                 ("haiku", "claude", "claude-haiku-4-5"),
@@ -202,7 +197,7 @@ def get_default_agent() -> Optional[dict]:
     """Return the first available agent in fallback order: claude → codex → cursor."""
     with _connect() as conn:
         rows = {r["name"]: dict(r) for r in conn.execute("SELECT * FROM agents").fetchall()}
-    for backend in _BACKEND_FALLBACK_ORDER:
+    for backend in BACKENDS:
         if backend in rows:
             return rows[backend]
     # Any agent at all
@@ -593,7 +588,7 @@ def get_topic_agents(topic: str) -> list[dict]:
 def get_topic_session(topic: str, agent: str) -> Optional[dict]:
     with _connect() as conn:
         row = conn.execute(
-            "SELECT session_id, cwd FROM topic_sessions WHERE topic=? AND agent=?",
+            "SELECT session_id, cwd, backend_fingerprint FROM topic_sessions WHERE topic=? AND agent=?",
             (topic, agent),
         ).fetchone()
     return dict(row) if row else None
@@ -602,15 +597,17 @@ def get_topic_session(topic: str, agent: str) -> Optional[dict]:
 _invalidated_session_ids: set[str] = set()
 
 
-def set_topic_session(topic: str, agent: str, session_id: str, cwd: Optional[str]) -> None:
+def set_topic_session(topic: str, agent: str, session_id: str, cwd: Optional[str],
+                      backend_fingerprint: Optional[str] = None) -> None:
     if session_id in _invalidated_session_ids:
         _invalidated_session_ids.discard(session_id)
         return
     with _connect() as conn:
         conn.execute(
-            """INSERT INTO topic_sessions (topic, agent, session_id, cwd) VALUES (?, ?, ?, ?)
-               ON CONFLICT(topic, agent) DO UPDATE SET session_id=excluded.session_id, cwd=excluded.cwd""",
-            (topic, agent, session_id, cwd),
+            """INSERT INTO topic_sessions (topic, agent, session_id, cwd, backend_fingerprint) VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(topic, agent) DO UPDATE SET session_id=excluded.session_id,
+                 cwd=excluded.cwd, backend_fingerprint=excluded.backend_fingerprint""",
+            (topic, agent, session_id, cwd, backend_fingerprint),
         )
 
 

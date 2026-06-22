@@ -56,6 +56,11 @@ shipped example before starting the server.
 Agent-specific config (model, cwd, timeout) stays in the DB, writable at
 runtime without a server restart.
 
+Backend definitions were subsequently added to this infrastructure file by
+ADR-0024. They describe reusable CLI driver instances; agents remain in SQLite
+and reference a backend ID, so there is still one source of truth for each
+agent.
+
 Storing config in `~/.squid/` means it survives tarball installs/updates —
 users never need to re-edit their config after upgrading.
 

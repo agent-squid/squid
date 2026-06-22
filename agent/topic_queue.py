@@ -127,15 +127,27 @@ class TopicWorker:
 
     async def _process(self, item: QueueItem):
         from .runners import run_claude, run_codex, run_copilot, run_cursor, run_antigravity, run_opencode, CLINotFoundError, CLIError
-        from .config import SQUID_HOME, ENABLED_BACKENDS
+        from .config import SQUID_HOME
+        from .backends import get_backend
         from .stats_db import insert_run_event, update_assistant_message, save_stats, set_topic_session
         from .git_changes import prepare_trackers
 
+        backend = get_backend(item.backend)
+        if backend is None:
+            await item.out_q.put({"_error": f"Backend {item.backend!r} is not configured"})
+            await item.out_q.put(None)
+            return
         runner = {"claude": run_claude, "codex": run_codex, "cursor": run_cursor,
                   "copilot": run_copilot, "antigravity": run_antigravity,
-                  "opencode": run_opencode}.get(item.backend)
-        if runner is None or item.backend not in ENABLED_BACKENDS:
-            await item.out_q.put({"_error": f"Backend {item.backend!r} is not yet supported"})
+                  "opencode": run_opencode}.get(backend.driver)
+        if runner is None:
+            await item.out_q.put({"_error": f"Driver {backend.driver!r} is not supported"})
+            await item.out_q.put(None)
+            return
+        try:
+            backend_env = backend.execution_env()
+        except ValueError as exc:
+            await item.out_q.put({"_error": str(exc)})
             await item.out_q.put(None)
             return
 
@@ -157,6 +169,8 @@ class TopicWorker:
             topic=item.topic, agent=item.agent or "",
             response_timeout=item.timeout,
             adhoc=item.adhoc, msg_id=item.msg_id,
+            backend_id=item.backend, backend_env=backend_env,
+            backend_settings=backend.driver_settings(), backend_args=backend.args,
         )
         if item.resume_session_id:
             kwargs["resume_session_id"] = item.resume_session_id
@@ -204,7 +218,10 @@ class TopicWorker:
                                        backend=item.backend, model=item.model, cwd=effective_cwd,
                                        lookback=item.lookback)
                             if item.agent and not item.adhoc:
-                                set_topic_session(item.topic, item.agent, session_id, effective_cwd)
+                                set_topic_session(
+                                    item.topic, item.agent, session_id, effective_cwd,
+                                    backend.fingerprint,
+                                )
                             enriched["session_id"] = session_id
                             enriched["cwd"] = effective_cwd
                         insert_run_event(item.msg_id, run_seq, "stats", json.dumps(enriched))

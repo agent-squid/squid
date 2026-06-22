@@ -168,6 +168,29 @@ def test_codex_stats_keep_cached_tokens_as_breakdown_only():
     assert stats["output_tokens"] == 1200
 
 
+def test_codex_backend_configuration_reaches_command_and_process_metadata():
+    captured = {}
+
+    async def fake_stream_lines(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        yield '{"type":"turn.completed","usage":{}}'
+
+    async def collect():
+        return [chunk async for chunk in run_codex(
+            "hello", cwd="/tmp", backend_id="local-codex",
+            backend_env={"LOCAL_TOKEN": "token"},
+            backend_settings={"model_provider": "vllm_mlx"},
+        )]
+
+    with patch("agent.runners.CODEX_PATH", "codex"), patch("agent.runners._stream_lines", fake_stream_lines):
+        asyncio.run(collect())
+
+    assert ["-c", 'model_provider="vllm_mlx"'] == captured["cmd"][5:7]
+    assert captured["kwargs"]["backend"] == "local-codex"
+    assert captured["kwargs"]["extra_env"] == {"LOCAL_TOKEN": "token"}
+
+
 def test_codex_file_change_event_yields_diff_tool():
     async def fake_stream_lines(*args, **kwargs):
         yield '{"type":"thread.started","thread_id":"thread-1"}'

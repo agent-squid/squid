@@ -39,4 +39,8 @@ def test_topics_management_summary_includes_hidden_and_agent_lanes(tmp_path, mon
         "last_at": all_topics[0]["agents"][0]["last_at"],
         "last_model": None,
         "last_backend": None,
+        "session_turns": 0,
+        "adhoc_turns": 0,
+        "agent_turns": 0,
+        "live_turns": 0,
     }]

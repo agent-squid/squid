@@ -369,12 +369,7 @@
         <form id="agent-form">
           <div class="agent-form-row">
             <input id="af-name"    type="text" placeholder="name" spellcheck="false" required />
-            <select id="af-backend">
-              <option value="claude">claude</option>
-              <option value="codex">codex</option>
-              <option value="cursor">cursor</option>
-              <option value="opencode">opencode</option>
-            </select>
+            <select id="af-backend"></select>
             <input id="af-model"   type="text" placeholder="e.g. claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7" spellcheck="false" />
             <input id="af-cwd"     type="text"   placeholder="/tmp/<user>/squid/…" spellcheck="false" />
             <button type="submit">Save</button>
@@ -390,6 +385,6 @@
   </div>
   <div id="app-tooltip"></div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="app.js?v=20260616-043"></script>
+  <script src="app.js?v=20260621-050"></script>
 </body>
 </html>

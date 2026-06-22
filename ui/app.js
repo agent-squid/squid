@@ -2477,9 +2477,9 @@ function setQuotaSnapshot(backend, snapshot) {
 }
 
 function quotaTimeText(resetAt) {
-  if (!resetAt) return '…';
+  if (!resetAt) return '';
   const diff = resetAt - Date.now();
-  if (diff <= 0) return 'resetting…';
+  if (diff <= 0) return 'resetting';
   const totalMin = Math.floor(diff / 60000);
   const h = Math.floor(totalMin / 60);
   const m = String(totalMin % 60).padStart(2, '0');
@@ -2493,7 +2493,24 @@ function setVisibleQuotaBackend(backend) {
   const displayIds = new Set(Object.values(QUOTA_CONFIG).map(cfg => cfg.displayId));
   for (const id of displayIds) document.getElementById(id)?.classList.add('quota-hidden');
   if (activeQuotaBackend) {
-    document.getElementById(QUOTA_CONFIG[gaugeType].displayId)?.classList.remove('quota-hidden');
+    const cfg = QUOTA_CONFIG[gaugeType];
+    const displayEl = document.getElementById(cfg.displayId);
+    displayEl?.classList.remove('quota-hidden', 'loaded', 'error');
+    const snapshot = quotaSnapshots[activeQuotaBackend];
+    if (snapshot?.status === 'loaded') {
+      displayEl?.classList.add('loaded');
+      if (displayEl) displayEl.title = snapshot.title ?? '';
+      updateGaugeLabel(activeQuotaBackend);
+    } else if (snapshot?.status === 'error') {
+      displayEl?.classList.add('error');
+      if (displayEl) displayEl.title = cfg.errorTitle ?? '';
+      const label = document.getElementById(cfg.labelId);
+      if (label) label.textContent = snapshot.text;
+      const arc = document.getElementById(cfg.pieArcId);
+      if (arc) arc.setAttribute('stroke-dasharray', `0 ${cfg.pieC}`);
+    } else {
+      updateGaugeLabel(activeQuotaBackend);
+    }
   }
 }
 
@@ -2527,7 +2544,11 @@ async function updateActiveQuotaGauge() {
   const seq = ++quotaResolveSeq;
   const backend = await resolveActiveQuotaBackend();
   if (seq !== quotaResolveSeq) return;
+  const previousBackend = activeQuotaBackend;
   setVisibleQuotaBackend(backend);
+  if (activeQuotaBackend && activeQuotaBackend !== previousBackend) {
+    fetchQuotaForBackend(activeQuotaBackend);
+  }
 }
 
 function parseClaudeQuota(data) {
@@ -2559,6 +2580,7 @@ function parseCodexQuota(data) {
 
 function scheduleGaugeTick(backend) {
   const state = quotaStateFor(backend);
+  if (!state.resetAt || state.resetAt <= Date.now()) return;
   state.timer = setTimeout(() => {
     updateGaugeLabel(backend);
     scheduleGaugeTick(backend);
@@ -2566,6 +2588,7 @@ function scheduleGaugeTick(backend) {
 }
 
 function updateGaugeLabel(backend) {
+  if (backend !== activeQuotaBackend) return;
   const cfg = quotaConfigFor(backend);
   const state = quotaStateFor(backend);
   if (!cfg) return;
@@ -2600,10 +2623,12 @@ function renderQuotaLoaded(backend, snapshot) {
   state.resetAt = snapshot.resetAt;
   state.displayText = snapshot.displayText ?? null;
 
-  const displayEl = document.getElementById(cfg.displayId);
-  displayEl.classList.remove('error');
-  displayEl.classList.add('loaded');
-  displayEl.title = snapshot.title ?? '';
+  if (backend === activeQuotaBackend) {
+    const displayEl = document.getElementById(cfg.displayId);
+    displayEl.classList.remove('error');
+    displayEl.classList.add('loaded');
+    displayEl.title = snapshot.title ?? '';
+  }
   updateGaugeLabel(backend);
   if (state.timer) clearTimeout(state.timer);
   state.timer = null;
@@ -2625,16 +2650,18 @@ function showQuotaError(backend, text) {
   state.resetAt = null;
   if (state.timer) { clearTimeout(state.timer); state.timer = null; }
 
-  const displayEl = document.getElementById(cfg.displayId);
-  displayEl.classList.remove('loaded');
-  displayEl.classList.add('error');
-  displayEl.title = cfg.errorTitle;
   setQuotaSnapshot(backend, { status: 'error', text });
 
-  const label = document.getElementById(cfg.labelId);
-  if (label) label.textContent = text;
-  const arc = document.getElementById(cfg.pieArcId);
-  if (arc) arc.setAttribute('stroke-dasharray', `0 ${cfg.pieC}`);
+  if (backend === activeQuotaBackend) {
+    const displayEl = document.getElementById(cfg.displayId);
+    displayEl.classList.remove('loaded');
+    displayEl.classList.add('error');
+    displayEl.title = cfg.errorTitle;
+    const label = document.getElementById(cfg.labelId);
+    if (label) label.textContent = text;
+    const arc = document.getElementById(cfg.pieArcId);
+    if (arc) arc.setAttribute('stroke-dasharray', `0 ${cfg.pieC}`);
+  }
 }
 
 async function fetchQuotaForBackend(backend, { trackDelta = false } = {}) {
@@ -2664,7 +2691,10 @@ async function fetchQuotaForBackend(backend, { trackDelta = false } = {}) {
       pct: data.used_percent == null ? null : Math.max(0, Math.min(100, Math.round(data.used_percent))),
       resetAt,
       title: data.title || '',
-      displayText: data.text ?? null,
+      // Percentage gauges build their label from pct + resetAt (for example,
+      // "42% in 4:34"). `text` is reserved for non-percentage gauges such as
+      // static labels, unlimited plans, and account balances.
+      displayText: data.used_percent == null ? (data.text ?? null) : null,
     };
     if (gaugeTypeFor(backend) === 'deepseek' && snapshot.raw != null) {
       const max = parseFloat(localStorage.getItem(`deepseek-max-balance:${backend}`)
@@ -5288,13 +5318,6 @@ document.addEventListener('visibilitychange', () => {
     messages.scrollTop = messages.scrollHeight;
     if (_activePollImmediate) _activePollImmediate();
     startProcPoll();
-    // If the active quota gauge has a stale reset time, refetch on return
-    if (activeQuotaBackend) {
-      const st = quotaStateFor(activeQuotaBackend);
-      if (st && (!st.resetAt || st.resetAt <= Date.now())) {
-        fetchQuotaForBackend(activeQuotaBackend);
-      }
-    }
   }
 });
 

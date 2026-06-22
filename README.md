@@ -92,14 +92,15 @@ Edit `~/.squid/squid.yaml` to change port, `localfile_roots`, or timeouts. Apply
 bin/start.sh --restart
 ```
 
-To use DeepSeek through Claude Code's Anthropic-compatible backend, add your DeepSeek API key:
+To use the configured `deepcla` backend, export your DeepSeek API key before starting Squid:
 
-```yaml
-deepseek:
-  claude_key: "<your-deepseek-api-key>"
+```bash
+export DEEPSEEK_API_KEY="<your-deepseek-api-key>"
 ```
 
-After restarting, Squid automatically creates the `deepcla` agent with backend `claude` and model `deepseek-v4-pro`. Use it like any other agent:
+The shipped YAML example defines `deepcla` with `driver: claude`, canonical
+DeepSeek connection fields, and `gauge: deepseek`. Create an agent using backend
+`deepcla` and model `deepseek-v4-pro`, then use it normally:
 
 ```text
 #work@deepcla implement the feature
@@ -120,9 +121,12 @@ To stop without restarting: `bin/stop.sh`
 | Backend       | CLI                                              | Install                                        | Sessions      |
 |---------------|--------------------------------------------------|------------------------------------------------|---------------|
 | `claude`      | `claude` (Claude Code)                           | `npm install -g @anthropic-ai/claude-code`     | resumable     |
-| `claude` (`deepcla`) | `claude` + DeepSeek Anthropic-compatible API | Claude Code CLI + DeepSeek API key              | resumable     |
+| `deepcla`     | `claude` + DeepSeek Anthropic-compatible API   | Claude Code CLI + DeepSeek API key              | resumable     |
 | `codex`       | `codex` (OpenAI Codex)                           | `npm install -g @openai/codex`                 | resumable     |
 | `cursor`      | `cursor-agent` (Cursor)                          | `curl https://cursor.com/install -fsS \| bash` | resumable     |
+| `opencode`    | `opencode`                                       | `npm install -g opencode-ai`                    | resumable     |
+
+A **driver** is Squid's coded CLI adapter (`claude`, `codex`, `cursor`, or `opencode`). A **backend** is a YAML-configured instance of one driver. Multiple backends can share a driver while using different endpoints, credentials, arguments, and colors. See `config/squid.yaml.example`.
 
 ## Input syntax
 
@@ -157,7 +161,7 @@ curl -X POST http://127.0.0.1:8000/config/agents \
 | Field     | Type    | Description                                                                      |
 |-----------|---------|----------------------------------------------------------------------------------|
 | `name`    | string  | Agent identifier — used in `#topic@agent` syntax                                 |
-| `backend` | string  | `claude` \| `codex` \| `cursor`; DeepSeek agents use `claude` |
+| `backend` | string  | Backend ID configured under `backends` in `~/.squid/squid.yaml`                |
 | `model`   | string  | Model name passed as `--model` to the CLI (optional)                             |
 | `cwd`     | string  | Absolute path for the subprocess cwd; `null` = `/tmp/<user>/squid`              |
 | `timeout` | integer | Response timeout in seconds; overrides the global 1800 s default                 |
@@ -363,7 +367,7 @@ Clears the stored session ID, cwd, and injection log for this `(topic, agent)`. 
 {
   "status": "ok",
   "backends": {
-    "claude":  { "available": true,  "path": "/usr/local/bin/claude", "gauge_authed": true  },
+    "claude":  { "available": true,  "path": "/usr/local/bin/claude", "gauge": { "type": "claude" }, "gauge_authed": true  },
     "codex":   { "available": true,  "path": "/usr/local/bin/codex",  "gauge_authed": false },
     "cursor":  { "available": false, "path": null,                    "gauge_authed": false }
   }

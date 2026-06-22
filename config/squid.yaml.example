@@ -12,5 +12,51 @@ agent:
   first_byte_timeout: 300
   response_timeout: 1800
 
-deepseek:
-  claude_key: ""   # DeepSeek API key (Anthropic-compatible endpoint) — powers the deepcla agent
+# A backend is a configured instance of a coded CLI driver. Add more backends
+# with one of these drivers: claude, codex, cursor, opencode.
+backends:
+  claude:
+    driver: claude
+    color: "#AE5332"
+    gauge: claude
+
+  codex:
+    driver: codex
+    color: "#7070A0"
+    gauge: codex
+
+  cursor:
+    driver: cursor
+    color: "#FFFFFF"
+    gauge: cursor
+
+  opencode:
+    driver: opencode
+    color: "#CFCECD"
+    gauge:
+      type: static
+      text: Free tier
+      title: OpenCode-managed limits
+
+  # DeepSeek through Claude Code's Anthropic-compatible transport.
+  # Export DEEPSEEK_API_KEY before starting Squid.
+  deepcla:
+    driver: claude
+    color: "#4D9DE0"
+    provider: deepseek
+    base_url: "https://api.deepseek.com/anthropic"
+    api_key:
+      env: DEEPSEEK_API_KEY
+    gauge: deepseek
+
+  # Canonical base_url/api_key fields are translated into driver-specific
+  # environment and settings. Raw env/settings/args remain available as escapes.
+  # qwen:
+  #   driver: codex
+  #   color: "#10A37F"
+  #   provider: qwen
+  #   base_url: "http://127.0.0.1:9000/v1"
+  #   gauge:
+  #     type: static
+  #     text: Local
+  #     title: No provider quota

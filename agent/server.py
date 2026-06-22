@@ -37,7 +37,8 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, OPENCODE_PATH, SQUID_HOME, RESPONSE_TIMEOUT, DEEPSEEK_CLAUDE_KEY, DEEPSEEK_DEFAULT_MODEL, _cfg
+from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, OPENCODE_PATH, SQUID_HOME, RESPONSE_TIMEOUT, _cfg
+from .backends import BACKENDS, get_backend, public_backends
 from .runners import run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError, CLIError, list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic
 from .history import list_history
 from .topic_queue import TopicDispatcher
@@ -105,15 +106,16 @@ def _claude_logged_in() -> bool:
 
 def _check_deps():
     missing, warnings = [], []
-    if not CLAUDE_PATH:
+    configured_drivers = {backend.driver for backend in BACKENDS.values()}
+    if "claude" in configured_drivers and not CLAUDE_PATH:
         missing.append("claude        →  npm install -g @anthropic-ai/claude-code")
-    elif not _claude_logged_in():
+    elif "claude" in BACKENDS and not _claude_logged_in():
         warnings.append("claude is installed but not logged in  →  run: claude login")
-    if not CODEX_PATH:
+    if "codex" in configured_drivers and not CODEX_PATH:
         missing.append("codex         →  npm install -g @openai/codex")
-    if not CURSOR_PATH:
+    if "cursor" in configured_drivers and not CURSOR_PATH:
         missing.append("cursor-agent  →  curl https://cursor.com/install -fsS | bash")
-    if not OPENCODE_PATH:
+    if "opencode" in configured_drivers and not OPENCODE_PATH:
         missing.append("opencode      →  npm install -g opencode-ai")
     if missing:
         log.warning("Missing CLI tools:\n  " + "\n  ".join(missing))
@@ -122,19 +124,16 @@ def _check_deps():
     if not missing and not warnings:
         log.info("claude=%s  codex=%s  cursor=%s  opencode=%s", CLAUDE_PATH, CODEX_PATH, CURSOR_PATH, OPENCODE_PATH)
 
-def _provision_deepseek_agents():
-    """Create (or correct) deepcla agent if Claude Code CLI and key are available.
-    deepcod is intentionally omitted — Codex CLI is hardwired to ChatGPT's API and
-    does not support custom OpenAI-compatible base URLs.
-    """
-    if CLAUDE_PATH and DEEPSEEK_CLAUDE_KEY:
-        existing = get_agent("deepcla")
-        if not existing or existing.get("backend") != "claude":
-            upsert_agent("deepcla", "claude", DEEPSEEK_DEFAULT_MODEL)
-            log.info("provisioned agent: deepcla (backend=claude model=%s)", DEEPSEEK_DEFAULT_MODEL)
+def _migrate_legacy_deepseek_agent():
+    """Move the old model-routed deepcla agent onto its configured backend."""
+    legacy = _cfg.get("deepseek") or {}
+    existing = get_agent("deepcla")
+    if legacy.get("claude_key") and "deepcla" in BACKENDS and existing and existing.get("backend") == "claude":
+        upsert_agent("deepcla", "deepcla", existing.get("model") or "deepseek-v4-pro", existing.get("cwd"))
+        log.info("migrated agent: deepcla (backend=deepcla)")
 
 _check_deps()
-_provision_deepseek_agents()
+_migrate_legacy_deepseek_agent()
 sync_now()
 
 app = FastAPI(title="Squid", version="0.1.0")
@@ -178,7 +177,7 @@ class TopicHiddenRequest(BaseModel):
 
 class AgentRequest(BaseModel):
     name: str = Field(..., min_length=1)
-    backend: Literal["auto", "claude", "cursor", "codex", "opencode"] = "auto"
+    backend: str = "auto"
     model: Optional[str] = None
     cwd: Optional[str] = None
 
@@ -485,8 +484,14 @@ async def chat(req: ChatRequest):
     if not req.adhoc and resolved_agent:
         stored = get_topic_session(topic, resolved_agent)
         if stored:
-            resume_session_id = stored["session_id"]
-            cwd = stored["cwd"]
+            backend_definition = get_backend(backend)
+            stored_fingerprint = stored.get("backend_fingerprint")
+            if backend_definition and stored_fingerprint and stored_fingerprint != backend_definition.fingerprint:
+                clear_topic_session(topic, resolved_agent)
+                log.info("cleared session after backend config change: topic=%s agent=%s backend=%s", topic, resolved_agent, backend)
+            else:
+                resume_session_id = stored["session_id"]
+                cwd = stored["cwd"]
 
     # 3. Context history for adhoc turns
     lookback = int(req.lookback) if req.lookback else 0
@@ -624,18 +629,31 @@ async def queued():
 
 @app.get("/health")
 async def health():
+    backends = public_backends()
+    for backend_id, info in backends.items():
+        backend = get_backend(backend_id)
+        gauge_type = backend.gauge.type if backend else "none"
+        if gauge_type == "claude":
+            gauge_authed = bool(creds.get_org_id() and creds.get_session_key())
+        elif gauge_type == "codex":
+            gauge_authed = bool(creds.get_codex_token())
+        elif gauge_type == "cursor":
+            gauge_authed = bool(creds.get_cursor_token())
+        elif gauge_type == "deepseek":
+            try:
+                gauge_authed = bool(backend and backend.resolved_api_key())
+            except ValueError:
+                gauge_authed = False
+        elif gauge_type == "static":
+            gauge_authed = True
+        else:
+            gauge_authed = None
+        info["gauge_authed"] = gauge_authed
     return JSONResponse({
         "status": "ok",
         "boot_time": BOOT_TIME,
         "squid_home": SQUID_HOME,
-        "backends": {
-            "claude":       {"available": bool(CLAUDE_PATH),    "path": CLAUDE_PATH,    "gauge_authed": bool(creds.get_org_id() and creds.get_session_key())},
-            "codex":        {"available": bool(CODEX_PATH),     "path": CODEX_PATH,    "gauge_authed": bool(creds.get_codex_token())},
-            "cursor":       {"available": bool(CURSOR_PATH),    "path": CURSOR_PATH,   "gauge_authed": bool(creds.get_cursor_token())},
-            "opencode":     {"available": bool(OPENCODE_PATH),  "path": OPENCODE_PATH, "gauge_authed": None},
-            "copilot":      {"available": bool(COPILOT_PATH),   "path": COPILOT_PATH,  "enabled": False},
-            "antigravity":  {"available": bool(AGY_PATH),       "path": AGY_PATH,      "enabled": False},
-        },
+        "backends": backends,
     })
 
 
@@ -833,7 +851,14 @@ async def get_agents():
 
 @app.post("/config/agents")
 async def create_agent(req: AgentRequest):
-    key_changed = upsert_agent(req.name, req.backend, req.model, req.cwd)
+    backend_id = req.backend
+    if backend_id == "auto":
+        backend_id = req.name if req.name in BACKENDS else next(
+            (name for name, backend in BACKENDS.items() if backend.available), ""
+        )
+    if not get_backend(backend_id):
+        return JSONResponse({"error": f"Backend {backend_id!r} is not configured"}, status_code=400)
+    key_changed = upsert_agent(req.name, backend_id, req.model, req.cwd)
     sessions_cleared = clear_agent_sessions(req.name) if key_changed else []
     return JSONResponse({"ok": True, "sessions_cleared": sessions_cleared})
 
@@ -1072,14 +1097,19 @@ async def quota_cursor():
 
 @app.get("/quota/deepseek")
 async def quota_deepseek():
-    if not DEEPSEEK_CLAUDE_KEY:
+    backend = get_backend("deepcla")
+    try:
+        deepseek_key = (backend.resolved_api_key() if backend else None)
+    except ValueError:
+        deepseek_key = None
+    if not deepseek_key:
         return JSONResponse({"error": "deepseek key not configured"}, status_code=400)
     try:
         import httpx
         async with httpx.AsyncClient() as client:
             r = await client.get(
                 "https://api.deepseek.com/user/balance",
-                headers={"Authorization": f"Bearer {DEEPSEEK_CLAUDE_KEY}"},
+                headers={"Authorization": f"Bearer {deepseek_key}"},
                 timeout=10,
             )
         if r.status_code != 200:
@@ -1088,6 +1118,103 @@ async def quota_deepseek():
     except Exception as exc:
         log.error("deepseek balance fetch failed: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=502)
+
+
+def _json_response_data(response: JSONResponse) -> dict:
+    try:
+        return json.loads(response.body)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+
+
+@app.get("/quota/backend/{backend_id}")
+async def quota_backend(backend_id: str):
+    """Return a normalized gauge snapshot for one configured backend."""
+    backend = get_backend(backend_id)
+    if backend is None:
+        return JSONResponse({"error": "backend not configured"}, status_code=404)
+    gauge = backend.gauge
+    if gauge.type == "none":
+        return JSONResponse({"status": "none"})
+    if gauge.type == "static":
+        return JSONResponse({
+            "status": "static", "text": gauge.text, "title": gauge.title,
+            "used_percent": None, "reset_at": None,
+        })
+
+    if gauge.type == "deepseek":
+        try:
+            api_key = backend.resolved_api_key()
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if not api_key:
+            return JSONResponse({"error": "api_key not configured"}, status_code=400)
+        try:
+            import httpx
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    "https://api.deepseek.com/user/balance",
+                    headers={"Authorization": f"Bearer {api_key}"}, timeout=10,
+                )
+            if response.status_code != 200:
+                return JSONResponse({"error": f"DeepSeek returned {response.status_code}"}, status_code=502)
+            data = response.json()
+        except Exception as exc:
+            log.error("deepseek balance fetch failed for %s: %s", backend_id, exc)
+            return JSONResponse({"error": str(exc)}, status_code=502)
+        balances = data.get("balance_infos") or []
+        info = next((item for item in balances if item.get("currency") == "USD"), None)
+        info = info or next((item for item in balances if item.get("currency") == "CNY"), None)
+        if not info:
+            return JSONResponse({"error": "balance unavailable"}, status_code=502)
+        symbol = "$" if info.get("currency") == "USD" else "¥"
+        balance = float(info.get("total_balance") or 0)
+        return JSONResponse({
+            "status": "ok", "text": f"{symbol}{balance:.2f}",
+            "raw": balance, "used_percent": None, "reset_at": None,
+            "title": f"DeepSeek balance · {symbol}{balance:.2f}",
+        })
+
+    raw_response = await {
+        "claude": quota_claude,
+        "codex": quota_codex,
+        "cursor": quota_cursor,
+    }[gauge.type]()
+    if raw_response.status_code >= 400:
+        return raw_response
+    data = _json_response_data(raw_response)
+    if gauge.type == "claude":
+        window = data.get("five_hour") or {}
+        used = window.get("utilization")
+        return JSONResponse({
+            "status": "ok", "text": f"{round(used)}%" if used is not None else None,
+            "raw": used, "used_percent": used, "reset_at": window.get("resets_at"),
+            "title": "Claude session usage",
+        })
+    if gauge.type == "codex":
+        rate_limit = data.get("rate_limit") or {}
+        window = rate_limit.get("primary_window") or {}
+        used = window.get("used_percent")
+        reset_at = window.get("reset_at")
+        if reset_at is None and window.get("reset_after_seconds") is not None:
+            reset_at = time.time() + window["reset_after_seconds"]
+        return JSONResponse({
+            "status": "ok", "text": f"{round(used)}%" if used is not None else None,
+            "raw": used, "used_percent": used, "reset_at": reset_at,
+            "title": "Codex usage",
+        })
+    if data.get("isUnlimited"):
+        return JSONResponse({
+            "status": "static", "text": "Unlimited", "used_percent": None,
+            "reset_at": None, "title": "Cursor unlimited",
+        })
+    plan = (data.get("individualUsage") or {}).get("plan") or {}
+    used = plan.get("totalPercentUsed")
+    return JSONResponse({
+        "status": "ok", "text": f"{round(used)}%" if used is not None else None,
+        "raw": used, "used_percent": used, "reset_at": data.get("billingCycleEnd"),
+        "title": data.get("autoModelSelectedDisplayMessage") or "Cursor usage",
+    })
 
 
 @app.get("/journals/{topic}")

@@ -5,7 +5,8 @@
 | Term | Meaning |
 |---|---|
 | **agent** | A named configuration: backend, model, cwd, timeout. Defined by the user and stored in the `agents` table. Referenced by name in the `@agent` input syntax. |
-| **backend** | The CLI used to run a turn: `claude`, `codex`, `cursor`, `antigravity`, or `copilot`. Must be explicitly set on each agent. |
+| **backend** | A named YAML configuration selecting a coded driver, provider connection, billing gauge, and color. Must be explicitly set on each agent. |
+| **driver** | The coded CLI protocol adapter used by a backend: `claude`, `codex`, `cursor`, or `opencode`. |
 | **topic** | A named conversation channel (e.g. `oncall`, `backend`). Each topic has a sticky agent you can switch dynamically and zero or more sessions and adhoc turns from multiple agents. Topic = *sessions(*agents) + *adhocs(*agents) |
 | **session** | A resumable CLI process context identified by a `session_id` (from `claude --resume`) or `thread_id` (Codex). Scoped to `(topic, agent)`. |)
 | **adhoc** | A one-off parallel turn that uses a `lookback` window of recent history as inline context instead of a persistent session. |
@@ -408,7 +409,7 @@ Poll a single message for status (used when client reconnects mid-stream).
 [
   {
     "name":       "string",
-    "backend":    "claude | cursor | antigravity | codex | copilot",
+    "backend":    "configured backend ID",
     "model":      "string | null",
     "cwd":        "string | null",
     "timeout":    300,
@@ -427,7 +428,7 @@ Create or update an agent (upsert by name).
 ```json
 {
   "name":    "string (required)",
-  "backend": "claude | cursor | antigravity | codex | copilot",
+  "backend": "configured backend ID",
   "model":   "string | null",
   "cwd":     "string | null  — abs path; null = /tmp/<user>/squid",
   "timeout": "integer | null  — seconds"
@@ -556,13 +557,27 @@ Fetch current Codex usage. Requires a saved Codex bearer token.
   "status":    "ok",
   "boot_time": "ISO8601",
   "backends": {
-    "claude":      { "available": true,  "path": "/usr/local/bin/claude" },
+    "claude":      { "available": true,  "path": "/usr/local/bin/claude", "gauge": { "type": "claude" } },
     "cursor":      { "available": false, "path": null },
     "antigravity": { "available": false, "path": null },
     "codex":       { "available": true,  "path": "/usr/local/bin/codex" },
     "copilot":     { "available": false, "path": null }
   }
 }
+```
+
+`available` means the driver executable and configured secret references are
+present. It does not probe the provider endpoint. Every backend registered in
+YAML is returned, including unavailable ones.
+
+### GET /quota/backend/{backend_id}
+
+Returns a normalized dynamic or static gauge snapshot for the configured
+backend. Gauge routing and credentials come from that backend rather than its
+driver or model name.
+
+```json
+{ "status": "ok", "text": "$12.34", "raw": 12.34, "used_percent": null, "reset_at": null, "title": "DeepSeek balance" }
 ```
 
 ---

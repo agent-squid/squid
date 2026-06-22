@@ -291,7 +291,8 @@ def test_worker_persists_agent_cwd_for_sessions_with_code_roots(tmp_path):
         return set_topic_session.call_args
 
     call_args = asyncio.run(run())
-    assert call_args.args == ("work", "codex", "thread-1", "/agent/config/cwd")
+    assert call_args.args[:4] == ("work", "codex", "thread-1", "/agent/config/cwd")
+    assert len(call_args.args[4]) == 16  # backend configuration fingerprint
 
 
 def test_worker_bug_emits_error_and_sentinel():

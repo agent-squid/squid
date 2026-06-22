@@ -12,7 +12,7 @@ import signal
 import time
 from typing import AsyncGenerator, List, Optional, Union
 
-from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, OPENCODE_PATH, FIRST_BYTE_TIMEOUT, RESPONSE_TIMEOUT, PROXY_ENV, DEEPSEEK_ANTHROPIC_BASE_URL, DEEPSEEK_DEFAULT_MODEL, DEEPSEEK_CLAUDE_KEY
+from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, OPENCODE_PATH, FIRST_BYTE_TIMEOUT, RESPONSE_TIMEOUT, PROXY_ENV
 
 # ---------------------------------------------------------------------------
 # Process registry
@@ -312,22 +312,14 @@ async def run_claude(
     response_timeout: Optional[int] = None,
     resume_session_id: Optional[str] = None,
     adhoc: bool = False, msg_id: Optional[int] = None,
+    backend_id: str = "claude", backend_env: Optional[dict] = None,
+    backend_settings: Optional[dict] = None, backend_args: tuple[str, ...] = (),
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream text chunks from claude CLI, then yield a stats dict."""
     if not CLAUDE_PATH:
         raise CLINotFoundError(
             "claude CLI not found in PATH. Install with: npm install -g @anthropic-ai/claude-code"
         )
-
-    extra_env: Optional[dict] = None
-    if model and model.lower().startswith("deepseek"):
-        if not DEEPSEEK_CLAUDE_KEY:
-            raise CLIError("deepseek.claude_key not set in ~/.squid/squid.yaml")
-        extra_env = {
-            "ANTHROPIC_BASE_URL": DEEPSEEK_ANTHROPIC_BASE_URL,
-            "ANTHROPIC_AUTH_TOKEN": DEEPSEEK_CLAUDE_KEY,
-            "ANTHROPIC_MODEL": model,
-        }
 
     cmd = [
         CLAUDE_PATH, "--print",
@@ -336,6 +328,7 @@ async def run_claude(
         "--verbose",
         "--dangerously-skip-permissions",
     ]
+    cmd += list(backend_args)
     if model:
         cmd += ["--model", model]
 
@@ -349,7 +342,7 @@ async def run_claude(
     streamed_text = False  # track whether any text chunks were streamed as content
     tool_blocks: dict[int, dict] = {}  # index -> {name, input_json}
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend="claude", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, extra_env=extra_env):
+    async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, extra_env=backend_env):
         if not line:
             continue
         try:
@@ -427,12 +420,29 @@ async def run_claude(
             }
 
 
+def _codex_config_args(settings: dict) -> list[str]:
+    """Flatten structured YAML settings into Codex `-c key=value` arguments."""
+    result: list[str] = []
+
+    def visit(prefix: str, value) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                visit(f"{prefix}.{key}" if prefix else str(key), child)
+            return
+        result.extend(["-c", f"{prefix}={json.dumps(value, separators=(',', ':'))}"])
+
+    visit("", settings)
+    return result
+
+
 async def run_codex(
     prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
     model: Optional[str] = None, topic: str = "", agent: str = "",
     response_timeout: Optional[int] = None,
     resume_session_id: Optional[str] = None,
     adhoc: bool = False, msg_id: Optional[int] = None,
+    backend_id: str = "codex", backend_env: Optional[dict] = None,
+    backend_settings: Optional[dict] = None, backend_args: tuple[str, ...] = (),
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream a response from codex CLI using non-interactive exec mode."""
     if not CODEX_PATH:
@@ -440,13 +450,16 @@ async def run_codex(
             "codex CLI not found in PATH. Install with: npm install -g @openai/codex"
         )
 
+    config_args = _codex_config_args(backend_settings or {})
     if resume_session_id:
         cmd = [CODEX_PATH, "exec", "resume", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"]
+        cmd += config_args + list(backend_args)
         if model:
             cmd += ["--model", model]
         cmd += [resume_session_id, prompt]
     else:
         cmd = [CODEX_PATH, "exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"]
+        cmd += config_args + list(backend_args)
         if model:
             cmd += ["--model", model]
         cmd.append(_build_prompt(prompt, history))
@@ -454,7 +467,7 @@ async def run_codex(
     start_ms = time.monotonic() * 1000
     thread_id: Optional[str] = None
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend="codex", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt):
+    async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, extra_env=backend_env):
         if not line:
             continue
         try:
@@ -623,6 +636,8 @@ async def run_cursor(
     response_timeout: Optional[int] = None,
     resume_session_id: Optional[str] = None,
     adhoc: bool = False, msg_id: Optional[int] = None,
+    backend_id: str = "cursor", backend_env: Optional[dict] = None,
+    backend_settings: Optional[dict] = None, backend_args: tuple[str, ...] = (),
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream text chunks from cursor-agent CLI, then yield a stats dict."""
     if not CURSOR_PATH:
@@ -636,6 +651,7 @@ async def run_cursor(
         "--stream-partial-output",
         "--trust",
     ]
+    cmd += list(backend_args)
     if resume_session_id:
         cmd += ["--resume", resume_session_id]
     if model:
@@ -645,7 +661,7 @@ async def run_cursor(
     session_id: Optional[str] = None
     text_started = False
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend="cursor", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt):
+    async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, extra_env=backend_env):
         if not line:
             continue
         try:
@@ -819,6 +835,8 @@ async def run_opencode(
     response_timeout: Optional[int] = None,
     resume_session_id: Optional[str] = None,
     adhoc: bool = False, msg_id: Optional[int] = None,
+    backend_id: str = "opencode", backend_env: Optional[dict] = None,
+    backend_settings: Optional[dict] = None, backend_args: tuple[str, ...] = (),
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream text chunks from opencode CLI, then yield a stats dict."""
     if not OPENCODE_PATH:
@@ -827,6 +845,7 @@ async def run_opencode(
         )
 
     cmd = [OPENCODE_PATH, "run", "--format", "json", "--dangerously-skip-permissions"]
+    cmd += list(backend_args)
     if model:
         cmd += ["-m", model]
     if resume_session_id:
@@ -839,7 +858,7 @@ async def run_opencode(
     total_input = total_output = total_cache_read = total_cache_write = 0
     total_cost: float = 0.0
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend="opencode", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt):
+    async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, extra_env=backend_env):
         if not line:
             continue
         try:
