@@ -18,7 +18,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono&display=swap" />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono&display=swap&text=%E2%96%88%E2%96%84%E2%96%80%E2%95%94%E2%95%90%E2%95%97%E2%95%91%E2%95%9A%E2%95%9D" />
   <link rel="stylesheet" href="/vendor/atom-one-dark.min.css" />
-  <link rel="stylesheet" href="style.css?v=20260616-020" />
+  <link rel="stylesheet" href="style.css?v=20260621-021" />
   <script src="/vendor/highlight.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/vendor/qrcode.min.js"></script>
@@ -378,6 +378,19 @@
         </form>
         <span class="settings-label">Backends</span>
         <div id="backends-catalog"></div>
+        <div id="config-editor-header">
+          <div>
+            <span class="settings-label">Configuration</span>
+            <span id="config-editor-path" class="settings-hint"></span>
+          </div>
+          <div id="config-editor-actions">
+            <span id="config-editor-status"></span>
+            <button id="config-editor-reload" type="button">Reload</button>
+            <button id="config-editor-save" type="button">Save YAML</button>
+          </div>
+        </div>
+        <textarea id="config-editor" spellcheck="false" aria-label="Squid YAML configuration"></textarea>
+        <div class="settings-hint">Configuration is validated and backed up before saving. Most changes require a server restart; file roots apply immediately.</div>
       </div>
     </div>
 
@@ -385,6 +398,6 @@
   </div>
   <div id="app-tooltip"></div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="app.js?v=20260621-050"></script>
+  <script src="app.js?v=20260621-052"></script>
 </body>
 </html>

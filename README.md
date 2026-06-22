@@ -86,7 +86,8 @@ bin/start.sh     # starts the server; bootstraps ~/.squid/ on first run
 
 ### 3. Configure (optional)
 
-Edit `~/.squid/squid.yaml` to change port, `localfile_roots`, or timeouts. Apply with:
+Edit `~/.squid/squid.yaml` directly or use the YAML editor in the Agents view to
+change backends, port, `localfile_roots`, or timeouts. Most changes apply after:
 
 ```bash
 bin/start.sh --restart
@@ -228,14 +229,17 @@ Squid has two security layers, both configured in `~/.squid/squid.yaml`.
 refuses to start. Remote access is handled exclusively by `tailscale serve`,
 which provides its own device-level authentication.
 
-**Layer 2 — `/localfile` path allowlist**: the endpoint that serves local files
-to the browser is restricted to explicit directories:
+**Layer 2 — `/localfile` path allowlist**: Squid's own `~/.squid` state directory
+is visible to the single-user web UI. Other local files are restricted to explicit
+directories:
 ```yaml
 server:
   localfile_roots:
     - "/tmp/<user>/squid"
 ```
-Replace `<user>` with your OS username. Add other directories as needed. An empty list disables the endpoint entirely.
+Replace `<user>` with your OS username. Add other directories in YAML or use the
+file viewer's **Allow directory** action. The selected directory applies immediately;
+other configuration changes require a restart.
 
 ## Couch Coding With Tailscale
 

@@ -32,11 +32,11 @@ _DRIVER_PATHS = {
 }
 
 _DEFAULT_BACKENDS: dict[str, dict[str, Any]] = {
-    "claude": {"driver": "claude", "color": "#AE5332", "gauge": "claude"},
-    "codex": {"driver": "codex", "color": "#7070A0", "gauge": "codex"},
-    "cursor": {"driver": "cursor", "color": "#FFFFFF", "gauge": "cursor"},
+    "claude": {"driver": "claude", "label": "Claude", "color": "#AE5332", "gauge": "claude"},
+    "codex": {"driver": "codex", "label": "Codex", "color": "#7070A0", "gauge": "codex"},
+    "cursor": {"driver": "cursor", "label": "Cursor", "color": "#FFFFFF", "gauge": "cursor"},
     "opencode": {
-        "driver": "opencode", "color": "#CFCECD",
+        "driver": "opencode", "label": "OpenCode", "color": "#CFCECD",
         "gauge": {"type": "static", "text": "Free tier", "title": "OpenCode-managed limits"},
     },
 }
@@ -57,7 +57,7 @@ class Backend:
     id: str
     driver: str
     color: str = "#888888"
-    label: Optional[str] = None
+    label: str = ""
     env: dict[str, Any] = field(default_factory=dict)
     settings: dict[str, Any] = field(default_factory=dict)
     args: tuple[str, ...] = ()
@@ -214,9 +214,9 @@ def _validate_backend(backend_id: str, raw: Any) -> Backend:
     color = raw.get("color", "#888888")
     if not isinstance(color, str) or not _COLOR_RE.fullmatch(color):
         raise ValueError(f"Backend {backend_id!r} color must be #RRGGBB")
-    label = raw.get("label")
-    if label is not None and not isinstance(label, str):
-        raise ValueError(f"Backend {backend_id!r} label must be a string")
+    label = raw.get("label", backend_id)
+    if not isinstance(label, str) or not label.strip():
+        raise ValueError(f"Backend {backend_id!r} label must be a non-empty string")
     env = raw.get("env") or {}
     if not isinstance(env, dict):
         raise ValueError(f"Backend {backend_id!r} env must be a mapping")
@@ -260,6 +260,7 @@ def _configured_backends() -> dict[str, Any]:
     if legacy.get("claude_key"):
         defaults["deepcla"] = {
             "driver": "claude",
+            "label": "DeepSeek",
             "color": "#4D9DE0",
             "provider": "deepseek",
             "base_url": "https://api.deepseek.com/anthropic",

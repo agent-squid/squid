@@ -97,18 +97,7 @@ function quotaGaugeColor(backend) {
 }
 
 function backendDisplayName(backend) {
-  const configured = _backendMetadata[backend]?.label;
-  if (configured) return configured;
-  const names = {
-    claude: 'Claude',
-    codex: 'Codex',
-    cursor: 'Cursor',
-    opencode: 'OpenCode',
-    deepseek: 'DeepSeek',
-    antigravity: 'Antigravity',
-    copilot: 'Copilot',
-  };
-  return names[(backend || '').toLowerCase()] || (backend || 'Agent');
+  return _backendMetadata[backend]?.label || backend || 'Agent';
 }
 
 function backendModelHint(backend) {
@@ -134,6 +123,8 @@ function backendModelHint(backend) {
 
   function localFileUrl(path, line, endLine) {
     const params = new URLSearchParams({ path });
+    const token = localStorage.getItem('squid_token');
+    if (token) params.set('token', token);
     const base = '/localfile?' + params.toString();
     if (!line) return base;
     return base + '#L' + line + (endLine && endLine !== line ? '-L' + endLine : '');
@@ -961,6 +952,10 @@ form.addEventListener('submit', async (e) => {
     input.value = '';
     resizeComposer();
     hideAutocomplete();
+    if (cmd.command === 'restart') {
+      clearTimeout(_draftSaveTimer);
+      localStorage.removeItem('squid_draft');
+    }
     await handleCommand(cmd, topic, agent, adhoc, lookback);
     // Re-set chip after topic-scoped commands so next message stays in context
     if (['clear', 'compact', 'stop', 'stopall', 'deq'].includes(cmd.command) && (topic !== 'default' || agent)) {
@@ -1278,6 +1273,8 @@ async function sendMessage(text) {
   let msgId = null;
   let statusTimer = null;
   let completedFromStatus = false;
+  let completionRendered = false;
+  let completionTimestampEl = null;
   let detachedPolling = false;
   let raw = '';
   let resolvedAgent = agent;  // updated by meta event
@@ -1321,6 +1318,22 @@ async function sendMessage(text) {
     scrollToBottom();
   }
 
+  function addCompletionTimestamp() {
+    if (!completionTimestampEl && !statsEl && doneTime && firstDataReceived) {
+      completionTimestampEl = addTimestamp(bubble, doneTime, false);
+    }
+  }
+
+  function renderCompletionTools(tools) {
+    const diffTools = changeTools(tools || []);
+    for (const tool of diffTools) {
+      const block = makeToolBlock(tool, msgId);
+      block.classList.add('tool-block-history');
+      messages.appendChild(block);
+    }
+    refreshAllRevertButtons();
+  }
+
   function startStatusFallback(id) {
     if (statusTimer || !id) return;
     const doPoll = async () => {
@@ -1329,12 +1342,26 @@ async function sendMessage(text) {
         if (!statusRes.ok) return;
         const data = await statusRes.json();
         if (data.status === 'done') {
+          if (completionRendered || completedFromStatus) return;
           completedFromStatus = true;
+          completionRendered = true;
           stopStatusFallback();
           doneTime = new Date().toISOString();
           freezeThinking();
           showStoredResponse(data.content || '');
-          if (!statsEl) addTimestamp(bubble, doneTime, false);
+          bubble.classList.add('history-item');
+          if (!statsEl && data.stats) statsEl = addStats(bubble, data.stats, doneTime);
+          if (statsEl) messages.appendChild(statsEl);
+          let storedTools = [];
+          if (data.context) {
+            try {
+              storedTools = typeof data.context === 'string' ? JSON.parse(data.context) : data.context;
+              if (!Array.isArray(storedTools)) storedTools = [];
+            } catch {}
+          }
+          renderCompletionTools(storedTools.length ? storedTools : liveToolEvents);
+          addCompletionTimestamp();
+          scrollToBottom();
           controller.abort();
         } else if (data.status === 'error') {
           completedFromStatus = true;
@@ -1497,6 +1524,10 @@ async function sendMessage(text) {
                 bubble.dataset.sessionId = stats.session_id;
               }
               statsEl = addStats(bubble, stats, new Date().toISOString());
+              if (completionTimestampEl) {
+                completionTimestampEl.remove();
+                completionTimestampEl = null;
+              }
               liveCtxSpan.textContent = 'ctx:' + fmtCtxLabel(!!stats.adhoc);
               if (stats.session_id) liveCtxSpan.dataset.sessionId = stats.session_id;
               if (stats.cwd) liveCtxSpan.dataset.cwd = stats.cwd;
@@ -1520,6 +1551,11 @@ async function sendMessage(text) {
             // no eventName reset — allow multi-line accumulation
 
           } else if (eventName === 'done') {
+            if (completionRendered) {
+              eventName = null;
+              continue;
+            }
+            completionRendered = true;
             stopStatusFallback();
             freezeThinking();
             invalidateTopicsCache();
@@ -1533,13 +1569,7 @@ async function sendMessage(text) {
                 if (kws.length) highlightTextNodes(bubble, kws);
               }
               if (statsEl) messages.appendChild(statsEl); // stats goes between bubble and diffs, not after
-              const diffTools = changeTools(liveToolEvents);
-              for (const tool of diffTools) {
-                const block = makeToolBlock(tool, msgId);
-                block.classList.add('tool-block-history');
-                messages.appendChild(block);
-              }
-              refreshAllRevertButtons();
+              renderCompletionTools(liveToolEvents);
               scrollToBottom();
             }
             // Update ctx label with pin count and store IDs for popup
@@ -1611,7 +1641,7 @@ async function sendMessage(text) {
       if (!bubble.parentNode) messages.appendChild(bubble);
       contentDiv.innerHTML = '<span class="msg-error">No response — backend may be rate-limited or unavailable.</span>';
     }
-    if (!statsEl && doneTime && firstDataReceived) addTimestamp(bubble, doneTime, false);
+    addCompletionTimestamp();
   }
 
   // Quota is a backend-wide meter, so this before/after difference is only an
@@ -2670,7 +2700,7 @@ async function fetchQuotaForBackend(backend, { trackDelta = false } = {}) {
   const state = quotaStateFor(backend);
   if (state.inFlight) return state.raw == null ? null : { backend, ...state };
   state.inFlight = true;
-  const label = backend[0].toUpperCase() + backend.slice(1);
+  const label = backendDisplayName(backend);
   try {
     const res = await fetch(`/quota/backend/${encodeURIComponent(backend)}`);
     if (!res.ok) {
@@ -3143,7 +3173,7 @@ function renderQuotaStatus() {
       detail = 'loading';
     }
     return `<div class="quota-status-row">
-      <span class="quota-status-name"><span class="quota-status-dot" style="background:${accent}"></span>${backendDisplayName(backend)}</span>
+      <span class="quota-status-name"><span class="quota-status-dot" style="background:${accent}"></span>${escapeHtml(backendDisplayName(backend))}</span>
       <span class="quota-status-value">${value}</span>
       <span class="quota-status-detail">${detail}</span>
     </div>`;
@@ -3903,7 +3933,7 @@ function renderBackendsCatalog(backends) {
     const available   = info.available;
     const gaugeAuthed = info.gauge_authed;
     const color       = agentThemeColor(id);
-    const label       = info.label || id;
+    const label       = info.label;
     const authHint    = driverInfo.authHint || `uses ${info.driver} driver`;
     const installCmd  = driverInfo.installCmd || '';
     const gauge       = info.gauge || { type: 'none' };
@@ -3958,6 +3988,49 @@ function renderBackendsCatalog(backends) {
 
 // ── agent manager ─────────────────────────────────────────────────────────────
 
+let _configRevision = null;
+
+async function loadConfigYaml() {
+  const editor = document.getElementById('config-editor');
+  const status = document.getElementById('config-editor-status');
+  if (!editor) return;
+  status.textContent = 'loading…';
+  try {
+    const res = await fetch('/config/yaml');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to load configuration');
+    editor.value = data.content;
+    _configRevision = data.revision;
+    document.getElementById('config-editor-path').textContent = data.path;
+    status.textContent = '';
+  } catch (err) {
+    status.textContent = err.message || 'failed to load';
+  }
+}
+
+async function saveConfigYaml() {
+  const editor = document.getElementById('config-editor');
+  const status = document.getElementById('config-editor-status');
+  const save = document.getElementById('config-editor-save');
+  save.disabled = true;
+  status.textContent = 'validating…';
+  try {
+    const res = await fetch('/config/yaml', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: editor.value, revision: _configRevision }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to save configuration');
+    _configRevision = data.revision;
+    status.textContent = data.restart_required ? 'saved ✓ · restart required' : 'saved ✓';
+  } catch (err) {
+    status.textContent = err.message || 'save failed';
+  } finally {
+    save.disabled = false;
+  }
+}
+
 async function loadAgents() {
   const listEl = document.getElementById('agents-list');
   listEl.innerHTML = '<div class="empty">Loading…</div>';
@@ -3977,6 +4050,7 @@ async function loadAgents() {
     if (cwdInput) cwdInput.placeholder = `${_squidHome}/…`;
   }
   renderBackendsCatalog(health?.backends);
+  loadConfigYaml();
   if (!agents.length) {
     listEl.innerHTML = '<div class="empty">No agents yet. Add one below.</div>';
     return;
@@ -4011,6 +4085,15 @@ function initAliases() {
   const afModel   = document.getElementById('af-model');
   afBackend.addEventListener('change', () => {
     afModel.placeholder = backendModelHint(afBackend.value);
+  });
+  document.getElementById('config-editor-reload').addEventListener('click', loadConfigYaml);
+  document.getElementById('config-editor-save').addEventListener('click', saveConfigYaml);
+  document.getElementById('config-editor').addEventListener('keydown', e => {
+    if (e.key !== 'Tab') return;
+    e.preventDefault();
+    const editor = e.currentTarget;
+    const start = editor.selectionStart;
+    editor.setRangeText('  ', start, editor.selectionEnd, 'end');
   });
 
   document.getElementById('agent-form').addEventListener('submit', async (e) => {
@@ -5149,28 +5232,58 @@ function openFileViewer(path, line, endLine) {
   modal.appendChild(box);
   document.body.appendChild(modal);
 
-  fetch('/localfile?' + new URLSearchParams({ path }))
-    .then(async res => {
+  function showAllowRoot() {
+    const hint = path.split('/').slice(0, -1).join('/') || '/';
+    body.innerHTML = '';
+    const panel = document.createElement('div');
+    panel.className = 'fv-config-hint';
+    panel.innerHTML = '<strong>Path not in allowed roots</strong>' +
+      '<p>Choose an existing parent directory to add to <code>server.localfile_roots</code>.</p>' +
+      '<p>All files beneath the selected directory will become readable in the Squid web UI.</p>';
+    const row = document.createElement('div');
+    row.className = 'fv-root-row';
+    const rootInput = document.createElement('input');
+    rootInput.value = hint;
+    rootInput.spellcheck = false;
+    rootInput.setAttribute('aria-label', 'Directory to allow');
+    const allowBtn = document.createElement('button');
+    allowBtn.type = 'button';
+    allowBtn.textContent = 'Allow directory';
+    const status = document.createElement('div');
+    status.className = 'fv-root-status';
+    row.append(rootInput, allowBtn);
+    panel.append(row, status);
+    body.appendChild(panel);
+
+    allowBtn.addEventListener('click', async () => {
+      allowBtn.disabled = true;
+      status.textContent = 'Updating configuration…';
+      try {
+        const res = await fetch('/config/localfile-roots', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path, root: rootInput.value.trim() }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to allow directory');
+        status.textContent = 'Allowed. Loading file…';
+        await loadFile();
+      } catch (err) {
+        status.textContent = err.message || 'Failed to update configuration.';
+        allowBtn.disabled = false;
+      }
+    });
+  }
+
+  async function loadFile() {
+    body.textContent = 'Loading…';
+    try {
+      const res = await fetch('/localfile?' + new URLSearchParams({ path }));
       if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
-        const err = d.error || '';
-        if (res.status === 403 && err.includes('localfile_roots')) {
-          body.innerHTML =
-            '<div class="fv-config-hint">' +
-            '<strong>File viewer not configured</strong>' +
-            '<p>Add <code>server.localfile_roots</code> to <code>~/.squid/squid.yaml</code>:</p>' +
-            '<pre>server:\n  localfile_roots:\n    - "' + (path.split('/').slice(0, 3).join('/') || _squidHome) + '"</pre>' +
-            '<p>Then do a hard restart: <code>bin/start.sh --restart</code></p>' +
-            '</div>';
-        } else if (res.status === 403 && err.includes('outside allowed roots')) {
-          const hint = path.split('/').slice(0, -1).join('/') || '/';
-          body.innerHTML =
-            '<div class="fv-config-hint">' +
-            '<strong>Path not in allowed roots</strong>' +
-            '<p>Add this directory to <code>server.localfile_roots</code> in <code>~/.squid/squid.yaml</code>:</p>' +
-            '<pre>server:\n  localfile_roots:\n    - "' + hint + '"</pre>' +
-            '<p>Then do a hard restart: <code>bin/start.sh --restart</code></p>' +
-            '</div>';
+        const data = await res.json().catch(() => ({}));
+        const err = data.error || '';
+        if (res.status === 403 && (err.includes('localfile_roots') || err.includes('outside allowed roots'))) {
+          showAllowRoot();
         } else {
           body.textContent = err || `Error ${res.status}`;
         }
@@ -5178,8 +5291,12 @@ function openFileViewer(path, line, endLine) {
       }
       const text = await res.text();
       _renderFileViewer(body, text, line, endLine, path);
-    })
-    .catch(() => { body.textContent = 'Failed to load file.'; });
+    } catch {
+      body.textContent = 'Failed to load file.';
+    }
+  }
+
+  loadFile();
 }
 
 const _EXT_LANG = {

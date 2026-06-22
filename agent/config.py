@@ -1,6 +1,8 @@
 import glob
+import hashlib
 import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Optional
 import yaml
@@ -9,6 +11,37 @@ _USER_CONFIG = Path.home() / ".squid" / "squid.yaml"
 
 def _load_config() -> dict:
     return yaml.safe_load(_USER_CONFIG.read_text())
+
+
+def config_text() -> str:
+    return _USER_CONFIG.read_text(encoding="utf-8")
+
+
+def config_revision(content: Optional[str] = None) -> str:
+    raw = config_text() if content is None else content
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def write_config_text(content: str, expected_revision: Optional[str] = None) -> str:
+    """Atomically replace squid.yaml, retaining the previous version as .bak."""
+    if expected_revision is not None and config_revision() != expected_revision:
+        raise RuntimeError("configuration changed since it was loaded")
+
+    mode = _USER_CONFIG.stat().st_mode & 0o777
+    backup = _USER_CONFIG.with_suffix(_USER_CONFIG.suffix + ".bak")
+    shutil.copy2(_USER_CONFIG, backup)
+    fd, tmp_name = tempfile.mkstemp(prefix=".squid.yaml.", dir=_USER_CONFIG.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, _USER_CONFIG)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+    return config_revision(content)
 
 _cfg = _load_config()
 

@@ -1084,6 +1084,30 @@ body {
 }
 .settings-label { font-size: var(--text-md); color: var(--text-lo); }
 .settings-hint { font-size: var(--text-xs); color: var(--text-ghost); }
+#config-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 0.4rem;
+}
+#config-editor-header > div { display: flex; align-items: baseline; gap: 0.6rem; }
+#config-editor-actions { flex-shrink: 0; }
+#config-editor-status { color: var(--text-mid); font-size: var(--text-xs); }
+#config-editor {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 360px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #0b0b10;
+  color: var(--text-muted);
+  font: 12px/1.55 'JetBrains Mono', ui-monospace, monospace;
+  padding: 0.75rem;
+  tab-size: 2;
+}
+#config-editor:focus { outline: none; border-color: var(--text-dim); }
 
 /* pin basket button */
 #pin-btn {
@@ -1464,6 +1488,19 @@ body {
 .fv-config-hint p { margin: 0 0 0.6rem; }
 .fv-config-hint code { background: rgba(255,255,255,0.1); padding: 0.1em 0.35em; border-radius: 4px; font-family: inherit; }
 .fv-config-hint pre { margin: 0; background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 0.7rem 1rem; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 13px; color: var(--accent); white-space: pre; }
+.fv-root-row { display: flex; gap: 0.5rem; margin: 0.8rem 0 0.5rem; }
+.fv-root-row input {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  padding: 0.45rem 0.6rem;
+}
+.fv-root-row button { white-space: nowrap; }
+.fv-root-status { min-height: 1.4em; color: var(--text-mid); }
 .fv-lines { display: table; min-width: 100%; }
 .fv-line {
   display: table-row;

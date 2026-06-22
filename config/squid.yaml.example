@@ -3,9 +3,10 @@
 server:
   host: "127.0.0.1"
   port: 8000
-  # Directories the file viewer may serve from. Empty = disabled.
+  # Additional directories the file viewer may serve from. ~/.squid is always allowed.
   # /tmp/squid is substituted with /tmp/<your-username>/squid by start.sh on first run.
   localfile_roots:
+    - "~/.squid"
     - "/tmp/squid"
 
 agent:
@@ -17,21 +18,25 @@ agent:
 backends:
   claude:
     driver: claude
+    label: Claude
     color: "#AE5332"
     gauge: claude
 
   codex:
     driver: codex
+    label: Codex
     color: "#7070A0"
     gauge: codex
 
   cursor:
     driver: cursor
+    label: Cursor
     color: "#FFFFFF"
     gauge: cursor
 
   opencode:
     driver: opencode
+    label: OpenCode
     color: "#CFCECD"
     gauge:
       type: static
@@ -42,6 +47,7 @@ backends:
   # Export DEEPSEEK_API_KEY before starting Squid.
   deepcla:
     driver: claude
+    label: DeepSeek
     color: "#4D9DE0"
     provider: deepseek
     base_url: "https://api.deepseek.com/anthropic"
@@ -53,6 +59,7 @@ backends:
   # environment and settings. Raw env/settings/args remain available as escapes.
   # qwen:
   #   driver: codex
+  #   label: Qwen
   #   color: "#10A37F"
   #   provider: qwen
   #   base_url: "http://127.0.0.1:9000/v1"

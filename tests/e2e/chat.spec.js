@@ -175,8 +175,36 @@ test.describe('response bubble', () => {
     const block = blocks.first();
     await expect(block.locator('.tool-toggle')).toContainText('Changed files: 1 file, +1 -1');
     await block.locator('.tool-toggle').click();
-    await expect(block.locator('.diff-file')).toContainText('M ui/app.js');
+    await expect(block.locator('.gitdiff-file-toggle')).toContainText('M ui/app.js');
     await expect(block.locator('.diff-hunk')).toContainText('@@ -1 +1 @@');
+  });
+
+  test('recovered completion restores GitDiff and renders one end timestamp', async ({ page }) => {
+    const gitDiff = {
+      name: 'GitDiff',
+      file_count: 1,
+      additions: 1,
+      deletions: 1,
+      files: [{ status: 'M', path: 'ui/app.js' }],
+      diff: 'diff --git a/ui/app.js b/ui/app.js\n@@ -1 +1 @@\n-old\n+new',
+    };
+    await page.route('**/chat/*/status', r => r.fulfill({ json: {
+      status: 'done',
+      content: 'Recovered response',
+      context: JSON.stringify([gitDiff]),
+    } }));
+    await page.route('**/chat', r => r.fulfill({
+      status: 200,
+      headers: SSE_HEADERS,
+      body: sse(META, { data: 'Partial response' }),
+    }));
+
+    await sendMsg(page);
+    await expect(page.locator('.tool-block-history')).toHaveCount(1, { timeout: 5_000 });
+    await expect(page.locator(RESPONSE)).toContainText('Recovered response');
+    await expect(page.locator('.msg-time')).toHaveCount(2); // user start + assistant completion
+    await page.waitForTimeout(2_200);
+    await expect(page.locator('.msg-time')).toHaveCount(2);
   });
 
   test('thinking bubble collapses to toggle when status events present', async ({ page }) => {

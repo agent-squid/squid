@@ -26,19 +26,25 @@ import base64
 import json
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
 from typing import AsyncGenerator, Literal, Optional, Union
 
+import yaml
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, OPENCODE_PATH, SQUID_HOME, RESPONSE_TIMEOUT, _cfg
-from .backends import BACKENDS, get_backend, public_backends
+from .config import (
+    CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH,
+    OPENCODE_PATH, SQUID_HOME, RESPONSE_TIMEOUT, _USER_CONFIG, _cfg,
+    config_revision, config_text, write_config_text,
+)
+from .backends import BACKENDS, _validate_backend, get_backend, public_backends
 from .runners import run_claude, run_codex, run_copilot, run_cursor, run_antigravity, CLINotFoundError, CLIError, list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic
 from .history import list_history
 from .topic_queue import TopicDispatcher
@@ -182,6 +188,16 @@ class AgentRequest(BaseModel):
     cwd: Optional[str] = None
 
 
+class ConfigRequest(BaseModel):
+    content: str = Field(..., min_length=1)
+    revision: Optional[str] = None
+
+
+class LocalfileRootRequest(BaseModel):
+    path: str = Field(..., min_length=1)
+    root: str = Field(..., min_length=1)
+
+
 class CredsRequest(BaseModel):
     org_id: str = Field(..., min_length=1)
     session_key: str = Field(..., min_length=1)
@@ -238,6 +254,92 @@ class CmdRequest(BaseModel):
     adhoc: Optional[bool] = None
     pos: Optional[int] = None
     msg_id: Optional[int] = None
+
+
+def _validate_config_content(content: str) -> dict:
+    try:
+        parsed = yaml.safe_load(content)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"invalid YAML: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("configuration must be a YAML mapping")
+
+    server_cfg = parsed.get("server")
+    if not isinstance(server_cfg, dict):
+        raise ValueError("server must be a mapping")
+    if server_cfg.get("host") != "127.0.0.1":
+        raise ValueError("server.host must remain 127.0.0.1")
+    port = server_cfg.get("port")
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+        raise ValueError("server.port must be an integer from 1 to 65535")
+    roots = server_cfg.get("localfile_roots") or []
+    if not isinstance(roots, list) or not all(isinstance(root, str) and root for root in roots):
+        raise ValueError("server.localfile_roots must be a list of paths")
+
+    agent_cfg = parsed.get("agent")
+    if not isinstance(agent_cfg, dict):
+        raise ValueError("agent must be a mapping")
+    for field in ("first_byte_timeout", "response_timeout"):
+        value = agent_cfg.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"agent.{field} must be a positive integer")
+
+    backends = parsed.get("backends")
+    if backends is not None:
+        if not isinstance(backends, dict) or not backends:
+            raise ValueError("backends must be a non-empty mapping")
+        for backend_id, raw in backends.items():
+            _validate_backend(backend_id, raw)
+    return parsed
+
+
+def _same_origin(request: Request) -> bool:
+    if request.headers.get("sec-fetch-site") == "cross-site":
+        return False
+    origin = request.headers.get("origin")
+    if not origin:
+        return True
+    return origin.rstrip("/") == str(request.base_url).rstrip("/")
+
+
+def _localfile_roots_from(config: dict) -> list[Path]:
+    configured = [
+        Path(root).expanduser().resolve()
+        for root in ((config.get("server") or {}).get("localfile_roots") or [])
+    ]
+    # Squid's own state is intentionally visible to its single-user web UI.
+    squid_state = _USER_CONFIG.parent.resolve()
+    return list(dict.fromkeys([squid_state, *configured]))
+
+
+def _append_localfile_root(content: str, root: str) -> str:
+    """Append a root while preserving the rest of the user's YAML verbatim."""
+    lines = content.splitlines(keepends=True)
+    server_index = next((i for i, line in enumerate(lines) if re.match(r"^server:\s*(?:#.*)?$", line)), None)
+    if server_index is None:
+        raise ValueError("server must use a block mapping to add a root from the file viewer")
+    server_end = next(
+        (i for i in range(server_index + 1, len(lines)) if lines[i].strip() and not lines[i].startswith((" ", "\t", "#"))),
+        len(lines),
+    )
+    roots_index = next(
+        (i for i in range(server_index + 1, server_end) if re.match(r"^  localfile_roots:\s*", lines[i])),
+        None,
+    )
+    item = f"    - {json.dumps(root)}\n"
+    if roots_index is None:
+        lines[server_index + 1:server_index + 1] = ["  localfile_roots:\n", item]
+    elif re.match(r"^  localfile_roots:\s*\[\s*\]\s*(?:#.*)?$", lines[roots_index]):
+        lines[roots_index:roots_index + 1] = ["  localfile_roots:\n", item]
+    elif re.match(r"^  localfile_roots:\s*(?:#.*)?$", lines[roots_index]):
+        roots_end = next(
+            (i for i in range(roots_index + 1, server_end) if lines[i].strip() and not lines[i].startswith("    ")),
+            server_end,
+        )
+        lines.insert(roots_end, item)
+    else:
+        raise ValueError("localfile_roots must use block-list syntax to add a root from the file viewer")
+    return "".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -844,6 +946,70 @@ async def agent_sessions(name: str):
     return JSONResponse({"topics": get_agent_sessions(name)})
 
 
+@app.get("/config/yaml")
+async def get_config_yaml(request: Request):
+    if not _same_origin(request):
+        return JSONResponse({"error": "cross-origin configuration reads are not allowed"}, status_code=403)
+    content = config_text()
+    return JSONResponse({
+        "content": content,
+        "revision": config_revision(content),
+        "path": str(_USER_CONFIG),
+    })
+
+
+@app.put("/config/yaml")
+async def update_config_yaml(req: ConfigRequest, request: Request):
+    if not _same_origin(request):
+        return JSONResponse({"error": "cross-origin configuration writes are not allowed"}, status_code=403)
+    try:
+        parsed = _validate_config_content(req.content)
+        revision = write_config_text(req.content, req.revision)
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    _cfg.clear()
+    _cfg.update(parsed)
+    _LOCALFILE_ROOTS[:] = _localfile_roots_from(parsed)
+    return JSONResponse({
+        "ok": True,
+        "revision": revision,
+        "restart_required": True,
+        "backup": str(_USER_CONFIG.with_suffix(_USER_CONFIG.suffix + ".bak")),
+    })
+
+
+@app.post("/config/localfile-roots")
+async def add_localfile_root(req: LocalfileRootRequest, request: Request):
+    if not _same_origin(request):
+        return JSONResponse({"error": "cross-origin configuration writes are not allowed"}, status_code=403)
+    requested_path = Path(req.path).expanduser().resolve()
+    root = Path(req.root).expanduser().resolve()
+    if not root.is_dir():
+        return JSONResponse({"error": "allowed root must be an existing directory"}, status_code=400)
+    if not requested_path.is_relative_to(root):
+        return JSONResponse({"error": "allowed root must contain the requested file"}, status_code=400)
+
+    if root in _LOCALFILE_ROOTS:
+        return JSONResponse({"ok": True, "root": str(root), "added": False})
+    try:
+        current = config_text()
+        updated = _append_localfile_root(current, str(root))
+        parsed = _validate_config_content(updated)
+        write_config_text(updated, config_revision(current))
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    _cfg.clear()
+    _cfg.update(parsed)
+    _LOCALFILE_ROOTS[:] = _localfile_roots_from(parsed)
+    return JSONResponse({"ok": True, "root": str(root), "added": True})
+
+
 @app.get("/config/agents")
 async def get_agents():
     return JSONResponse(list_agents())
@@ -1259,16 +1425,15 @@ async def get_remote_url():
         return JSONResponse({"url": None, "reason": "error"})
 
 
-_LOCALFILE_ROOTS: list[Path] = [
-    Path(r).expanduser().resolve()
-    for r in ((_cfg.get("server") or {}).get("localfile_roots") or [])
-]
+_LOCALFILE_ROOTS: list[Path] = _localfile_roots_from(_cfg)
 
 @app.get("/localfile")
-async def serve_local_file(path: str):
+async def serve_local_file(path: str, request: Request):
     """Serve a local file — only paths under server.localfile_roots are allowed."""
     import mimetypes
     from fastapi.responses import FileResponse, PlainTextResponse
+    if not _same_origin(request):
+        return JSONResponse({"error": "cross-origin file reads are not allowed"}, status_code=403)
     if not _LOCALFILE_ROOTS:
         return JSONResponse({"error": "localfile not enabled (set server.localfile_roots in ~/.squid/squid.yaml)"}, status_code=403)
     p = Path(path).expanduser().resolve()

@@ -61,13 +61,15 @@ test('status popup lists every configured backend, including inactive gauges', a
     backends: {
       claude: { label: 'Claude', gauge: { type: 'claude' } },
       codex: { label: 'Codex', gauge: { type: 'codex' } },
+      deepcla: { label: 'DeepSeek', gauge: { type: 'deepseek' } },
+      qwen: { label: 'Qwen', gauge: { type: 'static' } },
       local: { label: 'Local', gauge: { type: 'static' } },
       bare: { label: 'Bare', gauge: { type: 'none' } },
     },
   }}));
   await page.route('**/quota/backend/*', r => {
     const backend = r.request().url().split('/').pop();
-    if (backend === 'local') {
+    if (backend === 'local' || backend === 'qwen') {
       return r.fulfill({ json: { status: 'ok', text: 'Local', raw: null, used_percent: null } });
     }
     return r.fulfill({ json: { status: 'ok', raw: 42, used_percent: 42 } });
@@ -78,11 +80,14 @@ test('status popup lists every configured backend, including inactive gauges', a
   await page.locator('#proc-status').click();
 
   const rows = page.locator('#proc-status-popup .quota-status-row');
-  await expect(rows).toHaveCount(4);
-  await expect(rows).toContainText(['Claude', 'Codex', 'Local', 'Bare']);
+  await expect(rows).toHaveCount(6);
+  await expect(rows).toContainText(['Claude', 'Codex', 'DeepSeek', 'Qwen', 'Local', 'Bare']);
   await expect(rows.filter({ hasText: 'Claude' })).toContainText('42%');
   await expect(rows.filter({ hasText: 'Codex' })).toContainText('42%');
-  await expect(rows.filter({ hasText: 'Local' })).toContainText('Local');
+  const localRow = rows.filter({
+    has: page.locator('.quota-status-name').filter({ hasText: /^Local$/ }),
+  });
+  await expect(localRow).toContainText('Local');
   await expect(rows.filter({ hasText: 'Bare' })).toContainText('no quota integration');
 });
 
