@@ -1009,16 +1009,22 @@ def get_aggregated_stats(
     agent: str = "",
     topic: str = "",
     adhoc: str = "all",
+    tz_offset_minutes: int = 0,
 ) -> list:
+    # Shift UTC timestamps to local time before bucketing so day boundaries
+    # reflect the user's clock, not UTC midnight.
+    # getTimezoneOffset() returns minutes to subtract from local to get UTC,
+    # so negating it gives the offset to add to UTC to get local.
+    tz_shift = f"{-tz_offset_minutes} minutes"
     ss_bucket = (
-        "strftime('%Y-%m-%d %H:00', ss_inner.created_at)"
+        f"strftime('%Y-%m-%d %H:00', datetime(ss_inner.created_at, '{tz_shift}'))"
         if period == "hourly"
-        else "strftime('%Y-%m-%d', ss_inner.created_at)"
+        else f"strftime('%Y-%m-%d', datetime(ss_inner.created_at, '{tz_shift}'))"
     )
     cm_bucket = (
-        "strftime('%Y-%m-%d %H:00', cm.created_at)"
+        f"strftime('%Y-%m-%d %H:00', datetime(cm.created_at, '{tz_shift}'))"
         if period == "hourly"
-        else "strftime('%Y-%m-%d', cm.created_at)"
+        else f"strftime('%Y-%m-%d', datetime(cm.created_at, '{tz_shift}'))"
     )
     limit = (days * (24 if period == "hourly" else 1) + 1) if days else 5000
     cutoff = _stats_cutoff(days)

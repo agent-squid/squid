@@ -1518,6 +1518,10 @@ async function sendMessage(text) {
               contentDiv.innerHTML = marked.parse(raw);
               bubble.classList.add('history-item');
               messages.appendChild(bubble);
+              if (searchActive && searchState) {
+                const kws = searchState.keywords.trim().split(/\s+/).filter(Boolean);
+                if (kws.length) highlightTextNodes(bubble, kws);
+              }
               if (statsEl) messages.appendChild(statsEl); // stats goes between bubble and diffs, not after
               const diffTools = changeTools(liveToolEvents);
               for (const tool of diffTools) {
@@ -2114,7 +2118,11 @@ async function pollPendingItem(item, wipBubble) {
         clearInterval(timer);
         if (!wipBubble.parentNode) return;
         wipBubble.remove();
-        appendHistoryItem(data, messages);
+        const wipEl = appendHistoryItem(data, messages);
+        if (wipEl && searchActive && searchState) {
+          const kws = searchState.keywords.trim().split(/\s+/).filter(Boolean);
+          if (kws.length) highlightTextNodes(wipEl, kws);
+        }
         refreshAllRevertButtons();
         scrollToBottom();
       } else if (count >= MAX_POLLS) {
@@ -2578,6 +2586,7 @@ function renderQuotaLoaded(backend, snapshot) {
     pct: snapshot.pct,
     resetAt: snapshot.resetAt,
     title: snapshot.title,
+    displayText: snapshot.displayText ?? null,
   });
 }
 
@@ -3038,7 +3047,7 @@ function renderQuotaStatus() {
     if (q.status === 'loaded') {
       value = `${q.pct}%`;
       const reset = quotaTimeText(q.resetAt);
-      detail = reset ? `resets in ${reset}` : 'reset time unavailable';
+      detail = reset ? `resets in ${reset}` : (q.displayText ? `${q.displayText} remaining` : 'reset time unavailable');
     } else if (q.status === 'error') {
       value = 'error';
       detail = q.text || 'unavailable';
