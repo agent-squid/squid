@@ -54,6 +54,38 @@ test('opening the tracker restarts polling until an external process finishes', 
   await expect(tracker).not.toHaveClass(/has-procs/, { timeout: 5_000 });
 });
 
+test('status popup lists every configured backend, including inactive gauges', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/health', r => r.fulfill({ json: {
+    status: 'ok',
+    backends: {
+      claude: { label: 'Claude', gauge: { type: 'claude' } },
+      codex: { label: 'Codex', gauge: { type: 'codex' } },
+      local: { label: 'Local', gauge: { type: 'static' } },
+      bare: { label: 'Bare', gauge: { type: 'none' } },
+    },
+  }}));
+  await page.route('**/quota/backend/*', r => {
+    const backend = r.request().url().split('/').pop();
+    if (backend === 'local') {
+      return r.fulfill({ json: { status: 'ok', text: 'Local', raw: null, used_percent: null } });
+    }
+    return r.fulfill({ json: { status: 'ok', raw: 42, used_percent: 42 } });
+  });
+  await page.route('**/processes', r => r.fulfill({ json: [] }));
+
+  await page.goto('/');
+  await page.locator('#proc-status').click();
+
+  const rows = page.locator('#proc-status-popup .quota-status-row');
+  await expect(rows).toHaveCount(4);
+  await expect(rows).toContainText(['Claude', 'Codex', 'Local', 'Bare']);
+  await expect(rows.filter({ hasText: 'Claude' })).toContainText('42%');
+  await expect(rows.filter({ hasText: 'Codex' })).toContainText('42%');
+  await expect(rows.filter({ hasText: 'Local' })).toContainText('Local');
+  await expect(rows.filter({ hasText: 'Bare' })).toContainText('no quota integration');
+});
+
 test('an empty pre-chat poll does not stop tracking the newly started process', async ({ page }) => {
   await mockBackend(page);
   let chatStarted = false;

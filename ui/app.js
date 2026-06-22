@@ -3115,10 +3115,19 @@ function updateProcStatusDot(running, queued) {
 }
 
 function renderQuotaStatus() {
-  const rows = Object.keys(quotaSnapshots)
-    .filter(backend => quotaSnapshots[backend]?.status === 'loaded')
+  // The status popup is a backend overview, so its rows must come from the
+  // configured backend catalog. quotaSnapshots is populated lazily and only
+  // contains gauges that have already been fetched (usually the active one).
+  const backends = [...new Set([
+    ...Object.keys(_backendMetadata),
+    ...Object.keys(quotaSnapshots),
+  ])];
+  const rows = backends
     .map(backend => {
-    const q = quotaSnapshots[backend] || { backend, status: 'unsupported' };
+    const q = quotaSnapshots[backend] || {
+      backend,
+      status: quotaConfigFor(backend) ? 'unknown' : 'unsupported',
+    };
     const accent = agentThemeColor(backend);
     let value = 'n/a';
     let detail = 'no quota integration';
@@ -3215,7 +3224,13 @@ function renderProcPopup(running, queued) {
 
 function toggleProcPopup() {
   const open = procStatusPopup.classList.toggle('open');
-  if (open) { renderProcPopup(cachedProcRows, cachedQueueRows); startProcPoll(); }
+  if (open) {
+    renderProcPopup(cachedProcRows, cachedQueueRows);
+    startProcPoll();
+    for (const backend of Object.keys(_backendMetadata)) {
+      if (quotaConfigFor(backend)) fetchQuotaForBackend(backend);
+    }
+  }
 }
 
 let cachedProcRows  = [];
