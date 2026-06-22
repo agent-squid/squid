@@ -8,11 +8,9 @@ BOLD='\033[1m'; RESET='\033[0m'
 ok()   { echo -e "  ${GREEN}✓${RESET}  $1"; }
 warn() { echo -e "  ${YELLOW}!${RESET}  $1"; }
 fail() { echo -e "  ${RED}✗${RESET}  $1"; }
-step() { echo -e "\n${BOLD}$1${RESET}"; }
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 need_version() {
-  # need_version <cmd> <min_major> <min_minor> <version_flag>
   local cmd=$1 maj=$2 min=$3 flag=${4:---version}
   if ! command -v "$cmd" &>/dev/null; then return 1; fi
   local raw
@@ -27,45 +25,39 @@ ERRORS=0
 mark_error() { ERRORS=$((ERRORS + 1)); }
 
 # ── banner ──────────────────────────────────────────────────────────────────
-echo -e "\n${BOLD}squid — install${RESET}"
-echo    "  Sets up all runtime dependencies for the squid chat server."
+echo -e "\n${BOLD}squid — install${RESET}\n"
 
-# ════════════════════════════════════════════════════════════════════════════
-step "1 / 2  Coding agents (at least one required)"
-# ════════════════════════════════════════════════════════════════════════════
-
+# ── coding agents ────────────────────────────────────────────────────────────
 AGENTS_FOUND=0
 if command -v claude &>/dev/null; then
-  ok "claude $(claude --version 2>/dev/null || echo '(unknown version)')"
+  ok "claude $(claude --version 2>/dev/null || echo '')"
   AGENTS_FOUND=$((AGENTS_FOUND + 1))
 else
-  warn "claude not found — install with: npm install -g @anthropic-ai/claude-code"
+  warn "claude not found — npm install -g @anthropic-ai/claude-code"
 fi
 
 if command -v codex &>/dev/null; then
-  ok "codex found"
+  ok "codex"
   AGENTS_FOUND=$((AGENTS_FOUND + 1))
 else
-  warn "codex not found  — install with: npm install -g @openai/codex"
+  warn "codex not found  — npm install -g @openai/codex"
 fi
 
 if command -v cursor-agent &>/dev/null; then
-  ok "cursor-agent found"
+  ok "cursor-agent"
   AGENTS_FOUND=$((AGENTS_FOUND + 1))
 else
-  warn "cursor-agent not found — install with: curl https://cursor.com/install -fsS | bash"
+  warn "cursor-agent not found — curl https://cursor.com/install -fsS | bash"
 fi
 
 if [[ $AGENTS_FOUND -eq 0 ]]; then
-  fail "No coding agents found. Install at least one (claude, codex, or cursor-agent) before starting squid."
+  fail "No coding agents found. Install at least one before starting squid."
   mark_error
 fi
 
-# ════════════════════════════════════════════════════════════════════════════
-step "2 / 2  Python environment"
-# ════════════════════════════════════════════════════════════════════════════
+# ── install squid ────────────────────────────────────────────────────────────
+echo ""
 
-# Find a suitable python (3.11+)
 PYTHON=""
 for candidate in python3.13 python3.12 python3.11 python3.10 python3.9 python3 python; do
   if need_version "$candidate" 3 9 "--version"; then
@@ -75,47 +67,25 @@ for candidate in python3.13 python3.12 python3.11 python3.10 python3.9 python3 p
 done
 
 if [[ -z "$PYTHON" ]]; then
-  fail "Python >= 3.9 not found."
-  echo "     Install via https://python.org or:"
-  echo "       brew install python@3.13"
+  fail "Python >= 3.9 not found — brew install python@3.13"
   mark_error
 else
-  ok "$PYTHON ($($PYTHON --version))"
-
   VENV_DIR="$(cd "$(dirname "$0")/.." && pwd)/.venv"
-
-  if [[ -d "$VENV_DIR" ]]; then
-    ok "virtualenv already exists (.venv)"
-  else
-    echo "     Creating virtualenv …"
-    "$PYTHON" -m venv "$VENV_DIR"
-    ok "virtualenv created (.venv)"
-  fi
-
-  echo "     Installing Python dependencies …"
+  [[ -d "$VENV_DIR" ]] || "$PYTHON" -m venv "$VENV_DIR" &>/dev/null
   "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-  "$VENV_DIR/bin/pip" install "$(cd "$(dirname "$0")/.." && pwd)"
-  ok "Python dependencies installed"
+  "$VENV_DIR/bin/pip" install --quiet "$(cd "$(dirname "$0")/.." && pwd)"
+  ok "squid installed"
 fi
 
-# ════════════════════════════════════════════════════════════════════════════
+# ── result ───────────────────────────────────────────────────────────────────
 echo ""
 if [[ $ERRORS -gt 0 ]]; then
   fail "${ERRORS} prerequisite(s) missing — fix the errors above, then re-run ./install.sh"
   exit 1
 else
-  ok "All dependencies ready."
-  echo ""
-  echo -e "  ${BOLD}Start squid:${RESET}"
-  echo "    bin/start.sh"
-  echo ""
   USER_CONFIG="$HOME/.squid/squid.yaml"
   PORT=$("$VENV_DIR/bin/python3" -c "import yaml; print(yaml.safe_load(open('$USER_CONFIG'))['server']['port'])" 2>/dev/null || echo "8000")
-  echo -e "  ${BOLD}Open in your browser (on this machine):${RESET}"
-  echo "    http://127.0.0.1:${PORT}"
-  echo ""
-  echo -e "  ${YELLOW}Note:${RESET} always use the 127.0.0.1 URL on this machine."
-  echo "  The Tailscale HTTPS URL shown by start.sh is for other devices only"
-  echo "  (phone, tablet, another laptop). It does not work in the local browser."
+  echo -e "  ${BOLD}Start:${RESET}  bin/start.sh"
+  echo -e "  ${BOLD}Open:${RESET}   http://127.0.0.1:${PORT}"
   echo ""
 fi

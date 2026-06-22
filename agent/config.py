@@ -80,10 +80,6 @@ def find_cli(name: str) -> Optional[str]:
         candidate = os.path.join(base, name)
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
-    # Last resort: check if the binary exists at known path even if not executable by shutil
-    known = f"/usr/local/bin/{name}"
-    if os.path.exists(known):
-        return known
     return None
 
 CLAUDE_PATH    = find_cli(CLAUDE_CLI)
