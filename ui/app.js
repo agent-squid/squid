@@ -2055,9 +2055,11 @@ function makeToolBlock(tool, msgId) {
         : null;
       if (status !== 'D' && _absPath && _isTextPath(_absPath)) {
         const openBtn = document.createElement('button');
+        openBtn.type = 'button';
         openBtn.className = 'gitdiff-file-open';
-        openBtn.title = 'Open file';
-        openBtn.textContent = '↗';
+        openBtn.title = 'Open in file viewer';
+        openBtn.setAttribute('aria-label', `Open ${file.path} in file viewer`);
+        openBtn.textContent = 'view';
         openBtn.addEventListener('click', e => {
           e.stopPropagation();
           openFileViewer(_absPath);

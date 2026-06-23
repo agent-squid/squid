@@ -179,6 +179,49 @@ test.describe('response bubble', () => {
     await expect(block.locator('.diff-hunk')).toContainText('@@ -1 +1 @@');
   });
 
+  test('GitDiff file-open control is visible and opens the file viewer', async ({ page }) => {
+    await page.route('**/chat/1/diff-revert-status**', route => route.fulfill({
+      json: { 'ui/app.js': 'revertable' },
+    }));
+    await page.route('**/localfile**', route => route.fulfill({
+      status: 200, contentType: 'text/plain', body: 'const opened = true;',
+    }));
+    await page.route('**/chat', route => route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        META,
+        { event: 'tool', data: {
+          name: 'GitDiff',
+          repo: '/tmp/repo',
+          file_count: 1,
+          additions: 1,
+          deletions: 0,
+          files: [{ status: 'M', path: 'ui/app.js' }],
+          diff: 'diff --git a/ui/app.js b/ui/app.js\n@@ -1 +1 @@\n+const opened = true;',
+        } },
+        { data: 'Done' },
+        DONE,
+      ),
+    }));
+
+    await sendMsg(page);
+    const openButton = page.getByRole('button', { name: 'Open ui/app.js in file viewer' });
+    await expect(openButton).toBeVisible();
+    await expect(openButton).toHaveText('view');
+    const revertButton = page.getByRole('button', { name: 'revert' });
+    await expect(revertButton).toBeVisible();
+    const [viewSize, revertSize] = await Promise.all([
+      openButton.boundingBox(),
+      revertButton.boundingBox(),
+    ]);
+    expect(viewSize.width).toBeCloseTo(revertSize.width, 0);
+    expect(viewSize.height).toBeCloseTo(revertSize.height, 0);
+    await openButton.click();
+
+    await expect(page.locator('#file-modal-path')).toHaveText('/tmp/repo/ui/app.js');
+    await expect(page.locator('#file-modal-body')).toContainText('const opened = true;');
+  });
+
   test('recovered completion restores GitDiff and renders one end timestamp', async ({ page }) => {
     const gitDiff = {
       name: 'GitDiff',
