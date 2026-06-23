@@ -101,6 +101,20 @@ test.describe('response bubble', () => {
     await look(page);  // pause — observe: stats line is last child, bubble above it
   });
 
+  test('context indicator exposes the Squid message ID', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(META, { data: 'Response text' }, STATS, DONE),
+    }));
+
+    await sendMsg(page);
+    const ctx = page.locator(RESPONSE).locator('.user-ctx');
+    await expect(ctx).toContainText('#1 · ctx:');
+
+    await ctx.click();
+    await expect(page.locator('#ctx-popup')).toContainText('message#1');
+  });
+
   test('content is markdown-rendered in final bubble', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200, headers: SSE_HEADERS,

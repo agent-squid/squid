@@ -680,12 +680,16 @@ function _updateSearchBar() {
 }
 
 function highlightTextNodes(root, keywords) {
-  if (!keywords.length) return;
+  const escapedKeywords = [...new Set(keywords.filter(Boolean))]
+    .sort((a, b) => b.length - a.length)
+    .map(kw => kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  if (!escapedKeywords.length) return;
+  const pattern = new RegExp(escapedKeywords.join('|'), 'gi');
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
       const p = node.parentElement;
       if (!p) return NodeFilter.FILTER_REJECT;
-      if (p.closest('code, pre, script, style')) return NodeFilter.FILTER_REJECT;
+      if (p.closest('pre, script, style')) return NodeFilter.FILTER_REJECT;
       if (p.closest('.response-header, .history-prompt-full, .user-ctx')) return NodeFilter.FILTER_REJECT;
       return NodeFilter.FILTER_ACCEPT;
     }
@@ -694,18 +698,23 @@ function highlightTextNodes(root, keywords) {
   while (walker.nextNode()) nodes.push(walker.currentNode);
   for (const node of nodes) {
     const text = node.textContent;
-    let html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    let replaced = false;
-    for (const kw of keywords) {
-      const re = new RegExp(`(${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
-      const next = html.replace(re, '<mark class="search-kw-highlight">$1</mark>');
-      if (next !== html) { html = next; replaced = true; }
-    }
-    if (replaced) {
-      const span = document.createElement('span');
-      span.innerHTML = html;
-      node.parentNode.replaceChild(span, node);
-    }
+    pattern.lastIndex = 0;
+    let match = pattern.exec(text);
+    if (!match) continue;
+
+    const fragment = document.createDocumentFragment();
+    let offset = 0;
+    do {
+      if (match.index > offset) fragment.appendChild(document.createTextNode(text.slice(offset, match.index)));
+      const mark = document.createElement('mark');
+      mark.className = 'search-kw-highlight';
+      mark.textContent = match[0];
+      fragment.appendChild(mark);
+      offset = match.index + match[0].length;
+      match = pattern.exec(text);
+    } while (match);
+    if (offset < text.length) fragment.appendChild(document.createTextNode(text.slice(offset)));
+    node.parentNode.replaceChild(fragment, node);
   }
 }
 
@@ -1068,6 +1077,11 @@ function fmtCtxLabel(adhoc, pinCount = 0, mem = false) {
   return parts.join(' · ');
 }
 
+function setCtxLabel(spanEl, adhoc, pinCount = 0, mem = false) {
+  const msgId = spanEl.dataset.msgId;
+  spanEl.textContent = `${msgId ? `#${msgId} · ` : ''}ctx:${fmtCtxLabel(adhoc, pinCount, mem)}`;
+}
+
 const _lookbackUnselected = new Set(); // cleared on N change or after send; never persisted
 let _lastLookbackN = 0;
 
@@ -1395,7 +1409,7 @@ async function sendMessage(text) {
   responseHeader.appendChild(headerText);
   const liveCtxSpan = document.createElement('span');
   liveCtxSpan.className = 'user-ctx';
-  liveCtxSpan.textContent = 'ctx:' + fmtCtxLabel(adhoc);
+  setCtxLabel(liveCtxSpan, adhoc);
   liveCtxSpan.dataset.topic = topic;
   liveCtxSpan.addEventListener('click', e => { e.stopPropagation(); showCtxPopup(liveCtxSpan); });
   responseHeader.appendChild(liveCtxSpan);
@@ -1640,6 +1654,8 @@ async function sendMessage(text) {
               if (meta.msg_id) {
                 msgId = meta.msg_id;
                 bubble.dataset.msgId = String(msgId);
+                liveCtxSpan.dataset.msgId = String(msgId);
+                setCtxLabel(liveCtxSpan, adhoc);
                 thinkingBubble.dataset.msgId = String(msgId);
                 reconcilePendingBubble(msgId, thinkingBubble);
                 bubble.dataset.topic = topic;
@@ -1671,7 +1687,7 @@ async function sendMessage(text) {
                 completionTimestampEl.remove();
                 completionTimestampEl = null;
               }
-              liveCtxSpan.textContent = 'ctx:' + fmtCtxLabel(!!stats.adhoc);
+              setCtxLabel(liveCtxSpan, !!stats.adhoc);
               if (stats.session_id) liveCtxSpan.dataset.sessionId = stats.session_id;
               if (stats.cwd) liveCtxSpan.dataset.cwd = stats.cwd;
             } catch {}
@@ -1716,7 +1732,7 @@ async function sendMessage(text) {
               scrollToBottom();
             }
             // Update ctx label with pin count and store IDs for popup
-            liveCtxSpan.textContent = 'ctx:' + fmtCtxLabel(adhoc, _contextIds.length, _includeTopicMemory);
+            setCtxLabel(liveCtxSpan, adhoc, _contextIds.length, _includeTopicMemory);
             liveCtxSpan.dataset.pinnedIds = JSON.stringify(_contextIds);
             liveCtxSpan.dataset.mem = _includeTopicMemory ? 'true' : 'false';
             // Record injected pinned IDs keyed by session_id for cross-device correctness
@@ -2216,7 +2232,8 @@ function appendHistoryItem(item, container) {
   })();
   const ctxSpan = document.createElement('span');
   ctxSpan.className = 'user-ctx';
-  ctxSpan.textContent = 'ctx:' + fmtCtxLabel(!!item.adhoc, _pc.pins.length, _pc.mem);
+  if (item.id != null) ctxSpan.dataset.msgId = String(item.id);
+  setCtxLabel(ctxSpan, !!item.adhoc, _pc.pins.length, _pc.mem);
   ctxSpan.dataset.sessionId = item.session_id || '';
   ctxSpan.dataset.cwd = item.stats?.cwd || '';
   ctxSpan.dataset.topic = item.topic || '';
@@ -4792,12 +4809,16 @@ function showCtxPopup(spanEl) {
   popup._forSpanEl = spanEl;
 
   const sid    = spanEl.dataset.sessionId || '';
+  const msgId  = spanEl.dataset.msgId || '';
   const cwd    = spanEl.dataset.cwd || '';
   const mem    = spanEl.dataset.mem === 'true';
   const topic  = spanEl.dataset.topic || '';
   const pinIds = JSON.parse(spanEl.dataset.pinnedIds || '[]');
 
   let html = '';
+  if (msgId) {
+    html += `<div class="ctx-popup-row"><span class="ctx-popup-key">message</span><span class="ctx-popup-val">#${msgId}</span></div>`;
+  }
   if (sid || cwd) {
     html += `<div class="ctx-popup-row"><span class="ctx-popup-key">session</span><span class="ctx-popup-val">${sid}</span></div>`;
     if (cwd) html += `<div class="ctx-popup-row"><span class="ctx-popup-key">cwd</span><span class="ctx-popup-val">${cwd}</span></div>`;
