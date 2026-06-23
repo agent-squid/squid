@@ -68,6 +68,65 @@ test('clicking prompt history preserves adhoc lookback in the converted chip', a
   await expect(page.locator('#topic-chip')).toContainText('#squid@haiku!3');
 });
 
+test('ArrowUp converts recalled prompt routes to chips and ArrowDown restores the draft', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/prompts/recent**', route => route.fulfill({ json: { items: [
+    '#squid@haiku!3 review the changes',
+    '#other@codex inspect the changes',
+  ] } }));
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'draft', agent: 'codex', adhoc: false, lookback: 0,
+  })));
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  await composer.fill('unfinished draft');
+  await composer.evaluate(input => input.setSelectionRange(0, 0));
+  await composer.press('ArrowUp');
+
+  await expect(composer).toHaveValue('review the changes');
+  await expect(page.locator('#topic-chip')).toContainText('#squid@haiku!3');
+
+  await composer.press('ArrowUp');
+  await expect(composer).toHaveValue('inspect the changes');
+  await expect(page.locator('#topic-chip')).toContainText('#other@codex');
+
+  await composer.press('ArrowDown');
+  await expect(composer).toHaveValue('review the changes');
+  await expect(page.locator('#topic-chip')).toContainText('#squid@haiku!3');
+
+  await composer.press('ArrowDown');
+  await expect(composer).toHaveValue('unfinished draft');
+  await expect(page.locator('#topic-chip')).toContainText('#draft@codex');
+});
+
+test('ArrowUp moves within a multiline draft before recalling prompt history', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  await composer.fill('fix this word\nkeep editing here');
+  const endPosition = await composer.evaluate(input => {
+    input.setSelectionRange(input.value.length, input.value.length);
+    return input.selectionStart;
+  });
+
+  await composer.press('ArrowUp');
+
+  await expect(composer).toHaveValue('fix this word\nkeep editing here');
+  await expect.poll(() => composer.evaluate(input => input.selectionStart)).toBeLessThan(endPosition);
+  await expect(page.locator('#topic-chip')).not.toHaveClass(/visible/);
+
+  await composer.evaluate(input => input.setSelectionRange(0, 0));
+  await composer.press('ArrowUp');
+  await expect(composer).toHaveValue('push the changes');
+  await expect(page.locator('#topic-chip')).toContainText('#other@codex');
+
+  await composer.press('ArrowDown');
+  await expect(composer).toHaveValue('fix this word\nkeep editing here');
+  await expect(page.locator('#topic-chip')).not.toHaveClass(/visible/);
+});
+
 test('autocomplete can be dismissed with its touch-accessible close button', async ({ page }) => {
   await mockBackend(page);
   await page.setViewportSize({ width: 390, height: 844 });

@@ -802,6 +802,24 @@ function splitPromptHistoryEntry(entry) {
   return { route: match[1], prompt: match[2].trim() };
 }
 
+function applyPromptHistoryEntry(entry) {
+  const { route, prompt } = splitPromptHistoryEntry(entry);
+  if (route) {
+    const match = route.match(/^#(\w+)(?:@(\w+))?(!(?:(\d+))?)?$/);
+    if (match) {
+      setTopicChip(
+        match[1].toLowerCase(),
+        match[2] || null,
+        !!match[3],
+        match[4] ? Math.min(parseInt(match[4]), 20) : 0,
+      );
+    }
+  }
+  input.value = prompt;
+  input.setSelectionRange(prompt.length, prompt.length);
+  resizeComposer();
+}
+
 function currentPromptHistoryRoute() {
   if (!stickyChip || stickyChip.topic === 'default') return '';
   let route = `#${stickyChip.topic}`;
@@ -1244,10 +1262,7 @@ input.addEventListener('keydown', (e) => {
     if (promptHistoryPos >= 0) {
       e.preventDefault();
       promptHistoryPos = Math.min(promptHistoryPos + 1, promptHistory.length - 1);
-      const _ph = promptHistory[promptHistoryPos];
-      if (/^[#@]/.test(_ph) && stickyChip) clearTopicChip();
-      input.value = _ph;
-      resizeComposer();
+      applyPromptHistoryEntry(promptHistory[promptHistoryPos]);
       return;
     }
     const _posBefore = input.selectionStart;
@@ -1256,10 +1271,7 @@ input.addEventListener('keydown', (e) => {
         promptDraft = input.value;
         promptDraftChip = stickyChip ? { ...stickyChip } : null;
         promptHistoryPos = 0;
-        const _ph = promptHistory[0];
-        if (/^[#@]/.test(_ph) && stickyChip) clearTopicChip();
-        input.value = _ph;
-        resizeComposer();
+        applyPromptHistoryEntry(promptHistory[0]);
       }
     });
     return;
@@ -1270,11 +1282,10 @@ input.addEventListener('keydown', (e) => {
     if (promptHistoryPos < 0) {
       input.value = promptDraft;
       if (promptDraftChip) setTopicChip(promptDraftChip.topic, promptDraftChip.agent, promptDraftChip.adhoc, promptDraftChip.lookback || 0);
+      else clearTopicChip();
       promptDraftChip = null;
     } else {
-      const _ph = promptHistory[promptHistoryPos];
-      if (/^[#@]/.test(_ph) && stickyChip) clearTopicChip();
-      input.value = _ph;
+      applyPromptHistoryEntry(promptHistory[promptHistoryPos]);
     }
     resizeComposer();
     return;
