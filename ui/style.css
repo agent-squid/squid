@@ -2517,8 +2517,14 @@ button {
   font-weight: 600;
 }
 #filter-badge.active { display: flex; }
-#filter-badge-label { display: flex; align-items: center; gap: 0.05em; }
-#filter-badge-clear {
+#filter-badge-label { display: flex; align-items: center; gap: 0.35rem; }
+.filter-scope-segment {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  cursor: pointer;
+}
+.filter-scope-remove {
   background: none;
   border: none;
   color: #505060;
@@ -2529,7 +2535,8 @@ button {
   border-radius: 3px;
   margin-left: 0.1rem;
 }
-#filter-badge-clear:hover { color: var(--text-muted); background: #2a2828; }
+.filter-scope-remove:hover { color: var(--text-muted); background: #2a2828; }
+.filter-scope-remove::before { content: '×'; }
 
 /* Search bar */
 #search-bar {

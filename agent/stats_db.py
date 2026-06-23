@@ -155,6 +155,13 @@ def init_db() -> None:
                     "INSERT OR IGNORE INTO agents (name, backend) VALUES (?, ?)",
                     (backend, backend),
                 )
+        # Do not inherit Claude Code's changing default model. Pin native Claude
+        # agents that have never had an explicit model selected.
+        conn.execute(
+            "UPDATE agents SET model = ? WHERE name = ? AND backend = ? "
+            "AND (model IS NULL OR model = '')",
+            ("claude-sonnet-4-6", "claude", "claude"),
+        )
         # Seed haiku as a cost-comparison agent alongside the default claude agent
         claude_backend = BACKENDS.get("claude")
         if claude_backend and claude_backend.available:
@@ -848,12 +855,8 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
         where_parts.append("m.topic = ?")
         params.append(topic)
     if agent:
-        if agent.endswith('*'):
-            where_parts.append("m.agent LIKE ?")
-            params.append(agent[:-1] + '%')
-        else:
-            where_parts.append("m.agent = ?")
-            params.append(agent)
+        where_parts.append("m.agent = ?")
+        params.append(agent)
     if adhoc is not None:
         where_parts.append("COALESCE(m.adhoc, 0) = ?")
         params.append(1 if adhoc else 0)

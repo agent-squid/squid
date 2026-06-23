@@ -77,6 +77,115 @@ test('/filter with #topic only omits adhoc param from /history', async ({ page }
   expect(capturedUrl).not.toMatch(/adhoc/);
 });
 
+test('/f accepts an explicit topic after the command during normal typing', async ({ page }) => {
+  await mockBackend(page);
+
+  const urls = [];
+  await page.route('**/history**', async route => {
+    urls.push(route.request().url());
+    await route.fulfill({ json: { items: [], has_more: false } });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '#squid@claude!');
+  await page.keyboard.press('Enter');
+  await page.locator('#input').pressSequentially('/f #squid');
+  await page.keyboard.press('Enter');
+
+  const last = urls[urls.length - 1];
+  expect(last).toMatch(/topic=squid/);
+  expect(last).not.toMatch(/agent=/);
+  expect(last).not.toMatch(/adhoc=/);
+});
+
+test('/f supports an agent-only filter across topics', async ({ page }) => {
+  await mockBackend(page);
+
+  let capturedUrl = null;
+  await page.route('**/history**', async route => {
+    capturedUrl = route.request().url();
+    await route.fulfill({ json: { items: [], has_more: false } });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '/f @claude!');
+  await page.keyboard.press('Enter');
+
+  expect(capturedUrl).not.toMatch(/topic=/);
+  expect(capturedUrl).toMatch(/agent=claude/);
+  expect(capturedUrl).toMatch(/adhoc=true/);
+});
+
+test('/f @agent* filters both modes for one exact agent', async ({ page }) => {
+  await mockBackend(page);
+
+  let capturedUrl = null;
+  await page.route('**/history**', async route => {
+    capturedUrl = route.request().url();
+    await route.fulfill({ json: { items: [], has_more: false } });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '/f @claude*');
+  await page.keyboard.press('Enter');
+
+  expect(capturedUrl).not.toMatch(/topic=/);
+  expect(capturedUrl).toMatch(/agent=claude/);
+  expect(capturedUrl).not.toMatch(/adhoc=/);
+  await expect(page.locator('.filter-scope-agent')).toContainText('@claude*');
+
+  await page.locator('.filter-scope-agent').click();
+  await expect(page.locator('#input')).toHaveValue('/f @claude*');
+
+  await page.fill('#input', '/f #squid@claude*');
+  await page.keyboard.press('Enter');
+  expect(capturedUrl).toMatch(/topic=squid/);
+  expect(capturedUrl).toMatch(/agent=claude/);
+  expect(capturedUrl).not.toMatch(/adhoc=/);
+  await expect(page.locator('#filter-badge-label')).toContainText('#squid@claude*');
+});
+
+test('/f #all is rejected; reset is the explicit way to clear filters', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
+  await page.goto('/');
+
+  await page.fill('#input', '/f #squid');
+  await page.keyboard.press('Enter');
+  await page.fill('#input', '/f #all');
+  await page.keyboard.press('Enter');
+
+  await expect(page.locator('.filter-scope-topic')).toContainText('#squid');
+  await expect(page.locator('.cmd-feedback').last()).toContainText('Usage: /f');
+});
+
+test('filter badge segments can be removed independently and clicked to edit', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
+  await page.goto('/');
+
+  await page.fill('#input', '/f #squid@claude!');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.filter-scope-topic')).toContainText('#squid');
+  await expect(page.locator('.filter-scope-agent')).toContainText('@claude!');
+
+  await page.locator('.filter-scope-topic .filter-scope-remove').click();
+  await expect(page.locator('.filter-scope-topic')).toHaveCount(0);
+  await expect(page.locator('.filter-scope-agent')).toContainText('@claude!');
+
+  await page.fill('#input', 'unfinished prompt');
+  await page.locator('.filter-scope-agent').click();
+  await expect(page.locator('#input')).toHaveValue('/f @claude!');
+  await page.locator('#input').press('ArrowUp');
+  await expect(page.locator('#input')).toHaveValue('unfinished prompt');
+
+  await page.fill('#input', '/f #squid@claude!');
+  await page.keyboard.press('Enter');
+  await page.locator('.filter-scope-agent .filter-scope-remove').click();
+  await expect(page.locator('.filter-scope-topic')).toContainText('#squid');
+  await expect(page.locator('.filter-scope-agent')).toHaveCount(0);
+});
+
 test('/filter reset clears filter and reloads history without params', async ({ page }) => {
   await mockBackend(page);
 

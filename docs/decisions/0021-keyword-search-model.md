@@ -101,24 +101,18 @@ controls which topic, agent, and session type is searched.
 |--------|-------|-------|--------------|
 | *(none)* | from active filter or sticky chip | same | from active filter or sticky chip |
 | `#topic` | specified | all | none (session + adhoc) |
-| `#topic!` | specified | all | adhoc-only |
-| `#topic@agent` | specified | exact | none |
-| `#topic@agent*` | specified | LIKE prefix | none |
+| `#topic@agent` | specified | exact | session-only |
 | `#topic@agent!` | specified | exact | adhoc-only |
-| `#topic@agent*!` | specified | LIKE prefix | adhoc-only |
+| `#topic@agent*` | specified | exact | none (session + adhoc) |
 | `#all` | none | all | none |
-| `@agent` | none | exact | none |
-| `@agent*` | none | LIKE prefix | none |
+| `@agent` | none | exact | session-only |
 | `@agent!` | none | exact | adhoc-only |
+| `@agent*` | none | exact | none (session + adhoc) |
 
-**Wildcard** (`*`) applies only to agent names, not topics. A topic is a
-complete identifier; agent names vary by model variant (e.g. `claude`,
-`claude-opus`, `haiku`), so prefix matching is useful there.
-
-**`!` means adhoc-only**, not "include adhoc." Absence of `!` with an explicit
-scope means no adhoc filter (both session and adhoc messages returned). This
-matches the semantics of the `/filter` system where `#topic@agent!` filters
-history to adhoc messages only.
+Agent suffixes select execution mode: no suffix means the resumable session
+lane, `!` means the adhoc lane, and `*` means both. `*` does not prefix-match
+agent names and is not valid on a topic. A bare `#topic` is already the whole
+topic across every agent and execution mode.
 
 When no explicit scope is given, scope resolution follows this priority:
 
@@ -188,8 +182,8 @@ The service worker excludes `/search` from caching.
   fully-indexed database; only truly missing rows are inserted.
 - Good: unified scope with `/filter` means users learn one mental model for
   both history filtering and search scoping.
-- Good: agent wildcard (`@agent*`) handles model-variant naming without
-  requiring separate entries per model.
+- Good: search and filtering use the same agent-lane suffix semantics, with
+  `!` matching the existing adhoc routing notation.
 - Good: no snippet/expand UI — full cards make results immediately actionable
   (pin, copy, read in context).
 - Good: single-fetch with a 100-item cap eliminates repeated FTS index scans

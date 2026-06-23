@@ -39,6 +39,51 @@ test('unscoped global search does not display or restore #all', async ({ page })
   await expect(page.locator('#input')).toHaveValue('/s claude login');
 });
 
+test('agent-only adhoc search works across topics and preserves its syntax', async ({ page }) => {
+  await mockBackend(page);
+  let capturedUrl = null;
+  await page.route('**/search**', route => {
+    capturedUrl = route.request().url();
+    return route.fulfill({ json: { items: [] } });
+  });
+  await page.goto('/');
+
+  await page.fill('#input', '/s @claude! needle');
+  await page.keyboard.press('Enter');
+
+  expect(capturedUrl).not.toMatch(/topic=/);
+  expect(capturedUrl).toMatch(/agent=claude/);
+  expect(capturedUrl).toMatch(/adhoc=true/);
+  await expect(page.locator('.filter-scope-topic')).toHaveCount(0);
+  await expect(page.locator('.filter-scope-agent')).toContainText('@claude!');
+  await page.locator('#search-bar-keywords').click();
+  await expect(page.locator('#input')).toHaveValue('/s @claude! needle');
+});
+
+test('agent search suffix selects session, adhoc, or both for the exact agent', async ({ page }) => {
+  await mockBackend(page);
+  const urls = [];
+  await page.route('**/search**', route => {
+    urls.push(route.request().url());
+    return route.fulfill({ json: { items: [] } });
+  });
+  await page.goto('/');
+
+  await page.fill('#input', '/s @claude-opus needle');
+  await page.keyboard.press('Enter');
+  expect(urls.at(-1)).toMatch(/agent=claude-opus/);
+  expect(urls.at(-1)).toMatch(/adhoc=false/);
+
+  await page.fill('#input', '/s @claude-opus* needle');
+  await page.keyboard.press('Enter');
+  expect(urls.at(-1)).toMatch(/agent=claude-opus/);
+  expect(urls.at(-1)).not.toMatch(/adhoc=/);
+  await expect(page.locator('.filter-scope-agent')).toContainText('@claude-opus*');
+
+  await page.locator('#search-bar-keywords').click();
+  await expect(page.locator('#input')).toHaveValue('/s @claude-opus* needle');
+});
+
 test('clearing the #all scope removes its explicit marker', async ({ page }) => {
   await mockBackend(page);
   await page.goto('/');
@@ -47,7 +92,7 @@ test('clearing the #all scope removes its explicit marker', async ({ page }) => 
   await page.keyboard.press('Enter');
   await expect(page.locator('#filter-badge-label')).toHaveText('#all');
 
-  await page.locator('#filter-badge-clear').click();
+  await page.locator('.filter-scope-topic .filter-scope-remove').click();
   await expect(page.locator('#filter-badge')).not.toHaveClass(/active/);
 
   await page.locator('#search-bar-keywords').click();

@@ -27,27 +27,33 @@ independently clickable spans:
 **Filter behavior is hierarchical:** clicking `#work` shows all agentes in that topic; clicking
 `@claude-opus` within that view narrows to `topic = "work" AND agent = "claude-opus"`.
 
-**Filter state = input chip state.** Clicking `#work` sets the input chip to `#work`; clicking
-`@claude-opus` sets it to `#work@claude-opus`. The active filter and the active input context
-are the same object — no separate filter UI is needed.
+**Filter scope is editable.** The active topic and agent lane render as separate badge
+segments. Either segment can be removed independently, so removing `#work` leaves an
+agent-only filter across topics. Clicking a segment restores the full filter command in
+the composer for editing; an existing draft can be recovered with Up.
 
 **Slash command surface.** The same filter can be applied via commands typed into the input:
 
 | Command | Behavior |
 |---|---|
-| `/filter` | Apply the current input's `#topic` / `@agent` as the history filter |
-| `/filter reset` | Clear the active filter and reload full history |
+| `/f`, `/filter` | Apply the current input's full lane as the history filter |
+| `/f #work` | Filter the whole topic |
+| `/f @claude-opus!` | Filter an agent lane across all topics |
+| `/f @claude-opus*` | Filter both modes for an agent across all topics |
+| `/f #work@claude-opus!` | Filter one topic and agent lane |
+| `/f reset` | Clear the active filter and reload full history |
 
-`/filter` reads whatever is explicitly in the input — no agent auto-resolution. The `!`
-adhoc flag is part of the filter tuple; the lookback count `N` in `!N` is ignored (only
-`!` matters for filtering). This means:
+The command-argument form is canonical because topic input is promoted to the full sticky
+chip during normal typing. The legacy prefix form remains supported. The `!` adhoc flag is
+part of the agent segment; removing that segment removes both the agent and lane type.
 
 | Input | History filter |
 |---|---|
-| `#work /filter` | `topic=work` — all agents, all turn types |
-| `#work@claude-opus /filter` | `topic=work&agent=claude-opus&adhoc=false` — session turns only |
-| `#work@claude-opus! /filter` | `topic=work&agent=claude-opus&adhoc=true` — adhoc turns only |
-| `/filter reset` | no params — full history |
+| `/f #work` | `topic=work` — all agents, all turn types |
+| `/f #work@claude-opus` | `topic=work&agent=claude-opus&adhoc=false` — session turns only |
+| `/f @claude-opus!` | `agent=claude-opus&adhoc=true` — across all topics |
+| `/f @claude-opus*` | `agent=claude-opus` — session and adhoc across all topics |
+| `/f reset` | no params — full history |
 
 For sent messages the server resolves a null agent from the topic's sticky agent or the
 default agent, and the chip updates post-response. But `/filter` is processed before any

@@ -401,7 +401,7 @@ Type these directly in the message box (no `#topic` prefix needed):
 | `/stopall` | Kill + drain queue for the current topic                      |
 | `/clear`   | Clear the current session                                     |
 | `/compact` | Compact or reset context (auto and cross-agent compaction: TBD) |
-| `/filter`  | Filter history to the current topic/agent lane                |
+| `/f`, `/filter` | Filter history; scopes use `#topic`, `@agent`, `@agent!`, or `@agent*` |
 | `/remote`  | Show QR code with full HTTPS URL for mobile access            |
 | `deq`      | Drain entire pending queue                                    |
 | `deq N`    | Remove Nth queued item (1=first, -1=last)                     |

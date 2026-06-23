@@ -432,12 +432,23 @@ let historyFilter = { topic: null, agent: null, adhoc: null };
 
 function filterByTopic(topic) {
   setTopicChip(topic, null);
-  reloadHistory({ topic, agent: null, adhoc: null });
+  applyHistoryFilter({ topic, agent: null, adhoc: null });
 }
 
 function filterByAgent(topic, agent, adhoc = false, lookback = 0) {
   setTopicChip(topic, agent, adhoc, lookback);
-  reloadHistory({ topic, agent, adhoc });
+  applyHistoryFilter({ topic, agent, adhoc });
+}
+
+function applyHistoryFilter(filter) {
+  if (searchActive) {
+    searchActive = false;
+    searchState = null;
+    searchLoading = false;
+    document.getElementById('search-bar').classList.remove('active');
+    document.querySelectorAll('.search-result-item, #messages > .cmd-feedback.search-no-results').forEach(el => el.remove());
+  }
+  reloadHistory(filter);
 }
 
 function clearFilter() {
@@ -479,27 +490,71 @@ function _updateFilterBadge() {
   }
 
   labelEl.innerHTML = '';
+  const addSegment = (kind, content, remove) => {
+    const segment = document.createElement('span');
+    segment.className = `filter-scope-segment filter-scope-${kind}`;
+    segment.appendChild(content);
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'filter-scope-remove';
+    x.setAttribute('aria-label', `Remove ${kind} filter`);
+    x.addEventListener('click', e => { e.stopPropagation(); remove(); });
+    segment.appendChild(x);
+    segment.addEventListener('click', editActiveFilter);
+    labelEl.appendChild(segment);
+  };
+
   if (topic || explicitAll) {
     const t = document.createElement('span');
     t.className = 'tag-topic';
     t.textContent = '#' + (explicitAll ? 'all' : topic);
-    labelEl.appendChild(t);
+    addSegment('topic', t, () => removeFilterSegment('topic'));
   }
   if (agent) {
+    const lane = document.createElement('span');
     const a = document.createElement('span');
     a.className = 'tag-agent';
     a.textContent = '@' + agent;
     setAgentSlugColor(a, agent);
-    labelEl.appendChild(a);
-  }
-  if (adhoc) { // only show '!' for adhoc — 'sess' was removed because it concatenated visually with the agent name
-    const ad = document.createElement('span');
-    ad.className = 'tag-adhoc';
-    ad.textContent = '!';
-    if (agent) setAgentSlugColor(ad, agent);
-    labelEl.appendChild(ad);
+    lane.appendChild(a);
+    if (adhoc === true) {
+      const ad = document.createElement('span');
+      ad.className = 'tag-adhoc';
+      ad.textContent = '!';
+      setAgentSlugColor(ad, agent);
+      lane.appendChild(ad);
+    } else if (adhoc === null) {
+      const both = document.createElement('span');
+      both.className = 'tag-adhoc';
+      both.textContent = '*';
+      setAgentSlugColor(both, agent);
+      lane.appendChild(both);
+    }
+    addSegment('agent', lane, () => removeFilterSegment('agent'));
   }
   badge.classList.add('active');
+}
+
+function removeFilterSegment(kind) {
+  const active = (searchActive && searchState) ? searchState : historyFilter;
+  const next = { ...active };
+  if (kind === 'topic') {
+    next.topic = null;
+    next.explicitAll = false;
+  } else {
+    next.agent = null;
+    next.adhoc = null;
+  }
+
+  if (searchActive && searchState) {
+    searchState = next;
+    searchLoading = false;
+    document.querySelectorAll('.search-result-item, #messages > .cmd-feedback.search-no-results').forEach(el => el.remove());
+    _updateFilterBadge();
+    loadSearchResults();
+  } else {
+    reloadHistory({ topic: next.topic || null, agent: next.agent || null, adhoc: next.adhoc ?? null });
+  }
 }
 
 // ── history pagination (display) ─────────────────────────────────────────────
@@ -545,6 +600,7 @@ let promptHistory = [];   // newest first, in-memory, seeded from DB
 let promptHistoryPos = -1; // -1 = editing draft; 0..N = navigating history
 let promptDraft = '';      // stashed current input while navigating
 let promptDraftChip = null; // stashed chip state while navigating history
+let commandEditRestore = null; // prompt replaced by clicking an editable search/filter badge
 let _draftSaveTimer = null;
 
 function createTopSentinel() {
@@ -635,34 +691,48 @@ function initHistoryScroll() {
 
 // ── keyword search ────────────────────────────────────────────────────────────
 
-function parseSearchInput(text) {
-  let rest = text.trim();
-  let topic = null;
-  let agent = null;
-  let agentWildcard = false;
-  let adhocAll = false;
-
-  // #topic[@agent[*]][!] keywords
-  const topicMatch = rest.match(/^#(\w+)(?:@(\w+)(\*)?)?(!)?[ \t]*([\s\S]*)/);
-  if (topicMatch) {
-    topic = topicMatch[1].toLowerCase();
-    agent = topicMatch[2] || null;
-    agentWildcard = !!topicMatch[3];
-    adhocAll = !!topicMatch[4];
-    rest = topicMatch[5].trim();
-  } else {
-    // @agent[*][!] keywords — agent scope across all topics
-    const agentMatch = rest.match(/^@(\w+)(\*)?(!)?[ \t]+([\s\S]*)/);
-    if (agentMatch) {
-      topic = 'all';
-      agent = agentMatch[1];
-      agentWildcard = !!agentMatch[2];
-      adhocAll = !!agentMatch[3];
-      rest = agentMatch[4].trim();
-    }
+function parseScopeInput(text, { allowAll = false } = {}) {
+  const scope = (text || '').trim();
+  if (!scope) return undefined;
+  if (/^#all$/i.test(scope)) {
+    return allowAll
+      ? { topic: null, agent: null, adhoc: null, explicitAll: true }
+      : null;
   }
 
-  return { topic, agent, agentWildcard, adhocAll, keywords: rest };
+  const topicMatch = scope.match(/^#([\w-]+)(?:@([\w-]+)([!*])?)?$/);
+  if (topicMatch) {
+    const agent = topicMatch[2] || null;
+    const mode = topicMatch[3] || '';
+    return {
+      topic: topicMatch[1].toLowerCase(),
+      agent,
+      adhoc: agent ? (mode === '*' ? null : mode === '!') : null,
+      explicitAll: false,
+    };
+  }
+
+  const agentMatch = scope.match(/^@([\w-]+)([!*])?$/);
+  if (agentMatch) {
+    const mode = agentMatch[2] || '';
+    return {
+      topic: null,
+      agent: agentMatch[1],
+      adhoc: mode === '*' ? null : mode === '!',
+      explicitAll: false,
+    };
+  }
+  return null;
+}
+
+function parseSearchInput(text) {
+  const rest = text.trim();
+  const match = rest.match(/^(\S+)[ \t]+([\s\S]*)$/);
+  if (match && (match[1].startsWith('#') || match[1].startsWith('@'))) {
+    const scope = parseScopeInput(match[1], { allowAll: true });
+    if (scope) return { ...scope, explicitScope: true, keywords: match[2].trim() };
+  }
+  return { topic: null, agent: null, adhoc: null, explicitAll: false, explicitScope: false, keywords: rest };
 }
 
 function _updateSearchBar() {
@@ -722,17 +792,17 @@ function startSearch(rawArgs) {
   const parsed = parseSearchInput(rawArgs);
 
   if (!parsed.keywords) {
-    showCmdFeedback('Usage: /s [#topic[@agent[*]][!]] keywords…');
+    showCmdFeedback('Usage: /s [#topic[@agent[!|*]] | @agent[!|*] | #all] keywords…');
     return;
   }
 
   let topic, agent, adhoc;
-  const explicitAll = parsed.topic === 'all';
-  if (parsed.topic !== null) {
+  const explicitAll = parsed.explicitAll;
+  if (parsed.explicitScope) {
     // explicit scope typed in command overrides the active filter
-    topic = parsed.topic === 'all' ? null : parsed.topic;
-    agent = parsed.agent ? (parsed.agent + (parsed.agentWildcard ? '*' : '')) : null;
-    adhoc = parsed.adhocAll ? true : null;  // no ! → no adhoc filter; ! → adhoc-only
+    topic = parsed.topic;
+    agent = parsed.agent || null;
+    adhoc = parsed.adhoc;
   } else if (historyFilter.topic || historyFilter.agent) {
     // active history filter (set by /filter or tag click)
     topic = historyFilter.topic || null;
@@ -914,9 +984,8 @@ const SQUID_COMMANDS = [
   { name: 'stopall',      desc: 'kill + drain queue for current topic',               args: false },
   { name: 'deq',          desc: 'drain queue (deq N removes Nth item)',               args: true  },
   { name: 'restart',      desc: 'restart the server',                                 args: false },
-  { name: 'filter',       desc: 'filter history by current topic or agent',           args: false },
-  { name: 'filter reset', desc: 'clear the active filter',                            args: false },
-  { name: 's', alias: 'search', desc: 'search — e.g. /s fix bug  ·  /s #topic kw  ·  /s #topic@agent! kw', args: true },
+  { name: 'f', alias: 'filter', desc: 'filter — e.g. /f #topic  ·  /f @agent!  ·  /f reset', args: true },
+  { name: 's', alias: 'search', desc: 'search — e.g. /s #topic kw  ·  /s @agent! kw  ·  /s #all kw', args: true },
   { name: 'status',       desc: 'show active processes panel',                        args: false },
   { name: 'help',         desc: 'show help panel',                                    args: false },
   { name: 'remote',       desc: 'show QR code for mobile / tablet access',            args: false },
@@ -932,8 +1001,12 @@ function parseCommand(message) {
   if (/^status$/i.test(t))       return { command: 'status' };
   if (/^help$/i.test(t))         return { command: 'help' };
   if (/^remote$/i.test(t))       return { command: 'remote' };
-  if (/^filter reset$/i.test(t)) return { command: 'filter_reset' };
-  if (/^filter$/i.test(t))       return { command: 'filter' };
+  const mf = t.match(/^(?:f|filter)(?:\s+([\s\S]*))?$/i);
+  if (mf) {
+    const args = (mf[1] || '').trim();
+    if (/^reset$/i.test(args)) return { command: 'filter_reset' };
+    return { command: 'filter', args };
+  }
   const m = t.match(/^deq(?:\s+(-?\d+))?$/i);
   if (m) return { command: 'deq', pos: m[1] != null ? parseInt(m[1]) : null };
   if (message.trim().startsWith('/')) {
@@ -957,8 +1030,14 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
     return;
   }
   if (cmd.command === 'filter') {
-    if (agent) filterByAgent(topic, agent, adhoc, lookback);
-    else filterByTopic(topic);
+    const scope = parseScopeInput(cmd.args);
+    if (scope === null) {
+      showCmdFeedback('Usage: /f [#topic[@agent[!|*]] | @agent[!|*] | reset]');
+      return;
+    }
+    if (scope) applyHistoryFilter(scope);
+    else if (agent) applyHistoryFilter({ topic, agent, adhoc });
+    else applyHistoryFilter({ topic, agent: null, adhoc: null });
     return;
   }
   if (cmd.command === 'filter_reset') {
@@ -968,7 +1047,7 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
 
   if (cmd.command === 'search') {
     if (!cmd.args) {
-      showCmdFeedback('Usage: /s [#topic[@agent[*]][!]] keywords…');
+      showCmdFeedback('Usage: /s [#topic[@agent[!|*]] | @agent[!|*] | #all] keywords…');
       return;
     }
     startSearch(cmd.args);
@@ -1054,6 +1133,7 @@ form.addEventListener('submit', async (e) => {
   expandedSlugEditToken++;
   const text = input.value.trim();
   if (!text) return;
+  commandEditRestore = null;
   const { topic, agent, adhoc, lookback, message } = parseInput(text);
   if (!message) {
     input.value = '';
@@ -1252,6 +1332,14 @@ input.addEventListener('blur', () => {
 });
 
 input.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowUp' && commandEditRestore !== null) {
+    e.preventDefault();
+    input.value = commandEditRestore;
+    commandEditRestore = null;
+    input.setSelectionRange(input.value.length, input.value.length);
+    resizeComposer();
+    return;
+  }
   if (acOpen) {
     if (e.key === 'ArrowDown') { e.preventDefault(); acSel = Math.min(acSel + 1, acItems.length - 1); _acHighlight(); return; }
     if (e.key === 'ArrowUp')   { e.preventDefault(); acSel = Math.max(acSel - 1, -1); _acHighlight(); return; }
@@ -5362,29 +5450,23 @@ function initPin() {
 
 initSettings();
 initPin();
-document.getElementById('filter-badge-clear').addEventListener('click', clearFilter);
 document.getElementById('search-bar-clear').addEventListener('click', clearSearch);
 
-function formatSearchCommand(state) {
-  let cmd = '/s ';
-  if (state.explicitAll || state.topic) {
-    cmd += state.explicitAll ? '#all' : '#' + state.topic;
-    if (state.agent) cmd += '@' + state.agent;
-    if (state.adhoc) cmd += '!';
-    cmd += ' ';
-  } else if (state.agent) {
-    cmd += '@' + state.agent;
-    if (state.adhoc) cmd += '!';
-    cmd += ' ';
+function formatFilterCommand(state) {
+  let scope = '';
+  if (state.topic) scope = '#' + state.topic;
+  if (state.agent) {
+    scope += '@' + state.agent;
+    if (state.adhoc === true) scope += '!';
+    else if (state.adhoc === null) scope += '*';
   }
-  return (cmd + state.keywords).trim();
+  return scope ? `/f ${scope}` : '/f reset';
 }
 
-document.getElementById('search-bar-keywords').addEventListener('click', () => {
-  if (!searchActive || !searchState) return;
-  const cmd = formatSearchCommand(searchState);
+function stashComposerAndEdit(command) {
   const prev = input.value.trim();
-  if (prev) {
+  commandEditRestore = prev && prev !== command ? prev : null;
+  if (prev && prev !== command) {
     recordPrompt(prev);
     const hint = document.createElement('span');
     hint.className = 'restore-hint';
@@ -5395,9 +5477,38 @@ document.getElementById('search-bar-keywords').addEventListener('click', () => {
       hint.addEventListener('transitionend', () => hint.remove(), { once: true });
     }, 1800);
   }
-  input.value = cmd;
+  input.value = command;
   input.focus();
+  input.setSelectionRange(command.length, command.length);
   resizeComposer();
+}
+
+function editActiveFilter() {
+  const active = (searchActive && searchState) ? searchState : historyFilter;
+  stashComposerAndEdit(formatFilterCommand(active));
+}
+
+function formatSearchCommand(state) {
+  let cmd = '/s ';
+  if (state.explicitAll || state.topic) {
+    cmd += state.explicitAll ? '#all' : '#' + state.topic;
+    if (state.agent) cmd += '@' + state.agent;
+    if (state.agent && state.adhoc === true) cmd += '!';
+    else if (state.agent && state.adhoc === null) cmd += '*';
+    cmd += ' ';
+  } else if (state.agent) {
+    cmd += '@' + state.agent;
+    if (state.adhoc === true) cmd += '!';
+    else if (state.adhoc === null) cmd += '*';
+    cmd += ' ';
+  }
+  return (cmd + state.keywords).trim();
+}
+
+document.getElementById('search-bar-keywords').addEventListener('click', () => {
+  if (!searchActive || !searchState) return;
+  const cmd = formatSearchCommand(searchState);
+  stashComposerAndEdit(cmd);
 });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && document.getElementById('topic-delete-modal')?.classList.contains('open')) {

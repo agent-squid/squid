@@ -147,7 +147,11 @@ async def _stream_lines(
     if PROXY_ENV:
         env.update(PROXY_ENV)
     if extra_env:
-        env.update(extra_env)
+        for name, value in extra_env.items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = value
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -307,33 +311,6 @@ def _codex_diff_tool(payload: dict) -> Optional[dict]:
     return {"name": "Diff", "file": file_path, "diff": str(diff)}
 
 
-def _read_native_claude_token() -> Optional[str]:
-    """Return the current Claude OAuth access token for injection as ANTHROPIC_AUTH_TOKEN.
-
-    Strategy (in order):
-    1. Read fresh from macOS keychain via the `security` system tool (Apple-signed,
-       bypasses per-app ACL checks that block the node process in daemon contexts).
-       If successful, refresh the cached env var so the next os.execv restart inherits it.
-    2. Fall back to SQUID_NATIVE_CLAUDE_TOKEN env var — set by the server just before
-       os.execv so the token survives the exec even if the new process can't access
-       the keychain (security session context is not always preserved across exec).
-    """
-    try:
-        result = subprocess.run(
-            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0:
-            creds = json.loads(result.stdout.strip())
-            token = creds.get("claudeAiOauth", {}).get("accessToken")
-            if token:
-                os.environ["SQUID_NATIVE_CLAUDE_TOKEN"] = token
-                return token
-    except Exception:
-        pass
-    return os.environ.get("SQUID_NATIVE_CLAUDE_TOKEN") or None
-
-
 async def run_claude(
     prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
     model: Optional[str] = None, topic: str = "", agent: str = "",
@@ -370,15 +347,17 @@ async def run_claude(
     streamed_text = False  # track whether any text chunks were streamed as content
     tool_blocks: dict[int, dict] = {}  # index -> {name, input_json}
 
-    # For native OAuth auth (no explicit api_key / ANTHROPIC_AUTH_TOKEN already set),
-    # read the access token via `security` (Apple system tool, always trusted in macOS
-    # keychain ACL checks) and inject it as ANTHROPIC_AUTH_TOKEN.  This bypasses the
-    # ACL failure that node gets when running in a daemon/background security context.
     env_for_claude = dict(backend_env) if backend_env else {}
-    if not env_for_claude.get("ANTHROPIC_AUTH_TOKEN"):
-        native_token = _read_native_claude_token()
-        if native_token:
-            env_for_claude["ANTHROPIC_AUTH_TOKEN"] = native_token
+    if backend_id == "claude":
+        # Claude Code owns its OAuth credentials and refresh lifecycle. Inherited
+        # API/gateway variables take precedence over its claude.ai login, so remove
+        # them only for the native backend. Gateway backends such as deepcla keep
+        # their explicitly resolved child-process environment.
+        for name in (
+            "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
+            "SQUID_NATIVE_CLAUDE_TOKEN",
+        ):
+            env_for_claude[name] = None
 
     async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, extra_env=env_for_claude):
         if not line:

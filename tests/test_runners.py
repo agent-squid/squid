@@ -14,6 +14,7 @@ from agent.runners import (
     kill_all_procs,
     kill_procs_by_topic,
     kill_proc_by_msg_id,
+    run_claude,
     run_codex,
 )
 
@@ -166,6 +167,52 @@ def test_codex_stats_keep_cached_tokens_as_breakdown_only():
     assert stats["input_tokens"] == 900000
     assert stats["cache_read_tokens"] == 300000
     assert stats["output_tokens"] == 1200
+
+
+def test_native_claude_removes_inherited_anthropic_auth_environment():
+    captured = {}
+
+    async def fake_stream_lines(cmd, **kwargs):
+        captured["kwargs"] = kwargs
+        yield '{"type":"result","usage":{}}'
+
+    async def collect():
+        return [chunk async for chunk in run_claude("hello", cwd="/tmp")]
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), patch("agent.runners._stream_lines", fake_stream_lines):
+        asyncio.run(collect())
+
+    assert captured["kwargs"]["extra_env"] == {
+        "ANTHROPIC_AUTH_TOKEN": None,
+        "ANTHROPIC_API_KEY": None,
+        "ANTHROPIC_BASE_URL": None,
+        "SQUID_NATIVE_CLAUDE_TOKEN": None,
+    }
+
+
+def test_claude_gateway_backend_keeps_its_explicit_environment():
+    captured = {}
+
+    async def fake_stream_lines(cmd, **kwargs):
+        captured["kwargs"] = kwargs
+        yield '{"type":"result","usage":{}}'
+
+    async def collect():
+        return [chunk async for chunk in run_claude(
+            "hello", cwd="/tmp", backend_id="deepcla",
+            backend_env={
+                "ANTHROPIC_AUTH_TOKEN": "deepseek-token",
+                "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+            },
+        )]
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), patch("agent.runners._stream_lines", fake_stream_lines):
+        asyncio.run(collect())
+
+    assert captured["kwargs"]["extra_env"] == {
+        "ANTHROPIC_AUTH_TOKEN": "deepseek-token",
+        "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+    }
 
 
 def test_codex_backend_configuration_reaches_command_and_process_metadata():
