@@ -28,3 +28,4 @@ prompts:
   - Inspect the project and identify one concrete reliability problem. Do not edit files yet.
   - Implement the reliability improvement you identified and add focused tests.
   - Run the relevant tests, fix any failures, and summarize the final change.
+  - Review the complete diff as if it were a pull request. Inspect relevant surrounding code for correctness, regressions, and missing test coverage; fix concrete issues you find, rerun focused tests, and summarize the review findings and any resulting changes.

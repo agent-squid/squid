@@ -36,3 +36,25 @@ raw stream events, quota snapshots, git status, and the final binary diff.
 
 Run a second trial with `execution.order: [resumed, persistent]`. Do not use
 `--skip-cooldown` for a real measurement; it exists only for debugging.
+
+## Background runs and status
+
+Long runs can detach from the terminal:
+
+```bash
+.venv/bin/python -m benchmarks.claude_session_continuity.benchmark \
+  --config benchmarks/claude_session_continuity/prompts.example.yaml \
+  --background
+```
+
+The command immediately prints the child PID plus the result, state, and log
+paths. Poll the run using either the result path or the state path:
+
+```bash
+.venv/bin/python -m benchmarks.claude_session_continuity.benchmark \
+  --status benchmarks/claude_session_continuity/results/run-123.json
+```
+
+State is updated atomically during cooldown countdowns, gauge stabilization,
+prompt transitions, completion, and failure. The detached process continues if
+the launching terminal or Squid response ends.
