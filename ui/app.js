@@ -3942,25 +3942,25 @@ async function confirmTopicDelete() {
 const DRIVER_CATALOG = Object.freeze({
   claude: {
     label: 'Claude Code',
-    installCmd: 'npm install -g @anthropic-ai/claude-code',
+    installCmd: 'curl -fsSL https://claude.ai/install.sh | bash',
     authHint: 'run claude to authenticate',
     gaugeHint: 'click gauge in header → paste org ID + session key',
   },
   codex: {
     label: 'Codex',
-    installCmd: 'npm install -g @openai/codex',
+    installCmd: 'curl -fsSL https://chatgpt.com/codex/install.sh | sh',
     authHint: 'run codex to authenticate',
     gaugeHint: 'click gauge in header → use bookmarklet or paste token',
   },
   cursor: {
     label: 'Cursor Agent',
-    installCmd: 'curl https://cursor.com/install -fsS | bash',
+    installCmd: 'curl -fsS https://cursor.com/install | bash',
     authHint: 'run cursor-agent to authenticate',
     gaugeHint: 'automatic via cursor-agent',
   },
   opencode: {
     label: 'OpenCode',
-    installCmd: 'npm install -g opencode-ai',
+    installCmd: 'curl -fsSL https://opencode.ai/install | bash',
     authHint: 'free tier requires no auth — run opencode to configure providers',
     gaugeHint: 'free tier available (opencode/deepseek-v4-flash-free)',
   },
@@ -4592,9 +4592,10 @@ async function showBootBanner() {
       const setup = document.createElement('div');
       setup.className = 'no-agent-setup';
       const agents = [
-        { name: 'Claude Code',  cmd: 'npm install -g @anthropic-ai/claude-code' },
-        { name: 'Codex',        cmd: 'npm install -g @openai/codex' },
-        { name: 'Cursor Agent', cmd: 'curl https://cursor.com/install -fsS | bash' },
+        { name: 'Claude Code',  cmd: 'curl -fsSL https://claude.ai/install.sh | bash' },
+        { name: 'Codex',        cmd: 'curl -fsSL https://chatgpt.com/codex/install.sh | sh' },
+        { name: 'Cursor Agent', cmd: 'curl -fsS https://cursor.com/install | bash' },
+        { name: 'OpenCode',     cmd: 'curl -fsSL https://opencode.ai/install | bash' },
       ];
       setup.innerHTML = `
         <div class="no-agent-title">No coding agents found</div>

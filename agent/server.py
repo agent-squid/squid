@@ -135,15 +135,15 @@ def _check_deps():
     missing, warnings = [], []
     configured_drivers = {backend.driver for backend in BACKENDS.values()}
     if "claude" in configured_drivers and not CLAUDE_PATH:
-        missing.append("claude        →  npm install -g @anthropic-ai/claude-code")
+        missing.append("claude        →  curl -fsSL https://claude.ai/install.sh | bash")
     elif "claude" in BACKENDS and not _claude_logged_in():
         warnings.append("claude is installed but not logged in  →  run: claude login")
     if "codex" in configured_drivers and not CODEX_PATH:
-        missing.append("codex         →  npm install -g @openai/codex")
+        missing.append("codex         →  curl -fsSL https://chatgpt.com/codex/install.sh | sh")
     if "cursor" in configured_drivers and not CURSOR_PATH:
-        missing.append("cursor-agent  →  curl https://cursor.com/install -fsS | bash")
+        missing.append("cursor-agent  →  curl -fsS https://cursor.com/install | bash")
     if "opencode" in configured_drivers and not OPENCODE_PATH:
-        missing.append("opencode      →  npm install -g opencode-ai")
+        missing.append("opencode      →  curl -fsSL https://opencode.ai/install | bash")
     if missing:
         log.warning("Missing CLI tools:\n  " + "\n  ".join(missing))
     if warnings:

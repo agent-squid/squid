@@ -66,9 +66,10 @@ The agent runs where your repo lives. Squid gives that machine a browser interfa
 Squid needs at least one coding agent to talk to. Install whichever you use:
 
 ```bash
-npm install -g @anthropic-ai/claude-code   # Claude Code
-npm install -g @openai/codex               # OpenAI Codex
-curl https://cursor.com/install -fsS | bash  # Cursor Agent
+curl -fsSL https://claude.ai/install.sh | bash       # Claude Code
+curl -fsSL https://chatgpt.com/codex/install.sh | sh # OpenAI Codex
+curl -fsS https://cursor.com/install | bash          # Cursor Agent
+curl -fsSL https://opencode.ai/install | bash        # OpenCode
 ```
 
 DeepSeek uses the Claude Code CLI, so no additional CLI is required beyond `claude`.
@@ -119,13 +120,13 @@ To stop without restarting: `bin/stop.sh`
 
 ## Backends
 
-| Backend       | CLI                                              | Install                                        | Sessions      |
-|---------------|--------------------------------------------------|------------------------------------------------|---------------|
-| `claude`      | `claude` (Claude Code)                           | `npm install -g @anthropic-ai/claude-code`     | resumable     |
-| `deepcla`     | `claude` + DeepSeek Anthropic-compatible API   | Claude Code CLI + DeepSeek API key              | resumable     |
-| `codex`       | `codex` (OpenAI Codex)                           | `npm install -g @openai/codex`                 | resumable     |
-| `cursor`      | `cursor-agent` (Cursor)                          | `curl https://cursor.com/install -fsS \| bash` | resumable     |
-| `opencode`    | `opencode`                                       | `npm install -g opencode-ai`                    | resumable     |
+| Backend       | CLI                                            | Install                                                   | Sessions  |
+|---------------|------------------------------------------------|-----------------------------------------------------------|-----------|
+| `claude`      | `claude` (Claude Code)                         | `curl -fsSL https://claude.ai/install.sh \| bash`         | resumable |
+| `deepcla`     | `claude` + DeepSeek Anthropic-compatible API | Claude Code CLI + DeepSeek API key                         | resumable |
+| `codex`       | `codex` (OpenAI Codex)                         | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh`   | resumable |
+| `cursor`      | `cursor-agent` (Cursor)                        | `curl -fsS https://cursor.com/install \| bash`            | resumable |
+| `opencode`    | `opencode`                                     | `curl -fsSL https://opencode.ai/install \| bash`          | resumable |
 
 A **driver** is Squid's coded CLI adapter (`claude`, `codex`, `cursor`, or `opencode`). A **backend** is a YAML-configured instance of one driver. Multiple backends can share a driver while using different endpoints, credentials, arguments, and colors. See `config/squid.yaml.example`.
 

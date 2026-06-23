@@ -346,7 +346,7 @@ async def run_claude(
     """Stream text chunks from claude CLI, then yield a stats dict."""
     if not CLAUDE_PATH:
         raise CLINotFoundError(
-            "claude CLI not found in PATH. Install with: npm install -g @anthropic-ai/claude-code"
+            "claude CLI not found in PATH. Install with: curl -fsSL https://claude.ai/install.sh | bash"
         )
 
     cmd = [
@@ -487,7 +487,7 @@ async def run_codex(
     """Stream a response from codex CLI using non-interactive exec mode."""
     if not CODEX_PATH:
         raise CLINotFoundError(
-            "codex CLI not found in PATH. Install with: npm install -g @openai/codex"
+            "codex CLI not found in PATH. Install with: curl -fsSL https://chatgpt.com/codex/install.sh | sh"
         )
 
     config_args = _codex_config_args(backend_settings or {})
@@ -682,7 +682,7 @@ async def run_cursor(
     """Stream text chunks from cursor-agent CLI, then yield a stats dict."""
     if not CURSOR_PATH:
         raise CLINotFoundError(
-            "cursor-agent CLI not found in PATH. Install: curl https://cursor.com/install -fsS | bash"
+            "cursor-agent CLI not found in PATH. Install: curl -fsS https://cursor.com/install | bash"
         )
 
     cmd = [
@@ -881,7 +881,7 @@ async def run_opencode(
     """Stream text chunks from opencode CLI, then yield a stats dict."""
     if not OPENCODE_PATH:
         raise CLINotFoundError(
-            "opencode CLI not found in PATH. Install with: npm install -g opencode-ai"
+            "opencode CLI not found in PATH. Install with: curl -fsSL https://opencode.ai/install | bash"
         )
 
     cmd = [OPENCODE_PATH, "run", "--format", "json", "--dangerously-skip-permissions"]

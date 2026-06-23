@@ -35,21 +35,28 @@ if command -v claude &>/dev/null; then
   ok "claude $(claude --version 2>/dev/null || echo '')"
   AGENTS_FOUND=$((AGENTS_FOUND + 1))
 else
-  warn "claude not found — npm install -g @anthropic-ai/claude-code"
+  warn "claude not found — curl -fsSL https://claude.ai/install.sh | bash"
 fi
 
 if command -v codex &>/dev/null; then
   ok "codex"
   AGENTS_FOUND=$((AGENTS_FOUND + 1))
 else
-  warn "codex not found  — npm install -g @openai/codex"
+  warn "codex not found  — curl -fsSL https://chatgpt.com/codex/install.sh | sh"
 fi
 
 if command -v cursor-agent &>/dev/null; then
   ok "cursor-agent"
   AGENTS_FOUND=$((AGENTS_FOUND + 1))
 else
-  warn "cursor-agent not found — curl https://cursor.com/install -fsS | bash"
+  warn "cursor-agent not found — curl -fsS https://cursor.com/install | bash"
+fi
+
+if command -v opencode &>/dev/null; then
+  ok "opencode"
+  AGENTS_FOUND=$((AGENTS_FOUND + 1))
+else
+  warn "opencode not found — curl -fsSL https://opencode.ai/install | bash"
 fi
 
 if [[ $AGENTS_FOUND -eq 0 ]]; then
