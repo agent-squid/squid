@@ -44,3 +44,27 @@ def test_topics_management_summary_includes_hidden_and_agent_lanes(tmp_path, mon
         "agent_turns": 0,
         "live_turns": 0,
     }]
+
+
+def test_recent_prompts_returns_limit_unique_routed_prompts(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    for _ in range(10):
+        user_id = stats_db.insert_user_message("squid", "haiku", "push the changes")
+        stats_db.insert_assistant_message("squid", "haiku", user_id, adhoc=True)
+
+    for i in range(5):
+        user_id = stats_db.insert_user_message("topic", "codex", f"unique prompt {i}")
+        stats_db.insert_assistant_message("topic", "codex", user_id, adhoc=False)
+
+    prompts = stats_db.get_recent_prompts(limit=5)
+
+    assert prompts == [
+        "#topic@codex unique prompt 4",
+        "#topic@codex unique prompt 3",
+        "#topic@codex unique prompt 2",
+        "#topic@codex unique prompt 1",
+        "#topic@codex unique prompt 0",
+    ]
+    assert stats_db.get_recent_prompts(limit=6)[-1] == "#squid@haiku! push the changes"

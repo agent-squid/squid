@@ -898,9 +898,32 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
 def get_recent_prompts(limit: int = 50) -> list:
     with _connect() as conn:
         rows = conn.execute(
-            """SELECT content, topic, agent, adhoc FROM chat_messages
-               WHERE role = 'user' AND content IS NOT NULL AND content != ''
-               ORDER BY id DESC LIMIT ?""",
+            """WITH routed_prompts AS (
+                   SELECT u.id,
+                          TRIM(u.content) AS content,
+                          u.topic,
+                          u.agent,
+                          COALESCE((
+                              SELECT a.adhoc
+                              FROM chat_messages a
+                              WHERE a.reply_to = u.id AND a.role = 'assistant'
+                              ORDER BY a.id ASC
+                              LIMIT 1
+                          ), u.adhoc, 0) AS adhoc
+                   FROM chat_messages u
+                   WHERE u.role = 'user'
+                     AND u.content IS NOT NULL
+                     AND TRIM(u.content) != ''
+               ), latest_unique AS (
+                   SELECT MAX(id) AS id
+                   FROM routed_prompts
+                   GROUP BY content, topic, agent, adhoc
+               )
+               SELECT p.content, p.topic, p.agent, p.adhoc
+               FROM routed_prompts p
+               JOIN latest_unique latest ON latest.id = p.id
+               ORDER BY p.id DESC
+               LIMIT ?""",
             [limit],
         ).fetchall()
 

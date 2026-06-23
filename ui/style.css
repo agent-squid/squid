@@ -2407,6 +2407,7 @@ button {
 #autocomplete {
   display: none;
   flex-direction: column;
+  position: relative;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -2424,6 +2425,27 @@ button {
 .ac-meta  { color: var(--text-ghost); font-size: var(--text-body); margin-left: auto; padding-left: 0.5rem; white-space: nowrap; flex-shrink: 0; }
 .ac-sub   { color: var(--text-mid); font-size: var(--text-lg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; margin-left: 0.5rem; }
 .ac-cmd   { color: #7ec8a0; font-family: ui-monospace, monospace; font-weight: 600; }
+.ac-history-prompt { color: var(--text-mid); font-weight: 500; }
+.ac-item:hover .ac-history-prompt,
+.ac-item.selected .ac-history-prompt { color: var(--text-muted); }
+.ac-close {
+  position: sticky;
+  top: 0.3rem;
+  align-self: flex-end;
+  z-index: 2;
+  width: 1.65rem;
+  height: 1.65rem;
+  margin: 0.25rem 0.35rem -1.9rem 0;
+  border: 0;
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text-lo);
+  cursor: pointer;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+.ac-close:hover { color: var(--text-muted); background: var(--surface-2); }
+.ac-item:first-of-type { padding-right: 2.5rem; }
 .ac-item[data-cmd] .ac-meta { color: #2a5a40; font-size: var(--text-md); background: #0e2218; padding: 0.05em 0.35em; border-radius: 3px; }
 .ac-del-btn {
   flex-shrink: 0;
@@ -2443,6 +2465,8 @@ button {
 
 @media (max-width: 768px) {
   .ac-item { padding: 0.5rem 0.75rem; font-size: var(--text-body); }
+  .ac-close { width: 2rem; height: 2rem; margin-bottom: -2.25rem; }
+  .ac-item:first-of-type { padding-right: 2.9rem; }
 }
 
 /* inline topic tag — used in user bubbles and response context header */

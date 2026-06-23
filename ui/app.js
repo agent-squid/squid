@@ -770,6 +770,47 @@ function recordPrompt(text) {
   promptDraftChip = null;
 }
 
+function formatPromptHistoryEntry(topic, agent, adhoc, message) {
+  const prompt = message.trim();
+  if (!topic || topic === 'default') return prompt;
+  let route = `#${topic}`;
+  if (agent) route += `@${agent}`;
+  if (adhoc) route += '!';
+  return `${route} ${prompt}`;
+}
+
+function splitPromptHistoryEntry(entry) {
+  const text = String(entry || '').trim();
+  const match = text.match(/^(#\w+(?:@\w+)?(?:!\d*)?)\s+([\s\S]+)$/);
+  if (!match) return { route: '', prompt: text };
+  return { route: match[1], prompt: match[2].trim() };
+}
+
+function currentPromptHistoryRoute() {
+  if (!stickyChip || stickyChip.topic === 'default') return '';
+  let route = `#${stickyChip.topic}`;
+  if (stickyChip.agent) route += `@${stickyChip.agent}`;
+  if (stickyChip.adhoc) route += `!${stickyChip.lookback || ''}`;
+  return route;
+}
+
+function matchingPromptHistory(value, limit = 8) {
+  const prefix = value.trimStart().toLowerCase();
+  if (!prefix) return promptHistory.slice(0, limit);
+
+  const currentRoute = currentPromptHistoryRoute().toLowerCase();
+  return promptHistory
+    .map((entry, recency) => ({ entry, recency, ...splitPromptHistoryEntry(entry) }))
+    .filter(item => item.prompt.toLowerCase().startsWith(prefix))
+    .sort((a, b) => {
+      const aCurrent = a.route.toLowerCase() === currentRoute;
+      const bCurrent = b.route.toLowerCase() === currentRoute;
+      return Number(bCurrent) - Number(aCurrent) || a.recency - b.recency;
+    })
+    .slice(0, limit)
+    .map(item => item.entry);
+}
+
 async function initPromptHistory() {
   const draft = localStorage.getItem('squid_draft');
   if (draft) { input.value = draft; resizeComposer(); }
@@ -1006,7 +1047,7 @@ form.addEventListener('submit', async (e) => {
   hideAutocomplete();
   if (searchActive) clearSearch();
   invalidateTopicsCache();
-  recordPrompt(text);
+  recordPrompt(formatPromptHistoryEntry(topic, agent, adhoc, message));
   localStorage.removeItem('squid_draft');
   sendMessage(text);
 });
@@ -4359,13 +4400,13 @@ function hideAutocomplete() {
 
 function _acHighlight() {
   acEl.querySelectorAll('.ac-item').forEach((el, i) => el.classList.toggle('selected', i === acSel));
-  if (acSel >= 0) acEl.children[acSel]?.scrollIntoView({ block: 'nearest' });
+  if (acSel >= 0) acEl.querySelectorAll('.ac-item')[acSel]?.scrollIntoView({ block: 'nearest' });
 }
 
 function _acRender(items) {
   if (!items.length) { hideAutocomplete(); return; }
   acItems = items; acSel = -1;
-  acEl.innerHTML = items.map((item, i) =>
+  acEl.innerHTML = '<button class="ac-close" type="button" aria-label="Close suggestions">×</button>' + items.map((item, i) =>
     `<div class="ac-item" data-i="${i}"${item.execute != null ? ' data-cmd' : ''}>` +
     `<div class="ac-row"><span class="ac-label">${item.label}</span>` +
     (item.sub ? `<span class="ac-sub">${item.sub}</span>` : '') +
@@ -4395,6 +4436,12 @@ function _acRender(items) {
       if (!acEl.querySelector('.ac-item')) hideAutocomplete();
     })
   );
+  acEl.querySelector('.ac-close').addEventListener('mousedown', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    hideAutocomplete();
+    input.focus();
+  });
   acEl.classList.add('open');
   acOpen = true;
 }
@@ -4518,9 +4565,9 @@ async function updateAutocomplete() {
     }
 
     _acRender(items.slice(0, 10));
-  } else if (!val && promptHistory.length) {
-    _acRender(promptHistory.slice(0, 8).map(ph => ({
-      label: escapeHtml(truncate(ph, 70)),
+  } else if (promptHistory.length) {
+    _acRender(matchingPromptHistory(val).map(ph => ({
+      label: `<span class="ac-history-prompt">${escapeHtml(truncate(ph, 70))}</span>`,
       insert: ph,
       trail: false,
       clearChip: /^[#@]/.test(ph),
