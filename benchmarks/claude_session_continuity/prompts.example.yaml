@@ -1,0 +1,30 @@
+workspace:
+  # Each arm receives a detached worktree at this ref. The source worktree is
+  # never modified.
+  source: ~/Work/squid
+  baseline: HEAD
+  keep_worktrees: false
+
+execution:
+  # Reverse this list in the second trial to reduce order bias.
+  order: [persistent, resumed]
+  claude_bin: claude
+  model: sonnet
+  effort: high
+  permission_mode: acceptEdits
+  allowed_tools: [Read, Glob, Grep, Edit, Write, Bash]
+  prompt_timeout_seconds: 1800
+  extra_args: []
+  env: {}
+
+measurement:
+  cold_cache_seconds: 600
+  gauge_poll_seconds: 10
+  gauge_stable_samples: 3
+  gauge_epsilon: 0.001
+  gauge_timeout_seconds: 180
+
+prompts:
+  - Inspect the project and identify one concrete reliability problem. Do not edit files yet.
+  - Implement the reliability improvement you identified and add focused tests.
+  - Run the relevant tests, fix any failures, and summarize the final change.

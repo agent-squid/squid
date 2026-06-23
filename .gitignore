@@ -17,3 +17,4 @@ context/topics/default/*
 !context/topics/default/memory.md
 logs/
 .claude/
+benchmarks/claude_session_continuity/results/
