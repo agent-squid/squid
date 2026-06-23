@@ -31,7 +31,41 @@ test('typed prompt prefixes show unique routed history with the current route fi
   await expect(page.getByRole('button', { name: 'Close suggestions' })).toBeVisible();
 
   await items.nth(2).click();
-  await expect(page.locator('#input')).toHaveValue('#squid@haiku! push the changes');
+  await expect(page.locator('#input')).toHaveValue('push the changes');
+  await expect(page.locator('#topic-chip')).toHaveClass(/visible/);
+  await expect(page.locator('#topic-chip')).toContainText('#squid@haiku!');
+});
+
+test('Tab completion converts a routed prompt history slug into the topic chip', async ({ page }) => {
+  await mockBackend(page);
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
+  })));
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  await composer.fill('push');
+  await composer.press('Tab');
+
+  await expect(composer).toHaveValue('push the changes');
+  await expect(page.locator('#topic-chip')).toHaveClass(/visible/);
+  await expect(page.locator('#topic-chip')).toContainText('#squid@codex');
+});
+
+test('clicking prompt history preserves adhoc lookback in the converted chip', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/prompts/recent**', route => route.fulfill({ json: { items: [
+    '#squid@haiku!3 review the changes',
+  ] } }));
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  await composer.fill('review');
+  await page.locator('#autocomplete .ac-item').click();
+
+  await expect(composer).toHaveValue('review the changes');
+  await expect(page.locator('#topic-chip')).toHaveClass(/visible/);
+  await expect(page.locator('#topic-chip')).toContainText('#squid@haiku!3');
 });
 
 test('autocomplete can be dismissed with its touch-accessible close button', async ({ page }) => {

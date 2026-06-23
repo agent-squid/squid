@@ -1158,8 +1158,8 @@ async function _maybePromoteSlug(val) {
   updatePinCount();
 }
 
-async function _maybeCollapseExpandedSlug(force = false) {
-  if (!editingExpandedSlug) return;
+async function _maybeCollapseExpandedSlug(force = false, allowCompletedPrompt = false) {
+  if (!editingExpandedSlug && !allowCompletedPrompt) return;
 
   const val = input.value;
   const m = val.match(/^#(\w+)(?:@(\w+))?(!(\d*))? ([\s\S]+)$/);
@@ -1179,7 +1179,7 @@ async function _maybeCollapseExpandedSlug(force = false) {
 
   if (!agent) {
     const topics = await _acTopics();
-    if (!editingExpandedSlug || expandedSlugEditToken !== token || input.value !== val) return;
+    if ((!allowCompletedPrompt && (!editingExpandedSlug || expandedSlugEditToken !== token)) || input.value !== val) return;
     const topicData = topics.find(t => t.name === topic);
     agent = topicData?.agent || null;
     if (!adhocStr) adhoc = !!topicData?.sticky_adhoc;
@@ -4531,6 +4531,7 @@ function _acSelect(idx) {
   resizeComposer();
   input.focus();
   input.dispatchEvent(new Event('input'));
+  if (item.collapseSlug) _maybeCollapseExpandedSlug(true, true);
 }
 
 function _agentStyleAttr(agentName, backendFallback = null) {
@@ -4655,6 +4656,7 @@ async function updateAutocomplete() {
       insert: ph,
       trail: false,
       clearChip: /^[#@]/.test(ph),
+      collapseSlug: ph.startsWith('#'),
     })));
   } else {
     hideAutocomplete();
