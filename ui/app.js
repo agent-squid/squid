@@ -442,7 +442,7 @@ function filterByAgent(topic, agent, adhoc = false, lookback = 0) {
 
 function clearFilter() {
   if (searchActive && searchState) {
-    searchState = { ...searchState, topic: null, agent: null, adhoc: null };
+    searchState = { ...searchState, topic: null, agent: null, adhoc: null, explicitAll: false };
     searchLoading = false;
     document.querySelectorAll('.search-result-item').forEach(el => el.remove());
     document.querySelectorAll('#messages > .cmd-feedback.search-no-results').forEach(el => el.remove());
@@ -469,18 +469,20 @@ function reloadHistory(filter = {}) {
 function _updateFilterBadge() {
   const badge = document.getElementById('filter-badge');
   const labelEl = document.getElementById('filter-badge-label');
-  const { topic, agent, adhoc } = (searchActive && searchState) ? searchState : historyFilter;
+  const activeState = (searchActive && searchState) ? searchState : historyFilter;
+  const { topic, agent, adhoc } = activeState;
+  const explicitAll = !!activeState.explicitAll;
 
-  if (!topic && !agent) {
+  if (!topic && !agent && !explicitAll) {
     badge.classList.remove('active');
     return;
   }
 
   labelEl.innerHTML = '';
-  if (topic) {
+  if (topic || explicitAll) {
     const t = document.createElement('span');
     t.className = 'tag-topic';
-    t.textContent = '#' + topic;
+    t.textContent = '#' + (explicitAll ? 'all' : topic);
     labelEl.appendChild(t);
   }
   if (agent) {
@@ -536,7 +538,7 @@ function reconcilePendingBubble(msgId, preferredBubble) {
 
 // ── search state ──────────────────────────────────────────────────────────────
 let searchActive = false;
-let searchState = null;  // { topic, agent, adhoc, keywords }
+let searchState = null;  // { topic, agent, adhoc, explicitAll, keywords }
 let searchLoading = false;
 
 let promptHistory = [];   // newest first, in-memory, seeded from DB
@@ -716,6 +718,7 @@ function startSearch(rawArgs) {
   }
 
   let topic, agent, adhoc;
+  const explicitAll = parsed.topic === 'all';
   if (parsed.topic !== null) {
     // explicit scope typed in command overrides the active filter
     topic = parsed.topic === 'all' ? null : parsed.topic;
@@ -733,7 +736,7 @@ function startSearch(rawArgs) {
     adhoc = stickyChip?.adhoc ? true : false;
   }
 
-  searchState = { topic, agent, adhoc, keywords: parsed.keywords };
+  searchState = { topic, agent, adhoc, explicitAll, keywords: parsed.keywords };
   searchActive = true;
   searchLoading = false;
 
@@ -5329,20 +5332,25 @@ initSettings();
 initPin();
 document.getElementById('filter-badge-clear').addEventListener('click', clearFilter);
 document.getElementById('search-bar-clear').addEventListener('click', clearSearch);
-document.getElementById('search-bar-keywords').addEventListener('click', () => {
-  if (!searchActive || !searchState) return;
+
+function formatSearchCommand(state) {
   let cmd = '/s ';
-  if (searchState.topic) {
-    cmd += '#' + searchState.topic;
-    if (searchState.agent) cmd += '@' + searchState.agent;
-    if (searchState.adhoc) cmd += '!';
+  if (state.explicitAll || state.topic) {
+    cmd += state.explicitAll ? '#all' : '#' + state.topic;
+    if (state.agent) cmd += '@' + state.agent;
+    if (state.adhoc) cmd += '!';
     cmd += ' ';
-  } else if (searchState.agent) {
-    cmd += '@' + searchState.agent;
-    if (searchState.adhoc) cmd += '!';
+  } else if (state.agent) {
+    cmd += '@' + state.agent;
+    if (state.adhoc) cmd += '!';
     cmd += ' ';
   }
-  cmd += searchState.keywords;
+  return (cmd + state.keywords).trim();
+}
+
+document.getElementById('search-bar-keywords').addEventListener('click', () => {
+  if (!searchActive || !searchState) return;
+  const cmd = formatSearchCommand(searchState);
   const prev = input.value.trim();
   if (prev) {
     recordPrompt(prev);
@@ -5355,7 +5363,7 @@ document.getElementById('search-bar-keywords').addEventListener('click', () => {
       hint.addEventListener('transitionend', () => hint.remove(), { once: true });
     }, 1800);
   }
-  input.value = cmd.trim();
+  input.value = cmd;
   input.focus();
   resizeComposer();
 });
