@@ -689,7 +689,7 @@ function highlightTextNodes(root, keywords) {
     acceptNode(node) {
       const p = node.parentElement;
       if (!p) return NodeFilter.FILTER_REJECT;
-      if (p.closest('pre, script, style')) return NodeFilter.FILTER_REJECT;
+      if (p.closest('script, style')) return NodeFilter.FILTER_REJECT;
       if (p.closest('.response-header, .history-prompt-full, .user-ctx')) return NodeFilter.FILTER_REJECT;
       return NodeFilter.FILTER_ACCEPT;
     }

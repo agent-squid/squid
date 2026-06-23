@@ -147,9 +147,9 @@ separate snippet renderer.
 
 Keyword highlights are applied via a DOM `TreeWalker` that walks text nodes in
 the response body only, skipping `.response-header`, `.history-prompt-full`,
-`.user-ctx`, and `<pre>` elements. Inline `<code>` is included because a result
-whose only matches are inline commands would otherwise show no visible match.
-Matches are wrapped in
+`.user-ctx`, `<script>`, and `<style>` elements. Inline and fenced code are
+included because they are part of the indexed assistant content; every result
+should visibly show why it matched. Matches are wrapped in
 `<mark class="search-kw-highlight">`.
 
 Results load in reverse-chronological order, appended to the messages pane in
