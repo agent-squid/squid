@@ -311,8 +311,12 @@ function clearCachedSessionId(topic, agent) {
 
 const topicChipEl = document.getElementById('topic-chip');
 let stickyChip = null; // { topic, agent, adhoc } | null
+let editingExpandedSlug = false;
+let expandedSlugEditToken = 0;
 
 function setTopicChip(topic, agent, adhoc = false, lookback = 0) {
+  editingExpandedSlug = false;
+  expandedSlugEditToken++;
   stickyChip = { topic, agent, adhoc, lookback };
   // Don't persist a sessioned default chip — #default is adhoc-first; session there is ephemeral
   if (topic !== 'default' || adhoc) {
@@ -1016,6 +1020,8 @@ function resizeComposer() {
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
+  editingExpandedSlug = false;
+  expandedSlugEditToken++;
   const text = input.value.trim();
   if (!text) return;
   const { topic, agent, adhoc, lookback, message } = parseInput(text);
@@ -1152,6 +1158,42 @@ async function _maybePromoteSlug(val) {
   updatePinCount();
 }
 
+async function _maybeCollapseExpandedSlug(force = false) {
+  if (!editingExpandedSlug) return;
+
+  const val = input.value;
+  const m = val.match(/^#(\w+)(?:@(\w+))?(!(\d*))? ([\s\S]+)$/);
+  if (!m) return;
+
+  const prompt = m[5];
+  const promptStart = val.length - prompt.length;
+  if (!force && (input.selectionStart < promptStart || input.selectionEnd < promptStart)) return;
+
+  const token = expandedSlugEditToken;
+  const topic = m[1].toLowerCase();
+  const explicitAgent = m[2] || null;
+  const adhocStr = m[3] || null;
+  const lookback = adhocStr ? parseInt(m[4]) || 0 : 0;
+  let agent = explicitAgent;
+  let adhoc = !!adhocStr;
+
+  if (!agent) {
+    const topics = await _acTopics();
+    if (!editingExpandedSlug || expandedSlugEditToken !== token || input.value !== val) return;
+    const topicData = topics.find(t => t.name === topic);
+    agent = topicData?.agent || null;
+    if (!adhocStr) adhoc = !!topicData?.sticky_adhoc;
+  }
+
+  if (!force && (input.selectionStart < promptStart || input.selectionEnd < promptStart)) return;
+  const selectionStart = Math.max(0, input.selectionStart - promptStart);
+  const selectionEnd = Math.max(0, input.selectionEnd - promptStart);
+  setTopicChip(topic, agent, adhoc, lookback);
+  input.value = prompt;
+  input.setSelectionRange(selectionStart, selectionEnd);
+  input.dispatchEvent(new Event('input'));
+}
+
 input.addEventListener('input', () => {
   resizeComposer();
   updateAutocomplete();
@@ -1164,6 +1206,14 @@ input.addEventListener('input', () => {
   if (promptHistoryPos !== -1 && input.value !== promptHistory[promptHistoryPos]) {
     promptHistoryPos = -1;
   }
+});
+
+document.addEventListener('selectionchange', () => {
+  if (document.activeElement === input) _maybeCollapseExpandedSlug();
+});
+
+input.addEventListener('blur', () => {
+  _maybeCollapseExpandedSlug(true);
 });
 
 input.addEventListener('keydown', (e) => {
@@ -1222,13 +1272,22 @@ input.addEventListener('keydown', (e) => {
     e.preventDefault();
     form.requestSubmit();
   }
-  if (e.key === 'Backspace' && input.value === '' && stickyChip) {
+  if (
+    e.key === 'Backspace'
+    && stickyChip
+    && input.selectionStart === 0
+    && input.selectionEnd === 0
+  ) {
     e.preventDefault();
+    const prompt = input.value;
     let tag = `#${stickyChip.topic}`;
     if (stickyChip.agent) tag += `@${stickyChip.agent}`;
     if (stickyChip.adhoc) tag += `!${stickyChip.lookback || ''}`;
     clearTopicChip();
-    input.value = tag;
+    editingExpandedSlug = true;
+    expandedSlugEditToken++;
+    input.value = prompt ? `${tag} ${prompt}` : tag;
+    input.setSelectionRange(tag.length, tag.length);
     input.dispatchEvent(new Event('input'));
   }
 });
@@ -4456,6 +4515,17 @@ function _acSelect(idx) {
     form.requestSubmit();
     return;
   }
+  if (item.replaceSlug && editingExpandedSlug) {
+    const promptSeparator = input.value.indexOf(' ');
+    if (promptSeparator >= 0) {
+      input.value = item.insert + input.value.slice(promptSeparator);
+      input.setSelectionRange(item.insert.length, item.insert.length);
+      resizeComposer();
+      input.focus();
+      input.dispatchEvent(new Event('input'));
+      return;
+    }
+  }
   if (item.clearChip && stickyChip) clearTopicChip();
   input.value = item.trail === false ? item.insert : item.insert + ' ';
   resizeComposer();
@@ -4476,12 +4546,20 @@ function _acAgentLabel(topicName, agentName, backendFallback = null) {
   return `<span class="ac-topic">#${escapeHtml(topicName)}</span><span class="ac-agent"${_agentStyleAttr(agentName.replace(/!$/, ''), backendFallback)}>@${escapeHtml(agentName)}</span>`;
 }
 
+function _acLastPrompt(prompt) {
+  if (!prompt) return '';
+  return `<span class="ac-last-badge">last</span> ${escapeHtml(truncate(prompt, 55))}`;
+}
+
 async function updateAutocomplete() {
   const val = input.value;
+  const promptSeparator = editingExpandedSlug ? val.indexOf(' ') : -1;
+  const slugVal = promptSeparator >= 0 ? val.slice(0, promptSeparator) : val;
+  const replacingSlug = editingExpandedSlug && promptSeparator >= 0;
 
   // Command popup: message portion starts with /
   const { message: msgPart } = parseInput(val);
-  if (msgPart.startsWith('/')) {
+  if (!editingExpandedSlug && msgPart.startsWith('/')) {
     const slashIdx = val.lastIndexOf('/');
     const before   = val.slice(0, slashIdx);           // prefix to preserve (#topic@alias )
     const partial  = msgPart.slice(1).toLowerCase();   // typed after /
@@ -4503,8 +4581,8 @@ async function updateAutocomplete() {
     return;
   }
 
-  const mTopic = val.match(/^#(\w*)[!]?$/);
-  const mAlias = val.match(/^#(\w+)@(\w*)[!]?$/);
+  const mTopic = slugVal.match(/^#(\w*)[!]?$/);
+  const mAlias = slugVal.match(/^#(\w+)@(\w*)[!]?$/);
   if (mTopic) {
     const prefix = mTopic[1].toLowerCase();
     const topics = await _acTopics();
@@ -4514,9 +4592,10 @@ async function updateAutocomplete() {
         .map(t => ({
           label:       _acTopicLabel(t.name, t.agent || '', t.last_backend || null),
           insert:      '#' + t.name,
+          replaceSlug: replacingSlug,
           deleteTopic: t.name,
           meta:        t.active ? '● live' : t.queue_depth > 0 ? `queue ${t.queue_depth}` : '',
-          sub:         t.last_prompt ? truncate(t.last_prompt, 55) : '',
+          sub:         _acLastPrompt(t.last_prompt),
         }))
     );
   } else if (mAlias) {
@@ -4541,13 +4620,15 @@ async function updateAutocomplete() {
         items.push({
           label:  _acAgentLabel(topic, h.agent, backendByAgent.get(h.agent) || null),
           insert: `#${topic}@${h.agent}`,
-          sub:    h.last_prompt ? truncate(h.last_prompt, 55) : '',
+          replaceSlug: replacingSlug,
+          sub:    _acLastPrompt(h.last_prompt),
         });
       }
       items.push({
         label:  _acAgentLabel(topic, h.agent + '!', backendByAgent.get(h.agent) || null),
         insert: `#${topic}@${h.agent}!`,
-        sub:    h.last_adhoc_prompt ? truncate(h.last_adhoc_prompt, 55) : '',
+        replaceSlug: replacingSlug,
+        sub:    _acLastPrompt(h.last_adhoc_prompt),
         meta:   'adhoc',
       });
     }
@@ -4560,11 +4641,14 @@ async function updateAutocomplete() {
       items.push({
         label:  _acAgentLabel(topic, isDefault ? a.name + '!' : a.name, a.backend),
         insert: `#${topic}@${a.name}${isDefault ? '!' : ''}`,
+        replaceSlug: replacingSlug,
         meta:   a.backend,
       });
     }
 
     _acRender(items.slice(0, 10));
+  } else if (editingExpandedSlug) {
+    hideAutocomplete();
   } else if (promptHistory.length) {
     _acRender(matchingPromptHistory(val).map(ph => ({
       label: `<span class="ac-history-prompt">${escapeHtml(truncate(ph, 70))}</span>`,

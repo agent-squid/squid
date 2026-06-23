@@ -2424,6 +2424,18 @@ button {
 .ac-label .ac-agent { color: var(--agent-color, #848899); }
 .ac-meta  { color: var(--text-ghost); font-size: var(--text-body); margin-left: auto; padding-left: 0.5rem; white-space: nowrap; flex-shrink: 0; }
 .ac-sub   { color: var(--text-mid); font-size: var(--text-lg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; margin-left: 0.5rem; }
+.ac-last-badge {
+  display: inline-block;
+  color: var(--text-lo);
+  background: var(--surface-2);
+  border: 1px solid var(--text-ghost);
+  border-radius: 999px;
+  padding: 0.05em 0.4em;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: 1.2;
+  vertical-align: middle;
+}
 .ac-cmd   { color: #7ec8a0; font-family: ui-monospace, monospace; font-weight: 600; }
 .ac-history-prompt { color: var(--text-mid); font-weight: 500; }
 .ac-item:hover .ac-history-prompt,
