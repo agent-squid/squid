@@ -1456,11 +1456,17 @@ async def serve_local_file(path: str, request: Request):
         return JSONResponse({"error": "not found"}, status_code=404)
     if p.is_dir():
         entries = sorted(p.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
-        return JSONResponse({
-            "type": "directory",
-            "path": str(p),
-            "entries": [{"name": e.name, "path": str(e), "is_dir": e.is_dir()} for e in entries],
-        })
+        entry_list = []
+        for e in entries:
+            try:
+                st = e.stat()
+                size = st.st_size if not e.is_dir() else None
+                mtime = st.st_mtime
+            except OSError:
+                size = None
+                mtime = None
+            entry_list.append({"name": e.name, "path": str(e), "is_dir": e.is_dir(), "size": size, "mtime": mtime})
+        return JSONResponse({"type": "directory", "path": str(p), "entries": entry_list})
     if not p.is_file():
         return JSONResponse({"error": "not a file"}, status_code=400)
     mime, _ = mimetypes.guess_type(str(p))

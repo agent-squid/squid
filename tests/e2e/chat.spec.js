@@ -404,6 +404,9 @@ test.describe('recovered pending responses', () => {
     await page.evaluate(() => clearSearch());
     await expect(page.locator(`${THINKING}[data-msg-id="1"]`)).toHaveCount(1);
     await expect(page.locator(THINKING)).toHaveCount(2); // live (unidentified) + recovered WIP
+    const recovered = page.locator(`${THINKING}[data-msg-id="1"]`);
+    await expect(recovered.locator('.response-header')).toBeVisible();
+    await expect(recovered.locator('.response-header-text')).toContainText('long-running task');
 
     await fulfill(sse(META, { event: 'status', data: 'Still working...' }));
 

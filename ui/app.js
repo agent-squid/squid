@@ -2394,12 +2394,27 @@ function makeWipBubble(item) {
   const bubble = document.createElement('div');
   bubble.className = 'msg assistant msg-thinking history-item';
   bubble.dataset.msgId = String(item.id);
+  bubble.dataset.topic = item.topic || 'default';
+  if (item.agent) bubble.dataset.agent = item.agent;
+
+  // Recovered pending rows have no preceding user bubble after a refresh, so
+  // give them the same prompt-bearing header as completed history responses.
+  const header = document.createElement('div');
+  header.className = 'response-header';
+  const headerText = document.createElement('span');
+  headerText.className = 'response-header-text';
   const content = document.createElement('div');
   content.className = 'thinking-live';
   const asstLabel = item.agent || item.backend || '';
-  const statusLine = document.createElement('span');
-  statusLine.textContent = `#${item.topic || 'default'}${asstLabel ? ' @' + asstLabel : ''} · ${truncate(item.prompt || '', 55)}`;
-  content.appendChild(statusLine);
+  headerText.appendChild(makeTopicTag(item.topic || 'default', asstLabel, {
+    clickable: true,
+    adhoc: !!item.adhoc,
+    lookback: item.stats?.lookback ?? 0,
+    backend: item.backend || null,
+  }));
+  headerText.appendChild(document.createTextNode('  ' + truncate(item.prompt || '', 55)));
+  header.appendChild(headerText);
+  bubble.appendChild(header);
   addLoader(content);
   bubble.appendChild(content);
   const killBtn = document.createElement('button');
@@ -5554,10 +5569,36 @@ function _isTextPath(path) {
   return _TEXT_EXTS.has(ext) || !path.includes('.');
 }
 
-function openFileViewer(initialPath, line, endLine) {
-  let path = initialPath;
-  document.getElementById('file-modal')?.remove();
+let _fvNavigate = null;
 
+function _fmtSize(bytes) {
+  if (bytes == null) return '';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1048576).toFixed(1) + ' MB';
+}
+
+function _fmtMtime(ts) {
+  if (ts == null) return '';
+  const diff = (Date.now() / 1000) - ts;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+  if (diff < 604800) return Math.floor(diff / 86400) + 'd ago';
+  return new Date(ts * 1000).toLocaleDateString();
+}
+
+function openFileViewer(initialPath, initialLine, initialEndLine) {
+  document.getElementById('file-modal')?.remove();
+  _fvNavigate = null;
+
+  const navHistory = [{ path: initialPath, line: initialLine, endLine: initialEndLine }];
+  let historyIdx = 0;
+  let path = initialPath;
+  let line = initialLine;
+  let endLine = initialEndLine;
+
+  // ── DOM ──────────────────────────────────────────────────────────────────────
   const modal = document.createElement('div');
   modal.id = 'file-modal';
 
@@ -5567,31 +5608,112 @@ function openFileViewer(initialPath, line, endLine) {
   const header = document.createElement('div');
   header.id = 'file-modal-header';
 
-  const pathEl = document.createElement('span');
-  pathEl.id = 'file-modal-path';
-  pathEl.textContent = path + (line ? ':' + line + (endLine && endLine !== line ? '-' + endLine : '') : '');
+  const navBtns = document.createElement('div');
+  navBtns.className = 'fv-nav-btns';
+  const backBtn = document.createElement('button');
+  backBtn.className = 'fv-nav-btn';
+  backBtn.setAttribute('aria-label', 'Back');
+  backBtn.textContent = '‹';
+  const fwdBtn = document.createElement('button');
+  fwdBtn.className = 'fv-nav-btn';
+  fwdBtn.setAttribute('aria-label', 'Forward');
+  fwdBtn.textContent = '›';
+  navBtns.append(backBtn, fwdBtn);
 
+  const breadcrumb = document.createElement('div');
+  breadcrumb.id = 'file-modal-breadcrumb';
+
+  const actions = document.createElement('div');
+  actions.className = 'fv-header-actions';
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'fv-action-btn';
+  copyBtn.title = 'Copy path';
+  copyBtn.textContent = '⎘';
   const closeBtn = document.createElement('button');
   closeBtn.id = 'file-modal-close';
   closeBtn.textContent = '×';
-  const closeModal = () => modal.remove();
-  closeBtn.addEventListener('click', closeModal);
-  modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
-  const escHandler = e => { if (e.key === 'Escape') { closeModal(); document.removeEventListener('keydown', escHandler); } };
-  document.addEventListener('keydown', escHandler);
+  actions.append(copyBtn, closeBtn);
 
-  header.appendChild(pathEl);
-  header.appendChild(closeBtn);
+  header.append(navBtns, breadcrumb, actions);
 
   const body = document.createElement('div');
   body.id = 'file-modal-body';
   body.textContent = 'Loading…';
 
-  box.appendChild(header);
-  box.appendChild(body);
+  box.append(header, body);
   modal.appendChild(box);
   document.body.appendChild(modal);
 
+  // ── Navigation ───────────────────────────────────────────────────────────────
+  function navigate(newPath, newLine = null, newEndLine = null) {
+    navHistory.splice(historyIdx + 1);
+    navHistory.push({ path: newPath, line: newLine, endLine: newEndLine });
+    historyIdx = navHistory.length - 1;
+    path = newPath; line = newLine; endLine = newEndLine;
+    updateNav();
+    loadFile();
+  }
+
+  function updateNav() {
+    backBtn.disabled = historyIdx === 0;
+    fwdBtn.disabled = historyIdx === navHistory.length - 1;
+    breadcrumb.innerHTML = '';
+    const parts = path.split('/').filter(Boolean);
+    const addSep = () => {
+      const s = document.createElement('span');
+      s.className = 'fv-crumb-sep';
+      s.textContent = '/';
+      breadcrumb.appendChild(s);
+    };
+    const addCrumb = (label, crumbPath) => {
+      const isLast = crumbPath === null;
+      const el = document.createElement(isLast ? 'span' : 'a');
+      el.className = 'fv-crumb' + (isLast ? ' fv-crumb-current' : '');
+      el.textContent = label;
+      if (!isLast) {
+        el.href = '#';
+        el.addEventListener('click', e => { e.preventDefault(); navigate(crumbPath); });
+      }
+      breadcrumb.appendChild(el);
+    };
+    addCrumb('/', parts.length ? '/' : null);
+    parts.forEach((part, i) => {
+      addSep();
+      const isLast = i === parts.length - 1;
+      addCrumb(part, isLast ? null : '/' + parts.slice(0, i + 1).join('/'));
+    });
+  }
+
+  // ── Events ───────────────────────────────────────────────────────────────────
+  backBtn.addEventListener('click', () => {
+    if (historyIdx > 0) {
+      historyIdx--;
+      ({ path, line, endLine } = navHistory[historyIdx]);
+      updateNav(); loadFile();
+    }
+  });
+  fwdBtn.addEventListener('click', () => {
+    if (historyIdx < navHistory.length - 1) {
+      historyIdx++;
+      ({ path, line, endLine } = navHistory[historyIdx]);
+      updateNav(); loadFile();
+    }
+  });
+  copyBtn.addEventListener('click', () => {
+    navigator.clipboard?.writeText(path).then(() => {
+      copyBtn.textContent = '✓';
+      setTimeout(() => { copyBtn.textContent = '⎘'; }, 1500);
+    });
+  });
+  const closeModal = () => { modal.remove(); _fvNavigate = null; };
+  closeBtn.addEventListener('click', closeModal);
+  modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
+  const escHandler = e => { if (e.key === 'Escape') { closeModal(); document.removeEventListener('keydown', escHandler); } };
+  document.addEventListener('keydown', escHandler);
+
+  _fvNavigate = navigate;
+
+  // ── Content ──────────────────────────────────────────────────────────────────
   function showAllowRoot() {
     const hint = path.split('/').slice(0, -1).join('/') || '/';
     body.innerHTML = '';
@@ -5614,7 +5736,6 @@ function openFileViewer(initialPath, line, endLine) {
     row.append(rootInput, allowBtn);
     panel.append(row, status);
     body.appendChild(panel);
-
     allowBtn.addEventListener('click', async () => {
       allowBtn.disabled = true;
       status.textContent = 'Updating configuration…';
@@ -5640,8 +5761,8 @@ function openFileViewer(initialPath, line, endLine) {
     try {
       const res = await fetch('/localfile?' + new URLSearchParams({ path }));
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        const err = data.error || '';
+        const errData = await res.json().catch(() => ({}));
+        const err = errData.error || '';
         if (res.status === 403 && (err.includes('localfile_roots') || err.includes('outside allowed roots'))) {
           showAllowRoot();
         } else {
@@ -5650,32 +5771,29 @@ function openFileViewer(initialPath, line, endLine) {
         return;
       }
       const ct = res.headers.get('content-type') || '';
-      if (ct.includes('application/json')) {
-        const data = await res.json();
-        if (data.type === 'directory') {
-          pathEl.textContent = data.path;
-          _renderDirListing(body, data, (newPath) => {
-            path = newPath;
-            line = null;
-            endLine = null;
-            pathEl.textContent = newPath;
-            loadFile();
-          });
-          return;
-        }
-      }
       if (!ct.includes('text/') && !ct.includes('application/json')) {
-        modal.remove();
+        modal.remove(); _fvNavigate = null;
         window.open('/localfile?' + new URLSearchParams({ path }), '_blank');
         return;
       }
       const text = await res.text();
+      if (ct.includes('application/json')) {
+        try {
+          const data = JSON.parse(text);
+          if (data.type === 'directory') {
+            if (data.path !== path) { path = data.path; updateNav(); }
+            _renderDirListing(body, data);
+            return;
+          }
+        } catch {}
+      }
       _renderFileViewer(body, text, line, endLine, path);
     } catch {
       body.textContent = 'Failed to load file.';
     }
   }
 
+  updateNav();
   loadFile();
 }
 
@@ -5720,27 +5838,67 @@ function _splitHighlightedLines(html) {
   return lines;
 }
 
-function _renderDirListing(container, data, navigate) {
+function _renderDirListing(container, data) {
   container.innerHTML = '';
+
+  const filterWrap = document.createElement('div');
+  filterWrap.className = 'fv-filter-wrap';
+  const filterInput = document.createElement('input');
+  filterInput.className = 'fv-filter';
+  filterInput.type = 'text';
+  filterInput.placeholder = 'Filter…';
+  filterInput.setAttribute('aria-label', 'Filter files');
+  filterWrap.appendChild(filterInput);
+  container.appendChild(filterWrap);
+
   const list = document.createElement('div');
   list.className = 'fv-dir-listing';
+  container.appendChild(list);
 
-  if (!data.entries.length) {
-    const empty = document.createElement('div');
-    empty.className = 'fv-dir-empty';
-    empty.textContent = '(empty directory)';
-    list.appendChild(empty);
-  } else {
-    data.entries.forEach(entry => {
-      const row = document.createElement('div');
-      row.className = 'fv-dir-entry' + (entry.is_dir ? ' fv-dir-entry--dir' : '');
-      row.textContent = entry.is_dir ? entry.name + '/' : entry.name;
-      row.addEventListener('click', () => navigate(entry.path));
-      list.appendChild(row);
+  const hasMeta = data.entries.some(e => e.size != null || e.mtime != null);
+
+  function renderEntries(entries) {
+    list.innerHTML = '';
+    if (!entries.length) {
+      const empty = document.createElement('div');
+      empty.className = 'fv-dir-empty';
+      empty.textContent = filterInput.value ? 'No matches' : '(empty)';
+      list.appendChild(empty);
+      return;
+    }
+    entries.forEach(entry => {
+      const a = document.createElement('a');
+      a.className = 'fv-dir-entry' + (entry.is_dir ? ' fv-dir-entry--dir' : '');
+      a.href = '/localfile?' + new URLSearchParams({ path: entry.path });
+
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'fv-dir-name';
+      nameSpan.textContent = entry.is_dir ? entry.name + '/' : entry.name;
+      a.appendChild(nameSpan);
+
+      if (hasMeta) {
+        const sizeSpan = document.createElement('span');
+        sizeSpan.className = 'fv-dir-meta';
+        sizeSpan.textContent = entry.is_dir ? '' : _fmtSize(entry.size);
+        a.appendChild(sizeSpan);
+
+        const mtimeSpan = document.createElement('span');
+        mtimeSpan.className = 'fv-dir-meta';
+        mtimeSpan.textContent = _fmtMtime(entry.mtime);
+        a.appendChild(mtimeSpan);
+      }
+
+      list.appendChild(a);
     });
   }
 
-  container.appendChild(list);
+  filterInput.addEventListener('input', () => {
+    const q = filterInput.value.trim().toLowerCase();
+    renderEntries(q ? data.entries.filter(e => e.name.toLowerCase().includes(q)) : data.entries);
+  });
+
+  renderEntries(data.entries);
+  requestAnimationFrame(() => filterInput.focus());
 }
 
 function _renderFileViewer(container, text, targetLine, endLine, path) {
@@ -5801,12 +5959,16 @@ document.addEventListener('click', e => {
   const href = a.getAttribute('href') || '';
   if (!href.startsWith('/localfile')) return;
   const url = new URL(a.href);
-  const path = url.searchParams.get('path') || '';
+  const pathVal = url.searchParams.get('path') || '';
   e.preventDefault();
   const hm = url.hash.match(/^#L(\d+)(?:-L(\d+))?$/);
-  const line = hm ? parseInt(hm[1], 10) : null;
-  const endLine = hm?.[2] ? parseInt(hm[2], 10) : null;
-  openFileViewer(path, line, endLine);
+  const lineVal = hm ? parseInt(hm[1], 10) : null;
+  const endLineVal = hm?.[2] ? parseInt(hm[2], 10) : null;
+  if (_fvNavigate && document.getElementById('file-modal')) {
+    _fvNavigate(pathVal, lineVal, endLineVal);
+  } else {
+    openFileViewer(pathVal, lineVal, endLineVal);
+  }
 });
 
 initHistoryScroll();
