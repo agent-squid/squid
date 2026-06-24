@@ -47,10 +47,15 @@ results/run-<timestamp>/
 ```
 
 The report includes prompt outputs, raw stream events, quota snapshots, git
-status, and the final binary diff, including untracked submission files. The
-example uses two bounded Python tasks and writes each submission under a
-separate `benchmark_outputs/` directory so implementations can be reviewed or
-scored directly from either arm's saved files.
+status, normalized per-prompt and per-arm model usage, Claude debug logs, and
+the final binary diff, including untracked submission files. Persistent-process
+usage counters are cumulative, so the report subtracts the prior snapshot;
+resumed-process counters are summed because every prompt starts a fresh process.
+Controller-owned correctness checks run after each arm so quality can be
+compared independently of tests written by the model. The example uses two
+bounded Python tasks and writes each submission under a separate
+`benchmark_outputs/` directory so implementations can be reviewed or scored
+directly from either arm's saved files.
 
 Run a second trial with `execution.order: [persistent, resumed]`. Do not use
 `--skip-cooldown` for a real measurement; it exists only for debugging.

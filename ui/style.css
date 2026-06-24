@@ -1501,6 +1501,24 @@ body {
 }
 .fv-root-row button { white-space: nowrap; }
 .fv-root-status { min-height: 1.4em; color: var(--text-mid); }
+.fv-dir-listing { padding: 0.4rem 0; }
+.fv-dir-entry {
+  padding: 0.2rem 1.2rem;
+  cursor: pointer;
+  color: #c0c0d0;
+  line-height: 1.65;
+  white-space: pre;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: var(--text-md);
+}
+.fv-dir-entry:hover { background: rgba(255, 255, 255, 0.05); }
+.fv-dir-entry--dir { color: #7b9fcf; }
+.fv-dir-empty {
+  padding: 0.2rem 1.2rem;
+  color: var(--text-dim);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: var(--text-md);
+}
 .fv-lines { display: table; min-width: 100%; }
 .fv-line {
   display: table-row;

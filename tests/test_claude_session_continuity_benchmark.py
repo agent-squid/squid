@@ -13,6 +13,7 @@ from benchmarks.claude_session_continuity.benchmark import (
     RunState,
     claude_command,
     default_output_path,
+    evaluate_submissions,
     git_worktree_diff,
     log_path_for,
     main,
@@ -21,8 +22,12 @@ from benchmarks.claude_session_continuity.benchmark import (
     quota_window_changed,
     run_benchmark,
     run_prompts,
+    summarize_debug_logs,
     state_path_for,
+    sum_usage,
     sync_benchmark_outputs,
+    usage_difference,
+    usage_snapshot,
 )
 
 
@@ -156,6 +161,136 @@ def test_resumed_command_changes_only_session_selector():
     assert "--session-id" not in resumed
     assert first[: first.index("--session-id")] == resumed[: resumed.index("--resume")]
     assert first[first.index("--session-id") + 2 :] == resumed[resumed.index("--resume") + 2 :]
+
+
+def test_usage_normalization_subtracts_persistent_cumulative_counters():
+    first_event = {
+        "total_cost_usd": 0.10,
+        "modelUsage": {
+            "claude-sonnet": {
+                "inputTokens": 5,
+                "outputTokens": 100,
+                "cacheReadInputTokens": 1000,
+                "cacheCreationInputTokens": 800,
+                "costUSD": 0.10,
+            }
+        },
+        "usage": {"iterations": [{"type": "message"}]},
+    }
+    second_event = {
+        "total_cost_usd": 0.16,
+        "modelUsage": {
+            "claude-sonnet": {
+                "inputTokens": 8,
+                "outputTokens": 160,
+                "cacheReadInputTokens": 2100,
+                "cacheCreationInputTokens": 950,
+                "costUSD": 0.16,
+            }
+        },
+        "usage": {"iterations": [{"type": "message"}, {"type": "tool"}]},
+    }
+
+    first = usage_snapshot(first_event)
+    second = usage_snapshot(second_event)
+    delta = usage_difference(second, first)
+
+    assert delta["input_tokens"] == 3
+    assert delta["output_tokens"] == 60
+    assert delta["cache_read_input_tokens"] == 1100
+    assert delta["cache_creation_input_tokens"] == 150
+    assert delta["cost_usd"] == 0.06
+    assert delta["inference_iterations"] == 2
+    assert delta["models"]["claude-sonnet"]["output_tokens"] == 60
+
+
+def test_sum_usage_uses_normalized_prompt_deltas():
+    prompts = [
+        PromptResult(1, "one", "done", 1.0, [], usage_delta={
+            "input_tokens": 1, "output_tokens": 10,
+            "cache_read_input_tokens": 100, "cache_creation_input_tokens": 20,
+            "cost_usd": 0.01, "inference_iterations": 1, "models": {},
+        }),
+        PromptResult(2, "two", "done", 1.0, [], usage_delta={
+            "input_tokens": 2, "output_tokens": 20,
+            "cache_read_input_tokens": 200, "cache_creation_input_tokens": 30,
+            "cost_usd": 0.02, "inference_iterations": 2, "models": {},
+        }),
+    ]
+
+    total = sum_usage(prompts)
+
+    assert total["input_tokens"] == 3
+    assert total["output_tokens"] == 30
+    assert total["cache_read_input_tokens"] == 300
+    assert total["cache_creation_input_tokens"] == 50
+    assert total["cost_usd"] == 0.03
+    assert total["inference_iterations"] == 3
+
+
+def test_debug_summary_counts_requests_sources_and_models(tmp_path: Path):
+    first = tmp_path / "process-01.log"
+    second = tmp_path / "process-02.log"
+    first.write_text(
+        "[API:timing] dispatching to firstParty model=claude-haiku\n"
+        "[API REQUEST] /v1/messages id=one source=generate_session_title\n"
+        "[API:timing] dispatching to firstParty model=claude-sonnet\n"
+        "[API REQUEST] /v1/messages id=two source=sdk\n"
+    )
+    second.write_text(
+        "[API:timing] dispatching to firstParty model=claude-sonnet\n"
+        "[API REQUEST] /v1/messages id=three source=sdk\n"
+    )
+
+    summary = summarize_debug_logs([str(first), str(second)])
+
+    assert summary["file_count"] == 2
+    assert summary["bytes"] == first.stat().st_size + second.stat().st_size
+    assert summary["api_requests"] == 3
+    assert summary["request_sources"] == {"generate_session_title": 1, "sdk": 2}
+    assert summary["dispatched_models"] == {"claude-haiku": 1, "claude-sonnet": 2}
+
+
+def test_controller_evaluations_check_saved_submissions(tmp_path: Path):
+    lru = tmp_path / "benchmark_outputs" / "01_lru_cache" / "solution.py"
+    merge = tmp_path / "benchmark_outputs" / "02_merge_intervals" / "solution.py"
+    lru.parent.mkdir(parents=True)
+    merge.parent.mkdir(parents=True)
+    lru.write_text(
+        "from collections import OrderedDict\n"
+        "class LRUCache:\n"
+        "    def __init__(self, capacity): self.capacity, self.data = capacity, OrderedDict()\n"
+        "    def get(self, key):\n"
+        "        if key not in self.data: return -1\n"
+        "        self.data.move_to_end(key); return self.data[key]\n"
+        "    def put(self, key, value):\n"
+        "        if key in self.data: self.data.move_to_end(key)\n"
+        "        self.data[key] = value\n"
+        "        if len(self.data) > self.capacity: self.data.popitem(last=False)\n"
+    )
+    merge.write_text(
+        "def merge_intervals(intervals):\n"
+        "    result = []\n"
+        "    for start, end in sorted(intervals):\n"
+        "        if result and start <= result[-1][1]: result[-1][1] = max(result[-1][1], end)\n"
+        "        else: result.append([start, end])\n"
+        "    return result\n"
+    )
+
+    evaluations = evaluate_submissions(tmp_path)
+
+    assert [item["status"] for item in evaluations] == ["passed", "passed"]
+
+
+def test_controller_evaluations_report_missing_and_failed_submissions(tmp_path: Path):
+    lru = tmp_path / "benchmark_outputs" / "01_lru_cache" / "solution.py"
+    lru.parent.mkdir(parents=True)
+    lru.write_text("class LRUCache:\n    pass\n")
+
+    evaluations = evaluate_submissions(tmp_path)
+
+    assert evaluations[0]["status"] == "failed"
+    assert evaluations[1]["status"] == "missing"
 
 
 def test_native_claude_env_clears_inherited_and_overridden_auth():
@@ -400,3 +535,52 @@ def test_run_checkpoint_preserves_prompts_when_post_gauge_fails(
     assert report["active_arm"]["prompts"][0]["result"] == "done"
     assert "git_status" in report["active_arm"]
     assert "git_diff" in report["active_arm"]
+
+
+def test_successful_run_reports_normalized_usage_processes_and_evaluations(
+    mock_claude: Path, tmp_path: Path, monkeypatch
+):
+    class FakeWorktrees:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def create(self, _arm):
+            return tmp_path
+
+        def cleanup(self):
+            pass
+
+    class FakeGauge:
+        calls = 0
+
+        def stable(self, **_kwargs):
+            self.calls += 1
+            return GaugeSnapshot(float(self.calls), "reset-1", f"t{self.calls}")
+
+    monkeypatch.setattr(
+        "benchmarks.claude_session_continuity.benchmark.GitWorktrees", FakeWorktrees
+    )
+    monkeypatch.setattr(
+        "benchmarks.claude_session_continuity.benchmark.ClaudeGauge", FakeGauge
+    )
+    output = tmp_path / "run" / "report.json"
+    config = {
+        "workspace": {"source": str(tmp_path)},
+        "execution": {
+            "claude_bin": str(mock_claude),
+            "order": ["persistent", "resumed"],
+            "capture_debug": True,
+        },
+        "prompts": ["one"],
+    }
+
+    report = run_benchmark(config, output, skip_cooldown=True)
+
+    assert [arm["process_count"] for arm in report["arms"]] == [1, 1]
+    assert all(arm["usage_total"]["cost_usd"] == 0 for arm in report["arms"])
+    assert all(arm["debug_summary"]["file_count"] == 1 for arm in report["arms"])
+    assert all(
+        [evaluation["status"] for evaluation in arm["evaluations"]]
+        == ["missing", "missing"]
+        for arm in report["arms"]
+    )

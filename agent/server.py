@@ -359,7 +359,11 @@ def sse_chunk(data: str) -> str:
     return "data:" + data.replace("\n", "\ndata:") + "\n\n"
 
 def sse_event(event: str, data: str = "") -> str:
-    return f"event: {event}\ndata: {data}\n\n"
+    # SSE represents multiline payloads as repeated data fields. Preserve the
+    # original line structure instead of emitting bare continuation lines.
+    normalized = data.replace("\r\n", "\n").replace("\r", "\n")
+    encoded = normalized.replace("\n", "\ndata: ")
+    return f"event: {event}\ndata: {encoded}\n\n"
 
 
 def _normalize_topic_response(topic: str) -> Union[str, JSONResponse]:
@@ -501,7 +505,7 @@ async def stream_response(
 
             elif isinstance(chunk, dict) and "_status" in chunk:
                 status_raw += chunk["_status"]
-                text = chunk["_status"].replace("\n", " ")
+                text = chunk["_status"]
                 if text:
                     yield sse_event("status", text)
 
@@ -1450,6 +1454,13 @@ async def serve_local_file(path: str, request: Request):
         return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
     if not p.exists():
         return JSONResponse({"error": "not found"}, status_code=404)
+    if p.is_dir():
+        entries = sorted(p.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
+        return JSONResponse({
+            "type": "directory",
+            "path": str(p),
+            "entries": [{"name": e.name, "path": str(e), "is_dir": e.is_dir()} for e in entries],
+        })
     if not p.is_file():
         return JSONResponse({"error": "not a file"}, status_code=400)
     mime, _ = mimetypes.guess_type(str(p))

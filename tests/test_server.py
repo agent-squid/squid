@@ -66,6 +66,16 @@ def test_stream_response_passes_agent_cwd_and_code_roots_separately():
     assert chunks[-1] == "event: done\ndata: \n\n"
 
 
+def test_sse_event_preserves_multiline_data_fields():
+    assert server.sse_event("status", "first\nsecond\n\nthird") == (
+        "event: status\n"
+        "data: first\n"
+        "data: second\n"
+        "data: \n"
+        "data: third\n\n"
+    )
+
+
 def test_clear_command_kills_only_session_lane():
     client = TestClient(server.app)
 

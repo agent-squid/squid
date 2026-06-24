@@ -1176,8 +1176,7 @@ function fmtCtxLabel(adhoc, pinCount = 0, mem = false) {
 }
 
 function setCtxLabel(spanEl, adhoc, pinCount = 0, mem = false) {
-  const msgId = spanEl.dataset.msgId;
-  spanEl.textContent = `${msgId ? `#${msgId} · ` : ''}ctx:${fmtCtxLabel(adhoc, pinCount, mem)}`;
+  spanEl.textContent = `ctx:${fmtCtxLabel(adhoc, pinCount, mem)}`;
 }
 
 const _lookbackUnselected = new Set(); // cleared on N change or after send; never persisted
@@ -1723,7 +1722,10 @@ async function sendMessage(text) {
           eventName = line.slice(6).trim();
           dataLineCount = 0;
         } else if (line.startsWith('data:')) {
-          const data = line.slice(5);
+          // Match EventSource parsing: one optional space after "data:" is a
+          // field separator, not payload content.
+          const field = line.slice(5);
+          const data = field.startsWith(' ') ? field.slice(1) : field;
           dataLineCount++;
 
           if (eventName === 'meta') {
@@ -1803,8 +1805,10 @@ async function sendMessage(text) {
             eventName = null;
 
           } else if (eventName === 'status') {
-            if (statusBuf && !statusBuf.endsWith('\n')) statusBuf += ' ';
-            statusBuf += data.trimStart();
+            // Preserve streaming chunk boundaries exactly. Repeated data fields
+            // within one SSE event represent newlines in the source text.
+            if (dataLineCount > 1) statusBuf += '\n';
+            statusBuf += data;
             updateThinkingPreview();
             // no eventName reset — allow multi-line accumulation
 
@@ -5550,7 +5554,8 @@ function _isTextPath(path) {
   return _TEXT_EXTS.has(ext) || !path.includes('.');
 }
 
-function openFileViewer(path, line, endLine) {
+function openFileViewer(initialPath, line, endLine) {
+  let path = initialPath;
   document.getElementById('file-modal')?.remove();
 
   const modal = document.createElement('div');
@@ -5644,6 +5649,26 @@ function openFileViewer(path, line, endLine) {
         }
         return;
       }
+      const ct = res.headers.get('content-type') || '';
+      if (ct.includes('application/json')) {
+        const data = await res.json();
+        if (data.type === 'directory') {
+          pathEl.textContent = data.path;
+          _renderDirListing(body, data, (newPath) => {
+            path = newPath;
+            line = null;
+            endLine = null;
+            pathEl.textContent = newPath;
+            loadFile();
+          });
+          return;
+        }
+      }
+      if (!ct.includes('text/') && !ct.includes('application/json')) {
+        modal.remove();
+        window.open('/localfile?' + new URLSearchParams({ path }), '_blank');
+        return;
+      }
       const text = await res.text();
       _renderFileViewer(body, text, line, endLine, path);
     } catch {
@@ -5693,6 +5718,29 @@ function _splitHighlightedLines(html) {
   }
   if (line || open.length) lines.push(line + '</span>'.repeat(open.length));
   return lines;
+}
+
+function _renderDirListing(container, data, navigate) {
+  container.innerHTML = '';
+  const list = document.createElement('div');
+  list.className = 'fv-dir-listing';
+
+  if (!data.entries.length) {
+    const empty = document.createElement('div');
+    empty.className = 'fv-dir-empty';
+    empty.textContent = '(empty directory)';
+    list.appendChild(empty);
+  } else {
+    data.entries.forEach(entry => {
+      const row = document.createElement('div');
+      row.className = 'fv-dir-entry' + (entry.is_dir ? ' fv-dir-entry--dir' : '');
+      row.textContent = entry.is_dir ? entry.name + '/' : entry.name;
+      row.addEventListener('click', () => navigate(entry.path));
+      list.appendChild(row);
+    });
+  }
+
+  container.appendChild(list);
 }
 
 function _renderFileViewer(container, text, targetLine, endLine, path) {
@@ -5754,7 +5802,6 @@ document.addEventListener('click', e => {
   if (!href.startsWith('/localfile')) return;
   const url = new URL(a.href);
   const path = url.searchParams.get('path') || '';
-  if (!_isTextPath(path)) return;
   e.preventDefault();
   const hm = url.hash.match(/^#L(\d+)(?:-L(\d+))?$/);
   const line = hm ? parseInt(hm[1], 10) : null;

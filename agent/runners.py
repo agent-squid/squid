@@ -344,7 +344,6 @@ async def run_claude(
         cmd.append(_build_prompt(prompt, history))
 
     session_id: Optional[str] = None
-    streamed_text = False  # track whether any text chunks were streamed as content
     tool_blocks: dict[int, dict] = {}  # index -> {name, input_json}
 
     env_for_claude = dict(backend_env) if backend_env else {}
@@ -388,8 +387,11 @@ async def run_claude(
                 if dtype == "text_delta":
                     text = delta.get("text", "")
                     if text:
-                        streamed_text = True
-                        yield text  # stream directly as response content, not status
+                        # Claude can emit assistant text, continue with tool calls,
+                        # and revise or replace that text before the turn completes.
+                        # Keep these in-progress deltas in Squid's status bubble;
+                        # the result event below is the completed response.
+                        yield {"_status": text}
                 elif dtype == "input_json_delta" and idx in tool_blocks:
                     tool_blocks[idx]["input_json"] += delta.get("partial_json", "")
 
@@ -398,13 +400,11 @@ async def run_claude(
                 yield {"_tool": _tool_data(block["name"], block["input_json"])}
 
         elif t == "result":
-            # Skip final_text if we already streamed it chunk by chunk above
-            if not streamed_text:
-                final_text = event.get("result", "")
-                if final_text:
-                    if "Not logged in" in final_text and "/login" in final_text:
-                        raise CLIError("Claude auth failed (network down or token expired) — run: claude login")
-                    yield final_text
+            final_text = event.get("result", "")
+            if final_text:
+                if "Not logged in" in final_text and "/login" in final_text:
+                    raise CLIError("Claude auth failed (network down or token expired) — run: claude login")
+                yield final_text
             usage = event.get("usage", {})
             # ── Claude token semantics (verified via stream-json output, 2026-06) ──────────
             # The Anthropic API / Claude Code CLI splits input into THREE buckets:

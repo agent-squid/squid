@@ -14,6 +14,7 @@ execution:
   permission_mode: acceptEdits
   allowed_tools: [Read, Edit, Write, Bash]
   prompt_timeout_seconds: 600
+  capture_debug: true
   extra_args: []
   env: {}
 

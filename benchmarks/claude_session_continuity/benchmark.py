@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -18,7 +19,7 @@ import tempfile
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
@@ -47,6 +48,8 @@ class PromptResult:
     result: str
     duration_seconds: float
     events: list[dict[str, Any]]
+    usage_snapshot: dict[str, Any] = field(default_factory=dict)
+    usage_delta: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -69,6 +72,11 @@ class ArmResult:
     prompts: list[PromptResult]
     git_status: str
     git_diff: str
+    usage_total: dict[str, Any]
+    process_count: int
+    debug_logs: list[str]
+    debug_summary: dict[str, Any]
+    evaluations: list[dict[str, Any]]
 
 
 def state_path_for(output_path: Path) -> Path:
@@ -164,6 +172,198 @@ def user_message(prompt: str, session_id: str) -> dict[str, Any]:
         "parent_tool_use_id": None,
         "session_id": session_id,
     }
+
+
+USAGE_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "cost_usd",
+)
+
+MODEL_USAGE_FIELDS = {
+    "input_tokens": "inputTokens",
+    "output_tokens": "outputTokens",
+    "cache_read_input_tokens": "cacheReadInputTokens",
+    "cache_creation_input_tokens": "cacheCreationInputTokens",
+    "cost_usd": "costUSD",
+}
+
+
+def usage_snapshot(event: dict[str, Any]) -> dict[str, Any]:
+    """Normalize Claude's cumulative per-process model usage counters."""
+    models: dict[str, dict[str, float]] = {}
+    totals = {name: 0 for name in USAGE_FIELDS}
+    for model, raw in (event.get("modelUsage") or {}).items():
+        if not isinstance(raw, dict):
+            continue
+        values = {
+            name: float(raw.get(source, 0) or 0)
+            for name, source in MODEL_USAGE_FIELDS.items()
+        }
+        models[str(model)] = values
+        for name, value in values.items():
+            totals[name] += value
+    totals["cost_usd"] = float(event.get("total_cost_usd", totals["cost_usd"]) or 0)
+    totals["inference_iterations"] = len(
+        ((event.get("usage") or {}).get("iterations") or [])
+    )
+    totals["models"] = models
+    return totals
+
+
+def usage_difference(
+    current: dict[str, Any], previous: Optional[dict[str, Any]] = None
+) -> dict[str, Any]:
+    """Convert a cumulative snapshot into non-negative usage for one prompt."""
+    previous = previous or {}
+    result = {
+        name: round(max(0.0, float(current.get(name, 0)) - float(previous.get(name, 0))), 9)
+        for name in USAGE_FIELDS
+    }
+    result["inference_iterations"] = int(current.get("inference_iterations", 0) or 0)
+    current_models = current.get("models") or {}
+    previous_models = previous.get("models") or {}
+    result["models"] = {
+        model: {
+            name: round(
+                max(
+                    0.0,
+                    float(values.get(name, 0))
+                    - float((previous_models.get(model) or {}).get(name, 0)),
+                ),
+                9,
+            )
+            for name in USAGE_FIELDS
+        }
+        for model, values in current_models.items()
+    }
+    return result
+
+
+def sum_usage(prompts: list[PromptResult]) -> dict[str, Any]:
+    total = {name: 0.0 for name in USAGE_FIELDS}
+    total["inference_iterations"] = 0
+    models: dict[str, dict[str, float]] = {}
+    for prompt in prompts:
+        usage = prompt.usage_delta
+        for name in USAGE_FIELDS:
+            total[name] += float(usage.get(name, 0) or 0)
+        total["inference_iterations"] += int(usage.get("inference_iterations", 0) or 0)
+        for model, values in (usage.get("models") or {}).items():
+            target = models.setdefault(model, {name: 0.0 for name in USAGE_FIELDS})
+            for name in USAGE_FIELDS:
+                target[name] += float(values.get(name, 0) or 0)
+    for name in USAGE_FIELDS:
+        total[name] = round(total[name], 9)
+    for values in models.values():
+        for name in USAGE_FIELDS:
+            values[name] = round(values[name], 9)
+    total["models"] = models
+    return total
+
+
+def summarize_debug_logs(paths: list[str]) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "file_count": len(paths),
+        "bytes": 0,
+        "api_requests": 0,
+        "request_sources": {},
+        "dispatched_models": {},
+    }
+    for value in paths:
+        path = Path(value)
+        try:
+            summary["bytes"] += path.stat().st_size
+            lines = path.read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if "[API REQUEST]" in line:
+                summary["api_requests"] += 1
+                match = re.search(r"\bsource=([^\s]+)", line)
+                if match:
+                    source = match.group(1)
+                    summary["request_sources"][source] = (
+                        summary["request_sources"].get(source, 0) + 1
+                    )
+            match = re.search(r"dispatching to firstParty model=([^\s]+)", line)
+            if match:
+                model = match.group(1)
+                summary["dispatched_models"][model] = (
+                    summary["dispatched_models"].get(model, 0) + 1
+                )
+    return summary
+
+
+SUBMISSION_EVALUATORS = {
+    "01_lru_cache": r'''
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("submission", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+cache = module.LRUCache(2)
+assert cache.get(99) == -1
+cache.put(1, 1); cache.put(2, 2)
+assert cache.get(1) == 1
+cache.put(3, 3)
+assert cache.get(2) == -1
+cache.put(1, 10); cache.put(4, 4)
+assert cache.get(3) == -1 and cache.get(1) == 10 and cache.get(4) == 4
+single = module.LRUCache(1)
+single.put("a", 1); single.put("b", 2)
+assert single.get("a") == -1 and single.get("b") == 2
+''',
+    "02_merge_intervals": r'''
+import copy, importlib.util, sys
+spec = importlib.util.spec_from_file_location("submission", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+assert module.merge_intervals([]) == []
+value = [[8, 10], [1, 3], [2, 6], [15, 18]]
+original = copy.deepcopy(value)
+assert module.merge_intervals(value) == [[1, 6], [8, 10], [15, 18]]
+assert value == original
+assert module.merge_intervals([[1, 2], [2, 3], [3, 3]]) == [[1, 3]]
+assert module.merge_intervals([[-5, -1], [-3, 2], [10, 10]]) == [[-5, 2], [10, 10]]
+''',
+}
+
+
+def evaluate_submissions(cwd: Path, timeout_seconds: float = 10) -> list[dict[str, Any]]:
+    """Run controller-owned correctness checks against known benchmark tasks."""
+    evaluations = []
+    for task, script in SUBMISSION_EVALUATORS.items():
+        solution = cwd / "benchmark_outputs" / task / "solution.py"
+        if not solution.is_file():
+            evaluations.append({"task": task, "status": "missing", "duration_seconds": 0})
+            continue
+        started = time.monotonic()
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-I", "-c", script, str(solution)],
+                cwd=cwd,
+                text=True,
+                capture_output=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+            evaluations.append({
+                "task": task,
+                "status": "passed" if completed.returncode == 0 else "failed",
+                "returncode": completed.returncode,
+                "duration_seconds": round(time.monotonic() - started, 3),
+                "stdout": completed.stdout[-2000:],
+                "stderr": completed.stderr[-2000:],
+            })
+        except subprocess.TimeoutExpired:
+            evaluations.append({
+                "task": task,
+                "status": "timed_out",
+                "duration_seconds": round(time.monotonic() - started, 3),
+            })
+    return evaluations
 
 
 def claude_command(
@@ -292,6 +492,7 @@ class ClaudeStreamProcess:
                 result=result,
                 duration_seconds=round(time.monotonic() - started, 3),
                 events=events,
+                usage_snapshot=usage_snapshot(event),
             )
         detail = "\n".join(stderr[-10:])
         raise BenchmarkError(
@@ -484,10 +685,19 @@ def run_prompts(
     on_prompt_start: Optional[Callable[[int], None]] = None,
     on_prompt_complete: Optional[Callable[[PromptResult], None]] = None,
 ) -> list[PromptResult]:
+    previous_usage: Optional[dict[str, Any]] = None
+
     def ask(process: ClaudeStreamProcess, prompt: str, index: int) -> PromptResult:
+        nonlocal previous_usage
         if on_prompt_start:
             on_prompt_start(index)
         result = process.ask(prompt, session_id, index)
+        result.usage_delta = usage_difference(
+            result.usage_snapshot,
+            previous_usage if arm == "persistent" else None,
+        )
+        if arm == "persistent":
+            previous_usage = result.usage_snapshot
         if on_prompt_complete:
             on_prompt_complete(result)
         return result
@@ -567,6 +777,7 @@ def run_benchmark(
     allowed_tools = list(execution.get("allowed_tools") or [])
     extra_args = [str(arg) for arg in execution.get("extra_args") or []]
     prompt_timeout = float(execution.get("prompt_timeout_seconds", 1800))
+    capture_debug = bool(execution.get("capture_debug", True))
     cooldown = 0 if skip_cooldown else float(measurement.get("cold_cache_seconds", 600))
     gauge_options = {
         "interval_seconds": float(measurement.get("gauge_poll_seconds", 10)),
@@ -644,11 +855,27 @@ def run_benchmark(
                 "started_at": started_at,
                 "status": "running",
                 "prompts": [],
+                "debug_logs": [],
             }
             report["active_arm"] = active_arm
             write_json_atomic(output_path, report)
 
+            process_count = 0
+            debug_logs: list[str] = []
+
             def command_factory(resume: bool) -> list[str]:
+                nonlocal process_count
+                process_count += 1
+                process_args = list(extra_args)
+                if capture_debug and "--debug-file" not in process_args:
+                    debug_path = (
+                        output_path.parent / arm / "debug" / f"process-{process_count:02d}.log"
+                    )
+                    debug_path.parent.mkdir(parents=True, exist_ok=True)
+                    process_args.extend(["--debug-file", str(debug_path)])
+                    debug_logs.append(str(debug_path))
+                    active_arm["debug_logs"] = list(debug_logs)
+                    active_arm["process_count"] = process_count
                 return claude_command(
                     claude_bin=claude_bin,
                     session_id=session_id,
@@ -657,7 +884,7 @@ def run_benchmark(
                     permission_mode=permission_mode,
                     allowed_tools=allowed_tools,
                     resume=resume,
-                    extra_args=extra_args,
+                    extra_args=process_args,
                 )
 
             def prompt_started(index: int) -> None:
@@ -691,6 +918,9 @@ def run_benchmark(
                 on_prompt_start=prompt_started,
                 on_prompt_complete=prompt_completed,
             )
+            evaluations = evaluate_submissions(cwd)
+            active_arm["evaluations"] = evaluations
+            write_json_atomic(output_path, report)
             if state:
                 state.update(phase="gauge_after", prompt_index=None)
             after = gauge.stable(
@@ -717,6 +947,11 @@ def run_benchmark(
                 prompts=prompt_results,
                 git_status=git_capture(cwd, "status", "--short"),
                 git_diff=git_worktree_diff(cwd),
+                usage_total=sum_usage(prompt_results),
+                process_count=process_count,
+                debug_logs=debug_logs,
+                debug_summary=summarize_debug_logs(debug_logs),
+                evaluations=evaluations,
             )
             report["arms"].append(asdict(arm_result))
             report.pop("active_arm", None)

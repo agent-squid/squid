@@ -119,7 +119,8 @@ test('search keywords are highlighted in result content only', async ({ page }) 
 
   const result = page.locator('.search-result-item');
   await expect(result).toHaveCount(1);
-  await expect(result.locator('.user-ctx')).toContainText('#42 · ctx:');
+  await expect(result.locator('.user-ctx')).toHaveText(/^ctx:/);
+  await expect(result.locator('.user-ctx')).not.toContainText('#42');
   await expect(result.locator('mark.search-kw-highlight')).toHaveText(['Needle', 'search', 'needle', 'search', 'needle', 'search']);
   await expect(result.locator('.history-prompt mark.search-kw-highlight')).toHaveCount(0);
   await expect(result.locator('code:not(pre code) mark.search-kw-highlight')).toHaveText(['needle', 'search']);

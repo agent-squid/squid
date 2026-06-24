@@ -2,6 +2,7 @@
 Unit tests for runners.py process registry and kill functions.
 """
 import asyncio
+import json
 import signal
 import time
 from unittest.mock import patch, call
@@ -249,6 +250,35 @@ def test_claude_gateway_backend_keeps_its_explicit_environment():
         "ANTHROPIC_AUTH_TOKEN": "deepseek-token",
         "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
     }
+
+
+def test_claude_routes_partial_text_to_status_and_result_to_response():
+    async def fake_stream_lines(*args, **kwargs):
+        yield json.dumps({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "Working on it..."},
+            },
+        })
+        yield json.dumps({
+            "type": "result",
+            "result": "Finished response.",
+            "usage": {},
+        })
+
+    async def collect():
+        return [chunk async for chunk in run_claude("hello", cwd="/tmp")]
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        chunks = asyncio.run(collect())
+
+    assert chunks[0] == {"_status": "Working on it..."}
+    assert chunks[1] == "Finished response."
+    assert "_stats" in chunks[2]
 
 
 def test_codex_backend_configuration_reaches_command_and_process_metadata():

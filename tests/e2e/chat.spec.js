@@ -109,7 +109,8 @@ test.describe('response bubble', () => {
 
     await sendMsg(page);
     const ctx = page.locator(RESPONSE).locator('.user-ctx');
-    await expect(ctx).toContainText('#1 · ctx:');
+    await expect(ctx).toHaveText(/^ctx:/);
+    await expect(ctx).not.toContainText('#1');
 
     await ctx.click();
     await expect(page.locator('#ctx-popup')).toContainText('message#1');
@@ -275,6 +276,21 @@ test.describe('response bubble', () => {
     await expect(page.locator('.msg-thinking-done')).toBeVisible();
     await expect(page.locator('.thinking-toggle')).toBeVisible();
     await look(page);  // pause — observe: collapsed ▸ toggle above the response bubble
+  });
+
+  test('status streaming preserves newlines and adjacent delta chunks', async ({ page }) => {
+    const body = sse(META)
+      + 'event: status\ndata: first line\ndata: sec\n\n'
+      + 'event: status\ndata: ond line\n\n'
+      + sse({ data: 'Final response' }, DONE);
+    await page.route('**/chat', r => r.fulfill({
+      status: 200, headers: SSE_HEADERS, body,
+    }));
+
+    await sendMsg(page);
+
+    await expect(page.locator('.thinking-body')).toHaveText('first line\nsecond line');
+    await expect(page.locator(RESPONSE)).toContainText('Final response');
   });
 
   test('partial status remains in status bubble when the response errors', async ({ page }) => {
