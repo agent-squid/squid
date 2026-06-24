@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -11,12 +12,17 @@ from benchmarks.claude_session_continuity.benchmark import (
     PromptResult,
     RunState,
     claude_command,
+    default_output_path,
+    git_worktree_diff,
+    log_path_for,
     main,
+    native_claude_env,
     normalize_reset_time,
     quota_window_changed,
     run_benchmark,
     run_prompts,
     state_path_for,
+    sync_benchmark_outputs,
 )
 
 
@@ -31,7 +37,7 @@ for line in sys.stdin:
     session_id = incoming["session_id"]
     print(json.dumps({
         "type": "system", "subtype": "init", "session_id": session_id,
-        "model": "mock-claude",
+        "model": "claude-sonnet-mock",
     }), flush=True)
     print(json.dumps(incoming), flush=True)
     if content.startswith("remember "):
@@ -112,6 +118,25 @@ def test_prompt_callbacks_expose_live_progress(mock_claude: Path, tmp_path: Path
     assert completed == [1, 2]
 
 
+def test_process_kills_non_sonnet_model(tmp_path: Path):
+    executable = tmp_path / "mock-opus"
+    executable.write_text(MOCK_CLAUDE.replace("claude-sonnet-mock", "claude-opus-mock"))
+    executable.chmod(0o755)
+    session_id = "11111111-1111-4111-8111-111111111111"
+
+    with pytest.raises(BenchmarkError, match="non-sonnet model: claude-opus-mock"):
+        with ClaudeStreamProcess(
+            _mock_command(executable),
+            tmp_path,
+            {},
+            5,
+            required_model_family="sonnet",
+        ) as process:
+            process.ask("inspect", session_id, 1)
+
+    assert process.proc.returncode is not None
+
+
 def test_resumed_command_changes_only_session_selector():
     common = dict(
         claude_bin="/usr/local/bin/claude",
@@ -131,6 +156,68 @@ def test_resumed_command_changes_only_session_selector():
     assert "--session-id" not in resumed
     assert first[: first.index("--session-id")] == resumed[: resumed.index("--resume")]
     assert first[first.index("--session-id") + 2 :] == resumed[resumed.index("--resume") + 2 :]
+
+
+def test_native_claude_env_clears_inherited_and_overridden_auth():
+    env = native_claude_env(
+        {
+            "PATH": "/bin",
+            "ANTHROPIC_API_KEY": "inherited-key",
+            "ANTHROPIC_BASE_URL": "https://inherited.example",
+        },
+        {
+            "BENCHMARK_MARKER": "kept",
+            "ANTHROPIC_AUTH_TOKEN": "configured-token",
+            "SQUID_NATIVE_CLAUDE_TOKEN": "cached-token",
+        },
+    )
+
+    assert env == {"PATH": "/bin", "BENCHMARK_MARKER": "kept"}
+
+
+def test_git_worktree_diff_includes_untracked_files(tmp_path: Path):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "benchmark@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Benchmark Test"], cwd=tmp_path, check=True)
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("before\n")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+
+    tracked.write_text("after\n")
+    (tmp_path / "submission.py").write_text("def answer():\n    return 42\n")
+
+    diff = git_worktree_diff(tmp_path)
+
+    assert "+after" in diff
+    assert "submission.py" in diff
+    assert "+def answer():" in diff
+
+
+def test_run_directory_paths_and_submission_materialization(tmp_path: Path):
+    output = tmp_path / "run-20260623T120000Z" / "report.json"
+    workspace = tmp_path / "workspace"
+    submission = workspace / "benchmark_outputs" / "01_task" / "solution.py"
+    submission.parent.mkdir(parents=True)
+    submission.write_text("def answer():\n    return 42\n")
+
+    sync_benchmark_outputs(workspace, output.parent / "persistent")
+
+    assert state_path_for(output) == output.parent / "state.json"
+    assert log_path_for(output) == output.parent / "run.log"
+    stored = output.parent / "persistent" / "benchmark_outputs" / "01_task" / "solution.py"
+    assert stored.read_text() == submission.read_text()
+
+
+def test_default_output_uses_unique_timestamped_run_directory():
+    first = default_output_path(datetime(2026, 6, 23, 12, 0, 0, 1, timezone.utc))
+    second = default_output_path(datetime(2026, 6, 23, 12, 0, 0, 2, timezone.utc))
+
+    assert first.name == "report.json"
+    assert first.parent.name.startswith("run-")
+    assert first != second
 
 
 def test_gauge_stabilization_waits_for_consecutive_equal_samples(monkeypatch):

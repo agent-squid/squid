@@ -505,7 +505,15 @@ async def run_codex(
             if item.get("type") == "agent_message":
                 text = item.get("text", "")
                 if text:
-                    yield str(text)
+                    # Codex emits progress updates and the final answer with the
+                    # same item type. Keep commentary in Squid's status bubble;
+                    # only final_answer belongs in persisted response content.
+                    if item.get("phase") == "commentary":
+                        yield {"_status": str(text)}
+                    else:
+                        # Missing phase is the legacy CLI shape and remains
+                        # response content for backward compatibility.
+                        yield str(text)
             elif item.get("type") == "command_execution":
                 cmd_str = item.get("command", "")
                 # Strip /bin/zsh -lc "..." or /bin/bash -lc "..." wrapper

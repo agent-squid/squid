@@ -7,13 +7,13 @@ workspace:
 
 execution:
   # Reverse this list in the second trial to reduce order bias.
-  order: [persistent, resumed]
+  order: [resumed, persistent]
   claude_bin: claude
   model: sonnet
-  effort: high
+  effort: medium
   permission_mode: acceptEdits
-  allowed_tools: [Read, Glob, Grep, Edit, Write, Bash]
-  prompt_timeout_seconds: 1800
+  allowed_tools: [Read, Edit, Write, Bash]
+  prompt_timeout_seconds: 600
   extra_args: []
   env: {}
 
@@ -25,7 +25,30 @@ measurement:
   gauge_timeout_seconds: 180
 
 prompts:
-  - Inspect the project and identify one concrete reliability problem. Do not edit files yet.
-  - Implement the reliability improvement you identified and add focused tests.
-  - Run the relevant tests, fix any failures, and summarize the final change.
-  - Review the complete diff as if it were a pull request. Inspect relevant surrounding code for correctness, regressions, and missing test coverage; fix concrete issues you find, rerun focused tests, and summarize the review findings and any resulting changes.
+  - |
+    Complete this self-contained Python coding task. Do not inspect or modify files
+    outside benchmark_outputs/01_lru_cache.
+
+    Create benchmark_outputs/01_lru_cache/solution.py implementing an LRUCache
+    class with get(key) and put(key, value). get returns -1 for a missing key.
+    put updates an existing key or inserts a new one; when capacity is exceeded,
+    evict the least recently used key. Both operations must be O(1). Capacity is
+    always a positive integer. Use only the Python 3.11 standard library.
+
+    Also create benchmark_outputs/01_lru_cache/test_solution.py with focused
+    unittest tests for normal eviction, updating an existing key, and capacity 1.
+    Run the tests, fix failures, and finish with a concise summary.
+  - |
+    Complete this independent, self-contained Python coding task. Do not inspect
+    or modify files outside benchmark_outputs/02_merge_intervals.
+
+    Create benchmark_outputs/02_merge_intervals/solution.py implementing
+    merge_intervals(intervals), where intervals is a list of [start, end] integer
+    pairs with start <= end. Return a new list containing all overlapping or
+    touching intervals merged, sorted by start. Do not mutate the input. An empty
+    input returns an empty list. Use only the Python 3.11 standard library.
+
+    Also create benchmark_outputs/02_merge_intervals/test_solution.py with focused
+    unittest tests for empty input, unsorted overlapping intervals, touching
+    endpoints, nested intervals, and input preservation. Run the tests, fix
+    failures, and finish with a concise summary.

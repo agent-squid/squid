@@ -84,6 +84,47 @@ def test_worker_persists_stats_with_item_lookback():
     assert call_args.args[1]["lookback"] == 4
 
 
+def test_worker_keeps_status_out_of_persisted_response():
+    async def fake_runner(*args, **kwargs):
+        yield {"_status": "Checking the code..."}
+        yield "Final response only."
+
+    async def run():
+        worker = TopicWorker("work")
+        item = QueueItem(
+            seq=0,
+            topic="work",
+            agent="codex",
+            prompt="hello",
+            context_history=[],
+            backend="codex",
+            model=None,
+            msg_id=124,
+        )
+        with patch("agent.runners.run_codex", fake_runner), \
+             patch("agent.stats_db.insert_run_event"), \
+             patch("agent.stats_db.update_assistant_message") as update_message, \
+             patch("agent.stats_db.set_topic_session"), \
+             patch("agent.stats_db.save_stats"):
+            await worker._process(item)
+
+        chunks = []
+        while True:
+            chunk = await item.out_q.get()
+            chunks.append(chunk)
+            if chunk is None:
+                break
+        return update_message.call_args, chunks
+
+    update_call, chunks = asyncio.run(run())
+    assert update_call.args[1] == "Final response only."
+    assert update_call.args[3] == "done"
+    assert chunks[:2] == [
+        {"_status": "Checking the code..."},
+        "Final response only.",
+    ]
+
+
 def test_worker_emits_git_diff_tool_event(tmp_path):
     init_repo(tmp_path)
 

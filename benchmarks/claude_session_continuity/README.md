@@ -9,8 +9,12 @@ preserving one conversation across every prompt:
 
 Both arms use the same installed binary, stream-json protocol, model, settings,
 environment, prompt order, and a detached git worktree created from the same
-baseline. The measured value is the claude.ai five-hour quota gauge delta, not
-the token counts reported in Claude's JSON output.
+baseline. Native Claude authentication variables are removed from the child
+environment so Claude Code owns its OAuth credentials and refresh lifecycle.
+The benchmark requires Sonnet and verifies the actual model reported by every
+Claude process during initialization; it kills the process on any mismatch.
+The measured value is the claude.ai five-hour quota gauge delta, not the token
+counts reported in Claude's JSON output.
 
 ## Prerequisites
 
@@ -30,11 +34,25 @@ Copy and edit `prompts.example.yaml`, then run from the repository root:
 ```
 
 The default protocol waits ten idle minutes before each arm, then polls the
-quota gauge until it is stable before and after execution. Results are written
-under `results/`, which is ignored by git. The report includes prompt outputs,
-raw stream events, quota snapshots, git status, and the final binary diff.
+quota gauge until it is stable before and after execution. Each run receives a
+unique timestamped directory under `results/`, which is ignored by git:
 
-Run a second trial with `execution.order: [resumed, persistent]`. Do not use
+```text
+results/run-<timestamp>/
+  report.json
+  state.json
+  run.log
+  persistent/benchmark_outputs/...
+  resumed/benchmark_outputs/...
+```
+
+The report includes prompt outputs, raw stream events, quota snapshots, git
+status, and the final binary diff, including untracked submission files. The
+example uses two bounded Python tasks and writes each submission under a
+separate `benchmark_outputs/` directory so implementations can be reviewed or
+scored directly from either arm's saved files.
+
+Run a second trial with `execution.order: [persistent, resumed]`. Do not use
 `--skip-cooldown` for a real measurement; it exists only for debugging.
 
 ## Background runs and status
@@ -52,7 +70,7 @@ paths. Poll the run using either the result path or the state path:
 
 ```bash
 .venv/bin/python -m benchmarks.claude_session_continuity.benchmark \
-  --status benchmarks/claude_session_continuity/results/run-123.json
+  --status benchmarks/claude_session_continuity/results/run-<timestamp>
 ```
 
 State is updated atomically during cooldown countdowns, gauge stabilization,

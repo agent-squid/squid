@@ -71,5 +71,11 @@ test('percentage quota gauges retain their reset countdown', async ({ page }) =>
       });
     }, backend);
     await expect(page.locator(`#${labelId}`)).toHaveText('97% in 4.2D');
+
+    await page.evaluate(backendId => {
+      quotaStateFor(backendId).delta = 52;
+      updateGaugeLabel(backendId);
+    }, backend);
+    await expect(page.locator(`#${labelId}`)).toHaveText('97% +52 pp in 4.2D');
   }
 });

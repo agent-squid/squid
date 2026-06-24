@@ -28,6 +28,14 @@ import yaml
 from agent import creds
 
 
+NATIVE_CLAUDE_AUTH_ENV = (
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "SQUID_NATIVE_CLAUDE_TOKEN",
+)
+
+
 class BenchmarkError(RuntimeError):
     """The benchmark could not produce a valid measurement."""
 
@@ -64,11 +72,20 @@ class ArmResult:
 
 
 def state_path_for(output_path: Path) -> Path:
+    if output_path.name == "report.json":
+        return output_path.with_name("state.json")
     return output_path.with_suffix(".state.json")
 
 
 def log_path_for(output_path: Path) -> Path:
+    if output_path.name == "report.json":
+        return output_path.with_name("run.log")
     return output_path.with_suffix(".log")
+
+
+def default_output_path(now: Optional[datetime] = None) -> Path:
+    timestamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%dT%H%M%S.%fZ")
+    return Path(__file__).with_name("results") / f"run-{timestamp}" / "report.json"
 
 
 def write_json_atomic(path: Path, value: Any) -> None:
@@ -183,10 +200,18 @@ def claude_command(
 class ClaudeStreamProcess:
     """One native Claude Code process driven through newline-delimited JSON."""
 
-    def __init__(self, command: list[str], cwd: Path, env: dict[str, str], timeout: float):
+    def __init__(
+        self,
+        command: list[str],
+        cwd: Path,
+        env: dict[str, str],
+        timeout: float,
+        required_model_family: Optional[str] = None,
+    ):
         self.command = command
         self.cwd = cwd
         self.timeout = timeout
+        self.required_model_family = required_model_family
         self.proc = subprocess.Popen(
             command,
             cwd=str(cwd),
@@ -244,6 +269,17 @@ class ClaudeStreamProcess:
             except json.JSONDecodeError as exc:
                 raise BenchmarkError(f"Claude emitted non-JSON stdout: {line[:200]}") from exc
             events.append(event)
+            if event.get("type") == "system" and event.get("subtype") == "init":
+                actual_model = str(event.get("model") or "")
+                if (
+                    self.required_model_family
+                    and self.required_model_family.casefold() not in actual_model.casefold()
+                ):
+                    self.kill()
+                    raise BenchmarkError(
+                        f"Claude started with non-{self.required_model_family} model: "
+                        f"{actual_model or '<unknown>'}"
+                    )
             if event.get("type") != "result":
                 continue
             result = str(event.get("result") or "")
@@ -275,6 +311,11 @@ class ClaudeStreamProcess:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 return self.proc.wait(timeout=5)
+
+    def kill(self) -> int:
+        if self.proc.poll() is None:
+            self.proc.kill()
+        return self.proc.wait(timeout=5)
 
     def __enter__(self) -> "ClaudeStreamProcess":
         return self
@@ -386,6 +427,51 @@ def git_capture(cwd: Path, *args: str) -> str:
     return completed.stdout + completed.stderr
 
 
+def git_worktree_diff(cwd: Path) -> str:
+    """Capture tracked changes and untracked files without modifying the index."""
+    diff = git_capture(cwd, "diff", "--binary", "HEAD")
+    untracked = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=cwd,
+        capture_output=True,
+        check=False,
+    ).stdout.split(b"\0")
+    for raw_path in untracked:
+        if not raw_path:
+            continue
+        path = os.fsdecode(raw_path)
+        completed = subprocess.run(
+            ["git", "diff", "--no-index", "--binary", "--", "/dev/null", path],
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        diff += completed.stdout + completed.stderr
+    return diff
+
+
+def sync_benchmark_outputs(cwd: Path, destination: Path) -> None:
+    """Materialize an arm's generated benchmark files outside its temporary worktree."""
+    source = cwd / "benchmark_outputs"
+    target = destination / "benchmark_outputs"
+    shutil.rmtree(target, ignore_errors=True)
+    if source.is_dir():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, target, symlinks=True)
+
+
+def native_claude_env(
+    base: dict[str, str], overrides: Optional[dict[str, Any]] = None
+) -> dict[str, str]:
+    """Build an environment that leaves native OAuth ownership to Claude Code."""
+    env = dict(base)
+    env.update({str(key): str(value) for key, value in (overrides or {}).items()})
+    for name in NATIVE_CLAUDE_AUTH_ENV:
+        env.pop(name, None)
+    return env
+
+
 def run_prompts(
     *,
     arm: str,
@@ -407,12 +493,16 @@ def run_prompts(
         return result
 
     if arm == "persistent":
-        with ClaudeStreamProcess(command_factory(False), cwd, env, timeout) as process:
+        with ClaudeStreamProcess(
+            command_factory(False), cwd, env, timeout, required_model_family="sonnet"
+        ) as process:
             return [ask(process, prompt, index) for index, prompt in enumerate(prompts, 1)]
 
     results: list[PromptResult] = []
     for index, prompt in enumerate(prompts, 1):
-        with ClaudeStreamProcess(command_factory(index > 1), cwd, env, timeout) as process:
+        with ClaudeStreamProcess(
+            command_factory(index > 1), cwd, env, timeout, required_model_family="sonnet"
+        ) as process:
             results.append(ask(process, prompt, index))
     return results
 
@@ -470,6 +560,8 @@ def run_benchmark(
     if not claude_bin:
         raise BenchmarkError("claude binary not found")
     model = str(execution.get("model", "sonnet"))
+    if "sonnet" not in model.casefold():
+        raise BenchmarkError(f"execution.model must select Sonnet, got: {model}")
     effort = execution.get("effort")
     permission_mode = str(execution.get("permission_mode", "acceptEdits"))
     allowed_tools = list(execution.get("allowed_tools") or [])
@@ -482,8 +574,7 @@ def run_benchmark(
         "epsilon": float(measurement.get("gauge_epsilon", 0.001)),
         "timeout_seconds": float(measurement.get("gauge_timeout_seconds", 180)),
     }
-    env = os.environ.copy()
-    env.update({str(k): str(v) for k, v in (execution.get("env") or {}).items()})
+    env = native_claude_env(os.environ, execution.get("env"))
 
     gauge = ClaudeGauge()
     worktrees = GitWorktrees(source, baseline, keep_worktrees)
@@ -580,7 +671,8 @@ def run_benchmark(
                 active_arm["completed_prompts"] = result.prompt_index
                 active_arm["prompt_index"] = None
                 active_arm["git_status"] = git_capture(cwd, "status", "--short")
-                active_arm["git_diff"] = git_capture(cwd, "diff", "--binary", "HEAD")
+                active_arm["git_diff"] = git_worktree_diff(cwd)
+                sync_benchmark_outputs(cwd, output_path.parent / arm)
                 write_json_atomic(output_path, report)
                 if state:
                     state.update(
@@ -624,7 +716,7 @@ def run_benchmark(
                 completed_at=utc_now(),
                 prompts=prompt_results,
                 git_status=git_capture(cwd, "status", "--short"),
-                git_diff=git_capture(cwd, "diff", "--binary", "HEAD"),
+                git_diff=git_worktree_diff(cwd),
             )
             report["arms"].append(asdict(arm_result))
             report.pop("active_arm", None)
@@ -672,7 +764,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
     if args.status:
-        status_path = args.status if args.status.name.endswith(".state.json") else state_path_for(args.status)
+        if args.status.is_dir():
+            status_path = args.status / "state.json"
+        else:
+            status_path = (
+                args.status
+                if args.status.name in {"state.json"} or args.status.name.endswith(".state.json")
+                else state_path_for(args.status)
+            )
         if not status_path.exists():
             print(f"benchmark state not found: {status_path}", file=sys.stderr)
             return 1
@@ -687,7 +786,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         return 0
     if not args.config:
         parser.error("--config is required unless --status is used")
-    output = args.output or Path(__file__).with_name("results") / f"run-{int(time.time())}.json"
+    output = args.output or default_output_path()
     output = output.expanduser().resolve()
     if args.background:
         output.parent.mkdir(parents=True, exist_ok=True)

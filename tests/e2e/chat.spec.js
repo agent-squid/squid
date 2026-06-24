@@ -277,6 +277,25 @@ test.describe('response bubble', () => {
     await look(page);  // pause — observe: collapsed ▸ toggle above the response bubble
   });
 
+  test('partial status remains in status bubble when the response errors', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        META,
+        { event: 'status', data: 'Checking the code...' },
+        { event: 'error', data: 'Backend unavailable' },
+      ),
+    }));
+
+    await sendMsg(page);
+
+    const statusBubble = page.locator('.msg-thinking-done');
+    await expect(statusBubble.locator('.thinking-body')).toContainText('Checking the code...');
+    const response = page.locator(RESPONSE);
+    await expect(response.locator(MSG_ERROR)).toHaveText('Backend unavailable');
+    await expect(response).not.toContainText('Checking the code...');
+  });
+
   test('thinking bubble removed when no status events', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200, headers: SSE_HEADERS,

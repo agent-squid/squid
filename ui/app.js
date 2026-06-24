@@ -1849,6 +1849,9 @@ async function sendMessage(text) {
 
           } else if (eventName === 'error') {
             stopStatusFallback();
+            completedFromStatus = true;
+            completionRendered = true;
+            freezeThinking();
             const errLine = data.trim();
             showError(errLine);
             eventName = null;
@@ -1915,7 +1918,9 @@ async function sendMessage(text) {
   if (quotaBefore !== null && quotaAfter !== null && quotaAfter !== quotaBefore) {
     const d = Math.round((quotaAfter - quotaBefore) * 10) / 10;
     if (statsEl && d > 0) {
-      statsEl.querySelector('.stats-quota-delta').textContent = `  ·  +${d}%`;
+      const deltaEl = statsEl.querySelector('.stats-quota-delta');
+      deltaEl.textContent = `  ·  +${d} pp`;
+      deltaEl.title = 'Observed account quota-meter change; not exact message usage';
     }
     if (msgId) {
       fetch(`/chat/${msgId}/quota-delta`, {
@@ -2575,7 +2580,10 @@ function addStats(bubble, stats, timestamp) {
   const msgQd = (stats.msg_quota_before != null && stats.msg_quota_after != null)
     ? Math.round((stats.msg_quota_after - stats.msg_quota_before) * 10) / 10
     : stats.quota_delta;
-  if (msgQd != null && msgQd > 0) qdSpan.textContent = `  ·  +${msgQd}%`;
+  if (msgQd != null && msgQd > 0) {
+    qdSpan.textContent = `  ·  +${msgQd} pp`;
+    qdSpan.title = 'Observed account quota-meter change; not exact message usage';
+  }
   el.appendChild(qdSpan);
 
   let rows, thead, tfoot;
@@ -2912,7 +2920,7 @@ function updateGaugeLabel(backend) {
   } else if (state.pct == null) {
     label.textContent = '—';
   } else {
-    const delta = state.delta != null ? ` +${state.delta}%` : '';
+    const delta = state.delta != null ? ` +${state.delta} pp` : '';
     const timeStr = quotaTimeText(state.resetAt);
     label.textContent = `${state.pct}%${delta}` + (timeStr ? ` in ${timeStr}` : '');
   }
@@ -3664,7 +3672,7 @@ function renderTimeStats(rows) {
       <td>${r.total_turns || '—'}</td>
       <td>${fmtNum(inp)}</td>
       <td>${fmtNum(r.output_tokens || 0)}</td>
-      ${ex ? `<td>$${(r.cost_usd || 0).toFixed(4)}</td><td>${qd != null ? '+' + qd.toFixed(1) + '%' : '—'}</td>` : ''}
+      ${ex ? `<td>$${(r.cost_usd || 0).toFixed(4)}</td><td>${qd != null ? '+' + qd.toFixed(1) + ' pp' : '—'}</td>` : ''}
     </tr>`;
   }).join('');
 
@@ -3672,13 +3680,13 @@ function renderTimeStats(rows) {
     <thead><tr>
       <th>${statsPeriod === 'hourly' ? 'Hour' : 'Date'}</th>
       <th>Sessions</th><th>Turns</th><th>Tokens In</th><th>Tokens Out</th>
-      ${ex ? '<th>Cost</th><th>Quota Δ</th>' : ''}
+      ${ex ? '<th>Cost</th><th title="Observed account meter change; not exact attributed usage">Quota meter Δ</th>' : ''}
     </tr></thead>
     <tbody>${bodyRows}</tbody>
     <tfoot><tr>
       <td>Total</td><td>${totalSessions}</td><td>${totalTurns || '—'}</td>
       <td>${fmtNum(totalIn)}</td><td>${fmtNum(totalOut)}</td>
-      ${ex ? `<td>$${totalCost.toFixed(4)}</td><td>${totalQuotaDelta > 0 ? '+' + totalQuotaDelta.toFixed(1) + '%' : '—'}</td>` : ''}
+      ${ex ? `<td>$${totalCost.toFixed(4)}</td><td>${totalQuotaDelta > 0 ? '+' + totalQuotaDelta.toFixed(1) + ' pp' : '—'}</td>` : ''}
     </tr></tfoot>
   </table>`;
   _statsAppendPager(rows.length);

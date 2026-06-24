@@ -169,6 +169,42 @@ def test_codex_stats_keep_cached_tokens_as_breakdown_only():
     assert stats["output_tokens"] == 1200
 
 
+def test_codex_routes_commentary_to_status_and_persists_only_final_answer():
+    async def fake_stream_lines(*args, **kwargs):
+        yield '{"type":"thread.started","thread_id":"thread-1"}'
+        yield '{"type":"item.completed","item":{"type":"agent_message","phase":"commentary","text":"Checking the code..."}}'
+        yield '{"type":"item.completed","item":{"type":"agent_message","phase":"final_answer","text":"Fixed and tested."}}'
+        yield '{"type":"turn.completed","usage":{}}'
+
+    async def collect():
+        return [chunk async for chunk in run_codex("fix it", cwd="/tmp")]
+
+    with patch("agent.runners.CODEX_PATH", "codex"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        chunks = asyncio.run(collect())
+
+    assert chunks[0] == {"_status": "Checking the code..."}
+    assert chunks[1] == "Fixed and tested."
+    assert chunks[2]["_stats"]["session_id"] == "thread-1"
+
+
+def test_codex_keeps_legacy_agent_messages_as_response_content():
+    async def fake_stream_lines(*args, **kwargs):
+        yield '{"type":"item.completed","item":{"type":"agent_message","text":"Legacy response"}}'
+        yield '{"type":"turn.completed","usage":{}}'
+
+    async def collect():
+        return [chunk async for chunk in run_codex("hello", cwd="/tmp")]
+
+    with patch("agent.runners.CODEX_PATH", "codex"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        chunks = asyncio.run(collect())
+
+    assert chunks[0] == "Legacy response"
+
+
 def test_native_claude_removes_inherited_anthropic_auth_environment():
     captured = {}
 
