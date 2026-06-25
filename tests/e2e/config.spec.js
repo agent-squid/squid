@@ -60,6 +60,20 @@ test('blocked file viewer lets the user choose a broader parent and retries', as
   expect(submitted).toEqual({ path: '/tmp/work/project/file.md', root: '/tmp/work' });
 });
 
+test('file viewer renders markdown when served as generic binary', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/localfile**', route => route.fulfill({
+    status: 200,
+    contentType: 'application/octet-stream',
+    body: '# Markdown\n\nVisible in the viewer',
+  }));
+
+  await page.goto('/');
+  await page.evaluate(() => openFileViewer('/tmp/work/project/file.md'));
+
+  await expect(page.locator('#file-modal-body')).toContainText('Visible in the viewer');
+});
+
 test('/restart clears its persisted draft before the page reloads', async ({ page }) => {
   await mockApp(page);
   await page.route('**/cmd', route => route.fulfill({ json: { ok: true } }));

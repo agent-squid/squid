@@ -5771,7 +5771,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
         return;
       }
       const ct = res.headers.get('content-type') || '';
-      if (!ct.includes('text/') && !ct.includes('application/json')) {
+      if (!ct.includes('text/') && !ct.includes('application/json') && !_isTextPath(path)) {
         modal.remove(); _fvNavigate = null;
         window.open('/localfile?' + new URLSearchParams({ path }), '_blank');
         return;

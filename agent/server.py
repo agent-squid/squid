@@ -1439,6 +1439,10 @@ async def get_remote_url():
 
 
 _LOCALFILE_ROOTS: list[Path] = _localfile_roots_from(_cfg)
+_LOCALFILE_TEXT_MIME_BY_SUFFIX = {
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+}
 
 @app.get("/localfile")
 async def serve_local_file(path: str, request: Request):
@@ -1469,7 +1473,9 @@ async def serve_local_file(path: str, request: Request):
         return JSONResponse({"type": "directory", "path": str(p), "entries": entry_list})
     if not p.is_file():
         return JSONResponse({"error": "not a file"}, status_code=400)
-    mime, _ = mimetypes.guess_type(str(p))
+    mime = _LOCALFILE_TEXT_MIME_BY_SUFFIX.get(p.suffix.lower())
+    if mime is None:
+        mime, _ = mimetypes.guess_type(str(p))
     if mime and mime.startswith("text/"):
         return PlainTextResponse(p.read_text(errors="replace"), media_type=mime)
     return FileResponse(str(p), media_type=mime or "application/octet-stream")

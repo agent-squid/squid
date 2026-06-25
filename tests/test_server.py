@@ -207,6 +207,7 @@ def test_file_root_can_expand_to_an_edited_parent_and_applies_immediately(tmp_pa
 
             visible = client.get("/localfile", params={"path": str(requested)})
             assert visible.status_code == 200
+            assert visible.headers["content-type"].startswith("text/markdown")
             assert visible.text == "visible now"
     finally:
         server._cfg.clear()
