@@ -845,6 +845,13 @@ body {
   color: var(--accent-dim);
   margin-bottom: 0.5rem;
 }
+.boot-logo-icon {
+  display: block;
+  width: 160px;
+  max-width: 42vw;
+  height: auto;
+  margin: 0 auto 0.65rem;
+}
 .boot-meta {
   font-family: ui-monospace, monospace;
   font-size: var(--text-xs);
@@ -2375,6 +2382,11 @@ button {
   }
 
   .boot-art-mobile { display: none; }
+  .boot-logo-icon {
+    width: 104px;
+    max-width: 34vw;
+    margin-bottom: 0.5rem;
+  }
 
   #pin-btn,
   #send-btn {

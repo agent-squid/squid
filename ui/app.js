@@ -2062,6 +2062,36 @@ function _countDiffStats(chunk) {
   return { add, del };
 }
 
+function _firstChangedNewRange(chunk) {
+  let newLine = null;
+  let fallback = null;
+  let start = null;
+  let end = null;
+  for (const line of (chunk || '').split('\n')) {
+    const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunk) {
+      if (start) return { line: start, endLine: end };
+      if (fallback) return fallback;
+      newLine = parseInt(hunk[1], 10);
+      fallback = { line: newLine, endLine: newLine };
+      continue;
+    }
+    if (newLine == null) continue;
+    if (line.startsWith('+') && !line.startsWith('+++')) {
+      if (!start) start = newLine;
+      end = newLine;
+      newLine++;
+    } else if (line.startsWith('-') && !line.startsWith('---')) {
+      continue;
+    } else {
+      if (start) return { line: start, endLine: end };
+      newLine++;
+    }
+  }
+  if (start) return { line: start, endLine: end };
+  return fallback;
+}
+
 function renderUnifiedDiffLines(container, diff) {
   for (const line of (diff || '').split('\n')) {
     const el = document.createElement('span');
@@ -2187,6 +2217,7 @@ function makeToolBlock(tool, msgId) {
       const displayPath = displayPaths[i];
       const fullDisplayPath = fullDisplayPaths[i];
       const chunk = fileDiffs.get(file.path) || fileDiffs.get(file.old_path) || '';
+      const firstChangedRange = _firstChangedNewRange(chunk);
 
       const row = document.createElement('div');
       row.className = 'gitdiff-file-row';
@@ -2235,7 +2266,7 @@ function makeToolBlock(tool, msgId) {
         openBtn.textContent = 'view';
         openBtn.addEventListener('click', e => {
           e.stopPropagation();
-          openFileViewer(_absPath);
+          openFileViewer(_absPath, firstChangedRange?.line, firstChangedRange?.endLine);
         });
         row.appendChild(openBtn);
       }
@@ -4921,6 +4952,9 @@ const BOOT_LOGO_ART = ` 🦑 AGENT
 const BOOT_LOGO_MOBILE = '🦑 AGENT-SQUID';
 
 function bootLogoHtml() {
+  if (Math.random() < 0.5) {
+    return '<img class="boot-logo-icon" src="/favicon.png" alt="" />';
+  }
   return `<pre class="boot-art">${BOOT_LOGO_ART}</pre>` +
     `<div class="boot-art-mobile">${BOOT_LOGO_MOBILE}</div>`;
 }

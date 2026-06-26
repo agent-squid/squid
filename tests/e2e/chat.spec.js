@@ -268,6 +268,7 @@ test.describe('response bubble', () => {
 
     await expect(page.locator('#file-modal-breadcrumb')).toContainText('tmp/repo/ui/app.js');
     await expect(page.locator('#file-modal-body')).toContainText('const opened = true;');
+    await expect(page.locator('#file-modal-body .fv-target')).toContainText('const opened = true;');
   });
 
   test('recovered completion restores GitDiff and renders one end timestamp', async ({ page }) => {
