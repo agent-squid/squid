@@ -233,7 +233,12 @@
       </div>
       <form id="form">
         <div id="input-area">
-          <div id="topic-chip"></div>
+          <div id="chip-row">
+            <div id="topic-chip"></div>
+            <button id="chip-filter-btn" type="button" title="Filter history by topic" hidden>
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1.5 2h13l-5 6.5V14l-3-1.5V8.5L1.5 2z"/></svg>
+            </button>
+          </div>
           <textarea id="input" placeholder="#topic or #topic@agent message…" rows="1"></textarea>
         </div>
         <button id="pin-btn" type="button" title="Pinned context">

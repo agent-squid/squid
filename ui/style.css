@@ -2154,9 +2154,29 @@ body {
   white-space: nowrap;
   cursor: pointer;
   user-select: none;
-  margin-top: 0.3rem;
 }
 #topic-chip.visible { display: block; }
+#chip-row {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.3rem;
+}
+#chip-row[hidden] { display: none; }
+#chip-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  opacity: 0.45;
+  transition: opacity 0.15s;
+}
+#chip-filter-btn:hover { opacity: 0.9; }
+#chip-filter-btn[hidden] { display: none; }
 #input {
   align-self: stretch;
   background: none;

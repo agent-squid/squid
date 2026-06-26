@@ -310,6 +310,8 @@ function clearCachedSessionId(topic, agent) {
 // ── topic chip ────────────────────────────────────────────────────────────────
 
 const topicChipEl = document.getElementById('topic-chip');
+const chipRow = document.getElementById('chip-row');
+const chipFilterBtn = document.getElementById('chip-filter-btn');
 let stickyChip = null; // { topic, agent, adhoc } | null
 let editingExpandedSlug = false;
 let expandedSlugEditToken = 0;
@@ -344,6 +346,8 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0) {
   }
   topicChipEl.classList.add('visible');
   topicChipEl.classList.remove('needs-agent');
+  chipRow.hidden = false;
+  chipFilterBtn.hidden = false;
   input.placeholder = 'message…';
   updateActiveQuotaGauge();
   updatePinCount();
@@ -354,15 +358,31 @@ function clearTopicChip() {
   stickyChip = null;
   localStorage.removeItem('squid_sticky_chip');
   topicChipEl.classList.remove('visible', 'needs-agent');
+  chipRow.hidden = true;
+  chipFilterBtn.hidden = true;
   input.placeholder = '#topic or #topic@agent message…';
   updateActiveQuotaGauge();
 }
 
 topicChipEl.addEventListener('click', () => {
   if (!stickyChip) return;
+  const prompt = input.value;
+  let tag = `#${stickyChip.topic}`;
+  if (stickyChip.agent) tag += `@${stickyChip.agent}`;
+  if (stickyChip.adhoc) tag += `!${stickyChip.lookback || ''}`;
+  clearTopicChip();
+  editingExpandedSlug = true;
+  expandedSlugEditToken++;
+  input.value = prompt ? `${tag} ${prompt}` : tag;
+  input.setSelectionRange(tag.length, tag.length);
+  input.dispatchEvent(new Event('input'));
+  input.focus();
+});
+
+chipFilterBtn.addEventListener('click', () => {
+  if (!stickyChip) return;
   if (stickyChip.agent) filterByAgent(stickyChip.topic, stickyChip.agent, stickyChip.adhoc, stickyChip.lookback || 0);
   else filterByTopic(stickyChip.topic);
-  input.focus();
 });
 
 function parseInput(text) {
