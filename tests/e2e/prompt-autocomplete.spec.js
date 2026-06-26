@@ -25,12 +25,25 @@ test('typed prompt prefixes show unique routed history with the current route fi
 
   const items = page.locator('#autocomplete .ac-item');
   await expect(items).toHaveCount(3);
-  await expect(items.nth(0)).toContainText('#squid@codex push the changes');
-  await expect(items.nth(1)).toContainText('#other@codex push the changes');
-  await expect(items.nth(2)).toContainText('#squid@haiku! push the changes');
+  await expect(page.locator('#autocomplete .ac-title')).toHaveText('Recent Prompts');
+  const currentRouteItem = page.locator('#autocomplete .ac-item', { hasText: '#squid@codex push the changes' });
+  const olderRouteItem = page.locator('#autocomplete .ac-item', { hasText: '#squid@haiku! push the changes' });
+  await expect(currentRouteItem).toBeVisible();
+  await expect(page.locator('#autocomplete .ac-item', { hasText: '#other@codex push the changes' })).toBeVisible();
+  await expect(olderRouteItem).toBeVisible();
+  await expect.poll(async () => {
+    const currentBox = await currentRouteItem.boundingBox();
+    const olderBox = await olderRouteItem.boundingBox();
+    return currentBox && olderBox ? currentBox.y > olderBox.y : false;
+  }).toBe(true);
+  await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#squid@codex push the changes');
+  await page.locator('#input').press('ArrowUp');
+  await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#other@codex push the changes');
+  await page.locator('#input').press('ArrowDown');
+  await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#squid@codex push the changes');
   await expect(page.getByRole('button', { name: 'Close suggestions' })).toBeVisible();
 
-  await items.nth(2).click();
+  await olderRouteItem.click();
   await expect(page.locator('#input')).toHaveValue('push the changes');
   await expect(page.locator('#topic-chip')).toHaveClass(/visible/);
   await expect(page.locator('#topic-chip')).toContainText('#squid@haiku!');
@@ -133,6 +146,8 @@ test('autocomplete can be dismissed with its touch-accessible close button', asy
   await page.goto('/');
 
   await page.fill('#input', 'push');
+  await expect(page.locator('.ac-close-mobile')).toHaveText('×');
+  await expect(page.locator('.ac-close-mobile')).toBeVisible();
   await page.getByRole('button', { name: 'Close suggestions' }).click();
 
   await expect(page.locator('#autocomplete')).not.toHaveClass(/open/);
@@ -140,23 +155,18 @@ test('autocomplete can be dismissed with its touch-accessible close button', asy
   await expect(page.locator('#input')).toHaveValue('push');
 });
 
-test('plain Enter sends typed text when no autocomplete result is selected', async ({ page }) => {
+test('plain Enter selects the focused bottom autocomplete result', async ({ page }) => {
   await mockBackend(page);
-  let sent;
-  await page.route('**/chat', route => {
-    sent = route.request().postDataJSON();
-    return route.fulfill({
-      contentType: 'text/event-stream',
-      body: 'event: done\ndata: {}\n\n',
-    });
-  });
   await page.goto('/');
 
   await page.fill('#input', 'push');
   await expect(page.locator('#autocomplete')).toHaveClass(/open/);
+  await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#other@codex push the changes');
   await page.keyboard.press('Enter');
 
-  await expect.poll(() => sent?.message).toBe('push');
+  await expect(page.locator('#input')).toHaveValue('push the changes');
+  await expect(page.locator('#topic-chip')).toHaveClass(/visible/);
+  await expect(page.locator('#topic-chip')).toContainText('#other@codex');
 });
 
 for (const { name, chip, route } of [
@@ -283,6 +293,7 @@ test('slug autocomplete stays separate from prompt history and preserves the pro
 
   const items = page.locator('#autocomplete .ac-item');
   await expect(items).toHaveCount(1);
+  await expect(page.locator('#autocomplete .ac-title')).toHaveText('Routes');
   await expect(items.first()).toContainText('#other@haiku');
   await expect(items.first()).toContainText('last previous topic prompt');
   await expect(items.first()).not.toContainText('push the changes');

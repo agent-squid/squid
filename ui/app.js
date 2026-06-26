@@ -1360,8 +1360,8 @@ input.addEventListener('keydown', (e) => {
     return;
   }
   if (acOpen) {
-    if (e.key === 'ArrowDown') { e.preventDefault(); acSel = Math.min(acSel + 1, acItems.length - 1); _acHighlight(); return; }
-    if (e.key === 'ArrowUp')   { e.preventDefault(); acSel = Math.max(acSel - 1, -1); _acHighlight(); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); acSel = Math.max(acSel - 1, 0); _acHighlight(); return; }
+    if (e.key === 'ArrowUp')   { e.preventDefault(); acSel = Math.min(acSel + 1, acItems.length - 1); _acHighlight(); return; }
     if (e.key === 'Tab' || (e.key === 'Enter' && acSel >= 0)) { e.preventDefault(); _acSelect(acSel >= 0 ? acSel : 0); return; }
     if (e.key === 'Escape') { hideAutocomplete(); return; }
   }
@@ -4746,14 +4746,16 @@ function hideAutocomplete() {
 }
 
 function _acHighlight() {
-  acEl.querySelectorAll('.ac-item').forEach((el, i) => el.classList.toggle('selected', i === acSel));
-  if (acSel >= 0) acEl.querySelectorAll('.ac-item')[acSel]?.scrollIntoView({ block: 'nearest' });
+  acEl.querySelectorAll('.ac-item').forEach(el => {
+    el.classList.toggle('selected', Number(el.dataset.i) === acSel);
+  });
+  if (acSel >= 0) acEl.querySelector(`.ac-item[data-i="${acSel}"]`)?.scrollIntoView({ block: 'nearest' });
 }
 
-function _acRender(items) {
+function _acRender(items, title = 'Suggestions') {
   if (!items.length) { hideAutocomplete(); return; }
-  acItems = items; acSel = -1;
-  acEl.innerHTML = '<button class="ac-close" type="button" aria-label="Close suggestions">Esc</button>' + items.map((item, i) =>
+  acItems = items; acSel = 0;
+  const rows = items.map((item, i) =>
     `<div class="ac-item" data-i="${i}"${item.execute != null ? ' data-cmd' : ''}>` +
     `<div class="ac-row"><span class="ac-label">${item.label}</span>` +
     (item.sub ? `<span class="ac-sub">${item.sub}</span>` : '') +
@@ -4761,11 +4763,19 @@ function _acRender(items) {
     (item.deleteTopic ? `<button class="ac-del-btn" data-topic="${item.deleteTopic}" type="button" title="Delete #${item.deleteTopic} sessions">✕</button>` : '') +
     `</div>` +
     `</div>`
-  ).join('');
-  acEl.querySelectorAll('.ac-item').forEach((el, i) =>
+  ).reverse().join('');
+  acEl.innerHTML =
+    `<div class="ac-list">${rows}</div>` +
+    `<div class="ac-header">` +
+    `<div class="ac-title">${escapeHtml(title)}</div>` +
+    `<button class="ac-close" type="button" aria-label="Close suggestions">` +
+    `<span class="ac-close-desktop">Esc</span><span class="ac-close-mobile">×</span>` +
+    `</button>` +
+    `</div>`;
+  acEl.querySelectorAll('.ac-item').forEach(el =>
     el.addEventListener('mousedown', e => {
       if (e.target.classList.contains('ac-del-btn')) return;
-      e.preventDefault(); _acSelect(i);
+      e.preventDefault(); _acSelect(Number(el.dataset.i));
     })
   );
   acEl.querySelectorAll('.ac-del-btn').forEach(btn =>
@@ -4791,6 +4801,11 @@ function _acRender(items) {
   });
   acEl.classList.add('open');
   acOpen = true;
+  _acHighlight();
+  requestAnimationFrame(() => {
+    const list = acEl.querySelector('.ac-list');
+    if (list) list.scrollTop = list.scrollHeight;
+  });
 }
 
 function _acSelect(idx) {
@@ -4863,7 +4878,7 @@ async function updateAutocomplete() {
         meta:    'squid',
         insert:  before + '/' + c.name,
         execute: !c.args,
-      })));
+      })), 'Commands');
     } else {
       hideAutocomplete();
     }
@@ -4885,7 +4900,8 @@ async function updateAutocomplete() {
           deleteTopic: t.name,
           meta:        t.active ? '● live' : t.queue_depth > 0 ? `queue ${t.queue_depth}` : '',
           sub:         _acLastPrompt(t.last_prompt),
-        }))
+        })),
+      'Routes'
     );
   } else if (mAlias) {
     const topic  = mAlias[1];
@@ -4935,7 +4951,7 @@ async function updateAutocomplete() {
       });
     }
 
-    _acRender(items.slice(0, 10));
+    _acRender(items.slice(0, 10), 'Routes');
   } else if (editingExpandedSlug) {
     hideAutocomplete();
   } else if (promptHistory.length) {
@@ -4965,7 +4981,7 @@ async function updateAutocomplete() {
         clearChip: /^[#@]/.test(ph),
         collapseSlug: ph.startsWith('#'),
       };
-    }));
+    }), 'Recent Prompts');
   } else {
     hideAutocomplete();
   }

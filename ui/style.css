@@ -2610,11 +2610,37 @@ button {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
-  overflow-y: auto;
+  overflow: hidden;
   max-height: 200px;
   flex-shrink: 0;
 }
 #autocomplete.open { display: flex; }
+.ac-list {
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.ac-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.25rem 0.35rem 0.25rem 0.75rem;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+.ac-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
 .ac-item { padding: 0.35rem 0.75rem; cursor: pointer; font-size: var(--text-md); }
 .ac-item:hover, .ac-item.selected { background: var(--surface-2); }
 .ac-row { display: flex; align-items: center; gap: 0; overflow: hidden; }
@@ -2640,12 +2666,8 @@ button {
 .ac-item:hover .ac-history-prompt,
 .ac-item.selected .ac-history-prompt { color: var(--text-muted); }
 .ac-close {
-  position: sticky;
-  top: 0.3rem;
-  align-self: flex-end;
-  z-index: 2;
+  flex-shrink: 0;
   padding: 0.05rem 0.35rem;
-  margin: 0 0.35rem 0 0;
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--surface);
@@ -2657,6 +2679,7 @@ button {
   font-weight: 600;
 }
 .ac-close:hover { color: var(--text-muted); background: var(--surface-2); }
+.ac-close-mobile { display: none; }
 .ac-item[data-cmd] .ac-meta { color: #2a5a40; font-size: var(--text-md); background: #0e2218; padding: 0.05em 0.35em; border-radius: 3px; }
 .ac-del-btn {
   flex-shrink: 0;
@@ -2676,7 +2699,9 @@ button {
 
 @media (max-width: 768px) {
   .ac-item { padding: 0.5rem 0.75rem; font-size: var(--text-body); }
-  .ac-close { padding: 0.1rem 0.4rem; }
+  .ac-close { padding: 0.1rem 0.45rem; font-size: var(--text-body); line-height: 1; }
+  .ac-close-desktop { display: none; }
+  .ac-close-mobile { display: inline; }
 }
 
 /* inline topic tag — used in user bubbles and response context header */
