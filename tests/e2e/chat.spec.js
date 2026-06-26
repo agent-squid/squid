@@ -194,6 +194,39 @@ test.describe('response bubble', () => {
     await expect(block.locator('.diff-hunk')).toContainText('@@ -1 +1 @@');
   });
 
+  test('GitDiff mobile labels use shortest unique file names', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 800 });
+    await page.route('**/chat', r => r.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        META,
+        { event: 'tool', data: {
+          name: 'GitDiff',
+          file_count: 3,
+          additions: 1,
+          deletions: 1,
+          files: [
+            { status: 'M', path: 'ui/app.js' },
+            { status: 'M', path: 'src/components/Button/index.ts' },
+            { status: 'M', path: 'src/pages/Button/index.ts' },
+          ],
+          diff: 'diff --git a/ui/app.js b/ui/app.js\n@@ -1 +1 @@\n-old\n+new',
+        } },
+        { data: 'Done' },
+        DONE,
+      ),
+    }));
+
+    await sendMsg(page);
+    const rows = page.locator('.gitdiff-file-toggle');
+    await expect(rows).toContainText([
+      'M app.js',
+      'M components/Button/index.ts',
+      'M pages/Button/index.ts',
+    ]);
+    await expect(rows.nth(1)).toHaveAttribute('title', 'src/components/Button/index.ts');
+  });
+
   test('GitDiff file-open control is visible and opens the file viewer', async ({ page }) => {
     await page.route('**/chat/1/diff-revert-status**', route => route.fulfill({
       json: { 'ui/app.js': 'revertable' },
@@ -233,7 +266,7 @@ test.describe('response bubble', () => {
     expect(viewSize.height).toBeCloseTo(revertSize.height, 0);
     await openButton.click();
 
-    await expect(page.locator('#file-modal-path')).toHaveText('/tmp/repo/ui/app.js');
+    await expect(page.locator('#file-modal-breadcrumb')).toContainText('tmp/repo/ui/app.js');
     await expect(page.locator('#file-modal-body')).toContainText('const opened = true;');
   });
 
@@ -407,6 +440,9 @@ test.describe('recovered pending responses', () => {
     const recovered = page.locator(`${THINKING}[data-msg-id="1"]`);
     await expect(recovered.locator('.response-header')).toBeVisible();
     await expect(recovered.locator('.response-header-text')).toContainText('long-running task');
+    await expect(recovered.locator('.history-prompt')).toBeVisible();
+    await recovered.locator('.history-prompt').click();
+    await expect(recovered.locator('.history-prompt-full.visible')).toHaveText('long-running task');
 
     await fulfill(sse(META, { event: 'status', data: 'Still working...' }));
 

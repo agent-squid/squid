@@ -2079,6 +2079,41 @@ function renderUnifiedDiffLines(container, diff) {
   }
 }
 
+function _gitDiffFullDisplayPath(file) {
+  return file?.old_path ? `${file.old_path} → ${file.path}` : (file?.path || '');
+}
+
+function _pathSegments(path) {
+  return String(path || '').split(/[\\/]+/).filter(Boolean);
+}
+
+function _shortestUniquePathLabels(paths) {
+  const segments = paths.map(_pathSegments);
+  const depths = segments.map(parts => parts.length ? 1 : 0);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const labels = segments.map((parts, i) => parts.slice(-depths[i]).join('/'));
+    const counts = new Map();
+    labels.forEach(label => counts.set(label, (counts.get(label) || 0) + 1));
+    labels.forEach((label, i) => {
+      if (label && counts.get(label) > 1 && depths[i] < segments[i].length) {
+        depths[i]++;
+        changed = true;
+      }
+    });
+  }
+  return segments.map((parts, i) => parts.slice(-depths[i]).join('/'));
+}
+
+function _gitDiffDisplayPaths(files) {
+  const fullLabels = files.map(_gitDiffFullDisplayPath);
+  if (!window.matchMedia?.('(max-width: 768px)').matches) return fullLabels;
+  const newLabels = _shortestUniquePathLabels(files.map(file => file.path || ''));
+  const oldLabels = _shortestUniquePathLabels(files.map(file => file.old_path || ''));
+  return files.map((file, i) => file.old_path ? `${oldLabels[i]} → ${newLabels[i]}` : newLabels[i]);
+}
+
 function makeToolBlock(tool, msgId) {
   const name = tool.name || '';
   const block = document.createElement('div');
@@ -2144,9 +2179,13 @@ function makeToolBlock(tool, msgId) {
     }
 
     const fileDiffs = splitUnifiedDiff(tool.diff || '');
-    for (const file of (tool.files || [])) {
+    const files = tool.files || [];
+    const displayPaths = _gitDiffDisplayPaths(files);
+    const fullDisplayPaths = files.map(_gitDiffFullDisplayPath);
+    for (const [i, file] of files.entries()) {
       const status = file.status || '?';
-      const displayPath = file.old_path ? `${file.old_path} → ${file.path}` : file.path;
+      const displayPath = displayPaths[i];
+      const fullDisplayPath = fullDisplayPaths[i];
       const chunk = fileDiffs.get(file.path) || fileDiffs.get(file.old_path) || '';
 
       const row = document.createElement('div');
@@ -2155,6 +2194,7 @@ function makeToolBlock(tool, msgId) {
 
       const fileToggle = document.createElement('button');
       fileToggle.className = 'gitdiff-file-toggle';
+      fileToggle.title = fullDisplayPath;
 
       const isBinary = chunk.includes('Binary files') || !_isTextPath(file.path || '');
       if (isBinary) {
@@ -2296,6 +2336,29 @@ function refreshAllRevertButtons() {
   document.querySelectorAll('.tool-block[data-msg-id][data-repo]').forEach(fetchRevertEligibility);
 }
 
+function makeHistoryPromptToggle(prompt) {
+  const promptToggle = document.createElement('span');
+  promptToggle.className = 'history-prompt';
+  const promptToggleText = document.createElement('span');
+  promptToggleText.className = 'history-prompt-truncated';
+  promptToggleText.textContent = truncate(prompt || '', 55);
+  const promptCaret = document.createElement('span');
+  promptCaret.className = 'history-prompt-caret';
+  promptCaret.textContent = '▼';
+  promptToggle.appendChild(promptToggleText);
+  promptToggle.appendChild(promptCaret);
+  const promptFullDiv = document.createElement('div');
+  promptFullDiv.className = 'history-prompt-full';
+  promptFullDiv.textContent = prompt || '';
+  const togglePrompt = () => {
+    const expanded = promptToggle.classList.toggle('expanded');
+    promptCaret.textContent = expanded ? '▲' : '▼';
+    promptFullDiv.classList.toggle('visible', expanded);
+  };
+  promptToggle.addEventListener('click', togglePrompt);
+  return { promptToggle, promptFullDiv };
+}
+
 
 function appendHistoryItem(item, container) {
   const lb = item.stats?.lookback ?? 0;
@@ -2314,25 +2377,7 @@ function appendHistoryItem(item, container) {
   asstHeaderText.className = 'response-header-text';
   asstHeaderText.appendChild(asstTag);
   asstHeaderText.appendChild(document.createTextNode('  '));
-  const promptToggle = document.createElement('span');
-  promptToggle.className = 'history-prompt';
-  const promptToggleText = document.createElement('span');
-  promptToggleText.className = 'history-prompt-truncated';
-  promptToggleText.textContent = truncate(item.prompt || '', 55);
-  const promptCaret = document.createElement('span');
-  promptCaret.className = 'history-prompt-caret';
-  promptCaret.textContent = '▼';
-  promptToggle.appendChild(promptToggleText);
-  promptToggle.appendChild(promptCaret);
-  const promptFullDiv = document.createElement('div');
-  promptFullDiv.className = 'history-prompt-full';
-  promptFullDiv.textContent = item.prompt || '';
-  const togglePrompt = () => {
-    const expanded = promptToggle.classList.toggle('expanded');
-    promptCaret.textContent = expanded ? '▲' : '▼';
-    promptFullDiv.classList.toggle('visible', expanded);
-  };
-  promptToggle.addEventListener('click', togglePrompt);
+  const { promptToggle, promptFullDiv } = makeHistoryPromptToggle(item.prompt);
   asstHeaderText.appendChild(promptToggle);
   asstHeader.appendChild(asstHeaderText);
 
@@ -2418,9 +2463,12 @@ function makeWipBubble(item) {
     lookback: item.stats?.lookback ?? 0,
     backend: item.backend || null,
   }));
-  headerText.appendChild(document.createTextNode('  ' + truncate(item.prompt || '', 55)));
+  headerText.appendChild(document.createTextNode('  '));
+  const { promptToggle, promptFullDiv } = makeHistoryPromptToggle(item.prompt);
+  headerText.appendChild(promptToggle);
   header.appendChild(headerText);
   bubble.appendChild(header);
+  bubble.appendChild(promptFullDiv);
   addLoader(content);
   bubble.appendChild(content);
   const killBtn = document.createElement('button');

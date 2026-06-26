@@ -725,6 +725,11 @@ body {
   padding: 0.45rem 1.8rem 0.45rem 0.9rem;
   background: var(--bg);
 }
+.msg.assistant.msg-thinking .response-header,
+.msg.assistant.msg-thinking .history-prompt-full {
+  font-size: calc(var(--text-sm) / 0.78);
+  font-style: normal;
+}
 .msg.assistant.msg-thinking .loader span { background: var(--text-dim); }
 .thinking-live {
   max-height: 6em;
@@ -2356,6 +2361,12 @@ button {
   .msg.assistant {
     box-sizing: border-box;
     max-width: 100%;
+  }
+
+  .tool-block-history {
+    align-self: stretch;
+    max-width: 100%;
+    width: 100%;
   }
 
   .boot-banner {
