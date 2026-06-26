@@ -4633,7 +4633,7 @@ function _acHighlight() {
 function _acRender(items) {
   if (!items.length) { hideAutocomplete(); return; }
   acItems = items; acSel = -1;
-  acEl.innerHTML = '<button class="ac-close" type="button" aria-label="Close suggestions">×</button>' + items.map((item, i) =>
+  acEl.innerHTML = '<button class="ac-close" type="button" aria-label="Close suggestions">Esc</button>' + items.map((item, i) =>
     `<div class="ac-item" data-i="${i}"${item.execute != null ? ' data-cmd' : ''}>` +
     `<div class="ac-row"><span class="ac-label">${item.label}</span>` +
     (item.sub ? `<span class="ac-sub">${item.sub}</span>` : '') +

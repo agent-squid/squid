@@ -52,13 +52,83 @@ the final binary diff, including untracked submission files. Persistent-process
 usage counters are cumulative, so the report subtracts the prior snapshot;
 resumed-process counters are summed because every prompt starts a fresh process.
 Controller-owned correctness checks run after each arm so quality can be
-compared independently of tests written by the model. The example uses two
+compared independently of tests written by the model. The example uses seven
 bounded Python tasks and writes each submission under a separate
 `benchmark_outputs/` directory so implementations can be reviewed or scored
 directly from either arm's saved files.
 
 Run a second trial with `execution.order: [persistent, resumed]`. Do not use
 `--skip-cooldown` for a real measurement; it exists only for debugging.
+
+## Cache investigation notes
+
+The resumed arm originally looked materially worse than the persistent arm in
+short protocol captures. The important miss was not caused by `--resume`
+itself, MCP tool schema drift, or copied transcript reloads. With this
+controlled Claude Code setup:
+
+```yaml
+execution:
+  extra_args:
+    - --exclude-dynamic-system-prompt-sections
+    - --strict-mcp-config
+    - --mcp-config
+    - '{"mcpServers":{}}'
+```
+
+the Claude init events reported `mcp_servers: []` and the same built-in tool
+list for persistent and resumed processes. A raw mitm comparison of the
+after-fix resumed prompt-2 request showed:
+
+```text
+tools equal: true
+mcp tool names present: []
+prior messages equal ignoring cache_control movement: true
+prompt-1 status: Status: (clean)
+prompt-2 status: Status: (clean)
+```
+
+The only byte-level system difference was Claude Code's billing header
+`cch=...`; the cached system blocks were identical. The after-fix resumed arm
+had no `messages_changed` or `system_changed` cache-miss diagnostic. The single
+remaining miss diagnostic in that quick run was `unavailable` in the persistent
+arm, not a resumed-session prefix break.
+
+Before the fix, resumed prompt 2 regenerated the first user message with a
+different git status:
+
+```text
+Status:
+?? benchmark_outputs/
+```
+
+That changed the cached message prefix and Anthropic reported
+`messages_changed`. The benchmark was measuring a dirtier resumed worktree
+rather than an inherent resumed-session cache penalty.
+
+The fix is to keep generated benchmark submissions out of Claude Code's dynamic
+git-status reminder while still preserving them for scoring. Each temporary
+benchmark worktree now adds `benchmark_outputs/` to its local `.git/info/exclude`.
+`git_worktree_diff()` then explicitly includes files from that directory in the
+report diff, because `git ls-files --others --exclude-standard` no longer sees
+them.
+
+The quick captured repro changed from:
+
+```text
+before fix:
+  persistent prompt 2  cache_read 75889  cache_creation 1782
+  resumed prompt 2     cache_read 70779  cache_creation 6699  messages_changed
+
+after fix:
+  persistent prompt 2  cache_read 75993  cache_creation 1786
+  resumed prompt 2     cache_read 75748  cache_creation 1725
+```
+
+Conclusion: under the controlled no-dynamic-system/no-MCP setup, resumed is on
+par with persistent at the request/cache level for this short repro. Any real
+quota conclusion still needs a full two-order run with cooldowns, because the
+claude.ai quota gauge is coarse for tiny samples.
 
 ## Background runs and status
 

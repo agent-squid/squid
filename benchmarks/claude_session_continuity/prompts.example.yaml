@@ -53,3 +53,75 @@ prompts:
     unittest tests for empty input, unsorted overlapping intervals, touching
     endpoints, nested intervals, and input preservation. Run the tests, fix
     failures, and finish with a concise summary.
+  - |
+    Complete this independent, self-contained Python coding task. Do not inspect
+    or modify files outside benchmark_outputs/03_sliding_window_maximum.
+
+    Create benchmark_outputs/03_sliding_window_maximum/solution.py implementing
+    sliding_window_maximum(values, k). Return the maximum for every contiguous
+    window of size k in O(n) time without mutating values. For an empty values
+    list return []; otherwise raise ValueError when k < 1 or k > len(values).
+    Use only the Python 3.11 standard library.
+
+    Also create test_solution.py in that directory with focused unittest tests
+    for the standard example, duplicate and negative values, boundary window
+    sizes, empty input, invalid sizes, and input preservation. Run the tests, fix
+    failures, and finish with a concise summary.
+  - |
+    Complete this independent, self-contained Python coding task. Do not inspect
+    or modify files outside benchmark_outputs/04_topological_sort.
+
+    Create benchmark_outputs/04_topological_sort/solution.py implementing
+    topological_sort(graph), where graph maps string task names to iterables of
+    prerequisite task names. Include prerequisites absent as keys. Return a valid
+    ordering, choosing the lexicographically smallest currently available task at
+    every step. Raise ValueError for a cycle and do not mutate graph. Use only the
+    Python 3.11 standard library.
+
+    Also create test_solution.py in that directory with focused unittest tests
+    for empty and disconnected graphs, missing prerequisite keys, deterministic
+    tie-breaking, cycles, and input preservation. Run the tests, fix failures,
+    and finish with a concise summary.
+  - |
+    Complete this independent, self-contained Python coding task. Do not inspect
+    or modify files outside benchmark_outputs/05_trie.
+
+    Create benchmark_outputs/05_trie/solution.py implementing a Trie class with
+    insert(word), search(word), and starts_with(prefix). Inputs are arbitrary
+    Python strings, including the empty string. A newly constructed trie does not
+    contain the empty string; inserting it makes search("") true. All operations
+    must be O(m) for input length m. Use only the Python 3.11 standard library.
+
+    Also create test_solution.py in that directory with focused unittest tests
+    for exact versus prefix matches, duplicate insertion, empty strings, and
+    case-sensitive behavior. Run the tests, fix failures, and finish with a
+    concise summary.
+  - |
+    Complete this independent, self-contained Python coding task. Do not inspect
+    or modify files outside benchmark_outputs/06_running_median.
+
+    Create benchmark_outputs/06_running_median/solution.py implementing a
+    RunningMedian class with add(value) and median(). add must take O(log n) time
+    and median O(1) time. For an odd count return the middle value; for an even
+    count return the arithmetic mean of the middle values. median() must raise
+    ValueError when empty. Values are finite ints or floats. Use only the Python
+    3.11 standard library.
+
+    Also create test_solution.py in that directory with focused unittest tests
+    for empty state, incremental odd and even medians, duplicates, negative
+    values, and independent instances. Run the tests, fix failures, and finish
+    with a concise summary.
+  - |
+    Complete this independent, self-contained Python coding task. Do not inspect
+    or modify files outside benchmark_outputs/07_group_anagrams.
+
+    Create benchmark_outputs/07_group_anagrams/solution.py implementing
+    group_anagrams(words). Group strings that are exact case-sensitive anagrams.
+    Preserve input order inside each group and order groups by the first member's
+    appearance. Return a new list and do not mutate words. Empty strings and
+    duplicate strings are valid. Use only the Python 3.11 standard library.
+
+    Also create test_solution.py in that directory with focused unittest tests
+    for empty input, multiple groups, duplicates, empty strings, case sensitivity,
+    and input preservation. Run the tests, fix failures, and finish with a concise
+    summary.

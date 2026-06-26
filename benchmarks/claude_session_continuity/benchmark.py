@@ -35,6 +35,7 @@ NATIVE_CLAUDE_AUTH_ENV = (
     "ANTHROPIC_BASE_URL",
     "SQUID_NATIVE_CLAUDE_TOKEN",
 )
+BENCHMARK_OUTPUTS_DIR = "benchmark_outputs"
 
 
 class BenchmarkError(RuntimeError):
@@ -328,6 +329,92 @@ assert value == original
 assert module.merge_intervals([[1, 2], [2, 3], [3, 3]]) == [[1, 3]]
 assert module.merge_intervals([[-5, -1], [-3, 2], [10, 10]]) == [[-5, 2], [10, 10]]
 ''',
+    "03_sliding_window_maximum": r'''
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("submission", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+assert module.sliding_window_maximum([], 1) == []
+assert module.sliding_window_maximum([1, 3, -1, -3, 5, 3, 6, 7], 3) == [3, 3, 5, 5, 6, 7]
+assert module.sliding_window_maximum([4, 2, 2], 1) == [4, 2, 2]
+assert module.sliding_window_maximum([4, 2, 2], 3) == [4]
+assert module.sliding_window_maximum([-1, -1, -2, -1], 2) == [-1, -1, -1]
+for bad in (0, 4):
+    try:
+        module.sliding_window_maximum([1, 2, 3], bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid window size must raise ValueError")
+''',
+    "04_topological_sort": r'''
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("submission", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+assert module.topological_sort({}) == []
+graph = {"deploy": ["test", "build"], "test": ["build"], "build": []}
+assert module.topological_sort(graph) == ["build", "test", "deploy"]
+assert graph == {"deploy": ["test", "build"], "test": ["build"], "build": []}
+assert module.topological_sort({"b": [], "a": [], "c": ["a"]}) == ["a", "b", "c"]
+assert module.topological_sort({"b": ["a"]}) == ["a", "b"]
+try:
+    module.topological_sort({"a": ["b"], "b": ["a"]})
+except ValueError:
+    pass
+else:
+    raise AssertionError("a cycle must raise ValueError")
+''',
+    "05_trie": r'''
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("submission", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+trie = module.Trie()
+assert not trie.search("") and not trie.starts_with("a")
+trie.insert("apple")
+assert trie.search("apple") and not trie.search("app") and trie.starts_with("app")
+trie.insert("app")
+assert trie.search("app") and trie.starts_with("")
+trie.insert("")
+assert trie.search("")
+trie.insert("apple")
+assert trie.search("apple")
+''',
+    "06_running_median": r'''
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("submission", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+tracker = module.RunningMedian()
+try:
+    tracker.median()
+except ValueError:
+    pass
+else:
+    raise AssertionError("empty median must raise ValueError")
+expected = [5, 3.0, 5, 4.0, 5]
+for value, median in zip([5, 1, 9, 3, 8], expected):
+    tracker.add(value)
+    assert tracker.median() == median
+other = module.RunningMedian()
+for value in [-4, -4, 10, 10]:
+    other.add(value)
+assert other.median() == 3.0
+''',
+    "07_group_anagrams": r'''
+import copy, importlib.util, sys
+spec = importlib.util.spec_from_file_location("submission", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+assert module.group_anagrams([]) == []
+words = ["eat", "tea", "tan", "ate", "nat", "bat"]
+original = copy.deepcopy(words)
+assert module.group_anagrams(words) == [["eat", "tea", "ate"], ["tan", "nat"], ["bat"]]
+assert words == original
+assert module.group_anagrams(["", "", "a", "A", "a"]) == [["", ""], ["a", "a"], ["A"]]
+assert module.group_anagrams(["ab", "ba", "abc", "cab"]) == [["ab", "ba"], ["abc", "cab"]]
+''',
 }
 
 
@@ -605,6 +692,7 @@ class GitWorktrees:
             text=True,
         )
         self.paths.append(path)
+        configure_benchmark_worktree(path)
         return path
 
     def cleanup(self) -> None:
@@ -628,19 +716,60 @@ def git_capture(cwd: Path, *args: str) -> str:
     return completed.stdout + completed.stderr
 
 
+def configure_benchmark_worktree(cwd: Path) -> None:
+    """Keep generated benchmark outputs out of Claude Code's dynamic git status."""
+    completed = subprocess.run(
+        ["git", "rev-parse", "--git-path", "info/exclude"],
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    exclude_path = Path(completed.stdout.strip())
+    if not exclude_path.is_absolute():
+        exclude_path = cwd / exclude_path
+    exclude_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = exclude_path.read_text() if exclude_path.exists() else ""
+    pattern = f"{BENCHMARK_OUTPUTS_DIR}/"
+    if pattern in {line.strip() for line in existing.splitlines()}:
+        return
+    prefix = "" if not existing or existing.endswith("\n") else "\n"
+    exclude_path.write_text(
+        f"{existing}{prefix}# Squid session-continuity benchmark outputs\n{pattern}\n"
+    )
+
+
 def git_worktree_diff(cwd: Path) -> str:
     """Capture tracked changes and untracked files without modifying the index."""
     diff = git_capture(cwd, "diff", "--binary", "HEAD")
-    untracked = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
-        cwd=cwd,
-        capture_output=True,
-        check=False,
-    ).stdout.split(b"\0")
-    for raw_path in untracked:
-        if not raw_path:
-            continue
-        path = os.fsdecode(raw_path)
+    untracked_paths = {
+        os.fsdecode(raw_path)
+        for raw_path in subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=cwd,
+            capture_output=True,
+            check=False,
+        ).stdout.split(b"\0")
+        if raw_path
+    }
+    tracked_outputs = {
+        os.fsdecode(raw_path)
+        for raw_path in subprocess.run(
+            ["git", "ls-files", "-z", "--", BENCHMARK_OUTPUTS_DIR],
+            cwd=cwd,
+            capture_output=True,
+            check=False,
+        ).stdout.split(b"\0")
+        if raw_path
+    }
+    outputs = cwd / BENCHMARK_OUTPUTS_DIR
+    if outputs.is_dir():
+        for path in outputs.rglob("*"):
+            if path.is_file():
+                relative = str(path.relative_to(cwd))
+                if relative not in tracked_outputs:
+                    untracked_paths.add(relative)
+    for path in sorted(untracked_paths):
         completed = subprocess.run(
             ["git", "diff", "--no-index", "--binary", "--", "/dev/null", path],
             cwd=cwd,
@@ -654,8 +783,8 @@ def git_worktree_diff(cwd: Path) -> str:
 
 def sync_benchmark_outputs(cwd: Path, destination: Path) -> None:
     """Materialize an arm's generated benchmark files outside its temporary worktree."""
-    source = cwd / "benchmark_outputs"
-    target = destination / "benchmark_outputs"
+    source = cwd / BENCHMARK_OUTPUTS_DIR
+    target = destination / BENCHMARK_OUTPUTS_DIR
     shutil.rmtree(target, ignore_errors=True)
     if source.is_dir():
         target.parent.mkdir(parents=True, exist_ok=True)

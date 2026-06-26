@@ -12,6 +12,7 @@ from benchmarks.claude_session_continuity.benchmark import (
     PromptResult,
     RunState,
     claude_command,
+    configure_benchmark_worktree,
     default_output_path,
     evaluate_submissions,
     git_worktree_diff,
@@ -254,8 +255,15 @@ def test_debug_summary_counts_requests_sources_and_models(tmp_path: Path):
 def test_controller_evaluations_check_saved_submissions(tmp_path: Path):
     lru = tmp_path / "benchmark_outputs" / "01_lru_cache" / "solution.py"
     merge = tmp_path / "benchmark_outputs" / "02_merge_intervals" / "solution.py"
+    window = tmp_path / "benchmark_outputs" / "03_sliding_window_maximum" / "solution.py"
+    topo = tmp_path / "benchmark_outputs" / "04_topological_sort" / "solution.py"
+    trie = tmp_path / "benchmark_outputs" / "05_trie" / "solution.py"
+    median = tmp_path / "benchmark_outputs" / "06_running_median" / "solution.py"
+    anagrams = tmp_path / "benchmark_outputs" / "07_group_anagrams" / "solution.py"
     lru.parent.mkdir(parents=True)
     merge.parent.mkdir(parents=True)
+    for solution in (window, topo, trie, median, anagrams):
+        solution.parent.mkdir(parents=True)
     lru.write_text(
         "from collections import OrderedDict\n"
         "class LRUCache:\n"
@@ -276,10 +284,76 @@ def test_controller_evaluations_check_saved_submissions(tmp_path: Path):
         "        else: result.append([start, end])\n"
         "    return result\n"
     )
+    window.write_text(
+        "from collections import deque\n"
+        "def sliding_window_maximum(values, k):\n"
+        "    if not values: return []\n"
+        "    if k < 1 or k > len(values): raise ValueError\n"
+        "    queue, result = deque(), []\n"
+        "    for index, value in enumerate(values):\n"
+        "        while queue and queue[0] <= index - k: queue.popleft()\n"
+        "        while queue and values[queue[-1]] <= value: queue.pop()\n"
+        "        queue.append(index)\n"
+        "        if index >= k - 1: result.append(values[queue[0]])\n"
+        "    return result\n"
+    )
+    topo.write_text(
+        "import heapq\n"
+        "def topological_sort(graph):\n"
+        "    nodes = set(graph) | {item for deps in graph.values() for item in deps}\n"
+        "    dependents = {node: [] for node in nodes}\n"
+        "    degree = {node: 0 for node in nodes}\n"
+        "    for node, deps in graph.items():\n"
+        "        for dep in set(deps): dependents[dep].append(node); degree[node] += 1\n"
+        "    ready = [node for node in nodes if degree[node] == 0]; heapq.heapify(ready)\n"
+        "    result = []\n"
+        "    while ready:\n"
+        "        node = heapq.heappop(ready); result.append(node)\n"
+        "        for child in dependents[node]:\n"
+        "            degree[child] -= 1\n"
+        "            if degree[child] == 0: heapq.heappush(ready, child)\n"
+        "    if len(result) != len(nodes): raise ValueError\n"
+        "    return result\n"
+    )
+    trie.write_text(
+        "class Trie:\n"
+        "    def __init__(self): self.root = {}\n"
+        "    def insert(self, word):\n"
+        "        node = self.root\n"
+        "        for char in word: node = node.setdefault(char, {})\n"
+        "        node[None] = True\n"
+        "    def search(self, word):\n"
+        "        node = self._find(word); return node is not None and None in node\n"
+        "    def starts_with(self, prefix): return self._find(prefix) is not None\n"
+        "    def _find(self, value):\n"
+        "        node = self.root\n"
+        "        for char in value:\n"
+        "            if char not in node: return None\n"
+        "            node = node[char]\n"
+        "        return node\n"
+    )
+    median.write_text(
+        "import heapq\n"
+        "class RunningMedian:\n"
+        "    def __init__(self): self.low, self.high = [], []\n"
+        "    def add(self, value):\n"
+        "        heapq.heappush(self.low, -value)\n"
+        "        heapq.heappush(self.high, -heapq.heappop(self.low))\n"
+        "        if len(self.high) > len(self.low): heapq.heappush(self.low, -heapq.heappop(self.high))\n"
+        "    def median(self):\n"
+        "        if not self.low: raise ValueError\n"
+        "        return -self.low[0] if len(self.low) > len(self.high) else (-self.low[0] + self.high[0]) / 2\n"
+    )
+    anagrams.write_text(
+        "def group_anagrams(words):\n"
+        "    groups = {}\n"
+        "    for word in words: groups.setdefault(tuple(sorted(word)), []).append(word)\n"
+        "    return list(groups.values())\n"
+    )
 
     evaluations = evaluate_submissions(tmp_path)
 
-    assert [item["status"] for item in evaluations] == ["passed", "passed"]
+    assert [item["status"] for item in evaluations] == ["passed"] * 7
 
 
 def test_controller_evaluations_report_missing_and_failed_submissions(tmp_path: Path):
@@ -290,7 +364,7 @@ def test_controller_evaluations_report_missing_and_failed_submissions(tmp_path: 
     evaluations = evaluate_submissions(tmp_path)
 
     assert evaluations[0]["status"] == "failed"
-    assert evaluations[1]["status"] == "missing"
+    assert [item["status"] for item in evaluations[1:]] == ["missing"] * 6
 
 
 def test_native_claude_env_clears_inherited_and_overridden_auth():
@@ -328,6 +402,36 @@ def test_git_worktree_diff_includes_untracked_files(tmp_path: Path):
 
     assert "+after" in diff
     assert "submission.py" in diff
+    assert "+def answer():" in diff
+
+
+def test_benchmark_outputs_are_hidden_from_status_but_kept_in_report_diff(tmp_path: Path):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "benchmark@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Benchmark Test"], cwd=tmp_path, check=True)
+    readme = tmp_path / "README.md"
+    readme.write_text("baseline\n")
+    subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+
+    configure_benchmark_worktree(tmp_path)
+    output = tmp_path / "benchmark_outputs" / "01_task" / "solution.py"
+    output.parent.mkdir(parents=True)
+    output.write_text("def answer():\n    return 42\n")
+
+    status = subprocess.run(
+        ["git", "status", "--short"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout
+    diff = git_worktree_diff(tmp_path)
+
+    assert status == ""
+    assert "benchmark_outputs/01_task/solution.py" in diff
     assert "+def answer():" in diff
 
 
@@ -581,6 +685,6 @@ def test_successful_run_reports_normalized_usage_processes_and_evaluations(
     assert all(arm["debug_summary"]["file_count"] == 1 for arm in report["arms"])
     assert all(
         [evaluation["status"] for evaluation in arm["evaluations"]]
-        == ["missing", "missing"]
+        == ["missing"] * 7
         for arm in report["arms"]
     )
