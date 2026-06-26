@@ -528,8 +528,15 @@ def insert_user_message(
     topic: str, agent: Optional[str],
     content: str, context_ids: Optional[list[int]] = None,
     mem: bool = False,
+    mem_revision: Optional[str] = None,
 ) -> int:
-    context_json = json.dumps({"pins": context_ids or [], "mem": mem}) if (context_ids or mem) else None
+    if context_ids or mem or mem_revision:
+        context = {"pins": context_ids or [], "mem": mem}
+        if mem_revision:
+            context["mem_revision"] = mem_revision
+        context_json = json.dumps(context)
+    else:
+        context_json = None
     with _connect() as conn:
         cur = conn.execute(
             """INSERT INTO chat_messages (topic, agent, role, content, status, context)
@@ -628,14 +635,20 @@ def clear_topic_session(topic: str, agent: str) -> None:
         conn.execute("DELETE FROM topic_sessions WHERE topic=? AND agent=?", (topic, agent))
 
 
-def get_session_injected_ids(session_id: str) -> list[int]:
-    """Return all pin IDs that were injected in user messages belonging to this session."""
+def get_session_injected_context(session_id: str) -> dict:
+    """Return context injected by user prompts belonging to this backend session."""
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT context FROM chat_messages WHERE session_id=? AND role='user' AND context IS NOT NULL",
+            """SELECT u.context
+               FROM chat_messages AS u
+               JOIN chat_messages AS a ON a.reply_to = u.id
+               WHERE a.session_id=? AND u.role='user' AND u.context IS NOT NULL
+               ORDER BY u.id""",
             (session_id,),
         ).fetchall()
     ids: list[int] = []
+    memory_injected = False
+    memory_revision: Optional[str] = None
     for row in rows:
         try:
             v = json.loads(row["context"])
@@ -643,9 +656,23 @@ def get_session_injected_ids(session_id: str) -> list[int]:
                 ids.extend(v)
             elif isinstance(v, dict):
                 ids.extend(v.get("pins") or [])
+                if v.get("mem"):
+                    memory_injected = True
+                if v.get("mem_revision"):
+                    memory_injected = True
+                    memory_revision = v["mem_revision"]
         except Exception:
             pass
-    return list(dict.fromkeys(ids))  # dedupe preserving order
+    return {
+        "injected_ids": list(dict.fromkeys(ids)),  # dedupe preserving order
+        "memory_injected": memory_injected,
+        "memory_revision": memory_revision,
+    }
+
+
+def get_session_injected_ids(session_id: str) -> list[int]:
+    """Return all pin IDs that were injected in user messages belonging to this session."""
+    return get_session_injected_context(session_id)["injected_ids"]
 
 
 # ── context history ────────────────────────────────────────────────────────────

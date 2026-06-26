@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 from typing import Optional
 
@@ -8,6 +9,10 @@ from .topics import normalize_topic_slug
 
 _SQUID_HOME = Path.home() / ".squid"
 TOPICS_CONTEXT_DIR = _SQUID_HOME / "context" / "topics"
+
+
+def _content_revision(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 def _split_frontmatter(content: str) -> tuple[Optional[str], str]:
@@ -84,6 +89,7 @@ def read_topic_memory(topic: str) -> dict:
             "topic": slug,
             "exists": False,
             "content": "",
+            "revision": _content_revision(""),
             "path": _display_path(path),
             "squid": topic_memory_squid_config_from_content(""),
         }
@@ -92,6 +98,7 @@ def read_topic_memory(topic: str) -> dict:
         "topic": slug,
         "exists": True,
         "content": content,
+        "revision": _content_revision(content),
         "path": _display_path(path),
         "squid": topic_memory_squid_config_from_content(content),
     }
