@@ -352,6 +352,7 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0) {
   updateActiveQuotaGauge();
   updatePinCount();
   updateInContextMarkers();
+  _lastContextIndicatorKey = _contextIndicatorKeyFrom(topic, agent, adhoc, lookback);
 }
 
 function clearTopicChip() {
@@ -362,6 +363,7 @@ function clearTopicChip() {
   chipFilterBtn.hidden = true;
   input.placeholder = '#topic or #topic@agent message…';
   updateActiveQuotaGauge();
+  _lastContextIndicatorKey = '';
 }
 
 topicChipEl.addEventListener('click', () => {
@@ -400,10 +402,17 @@ function parseInput(text) {
   if (ms && ms[3].trim()) {
     return { topic: ms[1].toLowerCase(), agent: ms[2] || null, adhoc: false, lookback: 0, message: ms[3].trim() };
   }
-  // bare topic switch: #topic or #topic@agent with no message — switches chip only
-  const mb = text.match(/^#(\w+)(?:@(\w+))?(!)?$/);
+  // bare topic switch: #topic, #topic@agent, #topic!N, or #topic@agent!N with no message
+  // switches chip only.
+  const mb = text.match(/^#(\w+)(?:@(\w+))?(?:!(\d*))?$/);
   if (mb) {
-    return { topic: mb[1].toLowerCase(), agent: mb[2] || null, adhoc: !!mb[3], lookback: 0, message: '' };
+    return {
+      topic: mb[1].toLowerCase(),
+      agent: mb[2] || null,
+      adhoc: mb[3] !== undefined,
+      lookback: mb[3] ? Math.min(parseInt(mb[3]), 20) : 0,
+      message: '',
+    };
   }
   return { topic: 'default', agent: null, adhoc: true, lookback: 0, message: text };
 }
@@ -1000,6 +1009,9 @@ async function loadSearchResults() {
     messages.appendChild(cap);
   }
   messages.scrollTop = messages.scrollHeight;
+  updateInContextMarkers();
+  updatePinCount();
+  if (pinPanel.classList.contains('open')) renderPinPanel();
 }
 
 // ── live chat ────────────────────────────────────────────────────────────────
@@ -1209,8 +1221,9 @@ function setCtxLabel(spanEl, adhoc, pinCount = 0, mem = false, sessionTurnCount 
   spanEl.textContent = `ctx: ${fmtCtxLabel(adhoc, pinCount, mem, sessionTurnCount)}`;
 }
 
-const _lookbackUnselected = new Set(); // cleared on N change or after send; never persisted
-let _lastLookbackN = 0;
+const _lookbackUnselected = new Set(); // cleared when the active !N candidate set changes; never persisted
+let _lastLookbackSelectionKey = '';
+let _lastContextIndicatorKey = '';
 
 function _allLookbackItems(adhoc, lookback) {
   if (!adhoc || lookback <= 0) return [];
@@ -1218,27 +1231,37 @@ function _allLookbackItems(adhoc, lookback) {
     .filter(el => el.dataset.msgId)
     .map(el => {
       const id = parseInt(el.dataset.msgId);
-      const contentEl = el.querySelector(':scope > div:nth-child(2)');
-      return { id, el, topic: el.dataset.topic || 'default', agent: el.dataset.agent || null, session_id: el.dataset.sessionId || null, content: contentEl?.innerText || '' };
+      return { id, el, topic: el.dataset.topic || 'default', agent: el.dataset.agent || null, session_id: el.dataset.sessionId || null, content: _messageBodyText(el) };
     })
     .sort((a, b) => a.id - b.id)
     .slice(-lookback);
 }
 
+function _messageBodyText(bubbleEl) {
+  const bodyEls = [...bubbleEl.children].filter(el =>
+    el.tagName === 'DIV'
+    && !el.classList.contains('response-header')
+    && !el.classList.contains('history-prompt-full')
+  );
+  return bodyEls[bodyEls.length - 1]?.innerText || '';
+}
+
+function _lookbackSelectionKey(adhoc, lookback, items) {
+  return `${adhoc ? 1 : 0}:${lookback}:${items.map(item => item.id).join(',')}`;
+}
+
 function _activeLookbackItems(adhoc, lookback) {
-  return _allLookbackItems(adhoc, lookback).filter(item => !_lookbackUnselected.has(item.id));
+  const allItems = _allLookbackItems(adhoc, lookback);
+  const selectionKey = _lookbackSelectionKey(adhoc, lookback, allItems);
+  if (selectionKey !== _lastLookbackSelectionKey) {
+    _lookbackUnselected.clear();
+    _lastLookbackSelectionKey = selectionKey;
+  }
+  return allItems.filter(item => !_lookbackUnselected.has(item.id));
 }
 
 function updateInContextMarkers() {
   const { topic, agent, adhoc, lookback } = _currentContextTarget();
-
-  if (lookback !== _lastLookbackN) {
-    _lookbackUnselected.clear();
-    _lastLookbackN = lookback;
-    // Strip all stale lookback-sel classes before re-applying the new selection
-    document.querySelectorAll('.msg-pin-btn.lookback-sel')
-      .forEach(btn => btn.classList.remove('lookback-sel'));
-  }
 
   const taKey   = `${topic}@${agent || '_'}`;
   const sid     = (!adhoc && agent) ? (_sessionIds[taKey] || null) : null;
@@ -1258,6 +1281,7 @@ function updateInContextMarkers() {
       inCtx = !!(sid && el.dataset.sessionId === sid);
     }
     inCtx = inCtx || !!wasInjected;
+    const selectedForLookback = !!(adhoc && activeIdSet.has(msgId));
 
     if (ctxSpan) {
       ctxSpan.classList.toggle('ctx-live', inCtx);
@@ -1266,7 +1290,8 @@ function updateInContextMarkers() {
 
     // Reflect lookback selection state on the pin button
     const pinBtn = el.querySelector('.msg-pin-btn');
-    if (pinBtn) pinBtn.classList.toggle('lookback-sel', !!(adhoc && activeIdSet.has(msgId)));
+    el.classList.toggle('lookback-sel', selectedForLookback);
+    if (pinBtn) pinBtn.classList.toggle('lookback-sel', selectedForLookback);
   });
 
   // Clear lookback-sel on any bubbles no longer in active set (e.g. after N shrinks)
@@ -1274,6 +1299,24 @@ function updateInContextMarkers() {
     const id = parseInt(btn.dataset.msgId);
     if (!activeIdSet.has(id)) btn.classList.remove('lookback-sel');
   });
+}
+
+function _contextIndicatorKeyFrom(topic, agent, adhoc, lookback) {
+  return `${topic}@${agent || '_'}:${adhoc ? 'adhoc' : 'session'}:${lookback || 0}`;
+}
+
+function _contextIndicatorKey() {
+  const { topic, agent, adhoc, lookback } = _currentContextTarget();
+  return _contextIndicatorKeyFrom(topic, agent, adhoc, lookback);
+}
+
+function refreshContextIndicators({ force = false } = {}) {
+  const key = _contextIndicatorKey();
+  if (!force && key === _lastContextIndicatorKey) return;
+  _lastContextIndicatorKey = key;
+  updateInContextMarkers();
+  updatePinCount();
+  if (pinPanel.classList.contains('open')) renderPinPanel();
 }
 
 async function _maybePromoteSlug(val) {
@@ -1295,11 +1338,10 @@ async function _maybePromoteSlug(val) {
     if (!adhocStr) resolvedAdhoc = !!(topicData?.sticky_adhoc);
   }
 
-  setTopicChip(topic, agent, resolvedAdhoc, lookback);
   input.value = '';
+  setTopicChip(topic, agent, resolvedAdhoc, lookback);
   hideAutocomplete();
   resizeComposer();
-  updatePinCount();
 }
 
 async function _maybeCollapseExpandedSlug(force = false, allowCompletedPrompt = false) {
@@ -1341,8 +1383,9 @@ async function _maybeCollapseExpandedSlug(force = false, allowCompletedPrompt = 
 input.addEventListener('input', () => {
   resizeComposer();
   updateAutocomplete();
-  updateInContextMarkers();
-  updatePinCount();
+  // Expanded #topic@agent!N text is still being edited. The chip creation path
+  // is the commit point that selects lookback responses.
+  if (!input.value.trimStart().startsWith('#')) refreshContextIndicators();
   updateActiveQuotaGauge();
   _maybePromoteSlug(input.value);
   clearTimeout(_draftSaveTimer);
@@ -1715,7 +1758,7 @@ async function sendMessage(text) {
     }
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
     _lookbackUnselected.clear();
-    _lastLookbackN = 0;
+    _lastLookbackSelectionKey = '';
     if (_includeTopicMemory && !adhoc) {
       const memoryKey = _memoryInjectedKey(topic, _effectiveAgent);
       _memoryInjectedInto[memoryKey] = _topicMemoryForSend.revision;
@@ -2556,6 +2599,9 @@ async function pollPendingItem(item, wipBubble) {
           const kws = searchState.keywords.trim().split(/\s+/).filter(Boolean);
           if (kws.length) highlightTextNodes(wipEl, kws);
         }
+        updateInContextMarkers();
+        updatePinCount();
+        if (pinPanel.classList.contains('open')) renderPinPanel();
         refreshAllRevertButtons();
         scrollToBottom();
       } else if (count >= MAX_POLLS) {
@@ -5260,8 +5306,11 @@ function setPinnedItems(items) { localStorage.setItem('pinnedItems', JSON.string
 function clearPinnedItems() {
   setPinnedItems([]);
   document.querySelectorAll('.msg-pin-btn.pinned').forEach(b => b.classList.remove('pinned'));
+  document.querySelectorAll('.msg.assistant.pinned-sel').forEach(b => b.classList.remove('pinned-sel'));
   const { adhoc, lookback } = _currentContextTarget();
-  _allLookbackItems(adhoc, lookback).forEach(item => _lookbackUnselected.add(item.id));
+  const lookbackItems = _allLookbackItems(adhoc, lookback);
+  _lastLookbackSelectionKey = _lookbackSelectionKey(adhoc, lookback, lookbackItems);
+  lookbackItems.forEach(item => _lookbackUnselected.add(item.id));
   updateInContextMarkers();
   updatePinCount();
   if (pinPanel.classList.contains('open')) renderPinPanel();
@@ -5556,12 +5605,15 @@ function renderPinPanel() {
       const st = _pinStatus(item);
       const tag = _pinTagStr(item);
       const preview = (item.content || '').replace(/\s+/g, ' ').slice(0, 90);
-      const lbAttr = item.isManual ? '' : ' data-lb="1"';
-      html += `<div class="pin-item">
+      const itemCls = item.isLookback ? 'pin-item pin-item-lookback' : 'pin-item';
+      const control = item.isLookback
+        ? `<button class="pin-item-toggle active" data-lookback-id="${item.id}" type="button">On</button>`
+        : `<button class="pin-item-remove" data-id="${item.id}" type="button">✕</button>`;
+      html += `<div class="${itemCls}">
         <span class="pin-item-tag">${escapeHtml(tag)}</span>
         <span class="pin-item-preview">${escapeHtml(preview)}</span>
         <span class="pin-item-status ${st.cls}">${st.text}</span>
-        <button class="pin-item-remove" data-id="${item.id}"${lbAttr} type="button">✕</button>
+        ${control}
       </div>`;
     });
   } else {
@@ -5587,18 +5639,25 @@ function renderPinPanel() {
       renderPinPanel();
     });
   });
+  listEl.querySelectorAll('[data-lookback-id]').forEach(btn => {
+    btn.addEventListener('mousedown', e => {
+      e.preventDefault();
+      const id = parseInt(btn.dataset.lookbackId);
+      _lookbackUnselected.add(id);
+      updateInContextMarkers();
+      updatePinCount();
+      renderPinPanel();
+    });
+  });
   listEl.querySelectorAll('.pin-item-remove').forEach(btn => {
     btn.addEventListener('mousedown', e => {
       e.preventDefault();
       const id = parseInt(btn.dataset.id);
-      if (btn.dataset.lb) {
-        _lookbackUnselected.add(id);
-        updateInContextMarkers();
-      } else {
-        setPinnedItems(getPinnedItems().filter(i => i.id !== id));
-        document.querySelectorAll(`.msg-pin-btn[data-msg-id="${id}"]`)
-          .forEach(b => b.classList.remove('pinned'));
-      }
+      setPinnedItems(getPinnedItems().filter(i => i.id !== id));
+      document.querySelectorAll(`.msg-pin-btn[data-msg-id="${id}"]`)
+        .forEach(b => b.classList.remove('pinned'));
+      document.querySelectorAll(`.msg.assistant[data-msg-id="${id}"]`)
+        .forEach(b => b.classList.remove('pinned-sel'));
       updatePinCount();
       renderPinPanel();
     });
@@ -5670,6 +5729,7 @@ async function saveMemoryEditor() {
 }
 
 function openPinPanel() {
+  updateInContextMarkers();
   renderPinPanel();
   pinPanel.classList.add('open');
 }
@@ -5687,22 +5747,26 @@ function addPinButton(bubbleEl, msgId, topic, agent, sessionId = null) {
     <path d="M2 0h8a1 1 0 0 1 1 1v12.8l-5-2.9-5 2.9V1a1 1 0 0 1 1-1z"/>
   </svg>`;
   if (sessionId) bubbleEl.dataset.sessionId = sessionId;
-  if (getPinnedItems().find(i => i.id === msgId)) btn.classList.add('pinned');
+  if (getPinnedItems().find(i => i.id === msgId)) {
+    btn.classList.add('pinned');
+    bubbleEl.classList.add('pinned-sel');
+  }
   btn.addEventListener('click', e => {
     e.stopPropagation();
     const pinned = getPinnedItems();
     if (pinned.find(i => i.id === msgId)) {
       setPinnedItems(pinned.filter(i => i.id !== msgId));
       btn.classList.remove('pinned');
+      bubbleEl.classList.remove('pinned-sel');
     } else if (btn.classList.contains('lookback-sel')) {
       _lookbackUnselected.add(msgId);
       updateInContextMarkers();
     } else {
-      const contentEl = bubbleEl.querySelector(':scope > div:nth-child(2)');
-      const text = (contentEl?.innerText || '').slice(0, 300);
+      const text = _messageBodyText(bubbleEl).slice(0, 300);
       const sid = bubbleEl.dataset.sessionId || null;
       setPinnedItems([...pinned, { id: msgId, topic, agent: agent || null, session_id: sid, content: text }]);
       btn.classList.add('pinned');
+      bubbleEl.classList.add('pinned-sel');
     }
     updatePinCount();
     if (pinPanel.classList.contains('open')) renderPinPanel();

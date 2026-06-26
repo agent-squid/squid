@@ -1717,6 +1717,10 @@ body {
 }
 .msg-pin-btn:hover { color: var(--text-mid); }
 .msg.assistant { position: relative; }
+.msg.assistant.lookback-sel,
+.msg.assistant.pinned-sel {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
 .msg-pin-btn.pinned,
 .msg-pin-btn.lookback-sel { color: var(--accent); }
 

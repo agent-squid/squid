@@ -66,12 +66,17 @@ test('pin button on bubble adds item to pin panel', async ({ page }) => {
   const bubble = page.locator('.msg.assistant:not(.msg-thinking)');
   await bubble.hover();
   await bubble.locator('.msg-pin-btn').click();
+  await expect(bubble).toHaveClass(/pinned-sel/);
 
   // Open pin panel — should show the pinned item
   await page.click('#pin-btn');
   await expect(page.locator('#pin-panel.open')).toBeVisible();
   await expect(page.locator('.pin-item')).toHaveCount(1);
   await expect(page.locator('.pin-item-preview')).toContainText('Hello from agent');
+
+  await page.locator('.pin-item-remove').click();
+  await expect(page.locator('.pin-item')).toHaveCount(0);
+  await expect(bubble).not.toHaveClass(/pinned-sel/);
 });
 
 test('clear pins unselects pinned responses from pin panel', async ({ page }) => {
@@ -250,17 +255,24 @@ test('adhoc lookback selects recent visible responses as toggleable context pins
 
   await page.goto('/');
   await expect(page.locator('.history-item.msg.assistant')).toHaveCount(3);
-  await page.fill('#input', '#squid@claude!2 compare');
+  await page.fill('#input', '#squid@claude!2 ');
+  await expect(page.locator('#topic-chip')).toContainText('!2');
+  await expect(page.locator('.msg-pin-btn.lookback-sel')).toHaveCount(2);
+  await expect(page.locator('.msg-pin-btn[data-msg-id="11"]')).toHaveClass(/lookback-sel/);
+  await expect(page.locator('.msg-pin-btn[data-msg-id="12"]')).toHaveClass(/lookback-sel/);
 
   await page.click('#pin-btn');
   await expect(page.locator('.pin-item-lookback')).toHaveCount(2);
   await expect(page.locator('.pin-item-lookback')).toContainText(['second response', 'third response']);
 
   await page.locator('[data-lookback-id="11"]').click();
-  await expect(page.locator('[data-lookback-id="11"]')).toHaveText('Off');
+  await expect(page.locator('.msg-pin-btn[data-msg-id="11"]')).not.toHaveClass(/lookback-sel/);
+  await expect(page.locator('.msg-pin-btn[data-msg-id="12"]')).toHaveClass(/lookback-sel/);
+  await expect(page.locator('.pin-item-lookback')).toHaveCount(1);
   await page.click('#pin-btn');
 
   await page.focus('#input');
+  await page.fill('#input', 'compare');
   await page.keyboard.press('Enter');
   await expect(page.locator('.msg.assistant:not(.msg-thinking)').last()).toBeVisible();
 
@@ -268,6 +280,29 @@ test('adhoc lookback selects recent visible responses as toggleable context pins
   expect(capturedBody?.lookback).toBe(2);
   expect(capturedBody?.lookback_via_pins).toBe(true);
   expect(capturedBody?.pinned_ids).toEqual([12]);
+});
+
+test('adhoc lookback selects async search result responses without another keystroke', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/search**', r => r.fulfill({ json: {
+    items: [
+      { id: 21, topic: 'squid', agent: 'claude', role: 'assistant', status: 'done', prompt: 'p1', content: 'first search response', adhoc: false },
+      { id: 22, topic: 'squid', agent: 'claude', role: 'assistant', status: 'done', prompt: 'p2', content: 'second search response', adhoc: false },
+      { id: 23, topic: 'squid', agent: 'claude', role: 'assistant', status: 'done', prompt: 'p3', content: 'third search response', adhoc: false },
+    ],
+  }}));
+
+  await page.goto('/');
+  await page.fill('#input', '#squid@claude!2 ');
+  await expect(page.locator('#topic-chip')).toContainText('!2');
+
+  await page.fill('#input', '/s #squid response');
+  await page.keyboard.press('Enter');
+
+  await expect(page.locator('.search-result-item.msg.assistant')).toHaveCount(3);
+  await expect(page.locator('.search-result-item.msg.assistant.lookback-sel')).toHaveCount(2);
+  await expect(page.locator('.msg-pin-btn[data-msg-id="22"]')).toHaveClass(/lookback-sel/);
+  await expect(page.locator('.msg-pin-btn[data-msg-id="23"]')).toHaveClass(/lookback-sel/);
 });
 
 test('fresh session send includes topic memory when memory exists', async ({ page }) => {
