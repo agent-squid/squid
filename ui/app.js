@@ -876,12 +876,10 @@ function recordPrompt(text) {
   promptDraftChip = null;
 }
 
-function formatPromptHistoryEntry(topic, agent, adhoc, lookback, message) {
+function formatPromptHistoryEntry(topic, agent, adhoc, _lookback, message) {
   const prompt = message.trim();
-  if (!topic || topic === 'default') return prompt;
-  let route = `#${topic}`;
-  if (agent) route += `@${agent}`;
-  if (adhoc) route += lookback > 0 ? `!${lookback}` : '!';
+  const route = promptHistoryRoute(topic, agent, adhoc);
+  if (!route) return prompt;
   return `${route} ${prompt}`;
 }
 
@@ -890,6 +888,20 @@ function splitPromptHistoryEntry(entry) {
   const match = text.match(/^(#\w+(?:@\w+)?(?:!\d*)?)\s+([\s\S]+)$/);
   if (!match) return { route: '', prompt: text };
   return { route: match[1], prompt: match[2].trim() };
+}
+
+function promptHistoryRoute(topic, agent, adhoc) {
+  if (!topic || (topic === 'default' && !agent)) return '';
+  let route = `#${topic}`;
+  if (agent) route += `@${agent}`;
+  if (adhoc) route += '!';
+  return route;
+}
+
+function normalizePromptHistoryRoute(route) {
+  const match = String(route || '').match(/^#(\w+)(?:@(\w+))?(!)?\d*$/);
+  if (!match) return '';
+  return promptHistoryRoute(match[1].toLowerCase(), match[2] || null, !!match[3]);
 }
 
 function applyPromptHistoryEntry(entry) {
@@ -901,7 +913,7 @@ function applyPromptHistoryEntry(entry) {
         match[1].toLowerCase(),
         match[2] || null,
         !!match[3],
-        match[4] ? Math.min(parseInt(match[4]), 20) : 0,
+        0,
       );
     }
   }
@@ -912,10 +924,7 @@ function applyPromptHistoryEntry(entry) {
 
 function currentPromptHistoryRoute() {
   if (!stickyChip) return '';
-  let route = `#${stickyChip.topic}`;
-  if (stickyChip.agent) route += `@${stickyChip.agent}`;
-  if (stickyChip.adhoc) route += `!${stickyChip.lookback || ''}`;
-  return route;
+  return promptHistoryRoute(stickyChip.topic, stickyChip.agent, stickyChip.adhoc);
 }
 
 function matchingPromptHistory(value, limit = 8) {
@@ -927,8 +936,8 @@ function matchingPromptHistory(value, limit = 8) {
     .map((entry, recency) => ({ entry, recency, ...splitPromptHistoryEntry(entry) }))
     .filter(item => item.prompt.toLowerCase().startsWith(prefix))
     .sort((a, b) => {
-      const aCurrent = a.route.toLowerCase() === currentRoute;
-      const bCurrent = b.route.toLowerCase() === currentRoute;
+      const aCurrent = normalizePromptHistoryRoute(a.route).toLowerCase() === currentRoute;
+      const bCurrent = normalizePromptHistoryRoute(b.route).toLowerCase() === currentRoute;
       return Number(bCurrent) - Number(aCurrent) || a.recency - b.recency;
     })
     .slice(0, limit)
@@ -1929,8 +1938,7 @@ async function sendMessage(text) {
   // a later turn. Do not treat or aggregate it as exact per-prompt attribution.
   // See ADR-0023.
   await new Promise(r => setTimeout(r, 1000));
-  const hasQuotaBefore = quotaBeforeSnapshot?.backend === quotaBackend && quotaBeforeSnapshot.raw !== null;
-  const quotaAfterSnapshot = await fetchQuotaForBackend(quotaBackend, { trackDelta: hasQuotaBefore });
+  const quotaAfterSnapshot = await fetchQuotaForBackend(quotaBackend);
   const quotaBefore = quotaBeforeSnapshot?.raw ?? null;
   const quotaAfter = quotaAfterSnapshot?.raw ?? null;
   if (quotaBefore !== null && quotaAfter !== null && quotaAfter !== quotaBefore) {
@@ -2875,7 +2883,7 @@ const quotaState = {};
 
 function quotaStateFor(backend) {
   return quotaState[backend] ||= {
-    raw: null, pct: null, resetAt: null, displayText: null, delta: null,
+    raw: null, pct: null, resetAt: null, displayText: null,
     inFlight: false, timer: null, activeCount: 0,
   };
 }
@@ -3051,9 +3059,8 @@ function updateGaugeLabel(backend) {
   } else if (state.pct == null) {
     label.textContent = '—';
   } else {
-    const delta = state.delta != null ? ` +${state.delta} pp` : '';
     const timeStr = quotaTimeText(state.resetAt);
-    label.textContent = `${state.pct}%${delta}` + (timeStr ? ` in ${timeStr}` : '');
+    label.textContent = `${state.pct}%` + (timeStr ? ` in ${timeStr}` : '');
   }
   const arc = document.getElementById(cfg.pieArcId);
   if (arc && state.pct != null) {
@@ -3114,7 +3121,7 @@ function showQuotaError(backend, text) {
   }
 }
 
-async function fetchQuotaForBackend(backend, { trackDelta = false } = {}) {
+async function fetchQuotaForBackend(backend) {
   const cfg = quotaConfigFor(backend);
   if (!cfg) return null;
   const state = quotaStateFor(backend);
@@ -3155,12 +3162,6 @@ async function fetchQuotaForBackend(backend, { trackDelta = false } = {}) {
         snapshot.title = `DeepSeek · ${spent.toFixed(2)} spent of ${max.toFixed(2)}`;
       }
     }
-    if (trackDelta && state.raw !== null) {
-      const d = snapshot.raw - state.raw;
-      state.delta = d > 0.05 ? Math.round(d * 10) / 10 : null;
-    } else {
-      state.delta = null;
-    }
     renderQuotaLoaded(backend, snapshot);
     return { backend, ...state };
   } catch {
@@ -3171,8 +3172,8 @@ async function fetchQuotaForBackend(backend, { trackDelta = false } = {}) {
   }
 }
 
-async function fetchQuota(trackDelta = false) {
-  return fetchQuotaForBackend('claude', { trackDelta });
+async function fetchQuota() {
+  return fetchQuotaForBackend('claude');
 }
 
 function initQuota() {
@@ -4982,10 +4983,11 @@ async function updateAutocomplete() {
     _acRender(matchingPromptHistory(val).map(ph => {
       const { route, prompt } = splitPromptHistoryEntry(ph);
       const promptText = prompt || ph;
-      const isDifferentRoute = !!(route && route.toLowerCase() !== currentRoute);
+      const routeKey = normalizePromptHistoryRoute(route);
+      const isDifferentRoute = !!(routeKey && routeKey.toLowerCase() !== currentRoute);
       let routeHtml = '';
-      if (route) {
-        const rm = route.match(/^#(\w+)(?:@(\w+))?(!(?:(\d+))?)?$/);
+      if (routeKey) {
+        const rm = routeKey.match(/^#(\w+)(?:@(\w+))?(!)?$/);
         if (rm) {
           const topic = rm[1], agent = rm[2], adhoc = rm[3] || '';
           routeHtml = `<span class="ac-topic">#${escapeHtml(topic)}</span>`;
@@ -5000,7 +5002,7 @@ async function updateAutocomplete() {
         label,
         insert: promptText,
         trail: false,
-        ...(isDifferentRoute && routeHtml ? { routeHtml, fullEntry: ph } : {}),
+        ...(isDifferentRoute && routeHtml ? { routeHtml, fullEntry: `${routeKey} ${promptText}` } : {}),
       };
     }), 'Recent Prompts');
   } else {

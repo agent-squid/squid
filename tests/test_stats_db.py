@@ -82,6 +82,28 @@ def test_recent_prompts_keep_default_adhoc_prompts_plain(tmp_path, monkeypatch):
     assert stats_db.get_recent_prompts(limit=5) == ["plain prompt"]
 
 
+def test_recent_prompts_keep_default_agent_routes(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user_id = stats_db.insert_user_message("default", "opencode", "what's your model")
+    stats_db.insert_assistant_message("default", "opencode", user_id, adhoc=True)
+
+    assert stats_db.get_recent_prompts(limit=5) == ["#default@opencode! what's your model"]
+
+
+def test_recent_prompts_normalize_adhoc_lookback(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    old_user_id = stats_db.insert_user_message("squid", "codex", "reuse context", lookback=2)
+    stats_db.insert_assistant_message("squid", "codex", old_user_id, adhoc=True)
+    new_user_id = stats_db.insert_user_message("squid", "codex", "reuse context", lookback=0)
+    stats_db.insert_assistant_message("squid", "codex", new_user_id, adhoc=True)
+
+    assert stats_db.get_recent_prompts(limit=5) == ["#squid@codex! reuse context"]
+
+
 def test_session_injected_context_recovers_pins_and_memory_revision(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

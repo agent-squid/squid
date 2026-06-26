@@ -1031,7 +1031,7 @@ def get_recent_prompts(limit: int = 50) -> list:
                ), latest_unique AS (
                    SELECT MAX(id) AS id
                    FROM routed_prompts
-                   GROUP BY content, topic, agent, adhoc, lookback
+                   GROUP BY content, topic, agent, adhoc
                )
                SELECT p.content, p.topic, p.agent, p.adhoc, p.lookback
                FROM routed_prompts p
@@ -1051,14 +1051,13 @@ def get_recent_prompts(limit: int = 50) -> list:
         topic = row.get('topic') or ''
         agent = row.get('agent') or ''
         adhoc = bool(row.get('adhoc'))
-        lookback = int(row.get('lookback') or 0)
         prefix = ''
-        if topic and topic != 'default':
+        if topic and (topic != 'default' or agent):
             prefix = f'#{topic}'
             if agent:
                 prefix += f'@{agent}'
             if adhoc:
-                prefix += lookback > 0 and f'!{lookback}' or '!'
+                prefix += '!'
             prefix += ' '
         full = prefix + content
         if full not in seen:

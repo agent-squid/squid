@@ -72,6 +72,52 @@ test('different-route items show a route chip button; same-route items do not', 
   await expect(page.locator('#autocomplete .ac-item', { hasText: '#squid@haiku!' }).locator('.ac-route-btn')).toContainText('#squid@haiku!');
 });
 
+test('default topic prompt history distinguishes agent routes', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/prompts/recent**', route => route.fulfill({ json: { items: [
+    '#default@agentA compare models',
+    '#default@agentB compare models',
+    'compare bare default',
+  ] } }));
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'default', agent: 'agentB', adhoc: false, lookback: 0,
+  })));
+  await page.goto('/');
+
+  await page.fill('#input', 'compare');
+
+  const sameRouteItem = page.locator('#autocomplete .ac-item:not(:has(.ac-route-btn))', { hasText: 'compare models' });
+  await expect(sameRouteItem).toBeVisible();
+  await expect(sameRouteItem).not.toContainText('#default@agentB');
+
+  const otherRouteItem = page.locator('#autocomplete .ac-item', { hasText: '#default@agentA compare models' });
+  await expect(otherRouteItem.locator('.ac-route-btn')).toBeVisible();
+  await expect(otherRouteItem.locator('.ac-route-btn')).toContainText('#default@agentA');
+});
+
+test('adhoc prompt history route chips ignore lookback counts', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/prompts/recent**', route => route.fulfill({ json: { items: [
+    '#squid@codex!2 reuse context',
+    '#squid@haiku!3 reuse context',
+  ] } }));
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'squid', agent: 'codex', adhoc: true, lookback: 0,
+  })));
+  await page.goto('/');
+
+  await page.fill('#input', 'reuse');
+
+  const sameRouteItem = page.locator('#autocomplete .ac-item:not(:has(.ac-route-btn))', { hasText: 'reuse context' });
+  await expect(sameRouteItem).toBeVisible();
+  await expect(sameRouteItem).not.toContainText('#squid@codex');
+
+  const otherRouteItem = page.locator('#autocomplete .ac-item', { hasText: '#squid@haiku!' });
+  await expect(otherRouteItem.locator('.ac-route-btn')).toBeVisible();
+  await expect(otherRouteItem.locator('.ac-route-btn')).toContainText('#squid@haiku!');
+  await expect(otherRouteItem.locator('.ac-route-btn')).not.toContainText('!3');
+});
+
 test('clicking a different-route item body inserts prompt only without changing the route', async ({ page }) => {
   await mockBackend(page);
   await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
@@ -104,7 +150,7 @@ test('Tab completion converts a routed prompt history slug into the topic chip',
   await expect(page.locator('#topic-chip')).toContainText('#squid@codex');
 });
 
-test('clicking prompt history preserves adhoc lookback in the converted chip', async ({ page }) => {
+test('clicking prompt history normalizes adhoc lookback out of the converted chip', async ({ page }) => {
   await mockBackend(page);
   await page.route('**/prompts/recent**', route => route.fulfill({ json: { items: [
     '#squid@haiku!3 review the changes',
@@ -113,11 +159,12 @@ test('clicking prompt history preserves adhoc lookback in the converted chip', a
 
   const composer = page.locator('#input');
   await composer.fill('review');
+  await expect(page.locator('#autocomplete .ac-item .ac-route-btn')).toContainText('#squid@haiku!');
   await page.locator('#autocomplete .ac-item .ac-route-btn').click();
 
   await expect(composer).toHaveValue('review the changes');
   await expect(page.locator('#topic-chip')).toHaveClass(/visible/);
-  await expect(page.locator('#topic-chip')).toContainText('#squid@haiku!3');
+  await expect(page.locator('#topic-chip')).toContainText('#squid@haiku!');
 });
 
 test('ArrowUp converts recalled prompt routes to chips and ArrowDown restores the draft', async ({ page }) => {
@@ -137,7 +184,7 @@ test('ArrowUp converts recalled prompt routes to chips and ArrowDown restores th
   await composer.press('ArrowUp');
 
   await expect(composer).toHaveValue('review the changes');
-  await expect(page.locator('#topic-chip')).toContainText('#squid@haiku!3');
+  await expect(page.locator('#topic-chip')).toContainText('#squid@haiku!');
 
   await composer.press('ArrowUp');
   await expect(composer).toHaveValue('inspect the changes');
@@ -145,7 +192,7 @@ test('ArrowUp converts recalled prompt routes to chips and ArrowDown restores th
 
   await composer.press('ArrowDown');
   await expect(composer).toHaveValue('review the changes');
-  await expect(page.locator('#topic-chip')).toContainText('#squid@haiku!3');
+  await expect(page.locator('#topic-chip')).toContainText('#squid@haiku!');
 
   await composer.press('ArrowDown');
   await expect(composer).toHaveValue('unfinished draft');
