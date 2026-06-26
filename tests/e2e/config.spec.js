@@ -74,6 +74,74 @@ test('file viewer renders markdown when served as generic binary', async ({ page
   await expect(page.locator('#file-modal-body')).toContainText('Visible in the viewer');
 });
 
+test('mobile file viewer breadcrumb starts at the path end', async ({ page }) => {
+  await mockApp(page);
+  await page.setViewportSize({ width: 390, height: 800 });
+  await page.route('**/localfile**', route => route.fulfill({
+    status: 200,
+    contentType: 'text/plain',
+    body: 'file contents',
+  }));
+
+  await page.goto('/');
+  await page.evaluate(() => openFileViewer('/tmp/work/project/src/components/deeply/nested/file.md'));
+
+  await expect(page.locator('#file-modal-breadcrumb')).toContainText('file.md');
+  await expect.poll(() => page.locator('#file-modal-breadcrumb').evaluate(el => el.scrollLeft)).toBeGreaterThan(0);
+});
+
+test('analytics measures dropdown controls cost and quota columns independently', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/stats/filters', route => route.fulfill({
+    json: { agents: ['codex'], topics: ['squid'] },
+  }));
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    return route.fulfill({
+      json: [{
+        period: url.searchParams.get('period') === 'hourly' ? '2026-06-26 14:00' : '2026-06-26',
+        sessions: 2,
+        total_turns: 3,
+        input_tokens: 1500,
+        output_tokens: 700,
+        cost_usd: 1.25,
+        quota_delta: 2.5,
+      }],
+    });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Analytics' }).click();
+  await expect(page.locator('#stats-content table')).toBeVisible();
+  await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (4)');
+  await expect(page.locator('#stats-content th', { hasText: 'Sessions' })).toBeVisible();
+  await expect(page.locator('#stats-content th', { hasText: 'Turns' })).toBeVisible();
+  await expect(page.locator('#stats-content th', { hasText: 'Tokens In' })).toBeVisible();
+  await expect(page.locator('#stats-content th', { hasText: 'Tokens Out' })).toBeVisible();
+  await expect(page.locator('#stats-content th', { hasText: 'Cost' })).toHaveCount(0);
+  await expect(page.locator('#stats-content th', { hasText: 'Quota meter' })).toHaveCount(0);
+
+  await page.locator('#sf-measures-toggle').click();
+  await page.locator('#sf-measures-menu input[value="cost"]').check();
+  await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (5)');
+  await expect(page.locator('#stats-content th', { hasText: 'Cost' })).toBeVisible();
+  await expect(page.locator('#stats-content')).toContainText('$1.2500');
+  await expect(page.locator('#stats-content th', { hasText: 'Quota meter' })).toHaveCount(0);
+
+  await page.locator('#sf-measures-menu input[value="quota"]').check();
+  await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (6)');
+  await expect(page.locator('#stats-content th', { hasText: 'Quota meter' })).toBeVisible();
+  await expect(page.locator('#stats-content')).toContainText('+2.5 pp');
+
+  await page.locator('#sf-measures-menu input[value="tokens_out"]').uncheck();
+  await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (5)');
+  await expect(page.locator('#stats-content th', { hasText: 'Tokens Out' })).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Hourly' }).click();
+  await expect(page.locator('#stats-content tbody td').first()).toHaveText('06-26 14:00');
+  await expect(page.locator('#stats-content tbody td').first()).not.toContainText('2026');
+});
+
 test('/restart clears its persisted draft before the page reloads', async ({ page }) => {
   await mockApp(page);
   await page.route('**/cmd', route => route.fulfill({ json: { ok: true } }));

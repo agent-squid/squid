@@ -2755,6 +2755,23 @@ function fmtNum(n) {
   return Math.round(value).toLocaleString();
 }
 
+function fmtAxisNum(n) {
+  const value = Number(n) || 0;
+  const abs = Math.abs(value);
+  const compact = (divisor, suffix) => {
+    const scaled = value / divisor;
+    return scaled.toLocaleString(undefined, {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 1,
+    }) + suffix;
+  };
+  if (abs >= 1_000_000_000) return compact(1_000_000_000, 'B');
+  if (abs >= 1_000_000) return compact(1_000_000, 'M');
+  if (abs >= 1000) return compact(1000, 'K');
+  if (abs >= 10 || abs === 0) return Math.round(value).toLocaleString();
+  return Number(value.toFixed(2)).toLocaleString();
+}
+
 function fmtTime(iso) {
   if (!iso) return '';
   const d = new Date(iso);
@@ -3442,7 +3459,7 @@ let _lastStatsRows = null;
 let _statsFiltersLoaded = false;
 let _statsPage = 0;
 const _STATS_PAGE_SIZE = 10;
-let _statsShowExtra = false;
+const _statsMeasures = new Set(['sessions', 'turns', 'tokens_in', 'tokens_out']);
 
 function _rerenderStats() {
   if (!_lastStatsRows) return;
@@ -3477,6 +3494,85 @@ const CHART_METRICS = {
   sessions:   { label: 'Sessions',  fn: r => (r.sessions || 0),                                                        color: 'rgba(200,200,60,1)',   fill: 'rgba(200,200,60,0.08)'  },
 };
 
+function _statsMeasureSelected(measure) {
+  return _statsMeasures.has(measure);
+}
+
+function _formatCost(value) {
+  return `$${(value || 0).toFixed(4)}`;
+}
+
+function _formatQuotaDelta(value) {
+  return value != null ? `${value >= 0 ? '+' : ''}${value.toFixed(1)} pp` : '—';
+}
+
+function _statsInputTokens(row) {
+  const raw = row.input_tokens || 0, cr = row.cache_read_tokens || 0;
+  return (cr > 0 && raw < cr) ? raw + cr : raw;
+}
+
+const STATS_TABLE_MEASURES = [
+  { key: 'sessions', label: 'Sessions', row: r => r.sessions || 0, total: t => t.sessions || 0 },
+  { key: 'turns', label: 'Turns', row: r => r.total_turns || '—', total: t => t.turns || '—' },
+  { key: 'tokens_in', label: 'Tokens In', row: r => fmtNum(_statsInputTokens(r)), total: t => fmtNum(t.tokens_in || 0) },
+  { key: 'tokens_out', label: 'Tokens Out', row: r => fmtNum(r.output_tokens || 0), total: t => fmtNum(t.tokens_out || 0) },
+  { key: 'cost', label: 'Cost', row: r => _formatCost(r.cost_usd), total: t => _formatCost(t.cost || 0) },
+  { key: 'quota', label: 'Quota meter Δ', title: 'Observed account meter change; not exact attributed usage', row: r => _formatQuotaDelta(r.quota_delta), total: t => _formatQuotaDelta(t.quota) },
+];
+
+function _statsMeasureHeaders() {
+  return STATS_TABLE_MEASURES
+    .filter(m => _statsMeasureSelected(m.key))
+    .map(m => `<th${m.title ? ` title="${m.title}"` : ''}>${m.label}</th>`)
+    .join('');
+}
+
+function _statsMeasureCells(row) {
+  return STATS_TABLE_MEASURES
+    .filter(m => _statsMeasureSelected(m.key))
+    .map(m => `<td>${m.row(row)}</td>`)
+    .join('');
+}
+
+function _statsMeasureTotals(totals) {
+  return STATS_TABLE_MEASURES
+    .filter(m => _statsMeasureSelected(m.key))
+    .map(m => `<td>${m.total(totals)}</td>`)
+    .join('');
+}
+
+function _statsTotals(rows) {
+  const totals = { sessions: 0, turns: 0, tokens_in: 0, tokens_out: 0, cost: 0, quota: null };
+  for (const r of rows) {
+    totals.sessions += r.sessions || 0;
+    totals.turns += r.total_turns || 0;
+    totals.tokens_in += _statsInputTokens(r);
+    totals.tokens_out += r.output_tokens || 0;
+    totals.cost += r.cost_usd || 0;
+    if (r.quota_delta != null) totals.quota = (totals.quota || 0) + r.quota_delta;
+  }
+  return totals;
+}
+
+function _statsPeriodLabel(period) {
+  if (!period) return '—';
+  if (statsPeriod === 'hourly') {
+    const match = String(period).match(/^\d{4}-(\d{2}-\d{2}\s+\d{2}:\d{2})/);
+    if (match) return match[1];
+  }
+  return period;
+}
+
+function _updateStatsMeasureLabel() {
+  const toggle = document.getElementById('sf-measures-toggle');
+  if (!toggle) return;
+  const labels = STATS_TABLE_MEASURES
+    .filter(m => _statsMeasureSelected(m.key))
+    .map(m => m.label.replace(' meter Δ', ''));
+  toggle.textContent = labels.length ? `Measures (${labels.length})` : 'Measures';
+  toggle.classList.toggle('active', labels.length > 0);
+}
+
 function _destroyChart() {
   if (statsChartInstance) { statsChartInstance.destroy(); statsChartInstance = null; }
 }
@@ -3495,7 +3591,7 @@ function _renderChart(rows) {
   }];
   const scales = {
     x: { ticks: { color: '#555', font: { size: 10 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 12 }, grid: { color: '#1a1a24' } },
-    y1: { type: 'linear', position: 'left', ticks: { color: '#555', font: { size: 10 } }, grid: { color: '#1a1a24' } },
+    y1: { type: 'linear', position: 'left', ticks: { color: '#555', font: { size: 10 }, callback: fmtAxisNum }, grid: { color: '#1a1a24' } },
   };
   if (statsChartY2) {
     const m2 = CHART_METRICS[statsChartY2];
@@ -3507,7 +3603,7 @@ function _renderChart(rows) {
         pointRadius: labels.length > 60 ? 1 : labels.length > 20 ? 2 : 4,
         pointHoverRadius: 5,
       });
-      scales.y2 = { type: 'linear', position: 'right', ticks: { color: '#555', font: { size: 10 } }, grid: { display: false } };
+      scales.y2 = { type: 'linear', position: 'right', ticks: { color: '#555', font: { size: 10 }, callback: fmtAxisNum }, grid: { display: false } };
     }
   }
   _destroyChart();
@@ -3755,120 +3851,66 @@ async function loadStats() {
 }
 
 function renderTimeStats(rows) {
-  let totalSessions = 0, totalIn = 0, totalOut = 0, totalCost = 0, totalQuotaDelta = 0, totalTurns = 0;
-  for (const r of rows) {
-    const raw = r.input_tokens || 0, cr = r.cache_read_tokens || 0;
-    totalSessions += r.sessions || 0;
-    totalIn  += (cr > 0 && raw < cr) ? raw + cr : raw;
-    totalOut += r.output_tokens || 0;
-    totalCost += r.cost_usd || 0;
-    totalTurns += r.total_turns || 0;
-    if (r.quota_delta != null) totalQuotaDelta += r.quota_delta;
-  }
-  const ex = _statsShowExtra;
+  const totals = _statsTotals(rows);
   const bodyRows = _statsPageSlice(rows).map(r => {
-    const raw = r.input_tokens || 0, cr = r.cache_read_tokens || 0;
-    const inp = (cr > 0 && raw < cr) ? raw + cr : raw;
-    const qd  = r.quota_delta;
     return `<tr>
-      <td>${r.period || '—'}</td>
-      <td>${r.sessions}</td>
-      <td>${r.total_turns || '—'}</td>
-      <td>${fmtNum(inp)}</td>
-      <td>${fmtNum(r.output_tokens || 0)}</td>
-      ${ex ? `<td>$${(r.cost_usd || 0).toFixed(4)}</td><td>${qd != null ? '+' + qd.toFixed(1) + ' pp' : '—'}</td>` : ''}
+      <td>${_statsPeriodLabel(r.period)}</td>
+      ${_statsMeasureCells(r)}
     </tr>`;
   }).join('');
 
   statsContent.innerHTML = `<table>
     <thead><tr>
       <th>${statsPeriod === 'hourly' ? 'Hour' : 'Date'}</th>
-      <th>Sessions</th><th>Turns</th><th>Tokens In</th><th>Tokens Out</th>
-      ${ex ? '<th>Cost</th><th title="Observed account meter change; not exact attributed usage">Quota meter Δ</th>' : ''}
+      ${_statsMeasureHeaders()}
     </tr></thead>
     <tbody>${bodyRows}</tbody>
     <tfoot><tr>
-      <td>Total</td><td>${totalSessions}</td><td>${totalTurns || '—'}</td>
-      <td>${fmtNum(totalIn)}</td><td>${fmtNum(totalOut)}</td>
-      ${ex ? `<td>$${totalCost.toFixed(4)}</td><td>${totalQuotaDelta > 0 ? '+' + totalQuotaDelta.toFixed(1) + ' pp' : '—'}</td>` : ''}
+      <td>Total</td>${_statsMeasureTotals(totals)}
     </tr></tfoot>
   </table>`;
   _statsAppendPager(rows.length);
 }
 
 function renderTopicStats(rows) {
-  let totalSessions = 0, totalIn = 0, totalOut = 0, totalCost = 0, totalTurns = 0;
-  for (const r of rows) {
-    const raw = r.input_tokens || 0, cr = r.cache_read_tokens || 0;
-    totalSessions += r.sessions || 0;
-    totalIn  += (cr > 0 && raw < cr) ? raw + cr : raw;
-    totalOut += r.output_tokens || 0;
-    totalCost += r.cost_usd || 0;
-    totalTurns += r.total_turns || 0;
-  }
-  const ex = _statsShowExtra;
+  const totals = _statsTotals(rows);
   const bodyRows = _statsPageSlice(rows).map(r => {
-    const raw = r.input_tokens || 0, cr = r.cache_read_tokens || 0;
-    const inp = (cr > 0 && raw < cr) ? raw + cr : raw;
     return `<tr>
       <td>#${escapeHtml(r.topic)}</td>
-      <td>${r.sessions}</td>
-      <td>${r.total_turns || '—'}</td>
-      <td>${fmtNum(inp)}</td>
-      <td>${fmtNum(r.output_tokens || 0)}</td>
-      ${ex ? `<td>$${(r.cost_usd || 0).toFixed(4)}</td>` : ''}
+      ${_statsMeasureCells(r)}
     </tr>`;
   }).join('');
 
   statsContent.innerHTML = `<table>
     <thead><tr>
-      <th>Topic</th><th>Sessions</th><th>Turns</th><th>Tokens In</th><th>Tokens Out</th>
-      ${ex ? '<th>Cost</th>' : ''}
+      <th>Topic</th>
+      ${_statsMeasureHeaders()}
     </tr></thead>
     <tbody>${bodyRows}</tbody>
     <tfoot><tr>
-      <td>Total</td><td>${totalSessions}</td><td>${totalTurns || '—'}</td>
-      <td>${fmtNum(totalIn)}</td><td>${fmtNum(totalOut)}</td>
-      ${ex ? `<td>$${totalCost.toFixed(4)}</td>` : ''}
+      <td>Total</td>${_statsMeasureTotals(totals)}
     </tr></tfoot>
   </table>`;
   _statsAppendPager(rows.length);
 }
 
 function renderAgentStats(rows) {
-  let totalSessions = 0, totalIn = 0, totalOut = 0, totalCost = 0, totalTurns = 0;
-  for (const r of rows) {
-    const raw = r.input_tokens || 0, cr = r.cache_read_tokens || 0;
-    totalSessions += r.sessions || 0;
-    totalIn  += (cr > 0 && raw < cr) ? raw + cr : raw;
-    totalOut += r.output_tokens || 0;
-    totalCost += r.cost_usd || 0;
-    totalTurns += r.total_turns || 0;
-  }
-  const ex = _statsShowExtra;
+  const totals = _statsTotals(rows);
   const bodyRows = _statsPageSlice(rows).map(r => {
-    const raw = r.input_tokens || 0, cr = r.cache_read_tokens || 0;
-    const inp = (cr > 0 && raw < cr) ? raw + cr : raw;
     return `<tr>
       <td>${escapeHtml(r.agent)}</td>
-      <td>${r.sessions}</td>
-      <td>${r.total_turns || '—'}</td>
-      <td>${fmtNum(inp)}</td>
-      <td>${fmtNum(r.output_tokens || 0)}</td>
-      ${ex ? `<td>$${(r.cost_usd || 0).toFixed(4)}</td>` : ''}
+      ${_statsMeasureCells(r)}
     </tr>`;
   }).join('');
 
   statsContent.innerHTML = `<table>
     <thead><tr>
-      <th>Agent</th><th>Sessions</th><th>Turns</th><th>Tokens In</th><th>Tokens Out</th>
-      ${ex ? '<th>Cost</th>' : ''}
+      <th>Agent</th>
+      ${_statsMeasureHeaders()}
     </tr></thead>
     <tbody>${bodyRows}</tbody>
     <tfoot><tr>
-      <td>Total</td><td>${totalSessions}</td><td>${totalTurns || '—'}</td>
-      <td>${fmtNum(totalIn)}</td><td>${fmtNum(totalOut)}</td>
-      ${ex ? `<td>$${totalCost.toFixed(4)}</td>` : ''}
+      <td>Total</td>${_statsMeasureTotals(totals)}
     </tr></tfoot>
   </table>`;
   _statsAppendPager(rows.length);
@@ -3886,22 +3928,14 @@ function initStats() {
     });
   });
 
-  document.querySelectorAll('#sf-days .sf-chip').forEach(btn => {
-    btn.addEventListener('click', () => {
-      statsFilters.days = parseInt(btn.dataset.days);
-      document.querySelectorAll('#sf-days .sf-chip').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      loadStats();
-    });
+  document.getElementById('sf-days').addEventListener('change', e => {
+    statsFilters.days = parseInt(e.target.value);
+    loadStats();
   });
 
-  document.querySelectorAll('#sf-adhoc .sf-chip').forEach(btn => {
-    btn.addEventListener('click', () => {
-      statsFilters.adhoc = btn.dataset.adhoc;
-      document.querySelectorAll('#sf-adhoc .sf-chip').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      loadStats();
-    });
+  document.getElementById('sf-adhoc').addEventListener('change', e => {
+    statsFilters.adhoc = e.target.value;
+    loadStats();
   });
 
   document.getElementById('sf-agent').addEventListener('change', e => {
@@ -3914,11 +3948,30 @@ function initStats() {
     loadStats();
   });
 
-  document.getElementById('sf-extra-toggle').addEventListener('click', function() {
-    _statsShowExtra = !_statsShowExtra;
-    this.classList.toggle('active', _statsShowExtra);
-    _rerenderStats();
+  const measures = document.getElementById('sf-measures');
+  const measuresToggle = document.getElementById('sf-measures-toggle');
+  const measuresMenu = document.getElementById('sf-measures-menu');
+  measuresToggle.addEventListener('click', e => {
+    e.stopPropagation();
+    const open = measuresMenu.hidden;
+    measuresMenu.hidden = !open;
+    measuresToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
   });
+  measuresMenu.querySelectorAll('input[type="checkbox"]').forEach(input => {
+    input.addEventListener('change', () => {
+      if (input.checked) _statsMeasures.add(input.value);
+      else _statsMeasures.delete(input.value);
+      _updateStatsMeasureLabel();
+      _rerenderStats();
+    });
+  });
+  document.addEventListener('click', e => {
+    if (!measures.contains(e.target)) {
+      measuresMenu.hidden = true;
+      measuresToggle.setAttribute('aria-expanded', 'false');
+    }
+  });
+  _updateStatsMeasureLabel();
 
   document.getElementById('sc-y1').addEventListener('change', e => {
     statsChartY1 = e.target.value;
@@ -5809,6 +5862,9 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
       const isLast = i === parts.length - 1;
       addCrumb(part, isLast ? null : '/' + parts.slice(0, i + 1).join('/'));
     });
+    if (window.matchMedia?.('(max-width: 768px)').matches) {
+      requestAnimationFrame(() => { breadcrumb.scrollLeft = breadcrumb.scrollWidth; });
+    }
   }
 
   // ── Events ───────────────────────────────────────────────────────────────────

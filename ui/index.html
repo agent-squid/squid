@@ -320,27 +320,47 @@
         </div>
       </div>
       <div id="stats-filters">
-        <span class="sf-label">Range</span>
-        <div class="sf-chips" id="sf-days">
-          <button class="sf-chip" data-days="7" type="button">7d</button>
-          <button class="sf-chip active" data-days="30" type="button">30d</button>
-          <button class="sf-chip" data-days="90" type="button">90d</button>
-          <button class="sf-chip" data-days="0" type="button">All</button>
+        <div class="sf-row sf-primary-row">
+          <label class="sf-field"><span class="sf-label">Range</span>
+            <select id="sf-days">
+              <option value="7">7d</option>
+              <option value="30" selected>30d</option>
+              <option value="90">90d</option>
+              <option value="0">All</option>
+            </select>
+          </label>
+          <label class="sf-field"><span class="sf-label">Topic</span>
+            <select id="sf-topic"><option value="">All</option></select>
+          </label>
+          <label class="sf-field"><span class="sf-label">Agent</span>
+            <select id="sf-agent"><option value="">All</option></select>
+          </label>
         </div>
-        <span class="sf-sep"></span>
-        <span class="sf-label">Agent</span>
-        <select id="sf-agent"><option value="">All</option></select>
-        <span class="sf-label">Topic</span>
-        <select id="sf-topic"><option value="">All</option></select>
-        <span class="sf-sep"></span>
-        <span class="sf-label">Turns</span>
-        <div class="sf-chips" id="sf-adhoc">
-          <button class="sf-chip active" data-adhoc="all" type="button">All</button>
-          <button class="sf-chip" data-adhoc="session" type="button">Session</button>
-          <button class="sf-chip" data-adhoc="adhoc" type="button">Adhoc</button>
+        <span class="sf-break"></span>
+        <div class="sf-row sf-session-row">
+          <label class="sf-field"><span class="sf-label">Session Type</span>
+            <select id="sf-adhoc">
+              <option value="all" selected>All</option>
+              <option value="session">Session</option>
+              <option value="adhoc">Adhoc</option>
+            </select>
+          </label>
+          <span class="sf-sep"></span>
+          <div class="sf-field sf-menu-field">
+            <span class="sf-label">Measures</span>
+            <div class="sf-multi" id="sf-measures">
+              <button id="sf-measures-toggle" class="sf-chip sf-multi-toggle" type="button" aria-haspopup="true" aria-expanded="false">Measures (4)</button>
+              <div id="sf-measures-menu" class="sf-multi-menu" hidden>
+                <label><input type="checkbox" value="sessions" checked> Sessions</label>
+                <label><input type="checkbox" value="turns" checked> Turns</label>
+                <label><input type="checkbox" value="tokens_in" checked> Tokens In</label>
+                <label><input type="checkbox" value="tokens_out" checked> Tokens Out</label>
+                <label><input type="checkbox" value="cost"> Cost</label>
+                <label><input type="checkbox" value="quota"> Quota</label>
+              </div>
+            </div>
+          </div>
         </div>
-        <span class="sf-sep"></span>
-        <button id="sf-extra-toggle" class="sf-chip" type="button">Cost &amp; Quota</button>
       </div>
       <div id="stats-chart-wrap">
         <div id="stats-chart-controls">

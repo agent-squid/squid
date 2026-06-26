@@ -1186,6 +1186,7 @@ def get_stats_by_agent(
                           ss.cache_read_tokens,
                           ss.cache_write_tokens,
                           ss.cost_usd,
+                          ss.quota_delta,
                           COALESCE(cm.turns, 0) AS total_turns
                    FROM (
                        SELECT COALESCE(agent, backend, 'unknown') AS agent,
@@ -1194,7 +1195,9 @@ def get_stats_by_agent(
                               SUM(output_tokens) AS output_tokens,
                               SUM(cache_read_tokens) AS cache_read_tokens,
                               SUM(cache_write_tokens) AS cache_write_tokens,
-                              SUM(cost_usd) AS cost_usd
+                              SUM(cost_usd) AS cost_usd,
+                              SUM(CASE WHEN quota_before IS NOT NULL AND quota_after IS NOT NULL
+                                       THEN quota_after - quota_before ELSE NULL END) AS quota_delta
                        FROM session_stats
                        WHERE {ss_where}
                        GROUP BY agent
@@ -1261,6 +1264,7 @@ def get_stats_by_topic(
                           ss.output_tokens,
                           ss.cache_read_tokens,
                           ss.cost_usd,
+                          ss.quota_delta,
                           COALESCE(cm.turns, 0) AS total_turns
                    FROM (
                        SELECT topic,
@@ -1268,7 +1272,9 @@ def get_stats_by_topic(
                               SUM(input_tokens) AS input_tokens,
                               SUM(output_tokens) AS output_tokens,
                               SUM(cache_read_tokens) AS cache_read_tokens,
-                              SUM(cost_usd) AS cost_usd
+                              SUM(cost_usd) AS cost_usd,
+                              SUM(CASE WHEN quota_before IS NOT NULL AND quota_after IS NOT NULL
+                                       THEN quota_after - quota_before ELSE NULL END) AS quota_delta
                        FROM session_stats
                        WHERE {ss_where}
                        GROUP BY topic

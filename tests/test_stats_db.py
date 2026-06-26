@@ -68,3 +68,31 @@ def test_recent_prompts_returns_limit_unique_routed_prompts(tmp_path, monkeypatc
         "#topic@codex unique prompt 0",
     ]
     assert stats_db.get_recent_prompts(limit=6)[-1] == "#squid@haiku! push the changes"
+
+
+def test_grouped_stats_include_quota_delta(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    stats_db.save_stats(
+        "session-1",
+        {"input_tokens": 10, "output_tokens": 5, "cost_usd": 0.25},
+        topic="squid",
+        agent="codex",
+    )
+    stats_db.save_quota_delta("session-1", 40.0, 42.5)
+    stats_db.save_stats(
+        "session-2",
+        {"input_tokens": 20, "output_tokens": 10, "cost_usd": 0.50},
+        topic="squid",
+        agent="codex",
+    )
+    stats_db.save_quota_delta("session-2", 42.5, 43.0)
+
+    by_topic = stats_db.get_stats_by_topic(days=0)
+    by_agent = stats_db.get_stats_by_agent(days=0)
+
+    assert by_topic[0]["cost_usd"] == 0.75
+    assert by_topic[0]["quota_delta"] == 3.0
+    assert by_agent[0]["cost_usd"] == 0.75
+    assert by_agent[0]["quota_delta"] == 3.0
