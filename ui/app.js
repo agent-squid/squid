@@ -1188,15 +1188,16 @@ form.addEventListener('submit', async (e) => {
   sendMessage(text);
 });
 
-function fmtCtxLabel(adhoc, pinCount = 0, mem = false) {
-  const parts = [adhoc ? 'adhoc' : 'sess'];
+function fmtCtxLabel(adhoc, pinCount = 0, mem = false, sessionTurnCount = 0) {
+  const sessionLabel = !adhoc && sessionTurnCount > 0 ? `sess ${sessionTurnCount}t` : 'sess';
+  const parts = [adhoc ? 'adhoc' : sessionLabel];
   if (mem) parts.push('mem');
-  if (pinCount > 0) parts.push(`${pinCount} pin${pinCount !== 1 ? 's' : ''}`);
+  if (pinCount > 0) parts.push(`${pinCount}p`);
   return parts.join(' · ');
 }
 
-function setCtxLabel(spanEl, adhoc, pinCount = 0, mem = false) {
-  spanEl.textContent = `ctx:${fmtCtxLabel(adhoc, pinCount, mem)}`;
+function setCtxLabel(spanEl, adhoc, pinCount = 0, mem = false, sessionTurnCount = 0) {
+  spanEl.textContent = `ctx: ${fmtCtxLabel(adhoc, pinCount, mem, sessionTurnCount)}`;
 }
 
 const _lookbackUnselected = new Set(); // cleared on N change or after send; never persisted
@@ -1551,6 +1552,7 @@ async function sendMessage(text) {
   let detachedPolling = false;
   let raw = '';
   let resolvedAgent = agent;  // updated by meta event
+  let liveSessionTurnCount = 0;
   const liveToolEvents = [];
   const controller = new AbortController();
 
@@ -1625,6 +1627,9 @@ async function sendMessage(text) {
           bubble.classList.add('history-item');
           if (!statsEl && data.stats) statsEl = addStats(bubble, data.stats, doneTime);
           if (statsEl) messages.appendChild(statsEl);
+          liveSessionTurnCount = parseInt(data.session_turn_count || '0', 10) || liveSessionTurnCount;
+          liveCtxSpan.dataset.sessionTurnCount = String(liveSessionTurnCount);
+          setCtxLabel(liveCtxSpan, !!data.adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
           let storedTools = [];
           if (data.context) {
             try {
@@ -1795,7 +1800,9 @@ async function sendMessage(text) {
                 completionTimestampEl.remove();
                 completionTimestampEl = null;
               }
-              setCtxLabel(liveCtxSpan, !!stats.adhoc);
+              liveSessionTurnCount = parseInt(stats.session_turn_count || '0', 10) || 0;
+              setCtxLabel(liveCtxSpan, !!stats.adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
+              liveCtxSpan.dataset.sessionTurnCount = String(liveSessionTurnCount);
               if (stats.session_id) liveCtxSpan.dataset.sessionId = stats.session_id;
               if (stats.cwd) liveCtxSpan.dataset.cwd = stats.cwd;
             } catch {}
@@ -1842,7 +1849,7 @@ async function sendMessage(text) {
               scrollToBottom();
             }
             // Update ctx label with pin count and store IDs for popup
-            setCtxLabel(liveCtxSpan, adhoc, _contextIds.length, _includeTopicMemory);
+            setCtxLabel(liveCtxSpan, adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
             liveCtxSpan.dataset.pinnedIds = JSON.stringify(_contextIds);
             liveCtxSpan.dataset.mem = _includeTopicMemory ? 'true' : 'false';
             // Record injected pinned IDs keyed by session_id for cross-device correctness
@@ -2424,10 +2431,12 @@ function appendHistoryItem(item, container) {
   const ctxSpan = document.createElement('span');
   ctxSpan.className = 'user-ctx';
   if (item.id != null) ctxSpan.dataset.msgId = String(item.id);
-  setCtxLabel(ctxSpan, !!item.adhoc, _pc.pins.length, _pc.mem);
+  const sessionTurnCount = parseInt(item.session_turn_count || '0', 10) || 0;
+  setCtxLabel(ctxSpan, !!item.adhoc, _pc.pins.length, _pc.mem, sessionTurnCount);
   ctxSpan.dataset.sessionId = item.session_id || '';
   ctxSpan.dataset.cwd = item.stats?.cwd || '';
   ctxSpan.dataset.topic = item.topic || '';
+  ctxSpan.dataset.sessionTurnCount = String(sessionTurnCount);
   ctxSpan.dataset.pinnedIds = JSON.stringify(_pc.pins);
   ctxSpan.dataset.mem = _pc.mem ? 'true' : 'false';
   ctxSpan.addEventListener('click', e => { e.stopPropagation(); showCtxPopup(ctxSpan); });
@@ -5118,6 +5127,7 @@ function showCtxPopup(spanEl) {
   const cwd    = spanEl.dataset.cwd || '';
   const mem    = spanEl.dataset.mem === 'true';
   const topic  = spanEl.dataset.topic || '';
+  const sessionTurnCount = parseInt(spanEl.dataset.sessionTurnCount || '0', 10) || 0;
   const pinIds = JSON.parse(spanEl.dataset.pinnedIds || '[]');
 
   let html = '';
@@ -5126,7 +5136,12 @@ function showCtxPopup(spanEl) {
   }
   if (sid || cwd) {
     html += `<div class="ctx-popup-row"><span class="ctx-popup-key">session</span><span class="ctx-popup-val">${sid}</span></div>`;
+    if (sessionTurnCount > 0) {
+      html += `<div class="ctx-popup-row"><span class="ctx-popup-key">session context</span><span class="ctx-popup-val">${sessionTurnCount} turn${sessionTurnCount !== 1 ? 's' : ''}</span></div>`;
+    }
     if (cwd) html += `<div class="ctx-popup-row"><span class="ctx-popup-key">cwd</span><span class="ctx-popup-val">${cwd}</span></div>`;
+  } else if (sessionTurnCount > 0) {
+    html += `<div class="ctx-popup-row"><span class="ctx-popup-key">session context</span><span class="ctx-popup-val">${sessionTurnCount} turn${sessionTurnCount !== 1 ? 's' : ''}</span></div>`;
   }
   if (mem && topic) {
     if (html) html += `<div class="ctx-popup-divider"></div>`;

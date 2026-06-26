@@ -1,3 +1,5 @@
+import sqlite3
+
 from agent import stats_db
 
 
@@ -109,6 +111,95 @@ def test_session_injected_context_recovers_legacy_memory_flag(tmp_path, monkeypa
         "memory_injected": True,
         "memory_revision": None,
     }
+
+
+def test_history_items_include_session_turn_count(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    old_user_id = stats_db.insert_user_message("squid", "codex", "old")
+    old_asst_id = stats_db.insert_assistant_message("squid", "codex", old_user_id, adhoc=False)
+    stats_db.update_assistant_message(old_asst_id, "old response", "session-old", "done")
+
+    first_user_id = stats_db.insert_user_message("squid", "codex", "first")
+    first_asst_id = stats_db.insert_assistant_message("squid", "codex", first_user_id, adhoc=False)
+    stats_db.update_assistant_message(first_asst_id, "first response", "session-1", "done")
+
+    adhoc_user_id = stats_db.insert_user_message("squid", "codex", "adhoc")
+    adhoc_asst_id = stats_db.insert_assistant_message("squid", "codex", adhoc_user_id, adhoc=True)
+    stats_db.update_assistant_message(adhoc_asst_id, "adhoc response", None, "done")
+
+    second_user_id = stats_db.insert_user_message("squid", "codex", "second")
+    second_asst_id = stats_db.insert_assistant_message("squid", "codex", second_user_id, adhoc=False)
+    stats_db.update_assistant_message(second_asst_id, "second response", "session-1", "done")
+
+    pending_user_id = stats_db.insert_user_message("squid", "codex", "pending")
+    pending_asst_id = stats_db.insert_assistant_message("squid", "codex", pending_user_id, adhoc=False)
+
+    history = stats_db.get_messages_flat(topic="squid", agent="codex", limit=10)["items"]
+
+    by_prompt = {item["prompt"]: item for item in history}
+    assert by_prompt["old"]["session_turn_count"] == 1
+    assert by_prompt["first"]["session_turn_count"] == 1
+    assert by_prompt["adhoc"]["session_turn_count"] is None
+    assert by_prompt["second"]["session_turn_count"] == 2
+    assert by_prompt["pending"]["session_turn_count"] is None
+    assert stats_db.ensure_session_turn_index(pending_asst_id, "session-1") == 3
+    assert stats_db.get_message(pending_asst_id)["session_turn_count"] == 3
+
+
+def test_mark_orphaned_pending_preserves_contentful_assistant_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    content_user_id = stats_db.insert_user_message("squid", "codex", "contentful")
+    content_asst_id = stats_db.insert_assistant_message("squid", "codex", content_user_id, adhoc=False)
+    stats_db.update_assistant_message(content_asst_id, "recovered content", "session-1", "pending")
+
+    empty_user_id = stats_db.insert_user_message("squid", "codex", "empty")
+    empty_asst_id = stats_db.insert_assistant_message("squid", "codex", empty_user_id, adhoc=False)
+
+    assert stats_db.mark_orphaned_pending() == 2
+    assert stats_db.get_message(content_asst_id)["status"] == "done"
+    assert stats_db.get_message(empty_asst_id)["status"] == "error"
+
+
+def test_init_db_migrates_existing_chat_messages_turn_index(tmp_path, monkeypatch):
+    db_path = tmp_path / "squid.db"
+    monkeypatch.setattr(stats_db, "_DB_PATH", db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """CREATE TABLE chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                topic TEXT NOT NULL DEFAULT 'default',
+                agent TEXT,
+                session_id TEXT,
+                role TEXT NOT NULL,
+                content TEXT,
+                reply_to INTEGER,
+                status TEXT NOT NULL DEFAULT 'pending',
+                adhoc INTEGER DEFAULT 0,
+                context TEXT,
+                quota_delta REAL,
+                quota_before REAL,
+                quota_after REAL,
+                created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )"""
+        )
+        conn.execute("INSERT INTO chat_messages (topic, agent, role, content, status) VALUES ('squid', 'codex', 'user', 'first', 'done')")
+        conn.execute("INSERT INTO chat_messages (topic, agent, role, content, status, reply_to, session_id, adhoc) VALUES ('squid', 'codex', 'assistant', 'one', 'done', 1, 'session-1', 0)")
+        conn.execute("INSERT INTO chat_messages (topic, agent, role, content, status) VALUES ('squid', 'codex', 'user', 'adhoc', 'done')")
+        conn.execute("INSERT INTO chat_messages (topic, agent, role, content, status, reply_to, session_id, adhoc) VALUES ('squid', 'codex', 'assistant', 'adhoc', 'done', 3, 'adhoc-session', 1)")
+        conn.execute("INSERT INTO chat_messages (topic, agent, role, content, status) VALUES ('squid', 'codex', 'user', 'second', 'done')")
+        conn.execute("INSERT INTO chat_messages (topic, agent, role, content, status, reply_to, session_id, adhoc) VALUES ('squid', 'codex', 'assistant', 'two', 'done', 5, 'session-1', 0)")
+
+    stats_db.init_db()
+
+    rows = stats_db.get_messages_flat(topic="squid", agent="codex", limit=10)["items"]
+    by_prompt = {row["prompt"]: row for row in rows}
+    assert by_prompt["first"]["session_turn_count"] == 1
+    assert by_prompt["second"]["session_turn_count"] == 2
+    assert by_prompt["adhoc"]["session_turn_count"] is None
 
 
 def test_grouped_stats_include_quota_delta(tmp_path, monkeypatch):

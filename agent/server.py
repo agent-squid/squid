@@ -68,6 +68,7 @@ from .stats_db import (
     insert_user_message, insert_assistant_message, update_assistant_message,
     update_message_quota_snapshot,
     get_context_history, get_messages_by_ids, mark_orphaned_pending, get_message,
+    ensure_session_turn_index,
     get_session_injected_context,
     get_topic_session, clear_topic_session,
     delete_topic, delete_topic_agent, hide_topic, set_topic_hidden, get_topic_agents, get_topic_agent_history,
@@ -496,6 +497,8 @@ async def stream_response(
             if isinstance(chunk, dict) and "_stats" in chunk:
                 stats = dict(chunk["_stats"])
                 session_id = stats.get("session_id")
+                if session_id and not adhoc:
+                    stats["session_turn_count"] = ensure_session_turn_index(asst_msg_id, session_id)
                 yield sse_event("stats", json.dumps(stats))
 
             elif isinstance(chunk, dict) and "_tool" in chunk:
@@ -815,6 +818,21 @@ async def message_status(msg_id: int):
     row = get_message(msg_id)
     if not row:
         return JSONResponse({"error": "not found"}, status_code=404)
+    if (
+        row.get("status") == "pending"
+        and row.get("role") == "assistant"
+        and row.get("content")
+        and not any(proc.get("msg_id") == msg_id for proc in list_active_procs())
+    ):
+        update_assistant_message(
+            msg_id,
+            row.get("content") or "",
+            row.get("session_id"),
+            "done",
+            context=row.get("context"),
+            only_if_pending=True,
+        )
+        row = get_message(msg_id)
     return JSONResponse(row)
 
 

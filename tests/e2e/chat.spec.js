@@ -116,6 +116,39 @@ test.describe('response bubble', () => {
     await expect(page.locator('#ctx-popup')).toContainText('message#1');
   });
 
+  test('context indicator shows compact session turn, memory, and pin counts', async ({ page }) => {
+    await page.route('**/topics/*/memory', r => r.fulfill({ json: {
+      topic: 'squid',
+      exists: true,
+      content: 'Project preference',
+      path: '~/.squid/context/topics/squid/memory.md',
+    }}));
+    await page.route('**/topics/squid/session?agent=claude', r => r.fulfill({ json: { session_id: null, cwd: null } }));
+    await page.evaluate(() => {
+      localStorage.setItem('pinnedItems', JSON.stringify([
+        { id: 7, topic: 'squid', agent: 'claude', session_id: 'other', content: 'Pinned one' },
+        { id: 8, topic: 'squid', agent: 'claude', session_id: 'other', content: 'Pinned two' },
+      ]));
+    });
+    await page.route('**/chat', r => r.fulfill({
+      status: 200,
+      headers: SSE_HEADERS,
+      body: sse(
+        META,
+        { data: 'Response text' },
+        { event: 'stats', data: { session_id: 'test-sid', input_tokens: 10, output_tokens: 5, adhoc: false, lookback: 0, session_turn_count: 18 } },
+        DONE,
+      ),
+    }));
+
+    await sendMsg(page, '#squid@claude hello');
+    const ctx = page.locator(RESPONSE).locator('.user-ctx');
+    await expect(ctx).toHaveText('ctx: sess 18t · mem · 2p');
+
+    await ctx.click();
+    await expect(page.locator('#ctx-popup')).toContainText('session context18 turns');
+  });
+
   test('content is markdown-rendered in final bubble', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200, headers: SSE_HEADERS,

@@ -70,6 +70,7 @@ _TABLES = [
         status      TEXT NOT NULL DEFAULT 'pending',
         adhoc       INTEGER DEFAULT 0,
         context     TEXT,
+        session_turn_index INTEGER,
         quota_delta  REAL,
         quota_before REAL,
         quota_after  REAL,
@@ -120,6 +121,19 @@ _TABLES = [
 # Add future schema changes here as new entries after each release.
 _MIGRATIONS: list[str] = [
     "ALTER TABLE topic_sessions ADD COLUMN backend_fingerprint TEXT",
+    "ALTER TABLE chat_messages ADD COLUMN session_turn_index INTEGER",
+    "DROP INDEX IF EXISTS idx_chat_messages_session_turns",
+]
+
+_DATA_MIGRATIONS: list[tuple[str, str]] = [
+    ("backfill_session_turn_index", """WITH ranked AS (
+           SELECT id, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY id) AS rn
+           FROM chat_messages
+           WHERE session_id IS NOT NULL AND role = 'assistant' AND COALESCE(adhoc, 0) = 0
+       )
+       UPDATE chat_messages
+       SET session_turn_index = (SELECT rn FROM ranked WHERE ranked.id = chat_messages.id)
+       WHERE session_turn_index IS NULL AND id IN (SELECT id FROM ranked)"""),
 ]
 
 
@@ -139,6 +153,20 @@ def init_db() -> None:
                 conn.execute(sql)
             except sqlite3.OperationalError:
                 pass
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS schema_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )"""
+        )
+        for name, sql in _DATA_MIGRATIONS:
+            applied = conn.execute(
+                "SELECT 1 FROM schema_migrations WHERE name = ?", (name,)
+            ).fetchone()
+            if applied:
+                continue
+            conn.execute(sql)
+            conn.execute("INSERT INTO schema_migrations (name) VALUES (?)", (name,))
         # Seed opencode with its free default model so it works out of the box
         # (must run before the generic loop so the model is set on first insert)
         opencode_backend = BACKENDS.get("opencode")
@@ -559,6 +587,44 @@ def insert_assistant_message(
         return cur.lastrowid
 
 
+def _ensure_session_turn_index(conn: sqlite3.Connection, msg_id: int, session_id: Optional[str]) -> Optional[int]:
+    if not session_id:
+        return None
+    row = conn.execute(
+        """SELECT role, adhoc, session_id, session_turn_index FROM chat_messages
+           WHERE id = ?""",
+        (msg_id,),
+    ).fetchone()
+    if not row or row["role"] != "assistant" or row["adhoc"]:
+        return None
+    if row["session_turn_index"] is not None:
+        if row["session_id"] is None:
+            conn.execute(
+                "UPDATE chat_messages SET session_id = ? WHERE id = ? AND session_id IS NULL",
+                (session_id, msg_id),
+            )
+        return int(row["session_turn_index"])
+    prev = conn.execute(
+        """SELECT COALESCE(MAX(session_turn_index), 0)
+           FROM chat_messages
+           WHERE session_id = ? AND role = 'assistant'
+             AND COALESCE(adhoc, 0) = 0 AND id != ?""",
+        (session_id, msg_id),
+    ).fetchone()[0] or 0
+    turn_index = int(prev) + 1
+    conn.execute(
+        """UPDATE chat_messages SET session_id = COALESCE(session_id, ?), session_turn_index = ?
+           WHERE id = ? AND session_turn_index IS NULL""",
+        (session_id, turn_index, msg_id),
+    )
+    return turn_index
+
+
+def ensure_session_turn_index(msg_id: int, session_id: Optional[str]) -> Optional[int]:
+    with _connect() as conn:
+        return _ensure_session_turn_index(conn, msg_id, session_id)
+
+
 def update_assistant_message(
     msg_id: int, content: str, session_id: Optional[str], status: str = "done",
     context: Optional[str] = None,
@@ -566,16 +632,20 @@ def update_assistant_message(
 ) -> None:
     with _connect() as conn:
         if only_if_pending:
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE chat_messages SET content=?, session_id=?, status=?, context=?"
                 " WHERE id=? AND status='pending'",
                 (content, session_id, status, context, msg_id),
             )
+            if cur.rowcount:
+                _ensure_session_turn_index(conn, msg_id, session_id)
         else:
             conn.execute(
                 "UPDATE chat_messages SET content=?, session_id=?, status=?, context=? WHERE id=?",
                 (content, session_id, status, context, msg_id),
             )
+            if status == "done":
+                _ensure_session_turn_index(conn, msg_id, session_id)
 
 
 def update_message_quota_snapshot(msg_id: int, before: float, after: float) -> None:
@@ -765,8 +835,15 @@ def get_topic_messages_for_period(
 
 def mark_orphaned_pending() -> int:
     with _connect() as conn:
-        cur = conn.execute("UPDATE chat_messages SET status='error' WHERE status='pending'")
-        return cur.rowcount
+        done = conn.execute(
+            """UPDATE chat_messages SET status='done'
+               WHERE status='pending' AND role='assistant'
+                 AND content IS NOT NULL AND length(content) > 0"""
+        )
+        error = conn.execute(
+            "UPDATE chat_messages SET status='error' WHERE status='pending'"
+        )
+        return done.rowcount + error.rowcount
 
 
 def get_message(msg_id: int) -> Optional[dict]:
@@ -781,6 +858,7 @@ def get_message(msg_id: int) -> Optional[dict]:
                       m.context, m.created_at AS timestamp, m.reply_to,
                       m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
                       u.content AS prompt, u.context AS prompt_context,
+                      m.session_turn_index AS session_turn_count,
                       s.input_tokens, s.output_tokens, s.cache_read_tokens,
                       s.cache_write_tokens, s.history_input_tokens,
                       s.cost_usd, s.duration_ms, s.lookback,
@@ -825,6 +903,7 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
                        m.context, m.created_at AS timestamp, m.reply_to,
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
                        u.content AS prompt, u.context AS prompt_context,
+                       m.session_turn_index AS session_turn_count,
                        s.input_tokens, s.output_tokens, s.cache_read_tokens,
                        s.cache_write_tokens, s.history_input_tokens,
                        s.cost_usd, s.duration_ms, s.lookback,
@@ -897,6 +976,7 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
                        m.context, m.created_at AS timestamp, m.reply_to,
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
                        u.content AS prompt, u.context AS prompt_context,
+                       m.session_turn_index AS session_turn_count,
                        s.input_tokens, s.output_tokens, s.cache_read_tokens,
                        s.cache_write_tokens, s.history_input_tokens,
                        s.cost_usd, s.duration_ms, s.lookback,
