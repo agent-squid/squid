@@ -1061,12 +1061,20 @@ async def usage_stats(
     agent: str = "",
     topic: str = "",
     adhoc: str = "all",
+    tz_offset_minutes: int = 0,
 ):
     if group == "topic":
         return JSONResponse(get_stats_by_topic(days=days, agent=agent, topic=topic, adhoc=adhoc))
     if group == "agent":
         return JSONResponse(get_stats_by_agent(days=days, agent=agent, topic=topic, adhoc=adhoc))
-    return JSONResponse(get_aggregated_stats(period=period, days=days, agent=agent, topic=topic, adhoc=adhoc))
+    return JSONResponse(get_aggregated_stats(
+        period=period,
+        days=days,
+        agent=agent,
+        topic=topic,
+        adhoc=adhoc,
+        tz_offset_minutes=tz_offset_minutes,
+    ))
 
 
 @app.post("/stats/quota-delta")

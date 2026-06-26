@@ -3815,6 +3815,7 @@ async function loadStats() {
     params.set('period', statsPeriod);
   }
   params.set('days', statsFilters.days);
+  params.set('tz_offset_minutes', new Date().getTimezoneOffset());
   if (statsFilters.agent) params.set('agent', statsFilters.agent);
   if (statsFilters.topic) params.set('topic', statsFilters.topic);
   if (statsFilters.adhoc !== 'all') params.set('adhoc', statsFilters.adhoc);

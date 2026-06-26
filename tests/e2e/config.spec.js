@@ -95,8 +95,10 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await page.route('**/stats/filters', route => route.fulfill({
     json: { agents: ['codex'], topics: ['squid'] },
   }));
+  const statsRequests = [];
   await page.route('**/stats?**', route => {
     const url = new URL(route.request().url());
+    statsRequests.push(url);
     return route.fulfill({
       json: [{
         period: url.searchParams.get('period') === 'hourly' ? '2026-06-26 14:00' : '2026-06-26',
@@ -113,6 +115,7 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await page.goto('/');
   await page.getByRole('button', { name: 'Analytics' }).click();
   await expect(page.locator('#stats-content table')).toBeVisible();
+  expect(statsRequests.at(-1).searchParams.get('tz_offset_minutes')).not.toBeNull();
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (4)');
   await expect(page.locator('#stats-content th', { hasText: 'Sessions' })).toBeVisible();
   await expect(page.locator('#stats-content th', { hasText: 'Turns' })).toBeVisible();
@@ -138,6 +141,8 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect(page.locator('#stats-content th', { hasText: 'Tokens Out' })).toHaveCount(0);
 
   await page.getByRole('button', { name: 'Hourly' }).click();
+  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('period')).toBe('hourly');
+  expect(statsRequests.at(-1).searchParams.get('tz_offset_minutes')).not.toBeNull();
   await expect(page.locator('#stats-content tbody td').first()).toHaveText('06-26 14:00');
   await expect(page.locator('#stats-content tbody td').first()).not.toContainText('2026');
 });
