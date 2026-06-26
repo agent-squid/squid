@@ -130,6 +130,7 @@ test('pinned item from current session shows in-session skip', async ({ page }) 
   await expect(page.locator('.pin-item-status')).toContainText('in session');
   await expect(page.locator('.pin-item-status')).toContainText('skip');
   await expect(page.locator('.pin-item-status')).toContainText('claude');
+  await expect(page.locator('#pin-btn')).not.toHaveClass(/has-pins/);
 });
 
 test('/clear invalidates cached session id so same-session pin can inject', async ({ page }) => {
@@ -412,4 +413,5 @@ test('active session skips topic memory by default', async ({ page }) => {
 
   await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toBeVisible();
   expect(capturedBody?.include_topic_memory).toBeUndefined();
+  await expect(page.locator('#pin-btn')).not.toHaveClass(/has-pins/);
 });

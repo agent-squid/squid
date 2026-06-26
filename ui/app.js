@@ -1669,24 +1669,10 @@ async function sendMessage(text) {
       _effectiveAgent = topics.find(t => t.name === topic)?.agent || null;
     } catch {}
   }
-  const _taKey = `${topic}@${_effectiveAgent || '_'}`;
-  const _injected = getInjectedInto();
-  const _currentSid = _sessionIds[_taKey] || null;
   const _includeTopicMemory = (await _topicMemoryStateForSend(topic, _effectiveAgent, adhoc)).selected;
   const _lookbackItems = _activeLookbackItems(adhoc, lookback);
   const _lookbackIds = _lookbackItems.map(item => item.id);
-  const _pinnedIds = getPinnedItems()
-    .filter(item => {
-      // Skip pins from the current session — --resume already has that context
-      const sameSession = item.session_id && _currentSid && item.session_id === _currentSid;
-      if (sameSession && !adhoc) return false;
-      // Fresh adhoc turn (no lookback) — no accumulated context, always inject
-      if (adhoc && lookback === 0) return true;
-      // Skip already-injected items (keyed by session_id for cross-device correctness)
-      if (_currentSid && (_injected[_currentSid] || []).includes(item.id)) return false;
-      return true;
-    })
-    .map(item => item.id);
+  const _pinnedIds = _injectablePinnedIds(topic, _effectiveAgent, adhoc, lookback);
   const _contextIds = [...new Set([..._lookbackIds, ..._pinnedIds])];
 
   try {
@@ -5244,9 +5230,28 @@ async function _topicMemoryStateForSend(topic, agent, adhoc) {
   return { selected: _memorySelectionOverrides[key] ?? defaultSelected };
 }
 
+function _injectablePinnedIds(topic, agent, adhoc, lookback, items = getPinnedItems()) {
+  const taKey = `${topic}@${agent || '_'}`;
+  const currentSid = _sessionIds[taKey] || null;
+  const injected = getInjectedInto();
+  return items
+    .filter(item => {
+      const sameSession = item.session_id && currentSid && item.session_id === currentSid;
+      if (sameSession && !adhoc) return false;
+      if (adhoc && lookback === 0) return true;
+      if (currentSid && (injected[currentSid] || []).includes(item.id)) return false;
+      return true;
+    })
+    .map(item => item.id);
+}
+
 function updatePinCount() {
   const { topic, agent, adhoc, lookback } = _currentContextTarget();
-  const n = getPinnedItems().length + _activeLookbackItems(adhoc, lookback).length;
+  const ids = [
+    ..._activeLookbackItems(adhoc, lookback).map(item => item.id),
+    ..._injectablePinnedIds(topic, agent, adhoc, lookback),
+  ];
+  const n = new Set(ids).size;
   const memorySelected = _topicMemoryState().selected;
   const total = n + (memorySelected ? 1 : 0);
   pinCountEl.textContent = total || '';
