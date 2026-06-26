@@ -4819,13 +4819,33 @@ async function updateAutocomplete() {
   } else if (editingExpandedSlug) {
     hideAutocomplete();
   } else if (promptHistory.length) {
-    _acRender(matchingPromptHistory(val).map(ph => ({
-      label: `<span class="ac-history-prompt">${escapeHtml(truncate(ph, 70))}</span>`,
-      insert: ph,
-      trail: false,
-      clearChip: /^[#@]/.test(ph),
-      collapseSlug: ph.startsWith('#'),
-    })));
+    _acRender(matchingPromptHistory(val).map(ph => {
+      const { route, prompt } = splitPromptHistoryEntry(ph);
+      let label;
+      if (route) {
+        const rm = route.match(/^#(\w+)(?:@(\w+))?(!(?:(\d+))?)?$/);
+        if (rm) {
+          const topic = rm[1], agent = rm[2], adhoc = rm[3] || '', lookback = rm[4] || '';
+          label = `<span class="ac-topic">#${escapeHtml(topic)}</span>`;
+          if (agent) {
+            const display = `@${escapeHtml(agent)}${escapeHtml(adhoc)}${lookback}`;
+            label += `<span class="ac-agent"${_agentStyleAttr(agent)}>${escapeHtml(display)}</span>`;
+          }
+          label += ` <span class="ac-history-prompt">${escapeHtml(truncate(prompt, 55))}</span>`;
+        } else {
+          label = `<span class="ac-history-prompt">${escapeHtml(truncate(ph, 70))}</span>`;
+        }
+      } else {
+        label = `<span class="ac-history-prompt">${escapeHtml(truncate(ph, 70))}</span>`;
+      }
+      return {
+        label,
+        insert: ph,
+        trail: false,
+        clearChip: /^[#@]/.test(ph),
+        collapseSlug: ph.startsWith('#'),
+      };
+    }));
   } else {
     hideAutocomplete();
   }
