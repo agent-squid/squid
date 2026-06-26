@@ -64,6 +64,7 @@ class Backend:
     provider: Optional[str] = None
     api_key: Any = None
     base_url: Optional[str] = None
+    model: Optional[str] = None
     gauge: Gauge = field(default_factory=Gauge)
 
     @property
@@ -240,10 +241,13 @@ def _validate_backend(backend_id: str, raw: Any) -> Backend:
     base_url = raw.get("base_url")
     if base_url is not None and (not isinstance(base_url, str) or not base_url):
         raise ValueError(f"Backend {backend_id!r} base_url must be a non-empty string")
+    model = raw.get("model")
+    if model is not None and (not isinstance(model, str) or not model):
+        raise ValueError(f"Backend {backend_id!r} model must be a non-empty string")
     api_key = _validate_secret(backend_id, "api_key", raw.get("api_key"))
     gauge = _validate_gauge(backend_id, raw.get("gauge"))
     return Backend(backend_id, driver, color.upper(), label, env, settings, tuple(args),
-                   provider, api_key, base_url, gauge)
+                   provider, api_key, base_url, model, gauge)
 
 
 def _configured_backends() -> dict[str, Any]:

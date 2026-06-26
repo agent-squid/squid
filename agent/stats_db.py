@@ -180,8 +180,8 @@ def init_db() -> None:
         for backend, definition in BACKENDS.items():
             if definition.available:
                 conn.execute(
-                    "INSERT OR IGNORE INTO agents (name, backend) VALUES (?, ?)",
-                    (backend, backend),
+                    "INSERT OR IGNORE INTO agents (name, backend, model) VALUES (?, ?, ?)",
+                    (backend, backend, definition.model),
                 )
         # Do not inherit Claude Code's changing default model. Pin native Claude
         # agents that have never had an explicit model selected.

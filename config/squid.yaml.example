@@ -44,7 +44,9 @@ backends:
       title: OpenCode-managed limits
 
   # DeepSeek through Claude Code's Anthropic-compatible transport.
-  # Export DEEPSEEK_API_KEY before starting Squid.
+  # api_key accepts either a literal string or an env var reference:
+  #   api_key: "sk-..."                 # inline
+  #   api_key: {env: DEEPSEEK_API_KEY}  # read from environment variable
   deepcla:
     driver: claude
     label: DeepSeek
@@ -57,12 +59,18 @@ backends:
 
   # Canonical base_url/api_key fields are translated into driver-specific
   # environment and settings. Raw env/settings/args remain available as escapes.
+  #
+  # Example: local model served by vllm-mlx (or any OpenAI-compatible server).
+  #   base_url must point to the server's /v1 endpoint.
+  #   model must match the --served-model-name passed to the server; codex cannot
+  #   auto-discover the model name from a local server's /v1/models response.
   # qwen:
   #   driver: codex
   #   label: Qwen
   #   color: "#10A37F"
   #   provider: qwen
   #   base_url: "http://127.0.0.1:9000/v1"
+  #   model: qwen2.5-coder-7b-4bit  # must match --served-model-name on the server
   #   gauge:
   #     type: static
   #     text: Local
