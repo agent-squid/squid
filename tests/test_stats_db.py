@@ -70,6 +70,47 @@ def test_recent_prompts_returns_limit_unique_routed_prompts(tmp_path, monkeypatc
     assert stats_db.get_recent_prompts(limit=6)[-1] == "#squid@haiku! push the changes"
 
 
+def test_session_injected_context_recovers_pins_and_memory_revision(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user_id = stats_db.insert_user_message(
+        "squid",
+        "codex",
+        "use context",
+        context_ids=[7, 7, 8],
+        mem=True,
+        mem_revision="rev-1",
+    )
+    assistant_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
+    stats_db.update_assistant_message(assistant_id, "done", "session-1", "done")
+
+    context = stats_db.get_session_injected_context("session-1")
+
+    assert context == {
+        "injected_ids": [7, 8],
+        "memory_injected": True,
+        "memory_revision": "rev-1",
+    }
+
+
+def test_session_injected_context_recovers_legacy_memory_flag(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user_id = stats_db.insert_user_message("squid", "codex", "use memory", mem=True)
+    assistant_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
+    stats_db.update_assistant_message(assistant_id, "done", "session-1", "done")
+
+    context = stats_db.get_session_injected_context("session-1")
+
+    assert context == {
+        "injected_ids": [],
+        "memory_injected": True,
+        "memory_revision": None,
+    }
+
+
 def test_grouped_stats_include_quota_delta(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

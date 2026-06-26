@@ -1,3 +1,5 @@
+import hashlib
+
 import pytest
 
 from agent import memory
@@ -29,6 +31,7 @@ def test_missing_topic_memory_does_not_create_dir(tmp_path, monkeypatch):
     assert data["topic"] == "squid"
     assert data["exists"] is False
     assert data["content"] == ""
+    assert data["revision"] == hashlib.sha256(b"").hexdigest()
     assert not (tmp_path / "topics").exists()
 
 
@@ -39,7 +42,19 @@ def test_write_topic_memory_creates_lowercase_path(tmp_path, monkeypatch):
 
     assert data["topic"] == "squid"
     assert data["exists"] is True
+    assert data["revision"] == hashlib.sha256(b"Use explicit context.").hexdigest()
     assert (tmp_path / "topics" / "squid" / "memory.md").read_text() == "Use explicit context."
+
+
+def test_topic_memory_revision_changes_only_when_content_changes(tmp_path, monkeypatch):
+    monkeypatch.setattr(memory, "TOPICS_CONTEXT_DIR", tmp_path / "topics")
+
+    first = write_topic_memory("squid", "Use explicit context.")
+    same = write_topic_memory("squid", "Use explicit context.")
+    changed = write_topic_memory("squid", "Use updated context.")
+
+    assert same["revision"] == first["revision"]
+    assert changed["revision"] != first["revision"]
 
 
 def test_topic_memory_prompt_block_skips_empty_and_wraps_content(tmp_path, monkeypatch):

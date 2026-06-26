@@ -300,6 +300,92 @@ test('fresh session send includes topic memory when memory exists', async ({ pag
   expect(capturedBody?.include_topic_memory).toBe(true);
 });
 
+test('topic memory reinjects when revision changes after prior injection', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+
+  let memoryContent = MEMORY_WITH_SKIP;
+  let memoryRevision = 'rev-1';
+  await page.route('**/topics/squid/memory', r => r.fulfill({
+    json: {
+      topic: 'squid', exists: true, content: memoryContent, revision: memoryRevision,
+      path: '~/.squid/context/topics/squid/memory.md',
+      squid: { code_roots: [], code_roots_skipped: true, code_roots_missing: false },
+    },
+  }));
+  await page.route('**/topics/squid/session?agent=claude', r => r.fulfill({
+    json: { session_id: null, cwd: null },
+  }));
+
+  const capturedBodies = [];
+  await page.route('**/chat', async route => {
+    capturedBodies.push(route.request().postDataJSON());
+    await route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(META, { data: `response ${capturedBodies.length}` }, DONE),
+    });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '#squid@claude first');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toHaveCount(1);
+
+  await page.fill('#input', '#squid@claude second');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toHaveCount(2);
+
+  memoryContent = `${MEMORY_WITH_SKIP}\nFresh update.`;
+  memoryRevision = 'rev-2';
+
+  await page.fill('#input', '#squid@claude third');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toHaveCount(3);
+
+  expect(capturedBodies.map(body => body.include_topic_memory)).toEqual([true, undefined, true]);
+});
+
+test('context cart highlights stale topic memory from session revision', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/topics/squid/memory', r => r.fulfill({
+    json: {
+      topic: 'squid', exists: true, content: `${MEMORY_WITH_SKIP}\nFresh update.`, revision: 'rev-2',
+      path: '~/.squid/context/topics/squid/memory.md',
+      squid: { code_roots: [], code_roots_skipped: true, code_roots_missing: false },
+    },
+  }));
+  await page.route('**/topics/squid/session?agent=claude', r => r.fulfill({
+    json: { session_id: 'active-session', cwd: '/tmp/squid', injected_ids: [], memory_revision: 'rev-1' },
+  }));
+
+  await page.goto('/');
+  await page.fill('#input', '#squid@claude hello');
+  await page.click('#pin-btn');
+
+  await expect(page.locator('.memory-item-status')).toContainText('will inject');
+  await expect(page.locator('[data-memory-toggle]')).toHaveText('On');
+});
+
+test('context cart highlights legacy injected topic memory without revision', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/topics/squid/memory', r => r.fulfill({
+    json: {
+      topic: 'squid', exists: true, content: `${MEMORY_WITH_SKIP}\nFresh update.`, revision: 'rev-2',
+      path: '~/.squid/context/topics/squid/memory.md',
+      squid: { code_roots: [], code_roots_skipped: true, code_roots_missing: false },
+    },
+  }));
+  await page.route('**/topics/squid/session?agent=claude', r => r.fulfill({
+    json: { session_id: 'active-session', cwd: '/tmp/squid', injected_ids: [], memory_injected: true, memory_revision: null },
+  }));
+
+  await page.goto('/');
+  await page.fill('#input', '#squid@claude hello');
+  await page.click('#pin-btn');
+
+  await expect(page.locator('.memory-item-status')).toContainText('will inject');
+  await expect(page.locator('[data-memory-toggle]')).toHaveText('On');
+});
+
 test('/clear memory injects once and is unselected immediately after send', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
   await page.route('**/topics/squid/memory', r => r.fulfill({

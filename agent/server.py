@@ -55,7 +55,6 @@ from .memory import (
     code_roots_prompt_block,
     read_topic_memory,
     topic_memory_path,
-    topic_memory_prompt_block,
     topic_memory_squid_config,
     write_topic_memory_squid_code_roots,
     write_topic_memory,
@@ -69,7 +68,7 @@ from .stats_db import (
     insert_user_message, insert_assistant_message, update_assistant_message,
     update_message_quota_snapshot,
     get_context_history, get_messages_by_ids, mark_orphaned_pending, get_message,
-    get_session_injected_ids,
+    get_session_injected_context,
     get_topic_session, clear_topic_session,
     delete_topic, delete_topic_agent, hide_topic, set_topic_hidden, get_topic_agents, get_topic_agent_history,
     clear_agent_sessions, get_agent_sessions,
@@ -628,10 +627,18 @@ async def chat(req: ChatRequest):
         if code_roots_block:
             prefix_blocks.append(code_roots_block)
     tracking_roots: list[str] = code_roots
+    memory_revision: Optional[str] = None
     if req.include_topic_memory:
-        memory_block = topic_memory_prompt_block(topic)
-        if memory_block:
-            prefix_blocks.append(memory_block)
+        memory_data = read_topic_memory(topic)
+        memory_content = memory_data["content"].strip()
+        if memory_content:
+            memory_revision = memory_data.get("revision")
+            prefix_blocks.append("\n".join([
+                "Persistent user-editable topic memory:",
+                f'<topic_memory topic="{memory_data["topic"]}">',
+                memory_content,
+                "</topic_memory>",
+            ]))
 
     if req.pinned_ids:
         lookback_id_set = set(context_ids or [])
@@ -656,7 +663,9 @@ async def chat(req: ChatRequest):
 
     stored_context_ids = list({*(context_ids or []), *(req.pinned_ids or [])}) or None
     user_msg_id = insert_user_message(topic, resolved_agent, req.message,
-                                      context_ids=stored_context_ids, mem=req.include_topic_memory)
+                                      context_ids=stored_context_ids,
+                                      mem=bool(memory_revision),
+                                      mem_revision=memory_revision)
     asst_msg_id = insert_assistant_message(topic, resolved_agent, user_msg_id, adhoc=req.adhoc)
 
     log.info(
@@ -918,9 +927,9 @@ async def get_session(topic: str, agent: str):
     stored = get_topic_session(topic, agent)
     if not stored:
         return JSONResponse({"session_id": None, "cwd": None})
-    injected_ids = get_session_injected_ids(stored["session_id"])
+    injected_context = get_session_injected_context(stored["session_id"])
     return JSONResponse({"session_id": stored["session_id"], "cwd": stored["cwd"],
-                         "injected_ids": injected_ids})
+                         **injected_context})
 
 
 @app.delete("/topics/{topic}/agent")

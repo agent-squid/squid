@@ -286,7 +286,7 @@ document.getElementById('help-close').addEventListener('click', closeHelp);
 
 // ── per-topic session tracking ────────────────────────────────────────────────
 const _sessionIds = {}; // `${topic}@${agent|_}` → most recent session_id
-const _memoryInjectedInto = {}; // `${topic}@${agent|_}` → topic memory already sent to the current session
+const _memoryInjectedInto = {}; // `${topic}@${agent|_}` → topic memory revision sent to the current session
 let _agentsCache = null;
 let _agentsCachePromise = null;
 let _squidHome = '/tmp/squid'; // updated from /health on first loadAgents()
@@ -1669,7 +1669,8 @@ async function sendMessage(text) {
       _effectiveAgent = topics.find(t => t.name === topic)?.agent || null;
     } catch {}
   }
-  const _includeTopicMemory = (await _topicMemoryStateForSend(topic, _effectiveAgent, adhoc)).selected;
+  const _topicMemoryForSend = await _topicMemoryStateForSend(topic, _effectiveAgent, adhoc);
+  const _includeTopicMemory = _topicMemoryForSend.selected;
   const _lookbackItems = _activeLookbackItems(adhoc, lookback);
   const _lookbackIds = _lookbackItems.map(item => item.id);
   const _pinnedIds = _injectablePinnedIds(topic, _effectiveAgent, adhoc, lookback);
@@ -1703,8 +1704,8 @@ async function sendMessage(text) {
     _lastLookbackN = 0;
     if (_includeTopicMemory && !adhoc) {
       const memoryKey = _memoryInjectedKey(topic, _effectiveAgent);
-      _memoryInjectedInto[memoryKey] = true;
-      _memorySelectionOverrides[_memoryOverrideKey(topic, _effectiveAgent, false)] = false;
+      _memoryInjectedInto[memoryKey] = _topicMemoryForSend.revision;
+      delete _memorySelectionOverrides[_memoryOverrideKey(topic, _effectiveAgent, false)];
       updatePinCount();
       if (pinPanel.classList.contains('open')) renderPinPanel();
     }
@@ -5256,6 +5257,27 @@ function _memoryInjectedKey(topic, agent) {
   return `${topic}@${agent || '_'}`;
 }
 
+function _memoryRevision(meta) {
+  return meta?.revision || `content:${meta?.content || ''}`;
+}
+
+function _clearMemorySelectionOverridesForTopic(topic) {
+  for (const key of Object.keys(_memorySelectionOverrides)) {
+    if (key.startsWith(`${topic}@`)) delete _memorySelectionOverrides[key];
+  }
+}
+
+function _clearSessionLookupCacheForTopic(topic) {
+  for (const key of Object.keys(_sessionLookupCache)) {
+    if (key === `${topic}@_` || key.startsWith(`${topic}@`)) delete _sessionLookupCache[key];
+  }
+}
+
+function _rememberSessionMemoryRevision(topic, agent, session) {
+  if (!session?.memory_injected && !session?.memory_revision) return;
+  _memoryInjectedInto[_memoryInjectedKey(topic, agent)] = session.memory_revision || 'legacy:unknown';
+}
+
 function _getMemoryMeta(topic) {
   if (_memoryCache[topic]) return _memoryCache[topic];
   _memoryCache[topic] = { topic, exists: false, content: '', path: `~/.squid/context/topics/${topic}/memory.md`, loading: true };
@@ -5291,6 +5313,7 @@ function parseCodeRootsInput(value) {
 }
 
 async function saveCodeRootsDecision(topic, payload) {
+  const oldRevision = _memoryRevision(_memoryCache[topic]);
   const res = await fetch(`/topics/${encodeURIComponent(topic)}/memory/squid/code-roots`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -5298,6 +5321,10 @@ async function saveCodeRootsDecision(topic, payload) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `Save failed (${res.status})`);
+  if (_memoryRevision(data) !== oldRevision) {
+    _clearMemorySelectionOverridesForTopic(topic);
+    _clearSessionLookupCacheForTopic(topic);
+  }
   _memoryCache[topic] = { ...data, loading: false };
   updatePinCount();
   if (pinPanel.classList.contains('open')) renderPinPanel();
@@ -5319,6 +5346,7 @@ function _getSessionMeta(topic, agent) {
       _sessionLookupCache[key] = { ...(data || { session_id: null, cwd: null }), loading: false };
       if (data?.session_id) {
         _sessionIds[`${topic}@${agent}`] = data.session_id;
+        _rememberSessionMemoryRevision(topic, agent, data);
         if (data.injected_ids?.length) {
           const inj = getInjectedInto();
           inj[data.session_id] = [...new Set([...(inj[data.session_id] || []), ...data.injected_ids])];
@@ -5339,10 +5367,13 @@ function _topicMemoryState() {
   const session = _getSessionMeta(topic, agent);
   const exists = !!(meta.exists && (meta.content || '').trim());
   const key = _memoryOverrideKey(topic, agent, adhoc);
-  const injected = !adhoc && !!_memoryInjectedInto[_memoryInjectedKey(topic, agent)];
-  const defaultSelected = exists && (adhoc || (!injected && !session.loading && !session.session_id));
+  const revision = _memoryRevision(meta);
+  const injectedRevision = _memoryInjectedInto[_memoryInjectedKey(topic, agent)];
+  const injected = !adhoc && !!injectedRevision && injectedRevision === revision;
+  const stale = !adhoc && !!injectedRevision && injectedRevision !== revision;
+  const defaultSelected = exists && (adhoc || stale || (!injectedRevision && !session.loading && !session.session_id));
   const selected = exists && (_memorySelectionOverrides[key] ?? defaultSelected);
-  return { topic, agent, adhoc, meta, session, exists, selected, key, injected };
+  return { topic, agent, adhoc, meta, session, exists, selected, key, injected, stale, revision };
 }
 
 async function _topicMemoryStateForSend(topic, agent, adhoc) {
@@ -5352,6 +5383,7 @@ async function _topicMemoryStateForSend(topic, agent, adhoc) {
   if (meta) _memoryCache[topic] = { ...meta, loading: false };
   const exists = !!(meta?.exists && (meta.content || '').trim());
   if (!exists) return { selected: false };
+  const revision = _memoryRevision(meta);
 
   let session = { session_id: null };
   if (agent && !adhoc) {
@@ -5359,11 +5391,13 @@ async function _topicMemoryStateForSend(topic, agent, adhoc) {
       .then(r => r.ok ? r.json() : { session_id: null })
       .catch(() => ({ session_id: null }));
     if (session.session_id) _sessionIds[`${topic}@${agent}`] = session.session_id;
+    _rememberSessionMemoryRevision(topic, agent, session);
   }
   const key = _memoryOverrideKey(topic, agent, adhoc);
-  const injected = !adhoc && !!_memoryInjectedInto[_memoryInjectedKey(topic, agent)];
-  const defaultSelected = adhoc || (!injected && !session.session_id);
-  return { selected: _memorySelectionOverrides[key] ?? defaultSelected };
+  const injectedRevision = _memoryInjectedInto[_memoryInjectedKey(topic, agent)];
+  const stale = !adhoc && !!injectedRevision && injectedRevision !== revision;
+  const defaultSelected = adhoc || stale || (!injectedRevision && !session.session_id);
+  return { selected: _memorySelectionOverrides[key] ?? defaultSelected, revision };
 }
 
 function _injectablePinnedIds(topic, agent, adhoc, lookback, items = getPinnedItems()) {
@@ -5555,6 +5589,7 @@ function closeMemoryEditor() {
 async function saveMemoryEditor() {
   if (!_editingMemoryTopic) return;
   const topic = _editingMemoryTopic;
+  const oldRevision = _memoryRevision(_memoryCache[topic]);
   const idleLabel = 'Save';
   memorySaveBtn.disabled = true;
   memorySaveBtn.textContent = 'Saving...';
@@ -5567,6 +5602,10 @@ async function saveMemoryEditor() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || `Save failed (${res.status})`);
+    if (_memoryRevision(data) !== oldRevision) {
+      _clearMemorySelectionOverridesForTopic(topic);
+      _clearSessionLookupCacheForTopic(topic);
+    }
     _memoryCache[topic] = { ...data, loading: false };
     memoryPath.textContent = `${data.path || `~/.squid/context/topics/${topic}/memory.md`} · saved`;
     memorySaveBtn.textContent = 'Saved';
