@@ -104,6 +104,13 @@ body {
   background: var(--bg);
 }
 
+#right-rail {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: auto;
+}
+
 /* nav tabs (desktop) */
 #nav-tabs {
   display: flex;
@@ -179,7 +186,6 @@ body {
 /* quota display */
 #quota-display {
   --quota-accent: var(--accent);
-  margin-left: auto;
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -228,7 +234,6 @@ body {
 /* codex quota gauge */
 #codex-quota-display {
   --quota-accent: #f5f5f2;
-  margin-left: auto;
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -245,7 +250,6 @@ body {
 /* cursor quota gauge */
 #cursor-quota-display {
   --quota-accent: #f5f5f2;
-  margin-left: auto;
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -260,7 +264,6 @@ body {
 #cursor-quota-display.error #cursor-pie-arc { stroke: #a06655; }
 /* deepseek cost gauge */
 #deepseek-quota-display {
-  margin-left: auto;
   display: flex;
   align-items: center;
   gap: 0.5rem;
