@@ -44,18 +44,17 @@ backends:
       title: OpenCode-managed limits
 
   # DeepSeek through Claude Code's Anthropic-compatible transport.
-  # api_key accepts either a literal string or an env var reference:
-  #   api_key: "sk-..."                 # inline
+  # Get an API key at https://platform.deepseek.com/api_keys, then fill in one of:
+  #   api_key: "sk-..."                 # inline string
   #   api_key: {env: DEEPSEEK_API_KEY}  # read from environment variable
-  deepcla:
-    driver: claude
-    label: DeepSeek
-    color: "#4D9DE0"
-    provider: deepseek
-    base_url: "https://api.deepseek.com/anthropic"
-    api_key:
-      env: DEEPSEEK_API_KEY
-    gauge: deepseek
+  # deepcla:
+  #   driver: claude
+  #   label: DeepSeek
+  #   color: "#4D9DE0"
+  #   provider: deepseek
+  #   base_url: "https://api.deepseek.com/anthropic"
+  #   api_key: "sk-..."
+  #   gauge: deepseek
 
   # Canonical base_url/api_key fields are translated into driver-specific
   # environment and settings. Raw env/settings/args remain available as escapes.
