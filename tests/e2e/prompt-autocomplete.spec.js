@@ -26,7 +26,8 @@ test('typed prompt prefixes show unique routed history with the current route fi
   const items = page.locator('#autocomplete .ac-item');
   await expect(items).toHaveCount(3);
   await expect(page.locator('#autocomplete .ac-title')).toHaveText('Recent Prompts');
-  const currentRouteItem = page.locator('#autocomplete .ac-item', { hasText: '#squid@codex push the changes' });
+  // same-route item has no route chip — identified by absence of .ac-route-btn
+  const currentRouteItem = page.locator('#autocomplete .ac-item:not(:has(.ac-route-btn))');
   const olderRouteItem = page.locator('#autocomplete .ac-item', { hasText: '#squid@haiku! push the changes' });
   await expect(currentRouteItem).toBeVisible();
   await expect(page.locator('#autocomplete .ac-item', { hasText: '#other@codex push the changes' })).toBeVisible();
@@ -36,17 +37,55 @@ test('typed prompt prefixes show unique routed history with the current route fi
     const olderBox = await olderRouteItem.boundingBox();
     return currentBox && olderBox ? currentBox.y > olderBox.y : false;
   }).toBe(true);
-  await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#squid@codex push the changes');
+  await expect(page.locator('#autocomplete .ac-item.selected .ac-route-btn')).toHaveCount(0);
+  await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('push the changes');
   await page.locator('#input').press('ArrowUp');
   await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#other@codex push the changes');
   await page.locator('#input').press('ArrowDown');
-  await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#squid@codex push the changes');
+  await expect(page.locator('#autocomplete .ac-item.selected .ac-route-btn')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Close suggestions' })).toBeVisible();
 
-  await olderRouteItem.click();
+  await olderRouteItem.locator('.ac-route-btn').click();
   await expect(page.locator('#input')).toHaveValue('push the changes');
   await expect(page.locator('#topic-chip')).toHaveClass(/visible/);
   await expect(page.locator('#topic-chip')).toContainText('#squid@haiku!');
+});
+
+test('different-route items show a route chip button; same-route items do not', async ({ page }) => {
+  await mockBackend(page);
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
+  })));
+  await page.goto('/');
+
+  await page.fill('#input', 'push');
+
+  // same-route item has no route button
+  const sameRouteItem = page.locator('#autocomplete .ac-item:not(:has(.ac-route-btn))');
+  await expect(sameRouteItem).toBeVisible();
+  await expect(sameRouteItem.locator('.ac-route-btn')).toHaveCount(0);
+
+  // different-route items each have a route button showing their slug
+  await expect(page.locator('#autocomplete .ac-item', { hasText: '#other@codex' }).locator('.ac-route-btn')).toBeVisible();
+  await expect(page.locator('#autocomplete .ac-item', { hasText: '#other@codex' }).locator('.ac-route-btn')).toContainText('#other@codex');
+  await expect(page.locator('#autocomplete .ac-item', { hasText: '#squid@haiku!' }).locator('.ac-route-btn')).toBeVisible();
+  await expect(page.locator('#autocomplete .ac-item', { hasText: '#squid@haiku!' }).locator('.ac-route-btn')).toContainText('#squid@haiku!');
+});
+
+test('clicking a different-route item body inserts prompt only without changing the route', async ({ page }) => {
+  await mockBackend(page);
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
+  })));
+  await page.goto('/');
+
+  await page.fill('#input', 'push');
+  const otherRouteItem = page.locator('#autocomplete .ac-item', { hasText: '#other@codex push the changes' });
+  await otherRouteItem.locator('.ac-history-prompt').click();
+
+  await expect(page.locator('#input')).toHaveValue('push the changes');
+  await expect(page.locator('#topic-chip')).toHaveClass(/visible/);
+  await expect(page.locator('#topic-chip')).toContainText('#squid@codex');
 });
 
 test('Tab completion converts a routed prompt history slug into the topic chip', async ({ page }) => {
@@ -74,7 +113,7 @@ test('clicking prompt history preserves adhoc lookback in the converted chip', a
 
   const composer = page.locator('#input');
   await composer.fill('review');
-  await page.locator('#autocomplete .ac-item').click();
+  await page.locator('#autocomplete .ac-item .ac-route-btn').click();
 
   await expect(composer).toHaveValue('review the changes');
   await expect(page.locator('#topic-chip')).toHaveClass(/visible/);
@@ -155,18 +194,35 @@ test('autocomplete can be dismissed with its touch-accessible close button', asy
   await expect(page.locator('#input')).toHaveValue('push');
 });
 
-test('plain Enter selects the focused bottom autocomplete result', async ({ page }) => {
+test('plain Enter sends the message without selecting from autocomplete', async ({ page }) => {
   await mockBackend(page);
+  await page.route('**/chat**', r => r.fulfill({ json: {} }));
   await page.goto('/');
 
   await page.fill('#input', 'push');
   await expect(page.locator('#autocomplete')).toHaveClass(/open/);
-  await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#other@codex push the changes');
   await page.keyboard.press('Enter');
 
-  await expect(page.locator('#input')).toHaveValue('push the changes');
-  await expect(page.locator('#topic-chip')).toHaveClass(/visible/);
-  await expect(page.locator('#topic-chip')).toContainText('#other@codex');
+  await expect(page.locator('#input')).toHaveValue('');
+  await expect(page.locator('#autocomplete')).not.toHaveClass(/open/);
+});
+
+test('bare default prompts are recorded without a default route chip', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [] } }));
+  await page.route('**/chat**', r => r.fulfill({ json: {} }));
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  await composer.fill('plain prompt');
+  await page.keyboard.press('Enter');
+  await expect(composer).toHaveValue('');
+
+  await composer.fill('plain');
+  const item = page.locator('#autocomplete .ac-item', { hasText: 'plain prompt' });
+  await expect(item).toBeVisible();
+  await expect(item.locator('.ac-route-btn')).toHaveCount(0);
+  await expect(item).not.toContainText('#default');
 });
 
 for (const { name, chip, route } of [

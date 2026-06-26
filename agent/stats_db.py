@@ -71,6 +71,7 @@ _TABLES = [
         adhoc       INTEGER DEFAULT 0,
         context     TEXT,
         session_turn_index INTEGER,
+        lookback    INTEGER DEFAULT 0,
         quota_delta  REAL,
         quota_before REAL,
         quota_after  REAL,
@@ -123,6 +124,7 @@ _MIGRATIONS: list[str] = [
     "ALTER TABLE topic_sessions ADD COLUMN backend_fingerprint TEXT",
     "ALTER TABLE chat_messages ADD COLUMN session_turn_index INTEGER",
     "DROP INDEX IF EXISTS idx_chat_messages_session_turns",
+    "ALTER TABLE chat_messages ADD COLUMN lookback INTEGER DEFAULT 0",
 ]
 
 _DATA_MIGRATIONS: list[tuple[str, str]] = [
@@ -557,6 +559,7 @@ def insert_user_message(
     content: str, context_ids: Optional[list[int]] = None,
     mem: bool = False,
     mem_revision: Optional[str] = None,
+    lookback: int = 0,
 ) -> int:
     if context_ids or mem or mem_revision:
         context = {"pins": context_ids or [], "mem": mem}
@@ -567,9 +570,9 @@ def insert_user_message(
         context_json = None
     with _connect() as conn:
         cur = conn.execute(
-            """INSERT INTO chat_messages (topic, agent, role, content, status, context)
-               VALUES (?, ?, 'user', ?, 'done', ?)""",
-            (topic, agent, content, context_json),
+            """INSERT INTO chat_messages (topic, agent, role, content, status, context, lookback)
+               VALUES (?, ?, 'user', ?, 'done', ?, ?)""",
+            (topic, agent, content, context_json, lookback),
         )
         return cur.lastrowid
 
@@ -1019,7 +1022,8 @@ def get_recent_prompts(limit: int = 50) -> list:
                               WHERE a.reply_to = u.id AND a.role = 'assistant'
                               ORDER BY a.id ASC
                               LIMIT 1
-                          ), u.adhoc, 0) AS adhoc
+                          ), u.adhoc, 0) AS adhoc,
+                          u.lookback
                    FROM chat_messages u
                    WHERE u.role = 'user'
                      AND u.content IS NOT NULL
@@ -1027,9 +1031,9 @@ def get_recent_prompts(limit: int = 50) -> list:
                ), latest_unique AS (
                    SELECT MAX(id) AS id
                    FROM routed_prompts
-                   GROUP BY content, topic, agent, adhoc
+                   GROUP BY content, topic, agent, adhoc, lookback
                )
-               SELECT p.content, p.topic, p.agent, p.adhoc
+               SELECT p.content, p.topic, p.agent, p.adhoc, p.lookback
                FROM routed_prompts p
                JOIN latest_unique latest ON latest.id = p.id
                ORDER BY p.id DESC
@@ -1047,13 +1051,14 @@ def get_recent_prompts(limit: int = 50) -> list:
         topic = row.get('topic') or ''
         agent = row.get('agent') or ''
         adhoc = bool(row.get('adhoc'))
+        lookback = int(row.get('lookback') or 0)
         prefix = ''
         if topic and topic != 'default':
             prefix = f'#{topic}'
             if agent:
                 prefix += f'@{agent}'
             if adhoc:
-                prefix += '!'
+                prefix += lookback > 0 and f'!{lookback}' or '!'
             prefix += ' '
         full = prefix + content
         if full not in seen:

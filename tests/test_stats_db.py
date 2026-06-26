@@ -72,6 +72,16 @@ def test_recent_prompts_returns_limit_unique_routed_prompts(tmp_path, monkeypatc
     assert stats_db.get_recent_prompts(limit=6)[-1] == "#squid@haiku! push the changes"
 
 
+def test_recent_prompts_keep_default_adhoc_prompts_plain(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user_id = stats_db.insert_user_message("default", None, "plain prompt")
+    stats_db.insert_assistant_message("default", None, user_id, adhoc=True)
+
+    assert stats_db.get_recent_prompts(limit=5) == ["plain prompt"]
+
+
 def test_session_injected_context_recovers_pins_and_memory_revision(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

@@ -876,12 +876,12 @@ function recordPrompt(text) {
   promptDraftChip = null;
 }
 
-function formatPromptHistoryEntry(topic, agent, adhoc, message) {
+function formatPromptHistoryEntry(topic, agent, adhoc, lookback, message) {
   const prompt = message.trim();
   if (!topic || topic === 'default') return prompt;
   let route = `#${topic}`;
   if (agent) route += `@${agent}`;
-  if (adhoc) route += '!';
+  if (adhoc) route += lookback > 0 ? `!${lookback}` : '!';
   return `${route} ${prompt}`;
 }
 
@@ -911,7 +911,7 @@ function applyPromptHistoryEntry(entry) {
 }
 
 function currentPromptHistoryRoute() {
-  if (!stickyChip || stickyChip.topic === 'default') return '';
+  if (!stickyChip) return '';
   let route = `#${stickyChip.topic}`;
   if (stickyChip.agent) route += `@${stickyChip.agent}`;
   if (stickyChip.adhoc) route += `!${stickyChip.lookback || ''}`;
@@ -1183,7 +1183,7 @@ form.addEventListener('submit', async (e) => {
   hideAutocomplete();
   if (searchActive) clearSearch();
   invalidateTopicsCache();
-  recordPrompt(formatPromptHistoryEntry(topic, agent, adhoc, message));
+  recordPrompt(formatPromptHistoryEntry(topic, agent, adhoc, lookback, message));
   localStorage.removeItem('squid_draft');
   sendMessage(text);
 });
@@ -1363,7 +1363,7 @@ input.addEventListener('keydown', (e) => {
   if (acOpen) {
     if (e.key === 'ArrowDown') { e.preventDefault(); acSel = Math.max(acSel - 1, 0); _acHighlight(); return; }
     if (e.key === 'ArrowUp')   { e.preventDefault(); acSel = Math.min(acSel + 1, acItems.length - 1); _acHighlight(); return; }
-    if (e.key === 'Tab' || (e.key === 'Enter' && acSel >= 0)) { e.preventDefault(); _acSelect(acSel >= 0 ? acSel : 0); return; }
+    if (e.key === 'Tab') { e.preventDefault(); _acSelect(acSel >= 0 ? acSel : 0); return; }
     if (e.key === 'Escape') { hideAutocomplete(); return; }
   }
   if (!acOpen && e.key === 'ArrowUp' && promptHistory.length) {
@@ -4766,7 +4766,9 @@ function _acRender(items, title = 'Suggestions') {
   acItems = items; acSel = 0;
   const rows = items.map((item, i) =>
     `<div class="ac-item" data-i="${i}"${item.execute != null ? ' data-cmd' : ''}>` +
-    `<div class="ac-row"><span class="ac-label">${item.label}</span>` +
+    `<div class="ac-row">` +
+    (item.routeHtml ? `<button class="ac-route-btn" type="button" data-i="${i}" title="Switch to this route">${item.routeHtml}</button> ` : '') +
+    `<span class="ac-label">${item.label}</span>` +
     (item.sub ? `<span class="ac-sub">${item.sub}</span>` : '') +
     (item.meta ? `<span class="ac-meta">${item.meta}</span>` : '') +
     (item.deleteTopic ? `<button class="ac-del-btn" data-topic="${item.deleteTopic}" type="button" title="Delete #${item.deleteTopic} sessions">✕</button>` : '') +
@@ -4784,6 +4786,18 @@ function _acRender(items, title = 'Suggestions') {
   acEl.querySelectorAll('.ac-item').forEach(el =>
     el.addEventListener('mousedown', e => {
       if (e.target.classList.contains('ac-del-btn')) return;
+      const routeBtn = e.target.closest('.ac-route-btn');
+      if (routeBtn) {
+        e.preventDefault();
+        const idx = Number(routeBtn.dataset.i);
+        const fullEntry = idx >= 0 && idx < acItems.length ? acItems[idx].fullEntry : null;
+        if (fullEntry) {
+          hideAutocomplete();
+          applyPromptHistoryEntry(fullEntry);
+          input.focus();
+        }
+        return;
+      }
       e.preventDefault(); _acSelect(Number(el.dataset.i));
     })
   );
@@ -4964,31 +4978,29 @@ async function updateAutocomplete() {
   } else if (editingExpandedSlug) {
     hideAutocomplete();
   } else if (promptHistory.length) {
+    const currentRoute = currentPromptHistoryRoute().toLowerCase();
     _acRender(matchingPromptHistory(val).map(ph => {
       const { route, prompt } = splitPromptHistoryEntry(ph);
-      let label;
+      const promptText = prompt || ph;
+      const isDifferentRoute = !!(route && route.toLowerCase() !== currentRoute);
+      let routeHtml = '';
       if (route) {
         const rm = route.match(/^#(\w+)(?:@(\w+))?(!(?:(\d+))?)?$/);
         if (rm) {
-          const topic = rm[1], agent = rm[2], adhoc = rm[3] || '', lookback = rm[4] || '';
-          label = `<span class="ac-topic">#${escapeHtml(topic)}</span>`;
+          const topic = rm[1], agent = rm[2], adhoc = rm[3] || '';
+          routeHtml = `<span class="ac-topic">#${escapeHtml(topic)}</span>`;
           if (agent) {
-            const display = `@${escapeHtml(agent)}${escapeHtml(adhoc)}${lookback}`;
-            label += `<span class="ac-agent"${_agentStyleAttr(agent)}>${escapeHtml(display)}</span>`;
+            const display = `@${escapeHtml(agent)}${escapeHtml(adhoc)}`;
+            routeHtml += `<span class="ac-agent"${_agentStyleAttr(agent)}>${escapeHtml(display)}</span>`;
           }
-          label += ` <span class="ac-history-prompt">${escapeHtml(truncate(prompt, 55))}</span>`;
-        } else {
-          label = `<span class="ac-history-prompt">${escapeHtml(truncate(ph, 70))}</span>`;
         }
-      } else {
-        label = `<span class="ac-history-prompt">${escapeHtml(truncate(ph, 70))}</span>`;
       }
+      const label = `<span class="ac-history-prompt">${escapeHtml(truncate(promptText, 55))}</span>`;
       return {
         label,
-        insert: ph,
+        insert: promptText,
         trail: false,
-        clearChip: /^[#@]/.test(ph),
-        collapseSlug: ph.startsWith('#'),
+        ...(isDifferentRoute && routeHtml ? { routeHtml, fullEntry: ph } : {}),
       };
     }), 'Recent Prompts');
   } else {

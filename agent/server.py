@@ -668,7 +668,8 @@ async def chat(req: ChatRequest):
     user_msg_id = insert_user_message(topic, resolved_agent, req.message,
                                       context_ids=stored_context_ids,
                                       mem=bool(memory_revision),
-                                      mem_revision=memory_revision)
+                                      mem_revision=memory_revision,
+                                      lookback=lookback)
     asst_msg_id = insert_assistant_message(topic, resolved_agent, user_msg_id, adhoc=req.adhoc)
 
     log.info(

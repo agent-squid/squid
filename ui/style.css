@@ -2696,6 +2696,23 @@ button {
 }
 .ac-item:hover .ac-del-btn, .ac-item.selected .ac-del-btn { color: var(--text-lo); }
 .ac-del-btn:hover { color: #e06060 !important; }
+.ac-route-btn {
+  flex-shrink: 0;
+  margin-right: 0.4rem;
+  background: none;
+  border: 1px solid var(--border);
+  color: inherit;
+  cursor: pointer;
+  font-family: ui-monospace, monospace;
+  font-size: var(--text-body);
+  font-weight: 600;
+  padding: 0.05em 0.35em;
+  line-height: 1;
+  border-radius: 4px;
+}
+.ac-route-btn:hover { border-color: var(--accent-dim); background: var(--surface-2); }
+.ac-route-btn .ac-topic { color: var(--accent-dim); }
+.ac-route-btn .ac-agent { color: var(--agent-color, #848899); }
 
 @media (max-width: 768px) {
   .ac-item { padding: 0.5rem 0.75rem; font-size: var(--text-body); }
