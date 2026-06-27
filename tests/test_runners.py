@@ -15,13 +15,22 @@ from agent.runners import (
     kill_all_procs,
     kill_procs_by_topic,
     kill_proc_by_msg_id,
+    runner_for_driver,
     run_claude,
     run_codex,
+    run_opencode,
 )
 
 
 def _clear():
     _proc_registry.clear()
+
+
+def test_runner_for_driver_uses_shared_supported_driver_map():
+    assert runner_for_driver("claude") is run_claude
+    assert runner_for_driver("codex") is run_codex
+    assert runner_for_driver("opencode") is run_opencode
+    assert runner_for_driver("missing") is None
 
 
 # ── kill_procs_by_topic ────────────────────────────────────────────────────────

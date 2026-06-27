@@ -934,3 +934,18 @@ async def run_opencode(
             "duration_ms": int(time.monotonic() * 1000 - start_ms),
         }
     }
+
+
+RUNNER_NAMES_BY_DRIVER = {
+    "claude": "run_claude",
+    "codex": "run_codex",
+    "cursor": "run_cursor",
+    "copilot": "run_copilot",
+    "antigravity": "run_antigravity",
+    "opencode": "run_opencode",
+}
+
+
+def runner_for_driver(driver: str):
+    name = RUNNER_NAMES_BY_DRIVER.get(driver)
+    return globals().get(name) if name else None

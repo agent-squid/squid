@@ -8,21 +8,14 @@ from pathlib import Path
 from typing import Optional
 
 from .config import SQUID_HOME
-from .runners import run_claude, run_codex, run_copilot, run_cursor, run_antigravity
+from .backends import get_backend
+from .runners import run_claude, runner_for_driver
 from .stats_db import get_default_agent, get_topic_messages_for_period
 
 log = logging.getLogger(__name__)
 
 _JOURNAL_DIR = Path(__file__).parent.parent / "context" / "journals"
 _STATE_FILE = _JOURNAL_DIR / ".state.json"
-
-_RUNNERS = {
-    "claude":      run_claude,
-    "codex":       run_codex,
-    "cursor":      run_cursor,
-    "antigravity": run_antigravity,
-    "copilot":     run_copilot,
-}
 
 
 def _current_week() -> tuple[str, str, str]:
@@ -130,10 +123,11 @@ Bullet list of what failed and why, or what worked better than expected. If none
 
 async def _run_generation(prompt: str) -> str:
     agent_cfg = get_default_agent() or {}
-    backend = agent_cfg.get("backend") or "claude"
+    backend_id = agent_cfg.get("backend") or "claude"
     gen_agent = agent_cfg.get("name", "claude")
     model = agent_cfg.get("model")
-    runner = _RUNNERS.get(backend, run_claude)
+    backend = get_backend(backend_id)
+    runner = runner_for_driver(backend.driver if backend else backend_id) or run_claude
 
     chunks = []
     async for chunk in runner(

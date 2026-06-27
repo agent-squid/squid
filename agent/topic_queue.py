@@ -126,7 +126,7 @@ class TopicWorker:
             self.q.task_done()
 
     async def _process(self, item: QueueItem):
-        from .runners import run_claude, run_codex, run_copilot, run_cursor, run_antigravity, run_opencode, CLINotFoundError, CLIError
+        from .runners import CLIError, runner_for_driver
         from .config import SQUID_HOME
         from .backends import get_backend
         from .stats_db import insert_run_event, update_assistant_message, save_stats, set_topic_session
@@ -137,9 +137,7 @@ class TopicWorker:
             await item.out_q.put({"_error": f"Backend {item.backend!r} is not configured"})
             await item.out_q.put(None)
             return
-        runner = {"claude": run_claude, "codex": run_codex, "cursor": run_cursor,
-                  "copilot": run_copilot, "antigravity": run_antigravity,
-                  "opencode": run_opencode}.get(backend.driver)
+        runner = runner_for_driver(backend.driver)
         if runner is None:
             await item.out_q.put({"_error": f"Driver {backend.driver!r} is not supported"})
             await item.out_q.put(None)

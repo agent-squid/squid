@@ -4911,13 +4911,16 @@ function _agentStyleAttr(agentName, backendFallback = null) {
   return ` style="--agent-color:${agentSlugColor(agentName, backendFallback)}" data-agent-name="${escapeHtml(agentName || '')}"${backendFallback ? ` data-backend-fallback="${escapeHtml(backendFallback)}"` : ''}`;
 }
 
-function _acTopicLabel(topicName, modelLabel, backendFallback = null) {
-  return `<span class="ac-topic">#${escapeHtml(topicName)}</span>` +
-         (modelLabel ? `<span class="ac-agent"${_agentStyleAttr(modelLabel, backendFallback)}>@${escapeHtml(modelLabel)}</span>` : '');
+function _acRouteLabel(topic, agent = '', backendFallback = null) {
+  const cleanAgent = agent.replace(/[!]\d*$/, '');
+  return `<span class="ac-topic">#${escapeHtml(topic)}</span>` +
+    (agent ? `<span class="ac-agent"${_agentStyleAttr(cleanAgent, backendFallback)}>@${escapeHtml(agent)}</span>` : '');
 }
 
-function _acAgentLabel(topicName, agentName, backendFallback = null) {
-  return `<span class="ac-topic">#${escapeHtml(topicName)}</span><span class="ac-agent"${_agentStyleAttr(agentName.replace(/!$/, ''), backendFallback)}>@${escapeHtml(agentName)}</span>`;
+function _acRouteHtml(route) {
+  const rm = String(route || '').match(/^#(\w+)(?:@(\w+))?(!\d*)?$/);
+  if (!rm) return '';
+  return _acRouteLabel(rm[1], (rm[2] || '') + (rm[3] || ''));
 }
 
 function _acLastPrompt(prompt) {
@@ -4964,7 +4967,7 @@ async function updateAutocomplete() {
     _acRender(
       topics.filter(t => t.name.toLowerCase().startsWith(prefix)).slice(0, 8)
         .map(t => ({
-          label:       _acTopicLabel(t.name, t.agent || '', t.last_backend || null),
+          label:       _acRouteLabel(t.name, t.agent || '', t.last_backend || null),
           insert:      '#' + t.name,
           replaceSlug: replacingSlug,
           deleteTopic: t.name,
@@ -4993,14 +4996,14 @@ async function updateAutocomplete() {
       // Default topic: suppress session variant — adhoc only
       if (!isDefault) {
         items.push({
-          label:  _acAgentLabel(topic, h.agent, backendByAgent.get(h.agent) || null),
+          label:  _acRouteLabel(topic, h.agent, backendByAgent.get(h.agent) || null),
           insert: `#${topic}@${h.agent}`,
           replaceSlug: replacingSlug,
           sub:    _acLastPrompt(h.last_prompt),
         });
       }
       items.push({
-        label:  _acAgentLabel(topic, h.agent + '!', backendByAgent.get(h.agent) || null),
+        label:  _acRouteLabel(topic, h.agent + '!', backendByAgent.get(h.agent) || null),
         insert: `#${topic}@${h.agent}!`,
         replaceSlug: replacingSlug,
         sub:    _acLastPrompt(h.last_adhoc_prompt),
@@ -5014,7 +5017,7 @@ async function updateAutocomplete() {
       if (!a.name.toLowerCase().startsWith(prefix)) continue;
       // Default topic: only offer adhoc variant
       items.push({
-        label:  _acAgentLabel(topic, isDefault ? a.name + '!' : a.name, a.backend),
+        label:  _acRouteLabel(topic, isDefault ? a.name + '!' : a.name, a.backend),
         insert: `#${topic}@${a.name}${isDefault ? '!' : ''}`,
         replaceSlug: replacingSlug,
         meta:   a.backend,
@@ -5025,30 +5028,18 @@ async function updateAutocomplete() {
   } else if (editingExpandedSlug) {
     hideAutocomplete();
   } else if (promptHistory.length) {
-    const currentRoute = currentPromptHistoryRoute().toLowerCase();
+    const currentRoute = normalizePromptHistoryRoute(currentPromptHistoryRoute()).toLowerCase();
     _acRender(matchingPromptHistory(val).map(ph => {
       const { route, prompt } = splitPromptHistoryEntry(ph);
       const promptText = prompt || ph;
       const routeKey = normalizePromptHistoryRoute(route);
       const isDifferentRoute = !!(routeKey && routeKey.toLowerCase() !== currentRoute);
-      let routeHtml = '';
-      if (routeKey) {
-        const rm = routeKey.match(/^#(\w+)(?:@(\w+))?(!)?$/);
-        if (rm) {
-          const topic = rm[1], agent = rm[2], adhoc = rm[3] || '';
-          routeHtml = `<span class="ac-topic">#${escapeHtml(topic)}</span>`;
-          if (agent) {
-            const display = `@${escapeHtml(agent)}${escapeHtml(adhoc)}`;
-            routeHtml += `<span class="ac-agent"${_agentStyleAttr(agent)}>${escapeHtml(display)}</span>`;
-          }
-        }
-      }
-      const label = `<span class="ac-history-prompt">${escapeHtml(truncate(promptText, 55))}</span>`;
+      const routeHtml = isDifferentRoute ? _acRouteHtml(routeKey) : '';
       return {
-        label,
+        label: `<span class="ac-history-prompt">${escapeHtml(truncate(promptText, 55))}</span>`,
         insert: promptText,
         trail: false,
-        ...(isDifferentRoute && routeHtml ? { routeHtml, fullEntry: `${routeKey} ${promptText}` } : {}),
+        ...(routeHtml ? { routeHtml, fullEntry: `${routeKey} ${promptText}` } : {}),
       };
     }), 'Recent Prompts');
   } else {
