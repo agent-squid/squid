@@ -69,13 +69,13 @@ multiplexing. They are complementary, not competing.
 ## Alternative: Multi-Protocol Interactive Execution (ADR-0022)
 
 A third approach not considered in the original tmux analysis: support multiple
-driver protocols. A CLI may run as a one-shot structured stream, a long-lived
-structured interactive stream, or a direct PTY. A direct PTY (no tmux
+driver protocols. A CLI may run as `oneshot-cli`, `interactive-cli`, or
+`interactive-pty`. A direct PTY (no tmux
 intermediary) preserves process group control, enables a web terminal toggle by
 connecting xterm.js to the same PTY, and supports long-running sessions with
 idle-kill-resume lifecycle management.
 
-When a CLI exposes a long-lived structured interactive stream, Squid should
+When a CLI exposes a long-lived structured interactive CLI protocol, Squid should
 prefer that protocol over PTY: it keeps warm sessions while preserving explicit
 events and turn boundaries.
 
@@ -93,8 +93,8 @@ This differs from the tmux model in three key ways:
 
 The invisible PTY protocol is suitable when users want both a chat UI and
 occasional raw terminal access, and when long-running session warmth matters
-more than exact structured event delivery. It is not a replacement for one-shot
-structured stream mode. See ADR-0022 for the multi-protocol decision.
+more than exact structured event delivery. It is not a replacement for
+`oneshot-cli` mode. See ADR-0022 for the multi-protocol decision.
 
 ## Consequences
 

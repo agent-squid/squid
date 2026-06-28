@@ -128,9 +128,9 @@ To stop without restarting: `bin/stop.sh`
 | `cursor`      | `cursor-agent` (Cursor)                        | `curl -fsS https://cursor.com/install \| bash`            | resumable |
 | `opencode`    | `opencode`                                     | `curl -fsSL https://opencode.ai/install \| bash`          | resumable |
 
-A **driver** is Squid's coded coding-agent integration (`claude`, `codex`, `cursor`, or `opencode`). A **backend** is a YAML-configured instance of one driver: endpoint, credentials, arguments, gauge, UI color, and default model. Multiple backends can share a driver; for example `deepcla` uses the Claude driver with a DeepSeek endpoint. See `config/squid.yaml.example`.
+A **driver** is Squid's coded coding-agent integration (`claude`, `codex`, `cursor`, or `opencode`). A **backend** is a YAML-configured instance of one driver: endpoint, credentials, arguments, gauge, UI color, default model, and protocol. Multiple backends can share a driver; for example `deepcla` uses the Claude driver with a DeepSeek endpoint. See `config/squid.yaml.example`.
 
-Drivers communicate through protocols. Today the primary protocol is one-shot structured streaming. Squid's model also supports long-lived interactive protocols: `interactive-stream` when a CLI exposes structured events, and `interactive-pty` when the CLI's real interactive behavior only exists through a terminal.
+Drivers communicate through protocols. Today the primary protocol is `oneshot-cli`: Squid starts a CLI process for one turn, parses its output, then lets it exit. Squid's model also supports long-lived protocols: `interactive-cli` when a CLI exposes a structured stdin/stdout interface, and `interactive-pty` when the CLI's real interactive behavior only exists through a terminal. Interactive backends may keep a warm CLI process between turns, then stop it after the backend's idle timeout while preserving the native session for resume.
 
 ## Input syntax
 
@@ -376,9 +376,9 @@ Clears the stored session ID, cwd, and injection log for this `(topic, agent)`. 
 {
   "status": "ok",
   "backends": {
-    "claude":  { "available": true,  "path": "/usr/local/bin/claude", "gauge": { "type": "claude" }, "gauge_authed": true  },
-    "codex":   { "available": true,  "path": "/usr/local/bin/codex",  "gauge_authed": false },
-    "cursor":  { "available": false, "path": null,                    "gauge_authed": false }
+    "claude":  { "driver": "claude", "protocol": "oneshot-cli", "available": true,  "path": "/usr/local/bin/claude", "gauge": { "type": "claude" }, "gauge_authed": true  },
+    "codex":   { "driver": "codex",  "protocol": "oneshot-cli", "available": true,  "path": "/usr/local/bin/codex",  "gauge_authed": false },
+    "cursor":  { "driver": "cursor", "protocol": "oneshot-cli", "available": false, "path": null,                    "gauge_authed": false }
   }
 }
 ```

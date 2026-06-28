@@ -19,6 +19,20 @@ from .config import (
 
 
 SUPPORTED_DRIVERS = frozenset({"claude", "codex", "cursor", "opencode"})
+SUPPORTED_PROTOCOLS = frozenset({"oneshot-cli", "interactive-cli", "interactive-pty"})
+DEFAULT_INTERACTIVE_IDLE_TIMEOUT_SECONDS = 3600
+SUPPORTED_PROTOCOLS_BY_DRIVER = {
+    "claude": frozenset({"oneshot-cli", "interactive-cli"}),
+    "codex": frozenset({"oneshot-cli"}),
+    "cursor": frozenset({"oneshot-cli"}),
+    "opencode": frozenset({"oneshot-cli"}),
+}
+DEFAULT_PROTOCOL_BY_DRIVER = {
+    "claude": "oneshot-cli",
+    "codex": "oneshot-cli",
+    "cursor": "oneshot-cli",
+    "opencode": "oneshot-cli",
+}
 SUPPORTED_GAUGES = frozenset({"claude", "codex", "cursor", "deepseek", "static", "none"})
 _ID_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 _COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -53,6 +67,14 @@ class Gauge:
 
 
 @dataclass(frozen=True)
+class InteractiveSettings:
+    idle_timeout_seconds: float = DEFAULT_INTERACTIVE_IDLE_TIMEOUT_SECONDS
+
+    def public_dict(self) -> dict[str, Any]:
+        return {"idle_timeout_seconds": self.idle_timeout_seconds}
+
+
+@dataclass(frozen=True)
 class Backend:
     id: str
     driver: str
@@ -65,6 +87,8 @@ class Backend:
     api_key: Any = None
     base_url: Optional[str] = None
     model: Optional[str] = None
+    protocol: str = "oneshot-cli"
+    interactive: InteractiveSettings = field(default_factory=InteractiveSettings)
     gauge: Gauge = field(default_factory=Gauge)
 
     @property
@@ -85,6 +109,8 @@ class Backend:
             "provider": self.provider,
             "api_key": self.api_key,
             "base_url": self.base_url,
+            "protocol": self.protocol,
+            "interactive": self.interactive.public_dict(),
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(encoded.encode()).hexdigest()[:16]
@@ -168,6 +194,8 @@ class Backend:
             "missing_secrets": self.missing_secrets(),
             "provider": self.provider,
             "base_url": self.base_url,
+            "protocol": self.protocol,
+            "interactive": self.interactive.public_dict(),
             "gauge": self.gauge.public_dict(),
         }
 
@@ -204,6 +232,17 @@ def _validate_gauge(backend_id: str, raw: Any) -> Gauge:
     return Gauge(gauge_type, text, title)
 
 
+def _validate_interactive(backend_id: str, raw: Any) -> InteractiveSettings:
+    if raw is None:
+        return InteractiveSettings()
+    if not isinstance(raw, dict):
+        raise ValueError(f"Backend {backend_id!r} interactive must be a mapping")
+    timeout = raw.get("idle_timeout_seconds", DEFAULT_INTERACTIVE_IDLE_TIMEOUT_SECONDS)
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout < 0:
+        raise ValueError(f"Backend {backend_id!r} interactive.idle_timeout_seconds must be a non-negative number")
+    return InteractiveSettings(float(timeout))
+
+
 def _validate_backend(backend_id: str, raw: Any) -> Backend:
     if not _ID_RE.fullmatch(backend_id):
         raise ValueError(f"Invalid backend id {backend_id!r}")
@@ -212,6 +251,11 @@ def _validate_backend(backend_id: str, raw: Any) -> Backend:
     driver = raw.get("driver")
     if driver not in SUPPORTED_DRIVERS:
         raise ValueError(f"Backend {backend_id!r} has unsupported driver {driver!r}")
+    protocol = raw.get("protocol") or DEFAULT_PROTOCOL_BY_DRIVER[driver]
+    if protocol not in SUPPORTED_PROTOCOLS:
+        raise ValueError(f"Backend {backend_id!r} has unsupported protocol {protocol!r}")
+    if protocol not in SUPPORTED_PROTOCOLS_BY_DRIVER[driver]:
+        raise ValueError(f"Backend {backend_id!r} protocol {protocol!r} is not supported by driver {driver!r}")
     color = raw.get("color", "#888888")
     if not isinstance(color, str) or not _COLOR_RE.fullmatch(color):
         raise ValueError(f"Backend {backend_id!r} color must be #RRGGBB")
@@ -246,8 +290,9 @@ def _validate_backend(backend_id: str, raw: Any) -> Backend:
         raise ValueError(f"Backend {backend_id!r} model must be a non-empty string")
     api_key = _validate_secret(backend_id, "api_key", raw.get("api_key"))
     gauge = _validate_gauge(backend_id, raw.get("gauge"))
+    interactive = _validate_interactive(backend_id, raw.get("interactive"))
     return Backend(backend_id, driver, color.upper(), label, env, settings, tuple(args),
-                   provider, api_key, base_url, model, gauge)
+                   provider, api_key, base_url, model, protocol, interactive, gauge)
 
 
 def _configured_backends() -> dict[str, Any]:

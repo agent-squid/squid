@@ -832,15 +832,25 @@ def get_topic_messages_for_period(
 
 def mark_orphaned_pending() -> int:
     with _connect() as conn:
-        done = conn.execute(
-            """UPDATE chat_messages SET status='done'
-               WHERE status='pending' AND role='assistant'
-                 AND content IS NOT NULL AND length(content) > 0"""
-        )
-        error = conn.execute(
-            "UPDATE chat_messages SET status='error' WHERE status='pending'"
-        )
-        return done.rowcount + error.rowcount
+        rows = conn.execute(
+            "SELECT id, session_id FROM chat_messages WHERE status='pending' AND role='assistant'"
+        ).fetchall()
+        count = 0
+        for row in rows:
+            final_text = _completed_run_text(conn, row["id"])
+            if final_text:
+                conn.execute(
+                    "UPDATE chat_messages SET content=?, status='done' WHERE id=?",
+                    (final_text, row["id"]),
+                )
+                _ensure_session_turn_index(conn, row["id"], row["session_id"])
+            else:
+                conn.execute(
+                    "UPDATE chat_messages SET content='', status='error' WHERE id=?",
+                    (row["id"],),
+                )
+            count += 1
+        return count
 
 
 def get_message(msg_id: int) -> Optional[dict]:
@@ -1535,13 +1545,19 @@ def insert_run_event(msg_id: int, seq: int, event_type: str, payload: Optional[s
         )
 
 
-def has_done_run_event(msg_id: int) -> bool:
+def _completed_run_text(conn: sqlite3.Connection, msg_id: int) -> Optional[str]:
+    rows = conn.execute(
+        "SELECT event_type, payload FROM run_events WHERE msg_id=? ORDER BY seq",
+        (msg_id,),
+    ).fetchall()
+    if not any(row["event_type"] == "done" for row in rows):
+        return None
+    return "".join(row["payload"] or "" for row in rows if row["event_type"] == "text")
+
+
+def get_completed_run_text(msg_id: int) -> Optional[str]:
     with _connect() as conn:
-        row = conn.execute(
-            "SELECT 1 FROM run_events WHERE msg_id=? AND event_type='done' LIMIT 1",
-            (msg_id,),
-        ).fetchone()
-        return row is not None
+        return _completed_run_text(conn, msg_id)
 
 
 def get_run_events(msg_id: int, after_seq: int = -1) -> list[dict]:

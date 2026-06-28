@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import pytest
 
-from agent.backends import Backend, Gauge, _validate_backend
+from agent.backends import Backend, DEFAULT_INTERACTIVE_IDLE_TIMEOUT_SECONDS, Gauge, _validate_backend
 from agent.runners import _codex_config_args
 
 
@@ -18,6 +18,48 @@ def test_multiple_backends_can_share_driver():
     assert deepcla.driver == claude.driver == "claude"
     assert deepcla.id != claude.id
     assert deepcla.color == "#4D9DE0"
+
+
+def test_backend_protocol_defaults_and_can_select_claude_interactive_cli():
+    claude = _validate_backend("claude", {"driver": "claude"})
+    live = _validate_backend("claude-live", {
+        "driver": "claude",
+        "protocol": "interactive-cli",
+    })
+
+    assert claude.protocol == "oneshot-cli"
+    assert live.protocol == "interactive-cli"
+    assert claude.fingerprint != live.fingerprint
+    assert live.public_dict()["protocol"] == "interactive-cli"
+    assert live.interactive.idle_timeout_seconds == DEFAULT_INTERACTIVE_IDLE_TIMEOUT_SECONDS
+
+
+def test_backend_interactive_idle_timeout_is_configurable():
+    live = _validate_backend("claude-live", {
+        "driver": "claude",
+        "protocol": "interactive-cli",
+        "interactive": {"idle_timeout_seconds": 8 * 60 * 60},
+    })
+
+    assert live.interactive.idle_timeout_seconds == 28800
+    assert live.public_dict()["interactive"]["idle_timeout_seconds"] == 28800
+
+
+def test_backend_rejects_invalid_interactive_idle_timeout():
+    with pytest.raises(ValueError, match="idle_timeout_seconds"):
+        _validate_backend("claude-live", {
+            "driver": "claude",
+            "protocol": "interactive-cli",
+            "interactive": {"idle_timeout_seconds": -1},
+        })
+
+
+def test_backend_rejects_protocol_not_supported_by_driver():
+    with pytest.raises(ValueError, match="not supported by driver"):
+        _validate_backend("codex-live", {
+            "driver": "codex",
+            "protocol": "interactive-cli",
+        })
 
 
 def test_backend_secret_reference_is_resolved_at_execution_time():

@@ -9,21 +9,75 @@ from unittest.mock import patch, call
 import pytest
 
 from agent.runners import (
+    _claude_interactive_sessions,
     _proc_registry,
     _register_proc,
     _deregister_proc,
     kill_all_procs,
     kill_procs_by_topic,
     kill_proc_by_msg_id,
+    runner_for_backend,
     runner_for_driver,
     run_claude,
+    run_claude_interactive_cli,
     run_codex,
     run_opencode,
 )
+from agent.backends import _validate_backend
 
 
 def _clear():
     _proc_registry.clear()
+    _claude_interactive_sessions.clear()
+
+
+class _FakeStdin:
+    def __init__(self):
+        self.writes = []
+
+    def write(self, data):
+        self.writes.append(data)
+
+    async def drain(self):
+        pass
+
+
+class _FakeStdout:
+    def __init__(self, lines):
+        self.lines = [line.encode() for line in lines]
+
+    async def readline(self):
+        if self.lines:
+            return self.lines.pop(0)
+        return b""
+
+
+class _FakeStderr:
+    async def read(self, _n):
+        return b""
+
+
+class _FakeProcess:
+    def __init__(self, pid, lines):
+        self.pid = pid
+        self.returncode = None
+        self.stdin = _FakeStdin()
+        self.stdout = _FakeStdout(lines)
+        self.stderr = _FakeStderr()
+        self.terminated = False
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = 0
+
+    def kill(self):
+        self.terminated = True
+        self.returncode = -9
+
+    async def wait(self):
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
 
 
 def test_runner_for_driver_uses_shared_supported_driver_map():
@@ -31,6 +85,132 @@ def test_runner_for_driver_uses_shared_supported_driver_map():
     assert runner_for_driver("codex") is run_codex
     assert runner_for_driver("opencode") is run_opencode
     assert runner_for_driver("missing") is None
+
+
+def test_runner_for_backend_selects_protocol_and_forces_adhoc_oneshot():
+    live = _validate_backend("claude-live", {
+        "driver": "claude",
+        "protocol": "interactive-cli",
+    })
+
+    assert runner_for_backend(live) is run_claude_interactive_cli
+    assert runner_for_backend(live, adhoc=True) is run_claude
+
+
+def test_claude_interactive_reuses_live_process_for_same_session_key():
+    _clear()
+    fake_proc = _FakeProcess(9001, [
+        json.dumps({"type": "system", "session_id": "sess-1"}),
+        json.dumps({"type": "result", "result": "first", "usage": {}}),
+        json.dumps({"type": "result", "result": "second", "usage": {}}),
+    ])
+    created_cmds = []
+
+    async def fake_create_subprocess_exec(*cmd, **_kwargs):
+        created_cmds.append(list(cmd))
+        return fake_proc
+
+    async def collect(prompt, msg_id):
+        return [chunk async for chunk in run_claude_interactive_cli(
+            prompt, cwd="/tmp/project", topic="work", agent="claude", msg_id=msg_id,
+        )]
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), \
+         patch("agent.runners.asyncio.create_subprocess_exec", fake_create_subprocess_exec):
+        first = asyncio.run(collect("first prompt", 1))
+        second = asyncio.run(collect("second prompt", 2))
+
+    assert created_cmds == [[
+        "claude", "--print",
+        "--input-format", "stream-json",
+        "--output-format", "stream-json",
+        "--include-partial-messages",
+        "--verbose",
+        "--dangerously-skip-permissions",
+    ]]
+    assert first[0] == "first"
+    assert second[0] == "second"
+    payloads = [json.loads(data.decode()) for data in fake_proc.stdin.writes]
+    assert [payload["message"]["content"] for payload in payloads] == [
+        "first prompt",
+        "second prompt",
+    ]
+    assert list(_claude_interactive_sessions) == [
+        ("claude", "work", "claude", "/tmp/project", None, ()),
+    ]
+    assert _proc_registry[9001]["msg_id"] is None
+    _clear()
+
+
+def test_claude_interactive_starts_with_resume_id_and_skips_history_injection():
+    _clear()
+    fake_proc = _FakeProcess(9002, [
+        json.dumps({"type": "system", "session_id": "sess-1"}),
+        json.dumps({"type": "result", "result": "resumed", "usage": {}}),
+    ])
+    captured = {}
+
+    async def fake_create_subprocess_exec(*cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["cwd"] = kwargs["cwd"]
+        return fake_proc
+
+    history = [{"role": "user", "content": "old prompt"}]
+
+    async def collect():
+        return [chunk async for chunk in run_claude_interactive_cli(
+            "new prompt",
+            cwd="/tmp/project",
+            history=history,
+            topic="work",
+            agent="claude",
+            resume_session_id="sess-1",
+        )]
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), \
+         patch("agent.runners.asyncio.create_subprocess_exec", fake_create_subprocess_exec):
+        chunks = asyncio.run(collect())
+
+    assert chunks[0] == "resumed"
+    assert captured["cwd"] == "/tmp/project"
+    assert captured["cmd"][-2:] == ["--resume", "sess-1"]
+    payload = json.loads(fake_proc.stdin.writes[0].decode())
+    assert payload["message"]["content"] == "new prompt"
+    assert "old prompt" not in payload["message"]["content"]
+    _clear()
+
+
+def test_claude_interactive_closes_process_after_idle_timeout():
+    _clear()
+    fake_proc = _FakeProcess(9003, [
+        json.dumps({"type": "system", "session_id": "sess-1"}),
+        json.dumps({"type": "result", "result": "done", "usage": {}}),
+    ])
+
+    async def fake_create_subprocess_exec(*_cmd, **_kwargs):
+        return fake_proc
+
+    async def collect_and_wait():
+        chunks = [chunk async for chunk in run_claude_interactive_cli(
+            "prompt",
+            cwd="/tmp/project",
+            topic="work",
+            agent="claude",
+            interactive_idle_timeout_s=0.001,
+        )]
+        await asyncio.sleep(0.01)
+        return chunks
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), \
+         patch("agent.runners.asyncio.create_subprocess_exec", fake_create_subprocess_exec):
+        chunks = asyncio.run(collect_and_wait())
+
+    assert chunks[0] == "done"
+    assert fake_proc.terminated is True
+    assert 9003 not in _proc_registry
+    session = _claude_interactive_sessions[("claude", "work", "claude", "/tmp/project", None, ())]
+    assert session.proc is None
+    _clear()
 
 
 # ── kill_procs_by_topic ────────────────────────────────────────────────────────

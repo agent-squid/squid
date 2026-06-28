@@ -180,20 +180,31 @@ def test_history_items_include_session_turn_count(tmp_path, monkeypatch):
     assert stats_db.get_message(pending_asst_id)["session_turn_count"] == 3
 
 
-def test_mark_orphaned_pending_preserves_contentful_assistant_rows(tmp_path, monkeypatch):
+def test_mark_orphaned_pending_recovers_only_completed_run_text(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
 
     content_user_id = stats_db.insert_user_message("squid", "codex", "contentful")
     content_asst_id = stats_db.insert_assistant_message("squid", "codex", content_user_id, adhoc=False)
-    stats_db.update_assistant_message(content_asst_id, "recovered content", "session-1", "pending")
+    stats_db.update_assistant_message(content_asst_id, "partial snapshot", "session-1", "pending")
+    stats_db.insert_run_event(content_asst_id, 0, "status", "Working...")
+    stats_db.insert_run_event(content_asst_id, 1, "text", "recovered ")
+    stats_db.insert_run_event(content_asst_id, 2, "text", "content")
+    stats_db.insert_run_event(content_asst_id, 3, "done", None)
 
     empty_user_id = stats_db.insert_user_message("squid", "codex", "empty")
     empty_asst_id = stats_db.insert_assistant_message("squid", "codex", empty_user_id, adhoc=False)
+    stats_db.update_assistant_message(empty_asst_id, "partial snapshot", "session-1", "pending")
+    stats_db.insert_run_event(empty_asst_id, 0, "status", "Working...")
+    stats_db.insert_run_event(empty_asst_id, 1, "done", None)
 
     assert stats_db.mark_orphaned_pending() == 2
-    assert stats_db.get_message(content_asst_id)["status"] == "done"
-    assert stats_db.get_message(empty_asst_id)["status"] == "error"
+    content_row = stats_db.get_message(content_asst_id)
+    assert content_row["status"] == "done"
+    assert content_row["content"] == "recovered content"
+    empty_row = stats_db.get_message(empty_asst_id)
+    assert empty_row["status"] == "error"
+    assert empty_row["content"] == ""
 
 
 def test_init_db_migrates_existing_chat_messages_turn_index(tmp_path, monkeypatch):

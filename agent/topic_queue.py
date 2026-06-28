@@ -126,7 +126,7 @@ class TopicWorker:
             self.q.task_done()
 
     async def _process(self, item: QueueItem):
-        from .runners import CLIError, runner_for_driver
+        from .runners import CLIError, runner_for_backend
         from .config import SQUID_HOME
         from .backends import get_backend
         from .stats_db import insert_run_event, update_assistant_message, save_stats, set_topic_session
@@ -137,9 +137,9 @@ class TopicWorker:
             await item.out_q.put({"_error": f"Backend {item.backend!r} is not configured"})
             await item.out_q.put(None)
             return
-        runner = runner_for_driver(backend.driver)
+        runner = runner_for_backend(backend, adhoc=item.adhoc)
         if runner is None:
-            await item.out_q.put({"_error": f"Driver {backend.driver!r} is not supported"})
+            await item.out_q.put({"_error": f"Driver {backend.driver!r} protocol {backend.protocol!r} is not supported"})
             await item.out_q.put(None)
             return
         try:
@@ -170,6 +170,8 @@ class TopicWorker:
             backend_id=item.backend, backend_env=backend_env,
             backend_settings=backend.driver_settings(), backend_args=backend.args,
         )
+        if backend.protocol.startswith("interactive-"):
+            kwargs["interactive_idle_timeout_s"] = backend.interactive.idle_timeout_seconds
         if item.resume_session_id:
             kwargs["resume_session_id"] = item.resume_session_id
 
@@ -261,7 +263,7 @@ class TopicWorker:
                     raise
 
             await _emit_git_diff()
-            content = raw or status_raw or ""
+            content = raw
             context_json = json.dumps(tool_events) if tool_events else None
             update_assistant_message(item.msg_id, content, session_id,
                                      "done" if content else "error", context=context_json)

@@ -43,6 +43,11 @@ def _deregister_proc(pid: int) -> None:
     _proc_registry.pop(pid, None)
 
 
+def _update_proc(pid: int, **updates) -> None:
+    if pid in _proc_registry:
+        _proc_registry[pid].update(updates)
+
+
 def _signal_process_group(pid: int, sig: signal.Signals) -> bool:
     """Signal the CLI process group; fall back to the parent PID if needed."""
     try:
@@ -123,6 +128,110 @@ class CLINotFoundError(RuntimeError):
 
 class CLIError(RuntimeError):
     pass
+
+
+def _claude_child_env(backend_id: str, backend_env: Optional[dict]) -> dict:
+    env_for_claude = dict(backend_env) if backend_env else {}
+    if backend_id == "claude":
+        # Claude Code owns its OAuth credentials and refresh lifecycle. Inherited
+        # API/gateway variables take precedence over its claude.ai login, so remove
+        # them only for the native backend. Gateway backends such as deepcla keep
+        # their explicitly resolved child-process environment.
+        for name in (
+            "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
+            "SQUID_NATIVE_CLAUDE_TOKEN",
+        ):
+            env_for_claude[name] = None
+    return env_for_claude
+
+
+class _ClaudeStreamParser:
+    def __init__(self, history: Optional[List[dict]]):
+        self.history = history
+        self.session_id: Optional[str] = None
+        self.tool_blocks: dict[int, dict] = {}
+        self.done = False
+
+    def feed_line(self, line: str) -> list[Union[str, dict]]:
+        if not line:
+            return []
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return []
+
+        chunks: list[Union[str, dict]] = []
+        t = event.get("type")
+
+        if t == "system":
+            self.session_id = event.get("session_id")
+
+        elif t == "stream_event":
+            inner = event.get("event", {})
+            inner_type = inner.get("type", "")
+            idx = inner.get("index", 0)
+
+            if inner_type == "content_block_start":
+                block = inner.get("content_block", {})
+                if block.get("type") == "tool_use":
+                    self.tool_blocks[idx] = {"name": block.get("name", ""), "input_json": ""}
+
+            elif inner_type == "content_block_delta":
+                delta = inner.get("delta", {})
+                dtype = delta.get("type", "")
+                if dtype == "text_delta":
+                    text = delta.get("text", "")
+                    if text:
+                        # Claude can emit assistant text, continue with tool calls,
+                        # and revise or replace that text before the turn completes.
+                        # Keep these in-progress deltas in Squid's status bubble;
+                        # the result event below is the completed response.
+                        chunks.append({"_status": text})
+                elif dtype == "input_json_delta" and idx in self.tool_blocks:
+                    self.tool_blocks[idx]["input_json"] += delta.get("partial_json", "")
+
+            elif inner_type == "content_block_stop" and idx in self.tool_blocks:
+                block = self.tool_blocks.pop(idx)
+                chunks.append({"_tool": _tool_data(block["name"], block["input_json"])})
+
+        elif t == "result":
+            subtype = event.get("subtype")
+            final_text = event.get("result", "")
+            if subtype and subtype != "success":
+                self.done = True
+                raise CLIError(final_text or f"Claude result: {subtype}")
+            if final_text:
+                if "Not logged in" in final_text and "/login" in final_text:
+                    raise CLIError("Claude auth failed (network down or token expired) — run: claude login")
+                chunks.append(final_text)
+            usage = event.get("usage", {})
+            # ── Claude token semantics (verified via stream-json output, 2026-06) ──────────
+            # The Anthropic API / Claude Code CLI splits input into THREE buckets:
+            #
+            #   input_tokens                → tiny uncacheable residual (~2–4 tokens).
+            #   cache_creation_input_tokens → tokens written to the prompt cache this turn.
+            #   cache_read_input_tokens     → tokens served from a previous cache entry.
+            #
+            # True total processed this turn = input + cache_creation + cache_read.
+            #
+            # Codex is the OPPOSITE: input_tokens = full total (cache already included);
+            # cache_read_tokens is a subset breakdown. See run_codex() for that path.
+            # ─────────────────────────────────────────────────────────────────────────────
+            chunks.append({
+                "_stats": {
+                    "session_id": self.session_id,
+                    "input_tokens": usage.get("input_tokens", 0),
+                    "output_tokens": usage.get("output_tokens", 0),
+                    "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
+                    "cache_write_tokens": usage.get("cache_creation_input_tokens", 0),
+                    "history_input_tokens": _estimate_history_tokens(self.history),
+                    "cost_usd": event.get("total_cost_usd"),
+                    "duration_ms": event.get("duration_ms"),
+                }
+            })
+            self.done = True
+
+        return chunks
 
 
 async def _stream_lines(
@@ -343,100 +452,261 @@ async def run_claude(
     else:
         cmd.append(_build_prompt(prompt, history))
 
-    session_id: Optional[str] = None
-    tool_blocks: dict[int, dict] = {}  # index -> {name, input_json}
-
-    env_for_claude = dict(backend_env) if backend_env else {}
-    if backend_id == "claude":
-        # Claude Code owns its OAuth credentials and refresh lifecycle. Inherited
-        # API/gateway variables take precedence over its claude.ai login, so remove
-        # them only for the native backend. Gateway backends such as deepcla keep
-        # their explicitly resolved child-process environment.
-        for name in (
-            "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
-            "SQUID_NATIVE_CLAUDE_TOKEN",
-        ):
-            env_for_claude[name] = None
+    parser = _ClaudeStreamParser(history)
+    env_for_claude = _claude_child_env(backend_id, backend_env)
 
     async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, extra_env=env_for_claude):
-        if not line:
-            continue
+        for chunk in parser.feed_line(line):
+            yield chunk
+
+
+class _ClaudeInteractiveCLI:
+    def __init__(
+        self,
+        *,
+        key: tuple,
+        cwd: Optional[str],
+        backend_id: str,
+        backend_env: Optional[dict],
+        backend_args: tuple[str, ...],
+        model: Optional[str],
+        topic: str,
+        agent: str,
+        idle_timeout_s: float,
+    ):
+        self.key = key
+        self.cwd = cwd
+        self.backend_id = backend_id
+        self.backend_env = backend_env
+        self.backend_args = backend_args
+        self.model = model
+        self.topic = topic
+        self.agent = agent
+        self.idle_timeout_s = idle_timeout_s
+        self.proc: Optional[asyncio.subprocess.Process] = None
+        self.stderr_buf: list[bytes] = []
+        self.drain_task: Optional[asyncio.Task] = None
+        self.idle_task: Optional[asyncio.Task] = None
+        self.lock = asyncio.Lock()
+
+    async def _start(self, resume_session_id: Optional[str], prompt: str, msg_id: Optional[int]) -> None:
+        self._cancel_idle_close()
+        if self.proc and self.proc.returncode is None and self.proc.pid in _proc_registry:
+            return
+        if self.proc:
+            await self.close()
+        if not CLAUDE_PATH:
+            raise CLINotFoundError(
+                "claude CLI not found in PATH. Install with: curl -fsSL https://claude.ai/install.sh | bash"
+            )
+        cmd = [
+            CLAUDE_PATH, "--print",
+            "--input-format", "stream-json",
+            "--output-format", "stream-json",
+            "--include-partial-messages",
+            "--verbose",
+            "--dangerously-skip-permissions",
+        ]
+        cmd += list(self.backend_args)
+        if self.model:
+            cmd += ["--model", self.model]
+        if resume_session_id:
+            cmd += ["--resume", resume_session_id]
+
+        env = os.environ.copy()
+        if PROXY_ENV:
+            env.update(PROXY_ENV)
+        for name, value in _claude_child_env(self.backend_id, self.backend_env).items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = value
+
+        self.proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=self.cwd,
+            preexec_fn=os.setpgrp,
+            limit=8 * 1024 * 1024,
+        )
+        assert self.proc.stdout is not None
+        assert self.proc.stdin is not None
+        assert self.proc.stderr is not None
+        self.stderr_buf = []
+        _register_proc(self.proc.pid, backend=self.backend_id, topic=self.topic, agent=self.agent,
+                       adhoc=False, msg_id=msg_id, prompt=prompt)
+
+        async def _drain() -> None:
+            try:
+                assert self.proc is not None and self.proc.stderr is not None
+                while chunk := await self.proc.stderr.read(4096):
+                    self.stderr_buf.append(chunk)
+            except Exception:
+                pass
+
+        self.drain_task = asyncio.create_task(_drain(), name=f"claude-interactive-stderr-{self.proc.pid}")
+
+    def _cancel_idle_close(self) -> None:
+        task = self.idle_task
+        self.idle_task = None
+        if task and task is not asyncio.current_task():
+            task.cancel()
+
+    def _schedule_idle_close(self) -> None:
+        self._cancel_idle_close()
+        if not self.proc or self.proc.returncode is not None or self.idle_timeout_s <= 0:
+            return
+
+        async def _close_after_idle() -> None:
+            try:
+                await asyncio.sleep(self.idle_timeout_s)
+                async with self.lock:
+                    if self.proc and self.proc.returncode is None:
+                        await self.close()
+            except asyncio.CancelledError:
+                pass
+
+        self.idle_task = asyncio.create_task(
+            _close_after_idle(),
+            name=f"claude-interactive-idle-close-{self.proc.pid}",
+        )
+
+    async def close(self) -> None:
+        self._cancel_idle_close()
+        proc = self.proc
+        self.proc = None
+        if not proc:
+            return
+        _deregister_proc(proc.pid)
         try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+            if proc.returncode is None:
+                if not _signal_process_group(proc.pid, signal.SIGTERM):
+                    proc.terminate()
+                await asyncio.wait_for(proc.wait(), timeout=10)
+        except Exception:
+            try:
+                if proc.returncode is None:
+                    if not _signal_process_group(proc.pid, signal.SIGKILL):
+                        proc.kill()
+                    await proc.wait()
+            except Exception:
+                pass
+        if self.drain_task:
+            try:
+                await asyncio.wait_for(self.drain_task, timeout=3)
+            except Exception:
+                self.drain_task.cancel()
+            self.drain_task = None
 
-        t = event.get("type")
-
-        if t == "system":
-            session_id = event.get("session_id")
-
-        elif t == "stream_event":
-            inner = event.get("event", {})
-            inner_type = inner.get("type", "")
-            idx = inner.get("index", 0)
-
-            if inner_type == "content_block_start":
-                block = inner.get("content_block", {})
-                if block.get("type") == "tool_use":
-                    tool_blocks[idx] = {"name": block.get("name", ""), "input_json": ""}
-
-            elif inner_type == "content_block_delta":
-                delta = inner.get("delta", {})
-                dtype = delta.get("type", "")
-                if dtype == "text_delta":
-                    text = delta.get("text", "")
-                    if text:
-                        # Claude can emit assistant text, continue with tool calls,
-                        # and revise or replace that text before the turn completes.
-                        # Keep these in-progress deltas in Squid's status bubble;
-                        # the result event below is the completed response.
-                        yield {"_status": text}
-                elif dtype == "input_json_delta" and idx in tool_blocks:
-                    tool_blocks[idx]["input_json"] += delta.get("partial_json", "")
-
-            elif inner_type == "content_block_stop" and idx in tool_blocks:
-                block = tool_blocks.pop(idx)
-                yield {"_tool": _tool_data(block["name"], block["input_json"])}
-
-        elif t == "result":
-            final_text = event.get("result", "")
-            if final_text:
-                if "Not logged in" in final_text and "/login" in final_text:
-                    raise CLIError("Claude auth failed (network down or token expired) — run: claude login")
-                yield final_text
-            usage = event.get("usage", {})
-            # ── Claude token semantics (verified via stream-json output, 2026-06) ──────────
-            # The Anthropic API / Claude Code CLI splits input into THREE buckets:
-            #
-            #   input_tokens               → tiny uncacheable residual (~2–4 tokens).
-            #                                The user's actual message is NOT here.
-            #   cache_creation_input_tokens → tokens written to the prompt cache this turn,
-            #                                INCLUDING the user message. This is where the
-            #                                bulk of "new" content lives.
-            #   cache_read_input_tokens     → tokens served from a previous cache entry.
-            #
-            # True total processed this turn = input + cache_creation + cache_read.
-            #
-            # This is counter-intuitive: input_tokens alone (2–4) looks like a bug but it
-            # is correct. We have gone back and forth on this — do not "fix" it by treating
-            # input_tokens as the full user message count.
-            #
-            # Codex is the OPPOSITE: input_tokens = full total (cache already included);
-            # cache_read_tokens is a subset breakdown. See run_codex() for that path.
-            # ─────────────────────────────────────────────────────────────────────────────
-            yield {
-                "_stats": {
-                    "session_id": session_id,
-                    "input_tokens": usage.get("input_tokens", 0),
-                    "output_tokens": usage.get("output_tokens", 0),
-                    "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
-                    "cache_write_tokens": usage.get("cache_creation_input_tokens", 0),
-                    "history_input_tokens": _estimate_history_tokens(history),
-                    "cost_usd": event.get("total_cost_usd"),
-                    "duration_ms": event.get("duration_ms"),
-                }
+    async def query(
+        self,
+        prompt: str,
+        *,
+        history: Optional[List[dict]],
+        resume_session_id: Optional[str],
+        msg_id: Optional[int],
+        response_timeout: Optional[int],
+    ) -> AsyncGenerator[Union[str, dict], None]:
+        async with self.lock:
+            had_live_process = bool(self.proc and self.proc.returncode is None)
+            await self._start(resume_session_id, prompt, msg_id)
+            assert self.proc is not None
+            assert self.proc.stdin is not None
+            assert self.proc.stdout is not None
+            _update_proc(self.proc.pid, msg_id=msg_id, prompt_preview=(prompt[:80] + "…") if len(prompt) > 80 else prompt)
+            content = prompt if resume_session_id or had_live_process else _build_prompt(prompt, history)
+            payload = {
+                "type": "user",
+                "message": {"role": "user", "content": content},
+                "parent_tool_use_id": None,
             }
+            try:
+                self.proc.stdin.write((json.dumps(payload, separators=(",", ":")) + "\n").encode())
+                await self.proc.stdin.drain()
+            except Exception as exc:
+                await self.close()
+                raise CLIError(f"Claude interactive stdin failed: {exc}") from exc
+
+            parser = _ClaudeStreamParser(history)
+            timeout = response_timeout if response_timeout is not None else RESPONSE_TIMEOUT
+            deadline = asyncio.get_event_loop().time() + timeout
+            first_byte = True
+
+            try:
+                while not parser.done:
+                    remaining = deadline - asyncio.get_event_loop().time()
+                    if remaining <= 0:
+                        await self.close()
+                        raise CLIError("Response timeout exceeded")
+                    per_line = min(FIRST_BYTE_TIMEOUT if first_byte else remaining, remaining)
+                    try:
+                        line = await asyncio.wait_for(self.proc.stdout.readline(), timeout=per_line)
+                    except asyncio.TimeoutError:
+                        await self.close()
+                        raise CLIError("Timed out waiting for CLI response")
+                    if not line:
+                        returncode = self.proc.returncode
+                        await self.close()
+                        err = b"".join(self.stderr_buf).decode(errors="replace").strip()
+                        if returncode:
+                            raise CLIError(f"CLI exited {returncode}: {err}")
+                        raise CLIError("Claude interactive stream closed before result")
+                    first_byte = False
+                    for chunk in parser.feed_line(line.decode(errors="replace").rstrip("\n")):
+                        yield chunk
+            finally:
+                if self.proc:
+                    _update_proc(self.proc.pid, msg_id=None)
+                    self._schedule_idle_close()
+
+
+_claude_interactive_sessions: dict[tuple, _ClaudeInteractiveCLI] = {}
+
+
+async def run_claude_interactive_cli(
+    prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
+    model: Optional[str] = None, topic: str = "", agent: str = "",
+    response_timeout: Optional[int] = None,
+    resume_session_id: Optional[str] = None,
+    adhoc: bool = False, msg_id: Optional[int] = None,
+    backend_id: str = "claude", backend_env: Optional[dict] = None,
+    backend_settings: Optional[dict] = None, backend_args: tuple[str, ...] = (),
+    interactive_idle_timeout_s: float = 3600,
+) -> AsyncGenerator[Union[str, dict], None]:
+    """Stream one turn through a persistent Claude Code stream-json process."""
+    if adhoc:
+        async for chunk in run_claude(
+            prompt, cwd=cwd, history=history, model=model, topic=topic, agent=agent,
+            response_timeout=response_timeout, resume_session_id=resume_session_id,
+            adhoc=adhoc, msg_id=msg_id, backend_id=backend_id, backend_env=backend_env,
+            backend_settings=backend_settings, backend_args=backend_args,
+        ):
+            yield chunk
+        return
+    key = (backend_id, topic, agent, cwd, model, tuple(backend_args))
+    session = _claude_interactive_sessions.get(key)
+    if session is None:
+        session = _ClaudeInteractiveCLI(
+            key=key, cwd=cwd, backend_id=backend_id, backend_env=backend_env,
+            backend_args=backend_args, model=model, topic=topic, agent=agent,
+            idle_timeout_s=interactive_idle_timeout_s,
+        )
+        _claude_interactive_sessions[key] = session
+    else:
+        session.idle_timeout_s = interactive_idle_timeout_s
+    try:
+        async for chunk in session.query(
+            prompt, history=history, resume_session_id=resume_session_id,
+            msg_id=msg_id, response_timeout=response_timeout,
+        ):
+            yield chunk
+    except Exception:
+        await session.close()
+        _claude_interactive_sessions.pop(key, None)
+        raise
 
 
 def _codex_config_args(settings: dict) -> list[str]:
@@ -945,7 +1215,23 @@ RUNNER_NAMES_BY_DRIVER = {
     "opencode": "run_opencode",
 }
 
+RUNNER_NAMES_BY_DRIVER_PROTOCOL = {
+    ("claude", "oneshot-cli"): "run_claude",
+    ("claude", "interactive-cli"): "run_claude_interactive_cli",
+    ("codex", "oneshot-cli"): "run_codex",
+    ("cursor", "oneshot-cli"): "run_cursor",
+    ("opencode", "oneshot-cli"): "run_opencode",
+}
+
 
 def runner_for_driver(driver: str):
     name = RUNNER_NAMES_BY_DRIVER.get(driver)
+    return globals().get(name) if name else None
+
+
+def runner_for_backend(backend, *, adhoc: bool = False):
+    protocol = getattr(backend, "protocol", "oneshot-cli") or "oneshot-cli"
+    if adhoc and protocol != "oneshot-cli":
+        protocol = "oneshot-cli"
+    name = RUNNER_NAMES_BY_DRIVER_PROTOCOL.get((backend.driver, protocol))
     return globals().get(name) if name else None

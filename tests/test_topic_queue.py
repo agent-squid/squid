@@ -125,6 +125,36 @@ def test_worker_keeps_status_out_of_persisted_response():
     ]
 
 
+def test_worker_does_not_persist_status_as_response_when_no_final_text():
+    async def fake_runner(*args, **kwargs):
+        yield {"_status": "Checking the code..."}
+
+    async def run():
+        worker = TopicWorker("work")
+        item = QueueItem(
+            seq=0,
+            topic="work",
+            agent="codex",
+            prompt="hello",
+            context_history=[],
+            backend="codex",
+            model=None,
+            msg_id=125,
+        )
+        with patch("agent.runners.run_codex", fake_runner), \
+             patch("agent.stats_db.insert_run_event"), \
+             patch("agent.stats_db.update_assistant_message") as update_message, \
+             patch("agent.stats_db.set_topic_session"), \
+             patch("agent.stats_db.save_stats"):
+            await worker._process(item)
+
+        return update_message.call_args
+
+    update_call = asyncio.run(run())
+    assert update_call.args[1] == ""
+    assert update_call.args[3] == "error"
+
+
 def test_worker_emits_git_diff_tool_event(tmp_path):
     init_repo(tmp_path)
 

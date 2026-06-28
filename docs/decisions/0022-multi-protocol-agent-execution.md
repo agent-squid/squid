@@ -6,10 +6,11 @@ date: 2026-06-18
 
 ## Context and Problem Statement
 
-Squid currently drives coding-agent CLIs mostly through one-shot structured
-streams: each turn spawns a subprocess, reads stdout events, captures stats and
-session IDs, then exits. This gives deterministic turn boundaries and good
-observability, but it does not cover every useful CLI shape.
+Squid currently drives coding-agent CLIs mostly through a one-shot CLI
+protocol: each turn spawns a subprocess, reads and parses stdout, captures
+stats and session IDs when available, then exits. This gives deterministic
+turn boundaries and good observability, but it does not cover every useful CLI
+shape.
 
 Some agents expose their best behavior only in a long-lived interactive
 session: warm context, native slash commands, live tool display, built-in
@@ -28,11 +29,10 @@ detection, session/resume behavior, terminal attach support, and stats strategy.
 
 Supported protocol names:
 
-| Protocol | Lifetime | Output | Boundary | Primary use |
+| Protocol | Lifetime | Transport | Boundary | Primary use |
 |---|---|---|---|---|
-| `oneshot-text` | Per turn | Plain text | Process exit | Fallback for CLIs without structured events |
-| `oneshot-stream` | Per turn | Structured stream | Process exit or done event | Current default for session and adhoc turns |
-| `interactive-stream` | Long-lived | Structured stream | Structured done event | Preferred interactive protocol when a CLI exposes it |
+| `oneshot-cli` | Per turn | CLI stdin/stdout/stderr | Process exit or structured done event | Current default for session and adhoc turns |
+| `interactive-cli` | Long-lived | Structured CLI stdin/stdout/stderr | Structured done event | Preferred interactive protocol when a CLI exposes it |
 | `interactive-pty` | Long-lived | Terminal bytes / ANSI | Terminal heuristic | Fallback for interactive CLIs that only expose terminal UI |
 
 Drivers declare supported protocols. Backends may provide a default protocol,
@@ -46,14 +46,14 @@ Default selection order for normal session turns:
 1. Agent protocol override, if present.
 2. Backend default protocol, if present.
 3. Driver default protocol.
-4. `oneshot-stream` where available.
+4. `oneshot-cli` where available.
 
 Preferred protocols by workload:
 
-- **Sustained topic work**: `interactive-stream` first, `interactive-pty`
-  second, `oneshot-stream` fallback.
-- **Parallel adhoc work**: `oneshot-stream` first, `oneshot-text` fallback.
-- **Auditable automation**: `oneshot-stream`, because process exit and
+- **Sustained topic work**: `interactive-cli` first, `interactive-pty`
+  second, `oneshot-cli` fallback.
+- **Parallel adhoc work**: `oneshot-cli`.
+- **Auditable automation**: `oneshot-cli`, because process exit and
   structured stats are deterministic.
 
 Adhoc turns continue to prefer one-shot protocols because `#topic@agent!`
@@ -77,9 +77,9 @@ The server still exposes one SSE surface to the browser. Protocol-specific
 events are normalized to Squid's event stream: `meta`, text chunks, `status`,
 `tool`, `stats`, `done`, and `error`.
 
-## Interactive Structured Stream
+## Interactive CLI
 
-`interactive-stream` is the ideal protocol when a coding-agent CLI supports it:
+`interactive-cli` is the ideal protocol when a coding-agent CLI supports it:
 Squid keeps a process alive across turns but exchanges structured events over
 stdin/stdout or another non-terminal channel.
 
@@ -91,7 +91,7 @@ Benefits over PTY:
 - easier deterministic tests and replay
 - warm sessions and native slash commands if the CLI protocol accepts them
 
-Squid should prefer `interactive-stream` over PTY whenever a driver can
+Squid should prefer `interactive-cli` over PTY whenever a driver can
 implement it without losing native interactive behavior.
 
 ## Interactive PTY
@@ -135,8 +135,8 @@ locked cwd and resumes the native session.
 
 Stats are protocol-specific:
 
-- `oneshot-stream`: use structured result events when the CLI emits them.
-- `interactive-stream`: use structured stats or usage events when available.
+- `oneshot-cli`: use structured result events when the CLI emits them.
+- `interactive-cli`: use structured stats or usage events when available.
 - `interactive-pty`: send backend-native local commands such as `/cost` or
   `/usage`, run a sidecar local stats command, or omit stats if no reliable
   local source exists.
@@ -146,27 +146,31 @@ protocols that cannot expose them reliably.
 
 ## Comparison
 
-| Property | `oneshot-stream` | `interactive-stream` | `interactive-pty` |
+| Property | `oneshot-cli` | `interactive-cli` | `interactive-pty` |
 |---|---|---|---|
 | Process per turn | Yes | No | No |
-| Output | Structured events | Structured events | Terminal bytes / ANSI |
+| Transport | CLI stdin/stdout/stderr | Structured CLI stdin/stdout/stderr | Terminal bytes / ANSI |
 | Turn boundary | Process exit / done event | Structured done event | Heuristic |
 | Stats/tool events | Native when CLI emits them | Native when CLI emits them | Sidecar or parsed command output |
 | Slash commands | Synthetic prompt if supported | Native if protocol accepts commands | Native terminal input |
 | Web terminal toggle | No | Usually no | Yes |
 | Parallel adhoc fit | Good | Poor unless isolated | Poor unless isolated |
 | Token cache warmth | Cold per process | Warm within process | Warm within process |
+| Idle cleanup | Process exits every turn | Configured idle timeout, then resume | Configured idle timeout, then resume |
 | Implementation risk | Low | Medium, CLI-dependent | High, due to terminal parsing |
 
 ## Consequences
 
 - Good: Squid can support more than one execution protocol per driver/backend.
-- Good: structured interactive protocols are preferred when available, avoiding
+- Good: structured interactive CLI protocols are preferred when available, avoiding
   PTY parsing while keeping warm sessions.
-- Good: one-shot structured stream remains available for deterministic,
+- Good: one-shot CLI execution remains available for deterministic,
   parallel, and adhoc work.
 - Good: PTY still covers CLIs whose real interactive behavior only exists in a
   terminal and enables a web terminal toggle.
+- Good: interactive processes are treated as a warm cache; Squid can stop them
+  after a backend-configured idle timeout while keeping the durable session ID
+  for native resume.
 - Neutral: token stats are protocol-specific; PTY may need command scraping or
   sidecars.
 - Neutral: PTY turn boundary detection is heuristic.

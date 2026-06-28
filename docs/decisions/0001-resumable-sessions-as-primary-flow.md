@@ -116,10 +116,12 @@ silently and become increasingly expensive per turn.
 An alternative execution model for resumable sessions is a long-lived
 interactive protocol with idle-kill-resume (ADR-0022). Instead of spawning a
 fresh subprocess per turn, Squid may hold one interactive process across
-multiple user turns. When idle for a configurable period, the process is
-killed; the session_id in `topic_sessions` is preserved. The next user message
-spawns a new process with native resume arguments, reloading the conversation
-from the driver's on-disk session state.
+multiple user turns. When idle for a backend-configured period, the process is
+killed; the session_id in `topic_sessions` is preserved. The default idle
+timeout is one hour, following Claude Code's background-agent lifecycle more
+closely than a full-workday process cache. The next user message spawns a new
+process with native resume arguments, reloading the conversation from the
+driver's on-disk session state.
 
 This achieves the same session continuity guarantee as the per-turn batch model,
 with two differences:

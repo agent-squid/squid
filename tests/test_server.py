@@ -5,6 +5,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from agent import server
+from agent import stats_db
 from agent.backends import Backend, Gauge
 
 
@@ -74,6 +75,77 @@ def test_sse_event_preserves_multiline_data_fields():
         "data: \n"
         "data: third\n\n"
     )
+
+
+def test_status_recovers_final_content_from_text_events(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    user_id = stats_db.insert_user_message("squid", "codex", "prompt")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    stats_db.update_assistant_message(msg_id, "half baked", "session-1", "pending")
+
+    client = TestClient(server.app)
+
+    pending = client.get(f"/chat/{msg_id}/status")
+    assert pending.status_code == 200
+    assert pending.json()["status"] == "pending"
+    assert pending.json()["content"] == "half baked"
+
+    stats_db.insert_run_event(msg_id, 0, "text", "final from events")
+    stats_db.insert_run_event(msg_id, 1, "done", None)
+    done = client.get(f"/chat/{msg_id}/status")
+    assert done.status_code == 200
+    assert done.json()["status"] == "done"
+    assert done.json()["content"] == "final from events"
+
+
+def test_status_keeps_pending_partial_content_without_text_events(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    user_id = stats_db.insert_user_message("squid", "codex", "prompt")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    stats_db.update_assistant_message(msg_id, "partial snapshot", "session-1", "pending")
+    stats_db.insert_run_event(msg_id, 0, "status", "Working...")
+    stats_db.insert_run_event(msg_id, 1, "done", None)
+
+    client = TestClient(server.app)
+    done = client.get(f"/chat/{msg_id}/status")
+
+    assert done.status_code == 200
+    assert done.json()["status"] == "pending"
+    assert done.json()["content"] == "partial snapshot"
+
+
+def test_stream_response_does_not_promote_status_to_final_content():
+    async def fake_dispatch(**kwargs):
+        out_q = asyncio.Queue()
+        await out_q.put({"_status": "Working on it..."})
+        await out_q.put(None)
+        return out_q, 3, FinishedWorker()
+
+    async def run():
+        with patch.object(server.dispatcher, "dispatch", fake_dispatch), \
+             patch("agent.server.update_assistant_message") as update_message:
+            chunks = [
+                chunk
+                async for chunk in server.stream_response(
+                    "prompt",
+                    topic="squid",
+                    agent="codex",
+                    backend="codex",
+                    model=None,
+                    cwd="/tmp/squid",
+                    context_history=[],
+                    asst_msg_id=123,
+                )
+            ]
+            return chunks, update_message.call_args
+
+    chunks, update_call = asyncio.run(run())
+    assert any(chunk == "event: status\ndata: Working on it...\n\n" for chunk in chunks)
+    assert not any(chunk.startswith("data:Working on it...") for chunk in chunks)
+    assert update_call.args[1] == ""
+    assert update_call.args[3] == "done"
 
 
 def test_clear_command_kills_only_session_lane():

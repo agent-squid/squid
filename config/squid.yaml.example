@@ -14,15 +14,31 @@ agent:
   response_timeout: 1800
 
 # A driver is Squid's coded coding-agent integration. A backend is a configured
-# driver instance: endpoint, credentials, gauge, args/settings, color, and
-# optional default model. Named agents then choose backend + model override + cwd.
+# driver instance: endpoint, credentials, gauge, args/settings, color, optional
+# default model, and optional protocol. Named agents then choose backend + model
+# override + cwd.
 # Supported drivers: claude, codex, cursor, opencode.
+# Supported protocols: oneshot-cli, interactive-cli, interactive-pty.
 backends:
   claude:
     driver: claude
+    protocol: oneshot-cli
     label: Claude
     color: "#AE5332"
     gauge: claude
+
+  # Experimental Claude Code streaming-input mode. Create an agent on this
+  # backend to compare against the default one-turn CLI process model.
+  # claude-live:
+  #   driver: claude
+  #   protocol: interactive-cli
+  #   interactive:
+  #     # Seconds before Squid stops an idle live CLI process. The native
+  #     # session is preserved and resumed on the next turn. Set to 0 to disable.
+  #     idle_timeout_seconds: 3600
+  #   label: Claude Live
+  #   color: "#C46A3A"
+  #   gauge: claude
 
   codex:
     driver: codex

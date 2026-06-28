@@ -28,8 +28,9 @@ Squid distinguishes these concepts:
   resume, and token semantics.
 - A **backend** is a named YAML-configured instance of one driver. Backends own
   driver configuration: canonical provider, API key, base URL, gauge,
-  additional arguments, UI color, and default model. Multiple backends may use
-  the same driver with different endpoints or credentials.
+  additional arguments, UI color, default model, and protocol. Multiple
+  backends may use the same driver with different endpoints, credentials, or
+  protocols.
 - A **named agent** is a user-defined execution identity: `(backend, model,
   cwd)`, plus optional timeout. `model` may be null, in which case the backend's
   default model is used. Agents are addressed with `@agent`.
@@ -39,8 +40,8 @@ Squid distinguishes these concepts:
 
 Agents continue to store `(backend, model, cwd)` in SQLite. The backend ID is
 resolved at execution time, the backend resolves to a driver plus driver
-configuration, and the resulting driver runs the request. Routing is never
-inferred from the model name.
+configuration and protocol, and the resulting driver protocol runs the request.
+Routing is never inferred from the model name.
 
 `api_key` may be literal or referenced from an environment variable with
 `{env: NAME}` and is resolved only when the backend executes. Drivers translate
@@ -57,14 +58,17 @@ the server and selected only from backend configuration, never model names.
 Codex driver settings, including settings generated from canonical connection
 fields, are flattened to repeated `-c dotted.key=value` arguments.
 
-The backend configuration fingerprint is stored with resumable sessions. Squid
-starts a fresh session if execution-relevant backend configuration changes.
+The backend configuration fingerprint is stored with resumable sessions and
+includes protocol. Squid starts a fresh session if execution-relevant backend
+configuration changes.
 
 ## Consequences
 
 - New endpoints and models supported by an existing driver require YAML only.
 - Multiple backends may share one driver, such as `claude: claude` and
   `deepcla: claude`.
+- Multiple backends may share one driver while using different protocols, such
+  as `claude: oneshot-cli` and `claude-live: interactive-cli`.
 - Multiple backends may share a gauge implementation without sharing keys.
 - A genuinely different CLI protocol still requires a coded driver.
 - Topic identity and execution identity stay separate: `#topic` owns the

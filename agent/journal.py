@@ -9,7 +9,7 @@ from typing import Optional
 
 from .config import SQUID_HOME
 from .backends import get_backend
-from .runners import run_claude, runner_for_driver
+from .runners import run_claude, runner_for_backend
 from .stats_db import get_default_agent, get_topic_messages_for_period
 
 log = logging.getLogger(__name__)
@@ -127,7 +127,8 @@ async def _run_generation(prompt: str) -> str:
     gen_agent = agent_cfg.get("name", "claude")
     model = agent_cfg.get("model")
     backend = get_backend(backend_id)
-    runner = runner_for_driver(backend.driver if backend else backend_id) or run_claude
+    runner = runner_for_backend(backend, adhoc=True) if backend else None
+    runner = runner or run_claude
 
     chunks = []
     async for chunk in runner(

@@ -68,7 +68,7 @@ from .stats_db import (
     insert_user_message, insert_assistant_message, update_assistant_message,
     update_message_quota_snapshot,
     get_context_history, get_messages_by_ids, mark_orphaned_pending, get_message,
-    has_done_run_event,
+    get_completed_run_text,
     ensure_session_turn_index,
     get_session_injected_context,
     get_topic_session, clear_topic_session,
@@ -423,7 +423,7 @@ async def _drain_to_completion(
     except Exception:
         log.exception("drain error msg_id=%s", msg_id)
 
-    content = raw or status_raw or ""
+    content = raw
     context_json = json.dumps(tool_events) if tool_events else None
     try:
         update_assistant_message(msg_id, content, session_id, "done" if content else "error", context=context_json, only_if_pending=True)
@@ -523,9 +523,6 @@ async def stream_response(
 
             await asyncio.sleep(0)
 
-        if not raw and status_raw:
-            raw = status_raw
-            yield sse_chunk(raw)
         context_json = json.dumps(tool_events) if tool_events else None
         update_assistant_message(asst_msg_id, raw, session_id, "done", context=context_json, only_if_pending=True)
         yield sse_event("done")
@@ -542,7 +539,7 @@ async def stream_response(
     finally:
         if not _completed:
             try:
-                update_assistant_message(asst_msg_id, raw or status_raw or "", session_id, "pending", only_if_pending=True)
+                update_assistant_message(asst_msg_id, raw, session_id, "pending", only_if_pending=True)
             except Exception:
                 pass
             asyncio.create_task(
@@ -820,15 +817,15 @@ async def message_status(msg_id: int):
     row = get_message(msg_id)
     if not row:
         return JSONResponse({"error": "not found"}, status_code=404)
+    recovered_content = get_completed_run_text(msg_id)
     if (
         row.get("status") == "pending"
         and row.get("role") == "assistant"
-        and row.get("content")
-        and has_done_run_event(msg_id)
+        and recovered_content
     ):
         update_assistant_message(
             msg_id,
-            row.get("content") or "",
+            recovered_content,
             row.get("session_id"),
             "done",
             context=row.get("context"),

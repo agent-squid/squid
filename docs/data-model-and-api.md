@@ -5,11 +5,11 @@
 | Term | Meaning |
 |---|---|
 | **driver** | The coded coding-agent integration: `claude`, `codex`, `cursor`, or `opencode`. A driver owns command construction, supported protocols, parsing, resume behavior, and token semantics. |
-| **backend** | A named YAML configuration of one driver: provider connection, credentials, billing gauge, UI color, driver arguments/settings, and default model. Must be explicitly set on each agent. |
+| **backend** | A named YAML configuration of one driver: provider connection, credentials, billing gauge, UI color, driver arguments/settings, default model, and protocol. Must be explicitly set on each agent. |
 | **agent** | A named execution identity: backend, model override, cwd, timeout. Defined by the user and stored in the `agents` table. Referenced by name in the `@agent` input syntax. |
 | **topic** | A named conversation/work thread (e.g. `oncall`, `squid`). Each topic has a sticky agent and zero or more sessions and adhoc turns from multiple agents. |
 | **route** | A topic plus agent selection written as `#topic@agent`. `#topic` owns conversation history; `@agent` owns execution config. |
-| **protocol** | The driver communication shape for a turn/session, such as `oneshot-stream`, `interactive-stream`, or `interactive-pty`. Protocol selection is driver/backend/agent configuration, not model-name inference. |
+| **protocol** | The driver communication shape for a turn/session, such as `oneshot-cli`, `interactive-cli`, or `interactive-pty`. Protocol selection is driver/backend/agent configuration, not model-name inference. |
 | **session** | A resumable CLI process context identified by a `session_id` (from `claude --resume`) or `thread_id` (Codex). Scoped to `(topic, agent)`. |
 | **adhoc** | A one-off parallel turn that uses a `lookback` window of recent history as inline context instead of a persistent session. |
 
@@ -125,8 +125,8 @@ created_at           TEXT    ISO8601 — set on INSERT, never updated (used for 
 Same as above but no `--resume`. Uses `get_context_history(lookback=N)` as inline context
 (last N non-adhoc session turns for the topic/agent pair).
 The returned message IDs are stored in the user message's `context` column.
-Session state in `topic_sessions` is not written. Adhoc turns prefer one-shot
-protocols because they are parallel and outside the durable `(topic, agent)`
+Session state in `topic_sessions` is not written. Adhoc turns force
+`oneshot-cli` because they are parallel and outside the durable `(topic, agent)`
 session queue.
 
 ### Client disconnect mid-stream
@@ -554,11 +554,9 @@ Fetch current Codex usage. Requires a saved Codex bearer token.
   "status":    "ok",
   "boot_time": "ISO8601",
   "backends": {
-    "claude":      { "available": true,  "path": "/usr/local/bin/claude", "gauge": { "type": "claude" } },
-    "cursor":      { "available": false, "path": null },
-    "antigravity": { "available": false, "path": null },
-    "codex":       { "available": true,  "path": "/usr/local/bin/codex" },
-    "copilot":     { "available": false, "path": null }
+    "claude":      { "driver": "claude", "protocol": "oneshot-cli", "interactive": { "idle_timeout_seconds": 3600 }, "available": true,  "path": "/usr/local/bin/claude", "gauge": { "type": "claude" } },
+    "claude-live": { "driver": "claude", "protocol": "interactive-cli", "interactive": { "idle_timeout_seconds": 3600 }, "available": true, "path": "/usr/local/bin/claude", "gauge": { "type": "claude" } },
+    "codex":       { "driver": "codex", "protocol": "oneshot-cli", "interactive": { "idle_timeout_seconds": 3600 }, "available": true,  "path": "/usr/local/bin/codex" }
   }
 }
 ```
