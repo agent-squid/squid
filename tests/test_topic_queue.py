@@ -53,6 +53,27 @@ def test_dispatch_preserves_lookback_on_queue_item():
     assert captured["item"].lookback == 3
 
 
+def test_queue_preview_uses_display_prompt_not_augmented_prompt():
+    async def run():
+        worker = TopicWorker("work")
+        augmented = "Persistent user-editable topic memory:\n<topic_memory>secret</topic_memory>\n\nfix app"
+        item = QueueItem(
+            seq=0,
+            topic="work",
+            agent="codex",
+            prompt=augmented,
+            display_prompt="fix app",
+            context_history=[],
+            backend="codex",
+            model=None,
+            msg_id=124,
+        )
+        worker.q.put_nowait(item)
+        return worker.queue_items()
+
+    assert asyncio.run(run())[0]["prompt_preview"] == "fix app"
+
+
 def test_worker_persists_stats_with_item_lookback():
     async def fake_runner(*args, **kwargs):
         yield {"_stats": {"session_id": "thread-1", "input_tokens": 10, "output_tokens": 5}}
@@ -330,6 +351,43 @@ def test_worker_keeps_real_code_roots_in_prompt(tmp_path):
     asyncio.run(run())
     assert captured["cwd"] == "/should/not/win"
     assert str(tmp_path) in captured["prompt"]
+
+
+def test_worker_passes_display_prompt_as_runner_preview(tmp_path):
+    init_repo(tmp_path)
+    captured = {}
+
+    async def fake_runner(prompt, *args, **kwargs):
+        captured["prompt"] = prompt
+        captured["prompt_preview"] = kwargs["prompt_preview"]
+        yield "done"
+
+    async def run():
+        worker = TopicWorker("work")
+        item = QueueItem(
+            seq=0,
+            topic="work",
+            agent="codex",
+            prompt=code_roots_prompt_block([str(tmp_path)]) + "\n\nedit app.txt",
+            display_prompt="edit app.txt",
+            context_history=[],
+            backend="codex",
+            model=None,
+            cwd="/tmp/project",
+            code_roots=[str(tmp_path)],
+            adhoc=True,
+            msg_id=793,
+        )
+        with patch("agent.runners.run_codex", fake_runner), \
+             patch("agent.stats_db.insert_run_event"), \
+             patch("agent.stats_db.update_assistant_message"), \
+             patch("agent.stats_db.set_topic_session"), \
+             patch("agent.stats_db.save_stats"):
+            await worker._process(item)
+
+    asyncio.run(run())
+    assert str(tmp_path) in captured["prompt"]
+    assert captured["prompt_preview"] == "edit app.txt"
 
 
 def test_worker_persists_agent_cwd_for_sessions_with_code_roots(tmp_path):

@@ -332,6 +332,82 @@ test.describe('response bubble', () => {
     await expect(page.locator('.msg-time')).toHaveCount(2);
   });
 
+  test('live recovery ignores empty interrupted error until final completion', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200,
+      headers: { ...SSE_HEADERS, 'X-Squid-Msg-Id': '90' },
+      body: '',
+    }));
+
+    let statusCalls = 0;
+    await page.route('**/chat/90/status', r => {
+      statusCalls++;
+      if (statusCalls === 1) {
+        return r.fulfill({ json: { id: 90, status: 'pending', content: 'Partial response' } });
+      }
+      if (statusCalls === 2) {
+        return r.fulfill({ json: { id: 90, status: 'error', content: '' } });
+      }
+      return r.fulfill({ json: {
+        id: 90,
+        topic: 'default',
+        agent: 'claude',
+        backend: 'claude',
+        status: 'done',
+        content: 'Recovered final response',
+        adhoc: false,
+        timestamp: new Date().toISOString(),
+      }});
+    });
+
+    await sendMsg(page);
+
+    await expect(page.locator(RESPONSE).filter({ hasText: 'Recovered final response' })).toBeVisible({ timeout: 8_000 });
+    await expect(page.locator(MSG_ERROR).filter({ hasText: 'Response interrupted.' })).not.toBeAttached();
+    expect(statusCalls).toBeGreaterThanOrEqual(3);
+  });
+
+  test('stream error after partial content keeps partial in thinking bubble only', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200,
+      headers: SSE_HEADERS,
+      body: sse(META, { data: 'Partial answer' }, { event: 'error', data: 'Connection lost' }),
+    }));
+
+    await sendMsg(page);
+
+    const statusBubble = page.locator('.msg-thinking-done');
+    await expect(statusBubble).toContainText('Partial answer');
+    await expect(statusBubble).toContainText('Connection lost');
+    await expect(page.locator(RESPONSE)).not.toBeAttached();
+    await expect(page.locator(MSG_ERROR)).not.toBeAttached();
+  });
+
+  test('polling error after partial content keeps partial in thinking bubble only', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200,
+      headers: { ...SSE_HEADERS, 'X-Squid-Msg-Id': '91' },
+      body: '',
+    }));
+
+    let statusCalls = 0;
+    await page.route('**/chat/91/status', r => {
+      statusCalls++;
+      if (statusCalls === 1) {
+        return r.fulfill({ json: { id: 91, status: 'pending', content: 'Partial response' } });
+      }
+      return r.fulfill({ json: { id: 91, status: 'error', content: 'Partial response' } });
+    });
+
+    await sendMsg(page);
+
+    const statusBubble = page.locator('.msg-thinking-done');
+    await expect(statusBubble).toContainText('Partial response', { timeout: 5_000 });
+    await expect(statusBubble).toContainText('Connection interrupted.');
+    await expect(page.locator(RESPONSE)).not.toBeAttached();
+    await expect(page.locator(MSG_ERROR)).not.toBeAttached();
+  });
+
   test('thinking bubble collapses to toggle when status events present', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200, headers: SSE_HEADERS,

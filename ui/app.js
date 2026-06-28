@@ -1695,6 +1695,20 @@ async function sendMessage(text) {
     }
   }
 
+  function parkInterruptedPartial(content, reason = 'Connection interrupted.') {
+    if (content) raw = content;
+    if (reason && !statusBuf.includes(reason)) {
+      statusBuf += (statusBuf ? '\n' : '') + reason;
+    }
+    updateThinkingPreview();
+    thinkingFrozen = true;
+    killBtn.style.display = 'none';
+    if (thinkingLoader.parentNode) thinkingLoader.remove();
+    thinkingBubble.style.display = '';
+    thinkingBubble.classList.add('msg-thinking-done');
+    scrollToBottom();
+  }
+
   function renderCompletionTools(tools) {
     const diffTools = changeTools(tools || []);
     for (const tool of diffTools) {
@@ -1740,10 +1754,15 @@ async function sendMessage(text) {
           scrollToBottom();
           controller.abort();
         } else if (data.status === 'error') {
+          if (!String(data.content || '').trim()) return;
           completedFromStatus = true;
           stopStatusFallback();
-          freezeThinking();
-          showError(data.content || 'Response interrupted.');
+          if (raw || firstDataReceived) {
+            parkInterruptedPartial(data.content || raw);
+          } else {
+            freezeThinking();
+            showError(data.content);
+          }
           controller.abort();
         } else if (data.status === 'pending' && data.content && !thinkingFrozen) {
           raw = data.content;
@@ -1964,9 +1983,13 @@ async function sendMessage(text) {
             stopStatusFallback();
             completedFromStatus = true;
             completionRendered = true;
-            freezeThinking();
             const errLine = data.trim();
-            showError(errLine);
+            if (raw || firstDataReceived) {
+              parkInterruptedPartial(null, errLine || 'Connection interrupted.');
+            } else {
+              freezeThinking();
+              showError(errLine);
+            }
             eventName = null;
 
           } else {

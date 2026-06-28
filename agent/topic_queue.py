@@ -26,6 +26,7 @@ class QueueItem:
     adhoc: bool = False
     lookback: int = 0
     msg_id: Optional[int] = None
+    display_prompt: Optional[str] = None
     out_q: asyncio.Queue = field(default_factory=asyncio.Queue)
 
 
@@ -57,7 +58,11 @@ class TopicWorker:
                 "agent": it.agent,
                 "msg_id": it.msg_id,
                 "position": idx + 1,
-                "prompt_preview": (it.prompt[:80] + "…") if len(it.prompt) > 80 else it.prompt,
+                "prompt_preview": (
+                    ((it.display_prompt or it.prompt)[:80] + "…")
+                    if len(it.display_prompt or it.prompt) > 80
+                    else (it.display_prompt or it.prompt)
+                ),
             }
             for idx, it in enumerate(items) if it is not None
         ]
@@ -167,6 +172,7 @@ class TopicWorker:
             topic=item.topic, agent=item.agent or "",
             response_timeout=item.timeout,
             adhoc=item.adhoc, msg_id=item.msg_id,
+            prompt_preview=item.display_prompt,
             backend_id=item.backend, backend_env=backend_env,
             backend_settings=backend.driver_settings(), backend_args=backend.args,
         )
@@ -318,6 +324,7 @@ class TopicDispatcher:
         lookback: int = 0,
         msg_id: Optional[int] = None,
         code_roots: Optional[list[str]] = None,
+        display_prompt: Optional[str] = None,
     ) -> tuple[asyncio.Queue, int, TopicWorker]:
         if adhoc:
             # Each adhoc message gets its own ephemeral worker — never queued, always parallel.
@@ -328,7 +335,7 @@ class TopicDispatcher:
         worker = self._get_or_create(queue_key, topic)
         item = QueueItem(
             seq=0, topic=topic, agent=agent,
-            prompt=prompt, context_history=context_history,
+            prompt=prompt, display_prompt=display_prompt, context_history=context_history,
             backend=backend, model=model, cwd=cwd, code_roots=code_roots, timeout=response_timeout,
             resume_session_id=resume_session_id,
             adhoc=adhoc, lookback=lookback, msg_id=msg_id,

@@ -254,6 +254,7 @@ async def _stream_lines(
     msg_id: Optional[int] = None,
     response_timeout: Optional[int] = None,
     prompt: str = "",
+    prompt_preview: Optional[str] = None,
     extra_env: Optional[dict] = None,
 ) -> AsyncGenerator[str, None]:
     """Run cmd and yield stdout line by line.
@@ -285,7 +286,7 @@ async def _stream_lines(
     assert proc.stdout is not None
     assert proc.stderr is not None
     pid = proc.pid
-    _register_proc(pid, backend=backend, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, prompt=prompt)
+    _register_proc(pid, backend=backend, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, prompt=prompt_preview or prompt)
 
     # Drain stderr concurrently — prevents buffer-full deadlock if the
     # subprocess writes > 64KB of diagnostics before exiting.
@@ -437,6 +438,7 @@ async def run_claude(
     adhoc: bool = False, msg_id: Optional[int] = None,
     backend_id: str = "claude", backend_env: Optional[dict] = None,
     backend_settings: Optional[dict] = None, backend_args: tuple[str, ...] = (),
+    prompt_preview: Optional[str] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream text chunks from claude CLI, then yield a stats dict."""
     if not CLAUDE_PATH:
@@ -464,7 +466,7 @@ async def run_claude(
     parser = _ClaudeStreamParser(history)
     env_for_claude = _claude_child_env(backend_id, backend_env)
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, extra_env=env_for_claude):
+    async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, prompt_preview=prompt_preview, extra_env=env_for_claude):
         for chunk in parser.feed_line(line):
             yield chunk
 
@@ -498,7 +500,7 @@ class _ClaudeInteractiveCLI:
         self.idle_task: Optional[asyncio.Task] = None
         self.lock = asyncio.Lock()
 
-    async def _start(self, resume_session_id: Optional[str], prompt: str, msg_id: Optional[int]) -> None:
+    async def _start(self, resume_session_id: Optional[str], prompt: str, msg_id: Optional[int], prompt_preview: Optional[str]) -> None:
         self._cancel_idle_close()
         if self.proc and self.proc.returncode is None and self.proc.pid in _proc_registry:
             return
@@ -546,7 +548,7 @@ class _ClaudeInteractiveCLI:
         assert self.proc.stderr is not None
         self.stderr_buf = []
         _register_proc(self.proc.pid, backend=self.backend_id, topic=self.topic, agent=self.agent,
-                       adhoc=False, msg_id=msg_id, prompt=prompt, state="running")
+                       adhoc=False, msg_id=msg_id, prompt=prompt_preview or prompt, state="running")
 
         async def _drain() -> None:
             try:
@@ -618,10 +620,11 @@ class _ClaudeInteractiveCLI:
         resume_session_id: Optional[str],
         msg_id: Optional[int],
         response_timeout: Optional[int],
+        prompt_preview: Optional[str],
     ) -> AsyncGenerator[Union[str, dict], None]:
         async with self.lock:
             had_live_process = bool(self.proc and self.proc.returncode is None)
-            await self._start(resume_session_id, prompt, msg_id)
+            await self._start(resume_session_id, prompt, msg_id, prompt_preview)
             assert self.proc is not None
             assert self.proc.stdin is not None
             assert self.proc.stdout is not None
@@ -629,7 +632,7 @@ class _ClaudeInteractiveCLI:
                 self.proc.pid,
                 state="running",
                 msg_id=msg_id,
-                prompt_preview=(prompt[:80] + "…") if len(prompt) > 80 else prompt,
+                prompt_preview=((prompt_preview or prompt)[:80] + "…") if len(prompt_preview or prompt) > 80 else (prompt_preview or prompt),
             )
             content = prompt if resume_session_id or had_live_process else _build_prompt(prompt, history)
             payload = {
@@ -689,6 +692,7 @@ async def run_claude_interactive_cli(
     backend_id: str = "claude", backend_env: Optional[dict] = None,
     backend_settings: Optional[dict] = None, backend_args: tuple[str, ...] = (),
     interactive_idle_timeout_s: float = 3600,
+    prompt_preview: Optional[str] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream one turn through a persistent Claude Code stream-json process."""
     if adhoc:
@@ -697,6 +701,7 @@ async def run_claude_interactive_cli(
             response_timeout=response_timeout, resume_session_id=resume_session_id,
             adhoc=adhoc, msg_id=msg_id, backend_id=backend_id, backend_env=backend_env,
             backend_settings=backend_settings, backend_args=backend_args,
+            prompt_preview=prompt_preview,
         ):
             yield chunk
         return
@@ -714,7 +719,7 @@ async def run_claude_interactive_cli(
     try:
         async for chunk in session.query(
             prompt, history=history, resume_session_id=resume_session_id,
-            msg_id=msg_id, response_timeout=response_timeout,
+            msg_id=msg_id, response_timeout=response_timeout, prompt_preview=prompt_preview,
         ):
             yield chunk
     except Exception:
@@ -746,6 +751,7 @@ async def run_codex(
     adhoc: bool = False, msg_id: Optional[int] = None,
     backend_id: str = "codex", backend_env: Optional[dict] = None,
     backend_settings: Optional[dict] = None, backend_args: tuple[str, ...] = (),
+    prompt_preview: Optional[str] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream a response from codex CLI using non-interactive exec mode."""
     if not CODEX_PATH:
@@ -770,7 +776,7 @@ async def run_codex(
     start_ms = time.monotonic() * 1000
     thread_id: Optional[str] = None
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, extra_env=backend_env):
+    async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, prompt_preview=prompt_preview, extra_env=backend_env):
         if not line:
             continue
         try:
@@ -846,6 +852,7 @@ async def run_copilot(
     response_timeout: Optional[int] = None,
     resume_session_id: Optional[str] = None,
     adhoc: bool = False, msg_id: Optional[int] = None,
+    prompt_preview: Optional[str] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream a response from GitHub Copilot CLI using one-shot -p mode with JSONL output."""
     if not COPILOT_PATH:
@@ -869,7 +876,7 @@ async def run_copilot(
     stats_yielded = False
     session_error: Optional[str] = None
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend="copilot", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt):
+    async for line in _stream_lines(cmd, cwd=cwd, backend="copilot", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, prompt_preview=prompt_preview):
         if not line:
             continue
         try:
@@ -949,6 +956,7 @@ async def run_cursor(
     adhoc: bool = False, msg_id: Optional[int] = None,
     backend_id: str = "cursor", backend_env: Optional[dict] = None,
     backend_settings: Optional[dict] = None, backend_args: tuple[str, ...] = (),
+    prompt_preview: Optional[str] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream text chunks from cursor-agent CLI, then yield a stats dict."""
     if not CURSOR_PATH:
@@ -972,7 +980,7 @@ async def run_cursor(
     session_id: Optional[str] = None
     text_started = False
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, extra_env=backend_env):
+    async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, prompt_preview=prompt_preview, extra_env=backend_env):
         if not line:
             continue
         try:
@@ -1022,6 +1030,7 @@ async def run_antigravity(
     response_timeout: Optional[int] = None,
     resume_session_id: Optional[str] = None,
     adhoc: bool = False, msg_id: Optional[int] = None,
+    prompt_preview: Optional[str] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream text chunks from agy (Google Antigravity) CLI, then yield a stats dict."""
     if not AGY_PATH:
@@ -1042,7 +1051,7 @@ async def run_antigravity(
     streamed_text = False
     tool_blocks: dict[int, dict] = {}
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend="antigravity", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt):
+    async for line in _stream_lines(cmd, cwd=cwd, backend="antigravity", topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, prompt_preview=prompt_preview):
         if not line:
             continue
         try:
@@ -1148,6 +1157,7 @@ async def run_opencode(
     adhoc: bool = False, msg_id: Optional[int] = None,
     backend_id: str = "opencode", backend_env: Optional[dict] = None,
     backend_settings: Optional[dict] = None, backend_args: tuple[str, ...] = (),
+    prompt_preview: Optional[str] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
     """Stream text chunks from opencode CLI, then yield a stats dict."""
     if not OPENCODE_PATH:
@@ -1169,7 +1179,7 @@ async def run_opencode(
     total_input = total_output = total_cache_read = total_cache_write = 0
     total_cost: float = 0.0
 
-    async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, extra_env=backend_env):
+    async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, prompt_preview=prompt_preview, extra_env=backend_env):
         if not line:
             continue
         try:

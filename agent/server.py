@@ -467,6 +467,7 @@ async def stream_response(
     adhoc: bool = False,
     lookback: int = 0,
     code_roots: Optional[list[str]] = None,
+    display_prompt: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     yield sse_event("meta", json.dumps({"agent": agent, "backend": backend, "model": model, "msg_id": asst_msg_id, "adhoc": adhoc}))
 
@@ -478,6 +479,7 @@ async def stream_response(
         resume_session_id=resume_session_id,
         adhoc=adhoc, lookback=lookback, msg_id=asst_msg_id,
         code_roots=code_roots,
+        display_prompt=display_prompt,
     )
 
     raw = ""
@@ -704,6 +706,7 @@ async def chat(req: ChatRequest):
             adhoc=req.adhoc,
             lookback=lookback,
             code_roots=tracking_roots,
+            display_prompt=req.message,
         ),
         media_type="text/event-stream",
         headers={

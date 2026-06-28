@@ -56,6 +56,7 @@ def test_stream_response_passes_agent_cwd_and_code_roots_separately():
                     context_history=[],
                     asst_msg_id=123,
                     code_roots=["/Users/haebin/Work/squid"],
+                    display_prompt="user prompt",
                 )
             ]
 
@@ -63,6 +64,7 @@ def test_stream_response_passes_agent_cwd_and_code_roots_separately():
 
     assert captured["cwd"] == "/tmp/squid"
     assert captured["code_roots"] == ["/Users/haebin/Work/squid"]
+    assert captured["display_prompt"] == "user prompt"
     assert chunks[0].startswith("event: meta")
     assert chunks[-1] == "event: done\ndata: \n\n"
 
