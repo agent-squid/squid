@@ -16,7 +16,7 @@ topics schema are the only things to remove.
 ```sql
 CREATE TABLE agents (
     name       TEXT PRIMARY KEY,
-    backend    TEXT NOT NULL,             -- claude | codex | cursor | antigravity | copilot
+    backend    TEXT NOT NULL,             -- configured backend ID; resolves to a driver
     model      TEXT,                      -- null = backend default
     cwd        TEXT,                      -- null = /tmp/<user>/squid
     timeout    INTEGER,                   -- null = global default (1800s)

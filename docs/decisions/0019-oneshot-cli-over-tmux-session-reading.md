@@ -66,29 +66,35 @@ interactive session. Squid and tmux address different audiences: Squid drives
 CLIs programmatically from a server process; tmux is for human-facing terminal
 multiplexing. They are complementary, not competing.
 
-## Alternative: Invisible PTY with Chat Surface (ADR-0022)
+## Alternative: Multi-Protocol Interactive Execution (ADR-0022)
 
-A third approach not considered in the original tmux analysis: spawn the CLI in
-a **direct PTY** (no tmux intermediary), parse its ANSI output with a headless
-VT100 emulator, and present the result as chat-like message bubbles. This
-preserves process group control (no tmux between Squid and the CLI), enables a
-web terminal toggle by connecting xterm.js to the same PTY, and supports
-long-running sessions with idle-kill-resume lifecycle management.
+A third approach not considered in the original tmux analysis: support multiple
+driver protocols. A CLI may run as a one-shot structured stream, a long-lived
+structured interactive stream, or a direct PTY. A direct PTY (no tmux
+intermediary) preserves process group control, enables a web terminal toggle by
+connecting xterm.js to the same PTY, and supports long-running sessions with
+idle-kill-resume lifecycle management.
+
+When a CLI exposes a long-lived structured interactive stream, Squid should
+prefer that protocol over PTY: it keeps warm sessions while preserving explicit
+events and turn boundaries.
 
 This differs from the tmux model in three key ways:
 
-- **Session ID**: extracted from Claude's on-disk JSONL project files after the
-  first prompt (filename = session_id), not inferred from terminal content.
+- **Session ID**: created or discovered by the driver through native flags,
+  structured metadata, or backend session files, not inferred from terminal
+  content.
 - **Process control**: Squid holds the PTY fd directly; `kill_procs_by_topic()`
   still works without routing through a tmux intermediary.
 - **Turn boundary**: still heuristic (cursor-show sequence + prompt pattern +
-  quiescence fallback), which was one of the reasons tmux was rejected. This is
-  an acknowledged limitation in PTY mode.
+  quiescence fallback) for PTY protocols, which was one of the reasons tmux was
+  rejected. Structured interactive protocols avoid this limitation by emitting
+  explicit done events.
 
-The invisible PTY approach is suitable when users want both a chat UI and
+The invisible PTY protocol is suitable when users want both a chat UI and
 occasional raw terminal access, and when long-running session warmth matters
-more than exact structured event delivery. It is not a replacement for the
-batch mode — both coexist. See ADR-0022 for full design.
+more than exact structured event delivery. It is not a replacement for one-shot
+structured stream mode. See ADR-0022 for the multi-protocol decision.
 
 ## Consequences
 

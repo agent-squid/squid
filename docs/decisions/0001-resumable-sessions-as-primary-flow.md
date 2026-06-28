@@ -111,41 +111,41 @@ independent of the CLI's native `/compact`. Design questions to resolve:
 Until auto-compaction is implemented, long resumed sessions accumulate context
 silently and become increasingly expensive per turn.
 
-## PTY Mode: Idle-Kill-Resume
+## Interactive Protocols: Idle-Kill-Resume
 
-An alternative execution model for resumable sessions is the **invisible PTY
-with idle-kill-resume** (ADR-0022). Instead of spawning a fresh subprocess per
-turn, a single long-running interactive PTY is held across multiple user turns.
-When idle for a configurable period (default 1 hour), the PTY is killed; the
-session_id in `topic_sessions` is preserved. The next user message spawns a new
-PTY with `--resume <session_id>`, reloading the conversation from Claude's
-on-disk project files.
+An alternative execution model for resumable sessions is a long-lived
+interactive protocol with idle-kill-resume (ADR-0022). Instead of spawning a
+fresh subprocess per turn, Squid may hold one interactive process across
+multiple user turns. When idle for a configurable period, the process is
+killed; the session_id in `topic_sessions` is preserved. The next user message
+spawns a new process with native resume arguments, reloading the conversation
+from the driver's on-disk session state.
 
 This achieves the same session continuity guarantee as the per-turn batch model,
 with two differences:
 
-- **Within-session token cache warmth**: the PTY stays warm between turns,
-  so successive messages in a short window re-use Claude's prompt cache without
-  incurring a new cold-start. In batch mode, every turn is a cold-start.
+- **Within-session token cache warmth**: the interactive process stays warm
+  between turns, so successive messages in a short window can re-use provider
+  caches without incurring a new cold-start. In batch mode, every turn is a
+  cold-start.
 - **Native interactive features**: `/compact`, `/clear`, and Claude Code's
-  context-limit compaction all activate naturally in PTY mode. Batch mode
-  requires synthetic prompt injection to trigger these.
+  context-limit compaction all activate naturally in interactive protocols that
+  expose them. Batch mode requires synthetic prompt injection to trigger these.
 
-The `session_id` is extracted by scanning `~/.claude/projects/<cwd-hash>/`
-for the most recently modified `.jsonl` file after the first prompt — the
-filename equals the session_id and the first line confirms it. No probe prompt
-is needed.
+Session ID creation or extraction is protocol-specific. Drivers should prefer a
+native pre-created session ID or structured metadata. PTY fallbacks may need to
+read native session files if the CLI has no explicit session-id flag.
 
-Idle-kill-resume applies only to PTY mode. Batch mode (current default) has no
-idle processes to kill — subprocesses exit after every turn.
+Idle-kill-resume applies only to interactive protocols. Batch mode (current
+default) has no idle processes to kill — subprocesses exit after every turn.
 
 ## Consequences
 
 - Good: CLI owns context natively; no synthetic history injection overhead
 - Good: adhoc path gives precise control over injected context
 - Good: both modes coexist on the same topic via `!` syntax
-- Good: PTY mode (ADR-0022) provides within-session cache warmth and native
-  interactive commands without changing the session_id contract
+- Good: interactive protocols (ADR-0022) provide within-session cache warmth
+  and native interactive commands without changing the session_id contract
 - Bad: context grows with every turn — no auto-compaction yet
 - Bad: two code paths (`_build_prompt` + resume logic) to maintain
 - Bad: Codex `exec resume` does not support `/clear` or `/compact` natively —

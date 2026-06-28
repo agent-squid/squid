@@ -128,7 +128,9 @@ To stop without restarting: `bin/stop.sh`
 | `cursor`      | `cursor-agent` (Cursor)                        | `curl -fsS https://cursor.com/install \| bash`            | resumable |
 | `opencode`    | `opencode`                                     | `curl -fsSL https://opencode.ai/install \| bash`          | resumable |
 
-A **driver** is Squid's coded CLI adapter (`claude`, `codex`, `cursor`, or `opencode`). A **backend** is a YAML-configured instance of one driver. Multiple backends can share a driver while using different endpoints, credentials, arguments, and colors. See `config/squid.yaml.example`.
+A **driver** is Squid's coded coding-agent integration (`claude`, `codex`, `cursor`, or `opencode`). A **backend** is a YAML-configured instance of one driver: endpoint, credentials, arguments, gauge, UI color, and default model. Multiple backends can share a driver; for example `deepcla` uses the Claude driver with a DeepSeek endpoint. See `config/squid.yaml.example`.
+
+Drivers communicate through protocols. Today the primary protocol is one-shot structured streaming. Squid's model also supports long-lived interactive protocols: `interactive-stream` when a CLI exposes structured events, and `interactive-pty` when the CLI's real interactive behavior only exists through a terminal.
 
 ## Input syntax
 
@@ -148,7 +150,7 @@ This makes comparison easy. Ask the fully resumed session with `#topic@agent`, t
 
 ## Agents
 
-An agent defines an identity: `(backend, model, cwd)`. These three are **locked at session creation** and cannot change for the lifetime of that session. To use a different configuration on the same topic, create a new agent — it gets its own parallel queue lane.
+An agent defines an identity: `(backend, model, cwd)`. The backend supplies the driver and defaults; the agent may override the model and working directory. These three are **locked at session creation** and cannot change for the lifetime of that session. To use a different configuration on the same topic, create a new agent — it gets its own parallel queue lane.
 
 Agents are **immutable** — they cannot be edited after creation. If you need a different config, delete and recreate with a new name. (Deleting an agent does not affect existing messages in history.)
 
@@ -171,6 +173,8 @@ curl -X POST http://127.0.0.1:8000/config/agents \
 ### Agent required
 
 `@agent` must resolve to a known agent. If it doesn't exist, the UI prompts you to create it inline before the message is sent. There is no auto-detection of backend from model name — the agent locks all three dimensions `(backend, model, cwd)` explicitly.
+
+`#topic@agent` is a route. The topic owns the conversation/history; the agent owns execution config.
 
 ### Context directory and bare-run design
 
@@ -310,8 +314,8 @@ Use the agent directly when one terminal is enough. Use Squid when you want seve
 | `message`  | string         | required    | Prompt text                                      |
 | `topic`    | string         | `"default"` | Conversation thread identifier                   |
 | `agent`    | string         | `null`      | Agent to use; must exist or returns 400          |
-| `lookback` | int \| `"all"` | `5`         | History exchanges to inject (adhoc/oneshot only) |
-| `adhoc`    | bool           | `false`     | Run as oneshot, parallel, outside session queue  |
+| `lookback` | int \| `"all"` | `5`         | History exchanges to inject (adhoc one-shot only) |
+| `adhoc`    | bool           | `false`     | Run as a parallel one-shot turn outside session queue |
 
 ```bash
 curl -N -X POST http://127.0.0.1:8000/chat \

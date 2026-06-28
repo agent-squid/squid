@@ -13,8 +13,10 @@ agent:
   first_byte_timeout: 300
   response_timeout: 1800
 
-# A backend is a configured instance of a coded CLI driver. Add more backends
-# with one of these drivers: claude, codex, cursor, opencode.
+# A driver is Squid's coded coding-agent integration. A backend is a configured
+# driver instance: endpoint, credentials, gauge, args/settings, color, and
+# optional default model. Named agents then choose backend + model override + cwd.
+# Supported drivers: claude, codex, cursor, opencode.
 backends:
   claude:
     driver: claude
@@ -54,6 +56,7 @@ backends:
   #   provider: deepseek
   #   base_url: "https://api.deepseek.com/anthropic"
   #   api_key: "sk-..."
+  #   model: deepseek-chat  # backend default; an agent may override it
   #   gauge: deepseek
 
   # Canonical base_url/api_key fields are translated into driver-specific

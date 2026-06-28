@@ -4,11 +4,13 @@
 
 | Term | Meaning |
 |---|---|
-| **agent** | A named configuration: backend, model, cwd, timeout. Defined by the user and stored in the `agents` table. Referenced by name in the `@agent` input syntax. |
-| **backend** | A named YAML configuration selecting a coded driver, provider connection, billing gauge, and color. Must be explicitly set on each agent. |
-| **driver** | The coded CLI protocol adapter used by a backend: `claude`, `codex`, `cursor`, or `opencode`. |
-| **topic** | A named conversation channel (e.g. `oncall`, `backend`). Each topic has a sticky agent you can switch dynamically and zero or more sessions and adhoc turns from multiple agents. Topic = *sessions(*agents) + *adhocs(*agents) |
-| **session** | A resumable CLI process context identified by a `session_id` (from `claude --resume`) or `thread_id` (Codex). Scoped to `(topic, agent)`. |)
+| **driver** | The coded coding-agent integration: `claude`, `codex`, `cursor`, or `opencode`. A driver owns command construction, supported protocols, parsing, resume behavior, and token semantics. |
+| **backend** | A named YAML configuration of one driver: provider connection, credentials, billing gauge, UI color, driver arguments/settings, and default model. Must be explicitly set on each agent. |
+| **agent** | A named execution identity: backend, model override, cwd, timeout. Defined by the user and stored in the `agents` table. Referenced by name in the `@agent` input syntax. |
+| **topic** | A named conversation/work thread (e.g. `oncall`, `squid`). Each topic has a sticky agent and zero or more sessions and adhoc turns from multiple agents. |
+| **route** | A topic plus agent selection written as `#topic@agent`. `#topic` owns conversation history; `@agent` owns execution config. |
+| **protocol** | The driver communication shape for a turn/session, such as `oneshot-stream`, `interactive-stream`, or `interactive-pty`. Protocol selection is driver/backend/agent configuration, not model-name inference. |
+| **session** | A resumable CLI process context identified by a `session_id` (from `claude --resume`) or `thread_id` (Codex). Scoped to `(topic, agent)`. |
 | **adhoc** | A one-off parallel turn that uses a `lookback` window of recent history as inline context instead of a persistent session. |
 
 ---
@@ -23,7 +25,7 @@ SQLite database at `~/.squid/squid.db` (persists across installs).
 
 ```
 name       TEXT  PK          user-defined short name (e.g. "clawd", "code")
-backend    TEXT  NOT NULL    claude | cursor | antigravity | codex | copilot
+backend    TEXT  NOT NULL    backend ID from YAML; resolves to a driver
 model      TEXT              model string (e.g. claude-opus-4-5); null = backend default
 cwd        TEXT              working directory; null = /tmp/<user>/squid
 timeout    INTEGER           per-agent response timeout in seconds; null = global default
@@ -112,7 +114,7 @@ created_at           TEXT    ISO8601 — set on INSERT, never updated (used for 
 ## Key Data Flows
 
 ### Session turn (non-adhoc)
-1. `POST /chat` resolves agent name → looks up agent config → looks up `topic_sessions` for `session_id`
+1. `POST /chat` resolves route (`#topic@agent` or sticky topic) → looks up agent config → resolves backend → resolves driver/protocol → looks up `topic_sessions` for `session_id`
 2. `insert_user_message` (with `context=[]`) + `insert_assistant_message` (status=`pending`)
 3. CLI spawned via `TopicDispatcher` (FIFO per topic) with `--resume session_id` if present
 4. If `--resume` fails with "No conversation found": emit `status` event with stale session details, retry as fresh (see ADR-0001 — Stale Session Recovery)
@@ -123,7 +125,9 @@ created_at           TEXT    ISO8601 — set on INSERT, never updated (used for 
 Same as above but no `--resume`. Uses `get_context_history(lookback=N)` as inline context
 (last N non-adhoc session turns for the topic/agent pair).
 The returned message IDs are stored in the user message's `context` column.
-Session state in `topic_sessions` is not written.
+Session state in `topic_sessions` is not written. Adhoc turns prefer one-shot
+protocols because they are parallel and outside the durable `(topic, agent)`
+session queue.
 
 ### Client disconnect mid-stream
 `stream_response` finalizer spawns `_drain_to_completion` as a background task.
@@ -422,7 +426,8 @@ Poll a single message for status (used when client reconnects mid-stream).
 
 ### POST /config/agents
 
-Create or update an agent (upsert by name).
+Create or update an agent (upsert by name). An agent is the named execution
+identity used in `#topic@agent`: backend, model override, cwd, and timeout.
 
 **Request body**
 ```json
