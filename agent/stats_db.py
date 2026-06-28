@@ -449,12 +449,6 @@ def upsert_topic(
             )
 
 
-def hide_topic(name: str) -> bool:
-    with _connect() as conn:
-        cur = conn.execute("UPDATE topics SET hidden = 1 WHERE topic = ? AND agent = ''", (name,))
-    return cur.rowcount > 0
-
-
 def set_topic_hidden(name: str, hidden: bool) -> bool:
     with _connect() as conn:
         cur = conn.execute(
@@ -1539,6 +1533,15 @@ def insert_run_event(msg_id: int, seq: int, event_type: str, payload: Optional[s
             "INSERT OR IGNORE INTO run_events (msg_id, seq, event_type, payload) VALUES (?, ?, ?, ?)",
             (msg_id, seq, event_type, payload),
         )
+
+
+def has_done_run_event(msg_id: int) -> bool:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM run_events WHERE msg_id=? AND event_type='done' LIMIT 1",
+            (msg_id,),
+        ).fetchone()
+        return row is not None
 
 
 def get_run_events(msg_id: int, after_seq: int = -1) -> list[dict]:

@@ -325,14 +325,6 @@ Returns topic management data for the Topics tab. Unlike `GET /topics`, this inc
 
 ---
 
-### POST /topics/{topic}/hide
-
-Soft-delete a topic — hides it from autocomplete (`hidden=1`). Topic reappears automatically if a new message is sent to it.
-
-**Response**: `{ "ok": true | false }`
-
----
-
 ### PUT /topics/{topic}/hidden
 
 Sets whether a topic is hidden from autocomplete without deleting its messages or sessions.
