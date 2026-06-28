@@ -606,8 +606,9 @@ function invalidateHistoryLoad() {
 }
 
 function cancelPendingPoll(bubble) {
-  const timer = pendingPollTimers.get(bubble);
-  if (timer) clearInterval(timer);
+  const cleanup = pendingPollTimers.get(bubble);
+  if (typeof cleanup === 'function') cleanup();
+  else if (cleanup) clearInterval(cleanup);
   pendingPollTimers.delete(bubble);
 }
 
@@ -675,7 +676,7 @@ async function loadHistory() {
     if (item.status === 'pending') {
       const wipBubble = makeWipBubble(item);
       fragment.appendChild(wipBubble);
-      pollPendingItem(item, wipBubble);
+      reconnectPendingItem(item, wipBubble);
       continue;
     }
 
@@ -778,8 +779,18 @@ function _updateSearchBar() {
   _updateFilterBadge();
 }
 
+function searchHighlightTerms(keywords) {
+  const terms = [];
+  for (const keyword of keywords) {
+    const text = String(keyword || '');
+    const tokens = text.match(/[\p{L}\p{N}_]+/gu);
+    terms.push(...(tokens?.length ? tokens : [text]));
+  }
+  return terms;
+}
+
 function highlightTextNodes(root, keywords) {
-  const escapedKeywords = [...new Set(keywords.filter(Boolean))]
+  const escapedKeywords = [...new Set(searchHighlightTerms(keywords).filter(Boolean))]
     .sort((a, b) => b.length - a.length)
     .map(kw => kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
   if (!escapedKeywords.length) return;
@@ -1608,7 +1619,40 @@ async function sendMessage(text) {
   const liveToolEvents = [];
   const controller = new AbortController();
 
+  function attachMsgId(id) {
+    const parsed = parseInt(id, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) return false;
+    msgId = parsed;
+    bubble.dataset.msgId = String(msgId);
+    liveCtxSpan.dataset.msgId = String(msgId);
+    thinkingBubble.dataset.msgId = String(msgId);
+    reconcilePendingBubble(msgId, thinkingBubble);
+    killBtn.style.display = '';
+    return true;
+  }
 
+  async function recoverMsgIdFromProcesses() {
+    if (msgId) return true;
+    try {
+      const res = await fetch('/processes');
+      if (!res.ok) return false;
+      const rows = await res.json();
+      if (!Array.isArray(rows)) return false;
+      const matches = rows.filter(row => {
+        if (!row || row.msg_id == null || row.state === 'idle') return false;
+        if (row.topic !== topic) return false;
+        if (Boolean(row.adhoc) !== Boolean(adhoc)) return false;
+        const expectedAgent = resolvedAgent || agent;
+        if (expectedAgent && row.agent !== expectedAgent) return false;
+        return true;
+      });
+      if (matches.length !== 1) return false;
+      resolvedAgent = matches[0].agent || resolvedAgent;
+      return attachMsgId(matches[0].msg_id);
+    } catch {
+      return false;
+    }
+  }
 
   function revealResponseBubble() {
     if (firstDataReceived) return;
@@ -1677,6 +1721,8 @@ async function sendMessage(text) {
           freezeThinking();
           showStoredResponse(data.content || '');
           bubble.classList.add('history-item');
+          resolvedAgent = data.agent || resolvedAgent;
+          addPinButton(bubble, msgId, topic, resolvedAgent, data.session_id || null);
           if (!statsEl && data.stats) statsEl = addStats(bubble, data.stats, doneTime);
           if (statsEl) messages.appendChild(statsEl);
           liveSessionTurnCount = parseInt(data.session_turn_count || '0', 10) || liveSessionTurnCount;
@@ -1715,6 +1761,7 @@ async function sendMessage(text) {
       } catch {}
     };
     _activePollImmediate = doPoll;
+    doPoll();
     statusTimer = setInterval(doPoll, 2000);
   }
 
@@ -1757,6 +1804,7 @@ async function sendMessage(text) {
       throw new Error(err.error || `HTTP 400`);
     }
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+    if (!msgId) attachMsgId(res.headers.get('X-Squid-Msg-Id'));
     _lookbackUnselected.clear();
     _lastLookbackSelectionKey = '';
     if (_includeTopicMemory && !adhoc) {
@@ -1817,16 +1865,11 @@ async function sendMessage(text) {
               }
               setTopicChip(topic, resolvedAgent, resolvedAdhoc, lookback);
               if (meta.msg_id) {
-                msgId = meta.msg_id;
-                bubble.dataset.msgId = String(msgId);
-                liveCtxSpan.dataset.msgId = String(msgId);
+                attachMsgId(meta.msg_id);
                 setCtxLabel(liveCtxSpan, adhoc);
-                thinkingBubble.dataset.msgId = String(msgId);
-                reconcilePendingBubble(msgId, thinkingBubble);
                 bubble.dataset.topic = topic;
                 if (resolvedAgent) bubble.dataset.agent = resolvedAgent;
                 addPinButton(bubble, msgId, topic, resolvedAgent);
-                killBtn.style.display = '';
               }
             } catch {}
             eventName = null;
@@ -1943,7 +1986,7 @@ async function sendMessage(text) {
     }
   } catch (err) {
     if (!completedFromStatus && err.name !== 'AbortError') {
-      if (msgId) {
+      if (msgId || await recoverMsgIdFromProcesses()) {
         detachedPolling = true;
         statusBuf += (statusBuf ? '\n' : '') + 'Connection interrupted — recovering…';
         updateThinkingPreview();
@@ -1958,6 +2001,9 @@ async function sendMessage(text) {
     if (!thinkingFrozen) {
       if (!detachedPolling) {
         // Stream ended without a 'done' event — switch to polling if we have a msgId
+        if (!completedFromStatus && !msgId && !userAborted) {
+          await recoverMsgIdFromProcesses();
+        }
         if (!completedFromStatus && msgId && !userAborted) {
           detachedPolling = true;
           statusBuf += (statusBuf ? '\n' : '') + 'Connection interrupted — recovering…';
@@ -2577,6 +2623,92 @@ function makeWipBubble(item) {
   return bubble;
 }
 
+async function replacePendingWithStoredItem(item, wipBubble) {
+  try {
+    const res = await fetch(`/chat/${item.id}/status`);
+    if (!res.ok || !wipBubble.parentNode) return;
+    const data = await res.json();
+    if (data.status !== 'done' && data.status !== 'error') return;
+    if (data.status === 'error' && !String(data.content || '').trim()) return;
+    wipBubble.remove();
+    const wipEl = appendHistoryItem(data, messages);
+    if (wipEl && searchActive && searchState) {
+      const kws = searchState.keywords.trim().split(/\s+/).filter(Boolean);
+      if (kws.length) highlightTextNodes(wipEl, kws);
+    }
+    updateInContextMarkers();
+    updatePinCount();
+    if (pinPanel.classList.contains('open')) renderPinPanel();
+    refreshAllRevertButtons();
+    scrollToBottom();
+  } catch {}
+}
+
+function reconnectPendingItem(item, wipBubble) {
+  if (!window.EventSource) {
+    pollPendingItem(item, wipBubble);
+    return;
+  }
+
+  const live = wipBubble.querySelector('.thinking-live');
+  const loader = live?.querySelector('.loader');
+  let raw = '';
+  let statusBuf = '';
+  let closed = false;
+
+  const updatePreview = () => {
+    if (!live) return;
+    if (loader?.parentNode) loader.remove();
+    const text = (statusBuf ? statusBuf.trimEnd() + (raw ? '\n\n' : '') : '') + raw;
+    live.textContent = text.trim();
+    live.scrollTop = live.scrollHeight;
+  };
+
+  if (item.content && live) {
+    if (loader?.parentNode) loader.remove();
+    live.textContent = item.content;
+  }
+
+  const es = new EventSource(`/chat/${item.id}/events`);
+  pendingPollTimers.set(wipBubble, () => {
+    closed = true;
+    es.close();
+  });
+
+  es.onmessage = event => {
+    raw += event.data;
+    updatePreview();
+  };
+  es.addEventListener('status', event => {
+    statusBuf += (statusBuf ? '\n' : '') + event.data;
+    updatePreview();
+  });
+  es.addEventListener('tool', event => {
+    try {
+      statusBuf += (statusBuf ? '\n' : '') + toolLabel(JSON.parse(event.data));
+      updatePreview();
+    } catch {}
+  });
+  es.addEventListener('done', async () => {
+    closed = true;
+    es.close();
+    pendingPollTimers.delete(wipBubble);
+    await replacePendingWithStoredItem(item, wipBubble);
+  });
+  es.addEventListener('error', async event => {
+    if (closed) return;
+    closed = true;
+    es.close();
+    pendingPollTimers.delete(wipBubble);
+    if (event.data) {
+      if (live) live.innerHTML = `<span class="msg-error">${event.data}</span>`;
+      await replacePendingWithStoredItem(item, wipBubble);
+      return;
+    }
+    pollPendingItem(item, wipBubble);
+  });
+}
+
 async function pollPendingItem(item, wipBubble) {
   const MAX_POLLS = 960;
   let count = 0;
@@ -2590,20 +2722,9 @@ async function pollPendingItem(item, wipBubble) {
       const res = await fetch(`/chat/${item.id}/status`);
       if (!res.ok) { clearInterval(timer); return; }
       const data = await res.json();
-      if (data.status === 'done' || data.status === 'error') {
+      if (data.status === 'done' || (data.status === 'error' && String(data.content || '').trim())) {
         clearInterval(timer);
-        if (!wipBubble.parentNode) return;
-        wipBubble.remove();
-        const wipEl = appendHistoryItem(data, messages);
-        if (wipEl && searchActive && searchState) {
-          const kws = searchState.keywords.trim().split(/\s+/).filter(Boolean);
-          if (kws.length) highlightTextNodes(wipEl, kws);
-        }
-        updateInContextMarkers();
-        updatePinCount();
-        if (pinPanel.classList.contains('open')) renderPinPanel();
-        refreshAllRevertButtons();
-        scrollToBottom();
+        await replacePendingWithStoredItem(item, wipBubble);
       } else if (count >= MAX_POLLS) {
         clearInterval(timer);
         const content = wipBubble.querySelector('.thinking-live');
@@ -3686,8 +3807,22 @@ let procPollInterval  = null;
 let procPollHolds     = 0;
 let procPollSeq       = 0;
 
-function updateProcStatusDot(running, queued) {
-  procStatusBtn.classList.toggle('has-procs', running.length > 0 || queued.length > 0);
+function isIdleProc(row) {
+  return row?.state === 'idle';
+}
+
+function formatIdleDuration(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value)) return '—';
+  if (value < 60) return `${Math.max(0, Math.floor(value))}s`;
+  if (value < 3600) return `${(value / 60).toFixed(1)}m`;
+  if (value < 86400) return `${(value / 3600).toFixed(1)}h`;
+  return `${(value / 86400).toFixed(1)}d`;
+}
+
+function updateProcStatusDot(processes, queued) {
+  const active = processes.some(r => !isIdleProc(r));
+  procStatusBtn.classList.toggle('has-procs', active || queued.length > 0);
 }
 
 function renderQuotaStatus() {
@@ -3729,14 +3864,20 @@ function renderQuotaStatus() {
     <div class="quota-status-list">${rows}</div>`;
 }
 
-function renderProcPopup(running, queued) {
+function procStopButton(row) {
+  return `<button class="proc-stop-btn" data-msgid="${row.msg_id || ''}" data-topic="${row.topic || ''}" data-agent="${row.agent || ''}">Stop</button>`;
+}
+
+function renderProcPopup(processes, queued) {
   const header = `<div class="proc-popup-header">
     <span class="settings-label">Status</span>
     <button id="proc-popup-close" type="button">✕</button>
   </div>`;
 
   let body = renderQuotaStatus();
-  if (!running.length && !queued.length) {
+  const running = processes.filter(r => !isIdleProc(r));
+  const idle = processes.filter(isIdleProc);
+  if (!processes.length && !queued.length) {
     body += '<div class="proc-status-empty">No active processes or queued prompts.</div>';
   } else {
     if (running.length) {
@@ -3746,10 +3887,23 @@ function renderProcPopup(running, queued) {
           <td>@${r.agent || '—'}</td>
           <td class="proc-queue-preview">${r.prompt_preview || '—'}</td>
           <td>${r.duration_s}s</td>
-          <td><button class="proc-stop-btn" data-msgid="${r.msg_id || ''}" data-topic="${r.topic || ''}" data-agent="${r.agent || ''}">Stop</button></td>
+          <td>${procStopButton(r)}</td>
         </tr>`).join('');
       body += `<div class="proc-section-label">Running</div>
         <table><thead><tr><th>Topic</th><th>Agent</th><th>Prompt</th><th>Time</th><th></th></tr></thead>
+        <tbody>${rows}</tbody></table>`;
+    }
+    if (idle.length) {
+      const rows = idle.map(r => `
+        <tr>
+          <td><span class="proc-dot proc-dot-idle"></span>#${r.topic || '—'}</td>
+          <td>@${r.agent || '—'}</td>
+          <td class="proc-queue-preview">${r.prompt_preview || 'warm session'}</td>
+          <td>${formatIdleDuration(r.state_duration_s ?? r.duration_s)}</td>
+          <td>${procStopButton(r)}</td>
+        </tr>`).join('');
+      body += `<div class="proc-section-label">Idle Live Sessions</div>
+        <table><thead><tr><th>Topic</th><th>Agent</th><th>Last prompt</th><th>Idle</th><th></th></tr></thead>
         <tbody>${rows}</tbody></table>`;
     }
     if (queued.length) {
@@ -3822,7 +3976,8 @@ async function pollProcs() {
     cachedQueueRows = queued;
     updateProcStatusDot(cachedProcRows, cachedQueueRows);
     if (procStatusPopup.classList.contains('open')) renderProcPopup(cachedProcRows, cachedQueueRows);
-    if (!cachedProcRows.length && !cachedQueueRows.length && procPollHolds === 0) stopProcPoll();
+    const hasActive = cachedProcRows.some(r => !isIdleProc(r));
+    if (!hasActive && !cachedQueueRows.length && procPollHolds === 0 && !procStatusPopup.classList.contains('open')) stopProcPoll();
   } catch { /* ignore */ }
 }
 
@@ -5729,6 +5884,11 @@ function closePinPanel() {
 }
 
 function addPinButton(bubbleEl, msgId, topic, agent, sessionId = null) {
+  const existing = bubbleEl.querySelector(`.msg-pin-btn[data-msg-id="${msgId}"]`);
+  if (existing) {
+    if (sessionId) bubbleEl.dataset.sessionId = sessionId;
+    return existing;
+  }
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'msg-pin-btn';

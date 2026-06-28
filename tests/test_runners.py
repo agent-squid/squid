@@ -16,6 +16,7 @@ from agent.runners import (
     kill_all_procs,
     kill_procs_by_topic,
     kill_proc_by_msg_id,
+    list_active_procs,
     runner_for_backend,
     runner_for_driver,
     run_claude,
@@ -139,6 +140,10 @@ def test_claude_interactive_reuses_live_process_for_same_session_key():
         ("claude", "work", "claude", "/tmp/project", None, ()),
     ]
     assert _proc_registry[9001]["msg_id"] is None
+    assert _proc_registry[9001]["state"] == "idle"
+    proc = list_active_procs()[0]
+    assert proc["state"] == "idle"
+    assert "state_duration_s" in proc
     _clear()
 
 

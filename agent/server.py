@@ -68,7 +68,7 @@ from .stats_db import (
     insert_user_message, insert_assistant_message, update_assistant_message,
     update_message_quota_snapshot,
     get_context_history, get_messages_by_ids, mark_orphaned_pending, get_message,
-    get_completed_run_text,
+    get_completed_run_text, get_run_events,
     ensure_session_turn_index,
     get_session_injected_context,
     get_topic_session, clear_topic_session,
@@ -96,6 +96,11 @@ dispatcher = TopicDispatcher()
 # Discard the legacy cached OAuth access token if this process inherited one
 # from an older Squid restart.
 os.environ.pop("SQUID_NATIVE_CLAUDE_TOKEN", None)
+
+_SQUID_CHAT_COMMANDS = frozenset({
+    "clear", "compact", "deq", "f", "filter", "help", "remote", "restart",
+    "s", "search", "status", "stop", "stopall",
+})
 
 # ---------------------------------------------------------------------------
 # App + health check helpers
@@ -139,6 +144,19 @@ def _check_deps():
         log.warning("Auth issues:\n  " + "\n  ".join(warnings))
     if not missing and not warnings:
         log.info("claude=%s  codex=%s  cursor=%s  opencode=%s", CLAUDE_PATH, CODEX_PATH, CURSOR_PATH, OPENCODE_PATH)
+
+
+def _backend_native_chat_command_name(message: str) -> str:
+    text = message.strip()
+    if not text.startswith("/"):
+        return ""
+    return text[1:].split(None, 1)[0].lower()
+
+
+def _is_backend_native_chat_command(message: str) -> bool:
+    command_name = _backend_native_chat_command_name(message)
+    return bool(command_name and command_name not in _SQUID_CHAT_COMMANDS)
+
 
 def _migrate_legacy_deepseek_agent():
     """Move the old model-routed deepcla agent onto its configured backend."""
@@ -586,6 +604,7 @@ async def chat(req: ChatRequest):
 
     backend = agent_config.get("backend") or "claude"
     model: Optional[str] = agent_config.get("model") or None
+    native_backend_command = _is_backend_native_chat_command(req.message)
 
     upsert_topic(topic, resolved_agent, last_prompt=req.message,
                  last_backend=backend, last_model=model, adhoc=req.adhoc)
@@ -613,7 +632,7 @@ async def chat(req: ChatRequest):
     context_history: list[dict] = []
     context_ids: Optional[list[int]] = None
 
-    if req.adhoc and lookback > 0 and not req.lookback_via_pins:
+    if not native_backend_command and req.adhoc and lookback > 0 and not req.lookback_via_pins:
         context_history, context_ids = get_context_history(
             topic, lookback, agent=resolved_agent
         )
@@ -623,13 +642,13 @@ async def chat(req: ChatRequest):
     prefix_blocks: list[str] = []
     memory_config = topic_memory_squid_config(topic)
     code_roots = memory_config.get("code_roots") or []
-    if code_roots:
+    if not native_backend_command and code_roots:
         code_roots_block = code_roots_prompt_block(code_roots)
         if code_roots_block:
             prefix_blocks.append(code_roots_block)
-    tracking_roots: list[str] = code_roots
+    tracking_roots: list[str] = [] if native_backend_command else code_roots
     memory_revision: Optional[str] = None
-    if req.include_topic_memory:
+    if not native_backend_command and req.include_topic_memory:
         memory_data = read_topic_memory(topic)
         memory_content = memory_data["content"].strip()
         if memory_content:
@@ -641,7 +660,7 @@ async def chat(req: ChatRequest):
                 "</topic_memory>",
             ]))
 
-    if req.pinned_ids:
+    if not native_backend_command and req.pinned_ids:
         lookback_id_set = set(context_ids or [])
         filtered = [pid for pid in req.pinned_ids if pid not in lookback_id_set]
         if filtered:
@@ -687,7 +706,11 @@ async def chat(req: ChatRequest):
             code_roots=tracking_roots,
         ),
         media_type="text/event-stream",
-        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+        headers={
+            "X-Accel-Buffering": "no",
+            "Cache-Control": "no-cache",
+            "X-Squid-Msg-Id": str(asst_msg_id),
+        },
     )
 
 
@@ -833,6 +856,55 @@ async def message_status(msg_id: int):
         )
         row = get_message(msg_id)
     return JSONResponse(row)
+
+
+@app.get("/chat/{msg_id}/events")
+async def message_events(msg_id: int, after_seq: int = -1):
+    row = get_message(msg_id)
+    if not row:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    async def event_stream() -> AsyncGenerator[str, None]:
+        last_seq = after_seq
+        while True:
+            events = get_run_events(msg_id, last_seq)
+            for event in events:
+                last_seq = event["seq"]
+                event_type = event["event_type"]
+                payload = event["payload"] or ""
+                if event_type == "text":
+                    yield sse_chunk(payload)
+                elif event_type in {"stats", "status", "tool"}:
+                    yield sse_event(event_type, payload)
+                elif event_type == "done":
+                    yield sse_event("done")
+                    return
+                elif event_type == "error":
+                    current = get_message(msg_id)
+                    if current and current.get("status") == "done":
+                        yield sse_event("done")
+                        return
+                    yield sse_event("error", payload)
+                    return
+
+            current = get_message(msg_id)
+            if not current:
+                yield sse_event("error", "Message not found")
+                return
+            if current.get("status") == "done":
+                yield sse_event("done")
+                return
+            if current.get("status") == "error":
+                yield sse_event("error", current.get("content") or "Response interrupted.")
+                return
+
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
 
 
 @app.get("/topics")

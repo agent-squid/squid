@@ -91,6 +91,25 @@ test('status popup lists every configured backend, including inactive gauges', a
   await expect(rows.filter({ hasText: 'Bare' })).toContainText('no quota integration');
 });
 
+test('status popup formats idle live-session durations above a minute', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/processes', r => r.fulfill({ json: [
+    { topic: 'squid', agent: 'claude', state: 'idle', prompt_preview: 'seconds', state_duration_s: 42 },
+    { topic: 'squid', agent: 'codex', state: 'idle', prompt_preview: 'minutes', state_duration_s: 186 },
+    { topic: 'squid', agent: 'qwen', state: 'idle', prompt_preview: 'hours', state_duration_s: 11160 },
+    { topic: 'squid', agent: 'deepcla', state: 'idle', prompt_preview: 'days', state_duration_s: 267840 },
+  ] }));
+
+  await page.goto('/');
+  await page.locator('#proc-status').click();
+
+  const popup = page.locator('#proc-status-popup');
+  await expect(popup).toContainText('42s');
+  await expect(popup).toContainText('3.1m');
+  await expect(popup).toContainText('3.1h');
+  await expect(popup).toContainText('3.1d');
+});
+
 test('an empty pre-chat poll does not stop tracking the newly started process', async ({ page }) => {
   await mockBackend(page);
   let chatStarted = false;

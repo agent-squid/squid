@@ -126,3 +126,26 @@ test('search keywords are highlighted in result content only', async ({ page }) 
   await expect(result.locator('code:not(pre code) mark.search-kw-highlight')).toHaveText(['needle', 'search']);
   await expect(result.locator('pre mark.search-kw-highlight')).toHaveText(['needle', 'search']);
 });
+
+test('search highlighting follows FTS tokenization for punctuation-prefixed terms', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/search**', route => route.fulfill({
+    json: {
+      items: [{
+        id: 144,
+        topic: 'squid',
+        agent: 'codex',
+        prompt: 'What is a backend?',
+        content: 'The backend knows how to collect cost/usage from the runtime.',
+      }],
+    },
+  }));
+  await page.goto('/');
+
+  await page.fill('#input', '/s /cost');
+  await page.keyboard.press('Enter');
+
+  const result = page.locator('.search-result-item');
+  await expect(result).toHaveCount(1);
+  await expect(result.locator('mark.search-kw-highlight')).toHaveText(['cost']);
+});

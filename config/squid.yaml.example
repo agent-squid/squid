@@ -27,18 +27,18 @@ backends:
     color: "#AE5332"
     gauge: claude
 
-  # Experimental Claude Code streaming-input mode. Create an agent on this
-  # backend to compare against the default one-turn CLI process model.
-  # claude-live:
-  #   driver: claude
-  #   protocol: interactive-cli
-  #   interactive:
-  #     # Seconds before Squid stops an idle live CLI process. The native
-  #     # session is preserved and resumed on the next turn. Set to 0 to disable.
-  #     idle_timeout_seconds: 3600
-  #   label: Claude Live
-  #   color: "#C46A3A"
-  #   gauge: claude
+  # Experimental Claude Code streaming-input mode. Use agent "clive" to compare
+  # against the default one-turn CLI process model.
+  claude-live:
+    driver: claude
+    protocol: interactive-cli
+    interactive:
+      # Seconds before Squid stops an idle live CLI process. The native
+      # session is preserved and resumed on the next turn. Set to 0 to disable.
+      idle_timeout_seconds: 3600
+    label: Claude Live
+    color: "#C46A3A"
+    gauge: claude
 
   codex:
     driver: codex

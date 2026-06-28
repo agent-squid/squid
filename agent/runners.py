@@ -24,8 +24,9 @@ _proc_registry: dict[int, dict] = {}
 
 def _register_proc(pid: int, backend: str, topic: str, agent: str,
                    adhoc: bool = False, msg_id: Optional[int] = None,
-                   prompt: str = "") -> None:
+                   prompt: str = "", state: str = "running") -> None:
     preview = (prompt[:80] + "…") if len(prompt) > 80 else prompt
+    now = time.monotonic()
     _proc_registry[pid] = {
         "pid": pid,
         "backend": backend,
@@ -34,7 +35,9 @@ def _register_proc(pid: int, backend: str, topic: str, agent: str,
         "adhoc": adhoc,
         "msg_id": msg_id,
         "prompt_preview": preview,
-        "started_at": time.monotonic(),
+        "state": state,
+        "started_at": now,
+        "state_since": now,
         "started_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 
@@ -45,6 +48,8 @@ def _deregister_proc(pid: int) -> None:
 
 def _update_proc(pid: int, **updates) -> None:
     if pid in _proc_registry:
+        if "state" in updates and updates["state"] != _proc_registry[pid].get("state"):
+            updates.setdefault("state_since", time.monotonic())
         _proc_registry[pid].update(updates)
 
 
@@ -117,7 +122,11 @@ def get_active_agent_for_topic(topic: str) -> Optional[str]:
 def list_active_procs() -> list[dict]:
     now = time.monotonic()
     return [
-        {**info, "duration_s": round(now - info["started_at"], 1)}
+        {
+            **info,
+            "duration_s": round(now - info["started_at"], 1),
+            "state_duration_s": round(now - info.get("state_since", info["started_at"]), 1),
+        }
         for info in list(_proc_registry.values())
     ]
 
@@ -537,7 +546,7 @@ class _ClaudeInteractiveCLI:
         assert self.proc.stderr is not None
         self.stderr_buf = []
         _register_proc(self.proc.pid, backend=self.backend_id, topic=self.topic, agent=self.agent,
-                       adhoc=False, msg_id=msg_id, prompt=prompt)
+                       adhoc=False, msg_id=msg_id, prompt=prompt, state="running")
 
         async def _drain() -> None:
             try:
@@ -616,7 +625,12 @@ class _ClaudeInteractiveCLI:
             assert self.proc is not None
             assert self.proc.stdin is not None
             assert self.proc.stdout is not None
-            _update_proc(self.proc.pid, msg_id=msg_id, prompt_preview=(prompt[:80] + "…") if len(prompt) > 80 else prompt)
+            _update_proc(
+                self.proc.pid,
+                state="running",
+                msg_id=msg_id,
+                prompt_preview=(prompt[:80] + "…") if len(prompt) > 80 else prompt,
+            )
             content = prompt if resume_session_id or had_live_process else _build_prompt(prompt, history)
             payload = {
                 "type": "user",
@@ -659,7 +673,7 @@ class _ClaudeInteractiveCLI:
                         yield chunk
             finally:
                 if self.proc:
-                    _update_proc(self.proc.pid, msg_id=None)
+                    _update_proc(self.proc.pid, state="idle", msg_id=None)
                     self._schedule_idle_close()
 
 

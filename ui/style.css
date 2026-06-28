@@ -2938,6 +2938,10 @@ mark.search-kw-highlight {
   vertical-align: middle;
   animation: pulse 1.8s ease-in-out infinite;
 }
+.proc-dot-idle {
+  background: var(--text-dim);
+  animation: none;
+}
 
 /* command feedback system message */
 .cmd-feedback {

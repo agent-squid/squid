@@ -116,6 +116,25 @@ def test_status_keeps_pending_partial_content_without_text_events(tmp_path, monk
     assert done.json()["content"] == "partial snapshot"
 
 
+def test_event_replay_ignores_stale_error_when_message_is_done(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    user_id = stats_db.insert_user_message("squid", "codex", "prompt")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    stats_db.update_assistant_message(msg_id, "final text", "session-1", "done")
+    stats_db.insert_run_event(msg_id, 0, "text", "final text")
+    stats_db.insert_run_event(msg_id, 1, "error", "late transport error")
+
+    client = TestClient(server.app)
+    with client.stream("GET", f"/chat/{msg_id}/events") as res:
+        body = "".join(res.iter_text())
+
+    assert res.status_code == 200
+    assert "data:final text" in body
+    assert "event: done" in body
+    assert "late transport error" not in body
+
+
 def test_stream_response_does_not_promote_status_to_final_content():
     async def fake_dispatch(**kwargs):
         out_q = asyncio.Queue()
@@ -146,6 +165,99 @@ def test_stream_response_does_not_promote_status_to_final_content():
     assert not any(chunk.startswith("data:Working on it...") for chunk in chunks)
     assert update_call.args[1] == ""
     assert update_call.args[3] == "done"
+
+
+def test_backend_native_chat_command_detection_excludes_squid_commands():
+    assert server._is_backend_native_chat_command("/usage")
+    assert server._is_backend_native_chat_command("/cost")
+    assert server._is_backend_native_chat_command("/model opus")
+    assert not server._is_backend_native_chat_command("/clear")
+    assert not server._is_backend_native_chat_command("/s cost")
+    assert not server._is_backend_native_chat_command("plain prompt")
+
+
+def test_backend_native_chat_commands_bypass_context_augmentation_for_any_agent():
+    cases = [
+        ("/usage", "claude-live", Backend("claude-live", "claude", protocol="interactive-cli")),
+        ("/cost", "codex", Backend("codex", "codex")),
+        ("/model opus", "opencode", Backend("opencode", "opencode")),
+    ]
+
+    for native_command, backend_id, backend in cases:
+        captured = {}
+
+        async def fake_dispatch(**kwargs):
+            captured.update(kwargs)
+            out_q = asyncio.Queue()
+            await out_q.put(None)
+            return out_q, 1, FinishedWorker()
+
+        client = TestClient(server.app)
+
+        with patch("agent.server.get_agent", return_value={
+                "backend": backend_id, "model": None, "cwd": "/tmp/project",
+             }), \
+             patch("agent.server.get_backend", return_value=backend), \
+             patch("agent.server.upsert_topic"), \
+             patch("agent.server.get_topic_session", return_value=None), \
+             patch("agent.server.get_context_history") as get_context_history, \
+             patch("agent.server.topic_memory_squid_config", return_value={
+                 "code_roots": ["/Users/haebin/Work/squid"],
+             }), \
+             patch("agent.server.code_roots_prompt_block") as code_roots_prompt_block, \
+             patch("agent.server.read_topic_memory") as read_topic_memory, \
+             patch("agent.server.get_messages_by_ids") as get_messages_by_ids, \
+             patch("agent.server.insert_user_message", return_value=201), \
+             patch("agent.server.insert_assistant_message", return_value=202), \
+             patch("agent.server.update_assistant_message"), \
+             patch.object(server.dispatcher, "dispatch", fake_dispatch):
+            res = client.post("/chat", json={
+                "message": native_command,
+                "topic": "squid",
+                "agent": "clive",
+                "adhoc": True,
+                "lookback": 3,
+                "pinned_ids": [123],
+                "include_topic_memory": True,
+            })
+
+        assert res.status_code == 200
+        assert captured["prompt"] == native_command
+        assert captured["context_history"] == []
+        assert captured["code_roots"] == []
+        get_context_history.assert_not_called()
+        code_roots_prompt_block.assert_not_called()
+        read_topic_memory.assert_not_called()
+        get_messages_by_ids.assert_not_called()
+
+
+def test_chat_response_exposes_message_id_header():
+    async def fake_dispatch(**kwargs):
+        out_q = asyncio.Queue()
+        await out_q.put(None)
+        return out_q, 1, FinishedWorker()
+
+    client = TestClient(server.app)
+
+    with patch("agent.server.get_agent", return_value={
+            "backend": "codex", "model": None, "cwd": "/tmp/project",
+         }), \
+         patch("agent.server.get_backend", return_value=Backend("codex", "codex")), \
+         patch("agent.server.upsert_topic"), \
+         patch("agent.server.get_topic_session", return_value=None), \
+         patch("agent.server.topic_memory_squid_config", return_value={}), \
+         patch("agent.server.insert_user_message", return_value=201), \
+         patch("agent.server.insert_assistant_message", return_value=202), \
+         patch("agent.server.update_assistant_message"), \
+         patch.object(server.dispatcher, "dispatch", fake_dispatch):
+        res = client.post("/chat", json={
+            "message": "hello",
+            "topic": "squid",
+            "agent": "codex",
+        })
+
+    assert res.status_code == 200
+    assert res.headers["X-Squid-Msg-Id"] == "202"
 
 
 def test_clear_command_kills_only_session_lane():

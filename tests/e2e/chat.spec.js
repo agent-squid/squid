@@ -379,6 +379,49 @@ test.describe('response bubble', () => {
     await expect(response).not.toContainText('Checking the code...');
   });
 
+  test('interrupted stream before meta keeps a recovering status bubble', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200,
+      headers: { ...SSE_HEADERS, 'X-Squid-Msg-Id': '88' },
+      body: '',
+    }));
+    await page.route('**/chat/88/status', r => r.fulfill({ json: {
+      id: 88,
+      status: 'pending',
+      content: '',
+    }}));
+
+    await sendMsg(page);
+
+    const statusBubble = page.locator(THINKING);
+    await expect(statusBubble).toBeVisible();
+    await expect(statusBubble).toContainText('Connection interrupted');
+    await expect(page.locator(RESPONSE)).not.toBeAttached();
+  });
+
+  test('interrupted stream without headers recovers message id from process tracker', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200,
+      headers: SSE_HEADERS,
+      body: '',
+    }));
+    await page.route('**/processes', r => r.fulfill({ json: [
+      { topic: 'default', agent: 'claude', adhoc: true, msg_id: 89, state: 'running' },
+    ] }));
+    await page.route('**/chat/89/status', r => r.fulfill({ json: {
+      id: 89,
+      status: 'pending',
+      content: '',
+    }}));
+
+    await sendMsg(page);
+
+    const statusBubble = page.locator(THINKING);
+    await expect(statusBubble).toBeVisible();
+    await expect(statusBubble).toContainText('Connection interrupted');
+    await expect(statusBubble).toHaveAttribute('data-msg-id', '89');
+  });
+
   test('thinking bubble removed when no status events', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200, headers: SSE_HEADERS,
@@ -441,6 +484,100 @@ test.describe('parallel responses', () => {
 });
 
 test.describe('recovered pending responses', () => {
+  test('refresh recovery streams pending status from event replay', async ({ page }) => {
+    await mockBackend(page);
+
+    await page.route('**/history**', r => r.fulfill({ json: {
+      items: [{
+        id: 77,
+        topic: 'squid',
+        agent: 'claude',
+        backend: 'claude',
+        status: 'pending',
+        prompt: 'long-running task',
+        content: 'History partial',
+        adhoc: false,
+      }],
+      has_more: false,
+    }}));
+    let eventsRequested = false;
+    await page.route('**/chat/77/events', r => {
+      eventsRequested = true;
+      return r.fulfill({
+      status: 200,
+      headers: SSE_HEADERS,
+      body: sse(
+        { event: 'status', data: 'Still connected after refresh' },
+        { data: 'Recovered stream text' },
+        DONE,
+      ),
+    });
+    });
+    await page.route('**/chat/77/status', r => r.fulfill({ json: {
+      id: 77,
+      topic: 'squid',
+      agent: 'claude',
+      backend: 'claude',
+      status: 'done',
+      prompt: 'long-running task',
+      content: 'Recovered final response',
+      adhoc: false,
+      timestamp: new Date().toISOString(),
+    }}));
+
+    await page.goto('/');
+
+    await expect(page.locator(RESPONSE).filter({ hasText: 'Recovered final response' })).toBeVisible();
+    expect(eventsRequested).toBe(true);
+    await expect(page.locator(THINKING)).not.toBeAttached();
+  });
+
+  test('refresh polling does not finalize an empty interrupted error', async ({ page }) => {
+    await mockBackend(page);
+
+    await page.route('**/history**', r => r.fulfill({ json: {
+      items: [{
+        id: 78,
+        topic: 'squid',
+        agent: 'claude',
+        backend: 'claude',
+        status: 'pending',
+        prompt: 'long-running task',
+        content: 'History partial',
+        adhoc: false,
+      }],
+      has_more: false,
+    }}));
+    await page.route('**/chat/78/events', r => r.fulfill({ status: 500, body: '' }));
+    let statusCalls = 0;
+    await page.route('**/chat/78/status', r => {
+      statusCalls++;
+      if (statusCalls === 1) {
+        return r.fulfill({ json: { id: 78, status: 'pending', content: 'History partial' } });
+      }
+      if (statusCalls === 2) {
+        return r.fulfill({ json: { id: 78, status: 'error', content: '' } });
+      }
+      return r.fulfill({ json: {
+        id: 78,
+        topic: 'squid',
+        agent: 'claude',
+        backend: 'claude',
+        status: 'done',
+        prompt: 'long-running task',
+        content: 'Recovered final response',
+        adhoc: false,
+        timestamp: new Date().toISOString(),
+      }});
+    });
+
+    await page.goto('/');
+
+    await expect(page.locator(RESPONSE).filter({ hasText: 'Recovered final response' })).toBeVisible({ timeout: 8_000 });
+    await expect(page.locator(MSG_ERROR).filter({ hasText: 'Response interrupted.' })).not.toBeAttached();
+    await expect(page.locator(THINKING)).not.toBeAttached();
+  });
+
   test('search back keeps one status bubble when live meta arrives after history', async ({ page }) => {
     await mockBackend(page);
 
