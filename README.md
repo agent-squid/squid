@@ -9,7 +9,7 @@
    ╚═════╝  ╚══▀▀═╝  ╚═════╝ ╚═╝╚═════╝
 ```
 
-**Use your $20 plan like a $100 plan.**
+**Your Local Coding Agents, Unified.**
 
 Named sessions, parallel prompts, and goldfish mode — auto lookback or manual context selection — across Claude Code, Codex, Cursor Agent, and DeepSeek via Claude Code.
 
