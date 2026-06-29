@@ -424,6 +424,97 @@ def test_worker_persists_agent_cwd_for_sessions_with_code_roots(tmp_path):
     assert len(call_args.args[4]) == 16  # backend configuration fingerprint
 
 
+def test_worker_clears_session_on_prompt_too_long_text_response():
+    """When Claude responds with 'Prompt is too long' as text (not error), clear the DB session."""
+    async def fake_runner(prompt, **kwargs):
+        yield "Prompt is too long"
+
+    async def run():
+        worker = TopicWorker("mai")
+        item = QueueItem(
+            seq=0,
+            topic="mai",
+            agent="clive",
+            prompt="design an LLM orchestrator",
+            context_history=[],
+            backend="claude",
+            model=None,
+            adhoc=False,
+            resume_session_id="old-session-789",
+            msg_id=526,
+        )
+        with patch("agent.runners.run_claude", fake_runner), \
+             patch("agent.stats_db.insert_run_event"), \
+             patch("agent.stats_db.update_assistant_message"), \
+             patch("agent.stats_db.set_topic_session"), \
+             patch("agent.stats_db.clear_topic_session") as clear_session, \
+             patch("agent.stats_db.save_stats"):
+            await worker._process(item)
+
+        chunks = []
+        while True:
+            chunk = await item.out_q.get()
+            chunks.append(chunk)
+            if chunk is None:
+                break
+        return clear_session.call_args, chunks
+
+    clear_call, chunks = asyncio.run(run())
+    assert clear_call is not None, "clear_topic_session must be called when text response is 'Prompt is too long'"
+    assert clear_call.args == ("mai", "clive")
+    assert "Prompt is too long" in chunks
+
+
+def test_worker_retries_fresh_on_prompt_too_long():
+    call_count = 0
+
+    async def fake_runner(prompt, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            from agent.runners import CLIError
+            raise CLIError("Prompt is too long")
+        yield "success"
+
+    async def run():
+        worker = TopicWorker("mai")
+        item = QueueItem(
+            seq=0,
+            topic="mai",
+            agent="clive",
+            prompt="continue",
+            context_history=[],
+            backend="claude",
+            model=None,
+            adhoc=False,
+            resume_session_id="old-session-123",
+            msg_id=500,
+        )
+        with patch("agent.runners.run_claude", fake_runner), \
+             patch("agent.stats_db.insert_run_event"), \
+             patch("agent.stats_db.update_assistant_message"), \
+             patch("agent.stats_db.set_topic_session"), \
+             patch("agent.stats_db.clear_topic_session") as clear_session, \
+             patch("agent.stats_db.save_stats"):
+            await worker._process(item)
+
+        chunks = []
+        while True:
+            chunk = await item.out_q.get()
+            chunks.append(chunk)
+            if chunk is None:
+                break
+        return clear_session.call_args, chunks
+
+    clear_call, chunks = asyncio.run(run())
+    assert call_count == 2
+    assert clear_call is not None
+    assert clear_call.args == ("mai", "clive")
+    status_chunks = [c for c in chunks if isinstance(c, dict) and "_status" in c]
+    assert any("context window exceeded" in c["_status"].lower() for c in status_chunks)
+    assert "success" in chunks
+
+
 def test_worker_bug_emits_error_and_sentinel():
     async def run():
         worker = TopicWorker("work")

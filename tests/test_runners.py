@@ -111,15 +111,18 @@ def test_claude_interactive_reuses_live_process_for_same_session_key():
         created_cmds.append(list(cmd))
         return fake_proc
 
-    async def collect(prompt, msg_id):
+    async def collect(prompt, msg_id, resume_session_id=None):
         return [chunk async for chunk in run_claude_interactive_cli(
             prompt, cwd="/tmp/project", topic="work", agent="claude", msg_id=msg_id,
+            resume_session_id=resume_session_id,
         )]
 
     with patch("agent.runners.CLAUDE_PATH", "claude"), \
          patch("agent.runners.asyncio.create_subprocess_exec", fake_create_subprocess_exec):
         first = asyncio.run(collect("first prompt", 1))
-        second = asyncio.run(collect("second prompt", 2))
+        # second turn passes the session_id from the first turn, mirroring real usage
+        # (topic_queue calls set_topic_session after each turn; server passes it back)
+        second = asyncio.run(collect("second prompt", 2, resume_session_id="sess-1"))
 
     assert created_cmds == [[
         "claude", "--print",

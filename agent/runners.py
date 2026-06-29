@@ -715,13 +715,23 @@ async def run_claude_interactive_cli(
         )
         _claude_interactive_sessions[key] = session
     else:
+        if not resume_session_id and session.proc and session.proc.returncode is None:
+            # No stored session (cleared or first use) but a live process exists — its
+            # accumulated context is stale. Kill it so the next turn starts fresh.
+            await session.close()
         session.idle_timeout_s = interactive_idle_timeout_s
+    response_text = ""
     try:
         async for chunk in session.query(
             prompt, history=history, resume_session_id=resume_session_id,
             msg_id=msg_id, response_timeout=response_timeout, prompt_preview=prompt_preview,
         ):
+            if isinstance(chunk, str):
+                response_text += chunk
             yield chunk
+        if response_text.strip().lower() == "prompt is too long":
+            await session.close()
+            _claude_interactive_sessions.pop(key, None)
     except Exception:
         await session.close()
         _claude_interactive_sessions.pop(key, None)

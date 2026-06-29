@@ -134,7 +134,7 @@ class TopicWorker:
         from .runners import CLIError, runner_for_backend
         from .config import SQUID_HOME
         from .backends import get_backend
-        from .stats_db import insert_run_event, update_assistant_message, save_stats, set_topic_session
+        from .stats_db import insert_run_event, update_assistant_message, save_stats, set_topic_session, clear_topic_session
         from .git_changes import prepare_trackers
 
         backend = get_backend(item.backend)
@@ -252,7 +252,8 @@ class TopicWorker:
             try:
                 await _stream(effective_prompt, **kwargs)
             except CLIError as exc:
-                if item.resume_session_id and "No conversation found" in str(exc):
+                exc_str = str(exc)
+                if item.resume_session_id and "No conversation found" in exc_str:
                     status = (
                         f"Session not found — starting fresh\n"
                         f"  session: {item.resume_session_id}\n"
@@ -265,8 +266,26 @@ class TopicWorker:
                     await item.out_q.put({"_status": status})
                     kwargs.pop("resume_session_id", None)
                     await _stream(effective_prompt, **kwargs)
+                elif item.resume_session_id and "prompt is too long" in exc_str.lower():
+                    if item.agent:
+                        clear_topic_session(item.topic, item.agent)
+                    status = (
+                        f"Session context window exceeded — starting fresh\n"
+                        f"  session: {item.resume_session_id}\n"
+                        f"  cwd: {effective_cwd}\n"
+                        f"  backend: {item.backend}"
+                        + (f"  model: {item.model}" if item.model else "")
+                    )
+                    insert_run_event(item.msg_id, run_seq, "status", status)
+                    run_seq += 1
+                    await item.out_q.put({"_status": status})
+                    kwargs.pop("resume_session_id", None)
+                    await _stream(effective_prompt, **kwargs)
                 else:
                     raise
+
+            if raw.strip().lower() == "prompt is too long" and item.agent and not item.adhoc:
+                clear_topic_session(item.topic, item.agent)
 
             await _emit_git_diff()
             content = raw

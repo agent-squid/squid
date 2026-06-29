@@ -1950,8 +1950,11 @@ async function sendMessage(text) {
           if (!statsEl && data.stats) statsEl = addStats(bubble, data.stats, doneTime);
           if (statsEl) messages.appendChild(statsEl);
           liveSessionTurnCount = parseInt(data.session_turn_count || '0', 10) || liveSessionTurnCount;
+          _advisoryTurnCount = liveSessionTurnCount;
+          if (data.session_id && !adhoc) _sessionIds[`${topic}@${resolvedAgent || '_'}`] = data.session_id;
           liveCtxSpan.dataset.sessionTurnCount = String(liveSessionTurnCount);
           setCtxLabel(liveCtxSpan, !!data.adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
+          evaluateAdvisory();
           let storedTools = [];
           if (data.context) {
             try {
@@ -5905,6 +5908,7 @@ function _getSessionMeta(topic, agent) {
       updatePinCount();
       if (pinPanel.classList.contains('open')) renderPinPanel();
       updateInContextMarkers();
+      evaluateAdvisory();
     })
     .catch(() => { _sessionLookupCache[key].loading = false; });
   return _sessionLookupCache[key];

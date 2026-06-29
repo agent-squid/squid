@@ -102,7 +102,7 @@ export DEEPSEEK_API_KEY="<your-deepseek-api-key>"
 
 The shipped YAML example defines `deepcla` with `driver: claude`, canonical
 DeepSeek connection fields, and `gauge: deepseek`. Create an agent using backend
-`deepcla` and model `deepseek-v4-pro`, then use it normally:
+`deepcla` and model `deepseek-chat`, then use it normally:
 
 ```text
 #work@deepcla implement the feature
@@ -314,7 +314,7 @@ Use the agent directly when one terminal is enough. Use Squid when you want seve
 | `message`  | string         | required    | Prompt text                                      |
 | `topic`    | string         | `"default"` | Conversation thread identifier                   |
 | `agent`    | string         | `null`      | Agent to use; must exist or returns 400          |
-| `lookback` | int \| `"all"` | `5`         | History exchanges to inject (adhoc one-shot only) |
+| `lookback` | int            | `0`         | History exchanges to inject (adhoc one-shot only) |
 | `adhoc`    | bool           | `false`     | Run as a parallel one-shot turn outside session queue |
 
 ```bash
@@ -328,8 +328,9 @@ curl -N -X POST http://127.0.0.1:8000/chat \
 | Event    | Payload                            | Meaning                                      |
 |----------|------------------------------------|----------------------------------------------|
 | *(none)* | streamed text chunk                | Response content                             |
-| `meta`   | `{agent, backend, msg_id, adhoc}`  | Sent first; identifies the response          |
+| `meta`   | `{agent, backend, model, msg_id, adhoc}` | Sent first; identifies the response    |
 | `status` | partial text                       | Streaming token preview (thinking bubble)    |
+| `tool`   | tool activity object               | Tool call or result (thinking bubble)        |
 | `queued` | `{topic, position}`                | Request is queued behind another             |
 | `stats`  | token/cost/latency object          | Usage stats after the response               |
 | `done`   | —                                  | Stream finished cleanly                      |
@@ -337,16 +338,23 @@ curl -N -X POST http://127.0.0.1:8000/chat \
 
 ### `POST /cmd`
 
-| Field     | Type   | Description                                          |
-|-----------|--------|------------------------------------------------------|
-| `command` | string | `stop` \| `stopall` \| `deq` \| `list`              |
-| `topic`   | string | Target topic (default: `"default"`)                  |
-| `pos`     | int    | For `deq`: queue position (1=first, -1=last, …)      |
+| Field     | Type   | Description                                                                   |
+|-----------|--------|-------------------------------------------------------------------------------|
+| `command` | string | `stop` \| `stopall` \| `deq` \| `list` \| `restart` \| `clear` \| `compact` \| `stop_msg` \| `journal` |
+| `topic`   | string | Target topic (default: `"default"`)                                           |
+| `agent`   | string | Target agent (optional; defaults to active agent for the topic)               |
+| `pos`     | int    | For `deq`: queue position (1=first, -1=last, …)                               |
+| `msg_id`  | int    | For `stop_msg`: ID of the message whose process to kill                       |
 
 - `stop` — SIGTERM the running process for a topic (all agent lanes), leaves queue intact
 - `stopall` — SIGTERM + drain queue for all agent lanes of a topic
 - `deq` — remove a pending item from the queue without killing the running one
 - `list` — return all topics with last prompt and metadata
+- `restart` — restart the Squid server process
+- `clear` — clear the session for the topic (next message starts fresh)
+- `compact` — compact/reset the session context
+- `stop_msg` — kill the process running a specific message (by `msg_id`)
+- `journal` — generate a weekly journal for the topic
 
 ### `GET /history`
 
@@ -385,7 +393,7 @@ Clears the stored session ID, cwd, and injection log for this `(topic, agent)`. 
 
 ### `GET /stats`
 
-Query params: `period=daily|hourly`, `group=time|topic|model`
+Query params: `period=daily|hourly`, `group=time|topic|agent`, `days=30`, `agent=`, `topic=`, `adhoc=all`
 
 ### `GET/POST/DELETE /config/agents`
 
@@ -404,8 +412,12 @@ Type these directly in the message box (no `#topic` prefix needed):
 | `/stop`    | Kill running process for the current topic (all agent lanes)  |
 | `/stopall` | Kill + drain queue for the current topic                      |
 | `/clear`   | Clear the current session                                     |
-| `/compact` | Compact or reset context (auto and cross-agent compaction: TBD) |
+| `/compact` | Compact or reset context                                      |
+| `/restart` | Restart the Squid server                                      |
+| `/status`  | Show active processes panel                                   |
+| `/help`    | Show help panel                                               |
 | `/f`, `/filter` | Filter history; scopes use `#topic`, `@agent`, `@agent!`, or `@agent*` |
+| `/s`, `/search` | Search history; e.g. `/s #topic kw` or `/s @agent! kw`  |
 | `/remote`  | Show QR code with full HTTPS URL for mobile access            |
 | `deq`      | Drain entire pending queue                                    |
 | `deq N`    | Remove Nth queued item (1=first, -1=last)                     |
