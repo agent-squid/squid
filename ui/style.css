@@ -1736,6 +1736,26 @@ body {
 }
 .msg-pin-btn.pinned,
 .msg-pin-btn.lookback-sel { color: var(--accent); }
+.prompt-only-history-item {
+  position: relative;
+  padding-right: 2rem;
+}
+.prompt-only-open-btn {
+  position: absolute;
+  top: 0.35rem;
+  right: 0.45rem;
+  background: none;
+  border: none;
+  color: var(--text-ghost);
+  cursor: pointer;
+  padding: 0.15rem 0.2rem;
+  border-radius: 4px;
+  line-height: 1;
+}
+.prompt-only-open-btn:hover {
+  color: var(--text-mid);
+  background: rgba(255,255,255,0.06);
+}
 
 .pin-section-label {
   font-size: var(--text-sm);
@@ -2260,6 +2280,13 @@ body {
 }
 .composer-tool-btn:hover {
   opacity: 0.9;
+  color: var(--accent);
+  border-color: var(--border);
+  background: var(--surface-3);
+}
+.composer-tool-btn.active,
+.composer-tool-btn[aria-pressed="true"] {
+  opacity: 0.95;
   color: var(--accent);
   border-color: var(--border);
   background: var(--surface-3);

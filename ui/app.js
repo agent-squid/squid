@@ -544,6 +544,25 @@ function makeTopicTag(topic, agent, { clickable = false, adhoc = false, lookback
 // ── history filter ─────────────────────────────────────────────────────────────
 
 let historyFilter = { topic: null, agent: null, adhoc: null };
+let promptOnlyHistory = false;
+
+function updatePromptOnlyButton() {
+  const btn = document.getElementById('chip-prompts-btn');
+  if (!btn) return;
+  btn.classList.toggle('active', promptOnlyHistory);
+  btn.setAttribute('aria-pressed', promptOnlyHistory ? 'true' : 'false');
+  btn.title = promptOnlyHistory ? 'Show full thread' : 'User prompts only';
+}
+
+function togglePromptOnlyHistory() {
+  promptOnlyHistory = !promptOnlyHistory;
+  updatePromptOnlyButton();
+  if (searchActive) {
+    clearSearch();
+  } else {
+    reloadHistory(historyFilter);
+  }
+}
 
 function filterByTopic(topic) {
   setTopicChip(topic, null);
@@ -752,13 +771,18 @@ async function loadHistory() {
   const fragment = document.createDocumentFragment();
 
   for (const item of [...items].reverse()) {
-    if (!item.content && item.status !== 'pending') continue;
-
     // Skip if a bubble for this message is already in the DOM — e.g. an
     // in-progress live (SSE) bubble that survived a search → back round-trip.
     // Without this, loadHistory would render a second, polling-driven bubble
     // for the same message alongside the live one.
     if (item.id != null && messages.querySelector(`[data-msg-id="${item.id}"]`)) continue;
+
+    if (promptOnlyHistory) {
+      appendPromptOnlyHistoryItem(item, fragment);
+      continue;
+    }
+
+    if (!item.content && item.status !== 'pending') continue;
 
     if (item.status === 'pending') {
       const wipBubble = makeWipBubble(item);
@@ -2988,6 +3012,42 @@ function makeUserBubble(text, topic, agent, backendFallback = null, adhoc = fals
   content.appendChild(document.createTextNode(text));
   div.appendChild(content);
   return div;
+}
+
+function appendPromptOnlyHistoryItem(item, container) {
+  if (!String(item.prompt || '').trim()) return null;
+  const bubble = makeUserBubble(
+    item.prompt,
+    item.topic || 'default',
+    item.agent || null,
+    item.backend || null,
+    !!item.adhoc,
+    item.stats?.lookback ?? 0,
+  );
+  bubble.classList.add('history-item', 'prompt-only-history-item');
+  if (item.id) bubble.dataset.msgId = String(item.id);
+  bubble.dataset.topic = item.topic || 'default';
+  if (item.agent) bubble.dataset.agent = item.agent;
+  if (item.session_id) bubble.dataset.sessionId = item.session_id;
+  if (item.id) {
+    const openBtn = document.createElement('button');
+    openBtn.type = 'button';
+    openBtn.className = 'prompt-only-open-btn';
+    openBtn.title = 'Open full response';
+    openBtn.setAttribute('aria-label', 'Open full response');
+    openBtn.textContent = '↗';
+    openBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      openMsgModal(item.id);
+    });
+    bubble.appendChild(openBtn);
+  }
+  if (container) container.appendChild(bubble);
+  if (item.timestamp) {
+    const tsEl = addTimestamp(bubble, item.timestamp, true);
+    if (tsEl) tsEl.classList.add('history-item');
+  }
+  return bubble;
 }
 
 
@@ -6132,6 +6192,8 @@ function initPin() {
 initSettings();
 initPin();
 document.getElementById('search-bar-clear').addEventListener('click', clearSearch);
+document.getElementById('chip-prompts-btn')?.addEventListener('click', togglePromptOnlyHistory);
+updatePromptOnlyButton();
 
 function formatFilterCommand(state) {
   let scope = '';
@@ -6218,9 +6280,16 @@ const _TEXT_EXTS = new Set(['txt','md','py','js','ts','jsx','tsx','json','yaml',
   'h','hpp','cs','php','swift','kt','kts','lua','r','sql','html','css','xml','svg',
   'log','env','gitignore','dockerfile','makefile','lock','csv','tsv']);
 
+const _WEB_PREVIEW_EXTS = new Set(['html','htm','svg','pdf','png','jpg','jpeg','gif','webp','avif']);
+
 function _isTextPath(path) {
   const ext = (path.split('.').pop() || '').toLowerCase();
   return _TEXT_EXTS.has(ext) || !path.includes('.');
+}
+
+function _isWebPreviewPath(path) {
+  const ext = (path.split('.').pop() || '').toLowerCase();
+  return _WEB_PREVIEW_EXTS.has(ext);
 }
 
 let _fvNavigate = null;
@@ -6279,6 +6348,11 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
 
   const actions = document.createElement('div');
   actions.className = 'fv-header-actions';
+  const previewBtn = document.createElement('button');
+  previewBtn.className = 'fv-action-btn';
+  previewBtn.title = 'Preview in browser';
+  previewBtn.setAttribute('aria-label', 'Preview in browser');
+  previewBtn.textContent = '↗';
   const copyBtn = document.createElement('button');
   copyBtn.className = 'fv-action-btn';
   copyBtn.title = 'Copy path';
@@ -6286,7 +6360,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
   const closeBtn = document.createElement('button');
   closeBtn.id = 'file-modal-close';
   closeBtn.textContent = '×';
-  actions.append(copyBtn, closeBtn);
+  actions.append(previewBtn, copyBtn, closeBtn);
 
   header.append(navBtns, breadcrumb, actions);
 
@@ -6311,6 +6385,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
   function updateNav() {
     backBtn.disabled = historyIdx === 0;
     fwdBtn.disabled = historyIdx === navHistory.length - 1;
+    previewBtn.hidden = !_isWebPreviewPath(path);
     breadcrumb.innerHTML = '';
     const parts = path.split('/').filter(Boolean);
     const addSep = () => {
@@ -6355,6 +6430,9 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
       ({ path, line, endLine } = navHistory[historyIdx]);
       updateNav(); loadFile();
     }
+  });
+  previewBtn.addEventListener('click', () => {
+    window.open('/localfile?' + new URLSearchParams({ path }), '_blank', 'noopener');
   });
   copyBtn.addEventListener('click', () => {
     navigator.clipboard?.writeText(path).then(() => {
