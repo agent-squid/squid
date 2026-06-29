@@ -176,7 +176,7 @@ class TopicWorker:
             backend_id=item.backend, backend_env=backend_env,
             backend_settings=backend.driver_settings(), backend_args=backend.args,
         )
-        if backend.protocol.startswith("interactive-"):
+        if backend.protocol.startswith("interactive-") and not item.adhoc:
             kwargs["interactive_idle_timeout_s"] = backend.interactive.idle_timeout_seconds
         if item.resume_session_id:
             kwargs["resume_session_id"] = item.resume_session_id
