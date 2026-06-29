@@ -286,6 +286,10 @@ document.getElementById('help-close').addEventListener('click', closeHelp);
 
 // ── per-topic session tracking ────────────────────────────────────────────────
 const _sessionIds = {}; // `${topic}@${agent|_}` → most recent session_id
+const sessionAdvisoryEl    = document.getElementById('session-advisory');
+const sessionAdvisoryMsgEl = document.getElementById('session-advisory-msg');
+let _advisoryTurnCount = 0;
+let _advisoryDismissKey = null;
 const _memoryInjectedInto = {}; // `${topic}@${agent|_}` → topic memory revision sent to the current session
 let _agentsCache = null;
 let _agentsCachePromise = null;
@@ -357,6 +361,7 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0) {
   updatePinCount();
   updateInContextMarkers();
   _lastContextIndicatorKey = _contextIndicatorKeyFrom(topic, agent, adhoc, lookback);
+  evaluateAdvisory();
 }
 
 function clearTopicChip() {
@@ -367,6 +372,7 @@ function clearTopicChip() {
   updateComposerActionTitles();
   updateActiveQuotaGauge();
   _lastContextIndicatorKey = '';
+  hideAdvisory();
 }
 
 topicChipEl.addEventListener('click', () => {
@@ -441,6 +447,7 @@ chipFilterBtn.addEventListener('click', async e => {
 
 chipSearchBtn.addEventListener('click', async e => {
   e.stopPropagation();
+  if (input.value.trimStart().startsWith('/s')) return;
   const route = await resolveEffectiveComposerRoute();
   const parsed = parseInput(input.value);
   const keywords = input.value.trimStart().startsWith('#') ? parsed.message.trim() : input.value.trim();
@@ -606,7 +613,18 @@ function reloadHistory(filter = {}) {
   if (topSentinel) { topSentinel.remove(); topSentinel = null; }
   document.querySelectorAll('.history-item, .boot-banner, .tool-block-history').forEach(el => el.remove());
   // Remove live (non-history) messages too — completed ones are in the DB and will reload
-  document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats').forEach(el => el.remove());
+  // Preserve user bubbles and their timestamps that precede an active thinking bubble
+  const preserveForLive = new Set();
+  document.querySelectorAll('#messages > .msg-thinking').forEach(thinking => {
+    let el = thinking.previousElementSibling;
+    while (el && (el.classList.contains('msg-time') || (el.classList.contains('msg') && el.classList.contains('user')))) {
+      preserveForLive.add(el);
+      el = el.previousElementSibling;
+    }
+  });
+  document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats').forEach(el => {
+    if (!preserveForLive.has(el)) el.remove();
+  });
   _updateFilterBadge();
   initHistoryScroll();
 }
@@ -738,6 +756,8 @@ let promptDraftChip = null; // stashed chip state while navigating history
 let commandEditRestore = null; // prompt replaced by clicking an editable search/filter badge
 let _draftSaveTimer = null;
 const STASHED_PROMPTS_KEY = 'squid_stashed_prompts';
+const HIDDEN_PROMPTS_KEY  = 'squid_hidden_prompts';
+let hiddenPromptKeys = new Set(JSON.parse(localStorage.getItem(HIDDEN_PROMPTS_KEY) || '[]'));
 
 function createTopSentinel() {
   const el = document.createElement('div');
@@ -803,6 +823,7 @@ async function loadHistory() {
   historyLoading = false;
   updateInContextMarkers();
   refreshAllRevertButtons();
+  evaluateAdvisory();
 
   if (historyExhausted && topSentinel) {
     topSentinel.remove();
@@ -1025,6 +1046,15 @@ function saveStashedPrompt(text) {
   localStorage.setItem(STASHED_PROMPTS_KEY, JSON.stringify(items));
 }
 
+function hidePrompt(text) {
+  const key = promptHistoryDedupKey(text.trim());
+  hiddenPromptKeys.add(key);
+  localStorage.setItem(HIDDEN_PROMPTS_KEY, JSON.stringify([...hiddenPromptKeys]));
+  promptHistory = promptHistory.filter(e => promptHistoryDedupKey(e) !== key);
+  const stashed = getStashedPrompts().filter(e => promptHistoryDedupKey(e) !== key);
+  localStorage.setItem(STASHED_PROMPTS_KEY, JSON.stringify(stashed));
+}
+
 function mergePromptHistory(...groups) {
   const seen = new Set();
   const merged = [];
@@ -1106,13 +1136,13 @@ function currentPromptHistoryRoute() {
 
 function matchingPromptHistory(value, limit = 8) {
   const prefix = value.trimStart().toLowerCase();
-  if (!prefix) return dedupePromptHistoryEntries(promptHistory).slice(0, limit);
+  if (!prefix) return dedupePromptHistoryEntries(promptHistory.filter(e => !hiddenPromptKeys.has(promptHistoryDedupKey(e)))).slice(0, limit);
 
   const currentRoute = currentPromptHistoryRoute().toLowerCase();
   const seen = new Set();
   return promptHistory
     .map((entry, recency) => ({ entry, recency, ...splitPromptHistoryEntry(entry) }))
-    .filter(item => item.prompt.toLowerCase().startsWith(prefix))
+    .filter(item => !hiddenPromptKeys.has(promptHistoryDedupKey(item.entry)) && item.prompt.toLowerCase().startsWith(prefix))
     .sort((a, b) => {
       const aCurrent = normalizePromptHistoryRoute(a.route).toLowerCase() === currentRoute;
       const bCurrent = normalizePromptHistoryRoute(b.route).toLowerCase() === currentRoute;
@@ -1140,6 +1170,7 @@ function promptHistoryAutocompleteItems(entries) {
       label: `<span class="ac-history-prompt">${escapeHtml(truncate(promptText, 55))}</span>`,
       insert: promptText,
       trail: false,
+      deletePromptEntry: ph,
       ...(routeHtml ? { routeHtml, fullEntry: `${routeKey} ${promptText}` } : {}),
     };
   });
@@ -1604,49 +1635,40 @@ input.addEventListener('keydown', (e) => {
     resizeComposer();
     return;
   }
+  if (e.key === 'Tab' && !sessionAdvisoryEl.hidden) { e.preventDefault(); stashComposerAndEdit('/clear'); return; }
   if (acOpen) {
-    if (e.key === 'ArrowUp' && input.value.trim() === '' && promptHistory.length) {
+    if (e.key === 'ArrowDown') {
       e.preventDefault();
-      hideAutocomplete();
-      promptHistoryPos = 0;
-      applyPromptHistoryEntry(promptHistory[0]);
+      if (acSel <= 0) {
+        _acRestoreDraft();
+      } else {
+        acSel--;
+        _acHighlight();
+        _acPreview();
+      }
       return;
     }
-    if (e.key === 'ArrowDown') { e.preventDefault(); acSel = Math.max(acSel - 1, 0); _acHighlight(); return; }
-    if (e.key === 'ArrowUp')   { e.preventDefault(); acSel = Math.min(acSel + 1, acItems.length - 1); _acHighlight(); return; }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      acSel = Math.min(acSel + 1, acItems.length - 1);
+      _acHighlight();
+      _acPreview();
+      return;
+    }
     if (e.key === 'Tab') { e.preventDefault(); _acSelect(acSel >= 0 ? acSel : 0); return; }
-    if (e.key === 'Escape') { hideAutocomplete(); return; }
+    if (e.key === 'Escape') { e.preventDefault(); _acRestoreDraft(); return; }
   }
   if (!acOpen && e.key === 'ArrowUp' && promptHistory.length) {
-    if (promptHistoryPos >= 0) {
-      e.preventDefault();
-      promptHistoryPos = Math.min(promptHistoryPos + 1, promptHistory.length - 1);
-      applyPromptHistoryEntry(promptHistory[promptHistoryPos]);
-      return;
-    }
     const _posBefore = input.selectionStart;
     requestAnimationFrame(() => {
-      if (input.selectionStart === _posBefore) {
-        promptDraft = input.value;
-        promptDraftChip = stickyChip ? { ...stickyChip } : null;
-        promptHistoryPos = 0;
-        applyPromptHistoryEntry(promptHistory[0]);
-      }
+      if (input.selectionStart !== _posBefore) return;
+      const items = matchingPromptHistory('');
+      if (!items.length) return;
+      _acRender(promptHistoryAutocompleteItems(items), 'Recent prompts');
+      acSel = 0;
+      _acHighlight();
+      _acPreview();
     });
-    return;
-  }
-  if (!acOpen && e.key === 'ArrowDown' && promptHistoryPos >= 0) {
-    e.preventDefault();
-    promptHistoryPos--;
-    if (promptHistoryPos < 0) {
-      input.value = promptDraft;
-      if (promptDraftChip) setTopicChip(promptDraftChip.topic, promptDraftChip.agent, promptDraftChip.adhoc, promptDraftChip.lookback || 0);
-      else clearTopicChip();
-      promptDraftChip = null;
-    } else {
-      applyPromptHistoryEntry(promptHistory[promptHistoryPos]);
-    }
-    resizeComposer();
     return;
   }
   if (e.key === 'Escape' && searchActive) { clearSearch(); return; }
@@ -2103,10 +2125,15 @@ async function sendMessage(text) {
                 completionTimestampEl = null;
               }
               liveSessionTurnCount = parseInt(stats.session_turn_count || '0', 10) || 0;
+              _advisoryTurnCount = liveSessionTurnCount;
               setCtxLabel(liveCtxSpan, !!stats.adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
               liveCtxSpan.dataset.sessionTurnCount = String(liveSessionTurnCount);
               if (stats.session_id) liveCtxSpan.dataset.sessionId = stats.session_id;
               if (stats.cwd) liveCtxSpan.dataset.cwd = stats.cwd;
+              if (stats.session_id && !adhoc && stickyChip && !stickyChip.adhoc) {
+                localStorage.setItem(`squid_adv_lta_${stickyChip.topic}_${stickyChip.agent||'_'}_${stats.session_id}`, String(Date.now()));
+              }
+              evaluateAdvisory();
             } catch {}
             eventName = null;
 
@@ -2221,7 +2248,11 @@ async function sendMessage(text) {
           updateThinkingPreview();
           startStatusFallback(msgId);
         } else if (!completedFromStatus) {
-          freezeThinking();
+          if (!userAborted && raw) {
+            parkInterruptedPartial(raw, 'Stream ended — response may be incomplete.');
+          } else {
+            freezeThinking();
+          }
         }
       }
     }
@@ -5171,6 +5202,7 @@ let _topicsCache  = null;
 let acOpen  = false;
 let acItems = [];
 let acSel   = -1;
+let _acStashedForNav = false;
 
 function invalidateTopicsCache() { _topicsCache = null; }
 
@@ -5200,7 +5232,37 @@ async function _acAgents() {
 
 function hideAutocomplete() {
   acEl.classList.remove('open');
-  acOpen = false; acItems = []; acSel = -1;
+  acOpen = false; acItems = []; acSel = -1; _acStashedForNav = false;
+}
+
+function _acPreview() {
+  if (acSel < 0 || acSel >= acItems.length) return;
+  const item = acItems[acSel];
+  if (!_acStashedForNav) {
+    promptDraft = input.value;
+    promptDraftChip = stickyChip ? { ...stickyChip } : null;
+    _acStashedForNav = true;
+  }
+  if (item.fullEntry) {
+    applyPromptHistoryEntry(item.fullEntry);
+  } else {
+    input.value = item.insert;
+    input.setSelectionRange(item.insert.length, item.insert.length);
+    resizeComposer();
+  }
+}
+
+function _acRestoreDraft() {
+  const had = _acStashedForNav;
+  hideAutocomplete();
+  if (had) {
+    input.value = promptDraft;
+    if (promptDraftChip) setTopicChip(promptDraftChip.topic, promptDraftChip.agent, promptDraftChip.adhoc, promptDraftChip.lookback || 0);
+    else clearTopicChip();
+    promptDraft = '';
+    promptDraftChip = null;
+    resizeComposer();
+  }
 }
 
 function _acHighlight() {
@@ -5221,6 +5283,7 @@ function _acRender(items, title = 'Suggestions') {
     (item.sub ? `<span class="ac-sub">${item.sub}</span>` : '') +
     (item.meta ? `<span class="ac-meta">${item.meta}</span>` : '') +
     (item.deleteTopic ? `<button class="ac-del-btn" data-topic="${item.deleteTopic}" type="button" title="Delete #${item.deleteTopic} sessions">✕</button>` : '') +
+    (item.deletePromptEntry != null ? `<button class="ac-del-btn ac-del-prompt-btn" data-i="${i}" type="button" title="Remove from history">✕</button>` : '') +
     `</div>` +
     `</div>`
   ).reverse().join('');
@@ -5234,7 +5297,7 @@ function _acRender(items, title = 'Suggestions') {
     `</div>`;
   acEl.querySelectorAll('.ac-item').forEach(el =>
     el.addEventListener('mousedown', e => {
-      if (e.target.classList.contains('ac-del-btn')) return;
+      if (e.target.classList.contains('ac-del-btn') || e.target.classList.contains('ac-del-prompt-btn')) return;
       const routeBtn = e.target.closest('.ac-route-btn');
       if (routeBtn) {
         e.preventDefault();
@@ -5250,7 +5313,7 @@ function _acRender(items, title = 'Suggestions') {
       e.preventDefault(); _acSelect(Number(el.dataset.i));
     })
   );
-  acEl.querySelectorAll('.ac-del-btn').forEach(btn =>
+  acEl.querySelectorAll('.ac-del-btn:not(.ac-del-prompt-btn)').forEach(btn =>
     btn.addEventListener('mousedown', async e => {
       e.preventDefault(); e.stopPropagation();
       const name = btn.dataset.topic;
@@ -5261,6 +5324,18 @@ function _acRender(items, title = 'Suggestions') {
       });
       invalidateTopicsCache();
       acItems = acItems.filter(it => it.deleteTopic !== name);
+      btn.closest('.ac-item').remove();
+      if (!acEl.querySelector('.ac-item')) hideAutocomplete();
+    })
+  );
+  acEl.querySelectorAll('.ac-del-prompt-btn').forEach(btn =>
+    btn.addEventListener('mousedown', e => {
+      e.preventDefault(); e.stopPropagation();
+      const idx = Number(btn.dataset.i);
+      if (idx < 0 || idx >= acItems.length) return;
+      const entry = acItems[idx].deletePromptEntry;
+      if (entry) hidePrompt(entry);
+      acItems = acItems.filter((_, i) => i !== idx);
       btn.closest('.ac-item').remove();
       if (!acEl.querySelector('.ac-item')) hideAutocomplete();
     })
@@ -6206,10 +6281,61 @@ function formatFilterCommand(state) {
   return scope ? `/f ${scope}` : '/f reset';
 }
 
+function hideAdvisory() {
+  sessionAdvisoryEl.hidden = true;
+  _advisoryDismissKey = null;
+}
+
+function evaluateAdvisory() {
+  if (!stickyChip || stickyChip.adhoc) { hideAdvisory(); return; }
+  const { topic, agent } = stickyChip;
+  const sessionId = _sessionIds[`${topic}@${agent || '_'}`];
+  if (!sessionId) { hideAdvisory(); return; }
+
+  const domEls = messages.querySelectorAll(`[data-session-id="${CSS.escape(sessionId)}"][data-session-turn-count]`);
+  const turnCount = Math.max(
+    domEls.length ? parseInt(domEls[domEls.length - 1].dataset.sessionTurnCount || '0', 10) || 0 : 0,
+    _advisoryTurnCount
+  );
+
+  const ltaStr = localStorage.getItem(`squid_adv_lta_${topic}_${agent||'_'}_${sessionId}`);
+  const idleH = ltaStr ? (Date.now() - parseInt(ltaStr, 10)) / 3600000 : 0;
+  const turnBucket = Math.floor(turnCount / 10);
+
+  if (idleH >= 1) {
+    const key = `squid_adv_dis_${topic}_${agent||'_'}_${sessionId}_idle`;
+    if (!localStorage.getItem(key)) {
+      const h = Math.floor(idleH);
+      const ago = h < 2 ? 'an hour ago' : h < 24 ? `${h}h ago` : 'yesterday';
+      sessionAdvisoryMsgEl.textContent = `Still need context from ${ago}?`;
+      _advisoryDismissKey = key;
+      sessionAdvisoryEl.hidden = false;
+      return;
+    }
+  }
+  if (turnBucket >= 1) {
+    const key = `squid_adv_dis_${topic}_${agent||'_'}_${sessionId}_t${turnBucket}`;
+    if (!localStorage.getItem(key)) {
+      sessionAdvisoryMsgEl.textContent = `Need all ${turnBucket * 10}+ turns in context?`;
+      _advisoryDismissKey = key;
+      sessionAdvisoryEl.hidden = false;
+      return;
+    }
+  }
+  hideAdvisory();
+}
+
+window._squidEvalAdvisory = evaluateAdvisory;
+document.getElementById('session-advisory-clear').addEventListener('click', () => stashComposerAndEdit('/clear'));
+document.getElementById('session-advisory-dismiss').addEventListener('click', () => {
+  if (_advisoryDismissKey) localStorage.setItem(_advisoryDismissKey, '1');
+  hideAdvisory();
+});
+
 function stashComposerAndEdit(command) {
   const prev = input.value.trim();
   commandEditRestore = prev && prev !== command ? prev : null;
-  if (prev && prev !== command) {
+  if (prev && prev !== command && !prev.startsWith('/')) {
     recordPrompt(prev);
     const hint = document.createElement('span');
     hint.className = 'restore-hint';

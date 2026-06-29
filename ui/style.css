@@ -2256,13 +2256,16 @@ body {
 }
 #topic-chip.visible { display: block; }
 #chip-row {
-  display: inline-flex;
+  display: flex;
   flex-direction: row;
   align-items: center;
+  justify-content: space-between;
   gap: 0.3rem;
   margin-top: 0.3rem;
+  width: 100%;
 }
 #chip-row[hidden] { display: none; }
+#chip-actions { display: flex; align-items: center; gap: 2px; }
 .composer-tool-btn {
   display: inline-flex;
   align-items: center;
@@ -2278,11 +2281,13 @@ body {
   opacity: 0.45;
   transition: opacity 0.15s, color 0.15s, background 0.15s, border-color 0.15s;
 }
-.composer-tool-btn:hover {
-  opacity: 0.9;
-  color: var(--accent);
-  border-color: var(--border);
-  background: var(--surface-3);
+@media (hover: hover) {
+  .composer-tool-btn:hover {
+    opacity: 0.9;
+    color: var(--accent);
+    border-color: var(--border);
+    background: var(--surface-3);
+  }
 }
 .composer-tool-btn.active,
 .composer-tool-btn[aria-pressed="true"] {
@@ -2802,6 +2807,50 @@ button {
 #topic-chip.needs-agent { border-color: #5a3a10; }
 
 /* Filter badge */
+#session-advisory {
+  display: none;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.75rem;
+  background: #1c1a18;
+  border: 1px solid #3a3028;
+  border-radius: 6px;
+  font-size: var(--text-body);
+  font-family: ui-monospace, monospace;
+  color: var(--text-muted);
+  width: 100%;
+  box-sizing: border-box;
+}
+#session-advisory:not([hidden]) { display: flex; }
+#session-advisory-msg { flex: 1; }
+#session-advisory-clear {
+  background: none;
+  border: 1px solid #3a3028;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.85em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  font-family: ui-monospace, monospace;
+  white-space: nowrap;
+}
+#session-advisory-clear:hover { color: var(--text); border-color: #6a5040; }
+.advisory-clear-icon { display: none; }
+@media (max-width: 768px) {
+  .advisory-clear-label { display: none; }
+  .advisory-clear-icon { display: block; }
+}
+#session-advisory-dismiss {
+  background: none;
+  border: none;
+  color: #505060;
+  cursor: pointer;
+  font-size: 1.1em;
+  padding: 0 0.15rem;
+  line-height: 1;
+  border-radius: 3px;
+}
+#session-advisory-dismiss:hover { color: var(--text-muted); background: #2a2828; }
 #filter-badge {
   display: none;
   align-items: center;
