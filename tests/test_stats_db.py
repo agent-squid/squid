@@ -19,6 +19,7 @@ def test_init_db_seeds_clive_for_available_claude_live_backend(tmp_path, monkeyp
     assert agent["model"] is None
     assert agent["cwd"] is None
     assert agent["timeout"] is None
+    assert stats_db.get_agent("claude-live") is None
 
 
 def test_topic_agent_history_uses_mode_specific_prompts(tmp_path, monkeypatch):

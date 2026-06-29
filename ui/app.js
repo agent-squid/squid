@@ -312,9 +312,13 @@ function clearCachedSessionId(topic, agent) {
 const topicChipEl = document.getElementById('topic-chip');
 const chipRow = document.getElementById('chip-row');
 const chipFilterBtn = document.getElementById('chip-filter-btn');
+const chipSearchBtn = document.getElementById('chip-search-btn');
+const chipClearBtn = document.getElementById('chip-clear-btn');
+const chipStashBtn = document.getElementById('chip-stash-btn');
 let stickyChip = null; // { topic, agent, adhoc } | null
 let editingExpandedSlug = false;
 let expandedSlugEditToken = 0;
+let composerActionTitleSeq = 0;
 
 function setTopicChip(topic, agent, adhoc = false, lookback = 0) {
   editingExpandedSlug = false;
@@ -347,8 +351,8 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0) {
   topicChipEl.classList.add('visible');
   topicChipEl.classList.remove('needs-agent');
   chipRow.hidden = false;
-  chipFilterBtn.hidden = false;
   input.placeholder = 'message…';
+  updateComposerActionTitles();
   updateActiveQuotaGauge();
   updatePinCount();
   updateInContextMarkers();
@@ -359,9 +363,8 @@ function clearTopicChip() {
   stickyChip = null;
   localStorage.removeItem('squid_sticky_chip');
   topicChipEl.classList.remove('visible', 'needs-agent');
-  chipRow.hidden = true;
-  chipFilterBtn.hidden = true;
   input.placeholder = '#topic or #topic@agent message…';
+  updateComposerActionTitles();
   updateActiveQuotaGauge();
   _lastContextIndicatorKey = '';
 }
@@ -381,10 +384,93 @@ topicChipEl.addEventListener('click', () => {
   input.focus();
 });
 
-chipFilterBtn.addEventListener('click', () => {
-  if (!stickyChip) return;
-  if (stickyChip.agent) filterByAgent(stickyChip.topic, stickyChip.agent, stickyChip.adhoc, stickyChip.lookback || 0);
-  else filterByTopic(stickyChip.topic);
+function routeScopeText(route) {
+  const topic = route?.topic || 'default';
+  let scope = `#${topic}`;
+  if (route?.agent) {
+    scope += `@${route.agent}`;
+    if (route.adhoc) scope += '!';
+  }
+  return scope;
+}
+
+async function resolveEffectiveComposerRoute() {
+  if (input.value.trimStart().startsWith('#')) {
+    const parsed = parseInput(input.value);
+    return { topic: parsed.topic || 'default', agent: parsed.agent || null, adhoc: !!parsed.adhoc, lookback: parsed.lookback || 0 };
+  }
+  if (stickyChip) return { ...stickyChip };
+
+  let topic = 'default';
+  let agent = null;
+  let adhoc = true;
+  try {
+    const topics = await _acTopics();
+    const defaultTopic = topics.find(t => t.name === 'default');
+    if (defaultTopic?.agent) {
+      agent = defaultTopic.agent;
+      adhoc = !!defaultTopic.sticky_adhoc;
+    }
+  } catch { /* ignore */ }
+  if (!agent) {
+    try {
+      const agents = await _acAgents();
+      if (agents[0]?.name) agent = agents[0].name;
+    } catch { /* ignore */ }
+  }
+  return { topic, agent, adhoc, lookback: 0 };
+}
+
+async function updateComposerActionTitles() {
+  const seq = ++composerActionTitleSeq;
+  const route = await resolveEffectiveComposerRoute();
+  if (seq !== composerActionTitleSeq) return;
+  const scope = routeScopeText(route);
+  chipFilterBtn.title = `Filter history by ${scope}`;
+  chipSearchBtn.title = `Search ${scope}`;
+  chipClearBtn.title = 'Insert /clear';
+  chipStashBtn.title = `Stash prompt for autocomplete (${scope})`;
+}
+
+chipFilterBtn.addEventListener('click', async e => {
+  e.stopPropagation();
+  const route = await resolveEffectiveComposerRoute();
+  if (route.agent) filterByAgent(route.topic, route.agent, route.adhoc, route.lookback || 0);
+  else filterByTopic(route.topic);
+});
+
+chipSearchBtn.addEventListener('click', async e => {
+  e.stopPropagation();
+  const route = await resolveEffectiveComposerRoute();
+  const parsed = parseInput(input.value);
+  const keywords = input.value.trimStart().startsWith('#') ? parsed.message.trim() : input.value.trim();
+  const command = keywords ? `/s ${routeScopeText(route)} ${keywords}` : `/s ${routeScopeText(route)} `;
+  stashComposerAndEdit(command);
+});
+
+chipClearBtn.addEventListener('click', e => {
+  e.stopPropagation();
+  stashComposerAndEdit('/clear');
+});
+
+chipStashBtn.addEventListener('click', async e => {
+  e.stopPropagation();
+  const text = input.value;
+  const parsed = parseInput(text);
+  const message = parsed.message.trim();
+  if (!message) {
+    input.focus();
+    return;
+  }
+  const route = await resolveEffectiveComposerRoute();
+  const entry = formatPromptHistoryEntry(route.topic, route.agent, route.adhoc, route.lookback || 0, message);
+  recordPrompt(entry);
+  saveStashedPrompt(entry);
+  input.value = '';
+  localStorage.removeItem('squid_draft');
+  resizeComposer();
+  _acRender(promptHistoryAutocompleteItems(matchingPromptHistory('', 8)), 'Recent Prompts');
+  input.focus();
 });
 
 function parseInput(text) {
@@ -632,6 +718,7 @@ let promptDraft = '';      // stashed current input while navigating
 let promptDraftChip = null; // stashed chip state while navigating history
 let commandEditRestore = null; // prompt replaced by clicking an editable search/filter badge
 let _draftSaveTimer = null;
+const STASHED_PROMPTS_KEY = 'squid_stashed_prompts';
 
 function createTopSentinel() {
   const el = document.createElement('div');
@@ -890,10 +977,51 @@ function clearSearch() {
 function recordPrompt(text) {
   const t = text.trim();
   if (!t) return;
-  promptHistory = [t, ...promptHistory.filter(x => x !== t)].slice(0, 200);
+  const key = promptHistoryDedupKey(t);
+  promptHistory = [t, ...promptHistory.filter(x => promptHistoryDedupKey(x) !== key)].slice(0, 200);
   promptHistoryPos = -1;
   promptDraft = '';
   promptDraftChip = null;
+}
+
+function getStashedPrompts() {
+  try {
+    const items = JSON.parse(localStorage.getItem(STASHED_PROMPTS_KEY) || '[]');
+    return Array.isArray(items) ? items.filter(x => typeof x === 'string' && x.trim()) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveStashedPrompt(text) {
+  const t = text.trim();
+  if (!t) return;
+  const key = promptHistoryDedupKey(t);
+  const items = [t, ...getStashedPrompts().filter(x => promptHistoryDedupKey(x) !== key)].slice(0, 200);
+  localStorage.setItem(STASHED_PROMPTS_KEY, JSON.stringify(items));
+}
+
+function mergePromptHistory(...groups) {
+  const seen = new Set();
+  const merged = [];
+  groups.flat().forEach(item => {
+    const text = String(item || '').trim();
+    const key = promptHistoryDedupKey(text);
+    if (!text || seen.has(key)) return;
+    seen.add(key);
+    merged.push(text);
+  });
+  return merged.slice(0, 200);
+}
+
+function dedupePromptHistoryEntries(entries) {
+  const seen = new Set();
+  return entries.filter(entry => {
+    const key = promptHistoryDedupKey(entry);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function formatPromptHistoryEntry(topic, agent, adhoc, _lookback, message) {
@@ -908,6 +1036,11 @@ function splitPromptHistoryEntry(entry) {
   const match = text.match(/^(#\w+(?:@\w+)?(?:!\d*)?)\s+([\s\S]+)$/);
   if (!match) return { route: '', prompt: text };
   return { route: match[1], prompt: match[2].trim() };
+}
+
+function promptHistoryDedupKey(entry) {
+  const { route, prompt } = splitPromptHistoryEntry(entry);
+  return `${normalizePromptHistoryRoute(route).toLowerCase()}\0${prompt}`;
 }
 
 function promptHistoryRoute(topic, agent, adhoc) {
@@ -949,9 +1082,10 @@ function currentPromptHistoryRoute() {
 
 function matchingPromptHistory(value, limit = 8) {
   const prefix = value.trimStart().toLowerCase();
-  if (!prefix) return promptHistory.slice(0, limit);
+  if (!prefix) return dedupePromptHistoryEntries(promptHistory).slice(0, limit);
 
   const currentRoute = currentPromptHistoryRoute().toLowerCase();
+  const seen = new Set();
   return promptHistory
     .map((entry, recency) => ({ entry, recency, ...splitPromptHistoryEntry(entry) }))
     .filter(item => item.prompt.toLowerCase().startsWith(prefix))
@@ -960,8 +1094,31 @@ function matchingPromptHistory(value, limit = 8) {
       const bCurrent = normalizePromptHistoryRoute(b.route).toLowerCase() === currentRoute;
       return Number(bCurrent) - Number(aCurrent) || a.recency - b.recency;
     })
+    .filter(item => {
+      const key = promptHistoryDedupKey(item.entry);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
     .slice(0, limit)
     .map(item => item.entry);
+}
+
+function promptHistoryAutocompleteItems(entries) {
+  const currentRoute = normalizePromptHistoryRoute(currentPromptHistoryRoute()).toLowerCase();
+  return entries.map(ph => {
+    const { route, prompt } = splitPromptHistoryEntry(ph);
+    const promptText = prompt || ph;
+    const routeKey = normalizePromptHistoryRoute(route);
+    const isDifferentRoute = !!(routeKey && routeKey.toLowerCase() !== currentRoute);
+    const routeHtml = isDifferentRoute ? _acRouteHtml(routeKey) : '';
+    return {
+      label: `<span class="ac-history-prompt">${escapeHtml(truncate(promptText, 55))}</span>`,
+      insert: promptText,
+      trail: false,
+      ...(routeHtml ? { routeHtml, fullEntry: `${routeKey} ${promptText}` } : {}),
+    };
+  });
 }
 
 async function initPromptHistory() {
@@ -971,7 +1128,7 @@ async function initPromptHistory() {
     const res = await fetch('/prompts/recent?limit=50');
     if (!res.ok) return;
     const data = await res.json();
-    if (Array.isArray(data.items)) promptHistory = data.items;
+    if (Array.isArray(data.items)) promptHistory = mergePromptHistory(getStashedPrompts(), data.items);
   } catch { /* ignore */ }
 }
 
@@ -1424,6 +1581,13 @@ input.addEventListener('keydown', (e) => {
     return;
   }
   if (acOpen) {
+    if (e.key === 'ArrowUp' && input.value.trim() === '' && promptHistory.length) {
+      e.preventDefault();
+      hideAutocomplete();
+      promptHistoryPos = 0;
+      applyPromptHistoryEntry(promptHistory[0]);
+      return;
+    }
     if (e.key === 'ArrowDown') { e.preventDefault(); acSel = Math.max(acSel - 1, 0); _acHighlight(); return; }
     if (e.key === 'ArrowUp')   { e.preventDefault(); acSel = Math.min(acSel + 1, acItems.length - 1); _acHighlight(); return; }
     if (e.key === 'Tab') { e.preventDefault(); _acSelect(acSel >= 0 ? acSel : 0); return; }
@@ -4992,7 +5156,7 @@ function _acRender(items, title = 'Suggestions') {
   const rows = items.map((item, i) =>
     `<div class="ac-item" data-i="${i}"${item.execute != null ? ' data-cmd' : ''}>` +
     `<div class="ac-row">` +
-    (item.routeHtml ? `<button class="ac-route-btn" type="button" data-i="${i}" title="Switch to this route">${item.routeHtml}</button> ` : '') +
+    (item.routeHtml ? `<button class="ac-route-btn" type="button" data-i="${i}" title="Switch to this route">${item.routeHtml}<span class="ac-route-switch-icon" aria-hidden="true"></span></button> ` : '') +
     `<span class="ac-label">${item.label}</span>` +
     (item.sub ? `<span class="ac-sub">${item.sub}</span>` : '') +
     (item.meta ? `<span class="ac-meta">${item.meta}</span>` : '') +
@@ -5003,10 +5167,10 @@ function _acRender(items, title = 'Suggestions') {
   acEl.innerHTML =
     `<div class="ac-list">${rows}</div>` +
     `<div class="ac-header">` +
-    `<div class="ac-title">${escapeHtml(title)}</div>` +
     `<button class="ac-close" type="button" aria-label="Close suggestions">` +
     `<span class="ac-close-desktop">Esc</span><span class="ac-close-mobile">×</span>` +
     `</button>` +
+    `<div class="ac-title">${escapeHtml(title)}</div>` +
     `</div>`;
   acEl.querySelectorAll('.ac-item').forEach(el =>
     el.addEventListener('mousedown', e => {
@@ -5206,20 +5370,7 @@ async function updateAutocomplete() {
   } else if (editingExpandedSlug) {
     hideAutocomplete();
   } else if (promptHistory.length) {
-    const currentRoute = normalizePromptHistoryRoute(currentPromptHistoryRoute()).toLowerCase();
-    _acRender(matchingPromptHistory(val).map(ph => {
-      const { route, prompt } = splitPromptHistoryEntry(ph);
-      const promptText = prompt || ph;
-      const routeKey = normalizePromptHistoryRoute(route);
-      const isDifferentRoute = !!(routeKey && routeKey.toLowerCase() !== currentRoute);
-      const routeHtml = isDifferentRoute ? _acRouteHtml(routeKey) : '';
-      return {
-        label: `<span class="ac-history-prompt">${escapeHtml(truncate(promptText, 55))}</span>`,
-        insert: promptText,
-        trail: false,
-        ...(routeHtml ? { routeHtml, fullEntry: `${routeKey} ${promptText}` } : {}),
-      };
-    }), 'Recent Prompts');
+    _acRender(promptHistoryAutocompleteItems(matchingPromptHistory(val)), 'Recent Prompts');
   } else {
     hideAutocomplete();
   }
@@ -5786,7 +5937,7 @@ function renderPinPanel() {
       </div>`;
     });
   } else {
-    html += '<div style="padding:0.5rem 0.8rem;color:#484858;font-size:0.78em">No pins yet.<br>Click <svg width="9" height="11" viewBox="0 0 12 14" fill="currentColor" aria-hidden="true" style="vertical-align:-0.1em"><path d="M2 0h8a1 1 0 0 1 1 1v12.8l-5-2.9-5 2.9V1a1 1 0 0 1 1-1z"/></svg> on any response to add it.</div>';
+    html += '<div style="padding:0.5rem 0.8rem;color:#484858;font-size:0.78em">No pins yet.<br>Click <svg width="10" height="11" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" style="vertical-align:-0.1em"><path d="M25 21v1H8v-1l2-2L11 4L9 2V1h15v1l-2 2l1 15l2 2zM16 31h1l1-8h-3l1 8z"/></svg> on any response to add it.</div>';
   }
 
   listEl.innerHTML = html;
@@ -5917,8 +6068,8 @@ function addPinButton(bubbleEl, msgId, topic, agent, sessionId = null) {
   btn.className = 'msg-pin-btn';
   btn.dataset.msgId = String(msgId);
   btn.title = 'Pin as context';
-  btn.innerHTML = `<svg width="10" height="12" viewBox="0 0 12 14" fill="currentColor" aria-hidden="true">
-    <path d="M2 0h8a1 1 0 0 1 1 1v12.8l-5-2.9-5 2.9V1a1 1 0 0 1 1-1z"/>
+  btn.innerHTML = `<svg width="11" height="12" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true">
+    <path d="M25 21v1H8v-1l2-2L11 4L9 2V1h15v1l-2 2l1 15l2 2zM16 31h1l1-8h-3l1 8z"/>
   </svg>`;
   if (sessionId) bubbleEl.dataset.sessionId = sessionId;
   if (getPinnedItems().find(i => i.id === msgId)) {
@@ -6489,6 +6640,7 @@ initCreds();
 initCodexQuota();
 initCodexCreds();
 initCursorQuota();
+updateComposerActionTitles();
 updateActiveQuotaGauge();
 initPullToRefresh();
 // Discover processes that survived a refresh; polling stops again when idle.

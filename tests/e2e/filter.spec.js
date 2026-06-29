@@ -77,6 +77,25 @@ test('/filter with #topic only omits adhoc param from /history', async ({ page }
   expect(capturedUrl).not.toMatch(/adhoc/);
 });
 
+test('composer filter action works without a visible chip using the default latest agent', async ({ page }) => {
+  await mockBackend(page, { topic: 'default', agent: 'codex' });
+
+  let capturedUrl = null;
+  await page.route('**/history**', async route => {
+    capturedUrl = route.request().url();
+    await route.fulfill({ json: { items: [], has_more: false } });
+  });
+
+  await page.goto('/');
+  await expect(page.locator('#topic-chip')).not.toHaveClass(/visible/);
+  await page.locator('#chip-filter-btn').click();
+
+  await expect(page.locator('#topic-chip')).toContainText('#default@codex');
+  expect(capturedUrl).toMatch(/topic=default/);
+  expect(capturedUrl).toMatch(/agent=codex/);
+  expect(capturedUrl).toMatch(/adhoc=false/);
+});
+
 test('/f accepts an explicit topic after the command during normal typing', async ({ page }) => {
   await mockBackend(page);
 

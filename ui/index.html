@@ -180,7 +180,7 @@
         <div class="help-section">
           <div class="help-title">Context curation</div>
           <div class="help-row"><code>✕ session</code><span>clear session state; next message starts fresh</span></div>
-          <div class="help-row"><code><svg width="9" height="11" viewBox="0 0 12 14" fill="currentColor" aria-hidden="true" style="vertical-align:-0.1em"><path d="M2 0h8a1 1 0 0 1 1 1v12.8l-5-2.9-5 2.9V1a1 1 0 0 1 1-1z"/></svg> response</code><span>pin a response to inject as context in future adhoc turns</span></div>
+          <div class="help-row"><code><svg width="10" height="11" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" style="vertical-align:-0.1em"><path d="M25 21v1H8v-1l2-2L11 4L9 2V1h15v1l-2 2l1 15l2 2zM16 31h1l1-8h-3l1 8z"/></svg> response</code><span>pin a response to inject as context in future adhoc turns</span></div>
         </div>
         <div class="help-section">
           <div class="help-title">Keyboard</div>
@@ -236,16 +236,25 @@
       <form id="form">
         <div id="input-area">
           <div id="chip-row">
-            <div id="topic-chip"></div>
-            <button id="chip-filter-btn" type="button" title="Filter history by topic" hidden>
+            <button id="chip-filter-btn" class="composer-tool-btn" type="button" title="Filter history by current route">
               <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1.5 2h13l-5 6.5V14l-3-1.5V8.5L1.5 2z"/></svg>
             </button>
+            <button id="chip-search-btn" class="composer-tool-btn" type="button" title="Search current route">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M6.8 1.8a5 5 0 1 0 0 10a5 5 0 0 0 0-10zM3.1 6.8a3.7 3.7 0 1 1 7.4 0a3.7 3.7 0 0 1-7.4 0zm7.1 4.3l1-1l3.3 3.3l-1 1l-3.3-3.3z"/></svg>
+            </button>
+            <button id="chip-clear-btn" class="composer-tool-btn" type="button" title="Insert /clear">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M7.8 2.1a5.9 5.9 0 1 1-5.4 8.2l1.3-.5A4.5 4.5 0 1 0 4.6 5l1.3 1.3H2.1V2.5L3.6 4a5.9 5.9 0 0 1 4.2-1.9zM7.3 4.8h1.4v3.1l2.3 1.4l-.7 1.2l-3-1.8V4.8z"/></svg>
+            </button>
+            <button id="chip-stash-btn" class="composer-tool-btn" type="button" title="Stash prompt for autocomplete">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M2.2 9.2h3.2l1 1.4h3.2l1-1.4h3.2v4.1c0 .7-.5 1.2-1.2 1.2H3.4c-.7 0-1.2-.5-1.2-1.2V9.2zm1.4 1.4v2.5h8.8v-2.5h-1.1l-1 1.4H5.7l-1-1.4H3.6zM7.3 1.5h1.4v5.1l1.7-1.7l1 1L8 9.3L4.6 5.9l1-1l1.7 1.7V1.5z"/></svg>
+            </button>
+            <div id="topic-chip"></div>
           </div>
           <textarea id="input" placeholder="#topic or #topic@agent message…" rows="1"></textarea>
         </div>
         <button id="pin-btn" type="button" title="Pinned context">
-          <svg width="12" height="14" viewBox="0 0 12 14" fill="currentColor" aria-hidden="true">
-            <path d="M2 0h8a1 1 0 0 1 1 1v12.8l-5-2.9-5 2.9V1a1 1 0 0 1 1-1z"/>
+          <svg width="13" height="14" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true">
+            <path d="M25 21v1H8v-1l2-2L11 4L9 2V1h15v1l-2 2l1 15l2 2zM16 31h1l1-8h-3l1 8z"/>
           </svg>
           <span id="pin-count"></span>
         </button>

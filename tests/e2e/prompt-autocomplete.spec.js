@@ -254,6 +254,134 @@ test('plain Enter sends the message without selecting from autocomplete', async 
   await expect(page.locator('#autocomplete')).not.toHaveClass(/open/);
 });
 
+test('search composer action prefills the effective default agent route', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/topics', r => r.fulfill({ json: [
+    { name: 'default', agent: 'codex', sticky_adhoc: false, last_model: null, last_backend: 'codex', queue_depth: 0, active: false },
+  ] }));
+  await page.goto('/');
+
+  await expect(page.locator('#topic-chip')).not.toHaveClass(/visible/);
+  await page.fill('#input', 'needle');
+  await page.locator('#chip-search-btn').click();
+
+  await expect(page.locator('#input')).toHaveValue('/s #default@codex needle');
+});
+
+test('clear composer action inserts /clear and ArrowUp restores the draft', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  await composer.fill('draft before clear');
+  await page.locator('#chip-clear-btn').click();
+
+  await expect(composer).toHaveValue('/clear');
+  await composer.press('ArrowUp');
+  await expect(composer).toHaveValue('draft before clear');
+});
+
+test('stash composer action adds the prompt to recall and ArrowUp restores it', async ({ page }) => {
+  await mockBackend(page);
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
+  })));
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  await composer.fill('remember this draft');
+  await page.locator('#chip-stash-btn').click();
+
+  await expect(composer).toHaveValue('');
+  await expect(page.locator('#autocomplete')).toHaveClass(/open/);
+  await expect(page.locator('#autocomplete .ac-item', { hasText: 'remember this draft' })).toBeVisible();
+
+  await composer.press('ArrowUp');
+  await expect(composer).toHaveValue('remember this draft');
+  await expect(page.locator('#topic-chip')).toContainText('#squid@codex');
+});
+
+test('stashing an existing route prompt moves one copy to the latest position', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [
+    '#squid@codex older prompt',
+    '#squid@codex Push the change and update the v0.1 to latest commit.',
+  ] } }));
+  await page.addInitScript(() => {
+    localStorage.setItem('squid_stashed_prompts', JSON.stringify([
+      '#squid@codex Push the change and update the v0.1 to latest commit.',
+      '#squid@codex another stashed prompt',
+    ]));
+    localStorage.setItem('squid_sticky_chip', JSON.stringify({
+      topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
+    }));
+  });
+  await page.goto('/');
+
+  await page.fill('#input', 'Push the change and update the v0.1 to latest commit.');
+  await page.locator('#chip-stash-btn').click();
+
+  const stashed = await page.evaluate(() => JSON.parse(localStorage.getItem('squid_stashed_prompts')));
+  expect(stashed).toEqual([
+    '#squid@codex Push the change and update the v0.1 to latest commit.',
+    '#squid@codex another stashed prompt',
+  ]);
+  await expect(page.locator('#autocomplete .ac-item', { hasText: 'Push the change and update the v0.1 to latest commit.' })).toHaveCount(1);
+});
+
+test('composer action titles keep the restored chip route over delayed default fallback', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/topics', async route => {
+    await new Promise(resolve => setTimeout(resolve, 150));
+    await route.fulfill({ json: [
+      { name: 'default', agent: 'claude', sticky_adhoc: true, last_model: null, last_backend: 'claude', queue_depth: 0, active: false },
+    ] });
+  });
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'squid', agent: 'codex', adhoc: true, lookback: 1,
+  })));
+  await page.goto('/');
+
+  await expect(page.locator('#topic-chip')).toContainText('#squid@codex!1');
+  await expect(page.locator('#chip-stash-btn')).toHaveAttribute('title', 'Stash prompt for autocomplete (#squid@codex!)');
+  await page.waitForTimeout(250);
+  await expect(page.locator('#chip-stash-btn')).toHaveAttribute('title', 'Stash prompt for autocomplete (#squid@codex!)');
+});
+
+test('prompt autocomplete dedupes normalized stashed and recent routes', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [
+    '#squid@codex! reuse context',
+  ] } }));
+  await page.addInitScript(() => {
+    localStorage.setItem('squid_stashed_prompts', JSON.stringify([
+      '#squid@codex!1 reuse context',
+    ]));
+    localStorage.setItem('squid_sticky_chip', JSON.stringify({
+      topic: 'squid', agent: 'codex', adhoc: true, lookback: 1,
+    }));
+  });
+  await page.goto('/');
+
+  await page.fill('#input', 'reuse');
+  await expect(page.locator('#autocomplete .ac-item', { hasText: 'reuse context' })).toHaveCount(1);
+});
+
+test('prompt autocomplete dedupes exact duplicate recent prompts', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [
+    '#squid@codex Push the change and update the v0.1 to latest commit.',
+    '#squid@codex Push the change and update the v0.1 to latest commit.',
+  ] } }));
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
+  })));
+  await page.goto('/');
+
+  await page.fill('#input', 'Push');
+  await expect(page.locator('#autocomplete .ac-item', { hasText: 'Push the change and update the v0.1 to latest commit.' })).toHaveCount(1);
+});
+
 test('bare default prompts are recorded without a default route chip', async ({ page }) => {
   await mockBackend(page);
   await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [] } }));

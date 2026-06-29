@@ -180,6 +180,8 @@ def init_db() -> None:
             )
         # Seed one default agent per installed enabled CLI (INSERT OR IGNORE — never overwrites user edits)
         for backend, definition in BACKENDS.items():
+            if backend == "claude-live":
+                continue
             if definition.available:
                 conn.execute(
                     "INSERT OR IGNORE INTO agents (name, backend, model) VALUES (?, ?, ?)",

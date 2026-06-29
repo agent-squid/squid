@@ -1136,15 +1136,28 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
+  position: relative;
+  overflow: visible;
 }
 #pin-btn.has-pins { color: var(--accent); border-color: var(--accent); }
 #pin-count {
-  font-size: var(--text-sm);
+  position: absolute;
+  top: -0.45rem;
+  right: -0.45rem;
+  min-width: 1.1rem;
+  height: 1.1rem;
+  padding: 0 0.25rem;
+  border: 1px solid var(--bg);
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: var(--text-xs);
   font-weight: 700;
-  color: var(--accent);
+  line-height: 1rem;
+  text-align: center;
   display: none;
 }
-#pin-count.visible { display: inline; }
+#pin-count.visible { display: block; }
 
 /* pin panel (opens above form) */
 #pin-panel {
@@ -2230,19 +2243,28 @@ body {
   margin-top: 0.3rem;
 }
 #chip-row[hidden] { display: none; }
-#chip-filter-btn {
+.composer-tool-btn {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
   padding: 0;
   background: none;
-  border: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
   color: var(--text-dim);
   cursor: pointer;
   opacity: 0.45;
-  transition: opacity 0.15s;
+  transition: opacity 0.15s, color 0.15s, background 0.15s, border-color 0.15s;
 }
-#chip-filter-btn:hover { opacity: 0.9; }
-#chip-filter-btn[hidden] { display: none; }
+.composer-tool-btn:hover {
+  opacity: 0.9;
+  color: var(--accent);
+  border-color: var(--border);
+  background: var(--surface-3);
+}
+.composer-tool-btn[hidden] { display: none; }
 #input {
   align-self: stretch;
   background: none;
@@ -2449,7 +2471,6 @@ button {
   }
   #pin-btn { grid-column: 2; grid-row: 1; }
   #send-btn { grid-column: 2; grid-row: 2; }
-  #pin-count { display: none !important; }
 
   .send-label {
     display: none;
@@ -2628,9 +2649,8 @@ button {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 0.5rem;
-  padding: 0.25rem 0.35rem 0.25rem 0.75rem;
+  padding: 0.25rem 0.75rem 0.25rem 0.35rem;
   border-top: 1px solid var(--border);
   background: var(--surface);
 }
@@ -2717,6 +2737,12 @@ button {
 .ac-route-btn:hover { border-color: var(--accent-dim); background: var(--surface-2); }
 .ac-route-btn .ac-topic { color: var(--accent-dim); }
 .ac-route-btn .ac-agent { color: var(--agent-color, #848899); }
+.ac-route-switch-icon {
+  color: var(--accent);
+  font-size: 1.25em;
+  line-height: 0.8;
+}
+.ac-route-switch-icon::before { content: ' ⇄'; }
 
 @media (max-width: 768px) {
   .ac-item { padding: 0.5rem 0.75rem; font-size: var(--text-body); }
