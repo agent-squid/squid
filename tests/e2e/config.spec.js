@@ -10,6 +10,59 @@ async function mockApp(page) {
   await page.route('**/topics/**', r => r.fulfill({ json: {} }));
 }
 
+async function installCodeMirrorStub(page) {
+  await page.evaluate(() => {
+    function makeDoc(text) {
+      const lines = text.split('\n');
+      return {
+        lines: lines.length,
+        toString: () => text,
+        line(number) {
+          const n = Math.min(Math.max(number, 1), lines.length);
+          let from = 0;
+          for (let i = 1; i < n; i++) from += lines[i - 1].length + 1;
+          return { number: n, from, to: from + lines[n - 1].length };
+        },
+        lineAt(pos) {
+          let from = 0;
+          for (let i = 0; i < lines.length; i++) {
+            const to = from + lines[i].length;
+            if (pos <= to || i === lines.length - 1) return { number: i + 1, from, to };
+            from = to + 1;
+          }
+        },
+      };
+    }
+    class EditorState {
+      static create({ doc, extensions }) {
+        return { doc: makeDoc(doc), extensions, selection: { main: { from: 0, to: 0 } } };
+      }
+    }
+    class EditorView {
+      constructor({ state, parent }) {
+        this.state = state;
+        this.dom = document.createElement('div');
+        this.dom.className = 'cm-editor';
+        this.dom.textContent = state.doc.toString();
+        this.dom.dataset.extensions = state.extensions.flat().join(',');
+        parent.appendChild(this.dom);
+      }
+      dispatch(update) {
+        if (update.selection) {
+          const from = update.selection.anchor;
+          const to = update.selection.head ?? from;
+          this.state.selection = { main: { from, to } };
+          this.dom.dataset.selection = this.state.doc.toString().slice(Math.min(from, to), Math.max(from, to));
+          this.dom.dataset.line = String(this.state.doc.lineAt(from).number);
+        }
+      }
+      focus() {}
+      destroy() { this.dom.remove(); }
+    }
+    window._cm = { EditorView, EditorState, basicSetup: [], oneDark: [], atomOneDarkHighlight: 'atom-one-dark-highlight', LANGS: {} };
+  });
+}
+
 test('configuration editor loads and saves the complete YAML', async ({ page }) => {
   await mockApp(page);
   const original = `server:\n  host: "127.0.0.1"\n  port: 8000\nagent:\n  first_byte_timeout: 300\n  response_timeout: 1800\nbackends:\n  qwen:\n    driver: codex\n`;
@@ -72,6 +125,67 @@ test('file viewer renders markdown when served as generic binary', async ({ page
   await page.evaluate(() => openFileViewer('/tmp/work/project/file.md'));
 
   await expect(page.locator('#file-modal-body')).toContainText('Visible in the viewer');
+});
+
+test('file viewer edit mode uses a distinct editor surface', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/localfile**', route => route.fulfill({
+    status: 200,
+    contentType: 'text/plain',
+    body: 'file contents',
+  }));
+
+  await page.goto('/');
+  await installCodeMirrorStub(page);
+  await page.evaluate(() => openFileViewer('/tmp/work/project/file.md'));
+  await expect(page.locator('#file-modal-body')).toContainText('file contents');
+  const viewerBg = await page.locator('#file-modal-body').evaluate(el => getComputedStyle(el).backgroundColor);
+  const viewerFontSize = await page.locator('#file-modal-body').evaluate(el => getComputedStyle(el).fontSize);
+
+  await page.getByRole('button', { name: 'Edit file' }).click();
+
+  await expect(page.locator('#file-modal-box')).toHaveClass(/fv-editing/);
+  await expect(page.locator('.fv-edit-status')).toHaveText('Editing');
+  await expect(page.locator('.cm-editor')).toBeVisible();
+  await expect(page.locator('.cm-editor')).toHaveAttribute('data-extensions', /atom-one-dark-highlight/);
+  const editorBg = await page.locator('#file-modal-body').evaluate(el => getComputedStyle(el).backgroundColor);
+  expect(editorBg).not.toBe(viewerBg);
+  await expect(page.locator('.cm-editor')).toHaveCSS('font-size', viewerFontSize);
+  const activeLineBg = await page.locator('.cm-editor').evaluate(el => {
+    const activeLine = document.createElement('div');
+    activeLine.className = 'cm-activeLine';
+    el.appendChild(activeLine);
+    return getComputedStyle(activeLine).backgroundColor;
+  });
+  expect(activeLineBg).toBe('rgba(240, 112, 64, 0.12)');
+});
+
+test('file viewer editor can find text and jump to lines', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/localfile**', route => route.fulfill({
+    status: 200,
+    contentType: 'text/plain',
+    body: 'alpha\nbeta\ncharlie\ntarget here\n',
+  }));
+
+  await page.goto('/');
+  await installCodeMirrorStub(page);
+  await page.evaluate(() => openFileViewer('/tmp/work/project/file.md', 3));
+  await page.getByRole('button', { name: 'Edit file' }).click();
+
+  await expect(page.getByLabel('Line number')).toHaveValue('3');
+  await expect(page.locator('.cm-editor')).toHaveAttribute('data-line', '3');
+
+  await page.getByLabel('Find in editor').fill('target');
+  await page.getByLabel('Find in editor').press('Enter');
+  await expect(page.locator('.fv-edit-status')).toHaveText('Match on line 4');
+  await expect(page.locator('.cm-editor')).toHaveAttribute('data-selection', 'target');
+  await expect(page.getByLabel('Line number')).toHaveValue('4');
+
+  await page.getByLabel('Line number').fill('2');
+  await page.getByRole('button', { name: 'Go to line' }).click();
+  await expect(page.locator('.fv-edit-status')).toHaveText('Line 2');
+  await expect(page.locator('.cm-editor')).toHaveAttribute('data-line', '2');
 });
 
 test('mobile file viewer breadcrumb starts at the path end', async ({ page }) => {
