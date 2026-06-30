@@ -268,6 +268,16 @@ test('search composer action prefills the effective default agent route', async 
   await expect(page.locator('#input')).toHaveValue('/s #default@codex needle');
 });
 
+test('composer input icons render at 16px', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+
+  await expect(page.locator('#chip-actions .composer-tool-btn svg').first()).toHaveCSS('width', '16px');
+  await expect(page.locator('#chip-actions .composer-tool-btn svg').first()).toHaveCSS('height', '16px');
+  await expect(page.locator('#pin-btn svg')).toHaveCSS('width', '16px');
+  await expect(page.locator('#pin-btn svg')).toHaveCSS('height', '16px');
+});
+
 test('clear composer action inserts /clear and ArrowUp restores the draft', async ({ page }) => {
   await mockBackend(page);
   await page.goto('/');

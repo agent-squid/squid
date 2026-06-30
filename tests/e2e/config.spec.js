@@ -173,11 +173,32 @@ test('file viewer editor can find text and jump to lines', async ({ page }) => {
   await page.evaluate(() => openFileViewer('/tmp/work/project/file.md', 3));
   await page.getByRole('button', { name: 'Edit file' }).click();
 
+  const findPopover = page.locator('.fv-edit-find-popover');
+  await expect(findPopover).toBeHidden();
+  await expect(page.locator('.fv-edit-footer .fv-edit-tools')).toBeVisible();
+  const editorBox = await page.locator('.cm-editor').boundingBox();
+  await page.mouse.click(editorBox.x + 60, editorBox.y + 120);
+  await expect(findPopover).toBeHidden();
+
   await expect(page.getByLabel('Line number')).toHaveValue('3');
   await expect(page.locator('.cm-editor')).toHaveAttribute('data-line', '3');
 
+  await page.getByLabel('Line number').fill('2');
+  await page.getByRole('button', { name: 'Go to line' }).click();
+  await expect(findPopover).toBeVisible();
+  await expect(page.locator('#file-modal-body > .fv-edit-find-popover .fv-edit-tools')).toBeVisible();
+  let popoverBox = await findPopover.boundingBox();
+  let footerBox = await page.locator('.fv-edit-footer').boundingBox();
+  expect(popoverBox.y).toBeLessThan(footerBox.y);
+  await expect(page.locator('.fv-edit-status')).toHaveText('Line 2');
+  await expect(page.locator('.cm-editor')).toHaveAttribute('data-line', '2');
+
   await page.getByLabel('Find in editor').fill('target');
   await page.getByLabel('Find in editor').press('Enter');
+  await expect(findPopover).toBeVisible();
+  popoverBox = await findPopover.boundingBox();
+  footerBox = await page.locator('.fv-edit-footer').boundingBox();
+  expect(popoverBox.y).toBeLessThan(footerBox.y);
   await expect(page.locator('.fv-edit-status')).toHaveText('Match on line 4');
   await expect(page.locator('.cm-editor')).toHaveAttribute('data-selection', 'target');
   await expect(page.getByLabel('Line number')).toHaveValue('4');

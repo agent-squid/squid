@@ -6542,6 +6542,9 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
   lineGoBtn.setAttribute('aria-label', 'Go to line');
   lineGoBtn.textContent = 'Go';
   editTools.append(findInput, findPrevBtn, findNextBtn, lineInput, lineGoBtn);
+  const findPopover = document.createElement('div');
+  findPopover.className = 'fv-edit-find-popover';
+  findPopover.hidden = true;
   const saveBtn = document.createElement('button');
   saveBtn.className = 'fv-save-btn';
   saveBtn.textContent = 'Save';
@@ -6644,8 +6647,51 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
   // ── Edit mode ────────────────────────────────────────────────────────────────
   let _editOriginal = null;
   let _editFindPos = -1;
+  let _editFindCleanup = null;
+  let _editFindAnchor = null;
 
-  function moveEditorToLine(lineNo) {
+  function positionFindPopover(clientX = null, clientY = null) {
+    if (!body._cmView || findPopover.hidden) return;
+    const bodyRect = body.getBoundingClientRect();
+    const popRect = findPopover.getBoundingClientRect();
+    const gap = 10;
+    const fallbackX = bodyRect.width - popRect.width - gap;
+    const fallbackY = gap;
+    let x = clientX == null ? fallbackX : clientX - bodyRect.left + gap;
+    let y = clientY == null ? fallbackY : clientY - bodyRect.top + gap;
+    x = Math.max(gap, Math.min(x, bodyRect.width - popRect.width - gap));
+    y = Math.max(gap, Math.min(y, bodyRect.height - popRect.height - gap));
+    findPopover.style.transform = `translate(${x}px, ${y}px)`;
+  }
+
+  function showFindPopover(clientX = null, clientY = null) {
+    _editFindAnchor = clientX == null || clientY == null ? null : { clientX, clientY };
+    if (!findPopover.contains(editTools)) findPopover.appendChild(editTools);
+    if (!findPopover.isConnected) body.appendChild(findPopover);
+    findPopover.hidden = false;
+    requestAnimationFrame(() => positionFindPopover(clientX, clientY));
+  }
+
+  function showFindPopoverAtPos(pos) {
+    const view = body._cmView;
+    const coords = typeof view?.coordsAtPos === 'function' ? view.coordsAtPos(pos) : null;
+    if (coords) showFindPopover(coords.right || coords.left, coords.bottom || coords.top);
+    else showFindPopover();
+  }
+
+  function dockFindTools() {
+    if (!editFooter.contains(editTools)) editFooter.insertBefore(editTools, cancelBtn);
+    findPopover.hidden = true;
+  }
+
+  function teardownFindPopover() {
+    if (_editFindCleanup) _editFindCleanup();
+    _editFindCleanup = null;
+    _editFindAnchor = null;
+    dockFindTools();
+  }
+
+  function moveEditorToLine(lineNo, floatTools = false) {
     const view = body._cmView;
     if (!view) return;
     const doc = view.state.doc;
@@ -6655,6 +6701,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
     view.dispatch({ selection: { anchor: info.from }, scrollIntoView: true });
     lineInput.value = String(target);
     editStatus.textContent = `Line ${target}`;
+    if (floatTools) showFindPopoverAtPos(info.from);
     view.focus();
   }
 
@@ -6679,6 +6726,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
     const foundLine = view.state.doc.lineAt(pos).number;
     lineInput.value = String(foundLine);
     editStatus.textContent = `Match on line ${foundLine}`;
+    showFindPopoverAtPos(pos);
     view.focus();
   }
 
@@ -6722,11 +6770,20 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
     _editFindPos = -1;
     lineInput.value = line ? String(line) : '';
     saveBtn.disabled = false;
+    const reposition = () => {
+      if (_editFindAnchor) positionFindPopover(_editFindAnchor.clientX, _editFindAnchor.clientY);
+      else positionFindPopover();
+    };
+    window.addEventListener('resize', reposition);
+    _editFindCleanup = () => {
+      window.removeEventListener('resize', reposition);
+    };
     view.focus();
     if (line) requestAnimationFrame(() => moveEditorToLine(line));
   }
 
   function exitEditMode() {
+    teardownFindPopover();
     if (body._cmView) { body._cmView.destroy(); body._cmView = null; }
     _editOriginal = null;
     box.classList.remove('fv-editing');
@@ -6762,11 +6819,11 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
     }
   });
   findInput.addEventListener('input', () => { _editFindPos = -1; });
-  lineGoBtn.addEventListener('click', () => moveEditorToLine(lineInput.value));
+  lineGoBtn.addEventListener('click', () => moveEditorToLine(lineInput.value, true));
   lineInput.addEventListener('keydown', e => {
     if (e.key === 'Enter') {
       e.preventDefault();
-      moveEditorToLine(lineInput.value);
+      moveEditorToLine(lineInput.value, true);
     }
   });
 

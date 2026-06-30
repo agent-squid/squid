@@ -64,6 +64,8 @@ test('pin button on bubble adds item to pin panel', async ({ page }) => {
 
   // Click the pin button on the bubble
   const bubble = page.locator('.msg.assistant:not(.msg-thinking)');
+  await expect(bubble.locator('.msg-pin-btn svg')).toHaveCSS('width', '16px');
+  await expect(bubble.locator('.msg-pin-btn svg')).toHaveCSS('height', '16px');
   await bubble.hover();
   await bubble.locator('.msg-pin-btn').click();
   await expect(bubble).toHaveClass(/pinned-sel/);

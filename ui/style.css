@@ -1549,6 +1549,7 @@ body {
 }
 #file-modal-box.fv-editing #file-modal-body {
   background: #111015;
+  position: relative;
 }
 .fv-config-hint {
   padding: 1.2rem 1.4rem;
@@ -1687,6 +1688,18 @@ body {
   gap: 0.25rem;
   min-width: 0;
 }
+.fv-edit-find-popover {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 2;
+  padding: 0.3rem;
+  background: rgba(21, 17, 15, 0.96);
+  border: 1px solid rgba(240, 112, 64, 0.28);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.fv-edit-find-popover[hidden] { display: none; }
 .fv-edit-find,
 .fv-edit-line {
   background: var(--surface);
@@ -1746,8 +1759,7 @@ body {
   }
   .fv-edit-status { flex-basis: 100%; }
   .fv-edit-tools {
-    flex: 1 1 100%;
-    order: 2;
+    width: min(100%, 22rem);
   }
   .fv-edit-find { flex: 1; width: auto; }
   .fv-cancel-btn,
@@ -1894,6 +1906,11 @@ body {
   transition: color 0.15s;
 }
 .msg-pin-btn:hover { color: var(--text-mid); }
+.msg-pin-btn svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
 .msg.assistant { position: relative; }
 .msg.assistant.lookback-sel,
 .msg.assistant.pinned-sel {
@@ -2462,6 +2479,12 @@ body {
   background: var(--surface-3);
 }
 .composer-tool-btn[hidden] { display: none; }
+#chip-actions .composer-tool-btn svg,
+#pin-btn svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
 #input {
   align-self: stretch;
   background: none;
