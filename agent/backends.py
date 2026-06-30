@@ -28,7 +28,7 @@ SUPPORTED_PROTOCOLS_BY_DRIVER = {
     "opencode": frozenset({"oneshot-cli"}),
 }
 DEFAULT_PROTOCOL_BY_DRIVER = {
-    "claude": "oneshot-cli",
+    "claude": "interactive-cli",
     "codex": "oneshot-cli",
     "cursor": "oneshot-cli",
     "opencode": "oneshot-cli",

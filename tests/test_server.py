@@ -388,6 +388,9 @@ def test_file_root_can_expand_to_an_edited_parent_and_applies_immediately(tmp_pa
             })
             assert allowed.status_code == 200
             assert allowed.json()["added"] is True
+            roots = client.get("/config/localfile-roots")
+            assert roots.status_code == 200
+            assert str(tmp_path / "workspace") in roots.json()["roots"]
             assert '# retained comment' in config_path.read_text()
             assert f'- "{tmp_path / "workspace"}"' in config_path.read_text()
 
@@ -398,4 +401,28 @@ def test_file_root_can_expand_to_an_edited_parent_and_applies_immediately(tmp_pa
     finally:
         server._cfg.clear()
         server._cfg.update(original_cfg)
+        server._LOCALFILE_ROOTS[:] = original_roots
+
+
+def test_localfile_serves_unknown_extension_text_inline(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    text_file = root / "example.customthing"
+    text_file.write_text("plain text without a known extension\n")
+    binary_file = root / "binary.customthing"
+    binary_file.write_bytes(b"\x00\x01\x02\x03")
+    original_roots = list(server._LOCALFILE_ROOTS)
+    client = TestClient(server.app)
+
+    try:
+        server._LOCALFILE_ROOTS[:] = [root.resolve()]
+        text_res = client.get("/localfile", params={"path": str(text_file)})
+        assert text_res.status_code == 200
+        assert text_res.headers["content-type"].startswith("text/plain")
+        assert "plain text" in text_res.text
+
+        binary_res = client.get("/localfile", params={"path": str(binary_file)})
+        assert binary_res.status_code == 200
+        assert binary_res.headers["content-type"].startswith("application/octet-stream")
+    finally:
         server._LOCALFILE_ROOTS[:] = original_roots

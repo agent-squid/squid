@@ -35,7 +35,10 @@ async function installCodeMirrorStub(page) {
     }
     class EditorState {
       static create({ doc, extensions }) {
-        return { doc: makeDoc(doc), extensions, selection: { main: { from: 0, to: 0 } } };
+        const d = makeDoc(doc);
+        return { doc: d, extensions, selection: { main: { from: 0, to: 0 } }, _text: doc,
+          update(changeSpec) { return changeSpec; },
+        };
       }
     }
     class EditorView {
@@ -48,6 +51,13 @@ async function installCodeMirrorStub(page) {
         parent.appendChild(this.dom);
       }
       dispatch(update) {
+        if (update.changes) {
+          const { from, to, insert } = update.changes;
+          const old = this.state.doc.toString();
+          const text = old.slice(0, from) + insert + old.slice(to);
+          this.state = EditorState.create({ doc: text, extensions: this.state.extensions });
+          this.dom.textContent = text;
+        }
         if (update.selection) {
           const from = update.selection.anchor;
           const to = update.selection.head ?? from;
@@ -59,12 +69,19 @@ async function installCodeMirrorStub(page) {
       focus() {}
       destroy() { this.dom.remove(); }
     }
-    window._cm = { EditorView, EditorState, basicSetup: [], oneDark: [], atomOneDarkHighlight: 'atom-one-dark-highlight', LANGS: {} };
+    const stub = { EditorView, EditorState, basicSetup: [], oneDark: [], atomOneDarkHighlight: 'atom-one-dark-highlight', LANGS: {} };
+    Object.defineProperty(window, '_cm', {
+      configurable: true,
+      get: () => stub,
+      set: () => {},
+    });
+    window._cmPromise = Promise.resolve(true);
   });
 }
 
 test('configuration editor loads and saves the complete YAML', async ({ page }) => {
   await mockApp(page);
+  await installCodeMirrorStub(page);
   const original = `server:\n  host: "127.0.0.1"\n  port: 8000\nagent:\n  first_byte_timeout: 300\n  response_timeout: 1800\nbackends:\n  qwen:\n    driver: codex\n`;
   let saved;
   await page.route('**/config/yaml', async route => {
@@ -76,11 +93,20 @@ test('configuration editor loads and saves the complete YAML', async ({ page }) 
   });
 
   await page.goto('/');
-  await page.getByRole('button', { name: 'Agents', exact: true }).click();
-  const editor = page.locator('#config-editor');
-  await expect(editor).toHaveValue(/backends:/);
-  await expect(editor).toHaveValue(/qwen:/);
-  await editor.fill(original.replace('port: 8000', 'port: 8123'));
+  await page.locator('#hamburger-btn').click();
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.locator('#config-editor .cm-editor')).toBeVisible();
+  await expect(page.locator('#config-editor .cm-editor')).toContainText('backends:');
+  await expect(page.locator('#config-editor .cm-editor')).toContainText('qwen:');
+  // Edit via CM dispatch
+  const updated = original.replace('port: 8000', 'port: 8123');
+  await page.evaluate(content => {
+    const view = window._configCmView;
+    if (!view) return;
+    view.dispatch(view.state.update({
+      changes: { from: 0, to: view.state.doc.length, insert: content },
+    }));
+  }, updated);
   await page.locator('#config-editor-save').click();
 
   await expect(page.locator('#config-editor-status')).toHaveText('saved ✓ · restart required');
@@ -125,6 +151,22 @@ test('file viewer renders markdown when served as generic binary', async ({ page
   await page.evaluate(() => openFileViewer('/tmp/work/project/file.md'));
 
   await expect(page.locator('#file-modal-body')).toContainText('Visible in the viewer');
+});
+
+test('file viewer edits text confirmed by content type despite unknown extension', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/localfile**', route => route.fulfill({
+    status: 200,
+    contentType: 'text/plain',
+    body: 'unknown extension text',
+  }));
+
+  await page.goto('/');
+  await page.evaluate(() => openFileViewer('/tmp/work/project/example.customthing'));
+
+  await expect(page.locator('#file-modal-body')).toContainText('unknown extension text');
+  await expect(page.getByRole('button', { name: 'Edit file' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Edit history' })).toBeVisible();
 });
 
 test('file viewer edit mode uses a distinct editor surface', async ({ page }) => {

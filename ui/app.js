@@ -25,7 +25,20 @@ window.scrollTo(0, 0);
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch(() => {});
+    navigator.serviceWorker.register('/sw.js').then(reg => {
+      // Mobile PWAs (esp. iOS standalone) rarely re-check for SW updates on relaunch,
+      // so force a check on load and whenever the app regains foreground.
+      reg.update();
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') reg.update();
+      });
+    }).catch(() => {});
+  });
+  let swRefreshing = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (swRefreshing) return;
+    swRefreshing = true;
+    window.location.reload();
   });
 }
 
@@ -166,6 +179,7 @@ function switchView(name) {
   if (name === 'topics') loadTopicsView();
   if (name === 'analytics') loadStats();
   if (name === 'agents') loadAgents();
+  if (name === 'settings') loadConfigYaml();
 }
 
 function initSettings() {
@@ -187,11 +201,15 @@ function initSettings() {
     btn.addEventListener('click', () => {
       hamburgerMenu.classList.remove('open');
       hamburgerBtn.classList.remove('active');
-      switchView(btn.dataset.view);
+      if (btn.dataset.action === 'files') {
+        openFileRootBrowser();
+      } else {
+        switchView(btn.dataset.view);
+      }
     })
   );
   document.addEventListener('click', e => {
-    if (!hamburgerMenu.contains(e.target) && e.target !== hamburgerBtn) {
+    if (!hamburgerMenu.contains(e.target) && !hamburgerBtn.contains(e.target)) {
       hamburgerMenu.classList.remove('open');
       hamburgerBtn.classList.remove('active');
     }
@@ -477,6 +495,8 @@ chipStashBtn.addEventListener('click', async e => {
   localStorage.removeItem('squid_draft');
   resizeComposer();
   _acRender(promptHistoryAutocompleteItems(matchingPromptHistory('', 8)), 'Recent Prompts');
+  acSel = -1;
+  _acHighlight();
   input.focus();
 });
 
@@ -3325,6 +3345,7 @@ const QUOTA_CONFIG = {
 };
 
 const quotaSnapshots = {};
+const QUOTA_ERROR_RETRY_DELAYS = [3000, 10000, 30000];
 // Per-backend runtime state. timer is the label-refresh interval handle.
 // activeCount tracks in-flight messages; drives the 30s quota poll interval.
 const quotaState = {};
@@ -3332,7 +3353,7 @@ const quotaState = {};
 function quotaStateFor(backend) {
   return quotaState[backend] ||= {
     raw: null, pct: null, resetAt: null, displayText: null,
-    inFlight: false, timer: null, activeCount: 0,
+    inFlight: false, timer: null, retryTimer: null, retryAttempt: 0, activeCount: 0,
   };
 }
 
@@ -3520,9 +3541,15 @@ function updateGaugeLabel(backend) {
   }
 }
 
+function clearQuotaRetry(state) {
+  if (state.retryTimer) { clearTimeout(state.retryTimer); state.retryTimer = null; }
+  state.retryAttempt = 0;
+}
+
 function renderQuotaLoaded(backend, snapshot) {
   const cfg = quotaConfigFor(backend);
   const state = quotaStateFor(backend);
+  clearQuotaRetry(state);
   state.raw = snapshot.raw;
   state.pct = snapshot.pct;
   state.resetAt = snapshot.resetAt;
@@ -3552,6 +3579,7 @@ function showQuotaError(backend, text) {
   const cfg = quotaConfigFor(backend);
   if (!cfg) return;
   const state = quotaStateFor(backend);
+  clearQuotaRetry(state);
   state.resetAt = null;
   if (state.timer) { clearTimeout(state.timer); state.timer = null; }
 
@@ -3569,6 +3597,20 @@ function showQuotaError(backend, text) {
   }
 }
 
+function showTransientQuotaError(backend, text) {
+  const state = quotaStateFor(backend);
+  if (state.retryTimer) return;
+  const delay = QUOTA_ERROR_RETRY_DELAYS[state.retryAttempt++];
+  if (delay == null) {
+    showQuotaError(backend, text);
+    return;
+  }
+  state.retryTimer = setTimeout(async () => {
+    state.retryTimer = null;
+    await fetchQuotaForBackend(backend);
+  }, delay);
+}
+
 async function fetchQuotaForBackend(backend) {
   const cfg = quotaConfigFor(backend);
   if (!cfg) return null;
@@ -3579,11 +3621,15 @@ async function fetchQuotaForBackend(backend) {
   try {
     const res = await fetch(`/quota/backend/${encodeURIComponent(backend)}`);
     if (!res.ok) {
-      showQuotaError(backend, res.status === 400 ? `${label} auth` : `${label} error`);
+      if (res.status === 400) showQuotaError(backend, `${label} auth`);
+      else showTransientQuotaError(backend, `${label} error`);
       return null;
     }
     const data = await res.json();
-    if (data.status === 'none') return null;
+    if (data.status === 'none') {
+      clearQuotaRetry(state);
+      return null;
+    }
     if (!data.status) {
       showQuotaError(backend, `${label} n/a`);
       return null;
@@ -3613,7 +3659,7 @@ async function fetchQuotaForBackend(backend) {
     renderQuotaLoaded(backend, snapshot);
     return { backend, ...state };
   } catch {
-    showQuotaError(backend, `${label} error`);
+    showTransientQuotaError(backend, `${label} error`);
     return null;
   } finally {
     state.inFlight = false;
@@ -4929,36 +4975,71 @@ function renderBackendsCatalog(backends) {
 // ── agent manager ─────────────────────────────────────────────────────────────
 
 let _configRevision = null;
+let _configCmView = null;
 
 async function loadConfigYaml() {
-  const editor = document.getElementById('config-editor');
+  const container = document.getElementById('config-editor');
   const status = document.getElementById('config-editor-status');
-  if (!editor) return;
+  if (!container) return;
   status.textContent = 'loading…';
   try {
     const res = await fetch('/config/yaml');
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to load configuration');
-    editor.value = data.content;
     _configRevision = data.revision;
     document.getElementById('config-editor-path').textContent = data.path;
+
+    // Use CodeMirror if available
+    if (window._cm) {
+      const { EditorView, EditorState, basicSetup, oneDark, atomOneDarkHighlight, LANGS } = window._cm;
+      if (_configCmView) _configCmView.destroy();
+      const extensions = [basicSetup, oneDark];
+      if (atomOneDarkHighlight) extensions.push(atomOneDarkHighlight);
+      const lang = LANGS.yaml?.();
+      if (lang) extensions.push(lang);
+      _configCmView = new EditorView({
+        state: EditorState.create({ doc: data.content, extensions }),
+        parent: container,
+      });
+      window._configCmView = _configCmView;
+    } else {
+      // Fallback: wait for CM to load
+      const ok = await (window._cmPromise || Promise.resolve(false));
+      if (ok) return loadConfigYaml();
+      container.textContent = data.content;
+      container.style.whiteSpace = 'pre-wrap';
+      container.style.font = '12px/1.55 JetBrains Mono, ui-monospace, monospace';
+      container.style.padding = '0.75rem';
+      container.style.color = 'var(--text-muted)';
+      container.style.overflow = 'auto';
+    }
     status.textContent = '';
   } catch (err) {
     status.textContent = err.message || 'failed to load';
   }
 }
 
+function getConfigContent() {
+  if (_configCmView) return _configCmView.state.doc.toString();
+  return null;
+}
+
 async function saveConfigYaml() {
-  const editor = document.getElementById('config-editor');
   const status = document.getElementById('config-editor-status');
   const save = document.getElementById('config-editor-save');
   save.disabled = true;
   status.textContent = 'validating…';
+  const content = getConfigContent();
+  if (content === null) {
+    status.textContent = 'editor not ready — try again';
+    save.disabled = false;
+    return;
+  }
   try {
     const res = await fetch('/config/yaml', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: editor.value, revision: _configRevision }),
+      body: JSON.stringify({ content, revision: _configRevision }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to save configuration');
@@ -4990,7 +5071,6 @@ async function loadAgents() {
     if (cwdInput) cwdInput.placeholder = `${_squidHome}/…`;
   }
   renderBackendsCatalog(health?.backends);
-  loadConfigYaml();
   if (!agents.length) {
     listEl.innerHTML = '<div class="empty">No agents yet. Add one below.</div>';
     return;
@@ -5028,13 +5108,6 @@ function initAliases() {
   });
   document.getElementById('config-editor-reload').addEventListener('click', loadConfigYaml);
   document.getElementById('config-editor-save').addEventListener('click', saveConfigYaml);
-  document.getElementById('config-editor').addEventListener('keydown', e => {
-    if (e.key !== 'Tab') return;
-    e.preventDefault();
-    const editor = e.currentTarget;
-    const start = editor.selectionStart;
-    editor.setRangeText('  ', start, editor.selectionEnd, 'end');
-  });
 
   document.getElementById('agent-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -6441,6 +6514,10 @@ function _fmtMtime(ts) {
   return new Date(ts * 1000).toLocaleDateString();
 }
 
+function openFileRootBrowser() {
+  openFileViewer(null);
+}
+
 function openFileViewer(initialPath, initialLine, initialEndLine) {
   document.getElementById('file-modal')?.remove();
   _fvNavigate = null;
@@ -6450,6 +6527,8 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
   let path = initialPath;
   let line = initialLine;
   let endLine = initialEndLine;
+  let pathKind = initialPath ? null : 'roots';
+  let pathIsText = false;
 
   // ── DOM ──────────────────────────────────────────────────────────────────────
   const modal = document.createElement('div');
@@ -6461,16 +6540,26 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
   const header = document.createElement('div');
   header.id = 'file-modal-header';
 
+  // SVG icon set for the file viewer header (16x16, stroke-based, matches #send-btn's line style)
+  const FV_ICON_CHEVRON_LEFT = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M10 3.5L5.5 8l4.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const FV_ICON_CHEVRON_RIGHT = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const FV_ICON_EXTERNAL_LINK = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M7 3H4.5A1.5 1.5 0 0 0 3 4.5v7A1.5 1.5 0 0 0 4.5 13h7a1.5 1.5 0 0 0 1.5-1.5V9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.5 3H13v3.5M13 3 7.5 8.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const FV_ICON_PENCIL = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M11.4 2.4a1.4 1.4 0 0 1 2 2L5.6 12.2l-2.7.7.7-2.7 7.8-7.8Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const FV_ICON_HISTORY = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8.5" r="5" stroke="currentColor" stroke-width="1.4"/><path d="M8 5.8v2.9l2 1.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M6 2.2h4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
+  const FV_ICON_COPY = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="6" y="6" width="7.5" height="7.5" rx="1.3" stroke="currentColor" stroke-width="1.4"/><path d="M3.8 10.2h-.3A1.5 1.5 0 0 1 2 8.7v-5A1.5 1.5 0 0 1 3.5 2.2h5A1.5 1.5 0 0 1 10 3.7v.3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const FV_ICON_CHECK = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3.5 8.3l3 3 6-6.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const FV_ICON_CLOSE = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+
   const navBtns = document.createElement('div');
   navBtns.className = 'fv-nav-btns';
   const backBtn = document.createElement('button');
   backBtn.className = 'fv-nav-btn';
   backBtn.setAttribute('aria-label', 'Back');
-  backBtn.textContent = '‹';
+  backBtn.innerHTML = FV_ICON_CHEVRON_LEFT;
   const fwdBtn = document.createElement('button');
   fwdBtn.className = 'fv-nav-btn';
   fwdBtn.setAttribute('aria-label', 'Forward');
-  fwdBtn.textContent = '›';
+  fwdBtn.innerHTML = FV_ICON_CHEVRON_RIGHT;
   navBtns.append(backBtn, fwdBtn);
 
   const breadcrumb = document.createElement('div');
@@ -6482,26 +6571,26 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
   previewBtn.className = 'fv-action-btn';
   previewBtn.title = 'Preview in browser';
   previewBtn.setAttribute('aria-label', 'Preview in browser');
-  previewBtn.textContent = '↗';
+  previewBtn.innerHTML = FV_ICON_EXTERNAL_LINK;
   const editBtn = document.createElement('button');
   editBtn.className = 'fv-action-btn';
   editBtn.title = 'Edit file';
   editBtn.setAttribute('aria-label', 'Edit file');
-  editBtn.textContent = '✎';
+  editBtn.innerHTML = FV_ICON_PENCIL;
   editBtn.hidden = true;
   const historyBtn = document.createElement('button');
   historyBtn.className = 'fv-action-btn';
   historyBtn.title = 'Edit history';
   historyBtn.setAttribute('aria-label', 'Edit history');
-  historyBtn.textContent = '⟳';
+  historyBtn.innerHTML = FV_ICON_HISTORY;
   historyBtn.hidden = true;
   const copyBtn = document.createElement('button');
   copyBtn.className = 'fv-action-btn';
   copyBtn.title = 'Copy path';
-  copyBtn.textContent = '⎘';
+  copyBtn.innerHTML = FV_ICON_COPY;
   const closeBtn = document.createElement('button');
   closeBtn.id = 'file-modal-close';
-  closeBtn.textContent = '×';
+  closeBtn.innerHTML = FV_ICON_CLOSE;
   actions.append(previewBtn, historyBtn, editBtn, copyBtn, closeBtn);
 
   // edit footer (shown only in edit mode, appended to box)
@@ -6573,6 +6662,8 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
     navHistory.push({ path: newPath, line: newLine, endLine: newEndLine });
     historyIdx = navHistory.length - 1;
     path = newPath; line = newLine; endLine = newEndLine;
+    pathKind = path ? null : 'roots';
+    pathIsText = false;
     updateNav();
     loadFile();
   }
@@ -6580,8 +6671,20 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
   function updateNav() {
     backBtn.disabled = historyIdx === 0;
     fwdBtn.disabled = historyIdx === navHistory.length - 1;
-    previewBtn.hidden = !_isWebPreviewPath(path);
-    const isText = _isTextPath(path);
+    if (!path) {
+      pathKind = 'roots';
+      pathIsText = false;
+      previewBtn.hidden = true;
+      editBtn.hidden = true;
+      historyBtn.hidden = true;
+      copyBtn.hidden = true;
+      breadcrumb.textContent = 'Files';
+      return;
+    }
+    copyBtn.hidden = false;
+    const isFile = pathKind === 'file';
+    previewBtn.hidden = !isFile || !_isWebPreviewPath(path);
+    const isText = isFile && (pathIsText || _isTextPath(path));
     editBtn.hidden = !isText;
     historyBtn.hidden = !isText;
     breadcrumb.innerHTML = '';
@@ -6617,15 +6720,21 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
   // ── Events ───────────────────────────────────────────────────────────────────
   backBtn.addEventListener('click', () => {
     if (historyIdx > 0) {
+      exitEditMode();
       historyIdx--;
       ({ path, line, endLine } = navHistory[historyIdx]);
+      pathKind = path ? null : 'roots';
+      pathIsText = false;
       updateNav(); loadFile();
     }
   });
   fwdBtn.addEventListener('click', () => {
     if (historyIdx < navHistory.length - 1) {
+      exitEditMode();
       historyIdx++;
       ({ path, line, endLine } = navHistory[historyIdx]);
+      pathKind = path ? null : 'roots';
+      pathIsText = false;
       updateNav(); loadFile();
     }
   });
@@ -6634,8 +6743,8 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
   });
   copyBtn.addEventListener('click', () => {
     navigator.clipboard?.writeText(path).then(() => {
-      copyBtn.textContent = '✓';
-      setTimeout(() => { copyBtn.textContent = '⎘'; }, 1500);
+      copyBtn.innerHTML = FV_ICON_CHECK;
+      setTimeout(() => { copyBtn.innerHTML = FV_ICON_COPY; }, 1500);
     });
   });
   const closeModal = () => { modal.remove(); _fvNavigate = null; };
@@ -6734,7 +6843,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
     if (!window._cm) {
       editBtn.textContent = '…';
       const ok = await (window._cmPromise || Promise.resolve(false));
-      editBtn.textContent = '✎';
+      editBtn.innerHTML = FV_ICON_PENCIL;
       if (!ok) {
         body.innerHTML = '';
         body.style.padding = '1rem';
@@ -6779,7 +6888,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
       window.removeEventListener('resize', reposition);
     };
     view.focus();
-    if (line) requestAnimationFrame(() => moveEditorToLine(line));
+    if (line) moveEditorToLine(line);
   }
 
   function exitEditMode() {
@@ -6793,7 +6902,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
     body.style.padding = '';
     body.style.overflow = '';
     editFooter.hidden = true;
-    const isText = _isTextPath(path);
+    const isText = pathKind === 'file' && path ? (pathIsText || _isTextPath(path)) : false;
     editBtn.hidden = !isText;
     historyBtn.hidden = !isText;
   }
@@ -6956,9 +7065,49 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
     });
   }
 
+  function renderFileRoots(data) {
+    body.innerHTML = '';
+    const roots = data.roots || [];
+    if (!roots.length) {
+      const empty = document.createElement('div');
+      empty.className = 'fv-dir-empty';
+      empty.textContent = 'No local file roots configured';
+      body.appendChild(empty);
+      return;
+    }
+    const list = document.createElement('div');
+    list.className = 'fv-dir-listing fv-root-listing';
+    roots.forEach(root => {
+      const a = document.createElement('a');
+      a.className = 'fv-dir-entry fv-dir-entry--dir';
+      a.href = '/localfile?' + new URLSearchParams({ path: root });
+      a.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (_fvNavigate && document.getElementById('file-modal')) _fvNavigate(root);
+        else openFileViewer(root);
+      });
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'fv-dir-name';
+      nameSpan.textContent = root;
+      a.appendChild(nameSpan);
+      list.appendChild(a);
+    });
+    body.appendChild(list);
+  }
+
   async function loadFile() {
     body.textContent = 'Loading…';
     try {
+      if (!path) {
+        pathKind = 'roots';
+        pathIsText = false;
+        updateNav();
+        const rootsRes = await fetch('/config/localfile-roots');
+        if (!rootsRes.ok) throw new Error('roots');
+        renderFileRoots(await rootsRes.json());
+        return;
+      }
       const res = await fetch('/localfile?' + new URLSearchParams({ path }));
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
@@ -6981,12 +7130,18 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
         try {
           const data = JSON.parse(text);
           if (data.type === 'directory') {
-            if (data.path !== path) { path = data.path; updateNav(); }
+            pathKind = 'directory';
+            pathIsText = false;
+            if (data.path !== path) path = data.path;
+            updateNav();
             _renderDirListing(body, data);
             return;
           }
         } catch {}
       }
+      pathKind = 'file';
+      pathIsText = ct.includes('text/') || ct.includes('application/json');
+      updateNav();
       _renderFileViewer(body, text, line, endLine, path);
     } catch {
       body.textContent = 'Failed to load file.';
@@ -7070,6 +7225,12 @@ function _renderDirListing(container, data) {
       const a = document.createElement('a');
       a.className = 'fv-dir-entry' + (entry.is_dir ? ' fv-dir-entry--dir' : '');
       a.href = '/localfile?' + new URLSearchParams({ path: entry.path });
+      a.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (_fvNavigate && document.getElementById('file-modal')) _fvNavigate(entry.path);
+        else openFileViewer(entry.path);
+      });
 
       const nameSpan = document.createElement('span');
       nameSpan.className = 'fv-dir-name';

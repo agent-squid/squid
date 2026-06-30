@@ -1126,6 +1126,13 @@ async def add_localfile_root(req: LocalfileRootRequest, request: Request):
     return JSONResponse({"ok": True, "root": str(root), "added": True})
 
 
+@app.get("/config/localfile-roots")
+async def get_localfile_roots(request: Request):
+    if not _same_origin(request):
+        return JSONResponse({"error": "cross-origin configuration reads are not allowed"}, status_code=403)
+    return JSONResponse({"roots": [str(root) for root in _LOCALFILE_ROOTS]})
+
+
 @app.get("/config/agents")
 async def get_agents():
     return JSONResponse(list_agents())
@@ -1555,6 +1562,24 @@ _LOCALFILE_TEXT_MIME_BY_SUFFIX = {
     ".markdown": "text/markdown",
 }
 
+def _looks_like_text_file(path: Path, sample_size: int = 65536) -> bool:
+    try:
+        sample = path.read_bytes()[:sample_size]
+    except OSError:
+        return False
+    if not sample:
+        return True
+    if b"\x00" in sample:
+        return False
+    try:
+        text = sample.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    if not text:
+        return True
+    bad = sum(1 for ch in text if ch not in "\n\r\t" and (ord(ch) < 32 or ord(ch) == 127))
+    return bad / len(text) <= 0.01
+
 @app.get("/localfile")
 async def serve_local_file(path: str, request: Request):
     """Serve a local file — only paths under server.localfile_roots are allowed."""
@@ -1589,6 +1614,8 @@ async def serve_local_file(path: str, request: Request):
         mime, _ = mimetypes.guess_type(str(p))
     if mime and mime.startswith("text/"):
         return PlainTextResponse(p.read_text(errors="replace"), media_type=mime)
+    if (not mime or mime == "application/octet-stream") and _looks_like_text_file(p):
+        return PlainTextResponse(p.read_text(errors="replace"), media_type="text/plain")
     return FileResponse(str(p), media_type=mime or "application/octet-stream")
 
 

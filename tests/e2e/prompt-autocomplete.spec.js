@@ -272,10 +272,26 @@ test('composer input icons render at 16px', async ({ page }) => {
   await mockBackend(page);
   await page.goto('/');
 
+  await expect(page.locator('#chip-actions .composer-tool-btn').first()).toHaveCSS('width', '24px');
+  await expect(page.locator('#chip-actions .composer-tool-btn').first()).toHaveCSS('height', '24px');
   await expect(page.locator('#chip-actions .composer-tool-btn svg').first()).toHaveCSS('width', '16px');
   await expect(page.locator('#chip-actions .composer-tool-btn svg').first()).toHaveCSS('height', '16px');
   await expect(page.locator('#pin-btn svg')).toHaveCSS('width', '16px');
   await expect(page.locator('#pin-btn svg')).toHaveCSS('height', '16px');
+
+  const inputPaddingBottom = await page.locator('#input').evaluate(el => parseFloat(getComputedStyle(el).paddingBottom));
+  expect(inputPaddingBottom).toBeLessThanOrEqual(6);
+});
+
+test('mobile composer actions stay compact', async ({ page }) => {
+  await mockBackend(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+
+  await expect(page.locator('#chip-actions .composer-tool-btn').first()).toHaveCSS('width', '28px');
+  await expect(page.locator('#chip-actions .composer-tool-btn').first()).toHaveCSS('height', '28px');
+  const inputPaddingBottom = await page.locator('#input').evaluate(el => parseFloat(getComputedStyle(el).paddingBottom));
+  expect(inputPaddingBottom).toBeLessThanOrEqual(5);
 });
 
 test('clear composer action inserts /clear and ArrowUp restores the draft', async ({ page }) => {

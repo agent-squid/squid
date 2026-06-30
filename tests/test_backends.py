@@ -20,18 +20,18 @@ def test_multiple_backends_can_share_driver():
     assert deepcla.color == "#4D9DE0"
 
 
-def test_backend_protocol_defaults_and_can_select_claude_interactive_cli():
+def test_backend_protocol_defaults_to_interactive_cli_and_can_select_oneshot():
     claude = _validate_backend("claude", {"driver": "claude"})
-    live = _validate_backend("claude-live", {
+    oneshot = _validate_backend("claude-oneshot", {
         "driver": "claude",
-        "protocol": "interactive-cli",
+        "protocol": "oneshot-cli",
     })
 
-    assert claude.protocol == "oneshot-cli"
-    assert live.protocol == "interactive-cli"
-    assert claude.fingerprint != live.fingerprint
-    assert live.public_dict()["protocol"] == "interactive-cli"
-    assert live.interactive.idle_timeout_seconds == DEFAULT_INTERACTIVE_IDLE_TIMEOUT_SECONDS
+    assert claude.protocol == "interactive-cli"
+    assert oneshot.protocol == "oneshot-cli"
+    assert claude.fingerprint != oneshot.fingerprint
+    assert claude.public_dict()["protocol"] == "interactive-cli"
+    assert claude.interactive.idle_timeout_seconds == DEFAULT_INTERACTIVE_IDLE_TIMEOUT_SECONDS
 
 
 def test_backend_interactive_idle_timeout_is_configurable():
