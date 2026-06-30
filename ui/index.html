@@ -22,6 +22,83 @@
   <script src="/vendor/highlight.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/vendor/qrcode.min.js"></script>
+  <script type="module">
+    const B = 'https://esm.sh/';
+    const ti = url => import(url).catch(() => ({}));
+    window._cmPromise = (async () => {
+      // `codemirror` (CM6 meta-package) and all @codemirror/lang-*@6 packages
+      // share the same /@codemirror/state@^6.0.0 dep URL on esm.sh, so they
+      // use one module instance and instanceof checks work across packages.
+      const [
+        { EditorView, basicSetup },
+        { EditorState },
+        { javascript }, { python }, { json }, { html: htmlLang }, { css },
+        { markdown }, { xml }, { sql }, { cpp },
+        { HighlightStyle, StreamLanguage, syntaxHighlighting },
+        { tags },
+        modeYaml, modeShell, modeRuby, modeGo, modeRust, modeToml,
+        { oneDarkTheme },
+      ] = await Promise.all([
+        import(B + 'codemirror'),
+        import(B + '@codemirror/state@6'),
+        import(B + '@codemirror/lang-javascript@6'),
+        import(B + '@codemirror/lang-python@6'),
+        import(B + '@codemirror/lang-json@6'),
+        import(B + '@codemirror/lang-html@6'),
+        import(B + '@codemirror/lang-css@6'),
+        import(B + '@codemirror/lang-markdown@6'),
+        import(B + '@codemirror/lang-xml@6'),
+        import(B + '@codemirror/lang-sql@6'),
+        import(B + '@codemirror/lang-cpp@6'),
+        import(B + '@codemirror/language@6'),
+        import(B + '@lezer/highlight@1'),
+        ti(B + '@codemirror/legacy-modes@6/mode/yaml'),
+        ti(B + '@codemirror/legacy-modes@6/mode/shell'),
+        ti(B + '@codemirror/legacy-modes@6/mode/ruby'),
+        ti(B + '@codemirror/legacy-modes@6/mode/go'),
+        ti(B + '@codemirror/legacy-modes@6/mode/rust'),
+        ti(B + '@codemirror/legacy-modes@6/mode/toml'),
+        import(B + '@codemirror/theme-one-dark@6'),
+      ]);
+      const SL = m => m && StreamLanguage.define(m);
+      const LANGS = {
+        js:   () => javascript(),
+        jsx:  () => javascript({ jsx: true }),
+        ts:   () => javascript({ typescript: true }),
+        tsx:  () => javascript({ jsx: true, typescript: true }),
+        py:   () => python(),
+        json: () => json(),
+        html: () => htmlLang(),  htm: () => htmlLang(),
+        css:  () => css(),
+        md:   () => markdown(),
+        xml:  () => xml(),       svg: () => xml(),
+        sql:  () => sql(),
+        c:    () => cpp(),       h:   () => cpp(),
+        cpp:  () => cpp(),       hpp: () => cpp(),
+        yaml: () => SL(modeYaml.yaml),  yml: () => SL(modeYaml.yaml),
+        toml: () => SL(modeToml.toml),
+        sh:   () => SL(modeShell.shell), bash: () => SL(modeShell.shell),
+        zsh:  () => SL(modeShell.shell), fish: () => SL(modeShell.shell),
+        rb:   () => SL(modeRuby.ruby),
+        go:   () => SL(modeGo.go),
+        rs:   () => SL(modeRust.rust),
+      };
+      const atomOneDarkHighlight = syntaxHighlighting(HighlightStyle.define([
+        { tag: [tags.comment, tags.quote], color: '#5c6370', fontStyle: 'italic' },
+        { tag: [tags.keyword, tags.operatorKeyword], color: '#c678dd' },
+        { tag: [tags.deleted, tags.tagName, tags.heading], color: '#e06c75' },
+        { tag: [tags.atom, tags.bool, tags.null], color: '#56b6c2' },
+        { tag: [tags.string, tags.regexp, tags.special(tags.string)], color: '#98c379' },
+        { tag: [tags.attributeName, tags.number, tags.integer, tags.float, tags.typeName], color: '#d19a66' },
+        { tag: [tags.meta, tags.labelName, tags.link, tags.function(tags.variableName), tags.propertyName], color: '#61aeee' },
+        { tag: [tags.className, tags.standard(tags.variableName), tags.definition(tags.typeName)], color: '#e6c07b' },
+        { tag: tags.emphasis, fontStyle: 'italic' },
+        { tag: tags.strong, fontWeight: '700' },
+      ]));
+      window._cm = { EditorView, EditorState, basicSetup, oneDark: oneDarkTheme, atomOneDarkHighlight, LANGS };
+      return true;
+    })().catch(err => { console.error('CodeMirror load failed:', err); return false; });
+  </script>
 </head>
 <body>
   <div id="app">
@@ -149,12 +226,12 @@
         </div>
         <div class="help-section">
           <div class="help-title">Input box icons</div>
-          <div class="help-row"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" style="flex-shrink:0"><path d="M2.2 3.1c0-.9.7-1.6 1.6-1.6h8.4c.9 0 1.6.7 1.6 1.6v5.5c0 .9-.7 1.6-1.6 1.6H7.1L3.5 13v-2.8c-.7-.1-1.3-.8-1.3-1.6V3.1zm1.4 0v5.5c0 .2.2.3.3.3h1v1.2l1.7-1.2h5.6c.2 0 .3-.2.3-.3V3.1c0-.2-.2-.3-.3-.3H3.9c-.1 0-.3.1-.3.3z"/><path d="M8 4.1a1.4 1.4 0 1 1 0 2.8a1.4 1.4 0 0 1 0-2.8zm-2.6 4c.4-1 1.3-1.5 2.6-1.5s2.2.5 2.6 1.5H5.4z"/></svg><span>toggle to show only your prompts in history</span></div>
-          <div class="help-row"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" style="flex-shrink:0"><path d="M1.5 2h13l-5 6.5V14l-3-1.5V8.5L1.5 2z"/></svg><span>filter history to current route (#topic@agent)</span></div>
-          <div class="help-row"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" style="flex-shrink:0"><path d="M6.8 1.8a5 5 0 1 0 0 10a5 5 0 0 0 0-10zM3.1 6.8a3.7 3.7 0 1 1 7.4 0a3.7 3.7 0 0 1-7.4 0zm7.1 4.3l1-1l3.3 3.3l-1 1l-3.3-3.3z"/></svg><span>search within current route</span></div>
-          <div class="help-row"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" style="flex-shrink:0"><path d="M7.8 2.1a5.9 5.9 0 1 1-5.4 8.2l1.3-.5A4.5 4.5 0 1 0 4.6 5l1.3 1.3H2.1V2.5L3.6 4a5.9 5.9 0 0 1 4.2-1.9zM7.3 4.8h1.4v3.1l2.3 1.4l-.7 1.2l-3-1.8V4.8z"/></svg><span>insert <code>/clear</code> — clears session for next message</span></div>
-          <div class="help-row"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" style="flex-shrink:0"><path d="M2.2 9.2h3.2l1 1.4h3.2l1-1.4h3.2v4.1c0 .7-.5 1.2-1.2 1.2H3.4c-.7 0-1.2-.5-1.2-1.2V9.2zm1.4 1.4v2.5h8.8v-2.5h-1.1l-1 1.4H5.7l-1-1.4H3.6zM7.3 1.5h1.4v5.1l1.7-1.7l1 1L8 9.3L4.6 5.9l1-1l1.7 1.7V1.5z"/></svg><span>stash current prompt for autocomplete reuse</span></div>
-          <div class="help-row"><svg width="12" height="12" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" style="flex-shrink:0"><path d="M25 21v1H8v-1l2-2L11 4L9 2V1h15v1l-2 2l1 15l2 2zM16 31h1l1-8h-3l1 8z"/></svg><span>pinned context — responses pinned here inject as context in adhoc turns</span></div>
+          <div class="help-row"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" style="flex-shrink:0"><path d="M2.2 3.1c0-.9.7-1.6 1.6-1.6h8.4c.9 0 1.6.7 1.6 1.6v5.5c0 .9-.7 1.6-1.6 1.6H7.1L3.5 13v-2.8c-.7-.1-1.3-.8-1.3-1.6V3.1zm1.4 0v5.5c0 .2.2.3.3.3h1v1.2l1.7-1.2h5.6c.2 0 .3-.2.3-.3V3.1c0-.2-.2-.3-.3-.3H3.9c-.1 0-.3.1-.3.3z"/><path d="M8 4.1a1.4 1.4 0 1 1 0 2.8a1.4 1.4 0 0 1 0-2.8zm-2.6 4c.4-1 1.3-1.5 2.6-1.5s2.2.5 2.6 1.5H5.4z"/></svg><span>toggle to show only your prompts in history</span></div>
+          <div class="help-row"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" style="flex-shrink:0"><path d="M1.5 2h13l-5 6.5V14l-3-1.5V8.5L1.5 2z"/></svg><span>filter history to current route (#topic@agent)</span></div>
+          <div class="help-row"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" style="flex-shrink:0"><path d="M6.8 1.8a5 5 0 1 0 0 10a5 5 0 0 0 0-10zM3.1 6.8a3.7 3.7 0 1 1 7.4 0a3.7 3.7 0 0 1-7.4 0zm7.1 4.3l1-1l3.3 3.3l-1 1l-3.3-3.3z"/></svg><span>search within current route</span></div>
+          <div class="help-row"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" style="flex-shrink:0"><path d="M7.8 2.1a5.9 5.9 0 1 1-5.4 8.2l1.3-.5A4.5 4.5 0 1 0 4.6 5l1.3 1.3H2.1V2.5L3.6 4a5.9 5.9 0 0 1 4.2-1.9zM7.3 4.8h1.4v3.1l2.3 1.4l-.7 1.2l-3-1.8V4.8z"/></svg><span>insert <code>/clear</code> — clears session for next message</span></div>
+          <div class="help-row"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" style="flex-shrink:0"><path d="M2.2 9.2h3.2l1 1.4h3.2l1-1.4h3.2v4.1c0 .7-.5 1.2-1.2 1.2H3.4c-.7 0-1.2-.5-1.2-1.2V9.2zm1.4 1.4v2.5h8.8v-2.5h-1.1l-1 1.4H5.7l-1-1.4H3.6zM7.3 1.5h1.4v5.1l1.7-1.7l1 1L8 9.3L4.6 5.9l1-1l1.7 1.7V1.5z"/></svg><span>stash current prompt for autocomplete reuse</span></div>
+          <div class="help-row"><svg width="14" height="14" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" style="flex-shrink:0"><path d="M25 21v1H8v-1l2-2L11 4L9 2V1h15v1l-2 2l1 15l2 2zM16 31h1l1-8h-3l1 8z"/></svg><span>pinned context — responses pinned here inject as context in adhoc turns</span></div>
         </div>
         <div class="help-section">
           <div class="help-title">AgentSquid Commands — type <kbd>/</kbd> to browse</div>
@@ -238,7 +315,7 @@
           <span id="session-advisory-msg"></span>
           <button id="session-advisory-clear" type="button">
             <span class="advisory-clear-label">&#x21E5; /clear</span>
-            <svg class="advisory-clear-icon" width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M7.8 2.1a5.9 5.9 0 1 1-5.4 8.2l1.3-.5A4.5 4.5 0 1 0 4.6 5l1.3 1.3H2.1V2.5L3.6 4a5.9 5.9 0 0 1 4.2-1.9zM7.3 4.8h1.4v3.1l2.3 1.4l-.7 1.2l-3-1.8V4.8z"/></svg>
+            <svg class="advisory-clear-icon" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M7.8 2.1a5.9 5.9 0 1 1-5.4 8.2l1.3-.5A4.5 4.5 0 1 0 4.6 5l1.3 1.3H2.1V2.5L3.6 4a5.9 5.9 0 0 1 4.2-1.9zM7.3 4.8h1.4v3.1l2.3 1.4l-.7 1.2l-3-1.8V4.8z"/></svg>
           </button>
         </div>
         <div id="filter-badge">
@@ -256,29 +333,29 @@
             <div id="topic-chip"></div>
             <div id="chip-actions">
               <button id="chip-prompts-btn" class="composer-tool-btn" type="button" title="User prompts only" aria-pressed="false">
-                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
                   <path d="M2.2 3.1c0-.9.7-1.6 1.6-1.6h8.4c.9 0 1.6.7 1.6 1.6v5.5c0 .9-.7 1.6-1.6 1.6H7.1L3.5 13v-2.8c-.7-.1-1.3-.8-1.3-1.6V3.1zm1.4 0v5.5c0 .2.2.3.3.3h1v1.2l1.7-1.2h5.6c.2 0 .3-.2.3-.3V3.1c0-.2-.2-.3-.3-.3H3.9c-.1 0-.3.1-.3.3z"/>
                   <path d="M8 4.1a1.4 1.4 0 1 1 0 2.8a1.4 1.4 0 0 1 0-2.8zm-2.6 4c.4-1 1.3-1.5 2.6-1.5s2.2.5 2.6 1.5H5.4z"/>
                 </svg>
               </button>
               <button id="chip-filter-btn" class="composer-tool-btn" type="button" title="Filter history by current route">
-                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1.5 2h13l-5 6.5V14l-3-1.5V8.5L1.5 2z"/></svg>
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1.5 2h13l-5 6.5V14l-3-1.5V8.5L1.5 2z"/></svg>
               </button>
               <button id="chip-search-btn" class="composer-tool-btn" type="button" title="Search current route">
-                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M6.8 1.8a5 5 0 1 0 0 10a5 5 0 0 0 0-10zM3.1 6.8a3.7 3.7 0 1 1 7.4 0a3.7 3.7 0 0 1-7.4 0zm7.1 4.3l1-1l3.3 3.3l-1 1l-3.3-3.3z"/></svg>
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M6.8 1.8a5 5 0 1 0 0 10a5 5 0 0 0 0-10zM3.1 6.8a3.7 3.7 0 1 1 7.4 0a3.7 3.7 0 0 1-7.4 0zm7.1 4.3l1-1l3.3 3.3l-1 1l-3.3-3.3z"/></svg>
               </button>
               <button id="chip-clear-btn" class="composer-tool-btn" type="button" title="Insert /clear">
-                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M7.8 2.1a5.9 5.9 0 1 1-5.4 8.2l1.3-.5A4.5 4.5 0 1 0 4.6 5l1.3 1.3H2.1V2.5L3.6 4a5.9 5.9 0 0 1 4.2-1.9zM7.3 4.8h1.4v3.1l2.3 1.4l-.7 1.2l-3-1.8V4.8z"/></svg>
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M7.8 2.1a5.9 5.9 0 1 1-5.4 8.2l1.3-.5A4.5 4.5 0 1 0 4.6 5l1.3 1.3H2.1V2.5L3.6 4a5.9 5.9 0 0 1 4.2-1.9zM7.3 4.8h1.4v3.1l2.3 1.4l-.7 1.2l-3-1.8V4.8z"/></svg>
               </button>
               <button id="chip-stash-btn" class="composer-tool-btn" type="button" title="Stash prompt for autocomplete">
-                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M2.2 9.2h3.2l1 1.4h3.2l1-1.4h3.2v4.1c0 .7-.5 1.2-1.2 1.2H3.4c-.7 0-1.2-.5-1.2-1.2V9.2zm1.4 1.4v2.5h8.8v-2.5h-1.1l-1 1.4H5.7l-1-1.4H3.6zM7.3 1.5h1.4v5.1l1.7-1.7l1 1L8 9.3L4.6 5.9l1-1l1.7 1.7V1.5z"/></svg>
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M2.2 9.2h3.2l1 1.4h3.2l1-1.4h3.2v4.1c0 .7-.5 1.2-1.2 1.2H3.4c-.7 0-1.2-.5-1.2-1.2V9.2zm1.4 1.4v2.5h8.8v-2.5h-1.1l-1 1.4H5.7l-1-1.4H3.6zM7.3 1.5h1.4v5.1l1.7-1.7l1 1L8 9.3L4.6 5.9l1-1l1.7 1.7V1.5z"/></svg>
               </button>
             </div>
           </div>
           <textarea id="input" placeholder="#topic or #topic@agent message…" rows="1"></textarea>
         </div>
         <button id="pin-btn" type="button" title="Pinned context">
-          <svg width="13" height="14" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true">
+          <svg width="14" height="15" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true">
             <path d="M25 21v1H8v-1l2-2L11 4L9 2V1h15v1l-2 2l1 15l2 2zM16 31h1l1-8h-3l1 8z"/>
           </svg>
           <span id="pin-count"></span>

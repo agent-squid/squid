@@ -6207,7 +6207,7 @@ function addPinButton(bubbleEl, msgId, topic, agent, sessionId = null) {
   btn.className = 'msg-pin-btn';
   btn.dataset.msgId = String(msgId);
   btn.title = 'Pin as context';
-  btn.innerHTML = `<svg width="11" height="12" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true">
+  btn.innerHTML = `<svg width="14" height="15" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true">
     <path d="M25 21v1H8v-1l2-2L11 4L9 2V1h15v1l-2 2l1 15l2 2zM16 31h1l1-8h-3l1 8z"/>
   </svg>`;
   if (sessionId) bubbleEl.dataset.sessionId = sessionId;
@@ -6483,6 +6483,18 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
   previewBtn.title = 'Preview in browser';
   previewBtn.setAttribute('aria-label', 'Preview in browser');
   previewBtn.textContent = '↗';
+  const editBtn = document.createElement('button');
+  editBtn.className = 'fv-action-btn';
+  editBtn.title = 'Edit file';
+  editBtn.setAttribute('aria-label', 'Edit file');
+  editBtn.textContent = '✎';
+  editBtn.hidden = true;
+  const historyBtn = document.createElement('button');
+  historyBtn.className = 'fv-action-btn';
+  historyBtn.title = 'Edit history';
+  historyBtn.setAttribute('aria-label', 'Edit history');
+  historyBtn.textContent = '⟳';
+  historyBtn.hidden = true;
   const copyBtn = document.createElement('button');
   copyBtn.className = 'fv-action-btn';
   copyBtn.title = 'Copy path';
@@ -6490,7 +6502,53 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
   const closeBtn = document.createElement('button');
   closeBtn.id = 'file-modal-close';
   closeBtn.textContent = '×';
-  actions.append(previewBtn, copyBtn, closeBtn);
+  actions.append(previewBtn, historyBtn, editBtn, copyBtn, closeBtn);
+
+  // edit footer (shown only in edit mode, appended to box)
+  const editFooter = document.createElement('div');
+  editFooter.className = 'fv-edit-footer';
+  editFooter.hidden = true;
+  const editStatus = document.createElement('span');
+  editStatus.className = 'fv-edit-status';
+  const editTools = document.createElement('div');
+  editTools.className = 'fv-edit-tools';
+  const findInput = document.createElement('input');
+  findInput.className = 'fv-edit-find';
+  findInput.type = 'search';
+  findInput.placeholder = 'Find';
+  findInput.setAttribute('aria-label', 'Find in editor');
+  const findPrevBtn = document.createElement('button');
+  findPrevBtn.className = 'fv-edit-tool-btn';
+  findPrevBtn.type = 'button';
+  findPrevBtn.title = 'Previous match';
+  findPrevBtn.setAttribute('aria-label', 'Previous match');
+  findPrevBtn.textContent = '↑';
+  const findNextBtn = document.createElement('button');
+  findNextBtn.className = 'fv-edit-tool-btn';
+  findNextBtn.type = 'button';
+  findNextBtn.title = 'Next match';
+  findNextBtn.setAttribute('aria-label', 'Next match');
+  findNextBtn.textContent = '↓';
+  const lineInput = document.createElement('input');
+  lineInput.className = 'fv-edit-line';
+  lineInput.type = 'number';
+  lineInput.min = '1';
+  lineInput.placeholder = 'Line';
+  lineInput.setAttribute('aria-label', 'Line number');
+  const lineGoBtn = document.createElement('button');
+  lineGoBtn.className = 'fv-edit-tool-btn';
+  lineGoBtn.type = 'button';
+  lineGoBtn.title = 'Go to line';
+  lineGoBtn.setAttribute('aria-label', 'Go to line');
+  lineGoBtn.textContent = 'Go';
+  editTools.append(findInput, findPrevBtn, findNextBtn, lineInput, lineGoBtn);
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'fv-save-btn';
+  saveBtn.textContent = 'Save';
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'fv-cancel-btn';
+  cancelBtn.textContent = 'Cancel';
+  editFooter.append(editStatus, editTools, cancelBtn, saveBtn);
 
   header.append(navBtns, breadcrumb, actions);
 
@@ -6498,12 +6556,16 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
   body.id = 'file-modal-body';
   body.textContent = 'Loading…';
 
-  box.append(header, body);
+  box.append(header, body, editFooter);
   modal.appendChild(box);
   document.body.appendChild(modal);
 
   // ── Navigation ───────────────────────────────────────────────────────────────
   function navigate(newPath, newLine = null, newEndLine = null) {
+    exitEditMode();
+    _historyOpen = false;
+    historyBtn.style.opacity = '';
+    editFooter.hidden = true;
     navHistory.splice(historyIdx + 1);
     navHistory.push({ path: newPath, line: newLine, endLine: newEndLine });
     historyIdx = navHistory.length - 1;
@@ -6516,6 +6578,9 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
     backBtn.disabled = historyIdx === 0;
     fwdBtn.disabled = historyIdx === navHistory.length - 1;
     previewBtn.hidden = !_isWebPreviewPath(path);
+    const isText = _isTextPath(path);
+    editBtn.hidden = !isText;
+    historyBtn.hidden = !isText;
     breadcrumb.innerHTML = '';
     const parts = path.split('/').filter(Boolean);
     const addSep = () => {
@@ -6575,6 +6640,219 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
   modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
   const escHandler = e => { if (e.key === 'Escape') { closeModal(); document.removeEventListener('keydown', escHandler); } };
   document.addEventListener('keydown', escHandler);
+
+  // ── Edit mode ────────────────────────────────────────────────────────────────
+  let _editOriginal = null;
+  let _editFindPos = -1;
+
+  function moveEditorToLine(lineNo) {
+    const view = body._cmView;
+    if (!view) return;
+    const doc = view.state.doc;
+    const total = doc.lines || String(doc).split('\n').length;
+    const target = Math.min(Math.max(parseInt(lineNo, 10) || 1, 1), total);
+    const info = doc.line(target);
+    view.dispatch({ selection: { anchor: info.from }, scrollIntoView: true });
+    lineInput.value = String(target);
+    editStatus.textContent = `Line ${target}`;
+    view.focus();
+  }
+
+  function findInEditor(dir = 1) {
+    const view = body._cmView;
+    const query = findInput.value;
+    if (!view || !query) return;
+    const text = view.state.doc.toString();
+    const haystack = text.toLowerCase();
+    const needle = query.toLowerCase();
+    const current = view.state.selection?.main?.to ?? _editFindPos;
+    let pos = dir < 0
+      ? haystack.lastIndexOf(needle, Math.max(0, current - needle.length - 1))
+      : haystack.indexOf(needle, Math.max(0, current));
+    if (pos < 0) pos = dir < 0 ? haystack.lastIndexOf(needle) : haystack.indexOf(needle);
+    if (pos < 0) {
+      editStatus.textContent = 'No matches';
+      return;
+    }
+    _editFindPos = pos;
+    view.dispatch({ selection: { anchor: pos, head: pos + query.length }, scrollIntoView: true });
+    const foundLine = view.state.doc.lineAt(pos).number;
+    lineInput.value = String(foundLine);
+    editStatus.textContent = `Match on line ${foundLine}`;
+    view.focus();
+  }
+
+  async function enterEditMode(text) {
+    if (!window._cm) {
+      editBtn.textContent = '…';
+      const ok = await (window._cmPromise || Promise.resolve(false));
+      editBtn.textContent = '✎';
+      if (!ok) {
+        body.innerHTML = '';
+        body.style.padding = '1rem';
+        body.textContent = 'Editor unavailable — esm.sh could not be reached. Check your internet connection.';
+        return;
+      }
+    }
+    const { EditorView, EditorState, basicSetup, oneDark, atomOneDarkHighlight, LANGS } = window._cm;
+
+    _editOriginal = text;
+    body.innerHTML = '';
+    body.style.display = 'flex';
+    body.style.flexDirection = 'column';
+    body.style.padding = '0';
+    body.style.overflow = 'hidden';
+
+    const ext = (path || '').split('.').pop().toLowerCase();
+    const lang = LANGS[ext]?.();
+    const extensions = [basicSetup, oneDark];
+    if (atomOneDarkHighlight) extensions.push(atomOneDarkHighlight);
+    if (lang) extensions.push(lang);
+
+    const state = EditorState.create({ doc: text, extensions });
+    const view = new EditorView({ state, parent: body });
+    body._cmView = view;
+
+    box.classList.add('fv-editing');
+    editFooter.hidden = false;
+    editBtn.hidden = true;
+    historyBtn.hidden = true;
+    editStatus.textContent = 'Editing';
+    findInput.value = '';
+    _editFindPos = -1;
+    lineInput.value = line ? String(line) : '';
+    saveBtn.disabled = false;
+    view.focus();
+    if (line) requestAnimationFrame(() => moveEditorToLine(line));
+  }
+
+  function exitEditMode() {
+    if (body._cmView) { body._cmView.destroy(); body._cmView = null; }
+    _editOriginal = null;
+    box.classList.remove('fv-editing');
+    _editFindPos = -1;
+    body.style.display = '';
+    body.style.flexDirection = '';
+    body.style.padding = '';
+    body.style.overflow = '';
+    editFooter.hidden = true;
+    const isText = _isTextPath(path);
+    editBtn.hidden = !isText;
+    historyBtn.hidden = !isText;
+  }
+
+  editBtn.addEventListener('click', async () => {
+    const res = await fetch('/localfile?' + new URLSearchParams({ path }));
+    if (!res.ok) return;
+    const text = await res.text();
+    enterEditMode(text);
+  });
+
+  cancelBtn.addEventListener('click', () => {
+    exitEditMode();
+    loadFile();
+  });
+
+  findPrevBtn.addEventListener('click', () => findInEditor(-1));
+  findNextBtn.addEventListener('click', () => findInEditor(1));
+  findInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      findInEditor(e.shiftKey ? -1 : 1);
+    }
+  });
+  findInput.addEventListener('input', () => { _editFindPos = -1; });
+  lineGoBtn.addEventListener('click', () => moveEditorToLine(lineInput.value));
+  lineInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      moveEditorToLine(lineInput.value);
+    }
+  });
+
+  saveBtn.addEventListener('click', async () => {
+    const view = body._cmView;
+    if (!view) return;
+    saveBtn.disabled = true;
+    editStatus.textContent = 'Saving…';
+    try {
+      const res = await fetch('/localfile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path, content: view.state.doc.toString() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Save failed');
+      exitEditMode();
+      loadFile();
+    } catch (err) {
+      editStatus.textContent = err.message || 'Save failed';
+      saveBtn.disabled = false;
+    }
+  });
+
+  // ── History panel ────────────────────────────────────────────────────────────
+  let _historyOpen = false;
+
+  async function openHistoryPanel() {
+    _historyOpen = true;
+    historyBtn.style.opacity = '1';
+    body.innerHTML = 'Loading…';
+    const res = await fetch('/localfile/history?' + new URLSearchParams({ path }));
+    const data = await res.json();
+    body.innerHTML = '';
+    const panel = document.createElement('div');
+    panel.className = 'fv-history-panel';
+    const list = document.createElement('div');
+    list.className = 'fv-history-list';
+    if (!data.history?.length) {
+      const empty = document.createElement('div');
+      empty.className = 'fv-history-empty';
+      empty.textContent = 'No edit history for this file.';
+      list.appendChild(empty);
+    } else {
+      data.history.forEach(item => {
+        const row = document.createElement('div');
+        row.className = 'fv-history-item';
+        const time = document.createElement('span');
+        time.className = 'fv-history-time';
+        time.textContent = item.edited_at.replace('T', ' ').replace('Z', ' UTC');
+        const btn = document.createElement('button');
+        btn.className = 'fv-history-revert-btn';
+        btn.textContent = 'Revert to this';
+        btn.addEventListener('click', async () => {
+          btn.disabled = true;
+          btn.textContent = 'Reverting…';
+          try {
+            const r = await fetch('/localfile/revert-edit', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ edit_id: item.id }),
+            });
+            const d = await r.json();
+            if (!r.ok) throw new Error(d.error || 'Revert failed');
+            closeHistoryPanel();
+          } catch (err) {
+            btn.textContent = err.message || 'Failed';
+          }
+        });
+        row.append(time, btn);
+        list.appendChild(row);
+      });
+    }
+    panel.appendChild(list);
+    body.appendChild(panel);
+  }
+
+  function closeHistoryPanel() {
+    _historyOpen = false;
+    historyBtn.style.opacity = '';
+    loadFile();
+  }
+
+  historyBtn.addEventListener('click', () => {
+    if (_historyOpen) { closeHistoryPanel(); } else { openHistoryPanel(); }
+  });
 
   _fvNavigate = navigate;
 

@@ -77,6 +77,7 @@ from .stats_db import (
     get_diff_revert_eligibility, record_git_diff_revert, get_message_gitdiff,
     search_messages,
     get_recent_prompts,
+    save_file_edit, get_file_edit_history, get_file_edit_by_id,
 )
 from .journal import _generate_journal, _current_week, list_topic_journals, read_journal
 from . import creds
@@ -224,6 +225,15 @@ class ConfigRequest(BaseModel):
 class LocalfileRootRequest(BaseModel):
     path: str = Field(..., min_length=1)
     root: str = Field(..., min_length=1)
+
+
+class LocalfileWriteRequest(BaseModel):
+    path: str = Field(..., min_length=1)
+    content: str
+
+
+class LocalfileRevertEditRequest(BaseModel):
+    edit_id: int
 
 
 class CredsRequest(BaseModel):
@@ -1580,6 +1590,54 @@ async def serve_local_file(path: str, request: Request):
     if mime and mime.startswith("text/"):
         return PlainTextResponse(p.read_text(errors="replace"), media_type=mime)
     return FileResponse(str(p), media_type=mime or "application/octet-stream")
+
+
+@app.post("/localfile")
+async def write_local_file(req: LocalfileWriteRequest, request: Request):
+    if not _same_origin(request):
+        return JSONResponse({"error": "cross-origin writes are not allowed"}, status_code=403)
+    if not _LOCALFILE_ROOTS:
+        return JSONResponse({"error": "localfile not enabled"}, status_code=403)
+    p = Path(req.path).expanduser().resolve()
+    if not any(p.is_relative_to(root) for root in _LOCALFILE_ROOTS):
+        return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
+    if not p.is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    before = p.read_text(errors="replace")
+    p.write_text(req.content)
+    edit_id = await asyncio.to_thread(save_file_edit, str(p), before, req.content)
+    return JSONResponse({"ok": True, "edit_id": edit_id})
+
+
+@app.get("/localfile/history")
+async def local_file_history(path: str, request: Request):
+    if not _same_origin(request):
+        return JSONResponse({"error": "cross-origin reads are not allowed"}, status_code=403)
+    if not _LOCALFILE_ROOTS:
+        return JSONResponse({"error": "localfile not enabled"}, status_code=403)
+    p = Path(path).expanduser().resolve()
+    if not any(p.is_relative_to(root) for root in _LOCALFILE_ROOTS):
+        return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
+    rows = await asyncio.to_thread(get_file_edit_history, str(p))
+    return JSONResponse({"history": rows})
+
+
+@app.post("/localfile/revert-edit")
+async def revert_file_edit(req: LocalfileRevertEditRequest, request: Request):
+    if not _same_origin(request):
+        return JSONResponse({"error": "cross-origin writes are not allowed"}, status_code=403)
+    if not _LOCALFILE_ROOTS:
+        return JSONResponse({"error": "localfile not enabled"}, status_code=403)
+    edit = await asyncio.to_thread(get_file_edit_by_id, req.edit_id)
+    if not edit:
+        return JSONResponse({"error": "edit not found"}, status_code=404)
+    p = Path(edit["file_path"]).resolve()
+    if not any(p.is_relative_to(root) for root in _LOCALFILE_ROOTS):
+        return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
+    before = p.read_text(errors="replace")
+    p.write_text(edit["before"])
+    await asyncio.to_thread(save_file_edit, str(p), before, edit["before"])
+    return JSONResponse({"ok": True})
 
 
 if UI_DIR.exists():

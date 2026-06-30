@@ -102,6 +102,14 @@ _TABLES = [
         reverted_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         PRIMARY KEY (msg_id, repo, file_path)
     )""",
+    """CREATE TABLE IF NOT EXISTS file_edit_history (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_path   TEXT NOT NULL,
+        before      TEXT NOT NULL,
+        after       TEXT NOT NULL,
+        edited_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_file_edit_history_path ON file_edit_history (file_path, id DESC)",
     # FTS5 index — standalone table (not external-content). See ADR-0021.
     # Trigger fires on the status='done' update (final content), not the first
     # partial-content save, so the index always holds the complete response.
@@ -1544,6 +1552,33 @@ def get_message_gitdiff(msg_id: int, repo: str) -> Optional[dict]:
         (t for t in tools if t.get('name') == 'GitDiff' and t.get('repo') == repo),
         None,
     )
+
+
+def save_file_edit(file_path: str, before: str, after: str) -> int:
+    with _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO file_edit_history (file_path, before, after) VALUES (?, ?, ?)",
+            (file_path, before, after),
+        )
+        return cur.lastrowid
+
+
+def get_file_edit_history(file_path: str, limit: int = 20) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, file_path, edited_at FROM file_edit_history WHERE file_path = ? ORDER BY id DESC LIMIT ?",
+            (file_path, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_file_edit_by_id(edit_id: int) -> Optional[dict]:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT id, file_path, before, after, edited_at FROM file_edit_history WHERE id = ?",
+            (edit_id,),
+        ).fetchone()
+    return dict(row) if row else None
 
 
 def insert_run_event(msg_id: int, seq: int, event_type: str, payload: Optional[str]) -> None:
