@@ -1,6 +1,7 @@
 """
 stats_db.py — SQLite for stats, chat history, agents, and topics.
 """
+import logging
 import sqlite3
 import json
 import os
@@ -70,6 +71,7 @@ _TABLES = [
         status      TEXT NOT NULL DEFAULT 'pending',
         adhoc       INTEGER DEFAULT 0,
         context     TEXT,
+        status_raw  TEXT,
         session_turn_index INTEGER,
         lookback    INTEGER DEFAULT 0,
         quota_delta  REAL,
@@ -133,6 +135,7 @@ _MIGRATIONS: list[str] = [
     "ALTER TABLE chat_messages ADD COLUMN session_turn_index INTEGER",
     "DROP INDEX IF EXISTS idx_chat_messages_session_turns",
     "ALTER TABLE chat_messages ADD COLUMN lookback INTEGER DEFAULT 0",
+    "ALTER TABLE chat_messages ADD COLUMN status_raw TEXT",
 ]
 
 _DATA_MIGRATIONS: list[tuple[str, str]] = [
@@ -642,21 +645,22 @@ def ensure_session_turn_index(msg_id: int, session_id: Optional[str]) -> Optiona
 def update_assistant_message(
     msg_id: int, content: str, session_id: Optional[str], status: str = "done",
     context: Optional[str] = None,
+    status_raw: Optional[str] = None,
     only_if_pending: bool = False,
 ) -> None:
     with _connect() as conn:
         if only_if_pending:
             cur = conn.execute(
-                "UPDATE chat_messages SET content=?, session_id=?, status=?, context=?"
+                "UPDATE chat_messages SET content=?, session_id=?, status=?, context=?, status_raw=?"
                 " WHERE id=? AND status='pending'",
-                (content, session_id, status, context, msg_id),
+                (content, session_id, status, context, status_raw, msg_id),
             )
             if cur.rowcount:
                 _ensure_session_turn_index(conn, msg_id, session_id)
         else:
             conn.execute(
-                "UPDATE chat_messages SET content=?, session_id=?, status=?, context=? WHERE id=?",
-                (content, session_id, status, context, msg_id),
+                "UPDATE chat_messages SET content=?, session_id=?, status=?, context=?, status_raw=? WHERE id=?",
+                (content, session_id, status, context, status_raw, msg_id),
             )
             if status == "done":
                 _ensure_session_turn_index(conn, msg_id, session_id)
@@ -854,11 +858,11 @@ def mark_orphaned_pending() -> int:
         ).fetchall()
         count = 0
         for row in rows:
-            final_text = _completed_run_text(conn, row["id"])
+            final_text, status_raw = _completed_run_snapshot(conn, row["id"]) or (None, None)
             if final_text:
                 conn.execute(
-                    "UPDATE chat_messages SET content=?, status='done' WHERE id=?",
-                    (final_text, row["id"]),
+                    "UPDATE chat_messages SET content=?, status='done', status_raw=COALESCE(status_raw, ?) WHERE id=?",
+                    (final_text, status_raw, row["id"]),
                 )
                 _ensure_session_turn_index(conn, row["id"], row["session_id"])
             else:
@@ -879,7 +883,7 @@ def get_message(msg_id: int) -> Optional[dict]:
         row = conn.execute(
             """SELECT m.id, m.role, m.topic, m.agent,
                       m.content, m.status, m.adhoc, m.session_id,
-                      m.context, m.created_at AS timestamp, m.reply_to,
+                      m.context, m.status_raw, m.created_at AS timestamp, m.reply_to,
                       m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
                       u.content AS prompt, u.context AS prompt_context,
                       m.session_turn_index AS session_turn_count,
@@ -924,7 +928,7 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
         rows = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
                        m.content, m.status, m.adhoc, m.session_id,
-                       m.context, m.created_at AS timestamp, m.reply_to,
+                       m.context, m.status_raw, m.created_at AS timestamp, m.reply_to,
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
                        u.content AS prompt, u.context AS prompt_context,
                        m.session_turn_index AS session_turn_count,
@@ -997,7 +1001,7 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
         rows = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
                        m.content, m.status, m.adhoc, m.session_id,
-                       m.context, m.created_at AS timestamp, m.reply_to,
+                       m.context, m.status_raw, m.created_at AS timestamp, m.reply_to,
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
                        u.content AS prompt, u.context AS prompt_context,
                        m.session_turn_index AS session_turn_count,
@@ -1583,25 +1587,43 @@ def get_file_edit_by_id(edit_id: int) -> Optional[dict]:
 
 def insert_run_event(msg_id: int, seq: int, event_type: str, payload: Optional[str]) -> None:
     with _connect() as conn:
-        conn.execute(
+        cur = conn.execute(
             "INSERT OR IGNORE INTO run_events (msg_id, seq, event_type, payload) VALUES (?, ?, ?, ?)",
             (msg_id, seq, event_type, payload),
         )
+        if cur.rowcount == 0:
+            logging.getLogger("squid").warning(
+                "run_event seq collision: msg_id=%s seq=%s event_type=%s — event silently dropped",
+                msg_id, seq, event_type,
+            )
 
 
-def _completed_run_text(conn: sqlite3.Connection, msg_id: int) -> Optional[str]:
+def _completed_run_snapshot(conn: sqlite3.Connection, msg_id: int) -> Optional[tuple[str, Optional[str]]]:
     rows = conn.execute(
         "SELECT event_type, payload FROM run_events WHERE msg_id=? ORDER BY seq",
         (msg_id,),
     ).fetchall()
     if not any(row["event_type"] == "done" for row in rows):
         return None
-    return "".join(row["payload"] or "" for row in rows if row["event_type"] == "text")
+    text = "".join(row["payload"] or "" for row in rows if row["event_type"] == "text")
+    status_raw = "".join(row["payload"] or "" for row in rows if row["event_type"] == "status")
+    return text, status_raw or None
+
+
+def _completed_run_text(conn: sqlite3.Connection, msg_id: int) -> Optional[str]:
+    snapshot = _completed_run_snapshot(conn, msg_id)
+    return snapshot[0] if snapshot else None
 
 
 def get_completed_run_text(msg_id: int) -> Optional[str]:
     with _connect() as conn:
         return _completed_run_text(conn, msg_id)
+
+
+def get_completed_run_status_raw(msg_id: int) -> Optional[str]:
+    with _connect() as conn:
+        snapshot = _completed_run_snapshot(conn, msg_id)
+        return snapshot[1] if snapshot else None
 
 
 def get_run_events(msg_id: int, after_seq: int = -1) -> list[dict]:

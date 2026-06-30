@@ -455,6 +455,23 @@ test.describe('response bubble', () => {
     await expect(response).not.toContainText('Checking the code...');
   });
 
+  test('terminated response error removes the status bubble', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        META,
+        { event: 'status', data: 'Let me find the file browser header.' },
+        { event: 'error', data: 'CLI exited 143: ' },
+      ),
+    }));
+
+    await sendMsg(page);
+
+    await expect(page.locator(THINKING)).not.toBeAttached();
+    await expect(page.locator(RESPONSE)).toHaveCount(1);
+    await expect(page.locator(RESPONSE).locator(MSG_ERROR)).toHaveText('Response interrupted.');
+  });
+
   test('interrupted stream before meta keeps a recovering status bubble', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200,

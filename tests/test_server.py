@@ -101,6 +101,26 @@ def test_status_recovers_final_content_from_text_events(tmp_path, monkeypatch):
     assert done.json()["content"] == "final from events"
 
 
+def test_status_recovers_status_raw_from_run_events(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    user_id = stats_db.insert_user_message("squid", "codex", "prompt")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    stats_db.update_assistant_message(msg_id, "half baked", "session-1", "pending")
+    stats_db.insert_run_event(msg_id, 0, "status", "Working...\n")
+    stats_db.insert_run_event(msg_id, 1, "text", "final from events")
+    stats_db.insert_run_event(msg_id, 2, "status", "Done")
+    stats_db.insert_run_event(msg_id, 3, "done", None)
+
+    client = TestClient(server.app)
+    done = client.get(f"/chat/{msg_id}/status")
+
+    assert done.status_code == 200
+    assert done.json()["status"] == "done"
+    assert done.json()["content"] == "final from events"
+    assert done.json()["status_raw"] == "Working...\nDone"
+
+
 def test_status_keeps_pending_partial_content_without_text_events(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

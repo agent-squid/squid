@@ -1339,6 +1339,14 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
   }
 
   if (cmd.command === 'clear' || cmd.command === 'compact') {
+    if (await commandWouldStopRunningPrompt(cmd.command, topic, agent)) {
+      const route = agent ? `#${topic}@${agent}` : `#${topic}`;
+      const ok = confirm(`${cmd.command} will stop the prompt currently running on ${route} before clearing the session.\n\nContinue?`);
+      if (!ok) {
+        showCmdFeedback(`${cmd.command} cancelled`);
+        return;
+      }
+    }
     const feedbackEl = showCmdFeedback(`${cmd.command}…`);
     try {
       const body = { command: cmd.command, topic };
@@ -1354,6 +1362,14 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
       feedbackEl.textContent = `${cmd.command} — request failed`;
     }
     return;
+  }
+
+  if (cmd.command === 'restart' && await commandWouldStopAnyRunningPrompt()) {
+    const ok = confirm('restart will stop all currently running prompts.\n\nContinue?');
+    if (!ok) {
+      showCmdFeedback('restart cancelled');
+      return;
+    }
   }
 
   const label = cmd.command === 'deq'
@@ -1394,6 +1410,37 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
     feedbackEl.textContent = `${label} ${detail}`;
   } catch {
     feedbackEl.textContent = `${label} — request failed`;
+  }
+}
+
+async function commandWouldStopRunningPrompt(command, topic, agent) {
+  if (command !== 'clear' && command !== 'compact') return false;
+  try {
+    const res = await fetch('/processes');
+    if (!res.ok) return false;
+    const rows = await res.json();
+    if (!Array.isArray(rows)) return false;
+    return rows.some(row => {
+      if (!row || isIdleProc(row)) return false;
+      if (row.topic !== topic) return false;
+      if (Boolean(row.adhoc)) return false;
+      if (agent && row.agent !== agent) return false;
+      return true;
+    });
+  } catch {
+    return false;
+  }
+}
+
+async function commandWouldStopAnyRunningPrompt() {
+  try {
+    const res = await fetch('/processes');
+    if (!res.ok) return false;
+    const rows = await res.json();
+    if (!Array.isArray(rows)) return false;
+    return rows.some(row => row && !isIdleProc(row));
+  } catch {
+    return false;
   }
 }
 
@@ -1646,7 +1693,69 @@ input.addEventListener('blur', () => {
   _maybeCollapseExpandedSlug(true);
 });
 
+function semanticRouteBackspace() {
+  if (input.selectionStart !== input.selectionEnd) return false;
+  const val = input.value;
+  if (!val.startsWith('#')) return false;
+
+  const caret = input.selectionStart;
+  const promptSeparator = val.indexOf(' ');
+  const routeEnd = promptSeparator >= 0 ? promptSeparator : val.length;
+  if (caret <= 1 || caret > routeEnd) return false;
+
+  const route = val.slice(0, routeEnd);
+  const prompt = val.slice(routeEnd);
+  let nextRoute = null;
+  let nextCaret = caret;
+
+  if (caret === routeEnd && /^#\w+@\w+!\d+$/.test(route)) return false;
+
+  if (caret === routeEnd && route.endsWith('!')) {
+    nextRoute = route.slice(0, -1);
+    nextCaret = nextRoute.length;
+  } else {
+    const before = route.slice(0, caret);
+    const after = route.slice(caret);
+    const agentMatch = before.match(/^(#\w+@)\w+$/);
+    const topicMatch = before.match(/^(#)\w+$/);
+
+    if (agentMatch && (caret === routeEnd || after.startsWith('!'))) {
+      nextRoute = agentMatch[1] + after;
+      nextCaret = agentMatch[1].length;
+    } else if (before.endsWith('@') && /^#\w+@$/.test(before) && (caret === routeEnd || after.startsWith('!'))) {
+      nextRoute = before.slice(0, -1) + after;
+      nextCaret = before.length - 1;
+    } else if (topicMatch && (caret === routeEnd || after.startsWith('!'))) {
+      nextRoute = topicMatch[1] + after;
+      nextCaret = 1;
+    }
+  }
+
+  if (nextRoute == null) return false;
+  input.value = nextRoute + prompt;
+  input.setSelectionRange(nextCaret, nextCaret);
+  input.dispatchEvent(new Event('input'));
+  return true;
+}
+
+function closeEscSurfaces() {
+  let closed = false;
+  if (searchActive) { clearSearch(); closed = true; }
+  if (procStatusPopup?.classList.contains('open')) { procStatusPopup.classList.remove('open'); closed = true; }
+  if (pinPanel.classList.contains('open')) { closePinPanel(); closed = true; }
+  if (helpPanel.classList.contains('open')) { closeHelp(); closed = true; }
+  const msgModal = document.getElementById('msg-modal');
+  if (msgModal?.classList.contains('open')) { msgModal.classList.remove('open'); closed = true; }
+  if (document.getElementById('memory-modal')?.classList.contains('open')) { closeMemoryEditor(); closed = true; }
+  if (document.getElementById('topic-delete-modal')?.classList.contains('open')) { closeTopicDeleteModal(); closed = true; }
+  return closed;
+}
+
 input.addEventListener('keydown', (e) => {
+  if (e.key === 'Backspace' && semanticRouteBackspace()) {
+    e.preventDefault();
+    return;
+  }
   if (e.key === 'ArrowUp' && commandEditRestore !== null) {
     e.preventDefault();
     input.value = commandEditRestore;
@@ -1691,12 +1800,7 @@ input.addEventListener('keydown', (e) => {
     });
     return;
   }
-  if (e.key === 'Escape' && searchActive) { clearSearch(); return; }
-  if (e.key === 'Escape' && pinPanel.classList.contains('open')) { closePinPanel(); return; }
-  if (e.key === 'Escape' && helpPanel.classList.contains('open')) { closeHelp(); return; }
-  if (e.key === 'Escape' && document.getElementById('msg-modal')?.classList.contains('open')) { document.getElementById('msg-modal').classList.remove('open'); return; }
-  if (e.key === 'Escape' && document.getElementById('memory-modal')?.classList.contains('open')) { closeMemoryEditor(); return; }
-  if (e.key === 'Escape' && document.getElementById('topic-delete-modal')?.classList.contains('open')) { closeTopicDeleteModal(); return; }
+  if (e.key === 'Escape' && closeEscSurfaces()) { e.preventDefault(); return; }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     form.requestSubmit();
@@ -1745,6 +1849,7 @@ async function sendMessage(text) {
   const thinkingLoader = addLoader(thinkingContent);
   let thinkingFrozen = false;
   let statusBuf = '';
+  let statusRecoveredFromDb = false;
   let userAborted = false;
 
   // Kill button — shown once msg_id is known, hidden when done
@@ -1768,6 +1873,12 @@ async function sendMessage(text) {
   });
   thinkingBubble.appendChild(killBtn);
 
+  function setThinkingText(text) {
+    if (thinkingFrozen) return;
+    statusBuf = text;
+    updateThinkingPreview();
+  }
+
   function updateThinkingPreview() {
     if (thinkingFrozen) return;
     if (thinkingLoader.parentNode) thinkingLoader.remove();
@@ -1781,8 +1892,8 @@ async function sendMessage(text) {
     if (thinkingFrozen) return;
     thinkingFrozen = true;
     killBtn.style.display = 'none';
+    if (thinkingLoader.parentNode) thinkingLoader.remove();
     if (statusBuf.trim()) {
-      if (thinkingLoader.parentNode) thinkingLoader.remove();
       const lines = statusBuf.split('\n').map(l => l.trim()).filter(Boolean);
       const summary = lines[lines.length - 1] || '';
       const summaryTrunc = summary.length > 80 ? '…' + summary.slice(-77) : summary;
@@ -1902,14 +2013,26 @@ async function sendMessage(text) {
   function showError(text) {
     revealResponseBubble();  // sets firstDataReceived, suppresses finally fallback
     if (!bubble.parentNode) messages.appendChild(bubble);
-    const errDisplay = (text || 'Response interrupted.')
-      .split('\n')[0]
-      .replace(/^CLI exited \d+:\s*/, '')
-      .trim();
+    const errDisplay = normalizedErrorDisplay(text);
     // Don't wipe streamed content with a generic fallback message
     if (!errDisplay && raw) return;
     contentDiv.innerHTML = `<span class="msg-error">${errDisplay || 'Response interrupted.'}</span>`;
     scrollToBottom();
+  }
+
+  function normalizedErrorDisplay(text) {
+    return (text || 'Response interrupted.')
+      .split('\n')[0]
+      .replace(/^CLI exited \d+:\s*/, '')
+      .trim();
+  }
+
+  function discardInterruptedStatusBubble(errText) {
+    if (normalizedErrorDisplay(errText)) return false;
+    thinkingFrozen = true;
+    killBtn.style.display = 'none';
+    thinkingBubble.remove();
+    return true;
   }
 
   function showStoredResponse(content) {
@@ -1962,6 +2085,11 @@ async function sendMessage(text) {
           completionRendered = true;
           stopStatusFallback();
           doneTime = new Date().toISOString();
+          const reconnectMsg = 'Connection interrupted — recovering…';
+          const ssePart = statusBuf.replace(reconnectMsg, '').trim();
+          if (data.status_raw && data.status_raw.trim().length > ssePart.length) {
+            statusBuf = data.status_raw;
+          }
           freezeThinking();
           showStoredResponse(data.content || '');
           bubble.classList.add('history-item');
@@ -1993,22 +2121,32 @@ async function sendMessage(text) {
           if (raw || firstDataReceived) {
             parkInterruptedPartial(data.content || raw);
           } else {
-            freezeThinking();
+            discardInterruptedStatusBubble(data.content) || freezeThinking();
             showError(data.content);
           }
           controller.abort();
-        } else if (data.status === 'pending' && data.content && !thinkingFrozen) {
-          raw = data.content;
-          // If DB has tool events the SSE stream didn't deliver, surface them
-          if (data.context) {
-            try {
-              const dbTools = typeof data.context === 'string' ? JSON.parse(data.context) : data.context;
-              if (Array.isArray(dbTools) && dbTools.length > liveToolEvents.length) {
-                statusBuf = dbTools.map(toolLabel).join('\n') + '\nConnection interrupted — recovering…';
-              }
-            } catch {}
+        } else if (data.status === 'pending') {
+          if (data.content && !thinkingFrozen) raw = data.content;
+          // Recover status from DB once. Use length comparison so the richer source
+          // wins: DB status_raw beats a bare "Connection interrupted" message, but
+          // SSE-delivered text that is longer than the DB snapshot is kept as-is.
+          if (!thinkingFrozen && !statusRecoveredFromDb) {
+            const reconnectMsg = 'Connection interrupted — recovering…';
+            const ssePart = statusBuf.replace(reconnectMsg, '').trim();
+            if (data.status_raw && data.status_raw.trim().length > ssePart.length) {
+              statusBuf = data.status_raw + '\n' + reconnectMsg;
+              statusRecoveredFromDb = true;
+            } else if (data.context && !ssePart) {
+              try {
+                const dbTools = typeof data.context === 'string' ? JSON.parse(data.context) : data.context;
+                if (Array.isArray(dbTools) && dbTools.length > liveToolEvents.length) {
+                  statusBuf = dbTools.map(toolLabel).join('\n') + '\n' + reconnectMsg;
+                  statusRecoveredFromDb = true;
+                }
+              } catch {}
+            }
           }
-          updateThinkingPreview();
+          if (!thinkingFrozen) updateThinkingPreview();
         }
       } catch {}
     };
@@ -2225,7 +2363,7 @@ async function sendMessage(text) {
             if (raw || firstDataReceived) {
               parkInterruptedPartial(null, errLine || 'Connection interrupted.');
             } else {
-              freezeThinking();
+              discardInterruptedStatusBubble(errLine) || freezeThinking();
               showError(errLine);
             }
             eventName = null;
@@ -2812,6 +2950,25 @@ function appendHistoryItem(item, container) {
     const raw = (item.content || '').split('\n')[0].replace(/^CLI exited \d+:\s*/, '').trim();
     asstContent.innerHTML = `<span class="msg-error">${raw || 'Response interrupted.'}</span>`;
   } else {
+    // Show thinking/status toggle when historical status text is available
+    if (item.status_raw && item.status_raw.trim()) {
+      const lines = item.status_raw.split('\n').map(l => l.trim()).filter(Boolean);
+      const summary = lines[lines.length - 1] || '';
+      const summaryTrunc = summary.length > 80 ? '…' + summary.slice(-77) : summary;
+      const thinkingToggle = document.createElement('div');
+      thinkingToggle.className = 'msg-thinking-done history-item';
+      thinkingToggle.style.cssText = 'margin-bottom:4px;';
+      const toggle = document.createElement('button');
+      toggle.className = 'thinking-toggle';
+      toggle.textContent = summaryTrunc;
+      const body = document.createElement('div');
+      body.className = 'thinking-body';
+      body.textContent = lines.join('\n');
+      thinkingToggle.appendChild(toggle);
+      thinkingToggle.appendChild(body);
+      toggle.addEventListener('click', () => thinkingToggle.classList.toggle('thinking-expanded'));
+      asstBubble.appendChild(thinkingToggle);
+    }
     asstContent.innerHTML = marked.parse(item.content || '');
   }
   asstBubble.appendChild(asstContent);
@@ -5366,10 +5523,10 @@ function _acRender(items, title = 'Suggestions') {
   acEl.innerHTML =
     `<div class="ac-list">${rows}</div>` +
     `<div class="ac-header">` +
+    `<div class="ac-title">${escapeHtml(title)}</div>` +
     `<button class="ac-close" type="button" aria-label="Close suggestions">` +
     `<span class="ac-close-desktop">Esc</span><span class="ac-close-mobile">×</span>` +
     `</button>` +
-    `<div class="ac-title">${escapeHtml(title)}</div>` +
     `</div>`;
   acEl.querySelectorAll('.ac-item').forEach(el =>
     el.addEventListener('mousedown', e => {
@@ -5512,7 +5669,7 @@ async function updateAutocomplete() {
   }
 
   const mTopic = slugVal.match(/^#(\w*)[!]?$/);
-  const mAlias = slugVal.match(/^#(\w+)@(\w*)[!]?$/);
+  const mAlias = slugVal.match(/^#(\w+)@(\w*)(!\d*)?$/);
   if (mTopic) {
     const prefix = mTopic[1].toLowerCase();
     const topics = await _acTopics();
@@ -5532,6 +5689,8 @@ async function updateAutocomplete() {
   } else if (mAlias) {
     const topic  = mAlias[1];
     const prefix = mAlias[2].toLowerCase();
+    const adhocSuffix = mAlias[3] || '';
+    const preserveAdhocSuffix = mAlias[3] !== undefined;
     const [agents, history] = await Promise.all([
       _acAgents(),
       fetch(`/topics/${encodeURIComponent(topic)}/agents/history`).then(r => r.ok ? r.json() : []).catch(() => []),
@@ -5546,6 +5705,16 @@ async function updateAutocomplete() {
     // Used agents — with last prompt
     for (const h of history) {
       if (!h.agent.toLowerCase().startsWith(prefix)) continue;
+      if (preserveAdhocSuffix) {
+        items.push({
+          label:  _acRouteLabel(topic, h.agent + adhocSuffix, backendByAgent.get(h.agent) || null),
+          insert: `#${topic}@${h.agent}${adhocSuffix}`,
+          replaceSlug: replacingSlug,
+          sub:    _acLastPrompt(h.last_adhoc_prompt),
+          meta:   'adhoc',
+        });
+        continue;
+      }
       // Default topic: suppress session variant — adhoc only
       if (!isDefault) {
         items.push({
@@ -5568,6 +5737,15 @@ async function updateAutocomplete() {
     for (const a of agents) {
       if (usedNames.has(a.name)) continue;
       if (!a.name.toLowerCase().startsWith(prefix)) continue;
+      if (preserveAdhocSuffix) {
+        items.push({
+          label:  _acRouteLabel(topic, a.name + adhocSuffix, a.backend),
+          insert: `#${topic}@${a.name}${adhocSuffix}`,
+          replaceSlug: replacingSlug,
+          meta:   a.backend,
+        });
+        continue;
+      }
       // Default topic: only offer adhoc variant
       items.push({
         label:  _acRouteLabel(topic, isDefault ? a.name + '!' : a.name, a.backend),
@@ -6457,8 +6635,8 @@ document.getElementById('search-bar-keywords').addEventListener('click', () => {
   stashComposerAndEdit(cmd);
 });
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && document.getElementById('topic-delete-modal')?.classList.contains('open')) {
-    closeTopicDeleteModal();
+  if (e.key === 'Escape' && closeEscSurfaces()) {
+    e.preventDefault();
   }
 });
 document.addEventListener('click', e => {
@@ -7067,6 +7245,20 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
 
   function renderFileRoots(data) {
     body.innerHTML = '';
+    const hint = document.createElement('p');
+    hint.className = 'fv-roots-hint';
+    hint.appendChild(document.createTextNode('Only directories listed in the YAML config are shown. '));
+    const configLink = document.createElement('a');
+    configLink.href = '#';
+    configLink.textContent = 'Edit YAML config →';
+    configLink.addEventListener('click', e => {
+      e.preventDefault();
+      modal.remove();
+      _fvNavigate = null;
+      switchView('settings');
+    });
+    hint.appendChild(configLink);
+    body.appendChild(hint);
     const roots = data.roots || [];
     if (!roots.length) {
       const empty = document.createElement('div');

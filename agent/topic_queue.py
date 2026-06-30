@@ -291,7 +291,8 @@ class TopicWorker:
             content = raw
             context_json = json.dumps(tool_events) if tool_events else None
             update_assistant_message(item.msg_id, content, session_id,
-                                     "done" if content else "error", context=context_json)
+                                     "done" if content else "error", context=context_json,
+                                     status_raw=status_raw)
             insert_run_event(item.msg_id, run_seq, "done", None)
 
         except Exception as exc:
@@ -306,7 +307,8 @@ class TopicWorker:
             context_json = json.dumps(tool_events) if tool_events else None
             try:
                 update_assistant_message(item.msg_id, content, session_id,
-                                         "done" if raw else "error", context=context_json)
+                                         "done" if raw else "error", context=context_json,
+                                         status_raw=status_raw)
                 insert_run_event(item.msg_id, run_seq, "error", err_text)
             except Exception:
                 pass

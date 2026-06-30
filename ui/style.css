@@ -1621,6 +1621,9 @@ body {
 .fv-filter:focus { outline: none; border-color: rgba(255,255,255,0.18); }
 .fv-dir-listing { padding: 0.2rem 0 0.4rem; }
 .fv-root-listing { padding-top: 0.6rem; }
+.fv-roots-hint { margin: 0; padding: 0.55rem 1.4rem 0.3rem; font-size: 0.82em; color: var(--text-dim); }
+.fv-roots-hint a { color: var(--text-mid); text-decoration: none; }
+.fv-roots-hint a:hover { color: var(--accent-light); }
 .fv-dir-entry {
   display: flex;
   align-items: baseline;
@@ -2914,12 +2917,13 @@ button {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.25rem 0.75rem 0.25rem 0.35rem;
+  padding: 0.25rem 0.35rem 0.25rem 0.75rem;
   border-top: 1px solid var(--border);
   background: var(--surface);
 }
 .ac-title {
   min-width: 0;
+  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

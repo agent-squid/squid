@@ -68,7 +68,7 @@ from .stats_db import (
     insert_user_message, insert_assistant_message, update_assistant_message,
     update_message_quota_snapshot,
     get_context_history, get_messages_by_ids, mark_orphaned_pending, get_message,
-    get_completed_run_text, get_run_events,
+    get_completed_run_text, get_completed_run_status_raw, get_run_events,
     ensure_session_turn_index,
     get_session_injected_context,
     get_topic_session, clear_topic_session,
@@ -454,7 +454,7 @@ async def _drain_to_completion(
     content = raw
     context_json = json.dumps(tool_events) if tool_events else None
     try:
-        update_assistant_message(msg_id, content, session_id, "done" if content else "error", context=context_json, only_if_pending=True)
+        update_assistant_message(msg_id, content, session_id, "done" if content else "error", context=context_json, status_raw=status_raw, only_if_pending=True)
         log.info("drain complete msg_id=%s len=%d tools=%d sid=%s", msg_id, len(content), len(tool_events), session_id)
     except Exception:
         log.exception("drain save failed msg_id=%s", msg_id)
@@ -517,11 +517,11 @@ async def stream_response(
                 err_text = chunk["_error"]
                 if raw:
                     context_json = json.dumps(tool_events) if tool_events else None
-                    update_assistant_message(asst_msg_id, raw, session_id, "done", context=context_json, only_if_pending=True)
+                    update_assistant_message(asst_msg_id, raw, session_id, "done", context=context_json, status_raw=status_raw, only_if_pending=True)
                     yield sse_event("done")
                 else:
                     yield sse_event("error", err_text)
-                    update_assistant_message(asst_msg_id, err_text, session_id, "error", only_if_pending=True)
+                    update_assistant_message(asst_msg_id, err_text, session_id, "error", status_raw=status_raw, only_if_pending=True)
                 _completed = True
                 return
 
@@ -548,13 +548,13 @@ async def stream_response(
                 now = time.monotonic()
                 if raw and now - last_partial_save >= 0.5:
                     context_json = json.dumps(tool_events) if tool_events else None
-                    update_assistant_message(asst_msg_id, raw, session_id, "pending", context=context_json)
+                    update_assistant_message(asst_msg_id, raw, session_id, "pending", context=context_json, status_raw=status_raw)
                     last_partial_save = now
 
             await asyncio.sleep(0)
 
         context_json = json.dumps(tool_events) if tool_events else None
-        update_assistant_message(asst_msg_id, raw, session_id, "done", context=context_json, only_if_pending=True)
+        update_assistant_message(asst_msg_id, raw, session_id, "done", context=context_json, status_raw=status_raw, only_if_pending=True)
         yield sse_event("done")
         _completed = True
 
@@ -563,13 +563,13 @@ async def stream_response(
         err_text = f"Internal error: {exc}"
         yield sse_event("error", err_text)
         context_json = json.dumps(tool_events) if tool_events else None
-        update_assistant_message(asst_msg_id, err_text, session_id, "error", context=context_json)
+        update_assistant_message(asst_msg_id, err_text, session_id, "error", context=context_json, status_raw=status_raw)
         _completed = True
 
     finally:
         if not _completed:
             try:
-                update_assistant_message(asst_msg_id, raw, session_id, "pending", only_if_pending=True)
+                update_assistant_message(asst_msg_id, raw, session_id, "pending", status_raw=status_raw, only_if_pending=True)
             except Exception:
                 pass
             asyncio.create_task(
@@ -735,15 +735,26 @@ async def run_cmd(req: CmdRequest):
 
     if req.command == "stop_msg":
         killed = kill_proc_by_msg_id(req.msg_id) if req.msg_id else 0
+        log.info("cmd stop_msg topic=%s msg_id=%s killed=%s", req.topic, req.msg_id, killed)
         return JSONResponse({"ok": True, "killed": killed})
     if req.command == "stop":
         killed = dispatcher.stop_topic(topic, agent=req.agent, adhoc=req.adhoc)
+        log.info("cmd stop topic=%s agent=%s adhoc=%s killed=%s", topic, req.agent, req.adhoc, killed)
         return JSONResponse({"ok": True, "killed": killed})
     if req.command == "stopall":
         result = dispatcher.stopall_topic(topic, agent=req.agent, adhoc=req.adhoc)
+        log.info(
+            "cmd stopall topic=%s agent=%s adhoc=%s killed=%s drained=%s",
+            topic,
+            req.agent,
+            req.adhoc,
+            result.get("killed"),
+            result.get("drained"),
+        )
         return JSONResponse({"ok": True, **result})
     if req.command == "deq":
         drained = dispatcher.drain_topic(topic, req.pos)
+        log.info("cmd deq topic=%s pos=%s drained=%s", topic, req.pos, drained)
         return JSONResponse({"ok": True, "drained": drained})
     if req.command == "list":
         return JSONResponse({"ok": True, "topics": get_topics_summary()})
@@ -765,8 +776,9 @@ async def run_cmd(req: CmdRequest):
             agent = topic_row.get("agent") if topic_row else None
         if not agent:
             return JSONResponse({"ok": False, "error": "no active session"}, status_code=400)
-        kill_procs_by_topic(topic, agent=agent, adhoc=False)
+        killed = kill_procs_by_topic(topic, agent=agent, adhoc=False)
         clear_topic_session(topic, agent)
+        log.info("cmd %s topic=%s agent=%s killed=%s", req.command, topic, agent, killed)
         return JSONResponse({"ok": True, "agent": agent})
 
     if req.command == "journal":
@@ -859,12 +871,14 @@ async def message_status(msg_id: int):
         and row.get("role") == "assistant"
         and recovered_content
     ):
+        recovered_status_raw = row.get("status_raw") or get_completed_run_status_raw(msg_id)
         update_assistant_message(
             msg_id,
             recovered_content,
             row.get("session_id"),
             "done",
             context=row.get("context"),
+            status_raw=recovered_status_raw,
             only_if_pending=True,
         )
         row = get_message(msg_id)

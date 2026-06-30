@@ -35,6 +35,7 @@ async function mockBackend(page, { topic = 'squid', agent = 'claude' } = {}) {
   await page.route('**/topics/**',     r => r.fulfill({ json: [] }));
   await page.route('**/config/agents', r => r.fulfill({ json: [] }));
   await page.route('**/chat/*/status', r => r.fulfill({ json: { status: 'pending', content: '' } }));
+  await page.route('**/processes',     r => r.fulfill({ json: [] }));
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -155,6 +156,106 @@ test('#topic@agent! /clear preserves adhoc chip without sending adhoc to clear',
   expect(cmdBodies[1].topic).toBe('squid');
   expect(cmdBodies[1].agent).toBe('claude');
   expect(cmdBodies[1].adhoc).toBe(true);
+});
+
+test('/clear warns before stopping a running prompt and cancels cleanly', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/processes', r => r.fulfill({ json: [
+    { msg_id: 854, topic: 'squid', agent: 'claude', adhoc: false, state: 'running' },
+  ] }));
+
+  const cmdBodies = [];
+  await page.route('**/cmd', async route => {
+    cmdBodies.push(route.request().postDataJSON());
+    await route.fulfill({ json: { ok: true, agent: 'claude' } });
+  });
+  page.on('dialog', async dialog => {
+    expect(dialog.message()).toContain('clear will stop the prompt currently running on #squid@claude');
+    await dialog.dismiss();
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '#squid@claude /clear');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(200);
+
+  expect(cmdBodies).toHaveLength(0);
+  await expect(page.locator('.cmd-feedback')).toContainText('clear cancelled');
+});
+
+test('/clear warning can be accepted before sending clear command', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/processes', r => r.fulfill({ json: [
+    { msg_id: 854, topic: 'squid', agent: 'claude', adhoc: false, state: 'running' },
+  ] }));
+
+  const cmdBodies = [];
+  await page.route('**/cmd', async route => {
+    cmdBodies.push(route.request().postDataJSON());
+    await route.fulfill({ json: { ok: true, agent: 'claude' } });
+  });
+  page.on('dialog', async dialog => {
+    expect(dialog.message()).toContain('clear will stop the prompt currently running on #squid@claude');
+    await dialog.accept();
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '#squid@claude /clear');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(200);
+
+  expect(cmdBodies).toHaveLength(1);
+  expect(cmdBodies[0]).toMatchObject({ command: 'clear', topic: 'squid', agent: 'claude' });
+});
+
+test('/restart warns when any prompt is running and cancels cleanly', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/processes', r => r.fulfill({ json: [
+    { msg_id: 854, topic: 'other', agent: 'codex', adhoc: false, state: 'running' },
+  ] }));
+
+  const cmdBodies = [];
+  await page.route('**/cmd', async route => {
+    cmdBodies.push(route.request().postDataJSON());
+    await route.fulfill({ json: { ok: true } });
+  });
+  page.on('dialog', async dialog => {
+    expect(dialog.message()).toContain('restart will stop all currently running prompts');
+    await dialog.dismiss();
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '/restart');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(200);
+
+  expect(cmdBodies).toHaveLength(0);
+  await expect(page.locator('.cmd-feedback')).toContainText('restart cancelled');
+});
+
+test('/restart warning can be accepted before sending restart command', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/processes', r => r.fulfill({ json: [
+    { msg_id: 854, topic: 'other', agent: 'codex', adhoc: false, state: 'running' },
+  ] }));
+
+  const cmdBodies = [];
+  await page.route('**/cmd', async route => {
+    cmdBodies.push(route.request().postDataJSON());
+    await route.fulfill({ json: { ok: true } });
+  });
+  page.on('dialog', async dialog => {
+    expect(dialog.message()).toContain('restart will stop all currently running prompts');
+    await dialog.accept();
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '/restart');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(200);
+
+  expect(cmdBodies).toHaveLength(1);
+  expect(cmdBodies[0]).toMatchObject({ command: 'restart' });
 });
 
 test('kill button appears on thinking bubble and sends stop_msg with msg_id', async ({ page }) => {

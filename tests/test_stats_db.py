@@ -290,3 +290,158 @@ def test_grouped_stats_include_quota_delta(tmp_path, monkeypatch):
     assert by_topic[0]["quota_delta"] == 3.0
     assert by_agent[0]["cost_usd"] == 0.75
     assert by_agent[0]["quota_delta"] == 3.0
+
+
+# ── status_raw persistence ───────────────────────────────────────────────────
+
+
+def test_status_raw_persisted_and_retrieved(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user_id = stats_db.insert_user_message("squid", "codex", "test")
+    assistant_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
+    stats_db.update_assistant_message(
+        assistant_id, "response text", "session-1", "done",
+        status_raw="Working...\nAnalyzing files\nComplete",
+    )
+
+    row = stats_db.get_message(assistant_id)
+    assert row["status_raw"] == "Working...\nAnalyzing files\nComplete"
+
+
+def test_status_raw_included_in_history_and_search(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user_id = stats_db.insert_user_message("squid", "codex", "test prompt")
+    assistant_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
+    stats_db.update_assistant_message(
+        assistant_id, "searchable response", "session-1", "done",
+        status_raw="Working...\nDone",
+    )
+
+    history = stats_db.get_messages_flat(topic="squid", agent="codex")
+    assert history["items"][0]["status_raw"] == "Working...\nDone"
+
+    search = stats_db.search_messages("searchable", topic="squid", agent="codex")
+    assert search["items"][0]["status_raw"] == "Working...\nDone"
+
+
+def test_status_raw_preserved_across_partial_updates(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user_id = stats_db.insert_user_message("squid", "codex", "test")
+    assistant_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
+
+    # Simulate periodic save during streaming
+    stats_db.update_assistant_message(
+        assistant_id, "partial", "session-1", "pending",
+        status_raw="Working...\nThinking",
+    )
+    row = stats_db.get_message(assistant_id)
+    assert row["status_raw"] == "Working...\nThinking"
+
+    # Final save with more status
+    stats_db.update_assistant_message(
+        assistant_id, "full response", "session-1", "done",
+        status_raw="Working...\nThinking\nDone",
+    )
+    row = stats_db.get_message(assistant_id)
+    assert row["status_raw"] == "Working...\nThinking\nDone"
+
+
+def test_status_raw_null_preserved(tmp_path, monkeypatch):
+    """Null status_raw shouldn't crash — old callers may not pass it."""
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user_id = stats_db.insert_user_message("squid", "codex", "test")
+    assistant_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
+    stats_db.update_assistant_message(assistant_id, "response", "session-1", "done")
+
+    row = stats_db.get_message(assistant_id)
+    assert row["status_raw"] is None
+
+
+def test_status_raw_survives_only_if_pending_guard(tmp_path, monkeypatch):
+    """only_if_pending=True should write status_raw only when status is pending."""
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user_id = stats_db.insert_user_message("squid", "codex", "test")
+    assistant_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
+
+    # First call: pending → updates
+    stats_db.update_assistant_message(
+        assistant_id, "content", "session-1", "done",
+        status_raw="Streaming status",
+        only_if_pending=True,
+    )
+    row = stats_db.get_message(assistant_id)
+    assert row["status_raw"] == "Streaming status"
+
+    # Second call: already done → ignored
+    stats_db.update_assistant_message(
+        assistant_id, "new content", "session-1", "done",
+        status_raw="Should not update",
+        only_if_pending=True,
+    )
+    row = stats_db.get_message(assistant_id)
+    assert row["status_raw"] == "Streaming status"  # unchanged
+
+
+def test_insert_run_event_seq_collision_logged(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    import logging
+    logger = logging.getLogger("squid")
+    logger.propagate = True
+
+    # Insert at same (msg_id, seq) twice — second should log warning
+    stats_db.insert_run_event(1, 0, "text", "first")
+    assert "run_event seq collision" not in caplog.text
+
+    stats_db.insert_run_event(1, 0, "status", "collides")
+    assert "run_event seq collision" in caplog.text
+    assert "collides" in caplog.text or "status" in caplog.text
+
+
+def test_insert_run_event_different_seq_no_collision(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    import logging
+    logger = logging.getLogger("squid")
+    logger.propagate = True
+
+    stats_db.insert_run_event(1, 0, "status", "Working...")
+    stats_db.insert_run_event(1, 1, "text", "hello")
+    stats_db.insert_run_event(1, 2, "tool", '{"name":"Read"}')
+    stats_db.insert_run_event(1, 3, "done", None)
+
+    assert "run_event seq collision" not in caplog.text
+
+    events = stats_db.get_run_events(1)
+    assert len(events) == 4
+    assert events[0]["event_type"] == "status"
+    assert events[1]["event_type"] == "text"
+    assert events[2]["event_type"] == "tool"
+    assert events[3]["event_type"] == "done"
+
+
+def test_run_event_seq_collision_different_msg_id_allowed(tmp_path, monkeypatch, caplog):
+    """Same seq on different msg_id is fine — only (msg_id, seq) is unique."""
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    import logging
+    logger = logging.getLogger("squid")
+    logger.propagate = True
+
+    stats_db.insert_run_event(1, 0, "status", "msg1")
+    stats_db.insert_run_event(2, 0, "status", "msg2")
+
+    assert "run_event seq collision" not in caplog.text

@@ -18,6 +18,8 @@ async function mockBackend(page) {
   }}));
   await page.route('**/topics/**', r => r.fulfill({ json: [] }));
   await page.route('**/config/agents', r => r.fulfill({ json: [] }));
+  await page.route('**/chat/*/status', r => r.fulfill({ json: { status: 'pending', content: '' } }));
+  await page.route('**/processes', r => r.fulfill({ json: [] }));
 }
 
 function runningProcess() {
@@ -89,6 +91,18 @@ test('status popup lists every configured backend, including inactive gauges', a
   });
   await expect(localRow).toContainText('Local');
   await expect(rows.filter({ hasText: 'Bare' })).toContainText('no quota integration');
+});
+
+test('status popup closes on Escape', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+
+  const popup = page.locator('#proc-status-popup');
+  await page.locator('#proc-status').click();
+  await expect(popup).toHaveClass(/open/);
+
+  await page.keyboard.press('Escape');
+  await expect(popup).not.toHaveClass(/open/);
 });
 
 test('status popup formats idle live-session durations above a minute', async ({ page }) => {
@@ -165,4 +179,179 @@ test('an older running poll cannot overwrite a newer completed state', async ({ 
   releaseFirst();
   await page.waitForTimeout(500);
   await expect(page.locator('#proc-status')).not.toHaveClass(/has-procs/);
+});
+
+// ── thinking bubble status behavior ──────────────────────────────────────────
+
+function sse(...events) {
+  return events.map(({ event, data }) => {
+    const str = typeof data === 'string' ? data : JSON.stringify(data);
+    return event ? `event: ${event}\ndata: ${str}\n\n` : `data: ${str}\n\n`;
+  }).join('');
+}
+
+const META  = { event: 'meta',  data: { agent: 'claude', backend: 'claude', msg_id: 1, adhoc: false } };
+const STATS = { event: 'stats', data: { session_id: 'test-sid', input_tokens: 10, output_tokens: 5, adhoc: false, lookback: 0 } };
+const DONE  = { event: 'done',  data: '' };
+
+const THINKING = '.msg.assistant.msg-thinking';
+
+test('thinking bubble shows status text during streaming and collapses on done', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+
+  await page.route('**/chat', r => r.fulfill({
+    status: 200, headers: SSE_HEADERS,
+    body: sse(
+      META,
+      { event: 'status', data: 'Working...' },
+      { event: 'status', data: 'Analyzing files' },
+      { event: 'tool',   data: { name: 'Read', input_json: '{"file_path":"a.txt"}' } },
+      { event: 'status', data: 'Complete' },
+      { data: 'Response text' },
+      STATS,
+      DONE,
+    ),
+  }));
+
+  await page.fill('#input', 'test status');
+  await page.keyboard.press('Enter');
+
+  // During streaming, thinking bubble shows status text
+  const thinking = page.locator(THINKING);
+  await expect(thinking).toBeVisible();
+  await expect(thinking).toContainText('Working...');
+
+  // After done, thinking freezes with a collapsible toggle
+  await expect(thinking).toHaveClass(/msg-thinking-done/);
+  await expect(thinking.locator('.thinking-toggle')).toBeVisible();
+  // Toggle text is the last non-empty status line ("Complete")
+  await expect(thinking.locator('.thinking-toggle')).toHaveText('Complete');
+
+  // Click toggle to expand and see full status
+  await thinking.locator('.thinking-toggle').click();
+  await expect(thinking).toHaveClass(/thinking-expanded/);
+  await expect(thinking.locator('.thinking-body')).toContainText('Analyzing files');
+});
+
+test('thinking bubble is removed on done when no status text was streamed', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+
+  await page.route('**/chat', r => r.fulfill({
+    status: 200, headers: SSE_HEADERS,
+    body: sse(
+      META,
+      { data: 'Plain response without status' },
+      STATS,
+      DONE,
+    ),
+  }));
+
+  await page.fill('#input', 'plain');
+  await page.keyboard.press('Enter');
+
+  // Response bubble appears, thinking bubble should be gone
+  await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toBeVisible();
+  await expect(page.locator(THINKING)).not.toBeAttached();
+});
+
+test('history item shows thinking toggle when status_raw is present', async ({ page }) => {
+  await mockBackend(page);
+  // Return a completed item with status_raw in the history
+  await page.route('**/history**', r => r.fulfill({
+    json: {
+      items: [{
+        id: 50,
+        role: 'assistant',
+        topic: 'squid',
+        agent: 'claude',
+        content: 'The response content.',
+        status: 'done',
+        status_raw: 'Working...\nReading files\nDone',
+        session_id: 'sess-1',
+        timestamp: new Date().toISOString(),
+        prompt: 'test prompt',
+        adhoc: false,
+      }],
+      has_more: false,
+    },
+  }));
+
+  await page.goto('/');
+
+  // The history item should show the thinking toggle
+  const toggle = page.locator('.msg-thinking-done.history-item .thinking-toggle');
+  await expect(toggle).toBeVisible();
+  await expect(toggle).toHaveText('Done');
+
+  // Click to expand and verify full status text
+  await toggle.click();
+  await expect(page.locator('.msg-thinking-done.history-item .thinking-body')).toContainText('Reading files');
+});
+
+test('status recovery uses persisted status_raw in polling fallback', async ({ page }) => {
+  await mockBackend(page);
+  // SSE drops immediately after meta — no status events delivered via SSE.
+  // The client must recover status exclusively from the DB poll response.
+  await page.route('**/chat', r => r.fulfill({
+    status: 200, headers: SSE_HEADERS,
+    body: sse(META),
+  }));
+
+  // /chat/{id}/status returns pending with status_raw persisted by the server
+  await page.route('**/chat/*/status', r => r.fulfill({
+    json: {
+      id: 1,
+      role: 'assistant',
+      topic: 'squid',
+      agent: 'claude',
+      content: 'Partial response',
+      status: 'pending',
+      status_raw: 'Working...\nReading files\nIn progress',
+      session_id: 'sess-1',
+    },
+  }));
+
+  await page.goto('/');
+  await page.fill('#input', 'recovery test');
+  await page.keyboard.press('Enter');
+
+  // DB status_raw is recovered and shown; 'In progress' was never in the SSE stream
+  const thinking = page.locator(THINKING);
+  await expect(thinking).toContainText('In progress', { timeout: 5_000 });
+  await expect(thinking).toContainText('Connection interrupted', { timeout: 5_000 });
+});
+
+test('done polling fallback freezes persisted status_raw', async ({ page }) => {
+  await mockBackend(page);
+  // SSE drops before any status events. The first poll already sees completion.
+  await page.route('**/chat', r => r.fulfill({
+    status: 200, headers: SSE_HEADERS,
+    body: sse(META),
+  }));
+
+  await page.route('**/chat/*/status', r => r.fulfill({
+    json: {
+      id: 1,
+      role: 'assistant',
+      topic: 'squid',
+      agent: 'claude',
+      content: 'Recovered final response',
+      status: 'done',
+      status_raw: 'Working...\nReading files\nDone',
+      session_id: 'sess-1',
+    },
+  }));
+
+  await page.goto('/');
+  await page.fill('#input', 'done recovery test');
+  await page.keyboard.press('Enter');
+
+  const thinking = page.locator(THINKING);
+  await expect(thinking).toHaveClass(/msg-thinking-done/, { timeout: 5_000 });
+  await expect(thinking.locator('.thinking-toggle')).toHaveText('Done');
+  await thinking.locator('.thinking-toggle').click();
+  await expect(thinking.locator('.thinking-body')).toContainText('Reading files');
+  await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toContainText('Recovered final response');
 });

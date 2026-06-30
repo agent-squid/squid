@@ -44,6 +44,11 @@ test('typed prompt prefixes show unique routed history with the current route fi
   await page.locator('#input').press('ArrowDown');
   await expect(page.locator('#autocomplete .ac-item.selected .ac-route-btn')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Close suggestions' })).toBeVisible();
+  await expect.poll(async () => {
+    const titleBox = await page.locator('#autocomplete .ac-title').boundingBox();
+    const closeBox = await page.getByRole('button', { name: 'Close suggestions' }).boundingBox();
+    return titleBox && closeBox ? closeBox.x > titleBox.x : false;
+  }).toBe(true);
 
   await olderRouteItem.locator('.ac-route-btn').click();
   await expect(page.locator('#input')).toHaveValue('push the changes');
@@ -472,6 +477,33 @@ test('Backspace on an empty prompt keeps expanding the topic chip as before', as
   await expect(page.locator('#topic-chip')).not.toHaveClass(/visible/);
 });
 
+test('Backspace in an expanded route deletes route segments semantically', async ({ page }) => {
+  await mockBackend(page);
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'squid', agent: 'codex', adhoc: true, lookback: 12,
+  })));
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  await composer.fill('fix the bug');
+  await composer.evaluate(input => input.setSelectionRange(0, 0));
+  await composer.press('Backspace');
+
+  await composer.press('Backspace');
+  await expect(composer).toHaveValue('#squid@codex!1 fix the bug');
+  await composer.press('Backspace');
+  await expect(composer).toHaveValue('#squid@codex! fix the bug');
+  await composer.press('Backspace');
+  await expect(composer).toHaveValue('#squid@codex fix the bug');
+  await composer.press('Backspace');
+  await expect(composer).toHaveValue('#squid@ fix the bug');
+  await composer.press('Backspace');
+  await expect(composer).toHaveValue('#squid fix the bug');
+  await composer.press('Backspace');
+  await expect(composer).toHaveValue('# fix the bug');
+  await expect.poll(() => composer.evaluate(input => input.selectionStart)).toBe(1);
+});
+
 test('Backspace inside a populated prompt keeps the topic chip and edits normally', async ({ page }) => {
   await mockBackend(page);
   await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
@@ -558,6 +590,31 @@ test('slug autocomplete stays separate from prompt history and preserves the pro
 
   await expect(composer).toHaveValue('#other fix the bug');
   await expect.poll(() => composer.evaluate(input => input.selectionStart)).toBe('#other'.length);
+});
+
+test('agent autocomplete supports an empty agent slot before adhoc lookback', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/config/agents', route => route.fulfill({ json: [
+    { name: 'codex', backend: 'codex' },
+    { name: 'claude', backend: 'claude' },
+  ] }));
+  await page.route('**/topics/squid/agents/history', route => route.fulfill({ json: [
+    { agent: 'claude', last_prompt: 'session prompt', last_adhoc_prompt: 'adhoc prompt' },
+  ] }));
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  await composer.fill('#squid@!12');
+
+  await expect(page.locator('#autocomplete')).toHaveClass(/open/);
+  const claudeItem = page.locator('#autocomplete .ac-item', { hasText: '#squid@claude!12' });
+  await expect(claudeItem).toBeVisible();
+  await expect(claudeItem).toContainText('last adhoc prompt');
+
+  await claudeItem.click();
+
+  await expect(composer).toHaveValue('');
+  await expect(page.locator('#topic-chip')).toContainText('#squid@claude!12');
 });
 
 test('an invalid edited slug remains expanded on blur', async ({ page }) => {
