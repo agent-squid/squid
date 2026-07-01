@@ -189,6 +189,31 @@ def test_stream_response_does_not_promote_status_to_final_content():
     assert update_call.args[3] == "done"
 
 
+def test_drain_to_completion_continues_after_idle_timeout():
+    async def run():
+        out_q = asyncio.Queue()
+        calls = 0
+
+        async def fake_wait_for(awaitable, timeout):
+            nonlocal calls
+            awaitable.close()
+            calls += 1
+            if calls == 1:
+                raise asyncio.TimeoutError()
+            if calls == 2:
+                return "final after idle"
+            return None
+
+        with patch("agent.server.asyncio.wait_for", fake_wait_for), \
+             patch("agent.server.update_assistant_message") as update_message:
+            await server._drain_to_completion(out_q, 123, "", "", None)
+            return update_message.call_args
+
+    update_call = asyncio.run(run())
+    assert update_call.args[1] == "final after idle"
+    assert update_call.args[3] == "done"
+
+
 def test_backend_native_chat_command_detection_excludes_squid_commands():
     assert server._is_backend_native_chat_command("/usage")
     assert server._is_backend_native_chat_command("/cost")

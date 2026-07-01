@@ -7,9 +7,11 @@ const statsContent = document.getElementById('stats-content');
 const helpBtn      = document.getElementById('help-btn');
 const helpPanel    = document.getElementById('help-panel');
 const acEl         = document.getElementById('autocomplete');
-const pinBtn       = document.getElementById('pin-btn');
-const pinPanel     = document.getElementById('pin-panel');
-const pinCountEl   = document.getElementById('pin-count');
+const pinBtn          = document.getElementById('pin-btn');
+const pinPanel        = document.getElementById('pin-panel');
+const pinCountEl      = document.getElementById('pin-count');
+const bookmarkPanel   = document.getElementById('bookmark-panel');
+const bookmarkBtn     = document.getElementById('chip-bookmark-btn');
 
 window.scrollTo(0, 0);
 
@@ -844,6 +846,7 @@ async function loadHistory() {
   updateInContextMarkers();
   refreshAllRevertButtons();
   evaluateAdvisory();
+  refreshDateDividers();
 
   if (historyExhausted && topSentinel) {
     topSentinel.remove();
@@ -1029,7 +1032,7 @@ function clearSearch() {
   searchLoading = false;
   document.getElementById('search-bar').classList.remove('active');
 
-  document.querySelectorAll('.search-result-item').forEach(el => el.remove());
+  document.querySelectorAll('.search-result-item, .date-divider').forEach(el => el.remove());
   document.querySelectorAll('#messages > .cmd-feedback.search-no-results').forEach(el => el.remove());
   if (topSentinel) { topSentinel.remove(); topSentinel = null; }
   historyOffset = 0;
@@ -1044,6 +1047,7 @@ function recordPrompt(text) {
   if (!t) return;
   const key = promptHistoryDedupKey(t);
   promptHistory = [t, ...promptHistory.filter(x => promptHistoryDedupKey(x) !== key)].slice(0, 200);
+  saveStashedPrompt(t);
   promptHistoryPos = -1;
   promptDraft = '';
   promptDraftChip = null;
@@ -1239,6 +1243,7 @@ async function loadSearchResults() {
   [...fragment.children].forEach(el => el.classList.add('search-result-item'));
   messages.appendChild(fragment);
   searchLoading = false;
+  refreshDateDividers();
 
   if (items.length === 0) {
     const noResult = document.createElement('div');
@@ -1743,6 +1748,7 @@ function closeEscSurfaces() {
   if (searchActive) { clearSearch(); closed = true; }
   if (procStatusPopup?.classList.contains('open')) { procStatusPopup.classList.remove('open'); closed = true; }
   if (pinPanel.classList.contains('open')) { closePinPanel(); closed = true; }
+  if (bookmarkPanel.classList.contains('open')) { closeBookmarkPanel(); closed = true; }
   if (helpPanel.classList.contains('open')) { closeHelp(); closed = true; }
   const msgModal = document.getElementById('msg-modal');
   if (msgModal?.classList.contains('open')) { msgModal.classList.remove('open'); closed = true; }
@@ -2095,6 +2101,7 @@ async function sendMessage(text) {
           bubble.classList.add('history-item');
           resolvedAgent = data.agent || resolvedAgent;
           addPinButton(bubble, msgId, topic, resolvedAgent, data.session_id || null);
+          addBookmarkButton(bubble, msgId, topic, resolvedAgent);
           if (!statsEl && data.stats) statsEl = addStats(bubble, data.stats, doneTime);
           if (statsEl) messages.appendChild(statsEl);
           liveSessionTurnCount = parseInt(data.session_turn_count || '0', 10) || liveSessionTurnCount;
@@ -2260,6 +2267,7 @@ async function sendMessage(text) {
                 bubble.dataset.topic = topic;
                 if (resolvedAgent) bubble.dataset.agent = resolvedAgent;
                 addPinButton(bubble, msgId, topic, resolvedAgent);
+                addBookmarkButton(bubble, msgId, topic, resolvedAgent);
               }
             } catch {}
             eventName = null;
@@ -2950,29 +2958,12 @@ function appendHistoryItem(item, container) {
     const raw = (item.content || '').split('\n')[0].replace(/^CLI exited \d+:\s*/, '').trim();
     asstContent.innerHTML = `<span class="msg-error">${raw || 'Response interrupted.'}</span>`;
   } else {
-    // Show thinking/status toggle when historical status text is available
-    if (item.status_raw && item.status_raw.trim()) {
-      const lines = item.status_raw.split('\n').map(l => l.trim()).filter(Boolean);
-      const summary = lines[lines.length - 1] || '';
-      const summaryTrunc = summary.length > 80 ? '…' + summary.slice(-77) : summary;
-      const thinkingToggle = document.createElement('div');
-      thinkingToggle.className = 'msg-thinking-done history-item';
-      thinkingToggle.style.cssText = 'margin-bottom:4px;';
-      const toggle = document.createElement('button');
-      toggle.className = 'thinking-toggle';
-      toggle.textContent = summaryTrunc;
-      const body = document.createElement('div');
-      body.className = 'thinking-body';
-      body.textContent = lines.join('\n');
-      thinkingToggle.appendChild(toggle);
-      thinkingToggle.appendChild(body);
-      toggle.addEventListener('click', () => thinkingToggle.classList.toggle('thinking-expanded'));
-      asstBubble.appendChild(thinkingToggle);
-    }
     asstContent.innerHTML = marked.parse(item.content || '');
   }
   asstBubble.appendChild(asstContent);
+  if (item.timestamp) asstBubble.dataset.ts = item.timestamp;
   if (item.id) addPinButton(asstBubble, item.id, item.topic || 'default', item.agent || null, item.session_id || null);
+  if (item.id) addBookmarkButton(asstBubble, item.id, item.topic || 'default', item.agent || null);
 
   if (container) container.appendChild(asstBubble);
 
@@ -3422,6 +3413,32 @@ function fmtTime(iso) {
     month: 'short', day: 'numeric',
     hour: '2-digit', minute: '2-digit',
   });
+}
+
+function fmtDate(d) {
+  const now = new Date();
+  const toDay = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = toDay(now) - toDay(d);
+  if (diff === 0) return 'Today';
+  if (diff === 86400000) return 'Yesterday';
+  return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+function refreshDateDividers() {
+  document.querySelectorAll('#messages .date-divider').forEach(el => el.remove());
+  const bubbles = [...document.querySelectorAll('#messages .msg.assistant.history-item[data-ts]')];
+  let lastKey = null;
+  for (const el of bubbles) {
+    const d = new Date(el.dataset.ts);
+    const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+    if (key !== lastKey) {
+      const div = document.createElement('div');
+      div.className = 'date-divider history-item';
+      div.textContent = fmtDate(d);
+      el.before(div);
+      lastKey = key;
+    }
+  }
 }
 
 function addTimestamp(afterEl, isoStr, alignRight = false) {
@@ -6439,12 +6456,134 @@ async function saveMemoryEditor() {
 }
 
 function openPinPanel() {
+  if (bookmarkPanel.classList.contains('open')) closeBookmarkPanel();
   updateInContextMarkers();
   renderPinPanel();
   pinPanel.classList.add('open');
 }
 function closePinPanel() {
   pinPanel.classList.remove('open');
+}
+
+// ── Bookmarks ─────────────────────────────────────────────────────────────
+
+function getBookmarkedItems() {
+  try { return JSON.parse(localStorage.getItem('bookmarkedItems') || '[]'); } catch { return []; }
+}
+function setBookmarkedItems(items) { localStorage.setItem('bookmarkedItems', JSON.stringify(items)); }
+
+let _bookmarkQuery = '';
+
+function renderBookmarkPanel() {
+  const items = getBookmarkedItems();
+  const listEl = document.getElementById('bookmark-panel-list');
+  const clearBtn = document.getElementById('bookmark-panel-clear');
+  if (clearBtn) clearBtn.disabled = items.length === 0;
+
+  const q = _bookmarkQuery.trim().toLowerCase();
+  const filtered = q ? items.filter(i =>
+    (i.content || '').toLowerCase().includes(q) || (i.topic || '').toLowerCase().includes(q)
+  ) : items;
+
+  if (!filtered.length) {
+    listEl.innerHTML = items.length === 0
+      ? '<div style="padding:0.5rem 0.8rem;color:#484858;font-size:0.78em">No bookmarks yet.<br>Click <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" style="vertical-align:-0.1em"><path d="M4 1h8a1 1 0 0 1 1 1v12l-5-2.8-5 2.8V2a1 1 0 0 1 1-1z"/></svg> on any response to save it.</div>'
+      : '<div style="padding:0.5rem 0.8rem;color:#484858;font-size:0.78em">No matches.</div>';
+    return;
+  }
+
+  listEl.innerHTML = filtered.map(item => {
+    const tag = item.topic ? `#${escapeHtml(item.topic)}${item.agent ? `@${escapeHtml(item.agent)}` : ''}` : '';
+    const preview = escapeHtml((item.content || '').replace(/\s+/g, ' ').slice(0, 120));
+    return `<div class="bookmark-item" data-msg-id="${item.id}">
+      <span class="bookmark-item-tag">${tag}</span>
+      <span class="bookmark-item-preview">${preview}</span>
+      <button class="bookmark-item-remove" data-id="${item.id}" type="button">✕</button>
+    </div>`;
+  }).join('');
+
+  listEl.querySelectorAll('.bookmark-item').forEach(row => {
+    row.addEventListener('click', e => {
+      if (e.target.closest('.bookmark-item-remove')) return;
+      const id = parseInt(row.dataset.msgId);
+      closeBookmarkPanel();
+      const el = document.querySelector(`.msg.assistant[data-msg-id="${id}"]`);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  });
+  listEl.querySelectorAll('.bookmark-item-remove').forEach(btn => {
+    btn.addEventListener('mousedown', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      const id = parseInt(btn.dataset.id);
+      setBookmarkedItems(getBookmarkedItems().filter(i => i.id !== id));
+      document.querySelectorAll(`.msg-bookmark-btn[data-msg-id="${id}"]`).forEach(b => { b.classList.remove('bookmarked'); b.title = 'Bookmark'; });
+      renderBookmarkPanel();
+    });
+  });
+}
+
+function openBookmarkPanel() {
+  if (pinPanel.classList.contains('open')) closePinPanel();
+  renderBookmarkPanel();
+  bookmarkPanel.classList.add('open');
+  bookmarkBtn.classList.add('active');
+  document.getElementById('bookmark-search').value = '';
+  _bookmarkQuery = '';
+}
+function closeBookmarkPanel() {
+  bookmarkPanel.classList.remove('open');
+  bookmarkBtn.classList.remove('active');
+}
+
+function addBookmarkButton(bubbleEl, msgId, topic, agent) {
+  const existing = bubbleEl.querySelector(`.msg-bookmark-btn[data-msg-id="${msgId}"]`);
+  if (existing) return existing;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'msg-bookmark-btn';
+  btn.dataset.msgId = String(msgId);
+  btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 1h8a1 1 0 0 1 1 1v12l-5-2.8-5 2.8V2a1 1 0 0 1 1-1z"/></svg>`;
+  if (getBookmarkedItems().find(i => i.id === msgId)) {
+    btn.classList.add('bookmarked');
+    btn.title = 'Remove bookmark';
+  } else {
+    btn.title = 'Bookmark';
+  }
+  btn.addEventListener('click', e => {
+    e.stopPropagation();
+    const bookmarked = getBookmarkedItems();
+    if (bookmarked.find(i => i.id === msgId)) {
+      setBookmarkedItems(bookmarked.filter(i => i.id !== msgId));
+      btn.classList.remove('bookmarked');
+      btn.title = 'Bookmark';
+    } else {
+      const text = _messageBodyText(bubbleEl).slice(0, 300);
+      setBookmarkedItems([...bookmarked, { id: msgId, topic, agent: agent || null, content: text, saved_at: Date.now() }]);
+      btn.classList.add('bookmarked');
+      btn.title = 'Remove bookmark';
+    }
+    if (bookmarkPanel.classList.contains('open')) renderBookmarkPanel();
+  });
+  const header = bubbleEl.querySelector('.response-header');
+  (header || bubbleEl).appendChild(btn);
+}
+
+function initBookmark() {
+  bookmarkBtn.addEventListener('click', () => {
+    if (bookmarkPanel.classList.contains('open')) closeBookmarkPanel();
+    else openBookmarkPanel();
+  });
+  document.getElementById('bookmark-panel-close').addEventListener('click', closeBookmarkPanel);
+  document.getElementById('bookmark-panel-clear').addEventListener('click', () => {
+    setBookmarkedItems([]);
+    document.querySelectorAll('.msg-bookmark-btn.bookmarked').forEach(b => { b.classList.remove('bookmarked'); b.title = 'Bookmark'; });
+    renderBookmarkPanel();
+  });
+  document.getElementById('bookmark-search').addEventListener('input', e => {
+    _bookmarkQuery = e.target.value;
+    renderBookmarkPanel();
+  });
 }
 
 function addPinButton(bubbleEl, msgId, topic, agent, sessionId = null) {
@@ -6521,6 +6660,7 @@ function initPin() {
 
 initSettings();
 initPin();
+initBookmark();
 document.getElementById('search-bar-clear').addEventListener('click', clearSearch);
 document.getElementById('chip-prompts-btn')?.addEventListener('click', togglePromptOnlyHistory);
 updatePromptOnlyButton();
@@ -6642,6 +6782,7 @@ document.addEventListener('keydown', e => {
 document.addEventListener('click', e => {
   if (!acEl.contains(e.target) && e.target !== input) hideAutocomplete();
   if (!pinPanel.contains(e.target) && !pinBtn.contains(e.target)) closePinPanel();
+  if (!bookmarkPanel.contains(e.target) && !bookmarkBtn.contains(e.target)) closeBookmarkPanel();
   const ctxPopup = document.getElementById('ctx-popup');
   const inSecondary = e.target.closest('#msg-modal, #memory-modal, #topic-delete-modal');
   const secondaryOpen = document.getElementById('msg-modal')?.classList.contains('open')

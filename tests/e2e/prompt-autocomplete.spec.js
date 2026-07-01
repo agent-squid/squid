@@ -431,6 +431,26 @@ test('bare default prompts are recorded without a default route chip', async ({ 
   await expect(item).not.toContainText('#default');
 });
 
+test('submitted prompts are stashed before the chat response completes', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [] } }));
+  await page.route('**/chat**', () => {});
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
+  })));
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  await composer.fill('interruptible prompt');
+  await page.keyboard.press('Enter');
+
+  await expect.poll(() => page.evaluate(() => (
+    JSON.parse(localStorage.getItem('squid_stashed_prompts') || '[]')
+  ))).toEqual(['#squid@codex interruptible prompt']);
+  await composer.fill('interruptible');
+  await expect(page.locator('#autocomplete .ac-item', { hasText: 'interruptible prompt' })).toBeVisible();
+});
+
 for (const { name, chip, route } of [
   {
     name: 'topic and agent',

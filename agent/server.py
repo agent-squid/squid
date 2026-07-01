@@ -433,7 +433,7 @@ async def _drain_to_completion(
             try:
                 chunk = await asyncio.wait_for(out_q.get(), timeout=min(left, 30.0))
             except asyncio.TimeoutError:
-                break
+                continue
             if chunk is None:
                 break
             if isinstance(chunk, dict):
