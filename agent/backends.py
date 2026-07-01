@@ -23,9 +23,9 @@ SUPPORTED_PROTOCOLS = frozenset({"oneshot-cli", "interactive-cli", "interactive-
 DEFAULT_INTERACTIVE_IDLE_TIMEOUT_SECONDS = 3600
 SUPPORTED_PROTOCOLS_BY_DRIVER = {
     "claude": frozenset({"oneshot-cli", "interactive-cli"}),
-    "codex": frozenset({"oneshot-cli"}),
-    "cursor": frozenset({"oneshot-cli"}),
-    "opencode": frozenset({"oneshot-cli"}),
+    "codex": frozenset({"oneshot-cli", "interactive-cli"}),
+    "cursor": frozenset({"oneshot-cli", "interactive-cli"}),
+    "opencode": frozenset({"oneshot-cli", "interactive-cli"}),
 }
 DEFAULT_PROTOCOL_BY_DRIVER = {
     "claude": "interactive-cli",

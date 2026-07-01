@@ -856,6 +856,34 @@ async def run_codex(
             raise CLIError(event.get("message", "codex error"))
 
 
+async def run_codex_interactive_cli(
+    prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
+    model: Optional[str] = None, topic: str = "", agent: str = "",
+    response_timeout: Optional[int] = None,
+    resume_session_id: Optional[str] = None,
+    adhoc: bool = False, msg_id: Optional[int] = None,
+    backend_id: str = "codex", backend_env: Optional[dict] = None,
+    backend_settings: Optional[dict] = None, backend_args: tuple[str, ...] = (),
+    interactive_idle_timeout_s: float = 3600,
+    prompt_preview: Optional[str] = None,
+) -> AsyncGenerator[Union[str, dict], None]:
+    """Run a Codex turn with JSONL exec/resume semantics.
+
+    Codex's terminal TUI is interactive but emits ANSI screen updates, not a
+    stable machine-readable stream. For Squid, interactive-cli means using the
+    structured Codex CLI turn protocol and resuming the saved thread id.
+    """
+    _ = interactive_idle_timeout_s
+    async for chunk in run_codex(
+        prompt, cwd=cwd, history=history, model=model, topic=topic, agent=agent,
+        response_timeout=response_timeout, resume_session_id=resume_session_id,
+        adhoc=adhoc, msg_id=msg_id, backend_id=backend_id, backend_env=backend_env,
+        backend_settings=backend_settings, backend_args=backend_args,
+        prompt_preview=prompt_preview,
+    ):
+        yield chunk
+
+
 async def run_copilot(
     prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
     model: Optional[str] = None, topic: str = "", agent: str = "",
@@ -1032,6 +1060,29 @@ async def run_cursor(
                     "duration_ms": event.get("duration_ms"),
                 }
             }
+
+
+async def run_cursor_interactive_cli(
+    prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
+    model: Optional[str] = None, topic: str = "", agent: str = "",
+    response_timeout: Optional[int] = None,
+    resume_session_id: Optional[str] = None,
+    adhoc: bool = False, msg_id: Optional[int] = None,
+    backend_id: str = "cursor", backend_env: Optional[dict] = None,
+    backend_settings: Optional[dict] = None, backend_args: tuple[str, ...] = (),
+    interactive_idle_timeout_s: float = 3600,
+    prompt_preview: Optional[str] = None,
+) -> AsyncGenerator[Union[str, dict], None]:
+    """Run a Cursor turn with stream-json print/resume semantics."""
+    _ = interactive_idle_timeout_s
+    async for chunk in run_cursor(
+        prompt, cwd=cwd, history=history, model=model, topic=topic, agent=agent,
+        response_timeout=response_timeout, resume_session_id=resume_session_id,
+        adhoc=adhoc, msg_id=msg_id, backend_id=backend_id, backend_env=backend_env,
+        backend_settings=backend_settings, backend_args=backend_args,
+        prompt_preview=prompt_preview,
+    ):
+        yield chunk
 
 
 async def run_antigravity(
@@ -1240,6 +1291,29 @@ async def run_opencode(
     }
 
 
+async def run_opencode_interactive_cli(
+    prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
+    model: Optional[str] = None, topic: str = "", agent: str = "",
+    response_timeout: Optional[int] = None,
+    resume_session_id: Optional[str] = None,
+    adhoc: bool = False, msg_id: Optional[int] = None,
+    backend_id: str = "opencode", backend_env: Optional[dict] = None,
+    backend_settings: Optional[dict] = None, backend_args: tuple[str, ...] = (),
+    interactive_idle_timeout_s: float = 3600,
+    prompt_preview: Optional[str] = None,
+) -> AsyncGenerator[Union[str, dict], None]:
+    """Run an opencode turn with JSON run/session semantics."""
+    _ = interactive_idle_timeout_s
+    async for chunk in run_opencode(
+        prompt, cwd=cwd, history=history, model=model, topic=topic, agent=agent,
+        response_timeout=response_timeout, resume_session_id=resume_session_id,
+        adhoc=adhoc, msg_id=msg_id, backend_id=backend_id, backend_env=backend_env,
+        backend_settings=backend_settings, backend_args=backend_args,
+        prompt_preview=prompt_preview,
+    ):
+        yield chunk
+
+
 RUNNER_NAMES_BY_DRIVER = {
     "claude": "run_claude",
     "codex": "run_codex",
@@ -1253,8 +1327,11 @@ RUNNER_NAMES_BY_DRIVER_PROTOCOL = {
     ("claude", "oneshot-cli"): "run_claude",
     ("claude", "interactive-cli"): "run_claude_interactive_cli",
     ("codex", "oneshot-cli"): "run_codex",
+    ("codex", "interactive-cli"): "run_codex_interactive_cli",
     ("cursor", "oneshot-cli"): "run_cursor",
+    ("cursor", "interactive-cli"): "run_cursor_interactive_cli",
     ("opencode", "oneshot-cli"): "run_opencode",
+    ("opencode", "interactive-cli"): "run_opencode_interactive_cli",
 }
 
 

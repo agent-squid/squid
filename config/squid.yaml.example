@@ -42,18 +42,21 @@ backends:
 
   codex:
     driver: codex
+    # protocol: interactive-cli  # structured exec/resume JSONL, not TUI scraping
     label: Codex
     color: "#7070A0"
     gauge: codex
 
   cursor:
     driver: cursor
+    # protocol: interactive-cli  # structured stream-json print/resume
     label: Cursor
     color: "#FFFFFF"
     gauge: cursor
 
   opencode:
     driver: opencode
+    # protocol: interactive-cli  # structured json run/session
     label: OpenCode
     color: "#CFCECD"
     gauge:

@@ -54,12 +54,31 @@ def test_backend_rejects_invalid_interactive_idle_timeout():
         })
 
 
-def test_backend_rejects_protocol_not_supported_by_driver():
-    with pytest.raises(ValueError, match="not supported by driver"):
-        _validate_backend("codex-live", {
-            "driver": "codex",
-            "protocol": "interactive-cli",
-        })
+def test_backend_accepts_codex_interactive_cli_protocol():
+    backend = _validate_backend("codex-live", {
+        "driver": "codex",
+        "protocol": "interactive-cli",
+    })
+
+    assert backend.protocol == "interactive-cli"
+
+
+def test_backend_accepts_cursor_interactive_cli_protocol():
+    backend = _validate_backend("cursor-live", {
+        "driver": "cursor",
+        "protocol": "interactive-cli",
+    })
+
+    assert backend.protocol == "interactive-cli"
+
+
+def test_backend_accepts_opencode_interactive_cli_protocol():
+    backend = _validate_backend("opencode-live", {
+        "driver": "opencode",
+        "protocol": "interactive-cli",
+    })
+
+    assert backend.protocol == "interactive-cli"
 
 
 def test_backend_secret_reference_is_resolved_at_execution_time():

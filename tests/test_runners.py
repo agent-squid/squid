@@ -22,7 +22,10 @@ from agent.runners import (
     run_claude,
     run_claude_interactive_cli,
     run_codex,
+    run_codex_interactive_cli,
+    run_cursor_interactive_cli,
     run_opencode,
+    run_opencode_interactive_cli,
 )
 from agent.backends import _validate_backend
 
@@ -93,9 +96,27 @@ def test_runner_for_backend_selects_protocol_and_forces_adhoc_oneshot():
         "driver": "claude",
         "protocol": "interactive-cli",
     })
+    codex_live = _validate_backend("codex-live", {
+        "driver": "codex",
+        "protocol": "interactive-cli",
+    })
+    cursor_live = _validate_backend("cursor-live", {
+        "driver": "cursor",
+        "protocol": "interactive-cli",
+    })
+    opencode_live = _validate_backend("opencode-live", {
+        "driver": "opencode",
+        "protocol": "interactive-cli",
+    })
 
     assert runner_for_backend(live) is run_claude_interactive_cli
     assert runner_for_backend(live, adhoc=True) is run_claude
+    assert runner_for_backend(codex_live) is run_codex_interactive_cli
+    assert runner_for_backend(codex_live, adhoc=True) is run_codex
+    assert runner_for_backend(cursor_live) is run_cursor_interactive_cli
+    assert runner_for_backend(cursor_live, adhoc=True) is runner_for_driver("cursor")
+    assert runner_for_backend(opencode_live) is run_opencode_interactive_cli
+    assert runner_for_backend(opencode_live, adhoc=True) is run_opencode
 
 
 def test_claude_interactive_reuses_live_process_for_same_session_key():
@@ -401,6 +422,72 @@ def test_codex_keeps_legacy_agent_messages_as_response_content():
         chunks = asyncio.run(collect())
 
     assert chunks[0] == "Legacy response"
+
+
+def test_codex_interactive_cli_uses_structured_exec_resume_events():
+    async def fake_stream_lines(cmd, **kwargs):
+        assert cmd[:5] == ["codex", "exec", "resume", "--json", "--skip-git-repo-check"]
+        assert cmd[-2:] == ["thread-1", "next"]
+        yield '{"type":"thread.started","thread_id":"thread-1"}'
+        yield '{"type":"item.completed","item":{"type":"agent_message","text":"next answer"}}'
+        yield '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":4,"output_tokens":2}}'
+
+    async def collect():
+        return [chunk async for chunk in run_codex_interactive_cli(
+            "next", cwd="/tmp", resume_session_id="thread-1", interactive_idle_timeout_s=1,
+        )]
+
+    with patch("agent.runners.CODEX_PATH", "codex"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        chunks = asyncio.run(collect())
+
+    assert chunks[0] == "next answer"
+    assert chunks[1]["_stats"]["session_id"] == "thread-1"
+
+
+def test_cursor_interactive_cli_uses_structured_print_resume_events():
+    async def fake_stream_lines(cmd, **kwargs):
+        assert cmd[:4] == ["cursor-agent", "--print", "--output-format", "stream-json"]
+        assert "--resume" in cmd
+        assert cmd[-2:] == ["thread-1", "next"]
+        yield '{"type":"system","session_id":"thread-1"}'
+        yield '{"type":"assistant","message":{"content":[{"type":"text","text":"next"}]},"timestamp_ms":1}'
+        yield '{"type":"result","session_id":"thread-1","usage":{"inputTokens":10,"outputTokens":2,"cacheReadTokens":4,"cacheWriteTokens":0}}'
+
+    async def collect():
+        return [chunk async for chunk in run_cursor_interactive_cli(
+            "next", cwd="/tmp", resume_session_id="thread-1", interactive_idle_timeout_s=1,
+        )]
+
+    with patch("agent.runners.CURSOR_PATH", "cursor-agent"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        chunks = asyncio.run(collect())
+
+    assert chunks[0] == "next"
+    assert chunks[1]["_stats"]["session_id"] == "thread-1"
+
+
+def test_opencode_interactive_cli_uses_structured_run_session_events():
+    async def fake_stream_lines(cmd, **kwargs):
+        assert cmd[:4] == ["opencode", "run", "--format", "json"]
+        assert cmd[-3:] == ["--session", "thread-1", "next"]
+        yield '{"type":"text","sessionID":"thread-1","part":{"text":"next"}}'
+        yield '{"type":"step_finish","sessionID":"thread-1","part":{"tokens":{"input":10,"output":2,"cache":{"read":4,"write":0}},"cost":0}}'
+
+    async def collect():
+        return [chunk async for chunk in run_opencode_interactive_cli(
+            "next", cwd="/tmp", resume_session_id="thread-1", interactive_idle_timeout_s=1,
+        )]
+
+    with patch("agent.runners.OPENCODE_PATH", "opencode"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        chunks = asyncio.run(collect())
+
+    assert chunks[0] == "next"
+    assert chunks[1]["_stats"]["session_id"] == "thread-1"
 
 
 def test_native_claude_removes_inherited_anthropic_auth_environment():
