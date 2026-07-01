@@ -47,7 +47,7 @@ from .config import (
 )
 from .backends import BACKENDS, _validate_backend, get_backend, public_backends
 from .runners import list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic
-from .history import list_history
+from .history import list_history, list_history_by_ids
 from .topic_queue import TopicDispatcher
 from .context_sync import sync_now, maybe_sync
 from .topics import normalize_topic_slug
@@ -75,7 +75,7 @@ from .stats_db import (
     delete_topic, delete_topic_agent, set_topic_hidden, get_topic_agents, get_topic_agent_history,
     clear_agent_sessions, get_agent_sessions,
     get_diff_revert_eligibility, record_git_diff_revert, get_message_gitdiff,
-    search_messages,
+    search_messages, search_prompts,
     get_recent_prompts,
     save_file_edit, get_file_edit_history, get_file_edit_by_id,
 )
@@ -842,15 +842,30 @@ async def history(offset: int = 0, limit: int = 5, topic: Optional[str] = None,
     return JSONResponse(list_history(topic=topic, agent=agent, adhoc=adhoc, offset=offset, limit=limit))
 
 
+@app.get("/history/by-ids")
+async def history_by_ids(ids: str = ""):
+    if not ids.strip():
+        return JSONResponse({"items": [], "total": 0})
+    try:
+        parsed = [int(x.strip()) for x in ids.split(",") if x.strip()]
+    except ValueError:
+        return JSONResponse({"error": "invalid ids"}, status_code=400)
+    parsed = parsed[:200]  # cap to prevent abuse
+    return JSONResponse(list_history_by_ids(parsed))
+
+
 @app.get("/search")
 async def search(q: str, limit: int = 100, topic: Optional[str] = None,
-                 agent: Optional[str] = None, adhoc: Optional[bool] = None):
+                 agent: Optional[str] = None, adhoc: Optional[bool] = None,
+                 role: str = "assistant"):
     if topic is not None:
         normalized = _normalize_topic_response(topic)
         if isinstance(normalized, JSONResponse):
             return normalized
         topic = normalized
     limit = min(limit, 100)
+    if role == "user":
+        return JSONResponse(search_prompts(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit))
     return JSONResponse(search_messages(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit))
 
 

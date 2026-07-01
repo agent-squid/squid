@@ -300,18 +300,6 @@
         <div id="pin-panel-list"></div>
       </div>
 
-      <!-- Bookmark inbox panel (opens above form) -->
-      <div id="bookmark-panel">
-        <div id="bookmark-panel-header">
-          <span class="settings-label">Bookmarks</span>
-          <div id="bookmark-panel-actions">
-            <input id="bookmark-search" type="text" placeholder="Search…" autocomplete="off" spellcheck="false">
-            <button id="bookmark-panel-clear" type="button" class="btn-ghost">Clear all</button>
-            <button id="bookmark-panel-close" type="button">✕</button>
-          </div>
-        </div>
-        <div id="bookmark-panel-list"></div>
-      </div>
 
       <div id="msg-modal">
         <div id="msg-modal-box">
@@ -320,6 +308,24 @@
             <button id="msg-modal-close" type="button">✕</button>
           </div>
           <div id="msg-modal-body"></div>
+        </div>
+      </div>
+
+      <div id="restart-modal">
+        <div id="restart-modal-box">
+          <div id="restart-modal-header">
+            <span class="settings-label">Restart Squid</span>
+            <button id="restart-modal-close" type="button">✕</button>
+          </div>
+          <div id="restart-modal-body">
+            <div id="restart-modal-title">Running prompts will be stopped</div>
+            <div id="restart-modal-copy">Restarting now will stop these active prompts before the server restarts.</div>
+            <div id="restart-modal-processes"></div>
+          </div>
+          <div id="restart-modal-footer">
+            <button id="restart-modal-cancel" type="button">Cancel</button>
+            <button id="restart-modal-confirm" type="button">Restart</button>
+          </div>
         </div>
       </div>
 
@@ -347,7 +353,7 @@
           <div id="chip-row">
             <div id="topic-chip"></div>
             <div id="chip-actions">
-              <button id="chip-bookmark-btn" class="composer-tool-btn" type="button" title="Bookmarks">
+              <button id="chip-bookmark-btn" class="composer-tool-btn" type="button" title="Bookmarked only" aria-pressed="false">
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 1h8a1 1 0 0 1 1 1v12l-5-2.8-5 2.8V2a1 1 0 0 1 1-1z"/></svg>
               </button>
               <button id="chip-prompts-btn" class="composer-tool-btn" type="button" title="User prompts only" aria-pressed="false">

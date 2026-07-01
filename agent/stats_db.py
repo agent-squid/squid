@@ -126,6 +126,15 @@ _TABLES = [
            DELETE FROM messages_fts WHERE rowid = NEW.id;
            INSERT INTO messages_fts(rowid, content) VALUES (NEW.id, NEW.content);
        END""",
+    """CREATE VIRTUAL TABLE IF NOT EXISTS prompts_fts USING fts5(
+        content, tokenize='unicode61'
+    )""",
+    """CREATE TRIGGER IF NOT EXISTS prompts_fts_sync
+       AFTER INSERT ON chat_messages
+       WHEN NEW.role = 'user' AND NEW.content IS NOT NULL
+       BEGIN
+           INSERT INTO prompts_fts(rowid, content) VALUES (NEW.id, NEW.content);
+       END""",
 ]
 
 # v0.1 baseline — _TABLES above reflects the complete schema.
@@ -136,6 +145,11 @@ _MIGRATIONS: list[str] = [
     "DROP INDEX IF EXISTS idx_chat_messages_session_turns",
     "ALTER TABLE chat_messages ADD COLUMN lookback INTEGER DEFAULT 0",
     "ALTER TABLE chat_messages ADD COLUMN status_raw TEXT",
+    # prompts_fts backfill — safe to re-run; inserts only missing rows
+    """INSERT INTO prompts_fts(rowid, content)
+       SELECT id, content FROM chat_messages
+       WHERE role='user' AND content IS NOT NULL
+         AND id NOT IN (SELECT rowid FROM prompts_fts)""",
 ]
 
 _DATA_MIGRATIONS: list[tuple[str, str]] = [
@@ -964,6 +978,44 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
     }
 
 
+def get_history_items_by_ids(ids: list[int]) -> list[dict]:
+    if not ids:
+        return []
+    placeholders = ",".join("?" * len(ids))
+    stat_keys = {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
+                 "history_input_tokens", "cost_usd", "duration_ms", "lookback",
+                 "quota_before", "quota_after", "quota_delta",
+                 "msg_quota_before", "msg_quota_after", "backend", "model", "cwd"}
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""SELECT m.id, m.role, m.topic, m.agent,
+                       m.content, m.status, m.adhoc, m.session_id,
+                       m.context, m.status_raw, m.created_at AS timestamp, m.reply_to,
+                       m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
+                       u.content AS prompt, u.context AS prompt_context,
+                       m.session_turn_index AS session_turn_count,
+                       s.input_tokens, s.output_tokens, s.cache_read_tokens,
+                       s.cache_write_tokens, s.history_input_tokens,
+                       s.cost_usd, s.duration_ms, s.lookback,
+                       s.quota_before, s.quota_after, s.backend, s.model, s.cwd
+                FROM chat_messages m
+                LEFT JOIN chat_messages u ON m.reply_to = u.id
+                LEFT JOIN session_stats s ON m.session_id = s.session_id
+                WHERE m.id IN ({placeholders})
+                ORDER BY m.id ASC""",
+            ids,
+        ).fetchall()
+    items = []
+    for r in rows:
+        row = dict(r)
+        stats = {k: row.pop(k) for k in stat_keys}
+        if row.get("session_id") and any(v is not None for v in stats.values()):
+            stats["session_id"] = row["session_id"]
+            row["stats"] = stats
+        items.append(row)
+    return items
+
+
 def _build_fts_match(q: str) -> str:
     tokens = [t.replace('"', '') for t in q.strip().split()]
     tokens = [t for t in tokens if t]
@@ -1021,6 +1073,70 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
                  "history_input_tokens", "cost_usd", "duration_ms", "lookback",
                  "quota_before", "quota_after", "quota_delta",
                  "msg_quota_before", "msg_quota_after", "backend", "model", "cwd"}
+    items = []
+    for r in rows:
+        row = dict(r)
+        stats = {k: row.pop(k) for k in stat_keys}
+        if row.get("session_id") and any(v is not None for v in stats.values()):
+            stats["session_id"] = row["session_id"]
+            row["stats"] = stats
+        items.append(row)
+
+    return {"items": items}
+
+
+def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = None,
+                   adhoc: Optional[bool] = None, limit: int = 100) -> dict:
+    """Search user prompts via prompts_fts. Returns assistant reply items (same shape as
+    search_messages) so the frontend can render them with appendPromptOnlyHistoryItem."""
+    terms = _build_fts_match(q)
+    if not terms:
+        return {"items": []}
+
+    where_parts = [
+        "m.role = 'assistant'",
+        "m.status = 'done'",
+        "m.reply_to IN (SELECT rowid FROM prompts_fts WHERE prompts_fts MATCH ?)",
+    ]
+    params: list = [terms]
+
+    if topic:
+        where_parts.append("m.topic = ?")
+        params.append(topic)
+    if agent:
+        where_parts.append("m.agent = ?")
+        params.append(agent)
+    if adhoc is not None:
+        where_parts.append("COALESCE(m.adhoc, 0) = ?")
+        params.append(1 if adhoc else 0)
+
+    where = "WHERE " + " AND ".join(where_parts)
+
+    stat_keys = {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
+                 "history_input_tokens", "cost_usd", "duration_ms", "lookback",
+                 "quota_before", "quota_after", "quota_delta",
+                 "msg_quota_before", "msg_quota_after", "backend", "model", "cwd"}
+
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""SELECT m.id, m.role, m.topic, m.agent,
+                       m.content, m.status, m.adhoc, m.session_id,
+                       m.context, m.status_raw, m.created_at AS timestamp, m.reply_to,
+                       m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
+                       u.content AS prompt, u.context AS prompt_context,
+                       m.session_turn_index AS session_turn_count,
+                       s.input_tokens, s.output_tokens, s.cache_read_tokens,
+                       s.cache_write_tokens, s.history_input_tokens,
+                       s.cost_usd, s.duration_ms, s.lookback,
+                       s.quota_before, s.quota_after, s.backend, s.model, s.cwd
+                FROM chat_messages m
+                LEFT JOIN chat_messages u ON m.reply_to = u.id
+                LEFT JOIN session_stats s ON m.session_id = s.session_id
+                {where}
+                ORDER BY m.id DESC LIMIT ?""",
+            params + [limit],
+        ).fetchall()
+
     items = []
     for r in rows:
         row = dict(r)

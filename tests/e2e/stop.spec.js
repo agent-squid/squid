@@ -211,7 +211,7 @@ test('/clear warning can be accepted before sending clear command', async ({ pag
 test('/restart warns when any prompt is running and cancels cleanly', async ({ page }) => {
   await mockBackend(page);
   await page.route('**/processes', r => r.fulfill({ json: [
-    { msg_id: 854, topic: 'other', agent: 'codex', adhoc: false, state: 'running' },
+    { msg_id: 854, topic: 'other', agent: 'codex', adhoc: false, state: 'running', prompt_preview: 'working now' },
   ] }));
 
   const cmdBodies = [];
@@ -219,15 +219,14 @@ test('/restart warns when any prompt is running and cancels cleanly', async ({ p
     cmdBodies.push(route.request().postDataJSON());
     await route.fulfill({ json: { ok: true } });
   });
-  page.on('dialog', async dialog => {
-    expect(dialog.message()).toContain('restart will stop all currently running prompts');
-    await dialog.dismiss();
-  });
 
   await page.goto('/');
   await page.fill('#input', '/restart');
   await page.keyboard.press('Enter');
-  await page.waitForTimeout(200);
+  await expect(page.locator('#restart-modal.open')).toBeVisible();
+  await expect(page.locator('#restart-modal-processes')).toContainText('#other@codex');
+  await expect(page.locator('#restart-modal-processes')).toContainText('working now');
+  await page.locator('#restart-modal-cancel').click();
 
   expect(cmdBodies).toHaveLength(0);
   await expect(page.locator('.cmd-feedback')).toContainText('restart cancelled');
@@ -236,7 +235,7 @@ test('/restart warns when any prompt is running and cancels cleanly', async ({ p
 test('/restart warning can be accepted before sending restart command', async ({ page }) => {
   await mockBackend(page);
   await page.route('**/processes', r => r.fulfill({ json: [
-    { msg_id: 854, topic: 'other', agent: 'codex', adhoc: false, state: 'running' },
+    { msg_id: 854, topic: 'other', agent: 'codex', adhoc: false, state: 'running', prompt_preview: 'working now' },
   ] }));
 
   const cmdBodies = [];
@@ -244,14 +243,12 @@ test('/restart warning can be accepted before sending restart command', async ({
     cmdBodies.push(route.request().postDataJSON());
     await route.fulfill({ json: { ok: true } });
   });
-  page.on('dialog', async dialog => {
-    expect(dialog.message()).toContain('restart will stop all currently running prompts');
-    await dialog.accept();
-  });
 
   await page.goto('/');
   await page.fill('#input', '/restart');
   await page.keyboard.press('Enter');
+  await expect(page.locator('#restart-modal.open')).toBeVisible();
+  await page.locator('#restart-modal-confirm').click();
   await page.waitForTimeout(200);
 
   expect(cmdBodies).toHaveLength(1);

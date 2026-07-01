@@ -10,7 +10,6 @@ const acEl         = document.getElementById('autocomplete');
 const pinBtn          = document.getElementById('pin-btn');
 const pinPanel        = document.getElementById('pin-panel');
 const pinCountEl      = document.getElementById('pin-count');
-const bookmarkPanel   = document.getElementById('bookmark-panel');
 const bookmarkBtn     = document.getElementById('chip-bookmark-btn');
 
 window.scrollTo(0, 0);
@@ -486,6 +485,9 @@ chipStashBtn.addEventListener('click', async e => {
   const parsed = parseInput(text);
   const message = parsed.message.trim();
   if (!message) {
+    _acRender(promptHistoryAutocompleteItems(matchingPromptHistory('', 8)), 'Recent Prompts');
+    acSel = -1;
+    _acHighlight();
     input.focus();
     return;
   }
@@ -585,6 +587,10 @@ function updatePromptOnlyButton() {
 
 function togglePromptOnlyHistory() {
   promptOnlyHistory = !promptOnlyHistory;
+  if (promptOnlyHistory && bookmarkOnlyHistory) {
+    bookmarkOnlyHistory = false;
+    updateBookmarkButton();
+  }
   updatePromptOnlyButton();
   if (searchActive) {
     clearSearch();
@@ -648,7 +654,39 @@ function reloadHistory(filter = {}) {
     if (!preserveForLive.has(el)) el.remove();
   });
   _updateFilterBadge();
-  initHistoryScroll();
+  if (bookmarkOnlyHistory) {
+    loadBookmarkHistory();
+  } else {
+    initHistoryScroll();
+  }
+}
+
+async function loadBookmarkHistory() {
+  const bookmarked = getBookmarkedItems();
+  if (!bookmarked.length) {
+    refreshDateDividers();
+    return;
+  }
+  const ids = bookmarked.map(i => i.id).join(',');
+  let data;
+  try {
+    const res = await fetch(`/history/by-ids?ids=${ids}`);
+    data = await res.json();
+  } catch {
+    return;
+  }
+  const { items } = data;
+  const fragment = document.createDocumentFragment();
+  for (const item of items) {
+    if (!item.content && item.status !== 'pending') continue;
+    appendHistoryItem(item, fragment);
+  }
+  messages.appendChild(fragment);
+  messages.scrollTop = messages.scrollHeight;
+  updateInContextMarkers();
+  refreshAllRevertButtons();
+  evaluateAdvisory();
+  refreshDateDividers();
 }
 
 function _updateFilterBadge() {
@@ -788,6 +826,7 @@ function createTopSentinel() {
 }
 
 async function loadHistory() {
+  if (bookmarkOnlyHistory) return;
   if (historyExhausted || historyLoading) return;
   historyLoading = true;
   const generation = historyGeneration;
@@ -795,9 +834,10 @@ async function loadHistory() {
   let data;
   try {
     let url = `/history?offset=${historyOffset}&limit=5`;
-    if (historyFilter.topic) url += `&topic=${encodeURIComponent(historyFilter.topic)}`;
-    if (historyFilter.agent) url += `&agent=${encodeURIComponent(historyFilter.agent)}`;
-    if (historyFilter.adhoc != null) url += `&adhoc=${historyFilter.adhoc}`;
+    const applyRouteFilter = !promptOnlyHistory && !bookmarkOnlyHistory;
+    if (applyRouteFilter && historyFilter.topic) url += `&topic=${encodeURIComponent(historyFilter.topic)}`;
+    if (applyRouteFilter && historyFilter.agent) url += `&agent=${encodeURIComponent(historyFilter.agent)}`;
+    if (applyRouteFilter && historyFilter.adhoc != null) url += `&adhoc=${historyFilter.adhoc}`;
     const res = await fetch(url);
     data = await res.json();
   } catch {
@@ -1215,10 +1255,12 @@ async function loadSearchResults() {
   if (searchLoading || !searchState) return;
   searchLoading = true;
 
-  let url = `/search?limit=100&q=${encodeURIComponent(searchState.keywords)}`;
-  if (searchState.topic) url += `&topic=${encodeURIComponent(searchState.topic)}`;
-  if (searchState.agent) url += `&agent=${encodeURIComponent(searchState.agent)}`;
-  if (searchState.adhoc !== null && searchState.adhoc !== undefined) url += `&adhoc=${searchState.adhoc}`;
+  const searchRole = promptOnlyHistory ? 'user' : 'assistant';
+  let url = `/search?limit=100&q=${encodeURIComponent(searchState.keywords)}&role=${searchRole}`;
+  const applyRouteFilter = !promptOnlyHistory && !bookmarkOnlyHistory;
+  if (applyRouteFilter && searchState.topic) url += `&topic=${encodeURIComponent(searchState.topic)}`;
+  if (applyRouteFilter && searchState.agent) url += `&agent=${encodeURIComponent(searchState.agent)}`;
+  if (applyRouteFilter && searchState.adhoc !== null && searchState.adhoc !== undefined) url += `&adhoc=${searchState.adhoc}`;
 
   let data;
   try {
@@ -1234,10 +1276,17 @@ async function loadSearchResults() {
   if (!Array.isArray(items)) { searchLoading = false; return; }
 
   const kws = searchState.keywords.trim().split(/\s+/).filter(Boolean);
+  const bookmarkedIds = bookmarkOnlyHistory ? new Set(getBookmarkedItems().map(i => i.id)) : null;
   const fragment = document.createDocumentFragment();
   for (const item of [...items].reverse()) {
-    if (!item.content) continue;
-    const el = appendHistoryItem(item, fragment);
+    if (!item.content && !item.prompt) continue;
+    if (bookmarkedIds && !bookmarkedIds.has(item.id)) continue;
+    let el;
+    if (promptOnlyHistory) {
+      el = appendPromptOnlyHistoryItem(item, fragment);
+    } else {
+      el = appendHistoryItem(item, fragment);
+    }
     if (el) highlightTextNodes(el, kws);
   }
   [...fragment.children].forEach(el => el.classList.add('search-result-item'));
@@ -1344,9 +1393,15 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
   }
 
   if (cmd.command === 'clear' || cmd.command === 'compact') {
-    if (await commandWouldStopRunningPrompt(cmd.command, topic, agent)) {
+    const stoppingRows = await commandWouldStopRunningPrompt(cmd.command, topic, agent);
+    if (stoppingRows.length) {
       const route = agent ? `#${topic}@${agent}` : `#${topic}`;
-      const ok = confirm(`${cmd.command} will stop the prompt currently running on ${route} before clearing the session.\n\nContinue?`);
+      const ok = await confirmRestartWithRunningPrompts(stoppingRows, {
+        header: cmd.command === 'compact' ? 'Compact Session' : 'Clear Session',
+        title: 'Running prompt will be stopped',
+        copy: `${cmd.command === 'compact' ? 'Compacting' : 'Clearing'} ${route} will stop the prompt currently running before clearing the session.`,
+        confirmLabel: cmd.command === 'compact' ? 'Compact' : 'Clear',
+      });
       if (!ok) {
         showCmdFeedback(`${cmd.command} cancelled`);
         return;
@@ -1369,8 +1424,9 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
     return;
   }
 
-  if (cmd.command === 'restart' && await commandWouldStopAnyRunningPrompt()) {
-    const ok = confirm('restart will stop all currently running prompts.\n\nContinue?');
+  if (cmd.command === 'restart') {
+    const runningPrompts = await runningPromptsForRestart();
+    const ok = !runningPrompts.length || await confirmRestartWithRunningPrompts(runningPrompts);
     if (!ok) {
       showCmdFeedback('restart cancelled');
       return;
@@ -1419,13 +1475,13 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
 }
 
 async function commandWouldStopRunningPrompt(command, topic, agent) {
-  if (command !== 'clear' && command !== 'compact') return false;
+  if (command !== 'clear' && command !== 'compact') return [];
   try {
     const res = await fetch('/processes');
-    if (!res.ok) return false;
+    if (!res.ok) return [];
     const rows = await res.json();
-    if (!Array.isArray(rows)) return false;
-    return rows.some(row => {
+    if (!Array.isArray(rows)) return [];
+    return rows.filter(row => {
       if (!row || isIdleProc(row)) return false;
       if (row.topic !== topic) return false;
       if (Boolean(row.adhoc)) return false;
@@ -1433,20 +1489,64 @@ async function commandWouldStopRunningPrompt(command, topic, agent) {
       return true;
     });
   } catch {
-    return false;
+    return [];
   }
 }
 
-async function commandWouldStopAnyRunningPrompt() {
+async function runningPromptsForRestart() {
   try {
     const res = await fetch('/processes');
-    if (!res.ok) return false;
+    if (!res.ok) return [];
     const rows = await res.json();
-    if (!Array.isArray(rows)) return false;
-    return rows.some(row => row && !isIdleProc(row));
+    if (!Array.isArray(rows)) return [];
+    return rows.filter(row => row && !isIdleProc(row));
   } catch {
-    return false;
+    return [];
   }
+}
+
+function confirmRestartWithRunningPrompts(rows, {
+  header = 'Restart Squid',
+  title = 'Running prompts will be stopped',
+  copy = 'Restarting now will stop these active prompts before the server restarts.',
+  confirmLabel = 'Restart',
+} = {}) {
+  return new Promise(resolve => {
+    const modal = document.getElementById('restart-modal');
+    const list = document.getElementById('restart-modal-processes');
+    const confirmBtn = document.getElementById('restart-modal-confirm');
+    document.querySelector('#restart-modal .settings-label').textContent = header;
+    document.getElementById('restart-modal-title').textContent = title;
+    document.getElementById('restart-modal-copy').textContent = copy;
+    confirmBtn.textContent = confirmLabel;
+    const close = (ok) => {
+      modal.classList.remove('open');
+      resolve(ok);
+    };
+    list.innerHTML = rows.map(row => {
+      const route = `#${escapeHtml(row.topic || 'default')}${row.agent ? `@${escapeHtml(row.agent)}` : ''}${row.adhoc ? '!' : ''}`;
+      const preview = escapeHtml(row.prompt_preview || `message #${row.msg_id || ''}`.trim());
+      const duration = row.duration_s != null ? `${escapeHtml(String(row.duration_s))}s` : '';
+      return `<div class="restart-process-row">
+        <span class="proc-dot"></span>
+        <span class="restart-process-route">${route}</span>
+        <span class="restart-process-preview">${preview}${duration ? ` · ${duration}` : ''}</span>
+      </div>`;
+    }).join('');
+    confirmBtn.disabled = false;
+    modal.classList.add('open');
+    confirmBtn.focus();
+    modal._resolveRestart = close;
+  });
+}
+
+function closeRestartModal(ok = false) {
+  const modal = document.getElementById('restart-modal');
+  if (!modal) return;
+  const resolve = modal._resolveRestart;
+  modal._resolveRestart = null;
+  modal.classList.remove('open');
+  if (resolve) resolve(ok);
 }
 
 function showCmdFeedback(text) {
@@ -1722,7 +1822,6 @@ function semanticRouteBackspace() {
     const before = route.slice(0, caret);
     const after = route.slice(caret);
     const agentMatch = before.match(/^(#\w+@)\w+$/);
-    const topicMatch = before.match(/^(#)\w+$/);
 
     if (agentMatch && (caret === routeEnd || after.startsWith('!'))) {
       nextRoute = agentMatch[1] + after;
@@ -1730,9 +1829,6 @@ function semanticRouteBackspace() {
     } else if (before.endsWith('@') && /^#\w+@$/.test(before) && (caret === routeEnd || after.startsWith('!'))) {
       nextRoute = before.slice(0, -1) + after;
       nextCaret = before.length - 1;
-    } else if (topicMatch && (caret === routeEnd || after.startsWith('!'))) {
-      nextRoute = topicMatch[1] + after;
-      nextCaret = 1;
     }
   }
 
@@ -1748,10 +1844,11 @@ function closeEscSurfaces() {
   if (searchActive) { clearSearch(); closed = true; }
   if (procStatusPopup?.classList.contains('open')) { procStatusPopup.classList.remove('open'); closed = true; }
   if (pinPanel.classList.contains('open')) { closePinPanel(); closed = true; }
-  if (bookmarkPanel.classList.contains('open')) { closeBookmarkPanel(); closed = true; }
   if (helpPanel.classList.contains('open')) { closeHelp(); closed = true; }
   const msgModal = document.getElementById('msg-modal');
   if (msgModal?.classList.contains('open')) { msgModal.classList.remove('open'); closed = true; }
+  const restartModal = document.getElementById('restart-modal');
+  if (restartModal?.classList.contains('open')) { closeRestartModal(false); closed = true; }
   if (document.getElementById('memory-modal')?.classList.contains('open')) { closeMemoryEditor(); closed = true; }
   if (document.getElementById('topic-delete-modal')?.classList.contains('open')) { closeTopicDeleteModal(); closed = true; }
   return closed;
@@ -3231,6 +3328,7 @@ function appendPromptOnlyHistoryItem(item, container) {
   bubble.dataset.topic = item.topic || 'default';
   if (item.agent) bubble.dataset.agent = item.agent;
   if (item.session_id) bubble.dataset.sessionId = item.session_id;
+  if (item.timestamp) bubble.dataset.ts = item.timestamp;
   if (item.id) {
     const openBtn = document.createElement('button');
     openBtn.type = 'button';
@@ -3426,7 +3524,7 @@ function fmtDate(d) {
 
 function refreshDateDividers() {
   document.querySelectorAll('#messages .date-divider').forEach(el => el.remove());
-  const bubbles = [...document.querySelectorAll('#messages .msg.assistant.history-item[data-ts]')];
+  const bubbles = [...document.querySelectorAll('#messages .history-item[data-ts]')];
   let lastKey = null;
   for (const el of bubbles) {
     const d = new Date(el.dataset.ts);
@@ -6456,7 +6554,6 @@ async function saveMemoryEditor() {
 }
 
 function openPinPanel() {
-  if (bookmarkPanel.classList.contains('open')) closeBookmarkPanel();
   updateInContextMarkers();
   renderPinPanel();
   pinPanel.classList.add('open');
@@ -6472,68 +6569,26 @@ function getBookmarkedItems() {
 }
 function setBookmarkedItems(items) { localStorage.setItem('bookmarkedItems', JSON.stringify(items)); }
 
-let _bookmarkQuery = '';
+let bookmarkOnlyHistory = false;
 
-function renderBookmarkPanel() {
-  const items = getBookmarkedItems();
-  const listEl = document.getElementById('bookmark-panel-list');
-  const clearBtn = document.getElementById('bookmark-panel-clear');
-  if (clearBtn) clearBtn.disabled = items.length === 0;
+function updateBookmarkButton() {
+  bookmarkBtn.setAttribute('aria-pressed', bookmarkOnlyHistory ? 'true' : 'false');
+  bookmarkBtn.title = bookmarkOnlyHistory ? 'Show full thread' : 'Bookmarked only';
+}
 
-  const q = _bookmarkQuery.trim().toLowerCase();
-  const filtered = q ? items.filter(i =>
-    (i.content || '').toLowerCase().includes(q) || (i.topic || '').toLowerCase().includes(q)
-  ) : items;
-
-  if (!filtered.length) {
-    listEl.innerHTML = items.length === 0
-      ? '<div style="padding:0.5rem 0.8rem;color:#484858;font-size:0.78em">No bookmarks yet.<br>Click <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" style="vertical-align:-0.1em"><path d="M4 1h8a1 1 0 0 1 1 1v12l-5-2.8-5 2.8V2a1 1 0 0 1 1-1z"/></svg> on any response to save it.</div>'
-      : '<div style="padding:0.5rem 0.8rem;color:#484858;font-size:0.78em">No matches.</div>';
-    return;
+function toggleBookmarkOnlyHistory() {
+  bookmarkOnlyHistory = !bookmarkOnlyHistory;
+  if (bookmarkOnlyHistory && promptOnlyHistory) {
+    promptOnlyHistory = false;
+    updatePromptOnlyButton();
   }
-
-  listEl.innerHTML = filtered.map(item => {
-    const tag = item.topic ? `#${escapeHtml(item.topic)}${item.agent ? `@${escapeHtml(item.agent)}` : ''}` : '';
-    const preview = escapeHtml((item.content || '').replace(/\s+/g, ' ').slice(0, 120));
-    return `<div class="bookmark-item" data-msg-id="${item.id}">
-      <span class="bookmark-item-tag">${tag}</span>
-      <span class="bookmark-item-preview">${preview}</span>
-      <button class="bookmark-item-remove" data-id="${item.id}" type="button">✕</button>
-    </div>`;
-  }).join('');
-
-  listEl.querySelectorAll('.bookmark-item').forEach(row => {
-    row.addEventListener('click', e => {
-      if (e.target.closest('.bookmark-item-remove')) return;
-      const id = parseInt(row.dataset.msgId);
-      closeBookmarkPanel();
-      const el = document.querySelector(`.msg.assistant[data-msg-id="${id}"]`);
-      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    });
-  });
-  listEl.querySelectorAll('.bookmark-item-remove').forEach(btn => {
-    btn.addEventListener('mousedown', e => {
-      e.preventDefault();
-      e.stopPropagation();
-      const id = parseInt(btn.dataset.id);
-      setBookmarkedItems(getBookmarkedItems().filter(i => i.id !== id));
-      document.querySelectorAll(`.msg-bookmark-btn[data-msg-id="${id}"]`).forEach(b => { b.classList.remove('bookmarked'); b.title = 'Bookmark'; });
-      renderBookmarkPanel();
-    });
-  });
-}
-
-function openBookmarkPanel() {
-  if (pinPanel.classList.contains('open')) closePinPanel();
-  renderBookmarkPanel();
-  bookmarkPanel.classList.add('open');
-  bookmarkBtn.classList.add('active');
-  document.getElementById('bookmark-search').value = '';
-  _bookmarkQuery = '';
-}
-function closeBookmarkPanel() {
-  bookmarkPanel.classList.remove('open');
-  bookmarkBtn.classList.remove('active');
+  updateBookmarkButton();
+  if (searchActive) {
+    document.querySelectorAll('.search-result-item, .date-divider').forEach(el => el.remove());
+    loadSearchResults();
+  } else {
+    reloadHistory(historyFilter);
+  }
 }
 
 function addBookmarkButton(bubbleEl, msgId, topic, agent) {
@@ -6563,27 +6618,14 @@ function addBookmarkButton(bubbleEl, msgId, topic, agent) {
       btn.classList.add('bookmarked');
       btn.title = 'Remove bookmark';
     }
-    if (bookmarkPanel.classList.contains('open')) renderBookmarkPanel();
   });
   const header = bubbleEl.querySelector('.response-header');
   (header || bubbleEl).appendChild(btn);
 }
 
 function initBookmark() {
-  bookmarkBtn.addEventListener('click', () => {
-    if (bookmarkPanel.classList.contains('open')) closeBookmarkPanel();
-    else openBookmarkPanel();
-  });
-  document.getElementById('bookmark-panel-close').addEventListener('click', closeBookmarkPanel);
-  document.getElementById('bookmark-panel-clear').addEventListener('click', () => {
-    setBookmarkedItems([]);
-    document.querySelectorAll('.msg-bookmark-btn.bookmarked').forEach(b => { b.classList.remove('bookmarked'); b.title = 'Bookmark'; });
-    renderBookmarkPanel();
-  });
-  document.getElementById('bookmark-search').addEventListener('input', e => {
-    _bookmarkQuery = e.target.value;
-    renderBookmarkPanel();
-  });
+  bookmarkBtn.addEventListener('click', toggleBookmarkOnlyHistory);
+  updateBookmarkButton();
 }
 
 function addPinButton(bubbleEl, msgId, topic, agent, sessionId = null) {
@@ -6646,6 +6688,12 @@ function initPin() {
   });
   document.getElementById('msg-modal').addEventListener('mousedown', e => {
     if (e.target === document.getElementById('msg-modal')) document.getElementById('msg-modal').classList.remove('open');
+  });
+  document.getElementById('restart-modal-close').addEventListener('click', () => closeRestartModal(false));
+  document.getElementById('restart-modal-cancel').addEventListener('click', () => closeRestartModal(false));
+  document.getElementById('restart-modal-confirm').addEventListener('click', () => closeRestartModal(true));
+  document.getElementById('restart-modal').addEventListener('mousedown', e => {
+    if (e.target === document.getElementById('restart-modal')) closeRestartModal(false);
   });
   document.getElementById('topic-delete-modal-close').addEventListener('click', closeTopicDeleteModal);
   document.getElementById('topic-delete-cancel').addEventListener('click', closeTopicDeleteModal);
@@ -6782,7 +6830,6 @@ document.addEventListener('keydown', e => {
 document.addEventListener('click', e => {
   if (!acEl.contains(e.target) && e.target !== input) hideAutocomplete();
   if (!pinPanel.contains(e.target) && !pinBtn.contains(e.target)) closePinPanel();
-  if (!bookmarkPanel.contains(e.target) && !bookmarkBtn.contains(e.target)) closeBookmarkPanel();
   const ctxPopup = document.getElementById('ctx-popup');
   const inSecondary = e.target.closest('#msg-modal, #memory-modal, #topic-delete-modal');
   const secondaryOpen = document.getElementById('msg-modal')?.classList.contains('open')

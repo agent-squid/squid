@@ -63,6 +63,14 @@ FORCE=0
 for arg in "$@"; do [[ "$arg" == "--force" || "$arg" == "--restart" ]] && FORCE=1; done
 
 if [[ "$FORCE" == "1" ]]; then
+  # Warn if there are active prompts running
+  ACTIVE_COUNT=$(curl -sf "http://127.0.0.1:${PORT}/processes" 2>/dev/null \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d))" 2>/dev/null || echo "0")
+  if [[ "$ACTIVE_COUNT" -gt 0 ]]; then
+    echo "⚠ warning: $ACTIVE_COUNT prompt(s) still running."
+    read -r -p "Restart anyway and kill them? [y/N] " CONFIRM
+    [[ "$CONFIRM" =~ ^[Yy]$ ]] || { echo "aborted."; exit 1; }
+  fi
   # Kill by PID file
   if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     echo "stopping squid (PID $(cat "$PID_FILE"))..."

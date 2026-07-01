@@ -497,7 +497,7 @@ test('Backspace on an empty prompt keeps expanding the topic chip as before', as
   await expect(page.locator('#topic-chip')).not.toHaveClass(/visible/);
 });
 
-test('Backspace in an expanded route deletes route segments semantically', async ({ page }) => {
+test('Backspace in an expanded route deletes agent semantically and topic by char', async ({ page }) => {
   await mockBackend(page);
   await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
     topic: 'squid', agent: 'codex', adhoc: true, lookback: 12,
@@ -520,8 +520,8 @@ test('Backspace in an expanded route deletes route segments semantically', async
   await composer.press('Backspace');
   await expect(composer).toHaveValue('#squid fix the bug');
   await composer.press('Backspace');
-  await expect(composer).toHaveValue('# fix the bug');
-  await expect.poll(() => composer.evaluate(input => input.selectionStart)).toBe(1);
+  await expect(composer).toHaveValue('#squi fix the bug');
+  await expect.poll(() => composer.evaluate(input => input.selectionStart)).toBe(5);
 });
 
 test('Backspace inside a populated prompt keeps the topic chip and edits normally', async ({ page }) => {

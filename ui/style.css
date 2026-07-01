@@ -1454,6 +1454,95 @@ body {
   border-color: #7a2020;
   color: #fff;
 }
+
+#restart-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 116;
+  background: rgba(0, 0, 0, 0.55);
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+#restart-modal.open { display: flex; }
+#restart-modal-box {
+  width: min(440px, 96%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#restart-modal-header,
+#restart-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid var(--surface-2);
+}
+#restart-modal-footer {
+  justify-content: flex-end;
+  border-top: 1px solid var(--surface-2);
+  border-bottom: 0;
+}
+#restart-modal-close {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  padding: 0.1rem 0.3rem;
+  cursor: pointer;
+}
+#restart-modal-close:hover { color: #999; }
+#restart-modal-body { padding: 0.8rem 0.75rem; }
+#restart-modal-title {
+  color: #ddd;
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+}
+#restart-modal-copy {
+  color: #777;
+  font-size: var(--text-body);
+  line-height: 1.45;
+}
+#restart-modal-processes {
+  margin-top: 0.65rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.restart-process-row {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 0.45rem;
+  align-items: center;
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: var(--text-body);
+}
+.restart-process-route {
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+.restart-process-preview {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#restart-modal-cancel,
+#restart-modal-confirm {
+  border-radius: 6px;
+  padding: 0.28rem 0.75rem;
+}
+#restart-modal-confirm {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
 #topic-delete-confirm:hover {
   background: #a02828;
   border-color: #a02828;
@@ -1992,7 +2081,7 @@ body {
   align-items: center;
   gap: 0.75rem;
   padding: 0.5rem 1rem;
-  color: #484858;
+  color: var(--text-lo);
   font-size: var(--text-sm);
   user-select: none;
   pointer-events: none;
@@ -2002,8 +2091,9 @@ body {
   content: '';
   flex: 1;
   height: 1px;
-  background: var(--border-faint);
+  background: var(--border);
 }
+.date-divider:first-child { padding-top: 1.5rem; }
 
 /* ── Bookmark button (on assistant messages) ─────────────────────────────── */
 .msg-bookmark-btn {
@@ -2022,93 +2112,6 @@ body {
 .msg-pin-btn + .msg-bookmark-btn { margin-left: -0.4rem; }
 .msg-bookmark-btn.bookmarked { color: var(--accent); }
 
-/* ── Bookmark inbox panel ────────────────────────────────────────────────── */
-#bookmark-panel {
-  display: none;
-  flex-direction: column;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow: hidden;
-  max-height: 260px;
-  flex-shrink: 0;
-}
-#bookmark-panel.open { display: flex; }
-#bookmark-panel-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0.3rem 0.7rem;
-  border-bottom: 1px solid var(--surface-2);
-  flex-shrink: 0;
-}
-#bookmark-panel-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-}
-#bookmark-search {
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  color: var(--text-mid);
-  font-size: var(--text-sm);
-  padding: 0.15rem 0.45rem;
-  width: 120px;
-  outline: none;
-}
-#bookmark-search:focus { border-color: var(--accent); }
-#bookmark-panel-clear { font-size: var(--text-sm); padding: 0.12rem 0.45rem; }
-#bookmark-panel-clear:disabled { color: #3f3f4a; border-color: #25252f; }
-#bookmark-panel-close {
-  background: transparent;
-  border: none;
-  color: var(--text-ghost);
-  cursor: pointer;
-  font-size: var(--text-body);
-  padding: 0.1rem 0.3rem;
-}
-#bookmark-panel-close:hover { color: var(--text-mid); }
-#bookmark-panel-list {
-  overflow-y: auto;
-  flex: 1;
-  font-size: var(--text-md);
-  padding: 0.2rem 0;
-  scrollbar-width: thin;
-}
-.bookmark-item {
-  display: flex;
-  align-items: baseline;
-  gap: 0.4rem;
-  padding: 0.25rem 0.7rem;
-  cursor: pointer;
-}
-.bookmark-item:hover { background: var(--surface-3); }
-.bookmark-item-tag {
-  font-family: ui-monospace, monospace;
-  font-size: var(--text-body);
-  color: var(--accent-dim);
-  flex-shrink: 0;
-}
-.bookmark-item-preview {
-  color: var(--text-lo);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
-  min-width: 0;
-}
-.bookmark-item-remove {
-  background: none;
-  border: none;
-  color: #484858;
-  cursor: pointer;
-  font-size: var(--text-body);
-  padding: 0 0.15rem;
-  line-height: 1;
-  border-radius: 3px;
-  flex-shrink: 0;
-}
 
 
 /* topics view */
