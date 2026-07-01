@@ -858,7 +858,7 @@ async def history_by_ids(ids: str = ""):
 @app.get("/search")
 async def search(q: str, limit: int = 100, topic: Optional[str] = None,
                  agent: Optional[str] = None, adhoc: Optional[bool] = None,
-                 role: str = "assistant"):
+                 role: str = "assistant", bookmarked: bool = False):
     if topic is not None:
         normalized = _normalize_topic_response(topic)
         if isinstance(normalized, JSONResponse):
@@ -866,8 +866,8 @@ async def search(q: str, limit: int = 100, topic: Optional[str] = None,
         topic = normalized
     limit = min(limit, 100)
     if role == "user":
-        return JSONResponse(search_prompts(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit))
-    return JSONResponse(search_messages(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit))
+        return JSONResponse(search_prompts(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit, bookmarked=bookmarked))
+    return JSONResponse(search_messages(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit, bookmarked=bookmarked))
 
 
 @app.get("/prompts/recent")

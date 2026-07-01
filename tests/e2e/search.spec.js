@@ -25,6 +25,48 @@ test('explicit #all search shows its scope and restores the full command', async
   await expect(page.locator('#input')).toHaveValue('/s #all claude login');
 });
 
+test('search and filter tags align and search icon highlights while searching', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+
+  await page.fill('#input', '/s #all claude login');
+  await page.keyboard.press('Enter');
+
+  await expect(page.locator('#filter-badge')).toHaveClass(/active/);
+  await expect(page.locator('#search-bar')).toHaveClass(/active/);
+  await expect(page.locator('#chip-search-btn')).toHaveClass(/active/);
+  await expect(page.locator('#chip-search-btn')).toHaveAttribute('aria-pressed', 'true');
+
+  const heights = await page.evaluate(() => ({
+    filter: document.querySelector('#filter-badge').getBoundingClientRect().height,
+    search: document.querySelector('#search-bar').getBoundingClientRect().height,
+  }));
+  expect(Math.abs(heights.filter - heights.search)).toBeLessThanOrEqual(1);
+
+  await page.locator('#chip-search-btn').click();
+  await expect(page.locator('#search-bar')).not.toHaveClass(/active/);
+  await expect(page.locator('#chip-search-btn')).not.toHaveClass(/active/);
+  await expect(page.locator('#chip-search-btn')).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#input')).not.toHaveValue(/\/s #all claude login/);
+});
+
+test('search composer action inherits active filter scope over composer route', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
+  await page.goto('/');
+
+  await page.fill('#input', '/f #squid@claude');
+  await page.keyboard.press('Enter');
+  await page.locator('.filter-scope-agent .filter-scope-remove').click();
+  await expect(page.locator('.filter-scope-topic')).toContainText('#squid');
+  await expect(page.locator('.filter-scope-agent')).toHaveCount(0);
+
+  await page.fill('#input', 'needle');
+  await page.locator('#chip-search-btn').click();
+
+  await expect(page.locator('#input')).toHaveValue('/s #squid needle');
+});
+
 test('unscoped global search does not display or restore #all', async ({ page }) => {
   await mockBackend(page);
   await page.goto('/');
@@ -148,4 +190,214 @@ test('search highlighting follows FTS tokenization for punctuation-prefixed term
   const result = page.locator('.search-result-item');
   await expect(result).toHaveCount(1);
   await expect(result.locator('mark.search-kw-highlight')).toHaveText(['cost']);
+});
+
+test('user prompt search includes the active filter scope', async ({ page }) => {
+  await mockBackend(page);
+  const urls = [];
+  await page.route('**/search**', route => {
+    urls.push(route.request().url());
+    return route.fulfill({ json: { items: [] } });
+  });
+  await page.goto('/');
+
+  await page.fill('#input', '/f #squid@claude!');
+  await page.keyboard.press('Enter');
+  await page.locator('#chip-prompts-btn').click();
+  await page.fill('#input', '/s needle');
+  await page.keyboard.press('Enter');
+
+  const last = urls.at(-1);
+  expect(last).toMatch(/role=user/);
+  expect(last).toMatch(/topic=squid/);
+  expect(last).toMatch(/agent=claude/);
+  expect(last).toMatch(/adhoc=true/);
+});
+
+test('bookmarked search includes the active filter scope and keeps bookmark-only results', async ({ page }) => {
+  await mockBackend(page);
+  await page.unroute('**/search**');
+  const urls = [];
+  await page.route('**/search**', route => {
+    urls.push(route.request().url());
+    return route.fulfill({ json: { items: [
+      { id: 42, topic: 'squid', agent: 'claude', prompt: 'Find it', content: 'Needle bookmark', status: 'done', adhoc: false, timestamp: new Date().toISOString() },
+      { id: 99, topic: 'squid', agent: 'claude', prompt: 'Find another', content: 'Needle unbookmarked', status: 'done', adhoc: false, timestamp: new Date().toISOString() },
+    ] } });
+  });
+  await page.goto('/');
+  await page.evaluate(() => {
+    _bookmarkItems = [{ id: 42, topic: 'squid', agent: 'claude', content: 'Needle bookmark' }];
+    _bookmarkIds = new Set(_bookmarkItems.map(i => i.id));
+  });
+
+  await page.fill('#input', '/f #squid@claude');
+  await page.keyboard.press('Enter');
+  await page.locator('#chip-bookmark-btn').click();
+  await page.fill('#input', '/s needle');
+  await page.keyboard.press('Enter');
+
+  const last = urls.at(-1);
+  expect(last).toMatch(/role=assistant/);
+  expect(last).toMatch(/bookmarked=true/);
+  expect(last).toMatch(/topic=squid/);
+  expect(last).toMatch(/agent=claude/);
+  expect(last).toMatch(/adhoc=false/);
+  const result = page.locator('.msg.assistant.search-result-item');
+  await expect(result).toHaveCount(1);
+  await expect(result).toContainText('Needle bookmark');
+  await expect(result).not.toContainText('Needle unbookmarked');
+});
+
+test('clearing search restores the filtered bookmark-only history list', async ({ page }) => {
+  await mockBackend(page);
+  await page.unroute('**/history**');
+  await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/history/by-ids**', route => route.fulfill({ json: { items: [
+    { id: 42, role: 'assistant', topic: 'squid', agent: 'claude', prompt: 'Find it', content: 'Needle bookmark', status: 'done', adhoc: false, timestamp: new Date().toISOString() },
+    { id: 99, role: 'assistant', topic: 'other', agent: 'claude', prompt: 'Other', content: 'Other bookmark', status: 'done', adhoc: false, timestamp: new Date().toISOString() },
+  ] }}));
+  await page.route('**/search**', route => route.fulfill({ json: { items: [
+    { id: 42, topic: 'squid', agent: 'claude', prompt: 'Find it', content: 'Needle bookmark', status: 'done', adhoc: false, timestamp: new Date().toISOString() },
+  ] } }));
+
+  await page.goto('/');
+  await page.evaluate(() => {
+    _bookmarkItems = [
+      { id: 42, topic: 'squid', agent: 'claude', content: 'Needle bookmark' },
+      { id: 99, topic: 'other', agent: 'claude', content: 'Other bookmark' },
+    ];
+    _bookmarkIds = new Set(_bookmarkItems.map(i => i.id));
+  });
+
+  await page.fill('#input', '/f #squid');
+  await page.keyboard.press('Enter');
+  await page.locator('#chip-bookmark-btn').click();
+  await expect(page.locator('.msg.assistant.history-item')).toHaveCount(1);
+  await expect(page.locator('.msg.assistant.history-item')).toContainText('Needle bookmark');
+
+  await page.fill('#input', '/s needle');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.msg.assistant.search-result-item')).toHaveCount(1);
+
+  await page.locator('#chip-search-btn').click();
+  await expect(page.locator('#search-bar')).not.toHaveClass(/active/);
+  await expect(page.locator('.msg.assistant.history-item')).toHaveCount(1);
+  await expect(page.locator('.msg.assistant.history-item')).toContainText('Needle bookmark');
+  await expect(page.locator('.msg.assistant.history-item')).not.toContainText('Other bookmark');
+});
+
+test('clearing search preserves a topic-only filter after removing agent scope', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/search**', route => route.fulfill({ json: { items: [] } }));
+
+  await page.goto('/');
+  await page.fill('#input', '/f #squid@claude');
+  await page.keyboard.press('Enter');
+  await page.locator('.filter-scope-agent .filter-scope-remove').click();
+  await expect(page.locator('#filter-badge-label')).toHaveText('#squid');
+  await expect(page.locator('.filter-scope-agent')).toHaveCount(0);
+
+  await page.fill('#input', '/s needle');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#search-bar')).toHaveClass(/active/);
+
+  await page.locator('#chip-search-btn').click();
+  await expect(page.locator('#search-bar')).not.toHaveClass(/active/);
+  await expect(page.locator('#filter-badge-label')).toHaveText('#squid');
+  await expect(page.locator('.filter-scope-agent')).toHaveCount(0);
+});
+
+test('search icon prefill then clear preserves topic-only filter after removing agent scope', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/search**', route => route.fulfill({ json: { items: [] } }));
+
+  await page.goto('/');
+  await page.fill('#input', '/f #squid@claude');
+  await page.keyboard.press('Enter');
+  await page.locator('.filter-scope-agent .filter-scope-remove').click();
+  await expect(page.locator('#filter-badge-label')).toHaveText('#squid');
+
+  await page.fill('#input', 'needle');
+  await page.locator('#chip-search-btn').click();
+  await expect(page.locator('#input')).toHaveValue('/s #squid needle');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#search-bar')).toHaveClass(/active/);
+
+  await page.locator('#chip-search-btn').click();
+  await expect(page.locator('#search-bar')).not.toHaveClass(/active/);
+  await expect(page.locator('#filter-badge-label')).toHaveText('#squid');
+  await expect(page.locator('.filter-scope-agent')).toHaveCount(0);
+});
+
+test('bookmark search clear preserves topic-only filter after removing agent scope', async ({ page }) => {
+  await mockBackend(page);
+  await page.unroute('**/history**');
+  await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/history/by-ids**', route => route.fulfill({ json: { items: [
+    { id: 42, role: 'assistant', topic: 'squid', agent: 'claude', prompt: 'Find it', content: 'Needle bookmark', status: 'done', adhoc: false, timestamp: new Date().toISOString() },
+  ] }}));
+  await page.route('**/search**', route => route.fulfill({ json: { items: [
+    { id: 42, topic: 'squid', agent: 'claude', prompt: 'Find it', content: 'Needle bookmark', status: 'done', adhoc: false, timestamp: new Date().toISOString() },
+  ] } }));
+
+  await page.goto('/');
+  await page.evaluate(() => {
+    _bookmarkItems = [{ id: 42, topic: 'squid', agent: 'claude', content: 'Needle bookmark' }];
+    _bookmarkIds = new Set(_bookmarkItems.map(i => i.id));
+  });
+  await page.fill('#input', '/f #squid@claude');
+  await page.keyboard.press('Enter');
+  await page.locator('.filter-scope-agent .filter-scope-remove').click();
+  await page.locator('#chip-bookmark-btn').click();
+  await expect(page.locator('#filter-badge-label')).toHaveText('#squid');
+
+  await page.fill('#input', 'needle');
+  await page.locator('#chip-search-btn').click();
+  await expect(page.locator('#input')).toHaveValue('/s #squid needle');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.msg.assistant.search-result-item')).toHaveCount(1);
+
+  await page.locator('#chip-search-btn').click();
+  await expect(page.locator('#filter-badge-label')).toHaveText('#squid');
+  await expect(page.locator('.filter-scope-agent')).toHaveCount(0);
+  await expect(page.locator('.msg.assistant.history-item')).toHaveCount(1);
+});
+
+test('bookmark search clear does not restore filter removed during search', async ({ page }) => {
+  await mockBackend(page);
+  await page.unroute('**/history**');
+  await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/history/by-ids**', route => route.fulfill({ json: { items: [
+    { id: 42, role: 'assistant', topic: 'squid', agent: 'codex', prompt: 'Find it', content: 'Needle bookmark', status: 'done', adhoc: false, timestamp: new Date().toISOString() },
+  ] }}));
+  await page.route('**/search**', route => route.fulfill({ json: { items: [
+    { id: 42, topic: 'squid', agent: 'codex', prompt: 'Find it', content: 'Needle bookmark', status: 'done', adhoc: false, timestamp: new Date().toISOString() },
+  ] } }));
+
+  await page.goto('/');
+  await page.evaluate(() => {
+    _bookmarkItems = [{ id: 42, topic: 'squid', agent: 'codex', content: 'Needle bookmark' }];
+    _bookmarkIds = new Set(_bookmarkItems.map(i => i.id));
+  });
+  await page.locator('#chip-bookmark-btn').click();
+  await page.fill('#input', '/f #squid@codex');
+  await page.keyboard.press('Enter');
+  await page.locator('.filter-scope-topic .filter-scope-remove').click();
+  await expect(page.locator('#filter-badge-label')).toHaveText('@codex');
+
+  await page.fill('#input', 'needle');
+  await page.locator('#chip-search-btn').click();
+  await expect(page.locator('#input')).toHaveValue('/s @codex needle');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.msg.assistant.search-result-item')).toHaveCount(1);
+
+  await page.locator('#chip-filter-btn').click();
+  await expect(page.locator('#filter-badge')).not.toHaveClass(/active/);
+
+  await page.locator('#chip-search-btn').click();
+  await expect(page.locator('#search-bar')).not.toHaveClass(/active/);
+  await expect(page.locator('#filter-badge')).not.toHaveClass(/active/);
 });

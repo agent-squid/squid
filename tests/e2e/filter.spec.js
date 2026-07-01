@@ -80,9 +80,9 @@ test('/filter with #topic only omits adhoc param from /history', async ({ page }
 test('composer filter action works without a visible chip using the default latest agent', async ({ page }) => {
   await mockBackend(page, { topic: 'default', agent: 'codex' });
 
-  let capturedUrl = null;
+  const urls = [];
   await page.route('**/history**', async route => {
-    capturedUrl = route.request().url();
+    urls.push(route.request().url());
     await route.fulfill({ json: { items: [], has_more: false } });
   });
 
@@ -91,9 +91,15 @@ test('composer filter action works without a visible chip using the default late
   await page.locator('#chip-filter-btn').click();
 
   await expect(page.locator('#topic-chip')).toContainText('#default@codex');
-  expect(capturedUrl).toMatch(/topic=default/);
-  expect(capturedUrl).toMatch(/agent=codex/);
-  expect(capturedUrl).toMatch(/adhoc=false/);
+  expect(urls.at(-1)).toMatch(/topic=default/);
+  expect(urls.at(-1)).toMatch(/agent=codex/);
+  expect(urls.at(-1)).toMatch(/adhoc=false/);
+
+  await page.locator('#chip-filter-btn').click();
+  await expect.poll(() => urls.at(-1)).not.toMatch(/topic=/);
+  expect(urls.at(-1)).not.toMatch(/agent=/);
+  expect(urls.at(-1)).not.toMatch(/adhoc=/);
+  await expect(page.locator('#chip-filter-btn')).not.toHaveClass(/active/);
 });
 
 test('/f accepts an explicit topic after the command during normal typing', async ({ page }) => {
@@ -229,6 +235,93 @@ test('/filter reset clears filter and reloads history without params', async ({ 
   expect(last).not.toMatch(/topic=/);
   expect(last).not.toMatch(/agent=/);
   expect(last).not.toMatch(/adhoc=/);
+});
+
+test('composer filter icon highlights only while a filter is active', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
+
+  await page.goto('/');
+  await expect(page.locator('#chip-filter-btn')).not.toHaveClass(/active/);
+
+  await page.fill('#input', '/f #squid@claude!');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#chip-filter-btn')).toHaveClass(/active/);
+  await expect(page.locator('#chip-filter-btn')).toHaveAttribute('aria-pressed', 'true');
+
+  await page.fill('#input', '/f reset');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#chip-filter-btn')).not.toHaveClass(/active/);
+  await expect(page.locator('#chip-filter-btn')).toHaveAttribute('aria-pressed', 'false');
+});
+
+test('composer filter action clears an active filter even when current route differs', async ({ page }) => {
+  await mockBackend(page);
+
+  const urls = [];
+  await page.route('**/history**', route => {
+    urls.push(route.request().url());
+    return route.fulfill({ json: { items: [], has_more: false } });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '/f #squid');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.filter-scope-topic')).toContainText('#squid');
+
+  await page.fill('#input', '#squid@claude draft');
+  await page.locator('#chip-filter-btn').click();
+
+  await expect.poll(() => urls.at(-1)).not.toMatch(/topic=/);
+  expect(urls.at(-1)).not.toMatch(/agent=/);
+  expect(urls.at(-1)).not.toMatch(/adhoc=/);
+  await expect(page.locator('#chip-filter-btn')).not.toHaveClass(/active/);
+});
+
+test('user prompts only keeps the active history filter', async ({ page }) => {
+  await mockBackend(page);
+
+  const urls = [];
+  await page.route('**/history**', route => {
+    urls.push(route.request().url());
+    return route.fulfill({ json: { items: [], has_more: false } });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '/f #squid@claude!');
+  await page.keyboard.press('Enter');
+  await page.locator('#chip-prompts-btn').click();
+
+  const last = urls[urls.length - 1];
+  expect(last).toMatch(/topic=squid/);
+  expect(last).toMatch(/agent=claude/);
+  expect(last).toMatch(/adhoc=true/);
+});
+
+test('bookmarked only applies the active filter to fetched bookmark rows', async ({ page }) => {
+  await mockBackend(page);
+  await page.unroute('**/history**');
+  await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/history/by-ids**', route => route.fulfill({ json: { items: [
+    { id: 10, role: 'assistant', topic: 'squid', agent: 'claude', content: 'matching bookmark', status: 'done', adhoc: false, prompt: 'match', timestamp: new Date().toISOString() },
+    { id: 11, role: 'assistant', topic: 'other', agent: 'claude', content: 'other bookmark', status: 'done', adhoc: false, prompt: 'other', timestamp: new Date().toISOString() },
+  ] }}));
+
+  await page.goto('/');
+  await page.evaluate(() => {
+    _bookmarkItems = [
+      { id: 10, topic: 'squid', agent: 'claude', content: 'matching bookmark' },
+      { id: 11, topic: 'other', agent: 'claude', content: 'other bookmark' },
+    ];
+    _bookmarkIds = new Set(_bookmarkItems.map(i => i.id));
+  });
+  await page.fill('#input', '/f #squid');
+  await page.keyboard.press('Enter');
+  await page.locator('#chip-bookmark-btn').click();
+
+  await expect(page.locator('.msg.assistant.history-item')).toHaveCount(1);
+  await expect(page.locator('.msg.assistant.history-item')).toContainText('matching bookmark');
+  await expect(page.locator('.msg.assistant.history-item')).not.toContainText('other bookmark');
 });
 
 test('history renders only assistant bubbles — no user bubbles', async ({ page }) => {

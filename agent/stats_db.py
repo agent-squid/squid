@@ -1032,7 +1032,8 @@ def _build_fts_match(q: str) -> str:
 
 
 def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = None,
-                    adhoc: Optional[bool] = None, limit: int = 100) -> dict:
+                    adhoc: Optional[bool] = None, limit: int = 100,
+                    bookmarked: bool = False) -> dict:
     terms = _build_fts_match(q)
     if not terms:
         return {"items": []}
@@ -1055,6 +1056,7 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
         params.append(1 if adhoc else 0)
 
     where = "WHERE " + " AND ".join(where_parts)
+    bookmark_join = "JOIN bookmarks b ON b.msg_id = m.id" if bookmarked else ""
 
     with _connect() as conn:
         rows = conn.execute(
@@ -1069,6 +1071,7 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
                        s.cost_usd, s.duration_ms, s.lookback,
                        s.quota_before, s.quota_after, s.backend, s.model, s.cwd
                 FROM chat_messages m
+                {bookmark_join}
                 LEFT JOIN chat_messages u ON m.reply_to = u.id
                 LEFT JOIN session_stats s ON m.session_id = s.session_id
                 {where}
@@ -1093,7 +1096,8 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
 
 
 def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = None,
-                   adhoc: Optional[bool] = None, limit: int = 100) -> dict:
+                   adhoc: Optional[bool] = None, limit: int = 100,
+                   bookmarked: bool = False) -> dict:
     """Search user prompts via prompts_fts. Returns assistant reply items (same shape as
     search_messages) so the frontend can render them with appendPromptOnlyHistoryItem."""
     terms = _build_fts_match(q)
@@ -1118,6 +1122,7 @@ def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = N
         params.append(1 if adhoc else 0)
 
     where = "WHERE " + " AND ".join(where_parts)
+    bookmark_join = "JOIN bookmarks b ON b.msg_id = m.id" if bookmarked else ""
 
     stat_keys = {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
                  "history_input_tokens", "cost_usd", "duration_ms", "lookback",
@@ -1137,6 +1142,7 @@ def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = N
                        s.cost_usd, s.duration_ms, s.lookback,
                        s.quota_before, s.quota_after, s.backend, s.model, s.cwd
                 FROM chat_messages m
+                {bookmark_join}
                 LEFT JOIN chat_messages u ON m.reply_to = u.id
                 LEFT JOIN session_stats s ON m.session_id = s.session_id
                 {where}

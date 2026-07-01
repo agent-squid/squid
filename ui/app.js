@@ -309,6 +309,7 @@ document.getElementById('help-close').addEventListener('click', closeHelp);
 
 // ── per-topic session tracking ────────────────────────────────────────────────
 const _sessionIds = {}; // `${topic}@${agent|_}` → most recent session_id
+const _sessionTurnCounts = {}; // session_id → turn count
 const sessionAdvisoryEl    = document.getElementById('session-advisory');
 const sessionAdvisoryMsgEl = document.getElementById('session-advisory-msg');
 let _advisoryTurnCount = 0;
@@ -326,6 +327,7 @@ function clearCachedSessionId(topic, agent) {
     const inj = getInjectedInto();
     delete inj[sid];
     setInjectedInto(inj);
+    delete _sessionTurnCounts[sid];
   }
   delete _sessionIds[taKey];
   delete _memoryInjectedInto[taKey];
@@ -374,6 +376,16 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0) {
     adSpan.textContent = lookback > 0 ? `!${lookback}` : '!';
     if (agent) setAgentSlugColor(adSpan, agent);
     topicChipEl.appendChild(adSpan);
+  } else {
+    clearTimeout(_chipTurnCountTimer);
+    _chipTurnCountTimer = null;
+    const sid = _sessionIds[`${topic}@${agent || '_'}`];
+    const count = sid ? (_sessionTurnCounts[sid] || 0) : 0;
+    if (count > 0) {
+      _renderChipTurnCount(count);
+    } else {
+      _scheduleChipTurnCountUpdate(topic, agent);
+    }
   }
   topicChipEl.classList.add('visible');
   topicChipEl.classList.remove('needs-agent');
@@ -396,6 +408,39 @@ function clearTopicChip() {
   updateActiveQuotaGauge();
   _lastContextIndicatorKey = '';
   hideAdvisory();
+}
+
+function _renderChipTurnCount(count) {
+  let tcSpan = topicChipEl.querySelector('.chip-turn-count');
+  if (count <= 0) { tcSpan?.remove(); return; }
+  if (!tcSpan) {
+    tcSpan = document.createElement('span');
+    tcSpan.className = 'chip-turn-count';
+    topicChipEl.appendChild(tcSpan);
+  }
+  tcSpan.textContent = `·${count}t`;
+  tcSpan.classList.toggle('mid', count > 10 && count <= 20);
+  tcSpan.classList.toggle('high', count > 20);
+}
+
+function _updateChipTurnCount(topic, agent, sessionId, count) {
+  if (sessionId && count > 0) _sessionTurnCounts[sessionId] = count;
+  if (!stickyChip || stickyChip.adhoc || stickyChip.topic !== topic || (stickyChip.agent || null) !== (agent || null)) return;
+  _renderChipTurnCount(count);
+}
+
+let _chipTurnCountTimer = null;
+
+function _scheduleChipTurnCountUpdate(topic, agent) {
+  clearTimeout(_chipTurnCountTimer);
+  _chipTurnCountTimer = setTimeout(() => {
+    _chipTurnCountTimer = null;
+    if (!stickyChip || stickyChip.adhoc || stickyChip.topic !== topic || (stickyChip.agent || null) !== (agent || null)) return;
+    const sid = _sessionIds[`${topic}@${agent || '_'}`];
+    if (!sid) return;
+    const count = _sessionTurnCounts[sid] || 0;
+    if (count > 0) _renderChipTurnCount(count);
+  }, 700);
 }
 
 topicChipEl.addEventListener('click', () => {
@@ -421,6 +466,23 @@ function routeScopeText(route) {
     if (route.adhoc) scope += '!';
   }
   return scope;
+}
+
+function searchScopeText(state) {
+  if (!state) return '';
+  let scope = '';
+  if (state.explicitAll) scope = '#all';
+  else if (state.topic) scope = `#${state.topic}`;
+  if (state.agent) {
+    scope += `@${state.agent}`;
+    if (state.adhoc === true) scope += '!';
+    else if (state.adhoc === null) scope += '*';
+  }
+  return scope;
+}
+
+function activeHistoryFilterScope() {
+  return (historyFilter.topic || historyFilter.agent) ? searchScopeText(historyFilter) : '';
 }
 
 async function resolveEffectiveComposerRoute() {
@@ -463,6 +525,11 @@ async function updateComposerActionTitles() {
 
 chipFilterBtn.addEventListener('click', async e => {
   e.stopPropagation();
+  const active = (searchActive && searchState) ? searchState : historyFilter;
+  if (active?.topic || active?.agent || active?.explicitAll) {
+    clearFilter();
+    return;
+  }
   const route = await resolveEffectiveComposerRoute();
   if (route.agent) filterByAgent(route.topic, route.agent, route.adhoc, route.lookback || 0);
   else filterByTopic(route.topic);
@@ -470,11 +537,16 @@ chipFilterBtn.addEventListener('click', async e => {
 
 chipSearchBtn.addEventListener('click', async e => {
   e.stopPropagation();
+  if (searchActive) {
+    clearSearch();
+    return;
+  }
   if (input.value.trimStart().startsWith('/s')) return;
-  const route = await resolveEffectiveComposerRoute();
   const parsed = parseInput(input.value);
   const keywords = input.value.trimStart().startsWith('#') ? parsed.message.trim() : input.value.trim();
-  const command = keywords ? `/s ${routeScopeText(route)} ${keywords}` : `/s ${routeScopeText(route)} `;
+  let scope = activeHistoryFilterScope();
+  if (!scope) scope = routeScopeText(await resolveEffectiveComposerRoute());
+  const command = keywords ? `/s ${scope} ${keywords}` : `/s ${scope} `;
   stashComposerAndEdit(command);
 });
 
@@ -596,6 +668,32 @@ function updatePromptOnlyButton() {
   btn.title = promptOnlyHistory ? 'Show full thread' : 'User prompts only';
 }
 
+function updateFilterButton() {
+  const active = (searchActive && searchState) ? searchState : historyFilter;
+  const isFiltered = !!(active?.topic || active?.agent || active?.explicitAll);
+  chipFilterBtn?.classList.toggle('active', isFiltered);
+  chipFilterBtn?.setAttribute('aria-pressed', isFiltered ? 'true' : 'false');
+}
+
+function updateSearchButton() {
+  chipSearchBtn?.classList.toggle('active', !!searchActive);
+  chipSearchBtn?.setAttribute('aria-pressed', searchActive ? 'true' : 'false');
+}
+
+function hasHistoryFilterScope() {
+  return !!(historyFilter.topic || historyFilter.agent || historyFilter.explicitAll);
+}
+
+function persistSearchFilterScope(state) {
+  if (!hasHistoryFilterScope()) return;
+  historyFilter = {
+    topic: state.topic || null,
+    agent: state.agent || null,
+    adhoc: state.adhoc ?? null,
+    explicitAll: !!state.explicitAll,
+  };
+}
+
 function togglePromptOnlyHistory() {
   promptOnlyHistory = !promptOnlyHistory;
   if (promptOnlyHistory && bookmarkOnlyHistory) {
@@ -634,6 +732,7 @@ function applyHistoryFilter(filter) {
 function clearFilter() {
   if (searchActive && searchState) {
     searchState = { ...searchState, topic: null, agent: null, adhoc: null, explicitAll: false };
+    persistSearchFilterScope(searchState);
     searchLoading = false;
     document.querySelectorAll('.search-result-item').forEach(el => el.remove());
     document.querySelectorAll('#messages > .cmd-feedback.search-no-results').forEach(el => el.remove());
@@ -689,6 +788,7 @@ async function loadBookmarkHistory() {
   const { items } = data;
   const fragment = document.createDocumentFragment();
   for (const item of items) {
+    if (!itemMatchesFilter(item, historyFilter)) continue;
     if (!item.content) continue;
     appendHistoryItem(item, fragment);
   }
@@ -709,6 +809,7 @@ function _updateFilterBadge() {
 
   if (!topic && !agent && !explicitAll) {
     badge.classList.remove('active');
+    updateFilterButton();
     return;
   }
 
@@ -756,6 +857,15 @@ function _updateFilterBadge() {
     addSegment('agent', lane, () => removeFilterSegment('agent'));
   }
   badge.classList.add('active');
+  updateFilterButton();
+}
+
+function itemMatchesFilter(item, filter) {
+  if (!filter) return true;
+  if (filter.topic && (item.topic || 'default') !== filter.topic) return false;
+  if (filter.agent && (item.agent || null) !== filter.agent) return false;
+  if (filter.adhoc !== null && filter.adhoc !== undefined && !!item.adhoc !== filter.adhoc) return false;
+  return true;
 }
 
 function removeFilterSegment(kind) {
@@ -771,6 +881,7 @@ function removeFilterSegment(kind) {
 
   if (searchActive && searchState) {
     searchState = next;
+    persistSearchFilterScope(searchState);
     searchLoading = false;
     document.querySelectorAll('.search-result-item, #messages > .cmd-feedback.search-no-results').forEach(el => el.remove());
     _updateFilterBadge();
@@ -845,7 +956,7 @@ async function loadHistory() {
   let data;
   try {
     let url = `/history?offset=${historyOffset}&limit=5`;
-    const applyRouteFilter = !promptOnlyHistory && !bookmarkOnlyHistory;
+    const applyRouteFilter = !bookmarkOnlyHistory;
     if (applyRouteFilter && historyFilter.topic) url += `&topic=${encodeURIComponent(historyFilter.topic)}`;
     if (applyRouteFilter && historyFilter.agent) url += `&agent=${encodeURIComponent(historyFilter.agent)}`;
     if (applyRouteFilter && historyFilter.adhoc != null) url += `&adhoc=${historyFilter.adhoc}`;
@@ -977,11 +1088,13 @@ function _updateSearchBar() {
 
   if (!searchActive || !searchState) {
     bar.classList.remove('active');
+    updateSearchButton();
     return;
   }
 
   kwEl.textContent = searchState.keywords;
   bar.classList.add('active');
+  updateSearchButton();
   _updateFilterBadge();
 }
 
@@ -1082,6 +1195,7 @@ function clearSearch() {
   searchState = null;
   searchLoading = false;
   document.getElementById('search-bar').classList.remove('active');
+  updateSearchButton();
 
   document.querySelectorAll('.search-result-item, .date-divider').forEach(el => el.remove());
   document.querySelectorAll('#messages > .cmd-feedback.search-no-results').forEach(el => el.remove());
@@ -1090,7 +1204,11 @@ function clearSearch() {
   historyExhausted = false;
   invalidateHistoryLoad();
   _updateFilterBadge();
-  initHistoryScroll();
+  if (bookmarkOnlyHistory) {
+    loadBookmarkHistory();
+  } else {
+    initHistoryScroll();
+  }
 }
 
 function recordPrompt(text) {
@@ -1268,10 +1386,10 @@ async function loadSearchResults() {
 
   const searchRole = promptOnlyHistory ? 'user' : 'assistant';
   let url = `/search?limit=100&q=${encodeURIComponent(searchState.keywords)}&role=${searchRole}`;
-  const applyRouteFilter = !promptOnlyHistory && !bookmarkOnlyHistory;
-  if (applyRouteFilter && searchState.topic) url += `&topic=${encodeURIComponent(searchState.topic)}`;
-  if (applyRouteFilter && searchState.agent) url += `&agent=${encodeURIComponent(searchState.agent)}`;
-  if (applyRouteFilter && searchState.adhoc !== null && searchState.adhoc !== undefined) url += `&adhoc=${searchState.adhoc}`;
+  if (bookmarkOnlyHistory) url += '&bookmarked=true';
+  if (searchState.topic) url += `&topic=${encodeURIComponent(searchState.topic)}`;
+  if (searchState.agent) url += `&agent=${encodeURIComponent(searchState.agent)}`;
+  if (searchState.adhoc !== null && searchState.adhoc !== undefined) url += `&adhoc=${searchState.adhoc}`;
 
   let data;
   try {
@@ -2225,6 +2343,7 @@ async function sendMessage(text) {
           if (data.session_id && !adhoc) _sessionIds[`${topic}@${resolvedAgent || '_'}`] = data.session_id;
           liveCtxSpan.dataset.sessionTurnCount = String(liveSessionTurnCount);
           setCtxLabel(liveCtxSpan, !!data.adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
+          if (!adhoc) _updateChipTurnCount(topic, resolvedAgent || null, data.session_id || null, liveSessionTurnCount);
           evaluateAdvisory();
           let storedTools = [];
           if (data.context) {
@@ -2414,6 +2533,7 @@ async function sendMessage(text) {
               setCtxLabel(liveCtxSpan, !!stats.adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
               liveCtxSpan.dataset.sessionTurnCount = String(liveSessionTurnCount);
               if (stats.session_id) liveCtxSpan.dataset.sessionId = stats.session_id;
+              if (!adhoc) _updateChipTurnCount(topic, resolvedAgent || null, stats.session_id || null, liveSessionTurnCount);
               if (stats.cwd) liveCtxSpan.dataset.cwd = stats.cwd;
               if (stats.session_id && !adhoc && stickyChip && !stickyChip.adhoc) {
                 localStorage.setItem(`squid_adv_lta_${stickyChip.topic}_${stickyChip.agent||'_'}_${stats.session_id}`, String(Date.now()));
@@ -3056,6 +3176,18 @@ function appendHistoryItem(item, container) {
   ctxSpan.className = 'user-ctx';
   if (item.id != null) ctxSpan.dataset.msgId = String(item.id);
   const sessionTurnCount = parseInt(item.session_turn_count || '0', 10) || 0;
+  if (sessionTurnCount > 0 && item.session_id && !item.adhoc) {
+    const prev = _sessionTurnCounts[item.session_id] || 0;
+    if (sessionTurnCount > prev) {
+      _sessionTurnCounts[item.session_id] = sessionTurnCount;
+      const taKey = `${item.topic || 'default'}@${item.agent || '_'}`;
+      if (stickyChip && !stickyChip.adhoc && stickyChip.topic === (item.topic || 'default') &&
+          (stickyChip.agent || null) === (item.agent || null) &&
+          _sessionIds[taKey] === item.session_id) {
+        _renderChipTurnCount(sessionTurnCount);
+      }
+    }
+  }
   setCtxLabel(ctxSpan, !!item.adhoc, _pc.pins.length, _pc.mem, sessionTurnCount);
   ctxSpan.dataset.sessionId = item.session_id || '';
   ctxSpan.dataset.cwd = item.stats?.cwd || '';
@@ -6290,6 +6422,11 @@ function _getSessionMeta(topic, agent) {
           setInjectedInto(inj);
         }
       }
+      if (!_acStashedForNav && data?.session_id && stickyChip && !stickyChip.adhoc &&
+          stickyChip.topic === topic && stickyChip.agent === agent) {
+        const count = _sessionTurnCounts[data.session_id] || 0;
+        if (count > 0) _renderChipTurnCount(count);
+      }
       updatePinCount();
       if (pinPanel.classList.contains('open')) renderPinPanel();
       updateInContextMarkers();
@@ -6764,6 +6901,7 @@ initBookmark();
 document.getElementById('search-bar-clear').addEventListener('click', clearSearch);
 document.getElementById('chip-prompts-btn')?.addEventListener('click', togglePromptOnlyHistory);
 updatePromptOnlyButton();
+updateSearchButton();
 
 function formatFilterCommand(state) {
   let scope = '';

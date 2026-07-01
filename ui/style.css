@@ -3169,6 +3169,9 @@ button {
 .chip-topic { color: var(--accent-dim); }
 .chip-agent { color: var(--agent-color, #848899); margin-left: 0.05em; }
 .chip-adhoc { color: var(--agent-color, #848899); margin-left: 0.05em; }
+.chip-turn-count { color: #4a4a6a; margin-left: 0.3em; font-weight: 400; }
+.chip-turn-count.mid { color: #7a6030; }
+.chip-turn-count.high { color: #8a3535; }
 #topic-chip.needs-agent .chip-topic { color: #b07830; }
 #topic-chip.needs-agent { border-color: #5a3a10; }
 
@@ -3219,17 +3222,20 @@ button {
   border-radius: 3px;
 }
 #session-advisory-dismiss:hover { color: var(--text-muted); background: #2a2828; }
-#filter-badge {
+#filter-badge,
+#search-bar {
   display: none;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.35rem 0.75rem;
+  min-height: 30px;
+  padding: 0 0.75rem;
   background: #1c1a18;
   border: 1px solid #3a3028;
   border-radius: 6px;
   font-size: var(--text-body);
   font-family: ui-monospace, monospace;
   font-weight: 600;
+  line-height: 1.2;
 }
 #filter-badge.active { display: flex; }
 #filter-badge-label { display: flex; align-items: center; gap: 0.35rem; }
@@ -3255,19 +3261,10 @@ button {
 
 /* Search bar */
 #search-bar {
-  display: none;
-  align-items: center;
   gap: 0.4rem;
-  padding: 0.35rem 0.75rem;
-  background: #1c1a18;
-  border: 1px solid #3a3028;
-  border-radius: 6px;
-  font-size: var(--text-body);
-  font-family: ui-monospace, monospace;
-  font-weight: 600;
 }
 #search-bar.active { display: flex; }
-.search-icon { color: #808090; font-size: 1.5em; line-height: 1; }
+.search-icon { color: #808090; font-size: 1.1em; line-height: 1; }
 #search-bar-keywords { color: var(--text); flex: 1; }
 #search-bar-clear {
   background: none;

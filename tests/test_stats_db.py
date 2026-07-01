@@ -328,6 +328,41 @@ def test_status_raw_included_in_history_and_search(tmp_path, monkeypatch):
     assert search["items"][0]["status_raw"] == "Working...\nDone"
 
 
+def test_search_messages_can_filter_bookmarks_before_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    bookmarked_user_id = stats_db.insert_user_message("squid", "codex", "bookmarked prompt")
+    bookmarked_id = stats_db.insert_assistant_message("squid", "codex", bookmarked_user_id, adhoc=False)
+    stats_db.update_assistant_message(bookmarked_id, "needle bookmarked response", "session-1", "done")
+    stats_db.add_bookmark(bookmarked_id, "squid", "codex", "needle bookmarked response")
+
+    newer_user_id = stats_db.insert_user_message("squid", "codex", "newer prompt")
+    newer_id = stats_db.insert_assistant_message("squid", "codex", newer_user_id, adhoc=False)
+    stats_db.update_assistant_message(newer_id, "needle unbookmarked response", "session-2", "done")
+
+    search = stats_db.search_messages("needle", topic="squid", agent="codex", bookmarked=True, limit=1)
+
+    assert [item["id"] for item in search["items"]] == [bookmarked_id]
+
+
+def test_search_prompts_uses_prompt_fts_before_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    prompt_match_user_id = stats_db.insert_user_message("squid", "codex", "needle prompt")
+    prompt_match_id = stats_db.insert_assistant_message("squid", "codex", prompt_match_user_id, adhoc=False)
+    stats_db.update_assistant_message(prompt_match_id, "ordinary response", "session-1", "done")
+
+    content_match_user_id = stats_db.insert_user_message("squid", "codex", "ordinary prompt")
+    content_match_id = stats_db.insert_assistant_message("squid", "codex", content_match_user_id, adhoc=False)
+    stats_db.update_assistant_message(content_match_id, "needle response", "session-2", "done")
+
+    search = stats_db.search_prompts("needle", topic="squid", agent="codex", limit=1)
+
+    assert [item["id"] for item in search["items"]] == [prompt_match_id]
+
+
 def test_status_raw_preserved_across_partial_updates(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
