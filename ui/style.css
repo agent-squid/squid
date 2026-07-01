@@ -2601,6 +2601,9 @@ body {
   font-family: ui-monospace, monospace;
   font-weight: 600;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
   cursor: pointer;
   user-select: none;
 }
@@ -2609,13 +2612,12 @@ body {
   display: flex;
   flex-direction: row;
   align-items: center;
-  justify-content: space-between;
   gap: 0.2rem;
   margin-top: 0.2rem;
   width: 100%;
 }
 #chip-row[hidden] { display: none; }
-#chip-actions { display: flex; align-items: center; gap: 0; margin-left: auto; }
+#chip-actions { display: flex; align-items: center; gap: 0; margin-left: auto; flex: 0 0 auto; }
 .composer-tool-btn {
   display: inline-flex;
   align-items: center;
