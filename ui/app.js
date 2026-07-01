@@ -6808,7 +6808,8 @@ function addBookmarkButton(bubbleEl, msgId, topic, agent) {
     btn.title = nowBookmarked ? 'Remove bookmark' : 'Bookmark';
   });
   const header = bubbleEl.querySelector('.response-header');
-  (header || bubbleEl).appendChild(btn);
+  const target = header || bubbleEl;
+  target.insertBefore(btn, target.firstChild);
 }
 
 function initBookmark() {

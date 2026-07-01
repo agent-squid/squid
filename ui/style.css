@@ -2025,7 +2025,7 @@ body {
   border: none;
   color: var(--text-ghost);
   cursor: pointer;
-  padding: 0.15rem 0.2rem;
+  padding: 0.15rem 0;
   border-radius: 4px;
   line-height: 1;
   flex-shrink: 0;
@@ -2099,7 +2099,7 @@ body {
   border: none;
   color: var(--text-ghost);
   cursor: pointer;
-  padding: 0.15rem 0.2rem;
+  padding: 0.15rem 0;
   border-radius: 4px;
   line-height: 1;
   flex-shrink: 0;
@@ -2107,7 +2107,7 @@ body {
 }
 .msg-bookmark-btn:hover { color: var(--text-mid); }
 .msg-bookmark-btn svg { width: 14px; height: 14px; display: block; }
-.msg-pin-btn + .msg-bookmark-btn { margin-left: -0.4rem; }
+.msg-bookmark-btn { margin-right: 0.1rem; }
 .msg-bookmark-btn.bookmarked { color: var(--accent); }
 
 
