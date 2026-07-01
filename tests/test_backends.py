@@ -8,16 +8,16 @@ from agent.runners import _codex_config_args
 
 
 def test_multiple_backends_can_share_driver():
-    deepcla = _validate_backend("deepcla", {
+    deepseek = _validate_backend("deepseek", {
         "driver": "claude",
         "color": "#4d9de0",
         "env": {"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic"},
     })
     claude = _validate_backend("claude", {"driver": "claude", "color": "#AE5332"})
 
-    assert deepcla.driver == claude.driver == "claude"
-    assert deepcla.id != claude.id
-    assert deepcla.color == "#4D9DE0"
+    assert deepseek.driver == claude.driver == "claude"
+    assert deepseek.id != claude.id
+    assert deepseek.color == "#4D9DE0"
 
 
 def test_backend_protocol_defaults_to_interactive_cli_and_can_select_oneshot():
@@ -83,7 +83,7 @@ def test_backend_accepts_opencode_interactive_cli_protocol():
 
 def test_backend_secret_reference_is_resolved_at_execution_time():
     backend = Backend(
-        "deepcla", "claude", env={"ANTHROPIC_AUTH_TOKEN": {"env": "DEEPSEEK_API_KEY"}}
+        "deepseek", "claude", env={"ANTHROPIC_AUTH_TOKEN": {"env": "DEEPSEEK_API_KEY"}}
     )
     with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "secret"}):
         assert backend.resolved_env() == {"ANTHROPIC_AUTH_TOKEN": "secret"}
@@ -92,7 +92,7 @@ def test_backend_secret_reference_is_resolved_at_execution_time():
 
 def test_backend_reports_missing_secret_without_exposing_it():
     backend = Backend(
-        "deepcla", "claude", env={"ANTHROPIC_AUTH_TOKEN": {"env": "MISSING_SQUID_TEST_KEY"}}
+        "deepseek", "claude", env={"ANTHROPIC_AUTH_TOKEN": {"env": "MISSING_SQUID_TEST_KEY"}}
     )
     with patch.dict(os.environ, {}, clear=True):
         assert backend.missing_secrets() == ["MISSING_SQUID_TEST_KEY"]
@@ -119,7 +119,7 @@ def test_codex_settings_are_flattened_into_config_arguments():
 
 
 def test_canonical_connection_fields_translate_for_claude():
-    backend = _validate_backend("deepcla", {
+    backend = _validate_backend("deepseek", {
         "driver": "claude",
         "provider": "deepseek",
         "base_url": "https://api.deepseek.com/anthropic",

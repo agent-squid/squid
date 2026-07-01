@@ -603,7 +603,7 @@ def test_claude_gateway_backend_keeps_its_explicit_environment():
 
     async def collect():
         return [chunk async for chunk in run_claude(
-            "hello", cwd="/tmp", backend_id="deepcla",
+            "hello", cwd="/tmp", backend_id="deepseek",
             backend_env={
                 "ANTHROPIC_AUTH_TOKEN": "deepseek-token",
                 "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",

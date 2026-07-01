@@ -2097,7 +2097,14 @@ async function sendMessage(text) {
     killBtn.disabled = true;
     userAborted = true;
     controller.abort();
-    if (msgId) {
+    if (queuePosition !== null) {
+      await fetch('/cmd', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: 'deq', topic, pos: queuePosition }),
+      }).catch(() => {});
+      pollProcs();
+    } else if (msgId) {
       await fetch('/cmd', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2189,6 +2196,7 @@ async function sendMessage(text) {
   let statsEl = null;
   let doneTime = null;
   let msgId = null;
+  let queuePosition = null;
   let statusTimer = null;
   let completedFromStatus = false;
   let completionRendered = false;
@@ -2497,6 +2505,7 @@ async function sendMessage(text) {
               }
               setTopicChip(topic, resolvedAgent, resolvedAdhoc, lookback);
               if (meta.msg_id) {
+                queuePosition = null;
                 attachMsgId(meta.msg_id);
                 setCtxLabel(liveCtxSpan, adhoc);
                 bubble.dataset.topic = topic;
@@ -2510,6 +2519,7 @@ async function sendMessage(text) {
           } else if (eventName === 'queued') {
             try {
               const info = JSON.parse(data);
+              queuePosition = info.position;
               setThinkingText(`#${info.topic} · queued — position ${info.position}`);
             } catch {}
             pollProcs();

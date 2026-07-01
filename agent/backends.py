@@ -29,9 +29,9 @@ SUPPORTED_PROTOCOLS_BY_DRIVER = {
 }
 DEFAULT_PROTOCOL_BY_DRIVER = {
     "claude": "interactive-cli",
-    "codex": "oneshot-cli",
-    "cursor": "oneshot-cli",
-    "opencode": "oneshot-cli",
+    "codex": "interactive-cli",
+    "cursor": "interactive-cli",
+    "opencode": "interactive-cli",
 }
 SUPPORTED_GAUGES = frozenset({"claude", "codex", "cursor", "deepseek", "static", "none"})
 _ID_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
@@ -307,7 +307,7 @@ def _configured_backends() -> dict[str, Any]:
     defaults = {name: dict(value) for name, value in _DEFAULT_BACKENDS.items()}
     legacy = _cfg.get("deepseek") or {}
     if legacy.get("claude_key"):
-        defaults["deepcla"] = {
+        defaults["deepseek"] = {
             "driver": "claude",
             "label": "DeepSeek",
             "color": "#4D9DE0",

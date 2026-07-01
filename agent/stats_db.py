@@ -233,13 +233,6 @@ def init_db() -> None:
                 "INSERT OR IGNORE INTO agents (name, backend, model) VALUES (?, ?, ?)",
                 ("haiku", "claude", "claude-haiku-4-5"),
             )
-        # Seed a short alias for the experimental persistent Claude backend.
-        claude_live_backend = BACKENDS.get("claude-live")
-        if claude_live_backend and claude_live_backend.available:
-            conn.execute(
-                "INSERT OR IGNORE INTO agents (name, backend, model) VALUES (?, ?, ?)",
-                ("clive", "claude-live", claude_live_backend.model),
-            )
         # FTS repair: remove entries whose content was indexed mid-stream
         # (partial saves) and now differs from the final stored content.
         conn.execute("""

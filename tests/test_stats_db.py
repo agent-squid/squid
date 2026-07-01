@@ -1,25 +1,6 @@
 import sqlite3
-from types import SimpleNamespace
-
 from agent import stats_db
 
-
-def test_init_db_seeds_clive_for_available_claude_live_backend(tmp_path, monkeypatch):
-    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
-    monkeypatch.setattr(stats_db, "BACKENDS", {
-        "claude-live": SimpleNamespace(available=True, model=None),
-    })
-
-    stats_db.init_db()
-
-    agent = stats_db.get_agent("clive")
-    assert agent is not None
-    assert agent["name"] == "clive"
-    assert agent["backend"] == "claude-live"
-    assert agent["model"] is None
-    assert agent["cwd"] is None
-    assert agent["timeout"] is None
-    assert stats_db.get_agent("claude-live") is None
 
 
 def test_topic_agent_history_uses_mode_specific_prompts(tmp_path, monkeypatch):

@@ -22,7 +22,7 @@ agent:
 backends:
   claude:
     driver: claude
-    protocol: oneshot-cli
+    protocol: interactive-cli
     label: Claude
     color: "#AE5332"
     gauge: claude
@@ -42,21 +42,21 @@ backends:
 
   codex:
     driver: codex
-    # protocol: interactive-cli  # structured exec/resume JSONL, not TUI scraping
+    protocol: interactive-cli
     label: Codex
     color: "#7070A0"
     gauge: codex
 
   cursor:
     driver: cursor
-    # protocol: interactive-cli  # structured stream-json print/resume
+    protocol: interactive-cli
     label: Cursor
     color: "#FFFFFF"
     gauge: cursor
 
   opencode:
     driver: opencode
-    # protocol: interactive-cli  # structured json run/session
+    protocol: interactive-cli
     label: OpenCode
     color: "#CFCECD"
     gauge:
@@ -68,8 +68,9 @@ backends:
   # Get an API key at https://platform.deepseek.com/api_keys, then fill in one of:
   #   api_key: "sk-..."                 # inline string
   #   api_key: {env: DEEPSEEK_API_KEY}  # read from environment variable
-  # deepcla:
+  # deepseek:
   #   driver: claude
+  #   protocol: interactive-cli
   #   label: DeepSeek
   #   color: "#4D9DE0"
   #   provider: deepseek
@@ -87,6 +88,7 @@ backends:
   #   auto-discover the model name from a local server's /v1/models response.
   # qwen:
   #   driver: codex
+  #   protocol: interactive-cli
   #   label: Qwen
   #   color: "#10A37F"
   #   provider: qwen
