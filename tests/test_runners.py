@@ -123,7 +123,9 @@ def test_claude_interactive_reuses_live_process_for_same_session_key():
     _clear()
     fake_proc = _FakeProcess(9001, [
         json.dumps({"type": "system", "session_id": "sess-1"}),
+        json.dumps({"type": "user", "isReplay": True, "message": {"role": "user", "content": "first prompt"}}),
         json.dumps({"type": "result", "result": "first", "usage": {}}),
+        json.dumps({"type": "user", "isReplay": True, "message": {"role": "user", "content": "second prompt"}}),
         json.dumps({"type": "result", "result": "second", "usage": {}}),
     ])
     created_cmds = []
@@ -150,6 +152,7 @@ def test_claude_interactive_reuses_live_process_for_same_session_key():
         "--input-format", "stream-json",
         "--output-format", "stream-json",
         "--include-partial-messages",
+        "--replay-user-messages",
         "--verbose",
         "--dangerously-skip-permissions",
     ]]
@@ -171,10 +174,89 @@ def test_claude_interactive_reuses_live_process_for_same_session_key():
     _clear()
 
 
+def test_claude_interactive_ignores_results_before_matching_prompt_replay():
+    _clear()
+    fake_proc = _FakeProcess(9004, [
+        json.dumps({"type": "system", "session_id": "sess-1"}),
+        json.dumps({"type": "result", "result": "stale task notification answer", "usage": {}}),
+        json.dumps({"type": "user", "isReplay": True, "message": {"role": "user", "content": "current prompt"}}),
+        json.dumps({"type": "result", "result": "current answer", "usage": {}}),
+    ])
+
+    async def fake_create_subprocess_exec(*_cmd, **_kwargs):
+        return fake_proc
+
+    async def collect():
+        return [chunk async for chunk in run_claude_interactive_cli(
+            "current prompt", cwd="/tmp/project", topic="work", agent="claude",
+        )]
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), \
+         patch("agent.runners.asyncio.create_subprocess_exec", fake_create_subprocess_exec):
+        chunks = asyncio.run(collect())
+
+    assert chunks[0] == "current answer"
+    assert all(chunk != "stale task notification answer" for chunk in chunks)
+    _clear()
+
+
+def test_claude_interactive_waits_for_matching_agent_task_notification():
+    _clear()
+    fake_proc = _FakeProcess(9005, [
+        json.dumps({"type": "system", "session_id": "sess-1"}),
+        json.dumps({"type": "user", "isReplay": True, "message": {"role": "user", "content": "2."}}),
+        json.dumps({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "tool_use", "id": "toolu_agent_1", "name": "Agent"},
+            },
+        }),
+        json.dumps({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": '{"description":"scan panels"}'},
+            },
+        }),
+        json.dumps({"type": "stream_event", "event": {"type": "content_block_stop", "index": 0}}),
+        json.dumps({"type": "result", "result": "Scanning all panels now.", "usage": {}}),
+        json.dumps({
+            "type": "user",
+            "isReplay": True,
+            "message": {
+                "role": "user",
+                "content": "<task-notification><tool-use-id>toolu_agent_1</tool-use-id><status>completed</status></task-notification>",
+            },
+        }),
+        json.dumps({"type": "result", "result": "Use Esc for dismissible panels, not confirmation modals.", "usage": {}}),
+    ])
+
+    async def fake_create_subprocess_exec(*_cmd, **_kwargs):
+        return fake_proc
+
+    async def collect():
+        return [chunk async for chunk in run_claude_interactive_cli(
+            "2.", cwd="/tmp/project", topic="work", agent="claude",
+        )]
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), \
+         patch("agent.runners.asyncio.create_subprocess_exec", fake_create_subprocess_exec):
+        chunks = asyncio.run(collect())
+
+    assert chunks[0] == {"_tool": {"name": "Agent", "tool_use_id": "toolu_agent_1", "description": "scan panels"}}
+    assert "Scanning all panels now." not in chunks
+    assert "Use Esc for dismissible panels, not confirmation modals." in chunks
+    _clear()
+
+
 def test_claude_interactive_starts_with_resume_id_and_skips_history_injection():
     _clear()
     fake_proc = _FakeProcess(9002, [
         json.dumps({"type": "system", "session_id": "sess-1"}),
+        json.dumps({"type": "user", "isReplay": True, "message": {"role": "user", "content": "new prompt"}}),
         json.dumps({"type": "result", "result": "resumed", "usage": {}}),
     ])
     captured = {}
@@ -213,6 +295,7 @@ def test_claude_interactive_closes_process_after_idle_timeout():
     _clear()
     fake_proc = _FakeProcess(9003, [
         json.dumps({"type": "system", "session_id": "sess-1"}),
+        json.dumps({"type": "user", "isReplay": True, "message": {"role": "user", "content": "prompt"}}),
         json.dumps({"type": "result", "result": "done", "usage": {}}),
     ])
 

@@ -154,6 +154,44 @@ def _claude_child_env(backend_id: str, backend_env: Optional[dict]) -> dict:
     return env_for_claude
 
 
+def _claude_replayed_user_content(event: dict) -> Optional[str]:
+    if event.get("type") != "user" or not event.get("isReplay"):
+        return None
+    message = event.get("message")
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return None
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text", "")))
+        if parts:
+            return "".join(parts)
+    return None
+
+
+def _xmlish_tag_value(text: str, tag: str) -> Optional[str]:
+    start = f"<{tag}>"
+    end = f"</{tag}>"
+    i = text.find(start)
+    if i < 0:
+        return None
+    i += len(start)
+    j = text.find(end, i)
+    if j < 0:
+        return None
+    return text[i:j]
+
+
+def _claude_task_notification_tool_use_id(content: Optional[str]) -> Optional[str]:
+    if not content or not content.lstrip().startswith("<task-notification>"):
+        return None
+    return _xmlish_tag_value(content, "tool-use-id")
+
+
 class _ClaudeStreamParser:
     def __init__(self, history: Optional[List[dict]]):
         self.history = history
@@ -183,7 +221,11 @@ class _ClaudeStreamParser:
             if inner_type == "content_block_start":
                 block = inner.get("content_block", {})
                 if block.get("type") == "tool_use":
-                    self.tool_blocks[idx] = {"name": block.get("name", ""), "input_json": ""}
+                    self.tool_blocks[idx] = {
+                        "id": block.get("id", ""),
+                        "name": block.get("name", ""),
+                        "input_json": "",
+                    }
 
             elif inner_type == "content_block_delta":
                 delta = inner.get("delta", {})
@@ -201,7 +243,7 @@ class _ClaudeStreamParser:
 
             elif inner_type == "content_block_stop" and idx in self.tool_blocks:
                 block = self.tool_blocks.pop(idx)
-                chunks.append({"_tool": _tool_data(block["name"], block["input_json"])})
+                chunks.append({"_tool": _tool_data(block["name"], block["input_json"], block.get("id"))})
 
         elif t == "result":
             subtype = event.get("subtype")
@@ -228,7 +270,7 @@ class _ClaudeStreamParser:
             # ─────────────────────────────────────────────────────────────────────────────
             chunks.append({
                 "_stats": {
-                    "session_id": self.session_id,
+                    "session_id": self.session_id or event.get("session_id"),
                     "input_tokens": usage.get("input_tokens", 0),
                     "output_tokens": usage.get("output_tokens", 0),
                     "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
@@ -373,13 +415,15 @@ def _estimate_history_tokens(history: Optional[List[dict]]) -> int:
     return total_chars // 4
 
 
-def _tool_data(name: str, input_json: str) -> dict:
+def _tool_data(name: str, input_json: str, tool_use_id: Optional[str] = None) -> dict:
     """Parse a completed tool call into structured data for the client to render."""
     try:
         inp = json.loads(input_json) if input_json.strip() else {}
     except json.JSONDecodeError:
         inp = {}
     base: dict = {"name": name}
+    if tool_use_id:
+        base["tool_use_id"] = tool_use_id
     if name == "Edit":
         return {**base, "file": inp.get("file_path", ""),
                 "old": inp.get("old_string", ""), "new": inp.get("new_string", "")}
@@ -515,6 +559,7 @@ class _ClaudeInteractiveCLI:
             "--input-format", "stream-json",
             "--output-format", "stream-json",
             "--include-partial-messages",
+            "--replay-user-messages",
             "--verbose",
             "--dangerously-skip-permissions",
         ]
@@ -648,12 +693,18 @@ class _ClaudeInteractiveCLI:
                 raise CLIError(f"Claude interactive stdin failed: {exc}") from exc
 
             parser = _ClaudeStreamParser(history)
+            accepting_turn = False
+            current_turn_is_prompt = False
+            pending_agent_tool_use_id: Optional[str] = None
+            turn_live_chunks: list[dict] = []
+            turn_result_chunks: list[Union[str, dict]] = []
+            turn_agent_tool_use_id: Optional[str] = None
             timeout = response_timeout if response_timeout is not None else RESPONSE_TIMEOUT
             deadline = asyncio.get_event_loop().time() + timeout
             first_byte = True
 
             try:
-                while not parser.done:
+                while True:
                     remaining = deadline - asyncio.get_event_loop().time()
                     if remaining <= 0:
                         await self.close()
@@ -672,8 +723,64 @@ class _ClaudeInteractiveCLI:
                             raise CLIError(f"CLI exited {returncode}: {err}")
                         raise CLIError("Claude interactive stream closed before result")
                     first_byte = False
-                    for chunk in parser.feed_line(line.decode(errors="replace").rstrip("\n")):
-                        yield chunk
+                    line_text = line.decode(errors="replace").rstrip("\n")
+                    try:
+                        event = json.loads(line_text)
+                    except json.JSONDecodeError:
+                        event = {}
+                    replayed = _claude_replayed_user_content(event)
+                    if replayed == content:
+                        accepting_turn = True
+                        current_turn_is_prompt = True
+                        for chunk in turn_live_chunks:
+                            yield chunk
+                        turn_live_chunks = []
+                    elif (
+                        pending_agent_tool_use_id
+                        and _claude_task_notification_tool_use_id(replayed) == pending_agent_tool_use_id
+                    ):
+                        accepting_turn = True
+                        current_turn_is_prompt = False
+                        for chunk in turn_live_chunks:
+                            yield chunk
+                        turn_live_chunks = []
+
+                    chunks = parser.feed_line(line_text)
+                    for chunk in chunks:
+                        if isinstance(chunk, dict) and ("_status" in chunk or "_tool" in chunk):
+                            tool = chunk.get("_tool")
+                            if isinstance(tool, dict) and tool.get("name") == "Agent":
+                                turn_agent_tool_use_id = tool.get("tool_use_id") or ""
+                            if accepting_turn:
+                                yield chunk
+                            else:
+                                turn_live_chunks.append(chunk)
+                        else:
+                            turn_result_chunks.append(chunk)
+
+                    if parser.done:
+                        if accepting_turn and current_turn_is_prompt and turn_agent_tool_use_id:
+                            pending_agent_tool_use_id = turn_agent_tool_use_id
+                            parser = _ClaudeStreamParser(history)
+                            accepting_turn = False
+                            current_turn_is_prompt = False
+                            turn_live_chunks = []
+                            turn_result_chunks = []
+                            turn_agent_tool_use_id = None
+                            continue
+                        if accepting_turn:
+                            for chunk in turn_result_chunks:
+                                yield chunk
+                            break
+                        # Claude may have processed a queued task-notification
+                        # before the prompt Squid just wrote. Discard that turn
+                        # and keep reading until the replayed prompt matches.
+                        parser = _ClaudeStreamParser(history)
+                        accepting_turn = False
+                        current_turn_is_prompt = False
+                        turn_live_chunks = []
+                        turn_result_chunks = []
+                        turn_agent_tool_use_id = None
             finally:
                 if self.proc:
                     _update_proc(self.proc.pid, state="idle", msg_id=None)

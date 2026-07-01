@@ -252,7 +252,7 @@ async function openRemoteQR() {
 
   const closeBtn = document.createElement('button');
   closeBtn.id = 'remote-modal-close';
-  closeBtn.textContent = '✕';
+  closeBtn.innerHTML = '<span class="close-desktop">Esc</span><span class="close-mobile">✕</span>';
   closeBtn.addEventListener('click', () => modal.remove());
   modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
   document.addEventListener('keydown', function esc(e) {
@@ -689,7 +689,7 @@ async function loadBookmarkHistory() {
   const { items } = data;
   const fragment = document.createDocumentFragment();
   for (const item of items) {
-    if (!item.content && item.status !== 'pending') continue;
+    if (!item.content) continue;
     appendHistoryItem(item, fragment);
   }
   messages.appendChild(fragment);
@@ -1291,6 +1291,7 @@ async function loadSearchResults() {
   const fragment = document.createDocumentFragment();
   for (const item of [...items].reverse()) {
     if (!item.content && !item.prompt) continue;
+    if (item.status === 'pending') continue;
     if (bookmarkedIds && !bookmarkedIds.has(item.id)) continue;
     let el;
     if (promptOnlyHistory) {
@@ -1862,6 +1863,7 @@ function closeEscSurfaces() {
   if (restartModal?.classList.contains('open')) { closeRestartModal(false); closed = true; }
   if (document.getElementById('memory-modal')?.classList.contains('open')) { closeMemoryEditor(); closed = true; }
   if (document.getElementById('topic-delete-modal')?.classList.contains('open')) { closeTopicDeleteModal(); closed = true; }
+  if (!sessionAdvisoryEl.hidden) { if (_advisoryDismissKey) localStorage.setItem(_advisoryDismissKey, '1'); sessionAdvisoryEl.hidden = true; closed = true; }
   return closed;
 }
 
@@ -4487,7 +4489,7 @@ function procStopButton(row) {
 function renderProcPopup(processes, queued) {
   const header = `<div class="proc-popup-header">
     <span class="settings-label">Status</span>
-    <button id="proc-popup-close" type="button">✕</button>
+    <button id="proc-popup-close" type="button"><span class="close-desktop">Esc</span><span class="close-mobile">✕</span></button>
   </div>`;
 
   let body = renderQuotaStatus();
