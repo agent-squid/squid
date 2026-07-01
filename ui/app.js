@@ -485,7 +485,7 @@ chipStashBtn.addEventListener('click', async e => {
   const parsed = parseInput(text);
   const message = parsed.message.trim();
   if (!message) {
-    _acRender(promptHistoryAutocompleteItems(matchingPromptHistory('', 8)), 'Recent Prompts');
+    _acRender(promptHistoryAutocompleteItems(matchingPromptHistory('', Infinity)), 'Recent Prompts');
     acSel = -1;
     _acHighlight();
     input.focus();
@@ -498,7 +498,7 @@ chipStashBtn.addEventListener('click', async e => {
   input.value = '';
   localStorage.removeItem('squid_draft');
   resizeComposer();
-  _acRender(promptHistoryAutocompleteItems(matchingPromptHistory('', 8)), 'Recent Prompts');
+  _acRender(promptHistoryAutocompleteItems(matchingPromptHistory('', Infinity)), 'Recent Prompts');
   acSel = -1;
   _acHighlight();
   input.focus();
