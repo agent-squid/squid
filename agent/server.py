@@ -78,6 +78,7 @@ from .stats_db import (
     search_messages, search_prompts,
     get_recent_prompts,
     save_file_edit, get_file_edit_history, get_file_edit_by_id,
+    get_bookmarks, add_bookmark, remove_bookmark,
 )
 from .journal import _generate_journal, _current_week, list_topic_journals, read_journal
 from . import creds
@@ -1308,6 +1309,27 @@ async def revert_diff(msg_id: int, req: RevertRequest):
         await asyncio.to_thread(record_git_diff_revert, msg_id, req.repo, reverted)
 
     return JSONResponse({"ok": True, "reverted": reverted, "failed": failed})
+
+
+@app.get("/bookmarks")
+async def list_bookmarks():
+    return JSONResponse({"items": get_bookmarks()})
+
+
+@app.post("/bookmarks")
+async def create_bookmark(request: Request):
+    body = await request.json()
+    msg_id = body.get("msg_id")
+    if not isinstance(msg_id, int):
+        return JSONResponse({"error": "msg_id required"}, status_code=400)
+    add_bookmark(msg_id, body.get("topic"), body.get("agent"), body.get("content"))
+    return JSONResponse({"ok": True})
+
+
+@app.delete("/bookmarks/{msg_id}")
+async def delete_bookmark(msg_id: int):
+    remove_bookmark(msg_id)
+    return JSONResponse({"ok": True})
 
 
 @app.post("/config/creds")

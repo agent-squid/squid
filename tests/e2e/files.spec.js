@@ -39,7 +39,6 @@ test('Files menu opens configured roots and browses into files', async ({ page }
   });
 
   await page.goto('/');
-  await page.locator('#hamburger-btn').click();
   await page.getByRole('button', { name: 'Files' }).click();
 
   await expect(page.locator('#file-modal')).toBeVisible();
@@ -119,7 +118,6 @@ test('yaml example files open inline from the browser instead of downloading', a
   });
 
   await page.goto('/');
-  await page.locator('#hamburger-btn').click();
   await page.getByRole('button', { name: 'Files' }).click();
   await page.getByRole('link', { name: '/tmp/work' }).click();
   await page.getByRole('link', { name: 'squid/' }).click();
@@ -133,3 +131,27 @@ test('yaml example files open inline from the browser instead of downloading', a
   expect(await downloadPromise).toBe(false);
 });
 
+test('desktop burger only shows settings while mobile burger shows primary nav', async ({ page }) => {
+  await mockApp(page);
+
+  await page.setViewportSize({ width: 1024, height: 720 });
+  await page.goto('/');
+  await page.locator('#hamburger-btn').click();
+  await expect(page.locator('#hamburger-menu')).toBeVisible();
+  await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Settings' })).toBeVisible();
+  await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Chat' })).toBeHidden();
+  await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Topics' })).toBeHidden();
+  await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Files' })).toBeHidden();
+  await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Agents' })).toBeHidden();
+  await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Analytics' })).toBeHidden();
+
+  await page.setViewportSize({ width: 390, height: 720 });
+  await page.locator('#hamburger-btn').click();
+  await page.locator('#hamburger-btn').click();
+  await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Chat' })).toBeVisible();
+  await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Topics' })).toBeVisible();
+  await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Files' })).toBeVisible();
+  await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Agents' })).toBeVisible();
+  await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Analytics' })).toBeVisible();
+  await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Settings' })).toBeVisible();
+});

@@ -112,6 +112,13 @@ _TABLES = [
         edited_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )""",
     "CREATE INDEX IF NOT EXISTS idx_file_edit_history_path ON file_edit_history (file_path, id DESC)",
+    """CREATE TABLE IF NOT EXISTS bookmarks (
+        msg_id      INTEGER PRIMARY KEY,
+        topic       TEXT,
+        agent       TEXT,
+        content     TEXT,
+        saved_at    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )""",
     # FTS5 index — standalone table (not external-content). See ADR-0021.
     # Trigger fires on the status='done' update (final content), not the first
     # partial-content save, so the index always holds the complete response.
@@ -1749,3 +1756,26 @@ def get_run_events(msg_id: int, after_seq: int = -1) -> list[dict]:
             (msg_id, after_seq),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── bookmarks ─────────────────────────────────────────────────────────────────
+
+def get_bookmarks() -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT msg_id AS id, topic, agent, content, saved_at FROM bookmarks ORDER BY saved_at DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def add_bookmark(msg_id: int, topic: Optional[str], agent: Optional[str], content: Optional[str]) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO bookmarks (msg_id, topic, agent, content) VALUES (?, ?, ?, ?)",
+            (msg_id, topic, agent, content),
+        )
+
+
+def remove_bookmark(msg_id: int) -> None:
+    with _connect() as conn:
+        conn.execute("DELETE FROM bookmarks WHERE msg_id = ?", (msg_id,))

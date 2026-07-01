@@ -188,7 +188,11 @@ function initSettings() {
     btn.addEventListener('click', () => {
       hamburgerMenu.classList.remove('open');
       hamburgerBtn.classList.remove('active');
-      switchView(btn.dataset.view);
+      if (btn.dataset.action === 'files') {
+        openFileRootBrowser();
+      } else {
+        switchView(btn.dataset.view);
+      }
     })
   );
   const hamburgerBtn  = document.getElementById('hamburger-btn');
@@ -538,16 +542,16 @@ function parseInput(text) {
 
 function makeTopicTag(topic, agent, { clickable = false, adhoc = false, lookback = 0, backend = null } = {}) {
   const wrap = document.createElement('span');
-  wrap.className = 'topic-tag';
+  wrap.className = 'topic-tag' + (clickable ? ' clickable' : '');
 
   const tSpan = document.createElement('span');
-  tSpan.className = 'tag-topic' + (clickable ? ' clickable' : '');
+  tSpan.className = 'tag-topic';
   tSpan.textContent = '#' + topic;
   wrap.appendChild(tSpan);
 
   if (agent) {
     const aSpan = document.createElement('span');
-    aSpan.className = 'tag-agent' + (clickable ? ' clickable' : '');
+    aSpan.className = 'tag-agent';
     aSpan.textContent = '@' + agent;
     setAgentSlugColor(aSpan, agent, backend);
     wrap.appendChild(aSpan);
@@ -564,8 +568,15 @@ function makeTopicTag(topic, agent, { clickable = false, adhoc = false, lookback
   if (clickable) {
     wrap.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (agent && e.target.classList.contains('tag-agent')) filterByAgent(topic, agent, adhoc, lookback);
-      else filterByTopic(topic);
+      if (
+        !stickyChip ||
+        stickyChip.topic !== topic ||
+        stickyChip.agent !== (agent || null) ||
+        !!stickyChip.adhoc !== !!adhoc ||
+        (stickyChip.lookback || 0) !== (lookback || 0)
+      ) {
+        setTopicChip(topic, agent || null, adhoc, lookback);
+      }
     });
   }
 
@@ -1276,7 +1287,7 @@ async function loadSearchResults() {
   if (!Array.isArray(items)) { searchLoading = false; return; }
 
   const kws = searchState.keywords.trim().split(/\s+/).filter(Boolean);
-  const bookmarkedIds = bookmarkOnlyHistory ? new Set(getBookmarkedItems().map(i => i.id)) : null;
+  const bookmarkedIds = bookmarkOnlyHistory ? _bookmarkIds : null;
   const fragment = document.createDocumentFragment();
   for (const item of [...items].reverse()) {
     if (!item.content && !item.prompt) continue;
@@ -2018,6 +2029,12 @@ async function sendMessage(text) {
     }
   }
 
+  function removeThinking() {
+    thinkingFrozen = true;
+    killBtn.style.display = 'none';
+    thinkingBubble.remove();
+  }
+
   requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
 
   // ── Response bubble (not yet in DOM — appended on first content chunk) ────────
@@ -2193,7 +2210,7 @@ async function sendMessage(text) {
           if (data.status_raw && data.status_raw.trim().length > ssePart.length) {
             statusBuf = data.status_raw;
           }
-          freezeThinking();
+          removeThinking();
           showStoredResponse(data.content || '');
           bubble.classList.add('history-item');
           resolvedAgent = data.agent || resolvedAgent;
@@ -2428,7 +2445,7 @@ async function sendMessage(text) {
             }
             completionRendered = true;
             stopStatusFallback();
-            freezeThinking();
+            removeThinking();
             invalidateTopicsCache();
             doneTime = new Date().toISOString();
             if (firstDataReceived) {
@@ -6564,10 +6581,49 @@ function closePinPanel() {
 
 // ── Bookmarks ─────────────────────────────────────────────────────────────
 
-function getBookmarkedItems() {
-  try { return JSON.parse(localStorage.getItem('bookmarkedItems') || '[]'); } catch { return []; }
+let _bookmarkItems = [];
+let _bookmarkIds = new Set();
+
+function getBookmarkedItems() { return _bookmarkItems; }
+
+async function _loadBookmarks() {
+  try {
+    const res = await fetch('/bookmarks');
+    if (!res.ok) return;
+    const data = await res.json();
+    _bookmarkItems = data.items || [];
+    _bookmarkIds = new Set(_bookmarkItems.map(i => i.id));
+    // one-time migration: push any localStorage bookmarks to the server
+    const legacy = (() => { try { return JSON.parse(localStorage.getItem('bookmarkedItems') || '[]'); } catch { return []; } })();
+    for (const item of legacy) {
+      if (!_bookmarkIds.has(item.id)) {
+        await fetch('/bookmarks', { method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ msg_id: item.id, topic: item.topic, agent: item.agent || null, content: item.content || null }) });
+      }
+    }
+    if (legacy.length) {
+      localStorage.removeItem('bookmarkedItems');
+      const res2 = await fetch('/bookmarks');
+      if (res2.ok) { const d = await res2.json(); _bookmarkItems = d.items || []; _bookmarkIds = new Set(_bookmarkItems.map(i => i.id)); }
+    }
+  } catch { /* ignore — falls back to empty */ }
 }
-function setBookmarkedItems(items) { localStorage.setItem('bookmarkedItems', JSON.stringify(items)); }
+
+async function _apiToggleBookmark(msgId, topic, agent, text) {
+  if (_bookmarkIds.has(msgId)) {
+    _bookmarkIds.delete(msgId);
+    _bookmarkItems = _bookmarkItems.filter(i => i.id !== msgId);
+    fetch(`/bookmarks/${msgId}`, { method: 'DELETE' }).catch(() => {});
+    return false;
+  } else {
+    const content = text ? text.slice(0, 300) : null;
+    _bookmarkIds.add(msgId);
+    _bookmarkItems = [{ id: msgId, topic, agent: agent || null, content, saved_at: new Date().toISOString() }, ..._bookmarkItems];
+    fetch('/bookmarks', { method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ msg_id: msgId, topic, agent: agent || null, content }) }).catch(() => {});
+    return true;
+  }
+}
 
 let bookmarkOnlyHistory = false;
 
@@ -6599,25 +6655,18 @@ function addBookmarkButton(bubbleEl, msgId, topic, agent) {
   btn.className = 'msg-bookmark-btn';
   btn.dataset.msgId = String(msgId);
   btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 1h8a1 1 0 0 1 1 1v12l-5-2.8-5 2.8V2a1 1 0 0 1 1-1z"/></svg>`;
-  if (getBookmarkedItems().find(i => i.id === msgId)) {
+  if (_bookmarkIds.has(msgId)) {
     btn.classList.add('bookmarked');
     btn.title = 'Remove bookmark';
   } else {
     btn.title = 'Bookmark';
   }
-  btn.addEventListener('click', e => {
+  btn.addEventListener('click', async e => {
     e.stopPropagation();
-    const bookmarked = getBookmarkedItems();
-    if (bookmarked.find(i => i.id === msgId)) {
-      setBookmarkedItems(bookmarked.filter(i => i.id !== msgId));
-      btn.classList.remove('bookmarked');
-      btn.title = 'Bookmark';
-    } else {
-      const text = _messageBodyText(bubbleEl).slice(0, 300);
-      setBookmarkedItems([...bookmarked, { id: msgId, topic, agent: agent || null, content: text, saved_at: Date.now() }]);
-      btn.classList.add('bookmarked');
-      btn.title = 'Remove bookmark';
-    }
+    const text = _messageBodyText(bubbleEl);
+    const nowBookmarked = await _apiToggleBookmark(msgId, topic, agent, text);
+    btn.classList.toggle('bookmarked', nowBookmarked);
+    btn.title = nowBookmarked ? 'Remove bookmark' : 'Bookmark';
   });
   const header = bubbleEl.querySelector('.response-header');
   (header || bubbleEl).appendChild(btn);
@@ -6626,6 +6675,7 @@ function addBookmarkButton(bubbleEl, msgId, topic, agent) {
 function initBookmark() {
   bookmarkBtn.addEventListener('click', toggleBookmarkOnlyHistory);
   updateBookmarkButton();
+  _loadBookmarks();
 }
 
 function addPinButton(bubbleEl, msgId, topic, agent, sessionId = null) {

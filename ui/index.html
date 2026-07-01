@@ -18,7 +18,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono&display=swap" />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono&display=swap&text=%E2%96%88%E2%96%84%E2%96%80%E2%95%94%E2%95%90%E2%95%97%E2%95%91%E2%95%9A%E2%95%9D" />
   <link rel="stylesheet" href="/vendor/atom-one-dark.min.css" />
-  <link rel="stylesheet" href="style.css?v=20260630-074" />
+  <link rel="stylesheet" href="style.css?v=20260701-001" />
   <script src="/vendor/highlight.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/vendor/qrcode.min.js"></script>
@@ -109,6 +109,7 @@
       <nav id="nav-tabs">
         <button class="nav-tab active" data-view="chat">Chat</button>
         <button class="nav-tab" data-view="topics">Topics</button>
+        <button class="nav-tab" data-action="files">Files</button>
         <button class="nav-tab" data-view="agents">Agents</button>
         <button class="nav-tab" data-view="analytics">Analytics</button>
       </nav>
@@ -144,11 +145,11 @@
 
         <!-- Hamburger dropdown -->
         <div id="hamburger-menu">
-          <button class="hmenu-item active" data-view="chat">Chat</button>
-          <button class="hmenu-item" data-view="topics">Topics</button>
-          <button class="hmenu-item" data-view="agents">Agents</button>
-          <button class="hmenu-item" data-view="analytics">Analytics</button>
-          <button class="hmenu-item" data-action="files">Files</button>
+          <button class="hmenu-item hmenu-primary active" data-view="chat">Chat</button>
+          <button class="hmenu-item hmenu-primary" data-view="topics">Topics</button>
+          <button class="hmenu-item hmenu-primary" data-action="files">Files</button>
+          <button class="hmenu-item hmenu-primary" data-view="agents">Agents</button>
+          <button class="hmenu-item hmenu-primary" data-view="analytics">Analytics</button>
           <button class="hmenu-item" data-view="settings">Settings</button>
         </div>
       </div>
@@ -562,6 +563,6 @@
   </div>
   <div id="app-tooltip"></div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="app.js?v=20260630-074"></script>
+  <script src="app.js?v=20260701-001"></script>
 </body>
 </html>

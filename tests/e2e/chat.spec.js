@@ -116,6 +116,31 @@ test.describe('response bubble', () => {
     await expect(page.locator('#ctx-popup')).toContainText('message#1');
   });
 
+  test('clicking a header route sets composer route without filtering history', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(META, { data: 'Hello' }, DONE),
+    }));
+
+    await sendMsg(page, '#squid@claude remember this route');
+    await expect(page.locator(`${RESPONSE} .response-header .tag-topic`)).not.toHaveClass(/clickable/);
+    await expect(page.locator(`${RESPONSE} .response-header .tag-agent`)).not.toHaveClass(/clickable/);
+    let historyReloads = 0;
+    await page.route('**/history**', r => {
+      historyReloads++;
+      return r.fulfill({ json: { items: [], has_more: false } });
+    });
+    await page.locator(`${RESPONSE} .response-header .tag-topic`).click();
+    await page.waitForTimeout(300);
+
+    await expect(page.locator('#topic-chip')).toHaveClass(/visible/);
+    await expect(page.locator('#topic-chip')).toContainText('#squid');
+    await expect(page.locator('#topic-chip')).toContainText('@claude');
+    await expect(page.locator('#filter-badge')).not.toHaveClass(/active/);
+    await expect(page.locator(RESPONSE)).toContainText('Hello');
+    expect(historyReloads).toBe(0);
+  });
+
   test('context indicator shows compact session turn, memory, and pin counts', async ({ page }) => {
     await page.route('**/topics/*/memory', r => r.fulfill({ json: {
       topic: 'squid',
@@ -408,7 +433,7 @@ test.describe('response bubble', () => {
     await expect(page.locator(MSG_ERROR)).not.toBeAttached();
   });
 
-  test('thinking bubble collapses to toggle when status events present', async ({ page }) => {
+  test('status events are hidden after final response completes', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200, headers: SSE_HEADERS,
       body: sse(META, { event: 'status', data: 'Thinking...' }, { data: 'Result' }, DONE),
@@ -416,9 +441,11 @@ test.describe('response bubble', () => {
 
     await sendMsg(page);
     await expect(page.locator(RESPONSE)).toBeVisible();
-    await expect(page.locator('.msg-thinking-done')).toBeVisible();
-    await expect(page.locator('.thinking-toggle')).toBeVisible();
-    await look(page);  // pause — observe: collapsed ▸ toggle above the response bubble
+    await expect(page.locator(RESPONSE)).toContainText('Result');
+    await expect(page.locator(RESPONSE)).not.toContainText('Thinking...');
+    await expect(page.locator(THINKING)).not.toBeAttached();
+    await expect(page.locator('.msg-thinking-done')).not.toBeAttached();
+    await look(page);  // pause — observe: only final response bubble
   });
 
   test('status streaming preserves newlines and adjacent delta chunks', async ({ page }) => {
@@ -432,8 +459,9 @@ test.describe('response bubble', () => {
 
     await sendMsg(page);
 
-    await expect(page.locator('.thinking-body')).toHaveText('first line\nsecond line');
+    await expect(page.locator(THINKING)).not.toBeAttached();
     await expect(page.locator(RESPONSE)).toContainText('Final response');
+    await expect(page.locator(RESPONSE)).not.toContainText('first line');
   });
 
   test('partial status remains in status bubble when the response errors', async ({ page }) => {
