@@ -100,6 +100,10 @@ class Backend:
         return bool(self.path) and not self.missing_secrets()
 
     @property
+    def requires_api_key(self) -> bool:
+        return self.provider == "deepseek" or self.gauge.type == "deepseek"
+
+    @property
     def fingerprint(self) -> str:
         payload = {
             "driver": self.driver,
@@ -117,6 +121,8 @@ class Backend:
 
     def missing_secrets(self) -> list[str]:
         missing: list[str] = []
+        if self.requires_api_key and not self.api_key:
+            missing.append("api_key")
         for value in self.env.values():
             if isinstance(value, dict) and set(value) == {"env"}:
                 name = value["env"]

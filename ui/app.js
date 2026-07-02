@@ -7677,6 +7677,18 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
     body.appendChild(list);
   }
 
+  async function loadFileRoots() {
+    const rootsRes = await fetch('/config/localfile-roots');
+    if (rootsRes.ok) return rootsRes.json();
+    if (rootsRes.status !== 404) throw new Error('roots');
+    const healthRes = await fetch('/health').catch(() => null);
+    if (healthRes?.ok) {
+      const health = await healthRes.json();
+      if (health.squid_home) _squidHome = health.squid_home;
+    }
+    return { roots: _squidHome ? [_squidHome] : [] };
+  }
+
   async function loadFile() {
     body.textContent = 'Loading…';
     try {
@@ -7684,9 +7696,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
         pathKind = 'roots';
         pathIsText = false;
         updateNav();
-        const rootsRes = await fetch('/config/localfile-roots');
-        if (!rootsRes.ok) throw new Error('roots');
-        renderFileRoots(await rootsRes.json());
+        renderFileRoots(await loadFileRoots());
         return;
       }
       const res = await fetch('/localfile?' + new URLSearchParams({ path }));

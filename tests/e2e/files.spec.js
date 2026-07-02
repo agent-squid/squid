@@ -67,6 +67,24 @@ test('Files menu opens configured roots and browses into files', async ({ page }
   await expect(page.getByRole('button', { name: 'Edit file' })).toBeVisible();
 });
 
+test('Files menu falls back to squid_home when roots endpoint is missing', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/health', r => r.fulfill({
+    json: { status: 'ok', squid_home: '/tmp/fresh/squid', backends: {} },
+  }));
+  await page.route('**/config/localfile-roots**', r => r.fulfill({
+    status: 404,
+    body: 'Not Found',
+  }));
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Files' }).click();
+
+  await expect(page.locator('#file-modal')).toBeVisible();
+  await expect(page.locator('#file-modal-breadcrumb')).toHaveText('Files');
+  await expect(page.getByRole('link', { name: '/tmp/fresh/squid' })).toBeVisible();
+});
+
 test('yaml example files open inline from the browser instead of downloading', async ({ page }) => {
   await mockApp(page);
   await page.route('**/config/localfile-roots**', r => r.fulfill({

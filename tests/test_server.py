@@ -403,6 +403,18 @@ def test_yaml_config_can_be_read_validated_and_atomically_updated(tmp_path):
         server._LOCALFILE_ROOTS[:] = original_roots
 
 
+def test_api_routes_are_registered_before_static_ui():
+    client = TestClient(server.app)
+
+    bookmarks = client.get("/bookmarks")
+    roots = client.get("/config/localfile-roots")
+
+    assert bookmarks.status_code == 200
+    assert "items" in bookmarks.json()
+    assert roots.status_code == 200
+    assert "roots" in roots.json()
+
+
 def test_file_root_can_expand_to_an_edited_parent_and_applies_immediately(tmp_path):
     existing_root = tmp_path / "existing"
     existing_root.mkdir()

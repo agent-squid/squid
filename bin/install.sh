@@ -24,6 +24,33 @@ need_version() {
 ERRORS=0
 mark_error() { ERRORS=$((ERRORS + 1)); }
 
+run_quiet() {
+  local msg=$1
+  shift
+  local log_file
+  log_file=$(mktemp -t squid-install.XXXXXX)
+  "$@" >"$log_file" 2>&1 &
+  local pid=$!
+  local frames=("-" "\\" "|" "/")
+  local i=0
+  while kill -0 "$pid" 2>/dev/null; do
+    printf "\r  ${YELLOW}%s${RESET}  %s" "${frames[$((i % 4))]}" "$msg"
+    i=$((i + 1))
+    sleep 0.2
+  done
+  if wait "$pid"; then
+    printf "\r\033[K"
+    ok "$msg"
+    rm -f "$log_file"
+  else
+    printf "\r\033[K"
+    fail "$msg"
+    sed -n '1,120p' "$log_file" >&2
+    rm -f "$log_file"
+    exit 1
+  fi
+}
+
 SQUID_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # ── banner ──────────────────────────────────────────────────────────────────
@@ -80,9 +107,9 @@ if [[ -z "$PYTHON" ]]; then
   mark_error
 else
   VENV_DIR="$SQUID_DIR/.venv"
-  [[ -d "$VENV_DIR" ]] || "$PYTHON" -m venv "$VENV_DIR" &>/dev/null
-  "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-  "$VENV_DIR/bin/pip" install --quiet "$SQUID_DIR"
+  [[ -d "$VENV_DIR" ]] || run_quiet "create Python virtualenv" "$PYTHON" -m venv "$VENV_DIR"
+  run_quiet "upgrade pip" "$VENV_DIR/bin/pip" install --quiet --upgrade pip
+  run_quiet "install squid package" "$VENV_DIR/bin/pip" install --quiet "$SQUID_DIR"
   ok "squid installed"
 fi
 

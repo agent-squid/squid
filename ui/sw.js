@@ -37,6 +37,7 @@ self.addEventListener('fetch', (event) => {
   if (url.pathname === '/manifest.webmanifest' || url.pathname.startsWith('/icons/')) return;
   if (
     url.pathname.startsWith('/chat')
+    || url.pathname.startsWith('/bookmarks')
     || url.pathname.startsWith('/cmd')
     || url.pathname.startsWith('/config')
     || url.pathname.startsWith('/health')

@@ -114,6 +114,31 @@ test('configuration editor loads and saves the complete YAML', async ({ page }) 
   expect(saved.content).toContain('port: 8123');
 });
 
+test('agents backend catalog marks unkeyed DeepSeek as unavailable', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/health', r => r.fulfill({ json: {
+    status: 'ok',
+    backends: {
+      deepseek: {
+        driver: 'claude',
+        label: 'DeepSeek',
+        available: false,
+        missing_secrets: ['api_key'],
+        gauge: { type: 'deepseek' },
+        gauge_authed: false,
+      },
+    },
+  }}));
+
+  await page.goto('/');
+  await page.locator('.nav-tab[data-view="agents"]').click();
+
+  const row = page.locator('#backends-catalog .bcat-row').filter({ hasText: 'DeepSeek' });
+  await expect(row).toBeVisible();
+  await expect(row).toContainText('missing: api_key');
+  await expect(row).not.toContainText('detected');
+});
+
 test('blocked file viewer lets the user choose a broader parent and retries', async ({ page }) => {
   await mockApp(page);
   let allowed = false;

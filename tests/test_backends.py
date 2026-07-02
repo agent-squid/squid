@@ -134,6 +134,34 @@ def test_canonical_connection_fields_translate_for_claude():
     assert backend.gauge == Gauge(type="deepseek")
 
 
+def test_deepseek_backend_without_api_key_is_not_available():
+    backend = _validate_backend("deepseek", {
+        "driver": "claude",
+        "provider": "deepseek",
+        "base_url": "https://api.deepseek.com/anthropic",
+        "gauge": "deepseek",
+    })
+
+    with patch("agent.backends._DRIVER_PATHS", {"claude": "/usr/local/bin/claude"}):
+        assert backend.missing_secrets() == ["api_key"]
+        assert backend.public_dict()["missing_secrets"] == ["api_key"]
+        assert backend.available is False
+
+
+def test_deepseek_backend_with_api_key_can_be_available():
+    backend = _validate_backend("deepseek", {
+        "driver": "claude",
+        "provider": "deepseek",
+        "base_url": "https://api.deepseek.com/anthropic",
+        "api_key": "deepseek-secret",
+        "gauge": "deepseek",
+    })
+
+    with patch("agent.backends._DRIVER_PATHS", {"claude": "/usr/local/bin/claude"}):
+        assert backend.missing_secrets() == []
+        assert backend.available is True
+
+
 def test_canonical_connection_fields_translate_for_codex():
     backend = _validate_backend("qwen", {
         "driver": "codex",
