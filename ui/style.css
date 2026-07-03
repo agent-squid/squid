@@ -516,6 +516,8 @@ body {
   animation: pulse 1.4s ease-in-out infinite;
 }
 #proc-status.has-procs:hover::after { background: #5a9a5a; }
+#proc-status.has-idle::after { background: #3a3a52; }
+#proc-status.has-idle:hover::after { background: #4a4a62; }
 
 /* process status popup */
 #proc-status-popup {

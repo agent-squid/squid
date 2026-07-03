@@ -4575,7 +4575,9 @@ function formatIdleDuration(seconds) {
 
 function updateProcStatusDot(processes, queued) {
   const active = processes.some(r => !isIdleProc(r));
+  const hasIdle = !active && processes.some(isIdleProc);
   procStatusBtn.classList.toggle('has-procs', active || queued.length > 0);
+  procStatusBtn.classList.toggle('has-idle', hasIdle);
 }
 
 function renderQuotaStatus() {
