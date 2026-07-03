@@ -2495,7 +2495,7 @@ body {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
-  max-height: 70vh;
+  max-height: calc(100vh - 360px);
   overflow: hidden;
 }
 #help-panel.open { display: flex; }
@@ -2774,7 +2774,7 @@ button {
     top: calc(48px + env(safe-area-inset-top)) !important;
     left: 0.75rem;
     right: 0.75rem;
-    max-height: min(70dvh, 480px);
+    max-height: min(45dvh, 400px);
   }
 
   #help-close {

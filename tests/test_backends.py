@@ -145,6 +145,35 @@ def test_deepseek_backend_without_api_key_is_not_available():
     with patch("agent.backends._DRIVER_PATHS", {"claude": "/usr/local/bin/claude"}):
         assert backend.missing_secrets() == ["api_key"]
         assert backend.public_dict()["missing_secrets"] == ["api_key"]
+        assert backend.public_dict()["missing_requirements"] == ["api_key"]
+        assert backend.available is False
+
+
+def test_provider_backend_without_base_url_is_not_available():
+    backend = _validate_backend("qwen", {
+        "driver": "codex",
+        "provider": "qwen",
+        "gauge": {"type": "static", "text": "Local"},
+    })
+
+    with patch("agent.backends._DRIVER_PATHS", {"codex": "/usr/local/bin/codex"}):
+        assert backend.kind == "provider"
+        assert backend.missing_settings() == ["base_url"]
+        assert backend.public_dict()["missing_requirements"] == ["base_url"]
+        assert backend.available is False
+
+
+def test_deepseek_backend_without_base_url_is_not_available():
+    backend = _validate_backend("deepseek", {
+        "driver": "claude",
+        "provider": "deepseek",
+        "api_key": "deepseek-secret",
+        "gauge": "deepseek",
+    })
+
+    with patch("agent.backends._DRIVER_PATHS", {"claude": "/usr/local/bin/claude"}):
+        assert backend.missing_settings() == ["base_url"]
+        assert backend.public_dict()["missing_requirements"] == ["base_url"]
         assert backend.available is False
 
 
@@ -158,7 +187,9 @@ def test_deepseek_backend_with_api_key_can_be_available():
     })
 
     with patch("agent.backends._DRIVER_PATHS", {"claude": "/usr/local/bin/claude"}):
+        assert backend.kind == "provider"
         assert backend.missing_secrets() == []
+        assert backend.missing_settings() == []
         assert backend.available is True
 
 

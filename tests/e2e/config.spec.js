@@ -121,9 +121,10 @@ test('agents backend catalog marks unkeyed DeepSeek as unavailable', async ({ pa
     backends: {
       deepseek: {
         driver: 'claude',
+        kind: 'provider',
         label: 'DeepSeek',
         available: false,
-        missing_secrets: ['api_key'],
+        missing_requirements: ['api_key'],
         gauge: { type: 'deepseek' },
         gauge_authed: false,
       },
@@ -136,6 +137,33 @@ test('agents backend catalog marks unkeyed DeepSeek as unavailable', async ({ pa
   const row = page.locator('#backends-catalog .bcat-row').filter({ hasText: 'DeepSeek' });
   await expect(row).toBeVisible();
   await expect(row).toContainText('missing: api_key');
+  await expect(row).not.toContainText('detected');
+});
+
+test('agents backend catalog marks configured provider backends as ready', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/health', r => r.fulfill({ json: {
+    status: 'ok',
+    backends: {
+      qwen: {
+        driver: 'codex',
+        kind: 'provider',
+        label: 'Qwen',
+        available: true,
+        missing_requirements: [],
+        gauge: { type: 'static', text: 'Local' },
+        gauge_authed: true,
+      },
+    },
+  }}));
+
+  await page.goto('/');
+  await page.locator('.nav-tab[data-view="agents"]').click();
+
+  const row = page.locator('#backends-catalog .bcat-row').filter({ hasText: 'Qwen' });
+  await expect(row).toBeVisible();
+  await expect(row).toContainText('ready');
+  await expect(row).toContainText('configured in YAML');
   await expect(row).not.toContainText('detected');
 });
 

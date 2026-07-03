@@ -5351,9 +5351,10 @@ function renderBackendsCatalog(backends) {
     const driverInfo = DRIVER_CATALOG[info.driver] || {};
     const available   = info.available;
     const gaugeAuthed = info.gauge_authed;
+    const isProvider  = info.kind === 'provider';
     const color       = agentThemeColor(id);
     const label       = info.label;
-    const authHint    = driverInfo.authHint || `uses ${info.driver} driver`;
+    const authHint    = isProvider ? 'configured in YAML' : (driverInfo.authHint || `uses ${info.driver} driver`);
     const installCmd  = driverInfo.installCmd || '';
     const gauge       = info.gauge || { type: 'none' };
     const gaugeHint   = gauge.type === 'static'
@@ -5362,11 +5363,15 @@ function renderBackendsCatalog(backends) {
 
     let codingHtml;
     if (available) {
-      codingHtml = `<span class="bcat-status-ok">✓ detected</span>
+      codingHtml = `<span class="bcat-status-ok">✓ ${isProvider ? 'ready' : 'detected'}</span>
         <span class="bcat-hint">${escapeHtml(authHint)}</span>`;
     } else {
-      const missing = info.missing_secrets?.length
-        ? `missing: ${info.missing_secrets.join(', ')}`
+      const missingItems = info.missing_requirements || [
+        ...(info.missing_settings || []),
+        ...(info.missing_secrets || []),
+      ];
+      const missing = missingItems.length
+        ? `missing: ${missingItems.join(', ')}`
         : 'driver not found';
       codingHtml = `<span class="bcat-status-miss">✗ ${escapeHtml(missing)}</span>` +
         (installCmd ? `<div class="bcat-install">

@@ -97,7 +97,15 @@ class Backend:
 
     @property
     def available(self) -> bool:
-        return bool(self.path) and not self.missing_secrets()
+        return bool(self.path) and not self.missing_requirements()
+
+    @property
+    def kind(self) -> str:
+        return "provider" if self.provider or self.base_url or self.api_key is not None else "native"
+
+    @property
+    def requires_base_url(self) -> bool:
+        return self.kind == "provider" and self.driver in {"claude", "codex"}
 
     @property
     def requires_api_key(self) -> bool:
@@ -133,6 +141,15 @@ class Backend:
             if not os.environ.get(name):
                 missing.append(name)
         return missing
+
+    def missing_settings(self) -> list[str]:
+        missing: list[str] = []
+        if self.requires_base_url and not self.base_url:
+            missing.append("base_url")
+        return missing
+
+    def missing_requirements(self) -> list[str]:
+        return self.missing_settings() + self.missing_secrets()
 
     def resolved_api_key(self) -> Optional[str]:
         if self.api_key is None:
@@ -193,11 +210,14 @@ class Backend:
     def public_dict(self) -> dict[str, Any]:
         return {
             "driver": self.driver,
+            "kind": self.kind,
             "label": self.label,
             "color": self.color,
             "available": self.available,
             "path": self.path,
             "missing_secrets": self.missing_secrets(),
+            "missing_settings": self.missing_settings(),
+            "missing_requirements": self.missing_requirements(),
             "provider": self.provider,
             "base_url": self.base_url,
             "protocol": self.protocol,
