@@ -22,11 +22,8 @@ from agent.runners import (
     run_claude,
     run_claude_interactive_cli,
     run_codex,
-    run_codex_interactive_cli,
     run_cursor,
-    run_cursor_interactive_cli,
     run_opencode,
-    run_opencode_interactive_cli,
 )
 from agent.backends import Backend, _validate_backend
 
@@ -555,7 +552,7 @@ def test_codex_keeps_legacy_agent_messages_as_response_content():
     assert chunks[0] == "Legacy response"
 
 
-def test_codex_interactive_cli_uses_structured_exec_resume_events():
+def test_codex_oneshot_resume_uses_structured_exec_resume_events():
     async def fake_stream_lines(cmd, **kwargs):
         assert cmd[:5] == ["codex", "exec", "resume", "--json", "--skip-git-repo-check"]
         assert cmd[-2:] == ["thread-1", "next"]
@@ -564,9 +561,7 @@ def test_codex_interactive_cli_uses_structured_exec_resume_events():
         yield '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":4,"output_tokens":2}}'
 
     async def collect():
-        return [chunk async for chunk in run_codex_interactive_cli(
-            "next", cwd="/tmp", resume_session_id="thread-1", interactive_idle_timeout_s=1,
-        )]
+        return [chunk async for chunk in run_codex("next", cwd="/tmp", resume_session_id="thread-1")]
 
     with patch("agent.runners.CODEX_PATH", "codex"), patch(
         "agent.runners._stream_lines", fake_stream_lines
@@ -577,7 +572,7 @@ def test_codex_interactive_cli_uses_structured_exec_resume_events():
     assert chunks[1]["_stats"]["session_id"] == "thread-1"
 
 
-def test_codex_oneshot_vs_interactive_cli_command_shape():
+def test_codex_oneshot_fresh_vs_resume_command_shape():
     captured = []
 
     async def fake_stream_lines(cmd, **kwargs):
@@ -587,10 +582,8 @@ def test_codex_oneshot_vs_interactive_cli_command_shape():
 
     async def collect():
         oneshot = [chunk async for chunk in run_codex("fresh", cwd="/tmp")]
-        interactive = [chunk async for chunk in run_codex_interactive_cli(
-            "next", cwd="/tmp", resume_session_id="thread-1",
-        )]
-        return oneshot, interactive
+        resumed = [chunk async for chunk in run_codex("next", cwd="/tmp", resume_session_id="thread-1")]
+        return oneshot, resumed
 
     with patch("agent.runners.CODEX_PATH", "codex"), patch(
         "agent.runners._stream_lines", fake_stream_lines
@@ -604,7 +597,7 @@ def test_codex_oneshot_vs_interactive_cli_command_shape():
     assert captured[1][-2:] == ["thread-1", "next"]
 
 
-def test_cursor_interactive_cli_uses_structured_print_resume_events():
+def test_cursor_oneshot_resume_uses_structured_print_resume_events():
     async def fake_stream_lines(cmd, **kwargs):
         assert cmd[:4] == ["cursor-agent", "--print", "--output-format", "stream-json"]
         assert "--resume" in cmd
@@ -614,9 +607,7 @@ def test_cursor_interactive_cli_uses_structured_print_resume_events():
         yield '{"type":"result","session_id":"thread-1","usage":{"inputTokens":10,"outputTokens":2,"cacheReadTokens":4,"cacheWriteTokens":0}}'
 
     async def collect():
-        return [chunk async for chunk in run_cursor_interactive_cli(
-            "next", cwd="/tmp", resume_session_id="thread-1", interactive_idle_timeout_s=1,
-        )]
+        return [chunk async for chunk in run_cursor("next", cwd="/tmp", resume_session_id="thread-1")]
 
     with patch("agent.runners.CURSOR_PATH", "cursor-agent"), patch(
         "agent.runners._stream_lines", fake_stream_lines
@@ -627,7 +618,7 @@ def test_cursor_interactive_cli_uses_structured_print_resume_events():
     assert chunks[1]["_stats"]["session_id"] == "thread-1"
 
 
-def test_cursor_oneshot_vs_interactive_cli_command_shape():
+def test_cursor_oneshot_fresh_vs_resume_command_shape():
     captured = []
 
     async def fake_stream_lines(cmd, **kwargs):
@@ -637,10 +628,8 @@ def test_cursor_oneshot_vs_interactive_cli_command_shape():
 
     async def collect():
         oneshot = [chunk async for chunk in run_cursor("fresh", cwd="/tmp")]
-        interactive = [chunk async for chunk in run_cursor_interactive_cli(
-            "next", cwd="/tmp", resume_session_id="thread-1",
-        )]
-        return oneshot, interactive
+        resumed = [chunk async for chunk in run_cursor("next", cwd="/tmp", resume_session_id="thread-1")]
+        return oneshot, resumed
 
     with patch("agent.runners.CURSOR_PATH", "cursor-agent"), patch(
         "agent.runners._stream_lines", fake_stream_lines
@@ -655,7 +644,7 @@ def test_cursor_oneshot_vs_interactive_cli_command_shape():
     assert captured[1][-2:] == ["thread-1", "next"]
 
 
-def test_opencode_interactive_cli_uses_structured_run_session_events():
+def test_opencode_oneshot_resume_uses_structured_run_session_events():
     async def fake_stream_lines(cmd, **kwargs):
         assert cmd[:4] == ["opencode", "run", "--format", "json"]
         assert cmd[-3:] == ["--session", "thread-1", "next"]
@@ -663,9 +652,7 @@ def test_opencode_interactive_cli_uses_structured_run_session_events():
         yield '{"type":"step_finish","sessionID":"thread-1","part":{"tokens":{"input":10,"output":2,"cache":{"read":4,"write":0}},"cost":0}}'
 
     async def collect():
-        return [chunk async for chunk in run_opencode_interactive_cli(
-            "next", cwd="/tmp", resume_session_id="thread-1", interactive_idle_timeout_s=1,
-        )]
+        return [chunk async for chunk in run_opencode("next", cwd="/tmp", resume_session_id="thread-1")]
 
     with patch("agent.runners.OPENCODE_PATH", "opencode"), patch(
         "agent.runners._stream_lines", fake_stream_lines
@@ -676,7 +663,7 @@ def test_opencode_interactive_cli_uses_structured_run_session_events():
     assert chunks[1]["_stats"]["session_id"] == "thread-1"
 
 
-def test_opencode_oneshot_vs_interactive_cli_command_shape():
+def test_opencode_oneshot_fresh_vs_resume_command_shape():
     captured = []
 
     async def fake_stream_lines(cmd, **kwargs):
@@ -685,10 +672,8 @@ def test_opencode_oneshot_vs_interactive_cli_command_shape():
 
     async def collect():
         oneshot = [chunk async for chunk in run_opencode("fresh", cwd="/tmp")]
-        interactive = [chunk async for chunk in run_opencode_interactive_cli(
-            "next", cwd="/tmp", resume_session_id="thread-1",
-        )]
-        return oneshot, interactive
+        resumed = [chunk async for chunk in run_opencode("next", cwd="/tmp", resume_session_id="thread-1")]
+        return oneshot, resumed
 
     with patch("agent.runners.OPENCODE_PATH", "opencode"), patch(
         "agent.runners._stream_lines", fake_stream_lines

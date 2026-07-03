@@ -177,6 +177,7 @@ function switchView(name) {
     btn.classList.toggle('active', btn.dataset.view === name);
   });
   currentView = name;
+  if (name === 'files') openFilesTabView();
   if (name === 'topics') loadTopicsView();
   if (name === 'analytics') loadStats();
   if (name === 'agents') loadAgents();
@@ -188,11 +189,7 @@ function initSettings() {
     btn.addEventListener('click', () => {
       hamburgerMenu.classList.remove('open');
       hamburgerBtn.classList.remove('active');
-      if (btn.dataset.action === 'files') {
-        openFileRootBrowser();
-      } else {
-        switchView(btn.dataset.view);
-      }
+      switchView(btn.dataset.view);
     })
   );
   const hamburgerBtn  = document.getElementById('hamburger-btn');
@@ -206,11 +203,7 @@ function initSettings() {
     btn.addEventListener('click', () => {
       hamburgerMenu.classList.remove('open');
       hamburgerBtn.classList.remove('active');
-      if (btn.dataset.action === 'files') {
-        openFileRootBrowser();
-      } else {
-        switchView(btn.dataset.view);
-      }
+      switchView(btn.dataset.view);
     })
   );
   document.addEventListener('click', e => {
@@ -5419,11 +5412,18 @@ function renderBackendsCatalog(backends) {
 let _configRevision = null;
 let _configCmView = null;
 
+function setConfigStatus(text, state = 'neutral') {
+  const status = document.getElementById('config-editor-status');
+  if (!status) return;
+  status.textContent = text || '';
+  status.classList.remove('ok', 'error');
+  if (state === 'ok' || state === 'error') status.classList.add(state);
+}
+
 async function loadConfigYaml() {
   const container = document.getElementById('config-editor');
-  const status = document.getElementById('config-editor-status');
   if (!container) return;
-  status.textContent = 'loading…';
+  setConfigStatus('loading…');
   try {
     const res = await fetch('/config/yaml');
     const data = await res.json();
@@ -5455,9 +5455,9 @@ async function loadConfigYaml() {
       container.style.color = 'var(--text-muted)';
       container.style.overflow = 'auto';
     }
-    status.textContent = '';
+    setConfigStatus('');
   } catch (err) {
-    status.textContent = err.message || 'failed to load';
+    setConfigStatus(`Error: ${err.message || 'failed to load'}`, 'error');
   }
 }
 
@@ -5467,13 +5467,12 @@ function getConfigContent() {
 }
 
 async function saveConfigYaml() {
-  const status = document.getElementById('config-editor-status');
   const save = document.getElementById('config-editor-save');
   save.disabled = true;
-  status.textContent = 'validating…';
+  setConfigStatus('validating…');
   const content = getConfigContent();
   if (content === null) {
-    status.textContent = 'editor not ready — try again';
+    setConfigStatus('Error: editor not ready — try again', 'error');
     save.disabled = false;
     return;
   }
@@ -5486,9 +5485,9 @@ async function saveConfigYaml() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to save configuration');
     _configRevision = data.revision;
-    status.textContent = data.restart_required ? 'saved ✓ · restart required' : 'saved ✓';
+    setConfigStatus(data.restart_required ? 'saved ✓ · restart required' : 'saved ✓', 'ok');
   } catch (err) {
-    status.textContent = err.message || 'save failed';
+    setConfigStatus(`Error: ${err.message || 'save failed'}`, 'error');
   } finally {
     save.disabled = false;
   }
@@ -7094,9 +7093,15 @@ function openFileRootBrowser() {
   openFileViewer(null);
 }
 
-function openFileViewer(initialPath, initialLine, initialEndLine) {
+function openFilesTabView() {
+  openFileViewer(null, null, null, document.getElementById('view-files'));
+}
+
+function openFileViewer(initialPath, initialLine, initialEndLine, inlineContainer = null) {
   document.getElementById('file-modal')?.remove();
   _fvNavigate = null;
+
+  const isInline = !!inlineContainer;
 
   const navHistory = [{ path: initialPath, line: initialLine, endLine: initialEndLine }];
   let historyIdx = 0;
@@ -7107,11 +7112,19 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
   let pathIsText = false;
 
   // ── DOM ──────────────────────────────────────────────────────────────────────
-  const modal = document.createElement('div');
-  modal.id = 'file-modal';
-
-  const box = document.createElement('div');
-  box.id = 'file-modal-box';
+  let modal, box;
+  if (isInline) {
+    inlineContainer.innerHTML = '';
+    box = document.createElement('div');
+    box.id = 'file-modal-box';
+    inlineContainer.appendChild(box);
+    modal = inlineContainer;
+  } else {
+    modal = document.createElement('div');
+    modal.id = 'file-modal';
+    box = document.createElement('div');
+    box.id = 'file-modal-box';
+  }
 
   const header = document.createElement('div');
   header.id = 'file-modal-header';
@@ -7225,8 +7238,10 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
   body.textContent = 'Loading…';
 
   box.append(header, body, editFooter);
-  modal.appendChild(box);
-  document.body.appendChild(modal);
+  if (!isInline) {
+    modal.appendChild(box);
+    document.body.appendChild(modal);
+  }
 
   // ── Navigation ───────────────────────────────────────────────────────────────
   function navigate(newPath, newLine = null, newEndLine = null) {
@@ -7323,11 +7338,14 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
       setTimeout(() => { copyBtn.innerHTML = FV_ICON_COPY; }, 1500);
     });
   });
-  const closeModal = () => { modal.remove(); _fvNavigate = null; };
+  const closeModal = () => { if (!isInline) modal.remove(); _fvNavigate = null; };
+  closeBtn.hidden = isInline;
   closeBtn.addEventListener('click', closeModal);
-  modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
-  const escHandler = e => { if (e.key === 'Escape') { closeModal(); document.removeEventListener('keydown', escHandler); } };
-  document.addEventListener('keydown', escHandler);
+  if (!isInline) {
+    modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
+    const escHandler = e => { if (e.key === 'Escape') { closeModal(); document.removeEventListener('keydown', escHandler); } };
+    document.addEventListener('keydown', escHandler);
+  }
 
   // ── Edit mode ────────────────────────────────────────────────────────────────
   let _editOriginal = null;
@@ -7651,7 +7669,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
     configLink.textContent = 'Edit YAML config →';
     configLink.addEventListener('click', e => {
       e.preventDefault();
-      modal.remove();
+      if (!isInline) modal.remove();
       _fvNavigate = null;
       switchView('settings');
     });
@@ -7674,8 +7692,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
       a.addEventListener('click', e => {
         e.preventDefault();
         e.stopPropagation();
-        if (_fvNavigate && document.getElementById('file-modal')) _fvNavigate(root);
-        else openFileViewer(root);
+        navigate(root);
       });
       const nameSpan = document.createElement('span');
       nameSpan.className = 'fv-dir-name';
@@ -7722,8 +7739,9 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
       }
       const ct = res.headers.get('content-type') || '';
       if (!ct.includes('text/') && !ct.includes('application/json') && !_isTextPath(path)) {
-        modal.remove(); _fvNavigate = null;
+        if (!isInline) { modal.remove(); _fvNavigate = null; }
         window.open('/localfile?' + new URLSearchParams({ path }), '_blank');
+        if (isInline) { body.textContent = 'Opened in new tab'; }
         return;
       }
       const text = await res.text();
@@ -7829,7 +7847,7 @@ function _renderDirListing(container, data) {
       a.addEventListener('click', e => {
         e.preventDefault();
         e.stopPropagation();
-        if (_fvNavigate && document.getElementById('file-modal')) _fvNavigate(entry.path);
+        if (_fvNavigate) _fvNavigate(entry.path);
         else openFileViewer(entry.path);
       });
 

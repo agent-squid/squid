@@ -114,6 +114,32 @@ test('configuration editor loads and saves the complete YAML', async ({ page }) 
   expect(saved.content).toContain('port: 8123');
 });
 
+test('configuration editor shows backend validation errors prominently', async ({ page }) => {
+  await mockApp(page);
+  await installCodeMirrorStub(page);
+  const invalid = `server:\n  host: "127.0.0.1"\n  port: 8000\nagent:\n  first_byte_timeout: 300\n  response_timeout: 1800\nbackends:\n  codex-live:\n    driver: codex\n    protocol: interactive-cli\n`;
+  await page.route('**/config/yaml', async route => {
+    if (route.request().method() === 'PUT') {
+      return route.fulfill({
+        status: 400,
+        json: { error: "Backend 'codex-live' protocol 'interactive-cli' is not supported by driver 'codex'" },
+      });
+    }
+    return route.fulfill({ json: { content: invalid, revision: 'rev-1', path: '/home/user/.squid/squid.yaml' } });
+  });
+
+  await page.goto('/');
+  await page.locator('#hamburger-btn').click();
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.locator('#config-editor-save').click();
+
+  const status = page.locator('#config-editor-status');
+  await expect(status).toHaveText("Error: Backend 'codex-live' protocol 'interactive-cli' is not supported by driver 'codex'");
+  await expect(status).toHaveClass(/error/);
+  await expect(status).toHaveCSS('color', 'rgb(255, 107, 107)');
+  await expect(status).toHaveCSS('border-top-color', 'rgb(255, 77, 77)');
+});
+
 test('agents backend catalog marks unkeyed DeepSeek as unavailable', async ({ page }) => {
   await mockApp(page);
   await page.route('**/health', r => r.fulfill({ json: {
