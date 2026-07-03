@@ -136,7 +136,8 @@ test('agents backend catalog marks unkeyed DeepSeek as unavailable', async ({ pa
 
   const row = page.locator('#backends-catalog .bcat-row').filter({ hasText: 'DeepSeek' });
   await expect(row).toBeVisible();
-  await expect(row).toContainText('missing: api_key');
+  await expect(row).toContainText('configure DeepSeek API key in backend YAML');
+  await expect(row).not.toContainText('curl -fsSL');
   await expect(row).not.toContainText('detected');
 });
 
@@ -150,6 +151,7 @@ test('agents backend catalog marks configured provider backends as ready', async
         kind: 'provider',
         label: 'Qwen',
         available: true,
+        protocol: 'oneshot-cli',
         missing_requirements: [],
         gauge: { type: 'static', text: 'Local' },
         gauge_authed: true,
@@ -164,6 +166,7 @@ test('agents backend catalog marks configured provider backends as ready', async
   await expect(row).toBeVisible();
   await expect(row).toContainText('ready');
   await expect(row).toContainText('configured in YAML');
+  await expect(row).toContainText('protocol: oneshot-cli');
   await expect(row).not.toContainText('detected');
 });
 
@@ -190,7 +193,7 @@ test('agents backend catalog treats keyed DeepSeek as ready without Claude auth 
   const row = page.locator('#backends-catalog .bcat-row').filter({ hasText: 'DeepSeek' });
   await expect(row).toBeVisible();
   await expect(row).toContainText('ready');
-  await expect(row).toContainText('uses this backend API key');
+  await expect(row).toContainText('DeepSeek API key configured');
   await expect(row).toContainText('gauge ✓');
   await expect(row).not.toContainText('run claude to authenticate');
   await expect(row).not.toContainText('detected');

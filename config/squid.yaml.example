@@ -19,6 +19,8 @@ agent:
 # override + cwd.
 # Supported drivers: claude, codex, cursor, opencode.
 # Supported protocols: oneshot-cli, interactive-cli, interactive-pty.
+# interactive-cli currently requires a driver with a true persistent structured
+# stdin/stdout protocol; among bundled drivers, only claude supports it today.
 backends:
   claude:
     driver: claude
@@ -29,21 +31,21 @@ backends:
 
   codex:
     driver: codex
-    protocol: interactive-cli
+    protocol: oneshot-cli
     label: Codex
     color: "#7070A0"
     gauge: codex
 
   cursor:
     driver: cursor
-    protocol: interactive-cli
+    protocol: oneshot-cli
     label: Cursor
     color: "#FFFFFF"
     gauge: cursor
 
   opencode:
     driver: opencode
-    protocol: interactive-cli
+    protocol: oneshot-cli
     label: OpenCode
     color: "#CFCECD"
     gauge:
@@ -57,7 +59,7 @@ backends:
   #   api_key: {env: DEEPSEEK_API_KEY}  # read from environment variable
   # deepseek:
   #   driver: claude
-  #   protocol: interactive-cli
+  #   protocol: oneshot-cli
   #   label: DeepSeek
   #   color: "#4D9DE0"
   #   provider: deepseek
@@ -75,7 +77,7 @@ backends:
   #   auto-discover the model name from a local server's /v1/models response.
   # qwen:
   #   driver: codex
-  #   protocol: interactive-cli
+  #   protocol: oneshot-cli
   #   label: Qwen
   #   color: "#10A37F"
   #   provider: qwen

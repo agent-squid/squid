@@ -1,4 +1,7 @@
 import os
+import json
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,11 +16,72 @@ from agent.backends import (
 from agent.runners import _codex_config_args
 
 
+def _public_backends_from_home(home: Path) -> dict:
+    code = """
+import json
+from agent.backends import public_backends
+print(json.dumps(public_backends(), sort_keys=True))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path.cwd(),
+        env={**os.environ, "HOME": str(home)},
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return json.loads(result.stdout)
+
+
+def _write_user_config(home: Path, content: str) -> None:
+    squid_dir = home / ".squid"
+    squid_dir.mkdir(parents=True)
+    (squid_dir / "squid.yaml").write_text(content, encoding="utf-8")
+
+
 def test_shipped_default_yaml_does_not_enable_deepseek_backend():
     config = yaml.safe_load(Path("config/squid.yaml.example").read_text())
 
     assert "deepseek" not in config["backends"]
     assert "deepcla" not in config["backends"]
+
+
+def test_fresh_home_example_does_not_expose_deepseek_or_deepcla(tmp_path):
+    home = tmp_path / "home"
+    _write_user_config(home, Path("config/squid.yaml.example").read_text())
+
+    backends = _public_backends_from_home(home)
+
+    assert "deepseek" not in backends
+    assert "deepcla" not in backends
+    assert backends["claude"]["protocol"] == "interactive-cli"
+    assert backends["codex"]["protocol"] == "oneshot-cli"
+    assert backends["cursor"]["protocol"] == "oneshot-cli"
+    assert backends["opencode"]["protocol"] == "oneshot-cli"
+
+
+def test_fresh_home_legacy_deepcla_is_exposed_as_deepseek_only(tmp_path):
+    home = tmp_path / "home"
+    _write_user_config(home, """
+server:
+  host: "127.0.0.1"
+  port: 8000
+agent:
+  first_byte_timeout: 300
+  response_timeout: 1800
+backends:
+  deepcla:
+    driver: claude
+    provider: deepseek
+    base_url: "https://api.deepseek.com/anthropic"
+    api_key: "deepseek-secret"
+    gauge: deepseek
+""")
+
+    backends = _public_backends_from_home(home)
+
+    assert "deepseek" in backends
+    assert "deepcla" not in backends
 
 
 def test_legacy_deepcla_backend_config_is_exposed_as_deepseek():
@@ -51,7 +115,7 @@ def test_multiple_backends_can_share_driver():
     assert deepseek.color == "#4D9DE0"
 
 
-def test_backend_protocol_defaults_to_interactive_cli_and_can_select_oneshot():
+def test_claude_backend_protocol_defaults_to_interactive_cli_and_can_select_oneshot():
     claude = _validate_backend("claude", {"driver": "claude"})
     oneshot = _validate_backend("claude-oneshot", {
         "driver": "claude",
@@ -63,6 +127,14 @@ def test_backend_protocol_defaults_to_interactive_cli_and_can_select_oneshot():
     assert claude.fingerprint != oneshot.fingerprint
     assert claude.public_dict()["protocol"] == "interactive-cli"
     assert claude.interactive.idle_timeout_seconds == DEFAULT_INTERACTIVE_IDLE_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize("driver", ["codex", "cursor", "opencode"])
+def test_non_persistent_drivers_default_to_oneshot_cli(driver):
+    backend = _validate_backend(driver, {"driver": driver})
+
+    assert backend.protocol == "oneshot-cli"
+    assert backend.public_dict()["supports_idle_process"] is False
 
 
 def test_backend_interactive_idle_timeout_is_configurable():
@@ -85,32 +157,27 @@ def test_backend_rejects_invalid_interactive_idle_timeout():
         })
 
 
-def test_backend_accepts_codex_interactive_cli_protocol():
-    backend = _validate_backend("codex-live", {
-        "driver": "codex",
+@pytest.mark.parametrize("driver", ["codex", "cursor", "opencode"])
+def test_non_persistent_drivers_reject_interactive_cli_protocol(driver):
+    with pytest.raises(ValueError, match="not supported"):
+        _validate_backend(f"{driver}-live", {
+            "driver": driver,
+            "protocol": "interactive-cli",
+        })
+
+
+def test_claude_interactive_backend_reports_idle_process_support():
+    backend = _validate_backend("claude-live", {
+        "driver": "claude",
         "protocol": "interactive-cli",
     })
-
-    assert backend.protocol == "interactive-cli"
-
-
-def test_backend_accepts_cursor_interactive_cli_protocol():
-    backend = _validate_backend("cursor-live", {
-        "driver": "cursor",
-        "protocol": "interactive-cli",
+    oneshot = _validate_backend("claude-oneshot", {
+        "driver": "claude",
+        "protocol": "oneshot-cli",
     })
 
-    assert backend.protocol == "interactive-cli"
-
-
-def test_backend_accepts_opencode_interactive_cli_protocol():
-    backend = _validate_backend("opencode-live", {
-        "driver": "opencode",
-        "protocol": "interactive-cli",
-    })
-
-    assert backend.protocol == "interactive-cli"
-
+    assert backend.public_dict()["supports_idle_process"] is True
+    assert oneshot.public_dict()["supports_idle_process"] is False
 
 def test_backend_secret_reference_is_resolved_at_execution_time():
     backend = Backend(

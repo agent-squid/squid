@@ -1434,11 +1434,8 @@ RUNNER_NAMES_BY_DRIVER_PROTOCOL = {
     ("claude", "oneshot-cli"): "run_claude",
     ("claude", "interactive-cli"): "run_claude_interactive_cli",
     ("codex", "oneshot-cli"): "run_codex",
-    ("codex", "interactive-cli"): "run_codex_interactive_cli",
     ("cursor", "oneshot-cli"): "run_cursor",
-    ("cursor", "interactive-cli"): "run_cursor_interactive_cli",
     ("opencode", "oneshot-cli"): "run_opencode",
-    ("opencode", "interactive-cli"): "run_opencode_interactive_cli",
 }
 
 

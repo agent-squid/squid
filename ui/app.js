@@ -5359,7 +5359,7 @@ function renderBackendsCatalog(backends) {
     const usesBackendApiKey = info.provider === 'deepseek' || gauge.type === 'deepseek';
     const readyViaConfig = isProvider || usesBackendApiKey;
     const authHint    = usesBackendApiKey
-      ? 'uses this backend API key'
+      ? 'DeepSeek API key configured'
       : (isProvider ? 'configured in YAML' : (driverInfo.authHint || `uses ${info.driver} driver`));
     const gaugeHint   = gauge.type === 'static'
       ? (gauge.text || 'static')
@@ -5374,11 +5374,11 @@ function renderBackendsCatalog(backends) {
         ...(info.missing_settings || []),
         ...(info.missing_secrets || []),
       ];
-      const missing = missingItems.length
-        ? `missing: ${missingItems.join(', ')}`
-        : 'driver not found';
+      const missing = usesBackendApiKey && missingItems.includes('api_key')
+        ? 'configure DeepSeek API key in backend YAML'
+        : (missingItems.length ? `missing: ${missingItems.join(', ')}` : 'driver not found');
       codingHtml = `<span class="bcat-status-miss">✗ ${escapeHtml(missing)}</span>` +
-        (installCmd ? `<div class="bcat-install">
+        (installCmd && !missingItems.length ? `<div class="bcat-install">
           <code class="bcat-cmd">${escapeHtml(installCmd)}</code>
           <button class="bcat-copy" data-cmd="${escapeHtml(installCmd)}">copy</button>
         </div>` : '');
@@ -5399,7 +5399,7 @@ function renderBackendsCatalog(backends) {
 
     return `<div class="bcat-row">
       <div class="bcat-name"><span class="bcat-dot" style="background:${color}"></span>${escapeHtml(label)}</div>
-      <div class="bcat-coding">${codingHtml}</div>
+      <div class="bcat-coding">${codingHtml}<span class="bcat-hint">protocol: ${escapeHtml(info.protocol || 'oneshot-cli')}</span></div>
       <div class="bcat-gauge">${gaugeHtml}</div>
     </div>`;
   }).join('');

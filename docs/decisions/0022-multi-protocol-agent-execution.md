@@ -94,6 +94,11 @@ Benefits over PTY:
 Squid should prefer `interactive-cli` over PTY whenever a driver can
 implement it without losing native interactive behavior.
 
+Among bundled drivers, `claude` currently has the only `interactive-cli`
+implementation that keeps a structured process alive across turns. Other
+drivers remain `oneshot-cli` until they expose or Squid implements an equivalent
+long-lived structured transport.
+
 ## Interactive PTY
 
 `interactive-pty` is accepted as a fallback protocol for CLIs whose real

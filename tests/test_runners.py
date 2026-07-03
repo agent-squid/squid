@@ -23,11 +23,12 @@ from agent.runners import (
     run_claude_interactive_cli,
     run_codex,
     run_codex_interactive_cli,
+    run_cursor,
     run_cursor_interactive_cli,
     run_opencode,
     run_opencode_interactive_cli,
 )
-from agent.backends import _validate_backend
+from agent.backends import Backend, _validate_backend
 
 
 def _clear():
@@ -96,27 +97,74 @@ def test_runner_for_backend_selects_protocol_and_forces_adhoc_oneshot():
         "driver": "claude",
         "protocol": "interactive-cli",
     })
-    codex_live = _validate_backend("codex-live", {
+    codex = _validate_backend("codex", {
         "driver": "codex",
-        "protocol": "interactive-cli",
     })
-    cursor_live = _validate_backend("cursor-live", {
+    cursor = _validate_backend("cursor", {
         "driver": "cursor",
-        "protocol": "interactive-cli",
     })
-    opencode_live = _validate_backend("opencode-live", {
+    opencode = _validate_backend("opencode", {
         "driver": "opencode",
-        "protocol": "interactive-cli",
     })
 
     assert runner_for_backend(live) is run_claude_interactive_cli
     assert runner_for_backend(live, adhoc=True) is run_claude
-    assert runner_for_backend(codex_live) is run_codex_interactive_cli
-    assert runner_for_backend(codex_live, adhoc=True) is run_codex
-    assert runner_for_backend(cursor_live) is run_cursor_interactive_cli
-    assert runner_for_backend(cursor_live, adhoc=True) is runner_for_driver("cursor")
-    assert runner_for_backend(opencode_live) is run_opencode_interactive_cli
-    assert runner_for_backend(opencode_live, adhoc=True) is run_opencode
+    assert runner_for_backend(codex) is run_codex
+    assert runner_for_backend(cursor) is runner_for_driver("cursor")
+    assert runner_for_backend(opencode) is run_opencode
+
+
+@pytest.mark.parametrize("driver,oneshot_runner", [
+    ("claude", run_claude),
+    ("codex", run_codex),
+    ("cursor", run_cursor),
+    ("opencode", run_opencode),
+])
+def test_runner_for_backend_selects_oneshot_cli(driver, oneshot_runner):
+    oneshot = _validate_backend(f"{driver}-oneshot", {
+        "driver": driver,
+        "protocol": "oneshot-cli",
+    })
+
+    assert runner_for_backend(oneshot) is oneshot_runner
+
+
+def test_runner_for_backend_selects_claude_interactive_cli():
+    interactive = _validate_backend("claude-live", {
+        "driver": "claude",
+        "protocol": "interactive-cli",
+    })
+
+    assert runner_for_backend(interactive) is run_claude_interactive_cli
+
+
+@pytest.mark.parametrize("driver", ["codex", "cursor", "opencode"])
+def test_runner_for_backend_does_not_route_non_persistent_interactive_cli(driver):
+    backend = Backend(f"{driver}-live", driver, protocol="interactive-cli")
+
+    assert runner_for_backend(backend) is None
+
+
+def test_claude_oneshot_cli_passes_prompt_as_process_argument():
+    captured = {}
+
+    async def fake_stream_lines(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        yield json.dumps({"type": "result", "result": "answer", "usage": {}})
+
+    async def collect():
+        return [chunk async for chunk in run_claude("fresh prompt", cwd="/tmp/project")]
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        chunks = asyncio.run(collect())
+
+    assert captured["cmd"][:2] == ["claude", "--print"]
+    assert captured["cmd"][-1] == "fresh prompt"
+    assert captured["kwargs"]["prompt"] == "fresh prompt"
+    assert chunks[0] == "answer"
 
 
 def test_claude_interactive_reuses_live_process_for_same_session_key():
@@ -529,6 +577,33 @@ def test_codex_interactive_cli_uses_structured_exec_resume_events():
     assert chunks[1]["_stats"]["session_id"] == "thread-1"
 
 
+def test_codex_oneshot_vs_interactive_cli_command_shape():
+    captured = []
+
+    async def fake_stream_lines(cmd, **kwargs):
+        captured.append(cmd)
+        yield '{"type":"thread.started","thread_id":"thread-1"}'
+        yield '{"type":"turn.completed","usage":{}}'
+
+    async def collect():
+        oneshot = [chunk async for chunk in run_codex("fresh", cwd="/tmp")]
+        interactive = [chunk async for chunk in run_codex_interactive_cli(
+            "next", cwd="/tmp", resume_session_id="thread-1",
+        )]
+        return oneshot, interactive
+
+    with patch("agent.runners.CODEX_PATH", "codex"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        asyncio.run(collect())
+
+    assert captured[0][:3] == ["codex", "exec", "--json"]
+    assert "resume" not in captured[0]
+    assert captured[0][-1] == "fresh"
+    assert captured[1][:4] == ["codex", "exec", "resume", "--json"]
+    assert captured[1][-2:] == ["thread-1", "next"]
+
+
 def test_cursor_interactive_cli_uses_structured_print_resume_events():
     async def fake_stream_lines(cmd, **kwargs):
         assert cmd[:4] == ["cursor-agent", "--print", "--output-format", "stream-json"]
@@ -552,6 +627,34 @@ def test_cursor_interactive_cli_uses_structured_print_resume_events():
     assert chunks[1]["_stats"]["session_id"] == "thread-1"
 
 
+def test_cursor_oneshot_vs_interactive_cli_command_shape():
+    captured = []
+
+    async def fake_stream_lines(cmd, **kwargs):
+        captured.append(cmd)
+        yield '{"type":"system","session_id":"thread-1"}'
+        yield '{"type":"result","session_id":"thread-1","usage":{}}'
+
+    async def collect():
+        oneshot = [chunk async for chunk in run_cursor("fresh", cwd="/tmp")]
+        interactive = [chunk async for chunk in run_cursor_interactive_cli(
+            "next", cwd="/tmp", resume_session_id="thread-1",
+        )]
+        return oneshot, interactive
+
+    with patch("agent.runners.CURSOR_PATH", "cursor-agent"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        asyncio.run(collect())
+
+    assert captured[0][:4] == ["cursor-agent", "--print", "--output-format", "stream-json"]
+    assert "--resume" not in captured[0]
+    assert captured[0][-1] == "fresh"
+    assert captured[1][:4] == ["cursor-agent", "--print", "--output-format", "stream-json"]
+    assert "--resume" in captured[1]
+    assert captured[1][-2:] == ["thread-1", "next"]
+
+
 def test_opencode_interactive_cli_uses_structured_run_session_events():
     async def fake_stream_lines(cmd, **kwargs):
         assert cmd[:4] == ["opencode", "run", "--format", "json"]
@@ -571,6 +674,32 @@ def test_opencode_interactive_cli_uses_structured_run_session_events():
 
     assert chunks[0] == "next"
     assert chunks[1]["_stats"]["session_id"] == "thread-1"
+
+
+def test_opencode_oneshot_vs_interactive_cli_command_shape():
+    captured = []
+
+    async def fake_stream_lines(cmd, **kwargs):
+        captured.append(cmd)
+        yield '{"type":"step_finish","sessionID":"thread-1","part":{"tokens":{}}}'
+
+    async def collect():
+        oneshot = [chunk async for chunk in run_opencode("fresh", cwd="/tmp")]
+        interactive = [chunk async for chunk in run_opencode_interactive_cli(
+            "next", cwd="/tmp", resume_session_id="thread-1",
+        )]
+        return oneshot, interactive
+
+    with patch("agent.runners.OPENCODE_PATH", "opencode"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        asyncio.run(collect())
+
+    assert captured[0][:4] == ["opencode", "run", "--format", "json"]
+    assert "--session" not in captured[0]
+    assert captured[0][-1] == "fresh"
+    assert captured[1][:4] == ["opencode", "run", "--format", "json"]
+    assert captured[1][-3:] == ["--session", "thread-1", "next"]
 
 
 def test_native_claude_removes_inherited_anthropic_auth_environment():
