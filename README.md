@@ -9,6 +9,14 @@
    ╚═════╝  ╚══▀▀═╝  ╚═════╝ ╚═╝╚═════╝
 ```
 
+## The Squid Manifesto: EVERY. TOKEN. COUNTS!
+
+* COUNT every token, every prompt!
+* UNIFY your subscriptions, free tiers, and local models into one workplace.
+* SHARE context explicitly across models, topics, sessions; no waste!
+* CLEAR old context without fear; AgentSquid alerts you and let you choose exactly what stays!
+* PARALLELIZE your prompts, no more waiting!
+
 **Your Local Coding Agents, Unified**
 
 Agent-Squid lets you run Claude Code, OpenAI Codex, Cursor Agent, OpenCode with DeepSeek Free, Claude with DeepSeek Pro, and Codex with other local models like Qwen via one browser UI. Your agents still run on your own machine, with your repo, shell tools, credentials, and native CLI sessions. Squid gives those sessions names, history, queues, controls, and phone/tablet access.
