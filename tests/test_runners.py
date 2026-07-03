@@ -498,6 +498,171 @@ def test_stopall_signals_process_groups():
     _clear()
 
 
+# ── ask_followup_question handling ────────────────────────────────────────────
+
+class _HangingStdout:
+    """Stdout that serves lines then blocks forever (simulates Claude Code waiting for tool result)."""
+    def __init__(self, lines):
+        self.lines = [l.encode() for l in lines]
+
+    async def readline(self):
+        if self.lines:
+            return self.lines.pop(0)
+        await asyncio.sleep(1000)
+        return b""
+
+
+def _ask_followup_stream_events(tool_use_id: str, question: str) -> list[str]:
+    return [
+        json.dumps({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "tool_use", "id": tool_use_id, "name": "ask_followup_question"},
+            },
+        }),
+        json.dumps({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": json.dumps({"question": question})},
+            },
+        }),
+        json.dumps({"type": "stream_event", "event": {"type": "content_block_stop", "index": 0}}),
+    ]
+
+
+def test_claude_interactive_soft_completes_on_ask_followup_question():
+    """When Claude emits ask_followup_question then blocks, Squid soft-completes:
+    surfaces the question as response text and stores pending_followup."""
+    _clear()
+    fake_proc = _FakeProcess(9010, [])
+    fake_proc.stdout = _HangingStdout([
+        json.dumps({"type": "system", "session_id": "sess-ask"}),
+        json.dumps({"type": "user", "isReplay": True, "message": {"role": "user", "content": "do the thing"}}),
+        *_ask_followup_stream_events("toolu_ask_1", "Which branch should I use?"),
+        # no result event — Claude Code blocks here
+    ])
+
+    async def fake_create_subprocess_exec(*_cmd, **_kwargs):
+        return fake_proc
+
+    async def collect():
+        return [chunk async for chunk in run_claude_interactive_cli(
+            "do the thing", cwd="/tmp/project", topic="work", agent="claude",
+            interactive_idle_timeout_s=3600,
+        )]
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), \
+         patch("agent.runners._ASK_FOLLOWUP_RESULT_WAIT", 0.05), \
+         patch("agent.runners.asyncio.create_subprocess_exec", fake_create_subprocess_exec):
+        chunks = asyncio.run(collect())
+
+    assert chunks == ["Which branch should I use?"]
+    session = _claude_interactive_sessions[("claude", "work", "claude", "/tmp/project", None, ())]
+    assert session.pending_followup == {"tool_use_id": "toolu_ask_1"}
+    assert session.proc is not None and session.proc.returncode is None  # process kept alive
+    _clear()
+
+
+def test_claude_interactive_sends_parent_tool_use_id_on_reply_to_followup():
+    """After a soft-complete with pending_followup, the next query sends
+    parent_tool_use_id so Claude Code receives the answer as a tool result."""
+    _clear()
+
+    class _TwoTurnStdout:
+        def __init__(self, turn1_lines, turn2_lines):
+            self._lines = [l.encode() for l in turn1_lines]
+            self._turn2 = [l.encode() for l in turn2_lines]
+            self.advanced = False
+
+        def advance(self):
+            self.advanced = True
+
+        async def readline(self):
+            if self._lines:
+                return self._lines.pop(0)
+            if not self.advanced:
+                await asyncio.sleep(1000)  # block until soft-complete fires
+            if self._turn2:
+                return self._turn2.pop(0)
+            return b""
+
+    stdout = _TwoTurnStdout(
+        turn1_lines=[
+            json.dumps({"type": "system", "session_id": "sess-ask"}),
+            json.dumps({"type": "user", "isReplay": True, "message": {"role": "user", "content": "do the thing"}}),
+            *_ask_followup_stream_events("toolu_ask_1", "Which branch?"),
+        ],
+        turn2_lines=[
+            json.dumps({"type": "user", "isReplay": True, "message": {"role": "user", "content": "main branch"}}),
+            json.dumps({"type": "result", "result": "Got it, using main.", "usage": {}}),
+        ],
+    )
+
+    fake_proc = _FakeProcess(9011, [])
+    fake_proc.stdout = stdout
+
+    async def fake_create_subprocess_exec(*_cmd, **_kwargs):
+        return fake_proc
+
+    async def run_two_turns():
+        chunks1 = [chunk async for chunk in run_claude_interactive_cli(
+            "do the thing", cwd="/tmp/project", topic="work", agent="claude",
+            interactive_idle_timeout_s=3600,
+        )]
+        stdout.advance()
+        chunks2 = [chunk async for chunk in run_claude_interactive_cli(
+            "main branch", cwd="/tmp/project", topic="work", agent="claude",
+            resume_session_id="sess-ask", interactive_idle_timeout_s=3600,
+        )]
+        return chunks1, chunks2
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), \
+         patch("agent.runners._ASK_FOLLOWUP_RESULT_WAIT", 0.05), \
+         patch("agent.runners.asyncio.create_subprocess_exec", fake_create_subprocess_exec):
+        chunks1, chunks2 = asyncio.run(run_two_turns())
+
+    assert chunks1[0] == "Which branch?"
+    assert any(c == "Got it, using main." for c in chunks2)
+
+    payloads = [json.loads(data.decode()) for data in fake_proc.stdin.writes]
+    assert payloads[0]["message"]["content"] == "do the thing"
+    assert payloads[0]["parent_tool_use_id"] is None
+    assert payloads[1]["message"]["content"] == "main branch"
+    assert payloads[1]["parent_tool_use_id"] == "toolu_ask_1"
+    _clear()
+
+
+def test_claude_interactive_surfaces_question_when_result_fires_empty_after_followup():
+    """When Claude Code auto-handles ask_followup_question and result fires with
+    empty text, Squid inserts the question text as the response."""
+    _clear()
+    fake_proc = _FakeProcess(9012, [
+        json.dumps({"type": "system", "session_id": "sess-ask"}),
+        json.dumps({"type": "user", "isReplay": True, "message": {"role": "user", "content": "do the thing"}}),
+        *_ask_followup_stream_events("toolu_ask_2", "What directory?"),
+        json.dumps({"type": "result", "result": "", "usage": {}}),  # auto-handled, empty result
+    ])
+
+    async def fake_create_subprocess_exec(*_cmd, **_kwargs):
+        return fake_proc
+
+    async def collect():
+        return [chunk async for chunk in run_claude_interactive_cli(
+            "do the thing", cwd="/tmp/project", topic="work", agent="claude",
+        )]
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), \
+         patch("agent.runners.asyncio.create_subprocess_exec", fake_create_subprocess_exec):
+        chunks = asyncio.run(collect())
+
+    assert any(c == "What directory?" for c in chunks)
+    _clear()
+
+
 def test_codex_stats_keep_cached_tokens_as_breakdown_only():
     async def fake_stream_lines(*args, **kwargs):
         yield '{"type":"thread.started","thread_id":"thread-1"}'

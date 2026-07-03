@@ -437,6 +437,11 @@ def _tool_data(name: str, input_json: str, tool_use_id: Optional[str] = None) ->
         return {**base, "command": inp.get("command", "")}
     if name == "Agent":
         return {**base, "description": (inp.get("description") or inp.get("prompt") or "")[:300]}
+    if name == "ask_followup_question":
+        result: dict = {**base, "question": inp.get("question", "")}
+        if inp.get("options"):
+            result["options"] = inp["options"]
+        return result
     if name in ("WebFetch", "WebSearch"):
         return {**base, "query": inp.get("url", inp.get("query", ""))}
     if name == "TodoWrite":
@@ -515,6 +520,11 @@ async def run_claude(
             yield chunk
 
 
+# After ask_followup_question tool use is detected, wait this long for a result
+# event before assuming Claude Code is blocking on stdin (soft-complete the turn).
+_ASK_FOLLOWUP_RESULT_WAIT: float = 10.0
+
+
 class _ClaudeInteractiveCLI:
     def __init__(
         self,
@@ -543,6 +553,7 @@ class _ClaudeInteractiveCLI:
         self.drain_task: Optional[asyncio.Task] = None
         self.idle_task: Optional[asyncio.Task] = None
         self.lock = asyncio.Lock()
+        self.pending_followup: Optional[dict] = None
 
     async def _start(self, resume_session_id: Optional[str], prompt: str, msg_id: Optional[int], prompt_preview: Optional[str]) -> None:
         self._cancel_idle_close()
@@ -680,10 +691,17 @@ class _ClaudeInteractiveCLI:
                 prompt_preview=((prompt_preview or prompt)[:80] + "…") if len(prompt_preview or prompt) > 80 else (prompt_preview or prompt),
             )
             content = prompt if resume_session_id or had_live_process else _build_prompt(prompt, history)
+            # If the previous turn ended with ask_followup_question, send this
+            # message as the tool result (via parent_tool_use_id). This unblocks
+            # Claude Code which was waiting for the user's answer on stdin.
+            # Only valid when reusing the same live process; a restarted process
+            # has no memory of the pending tool call.
+            followup_id = self.pending_followup.get("tool_use_id") if (self.pending_followup and had_live_process) else None
+            self.pending_followup = None
             payload = {
                 "type": "user",
                 "message": {"role": "user", "content": content},
-                "parent_tool_use_id": None,
+                "parent_tool_use_id": followup_id,
             }
             try:
                 self.proc.stdin.write((json.dumps(payload, separators=(",", ":")) + "\n").encode())
@@ -699,6 +717,8 @@ class _ClaudeInteractiveCLI:
             turn_live_chunks: list[dict] = []
             turn_result_chunks: list[Union[str, dict]] = []
             turn_agent_tool_use_id: Optional[str] = None
+            ask_followup_tool_use_id: Optional[str] = None
+            ask_followup_question_text: str = ""
             timeout = response_timeout if response_timeout is not None else RESPONSE_TIMEOUT
             deadline = asyncio.get_event_loop().time() + timeout
             first_byte = True
@@ -710,9 +730,26 @@ class _ClaudeInteractiveCLI:
                         await self.close()
                         raise CLIError("Response timeout exceeded")
                     per_line = min(FIRST_BYTE_TIMEOUT if first_byte else remaining, remaining)
+                    if ask_followup_tool_use_id:
+                        # Claude Code is likely blocking on stdin waiting for the
+                        # user's answer; use a short window before soft-completing.
+                        per_line = min(_ASK_FOLLOWUP_RESULT_WAIT, per_line)
                     try:
                         line = await asyncio.wait_for(self.proc.stdout.readline(), timeout=per_line)
                     except asyncio.TimeoutError:
+                        if ask_followup_tool_use_id:
+                            # Claude Code is blocked waiting for a tool result on
+                            # stdin. Soft-complete: surface the question as the
+                            # turn response, keep the process alive, and store the
+                            # pending tool_use_id so the next query() sends the
+                            # user's reply as parent_tool_use_id (unblocking it).
+                            self.pending_followup = {"tool_use_id": ask_followup_tool_use_id}
+                            if ask_followup_question_text:
+                                turn_result_chunks.append(ask_followup_question_text)
+                            if accepting_turn:
+                                for chunk in turn_result_chunks:
+                                    yield chunk
+                            break
                         await self.close()
                         raise CLIError("Timed out waiting for CLI response")
                     if not line:
@@ -751,6 +788,12 @@ class _ClaudeInteractiveCLI:
                             tool = chunk.get("_tool")
                             if isinstance(tool, dict) and tool.get("name") == "Agent":
                                 turn_agent_tool_use_id = tool.get("tool_use_id") or ""
+                            if isinstance(tool, dict) and tool.get("name") == "ask_followup_question":
+                                # Record tool info; don't emit as a tool widget.
+                                # The question text is surfaced as plain response text.
+                                ask_followup_tool_use_id = tool.get("tool_use_id") or ""
+                                ask_followup_question_text = tool.get("question", "")
+                                continue
                             if accepting_turn:
                                 yield chunk
                             else:
@@ -769,6 +812,12 @@ class _ClaudeInteractiveCLI:
                             turn_agent_tool_use_id = None
                             continue
                         if accepting_turn:
+                            if ask_followup_tool_use_id and ask_followup_question_text:
+                                # Claude Code auto-handled ask_followup_question (result
+                                # fired normally). Ensure the question is visible when the
+                                # result body is absent (Claude Code returned empty text).
+                                if not any(isinstance(c, str) and c.strip() for c in turn_result_chunks):
+                                    turn_result_chunks.insert(0, ask_followup_question_text)
                             for chunk in turn_result_chunks:
                                 yield chunk
                             break

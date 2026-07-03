@@ -1535,10 +1535,15 @@ async def quota_backend(backend_id: str):
     if gauge.type == "claude":
         window = data.get("five_hour") or {}
         used = window.get("utilization")
+        sd = data.get("seven_day") or {}
         return JSONResponse({
             "status": "ok", "text": f"{round(used)}%" if used is not None else None,
             "raw": used, "used_percent": used, "reset_at": window.get("resets_at"),
             "title": "Claude session usage",
+            "seven_day": {
+                "used_percent": sd.get("utilization"),
+                "reset_at": sd.get("resets_at"),
+            } if sd else None,
         })
     if gauge.type == "codex":
         rate_limit = data.get("rate_limit") or {}
@@ -1547,10 +1552,15 @@ async def quota_backend(backend_id: str):
         reset_at = window.get("reset_at")
         if reset_at is None and window.get("reset_after_seconds") is not None:
             reset_at = time.time() + window["reset_after_seconds"]
+        secondary = rate_limit.get("secondary_window") or {}
         return JSONResponse({
             "status": "ok", "text": f"{round(used)}%" if used is not None else None,
             "raw": used, "used_percent": used, "reset_at": reset_at,
             "title": "Codex usage",
+            "seven_day": {
+                "used_percent": secondary.get("used_percent"),
+                "reset_at": secondary.get("reset_at"),
+            } if secondary else None,
         })
     if data.get("isUnlimited"):
         return JSONResponse({

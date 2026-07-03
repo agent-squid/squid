@@ -346,6 +346,7 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0) {
   editingExpandedSlug = false;
   expandedSlugEditToken++;
   stickyChip = { topic, agent, adhoc, lookback };
+  _advisoryTurnCount = 0;
   // Don't persist a sessioned default chip — #default is adhoc-first; session there is ephemeral
   if (topic !== 'default' || adhoc) {
     localStorage.setItem('squid_sticky_chip', JSON.stringify({ topic, agent, adhoc, lookback }));
@@ -3730,6 +3731,10 @@ const QUOTA_CONFIG = {
     displayId:    'quota-display',
     pieArcId:     'quota-pie-arc',
     labelId:      'quota-label',
+    fiveHourPctId:   'quota-5h-pct',
+    sevenDayArcId:   'quota-7d-arc',
+    sevenDayLabelId: 'quota-7d-label',
+    sevenDaySuffixId: 'quota-7d-suffix',
     pieC:         2 * Math.PI * 6,
     credsPopupId: 'quota-creds-popup',
     errorTitle:   'Claude usage unavailable · click for credentials',
@@ -3739,6 +3744,10 @@ const QUOTA_CONFIG = {
     displayId:    'codex-quota-display',
     pieArcId:     'codex-pie-arc',
     labelId:      'codex-quota-label',
+    fiveHourPctId:   'codex-5h-pct',
+    sevenDayArcId:   'codex-7d-arc',
+    sevenDayLabelId: 'codex-7d-label',
+    sevenDaySuffixId: 'codex-7d-suffix',
     pieC:         2 * Math.PI * 6,
     credsPopupId: 'codex-creds-popup',
     errorTitle:   'Codex usage unavailable · click for credentials',
@@ -3748,6 +3757,7 @@ const QUOTA_CONFIG = {
     displayId:    'cursor-quota-display',
     pieArcId:     'cursor-pie-arc',
     labelId:      'cursor-quota-label',
+    fiveHourPctId:   'cursor-5h-pct',
     pieC:         2 * Math.PI * 6,
     credsPopupId: 'cursor-creds-popup',
     errorTitle:   'Cursor usage unavailable · click for info',
@@ -3763,9 +3773,9 @@ const QUOTA_CONFIG = {
     formatLabel:  (state) => state.displayText || '—',
   },
   static: {
-    displayId:    'quota-display',
-    pieArcId:     'quota-pie-arc',
-    labelId:      'quota-label',
+    displayId:    'static-quota-display',
+    pieArcId:     'static-pie-arc',
+    labelId:      'static-quota-label',
     pieC:         2 * Math.PI * 6,
   },
 };
@@ -3904,38 +3914,12 @@ async function updateActiveQuotaGauge() {
   }
 }
 
-function parseClaudeQuota(data) {
-  const session = data?.five_hour;
-  if (!session) return null;
-  const raw = session.utilization ?? 0;
-  return {
-    raw,
-    pct: Math.round(raw),
-    resetAt: new Date(session.resets_at).getTime(),
-    title: 'Claude session usage',
-  };
-}
-
-function parseCodexQuota(data) {
-  const primary = data?.rate_limit?.primary_window;
-  if (!primary) return null;
-  const raw = primary.used_percent ?? 0;
-  const resetAt = primary.reset_after_seconds != null
-    ? Date.now() + primary.reset_after_seconds * 1000
-    : (primary.reset_at != null ? primary.reset_at * 1000 : null);
-  return {
-    raw,
-    pct: Math.max(0, Math.min(100, Math.round(raw))),
-    resetAt,
-    title: buildCodexQuotaTitle(data),
-  };
-}
-
 function scheduleGaugeTick(backend) {
   const state = quotaStateFor(backend);
   if (!state.resetAt || state.resetAt <= Date.now()) return;
   state.timer = setTimeout(() => {
     updateGaugeLabel(backend);
+    updateSevenDayGauge(backend);
     scheduleGaugeTick(backend);
   }, 10000);
 }
@@ -3954,8 +3938,17 @@ function updateGaugeLabel(backend) {
   } else if (state.pct == null) {
     label.textContent = '—';
   } else {
-    const timeStr = quotaTimeText(state.resetAt);
-    label.textContent = `${state.pct}%` + (timeStr ? ` in ${timeStr}` : '');
+    // If the backend has 5h/7d dual gauges, percentage goes in donut center,
+    // external label shows only countdown. Otherwise show "X% in Xh".
+    if (cfg.fiveHourPctId) {
+      const pctEl = document.getElementById(cfg.fiveHourPctId);
+      if (pctEl) pctEl.textContent = `${state.pct}`;
+      const timeStr = quotaTimeText(state.resetAt);
+      label.textContent = timeStr || '';
+    } else {
+      const timeStr = quotaTimeText(state.resetAt);
+      label.textContent = `${state.pct}%` + (timeStr ? ` in ${timeStr}` : '');
+    }
   }
   const arc = document.getElementById(cfg.pieArcId);
   if (arc && state.pct != null) {
@@ -3964,6 +3957,35 @@ function updateGaugeLabel(backend) {
     arc.setAttribute('stroke', quotaGaugeColor(backend, state.pct));
   } else if (arc) {
     arc.setAttribute('stroke-dasharray', `0 ${cfg.pieC}`);
+  }
+}
+
+function updateSevenDayGauge(backend) {
+  const state = quotaStateFor(backend);
+  const cfg = quotaConfigFor(backend);
+  if (!state.sevenDay || !cfg.sevenDayArcId) return;
+  const arc = document.getElementById(cfg.sevenDayArcId);
+  const label = document.getElementById(cfg.sevenDayLabelId);
+  if (arc && state.sevenDay.pct != null) {
+    const filled = (state.sevenDay.pct / 100) * cfg.pieC;
+    arc.setAttribute('stroke-dasharray', `${filled} ${cfg.pieC}`);
+    arc.setAttribute('stroke', quotaGaugeColor(backend, state.sevenDay.pct));
+  } else if (arc) {
+    arc.setAttribute('stroke-dasharray', `0 ${cfg.pieC}`);
+  }
+  if (label) {
+    label.textContent = state.sevenDay.pct != null ? `${state.sevenDay.pct}` : '—';
+  }
+  // Update 7D suffix with days remaining
+  const suffix = document.getElementById(cfg.sevenDaySuffixId);
+  if (suffix) {
+    if (state.sevenDay.resetAt) {
+      const diff = state.sevenDay.resetAt - Date.now();
+      const days = Math.max(0, diff / (24 * 60 * 60 * 1000));
+      suffix.textContent = `${days.toFixed(1)}D`;
+    } else {
+      suffix.textContent = '7D';
+    }
   }
 }
 
@@ -3980,6 +4002,7 @@ function renderQuotaLoaded(backend, snapshot) {
   state.pct = snapshot.pct;
   state.resetAt = snapshot.resetAt;
   state.displayText = snapshot.displayText ?? null;
+  state.sevenDay = snapshot.sevenDay ?? null;
 
   if (backend === activeQuotaBackend) {
     const displayEl = document.getElementById(cfg.displayId);
@@ -3988,6 +4011,7 @@ function renderQuotaLoaded(backend, snapshot) {
     displayEl.title = snapshot.title ?? '';
   }
   updateGaugeLabel(backend);
+  if (cfg.sevenDayArcId) updateSevenDayGauge(backend);
   if (state.timer) clearTimeout(state.timer);
   state.timer = null;
   scheduleGaugeTick(backend);
@@ -4020,6 +4044,16 @@ function showQuotaError(backend, text) {
     if (label) label.textContent = text;
     const arc = document.getElementById(cfg.pieArcId);
     if (arc) arc.setAttribute('stroke-dasharray', `0 ${cfg.pieC}`);
+  }
+  if (cfg.sevenDayArcId) {
+    const sevenDayArc = document.getElementById(cfg.sevenDayArcId);
+    if (sevenDayArc) sevenDayArc.setAttribute('stroke-dasharray', `0 ${cfg.pieC}`);
+    const sevenDayLabel = document.getElementById(cfg.sevenDayLabelId);
+    if (sevenDayLabel) sevenDayLabel.textContent = '—';
+  }
+  if (cfg.fiveHourPctId) {
+    const fiveHrPct = document.getElementById(cfg.fiveHourPctId);
+    if (fiveHrPct) fiveHrPct.textContent = '—';
   }
 }
 
@@ -4072,6 +4106,14 @@ async function fetchQuotaForBackend(backend) {
       // "42% in 4:34"). `text` is reserved for non-percentage gauges such as
       // static labels, unlimited plans, and account balances.
       displayText: data.used_percent == null ? (data.text ?? null) : null,
+      sevenDay: data.seven_day ? {
+        pct: data.seven_day.used_percent == null ? null : Math.round(data.seven_day.used_percent),
+        resetAt: data.seven_day.reset_at
+          ? (typeof data.seven_day.reset_at === 'number'
+            ? data.seven_day.reset_at * 1000
+            : new Date(data.seven_day.reset_at).getTime())
+          : null,
+      } : null,
     };
     if (gaugeTypeFor(backend) === 'deepseek' && snapshot.raw != null) {
       const max = parseFloat(localStorage.getItem(`deepseek-max-balance:${backend}`)
@@ -4101,13 +4143,26 @@ function initQuota() {
   quotaDisplay.style.setProperty('--quota-accent', agentThemeColor('claude'));
   setVisibleQuotaBackend('claude');
   quotaDisplay.innerHTML = `
-    <svg id="quota-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
-      <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
-      <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('claude')}"
-              stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
-              transform="rotate(-90 9 9)"/>
-    </svg>
-    <span id="${cfg.labelId}"></span>`;
+    <span class="quota-7d-group">
+      <svg id="quota-7d-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
+        <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
+        <circle id="${cfg.sevenDayArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('claude')}"
+                stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
+                transform="rotate(-90 9 9)"/>
+        <text id="${cfg.sevenDayLabelId}" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
+      </svg>
+      <span id="${cfg.sevenDaySuffixId}" class="quota-7d-suffix">7D</span>
+    </span>
+    <span style="display:inline-flex;align-items:center">
+      <svg id="quota-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
+        <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
+        <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('claude')}"
+                stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
+                transform="rotate(-90 9 9)"/>
+        <text id="${cfg.fiveHourPctId}" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
+      </svg>
+      <span id="${cfg.labelId}"></span>
+    </span>`;
 
   const credsPopup = document.getElementById(cfg.credsPopupId);
   quotaDisplay.addEventListener('click', () => {
@@ -4160,33 +4215,30 @@ function parseDeepSeekQuota(data) {
   };
 }
 
-function buildCodexQuotaTitle(data) {
-  const primary = data?.rate_limit?.primary_window;
-  const secondary = data?.rate_limit?.secondary_window;
-  const parts = ['Codex usage'];
-  if (primary?.used_percent != null) {
-    parts.push(`5h ${Math.round(primary.used_percent)}%`);
-  }
-  if (secondary?.used_percent != null) {
-    parts.push(`weekly ${Math.round(secondary.used_percent)}%`);
-  }
-  if (data?.rate_limit?.limit_reached) {
-    parts.push('limit reached');
-  }
-  return parts.join(' · ') + ' · click for credentials';
-}
-
 function initCodexQuota() {
   const cfg = QUOTA_CONFIG.codex;
   codexQuotaDisplay.style.setProperty('--quota-accent', agentThemeColor('codex'));
   codexQuotaDisplay.innerHTML = `
-    <svg id="codex-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
-      <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
-      <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('codex')}"
-              stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
-              transform="rotate(-90 9 9)"/>
-    </svg>
-    <span id="${cfg.labelId}"></span>`;
+    <span class="quota-7d-group">
+      <svg id="codex-7d-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
+        <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
+        <circle id="${cfg.sevenDayArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('codex')}"
+                stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
+                transform="rotate(-90 9 9)"/>
+        <text id="${cfg.sevenDayLabelId}" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
+      </svg>
+      <span id="${cfg.sevenDaySuffixId}" class="quota-7d-suffix">7D</span>
+    </span>
+    <span style="display:inline-flex;align-items:center">
+      <svg id="codex-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
+        <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
+        <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('codex')}"
+                stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
+                transform="rotate(-90 9 9)"/>
+        <text id="${cfg.fiveHourPctId}" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
+      </svg>
+      <span id="${cfg.labelId}"></span>
+    </span>`;
   showQuotaError('codex', 'Codex auth');
 
   const credsPopup = document.getElementById(cfg.credsPopupId);
@@ -4361,13 +4413,16 @@ function initCursorQuota() {
   const cfg = QUOTA_CONFIG.cursor;
   cursorQuotaDisplay.style.setProperty('--quota-accent', agentThemeColor('cursor'));
   cursorQuotaDisplay.innerHTML = `
-    <svg id="cursor-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
-      <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
-      <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('cursor')}"
-              stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
-              transform="rotate(-90 9 9)"/>
-    </svg>
-    <span id="${cfg.labelId}"></span>`;
+    <span style="display:inline-flex;align-items:center">
+      <svg id="cursor-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
+        <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
+        <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('cursor')}"
+                stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
+                transform="rotate(-90 9 9)"/>
+        <text id="${cfg.fiveHourPctId}" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
+      </svg>
+      <span id="${cfg.labelId}"></span>
+    </span>`;
 
   const credsPopup = document.getElementById(cfg.credsPopupId);
   cursorQuotaDisplay.addEventListener('click', () => credsPopup.classList.toggle('open'));
@@ -4377,6 +4432,9 @@ function initCursorQuota() {
   });
   fetchCursorQuota();
 }
+
+// ── Static (text-only) gauge ───────────────────────────────────────────────────
+
 
 // ── usage stats panel ─────────────────────────────────────────────────────────
 
