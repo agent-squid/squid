@@ -5354,16 +5354,20 @@ function renderBackendsCatalog(backends) {
     const isProvider  = info.kind === 'provider';
     const color       = agentThemeColor(id);
     const label       = info.label;
-    const authHint    = isProvider ? 'configured in YAML' : (driverInfo.authHint || `uses ${info.driver} driver`);
     const installCmd  = driverInfo.installCmd || '';
     const gauge       = info.gauge || { type: 'none' };
+    const usesBackendApiKey = info.provider === 'deepseek' || gauge.type === 'deepseek';
+    const readyViaConfig = isProvider || usesBackendApiKey;
+    const authHint    = usesBackendApiKey
+      ? 'uses this backend API key'
+      : (isProvider ? 'configured in YAML' : (driverInfo.authHint || `uses ${info.driver} driver`));
     const gaugeHint   = gauge.type === 'static'
       ? (gauge.text || 'static')
       : (GAUGE_CATALOG[gauge.type] || '—');
 
     let codingHtml;
     if (available) {
-      codingHtml = `<span class="bcat-status-ok">✓ ${isProvider ? 'ready' : 'detected'}</span>
+      codingHtml = `<span class="bcat-status-ok">✓ ${readyViaConfig ? 'ready' : 'detected'}</span>
         <span class="bcat-hint">${escapeHtml(authHint)}</span>`;
     } else {
       const missingItems = info.missing_requirements || [
@@ -7690,8 +7694,9 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
     if (healthRes?.ok) {
       const health = await healthRes.json();
       if (health.squid_home) _squidHome = health.squid_home;
+      return { roots: _squidHome ? [_squidHome] : [] };
     }
-    return { roots: _squidHome ? [_squidHome] : [] };
+    throw new Error('Squid server API not available. Open the Squid server URL, not the static UI preview.');
   }
 
   async function loadFile() {
@@ -7739,8 +7744,8 @@ function openFileViewer(initialPath, initialLine, initialEndLine) {
       pathIsText = ct.includes('text/') || ct.includes('application/json');
       updateNav();
       _renderFileViewer(body, text, line, endLine, path);
-    } catch {
-      body.textContent = 'Failed to load file.';
+    } catch (err) {
+      body.textContent = err?.message || 'Failed to load file.';
     }
   }
 

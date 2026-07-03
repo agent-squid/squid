@@ -85,6 +85,22 @@ test('Files menu falls back to squid_home when roots endpoint is missing', async
   await expect(page.getByRole('link', { name: '/tmp/fresh/squid' })).toBeVisible();
 });
 
+test('Files menu reports when opened against static UI without Squid API', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/health', r => r.fulfill({ status: 404, body: 'Not Found' }));
+  await page.route('**/config/localfile-roots**', r => r.fulfill({
+    status: 404,
+    body: 'Not Found',
+  }));
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Files' }).click();
+
+  await expect(page.locator('#file-modal')).toBeVisible();
+  await expect(page.locator('#file-modal-body')).toContainText('Squid server API not available');
+  await expect(page.locator('#file-modal-body')).not.toContainText('/tmp/squid');
+});
+
 test('yaml example files open inline from the browser instead of downloading', async ({ page }) => {
   await mockApp(page);
   await page.route('**/config/localfile-roots**', r => r.fulfill({

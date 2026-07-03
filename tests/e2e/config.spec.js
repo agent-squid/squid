@@ -167,6 +167,35 @@ test('agents backend catalog marks configured provider backends as ready', async
   await expect(row).not.toContainText('detected');
 });
 
+test('agents backend catalog treats keyed DeepSeek as ready without Claude auth hint', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/health', r => r.fulfill({ json: {
+    status: 'ok',
+    backends: {
+      deepseek: {
+        driver: 'claude',
+        label: 'DeepSeek',
+        available: true,
+        missing_requirements: [],
+        provider: 'deepseek',
+        gauge: { type: 'deepseek' },
+        gauge_authed: true,
+      },
+    },
+  }}));
+
+  await page.goto('/');
+  await page.locator('.nav-tab[data-view="agents"]').click();
+
+  const row = page.locator('#backends-catalog .bcat-row').filter({ hasText: 'DeepSeek' });
+  await expect(row).toBeVisible();
+  await expect(row).toContainText('ready');
+  await expect(row).toContainText('uses this backend API key');
+  await expect(row).toContainText('gauge ✓');
+  await expect(row).not.toContainText('run claude to authenticate');
+  await expect(row).not.toContainText('detected');
+});
+
 test('blocked file viewer lets the user choose a broader parent and retries', async ({ page }) => {
   await mockApp(page);
   let allowed = false;
