@@ -19,7 +19,7 @@ Use it when your workflow has become a wall of unnamed terminal tabs or you need
 #launch@claude write the release notes
 #launch@codex! review the diff for regressions
 #bug@cursor reproduce the auth failure
-#ops@copilot summarize the incident notes
+#ops@opencode summarize the incident notes
 ```
 NOTE: These topics are sticky. Once you are in the topic, no need to type it. :)
 
@@ -176,7 +176,7 @@ FastAPI Squid server
               +-- ephemeral worker per adhoc ! turn
         |
         +-- local CLI subprocesses
-              claude / codex / cursor-agent / copilot / agy
+              claude / codex / cursor-agent / opencode
 ```
 
 The CLI owns the real conversation context. Squid stores history, stats, topics, active session IDs, cwd locks, and UI state needed to make the workflow manageable. Session turns use native resume. Adhoc turns build an explicit limited-context prompt, which makes the two modes easy to compare.
