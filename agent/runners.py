@@ -144,7 +144,7 @@ def _claude_child_env(backend_id: str, backend_env: Optional[dict]) -> dict:
     if backend_id == "claude":
         # Claude Code owns its OAuth credentials and refresh lifecycle. Inherited
         # API/gateway variables take precedence over its claude.ai login, so remove
-        # them only for the native backend. Gateway backends such as deepcla keep
+        # them only for the native backend. Gateway backends such as deepseek keep
         # their explicitly resolved child-process environment.
         for name in (
             "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",

@@ -50,7 +50,7 @@ settings. Raw `env`, `settings`, and `args` remain escape hatches. Backend
 metadata returned to the UI never contains credentials or raw settings.
 
 Each backend selects a gauge adapter independently of its driver. For example,
-`deepcla` and `deepopen` can both use the coded `deepseek` balance adapter while
+`deepseek` and `deepopen` can both use the coded `deepseek` balance adapter while
 retaining separate API keys. Static gauges represent local or provider-managed
 service without inventing a numeric quota. Quota responses are normalized by
 the server and selected only from backend configuration, never model names.
@@ -66,7 +66,7 @@ configuration changes.
 
 - New endpoints and models supported by an existing driver require YAML only.
 - Multiple backends may share one driver, such as `claude: claude` and
-  `deepcla: claude`.
+  `deepseek: claude`.
 - Multiple backends may share one driver while using different protocols, such
   as `claude: oneshot-cli` and `claude-live: interactive-cli`.
 - Multiple backends may share a gauge implementation without sharing keys.

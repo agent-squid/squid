@@ -161,12 +161,13 @@ def _is_backend_native_chat_command(message: str) -> bool:
 
 
 def _migrate_legacy_deepseek_agent():
-    """Move the old model-routed deepcla agent onto its configured backend."""
-    legacy = _cfg.get("deepseek") or {}
+    """Rename the old DeepSeek agent/backend id from deepcla to deepseek."""
     existing = get_agent("deepcla")
-    if legacy.get("claude_key") and "deepcla" in BACKENDS and existing and existing.get("backend") == "claude":
-        upsert_agent("deepcla", "deepcla", existing.get("model") or "deepseek-v4-pro", existing.get("cwd"))
-        log.info("migrated agent: deepcla (backend=deepcla)")
+    backend = get_backend("deepseek")
+    if backend and existing:
+        upsert_agent("deepseek", "deepseek", existing.get("model") or backend.model or "deepseek-chat", existing.get("cwd"))
+        delete_agent("deepcla")
+        log.info("migrated agent: deepcla -> deepseek")
 
 _check_deps()
 _migrate_legacy_deepseek_agent()
@@ -1445,7 +1446,7 @@ async def quota_cursor():
 
 @app.get("/quota/deepseek")
 async def quota_deepseek():
-    backend = get_backend("deepcla")
+    backend = get_backend("deepseek")
     try:
         deepseek_key = (backend.resolved_api_key() if backend else None)
     except ValueError:

@@ -326,7 +326,11 @@ def _configured_backends() -> dict[str, Any]:
     if configured is not None:
         if not isinstance(configured, dict) or not configured:
             raise ValueError("backends must be a non-empty mapping")
-        return configured
+        normalized = dict(configured)
+        legacy_deepseek = normalized.pop("deepcla", None)
+        if legacy_deepseek is not None and "deepseek" not in normalized:
+            normalized["deepseek"] = legacy_deepseek
+        return normalized
 
     # Compatibility for existing squid.yaml files. New installations receive an
     # explicit backends section from config/squid.yaml.example.

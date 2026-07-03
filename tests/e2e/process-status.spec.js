@@ -63,7 +63,7 @@ test('status popup lists every configured backend, including inactive gauges', a
     backends: {
       claude: { label: 'Claude', gauge: { type: 'claude' } },
       codex: { label: 'Codex', gauge: { type: 'codex' } },
-      deepcla: { label: 'DeepSeek', gauge: { type: 'deepseek' } },
+      deepseek: { label: 'DeepSeek', gauge: { type: 'deepseek' } },
       qwen: { label: 'Qwen', gauge: { type: 'static' } },
       local: { label: 'Local', gauge: { type: 'static' } },
       bare: { label: 'Bare', gauge: { type: 'none' } },
@@ -111,7 +111,7 @@ test('status popup formats idle live-session durations above a minute', async ({
     { topic: 'squid', agent: 'claude', state: 'idle', prompt_preview: 'seconds', state_duration_s: 42 },
     { topic: 'squid', agent: 'codex', state: 'idle', prompt_preview: 'minutes', state_duration_s: 186 },
     { topic: 'squid', agent: 'qwen', state: 'idle', prompt_preview: 'hours', state_duration_s: 11160 },
-    { topic: 'squid', agent: 'deepcla', state: 'idle', prompt_preview: 'days', state_duration_s: 267840 },
+    { topic: 'squid', agent: 'deepseek', state: 'idle', prompt_preview: 'days', state_duration_s: 267840 },
   ] }));
 
   await page.goto('/');

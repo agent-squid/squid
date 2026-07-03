@@ -1,10 +1,41 @@
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import yaml
 
-from agent.backends import Backend, DEFAULT_INTERACTIVE_IDLE_TIMEOUT_SECONDS, Gauge, _validate_backend
+from agent import backends as backends_module
+from agent.backends import (
+    Backend, DEFAULT_INTERACTIVE_IDLE_TIMEOUT_SECONDS, Gauge,
+    _configured_backends, _validate_backend,
+)
 from agent.runners import _codex_config_args
+
+
+def test_shipped_default_yaml_does_not_enable_deepseek_backend():
+    config = yaml.safe_load(Path("config/squid.yaml.example").read_text())
+
+    assert "deepseek" not in config["backends"]
+    assert "deepcla" not in config["backends"]
+
+
+def test_legacy_deepcla_backend_config_is_exposed_as_deepseek():
+    with patch.dict(backends_module._cfg, {
+        "backends": {
+            "deepcla": {
+                "driver": "claude",
+                "provider": "deepseek",
+                "base_url": "https://api.deepseek.com/anthropic",
+                "api_key": "deepseek-secret",
+                "gauge": "deepseek",
+            },
+        },
+    }, clear=True):
+        configured = _configured_backends()
+
+    assert "deepseek" in configured
+    assert "deepcla" not in configured
 
 
 def test_multiple_backends_can_share_driver():
