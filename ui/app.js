@@ -6353,7 +6353,7 @@ function escapeHtml(s) {
 }
 
 function getPinnedItems() {
-  try { return JSON.parse(localStorage.getItem('pinnedItems') || '[]'); } catch { return []; }
+  try { return (JSON.parse(localStorage.getItem('pinnedItems') || '[]')).sort((a, b) => a.id - b.id); } catch { return []; }
 }
 function setPinnedItems(items) { localStorage.setItem('pinnedItems', JSON.stringify(items)); }
 function clearPinnedItems() {
