@@ -40,7 +40,7 @@ backends:
     driver: cursor
     protocol: oneshot-cli
     label: Cursor
-    color: "#FFFFFF"
+    color: "#8F8D8D"
     gauge: cursor
 
   opencode:
