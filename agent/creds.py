@@ -25,7 +25,7 @@ def _save(data: dict) -> None:
 
 
 def save(org_id: str, session_key: str) -> None:
-    _save({"org_id": org_id, "session_key": session_key})
+    _save({"claude_org_id": org_id, "claude_session_key": session_key})
 
 
 def save_codex(token: str) -> None:
@@ -33,11 +33,13 @@ def save_codex(token: str) -> None:
 
 
 def get_org_id() -> Optional[str]:
-    return load().get("org_id")
+    d = load()
+    return d.get("claude_org_id") or d.get("org_id")
 
 
 def get_session_key() -> Optional[str]:
-    return load().get("session_key")
+    d = load()
+    return d.get("claude_session_key") or d.get("session_key")
 
 
 def get_codex_token() -> Optional[str]:
@@ -91,6 +93,20 @@ def read_codex_creds() -> str:
     if not token:
         raise RuntimeError("accessToken not found. Make sure you are logged into ChatGPT.")
     return token
+
+
+def save_deepseek_max_budget(amount: float) -> None:
+    _save({"deepseek_max_budget": amount})
+
+
+def get_deepseek_max_budget() -> Optional[float]:
+    return load().get("deepseek_max_budget")
+
+
+def clear_deepseek_max_budget() -> None:
+    data = load()
+    data.pop("deepseek_max_budget", None)
+    _CREDS_PATH.write_text(json.dumps(data, indent=2))
 
 
 def get_cursor_token() -> Optional[str]:

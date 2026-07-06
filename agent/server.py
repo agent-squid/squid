@@ -239,8 +239,8 @@ class LocalfileRevertEditRequest(BaseModel):
 
 
 class CredsRequest(BaseModel):
-    org_id: str = Field(..., min_length=1)
-    session_key: str = Field(..., min_length=1)
+    claude_org_id: str = Field(..., min_length=1)
+    claude_session_key: str = Field(..., min_length=1)
 
 
 class CodexCredsRequest(BaseModel):
@@ -1349,7 +1349,7 @@ async def delete_bookmark(msg_id: int):
 
 @app.post("/config/creds")
 async def save_creds(req: CredsRequest):
-    creds.save(req.org_id.strip(), req.session_key.strip())
+    creds.save(req.claude_org_id.strip(), req.claude_session_key.strip())
     return JSONResponse({"ok": True})
 
 
@@ -1365,7 +1365,7 @@ async def auto_detect_creds():
         missing = [k for k, v in {"sessionKey": session_key, "lastActiveOrg": org_id}.items() if not v]
         return JSONResponse({"error": f"Cookies not found: {', '.join(missing)}. Make sure you are logged into claude.ai in Chrome."}, status_code=404)
     creds.save(org_id, session_key)
-    return JSONResponse({"ok": True, "org_id": org_id})
+    return JSONResponse({"ok": True, "claude_org_id": org_id})
 
 
 @app.post("/config/creds/codex/auto")
@@ -1483,6 +1483,21 @@ async def quota_deepseek():
         return JSONResponse({"error": str(exc)}, status_code=502)
 
 
+@app.post("/config/deepseek/max-budget")
+async def set_deepseek_max_budget(body: dict):
+    amount = body.get("amount")
+    if not amount or amount <= 0:
+        return JSONResponse({"error": "invalid amount"}, status_code=400)
+    creds.save_deepseek_max_budget(amount)
+    return JSONResponse({"status": "ok"})
+
+
+@app.delete("/config/deepseek/max-budget")
+async def clear_deepseek_max_budget():
+    creds.clear_deepseek_max_budget()
+    return JSONResponse({"status": "ok"})
+
+
 def _json_response_data(response: JSONResponse) -> dict:
     try:
         return json.loads(response.body)
@@ -1532,6 +1547,16 @@ async def quota_backend(backend_id: str):
             return JSONResponse({"error": "balance unavailable"}, status_code=502)
         symbol = "$" if info.get("currency") == "USD" else "¥"
         balance = float(info.get("total_balance") or 0)
+        max_budget = creds.get_deepseek_max_budget()
+        if max_budget and max_budget > 0:
+            spent = max(0, max_budget - balance)
+            pct = max(0, min(100, round(spent / max_budget * 100)))
+            return JSONResponse({
+                "status": "ok", "text": f"{symbol}{balance:.2f}",
+                "raw": balance, "used_percent": None, "reset_at": None,
+                "title": f"DeepSeek · {symbol}{spent:.2f} spent of {symbol}{max_budget:.2f}",
+                "max_budget": max_budget, "max_budget_pct": pct, "spent": spent,
+            })
         return JSONResponse({
             "status": "ok", "text": f"{symbol}{balance:.2f}",
             "raw": balance, "used_percent": None, "reset_at": None,
@@ -1661,6 +1686,7 @@ async def serve_local_file(path: str, request: Request):
     """Serve a local file — only paths under server.localfile_roots are allowed."""
     import mimetypes
     from fastapi.responses import FileResponse, PlainTextResponse
+    _nocache = {"Cache-Control": "no-store"}
     if not _same_origin(request):
         return JSONResponse({"error": "cross-origin file reads are not allowed"}, status_code=403)
     if not _LOCALFILE_ROOTS:
@@ -1682,17 +1708,17 @@ async def serve_local_file(path: str, request: Request):
                 size = None
                 mtime = None
             entry_list.append({"name": e.name, "path": str(e), "is_dir": e.is_dir(), "size": size, "mtime": mtime})
-        return JSONResponse({"type": "directory", "path": str(p), "entries": entry_list})
+        return JSONResponse({"type": "directory", "path": str(p), "entries": entry_list}, headers=_nocache)
     if not p.is_file():
         return JSONResponse({"error": "not a file"}, status_code=400)
     mime = _LOCALFILE_TEXT_MIME_BY_SUFFIX.get(p.suffix.lower())
     if mime is None:
         mime, _ = mimetypes.guess_type(str(p))
     if mime and mime.startswith("text/"):
-        return PlainTextResponse(p.read_text(errors="replace"), media_type=mime)
+        return PlainTextResponse(p.read_text(errors="replace"), media_type=mime, headers=_nocache)
     if (not mime or mime == "application/octet-stream") and _looks_like_text_file(p):
-        return PlainTextResponse(p.read_text(errors="replace"), media_type="text/plain")
-    return FileResponse(str(p), media_type=mime or "application/octet-stream")
+        return PlainTextResponse(p.read_text(errors="replace"), media_type="text/plain", headers=_nocache)
+    return FileResponse(str(p), media_type=mime or "application/octet-stream", headers=_nocache)
 
 
 @app.post("/localfile")

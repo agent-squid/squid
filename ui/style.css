@@ -177,6 +177,12 @@ body {
 .hmenu-item.active { background: var(--surface-2); color: var(--accent); }
 .hmenu-item:hover:not(.active) { background: var(--surface-3); color: var(--text-muted); }
 .hmenu-primary { display: none; }
+.hmenu-separator {
+  border: none;
+  border-top: 1px solid var(--border, #444);
+  margin: 0.3rem 0.75rem;
+  opacity: 0.4;
+}
 
 /* views */
 .view { display: none; flex-direction: column; flex: 1; min-height: 0; gap: 1rem; }
@@ -291,9 +297,10 @@ body {
 #cursor-quota-display.error #cursor-pie-arc { stroke: #a06655; }
 /* deepseek cost gauge */
 #deepseek-quota-display {
+  --quota-accent: #4d9de0;
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0;
   background: transparent;
   border: none;
   font-size: var(--text-sm);

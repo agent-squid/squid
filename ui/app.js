@@ -184,6 +184,21 @@ function switchView(name) {
   if (name === 'settings') loadConfigYaml();
 }
 
+async function doRefresh() {
+  /* Clear all Cache API caches, unregister service workers, then reload. */
+  try {
+    if ('caches' in window) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map(k => caches.delete(k)));
+    }
+    if ('serviceWorker' in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r => r.unregister()));
+    }
+  } catch (_) {/* best-effort */}
+  window.location.reload();
+}
+
 function initSettings() {
   document.querySelectorAll('.nav-tab').forEach(btn =>
     btn.addEventListener('click', () => {
@@ -201,11 +216,18 @@ function initSettings() {
   });
   document.querySelectorAll('.hmenu-item').forEach(btn =>
     btn.addEventListener('click', () => {
+      if (btn.id === 'hmenu-refresh') return;
       hamburgerMenu.classList.remove('open');
       hamburgerBtn.classList.remove('active');
       switchView(btn.dataset.view);
     })
   );
+  document.getElementById('hmenu-refresh')?.addEventListener('click', e => {
+    e.stopPropagation();
+    hamburgerMenu.classList.remove('open');
+    hamburgerBtn.classList.remove('active');
+    doRefresh()
+  });
   document.addEventListener('click', e => {
     if (!hamburgerMenu.contains(e.target) && !hamburgerBtn.contains(e.target)) {
       hamburgerMenu.classList.remove('open');
@@ -1577,11 +1599,11 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
 
     if (cmd.command === 'restart') {
       feedbackEl.textContent = 'restarting…';
-      // Poll /health until server is back up, then reload
+      // Poll /health until server is back up, then hard-refresh
       const poll = async () => {
         try {
           const r = await fetch('/health');
-          if (r.ok) { location.reload(); return; }
+          if (r.ok) { doRefresh(); return; }
         } catch {}
         setTimeout(poll, 500);
       };
@@ -3766,6 +3788,7 @@ const QUOTA_CONFIG = {
     endpoint:     '/quota/deepseek',  // returns remaining pre-paid balance
     displayId:    'deepseek-quota-display',
     pieArcId:     'deepseek-pie-arc',
+    fiveHourPctId:   'deepseek-pct',
     labelId:      'deepseek-quota-label',
     pieC:         2 * Math.PI * 6,
     credsPopupId: 'deepseek-max-popup',
@@ -3931,6 +3954,14 @@ function updateGaugeLabel(backend) {
   if (!cfg) return;
   const label = document.getElementById(cfg.labelId);
   if (!label) return;
+
+  // Update center percentage for gauges that show pct in donut center
+  // (codex/claude always; deepseek only when max budget is set — pct is null otherwise)
+  if (cfg.fiveHourPctId) {
+    const pctEl = document.getElementById(cfg.fiveHourPctId);
+    if (pctEl) pctEl.textContent = state.pct != null ? `${state.pct}` : '';
+  }
+
   if (state.displayText != null) {
     label.textContent = state.displayText;
   } else if (cfg.formatLabel) {
@@ -3941,8 +3972,6 @@ function updateGaugeLabel(backend) {
     // If the backend has 5h/7d dual gauges, percentage goes in donut center,
     // external label shows only countdown. Otherwise show "X% in Xh".
     if (cfg.fiveHourPctId) {
-      const pctEl = document.getElementById(cfg.fiveHourPctId);
-      if (pctEl) pctEl.textContent = `${state.pct}`;
       const timeStr = quotaTimeText(state.resetAt);
       label.textContent = timeStr || '';
     } else {
@@ -4099,13 +4128,16 @@ async function fetchQuotaForBackend(backend) {
       : (data.reset_at ? new Date(data.reset_at).getTime() : null);
     const snapshot = {
       raw: data.raw ?? null,
-      pct: data.used_percent == null ? null : Math.max(0, Math.min(100, Math.round(data.used_percent))),
+      pct: data.used_percent != null
+        ? Math.max(0, Math.min(100, Math.round(data.used_percent)))
+        : (gaugeTypeFor(backend) === 'deepseek' && data.max_budget_pct != null
+          ? Math.max(0, Math.min(100, Math.round(data.max_budget_pct)))
+          : null),
       resetAt,
       title: data.title || '',
-      // Percentage gauges build their label from pct + resetAt (for example,
-      // "42% in 4:34"). `text` is reserved for non-percentage gauges such as
-      // static labels, unlimited plans, and account balances.
-      displayText: data.used_percent == null ? (data.text ?? null) : null,
+      displayText: gaugeTypeFor(backend) === 'deepseek'
+        ? (data.text ?? null)
+        : (data.used_percent == null ? (data.text ?? null) : null),
       sevenDay: data.seven_day ? {
         pct: data.seven_day.used_percent == null ? null : Math.round(data.seven_day.used_percent),
         resetAt: data.seven_day.reset_at
@@ -4115,15 +4147,6 @@ async function fetchQuotaForBackend(backend) {
           : null,
       } : null,
     };
-    if (gaugeTypeFor(backend) === 'deepseek' && snapshot.raw != null) {
-      const max = parseFloat(localStorage.getItem(`deepseek-max-balance:${backend}`)
-        || localStorage.getItem('deepseek-max-balance') || '');
-      if (max > 0) {
-        const spent = Math.max(0, max - snapshot.raw);
-        snapshot.pct = Math.max(0, Math.min(100, Math.round((spent / max) * 100)));
-        snapshot.title = `DeepSeek · ${spent.toFixed(2)} spent of ${max.toFixed(2)}`;
-      }
-    }
     renderQuotaLoaded(backend, snapshot);
     return { backend, ...state };
   } catch {
@@ -4194,26 +4217,6 @@ function parseCursorQuota(data) {
   return { raw, pct, resetAt, title };
 }
 
-function parseDeepSeekQuota(data) {
-  const usd = data.balance_infos?.find(b => b.currency === 'USD');
-  const cny = data.balance_infos?.find(b => b.currency === 'CNY');
-  const info = usd || cny;
-  if (!info) return null;
-  const symbol = info.currency === 'USD' ? '$' : '¥';
-  const balance = parseFloat(info.total_balance);
-  const displayText = `${symbol}${balance.toFixed(2)}`;
-  const maxStr = localStorage.getItem('deepseek-max-balance');
-  const max = maxStr ? parseFloat(maxStr) : null;
-  const spent = max ? Math.max(0, max - balance) : 0;
-  const pct = (max && max > 0) ? Math.max(0, Math.min(100, Math.round((spent / max) * 100))) : 0;
-  return {
-    raw: balance,
-    pct,
-    resetAt: null,
-    title: `DeepSeek · ${symbol}${spent.toFixed(2)} spent${max ? ` of ${symbol}${parseFloat(max).toFixed(2)}` : ' · click to set max'}`,
-    displayText,
-  };
-}
 
 function initCodexQuota() {
   const cfg = QUOTA_CONFIG.codex;
@@ -4256,13 +4259,16 @@ function initDeepSeekQuota() {
   if (!displayEl) return;
   displayEl.style.setProperty('--quota-accent', agentThemeColor('deepseek'));
   displayEl.innerHTML = `
-    <svg id="deepseek-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
-      <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
-      <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('deepseek')}"
-              stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
-              transform="rotate(-90 9 9)"/>
-    </svg>
-    <span id="${cfg.labelId}">—</span>`;
+    <span style="display:inline-flex;align-items:center">
+      <svg id="deepseek-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
+        <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
+        <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('deepseek')}"
+                stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
+                transform="rotate(-90 9 9)"/>
+        <text id="${cfg.fiveHourPctId}" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff"></text>
+      </svg>
+      <span id="${cfg.labelId}">—</span>
+    </span>`;
 
   const popup = document.getElementById(cfg.credsPopupId);
   displayEl.addEventListener('click', () => popup.classList.toggle('open'));
@@ -4279,22 +4285,32 @@ function initDeepSeekMaxPopup() {
   const status   = document.getElementById('deepseek-max-status');
   if (!maxInput || !saveBtn) return;
 
-  const storageKey = () => `deepseek-max-balance:${activeQuotaBackend || 'deepseek'}`;
-
-  saveBtn.addEventListener('click', () => {
+  saveBtn.addEventListener('click', async () => {
     const val = parseFloat(maxInput.value);
     if (!val || val <= 0) { status.textContent = 'enter a positive amount'; return; }
-    localStorage.setItem(storageKey(), String(val));
-    status.textContent = 'saved ✓';
-    if (activeQuotaBackend) fetchQuotaForBackend(activeQuotaBackend);
+    const res = await fetch(`/config/deepseek/max-budget`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ amount: val }),
+    });
+    if (res.ok) {
+      status.textContent = 'saved ✓';
+      if (activeQuotaBackend) fetchQuotaForBackend(activeQuotaBackend);
+    } else {
+      status.textContent = 'save failed';
+    }
     setTimeout(() => { status.textContent = ''; }, 2000);
   });
 
-  clearBtn?.addEventListener('click', () => {
-    localStorage.removeItem(storageKey());
+  clearBtn?.addEventListener('click', async () => {
+    const res = await fetch(`/config/deepseek/max-budget`, { method: 'DELETE' });
     maxInput.value = '';
-    status.textContent = 'cleared';
-    if (activeQuotaBackend) fetchQuotaForBackend(activeQuotaBackend);
+    if (res.ok) {
+      status.textContent = 'cleared';
+      if (activeQuotaBackend) fetchQuotaForBackend(activeQuotaBackend);
+    } else {
+      status.textContent = 'clear failed';
+    }
     setTimeout(() => { status.textContent = ''; }, 2000);
   });
 }
@@ -4369,7 +4385,7 @@ function initCreds() {
       const res = await fetch('/config/creds/auto', { method: 'POST' });
       const data = await res.json();
       if (res.ok) {
-        autoStatus.textContent = `saved ✓ (org: ${data.org_id.slice(0, 8)}…)`;
+        autoStatus.textContent = `saved ✓ (org: ${(data.claude_org_id || '').slice(0, 8)}…)`;
         fetchQuota();
       } else {
         autoStatus.textContent = data.error || 'failed';
@@ -4380,14 +4396,14 @@ function initCreds() {
   });
 
   saveBtn.addEventListener('click', async () => {
-    const org_id      = orgInput.value.trim();
-    const session_key = keyInput.value.trim();
-    if (!org_id || !session_key) { status.textContent = 'both fields required'; return; }
+    const claude_org_id      = orgInput.value.trim();
+    const claude_session_key = keyInput.value.trim();
+    if (!claude_org_id || !claude_session_key) { status.textContent = 'both fields required'; return; }
     try {
       const res = await fetch('/config/creds', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ org_id, session_key }),
+        body: JSON.stringify({ claude_org_id, claude_session_key }),
       });
       if (res.ok) {
         status.textContent = 'saved ✓';
@@ -7562,7 +7578,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   }
 
   editBtn.addEventListener('click', async () => {
-    const res = await fetch('/localfile?' + new URLSearchParams({ path }));
+    const res = await fetch('/localfile?' + new URLSearchParams({ path, _t: Date.now() }));
     if (!res.ok) return;
     const text = await res.text();
     enterEditMode(text);
@@ -7786,7 +7802,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
         renderFileRoots(await loadFileRoots());
         return;
       }
-      const res = await fetch('/localfile?' + new URLSearchParams({ path }));
+      const res = await fetch('/localfile?' + new URLSearchParams({ path, _t: Date.now() }));
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
         const err = errData.error || '';
@@ -7800,7 +7816,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
       const ct = res.headers.get('content-type') || '';
       if (!ct.includes('text/') && !ct.includes('application/json') && !_isTextPath(path)) {
         if (!isInline) { modal.remove(); _fvNavigate = null; }
-        window.open('/localfile?' + new URLSearchParams({ path }), '_blank');
+        window.open('/localfile?' + new URLSearchParams({ path, _t: Date.now() }), '_blank');
         if (isInline) { body.textContent = 'Opened in new tab'; }
         return;
       }
@@ -8077,22 +8093,22 @@ document.addEventListener('visibilitychange', () => {
   }
 
   if (type === 'claude' && parts.length >= 3) {
-    const org_id = decodeURIComponent(parts[1]);
-    const session_key = decodeURIComponent(parts[2]);
+    const claude_org_id = decodeURIComponent(parts[1]);
+    const claude_session_key = decodeURIComponent(parts[2]);
     fetch('/config/creds', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ org_id, session_key }),
+      body: JSON.stringify({ claude_org_id, claude_session_key }),
     })
       .then(r => r.json())
       .then(d => _showImportResult('quota-creds-popup', 'creds-status', !!d.ok))
       .catch(() => _showImportResult('quota-creds-popup', 'creds-status', false));
   } else if (type === 'claude-org' && parts.length >= 2) {
-    const org_id = decodeURIComponent(parts[1]);
+    const claude_org_id = decodeURIComponent(parts[1]);
     const orgInput = document.getElementById('creds-org');
     const popup = document.getElementById('quota-creds-popup');
     const status = document.getElementById('creds-status');
-    if (orgInput) orgInput.value = org_id;
+    if (orgInput) orgInput.value = claude_org_id;
     if (popup) popup.classList.add('open');
     if (status) { status.textContent = 'Org ID filled — paste session key below'; status.style.color = '#888'; }
     document.getElementById('creds-key')?.focus();
