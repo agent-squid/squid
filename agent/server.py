@@ -386,6 +386,14 @@ def _append_localfile_root(content: str, root: str) -> str:
 # SSE helpers
 # ---------------------------------------------------------------------------
 
+# Idle handling for the /chat SSE loop. Poll out_q on a short timeout so we can
+# emit periodic keepalive comments during long silent gaps (Opus extended
+# thinking, long tool runs) — keeps proxies/tunnels/mobile links from dropping
+# the stream and forcing the client into "recovering" polling.
+_OUT_Q_POLL_TIMEOUT = 1.0  # seconds
+_HEARTBEAT_TICKS = 10      # emit a heartbeat after this many idle poll timeouts (~10s)
+
+
 def sse_chunk(data: str) -> str:
     return "data:" + data.replace("\n", "\ndata:") + "\n\n"
 
@@ -500,6 +508,7 @@ async def stream_response(
     session_id: Optional[str] = None
     last_partial_save = time.monotonic()
     _completed = False
+    idle_ticks = 0
 
     try:
         while True:
@@ -508,9 +517,14 @@ async def stream_response(
                 yield sse_event("queued", json.dumps({"topic": topic, "position": position}))
 
             try:
-                chunk = await asyncio.wait_for(out_q.get(), timeout=1.0)
+                chunk = await asyncio.wait_for(out_q.get(), timeout=_OUT_Q_POLL_TIMEOUT)
             except asyncio.TimeoutError:
+                idle_ticks += 1
+                if idle_ticks >= _HEARTBEAT_TICKS:
+                    idle_ticks = 0
+                    yield ": ping\n\n"
                 continue
+            idle_ticks = 0
 
             if chunk is None:
                 break

@@ -157,6 +157,41 @@ def test_event_replay_ignores_stale_error_when_message_is_done(tmp_path, monkeyp
     assert "late transport error" not in body
 
 
+def test_stream_response_emits_heartbeat_during_idle_gap():
+    """During a silent gap (no chunks) the SSE loop emits keepalive comments so
+    proxies/mobile links don't drop the connection and force 'recovering' polling."""
+    class _SlowQueue:
+        """Times out the first get() (idle gap), then finishes the turn."""
+        def __init__(self):
+            self._n = 0
+
+        async def get(self):
+            self._n += 1
+            if self._n == 1:
+                await asyncio.sleep(3600)  # never returns before poll timeout
+            return None  # end the turn
+
+    async def fake_dispatch(**kwargs):
+        return _SlowQueue(), 3, FinishedWorker()
+
+    async def run():
+        with patch.object(server.dispatcher, "dispatch", fake_dispatch), \
+             patch("agent.server._OUT_Q_POLL_TIMEOUT", 0.01), \
+             patch("agent.server._HEARTBEAT_TICKS", 1), \
+             patch("agent.server.update_assistant_message"):
+            return [
+                chunk
+                async for chunk in server.stream_response(
+                    "prompt", topic="squid", agent="claude", backend="claude",
+                    model=None, cwd="/tmp/squid", context_history=[], asst_msg_id=123,
+                )
+            ]
+
+    chunks = asyncio.run(run())
+    assert any(chunk == ": ping\n\n" for chunk in chunks)
+    assert any(chunk == "event: done\ndata: \n\n" for chunk in chunks)
+
+
 def test_stream_response_does_not_promote_status_to_final_content():
     async def fake_dispatch(**kwargs):
         out_q = asyncio.Queue()

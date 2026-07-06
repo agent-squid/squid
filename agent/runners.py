@@ -525,6 +525,18 @@ async def run_claude(
 _ASK_FOLLOWUP_RESULT_WAIT: float = 10.0
 
 
+def _format_followup_text(tool: dict) -> str:
+    """Render an ask_followup_question tool into the plain text shown to the user:
+    the question, plus any offered options as a bulleted list."""
+    text = tool.get("question", "") or ""
+    options = tool.get("options")
+    if isinstance(options, (list, tuple)) and options:
+        lines = [f"- {opt}" for opt in options if str(opt).strip()]
+        if lines:
+            text = (text + "\n\n" + "\n".join(lines)) if text else "\n".join(lines)
+    return text
+
+
 class _ClaudeInteractiveCLI:
     def __init__(
         self,
@@ -701,8 +713,9 @@ class _ClaudeInteractiveCLI:
             payload = {
                 "type": "user",
                 "message": {"role": "user", "content": content},
-                "parent_tool_use_id": followup_id,
             }
+            if followup_id:
+                payload["parent_tool_use_id"] = followup_id
             try:
                 self.proc.stdin.write((json.dumps(payload, separators=(",", ":")) + "\n").encode())
                 await self.proc.stdin.drain()
@@ -792,7 +805,7 @@ class _ClaudeInteractiveCLI:
                                 # Record tool info; don't emit as a tool widget.
                                 # The question text is surfaced as plain response text.
                                 ask_followup_tool_use_id = tool.get("tool_use_id") or ""
-                                ask_followup_question_text = tool.get("question", "")
+                                ask_followup_question_text = _format_followup_text(tool)
                                 continue
                             if accepting_turn:
                                 yield chunk
@@ -810,6 +823,8 @@ class _ClaudeInteractiveCLI:
                             turn_live_chunks = []
                             turn_result_chunks = []
                             turn_agent_tool_use_id = None
+                            ask_followup_tool_use_id = None
+                            ask_followup_question_text = ""
                             continue
                         if accepting_turn:
                             if ask_followup_tool_use_id and ask_followup_question_text:
@@ -830,6 +845,8 @@ class _ClaudeInteractiveCLI:
                         turn_live_chunks = []
                         turn_result_chunks = []
                         turn_agent_tool_use_id = None
+                        ask_followup_tool_use_id = None
+                        ask_followup_question_text = ""
             finally:
                 if self.proc:
                     _update_proc(self.proc.pid, state="idle", msg_id=None)

@@ -512,7 +512,10 @@ class _HangingStdout:
         return b""
 
 
-def _ask_followup_stream_events(tool_use_id: str, question: str) -> list[str]:
+def _ask_followup_stream_events(tool_use_id: str, question: str, options=None) -> list[str]:
+    inp: dict = {"question": question}
+    if options is not None:
+        inp["options"] = options
     return [
         json.dumps({
             "type": "stream_event",
@@ -527,7 +530,7 @@ def _ask_followup_stream_events(tool_use_id: str, question: str) -> list[str]:
             "event": {
                 "type": "content_block_delta",
                 "index": 0,
-                "delta": {"type": "input_json_delta", "partial_json": json.dumps({"question": question})},
+                "delta": {"type": "input_json_delta", "partial_json": json.dumps(inp)},
             },
         }),
         json.dumps({"type": "stream_event", "event": {"type": "content_block_stop", "index": 0}}),
@@ -630,7 +633,7 @@ def test_claude_interactive_sends_parent_tool_use_id_on_reply_to_followup():
 
     payloads = [json.loads(data.decode()) for data in fake_proc.stdin.writes]
     assert payloads[0]["message"]["content"] == "do the thing"
-    assert payloads[0]["parent_tool_use_id"] is None
+    assert "parent_tool_use_id" not in payloads[0]  # omitted when there is no pending followup
     assert payloads[1]["message"]["content"] == "main branch"
     assert payloads[1]["parent_tool_use_id"] == "toolu_ask_1"
     _clear()
@@ -660,6 +663,35 @@ def test_claude_interactive_surfaces_question_when_result_fires_empty_after_foll
         chunks = asyncio.run(collect())
 
     assert any(c == "What directory?" for c in chunks)
+    _clear()
+
+
+def test_claude_interactive_surfaces_followup_options():
+    """When ask_followup_question offers options, they are surfaced alongside the
+    question as a bulleted list in the soft-completed response text."""
+    _clear()
+    fake_proc = _FakeProcess(9013, [])
+    fake_proc.stdout = _HangingStdout([
+        json.dumps({"type": "system", "session_id": "sess-ask"}),
+        json.dumps({"type": "user", "isReplay": True, "message": {"role": "user", "content": "do the thing"}}),
+        *_ask_followup_stream_events("toolu_ask_3", "Which branch?", options=["main", "develop"]),
+    ])
+
+    async def fake_create_subprocess_exec(*_cmd, **_kwargs):
+        return fake_proc
+
+    async def collect():
+        return [chunk async for chunk in run_claude_interactive_cli(
+            "do the thing", cwd="/tmp/project", topic="work", agent="claude",
+            interactive_idle_timeout_s=3600,
+        )]
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), \
+         patch("agent.runners._ASK_FOLLOWUP_RESULT_WAIT", 0.05), \
+         patch("agent.runners.asyncio.create_subprocess_exec", fake_create_subprocess_exec):
+        chunks = asyncio.run(collect())
+
+    assert chunks == ["Which branch?\n\n- main\n- develop"]
     _clear()
 
 
