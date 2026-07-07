@@ -273,8 +273,8 @@ body {
 }
 #codex-quota-display:hover { color: var(--text-mid); }
 #codex-quota-display.loaded { color: var(--text-lo); }
-#codex-quota-display.error { color: #a06655; }
-#codex-quota-display.error #codex-pie-arc { stroke: #a06655; }
+#codex-quota-display.error { color: var(--quota-accent); }
+#codex-quota-display.error #codex-pie-arc { stroke: var(--quota-accent); }
 
 /* cursor quota gauge */
 #cursor-quota-display {
@@ -293,8 +293,8 @@ body {
 }
 #cursor-quota-display:hover { color: var(--text-mid); }
 #cursor-quota-display.loaded { color: var(--text-lo); }
-#cursor-quota-display.error { color: #a06655; }
-#cursor-quota-display.error #cursor-pie-arc { stroke: #a06655; }
+#cursor-quota-display.error { color: var(--quota-accent); }
+#cursor-quota-display.error #cursor-pie-arc { stroke: var(--quota-accent); }
 /* deepseek cost gauge */
 #deepseek-quota-display {
   --quota-accent: #4d9de0;
