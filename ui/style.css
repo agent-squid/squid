@@ -2973,7 +2973,12 @@ button {
     bottom: calc(4.5rem + env(safe-area-inset-bottom));
   }
 
-  #view-topics, #view-stats, #view-agents, #view-settings { padding-top: 0.75rem; }
+  .view { padding-top: 0.75rem; }
+  #view-community {
+    width: calc(100% + 1.5rem);
+    margin-left: -0.75rem;
+    padding-top: 0;
+  }
   #stats-filters {
     align-items: flex-start;
     gap: 0.35rem 0.45rem;
