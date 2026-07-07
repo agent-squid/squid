@@ -18,3 +18,4 @@ context/topics/default/*
 logs/
 .claude/
 benchmarks/claude_session_continuity/results/
+config/squid.yaml
