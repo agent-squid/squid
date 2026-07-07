@@ -179,7 +179,7 @@ function switchView(name) {
   currentView = name;
   if (name === 'files') openFilesTabView();
   if (name === 'topics') loadTopicsView();
-  if (name === 'analytics') loadStats();
+  if (name === 'stats') loadStats();
   if (name === 'agents') loadAgents();
   if (name === 'settings') loadConfigYaml();
 }

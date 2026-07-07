@@ -108,10 +108,11 @@
       <!-- Desktop nav tabs -->
       <nav id="nav-tabs">
         <button class="nav-tab active" data-view="chat">Chat</button>
-        <button class="nav-tab" data-view="topics">Topics</button>
         <button class="nav-tab" data-view="files">Files</button>
+        <button class="nav-tab" data-view="topics">Topics</button>
         <button class="nav-tab" data-view="agents">Agents</button>
-        <button class="nav-tab" data-view="analytics">Analytics</button>
+        <button class="nav-tab" data-view="stats">Stats</button>
+        <button class="nav-tab" data-view="community" title="Community">🪸</button>
       </nav>
 
       <!-- Process status dot -->
@@ -148,10 +149,11 @@
         <!-- Hamburger dropdown -->
         <div id="hamburger-menu">
           <button class="hmenu-item hmenu-primary active" data-view="chat">Chat</button>
-          <button class="hmenu-item hmenu-primary" data-view="topics">Topics</button>
           <button class="hmenu-item hmenu-primary" data-view="files">Files</button>
+          <button class="hmenu-item hmenu-primary" data-view="topics">Topics</button>
           <button class="hmenu-item hmenu-primary" data-view="agents">Agents</button>
-          <button class="hmenu-item hmenu-primary" data-view="analytics">Analytics</button>
+          <button class="hmenu-item hmenu-primary" data-view="stats">Stats</button>
+          <button class="hmenu-item hmenu-primary" data-view="community">Community</button>
           <button class="hmenu-item" data-view="settings">Settings</button>
           <div class="hmenu-separator"></div>
           <button class="hmenu-item" id="hmenu-refresh">Hard Refresh</button>
@@ -453,8 +455,8 @@
       <div id="topics-list"></div>
     </div>
 
-    <!-- ── ANALYTICS VIEW ────────────────────────────────────────────────── -->
-    <div id="view-analytics" class="view">
+    <!-- ── STATS VIEW ────────────────────────────────────────────────── -->
+    <div id="view-stats" class="view">
       <div id="stats-header">
         <div id="stats-tabs">
           <button class="st active" data-period="daily" data-group="time">Daily</button>
@@ -548,6 +550,11 @@
         <span class="settings-label">Backends</span>
         <div id="backends-catalog"></div>
       </div>
+    </div>
+
+    <!-- ── COMMUNITY VIEW ────────────────────────────────────────────────── -->
+    <div id="view-community" class="view">
+      <iframe src="https://agentsquid.ai/community.html?embed=1" id="community-iframe"></iframe>
     </div>
 
     <!-- ── SETTINGS VIEW ────────────────────────────────────────────────────── -->

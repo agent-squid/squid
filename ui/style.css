@@ -39,6 +39,15 @@
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* Thin dark scrollbars across the app */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2a2a40 transparent;
+}
+*::-webkit-scrollbar { width: 5px; height: 5px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: #2a2a40; border-radius: 3px; }
+
 #remote-modal {
   position: fixed; inset: 0; background: rgba(0,0,0,0.75);
   display: flex; align-items: center; justify-content: center; z-index: 9999;
@@ -189,7 +198,9 @@ body {
 .view.active { display: flex; }
 #view-chat { position: relative; }
 #view-topics { gap: 0; min-height: 0; }
-#view-analytics { gap: 0; }
+#view-stats { gap: 0; }
+#view-community { gap: 0; }
+#view-community iframe { width: 100%; height: 100%; border: none; background: transparent; }
 #view-agents { overflow-y: auto; padding-bottom: 1rem; gap: 0.75rem; }
 #view-settings { gap: 0; }
 #view-files { gap: 0; }
@@ -2338,7 +2349,7 @@ body {
 }
 
 
-/* analytics view header */
+/* stats view header */
 
 #stats-header {
   display: flex;
@@ -2962,7 +2973,7 @@ button {
     bottom: calc(4.5rem + env(safe-area-inset-bottom));
   }
 
-  #view-topics, #view-analytics, #view-agents, #view-settings { padding-top: 0.75rem; }
+  #view-topics, #view-stats, #view-agents, #view-settings { padding-top: 0.75rem; }
   #stats-filters {
     align-items: flex-start;
     gap: 0.35rem 0.45rem;
