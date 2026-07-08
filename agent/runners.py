@@ -501,7 +501,6 @@ async def run_claude(
         "--include-partial-messages",
         "--verbose",
         "--dangerously-skip-permissions",
-        "--disable-slash-commands",
     ]
     cmd += list(backend_args)
     if model:
@@ -586,7 +585,6 @@ class _ClaudeInteractiveCLI:
             "--replay-user-messages",
             "--verbose",
             "--dangerously-skip-permissions",
-            "--disable-slash-commands",
         ]
         cmd += list(self.backend_args)
         if self.model:
