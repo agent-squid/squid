@@ -219,13 +219,6 @@ def init_db() -> None:
                     "INSERT OR IGNORE INTO agents (name, backend, model) VALUES (?, ?, ?)",
                     (backend, backend, definition.model),
                 )
-        # Do not inherit Claude Code's changing default model. Pin native Claude
-        # agents that have never had an explicit model selected.
-        conn.execute(
-            "UPDATE agents SET model = ? WHERE name = ? AND backend = ? "
-            "AND (model IS NULL OR model = '')",
-            ("claude-sonnet-4-6", "claude", "claude"),
-        )
         # Seed haiku as a cost-comparison agent alongside the default claude agent
         claude_backend = BACKENDS.get("claude")
         if claude_backend and claude_backend.available:
