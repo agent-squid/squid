@@ -8,6 +8,31 @@
    ██████╔╝╚██████╔╝╚██████╔╝██║██████╔╝
    ╚═════╝  ╚══▀▀═╝  ╚═════╝ ╚═╝╚═════╝
 ```
+## Quick Start
+
+```bash
+curl -L https://github.com/agent-squid/squid/archive/refs/tags/v0.1.tar.gz | tar xz
+./squid-0.1/bin/start.sh 
+```
+
+Open in your browser:
+```text
+http://127.0.0.1:8000
+```
+
+Install at least one supported CLI:
+
+| Backend | CLI | Install |
+|---|---|---|
+| Claude Code | `claude` | `curl -fsSL https://claude.ai/install.sh | bash` |
+| OpenAI Codex | `codex` | `curl -fsSL https://chatgpt.com/codex/install.sh | sh` |
+| Cursor Agent | `cursor-agent` | `curl -fsS https://cursor.com/install | bash` |
+| OpenCode | `opencode` | `curl -fsSL https://opencode.ai/install | bash` |
+
+Create agents in the UI. An agent is a named config:
+```text
+name + backend + model + working directory
+```
 
 ## The Squid Manifesto: EVERY. TOKEN. COUNTS!
 
@@ -64,32 +89,6 @@ Topics and agents are not a rigid setup step. You can create a new `#topic` the 
 - **Analytics:** review usage by time, topic, or agent, plus live process state.
 - **Per-prompt usage:** every completed prompt can show input, output, cache, reasoning, cost, duration, and quota signals when the backend exposes them.
 - **Phone/tablet access:** lie on the couch while your local machine keeps coding.
-
-## Quick Start
-
-```bash
-curl -L https://github.com/agent-squid/squid/archive/refs/tags/v0.1.tar.gz | tar xz
-./squid-0.1/bin/start.sh 
-```
-
-Open in your browser:
-```text
-http://127.0.0.1:8000
-```
-
-Install at least one supported CLI:
-
-| Backend | CLI | Install |
-|---|---|---|
-| Claude Code | `claude` | `curl -fsSL https://claude.ai/install.sh | bash` |
-| OpenAI Codex | `codex` | `curl -fsSL https://chatgpt.com/codex/install.sh | sh` |
-| Cursor Agent | `cursor-agent` | `curl -fsS https://cursor.com/install | bash` |
-| OpenCode | `opencode` | `curl -fsSL https://opencode.ai/install | bash` |
-
-Create agents in the UI. An agent is a named config:
-```text
-name + backend + model + working directory
-```
 
 ## Basic Usage
 
