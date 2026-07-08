@@ -56,19 +56,22 @@ test('opening the tracker restarts polling until an external process finishes', 
   await expect(tracker).not.toHaveClass(/has-procs/, { timeout: 5_000 });
 });
 
-test('status popup lists every configured backend, including inactive gauges', async ({ page }) => {
+test('status popup lists quota gauges only for available backends', async ({ page }) => {
   await mockBackend(page);
   await page.route('**/health', r => r.fulfill({ json: {
     status: 'ok',
     backends: {
-      claude: { label: 'Claude', gauge: { type: 'claude' } },
-      codex: { label: 'Codex', gauge: { type: 'codex' } },
-      deepseek: { label: 'DeepSeek', gauge: { type: 'deepseek' } },
-      qwen: { label: 'Qwen', gauge: { type: 'static' } },
-      local: { label: 'Local', gauge: { type: 'static' } },
-      bare: { label: 'Bare', gauge: { type: 'none' } },
+      claude: { label: 'Claude', available: true, gauge: { type: 'claude' } },
+      codex: { label: 'Codex', available: true, gauge: { type: 'codex' } },
+      deepseek: { label: 'DeepSeek', available: false, gauge: { type: 'deepseek' } },
+      qwen: { label: 'Qwen', available: false, gauge: { type: 'static' } },
+      local: { label: 'Local', available: true, gauge: { type: 'static' } },
+      bare: { label: 'Bare', available: true, gauge: { type: 'none' } },
     },
   }}));
+  await page.route('**/config/agents', r => r.fulfill({ json: [
+    { name: 'qwen-agent', backend: 'qwen' },
+  ] }));
   await page.route('**/quota/backend/*', r => {
     const backend = r.request().url().split('/').pop();
     if (backend === 'local' || backend === 'qwen') {
@@ -82,15 +85,43 @@ test('status popup lists every configured backend, including inactive gauges', a
   await page.locator('#proc-status').click();
 
   const rows = page.locator('#proc-status-popup .quota-status-row');
-  await expect(rows).toHaveCount(6);
-  await expect(rows).toContainText(['Claude', 'Codex', 'DeepSeek', 'Qwen', 'Local', 'Bare']);
+  await expect(rows).toHaveCount(3);
+  await expect(rows).toContainText(['Claude', 'Codex', 'Local']);
   await expect(rows.filter({ hasText: 'Claude' })).toContainText('42%');
   await expect(rows.filter({ hasText: 'Codex' })).toContainText('42%');
+  await expect(rows.filter({ hasText: 'DeepSeek' })).toHaveCount(0);
+  await expect(rows.filter({ hasText: 'Qwen' })).toHaveCount(0);
   const localRow = rows.filter({
     has: page.locator('.quota-status-name').filter({ hasText: /^Local$/ }),
   });
   await expect(localRow).toContainText('Local');
-  await expect(rows.filter({ hasText: 'Bare' })).toContainText('no quota integration');
+  await expect(rows.filter({ hasText: 'Bare' })).toHaveCount(0);
+});
+
+test('fresh install status popup hides unavailable default gauges', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/health', r => r.fulfill({ json: {
+    status: 'ok',
+    backends: {
+      claude: { label: 'Claude', available: false, gauge: { type: 'claude' } },
+      codex: { label: 'Codex', available: false, gauge: { type: 'codex' } },
+      cursor: { label: 'Cursor', available: false, gauge: { type: 'cursor' } },
+      opencode: { label: 'OpenCode', available: true, gauge: { type: 'static', text: 'Free tier' } },
+      local: { label: 'Local', available: true, gauge: { type: 'none' } },
+    },
+  }}));
+  await page.route('**/processes', r => r.fulfill({ json: [] }));
+
+  await page.goto('/');
+  await page.locator('#proc-status').click();
+
+  const rows = page.locator('#proc-status-popup .quota-status-row');
+  await expect(rows).toHaveCount(1);
+  await expect(rows).toContainText(['OpenCode']);
+  await expect(page.locator('#proc-status-popup')).not.toContainText('Claude');
+  await expect(page.locator('#proc-status-popup')).not.toContainText('Codex');
+  await expect(page.locator('#proc-status-popup')).not.toContainText('Cursor');
+  await expect(page.locator('#proc-status-popup')).toContainText('No active processes or queued prompts.');
 });
 
 test('status popup closes on Escape', async ({ page }) => {

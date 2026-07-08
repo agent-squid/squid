@@ -4654,6 +4654,13 @@ function updateProcStatusDot(processes, queued) {
   procStatusBtn.classList.toggle('has-idle', hasIdle);
 }
 
+function shouldShowQuotaStatusBackend(backend) {
+  const info = _backendMetadata[backend];
+  const gaugeType = info?.gauge?.type || 'none';
+  if (gaugeType === 'none') return false;
+  return !!info?.available;
+}
+
 function renderQuotaStatus() {
   // The status popup is a backend overview, so its rows must come from the
   // configured backend catalog. quotaSnapshots is populated lazily and only
@@ -4661,7 +4668,7 @@ function renderQuotaStatus() {
   const backends = [...new Set([
     ...Object.keys(_backendMetadata),
     ...Object.keys(quotaSnapshots),
-  ])];
+  ])].filter(shouldShowQuotaStatusBackend);
   const rows = backends
     .map(backend => {
     const q = quotaSnapshots[backend] || {
@@ -4689,6 +4696,7 @@ function renderQuotaStatus() {
     </div>`;
   }).join('');
 
+  if (!rows) return '';
   return `<div class="proc-section-label">Quotas</div>
     <div class="quota-status-list">${rows}</div>`;
 }
