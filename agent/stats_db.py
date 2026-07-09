@@ -880,10 +880,16 @@ def get_topic_messages_for_period(
     return result
 
 
-def mark_orphaned_pending() -> int:
+def mark_orphaned_pending(before_created_at: Optional[str] = None) -> int:
     with _connect() as conn:
+        where = "status='pending' AND role='assistant'"
+        params: list[str] = []
+        if before_created_at:
+            where += " AND created_at < ?"
+            params.append(before_created_at)
         rows = conn.execute(
-            "SELECT id, session_id FROM chat_messages WHERE status='pending' AND role='assistant'"
+            f"SELECT id, session_id FROM chat_messages WHERE {where}",
+            params,
         ).fetchall()
         count = 0
         for row in rows:

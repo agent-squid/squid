@@ -84,16 +84,13 @@ from .stats_db import (
 from .journal import _generate_journal, _current_week, list_topic_journals, read_journal
 from . import creds
 
+BOOT_TIME = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
 init_db()
-orphaned = mark_orphaned_pending()
-if orphaned:
-    import logging as _log
-    _log.getLogger(__name__).warning("Marked %d orphaned pending messages as error", orphaned)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 log = logging.getLogger(__name__)
 
-BOOT_TIME = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 dispatcher = TopicDispatcher()
 
 # Discard the legacy cached OAuth access token if this process inherited one
@@ -176,6 +173,14 @@ sync_now()
 
 app = FastAPI(title="Squid", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+@app.on_event("startup")
+async def _recover_orphaned_pending_on_startup():
+    orphaned = mark_orphaned_pending(before_created_at=BOOT_TIME)
+    if orphaned:
+        log.warning("Marked %d orphaned pending messages as error", orphaned)
+
 
 UI_DIR = Path(__file__).parent.parent / "ui"
 
