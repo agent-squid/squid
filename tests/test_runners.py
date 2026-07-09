@@ -245,6 +245,117 @@ def test_claude_interactive_ignores_results_before_matching_prompt_replay():
     _clear()
 
 
+def test_claude_interactive_handles_assistant_message_events():
+    _clear()
+    fake_proc = _FakeProcess(9008, [
+        json.dumps({"type": "system", "session_id": "sess-1"}),
+        json.dumps({"type": "user", "isReplay": True, "message": {"role": "user", "content": "current prompt"}}),
+        json.dumps({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Checking the code."}],
+                "stop_reason": "tool_use",
+            },
+        }),
+        json.dumps({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_bash_1",
+                    "name": "Bash",
+                    "input": {"command": "git status", "description": "Check status"},
+                }],
+                "stop_reason": "tool_use",
+            },
+        }),
+        json.dumps({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Final answer."}],
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "cache_read_input_tokens": 3,
+                    "cache_creation_input_tokens": 4,
+                },
+            },
+            "total_cost_usd": 0.001,
+            "duration_ms": 1234,
+        }),
+    ])
+
+    async def fake_create_subprocess_exec(*_cmd, **_kwargs):
+        return fake_proc
+
+    async def collect():
+        return [chunk async for chunk in run_claude_interactive_cli(
+            "current prompt", cwd="/tmp/project", topic="work", agent="claude",
+        )]
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), \
+         patch("agent.runners.asyncio.create_subprocess_exec", fake_create_subprocess_exec):
+        chunks = asyncio.run(collect())
+
+    assert {"_status": "Checking the code."} in chunks
+    assert {"_tool": {"name": "Bash", "tool_use_id": "toolu_bash_1", "command": "git status"}} in chunks
+    assert "Final answer." in chunks
+    stats = next(chunk["_stats"] for chunk in chunks if isinstance(chunk, dict) and "_stats" in chunk)
+    assert stats["input_tokens"] == 1
+    assert stats["output_tokens"] == 2
+    assert stats["cache_read_tokens"] == 3
+    assert stats["cache_write_tokens"] == 4
+    assert stats["cost_usd"] == 0.001
+    assert stats["duration_ms"] == 1234
+    _clear()
+
+
+def test_claude_interactive_skips_thinking_only_assistant_end_turn():
+    _clear()
+    fake_proc = _FakeProcess(9009, [
+        json.dumps({"type": "system", "session_id": "sess-1"}),
+        json.dumps({"type": "user", "isReplay": True, "message": {"role": "user", "content": "current prompt"}}),
+        json.dumps({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "thinking", "thinking": "internal only"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 9, "output_tokens": 9},
+            },
+        }),
+        json.dumps({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Visible final."}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 2},
+            },
+        }),
+    ])
+
+    async def fake_create_subprocess_exec(*_cmd, **_kwargs):
+        return fake_proc
+
+    async def collect():
+        return [chunk async for chunk in run_claude_interactive_cli(
+            "current prompt", cwd="/tmp/project", topic="work", agent="claude",
+        )]
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), \
+         patch("agent.runners.asyncio.create_subprocess_exec", fake_create_subprocess_exec):
+        chunks = asyncio.run(collect())
+
+    assert "Visible final." in chunks
+    assert not any(isinstance(chunk, dict) and chunk.get("_stats", {}).get("input_tokens") == 9 for chunk in chunks)
+    _clear()
+
+
 def test_claude_interactive_waits_for_matching_agent_task_notification():
     _clear()
     fake_proc = _FakeProcess(9005, [

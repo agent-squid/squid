@@ -210,6 +210,24 @@ class _ClaudeStreamParser:
         self.tool_blocks: dict[int, dict] = {}
         self.done = False
 
+    def _stats_chunk(self, event: dict) -> dict:
+        message = event.get("message")
+        usage = event.get("usage", {})
+        if not usage and isinstance(message, dict):
+            usage = message.get("usage", {})
+        return {
+            "_stats": {
+                "session_id": self.session_id or event.get("session_id"),
+                "input_tokens": usage.get("input_tokens", 0),
+                "output_tokens": usage.get("output_tokens", 0),
+                "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
+                "cache_write_tokens": usage.get("cache_creation_input_tokens", 0),
+                "history_input_tokens": _estimate_history_tokens(self.history),
+                "cost_usd": event.get("total_cost_usd"),
+                "duration_ms": event.get("duration_ms"),
+            }
+        }
+
     def feed_line(self, line: str) -> list[Union[str, dict]]:
         if not line:
             return []
@@ -223,6 +241,36 @@ class _ClaudeStreamParser:
 
         if t == "system":
             self.session_id = event.get("session_id")
+
+        elif t == "assistant":
+            message = event.get("message", {})
+            content = message.get("content", []) if isinstance(message, dict) else []
+            stop_reason = message.get("stop_reason") if isinstance(message, dict) else None
+            text_parts: list[str] = []
+            if isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = block.get("type")
+                    if block_type == "text":
+                        text = block.get("text", "")
+                        if text:
+                            text_parts.append(text)
+                    elif block_type == "tool_use":
+                        name = block.get("name", "")
+                        tool_input = block.get("input", {})
+                        input_json = json.dumps(tool_input) if isinstance(tool_input, dict) else str(tool_input or "")
+                        chunks.append({"_tool": _tool_data(name, input_json, block.get("id"))})
+
+            text = "".join(text_parts)
+            if text:
+                if stop_reason == "end_turn":
+                    chunks.append(text)
+                else:
+                    chunks.append({"_status": text})
+            if stop_reason == "end_turn" and text:
+                chunks.append(self._stats_chunk(event))
+                self.done = True
 
         elif t == "stream_event":
             inner = event.get("event", {})
@@ -266,7 +314,6 @@ class _ClaudeStreamParser:
                 if "Not logged in" in final_text and "/login" in final_text:
                     raise CLIError("Claude auth failed (network down or token expired) — run: claude login")
                 chunks.append(final_text)
-            usage = event.get("usage", {})
             # ── Claude token semantics (verified via stream-json output, 2026-06) ──────────
             # The Anthropic API / Claude Code CLI splits input into THREE buckets:
             #
@@ -279,18 +326,7 @@ class _ClaudeStreamParser:
             # Codex is the OPPOSITE: input_tokens = full total (cache already included);
             # cache_read_tokens is a subset breakdown. See run_codex() for that path.
             # ─────────────────────────────────────────────────────────────────────────────
-            chunks.append({
-                "_stats": {
-                    "session_id": self.session_id or event.get("session_id"),
-                    "input_tokens": usage.get("input_tokens", 0),
-                    "output_tokens": usage.get("output_tokens", 0),
-                    "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
-                    "cache_write_tokens": usage.get("cache_creation_input_tokens", 0),
-                    "history_input_tokens": _estimate_history_tokens(self.history),
-                    "cost_usd": event.get("total_cost_usd"),
-                    "duration_ms": event.get("duration_ms"),
-                }
-            })
+            chunks.append(self._stats_chunk(event))
             self.done = True
 
         return chunks
