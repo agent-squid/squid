@@ -1,7 +1,7 @@
 {
-  "name": "Squid",
-  "short_name": "Squid",
-  "description": "Squid chat console",
+  "name": "AgentSquid",
+  "short_name": "AgentSquid",
+  "description": "AgentSquid chat console",
   "id": "/",
   "start_url": "/",
   "scope": "/",
