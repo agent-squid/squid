@@ -2,7 +2,7 @@
 status: accepted
 date: 2026-07-09
 ---
-# ADR-0025: Git Worktree Isolation for Agent Changes
+# ADR-0025: Per-Turn Git Worktree Isolation for Agent Changes
 
 ## Context
 
@@ -18,167 +18,129 @@ changes land directly in the working tree. This creates two problems:
    state.
 
 Isolating each turn also makes it trivial to compute a diff scoped to exactly
-that turn's changes, independent of anything else happening in the repository.
+that turn's changes.
 
 ## Considered Options
 
 1. **No isolation.** Agents write directly to the real working tree. Diffs are
    computed from the pre-turn Git snapshot vs. the post-turn working tree state.
    Concurrent or cross-session changes may be included in the diff.
-2. **Per-session worktree with per-turn commit cycles.** Create one Git worktree
-   per session. At the end of each turn, commit any remaining changes to the
-   session branch, merge to main, and rebase the worktree onto the new HEAD —
-   ready for the next turn without recreating the worktree.
-3. **Per-turn worktree.** Create and destroy a fresh Git worktree for every
-   agent turn.
+2. **Per-turn isolation via Git worktrees.** At the start of each turn, ensure a
+   dedicated worktree exists for the `(topic, agent)` pair. The agent runs inside
+   it. At turn end, commit any remaining changes, merge to main, and rebase the
+   worktree onto the new HEAD — ready for the next turn without recreating it.
 
 ## Decision
 
-**Option 2.** Squid creates one Git worktree per session and enforces isolation
-at the turn boundary via a commit-merge-rebase cycle.
+**Option 2.** Squid creates a Git worktree keyed by `(topic, agent)` and keeps
+it alive across turns, enforcing turn-level isolation via a commit-merge-rebase
+cycle at the end of each turn.
 
 ### Naming and paths
 
 ```
-worktree path:   <code-root>/.worktrees/sqd-<session-id>/
-branch name:     sqd-<session-id>
+worktree path:  ~/.squid/worktrees/<repo_hash>/sqd-<slug>-<md5>/
+branch name:    sqd-<slug>-<md5>
 ```
 
-The `.worktrees/` directory is gitignored. The `sqd-` prefix lets users and
-agents identify Squid-managed branches at a glance.
+`<slug>` is derived from `topic` and `agent`; `<md5>` is the first 6 hex chars
+of `MD5(topic:agent)`. `<repo_hash>` is 8 hex chars of `MD5(repo_root)`.
+Worktrees live outside the project directory so they never appear in the user's
+repo. The `sqd-` prefix lets users identify Squid-managed branches.
 
-### How the worktree is passed as the agent's working directory
+### How the worktree becomes the agent's working directory
 
-When Squid launches an agent subprocess for a turn, it sets the process `cwd`
-to the worktree path (`.worktrees/sqd-<session-id>/`) instead of the real code
-root. The worktree is a full checkout of the repository at the session branch
-HEAD, so the agent's file reads and writes land in the isolated branch. The real
-working tree of the original repository is never touched while the worktree is
-live.
+At the start of each non-adhoc turn, `_setup_worktrees` calls `ensure_worktree`
+for each git repo under `code_roots`:
 
-The real code-root paths injected into model context remain the canonical
-repository locations (see ADR-0020), not the worktree path. The agent sees the
-correct project structure while its edits are isolated.
+1. If the worktree path already exists (from a prior turn), it is reused as-is.
+2. If not, `git worktree add -b sqd-<key> <path> HEAD` creates it from the
+   current HEAD.
 
-### Session lifecycle
+`_setup_worktrees` then remaps all paths:
 
-```
-session open
-  → git worktree add .worktrees/sqd-<id> -b sqd-<id> HEAD
+- `effective_cwd` — the agent subprocess launch directory — is replaced with the
+  worktree path.
+- `effective_code_roots` — the paths injected into model context — are also
+  replaced with their worktree equivalents via `map_to_worktree`.
 
-prompt runs
-  → agent subprocess launched with cwd = .worktrees/sqd-<id>/
+The agent reads and writes files inside the worktree. The original working tree
+is never touched while the worktree is live. Adhoc messages bypass this entirely
+and run against the real working tree.
 
-turn ends (see turn cycle below)
-
-session close / clear
-  → run final turn cycle if there are uncommitted changes
-  → git worktree remove .worktrees/sqd-<id>
-  → git branch -d sqd-<id>
-
-session resume
-  → reuse existing worktree if .worktrees/sqd-<id>/ exists
-  → if not (expired or pruned): recreate from HEAD, then cherry-pick
-    committed session-branch changes on top
-```
-
-### Turn cycle (end of every prompt)
+### Turn cycle
 
 ```
-turn N ends:
-  1. auto-commit any uncommitted changes in the worktree ("squid: turn N")
-  2. compute diff: sqd-<id>..HEAD^ (changes committed this turn vs. pre-turn HEAD)
-  3. display diff to user — changes are already committed to sqd-<id> at this point
-  4. merge sqd-<id> → main (fast-forward when possible)
-  5. rebase worktree branch onto new main HEAD
-     → worktree is now clean and current, ready for turn N+1
+turn N starts
+  → ensure_worktree (create or reuse for this topic+agent pair)
+  → remap effective_cwd and effective_code_roots to worktree paths
+  → take pre-turn git snapshot of the worktree for diff tracking
+  → agent subprocess runs with cwd = worktree path
+
+turn N ends
+  1. emit git diff (pre-turn snapshot vs. current worktree state,
+     including any uncommitted changes still in the worktree)
+  2. sync_after_turn:
+     a. auto-commit any remaining uncommitted changes ("squid: turn N")
+     b. merge sqd-<key> → main (--no-ff)
+     c. rebase worktree branch onto new main HEAD
+        → worktree is clean and current for turn N+1
 ```
 
-The diff is always shown from the committed branch state. By the time the user
-sees the diff, the turn's changes exist as a commit on `sqd-<id>` and (after
-merge) on main. No uncommitted state is left in the worktree between turns.
+The diff is shown before the auto-commit; it captures the full set of changes
+the agent made in the worktree during the turn, whether or not they have been
+committed yet. After `sync_after_turn` those changes are committed on the session
+branch and merged to main.
 
-### Session expiry (1 hour idle)
+### Session close
 
-If a session has been idle for more than one hour:
+On session close or clear, `_cleanup_worktrees` runs:
+1. Final `sync_after_turn` (commit any mid-turn leftovers + merge + rebase).
+2. `git worktree remove` + `git branch -D sqd-<key>` if merge was clean.
+3. Worktrees with unresolved conflicts are kept alive (see below).
 
-1. Commit any pending changes in the worktree to `sqd-<id>`.
-2. `git worktree remove .worktrees/sqd-<id>/`.
-3. The branch `sqd-<id>` is retained so work is not lost.
+### Merge conflicts
 
-On resume after expiry:
-1. `git worktree add .worktrees/sqd-<id> sqd-<id>` (recreate from the retained branch).
-2. If `sqd-<id>` has diverged from main, rebase onto HEAD before the next prompt.
+Git auto-merges changes to different hunks within the same file. A conflict only
+occurs when two sessions modify the same lines.
 
-### Staleness and refresh
-
-A worktree becomes stale when main accumulates commits since the worktree's
-base (e.g., another session merged its changes). At the start of each prompt,
-Squid checks whether the worktree branch is behind HEAD:
-
-- **No local changes in the worktree** → `git reset --hard HEAD` (no rebase needed).
-- **Has local changes** → `git rebase sqd-<id> onto HEAD`; surface conflicts to
-  the user if the rebase cannot proceed automatically.
-
-Refresh is also triggered unconditionally on resume after expiry.
-
-### Merge conflicts at session close
-
-When two sessions have edited the same lines of the same file, `git merge` at
-session close will produce a conflict. Different hunks in the same file
-auto-merge cleanly.
-
-When a conflict is detected, Squid:
-
-1. Keeps the worktree alive (does not delete it).
-2. Surfaces conflicting files in the UI.
-3. Opens a diff/editor view showing conflict markers.
-4. Presents a "Mark as Resolved" button per file; validates that no conflict
-   markers (`<<<<<<<`) remain before accepting.
-5. Once all files are resolved: `git merge --continue`, then removes the
-   worktree and branch.
+When `merge --no-ff` fails:
+- The merge is aborted immediately (`git merge --abort`).
+- The worktree is left intact; changes remain committed on the session branch.
+- The conflicting file list is returned to the caller for surfacing in the UI.
+- The session branch and worktree are not removed until the conflict is resolved.
 
 ## Fallback
 
-Git worktrees require a repository with at least one commit and a working Git
-installation. Worktree creation also fails on repositories in a detached-HEAD
-state, when disk space is exhausted, or if the target path already exists and
-is stale.
+Worktrees require a git repo with at least one commit. They also fail on
+detached-HEAD state, disk exhaustion, or if the path already exists and is
+corrupt. Non-git directories have no worktree support at all.
 
-Non-git directories have no worktree support at all.
+When `ensure_worktree` raises for any root, `_setup_worktrees` catches the
+exception, logs it, and excludes that root from the worktree map. If no roots
+produce a working worktree map, the function returns the original `code_roots`
+and `cwd` unchanged — the agent runs directly in the real working tree.
 
-When worktree creation fails for any reason, Squid falls back to running the
-agent directly in the real working tree (same as Option 1):
-
-- Changes are **not isolated** per turn; edits land directly in the shared
-  working tree.
-- The diff shown after the turn may include changes from concurrent user edits,
-  other processes, or other sessions targeting the same root.
-- Squid labels the displayed diff as "unscoped" so the user knows the turn
-  boundary was not enforced.
-- Squid logs the specific worktree error and surfaces it in the session header.
-
-Fallback is temporary: if the root cause is resolved (repository initialized,
-disk freed, detached-HEAD fixed), the next session open retries worktree
-creation.
+In fallback mode:
+- Changes land directly in the shared working tree (Option 1 behavior).
+- The diff may include concurrent user edits or changes from other sessions.
+- Squid labels the diff as "unscoped" and surfaces the worktree error in the
+  session header.
+- The next turn retries worktree creation; fallback is not permanent.
 
 ## Consequences
 
-- Good: each turn diff is exactly scoped to that turn's agent changes, and those
-  changes are already committed before the diff is displayed.
-- Good: inter-turn isolation is maintained within a session; each turn starts
-  from a clean, rebased HEAD.
-- Good: multiple sessions targeting different topics on the same code root do
-  not interfere with each other.
-- Good: the auto-commit at each turn end creates a legible per-turn commit
-  history on main.
-- Good: one worktree per session is cheaper than one per turn; session resume
-  reuses the existing worktree without any git operations.
-- Bad: if Squid crashes mid-turn, stale `.worktrees/sqd-*` directories and
-  branches may be left behind; a startup sweep is needed to prune them.
-- Bad: non-git directories and newly-initialized repos without an initial commit
-  cannot use worktrees; bleed behavior applies until the condition is fixed.
-- Bad: in fallback mode, cross-session or cross-turn change bleed is possible
-  and the diff shown is not turn-scoped.
-- Bad: merge conflicts at session close require user intervention via the
-  conflict resolution UI before the worktree can be removed.
+- Good: each turn diff is scoped to that turn's worktree changes, isolated from
+  the real working tree and from other sessions.
+- Good: the worktree persists across turns so there is no per-turn setup cost
+  after the first turn.
+- Good: multiple sessions on the same code root are isolated from each other via
+  separate worktrees on separate branches.
+- Good: auto-commit at each turn end produces a per-turn commit history on main.
+- Bad: if Squid crashes mid-turn, stale `~/.squid/worktrees/` directories and
+  `sqd-*` branches can accumulate; a startup sweep is needed to prune them.
+- Bad: non-git directories and repos without an initial commit fall back to
+  direct working-tree mode; bleed is possible until the condition is fixed.
+- Bad: in fallback mode, the diff is not turn-scoped and the user must be told.
+- Bad: merge conflicts at session close or turn end require user intervention
+  before the worktree is removed.
