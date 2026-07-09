@@ -192,6 +192,17 @@ def _claude_task_notification_tool_use_id(content: Optional[str]) -> Optional[st
     return _xmlish_tag_value(content, "tool-use-id")
 
 
+def _claude_event_task_notification_tool_use_id(event: dict) -> Optional[str]:
+    tool_use_id = _claude_task_notification_tool_use_id(_claude_replayed_user_content(event))
+    if tool_use_id:
+        return tool_use_id
+    if event.get("type") == "queue-operation":
+        content = event.get("content")
+        if isinstance(content, str):
+            return _claude_task_notification_tool_use_id(content)
+    return None
+
+
 class _ClaudeStreamParser:
     def __init__(self, history: Optional[List[dict]]):
         self.history = history
@@ -787,7 +798,7 @@ class _ClaudeInteractiveCLI:
                         turn_live_chunks = []
                     elif (
                         pending_agent_tool_use_id
-                        and _claude_task_notification_tool_use_id(replayed) == pending_agent_tool_use_id
+                        and _claude_event_task_notification_tool_use_id(event) == pending_agent_tool_use_id
                     ):
                         accepting_turn = True
                         current_turn_is_prompt = False

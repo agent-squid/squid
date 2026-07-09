@@ -134,7 +134,15 @@ class TopicWorker:
         from .runners import CLIError, runner_for_backend
         from .config import SQUID_HOME
         from .backends import get_backend
-        from .stats_db import insert_run_event, update_assistant_message, save_stats, set_topic_session, clear_topic_session
+        from .stats_db import (
+            get_completed_run_status_raw,
+            get_completed_run_text,
+            insert_run_event,
+            update_assistant_message,
+            save_stats,
+            set_topic_session,
+            clear_topic_session,
+        )
         from .git_changes import prepare_trackers
 
         backend = get_backend(item.backend)
@@ -299,7 +307,8 @@ class TopicWorker:
             err_text = str(exc)
             if not isinstance(exc, CLIError):
                 log.exception("Unexpected error processing msg_id=%s", item.msg_id)
-            content = raw or err_text
+            recovered_content = get_completed_run_text(item.msg_id) if not raw else None
+            content = raw or recovered_content or err_text
             try:
                 await _emit_git_diff()
             except Exception:
@@ -307,8 +316,8 @@ class TopicWorker:
             context_json = json.dumps(tool_events) if tool_events else None
             try:
                 update_assistant_message(item.msg_id, content, session_id,
-                                         "done" if raw else "error", context=context_json,
-                                         status_raw=status_raw)
+                                         "done" if raw or recovered_content else "error", context=context_json,
+                                         status_raw=status_raw or get_completed_run_status_raw(item.msg_id))
                 insert_run_event(item.msg_id, run_seq, "error", err_text)
             except Exception:
                 pass

@@ -207,6 +207,24 @@ def test_mark_orphaned_pending_recovers_only_completed_run_text(tmp_path, monkey
     assert empty_row["content"] == ""
 
 
+def test_mark_orphaned_pending_respects_created_at_cutoff(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    before_user_id = stats_db.insert_user_message("squid", "codex", "before")
+    before_asst_id = stats_db.insert_assistant_message("squid", "codex", before_user_id, adhoc=False)
+    after_user_id = stats_db.insert_user_message("squid", "codex", "after")
+    after_asst_id = stats_db.insert_assistant_message("squid", "codex", after_user_id, adhoc=False)
+
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        conn.execute("UPDATE chat_messages SET created_at=? WHERE id=?", ("2026-07-09T19:00:00Z", before_asst_id))
+        conn.execute("UPDATE chat_messages SET created_at=? WHERE id=?", ("2026-07-09T19:30:00Z", after_asst_id))
+
+    assert stats_db.mark_orphaned_pending(before_created_at="2026-07-09T19:15:00Z") == 1
+    assert stats_db.get_message(before_asst_id)["status"] == "error"
+    assert stats_db.get_message(after_asst_id)["status"] == "pending"
+
+
 def test_init_db_migrates_existing_chat_messages_turn_index(tmp_path, monkeypatch):
     db_path = tmp_path / "squid.db"
     monkeypatch.setattr(stats_db, "_DB_PATH", db_path)
