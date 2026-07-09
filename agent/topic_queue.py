@@ -29,7 +29,6 @@ class QueueItem:
     lookback: int = 0
     msg_id: Optional[int] = None
     display_prompt: Optional[str] = None
-    worktree_agent: Optional[str] = None
     out_q: asyncio.Queue = field(default_factory=asyncio.Queue)
 
 
@@ -301,22 +300,21 @@ class TopicWorker:
 
             await _emit_git_diff()
 
-            if item.agent:
-                wt_agent = item.worktree_agent or item.agent
+            if item.agent and item.msg_id:
+                wt_key = str(item.msg_id)
                 from .stats_db import get_worktrees, delete_worktree
                 from .worktree import sync_after_turn, remove_worktree
-                wt_records = await asyncio.to_thread(get_worktrees, item.topic, wt_agent)
+                wt_records = await asyncio.to_thread(get_worktrees, item.topic, wt_key)
                 for rec in wt_records:
                     try:
                         conflicts = await asyncio.to_thread(
-                            sync_after_turn, Path(rec["repo_root"]), item.topic, wt_agent, item.msg_id
+                            sync_after_turn, Path(rec["repo_root"]), item.topic, wt_key, item.msg_id
                         )
                         if conflicts:
                             log.warning("worktree merge conflicts after turn msg_id=%s: %s", item.msg_id, conflicts)
-                        elif item.adhoc:
-                            # Adhoc worktrees are ephemeral — remove immediately after turn
-                            await asyncio.to_thread(remove_worktree, Path(rec["repo_root"]), item.topic, wt_agent)
-                            await asyncio.to_thread(delete_worktree, item.topic, wt_agent, rec["repo_root"])
+                        else:
+                            await asyncio.to_thread(remove_worktree, Path(rec["repo_root"]), item.topic, wt_key)
+                            await asyncio.to_thread(delete_worktree, item.topic, wt_key, rec["repo_root"])
                     except Exception:
                         log.exception("worktree sync failed after turn msg_id=%s", item.msg_id)
 
@@ -380,7 +378,6 @@ class TopicDispatcher:
         msg_id: Optional[int] = None,
         code_roots: Optional[list[str]] = None,
         display_prompt: Optional[str] = None,
-        worktree_agent: Optional[str] = None,
     ) -> tuple[asyncio.Queue, int, TopicWorker]:
         if adhoc:
             # Each adhoc message gets its own ephemeral worker — never queued, always parallel.
@@ -396,7 +393,6 @@ class TopicDispatcher:
             code_roots=code_roots, timeout=response_timeout,
             resume_session_id=resume_session_id,
             adhoc=adhoc, lookback=lookback, msg_id=msg_id,
-            worktree_agent=worktree_agent,
         )
         seq = await worker.enqueue(item)
         return item.out_q, seq, worker

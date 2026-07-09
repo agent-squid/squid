@@ -1835,3 +1835,16 @@ def delete_worktree(topic: str, agent: str, repo_root: str) -> None:
 def delete_all_worktrees(topic: str, agent: str) -> None:
     with _connect() as conn:
         conn.execute("DELETE FROM worktrees WHERE topic=? AND agent=?", (topic, agent))
+
+
+def get_all_worktrees_for_topic(topic: str) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM worktrees WHERE topic=?", (topic,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_all_topic_worktrees(topic: str) -> None:
+    with _connect() as conn:
+        conn.execute("DELETE FROM worktrees WHERE topic=?", (topic,))

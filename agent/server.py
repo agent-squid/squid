@@ -30,7 +30,6 @@ import re
 import subprocess
 import sys
 import time
-import uuid
 from pathlib import Path
 from typing import AsyncGenerator, Literal, Optional, Union
 
@@ -81,6 +80,7 @@ from .stats_db import (
     save_file_edit, get_file_edit_history, get_file_edit_by_id,
     get_bookmarks, add_bookmark, remove_bookmark,
     save_worktree, get_worktrees, delete_worktree, delete_all_worktrees,
+    get_all_worktrees_for_topic, delete_all_topic_worktrees,
 )
 from .journal import _generate_journal, _current_week, list_topic_journals, read_journal
 from . import creds
@@ -515,53 +515,31 @@ async def _setup_worktrees(
     return effective_roots, effective_cwd
 
 
-async def _sync_turn_worktrees(topic: str, agent: str, msg_id: Optional[int]) -> dict[str, list[str]]:
+async def _cleanup_worktrees(topic: str) -> dict[str, list[str]]:
     """
-    Called at end of each turn: commit + merge + rebase each worktree.
-    Returns repo_root -> conflict_files for any repos with merge conflicts.
-    """
-    from .worktree import sync_after_turn
-
-    records = await asyncio.to_thread(get_worktrees, topic, agent)
-    conflicts: dict[str, list[str]] = {}
-
-    for rec in records:
-        repo_root = Path(rec["repo_root"])
-        try:
-            conflict_files = await asyncio.to_thread(
-                sync_after_turn, repo_root, topic, agent, msg_id
-            )
-            if conflict_files:
-                conflicts[rec["repo_root"]] = conflict_files
-        except Exception:
-            log.exception("worktree sync failed for %s topic=%s agent=%s", repo_root, topic, agent)
-
-    return conflicts
-
-
-async def _cleanup_worktrees(topic: str, agent: str) -> dict[str, list[str]]:
-    """
-    Called at session close: do a final sync then remove worktrees.
+    Orphan sweep at session close: sync and remove any worktrees still registered
+    for this topic (normally already removed at turn end; these are crash leftovers).
     Worktrees with unresolved conflicts are kept alive.
     """
     from .worktree import remove_worktree, sync_after_turn
 
-    records = await asyncio.to_thread(get_worktrees, topic, agent)
+    records = await asyncio.to_thread(get_all_worktrees_for_topic, topic)
     conflicts: dict[str, list[str]] = {}
 
     for rec in records:
         repo_root = Path(rec["repo_root"])
+        wt_key = rec["agent"]
         try:
             conflict_files = await asyncio.to_thread(
-                sync_after_turn, repo_root, topic, agent, None
+                sync_after_turn, repo_root, topic, wt_key, None
             )
             if conflict_files:
                 conflicts[rec["repo_root"]] = conflict_files
             else:
-                await asyncio.to_thread(remove_worktree, repo_root, topic, agent)
-                await asyncio.to_thread(delete_worktree, topic, agent, rec["repo_root"])
+                await asyncio.to_thread(remove_worktree, repo_root, topic, wt_key)
+                await asyncio.to_thread(delete_worktree, topic, wt_key, rec["repo_root"])
         except Exception:
-            log.exception("worktree cleanup failed for %s topic=%s agent=%s", repo_root, topic, agent)
+            log.exception("worktree cleanup failed for %s topic=%s key=%s", repo_root, topic, wt_key)
 
     return conflicts
 
@@ -586,7 +564,6 @@ async def stream_response(
     code_roots: Optional[list[str]] = None,
     display_prompt: Optional[str] = None,
     source_cwd: Optional[str] = None,
-    worktree_agent: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     yield sse_event("meta", json.dumps({"agent": agent, "backend": backend, "model": model, "msg_id": asst_msg_id, "adhoc": adhoc}))
 
@@ -600,7 +577,6 @@ async def stream_response(
         adhoc=adhoc, lookback=lookback, msg_id=asst_msg_id,
         code_roots=code_roots,
         display_prompt=display_prompt,
-        worktree_agent=worktree_agent,
     )
 
     raw = ""
@@ -766,38 +742,52 @@ async def chat(req: ChatRequest):
             topic, lookback, agent=resolved_agent
         )
 
-    # Inject pinned messages — works for both adhoc and session turns
-    effective_message = req.message
-    prefix_blocks: list[str] = []
     memory_config = topic_memory_squid_config(topic)
     code_roots = memory_config.get("code_roots") or []
     source_cwd = cwd  # original cwd before worktree remapping
 
-    # Set up worktree isolation for all turns in git repos.
-    # Adhoc turns use a unique per-turn key so parallel adhoc turns get separate worktrees.
+    # Load memory early so memory_revision is available for message insertion.
+    memory_revision: Optional[str] = None
+    memory_data_for_prompt: Optional[dict] = None
+    if not native_backend_command and req.include_topic_memory:
+        memory_data_for_prompt = read_topic_memory(topic)
+        if memory_data_for_prompt["content"].strip():
+            memory_revision = memory_data_for_prompt.get("revision")
+
+    # Insert user and assistant message rows before worktree setup so asst_msg_id
+    # is available as the per-turn worktree key.
+    stored_context_ids = list({*(context_ids or []), *(req.pinned_ids or [])}) or None
+    user_msg_id = insert_user_message(topic, resolved_agent, req.message,
+                                      context_ids=stored_context_ids,
+                                      mem=bool(memory_revision),
+                                      mem_revision=memory_revision,
+                                      lookback=lookback)
+    asst_msg_id = insert_assistant_message(topic, resolved_agent, user_msg_id, adhoc=req.adhoc)
+
+    # Set up per-turn worktree isolation. Every turn (adhoc or not) gets its own
+    # worktree keyed by asst_msg_id, so parallel turns never share state.
     effective_code_roots = code_roots
     effective_cwd = cwd
-    wt_agent_key: Optional[str] = None
     if resolved_agent and code_roots:
-        wt_agent_key = f"adhoc-{uuid.uuid4().hex[:8]}" if req.adhoc else resolved_agent
         effective_code_roots, effective_cwd = await _setup_worktrees(
-            code_roots, cwd, topic, wt_agent_key
+            code_roots, cwd, topic, str(asst_msg_id)
         )
 
+    # Build prefix blocks in injection order: code roots → memory → pinned context.
+    effective_message = req.message
+    prefix_blocks: list[str] = []
     if not native_backend_command and effective_code_roots:
         code_roots_block = code_roots_prompt_block(effective_code_roots)
         if code_roots_block:
             prefix_blocks.append(code_roots_block)
     tracking_roots: list[str] = [] if native_backend_command else effective_code_roots
-    memory_revision: Optional[str] = None
-    if not native_backend_command and req.include_topic_memory:
-        memory_data = read_topic_memory(topic)
-        memory_content = memory_data["content"].strip()
+
+    if memory_data_for_prompt:
+        memory_content = memory_data_for_prompt["content"].strip()
         if memory_content:
-            memory_revision = memory_data.get("revision")
             prefix_blocks.append("\n".join([
                 "Persistent user-editable topic memory:",
-                f'<topic_memory topic="{memory_data["topic"]}">',
+                f'<topic_memory topic="{memory_data_for_prompt["topic"]}">',
                 memory_content,
                 "</topic_memory>",
             ]))
@@ -823,14 +813,6 @@ async def chat(req: ChatRequest):
     if prefix_blocks:
         effective_message = "\n\n".join(prefix_blocks + [req.message])
 
-    stored_context_ids = list({*(context_ids or []), *(req.pinned_ids or [])}) or None
-    user_msg_id = insert_user_message(topic, resolved_agent, req.message,
-                                      context_ids=stored_context_ids,
-                                      mem=bool(memory_revision),
-                                      mem_revision=memory_revision,
-                                      lookback=lookback)
-    asst_msg_id = insert_assistant_message(topic, resolved_agent, user_msg_id, adhoc=req.adhoc)
-
     log.info(
         "chat  topic=%s  agent=%s  backend=%s  model=%s  adhoc=%s  resume=%s  ctx=%d  pinned=%d  memory=%s  msg=%.80r",
         topic, resolved_agent, backend, model, req.adhoc,
@@ -848,7 +830,6 @@ async def chat(req: ChatRequest):
             code_roots=tracking_roots,
             display_prompt=req.message,
             source_cwd=source_cwd,
-            worktree_agent=wt_agent_key,
         ),
         media_type="text/event-stream",
         headers={
@@ -909,7 +890,7 @@ async def run_cmd(req: CmdRequest):
         if not agent:
             return JSONResponse({"ok": False, "error": "no active session"}, status_code=400)
         killed = kill_procs_by_topic(topic, agent=agent, adhoc=False)
-        conflicts = await _cleanup_worktrees(topic, agent)
+        conflicts = await _cleanup_worktrees(topic)
         clear_topic_session(topic, agent)
         log.info("cmd %s topic=%s agent=%s killed=%s", req.command, topic, agent, killed)
         result: dict = {"ok": True, "agent": agent}
@@ -1205,7 +1186,7 @@ async def clear_session(topic: str, agent: str):
     topic = _normalize_topic_response(topic)
     if isinstance(topic, JSONResponse):
         return topic
-    conflicts = await _cleanup_worktrees(topic, agent)
+    conflicts = await _cleanup_worktrees(topic)
     clear_topic_session(topic, agent)
     result: dict = {"ok": True}
     if conflicts:
