@@ -23,6 +23,8 @@
   --accent:       #f07040;  /* primary action (send, active tabs) */
   --accent-dim:   #d07840;  /* warm secondary (topic tags, boot) */
   --accent-light: #f5a060;  /* inline code, links */
+  --close-mark:   #d07840;  /* dismiss affordances */
+  --remove-mark:  #c87941;  /* remove/interrupt affordances */
 
   /* ── Semantic ───────────────────────────────────────────────── */
   --danger:       #e05030;  /* destructive hover */
@@ -671,9 +673,9 @@ body {
 }
 .proc-deq-btn {
   background: transparent;
-  border: 1px solid var(--border);
+  border: 1px solid #4a3328;
   border-radius: 4px;
-  color: var(--text-dim);
+  color: var(--remove-mark);
   cursor: pointer;
   font-size: var(--text-md);
   line-height: 1;
@@ -697,13 +699,13 @@ body {
 #proc-popup-close {
   background: transparent;
   border: none;
-  color: var(--text-ghost);
+  color: var(--close-mark);
   cursor: pointer;
   font-size: var(--text-body);
   padding: 0.1rem 0.3rem;
   line-height: 1;
 }
-#proc-popup-close:hover { color: var(--text-mid); }
+#proc-popup-close:hover { color: var(--accent-light); }
 
 .text-logo {
   display: flex;
@@ -1286,12 +1288,12 @@ body {
 #pin-panel-close {
   background: transparent;
   border: none;
-  color: var(--text-ghost);
+  color: var(--close-mark);
   cursor: pointer;
   font-size: var(--text-body);
   padding: 0.1rem 0.3rem;
 }
-#pin-panel-close:hover { color: var(--text-mid); }
+#pin-panel-close:hover { color: var(--accent-light); }
 #pin-panel-list {
   overflow-y: auto;
   flex: 1;
@@ -1327,7 +1329,7 @@ body {
 .pin-item-remove {
   background: none;
   border: none;
-  color: #484858;
+  color: var(--remove-mark);
   cursor: pointer;
   font-size: var(--text-body);
   padding: 0 0.15rem;
@@ -2093,16 +2095,16 @@ body {
   right: 0.3rem;
   background: none;
   border: none;
-  color: var(--text-lo);
+  color: var(--remove-mark);
   cursor: pointer;
   font-size: 1rem;
   line-height: 1;
   padding: 0.1rem 0.25rem;
   border-radius: 3px;
-  opacity: 0.6;
+  opacity: 0.85;
   transition: opacity 0.15s, color 0.15s;
 }
-.thinking-kill-btn:hover { opacity: 1; color: #e05050; }
+.thinking-kill-btn:hover { opacity: 1; color: var(--danger); }
 .thinking-kill-btn:disabled { opacity: 0.3; cursor: default; }
 
 .msg-pin-btn {
@@ -2595,12 +2597,12 @@ body {
 #help-close {
   background: transparent;
   border: none;
-  color: var(--text-ghost);
+  color: var(--close-mark);
   cursor: pointer;
   font-size: var(--text-body);
   padding: 0.1rem 0.3rem;
 }
-#help-close:hover { color: var(--text-mid); }
+#help-close:hover { color: var(--accent-light); }
 #help-content {
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
@@ -3178,17 +3180,17 @@ button {
 .ac-close {
   flex-shrink: 0;
   padding: 0.05rem 0.35rem;
-  border: 1px solid var(--border);
+  border: 1px solid #4a3328;
   border-radius: 4px;
   background: var(--surface);
-  color: var(--text-lo);
+  color: var(--close-mark);
   cursor: pointer;
   font-family: ui-monospace, monospace;
   font-size: var(--text-xs);
   line-height: 1.3;
   font-weight: 600;
 }
-.ac-close:hover { color: var(--text-muted); background: var(--surface-2); }
+.ac-close:hover { color: var(--accent-light); background: var(--surface-2); }
 .ac-close-mobile { display: none; }
 .close-mobile { display: none; }
 .ac-item[data-cmd] .ac-meta { color: #2a5a40; font-size: var(--text-md); background: #0e2218; padding: 0.05em 0.35em; border-radius: 3px; }
@@ -3197,7 +3199,7 @@ button {
   margin-left: 0.4rem;
   background: none;
   border: none;
-  color: #484858;
+  color: var(--remove-mark);
   cursor: pointer;
   font: inherit;
   font-size: var(--text-body);
@@ -3205,8 +3207,8 @@ button {
   line-height: 1;
   border-radius: 3px;
 }
-.ac-item:hover .ac-del-btn, .ac-item.selected .ac-del-btn { color: var(--text-lo); }
-.ac-del-btn:hover { color: #e06060 !important; }
+.ac-item:hover .ac-del-btn, .ac-item.selected .ac-del-btn { color: var(--remove-mark); }
+.ac-del-btn:hover { color: var(--danger) !important; }
 .ac-route-btn {
   flex-shrink: 0;
   margin-right: 0.4rem;
