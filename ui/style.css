@@ -140,6 +140,7 @@ body {
 }
 .nav-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 .nav-tab:hover:not(.active) { color: var(--text-mid); border-color: #333; }
+.nav-tab svg { vertical-align: middle; }
 
 /* hamburger (desktop settings; mobile app nav) */
 #hamburger-btn {
