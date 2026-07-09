@@ -177,6 +177,11 @@ function switchView(name) {
     btn.classList.toggle('active', btn.dataset.view === name);
   });
   currentView = name;
+  document.getElementById('right-rail')?.classList.toggle('quota-chat-hidden', name !== 'chat');
+  if (name !== 'chat') {
+    document.querySelectorAll('#quota-creds-popup, #codex-creds-popup, #cursor-creds-popup, #deepseek-max-popup')
+      .forEach(popup => popup.classList.remove('open'));
+  }
   if (name === 'files') openFilesTabView();
   if (name === 'topics') loadTopicsView();
   if (name === 'stats') loadStats();

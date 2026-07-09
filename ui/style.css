@@ -338,6 +338,13 @@ body {
 }
 #static-quota-display.loaded { color: var(--text-lo); }
 .quota-hidden { display: none !important; }
+#right-rail.quota-chat-hidden #quota-display,
+#right-rail.quota-chat-hidden #codex-quota-display,
+#right-rail.quota-chat-hidden #cursor-quota-display,
+#right-rail.quota-chat-hidden #deepseek-quota-display,
+#right-rail.quota-chat-hidden #static-quota-display {
+  display: none !important;
+}
 
 /* claude dual-gauge (5h + 7d) */
 .quota-7d-group {

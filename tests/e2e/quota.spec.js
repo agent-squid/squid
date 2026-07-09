@@ -2,7 +2,7 @@ const { test, expect } = require('@playwright/test');
 
 async function mockShell(page) {
   await page.route('**/health', route => route.fulfill({
-    json: { status: 'ok', backends: { claude: { gauge: { type: 'claude' } } } },
+    json: { status: 'ok', backends: { claude: { available: true, gauge: { type: 'claude' } } } },
   }));
   await page.route('**/config/agents', route => route.fulfill({ json: [] }));
   await page.route('**/topics', route => route.fulfill({ json: [] }));
@@ -25,9 +25,34 @@ test('topbar quota gauge keeps its neutral original treatment', async ({ page })
   await expect(page.getByRole('button', { name: 'Status' })).toBeVisible();
   await expect(page.locator('#quota-display')).toBeVisible();
   await expect(page.locator('#quota-display')).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
-  await expect(page.locator('#quota-display svg')).toHaveCount(1);
+  await expect(page.locator('#quota-display svg')).toHaveCount(2);
   await page.locator('#quota-display').click();
   await expect(page.locator('#quota-creds-popup')).toHaveClass(/open/);
+});
+
+test('topbar quota gauge is chat-only while status keeps quota available', async ({ page }) => {
+  await mockShell(page);
+  await page.route('**/quota/backend/*', route => route.fulfill({
+    json: { status: 'ok', raw: 42, used_percent: 42 },
+  }));
+  await page.route('**/config/localfile-roots**', route => route.fulfill({ json: { roots: [] } }));
+
+  await page.goto('/');
+  await expect(page.locator('#quota-display')).toBeVisible();
+  await page.locator('#quota-display').click();
+  await expect(page.locator('#quota-creds-popup')).toHaveClass(/open/);
+
+  await page.getByRole('button', { name: 'Files' }).click();
+  await expect(page.locator('#quota-display')).toBeHidden();
+  await expect(page.locator('#quota-creds-popup')).not.toHaveClass(/open/);
+
+  await page.getByRole('button', { name: 'Status' }).click();
+  const rows = page.locator('#proc-status-popup .quota-status-row');
+  await expect(rows).toHaveCount(1);
+  await expect(rows.filter({ hasText: 'Claude' })).toContainText('42%');
+
+  await page.getByRole('button', { name: 'Chat' }).click();
+  await expect(page.locator('#quota-display')).toBeVisible();
 });
 
 test('quota transient errors retry before showing failure', async ({ page }) => {
@@ -37,7 +62,7 @@ test('quota transient errors retry before showing failure', async ({ page }) => 
   }));
 
   await page.goto('/');
-  await expect(page.locator('#quota-label')).toHaveText('42%');
+  await expect(page.locator('#quota-5h-pct')).toHaveText('42');
 
   const result = await page.evaluate(async () => {
     const realFetch = window.fetch.bind(window);
@@ -88,7 +113,7 @@ test('quota transient errors retry before showing failure', async ({ page }) => 
 
   expect(result.delays).toEqual([3000, 10000, 30000]);
   expect(result.quotaCalls).toBe(4);
-  expect(result.afterFirst).toEqual({ text: '42%', isError: false });
+  expect(result.afterFirst).toEqual({ text: '', isError: false });
   expect(result.finalText).toBe('claude error');
   expect(result.finalIsError).toBe(true);
 });
@@ -118,7 +143,8 @@ test('percentage quota gauges retain their reset countdown', async ({ page }) =>
     input.value = '#work';
     await updateActiveQuotaGauge();
   });
-  await expect(page.locator('#cursor-quota-label')).toHaveText('100% in 4.2D');
+  await expect(page.locator('#cursor-5h-pct')).toHaveText('100');
+  await expect(page.locator('#cursor-quota-label')).toHaveText('4.2D');
 
   // A late response for another backend must not overwrite a shared gauge.
   await page.evaluate(() => {
@@ -134,7 +160,7 @@ test('percentage quota gauges retain their reset countdown', async ({ page }) =>
       raw: 55, pct: 55, resetAt: Date.now() + 60 * 60 * 1000, title: 'Claude usage',
     });
   });
-  await expect(page.locator('#quota-label')).toHaveText('Local');
+  await expect(page.locator('#static-quota-label')).toHaveText('Local');
 
   for (const backend of ['claude', 'codex', 'cursor']) {
     await page.evaluate(async backendId => {
@@ -144,9 +170,11 @@ test('percentage quota gauges retain their reset countdown', async ({ page }) =>
     }, backend);
 
     const labelId = backend === 'claude' ? 'quota-label' : `${backend}-quota-label`;
+    const pctId = backend === 'claude' ? 'quota-5h-pct' : `${backend}-5h-pct`;
     const expected = backend === 'cursor'
-      ? '100% in 4.2D'
-      : /^100% in 4:3[345]$/;
+      ? '4.2D'
+      : /^4:3[345]$/;
+    await expect(page.locator(`#${pctId}`)).toHaveText('100');
     await expect(page.locator(`#${labelId}`)).toHaveText(expected);
 
     await page.evaluate(backendId => {
@@ -156,12 +184,13 @@ test('percentage quota gauges retain their reset countdown', async ({ page }) =>
         resetAt: Date.now() + 4.2 * 24 * 60 * 60 * 1000,
       });
     }, backend);
-    await expect(page.locator(`#${labelId}`)).toHaveText('97% in 4.2D');
+    await expect(page.locator(`#${pctId}`)).toHaveText('97');
+    await expect(page.locator(`#${labelId}`)).toHaveText('4.2D');
 
     await page.evaluate(backendId => {
       quotaStateFor(backendId).delta = 52;
       updateGaugeLabel(backendId);
     }, backend);
-    await expect(page.locator(`#${labelId}`)).toHaveText('97% in 4.2D');
+    await expect(page.locator(`#${labelId}`)).toHaveText('4.2D');
   }
 });
