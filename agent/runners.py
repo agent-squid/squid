@@ -735,18 +735,37 @@ class _ClaudeInteractiveCLI:
                 raise CLIError(f"Claude interactive stdin failed: {exc}") from exc
 
             parser = _ClaudeStreamParser(history)
-            accepting_turn = False
-            current_turn_is_prompt = False
+            WAIT_PROMPT_REPLAY = "wait_prompt_replay"
+            READ_PROMPT_TURN = "read_prompt_turn"
+            WAIT_AGENT_NOTIFICATION = "wait_agent_notification"
+            READ_AGENT_COMPLETION_TURN = "read_agent_completion_turn"
+            phase = WAIT_PROMPT_REPLAY
             pending_agent_tool_use_id: Optional[str] = None
             turn_live_chunks: list[dict] = []
             turn_result_chunks: list[Union[str, dict]] = []
             turn_agent_tool_use_id: Optional[str] = None
             ask_followup_tool_use_id: Optional[str] = None
             ask_followup_question_text: str = ""
-            accepted_agent_notification = False
             timeout = response_timeout if response_timeout is not None else RESPONSE_TIMEOUT
             deadline = asyncio.get_event_loop().time() + timeout
             first_byte = True
+
+            def is_reading_accepted_turn() -> bool:
+                return phase in (READ_PROMPT_TURN, READ_AGENT_COMPLETION_TURN)
+
+            def has_visible_response() -> bool:
+                return any(isinstance(c, str) and c.strip() for c in turn_result_chunks)
+
+            def reset_turn(next_phase: str) -> None:
+                nonlocal parser, phase, turn_live_chunks, turn_result_chunks
+                nonlocal turn_agent_tool_use_id, ask_followup_tool_use_id, ask_followup_question_text
+                parser = _ClaudeStreamParser(history)
+                phase = next_phase
+                turn_live_chunks = []
+                turn_result_chunks = []
+                turn_agent_tool_use_id = None
+                ask_followup_tool_use_id = None
+                ask_followup_question_text = ""
 
             try:
                 while True:
@@ -771,7 +790,7 @@ class _ClaudeInteractiveCLI:
                             self.pending_followup = {"tool_use_id": ask_followup_tool_use_id}
                             if ask_followup_question_text:
                                 turn_result_chunks.append(ask_followup_question_text)
-                            if accepting_turn:
+                            if is_reading_accepted_turn():
                                 for chunk in turn_result_chunks:
                                     yield chunk
                             break
@@ -792,8 +811,7 @@ class _ClaudeInteractiveCLI:
                         event = {}
                     replayed = _claude_replayed_user_content(event)
                     if replayed == content:
-                        accepting_turn = True
-                        current_turn_is_prompt = True
+                        phase = READ_PROMPT_TURN
                         for chunk in turn_live_chunks:
                             yield chunk
                         turn_live_chunks = []
@@ -801,9 +819,7 @@ class _ClaudeInteractiveCLI:
                         pending_agent_tool_use_id
                         and _claude_event_task_notification_tool_use_id(event) == pending_agent_tool_use_id
                     ):
-                        accepting_turn = True
-                        current_turn_is_prompt = False
-                        accepted_agent_notification = True
+                        phase = READ_AGENT_COMPLETION_TURN
                         for chunk in turn_live_chunks:
                             yield chunk
                         turn_live_chunks = []
@@ -820,7 +836,7 @@ class _ClaudeInteractiveCLI:
                                 ask_followup_tool_use_id = tool.get("tool_use_id") or ""
                                 ask_followup_question_text = _format_followup_text(tool)
                                 continue
-                            if accepting_turn:
+                            if is_reading_accepted_turn():
                                 yield chunk
                             else:
                                 turn_live_chunks.append(chunk)
@@ -828,43 +844,24 @@ class _ClaudeInteractiveCLI:
                             turn_result_chunks.append(chunk)
 
                     if parser.done:
-                        if accepting_turn and current_turn_is_prompt and turn_agent_tool_use_id:
+                        if phase == READ_PROMPT_TURN and turn_agent_tool_use_id:
                             pending_agent_tool_use_id = turn_agent_tool_use_id
-                            parser = _ClaudeStreamParser(history)
-                            accepting_turn = False
-                            current_turn_is_prompt = False
-                            accepted_agent_notification = False
-                            turn_live_chunks = []
-                            turn_result_chunks = []
-                            turn_agent_tool_use_id = None
-                            ask_followup_tool_use_id = None
-                            ask_followup_question_text = ""
+                            reset_turn(WAIT_AGENT_NOTIFICATION)
                             continue
-                        if accepting_turn:
+                        if is_reading_accepted_turn():
                             if ask_followup_tool_use_id and ask_followup_question_text:
                                 # Claude Code auto-handled ask_followup_question (result
                                 # fired normally). Ensure the question is visible when the
                                 # result body is absent (Claude Code returned empty text).
-                                if not any(isinstance(c, str) and c.strip() for c in turn_result_chunks):
+                                if not has_visible_response():
                                     turn_result_chunks.insert(0, ask_followup_question_text)
-                            elif (
-                                accepted_agent_notification
-                                and not any(isinstance(c, str) and c.strip() for c in turn_result_chunks)
-                            ):
+                            elif phase == READ_AGENT_COMPLETION_TURN and not has_visible_response():
                                 # Claude can emit a successful, result-empty thinking-only
                                 # assistant turn immediately after replaying an async Agent
                                 # task notification, then emit the actual user-visible
                                 # answer as the next assistant result. Do not complete the
                                 # Squid turn on stats-only output from that internal turn.
-                                parser = _ClaudeStreamParser(history)
-                                accepting_turn = True
-                                current_turn_is_prompt = False
-                                accepted_agent_notification = True
-                                turn_live_chunks = []
-                                turn_result_chunks = []
-                                turn_agent_tool_use_id = None
-                                ask_followup_tool_use_id = None
-                                ask_followup_question_text = ""
+                                reset_turn(READ_AGENT_COMPLETION_TURN)
                                 continue
                             for chunk in turn_result_chunks:
                                 yield chunk
@@ -872,15 +869,7 @@ class _ClaudeInteractiveCLI:
                         # Claude may have processed a queued task-notification
                         # before the prompt Squid just wrote. Discard that turn
                         # and keep reading until the replayed prompt matches.
-                        parser = _ClaudeStreamParser(history)
-                        accepting_turn = False
-                        current_turn_is_prompt = False
-                        accepted_agent_notification = False
-                        turn_live_chunks = []
-                        turn_result_chunks = []
-                        turn_agent_tool_use_id = None
-                        ask_followup_tool_use_id = None
-                        ask_followup_question_text = ""
+                        reset_turn(phase)
             finally:
                 if self.proc:
                     _update_proc(self.proc.pid, state="idle", msg_id=None)
