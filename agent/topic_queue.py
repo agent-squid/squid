@@ -11,6 +11,18 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 
+def remap_worktree_paths(text: str, worktree_sources: dict[str, str]) -> str:
+    """Replace ephemeral Squid worktree path prefixes with source repo paths."""
+    if not text or not worktree_sources:
+        return text
+    remapped = text
+    for worktree_path, source_path in sorted(
+        worktree_sources.items(), key=lambda item: len(item[0]), reverse=True
+    ):
+        remapped = remapped.replace(str(worktree_path), str(source_path))
+    return remapped
+
+
 @dataclass
 class QueueItem:
     seq: int
@@ -263,6 +275,7 @@ class TopicWorker:
                         insert_run_event(item.msg_id, run_seq, "error", chunk["_error"])
                         await item.out_q.put(chunk)
                 else:
+                    chunk = remap_worktree_paths(chunk, worktree_sources)
                     raw += chunk
                     insert_run_event(item.msg_id, run_seq, "text", chunk)
                     await item.out_q.put(chunk)
