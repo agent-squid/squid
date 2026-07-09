@@ -50,10 +50,11 @@ repo. The `sqd-` prefix lets users identify Squid-managed branches.
 
 ### How the worktree becomes the agent's working directory
 
-At the start of each non-adhoc turn, `_setup_worktrees` calls `ensure_worktree`
-for each git repo under `code_roots`:
+At the start of each turn, `_setup_worktrees` calls `ensure_worktree` for each
+git repo under `code_roots`:
 
-1. If the worktree path already exists (from a prior turn), it is reused as-is.
+1. If the worktree path already exists (from a prior turn of the same key), it
+   is reused as-is.
 2. If not, `git worktree add -b sqd-<key> <path> HEAD` creates it from the
    current HEAD.
 
@@ -65,8 +66,12 @@ for each git repo under `code_roots`:
   replaced with their worktree equivalents via `map_to_worktree`.
 
 The agent reads and writes files inside the worktree. The original working tree
-is never touched while the worktree is live. Adhoc messages bypass this entirely
-and run against the real working tree.
+is never touched while the worktree is live.
+
+**Adhoc turns** use a unique per-turn key (`adhoc-<uuid8>`) instead of the
+agent name, because adhoc turns run in parallel and must not share a worktree.
+Their worktree is removed immediately after the turn's sync completes (see Turn
+cycle below).
 
 ### Turn cycle
 
@@ -85,6 +90,9 @@ turn N ends
      b. merge sqd-<key> → main (--no-ff)
      c. rebase worktree branch onto new main HEAD
         → worktree is clean and current for turn N+1
+
+  adhoc turns only:
+  3. remove worktree + delete branch (ephemeral — not reused across turns)
 ```
 
 The diff is shown before the auto-commit; it captures the full set of changes
@@ -130,12 +138,13 @@ In fallback mode:
 
 ## Consequences
 
+- Good: all turns — both regular and adhoc — are isolated in their own worktree.
 - Good: each turn diff is scoped to that turn's worktree changes, isolated from
   the real working tree and from other sessions.
-- Good: the worktree persists across turns so there is no per-turn setup cost
-  after the first turn.
-- Good: multiple sessions on the same code root are isolated from each other via
-  separate worktrees on separate branches.
+- Good: regular-turn worktrees persist across turns so there is no per-turn
+  setup cost after the first turn.
+- Good: multiple sessions and parallel adhoc turns on the same code root are
+  isolated from each other via separate worktrees on separate branches.
 - Good: auto-commit at each turn end produces a per-turn commit history on main.
 - Bad: if Squid crashes mid-turn, stale `~/.squid/worktrees/` directories and
   `sqd-*` branches can accumulate; a startup sweep is needed to prune them.
