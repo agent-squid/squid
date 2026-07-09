@@ -369,6 +369,8 @@ def test_get_messages_by_ids_includes_compact_gitdiff_context(tmp_path, monkeypa
     context = json.dumps([{
         "name": "GitDiff",
         "repo": "/tmp/project",
+        "source": "/tmp/project",
+        "worktree_repo": "/tmp/.squid/worktrees/abcd1234/sqd-squid-1234-deadbe",
         "file_count": 2,
         "additions": 12,
         "deletions": 3,
@@ -403,6 +405,51 @@ def test_get_messages_by_ids_includes_compact_gitdiff_context(tmp_path, monkeypa
         )},
     ]
     assert "full diff should not be injected" not in messages[1]["content"]
+    assert "sqd-squid-1234-deadbe" not in messages[1]["content"]
+
+
+def test_get_messages_by_ids_sanitizes_transient_worktree_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user_id = stats_db.insert_user_message("squid", "codex", "review old change")
+    assistant_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
+    context = json.dumps([{
+        "name": "GitDiff",
+        "repo": "/Users/alice/Work/squid",
+        "worktree_repo": "/Users/alice/.squid/worktrees/abcd1234/sqd-squid-2066-921e61",
+        "file_count": 1,
+        "additions": 1,
+        "deletions": 0,
+        "stat": " agent/stats_db.py | 1 +",
+        "files": [{"status": "M", "path": "agent/stats_db.py"}],
+        "diff": "full diff should not be injected",
+    }])
+    old_body = (
+        "I'll implement this in "
+        "`/Users/alice/.squid/worktrees/abcd1234/sqd-squid-2066-921e61`.\n\n"
+        "Changed files from this response:\n"
+        "<changed_files>\n"
+        "Repo: /Users/alice/.squid/worktrees/abcd1234/sqd-squid-2066-921e61\n"
+        "Summary: 1 file, +1 -0\n"
+        "Files:\n"
+        "- M agent/stats_db.py\n"
+        "</changed_files>"
+    )
+    stats_db.update_assistant_message(
+        assistant_id, old_body, "session-1", "done", context=context,
+    )
+
+    messages = stats_db.get_messages_by_ids([assistant_id])
+    assistant_content = messages[1]["content"]
+
+    assert "/Users/alice/.squid/worktrees" not in assistant_content
+    assert "sqd-squid-2066-921e61" not in assistant_content
+    assert "[temporary Squid worktree]" in assistant_content
+    assert assistant_content.count("Changed files from this response:") == 1
+    assert "Repo: /Users/alice/Work/squid" in assistant_content
+    assert "Repo: [temporary Squid worktree]" not in assistant_content
+    assert "full diff should not be injected" not in assistant_content
 
 
 def test_search_messages_can_filter_bookmarks_before_limit(tmp_path, monkeypatch):

@@ -5,6 +5,7 @@ import logging
 import sqlite3
 import json
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -13,6 +14,8 @@ from .backends import BACKENDS
 # Store database in ~/.squid/ so it persists across installs/updates.
 # Override with SQUID_DB_PATH env var (e.g. for containers).
 _DB_PATH = Path(os.environ.get("SQUID_DB_PATH", Path.home() / ".squid" / "squid.db"))
+_SQUID_WORKTREE_PATH_RE = re.compile(r"(?:~|/[^`'\"<>\s]*)/\.squid/worktrees/[^`'\"<>\s),]+")
+_CHANGED_FILES_BLOCK_RE = re.compile(r"\n*Changed files from this response:\n<changed_files>.*?</changed_files>", re.DOTALL)
 try:
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 except Exception:
@@ -841,7 +844,7 @@ def _gitdiff_context_summary(context: Optional[str]) -> str:
         if not files:
             continue
 
-        repo = tool.get("worktree_repo") or tool.get("repo") or tool.get("cwd")
+        repo = tool.get("repo") or tool.get("source") or tool.get("cwd")
         file_count = tool.get("file_count") or len(files)
         additions = tool.get("additions")
         deletions = tool.get("deletions")
@@ -871,6 +874,11 @@ def _gitdiff_context_summary(context: Optional[str]) -> str:
     return "\n\n".join(blocks)
 
 
+def _sanitize_pinned_assistant_content(content: str) -> str:
+    content = _CHANGED_FILES_BLOCK_RE.sub("", content).rstrip()
+    return _SQUID_WORKTREE_PATH_RE.sub("[temporary Squid worktree]", content)
+
+
 def get_messages_by_ids(ids: list[int]) -> list[dict]:
     """Fetch specific assistant messages by ID as context history pairs.
     Returns [user, asst, ...] dicts in ascending ID order. Only done rows with content."""
@@ -890,7 +898,7 @@ def get_messages_by_ids(ids: list[int]) -> list[dict]:
         ).fetchall()
     result = []
     for row in rows:
-        asst_content = row["asst_content"]
+        asst_content = _sanitize_pinned_assistant_content(row["asst_content"])
         gitdiff_summary = _gitdiff_context_summary(row["context"])
         if gitdiff_summary:
             asst_content = f"{asst_content.rstrip()}\n\n{gitdiff_summary}"
