@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from agent import stats_db
 
@@ -325,6 +326,38 @@ def test_status_raw_included_in_history_and_search(tmp_path, monkeypatch):
 
     search = stats_db.search_messages("searchable", topic="squid", agent="codex")
     assert search["items"][0]["status_raw"] == "Working...\nDone"
+
+
+def test_reverting_later_gitdiff_unblocks_older_same_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    repo = "/tmp/project"
+    first_user_id = stats_db.insert_user_message("squid", "codex", "first")
+    first_id = stats_db.insert_assistant_message("squid", "codex", first_user_id, adhoc=False)
+    first_context = json.dumps([{
+        "name": "GitDiff",
+        "repo": repo,
+        "files": [{"status": "M", "path": "app.txt"}],
+        "diff": "diff --git a/app.txt b/app.txt\n",
+    }])
+    stats_db.update_assistant_message(first_id, "first", "session-1", "done", context=first_context)
+
+    second_user_id = stats_db.insert_user_message("squid", "codex", "second")
+    second_id = stats_db.insert_assistant_message("squid", "codex", second_user_id, adhoc=False)
+    second_context = json.dumps([{
+        "name": "GitDiff",
+        "repo": repo,
+        "files": [{"status": "M", "path": "app.txt"}],
+        "diff": "diff --git a/app.txt b/app.txt\n",
+    }])
+    stats_db.update_assistant_message(second_id, "second", "session-1", "done", context=second_context)
+
+    assert stats_db.get_diff_revert_eligibility(first_id, repo) == {"app.txt": "conflicting"}
+
+    stats_db.record_git_diff_revert(second_id, repo, ["app.txt"])
+
+    assert stats_db.get_diff_revert_eligibility(first_id, repo) == {"app.txt": "revertable"}
 
 
 def test_search_messages_can_filter_bookmarks_before_limit(tmp_path, monkeypatch):

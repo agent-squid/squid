@@ -144,6 +144,7 @@ class TopicWorker:
             save_stats,
             set_topic_session,
             clear_topic_session,
+            get_worktrees,
         )
         from .git_changes import prepare_trackers
 
@@ -166,6 +167,13 @@ class TopicWorker:
 
         source_cwd = item.cwd or SQUID_HOME
         tracking_roots = item.code_roots or []
+        worktree_sources: dict[str, str] = {}
+        if item.msg_id:
+            wt_records = await asyncio.to_thread(get_worktrees, item.topic, str(item.msg_id))
+            worktree_sources = {
+                rec["worktree_path"]: rec["repo_root"]
+                for rec in wt_records
+            }
         git_trackers = await asyncio.to_thread(
             prepare_trackers,
             tracking_roots,
@@ -173,6 +181,7 @@ class TopicWorker:
             agent=item.agent,
             adhoc=item.adhoc,
             msg_id=item.msg_id,
+            worktree_sources=worktree_sources,
         )
         effective_cwd = source_cwd
         effective_prompt = item.prompt
@@ -302,7 +311,7 @@ class TopicWorker:
 
             if item.agent and item.msg_id:
                 wt_key = str(item.msg_id)
-                from .stats_db import get_worktrees, delete_worktree
+                from .stats_db import delete_worktree
                 from .worktree import sync_after_turn, remove_worktree
                 wt_records = await asyncio.to_thread(get_worktrees, item.topic, wt_key)
                 for rec in wt_records:

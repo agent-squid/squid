@@ -1,6 +1,6 @@
 import subprocess
 
-from agent.git_changes import prepare_tracker
+from agent.git_changes import apply_reverse_patch, prepare_tracker, prepare_trackers
 
 
 def git(cwd, *args):
@@ -110,3 +110,44 @@ def test_adhoc_tracker_cleanup_keeps_direct_watch_root(tmp_path):
     tracker.cleanup()
 
     assert repo.exists()
+
+
+def test_worktree_tracker_emits_durable_repo_for_revert(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    wt = tmp_path / "wt"
+    git(repo, "worktree", "add", "-b", "sqd-test", str(wt), "HEAD")
+
+    trackers = prepare_trackers(
+        [str(wt)],
+        topic="worktree-revert",
+        agent="codex",
+        adhoc=False,
+        msg_id=42,
+        worktree_sources={str(wt): str(repo)},
+    )
+
+    assert len(trackers) == 1
+    tracker = trackers[0]
+    assert tracker.repo_root == wt
+    assert tracker.event_repo_root == repo
+
+    (wt / "app.txt").write_text("changed in worktree\n")
+    event = tracker.build_event()
+
+    assert event is not None
+    assert event["repo"] == str(repo)
+    assert event["cwd"] == str(repo)
+    assert event["worktree_repo"] == str(wt)
+    assert event["worktree_cwd"] == str(wt)
+    assert "-base" in event["diff"]
+    assert "+changed in worktree" in event["diff"]
+
+    git(wt, "add", "app.txt")
+    git(wt, "commit", "-m", "worktree change")
+    git(repo, "merge", "--no-ff", "sqd-test")
+    ok, err = apply_reverse_patch(repo, event["diff"])
+
+    assert ok, err
+    assert (repo / "app.txt").read_text() == "base\n"
