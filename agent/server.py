@@ -30,6 +30,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import AsyncGenerator, Literal, Optional, Union
 
@@ -585,6 +586,7 @@ async def stream_response(
     code_roots: Optional[list[str]] = None,
     display_prompt: Optional[str] = None,
     source_cwd: Optional[str] = None,
+    worktree_agent: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     yield sse_event("meta", json.dumps({"agent": agent, "backend": backend, "model": model, "msg_id": asst_msg_id, "adhoc": adhoc}))
 
@@ -598,6 +600,7 @@ async def stream_response(
         adhoc=adhoc, lookback=lookback, msg_id=asst_msg_id,
         code_roots=code_roots,
         display_prompt=display_prompt,
+        worktree_agent=worktree_agent,
     )
 
     raw = ""
@@ -770,12 +773,15 @@ async def chat(req: ChatRequest):
     code_roots = memory_config.get("code_roots") or []
     source_cwd = cwd  # original cwd before worktree remapping
 
-    # Set up worktree isolation for non-adhoc sessions in git repos
+    # Set up worktree isolation for all turns in git repos.
+    # Adhoc turns use a unique per-turn key so parallel adhoc turns get separate worktrees.
     effective_code_roots = code_roots
     effective_cwd = cwd
-    if not req.adhoc and resolved_agent and code_roots:
+    wt_agent_key: Optional[str] = None
+    if resolved_agent and code_roots:
+        wt_agent_key = f"adhoc-{uuid.uuid4().hex[:8]}" if req.adhoc else resolved_agent
         effective_code_roots, effective_cwd = await _setup_worktrees(
-            code_roots, cwd, topic, resolved_agent
+            code_roots, cwd, topic, wt_agent_key
         )
 
     if not native_backend_command and effective_code_roots:
@@ -842,6 +848,7 @@ async def chat(req: ChatRequest):
             code_roots=tracking_roots,
             display_prompt=req.message,
             source_cwd=source_cwd,
+            worktree_agent=wt_agent_key,
         ),
         media_type="text/event-stream",
         headers={
