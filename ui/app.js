@@ -4459,7 +4459,7 @@ function initCursorQuota() {
 
 // ── usage stats panel ─────────────────────────────────────────────────────────
 
-let statsPeriod = 'daily';
+let statsPeriod = 'hourly';
 let statsGroup  = 'time';
 let statsFilters = { days: 30, agent: '', topic: '', adhoc: 'all' };
 let statsChartY1 = 'turns';

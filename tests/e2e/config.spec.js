@@ -401,8 +401,11 @@ test('analytics measures dropdown controls cost and quota columns independently'
   });
 
   await page.goto('/');
-  await page.getByRole('button', { name: 'Analytics' }).click();
+  await page.getByRole('button', { name: 'Stats' }).click();
   await expect(page.locator('#stats-content table')).toBeVisible();
+  await expect(page.locator('#stats-tabs .st').first()).toHaveText('Hourly');
+  await expect(page.locator('#stats-tabs .st').nth(1)).toHaveText('Daily');
+  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('period')).toBe('hourly');
   expect(statsRequests.at(-1).searchParams.get('tz_offset_minutes')).not.toBeNull();
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (4)');
   await expect(page.locator('#stats-content th', { hasText: 'Sessions' })).toBeVisible();
@@ -428,11 +431,10 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (5)');
   await expect(page.locator('#stats-content th', { hasText: 'Tokens Out' })).toHaveCount(0);
 
-  await page.getByRole('button', { name: 'Hourly' }).click();
-  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('period')).toBe('hourly');
+  await page.getByRole('button', { name: 'Daily' }).click();
+  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('period')).toBe('daily');
   expect(statsRequests.at(-1).searchParams.get('tz_offset_minutes')).not.toBeNull();
-  await expect(page.locator('#stats-content tbody td').first()).toHaveText('06-26 14:00');
-  await expect(page.locator('#stats-content tbody td').first()).not.toContainText('2026');
+  await expect(page.locator('#stats-content tbody td').first()).toHaveText('2026-06-26');
 });
 
 test('/restart clears its persisted draft before the page reloads', async ({ page }) => {
