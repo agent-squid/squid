@@ -116,6 +116,14 @@ changes as Git commits and the DB's worktree registry row is deleted. The stored
 `GitDiff` is durable history/metadata for the completed turn, not the canonical
 copy of the change.
 
+Pinned or review context built from stored messages must present the source
+repository as the canonical repo. Stored `GitDiff` payloads may include
+`worktree_repo` and `worktree_cwd` for diagnostics and source-root mapping, but
+those temporary paths must not be injected as the primary review target. When
+old assistant text contains Squid worktree paths or prior `<changed_files>`
+blocks, prompt construction sanitizes that text and appends a fresh source-repo
+summary from the stored `GitDiff`.
+
 ### Session close
 
 On normal turn completion, `TopicQueue._process` calls `sync_after_turn`,
