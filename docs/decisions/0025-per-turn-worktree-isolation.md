@@ -43,20 +43,25 @@ worktree path:  ~/.squid/worktrees/<repo_hash>/sqd-<slug>-<md5>/
 branch name:    sqd-<slug>-<md5>
 ```
 
-`<slug>` is derived from `topic` and `agent`; `<md5>` is the first 6 hex chars
-of `MD5(topic:agent)`. `<repo_hash>` is 8 hex chars of `MD5(repo_root)`.
-Worktrees live outside the project directory so they never appear in the user's
-repo. The `sqd-` prefix lets users identify Squid-managed branches.
+The key passed to the naming functions is `str(asst_msg_id)` — the assistant
+message ID for this turn, which is unique across all turns. `<slug>` and `<md5>`
+are derived from `(topic, key)`. `<repo_hash>` is 8 hex chars of
+`MD5(repo_root)`. Worktrees live outside the project directory so they never
+appear in the user's repo. The `sqd-` prefix lets users identify Squid-managed
+branches.
+
+Using the assistant message ID as the key means every turn — adhoc or regular —
+gets a fresh, isolated worktree with no state carried over from prior turns.
+The assistant message row is inserted before worktree setup so the ID is
+available as the key.
 
 ### How the worktree becomes the agent's working directory
 
-At the start of each turn, `_setup_worktrees` calls `ensure_worktree` for each
-git repo under `code_roots`:
+At the start of each turn, `_setup_worktrees` calls `ensure_worktree` with
+`str(asst_msg_id)` as the key for each git repo under `code_roots`:
 
-1. If the worktree path already exists (from a prior turn of the same key), it
-   is reused as-is.
-2. If not, `git worktree add -b sqd-<key> <path> HEAD` creates it from the
-   current HEAD.
+- `git worktree add -b sqd-<key> <path> HEAD` creates the worktree from the
+  current HEAD (which always includes all prior turns' merged changes).
 
 `_setup_worktrees` then remaps all paths:
 
@@ -66,12 +71,8 @@ git repo under `code_roots`:
   replaced with their worktree equivalents via `map_to_worktree`.
 
 The agent reads and writes files inside the worktree. The original working tree
-is never touched while the worktree is live.
-
-**Adhoc turns** use a unique per-turn key (`adhoc-<uuid8>`) instead of the
-agent name, because adhoc turns run in parallel and must not share a worktree.
-Their worktree is removed immediately after the turn's sync completes (see Turn
-cycle below).
+is never touched during the turn. Both regular and adhoc turns follow the same
+path; there is no special-casing.
 
 ### Turn cycle
 
@@ -91,8 +92,8 @@ turn N ends
      c. rebase worktree branch onto new main HEAD
         → worktree is clean and current for turn N+1
 
-  adhoc turns only:
-  3. remove worktree + delete branch (ephemeral — not reused across turns)
+  3. remove worktree + delete branch (every turn is ephemeral; next turn
+     creates a fresh worktree from the new HEAD)
 ```
 
 The diff is shown before the auto-commit; it captures the full set of changes
@@ -102,10 +103,12 @@ branch and merged to main.
 
 ### Session close
 
-On session close or clear, `_cleanup_worktrees` runs:
-1. Final `sync_after_turn` (commit any mid-turn leftovers + merge + rebase).
-2. `git worktree remove` + `git branch -D sqd-<key>` if merge was clean.
-3. Worktrees with unresolved conflicts are kept alive (see below).
+On session close or clear, `_cleanup_worktrees(topic)` runs an orphan sweep:
+it queries all worktrees still registered for the topic (normally none, since
+each turn deletes its own worktree), syncs any with uncommitted changes, and
+removes them. This only fires for crash leftovers — worktrees abandoned because
+the server was killed mid-turn. The sweep uses `get_all_worktrees_for_topic`
+rather than an agent-name lookup, since worktrees are keyed by `asst_msg_id`.
 
 ### Merge conflicts
 
