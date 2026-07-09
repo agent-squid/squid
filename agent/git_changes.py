@@ -91,6 +91,8 @@ class GitChangeTracker:
     source_root: Path
     run_cwd: Path
     repo_root: Path
+    event_cwd: Path
+    event_repo_root: Path
     base_tree: str
     persistent: bool
 
@@ -103,19 +105,29 @@ class GitChangeTracker:
         agent: Optional[str],
         adhoc: bool,
         msg_id: Optional[int],
+        source_cwd: Optional[str] = None,
+        source_root: Optional[str] = None,
     ) -> Optional["GitChangeTracker"]:
         del topic, agent, adhoc, msg_id
-        source_cwd = Path(cwd).expanduser().resolve()
-        source_root = _repo_root(source_cwd)
-        if not source_root:
+        run_cwd = Path(cwd).expanduser().resolve()
+        run_root = _repo_root(run_cwd)
+        if not run_root:
             return None
 
-        base_tree = _snapshot_tree(source_root)
+        event_cwd = Path(source_cwd).expanduser().resolve() if source_cwd else run_cwd
+        if source_root:
+            event_root = Path(source_root).expanduser().resolve()
+        else:
+            event_root = _repo_root(event_cwd) or run_root
+
+        base_tree = _snapshot_tree(run_root)
         return cls(
-            source_cwd=source_cwd,
-            source_root=source_root,
-            run_cwd=source_cwd,
-            repo_root=source_root,
+            source_cwd=event_cwd,
+            source_root=event_root,
+            run_cwd=run_cwd,
+            repo_root=run_root,
+            event_cwd=event_cwd,
+            event_repo_root=event_root,
             base_tree=base_tree,
             persistent=True,
         )
@@ -145,12 +157,16 @@ class GitChangeTracker:
             "stat": stat,
             "diff": diff,
             "base": self.base_tree,
-            "cwd": str(self.run_cwd),
+            "cwd": str(self.event_cwd),
             "source": str(self.source_cwd),
-            "repo": str(self.repo_root),
+            "repo": str(self.event_repo_root),
             "mode": "direct-watch",
             "persistent": self.persistent,
             "truncated": truncated,
+            **({
+                "worktree_cwd": str(self.run_cwd),
+                "worktree_repo": str(self.repo_root),
+            } if self.repo_root != self.event_repo_root else {}),
         }
 
     def cleanup(self) -> None:
@@ -205,9 +221,28 @@ def prepare_tracker(*args, **kwargs) -> Optional[GitChangeTracker]:
         return None
 
 
-def prepare_trackers(roots: list[str], **kwargs) -> list[GitChangeTracker]:
+def _source_for_worktree_path(path: Path, worktree_sources: dict[Path, Path]) -> tuple[Optional[Path], Optional[Path]]:
+    for worktree_root, source_root in worktree_sources.items():
+        try:
+            rel = path.relative_to(worktree_root)
+        except ValueError:
+            continue
+        return source_root / rel, source_root
+    return None, None
+
+
+def prepare_trackers(
+    roots: list[str],
+    *,
+    worktree_sources: Optional[dict[str, str]] = None,
+    **kwargs,
+) -> list[GitChangeTracker]:
     trackers: list[GitChangeTracker] = []
     seen: set[Path] = set()
+    resolved_worktree_sources = {
+        Path(wt).expanduser().resolve(): Path(src).expanduser().resolve()
+        for wt, src in (worktree_sources or {}).items()
+    }
     for root in roots:
         try:
             source = Path(root).expanduser().resolve()
@@ -219,7 +254,13 @@ def prepare_trackers(roots: list[str], **kwargs) -> list[GitChangeTracker]:
         if dedupe_key in seen:
             continue
         seen.add(dedupe_key)
-        tracker = prepare_tracker(str(source), **kwargs)
+        source_cwd, source_root = _source_for_worktree_path(source, resolved_worktree_sources)
+        tracker = prepare_tracker(
+            str(source),
+            source_cwd=str(source_cwd) if source_cwd else None,
+            source_root=str(source_root) if source_root else None,
+            **kwargs,
+        )
         if tracker:
             trackers.append(tracker)
     return trackers
