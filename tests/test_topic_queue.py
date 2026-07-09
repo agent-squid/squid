@@ -3,7 +3,7 @@ import subprocess
 from unittest.mock import patch
 
 from agent.memory import code_roots_prompt_block
-from agent.topic_queue import QueueItem, TopicDispatcher, TopicWorker
+from agent.topic_queue import QueueItem, TopicDispatcher, TopicWorker, remap_worktree_paths
 
 
 def git(cwd, *args):
@@ -144,6 +144,65 @@ def test_worker_keeps_status_out_of_persisted_response():
         {"_status": "Checking the code..."},
         "Final response only.",
     ]
+
+
+def test_remap_worktree_paths_uses_source_repo_for_response_links():
+    text = (
+        "See [app.py](/Users/alice/.squid/worktrees/abcd1234/sqd-squid-2066-921e61/app.py:12) "
+        "and `/Users/alice/.squid/worktrees/abcd1234/sqd-squid-2066-921e61/tests/test_app.py`."
+    )
+
+    remapped = remap_worktree_paths(text, {
+        "/Users/alice/.squid/worktrees/abcd1234/sqd-squid-2066-921e61": "/Users/alice/Work/squid",
+    })
+
+    assert "/Users/alice/.squid/worktrees" not in remapped
+    assert "[app.py](/Users/alice/Work/squid/app.py:12)" in remapped
+    assert "`/Users/alice/Work/squid/tests/test_app.py`" in remapped
+
+
+def test_worker_remaps_worktree_paths_before_stream_and_persist():
+    worktree = "/Users/alice/.squid/worktrees/abcd1234/sqd-squid-2066-921e61"
+    source = "/Users/alice/Work/squid"
+
+    async def fake_runner(*args, **kwargs):
+        yield f"See [app.py]({worktree}/app.py:12)"
+
+    async def run():
+        worker = TopicWorker("work")
+        item = QueueItem(
+            seq=0,
+            topic="work",
+            agent="codex",
+            prompt="hello",
+            context_history=[],
+            backend="codex",
+            model=None,
+            msg_id=2066,
+        )
+        with patch("agent.runners.run_codex", fake_runner), \
+             patch("agent.stats_db.get_worktrees", return_value=[{
+                 "worktree_path": worktree,
+                 "repo_root": source,
+             }]), \
+             patch("agent.stats_db.insert_run_event"), \
+             patch("agent.stats_db.update_assistant_message") as update_message, \
+             patch("agent.stats_db.set_topic_session"), \
+             patch("agent.stats_db.save_stats"):
+            await worker._process(item)
+
+        chunks = []
+        while True:
+            chunk = await item.out_q.get()
+            chunks.append(chunk)
+            if chunk is None:
+                break
+        return update_message.call_args, chunks
+
+    update_call, chunks = asyncio.run(run())
+    expected = "See [app.py](/Users/alice/Work/squid/app.py:12)"
+    assert chunks[:1] == [expected]
+    assert update_call.args[1] == expected
 
 
 def test_worker_does_not_persist_status_as_response_when_no_final_text():

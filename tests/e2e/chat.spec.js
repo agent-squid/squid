@@ -203,6 +203,19 @@ test.describe('response bubble', () => {
     expect(href).toContain('token=test-token');
   });
 
+  test('Squid worktree links are not rewritten to local file links', async ({ page }) => {
+    await page.goto('/');
+    await page.route('**/chat', r => r.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(META, { data: '[app.py](/Users/haebin/.squid/worktrees/ef27c425/sqd-squid-2066-921e61/app.py:12)' }, DONE),
+    }));
+
+    await sendMsg(page);
+    const href = await page.locator(`${RESPONSE} a`).getAttribute('href');
+    expect(href).toContain('/Users/haebin/.squid/worktrees/ef27c425/sqd-squid-2066-921e61/app.py:12');
+    expect(href).not.toContain('/localfile?path=');
+  });
+
   test('renders Codex unified diff tool blocks', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200, headers: SSE_HEADERS,
@@ -327,6 +340,44 @@ test.describe('response bubble', () => {
     await expect(page.locator('#file-modal-breadcrumb')).toContainText('tmp/repo/ui/app.js');
     await expect(page.locator('#file-modal-body')).toContainText('const opened = true;');
     await expect(page.locator('#file-modal-body .fv-target')).toContainText('const opened = true;');
+  });
+
+  test('GitDiff file-open uses source repo instead of worktree repo', async ({ page }) => {
+    const openedPaths = [];
+    await page.route('**/chat/1/diff-revert-status**', route => route.fulfill({
+      json: { 'ui/app.js': 'revertable' },
+    }));
+    await page.route('**/localfile**', route => {
+      const url = new URL(route.request().url());
+      openedPaths.push(url.searchParams.get('path'));
+      route.fulfill({ status: 200, contentType: 'text/plain', body: 'const opened = true;' });
+    });
+    await page.route('**/chat', route => route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        META,
+        { event: 'tool', data: {
+          name: 'GitDiff',
+          repo: '/Users/haebin/Work/squid',
+          source: '/Users/haebin/Work/squid',
+          worktree_repo: '/Users/haebin/.squid/worktrees/ef27c425/sqd-squid-2066-921e61',
+          file_count: 1,
+          additions: 1,
+          deletions: 0,
+          files: [{ status: 'M', path: 'ui/app.js' }],
+          diff: 'diff --git a/ui/app.js b/ui/app.js\n@@ -1 +1 @@\n+const opened = true;',
+        } },
+        { data: 'Done' },
+        DONE,
+      ),
+    }));
+
+    await sendMsg(page);
+    await page.getByRole('button', { name: 'Open ui/app.js in file viewer' }).click();
+
+    await expect(page.locator('#file-modal-breadcrumb')).toContainText('Work/squid/ui/app.js');
+    expect(openedPaths[0]).toBe('/Users/haebin/Work/squid/ui/app.js');
+    expect(openedPaths[0]).not.toContain('/.squid/worktrees/');
   });
 
   test('recovered completion restores GitDiff and renders one end timestamp', async ({ page }) => {

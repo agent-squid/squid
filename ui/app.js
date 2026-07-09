@@ -135,6 +135,10 @@ function backendModelHint(backend) {
     return /^(\/|~\/)/.test(path) && /\.\w{1,16}$/.test(path);
   }
 
+  function isSquidWorktreePath(path) {
+    return /(^|\/)\.squid\/worktrees\//.test(path || '');
+  }
+
   function localFileUrl(path, line, endLine) {
     const params = new URLSearchParams({ path });
     const token = localStorage.getItem('squid_token');
@@ -150,6 +154,7 @@ function backendModelHint(backend) {
     if (url.startsWith('file://')) rawPath = decodeURIComponent(url.replace(/^file:\/\//, ''));
     const { line, endLine } = extractLine(rawPath);
     const path = stripLineSuffix(rawPath);
+    if (isSquidWorktreePath(path)) return url;
     if (isLocalFilePath(path)) return localFileUrl(path, line, endLine);
     return url;
   }
@@ -2927,6 +2932,10 @@ function _gitDiffDisplayPaths(files) {
   return files.map((file, i) => file.old_path ? `${oldLabels[i]} → ${newLabels[i]}` : newLabels[i]);
 }
 
+function _gitDiffSourceRepo(tool) {
+  return tool?.repo || tool?.source || tool?.cwd || '';
+}
+
 function makeToolBlock(tool, msgId) {
   const name = tool.name || '';
   const block = document.createElement('div');
@@ -2983,9 +2992,10 @@ function makeToolBlock(tool, msgId) {
     const deletions = tool.deletions ?? 0;
     toggle.textContent = `Changed files: ${count} file${count !== 1 ? 's' : ''}, +${additions} -${deletions}`;
 
-    if (msgId && tool.repo) {
+    const sourceRepo = _gitDiffSourceRepo(tool);
+    if (msgId && sourceRepo) {
       block.dataset.msgId = String(msgId);
-      block.dataset.repo = tool.repo;
+      block.dataset.repo = sourceRepo;
       const revertBar = document.createElement('div');
       revertBar.className = 'gitdiff-revert-bar';
       body.appendChild(revertBar);
@@ -3004,7 +3014,7 @@ function makeToolBlock(tool, msgId) {
 
       const row = document.createElement('div');
       row.className = 'gitdiff-file-row';
-      if (msgId && tool.repo) row.dataset.file = file.path;
+      if (msgId && sourceRepo) row.dataset.file = file.path;
 
       const fileToggle = document.createElement('button');
       fileToggle.className = 'gitdiff-file-toggle';
@@ -3038,7 +3048,7 @@ function makeToolBlock(tool, msgId) {
       }
 
       const _absPath = file.path
-        ? (file.path.startsWith('/') ? file.path : tool.repo ? tool.repo + '/' + file.path : null)
+        ? (file.path.startsWith('/') ? file.path : sourceRepo ? sourceRepo + '/' + file.path : null)
         : null;
       if (status !== 'D' && _absPath && _isTextPath(_absPath)) {
         const openBtn = document.createElement('button');
