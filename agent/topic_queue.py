@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 log = logging.getLogger(__name__)
@@ -20,6 +21,7 @@ class QueueItem:
     backend: str
     model: Optional[str]
     cwd: Optional[str] = None
+    source_cwd: Optional[str] = None
     code_roots: Optional[list[str]] = None
     timeout: Optional[int] = None
     resume_session_id: Optional[str] = None
@@ -225,7 +227,8 @@ class TopicWorker:
                                        lookback=item.lookback)
                             if item.agent and not item.adhoc:
                                 set_topic_session(
-                                    item.topic, item.agent, session_id, effective_cwd,
+                                    item.topic, item.agent, session_id,
+                                    item.source_cwd or effective_cwd,
                                     backend.fingerprint,
                                 )
                             enriched["session_id"] = session_id
@@ -288,6 +291,21 @@ class TopicWorker:
                 clear_topic_session(item.topic, item.agent)
 
             await _emit_git_diff()
+
+            if not item.adhoc and item.agent:
+                from .stats_db import get_worktrees
+                from .worktree import sync_after_turn
+                wt_records = await asyncio.to_thread(get_worktrees, item.topic, item.agent)
+                for rec in wt_records:
+                    try:
+                        conflicts = await asyncio.to_thread(
+                            sync_after_turn, Path(rec["repo_root"]), item.topic, item.agent, item.msg_id
+                        )
+                        if conflicts:
+                            log.warning("worktree merge conflicts after turn msg_id=%s: %s", item.msg_id, conflicts)
+                    except Exception:
+                        log.exception("worktree sync failed after turn msg_id=%s", item.msg_id)
+
             content = raw
             context_json = json.dumps(tool_events) if tool_events else None
             update_assistant_message(item.msg_id, content, session_id,
@@ -339,6 +357,7 @@ class TopicDispatcher:
         model: Optional[str],
         agent: Optional[str] = None,
         cwd: Optional[str] = None,
+        source_cwd: Optional[str] = None,
         response_timeout: Optional[int] = None,
         resume_session_id: Optional[str] = None,
         adhoc: bool = False,
@@ -357,7 +376,8 @@ class TopicDispatcher:
         item = QueueItem(
             seq=0, topic=topic, agent=agent,
             prompt=prompt, display_prompt=display_prompt, context_history=context_history,
-            backend=backend, model=model, cwd=cwd, code_roots=code_roots, timeout=response_timeout,
+            backend=backend, model=model, cwd=cwd, source_cwd=source_cwd,
+            code_roots=code_roots, timeout=response_timeout,
             resume_session_id=resume_session_id,
             adhoc=adhoc, lookback=lookback, msg_id=msg_id,
         )

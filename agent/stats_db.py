@@ -119,6 +119,17 @@ _TABLES = [
         content     TEXT,
         saved_at    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )""",
+    """CREATE TABLE IF NOT EXISTS worktrees (
+        topic           TEXT NOT NULL,
+        agent           TEXT NOT NULL,
+        repo_root       TEXT NOT NULL,
+        worktree_path   TEXT NOT NULL,
+        branch_name     TEXT NOT NULL,
+        status          TEXT NOT NULL DEFAULT 'active',
+        created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        last_used_at    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        PRIMARY KEY (topic, agent, repo_root)
+    )""",
     # FTS5 index — standalone table (not external-content). See ADR-0021.
     # Trigger fires on the status='done' update (final content), not the first
     # partial-content save, so the index always holds the complete response.
@@ -148,6 +159,17 @@ _TABLES = [
 # Add future schema changes here as new entries after each release.
 _MIGRATIONS: list[str] = [
     "ALTER TABLE topic_sessions ADD COLUMN backend_fingerprint TEXT",
+    """CREATE TABLE IF NOT EXISTS worktrees (
+        topic           TEXT NOT NULL,
+        agent           TEXT NOT NULL,
+        repo_root       TEXT NOT NULL,
+        worktree_path   TEXT NOT NULL,
+        branch_name     TEXT NOT NULL,
+        status          TEXT NOT NULL DEFAULT 'active',
+        created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        last_used_at    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        PRIMARY KEY (topic, agent, repo_root)
+    )""",
     "ALTER TABLE chat_messages ADD COLUMN session_turn_index INTEGER",
     "DROP INDEX IF EXISTS idx_chat_messages_session_turns",
     "ALTER TABLE chat_messages ADD COLUMN lookback INTEGER DEFAULT 0",
@@ -1771,3 +1793,39 @@ def add_bookmark(msg_id: int, topic: Optional[str], agent: Optional[str], conten
 def remove_bookmark(msg_id: int) -> None:
     with _connect() as conn:
         conn.execute("DELETE FROM bookmarks WHERE msg_id = ?", (msg_id,))
+
+
+# ---------------------------------------------------------------------------
+# Worktrees
+# ---------------------------------------------------------------------------
+
+def save_worktree(topic: str, agent: str, repo_root: str, wt_path: str, br: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            """INSERT INTO worktrees (topic, agent, repo_root, worktree_path, branch_name)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(topic, agent, repo_root) DO UPDATE SET
+                 last_used_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), status='active'""",
+            (topic, agent, repo_root, wt_path, br),
+        )
+
+
+def get_worktrees(topic: str, agent: str) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM worktrees WHERE topic=? AND agent=?", (topic, agent)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_worktree(topic: str, agent: str, repo_root: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "DELETE FROM worktrees WHERE topic=? AND agent=? AND repo_root=?",
+            (topic, agent, repo_root),
+        )
+
+
+def delete_all_worktrees(topic: str, agent: str) -> None:
+    with _connect() as conn:
+        conn.execute("DELETE FROM worktrees WHERE topic=? AND agent=?", (topic, agent))

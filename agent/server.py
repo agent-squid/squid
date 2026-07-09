@@ -79,6 +79,7 @@ from .stats_db import (
     get_recent_prompts,
     save_file_edit, get_file_edit_history, get_file_edit_by_id,
     get_bookmarks, add_bookmark, remove_bookmark,
+    save_worktree, get_worktrees, delete_worktree, delete_all_worktrees,
 )
 from .journal import _generate_journal, _current_week, list_topic_journals, read_journal
 from . import creds
@@ -470,6 +471,96 @@ async def _drain_to_completion(
         log.exception("drain save failed msg_id=%s", msg_id)
 
 # ---------------------------------------------------------------------------
+# Worktree helpers
+# ---------------------------------------------------------------------------
+
+async def _setup_worktrees(
+    code_roots: list[str],
+    cwd: Optional[str],
+    topic: str,
+    agent: str,
+) -> tuple[list[str], Optional[str]]:
+    """
+    Create worktrees for each unique git repo in code_roots and remap paths.
+    Returns (effective_code_roots, effective_cwd).
+    Falls back to original paths on any error.
+    """
+    from .worktree import repo_root_for, ensure_worktree, map_to_worktree, branch_name
+
+    worktree_map: dict[Path, Path] = {}
+    for root in code_roots:
+        try:
+            repo_root = await asyncio.to_thread(repo_root_for, root)
+            if repo_root and repo_root not in worktree_map:
+                wt_path = await asyncio.to_thread(ensure_worktree, repo_root, topic, agent)
+                worktree_map[repo_root] = wt_path
+                await asyncio.to_thread(
+                    save_worktree, topic, agent,
+                    str(repo_root), str(wt_path), branch_name(topic, agent),
+                )
+        except Exception:
+            log.exception("worktree setup failed for root=%s topic=%s agent=%s", root, topic, agent)
+
+    if not worktree_map:
+        return code_roots, cwd
+
+    effective_roots = [map_to_worktree(r, worktree_map) or r for r in code_roots]
+    effective_cwd = (map_to_worktree(cwd, worktree_map) or cwd) if cwd else cwd
+    return effective_roots, effective_cwd
+
+
+async def _sync_turn_worktrees(topic: str, agent: str, msg_id: Optional[int]) -> dict[str, list[str]]:
+    """
+    Called at end of each turn: commit + merge + rebase each worktree.
+    Returns repo_root -> conflict_files for any repos with merge conflicts.
+    """
+    from .worktree import sync_after_turn
+
+    records = await asyncio.to_thread(get_worktrees, topic, agent)
+    conflicts: dict[str, list[str]] = {}
+
+    for rec in records:
+        repo_root = Path(rec["repo_root"])
+        try:
+            conflict_files = await asyncio.to_thread(
+                sync_after_turn, repo_root, topic, agent, msg_id
+            )
+            if conflict_files:
+                conflicts[rec["repo_root"]] = conflict_files
+        except Exception:
+            log.exception("worktree sync failed for %s topic=%s agent=%s", repo_root, topic, agent)
+
+    return conflicts
+
+
+async def _cleanup_worktrees(topic: str, agent: str) -> dict[str, list[str]]:
+    """
+    Called at session close: do a final sync then remove worktrees.
+    Worktrees with unresolved conflicts are kept alive.
+    """
+    from .worktree import remove_worktree, sync_after_turn
+
+    records = await asyncio.to_thread(get_worktrees, topic, agent)
+    conflicts: dict[str, list[str]] = {}
+
+    for rec in records:
+        repo_root = Path(rec["repo_root"])
+        try:
+            conflict_files = await asyncio.to_thread(
+                sync_after_turn, repo_root, topic, agent, None
+            )
+            if conflict_files:
+                conflicts[rec["repo_root"]] = conflict_files
+            else:
+                await asyncio.to_thread(remove_worktree, repo_root, topic, agent)
+                await asyncio.to_thread(delete_worktree, topic, agent, rec["repo_root"])
+        except Exception:
+            log.exception("worktree cleanup failed for %s topic=%s agent=%s", repo_root, topic, agent)
+
+    return conflicts
+
+
+# ---------------------------------------------------------------------------
 # Streaming response generator
 # ---------------------------------------------------------------------------
 
@@ -488,6 +579,7 @@ async def stream_response(
     lookback: int = 0,
     code_roots: Optional[list[str]] = None,
     display_prompt: Optional[str] = None,
+    source_cwd: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     yield sse_event("meta", json.dumps({"agent": agent, "backend": backend, "model": model, "msg_id": asst_msg_id, "adhoc": adhoc}))
 
@@ -495,6 +587,7 @@ async def stream_response(
     out_q, seq, worker = await dispatcher.dispatch(
         topic=topic, prompt=message, context_history=context_history,
         backend=backend, model=model, agent=agent, cwd=effective_cwd,
+        source_cwd=source_cwd,
         response_timeout=response_timeout,
         resume_session_id=resume_session_id,
         adhoc=adhoc, lookback=lookback, msg_id=asst_msg_id,
@@ -670,11 +763,21 @@ async def chat(req: ChatRequest):
     prefix_blocks: list[str] = []
     memory_config = topic_memory_squid_config(topic)
     code_roots = memory_config.get("code_roots") or []
-    if not native_backend_command and code_roots:
-        code_roots_block = code_roots_prompt_block(code_roots)
+    source_cwd = cwd  # original cwd before worktree remapping
+
+    # Set up worktree isolation for non-adhoc sessions in git repos
+    effective_code_roots = code_roots
+    effective_cwd = cwd
+    if not req.adhoc and resolved_agent and code_roots:
+        effective_code_roots, effective_cwd = await _setup_worktrees(
+            code_roots, cwd, topic, resolved_agent
+        )
+
+    if not native_backend_command and effective_code_roots:
+        code_roots_block = code_roots_prompt_block(effective_code_roots)
         if code_roots_block:
             prefix_blocks.append(code_roots_block)
-    tracking_roots: list[str] = [] if native_backend_command else code_roots
+    tracking_roots: list[str] = [] if native_backend_command else effective_code_roots
     memory_revision: Optional[str] = None
     if not native_backend_command and req.include_topic_memory:
         memory_data = read_topic_memory(topic)
@@ -726,13 +829,14 @@ async def chat(req: ChatRequest):
     await maybe_sync()
     return StreamingResponse(
         stream_response(
-            effective_message, topic, resolved_agent, backend, model, cwd,
+            effective_message, topic, resolved_agent, backend, model, effective_cwd,
             context_history, asst_msg_id, response_timeout,
             resume_session_id=resume_session_id,
             adhoc=req.adhoc,
             lookback=lookback,
             code_roots=tracking_roots,
             display_prompt=req.message,
+            source_cwd=source_cwd,
         ),
         media_type="text/event-stream",
         headers={
@@ -793,9 +897,13 @@ async def run_cmd(req: CmdRequest):
         if not agent:
             return JSONResponse({"ok": False, "error": "no active session"}, status_code=400)
         killed = kill_procs_by_topic(topic, agent=agent, adhoc=False)
+        conflicts = await _cleanup_worktrees(topic, agent)
         clear_topic_session(topic, agent)
         log.info("cmd %s topic=%s agent=%s killed=%s", req.command, topic, agent, killed)
-        return JSONResponse({"ok": True, "agent": agent})
+        result: dict = {"ok": True, "agent": agent}
+        if conflicts:
+            result["worktree_conflicts"] = conflicts
+        return JSONResponse(result)
 
     if req.command == "journal":
         week_key, week_start, week_end = _current_week()
@@ -1085,8 +1193,12 @@ async def clear_session(topic: str, agent: str):
     topic = _normalize_topic_response(topic)
     if isinstance(topic, JSONResponse):
         return topic
+    conflicts = await _cleanup_worktrees(topic, agent)
     clear_topic_session(topic, agent)
-    return JSONResponse({"ok": True})
+    result: dict = {"ok": True}
+    if conflicts:
+        result["worktree_conflicts"] = conflicts
+    return JSONResponse(result)
 
 
 @app.get("/context/{topic}")
