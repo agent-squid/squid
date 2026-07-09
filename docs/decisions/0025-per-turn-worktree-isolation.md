@@ -25,16 +25,16 @@ that turn's changes.
 1. **No isolation.** Agents write directly to the real working tree. Diffs are
    computed from the pre-turn Git snapshot vs. the post-turn working tree state.
    Concurrent or cross-session changes may be included in the diff.
-2. **Per-turn isolation via Git worktrees.** At the start of each turn, ensure a
-   dedicated worktree exists for the `(topic, agent)` pair. The agent runs inside
-   it. At turn end, commit any remaining changes, merge to main, and rebase the
-   worktree onto the new HEAD — ready for the next turn without recreating it.
+2. **Per-turn isolation via Git worktrees.** At the start of each turn, create
+   or reuse the worktree keyed by that turn's assistant message ID. The agent
+   runs inside it. At turn end, capture the diff, commit any remaining changes,
+   merge to the source repo, and remove the worktree and branch on success.
 
 ## Decision
 
-**Option 2.** Squid creates a Git worktree keyed by `(topic, agent)` and keeps
-it alive across turns, enforcing turn-level isolation via a commit-merge-rebase
-cycle at the end of each turn.
+**Option 2.** Squid creates a Git worktree keyed by `(topic, assistant message
+ID)`, runs the agent inside it, captures a turn-scoped diff, syncs successful
+changes back to the source repository, and removes the worktree on success.
 
 ### Naming and paths
 
@@ -44,8 +44,10 @@ branch name:    sqd-<slug>-<md5>
 ```
 
 The key passed to the naming functions is `str(asst_msg_id)` — the assistant
-message ID for this turn, which is unique across all turns. `<slug>` and `<md5>`
-are derived from `(topic, key)`. `<repo_hash>` is 8 hex chars of
+message ID for this turn, which is unique across all turns. It is stored in the
+`worktrees.agent` column because the table predates per-turn keys; for worktree
+rows, that column is a worktree key, not the configured agent name. `<slug>` and
+`<md5>` are derived from `(topic, key)`. `<repo_hash>` is 8 hex chars of
 `MD5(repo_root)`. Worktrees live outside the project directory so they never
 appear in the user's repo. The `sqd-` prefix lets users identify Squid-managed
 branches.
@@ -78,7 +80,7 @@ path; there is no special-casing.
 
 ```
 turn N starts
-  → ensure_worktree (create or reuse for this topic+agent pair)
+  → ensure_worktree (create or reuse for this topic+message pair)
   → remap effective_cwd and effective_code_roots to worktree paths
   → take pre-turn git snapshot of the worktree for diff tracking
   → agent subprocess runs with cwd = worktree path
@@ -88,27 +90,50 @@ turn N ends
      including any uncommitted changes still in the worktree)
   2. sync_after_turn:
      a. auto-commit any remaining uncommitted changes ("squid: turn N")
-     b. merge sqd-<key> → main (--no-ff)
-     c. rebase worktree branch onto new main HEAD
-        → worktree is clean and current for turn N+1
-
+     b. merge sqd-<key> → source repository's current branch (--no-ff)
+     c. rebase worktree branch onto the new source HEAD
   3. remove worktree + delete branch (every turn is ephemeral; next turn
      creates a fresh worktree from the new HEAD)
 ```
 
 The diff is shown before the auto-commit; it captures the full set of changes
 the agent made in the worktree during the turn, whether or not they have been
-committed yet. After `sync_after_turn` those changes are committed on the session
-branch and merged to main.
+committed yet. After `sync_after_turn` those changes are committed on the
+per-turn branch and merged to the source repository's current branch.
+
+### Source of truth
+
+The Git repository and active worktree are the source of truth for file
+contents. SQLite is not the source of truth for reconstructing the working tree.
+It stores:
+
+- the temporary worktree registry needed for cleanup and source-root mapping;
+- run events and the assistant message context, including the captured
+  `GitDiff` event used for UI display, revert checks, search, and pinned context.
+
+Once a turn syncs successfully, the source repository contains the actual
+changes as Git commits and the DB's worktree registry row is deleted. The stored
+`GitDiff` is durable history/metadata for the completed turn, not the canonical
+copy of the change.
 
 ### Session close
 
+On normal turn completion, `TopicQueue._process` calls `sync_after_turn`,
+`remove_worktree`, and `delete_worktree` for every registry row keyed by
+`str(asst_msg_id)`. Successful turns therefore leave no live worktree behind.
+
 On session close or clear, `_cleanup_worktrees(topic)` runs an orphan sweep:
-it queries all worktrees still registered for the topic (normally none, since
-each turn deletes its own worktree), syncs any with uncommitted changes, and
-removes them. This only fires for crash leftovers — worktrees abandoned because
-the server was killed mid-turn. The sweep uses `get_all_worktrees_for_topic`
-rather than an agent-name lookup, since worktrees are keyed by `asst_msg_id`.
+it queries all worktrees still registered for the topic, syncs any with
+uncommitted changes, and removes them. This handles leftovers from crashes,
+cancelled runs, exceptions during cleanup, and conflict paths. The sweep uses
+`get_all_worktrees_for_topic` rather than an agent-name lookup, since worktrees
+are keyed by `asst_msg_id`.
+
+If a code review or follow-up agent is launched while a turn is active, or
+against an unresolved/stale worktree path, that agent may legitimately inspect
+the worktree because Squid has remapped the topic code roots to the isolated
+worktree for that run. That does not make the DB the file source of truth; it
+means the worktree is the live execution root until cleanup succeeds.
 
 ### Merge conflicts
 
@@ -117,9 +142,9 @@ occurs when two sessions modify the same lines.
 
 When `merge --no-ff` fails:
 - The merge is aborted immediately (`git merge --abort`).
-- The worktree is left intact; changes remain committed on the session branch.
+- The worktree is left intact; changes remain committed on the per-turn branch.
 - The conflicting file list is returned to the caller for surfacing in the UI.
-- The session branch and worktree are not removed until the conflict is resolved.
+- The per-turn branch and worktree are not removed until the conflict is resolved.
 
 ## Fallback
 
@@ -144,13 +169,15 @@ In fallback mode:
 - Good: all turns — both regular and adhoc — are isolated in their own worktree.
 - Good: each turn diff is scoped to that turn's worktree changes, isolated from
   the real working tree and from other sessions.
-- Good: regular-turn worktrees persist across turns so there is no per-turn
-  setup cost after the first turn.
 - Good: multiple sessions and parallel adhoc turns on the same code root are
   isolated from each other via separate worktrees on separate branches.
-- Good: auto-commit at each turn end produces a per-turn commit history on main.
+- Good: auto-commit at each turn end produces a per-turn commit history on the
+  source repo's current branch.
+- Good: successful turns clean up their isolated worktree and branch
+  immediately after sync.
 - Bad: if Squid crashes mid-turn, stale `~/.squid/worktrees/` directories and
-  `sqd-*` branches can accumulate; a startup sweep is needed to prune them.
+  `sqd-*` branches can accumulate until topic close/clear or a startup sweep
+  prunes them.
 - Bad: non-git directories and repos without an initial commit fall back to
   direct working-tree mode; bleed is possible until the condition is fixed.
 - Bad: in fallback mode, the diff is not turn-scoped and the user must be told.
