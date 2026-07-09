@@ -823,6 +823,54 @@ def get_context_history(topic: str, limit: int, agent: Optional[str] = None) -> 
     return result, ids
 
 
+def _gitdiff_context_summary(context: Optional[str]) -> str:
+    if not context:
+        return ""
+    try:
+        tools = json.loads(context)
+    except Exception:
+        return ""
+    if not isinstance(tools, list):
+        return ""
+
+    blocks = []
+    for tool in tools:
+        if not isinstance(tool, dict) or tool.get("name") != "GitDiff":
+            continue
+        files = [f for f in tool.get("files", []) if isinstance(f, dict) and f.get("path")]
+        if not files:
+            continue
+
+        repo = tool.get("worktree_repo") or tool.get("repo") or tool.get("cwd")
+        file_count = tool.get("file_count") or len(files)
+        additions = tool.get("additions")
+        deletions = tool.get("deletions")
+        total = f"{file_count} file{'s' if file_count != 1 else ''}"
+        if isinstance(additions, int) and isinstance(deletions, int):
+            total = f"{total}, +{additions} -{deletions}"
+
+        lines = ["Changed files from this response:", "<changed_files>"]
+        if repo:
+            lines.append(f"Repo: {repo}")
+        lines.append(f"Summary: {total}")
+        stat = (tool.get("stat") or "").strip()
+        if stat:
+            lines.extend(["Stat:", stat])
+        lines.append("Files:")
+        for f in files:
+            status = f.get("status") or "?"
+            path = f.get("path")
+            old_path = f.get("old_path")
+            if old_path and old_path != path:
+                lines.append(f"- {status} {old_path} -> {path}")
+            else:
+                lines.append(f"- {status} {path}")
+        lines.append("</changed_files>")
+        blocks.append("\n".join(lines))
+
+    return "\n\n".join(blocks)
+
+
 def get_messages_by_ids(ids: list[int]) -> list[dict]:
     """Fetch specific assistant messages by ID as context history pairs.
     Returns [user, asst, ...] dicts in ascending ID order. Only done rows with content."""
@@ -831,7 +879,7 @@ def get_messages_by_ids(ids: list[int]) -> list[dict]:
     placeholders = ",".join("?" * len(ids))
     with _connect() as conn:
         rows = conn.execute(
-            f"""SELECT a.id, u.content AS user_content, a.content AS asst_content
+            f"""SELECT a.id, u.content AS user_content, a.content AS asst_content, a.context
                 FROM chat_messages a
                 JOIN chat_messages u ON u.id = a.reply_to
                 WHERE a.id IN ({placeholders})
@@ -842,9 +890,13 @@ def get_messages_by_ids(ids: list[int]) -> list[dict]:
         ).fetchall()
     result = []
     for row in rows:
+        asst_content = row["asst_content"]
+        gitdiff_summary = _gitdiff_context_summary(row["context"])
+        if gitdiff_summary:
+            asst_content = f"{asst_content.rstrip()}\n\n{gitdiff_summary}"
         result.extend([
             {"role": "user",      "content": row["user_content"]},
-            {"role": "assistant", "content": row["asst_content"]},
+            {"role": "assistant", "content": asst_content},
         ])
     return result
 

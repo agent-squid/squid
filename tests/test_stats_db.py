@@ -360,6 +360,51 @@ def test_reverting_later_gitdiff_unblocks_older_same_file(tmp_path, monkeypatch)
     assert stats_db.get_diff_revert_eligibility(first_id, repo) == {"app.txt": "revertable"}
 
 
+def test_get_messages_by_ids_includes_compact_gitdiff_context(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user_id = stats_db.insert_user_message("squid", "codex", "implement change")
+    assistant_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
+    context = json.dumps([{
+        "name": "GitDiff",
+        "repo": "/tmp/project",
+        "file_count": 2,
+        "additions": 12,
+        "deletions": 3,
+        "stat": " app.py | 10 +++++++---\n test_app.py | 5 +++++",
+        "files": [
+            {"status": "M", "path": "app.py"},
+            {"status": "A", "path": "test_app.py"},
+        ],
+        "diff": "full diff should not be injected",
+    }])
+    stats_db.update_assistant_message(
+        assistant_id, "implemented", "session-1", "done", context=context,
+    )
+
+    messages = stats_db.get_messages_by_ids([assistant_id])
+
+    assert messages == [
+        {"role": "user", "content": "implement change"},
+        {"role": "assistant", "content": (
+            "implemented\n\n"
+            "Changed files from this response:\n"
+            "<changed_files>\n"
+            "Repo: /tmp/project\n"
+            "Summary: 2 files, +12 -3\n"
+            "Stat:\n"
+            "app.py | 10 +++++++---\n"
+            " test_app.py | 5 +++++\n"
+            "Files:\n"
+            "- M app.py\n"
+            "- A test_app.py\n"
+            "</changed_files>"
+        )},
+    ]
+    assert "full diff should not be injected" not in messages[1]["content"]
+
+
 def test_search_messages_can_filter_bookmarks_before_limit(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
