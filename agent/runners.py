@@ -743,6 +743,7 @@ class _ClaudeInteractiveCLI:
             turn_agent_tool_use_id: Optional[str] = None
             ask_followup_tool_use_id: Optional[str] = None
             ask_followup_question_text: str = ""
+            accepted_agent_notification = False
             timeout = response_timeout if response_timeout is not None else RESPONSE_TIMEOUT
             deadline = asyncio.get_event_loop().time() + timeout
             first_byte = True
@@ -802,6 +803,7 @@ class _ClaudeInteractiveCLI:
                     ):
                         accepting_turn = True
                         current_turn_is_prompt = False
+                        accepted_agent_notification = True
                         for chunk in turn_live_chunks:
                             yield chunk
                         turn_live_chunks = []
@@ -831,6 +833,7 @@ class _ClaudeInteractiveCLI:
                             parser = _ClaudeStreamParser(history)
                             accepting_turn = False
                             current_turn_is_prompt = False
+                            accepted_agent_notification = False
                             turn_live_chunks = []
                             turn_result_chunks = []
                             turn_agent_tool_use_id = None
@@ -844,6 +847,25 @@ class _ClaudeInteractiveCLI:
                                 # result body is absent (Claude Code returned empty text).
                                 if not any(isinstance(c, str) and c.strip() for c in turn_result_chunks):
                                     turn_result_chunks.insert(0, ask_followup_question_text)
+                            elif (
+                                accepted_agent_notification
+                                and not any(isinstance(c, str) and c.strip() for c in turn_result_chunks)
+                            ):
+                                # Claude can emit a successful, result-empty thinking-only
+                                # assistant turn immediately after replaying an async Agent
+                                # task notification, then emit the actual user-visible
+                                # answer as the next assistant result. Do not complete the
+                                # Squid turn on stats-only output from that internal turn.
+                                parser = _ClaudeStreamParser(history)
+                                accepting_turn = True
+                                current_turn_is_prompt = False
+                                accepted_agent_notification = True
+                                turn_live_chunks = []
+                                turn_result_chunks = []
+                                turn_agent_tool_use_id = None
+                                ask_followup_tool_use_id = None
+                                ask_followup_question_text = ""
+                                continue
                             for chunk in turn_result_chunks:
                                 yield chunk
                             break
@@ -853,6 +875,7 @@ class _ClaudeInteractiveCLI:
                         parser = _ClaudeStreamParser(history)
                         accepting_turn = False
                         current_turn_is_prompt = False
+                        accepted_agent_notification = False
                         turn_live_chunks = []
                         turn_result_chunks = []
                         turn_agent_tool_use_id = None
