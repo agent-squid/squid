@@ -4527,6 +4527,7 @@ let _statsPresets = [];
 let _activeStatsPresetId = null;
 let _statsPresetDirty = false;
 let _statsPresetsLoaded = false;
+let _statsBreakdownColumnSort = 'name';
 const STATS_SERIES_COLORS = [
   'rgba(100,160,255,1)',
   'rgba(80,200,120,1)',
@@ -4599,6 +4600,29 @@ function _formatStatsMetricValue(value, metric) {
   if (metric === 'cost') return _formatCost(value);
   if (metric === 'quota') return _formatQuotaDelta(value);
   return fmtNum(value || 0);
+}
+
+const STATS_ICON_LEFT = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M10 3.5 5.5 8l4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const STATS_ICON_RIGHT = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m6 3.5 4.5 4.5L6 12.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+function _statsBreakdownHeader(label) {
+  return `<span class="stats-breakdown-heading">
+    <span class="stats-breakdown-label">${escapeHtml(label)}</span>
+    <span class="stats-breakdown-sort">
+      <button class="stats-breakdown-sort-btn${_statsBreakdownColumnSort === 'name' ? ' active' : ''}" type="button" data-stats-column-sort="name" title="Sort columns by name" aria-label="Sort breakdown columns by name">${STATS_ICON_LEFT}</button>
+      <button class="stats-breakdown-sort-btn${_statsBreakdownColumnSort === 'total' ? ' active' : ''}" type="button" data-stats-column-sort="total" title="Sort columns by total" aria-label="Sort breakdown columns by total">${STATS_ICON_RIGHT}</button>
+    </span>
+  </span>`;
+}
+
+function _bindStatsBreakdownSort() {
+  statsContent.querySelectorAll('[data-stats-column-sort]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      _statsBreakdownColumnSort = btn.dataset.statsColumnSort || 'name';
+      _rerenderStats();
+    });
+  });
 }
 
 const STATS_TABLE_MEASURES = [
@@ -4797,6 +4821,13 @@ function _breakdownPivot(rows) {
     }
     return { period, values, misc, total };
   });
+  if (_statsBreakdownColumnSort === 'total') {
+    selected.sort((a, b) => {
+      const totalA = periodRows.reduce((sum, row) => sum + (row.values[a] || 0), 0);
+      const totalB = periodRows.reduce((sum, row) => sum + (row.values[b] || 0), 0);
+      return totalB - totalA || (labels.get(a) || a).localeCompare(labels.get(b) || b);
+    });
+  }
   return { selected, labels, periodRows };
 }
 
@@ -5460,7 +5491,10 @@ function renderAgentBreakdownStats(rows) {
     grandTotal += row.total || 0;
   }
   const hasMisc = totalMisc > 0;
-  const headers = pivot.selected.map(key => `<th>${escapeHtml(pivot.labels.get(key) || key)}</th>`).join('');
+  const headers = pivot.selected.map(key => {
+    const label = pivot.labels.get(key) || key;
+    return `<th aria-label="${escapeHtml(label)}">${_statsBreakdownHeader(label)}</th>`;
+  }).join('');
   const miscHeader = hasMisc ? '<th>Misc</th>' : '';
   const bodyRows = _statsPageSlice(pivot.periodRows).map(row => {
     const cells = pivot.selected
@@ -5492,6 +5526,7 @@ function renderAgentBreakdownStats(rows) {
       <td>${_formatStatsMetricValue(grandTotal, metric)}</td>
     </tr></tfoot>
   </table>`;
+  _bindStatsBreakdownSort();
   _statsAppendPager(pivot.periodRows.length);
 }
 
@@ -5537,6 +5572,7 @@ function initStats() {
 
   document.getElementById('sf-breakdown').addEventListener('change', e => {
     statsBreakdown = e.target.value;
+    _statsBreakdownColumnSort = 'name';
     e.target.value = statsBreakdown;
     _markStatsPresetDirty();
     if (statsBreakdown) {
