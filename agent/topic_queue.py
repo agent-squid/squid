@@ -253,7 +253,9 @@ class TopicWorker:
                         enriched["lookback"] = item.lookback
                         if session_id:
                             save_stats(session_id, enriched, topic=item.topic, agent=item.agent,
-                                       backend=item.backend, model=item.model, cwd=display_cwd,
+                                       backend=item.backend,
+                                       model=enriched.pop("model", None) or item.model,
+                                       cwd=display_cwd,
                                        lookback=item.lookback)
                             if item.agent and not item.adhoc:
                                 set_topic_session(
