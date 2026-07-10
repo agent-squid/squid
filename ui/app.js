@@ -4522,7 +4522,11 @@ let _statsFiltersLoaded = false;
 let _statsPage = 0;
 const _STATS_PAGE_SIZE = 10;
 const _statsMeasures = new Set(['sessions', 'turns', 'tokens_in', 'tokens_out']);
-const _STATS_BREAKDOWN_TOP_N = 3;
+const _STATS_BREAKDOWN_SERIES_BUDGET = 4;
+let _statsPresets = [];
+let _activeStatsPresetId = null;
+let _statsPresetDirty = false;
+let _statsPresetsLoaded = false;
 const STATS_SERIES_COLORS = [
   'rgba(100,160,255,1)',
   'rgba(80,200,120,1)',
@@ -4661,17 +4665,38 @@ function _agentBaseKey(key) {
   return String(key || 'unknown').replace(/!$/, '');
 }
 
-function _topBreakdownAgentKeys(rows) {
+function _sessionTypesForFilter() {
+  if (statsFilters.adhoc === 'session') return ['session'];
+  if (statsFilters.adhoc === 'adhoc') return ['adhoc'];
+  return ['session', 'adhoc'];
+}
+
+function _statsSeriesKey(row) {
+  const agent = _agentBaseKey(_agentKey(row));
+  const sessionType = row.session_type || (String(_agentKey(row)).endsWith('!') ? 'adhoc' : 'session');
+  const agentLabel = sessionType === 'adhoc' && statsBreakdown.endsWith('_session') ? `${agent}!` : agent;
+  if (statsBreakdown === 'topic_agent' || statsBreakdown === 'topic_agent_session') {
+    return `${row.topic || 'unknown'}\u0000${agentLabel}`;
+  }
+  return agentLabel;
+}
+
+function _statsSeriesLabel(key) {
+  return String(key).replace('\u0000', ' / ');
+}
+
+function _topDimensionValues(rows, dimension, limit, allowed = null) {
   const totals = new Map();
   const labels = new Map();
   for (const row of rows) {
-    const key = _agentBaseKey(_agentKey(row));
-    totals.set(key, (totals.get(key) || 0) + _statsMetricValue(row, statsChartY1));
-    if (!labels.has(key)) labels.set(key, _agentBaseKey(_agentLabel(row)));
+    const key = dimension === 'topic' ? (row.topic || 'unknown') : _agentBaseKey(_agentKey(row));
+    if (allowed && !allowed.includes(key)) continue;
+    totals.set(key, (totals.get(key) || 0) + (row.total_turns || 0));
+    if (!labels.has(key)) labels.set(key, key);
   }
   return [...totals.entries()]
     .sort((a, b) => b[1] - a[1] || (labels.get(a[0]) || '').localeCompare(labels.get(b[0]) || ''))
-    .slice(0, _STATS_BREAKDOWN_TOP_N)
+    .slice(0, limit)
     .map(([key]) => key);
 }
 
@@ -4679,25 +4704,51 @@ function _breakdownSelection(rows) {
   const labels = new Map();
   const availableSeries = new Set();
   for (const row of rows) {
-    const key = _agentKey(row);
+    const key = _statsSeriesKey(row);
     availableSeries.add(key);
-    if (!labels.has(key)) labels.set(key, _agentLabel(row));
+    if (!labels.has(key)) labels.set(key, _statsSeriesLabel(key));
   }
-  let selectedAgents;
-  if (statsFilters.agents.length) {
-    selectedAgents = statsFilters.agents;
+  const sessionTypes = _sessionTypesForFilter();
+  const sessionCount = statsBreakdown.endsWith('_session') ? sessionTypes.length : 1;
+  const topicLimit = statsBreakdown.startsWith('topic_') ? Math.max(1, Math.floor(_STATS_BREAKDOWN_SERIES_BUDGET / (2 * sessionCount))) : 0;
+  const agentLimit = statsBreakdown === 'agent' ? _STATS_BREAKDOWN_SERIES_BUDGET : Math.max(1, Math.floor(_STATS_BREAKDOWN_SERIES_BUDGET / (Math.max(1, topicLimit) * sessionCount)));
+  const selectedTopics = statsFilters.topics.length ? statsFilters.topics : _topDimensionValues(rows, 'topic', topicLimit || _STATS_BREAKDOWN_SERIES_BUDGET);
+  const selectedAgents = statsFilters.agents.length ? statsFilters.agents : _topDimensionValues(rows, 'agent', agentLimit, null);
+
+  for (const topic of selectedTopics) {
     for (const agent of selectedAgents) {
-      if (!labels.has(agent)) labels.set(agent, agent);
+      if (statsBreakdown === 'topic_agent_session') {
+        for (const sessionType of sessionTypes) labels.set(`${topic}\u0000${sessionType === 'adhoc' ? `${agent}!` : agent}`, `${topic} / ${sessionType === 'adhoc' ? `${agent}!` : agent}`);
+      } else if (statsBreakdown === 'topic_agent') {
+        labels.set(`${topic}\u0000${agent}`, `${topic} / ${agent}`);
+      }
     }
-  } else {
-    selectedAgents = _topBreakdownAgentKeys(rows);
+  }
+  for (const agent of selectedAgents) {
+    if (statsBreakdown === 'agent_session') {
+      for (const sessionType of sessionTypes) labels.set(sessionType === 'adhoc' ? `${agent}!` : agent, sessionType === 'adhoc' ? `${agent}!` : agent);
+    } else if (statsBreakdown === 'agent') {
+      labels.set(agent, agent);
+    }
   }
 
   let selected;
-  if (statsBreakdown === 'agent_session') {
+  if (statsBreakdown === 'topic_agent_session') {
+    selected = [];
+    for (const topic of selectedTopics) {
+      for (const agent of selectedAgents) {
+        for (const sessionType of sessionTypes) selected.push(`${topic}\u0000${sessionType === 'adhoc' ? `${agent}!` : agent}`);
+      }
+    }
+  } else if (statsBreakdown === 'topic_agent') {
+    selected = [];
+    for (const topic of selectedTopics) {
+      for (const agent of selectedAgents) selected.push(`${topic}\u0000${agent}`);
+    }
+  } else if (statsBreakdown === 'agent_session') {
     selected = [];
     for (const agent of selectedAgents) {
-      selected.push(agent, `${agent}!`);
+      for (const sessionType of sessionTypes) selected.push(sessionType === 'adhoc' ? `${agent}!` : agent);
     }
   } else if (statsFilters.adhoc === 'all') {
     selected = [];
@@ -4725,11 +4776,11 @@ function _breakdownSelection(rows) {
     if (baseCompare) return baseCompare;
     return (a.endsWith('!') ? 1 : 0) - (b.endsWith('!') ? 1 : 0) || labelA.localeCompare(labelB) || a.localeCompare(b);
   });
-  return { selected, selectedAgents, labels };
+  return { selected, selectedAgents, selectedTopics, labels };
 }
 
 function _breakdownPivot(rows) {
-  const { selected, selectedAgents, labels } = _breakdownSelection(rows);
+  const { selected, selectedAgents, selectedTopics, labels } = _breakdownSelection(rows);
   const periods = [...new Set(rows.map(r => r.period))].sort().reverse();
   const periodRows = periods.map(period => {
     const values = Object.fromEntries(selected.map(key => [key, 0]));
@@ -4738,9 +4789,10 @@ function _breakdownPivot(rows) {
       if (row.period !== period) continue;
       const value = _statsMetricValue(row, statsChartY1);
       total += value;
-      const key = _agentKey(row);
-      const selectedKey = (statsBreakdown === 'agent_session' || statsFilters.adhoc !== 'session') ? _agentBaseKey(key) : key;
-      if (selectedAgents.includes(selectedKey) && selected.includes(key)) values[key] += value;
+      const key = _statsSeriesKey(row);
+      const selectedAgent = selectedAgents.includes(_agentBaseKey(_agentKey(row)));
+      const selectedTopic = !statsBreakdown.startsWith('topic_') || selectedTopics.includes(row.topic || 'unknown');
+      if (selectedAgent && selectedTopic && selected.includes(key)) values[key] += value;
       else misc += value;
     }
     return { period, values, misc, total };
@@ -4784,6 +4836,13 @@ function _syncStatsAgentMenuSelection() {
   _updateStatsFilterLabels();
 }
 
+function _syncStatsTopicMenuSelection() {
+  document.querySelectorAll('#sf-topic-menu input[type="checkbox"]').forEach(input => {
+    input.checked = statsFilters.topics.includes(input.value);
+  });
+  _updateStatsFilterLabels();
+}
+
 function _updateStatsBreakdownUi() {
   const active = !!statsBreakdown;
   document.getElementById('stats-chart-controls')?.classList.toggle('breakdown-active', active);
@@ -4804,6 +4863,117 @@ function _renderStatsMultiMenu(menu, values, selected, prefix) {
     const safe = escapeHtml(value);
     return `<label><input type="checkbox" value="${safe}"${selected.includes(value) ? ' checked' : ''}> ${prefix}${safe}</label>`;
   }).join('') || '<div class="empty">No options.</div>';
+}
+
+function _statsState() {
+  return {
+    version: 1,
+    time: { period: statsPeriod, days: statsFilters.days },
+    dimensions: {
+      topic: { mode: statsFilters.topics.length ? 'selected' : 'auto_top', values: [...statsFilters.topics] },
+      agent: { mode: statsFilters.agents.length ? 'selected' : 'auto_top', values: [...statsFilters.agents] },
+      session_type: { mode: statsFilters.adhoc === 'all' ? 'all' : 'selected', values: statsFilters.adhoc === 'all' ? [] : [statsFilters.adhoc] },
+    },
+    breakdown: { key: statsBreakdown },
+    measure: { primary: statsChartY1, secondary: statsChartY2 || null, visible: [..._statsMeasures] },
+  };
+}
+
+function _markStatsPresetDirty() {
+  if (!_activeStatsPresetId) return;
+  _statsPresetDirty = true;
+  _renderStatsPresetTabs();
+}
+
+function _applyStatsState(state) {
+  statsPeriod = state?.time?.period || 'hourly';
+  statsFilters.days = Number(state?.time?.days ?? 7);
+  statsBreakdown = state?.breakdown?.key || '';
+  const dims = state?.dimensions || {};
+  statsFilters.topics = dims.topic?.mode === 'selected' ? [...(dims.topic.values || [])] : [];
+  statsFilters.agents = dims.agent?.mode === 'selected' ? [...(dims.agent.values || [])] : [];
+  const sessionValues = dims.session_type?.values || [];
+  statsFilters.adhoc = dims.session_type?.mode === 'all' ? 'all' : (sessionValues[0] || 'all');
+  statsChartY1 = state?.measure?.primary || 'turns';
+  statsChartY2 = state?.measure?.secondary || '';
+  _statsMeasures.clear();
+  for (const key of state?.measure?.visible || ['sessions', 'turns', 'tokens_in', 'tokens_out']) _statsMeasures.add(key);
+  document.getElementById('sf-period').value = statsPeriod;
+  document.getElementById('sf-days').value = String(statsFilters.days);
+  document.getElementById('sf-breakdown').value = statsBreakdown;
+  document.getElementById('sf-adhoc').value = statsFilters.adhoc;
+  document.getElementById('sc-y1').value = statsChartY1;
+  const y2Sel = document.getElementById('sc-y2');
+  y2Sel.value = statsChartY2;
+  y2Sel.hidden = !statsChartY2;
+  document.getElementById('sc-compare-btn').textContent = statsChartY2 ? '− Y2' : '+ Y2';
+  document.querySelectorAll('#sf-measures-menu input[type="checkbox"]').forEach(input => {
+    input.checked = _statsMeasures.has(input.value);
+  });
+  _syncStatsTopicMenuSelection();
+  _syncStatsAgentMenuSelection();
+  _updateStatsMeasureLabel();
+  _updateStatsBreakdownUi();
+}
+
+function _renderStatsPresetTabs() {
+  const tabs = document.getElementById('stats-preset-tabs');
+  if (!tabs) return;
+  tabs.innerHTML = _statsPresets.map(preset => {
+    const classes = ['sf-chip', 'stats-preset-tab'];
+    if (preset.id === _activeStatsPresetId) classes.push('active');
+    if (preset.id === _activeStatsPresetId && _statsPresetDirty) classes.push('dirty');
+    if (preset.is_default) classes.push('default');
+    return `<button type="button" class="${classes.join(' ')}" data-id="${preset.id}">${escapeHtml(preset.name)}</button>`;
+  }).join('');
+  document.getElementById('stats-preset-overwrite').disabled = !_activeStatsPresetId;
+  document.getElementById('stats-preset-default').disabled = !_activeStatsPresetId;
+  document.getElementById('stats-preset-delete').disabled = !_activeStatsPresetId;
+}
+
+function _setStatsPresetStatus(text) {
+  const status = document.getElementById('stats-preset-status');
+  if (status) status.textContent = text || '';
+}
+
+async function _loadStatsPresets({ applyDefault = false } = {}) {
+  try {
+    _statsPresets = await fetch('/stats/filter-presets').then(r => r.json());
+    _renderStatsPresetTabs();
+    const def = _statsPresets.find(preset => preset.is_default);
+    if (applyDefault && def && !_activeStatsPresetId) {
+      _activeStatsPresetId = def.id;
+      _statsPresetDirty = false;
+      _applyStatsState(def.state);
+    }
+  } catch {
+    _statsPresets = [];
+  }
+}
+
+async function _saveStatsPreset({ overwrite = false, makeDefault = false } = {}) {
+  const nameInput = document.getElementById('stats-preset-name');
+  const active = _statsPresets.find(preset => preset.id === _activeStatsPresetId);
+  const name = (nameInput.value || active?.name || '').trim();
+  if (!name && !overwrite && !makeDefault) {
+    _setStatsPresetStatus('name required');
+    return;
+  }
+  const url = overwrite || makeDefault ? `/stats/filter-presets/${_activeStatsPresetId}` : '/stats/filter-presets';
+  const method = overwrite || makeDefault ? 'PUT' : 'POST';
+  const body = makeDefault ? { is_default: true } : { name, state: _statsState() };
+  const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    _setStatsPresetStatus(err.error || 'save failed');
+    return;
+  }
+  const preset = await res.json();
+  await _loadStatsPresets();
+  _activeStatsPresetId = preset.id;
+  _statsPresetDirty = false;
+  _renderStatsPresetTabs();
+  _setStatsPresetStatus(makeDefault ? 'default set' : 'saved');
 }
 
 function _destroyChart() {
@@ -5123,6 +5293,11 @@ async function loadStats() {
   statsContent.innerHTML = '<div class="empty">Loading…</div>';
   _updateStatsBreakdownUi();
 
+  if (!_statsPresetsLoaded) {
+    _statsPresetsLoaded = true;
+    await _loadStatsPresets({ applyDefault: true });
+  }
+
   if (!_statsFiltersLoaded) {
     _statsFiltersLoaded = true;
     fetch('/stats/filters').then(r => r.json()).then(data => {
@@ -5159,8 +5334,21 @@ async function loadStats() {
 
   if (chartWrap) chartWrap.hidden = false;
 
+  if (statsBreakdown && !statsFilters.topics.length && statsBreakdown.startsWith('topic_')) {
+    const sessionCount = statsBreakdown.endsWith('_session') ? _sessionTypesForFilter().length : 1;
+    const topicLimit = Math.max(1, Math.floor(_STATS_BREAKDOWN_SERIES_BUDGET / (2 * sessionCount)));
+    const defaultTopics = _topDimensionValues(rows, 'topic', topicLimit);
+    if (defaultTopics.length) {
+      statsFilters.topics = defaultTopics;
+      _syncStatsTopicMenuSelection();
+    }
+  }
+
   if (statsBreakdown && !statsFilters.agents.length) {
-    const defaultAgents = _topBreakdownAgentKeys(rows);
+    const topicCount = statsBreakdown.startsWith('topic_') ? Math.max(1, statsFilters.topics.length || 1) : 1;
+    const sessionCount = statsBreakdown.endsWith('_session') ? _sessionTypesForFilter().length : 1;
+    const agentLimit = statsBreakdown === 'agent' ? _STATS_BREAKDOWN_SERIES_BUDGET : Math.max(1, Math.floor(_STATS_BREAKDOWN_SERIES_BUDGET / (topicCount * sessionCount)));
+    const defaultAgents = _topDimensionValues(rows, 'agent', agentLimit);
     if (defaultAgents.length) {
       statsFilters.agents = defaultAgents;
       _syncStatsAgentMenuSelection();
@@ -5297,16 +5485,19 @@ function renderAgentBreakdownStats(rows) {
 function initStats() {
   document.getElementById('sf-period').addEventListener('change', e => {
     statsPeriod = e.target.value;
+    _markStatsPresetDirty();
     loadStats();
   });
 
   document.getElementById('sf-days').addEventListener('change', e => {
     statsFilters.days = parseInt(e.target.value);
+    _markStatsPresetDirty();
     loadStats();
   });
 
   document.getElementById('sf-adhoc').addEventListener('change', e => {
     statsFilters.adhoc = e.target.value;
+    _markStatsPresetDirty();
     loadStats();
   });
 
@@ -5325,6 +5516,7 @@ function initStats() {
       if (!e.target.matches('input[type="checkbox"]')) return;
       statsFilters[key] = [...menu.querySelectorAll('input[type="checkbox"]:checked')].map(input => input.value);
       _updateStatsFilterLabels();
+      _markStatsPresetDirty();
       loadStats();
     });
   });
@@ -5332,6 +5524,7 @@ function initStats() {
   document.getElementById('sf-breakdown').addEventListener('change', e => {
     statsBreakdown = e.target.value;
     e.target.value = statsBreakdown;
+    _markStatsPresetDirty();
     if (statsBreakdown) {
       statsChartY2 = '';
       const y2Sel = document.getElementById('sc-y2');
@@ -5356,6 +5549,7 @@ function initStats() {
     input.addEventListener('change', () => {
       if (input.checked) _statsMeasures.add(input.value);
       else _statsMeasures.delete(input.value);
+      _markStatsPresetDirty();
       _updateStatsMeasureLabel();
       _rerenderStats();
     });
@@ -5377,12 +5571,14 @@ function initStats() {
 
   document.getElementById('sc-y1').addEventListener('change', e => {
     statsChartY1 = e.target.value;
+    _markStatsPresetDirty();
     if (_lastStatsRows) _rerenderStats();
   });
 
   const y2Sel = document.getElementById('sc-y2');
   y2Sel.addEventListener('change', e => {
     statsChartY2 = e.target.value;
+    _markStatsPresetDirty();
     if (!statsChartY2) {
       y2Sel.hidden = true;
       document.getElementById('sc-compare-btn').textContent = '+ Y2';
@@ -5394,7 +5590,33 @@ function initStats() {
     const hidden = y2Sel.hidden;
     y2Sel.hidden = !hidden;
     document.getElementById('sc-compare-btn').textContent = hidden ? '− Y2' : '+ Y2';
+    _markStatsPresetDirty();
     if (!hidden) { statsChartY2 = ''; if (_lastStatsRows) _renderChart(_lastStatsRows); }
+  });
+
+  document.getElementById('stats-preset-tabs')?.addEventListener('click', e => {
+    const btn = e.target.closest('.stats-preset-tab');
+    if (!btn) return;
+    const preset = _statsPresets.find(item => String(item.id) === btn.dataset.id);
+    if (!preset) return;
+    _activeStatsPresetId = preset.id;
+    _statsPresetDirty = false;
+    document.getElementById('stats-preset-name').value = preset.name;
+    _applyStatsState(preset.state);
+    _renderStatsPresetTabs();
+    _setStatsPresetStatus('');
+    loadStats();
+  });
+  document.getElementById('stats-preset-save')?.addEventListener('click', () => _saveStatsPreset());
+  document.getElementById('stats-preset-overwrite')?.addEventListener('click', () => _saveStatsPreset({ overwrite: true }));
+  document.getElementById('stats-preset-default')?.addEventListener('click', () => _saveStatsPreset({ makeDefault: true }));
+  document.getElementById('stats-preset-delete')?.addEventListener('click', async () => {
+    if (!_activeStatsPresetId) return;
+    await fetch(`/stats/filter-presets/${_activeStatsPresetId}`, { method: 'DELETE' });
+    _activeStatsPresetId = null;
+    _statsPresetDirty = false;
+    await _loadStatsPresets();
+    _setStatsPresetStatus('deleted');
   });
 }
 
