@@ -292,6 +292,37 @@ def test_grouped_stats_include_quota_delta(tmp_path, monkeypatch):
     assert by_agent[0]["quota_delta"] == 3.0
 
 
+def test_agent_profile_breakdown_keeps_agent_variants_separate(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    stats_db.save_stats(
+        "session-1",
+        {"input_tokens": 100, "output_tokens": 10, "cost_usd": 1.0},
+        topic="squid",
+        agent="codex",
+        backend="codex",
+        model="gpt-5",
+        cwd="/repo",
+    )
+    stats_db.save_stats(
+        "session-2",
+        {"input_tokens": 40, "output_tokens": 8, "cost_usd": 0.4},
+        topic="squid",
+        agent="codex!",
+        backend="codex",
+        model="gpt-5",
+        cwd="/repo",
+    )
+
+    rows = stats_db.get_stats_by_agent_profile_breakdown(days=0, period="daily")
+    by_agent = {row["agent"]: row for row in rows}
+
+    assert by_agent["codex"]["input_tokens"] == 100
+    assert by_agent["codex!"]["input_tokens"] == 40
+    assert by_agent["codex"]["profile_key"] != by_agent["codex!"]["profile_key"]
+
+
 # ── status_raw persistence ───────────────────────────────────────────────────
 
 

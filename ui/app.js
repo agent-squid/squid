@@ -4513,6 +4513,7 @@ function initCursorQuota() {
 
 let statsPeriod = 'hourly';
 let statsGroup  = 'time';
+let statsBreakdown = 'none';
 let statsFilters = { days: 7, agent: '', topic: '', adhoc: 'all' };
 let statsChartY1 = 'turns';
 let statsChartY2 = '';
@@ -4522,11 +4523,21 @@ let _statsFiltersLoaded = false;
 let _statsPage = 0;
 const _STATS_PAGE_SIZE = 10;
 const _statsMeasures = new Set(['sessions', 'turns', 'tokens_in', 'tokens_out']);
+const _STATS_BREAKDOWN_TOP_N = 3;
+const STATS_SERIES_COLORS = [
+  'rgba(100,160,255,1)',
+  'rgba(80,200,120,1)',
+  'rgba(255,160,80,1)',
+  'rgba(200,100,200,1)',
+  'rgba(200,200,60,1)',
+  'rgba(120,200,220,1)',
+];
 
 function _rerenderStats() {
   if (!_lastStatsRows) return;
   if (statsGroup === 'topic') renderTopicStats(_lastStatsRows);
   else if (statsGroup === 'model') renderAgentStats(_lastStatsRows);
+  else if (statsBreakdown === 'agent_profile') { renderAgentProfileBreakdownStats(_lastStatsRows); _renderBreakdownChart(_lastStatsRows); }
   else { renderTimeStats(_lastStatsRows); _renderChart(_lastStatsRows); }
 }
 
@@ -4571,6 +4582,22 @@ function _formatQuotaDelta(value) {
 function _statsInputTokens(row) {
   const raw = row.input_tokens || 0, cr = row.cache_read_tokens || 0;
   return (cr > 0 && raw < cr) ? raw + cr : raw;
+}
+
+function _statsMetricValue(row, metric) {
+  if (metric === 'turns') return row.total_turns || 0;
+  if (metric === 'cost') return row.cost_usd || 0;
+  if (metric === 'tokens_in') return _statsInputTokens(row);
+  if (metric === 'tokens_out') return row.output_tokens || 0;
+  if (metric === 'sessions') return row.sessions || 0;
+  if (metric === 'quota') return row.quota_delta || 0;
+  return row.total_turns || 0;
+}
+
+function _formatStatsMetricValue(value, metric) {
+  if (metric === 'cost') return _formatCost(value);
+  if (metric === 'quota') return _formatQuotaDelta(value);
+  return fmtNum(value || 0);
 }
 
 const STATS_TABLE_MEASURES = [
@@ -4623,6 +4650,56 @@ function _statsPeriodLabel(period) {
     if (match) return match[1];
   }
   return period;
+}
+
+function _agentProfileLabel(row) {
+  const agent = row.agent || row.backend || 'unknown';
+  const parts = [agent];
+  if (row.backend && row.backend !== agent) parts.push(row.backend);
+  if (row.model) parts.push(row.model);
+  if (row.cwd) {
+    const cwd = String(row.cwd);
+    parts.push(cwd.split('/').filter(Boolean).pop() || cwd);
+  }
+  return parts.join(' · ');
+}
+
+function _agentProfileKey(row) {
+  return row.profile_key || [row.agent || row.backend || 'unknown', row.backend || '', row.model || '', row.cwd || ''].join('|');
+}
+
+function _breakdownSelection(rows) {
+  const totals = new Map();
+  const labels = new Map();
+  for (const row of rows) {
+    const key = _agentProfileKey(row);
+    totals.set(key, (totals.get(key) || 0) + _statsMetricValue(row, statsChartY1));
+    if (!labels.has(key)) labels.set(key, _agentProfileLabel(row));
+  }
+  const selected = [...totals.entries()]
+    .sort((a, b) => b[1] - a[1] || (labels.get(a[0]) || '').localeCompare(labels.get(b[0]) || ''))
+    .slice(0, _STATS_BREAKDOWN_TOP_N)
+    .map(([key]) => key);
+  return { selected, labels };
+}
+
+function _breakdownPivot(rows) {
+  const { selected, labels } = _breakdownSelection(rows);
+  const periods = [...new Set(rows.map(r => r.period))].sort().reverse();
+  const periodRows = periods.map(period => {
+    const values = Object.fromEntries(selected.map(key => [key, 0]));
+    let misc = 0, total = 0;
+    for (const row of rows) {
+      if (row.period !== period) continue;
+      const value = _statsMetricValue(row, statsChartY1);
+      total += value;
+      const key = _agentProfileKey(row);
+      if (selected.includes(key)) values[key] += value;
+      else misc += value;
+    }
+    return { period, values, misc, total };
+  });
+  return { selected, labels, periodRows };
 }
 
 function _updateStatsMeasureLabel() {
@@ -4679,6 +4756,56 @@ function _renderChart(rows) {
         tooltip: { backgroundColor: '#1a1a24', borderColor: '#2e2e3e', borderWidth: 1, titleColor: '#aaa', bodyColor: '#888' },
       },
       scales,
+    },
+  });
+}
+
+function _renderBreakdownChart(rows) {
+  if (!rows || !rows.length || typeof Chart === 'undefined') { _destroyChart(); return; }
+  const pivot = _breakdownPivot(rows);
+  const chronological = [...pivot.periodRows].reverse();
+  const labels = chronological.map(r => r.period);
+  const datasets = pivot.selected.map((key, i) => {
+    const color = STATS_SERIES_COLORS[i % STATS_SERIES_COLORS.length];
+    return {
+      label: pivot.labels.get(key) || key,
+      data: chronological.map(r => r.values[key] || 0),
+      borderColor: color,
+      backgroundColor: color.replace(',1)', ',0.08)'),
+      yAxisID: 'y1',
+      tension: 0.3,
+      fill: false,
+      pointRadius: labels.length > 60 ? 1 : labels.length > 20 ? 2 : 4,
+      pointHoverRadius: 5,
+    };
+  });
+  if (chronological.some(r => r.misc > 0)) {
+    datasets.push({
+      label: 'Misc',
+      data: chronological.map(r => r.misc || 0),
+      borderColor: 'rgba(140,140,150,1)',
+      backgroundColor: 'rgba(140,140,150,0.08)',
+      yAxisID: 'y1',
+      tension: 0.3,
+      fill: false,
+      pointRadius: labels.length > 60 ? 1 : labels.length > 20 ? 2 : 4,
+      pointHoverRadius: 5,
+    });
+  }
+  _destroyChart();
+  statsChartInstance = new Chart(document.getElementById('stats-chart'), {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: {
+        legend: { labels: { color: '#888', font: { size: 11 }, boxWidth: 12, padding: 12 } },
+        tooltip: { backgroundColor: '#1a1a24', borderColor: '#2e2e3e', borderWidth: 1, titleColor: '#aaa', bodyColor: '#888' },
+      },
+      scales: {
+        x: { ticks: { color: '#555', font: { size: 10 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 12 }, grid: { color: '#1a1a24' } },
+        y1: { type: 'linear', position: 'left', ticks: { color: '#555', font: { size: 10 }, callback: fmtAxisNum }, grid: { color: '#1a1a24' } },
+      },
     },
   });
 }
@@ -4919,6 +5046,7 @@ async function loadStats() {
     params.set('group', statsGroup === 'model' ? 'agent' : statsGroup);
   } else {
     params.set('period', statsPeriod);
+    if (statsBreakdown !== 'none') params.set('breakdown', statsBreakdown);
   }
   params.set('days', statsFilters.days);
   params.set('tz_offset_minutes', new Date().getTimezoneOffset());
@@ -4947,10 +5075,15 @@ async function loadStats() {
 
   _lastStatsRows = rows;
   _statsPage = 0;
+  document.getElementById('stats-chart-controls')?.classList.toggle('breakdown-active', statsGroup === 'time' && statsBreakdown !== 'none');
+
   if (statsGroup === 'topic') {
     renderTopicStats(rows);
   } else if (statsGroup === 'model') {
     renderAgentStats(rows);
+  } else if (statsBreakdown === 'agent_profile') {
+    renderAgentProfileBreakdownStats(rows);
+    _renderBreakdownChart(rows);
   } else {
     renderTimeStats(rows);
     _renderChart(rows);
@@ -5023,12 +5156,62 @@ function renderAgentStats(rows) {
   _statsAppendPager(rows.length);
 }
 
+function renderAgentProfileBreakdownStats(rows) {
+  const pivot = _breakdownPivot(rows);
+  const metric = statsChartY1;
+  const totalExplicit = {};
+  for (const key of pivot.selected) totalExplicit[key] = 0;
+  let totalMisc = 0, grandTotal = 0;
+  for (const row of pivot.periodRows) {
+    for (const key of pivot.selected) totalExplicit[key] += row.values[key] || 0;
+    totalMisc += row.misc || 0;
+    grandTotal += row.total || 0;
+  }
+  const hasMisc = totalMisc > 0;
+  const headers = pivot.selected.map(key => `<th>${escapeHtml(pivot.labels.get(key) || key)}</th>`).join('');
+  const miscHeader = hasMisc ? '<th>Misc</th>' : '';
+  const bodyRows = _statsPageSlice(pivot.periodRows).map(row => {
+    const cells = pivot.selected
+      .map(key => `<td>${_formatStatsMetricValue(row.values[key] || 0, metric)}</td>`)
+      .join('');
+    return `<tr>
+      <td>${_statsPeriodLabel(row.period)}</td>
+      ${cells}
+      ${hasMisc ? `<td>${_formatStatsMetricValue(row.misc || 0, metric)}</td>` : ''}
+      <td>${_formatStatsMetricValue(row.total || 0, metric)}</td>
+    </tr>`;
+  }).join('');
+  const totalCells = pivot.selected
+    .map(key => `<td>${_formatStatsMetricValue(totalExplicit[key] || 0, metric)}</td>`)
+    .join('');
+
+  statsContent.innerHTML = `<table>
+    <thead><tr>
+      <th>${statsPeriod === 'hourly' ? 'Hour' : 'Date'}</th>
+      ${headers}
+      ${miscHeader}
+      <th>Total</th>
+    </tr></thead>
+    <tbody>${bodyRows}</tbody>
+    <tfoot><tr>
+      <td>Total</td>
+      ${totalCells}
+      ${hasMisc ? `<td>${_formatStatsMetricValue(totalMisc, metric)}</td>` : ''}
+      <td>${_formatStatsMetricValue(grandTotal, metric)}</td>
+    </tr></tfoot>
+  </table>`;
+  _statsAppendPager(pivot.periodRows.length);
+}
+
 
 function initStats() {
   document.querySelectorAll('.st').forEach(btn => {
     btn.addEventListener('click', () => {
       statsPeriod = btn.dataset.period;
       statsGroup  = btn.dataset.group;
+      if (statsGroup !== 'time') statsBreakdown = 'none';
+      const breakdownSel = document.getElementById('sf-breakdown');
+      if (breakdownSel) breakdownSel.value = statsBreakdown;
       document.querySelectorAll('.st').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       loadStats();
@@ -5052,6 +5235,12 @@ function initStats() {
 
   document.getElementById('sf-topic').addEventListener('change', e => {
     statsFilters.topic = e.target.value;
+    loadStats();
+  });
+
+  document.getElementById('sf-breakdown').addEventListener('change', e => {
+    statsBreakdown = statsGroup === 'time' ? e.target.value : 'none';
+    e.target.value = statsBreakdown;
     loadStats();
   });
 
@@ -5082,7 +5271,7 @@ function initStats() {
 
   document.getElementById('sc-y1').addEventListener('change', e => {
     statsChartY1 = e.target.value;
-    if (_lastStatsRows) _renderChart(_lastStatsRows);
+    if (_lastStatsRows) _rerenderStats();
   });
 
   const y2Sel = document.getElementById('sc-y2');

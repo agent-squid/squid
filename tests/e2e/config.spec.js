@@ -387,6 +387,16 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await page.route('**/stats?**', route => {
     const url = new URL(route.request().url());
     statsRequests.push(url);
+    if (url.searchParams.get('breakdown') === 'agent_profile') {
+      return route.fulfill({
+        json: [
+          { period: '2026-06-26 14:00', profile_key: 'codex|codex|gpt-5|/repo', agent: 'codex', backend: 'codex', model: 'gpt-5', cwd: '/repo', sessions: 4, total_turns: 4, input_tokens: 1000, output_tokens: 200, cost_usd: 1.0 },
+          { period: '2026-06-26 14:00', profile_key: 'codex!|codex|gpt-5|/repo', agent: 'codex!', backend: 'codex', model: 'gpt-5', cwd: '/repo', sessions: 3, total_turns: 3, input_tokens: 400, output_tokens: 100, cost_usd: 0.4 },
+          { period: '2026-06-26 14:00', profile_key: 'clive|claude|sonnet|/repo', agent: 'clive', backend: 'claude', model: 'sonnet', cwd: '/repo', sessions: 2, total_turns: 2, input_tokens: 300, output_tokens: 80, cost_usd: 0.3 },
+          { period: '2026-06-26 14:00', profile_key: 'cursor|cursor|gpt-5|/repo', agent: 'cursor', backend: 'cursor', model: 'gpt-5', cwd: '/repo', sessions: 1, total_turns: 1, input_tokens: 200, output_tokens: 60, cost_usd: 0.2 },
+        ],
+      });
+    }
     return route.fulfill({
       json: [{
         period: url.searchParams.get('period') === 'hourly' ? '2026-06-26 14:00' : '2026-06-26',
@@ -436,6 +446,14 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('period')).toBe('daily');
   expect(statsRequests.at(-1).searchParams.get('tz_offset_minutes')).not.toBeNull();
   await expect(page.locator('#stats-content tbody td').first()).toHaveText('2026-06-26');
+
+  await page.getByRole('button', { name: 'Hourly' }).click();
+  await page.locator('#sf-breakdown').selectOption('agent_profile');
+  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBe('agent_profile');
+  await expect(page.getByRole('columnheader', { name: 'codex · gpt-5 · repo', exact: true })).toBeVisible();
+  await expect(page.locator('#stats-content th', { hasText: 'codex! · codex · gpt-5 · repo' })).toBeVisible();
+  await expect(page.locator('#stats-content th', { hasText: 'Misc' })).toBeVisible();
+  await expect(page.locator('#stats-content tfoot')).toContainText('10');
 });
 
 test('/restart clears its persisted draft before the page reloads', async ({ page }) => {

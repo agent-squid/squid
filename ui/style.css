@@ -2465,7 +2465,7 @@ body {
   cursor: pointer;
 }
 .sf-multi-menu label:hover { background: var(--surface-3); }
-#sf-days, #sf-agent, #sf-topic, #sf-adhoc {
+#sf-days, #sf-agent, #sf-topic, #sf-adhoc, #sf-breakdown {
   background: var(--surface-3);
   border: 1px solid #2a2a36;
   border-radius: 3px;
@@ -2475,7 +2475,7 @@ body {
   max-width: 9rem;
   min-width: 0;
 }
-#sf-days:focus, #sf-agent:focus, #sf-topic:focus, #sf-adhoc:focus { outline: 1px solid #4a4a70; }
+#sf-days:focus, #sf-agent:focus, #sf-topic:focus, #sf-adhoc:focus, #sf-breakdown:focus { outline: 1px solid #4a4a70; }
 
 #stats-chart-wrap {
   flex-shrink: 0;
@@ -2507,6 +2507,10 @@ body {
   padding: 0.1rem 0.4rem;
 }
 #sc-compare-btn:hover { border-color: #4a4a70; color: #9090c0; }
+#stats-chart-controls.breakdown-active #sc-compare-btn,
+#stats-chart-controls.breakdown-active #sc-y2 {
+  display: none;
+}
 #stats-chart-box { position: relative; height: 180px; }
 #stats-chart { position: absolute; inset: 0; }
 
@@ -3035,7 +3039,8 @@ button {
   #sf-days,
   #sf-topic,
   #sf-agent,
-  #sf-adhoc {
+  #sf-adhoc,
+  #sf-breakdown {
     max-width: none;
   }
   #stats-chart-controls {
