@@ -2453,11 +2453,17 @@ body {
 }
 .sf-chip.active { background: #2a2a3e; border-color: #4a4a70; color: #9090c0; }
 .sf-chip:hover:not(.active) { border-color: #3a3a50; color: #777; }
-.sf-chip:disabled {
+.sf-chip:disabled,
+.sf-chip.active:disabled {
+  background: var(--surface-3);
+  border-color: #2a2a36;
+  color: var(--text-dim);
   cursor: default;
   opacity: 0.45;
 }
-.sf-chip:disabled:hover {
+.sf-chip:disabled:hover,
+.sf-chip.active:disabled:hover {
+  background: var(--surface-3);
   border-color: #2a2a36;
   color: var(--text-dim);
 }
