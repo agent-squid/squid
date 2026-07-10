@@ -479,18 +479,51 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect(page.locator('#sc-compare-btn')).toBeHidden();
   await expect(page.locator('#sf-measures')).toBeVisible();
   await expect(page.locator('#sf-measures-toggle')).toBeDisabled();
+  const disabledMeasuresStyle = await page.locator('#sf-measures-toggle').evaluate(el => {
+    const style = getComputedStyle(el);
+    return {
+      backgroundColor: style.backgroundColor,
+      borderColor: style.borderColor,
+      color: style.color,
+      opacity: style.opacity,
+    };
+  });
+  await page.locator('#sf-measures-toggle').hover({ force: true });
+  await expect.poll(() => page.locator('#sf-measures-toggle').evaluate(el => {
+    const style = getComputedStyle(el);
+    return {
+      backgroundColor: style.backgroundColor,
+      borderColor: style.borderColor,
+      color: style.color,
+      opacity: style.opacity,
+    };
+  })).toEqual(disabledMeasuresStyle);
   await expect(page.locator('#stats-filters .sf-sep')).toBeVisible();
   await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toBeVisible();
   await expect(page.getByRole('columnheader', { name: 'clive', exact: true })).toBeVisible();
   await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'clive', 'codex', 'Misc', 'Total']);
   await expect(page.locator('#stats-content th', { hasText: 'Misc' })).toHaveCount(1);
   await expect(page.locator('#stats-content tfoot')).toContainText('9');
+  await page.locator('#sf-adhoc').selectOption('session');
+  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('adhoc')).toBe('session');
   await page.locator('#sc-y1').selectOption('cost');
   await expect(page.locator('#stats-content tfoot')).toContainText('$1.7000');
   await expect(page.locator('#stats-content tfoot')).not.toContainText('9');
 
   await page.locator('#sf-breakdown').selectOption('');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBeNull();
+  expect(statsRequests.at(-1).searchParams.get('topic')).toBeNull();
+  expect(statsRequests.at(-1).searchParams.get('agent')).toBeNull();
+  expect(statsRequests.at(-1).searchParams.get('adhoc')).toBeNull();
+  await expect(page.locator('#sf-topic-toggle')).toHaveText('All Topics');
+  await expect(page.locator('#sf-agent-toggle')).toHaveText('All Agents');
+  await expect(page.locator('#sf-adhoc')).toHaveValue('all');
+  await page.locator('#sf-topic-toggle').click();
+  await expect(page.locator('#sf-topic-menu input[value="squid"]')).not.toBeChecked();
+  await expect(page.locator('#sf-topic-menu input[value="ops"]')).not.toBeChecked();
+  await page.locator('#sf-agent-toggle').click();
+  await expect(page.locator('#sf-agent-menu input[value="codex"]')).not.toBeChecked();
+  await expect(page.locator('#sf-agent-menu input[value="clive"]')).not.toBeChecked();
   await expect(page.locator('#sc-compare-btn')).toBeVisible();
   await expect(page.locator('#sf-measures')).toBeVisible();
   await expect(page.locator('#sf-measures-toggle')).toBeEnabled();

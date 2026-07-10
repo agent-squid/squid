@@ -4904,6 +4904,15 @@ function _syncStatsTopicMenuSelection() {
   _updateStatsFilterLabels();
 }
 
+function _resetStatsDimensionFilters() {
+  statsFilters.topics = [];
+  statsFilters.agents = [];
+  statsFilters.adhoc = 'all';
+  document.getElementById('sf-adhoc').value = 'all';
+  _syncStatsTopicMenuSelection();
+  _syncStatsAgentMenuSelection();
+}
+
 function _updateStatsBreakdownUi() {
   const active = !!statsBreakdown;
   document.getElementById('stats-chart-controls')?.classList.toggle('breakdown-active', active);
@@ -5628,6 +5637,8 @@ function initStats() {
       y2Sel.hidden = true;
       y2Sel.value = '';
       document.getElementById('sc-compare-btn').textContent = '+ Y2';
+    } else {
+      _resetStatsDimensionFilters();
     }
     loadStats();
   });
