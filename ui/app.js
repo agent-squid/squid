@@ -4719,7 +4719,8 @@ function _statsSeriesLabel(key) {
     if (statsBreakdown === 'topic_agent') return `#${topic}@${_agentBaseKey(agent)}+`;
     return `#${topic}@${agent}`;
   }
-  if (statsBreakdown === 'agent' || statsBreakdown === 'agent_session') return `@${raw}`;
+  if (statsBreakdown === 'agent') return `@${raw}+`;
+  if (statsBreakdown === 'agent_session') return `@${raw}`;
   if (statsBreakdown === 'topic') return `#${raw}`;
   return raw;
 }

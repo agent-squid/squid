@@ -499,9 +499,9 @@ test('analytics measures dropdown controls cost and quota columns independently'
     };
   })).toEqual(disabledMeasuresStyle);
   await expect(page.locator('#stats-filters .sf-sep')).toBeVisible();
-  await expect(page.getByRole('columnheader', { name: '@codex', exact: true })).toBeVisible();
-  await expect(page.getByRole('columnheader', { name: '@clive', exact: true })).toBeVisible();
-  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', '@clive', '@codex', 'Misc', 'Total']);
+  await expect(page.getByRole('columnheader', { name: '@codex+', exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: '@clive+', exact: true })).toBeVisible();
+  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', '@clive+', '@codex+', 'Misc', 'Total']);
   await expect(page.locator('#stats-content th', { hasText: 'Misc' })).toHaveCount(1);
   await expect(page.locator('#stats-content tfoot')).toContainText('9');
   await page.locator('#sf-adhoc').selectOption('session');
@@ -562,10 +562,10 @@ test('agent breakdown defaults to top four agents when none are selected', async
   await expect(page.locator('#sf-agent-menu input[value="clive"]')).toBeChecked();
   await expect(page.locator('#sf-agent-menu input[value="cursor"]')).toBeChecked();
   await expect(page.locator('#sf-agent-menu input[value="haiku"]')).toBeChecked();
-  await expect(page.getByRole('columnheader', { name: '@codex', exact: true })).toBeVisible();
-  await expect(page.getByRole('columnheader', { name: '@clive', exact: true })).toBeVisible();
-  await expect(page.getByRole('columnheader', { name: '@cursor', exact: true })).toBeVisible();
-  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', '@clive', '@codex', '@cursor', '@haiku', 'Misc', 'Total']);
+  await expect(page.getByRole('columnheader', { name: '@codex+', exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: '@clive+', exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: '@cursor+', exact: true })).toBeVisible();
+  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', '@clive+', '@codex+', '@cursor+', '@haiku+', 'Misc', 'Total']);
   await expect(page.locator('#stats-content th', { hasText: 'Misc' })).toHaveCount(1);
 });
 
@@ -602,14 +602,14 @@ test('stats breakdown caps visible series and keeps edge columns sticky while sc
 
   await expect(page.locator('#stats-content thead th')).toHaveText([
     'Hour',
-    '@agent03',
-    '@agent04',
-    '@agent05',
-    '@agent06',
-    '@agent07',
-    '@agent08',
-    '@agent09',
-    '@agent10',
+    '@agent03+',
+    '@agent04+',
+    '@agent05+',
+    '@agent06+',
+    '@agent07+',
+    '@agent08+',
+    '@agent09+',
+    '@agent10+',
     'Misc',
     'Total',
   ]);
@@ -631,14 +631,14 @@ test('stats breakdown caps visible series and keeps edge columns sticky while sc
   await page.locator('#stats-content tfoot td').first().getByRole('button', { name: 'Sort breakdown columns by total' }).nth(1).click();
   await expect(page.locator('#stats-content thead th')).toHaveText([
     'Hour',
-    '@agent10',
-    '@agent09',
-    '@agent08',
-    '@agent07',
-    '@agent06',
-    '@agent05',
-    '@agent04',
-    '@agent03',
+    '@agent10+',
+    '@agent09+',
+    '@agent08+',
+    '@agent07+',
+    '@agent06+',
+    '@agent05+',
+    '@agent04+',
+    '@agent03+',
     'Misc',
     'Total',
   ]);
@@ -691,7 +691,7 @@ test('stats breakdown columns can sort by footer totals', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Sort breakdown columns by total' })).toHaveCount(0);
 
   await page.locator('#sf-breakdown').selectOption('agent');
-  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', '@clive', '@codex', '@cursor', '@haiku', 'Misc', 'Total']);
+  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', '@clive+', '@codex+', '@cursor+', '@haiku+', 'Misc', 'Total']);
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown_sort')).toBe('name');
   expect(statsRequests.at(-1).searchParams.get('breakdown_sort_dir')).toBe('asc');
   expect(new URL(page.url()).search).toBe('');
@@ -707,25 +707,25 @@ test('stats breakdown columns can sort by footer totals', async ({ page }) => {
   const totalSortButtons = page.locator('#stats-content tfoot td').first().getByRole('button', { name: 'Sort breakdown columns by total' });
 
   await totalSortButtons.nth(1).click();
-  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', '@codex', '@clive', '@cursor', '@haiku', 'Misc', 'Total']);
+  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', '@codex+', '@clive+', '@cursor+', '@haiku+', 'Misc', 'Total']);
   expect(new URL(page.url()).search).toBe('');
   await expect(page.locator('#stats-content thead th').first().locator('button.active')).toHaveCount(0);
   await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(1);
 
   await totalSortButtons.nth(0).click();
-  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', '@haiku', '@cursor', '@clive', '@codex', 'Misc', 'Total']);
+  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', '@haiku+', '@cursor+', '@clive+', '@codex+', 'Misc', 'Total']);
   expect(new URL(page.url()).search).toBe('');
   await expect(page.locator('#stats-content thead th').first().locator('button.active')).toHaveCount(0);
   await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(1);
 
   await nameSortButtons.nth(1).click();
-  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', '@haiku', '@cursor', '@codex', '@clive', 'Misc', 'Total']);
+  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', '@haiku+', '@cursor+', '@codex+', '@clive+', 'Misc', 'Total']);
   expect(new URL(page.url()).search).toBe('');
   await expect(page.locator('#stats-content thead th').first().locator('button.active')).toHaveCount(1);
   await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(0);
 
   await nameSortButtons.nth(0).click();
-  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', '@clive', '@codex', '@cursor', '@haiku', 'Misc', 'Total']);
+  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', '@clive+', '@codex+', '@cursor+', '@haiku+', 'Misc', 'Total']);
   await expect(page.locator('#stats-content thead th').first().locator('button.active')).toHaveCount(1);
   await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(0);
 });
@@ -767,7 +767,7 @@ test('stats interactions do not persist URL state and refresh returns to chat', 
   await page.getByRole('button', { name: 'Stats' }).click();
   await expect(page.locator('#view-stats')).toHaveClass(/active/);
   await page.locator('#sf-breakdown').selectOption('agent');
-  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', '@codex', 'Misc', 'Total']);
+  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', '@codex+', 'Misc', 'Total']);
   expect(new URL(page.url()).search).toBe('');
 
   await page.reload();
@@ -894,19 +894,19 @@ test('agent breakdown shows agent! columns based on session type filter', async 
   await expect(page.locator('#sf-adhoc')).toHaveValue('all');
 
   // default (session + adhoc): non-session breakdown aggregates both modes under the base agent
-  await expect(page.getByRole('columnheader', { name: '@codex', exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: '@codex+', exact: true })).toBeVisible();
   await expect(page.getByRole('columnheader', { name: '@codex!', exact: true })).toHaveCount(0);
 
   // session only: only codex column
   await page.locator('#sf-adhoc').selectOption('session');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('adhoc')).toBe('session');
-  await expect(page.getByRole('columnheader', { name: '@codex', exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: '@codex+', exact: true })).toBeVisible();
   await expect(page.getByRole('columnheader', { name: '@codex!', exact: true })).toHaveCount(0);
 
   // adhoc only: still base agent column, constrained to adhoc data
   await page.locator('#sf-adhoc').selectOption('adhoc');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('adhoc')).toBe('adhoc');
-  await expect(page.getByRole('columnheader', { name: '@codex', exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: '@codex+', exact: true })).toBeVisible();
   await expect(page.getByRole('columnheader', { name: '@codex!', exact: true })).toHaveCount(0);
 });
 
