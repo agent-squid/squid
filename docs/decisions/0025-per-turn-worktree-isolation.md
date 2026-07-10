@@ -90,6 +90,59 @@ the only process writing to `effective_code_roots` during that turn. This is
 surfaced to the model in the `<squid_code_roots>` context block so it can skip
 redundant re-reads and existence checks.
 
+### Dependency directories
+
+`git worktree add` only materializes tracked files. Installed dependencies
+(`node_modules`, `.venv`, etc.) are always gitignored, so a fresh worktree
+would be missing them entirely — any turn that runs the project's tooling
+would need to reinstall from scratch before it could do anything.
+
+`ensure_worktree` closes this gap by calling `_link_dependency_dirs(repo_root,
+wt)` right after `git worktree add` succeeds. It walks `repo_root` up to a
+bounded depth (`_DEPENDENCY_SCAN_MAX_DEPTH = 4`, skipping `.git`), and for
+every directory whose name matches `config.DEPENDENCY_DIRS`, symlinks it
+(not copies) from `repo_root` into the equivalent path under `wt`. Matched
+directories are not recursed into further, so a nested `node_modules` inside
+a matched `node_modules` is reached through the outer symlink, not linked a
+second time.
+
+`config.DEPENDENCY_DIRS` defaults to a cross-ecosystem list (`node_modules`,
+`.venv`, `venv`, `env`, `.tox`, `__pypackages__`, `vendor`, `target`,
+`.bundle`, `Pods`, `.cargo`, `.stack-work`, `elm-stuff`) and is overridable
+per-machine via `worktree.dependency_dirs` in `~/.squid/squid.yaml`, since
+dependency-directory naming is a tooling convention, not a per-topic setting.
+The list intentionally only ever matches directories, never individual
+files — this keeps it structurally unable to touch gitignored *state* files
+(`.env`, `squid.db`, `*.log`, `config/squid.yaml`), which must stay private
+to the source repo and not be shared across concurrent worktrees.
+
+Because this runs inside `ensure_worktree`, it is naturally scoped per
+`repo_root`: with multiple code roots, each unique git repo gets its own
+`ensure_worktree` call and therefore its own independent scan and symlink
+set — one repo's dependency dirs are never linked into another repo's
+worktree.
+
+**Safety guard:** `_link_dependency_dirs` refuses to run (logs and returns)
+if `wt` resolves to the same path as `repo_root`. This exists because a
+worktree that is accidentally the same path as its source repo would
+otherwise symlink a dependency directory onto itself, replacing the real
+directory with a broken self-referential symlink.
+
+**Gitignore trailing slash gotcha:** entries like `.venv/` or
+`tests/e2e/node_modules/` (with a trailing slash) are directory-only
+gitignore patterns — Git does not match them against a symlink, even one
+that points at a directory. Since these paths are always symlinks inside a
+worktree, the turn-end auto-commit's `git add -A` (`commit_worktree`) would
+otherwise pick them up as untracked-but-not-ignored and commit them into the
+source repo as tracked `120000` (symlink) blobs on every turn. Any gitignore
+entry covering a path in `config.DEPENDENCY_DIRS` must omit the trailing
+slash so the pattern matches directories and symlinks alike.
+
+Since these are symlinks and not copies, deleting one from inside a worktree
+(e.g. `rm -rf node_modules`) deletes the real directory in the source repo.
+Agents are not expected to write into dependency directories, but this is a
+sharper edge than the rest of the worktree, where all writes are isolated.
+
 ### Turn cycle
 
 ```
@@ -215,6 +268,15 @@ In fallback mode:
   immediately after sync.
 - Good: CWD is stable across all turns (source repo path, not worktree); agent
   CLI session logs accumulate under a single `~/.claude/projects/` entry.
+- Good: installed dependencies (`node_modules`, `.venv`, etc.) are symlinked
+  into every fresh worktree, so turns can run project tooling immediately
+  without reinstalling anything.
+- Bad: dependency directories are symlinks, so deleting one from inside a
+  worktree deletes the real directory in the source repo.
+- Bad: gitignore entries for any path matched by `config.DEPENDENCY_DIRS`
+  must not use a trailing slash, or the turn-end auto-commit will track the
+  worktree symlink into the source repo's history (see "Dependency
+  directories" above).
 - Bad: if Squid crashes mid-turn, stale `~/.squid/worktrees/` directories and
   `sqd-*` branches can accumulate until topic close/clear or a startup sweep
   prunes them.
