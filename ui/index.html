@@ -471,39 +471,38 @@
       </div>
       <div id="stats-filters">
         <div class="sf-row sf-primary-row">
-          <label class="sf-field"><span class="sf-label">Range</span>
+          <label class="sf-field">
             <select id="sf-days">
               <option value="7" selected>7d</option>
               <option value="30">30d</option>
               <option value="90">90d</option>
-              <option value="0">All</option>
+              <option value="0">All Time</option>
             </select>
           </label>
-          <label class="sf-field"><span class="sf-label">Topic</span>
-            <select id="sf-topic"><option value="">All</option></select>
+          <label class="sf-field">
+            <select id="sf-topic"><option value="">All Topics</option></select>
           </label>
-          <label class="sf-field"><span class="sf-label">Agent</span>
-            <select id="sf-agent"><option value="">All</option></select>
+          <label class="sf-field">
+            <select id="sf-agent"><option value="">All Agents</option></select>
           </label>
-          <label class="sf-field"><span class="sf-label">Session</span>
+          <label class="sf-field">
             <select id="sf-adhoc">
-              <option value="all" selected>All</option>
-              <option value="session">Session</option>
+              <option value="all" selected>All Sessions</option>
+              <option value="session">Sessions</option>
               <option value="adhoc">Adhoc</option>
             </select>
           </label>
         </div>
         <span class="sf-break"></span>
         <div class="sf-row sf-session-row">
-          <label class="sf-field"><span class="sf-label">Breakdown</span>
+          <label class="sf-field">
             <select id="sf-breakdown">
-              <option value="none" selected>None</option>
-              <option value="agent_profile">Agent Profile</option>
+              <option value="none" selected>No Breakdown</option>
+              <option value="agent_profile">By Agent Profile</option>
             </select>
           </label>
           <span class="sf-sep"></span>
           <div class="sf-field sf-menu-field">
-            <span class="sf-label">Measures</span>
             <div class="sf-multi" id="sf-measures">
               <button id="sf-measures-toggle" class="sf-chip sf-multi-toggle" type="button" aria-haspopup="true" aria-expanded="false">Measures (4)</button>
               <div id="sf-measures-menu" class="sf-multi-menu" hidden>
