@@ -7161,7 +7161,7 @@ const _TEXT_EXTS = new Set(['txt','md','py','js','ts','jsx','tsx','json','yaml',
   'h','hpp','cs','php','swift','kt','kts','lua','r','sql','html','css','xml','svg',
   'log','env','gitignore','dockerfile','makefile','lock','csv','tsv']);
 
-const _WEB_PREVIEW_EXTS = new Set(['html','htm','svg','pdf','png','jpg','jpeg','gif','webp','avif']);
+const _WEB_PREVIEW_EXTS = new Set(['html','htm','svg','pdf','png','jpg','jpeg','gif','webp','avif','md','markdown']);
 
 function _isTextPath(path) {
   const ext = (path.split('.').pop() || '').toLowerCase();

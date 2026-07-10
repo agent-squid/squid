@@ -1824,6 +1824,37 @@ async def serve_local_file(path: str, request: Request):
         return JSONResponse({"type": "directory", "path": str(p), "entries": entry_list}, headers=_nocache)
     if not p.is_file():
         return JSONResponse({"error": "not a file"}, status_code=400)
+    if p.suffix.lower() in (".md", ".markdown"):
+        import html as _html
+        import json as _json
+        md_text = p.read_text(errors="replace")
+        md_json = _json.dumps(md_text).replace("</", "<\\/")
+        html_body = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{_html.escape(p.name)}</title>
+<script src="/vendor/marked.min.js"></script>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 860px; margin: 40px auto; padding: 0 20px; line-height: 1.6; color: #222; }}
+  pre {{ background: #f6f8fa; padding: 12px 16px; border-radius: 6px; overflow-x: auto; }}
+  code {{ background: #f6f8fa; padding: 2px 5px; border-radius: 3px; font-size: 0.9em; }}
+  pre code {{ background: none; padding: 0; }}
+  blockquote {{ border-left: 4px solid #d0d7de; margin: 0; padding-left: 16px; color: #57606a; }}
+  img {{ max-width: 100%; }}
+  table {{ border-collapse: collapse; }}
+  th, td {{ border: 1px solid #d0d7de; padding: 6px 12px; }}
+</style>
+</head>
+<body>
+<div id="content"></div>
+<script>
+  document.getElementById('content').innerHTML = marked.parse({md_json});
+</script>
+</body>
+</html>"""
+        from fastapi.responses import HTMLResponse
+        return HTMLResponse(html_body, headers=_nocache)
     mime = _LOCALFILE_TEXT_MIME_BY_SUFFIX.get(p.suffix.lower())
     if mime is None:
         mime, _ = mimetypes.guess_type(str(p))
