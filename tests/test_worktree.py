@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from agent.worktree import (
+    _link_dependency_dirs,
     branch_name,
     commit_worktree,
     ensure_worktree,
@@ -130,6 +131,17 @@ def test_ensure_worktree_symlinks_dependency_dirs(tmp_path):
     assert (wt / "node_modules" / "some-pkg" / "index.js").exists()
     assert (wt / ".venv").is_symlink()
     assert (wt / ".venv" / "bin" / "python").exists()
+
+
+def test_link_dependency_dirs_refuses_when_wt_equals_repo_root(tmp_path):
+    repo = init_repo(tmp_path / "repo")
+    (repo / "node_modules").mkdir()
+    (repo / "node_modules" / "pkg.js").write_text("x\n")
+
+    _link_dependency_dirs(repo, repo)  # wt == repo_root: must not touch anything
+
+    assert not (repo / "node_modules").is_symlink()
+    assert (repo / "node_modules" / "pkg.js").read_text() == "x\n"
 
 
 def test_ensure_worktree_does_not_recurse_into_matched_dependency_dirs(tmp_path):
