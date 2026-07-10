@@ -4527,7 +4527,6 @@ const _STATS_BREAKDOWN_SERIES_BUDGET = 4;
 const _STATS_BREAKDOWN_VISIBLE_SERIES_LIMIT = 8;
 let _statsPresets = [];
 let _activeStatsPresetId = null;
-let _statsPresetDirty = false;
 let _statsPresetsLoaded = false;
 let _statsBreakdownColumnSort = { mode: 'name', dir: 'asc' };
 const STATS_SERIES_COLORS = [
@@ -5009,7 +5008,6 @@ function _overallStatsState() {
 }
 
 function _markStatsPresetDirty() {
-  _statsPresetDirty = true;
   _renderStatsPresetControls();
 }
 
@@ -5049,13 +5047,12 @@ function _renderStatsPresetControls() {
   const select = document.getElementById('stats-preset-select');
   if (!select) return;
   const options = ['<option value="__overall">Overall View</option>'];
-  if (_statsPresetDirty) options.push('<option value="__custom">Custom View</option>');
   options.push(..._statsPresets.map(preset => {
     const label = `${preset.name}${preset.is_default ? ' (default)' : ''}`;
     return `<option value="${preset.id}">${escapeHtml(label)}</option>`;
   }));
   select.innerHTML = options.join('');
-  select.value = _statsPresetDirty ? '__custom' : (_activeStatsPresetId ? String(_activeStatsPresetId) : '__overall');
+  select.value = _activeStatsPresetId ? String(_activeStatsPresetId) : '__overall';
   const hasActivePreset = !!_activeStatsPresetId;
   const hasDefaultPreset = _statsPresets.some(p => p.is_default);
   document.getElementById('stats-preset-update').disabled = !hasActivePreset;
@@ -5074,7 +5071,6 @@ async function _loadStatsPresets({ applyDefault = false } = {}) {
     const def = _statsPresets.find(preset => preset.is_default);
     if (applyDefault && def && !_activeStatsPresetId) {
       _activeStatsPresetId = def.id;
-      _statsPresetDirty = false;
       _applyStatsState(def.state);
     }
     _renderStatsPresetControls();
@@ -5142,7 +5138,6 @@ async function _saveStatsPreset({ update = false, makeDefault = false } = {}) {
   const preset = await res.json();
   await _loadStatsPresets();
   _activeStatsPresetId = preset.id;
-  _statsPresetDirty = false;
   _renderStatsPresetControls();
   _setStatsPresetStatus(makeDefault ? 'default set' : update ? 'updated' : 'saved');
 }
@@ -5769,7 +5764,6 @@ function initStats() {
   document.getElementById('stats-preset-select')?.addEventListener('change', e => {
     if (e.target.value === '__overall') {
       _activeStatsPresetId = null;
-      _statsPresetDirty = false;
       _applyStatsState(_overallStatsState());
       _renderStatsPresetControls();
       _setStatsPresetStatus('');
@@ -5782,7 +5776,6 @@ function initStats() {
       return;
     }
     _activeStatsPresetId = preset.id;
-    _statsPresetDirty = false;
     _applyStatsState(preset.state);
     _renderStatsPresetControls();
     _setStatsPresetStatus('');
@@ -5795,7 +5788,6 @@ function initStats() {
     if (!_activeStatsPresetId) return;
     await fetch(`/stats/filter-presets/${_activeStatsPresetId}`, { method: 'DELETE' });
     _activeStatsPresetId = null;
-    _statsPresetDirty = false;
     _applyStatsState(_overallStatsState());
     await _loadStatsPresets();
     _renderStatsPresetControls();
