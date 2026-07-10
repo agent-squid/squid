@@ -4711,6 +4711,11 @@ function _breakdownSelection(rows) {
   } else {
     selected = selectedAgents;
   }
+  selected = selected.slice().sort((a, b) => {
+    const labelA = labels.get(a) || a;
+    const labelB = labels.get(b) || b;
+    return labelA.localeCompare(labelB) || a.localeCompare(b);
+  });
   return { selected, selectedAgents, labels };
 }
 
