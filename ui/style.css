@@ -2588,11 +2588,12 @@ body {
   top: 0;
   background: var(--surface);
 }
-.stats-breakdown-heading {
-  display: inline-flex;
+.stats-breakdown-axis-label {
+  display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 0.35rem;
+  min-width: 4.5rem;
 }
 .stats-breakdown-sort {
   display: inline-flex;
