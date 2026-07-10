@@ -1333,7 +1333,7 @@ async def usage_stats(
     adhoc: str = "all",
     tz_offset_minutes: int = 0,
 ):
-    if group == "time" and breakdown == "agent_profile":
+    if group == "time" and breakdown in {"agent", "agent_session", "agent_profile"}:
         return JSONResponse(get_stats_by_agent_profile_breakdown(
             period=period,
             days=days,
@@ -1341,6 +1341,7 @@ async def usage_stats(
             topic=topic,
             adhoc=adhoc,
             tz_offset_minutes=tz_offset_minutes,
+            include_session=breakdown == "agent_session",
         ))
     if group == "topic":
         return JSONResponse(get_stats_by_topic(days=days, agent=agent, topic=topic, adhoc=adhoc))
