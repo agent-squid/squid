@@ -864,6 +864,11 @@ body {
 .diff-add    { background: rgba(40, 150, 70, 0.13); color: #70b870; }
 .diff-hunk   { background: rgba(80, 80, 150, 0.16); color: #8080c8; }
 .diff-file   { background: rgba(255, 255, 255, 0.035); color: #aaaabb; }
+.diff-header { margin: 0; }
+.diff-header-summary { cursor: pointer; user-select: none; }
+.diff-header-summary::-webkit-details-marker { display: none; }
+.diff-header-summary::before { content: '▸ '; font-style: normal; }
+.diff-header[open] .diff-header-summary::before { content: '▾ '; }
 .diff-sep    { height: 1px; background: #222; margin: 2px 0; }
 .gitdiff-file-row { border-top: 1px solid var(--surface-3); display: flex; flex-wrap: wrap; align-items: center; }
 .gitdiff-file-row:first-child { border-top: none; }

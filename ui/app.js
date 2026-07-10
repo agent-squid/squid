@@ -2891,9 +2891,27 @@ function _firstChangedNewRange(chunk) {
 }
 
 function renderUnifiedDiffLines(container, diff) {
+  let headerDetails = null;
   for (const line of (diff || '').split('\n')) {
     if (line.startsWith('diff --git ') || line.startsWith('index ') ||
-        line.startsWith('--- ') || line.startsWith('+++ ')) continue;
+        line.startsWith('--- ') || line.startsWith('+++ ')) {
+      if (line.startsWith('diff --git ')) {
+        headerDetails = document.createElement('details');
+        headerDetails.className = 'diff-header';
+        const summary = document.createElement('summary');
+        summary.className = 'diff-line diff-file diff-header-summary';
+        summary.textContent = line;
+        headerDetails.appendChild(summary);
+        container.appendChild(headerDetails);
+      } else if (headerDetails) {
+        const el = document.createElement('span');
+        el.className = 'diff-line diff-file';
+        el.textContent = line;
+        headerDetails.appendChild(el);
+      }
+      continue;
+    }
+    headerDetails = null;
     const el = document.createElement('span');
     if (line.startsWith('+')) {
       el.className = 'diff-line diff-add';
