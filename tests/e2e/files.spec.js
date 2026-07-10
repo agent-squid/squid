@@ -165,6 +165,86 @@ test('yaml example files open inline from the browser instead of downloading', a
   expect(await downloadPromise).toBe(false);
 });
 
+test('md file shows preview button and opens rendered preview with render=1', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/config/localfile-roots**', r => r.fulfill({
+    json: { roots: ['/tmp/work'] },
+  }));
+  await page.route(url => url.pathname === '/localfile', route => {
+    const url = new URL(route.request().url());
+    const path = url.searchParams.get('path');
+    if (path === '/tmp/work') {
+      return route.fulfill({
+        contentType: 'application/json',
+        json: {
+          type: 'directory',
+          path,
+          entries: [
+            { name: 'README.md', path: '/tmp/work/README.md', is_dir: false, size: 20, mtime: 1 },
+          ],
+        },
+      });
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: 'text/markdown',
+      body: '# Hello\n\nWorld',
+    });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Files' }).click();
+  await page.getByRole('link', { name: '/tmp/work' }).click();
+  await page.getByRole('link', { name: 'README.md' }).click();
+
+  // File viewer shows raw md source, not HTML
+  await expect(page.locator('#file-modal-body')).toContainText('# Hello');
+
+  // Preview button is visible for md files
+  await expect(page.getByRole('button', { name: 'Preview in browser' })).toBeVisible();
+
+  // Preview opens /localfile with render=1
+  await page.evaluate(() => {
+    window._openedUrl = null;
+    window.open = (url) => { window._openedUrl = url; };
+  });
+  await page.getByRole('button', { name: 'Preview in browser' }).click();
+  const openedUrl = await page.evaluate(() => window._openedUrl);
+  expect(openedUrl).toContain('render=1');
+  expect(openedUrl).toContain('/localfile');
+});
+
+test('plain text file has no preview button', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/config/localfile-roots**', r => r.fulfill({
+    json: { roots: ['/tmp/work'] },
+  }));
+  await page.route(url => url.pathname === '/localfile', route => {
+    const path = new URL(route.request().url()).searchParams.get('path');
+    if (path === '/tmp/work') {
+      return route.fulfill({
+        contentType: 'application/json',
+        json: {
+          type: 'directory',
+          path,
+          entries: [
+            { name: 'notes.txt', path: '/tmp/work/notes.txt', is_dir: false, size: 10, mtime: 1 },
+          ],
+        },
+      });
+    }
+    return route.fulfill({ status: 200, contentType: 'text/plain', body: 'hello world' });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Files' }).click();
+  await page.getByRole('link', { name: '/tmp/work' }).click();
+  await page.getByRole('link', { name: 'notes.txt' }).click();
+
+  await expect(page.locator('#file-modal-body')).toContainText('hello world');
+  await expect(page.getByRole('button', { name: 'Preview in browser' })).toBeHidden();
+});
+
 test('desktop burger only shows settings while mobile burger shows primary nav', async ({ page }) => {
   await mockApp(page);
 
