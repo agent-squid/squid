@@ -2003,6 +2003,7 @@ function closeEscSurfaces() {
   if (restartModal?.classList.contains('open')) { closeRestartModal(false); closed = true; }
   if (document.getElementById('memory-modal')?.classList.contains('open')) { closeMemoryEditor(); closed = true; }
   if (document.getElementById('topic-delete-modal')?.classList.contains('open')) { closeTopicDeleteModal(); closed = true; }
+  if (document.getElementById('preset-name-modal')?.classList.contains('open')) { _closePresetNameModal(null); closed = true; }
   if (!sessionAdvisoryEl.hidden) { if (_advisoryDismissKey) localStorage.setItem(_advisoryDismissKey, '1'); sessionAdvisoryEl.hidden = true; closed = true; }
   return closed;
 }
@@ -5081,12 +5082,35 @@ async function _loadStatsPresets({ applyDefault = false } = {}) {
   }
 }
 
+let _presetNameResolve = null;
+
+function _openPresetNameModal(defaultName) {
+  return new Promise(resolve => {
+    _presetNameResolve = resolve;
+    const input = document.getElementById('preset-name-input');
+    input.value = defaultName || '';
+    document.getElementById('preset-name-confirm').disabled = !input.value.trim();
+    document.getElementById('preset-name-modal').classList.add('open');
+    input.focus();
+    input.select();
+  });
+}
+
+function _closePresetNameModal(name = null) {
+  document.getElementById('preset-name-modal').classList.remove('open');
+  const resolve = _presetNameResolve;
+  _presetNameResolve = null;
+  if (resolve) resolve(name);
+}
+
 async function _saveStatsPreset({ update = false, makeDefault = false } = {}) {
   const active = _statsPresets.find(preset => preset.id === _activeStatsPresetId);
-  const name = update || makeDefault ? active?.name : window.prompt('Preset name', active?.name || '');
-  if (!name && !update && !makeDefault) {
-    _setStatsPresetStatus('name required');
-    return;
+  let name;
+  if (update || makeDefault) {
+    name = active?.name;
+  } else {
+    name = await _openPresetNameModal(active?.name || '');
+    if (!name) return;
   }
   const url = update || makeDefault ? `/stats/filter-presets/${_activeStatsPresetId}` : '/stats/filter-presets';
   const method = update || makeDefault ? 'PUT' : 'POST';
@@ -7733,6 +7757,28 @@ function initPin() {
   document.getElementById('topic-delete-modal').addEventListener('mousedown', e => {
     if (e.target === document.getElementById('topic-delete-modal')) closeTopicDeleteModal();
   });
+  document.getElementById('preset-name-modal-close').addEventListener('click', () => _closePresetNameModal(null));
+  document.getElementById('preset-name-cancel').addEventListener('click', () => _closePresetNameModal(null));
+  document.getElementById('preset-name-confirm').addEventListener('click', () => {
+    const name = document.getElementById('preset-name-input').value.trim();
+    if (name) _closePresetNameModal(name);
+  });
+  document.getElementById('preset-name-input').addEventListener('input', e => {
+    document.getElementById('preset-name-confirm').disabled = !e.target.value.trim();
+  });
+  document.getElementById('preset-name-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const name = document.getElementById('preset-name-input').value.trim();
+      if (name) _closePresetNameModal(name);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      _closePresetNameModal(null);
+    }
+  });
+  document.getElementById('preset-name-modal').addEventListener('mousedown', e => {
+    if (e.target === document.getElementById('preset-name-modal')) _closePresetNameModal(null);
+  });
   updatePinCount();
 }
 
@@ -7864,10 +7910,11 @@ document.addEventListener('click', e => {
   if (!acEl.contains(e.target) && e.target !== input) hideAutocomplete();
   if (!pinPanel.contains(e.target) && !pinBtn.contains(e.target)) closePinPanel();
   const ctxPopup = document.getElementById('ctx-popup');
-  const inSecondary = e.target.closest('#msg-modal, #memory-modal, #topic-delete-modal');
+  const inSecondary = e.target.closest('#msg-modal, #memory-modal, #topic-delete-modal, #preset-name-modal');
   const secondaryOpen = document.getElementById('msg-modal')?.classList.contains('open')
     || document.getElementById('memory-modal')?.classList.contains('open')
-    || document.getElementById('topic-delete-modal')?.classList.contains('open');
+    || document.getElementById('topic-delete-modal')?.classList.contains('open')
+    || document.getElementById('preset-name-modal')?.classList.contains('open');
   if (ctxPopup && !ctxPopup.contains(e.target) && !e.target.closest('.user-ctx') && !inSecondary && !secondaryOpen) {
     ctxPopup.classList.remove('open');
   }

@@ -1641,6 +1641,67 @@ body {
   border-color: #3a1818;
   color: var(--text-lo);
 }
+#preset-name-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 117;
+  background: rgba(0, 0, 0, 0.55);
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+#preset-name-modal.open { display: flex; }
+#preset-name-modal-box {
+  width: min(320px, 96%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#preset-name-modal-header,
+#preset-name-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid var(--surface-2);
+}
+#preset-name-modal-footer {
+  justify-content: flex-end;
+  border-top: 1px solid var(--surface-2);
+  border-bottom: 0;
+}
+#preset-name-modal-close {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  padding: 0.1rem 0.3rem;
+  cursor: pointer;
+}
+#preset-name-modal-close:hover { color: #999; }
+#preset-name-modal-body { padding: 0.8rem 0.75rem; }
+#preset-name-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+#preset-name-cancel,
+#preset-name-confirm {
+  border-radius: 6px;
+  padding: 0.28rem 0.75rem;
+}
+#preset-name-confirm {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+#preset-name-confirm:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
 /* ── file viewer modal ─────────────────────────────────────────────────────── */
 #file-modal {
   display: flex;
