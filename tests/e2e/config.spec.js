@@ -406,6 +406,7 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect(page.locator('#stats-tabs .st').first()).toHaveText('Hourly');
   await expect(page.locator('#stats-tabs .st').nth(1)).toHaveText('Daily');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('period')).toBe('hourly');
+  expect(statsRequests.at(-1).searchParams.get('days')).toBe('7');
   expect(statsRequests.at(-1).searchParams.get('tz_offset_minutes')).not.toBeNull();
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (4)');
   await expect(page.locator('#stats-content th', { hasText: 'Sessions' })).toBeVisible();
