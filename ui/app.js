@@ -2846,6 +2846,20 @@ function _countDiffStats(chunk) {
   return { add, del };
 }
 
+function _allChangedNewLines(chunk) {
+  const lines = new Set();
+  let newLine = null;
+  for (const line of (chunk || '').split('\n')) {
+    const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunk) { newLine = parseInt(hunk[1], 10); continue; }
+    if (newLine == null) continue;
+    if (line.startsWith('+') && !line.startsWith('+++')) { lines.add(newLine++); }
+    else if (line.startsWith('-') && !line.startsWith('---')) { /* skip */ }
+    else { newLine++; }
+  }
+  return lines;
+}
+
 function _firstChangedNewRange(chunk) {
   let newLine = null;
   let fallback = null;
@@ -3015,6 +3029,7 @@ function makeToolBlock(tool, msgId) {
       const fullDisplayPath = fullDisplayPaths[i];
       const chunk = fileDiffs.get(file.path) || fileDiffs.get(file.old_path) || '';
       const firstChangedRange = _firstChangedNewRange(chunk);
+      const allChangedLines = _allChangedNewLines(chunk);
 
       const row = document.createElement('div');
       row.className = 'gitdiff-file-row';
@@ -3063,7 +3078,7 @@ function makeToolBlock(tool, msgId) {
         openBtn.textContent = 'view';
         openBtn.addEventListener('click', e => {
           e.stopPropagation();
-          openFileViewer(_absPath, firstChangedRange?.line, firstChangedRange?.endLine);
+          openFileViewer(_absPath, firstChangedRange?.line, firstChangedRange?.endLine, null, allChangedLines);
         });
         row.appendChild(openBtn);
       }
@@ -7200,7 +7215,7 @@ function openFilesTabView() {
   openFileViewer(null, null, null, document.getElementById('view-files'));
 }
 
-function openFileViewer(initialPath, initialLine, initialEndLine, inlineContainer = null) {
+function openFileViewer(initialPath, initialLine, initialEndLine, inlineContainer = null, initialChangedLines = null) {
   document.getElementById('file-modal')?.remove();
   _fvNavigate = null;
 
@@ -7211,6 +7226,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   let path = initialPath;
   let line = initialLine;
   let endLine = initialEndLine;
+  let changedLines = initialChangedLines;
   let pathKind = initialPath ? null : 'roots';
   let pathIsText = false;
 
@@ -7867,7 +7883,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
       pathKind = 'file';
       pathIsText = ct.includes('text/') || ct.includes('application/json');
       updateNav();
-      _renderFileViewer(body, text, line, endLine, path);
+      _renderFileViewer(body, text, line, endLine, path, changedLines);
     } catch (err) {
       body.textContent = err?.message || 'Failed to load file.';
     }
@@ -7987,7 +8003,7 @@ function _renderDirListing(container, data) {
   requestAnimationFrame(() => filterInput.focus());
 }
 
-function _renderFileViewer(container, text, targetLine, endLine, path) {
+function _renderFileViewer(container, text, targetLine, endLine, path, changedLines = null) {
   const rawLines = text.split('\n');
   if (rawLines.length && rawLines[rawLines.length - 1] === '') rawLines.pop();
   const numWidth = String(rawLines.length).length;
@@ -8010,8 +8026,9 @@ function _renderFileViewer(container, text, targetLine, endLine, path) {
   rawLines.forEach((content, i) => {
     const n = i + 1;
     const inRange = targetLine && n >= targetLine && n <= (endLine || targetLine);
+    const isChanged = changedLines?.has(n);
     const row = document.createElement('div');
-    row.className = 'fv-line' + (inRange ? ' fv-target' : '');
+    row.className = 'fv-line' + (inRange ? ' fv-target' : isChanged ? ' fv-changed' : '');
     if (n === targetLine) row.id = 'fv-target';
 
     const num = document.createElement('span');
