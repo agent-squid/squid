@@ -2564,7 +2564,7 @@ body {
 #stats-close:hover { color: var(--text-mid); }
 
 #stats-content {
-  overflow-y: auto;
+  overflow: auto;
   -webkit-overflow-scrolling: touch;
   flex: 1;
   font-size: 13px;
@@ -2628,6 +2628,49 @@ body {
   border-top: 1px solid var(--surface-2);
   color: var(--text-muted);
   font-weight: 600;
+}
+#stats-content .stats-breakdown-table {
+  --stats-total-col-width: 5.75rem;
+  --stats-misc-col-width: 5.75rem;
+  width: max-content;
+  min-width: 100%;
+}
+#stats-content .stats-breakdown-table .stats-series-col {
+  min-width: 7.5rem;
+}
+#stats-content .stats-breakdown-table .stats-sticky-left,
+#stats-content .stats-breakdown-table .stats-sticky-right {
+  position: sticky;
+  background: var(--surface);
+  z-index: 2;
+}
+#stats-content .stats-breakdown-table th.stats-sticky-left,
+#stats-content .stats-breakdown-table th.stats-sticky-right {
+  z-index: 4;
+}
+#stats-content .stats-breakdown-table .stats-sticky-left {
+  left: 0;
+  min-width: 8.5rem;
+  box-shadow: 1px 0 0 var(--surface-2);
+}
+#stats-content .stats-breakdown-table .stats-sticky-right {
+  box-shadow: -1px 0 0 var(--surface-2);
+}
+#stats-content .stats-breakdown-table .stats-total-col {
+  right: 0;
+  min-width: var(--stats-total-col-width);
+}
+#stats-content .stats-breakdown-table.has-misc .stats-misc-col {
+  right: var(--stats-total-col-width);
+  min-width: var(--stats-misc-col-width);
+}
+#stats-content .stats-breakdown-table tbody tr:hover .stats-sticky-left,
+#stats-content .stats-breakdown-table tbody tr:hover .stats-sticky-right {
+  background: var(--surface-3);
+}
+#stats-content .stats-breakdown-table tfoot .stats-sticky-left,
+#stats-content .stats-breakdown-table tfoot .stats-sticky-right {
+  background: var(--surface);
 }
 #stats-content .empty { padding: 1rem; text-align: center; color: var(--text-ghost); }
 .stats-pager {
