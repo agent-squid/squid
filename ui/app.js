@@ -4733,7 +4733,7 @@ function _updateStatsBreakdownUi() {
   document.getElementById('stats-chart-controls')?.classList.toggle('breakdown-active', active);
   const measures = document.getElementById('sf-measures');
   if (measures) measures.hidden = active;
-  const measureSep = document.querySelector('.sf-session-row .sf-sep');
+  const measureSep = document.querySelector('.sf-primary-row .sf-sep');
   if (measureSep) measureSep.hidden = active;
 }
 
