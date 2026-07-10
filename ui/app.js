@@ -3042,6 +3042,7 @@ function makeToolBlock(tool, msgId) {
       fileToggle.title = fullDisplayPath;
 
       const isBinary = chunk.includes('Binary files') || !_isTextPath(file.path || '');
+      let fileBody = null;
       if (isBinary) {
         fileToggle.textContent = `${status} ${displayPath}`;
         fileToggle.classList.add('gitdiff-file-toggle--no-diff');
@@ -3053,14 +3054,13 @@ function makeToolBlock(tool, msgId) {
       } else if (chunk) {
         const { add, del } = _countDiffStats(chunk);
         fileToggle.textContent = `${status} ${displayPath}  +${add} -${del}`;
-        const fileBody = document.createElement('div');
+        fileBody = document.createElement('div');
         fileBody.className = 'gitdiff-file-body';
         const fileScroll = document.createElement('div');
         fileScroll.className = 'diff-scroll';
         renderUnifiedDiffLines(fileScroll, chunk);
         fileBody.appendChild(fileScroll);
         row.appendChild(fileToggle);
-        row.appendChild(fileBody);
         fileToggle.addEventListener('click', () => row.classList.toggle('gitdiff-file-expanded'));
       } else {
         fileToggle.textContent = `${status} ${displayPath}`;
@@ -3084,6 +3084,8 @@ function makeToolBlock(tool, msgId) {
         });
         row.appendChild(openBtn);
       }
+
+      if (fileBody) row.appendChild(fileBody);
 
       body.appendChild(row);
     }
@@ -3151,7 +3153,8 @@ async function fetchRevertEligibility(block) {
           }
         } catch { btn.disabled = false; btn.textContent = 'revert'; }
       });
-      row.appendChild(btn);
+      const _fb = row.querySelector('.gitdiff-file-body');
+      if (_fb) row.insertBefore(btn, _fb); else row.appendChild(btn);
     }
   }
 
