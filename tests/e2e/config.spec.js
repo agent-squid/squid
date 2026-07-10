@@ -419,7 +419,7 @@ test('analytics measures dropdown controls cost and quota columns independently'
   expect(statsRequests.at(-1).searchParams.get('breakdown')).toBeNull();
   expect(statsRequests.at(-1).searchParams.get('days')).toBe('7');
   expect(statsRequests.at(-1).searchParams.get('tz_offset_minutes')).not.toBeNull();
-  await expect(page.locator('#sf-breakdown option')).toHaveCount(2);
+  await expect(page.locator('#sf-breakdown option')).toHaveCount(3);
   await expect(page.locator('#sc-compare-btn')).toBeVisible();
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (4)');
   await expect(page.locator('#stats-content th', { hasText: 'Sessions' })).toBeVisible();
@@ -522,6 +522,42 @@ test('agent breakdown defaults to top three agents when none are selected', asyn
   await expect(page.getByRole('columnheader', { name: 'clive', exact: true })).toBeVisible();
   await expect(page.getByRole('columnheader', { name: 'cursor', exact: true })).toBeVisible();
   await expect(page.locator('#stats-content th', { hasText: 'Misc' })).toBeVisible();
+});
+
+test('agent session type breakdown expands selected base agents into session variants', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/stats/filters', route => route.fulfill({
+    json: { agents: ['codex', 'clive'], topics: [] },
+  }));
+  const statsRequests = [];
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    statsRequests.push(url);
+    if (url.searchParams.get('breakdown') === 'agent_session') {
+      return route.fulfill({
+        json: [
+          { period: '2026-06-26 14:00', agent_key: 'codex', agent: 'codex', sessions: 4, total_turns: 4 },
+          { period: '2026-06-26 14:00', agent_key: 'codex!', agent: 'codex!', sessions: 3, total_turns: 3 },
+          { period: '2026-06-26 14:00', agent_key: 'clive', agent: 'clive', sessions: 2, total_turns: 2 },
+        ],
+      });
+    }
+    return route.fulfill({ json: [{ period: '2026-06-26 14:00', sessions: 9, total_turns: 9 }] });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('#sf-agent-toggle').click();
+  await page.locator('#sf-agent-menu input[value="codex"]').check();
+  await page.locator('#sf-breakdown').selectOption('agent_session');
+  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBe('agent_session');
+  expect(statsRequests.at(-1).searchParams.get('agent')).toBeNull();
+  await expect(page.locator('#sf-agent-toggle')).toHaveText('@codex');
+  await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'codex!', exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'clive', exact: true })).toHaveCount(0);
+  await expect(page.locator('#stats-content th', { hasText: 'Misc' })).toBeVisible();
+  await expect(page.locator('#stats-content tfoot')).toContainText('9');
 });
 
 test('/restart clears its persisted draft before the page reloads', async ({ page }) => {

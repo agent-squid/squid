@@ -4657,13 +4657,17 @@ function _agentKey(row) {
   return row.agent_key || row.agent || 'unknown';
 }
 
+function _agentBaseKey(key) {
+  return String(key || 'unknown').replace(/!$/, '');
+}
+
 function _topBreakdownAgentKeys(rows) {
   const totals = new Map();
   const labels = new Map();
   for (const row of rows) {
-    const key = _agentKey(row);
+    const key = _agentBaseKey(_agentKey(row));
     totals.set(key, (totals.get(key) || 0) + _statsMetricValue(row, statsChartY1));
-    if (!labels.has(key)) labels.set(key, _agentLabel(row));
+    if (!labels.has(key)) labels.set(key, _agentBaseKey(_agentLabel(row)));
   }
   return [...totals.entries()]
     .sort((a, b) => b[1] - a[1] || (labels.get(a[0]) || '').localeCompare(labels.get(b[0]) || ''))
@@ -4672,27 +4676,39 @@ function _topBreakdownAgentKeys(rows) {
 }
 
 function _breakdownSelection(rows) {
-  const totals = new Map();
   const labels = new Map();
+  const availableSeries = new Set();
   for (const row of rows) {
     const key = _agentKey(row);
-    totals.set(key, (totals.get(key) || 0) + _statsMetricValue(row, statsChartY1));
+    availableSeries.add(key);
     if (!labels.has(key)) labels.set(key, _agentLabel(row));
   }
-  let selected;
+  let selectedAgents;
   if (statsFilters.agents.length) {
-    selected = statsFilters.agents;
-    for (const agent of selected) {
+    selectedAgents = statsFilters.agents;
+    for (const agent of selectedAgents) {
       if (!labels.has(agent)) labels.set(agent, agent);
     }
   } else {
-    selected = _topBreakdownAgentKeys(rows);
+    selectedAgents = _topBreakdownAgentKeys(rows);
   }
-  return { selected, labels };
+
+  let selected;
+  if (statsBreakdown === 'agent_session') {
+    selected = [];
+    for (const agent of selectedAgents) {
+      for (const key of [agent, `${agent}!`]) {
+        if (availableSeries.has(key)) selected.push(key);
+      }
+    }
+  } else {
+    selected = selectedAgents;
+  }
+  return { selected, selectedAgents, labels };
 }
 
 function _breakdownPivot(rows) {
-  const { selected, labels } = _breakdownSelection(rows);
+  const { selected, selectedAgents, labels } = _breakdownSelection(rows);
   const periods = [...new Set(rows.map(r => r.period))].sort().reverse();
   const periodRows = periods.map(period => {
     const values = Object.fromEntries(selected.map(key => [key, 0]));
@@ -4702,7 +4718,8 @@ function _breakdownPivot(rows) {
       const value = _statsMetricValue(row, statsChartY1);
       total += value;
       const key = _agentKey(row);
-      if (selected.includes(key)) values[key] += value;
+      const selectedKey = statsBreakdown === 'agent_session' ? _agentBaseKey(key) : key;
+      if (selectedAgents.includes(selectedKey) && selected.includes(key)) values[key] += value;
       else misc += value;
     }
     return { period, values, misc, total };
