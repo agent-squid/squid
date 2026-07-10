@@ -4694,13 +4694,20 @@ function _breakdownSelection(rows) {
   }
 
   let selected;
-  if (statsBreakdown === 'agent_session') {
+  if (statsBreakdown === 'agent_session' || statsFilters.adhoc === 'all') {
     selected = [];
     for (const agent of selectedAgents) {
       for (const key of [agent, `${agent}!`]) {
         if (availableSeries.has(key)) selected.push(key);
       }
     }
+  } else if (statsFilters.adhoc === 'adhoc') {
+    selected = [];
+    for (const agent of selectedAgents) {
+      const adhocKey = `${agent}!`;
+      if (availableSeries.has(adhocKey)) selected.push(adhocKey);
+    }
+    if (!selected.length) selected = selectedAgents;
   } else {
     selected = selectedAgents;
   }
@@ -4718,7 +4725,7 @@ function _breakdownPivot(rows) {
       const value = _statsMetricValue(row, statsChartY1);
       total += value;
       const key = _agentKey(row);
-      const selectedKey = statsBreakdown === 'agent_session' ? _agentBaseKey(key) : key;
+      const selectedKey = (statsBreakdown === 'agent_session' || statsFilters.adhoc !== 'session') ? _agentBaseKey(key) : key;
       if (selectedAgents.includes(selectedKey) && selected.includes(key)) values[key] += value;
       else misc += value;
     }
