@@ -3,6 +3,7 @@ Tests for agent/worktree.py — per-turn Git worktree isolation.
 
 Each test gets a fresh temp Git repo so there's no shared state.
 """
+import os
 import subprocess
 from pathlib import Path
 
@@ -131,6 +132,35 @@ def test_ensure_worktree_symlinks_dependency_dirs(tmp_path):
     assert (wt / "node_modules" / "some-pkg" / "index.js").exists()
     assert (wt / ".venv").is_symlink()
     assert (wt / ".venv" / "bin" / "python").exists()
+
+
+def test_ensure_worktree_playwright_cli_runs_through_nested_symlink(tmp_path):
+    """
+    Mirrors tests/e2e/node_modules' real layout: npm links node_modules/.bin/<cli>
+    as a relative symlink into node_modules/<pkg>/. Verifies that chain still
+    resolves, stays executable, and actually runs when reached through the
+    repo->worktree node_modules symlink (not just that the path exists).
+    """
+    repo = init_repo(tmp_path / "repo")
+    e2e = repo / "tests" / "e2e"
+    pkg_dir = e2e / "node_modules" / "playwright"
+    pkg_dir.mkdir(parents=True)
+    cli = pkg_dir / "cli.js"
+    cli.write_text("#!/bin/sh\necho Version 1.99.0\n")
+    cli.chmod(0o755)
+
+    bin_dir = e2e / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "playwright").symlink_to(Path("..") / "playwright" / "cli.js")
+
+    wt = ensure_worktree(repo, "t", "801")
+
+    linked_cli = wt / "tests" / "e2e" / "node_modules" / ".bin" / "playwright"
+    assert os.access(linked_cli, os.X_OK)
+    result = subprocess.run(
+        [str(linked_cli)], text=True, stdout=subprocess.PIPE, check=True,
+    )
+    assert result.stdout.strip() == "Version 1.99.0"
 
 
 def test_link_dependency_dirs_refuses_when_wt_equals_repo_root(tmp_path):
