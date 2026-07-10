@@ -68,9 +68,29 @@ At the start of each turn, `_setup_worktrees` calls `ensure_worktree` with
 `_setup_worktrees` then remaps all paths:
 
 - `effective_cwd` — the agent subprocess launch directory — is replaced with the
-  worktree path.
+  worktree path so that relative file paths the agent resolves (e.g. `./src`)
+  land inside the worktree, not the source repo.
 - `effective_code_roots` — the paths injected into model context — are also
   replaced with their worktree equivalents via `map_to_worktree`.
+
+The original `cwd` (source repo path) is preserved as `source_cwd` and passed
+alongside `effective_cwd` throughout the pipeline. `topic_queue._process`
+routes them to different consumers:
+
+- `proc_cwd` (`= item.cwd`, the worktree path) → subprocess `cwd` argument
+- `display_cwd` (`= item.source_cwd or proc_cwd`, the source repo path) →
+  `save_stats`, `set_topic_session`, and the `cwd` field in the SSE stats event
+
+This keeps stats and the UI showing the source repo path while the subprocess
+still runs inside the isolated worktree.
+
+**Known limitation — agent session logs:** Agent CLIs (e.g., Claude Code) key
+their local session history to the process working directory. Because Squid
+runs each turn in a distinct worktree path, Claude Code creates a separate
+project entry in `~/.claude/projects/` per turn. Those entries accumulate until
+the worktrees are pruned. There is currently no CLI flag to separate "project
+directory for session logs" from "process working directory," so this cannot be
+fixed without upstream changes to the agent CLI.
 
 The agent reads and writes files inside the worktree. The original working tree
 is never touched during the turn. Both regular and adhoc turns follow the same

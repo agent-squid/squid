@@ -177,7 +177,8 @@ class TopicWorker:
             await item.out_q.put(None)
             return
 
-        source_cwd = item.cwd or SQUID_HOME
+        proc_cwd = item.cwd or SQUID_HOME  # subprocess working dir (may be a worktree path)
+        display_cwd = item.source_cwd or proc_cwd  # source repo path for stats/UI
         tracking_roots = item.code_roots or []
         worktree_sources: dict[str, str] = {}
         if item.msg_id:
@@ -195,7 +196,7 @@ class TopicWorker:
             msg_id=item.msg_id,
             worktree_sources=worktree_sources,
         )
-        effective_cwd = source_cwd
+        effective_cwd = proc_cwd
         effective_prompt = item.prompt
         kwargs: dict = dict(
             history=item.context_history, model=item.model,
@@ -252,16 +253,16 @@ class TopicWorker:
                         enriched["lookback"] = item.lookback
                         if session_id:
                             save_stats(session_id, enriched, topic=item.topic, agent=item.agent,
-                                       backend=item.backend, model=item.model, cwd=effective_cwd,
+                                       backend=item.backend, model=item.model, cwd=display_cwd,
                                        lookback=item.lookback)
                             if item.agent and not item.adhoc:
                                 set_topic_session(
                                     item.topic, item.agent, session_id,
-                                    item.source_cwd or effective_cwd,
+                                    display_cwd,
                                     backend.fingerprint,
                                 )
                             enriched["session_id"] = session_id
-                            enriched["cwd"] = effective_cwd
+                            enriched["cwd"] = display_cwd
                         insert_run_event(item.msg_id, run_seq, "stats", json.dumps(enriched))
                         await item.out_q.put({"_stats": enriched})
                     elif "_tool" in chunk:
