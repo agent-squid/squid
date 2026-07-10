@@ -536,6 +536,41 @@ test('agent breakdown defaults to top four agents when none are selected', async
   await expect(page.locator('#stats-content th', { hasText: 'Misc' })).toHaveCount(0);
 });
 
+test('stats breakdown columns can sort by footer totals', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/stats/filters', route => route.fulfill({
+    json: { agents: ['codex', 'clive', 'cursor', 'haiku'], topics: [] },
+  }));
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get('breakdown') === 'agent') {
+      return route.fulfill({
+        json: [
+          { period: '2026-06-26 14:00', agent_key: 'codex', agent: 'codex', sessions: 1, total_turns: 9 },
+          { period: '2026-06-26 14:00', agent_key: 'clive', agent: 'clive', sessions: 1, total_turns: 7 },
+          { period: '2026-06-26 14:00', agent_key: 'cursor', agent: 'cursor', sessions: 1, total_turns: 5 },
+          { period: '2026-06-26 14:00', agent_key: 'haiku', agent: 'haiku', sessions: 1, total_turns: 2 },
+        ],
+      });
+    }
+    return route.fulfill({ json: [{ period: '2026-06-26 14:00', sessions: 4, total_turns: 23 }] });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+  await expect(page.getByRole('button', { name: 'Sort breakdown columns by total' })).toHaveCount(0);
+
+  await page.locator('#sf-breakdown').selectOption('agent');
+  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'clive', 'codex', 'cursor', 'haiku', 'Total']);
+  await expect(page.getByRole('button', { name: 'Sort breakdown columns by total' })).toHaveCount(4);
+
+  await page.getByRole('button', { name: 'Sort breakdown columns by total' }).first().click();
+  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'codex', 'clive', 'cursor', 'haiku', 'Total']);
+
+  await page.getByRole('button', { name: 'Sort breakdown columns by name' }).first().click();
+  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'clive', 'codex', 'cursor', 'haiku', 'Total']);
+});
+
 test('agent session type breakdown expands selected base agents into session variants', async ({ page }) => {
   await mockApp(page);
   await page.route('**/stats/filters', route => route.fulfill({
