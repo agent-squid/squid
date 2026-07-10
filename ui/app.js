@@ -178,7 +178,6 @@ function switchView(name) {
     btn.classList.toggle('active', btn.dataset.view === name);
   });
   currentView = name;
-  if (name !== 'stats') _clearStatsBrowserUrl();
   document.getElementById('right-rail')?.classList.toggle('quota-chat-hidden', name !== 'chat');
   if (name !== 'chat') {
     document.querySelectorAll('#quota-creds-popup, #codex-creds-popup, #cursor-creds-popup, #deepseek-max-popup')
@@ -4530,8 +4529,6 @@ let _activeStatsPresetId = null;
 let _statsPresetDirty = false;
 let _statsPresetsLoaded = false;
 let _statsBreakdownColumnSort = { mode: 'name', dir: 'asc' };
-let _statsUrlStateApplied = false;
-let _statsUrlOpenRequested = false;
 const STATS_SERIES_COLORS = [
   'rgba(100,160,255,1)',
   'rgba(80,200,120,1)',
@@ -4630,7 +4627,6 @@ function _bindStatsBreakdownSort() {
         mode: btn.dataset.statsColumnSort || 'name',
         dir: btn.dataset.statsColumnDir || 'asc',
       };
-      _syncStatsBrowserUrl();
       _rerenderStats();
     });
   });
@@ -4950,57 +4946,6 @@ function _statsQueryParams({ includeTz = false } = {}) {
   if (statsFilters.topics.length) params.set('topic', statsFilters.topics.join(','));
   if (statsFilters.adhoc !== 'all') params.set('adhoc', statsFilters.adhoc);
   return params;
-}
-
-const STATS_BROWSER_URL_KEYS = [
-  'view', 'period', 'breakdown', 'breakdown_sort', 'breakdown_sort_dir',
-  'days', 'agent', 'topic', 'adhoc',
-];
-
-function _syncStatsBrowserUrl() {
-  if (currentView !== 'stats' || !history.replaceState) return;
-  const url = new URL(location.href);
-  for (const key of STATS_BROWSER_URL_KEYS) url.searchParams.delete(key);
-  url.searchParams.set('view', 'stats');
-  for (const [key, value] of _statsQueryParams()) url.searchParams.set(key, value);
-  const next = `${url.pathname}${url.search}${url.hash}`;
-  const current = `${location.pathname}${location.search}${location.hash}`;
-  if (next !== current) history.replaceState(null, '', next);
-}
-
-function _clearStatsBrowserUrl() {
-  if (!history.replaceState) return;
-  const url = new URL(location.href);
-  const before = url.search;
-  for (const key of STATS_BROWSER_URL_KEYS) url.searchParams.delete(key);
-  if (url.search === before) return;
-  history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
-}
-
-function _applyStatsUrlState() {
-  const params = new URLSearchParams(location.search);
-  const hasStatsState = STATS_BROWSER_URL_KEYS.some(key => params.has(key));
-  if (!hasStatsState) return false;
-  const hasExplicitStatsState = STATS_BROWSER_URL_KEYS.some(key => key !== 'view' && params.has(key));
-  const period = params.get('period');
-  if (period === 'daily' || period === 'hourly') statsPeriod = period;
-  const days = Number(params.get('days'));
-  if (Number.isFinite(days) && days > 0) statsFilters.days = days;
-  statsBreakdown = params.get('breakdown') || '';
-  statsFilters.agents = (params.get('agent') || '').split(',').filter(Boolean);
-  statsFilters.topics = (params.get('topic') || '').split(',').filter(Boolean);
-  const adhoc = params.get('adhoc');
-  statsFilters.adhoc = ['session', 'adhoc'].includes(adhoc) ? adhoc : 'all';
-  _statsBreakdownColumnSort = _normalizeStatsBreakdownSort({
-    mode: params.get('breakdown_sort'),
-    dir: params.get('breakdown_sort_dir'),
-  });
-  document.getElementById('sf-period').value = statsPeriod;
-  document.getElementById('sf-days').value = String(statsFilters.days);
-  document.getElementById('sf-breakdown').value = statsBreakdown;
-  document.getElementById('sf-adhoc').value = statsFilters.adhoc;
-  _statsUrlStateApplied = hasExplicitStatsState;
-  return params.get('view') === 'stats';
 }
 
 function _statsState() {
@@ -5448,7 +5393,7 @@ async function loadStats() {
 
   if (!_statsPresetsLoaded) {
     _statsPresetsLoaded = true;
-    await _loadStatsPresets({ applyDefault: !_statsUrlStateApplied });
+    await _loadStatsPresets({ applyDefault: true });
   }
 
   if (!_statsFiltersLoaded) {
@@ -5461,7 +5406,6 @@ async function loadStats() {
   }
 
   const params = _statsQueryParams({ includeTz: true });
-  _syncStatsBrowserUrl();
 
   let rows;
   try {
@@ -5719,7 +5663,6 @@ function initStats() {
       }
     });
   });
-  _statsUrlOpenRequested = _applyStatsUrlState();
   _updateStatsFilterLabels();
   _updateStatsMeasureLabel();
 
@@ -8807,7 +8750,6 @@ document.addEventListener('click', e => {
 initHistoryScroll();
 initPromptHistory();
 initStats();
-if (_statsUrlOpenRequested) switchView('stats');
 initTopicsView();
 initAliases();
 initQuota();
