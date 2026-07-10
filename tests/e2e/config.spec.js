@@ -567,17 +567,30 @@ test('stats breakdown columns can sort by footer totals', async ({ page }) => {
   await expect(page.locator('#stats-content thead th').first().getByRole('button', { name: 'Sort breakdown columns by name' })).toHaveCount(2);
   await expect(page.locator('#stats-content tfoot td').first().getByRole('button', { name: 'Sort breakdown columns by total' })).toHaveCount(2);
   await expect(page.locator('#stats-content thead th').nth(1).getByRole('button')).toHaveCount(0);
-  await expect(page.locator('#stats-content thead th').first().locator('button.active')).toHaveCount(2);
+  await expect(page.locator('#stats-content thead th').first().locator('button.active')).toHaveCount(1);
   await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(0);
 
-  await page.locator('#stats-content tfoot td').first().getByRole('button', { name: 'Sort breakdown columns by total' }).first().click();
+  const nameSortButtons = page.locator('#stats-content thead th').first().getByRole('button', { name: 'Sort breakdown columns by name' });
+  const totalSortButtons = page.locator('#stats-content tfoot td').first().getByRole('button', { name: 'Sort breakdown columns by total' });
+
+  await totalSortButtons.nth(1).click();
   await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'codex', 'clive', 'cursor', 'haiku', 'Total']);
   await expect(page.locator('#stats-content thead th').first().locator('button.active')).toHaveCount(0);
-  await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(2);
+  await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(1);
 
-  await page.getByRole('button', { name: 'Sort breakdown columns by name' }).first().click();
+  await totalSortButtons.nth(0).click();
+  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'haiku', 'cursor', 'clive', 'codex', 'Total']);
+  await expect(page.locator('#stats-content thead th').first().locator('button.active')).toHaveCount(0);
+  await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(1);
+
+  await nameSortButtons.nth(1).click();
+  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'haiku', 'cursor', 'codex', 'clive', 'Total']);
+  await expect(page.locator('#stats-content thead th').first().locator('button.active')).toHaveCount(1);
+  await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(0);
+
+  await nameSortButtons.nth(0).click();
   await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'clive', 'codex', 'cursor', 'haiku', 'Total']);
-  await expect(page.locator('#stats-content thead th').first().locator('button.active')).toHaveCount(2);
+  await expect(page.locator('#stats-content thead th').first().locator('button.active')).toHaveCount(1);
   await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(0);
 });
 

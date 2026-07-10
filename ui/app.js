@@ -4527,7 +4527,7 @@ let _statsPresets = [];
 let _activeStatsPresetId = null;
 let _statsPresetDirty = false;
 let _statsPresetsLoaded = false;
-let _statsBreakdownColumnSort = 'name';
+let _statsBreakdownColumnSort = { mode: 'name', dir: 'asc' };
 const STATS_SERIES_COLORS = [
   'rgba(100,160,255,1)',
   'rgba(80,200,120,1)',
@@ -4606,13 +4606,14 @@ const STATS_ICON_LEFT = '<svg width="13" height="13" viewBox="0 0 16 16" fill="n
 const STATS_ICON_RIGHT = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m6 3.5 4.5 4.5L6 12.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 function _statsBreakdownAxisLabel(label, sortMode) {
-  const active = _statsBreakdownColumnSort === sortMode;
   const ariaLabel = sortMode === 'total' ? 'Sort breakdown columns by total' : 'Sort breakdown columns by name';
+  const leftActive = _statsBreakdownColumnSort.mode === sortMode && _statsBreakdownColumnSort.dir === 'asc';
+  const rightActive = _statsBreakdownColumnSort.mode === sortMode && _statsBreakdownColumnSort.dir === 'desc';
   return `<span class="stats-breakdown-axis-label">
     <span>${escapeHtml(label)}</span>
     <span class="stats-breakdown-sort">
-      <button class="stats-breakdown-sort-btn${active ? ' active' : ''}" type="button" data-stats-column-sort="${sortMode}" title="${escapeHtml(ariaLabel)}" aria-label="${escapeHtml(ariaLabel)}">${STATS_ICON_LEFT}</button>
-      <button class="stats-breakdown-sort-btn${active ? ' active' : ''}" type="button" data-stats-column-sort="${sortMode}" title="${escapeHtml(ariaLabel)}" aria-label="${escapeHtml(ariaLabel)}">${STATS_ICON_RIGHT}</button>
+      <button class="stats-breakdown-sort-btn${leftActive ? ' active' : ''}" type="button" data-stats-column-sort="${sortMode}" data-stats-column-dir="asc" title="${escapeHtml(ariaLabel)}" aria-label="${escapeHtml(ariaLabel)}">${STATS_ICON_LEFT}</button>
+      <button class="stats-breakdown-sort-btn${rightActive ? ' active' : ''}" type="button" data-stats-column-sort="${sortMode}" data-stats-column-dir="desc" title="${escapeHtml(ariaLabel)}" aria-label="${escapeHtml(ariaLabel)}">${STATS_ICON_RIGHT}</button>
     </span>
   </span>`;
 }
@@ -4621,7 +4622,10 @@ function _bindStatsBreakdownSort() {
   statsContent.querySelectorAll('[data-stats-column-sort]').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
-      _statsBreakdownColumnSort = btn.dataset.statsColumnSort || 'name';
+      _statsBreakdownColumnSort = {
+        mode: btn.dataset.statsColumnSort || 'name',
+        dir: btn.dataset.statsColumnDir || 'asc',
+      };
       _rerenderStats();
     });
   });
@@ -4711,6 +4715,16 @@ function _statsSeriesLabel(key) {
   return String(key).replace('\u0000', ' / ');
 }
 
+function _compareStatsSeriesByName(a, b, labels) {
+  const labelA = labels.get(a) || a;
+  const labelB = labels.get(b) || b;
+  const baseA = _agentBaseKey(labelA);
+  const baseB = _agentBaseKey(labelB);
+  const baseCompare = baseA.localeCompare(baseB) || _agentBaseKey(a).localeCompare(_agentBaseKey(b));
+  if (baseCompare) return baseCompare;
+  return (a.endsWith('!') ? 1 : 0) - (b.endsWith('!') ? 1 : 0) || labelA.localeCompare(labelB) || a.localeCompare(b);
+}
+
 function _topDimensionValues(rows, dimension, limit, allowed = null) {
   const totals = new Map();
   const labels = new Map();
@@ -4793,15 +4807,7 @@ function _breakdownSelection(rows) {
   } else {
     selected = selectedAgents;
   }
-  selected = selected.slice().sort((a, b) => {
-    const labelA = labels.get(a) || a;
-    const labelB = labels.get(b) || b;
-    const baseA = _agentBaseKey(labelA);
-    const baseB = _agentBaseKey(labelB);
-    const baseCompare = baseA.localeCompare(baseB) || _agentBaseKey(a).localeCompare(_agentBaseKey(b));
-    if (baseCompare) return baseCompare;
-    return (a.endsWith('!') ? 1 : 0) - (b.endsWith('!') ? 1 : 0) || labelA.localeCompare(labelB) || a.localeCompare(b);
-  });
+  selected = selected.slice().sort((a, b) => _compareStatsSeriesByName(a, b, labels));
   return { selected, selectedAgents, selectedTopics, labels };
 }
 
@@ -4823,12 +4829,15 @@ function _breakdownPivot(rows) {
     }
     return { period, values, misc, total };
   });
-  if (_statsBreakdownColumnSort === 'total') {
+  if (_statsBreakdownColumnSort.mode === 'total') {
     selected.sort((a, b) => {
       const totalA = periodRows.reduce((sum, row) => sum + (row.values[a] || 0), 0);
       const totalB = periodRows.reduce((sum, row) => sum + (row.values[b] || 0), 0);
-      return totalB - totalA || (labels.get(a) || a).localeCompare(labels.get(b) || b);
+      const totalCompare = _statsBreakdownColumnSort.dir === 'asc' ? totalA - totalB : totalB - totalA;
+      return totalCompare || _compareStatsSeriesByName(a, b, labels);
     });
+  } else if (_statsBreakdownColumnSort.dir === 'desc') {
+    selected.sort((a, b) => _compareStatsSeriesByName(b, a, labels));
   }
   return { selected, labels, periodRows };
 }
@@ -5574,7 +5583,7 @@ function initStats() {
 
   document.getElementById('sf-breakdown').addEventListener('change', e => {
     statsBreakdown = e.target.value;
-    _statsBreakdownColumnSort = 'name';
+    _statsBreakdownColumnSort = { mode: 'name', dir: 'asc' };
     e.target.value = statsBreakdown;
     _markStatsPresetDirty();
     if (statsBreakdown) {
