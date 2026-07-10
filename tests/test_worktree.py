@@ -115,6 +115,36 @@ def test_ensure_worktree_per_msg_id_are_independent(tmp_path):
     assert wt_b.exists()
 
 
+def test_ensure_worktree_symlinks_dependency_dirs(tmp_path):
+    repo = init_repo(tmp_path / "repo")
+    node_modules = repo / "node_modules" / "some-pkg"
+    node_modules.mkdir(parents=True)
+    (node_modules / "index.js").write_text("module.exports = {};\n")
+    venv = repo / ".venv" / "bin"
+    venv.mkdir(parents=True)
+    (venv / "python").write_text("#!/bin/sh\n")
+
+    wt = ensure_worktree(repo, "t", "210")
+
+    assert (wt / "node_modules").is_symlink()
+    assert (wt / "node_modules" / "some-pkg" / "index.js").exists()
+    assert (wt / ".venv").is_symlink()
+    assert (wt / ".venv" / "bin" / "python").exists()
+
+
+def test_ensure_worktree_does_not_recurse_into_matched_dependency_dirs(tmp_path):
+    repo = init_repo(tmp_path / "repo")
+    nested = repo / "node_modules" / "some-pkg" / "node_modules" / "nested-dep"
+    nested.mkdir(parents=True)
+
+    wt = ensure_worktree(repo, "t", "211")
+
+    # the outer node_modules is a symlink; the nested one under it is reached
+    # through that symlink, not independently symlinked by the worktree scan
+    assert (wt / "node_modules").is_symlink()
+    assert (wt / "node_modules" / "some-pkg" / "node_modules" / "nested-dep").exists()
+
+
 # ---------------------------------------------------------------------------
 # commit_worktree
 # ---------------------------------------------------------------------------
