@@ -381,7 +381,7 @@ test('mobile file viewer breadcrumb starts at the path end', async ({ page }) =>
 test('analytics measures dropdown controls cost and quota columns independently', async ({ page }) => {
   await mockApp(page);
   await page.route('**/stats/filters', route => route.fulfill({
-    json: { agents: ['codex'], topics: ['squid'] },
+    json: { agents: ['codex', 'clive'], topics: ['squid', 'ops'] },
   }));
   const statsRequests = [];
   await page.route('**/stats?**', route => {
@@ -425,6 +425,20 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect(page.locator('#stats-content th', { hasText: 'Tokens Out' })).toBeVisible();
   await expect(page.locator('#stats-content th', { hasText: 'Cost' })).toHaveCount(0);
   await expect(page.locator('#stats-content th', { hasText: 'Quota meter' })).toHaveCount(0);
+
+  await page.locator('#sf-topic-toggle').click();
+  await page.locator('#sf-topic-menu input[value="squid"]').check();
+  await expect(page.locator('#sf-topic-toggle')).toHaveText('#squid');
+  await page.locator('#sf-topic-menu input[value="ops"]').check();
+  await expect(page.locator('#sf-topic-toggle')).toHaveText('2 Topics');
+  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('topic')).toBe('squid,ops');
+
+  await page.locator('#sf-agent-toggle').click();
+  await page.locator('#sf-agent-menu input[value="codex"]').check();
+  await expect(page.locator('#sf-agent-toggle')).toHaveText('@codex');
+  await page.locator('#sf-agent-menu input[value="clive"]').check();
+  await expect(page.locator('#sf-agent-toggle')).toHaveText('2 Agents');
+  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('agent')).toBe('codex,clive');
 
   await page.locator('#sf-measures-toggle').click();
   await page.locator('#sf-measures-menu input[value="cost"]').check();

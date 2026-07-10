@@ -4514,7 +4514,7 @@ function initCursorQuota() {
 let statsPeriod = 'hourly';
 let statsGroup  = 'time';
 let statsBreakdown = 'none';
-let statsFilters = { days: 7, agent: '', topic: '', adhoc: 'all' };
+let statsFilters = { days: 7, agents: [], topics: [], adhoc: 'all' };
 let statsChartY1 = 'turns';
 let statsChartY2 = '';
 let statsChartInstance = null;
@@ -4710,6 +4710,32 @@ function _updateStatsMeasureLabel() {
     .map(m => m.label.replace(' meter Δ', ''));
   toggle.textContent = labels.length ? `Measures (${labels.length})` : 'Measures';
   toggle.classList.toggle('active', labels.length > 0);
+}
+
+function _statsMultiLabel(values, allLabel, singular, prefix) {
+  if (!values.length) return allLabel;
+  if (values.length === 1) return `${prefix}${values[0]}`;
+  return `${values.length} ${singular}s`;
+}
+
+function _updateStatsFilterLabels() {
+  const topicToggle = document.getElementById('sf-topic-toggle');
+  const agentToggle = document.getElementById('sf-agent-toggle');
+  if (topicToggle) {
+    topicToggle.textContent = _statsMultiLabel(statsFilters.topics, 'All Topics', 'Topic', '#');
+    topicToggle.classList.toggle('active', statsFilters.topics.length > 0);
+  }
+  if (agentToggle) {
+    agentToggle.textContent = _statsMultiLabel(statsFilters.agents, 'All Agents', 'Agent', '@');
+    agentToggle.classList.toggle('active', statsFilters.agents.length > 0);
+  }
+}
+
+function _renderStatsMultiMenu(menu, values, selected, prefix) {
+  menu.innerHTML = values.map(value => {
+    const safe = escapeHtml(value);
+    return `<label><input type="checkbox" value="${safe}"${selected.includes(value) ? ' checked' : ''}> ${prefix}${safe}</label>`;
+  }).join('') || '<div class="empty">No options.</div>';
 }
 
 function _destroyChart() {
@@ -5031,13 +5057,9 @@ async function loadStats() {
   if (!_statsFiltersLoaded) {
     _statsFiltersLoaded = true;
     fetch('/stats/filters').then(r => r.json()).then(data => {
-      const agentSel = document.getElementById('sf-agent');
-      const topicSel = document.getElementById('sf-topic');
-      const curAgent = agentSel.value, curTopic = topicSel.value;
-      agentSel.innerHTML = '<option value="">All Agents</option>' +
-        data.agents.map(a => `<option value="${escapeHtml(a)}"${a === curAgent ? ' selected' : ''}>@${escapeHtml(a)}</option>`).join('');
-      topicSel.innerHTML = '<option value="">All Topics</option>' +
-        data.topics.map(t => `<option value="${escapeHtml(t)}"${t === curTopic ? ' selected' : ''}>#${escapeHtml(t)}</option>`).join('');
+      _renderStatsMultiMenu(document.getElementById('sf-agent-menu'), data.agents, statsFilters.agents, '@');
+      _renderStatsMultiMenu(document.getElementById('sf-topic-menu'), data.topics, statsFilters.topics, '#');
+      _updateStatsFilterLabels();
     }).catch(() => {});
   }
 
@@ -5050,8 +5072,8 @@ async function loadStats() {
   }
   params.set('days', statsFilters.days);
   params.set('tz_offset_minutes', new Date().getTimezoneOffset());
-  if (statsFilters.agent) params.set('agent', statsFilters.agent);
-  if (statsFilters.topic) params.set('topic', statsFilters.topic);
+  if (statsFilters.agents.length) params.set('agent', statsFilters.agents.join(','));
+  if (statsFilters.topics.length) params.set('topic', statsFilters.topics.join(','));
   if (statsFilters.adhoc !== 'all') params.set('adhoc', statsFilters.adhoc);
 
   let rows;
@@ -5228,14 +5250,23 @@ function initStats() {
     loadStats();
   });
 
-  document.getElementById('sf-agent').addEventListener('change', e => {
-    statsFilters.agent = e.target.value;
-    loadStats();
-  });
-
-  document.getElementById('sf-topic').addEventListener('change', e => {
-    statsFilters.topic = e.target.value;
-    loadStats();
+  const filterMenus = [
+    { wrap: document.getElementById('sf-topic-filter'), toggle: document.getElementById('sf-topic-toggle'), menu: document.getElementById('sf-topic-menu'), key: 'topics' },
+    { wrap: document.getElementById('sf-agent-filter'), toggle: document.getElementById('sf-agent-toggle'), menu: document.getElementById('sf-agent-menu'), key: 'agents' },
+  ];
+  filterMenus.forEach(({ toggle, menu, key }) => {
+    toggle.addEventListener('click', e => {
+      e.stopPropagation();
+      const open = menu.hidden;
+      menu.hidden = !open;
+      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+    menu.addEventListener('change', e => {
+      if (!e.target.matches('input[type="checkbox"]')) return;
+      statsFilters[key] = [...menu.querySelectorAll('input[type="checkbox"]:checked')].map(input => input.value);
+      _updateStatsFilterLabels();
+      loadStats();
+    });
   });
 
   document.getElementById('sf-breakdown').addEventListener('change', e => {
@@ -5266,7 +5297,14 @@ function initStats() {
       measuresMenu.hidden = true;
       measuresToggle.setAttribute('aria-expanded', 'false');
     }
+    filterMenus.forEach(({ wrap, toggle, menu }) => {
+      if (!wrap.contains(e.target)) {
+        menu.hidden = true;
+        toggle.setAttribute('aria-expanded', 'false');
+      }
+    });
   });
+  _updateStatsFilterLabels();
   _updateStatsMeasureLabel();
 
   document.getElementById('sc-y1').addEventListener('change', e => {

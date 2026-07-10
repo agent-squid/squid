@@ -2433,10 +2433,14 @@ body {
 .sf-chip.active { background: #2a2a3e; border-color: #4a4a70; color: #9090c0; }
 .sf-chip:hover:not(.active) { border-color: #3a3a50; color: #777; }
 .sf-multi { position: relative; }
+#sf-topic-toggle,
+#sf-agent-toggle,
 .sf-multi-toggle {
   min-width: 5.5rem;
   text-align: left;
 }
+#sf-topic-toggle::after,
+#sf-agent-toggle::after,
 .sf-multi-toggle::after {
   content: "▾";
   float: right;
@@ -2465,7 +2469,7 @@ body {
   cursor: pointer;
 }
 .sf-multi-menu label:hover { background: var(--surface-3); }
-#sf-days, #sf-agent, #sf-topic, #sf-adhoc, #sf-breakdown {
+#sf-days, #sf-adhoc, #sf-breakdown {
   background: var(--surface-3);
   border: 1px solid #2a2a36;
   border-radius: 3px;
@@ -2475,7 +2479,7 @@ body {
   max-width: 9rem;
   min-width: 0;
 }
-#sf-days:focus, #sf-agent:focus, #sf-topic:focus, #sf-adhoc:focus, #sf-breakdown:focus { outline: 1px solid #4a4a70; }
+#sf-days:focus, #sf-adhoc:focus, #sf-breakdown:focus { outline: 1px solid #4a4a70; }
 
 #stats-chart-wrap {
   flex-shrink: 0;
@@ -3022,6 +3026,9 @@ button {
     flex: 1 1 0;
   }
   .sf-primary-row select {
+    width: 100%;
+  }
+  .sf-primary-row .sf-multi-toggle {
     width: 100%;
   }
   .sf-session-row {

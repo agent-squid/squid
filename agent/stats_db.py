@@ -1365,6 +1365,21 @@ def _stats_cutoff(days: int) -> Optional[str]:
     return (datetime.now(timezone.utc) - timedelta(days=days)).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
+def _stats_filter_values(value: str) -> list[str]:
+    return [part.strip() for part in (value or "").split(",") if part.strip()]
+
+
+def _append_stats_in_filter(clauses: list[str], params: list, expr: str, values: list[str]) -> None:
+    if not values:
+        return
+    if len(values) == 1:
+        clauses.append(f"{expr} = ?")
+        params.append(values[0])
+        return
+    clauses.append(f"{expr} IN ({','.join('?' for _ in values)})")
+    params.extend(values)
+
+
 def get_aggregated_stats(
     period: str = "daily",
     days: int = 30,
@@ -1390,30 +1405,24 @@ def get_aggregated_stats(
     )
     limit = (days * (24 if period == "hourly" else 1) + 1) if days else 5000
     cutoff = _stats_cutoff(days)
+    agents = _stats_filter_values(agent)
+    topics = _stats_filter_values(topic)
 
     ss_clauses: list[str] = ["ss_inner.created_at IS NOT NULL"]
     ss_params: list = []
     if cutoff:
         ss_clauses.append("ss_inner.created_at >= ?")
         ss_params.append(cutoff)
-    if agent:
-        ss_clauses.append("COALESCE(ss_inner.agent, ss_inner.backend) = ?")
-        ss_params.append(agent)
-    if topic:
-        ss_clauses.append("ss_inner.topic = ?")
-        ss_params.append(topic)
+    _append_stats_in_filter(ss_clauses, ss_params, "COALESCE(ss_inner.agent, ss_inner.backend)", agents)
+    _append_stats_in_filter(ss_clauses, ss_params, "ss_inner.topic", topics)
 
     cm_clauses: list[str] = ["cm.role = 'assistant'"]
     cm_params: list = []
     if cutoff:
         cm_clauses.append("cm.created_at >= ?")
         cm_params.append(cutoff)
-    if agent:
-        cm_clauses.append("cm.agent = ?")
-        cm_params.append(agent)
-    if topic:
-        cm_clauses.append("cm.topic = ?")
-        cm_params.append(topic)
+    _append_stats_in_filter(cm_clauses, cm_params, "cm.agent", agents)
+    _append_stats_in_filter(cm_clauses, cm_params, "cm.topic", topics)
 
     if adhoc == "session":
         s_expr = "COUNT(CASE WHEN cm.adhoc = 0 OR cm.adhoc IS NULL THEN 1 END)"
@@ -1492,18 +1501,16 @@ def get_stats_by_agent_profile_breakdown(
     )
     limit = (days * (24 if period == "hourly" else 1) + 1) if days else 5000
     cutoff = _stats_cutoff(days)
+    agents = _stats_filter_values(agent)
+    topics = _stats_filter_values(topic)
 
     clauses: list[str] = ["created_at IS NOT NULL"]
     params: list = []
     if cutoff:
         clauses.append("created_at >= ?")
         params.append(cutoff)
-    if agent:
-        clauses.append("COALESCE(agent, backend) = ?")
-        params.append(agent)
-    if topic:
-        clauses.append("topic = ?")
-        params.append(topic)
+    _append_stats_in_filter(clauses, params, "COALESCE(agent, backend)", agents)
+    _append_stats_in_filter(clauses, params, "topic", topics)
 
     where = " AND ".join(clauses)
 
@@ -1549,30 +1556,24 @@ def get_stats_by_agent(
     days: int = 30, agent: str = "", topic: str = "", adhoc: str = "all"
 ) -> list:
     cutoff = _stats_cutoff(days)
+    agents = _stats_filter_values(agent)
+    topics = _stats_filter_values(topic)
 
     ss_clauses: list[str] = ["1=1"]
     ss_params: list = []
     if cutoff:
         ss_clauses.append("created_at >= ?")
         ss_params.append(cutoff)
-    if topic:
-        ss_clauses.append("topic = ?")
-        ss_params.append(topic)
-    if agent:
-        ss_clauses.append("COALESCE(agent, backend) = ?")
-        ss_params.append(agent)
+    _append_stats_in_filter(ss_clauses, ss_params, "topic", topics)
+    _append_stats_in_filter(ss_clauses, ss_params, "COALESCE(agent, backend)", agents)
 
     cm_clauses: list[str] = ["role = 'assistant'"]
     cm_params: list = []
     if cutoff:
         cm_clauses.append("created_at >= ?")
         cm_params.append(cutoff)
-    if topic:
-        cm_clauses.append("topic = ?")
-        cm_params.append(topic)
-    if agent:
-        cm_clauses.append("agent = ?")
-        cm_params.append(agent)
+    _append_stats_in_filter(cm_clauses, cm_params, "topic", topics)
+    _append_stats_in_filter(cm_clauses, cm_params, "agent", agents)
 
     if adhoc == "session":
         turn_expr = "COUNT(CASE WHEN adhoc = 0 OR adhoc IS NULL THEN 1 END)"
@@ -1628,30 +1629,24 @@ def get_stats_by_topic(
     days: int = 30, agent: str = "", topic: str = "", adhoc: str = "all"
 ) -> list:
     cutoff = _stats_cutoff(days)
+    agents = _stats_filter_values(agent)
+    topics = _stats_filter_values(topic)
 
     ss_clauses: list[str] = ["topic IS NOT NULL"]
     ss_params: list = []
     if cutoff:
         ss_clauses.append("created_at >= ?")
         ss_params.append(cutoff)
-    if agent:
-        ss_clauses.append("COALESCE(agent, backend) = ?")
-        ss_params.append(agent)
-    if topic:
-        ss_clauses.append("topic = ?")
-        ss_params.append(topic)
+    _append_stats_in_filter(ss_clauses, ss_params, "COALESCE(agent, backend)", agents)
+    _append_stats_in_filter(ss_clauses, ss_params, "topic", topics)
 
     cm_clauses: list[str] = ["role = 'assistant'"]
     cm_params: list = []
     if cutoff:
         cm_clauses.append("created_at >= ?")
         cm_params.append(cutoff)
-    if agent:
-        cm_clauses.append("agent = ?")
-        cm_params.append(agent)
-    if topic:
-        cm_clauses.append("topic = ?")
-        cm_params.append(topic)
+    _append_stats_in_filter(cm_clauses, cm_params, "agent", agents)
+    _append_stats_in_filter(cm_clauses, cm_params, "topic", topics)
 
     if adhoc == "session":
         turn_expr = "COUNT(CASE WHEN adhoc = 0 OR adhoc IS NULL THEN 1 END)"
