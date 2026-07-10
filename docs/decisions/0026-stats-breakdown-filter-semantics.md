@@ -112,6 +112,56 @@ With breakdown = `Topic x Agent x Session Type`:
 - Session type filter limits the session type dimension.
 - The result is split by topic, base agent, and session type.
 
+## Implementation Contract
+
+The supported breakdown keys are:
+
+| Key | Grain |
+|---|---|
+| empty / omitted | total over time |
+| `agent` | time x agent |
+| `agent_session` | time x agent x session type |
+| `topic_agent` | time x topic x agent |
+| `topic_agent_session` | time x topic x agent x session type |
+
+All breakdowns should use the same conceptual response shape: one row per time
+bucket and breakdown-grain tuple, with the same measure fields used by the
+`Total` view. Dimension fields are present when they participate in the active
+breakdown.
+
+Required measure fields:
+
+- `period`
+- `sessions`
+- `total_turns`
+- `input_tokens`
+- `output_tokens`
+- `cost_usd`
+- `quota_delta`
+
+Required dimension fields by breakdown:
+
+| Key | Dimension fields |
+|---|---|
+| `agent` | `agent_key`, `agent` |
+| `agent_session` | `agent_key`, `agent`, `session_type` |
+| `topic_agent` | `topic`, `agent_key`, `agent` |
+| `topic_agent_session` | `topic`, `agent_key`, `agent`, `session_type` |
+
+`session_type` is the normalized dimension value, either `session` or `adhoc`.
+Rendered labels may still use the existing `agent` / `agent!` convention, but
+the API shape should expose the normalized dimension so future renderers do not
+need to parse punctuation.
+
+The UI should pivot rows by:
+
+1. time grain from `period`
+2. active breakdown grain tuple
+3. selected measure
+
+Adding a new breakdown should not require a new chart/table rendering model if
+it follows that row shape.
+
 ## Session Type Expansion
 
 The session type filter controls lane expansion for each selected base agent:
@@ -153,6 +203,28 @@ filters, then expand those choices into session lanes. It should not chase the
 top four individual topic/agent/session cells, because that would make the
 default set too dynamic and would reintroduce exact-series behavior through the
 back door.
+
+Default dimension counts are allocated under the four-series budget as complete
+combinations:
+
+| Breakdown | Default source values with `Sess + Adhoc` |
+|---|---|
+| `agent` | top four agents |
+| `agent_session` | top two agents x two session types |
+| `topic_agent` | top two topics x top two agents |
+| `topic_agent_session` | top one topic x top two agents x two session types |
+
+When the session type filter is `Session` or `Adhoc`, the session type
+cardinality is one and the freed budget may be used by the remaining dimensions.
+For example, `topic_agent_session` with `Session` may select two topics x two
+agents x one session type.
+
+When a breakdown contains more dimensions than fit in the budget, reduce the
+most explosive or dynamic dimension first. Today, topic is treated as broader
+than agent for defaults because topic populations change more with day range and
+workflow, so `topic_agent_session` uses one topic before reducing agents or
+session types. A future session-id dimension should be treated as broader than
+topic and should usually default to one session id in compound breakdowns.
 
 For a breakdown with session type and `Sess + Adhoc`, the session type dimension
 has cardinality two. Therefore default rendered series should usually be even:
