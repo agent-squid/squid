@@ -388,22 +388,12 @@ test('analytics measures dropdown controls cost and quota columns independently'
     const url = new URL(route.request().url());
     const period = url.searchParams.get('period') === 'hourly' ? '2026-06-26 14:00' : '2026-06-26';
     statsRequests.push(url);
-    if (url.searchParams.get('breakdown') === 'agent_session') {
-      return route.fulfill({
-        json: [
-          { period, profile_key: 'codex', agent: 'codex', sessions: 4, total_turns: 4, input_tokens: 1000, output_tokens: 200, cost_usd: 1.0 },
-          { period, profile_key: 'codex!', agent: 'codex!', sessions: 3, total_turns: 3, input_tokens: 400, output_tokens: 100, cost_usd: 0.4 },
-          { period, profile_key: 'clive', agent: 'clive', sessions: 2, total_turns: 2, input_tokens: 300, output_tokens: 80, cost_usd: 0.3 },
-          { period, profile_key: 'cursor', agent: 'cursor', sessions: 1, total_turns: 1, input_tokens: 200, output_tokens: 60, cost_usd: 0.2 },
-        ],
-      });
-    }
     if (url.searchParams.get('breakdown') === 'agent') {
       return route.fulfill({
         json: [
-          { period, profile_key: 'codex', agent: 'codex', sessions: 7, total_turns: 7, input_tokens: 1400, output_tokens: 300, cost_usd: 1.4 },
-          { period, profile_key: 'clive', agent: 'clive', sessions: 2, total_turns: 2, input_tokens: 300, output_tokens: 80, cost_usd: 0.3 },
-          { period, profile_key: 'cursor', agent: 'cursor', sessions: 1, total_turns: 1, input_tokens: 200, output_tokens: 60, cost_usd: 0.2 },
+          { period, agent_key: 'codex', agent: 'codex', sessions: 7, total_turns: 7, input_tokens: 1400, output_tokens: 300, cost_usd: 1.4 },
+          { period, agent_key: 'clive', agent: 'clive', sessions: 2, total_turns: 2, input_tokens: 300, output_tokens: 80, cost_usd: 0.3 },
+          { period, agent_key: 'cursor', agent: 'cursor', sessions: 1, total_turns: 1, input_tokens: 200, output_tokens: 60, cost_usd: 0.2 },
         ],
       });
     }
@@ -429,7 +419,7 @@ test('analytics measures dropdown controls cost and quota columns independently'
   expect(statsRequests.at(-1).searchParams.get('breakdown')).toBeNull();
   expect(statsRequests.at(-1).searchParams.get('days')).toBe('7');
   expect(statsRequests.at(-1).searchParams.get('tz_offset_minutes')).not.toBeNull();
-  await expect(page.locator('#sf-breakdown option')).toHaveCount(3);
+  await expect(page.locator('#sf-breakdown option')).toHaveCount(2);
   await expect(page.locator('#sc-compare-btn')).toBeVisible();
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (4)');
   await expect(page.locator('#stats-content th', { hasText: 'Sessions' })).toBeVisible();
@@ -475,17 +465,23 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect(page.locator('#stats-content tbody td').first()).toHaveText('2026-06-26');
 
   await page.getByRole('button', { name: 'Hourly' }).click();
-  await page.locator('#sf-breakdown').selectOption('agent_session');
-  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBe('agent_session');
+  await page.locator('#sf-breakdown').selectOption('agent');
+  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBe('agent');
+  expect(statsRequests.at(-1).searchParams.get('agent')).toBeNull();
   await expect(page.locator('#sc-compare-btn')).toBeHidden();
+  await expect(page.locator('#sf-measures')).toBeHidden();
   await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toBeVisible();
-  await expect(page.getByRole('columnheader', { name: 'codex!', exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'clive', exact: true })).toBeVisible();
   await expect(page.locator('#stats-content th', { hasText: 'Misc' })).toBeVisible();
   await expect(page.locator('#stats-content tfoot')).toContainText('10');
+  await page.locator('#sc-y1').selectOption('cost');
+  await expect(page.locator('#stats-content tfoot')).toContainText('$1.9000');
+  await expect(page.locator('#stats-content tfoot')).not.toContainText('10');
 
   await page.locator('#sf-breakdown').selectOption('');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBeNull();
   await expect(page.locator('#sc-compare-btn')).toBeVisible();
+  await expect(page.locator('#sf-measures')).toBeVisible();
 });
 
 test('/restart clears its persisted draft before the page reloads', async ({ page }) => {

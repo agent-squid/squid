@@ -61,7 +61,7 @@ from .memory import (
 )
 from .stats_db import (
     init_db, get_aggregated_stats, save_quota_delta, get_stats_by_topic, get_stats_by_agent,
-    get_stats_by_agent_profile_breakdown, get_stats_filter_options,
+    get_stats_by_agent_breakdown, get_stats_filter_options,
     get_topics_summary, get_topics_management_summary,
     get_agent, upsert_agent, delete_agent, list_agents, get_default_agent,
     get_topic, upsert_topic, list_topics,
@@ -1333,8 +1333,8 @@ async def usage_stats(
     adhoc: str = "all",
     tz_offset_minutes: int = 0,
 ):
-    if group == "time" and breakdown in {"agent", "agent_session", "agent_profile"}:
-        return JSONResponse(get_stats_by_agent_profile_breakdown(
+    if group == "time" and breakdown in {"agent", "agent_session"}:
+        return JSONResponse(get_stats_by_agent_breakdown(
             period=period,
             days=days,
             agent=agent,
