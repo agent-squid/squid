@@ -789,6 +789,7 @@ class _ClaudeInteractiveCLI:
             turn_live_chunks: list[dict] = []
             turn_result_chunks: list[Union[str, dict]] = []
             turn_agent_tool_use_id: Optional[str] = None
+            turn_agent_label: str = "Agent"
             ask_followup_tool_use_id: Optional[str] = None
             ask_followup_question_text: str = ""
             timeout = response_timeout if response_timeout is not None else RESPONSE_TIMEOUT
@@ -803,14 +804,23 @@ class _ClaudeInteractiveCLI:
 
             def reset_turn(next_phase: str) -> None:
                 nonlocal parser, phase, turn_live_chunks, turn_result_chunks
-                nonlocal turn_agent_tool_use_id, ask_followup_tool_use_id, ask_followup_question_text
+                nonlocal turn_agent_tool_use_id, turn_agent_label
+                nonlocal ask_followup_tool_use_id, ask_followup_question_text
                 parser = _ClaudeStreamParser(history)
                 phase = next_phase
                 turn_live_chunks = []
                 turn_result_chunks = []
                 turn_agent_tool_use_id = None
+                turn_agent_label = "Agent"
                 ask_followup_tool_use_id = None
                 ask_followup_question_text = ""
+
+            def agent_status_chunks() -> list[dict]:
+                text = "".join(c for c in turn_result_chunks if isinstance(c, str)).strip()
+                if not text:
+                    return []
+                label = turn_agent_label.strip() or "Agent"
+                return [{"_status": f"[{label}] {text}\n"}]
 
             try:
                 while True:
@@ -875,6 +885,8 @@ class _ClaudeInteractiveCLI:
                             tool = chunk.get("_tool")
                             if isinstance(tool, dict) and tool.get("name") == "Agent":
                                 turn_agent_tool_use_id = tool.get("tool_use_id") or ""
+                                description = (tool.get("description") or "").strip()
+                                turn_agent_label = f"Agent: {description}" if description else "Agent"
                             if isinstance(tool, dict) and tool.get("name") == "ask_followup_question":
                                 # Record tool info; don't emit as a tool widget.
                                 # The question text is surfaced as plain response text.
@@ -891,6 +903,8 @@ class _ClaudeInteractiveCLI:
                     if parser.done:
                         if phase == READ_PROMPT_TURN and turn_agent_tool_use_id:
                             pending_agent_tool_use_id = turn_agent_tool_use_id
+                            for chunk in agent_status_chunks():
+                                yield chunk
                             reset_turn(WAIT_AGENT_NOTIFICATION)
                             continue
                         if is_reading_accepted_turn():
