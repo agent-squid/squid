@@ -442,23 +442,22 @@ Preset UI behavior:
 - Delete removes the preset. If the deleted preset was active, the current
   controls may remain as an unsaved temporary state.
 - Mark Default sets `is_default = 1` on exactly one preset. On first Stats tab
-  load, apply the default preset if no explicit URL/query state is present.
+  load, apply the default preset.
 
-The structured `state_json` is the canonical saved form. A URL query string is a
-projection of the same state for sharing and browser navigation. The app may
-derive a URL from `state_json`, and may hydrate controls from URL parameters,
-but should not store only the URL as the preset source of truth.
+The structured `state_json` is the canonical saved form. Stats state is not
+persisted through the browser URL, and Stats query parameters must not drive
+view selection or control hydration on page load. Refresh should return to the
+normal startup view instead of reopening Stats from stale URL state. Reusable
+Stats views should be stored as named presets, not as URL query strings.
 
-Reasons to keep structured state instead of URL-only persistence:
+Reasons to keep structured state instead of URL persistence:
 
 - It preserves selection modes such as `auto_top`, `selected`, and `all`.
-- It can round-trip future dimensions without inventing new query syntax first.
+- It can round-trip future dimensions without inventing browser query syntax.
 - It is easier to validate and migrate by `version`.
 - It avoids treating presentation labels or expanded series as saved state.
-
-URL/query state takes precedence over the default preset because opening a
-shared link is an explicit user action. Applying a named preset should update
-the controls and may update the URL to the equivalent query representation.
+- It avoids stale URL state changing the active tab or Stats controls after
+  refresh.
 
 ## Non-Goals
 
