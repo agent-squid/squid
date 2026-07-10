@@ -475,6 +475,7 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect(page.locator('#sf-measures')).toBeHidden();
   await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toBeVisible();
   await expect(page.getByRole('columnheader', { name: 'clive', exact: true })).toBeVisible();
+  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'clive', 'codex', 'Total']);
   await expect(page.locator('#stats-content th', { hasText: 'Misc' })).toHaveCount(0);
   await expect(page.locator('#stats-content tfoot')).toContainText('9');
   await page.locator('#sc-y1').selectOption('cost');
@@ -523,6 +524,7 @@ test('agent breakdown defaults to top three agents when none are selected', asyn
   await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toBeVisible();
   await expect(page.getByRole('columnheader', { name: 'clive', exact: true })).toBeVisible();
   await expect(page.getByRole('columnheader', { name: 'cursor', exact: true })).toBeVisible();
+  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'clive', 'codex', 'cursor', 'Misc', 'Total']);
   await expect(page.locator('#stats-content th', { hasText: 'Misc' })).toBeVisible();
 });
 
