@@ -600,8 +600,12 @@ test('agent breakdown shows agent! columns based on session type filter', async 
   await page.getByRole('button', { name: 'Stats' }).click();
   await page.locator('#sf-breakdown').selectOption('agent');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBe('agent');
+  await expect(page.locator('#sf-adhoc option[value="all"]')).toHaveText('Sess + Adhoc');
+  await expect(page.locator('#sf-adhoc option[value="session"]')).toHaveText('Session');
+  await expect(page.locator('#sf-adhoc option[value="adhoc"]')).toHaveText('Adhoc');
+  await expect(page.locator('#sf-adhoc')).toHaveValue('all');
 
-  // default (all sessions): both codex and codex! columns shown
+  // default (session + adhoc): both codex and codex! columns shown
   await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toBeVisible();
   await expect(page.getByRole('columnheader', { name: 'codex!', exact: true })).toBeVisible();
 
