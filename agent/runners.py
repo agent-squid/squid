@@ -218,6 +218,7 @@ class _ClaudeStreamParser:
         self.session_id: Optional[str] = None
         self.tool_blocks: dict[int, dict] = {}
         self.done = False
+        self.done_from_assistant_text = False
 
     def _stats_chunk(self, event: dict) -> dict:
         message = event.get("message")
@@ -281,6 +282,7 @@ class _ClaudeStreamParser:
             if stop_reason == "end_turn" and text:
                 chunks.append(self._stats_chunk(event))
                 self.done = True
+                self.done_from_assistant_text = True
 
         elif t == "stream_event":
             inner = event.get("event", {})
@@ -902,7 +904,11 @@ class _ClaudeInteractiveCLI:
                             turn_result_chunks.append(chunk)
 
                     if parser.done:
-                        if phase == READ_PROMPT_TURN and turn_agent_tool_use_id:
+                        if (
+                            phase == READ_PROMPT_TURN
+                            and turn_agent_tool_use_id
+                            and not parser.done_from_assistant_text
+                        ):
                             pending_agent_tool_use_id = turn_agent_tool_use_id
                             for chunk in agent_status_chunks():
                                 yield chunk
