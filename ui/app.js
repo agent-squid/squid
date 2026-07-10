@@ -4605,12 +4605,14 @@ function _formatStatsMetricValue(value, metric) {
 const STATS_ICON_LEFT = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M10 3.5 5.5 8l4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const STATS_ICON_RIGHT = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m6 3.5 4.5 4.5L6 12.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
-function _statsBreakdownAxisLabel(label) {
+function _statsBreakdownAxisLabel(label, sortMode) {
+  const active = _statsBreakdownColumnSort === sortMode;
+  const ariaLabel = sortMode === 'total' ? 'Sort breakdown columns by total' : 'Sort breakdown columns by name';
   return `<span class="stats-breakdown-axis-label">
     <span>${escapeHtml(label)}</span>
     <span class="stats-breakdown-sort">
-      <button class="stats-breakdown-sort-btn${_statsBreakdownColumnSort === 'name' ? ' active' : ''}" type="button" data-stats-column-sort="name" title="Sort columns by name" aria-label="Sort breakdown columns by name">${STATS_ICON_LEFT}</button>
-      <button class="stats-breakdown-sort-btn${_statsBreakdownColumnSort === 'total' ? ' active' : ''}" type="button" data-stats-column-sort="total" title="Sort columns by total" aria-label="Sort breakdown columns by total">${STATS_ICON_RIGHT}</button>
+      <button class="stats-breakdown-sort-btn${active ? ' active' : ''}" type="button" data-stats-column-sort="${sortMode}" title="${escapeHtml(ariaLabel)}" aria-label="${escapeHtml(ariaLabel)}">${STATS_ICON_LEFT}</button>
+      <button class="stats-breakdown-sort-btn${active ? ' active' : ''}" type="button" data-stats-column-sort="${sortMode}" title="${escapeHtml(ariaLabel)}" aria-label="${escapeHtml(ariaLabel)}">${STATS_ICON_RIGHT}</button>
     </span>
   </span>`;
 }
@@ -5513,14 +5515,14 @@ function renderAgentBreakdownStats(rows) {
 
   statsContent.innerHTML = `<table>
     <thead><tr>
-      <th>${_statsBreakdownAxisLabel(statsPeriod === 'hourly' ? 'Hour' : 'Date')}</th>
+      <th>${_statsBreakdownAxisLabel(statsPeriod === 'hourly' ? 'Hour' : 'Date', 'name')}</th>
       ${headers}
       ${miscHeader}
       <th>Total</th>
     </tr></thead>
     <tbody>${bodyRows}</tbody>
     <tfoot><tr>
-      <td>${_statsBreakdownAxisLabel('Total')}</td>
+      <td>${_statsBreakdownAxisLabel('Total', 'total')}</td>
       ${totalCells}
       ${hasMisc ? `<td>${_formatStatsMetricValue(totalMisc, metric)}</td>` : ''}
       <td>${_formatStatsMetricValue(grandTotal, metric)}</td>
