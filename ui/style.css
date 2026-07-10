@@ -1871,6 +1871,9 @@ body {
   color: #c0c0d0;
   line-height: 1.65;
 }
+#view-settings .cm-editor {
+  font-size: var(--text-md);
+}
 #view-settings .cm-line {
   line-height: 1.65;
 }
