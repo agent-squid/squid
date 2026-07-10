@@ -79,13 +79,23 @@ path; there is no special-casing.
 ### Turn cycle
 
 ```
-turn N starts
-  → ensure_worktree (create or reuse for this topic+message pair)
+turn N starts  [server.py: _setup_worktrees]
+  → ensure_worktree(repo_root, topic, str(asst_msg_id)) for each git root
+  → save worktree row to DB: (topic, str(asst_msg_id), repo_root, wt_path, branch)
   → remap effective_cwd and effective_code_roots to worktree paths
   → take pre-turn git snapshot of the worktree for diff tracking
+
+  [topic_queue.py: _process]
+  → load worktree_sources map from DB (wt_path → repo_root) for text remapping
   → agent subprocess runs with cwd = worktree path
 
-turn N ends
+turn N in flight  [topic_queue.py: _stream]
+  → each text chunk is passed through remap_worktree_paths() before being
+    stored in the DB or forwarded to the UI; ephemeral worktree path prefixes
+    are rewritten to their source repo equivalents so stored text never
+    contains paths that will not exist after the worktree is removed
+
+turn N ends  [topic_queue.py: _process]
   1. emit git diff (pre-turn snapshot vs. current worktree state,
      including any uncommitted changes still in the worktree)
   2. sync_after_turn:
@@ -94,6 +104,7 @@ turn N ends
      c. rebase worktree branch onto the new source HEAD
   3. remove worktree + delete branch (every turn is ephemeral; next turn
      creates a fresh worktree from the new HEAD)
+  4. delete worktree DB row
 ```
 
 The diff is shown before the auto-commit; it captures the full set of changes
@@ -117,12 +128,15 @@ changes as Git commits and the DB's worktree registry row is deleted. The stored
 copy of the change.
 
 Pinned or review context built from stored messages must present the source
-repository as the canonical repo. Stored `GitDiff` payloads may include
-`worktree_repo` and `worktree_cwd` for diagnostics and source-root mapping, but
-those temporary paths must not be injected as the primary review target. When
-old assistant text contains Squid worktree paths or prior `<changed_files>`
-blocks, prompt construction sanitizes that text and appends a fresh source-repo
-summary from the stored `GitDiff`.
+repository as the canonical repo. Stored `GitDiff` payloads include a `source`
+field for the canonical source repo path alongside optional `worktree_repo` and
+`worktree_cwd` diagnostic fields. The UI's `_gitDiffSourceRepo()` helper
+resolves the path for file-open buttons by iterating `[source, repo, cwd]` and
+returning the first value that is not a Squid worktree path; this ensures
+buttons point to the source repo even if the `repo` field captured a worktree
+path. When old assistant text contains Squid worktree paths or prior
+`<changed_files>` blocks, prompt construction sanitizes that text and appends a
+fresh source-repo summary from the stored `GitDiff`.
 
 ### Session close
 
@@ -130,12 +144,14 @@ On normal turn completion, `TopicQueue._process` calls `sync_after_turn`,
 `remove_worktree`, and `delete_worktree` for every registry row keyed by
 `str(asst_msg_id)`. Successful turns therefore leave no live worktree behind.
 
-On session close or clear, `_cleanup_worktrees(topic)` runs an orphan sweep:
-it queries all worktrees still registered for the topic, syncs any with
-uncommitted changes, and removes them. This handles leftovers from crashes,
-cancelled runs, exceptions during cleanup, and conflict paths. The sweep uses
-`get_all_worktrees_for_topic` rather than an agent-name lookup, since worktrees
-are keyed by `asst_msg_id`.
+On session close or clear, `_cleanup_worktrees(topic)` runs an orphan sweep.
+It first calls `get_active_msg_ids()` to get the set of `msg_id`s for all
+processes currently in the registry (both regular and adhoc). Any worktree
+whose `wt_key` (the `agent` column, which stores `str(asst_msg_id)`) matches
+an active `msg_id` is skipped — the turn is still running and must not be
+interrupted. For remaining worktrees, the sweep syncs any uncommitted changes
+and removes them. This handles leftovers from crashes, cancelled runs,
+exceptions during cleanup, and conflict paths.
 
 If a code review or follow-up agent is launched while a turn is active, or
 against an unresolved/stale worktree path, that agent may legitimately inspect
