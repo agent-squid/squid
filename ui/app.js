@@ -4716,7 +4716,7 @@ function _statsSeriesLabel(key) {
   const raw = String(key);
   const [topic, agent] = raw.split('\u0000');
   if (agent != null) {
-    if (statsBreakdown === 'topic_agent') return `#${topic}@${_agentBaseKey(agent)}*`;
+    if (statsBreakdown === 'topic_agent') return `#${topic}@${_agentBaseKey(agent)}+`;
     return `#${topic}@${agent}`;
   }
   if (statsBreakdown === 'agent' || statsBreakdown === 'agent_session') return `@${raw}`;
