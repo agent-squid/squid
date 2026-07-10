@@ -2446,6 +2446,10 @@ body {
   border-radius: 4px;
   box-shadow: 0 8px 24px rgba(0,0,0,0.35);
 }
+#sf-topic-menu {
+  left: 0;
+  right: auto;
+}
 .sf-multi-menu label {
   display: flex;
   align-items: center;
