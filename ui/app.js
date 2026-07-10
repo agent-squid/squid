@@ -5536,7 +5536,7 @@ function renderAgentBreakdownStats(rows) {
     totalMisc += row.misc || 0;
     grandTotal += row.total || 0;
   }
-  const hasMisc = totalMisc > 0 || pivot.overflowCount > 0;
+  const hasMisc = true;
   const headers = pivot.selected.map(key => {
     const label = pivot.labels.get(key) || key;
     return `<th class="stats-series-col" aria-label="${escapeHtml(label)}">${escapeHtml(label)}</th>`;
