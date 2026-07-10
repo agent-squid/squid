@@ -46,7 +46,7 @@ from .config import (
     config_revision, config_text, write_config_text,
 )
 from .backends import BACKENDS, _validate_backend, get_backend, public_backends
-from .runners import list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic
+from .runners import list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic, get_active_msg_ids
 from .history import list_history, list_history_by_ids
 from .topic_queue import TopicDispatcher
 from .context_sync import sync_now, maybe_sync
@@ -520,15 +520,23 @@ async def _cleanup_worktrees(topic: str) -> dict[str, list[str]]:
     Orphan sweep at session close: sync and remove any worktrees still registered
     for this topic (normally already removed at turn end; these are crash leftovers).
     Worktrees with unresolved conflicts are kept alive.
+    Worktrees whose turn is still running are skipped entirely.
     """
     from .worktree import remove_worktree, sync_after_turn
 
+    active = get_active_msg_ids()
     records = await asyncio.to_thread(get_all_worktrees_for_topic, topic)
     conflicts: dict[str, list[str]] = {}
 
     for rec in records:
         repo_root = Path(rec["repo_root"])
         wt_key = rec["agent"]
+        try:
+            if int(wt_key) in active:
+                log.debug("worktree skip — turn still active: topic=%s key=%s", topic, wt_key)
+                continue
+        except (ValueError, TypeError):
+            pass  # non-numeric wt_key: pre-dates per-turn keying, treat as orphan
         try:
             conflict_files = await asyncio.to_thread(
                 sync_after_turn, repo_root, topic, wt_key, None
