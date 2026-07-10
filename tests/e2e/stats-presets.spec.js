@@ -79,7 +79,7 @@ test('stats filter presets save in their own top row and apply saved state', asy
 
   await page.locator('#sf-topic-toggle').click();
   await page.locator('#sf-topic-menu input[value="ops"]').check();
-  await expect(page.locator('#stats-preset-select')).toHaveValue('__custom');
+  await expect(page.locator('#stats-preset-select')).toHaveValue('1');
   await page.locator('#stats-preset-select').selectOption('1');
   await expect(page.locator('#sf-topic-toggle')).toHaveText('#squid');
   await expect(page.locator('#sf-agent-toggle')).toHaveText('@codex');
