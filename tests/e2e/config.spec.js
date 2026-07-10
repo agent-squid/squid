@@ -430,6 +430,7 @@ test('analytics measures dropdown controls cost and quota columns independently'
   expect(statsRequests.at(-1).searchParams.get('days')).toBe('7');
   expect(statsRequests.at(-1).searchParams.get('tz_offset_minutes')).not.toBeNull();
   await expect(page.locator('#sf-breakdown option')).toHaveCount(3);
+  await expect(page.locator('#sc-compare-btn')).toBeVisible();
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (4)');
   await expect(page.locator('#stats-content th', { hasText: 'Sessions' })).toBeVisible();
   await expect(page.locator('#stats-content th', { hasText: 'Turns' })).toBeVisible();
@@ -476,10 +477,15 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await page.getByRole('button', { name: 'Hourly' }).click();
   await page.locator('#sf-breakdown').selectOption('agent_session');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBe('agent_session');
+  await expect(page.locator('#sc-compare-btn')).toBeHidden();
   await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toBeVisible();
   await expect(page.getByRole('columnheader', { name: 'codex!', exact: true })).toBeVisible();
   await expect(page.locator('#stats-content th', { hasText: 'Misc' })).toBeVisible();
   await expect(page.locator('#stats-content tfoot')).toContainText('10');
+
+  await page.locator('#sf-breakdown').selectOption('');
+  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBeNull();
+  await expect(page.locator('#sc-compare-btn')).toBeVisible();
 });
 
 test('/restart clears its persisted draft before the page reloads', async ({ page }) => {
