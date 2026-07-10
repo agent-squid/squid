@@ -138,6 +138,22 @@ The default rendered-series budget is four. This keeps the initial chart/table
 readable while preserving complete combinations. The UI may show fewer than four
 series if there are not enough available dimension values.
 
+Default source dimension values are ranked by `total_turns`, not by the active
+display measure and not by the sparsity of the rendered child combinations. This
+makes defaults stable when the user changes the chart measure or breakdown. For
+example, if `codex` is one of the top agents by turns, `Agent x Session Type`
+with `Sess + Adhoc` may render both `codex` and `codex!` even when one lane has
+no data in the selected range. The high-turn source agent anchors the default;
+the breakdown then shows the complete implied combination.
+
+For compound breakdowns, ranking should happen at the source dimension grain
+before Cartesian expansion. `Topic x Agent x Session Type` should choose
+topic/agent source values with the most turns under the active independent
+filters, then expand those choices into session lanes. It should not chase the
+top four individual topic/agent/session cells, because that would make the
+default set too dynamic and would reintroduce exact-series behavior through the
+back door.
+
 For a breakdown with session type and `Sess + Adhoc`, the session type dimension
 has cardinality two. Therefore default rendered series should usually be even:
 
