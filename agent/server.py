@@ -61,7 +61,9 @@ from .memory import (
 )
 from .stats_db import (
     init_db, get_aggregated_stats, save_quota_delta, get_stats_by_topic, get_stats_by_agent,
-    get_stats_by_agent_breakdown, get_stats_filter_options,
+    get_stats_by_agent_breakdown, get_stats_by_breakdown, get_stats_filter_options,
+    list_stats_filter_presets, create_stats_filter_preset, update_stats_filter_preset,
+    delete_stats_filter_preset,
     get_topics_summary, get_topics_management_summary,
     get_agent, upsert_agent, delete_agent, list_agents, get_default_agent,
     get_topic, upsert_topic, list_topics,
@@ -1317,9 +1319,46 @@ async def remove_agent(name: str):
     return JSONResponse({"ok": deleted})
 
 
+class StatsFilterPresetRequest(BaseModel):
+    name: Optional[str] = None
+    state: Optional[dict] = None
+    is_default: Optional[bool] = None
+
+
 @app.get("/stats/filters")
 async def stats_filter_options():
     return JSONResponse(get_stats_filter_options())
+
+
+@app.get("/stats/filter-presets")
+async def stats_filter_presets():
+    return JSONResponse(list_stats_filter_presets())
+
+
+@app.post("/stats/filter-presets")
+async def create_stats_preset(req: StatsFilterPresetRequest):
+    if not req.name or req.state is None:
+        return JSONResponse({"error": "name and state are required"}, status_code=400)
+    try:
+        return JSONResponse(create_stats_filter_preset(req.name, req.state))
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+@app.put("/stats/filter-presets/{preset_id}")
+async def update_stats_preset(preset_id: int, req: StatsFilterPresetRequest):
+    try:
+        preset = update_stats_filter_preset(preset_id, req.name, req.state, req.is_default)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if not preset:
+        return JSONResponse({"error": "preset not found"}, status_code=404)
+    return JSONResponse(preset)
+
+
+@app.delete("/stats/filter-presets/{preset_id}")
+async def delete_stats_preset(preset_id: int):
+    return JSONResponse({"ok": delete_stats_filter_preset(preset_id)})
 
 
 @app.get("/stats")
@@ -1333,15 +1372,15 @@ async def usage_stats(
     adhoc: str = "all",
     tz_offset_minutes: int = 0,
 ):
-    if group == "time" and breakdown in {"agent", "agent_session"}:
-        return JSONResponse(get_stats_by_agent_breakdown(
+    if group == "time" and breakdown in {"agent", "agent_session", "topic_agent", "topic_agent_session"}:
+        return JSONResponse(get_stats_by_breakdown(
             period=period,
             days=days,
             agent=agent,
             topic=topic,
             adhoc=adhoc,
             tz_offset_minutes=tz_offset_minutes,
-            include_session=breakdown == "agent_session",
+            breakdown=breakdown,
         ))
     if group == "topic":
         return JSONResponse(get_stats_by_topic(days=days, agent=agent, topic=topic, adhoc=adhoc))

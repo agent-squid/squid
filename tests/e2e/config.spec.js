@@ -421,7 +421,7 @@ test('analytics measures dropdown controls cost and quota columns independently'
   expect(statsRequests.at(-1).searchParams.get('breakdown')).toBeNull();
   expect(statsRequests.at(-1).searchParams.get('days')).toBe('7');
   expect(statsRequests.at(-1).searchParams.get('tz_offset_minutes')).not.toBeNull();
-  await expect(page.locator('#sf-breakdown option')).toHaveCount(3);
+  await expect(page.locator('#sf-breakdown option')).toHaveCount(5);
   await expect(page.locator('#sc-compare-btn')).toBeVisible();
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (4)');
   await expect.poll(() => page.evaluate(() => {
@@ -496,7 +496,7 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect(page.locator('#sf-measures-toggle')).toBeEnabled();
 });
 
-test('agent breakdown defaults to top three agents when none are selected', async ({ page }) => {
+test('agent breakdown defaults to top four agents when none are selected', async ({ page }) => {
   await mockApp(page);
   await page.route('**/stats/filters', route => route.fulfill({
     json: { agents: ['codex', 'clive', 'cursor', 'haiku'], topics: [] },
@@ -523,17 +523,17 @@ test('agent breakdown defaults to top three agents when none are selected', asyn
   await page.locator('#sf-breakdown').selectOption('agent');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBe('agent');
   expect(statsRequests.at(-1).searchParams.get('agent')).toBeNull();
-  await expect(page.locator('#sf-agent-toggle')).toHaveText('3 Agents');
+  await expect(page.locator('#sf-agent-toggle')).toHaveText('4 Agents');
   await page.locator('#sf-agent-toggle').click();
   await expect(page.locator('#sf-agent-menu input[value="codex"]')).toBeChecked();
   await expect(page.locator('#sf-agent-menu input[value="clive"]')).toBeChecked();
   await expect(page.locator('#sf-agent-menu input[value="cursor"]')).toBeChecked();
-  await expect(page.locator('#sf-agent-menu input[value="haiku"]')).not.toBeChecked();
+  await expect(page.locator('#sf-agent-menu input[value="haiku"]')).toBeChecked();
   await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toBeVisible();
   await expect(page.getByRole('columnheader', { name: 'clive', exact: true })).toBeVisible();
   await expect(page.getByRole('columnheader', { name: 'cursor', exact: true })).toBeVisible();
-  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'clive', 'codex', 'cursor', 'Misc', 'Total']);
-  await expect(page.locator('#stats-content th', { hasText: 'Misc' })).toBeVisible();
+  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'clive', 'codex', 'cursor', 'haiku', 'Total']);
+  await expect(page.locator('#stats-content th', { hasText: 'Misc' })).toHaveCount(0);
 });
 
 test('agent session type breakdown expands selected base agents into session variants', async ({ page }) => {
@@ -574,7 +574,7 @@ test('agent session type breakdown expands selected base agents into session var
   await expect(page.locator('#stats-content tfoot')).toContainText('7');
 });
 
-test('agent session type breakdown defaults three base agents into six session lanes', async ({ page }) => {
+test('agent session type breakdown defaults two base agents into four session lanes', async ({ page }) => {
   await mockApp(page);
   await page.route('**/stats/filters', route => route.fulfill({
     json: { agents: ['codex', 'clive', 'opencode', 'haiku'], topics: [] },
@@ -602,14 +602,14 @@ test('agent session type breakdown defaults three base agents into six session l
   await page.locator('#sf-breakdown').selectOption('agent_session');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBe('agent_session');
   expect(statsRequests.at(-1).searchParams.get('agent')).toBeNull();
-  await expect(page.locator('#sf-agent-toggle')).toHaveText('3 Agents');
+  await expect(page.locator('#sf-agent-toggle')).toHaveText('2 Agents');
   await expect(page.locator('#stats-content thead th')).toHaveText([
-    'Hour', 'clive', 'clive!', 'codex', 'codex!', 'opencode', 'opencode!', 'Misc', 'Total',
+    'Hour', 'clive', 'clive!', 'codex', 'codex!', 'Misc', 'Total',
   ]);
   await page.locator('#sf-agent-toggle').click();
   await expect(page.locator('#sf-agent-menu input[value="codex"]')).toBeChecked();
   await expect(page.locator('#sf-agent-menu input[value="clive"]')).toBeChecked();
-  await expect(page.locator('#sf-agent-menu input[value="opencode"]')).toBeChecked();
+  await expect(page.locator('#sf-agent-menu input[value="opencode"]')).not.toBeChecked();
   await expect(page.locator('#sf-agent-menu input[value="haiku"]')).not.toBeChecked();
 });
 
@@ -654,9 +654,9 @@ test('agent breakdown shows agent! columns based on session type filter', async 
   await expect(page.locator('#sf-adhoc option[value="adhoc"]')).toHaveText('Adhoc');
   await expect(page.locator('#sf-adhoc')).toHaveValue('all');
 
-  // default (session + adhoc): both codex and codex! columns shown
+  // default (session + adhoc): non-session breakdown aggregates both modes under the base agent
   await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toBeVisible();
-  await expect(page.getByRole('columnheader', { name: 'codex!', exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'codex!', exact: true })).toHaveCount(0);
 
   // session only: only codex column
   await page.locator('#sf-adhoc').selectOption('session');
@@ -664,11 +664,51 @@ test('agent breakdown shows agent! columns based on session type filter', async 
   await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toBeVisible();
   await expect(page.getByRole('columnheader', { name: 'codex!', exact: true })).toHaveCount(0);
 
-  // adhoc only: only codex! column
+  // adhoc only: still base agent column, constrained to adhoc data
   await page.locator('#sf-adhoc').selectOption('adhoc');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('adhoc')).toBe('adhoc');
-  await expect(page.getByRole('columnheader', { name: 'codex!', exact: true })).toBeVisible();
-  await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'codex!', exact: true })).toHaveCount(0);
+});
+
+test('topic agent session breakdown expands coarse topic and agent filters into session lanes', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/stats/filters', route => route.fulfill({
+    json: { agents: ['codex', 'clive'], topics: ['squid', 'ops'] },
+  }));
+  const statsRequests = [];
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    statsRequests.push(url);
+    if (url.searchParams.get('breakdown') === 'topic_agent_session') {
+      return route.fulfill({
+        json: [
+          { period: '2026-06-26 14:00', topic: 'squid', agent_key: 'codex', agent: 'codex', session_type: 'session', sessions: 4, total_turns: 4 },
+          { period: '2026-06-26 14:00', topic: 'squid', agent_key: 'codex', agent: 'codex', session_type: 'adhoc', sessions: 0, total_turns: 3 },
+          { period: '2026-06-26 14:00', topic: 'squid', agent_key: 'clive', agent: 'clive', session_type: 'session', sessions: 2, total_turns: 2 },
+          { period: '2026-06-26 14:00', topic: 'squid', agent_key: 'clive', agent: 'clive', session_type: 'adhoc', sessions: 0, total_turns: 1 },
+          { period: '2026-06-26 14:00', topic: 'ops', agent_key: 'codex', agent: 'codex', session_type: 'session', sessions: 1, total_turns: 1 },
+        ],
+      });
+    }
+    return route.fulfill({ json: [{ period: '2026-06-26 14:00', sessions: 8, total_turns: 11 }] });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('#sf-topic-toggle').click();
+  await page.locator('#sf-topic-menu input[value="squid"]').check();
+  await page.locator('#sf-agent-toggle').click();
+  await page.locator('#sf-agent-menu input[value="codex"]').check();
+  await page.locator('#sf-agent-menu input[value="clive"]').check();
+  await page.locator('#sf-breakdown').selectOption('topic_agent_session');
+
+  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBe('topic_agent_session');
+  expect(statsRequests.at(-1).searchParams.get('topic')).toBe('squid');
+  expect(statsRequests.at(-1).searchParams.get('agent')).toBe('codex,clive');
+  await expect(page.locator('#stats-content thead th')).toHaveText([
+    'Hour', 'squid / clive', 'squid / clive!', 'squid / codex', 'squid / codex!', 'Misc', 'Total',
+  ]);
 });
 
 test('/restart clears its persisted draft before the page reloads', async ({ page }) => {

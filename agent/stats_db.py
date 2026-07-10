@@ -134,6 +134,18 @@ _TABLES = [
         last_used_at    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         PRIMARY KEY (topic, agent, repo_root)
     )""",
+    """CREATE TABLE IF NOT EXISTS stats_filter_presets (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        name          TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        state_json    TEXT NOT NULL,
+        is_default    INTEGER NOT NULL DEFAULT 0,
+        display_order INTEGER NOT NULL DEFAULT 0,
+        created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS idx_stats_filter_presets_one_default
+       ON stats_filter_presets(is_default)
+       WHERE is_default = 1""",
     # FTS5 index — standalone table (not external-content). See ADR-0021.
     # Trigger fires on the status='done' update (final content), not the first
     # partial-content save, so the index always holds the complete response.
@@ -184,6 +196,18 @@ _MIGRATIONS: list[str] = [
        SELECT id, content FROM chat_messages
        WHERE role='user' AND content IS NOT NULL
          AND id NOT IN (SELECT rowid FROM prompts_fts)""",
+    """CREATE TABLE IF NOT EXISTS stats_filter_presets (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        name          TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        state_json    TEXT NOT NULL,
+        is_default    INTEGER NOT NULL DEFAULT 0,
+        display_order INTEGER NOT NULL DEFAULT 0,
+        created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS idx_stats_filter_presets_one_default
+       ON stats_filter_presets(is_default)
+       WHERE is_default = 1""",
 ]
 
 _DATA_MIGRATIONS: list[tuple[str, str]] = [
@@ -1498,18 +1522,34 @@ def get_stats_by_agent_breakdown(
     tz_offset_minutes: int = 0,
     include_session: bool = False,
 ) -> list:
+    breakdown = "agent_session" if include_session else "agent"
+    return get_stats_by_breakdown(period, days, agent, topic, adhoc, tz_offset_minutes, breakdown)
+
+
+def get_stats_by_breakdown(
+    period: str = "daily",
+    days: int = 30,
+    agent: str = "",
+    topic: str = "",
+    adhoc: str = "all",
+    tz_offset_minutes: int = 0,
+    breakdown: str = "agent",
+) -> list:
     tz_shift = f"{-tz_offset_minutes} minutes"
     bucket = (
         f"strftime('%Y-%m-%d %H:00', datetime(created_at, '{tz_shift}'))"
         if period == "hourly"
         else f"strftime('%Y-%m-%d', datetime(created_at, '{tz_shift}'))"
     )
+    include_topic = breakdown in {"topic_agent", "topic_agent_session"}
+    include_session = breakdown in {"agent_session", "topic_agent_session"}
     base_agent = "COALESCE(agent, backend, 'unknown')"
-    session_suffix = "CASE WHEN COALESCE(adhoc, 0) = 1 THEN '!' ELSE '' END"
-    series_expr = f"{base_agent} || {session_suffix}" if include_session else base_agent
     cm_base_agent = "COALESCE(agent, 'unknown')"
-    cm_session_suffix = "CASE WHEN COALESCE(adhoc, 0) = 1 THEN '!' ELSE '' END"
-    cm_series_expr = f"{cm_base_agent} || {cm_session_suffix}" if include_session else cm_base_agent
+    agent_key_expr = base_agent
+    cm_agent_key_expr = cm_base_agent
+    if include_session:
+        agent_key_expr = f"{base_agent} || CASE WHEN COALESCE(adhoc, 0) = 1 THEN '!' ELSE '' END"
+        cm_agent_key_expr = f"{cm_base_agent} || CASE WHEN COALESCE(adhoc, 0) = 1 THEN '!' ELSE '' END"
     cm_bucket = (
         f"strftime('%Y-%m-%d %H:00', datetime(created_at, '{tz_shift}'))"
         if period == "hourly"
@@ -1545,6 +1585,28 @@ def get_stats_by_agent_breakdown(
 
     ss_where = " AND ".join(ss_clauses)
     cm_where = " AND ".join(cm_clauses)
+    ss_dims = ["period", f"{agent_key_expr} AS agent_key", f"{agent_key_expr} AS agent"]
+    cm_dims = ["period", f"{cm_agent_key_expr} AS agent_key", f"{cm_agent_key_expr} AS agent"]
+    select_dims = ["ss.period", "ss.agent_key", "ss.agent"]
+    union_dims = ["cm.period", "cm.agent_key", "cm.agent"]
+    join_dims = ["cm.period = ss.period", "cm.agent_key = ss.agent_key"]
+    group_dims = ["period", "agent_key"]
+    if include_topic:
+        ss_dims.insert(1, "topic")
+        cm_dims.insert(1, "topic")
+        select_dims.insert(1, "ss.topic")
+        union_dims.insert(1, "cm.topic")
+        join_dims.append("cm.topic = ss.topic")
+        group_dims.append("topic")
+    if include_session:
+        session_type = "CASE WHEN COALESCE(adhoc, 0) = 1 THEN 'adhoc' ELSE 'session' END"
+        cm_session_type = "CASE WHEN COALESCE(adhoc, 0) = 1 THEN 'adhoc' ELSE 'session' END"
+        ss_dims.append(f"{session_type} AS session_type")
+        cm_dims.append(f"{cm_session_type} AS session_type")
+        select_dims.append("ss.session_type")
+        union_dims.append("cm.session_type")
+        join_dims.append("cm.session_type = ss.session_type")
+        group_dims.append("session_type")
 
     try:
         with _connect() as conn:
@@ -1552,7 +1614,7 @@ def get_stats_by_agent_breakdown(
                 f"""WITH ss AS (
                         SELECT
                             {bucket} AS period,
-                            {series_expr} AS agent_key,
+                            {', '.join(ss_dims[1:])},
                             COUNT(*) AS sessions,
                             SUM(input_tokens) AS input_tokens,
                             SUM(input_tokens - COALESCE(history_input_tokens, 0)) AS new_input_tokens,
@@ -1564,22 +1626,20 @@ def get_stats_by_agent_breakdown(
                                      THEN quota_after - quota_before ELSE NULL END) AS quota_delta
                         FROM session_stats
                         WHERE {ss_where}
-                        GROUP BY period, agent_key
+                        GROUP BY {', '.join(group_dims)}
                     ), cm AS (
                         SELECT
                             {cm_bucket} AS period,
-                            {cm_series_expr} AS agent_key,
+                            {', '.join(cm_dims[1:])},
                             COUNT(*) AS total_turns
                         FROM chat_messages
                         WHERE {cm_where}
-                        GROUP BY period, agent_key
+                        GROUP BY {', '.join(group_dims)}
                     )
                     SELECT *
                     FROM (
                         SELECT
-                            ss.period,
-                            ss.agent_key AS agent,
-                            ss.agent_key,
+                            {', '.join(select_dims)},
                             ss.sessions,
                             COALESCE(cm.total_turns, ss.sessions, 0) AS total_turns,
                             ss.input_tokens,
@@ -1590,12 +1650,10 @@ def get_stats_by_agent_breakdown(
                             ss.cost_usd,
                             ss.quota_delta
                         FROM ss
-                        LEFT JOIN cm ON cm.period = ss.period AND cm.agent_key = ss.agent_key
+                        LEFT JOIN cm ON {' AND '.join(join_dims)}
                         UNION ALL
                         SELECT
-                            cm.period,
-                            cm.agent_key AS agent,
-                            cm.agent_key,
+                            {', '.join(union_dims)},
                             0 AS sessions,
                             cm.total_turns,
                             0 AS input_tokens,
@@ -1606,7 +1664,7 @@ def get_stats_by_agent_breakdown(
                             0 AS cost_usd,
                             NULL AS quota_delta
                         FROM cm
-                        LEFT JOIN ss ON ss.period = cm.period AND ss.agent_key = cm.agent_key
+                        LEFT JOIN ss ON {' AND '.join(join_dims)}
                         WHERE ss.period IS NULL
                     )
                     ORDER BY period DESC, sessions DESC
@@ -1616,6 +1674,70 @@ def get_stats_by_agent_breakdown(
         return [dict(r) for r in rows]
     except sqlite3.OperationalError:
         return []
+
+
+def _stats_preset_row(row: sqlite3.Row) -> dict:
+    item = dict(row)
+    item["state"] = json.loads(item.pop("state_json") or "{}")
+    item["is_default"] = bool(item.get("is_default"))
+    return item
+
+
+def list_stats_filter_presets() -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT id, name, state_json, is_default, created_at, updated_at
+               FROM stats_filter_presets
+               ORDER BY display_order, lower(name)"""
+        ).fetchall()
+    return [_stats_preset_row(row) for row in rows]
+
+
+def create_stats_filter_preset(name: str, state: dict) -> dict:
+    with _connect() as conn:
+        cur = conn.execute(
+            """INSERT INTO stats_filter_presets(name, state_json, display_order)
+               VALUES (?, ?, COALESCE((SELECT MAX(display_order) + 1 FROM stats_filter_presets), 0))""",
+            (name.strip(), json.dumps(state, sort_keys=True)),
+        )
+        row = conn.execute(
+            """SELECT id, name, state_json, is_default, created_at, updated_at
+               FROM stats_filter_presets WHERE id=?""",
+            (cur.lastrowid,),
+        ).fetchone()
+    return _stats_preset_row(row)
+
+
+def update_stats_filter_preset(preset_id: int, name: Optional[str] = None, state: Optional[dict] = None, is_default: Optional[bool] = None) -> Optional[dict]:
+    with _connect() as conn:
+        if is_default is True:
+            conn.execute("UPDATE stats_filter_presets SET is_default=0")
+        fields: list[str] = []
+        params: list = []
+        if name is not None:
+            fields.append("name=?")
+            params.append(name.strip())
+        if state is not None:
+            fields.append("state_json=?")
+            params.append(json.dumps(state, sort_keys=True))
+        if is_default is not None:
+            fields.append("is_default=?")
+            params.append(1 if is_default else 0)
+        if fields:
+            fields.append("updated_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')")
+            conn.execute(f"UPDATE stats_filter_presets SET {', '.join(fields)} WHERE id=?", (*params, preset_id))
+        row = conn.execute(
+            """SELECT id, name, state_json, is_default, created_at, updated_at
+               FROM stats_filter_presets WHERE id=?""",
+            (preset_id,),
+        ).fetchone()
+    return _stats_preset_row(row) if row else None
+
+
+def delete_stats_filter_preset(preset_id: int) -> bool:
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM stats_filter_presets WHERE id=?", (preset_id,))
+        return cur.rowcount > 0
 
 
 def get_stats_by_agent(

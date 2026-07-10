@@ -461,6 +461,17 @@
 
     <!-- ── STATS VIEW ────────────────────────────────────────────────── -->
     <div id="view-stats" class="view">
+      <div id="stats-presets">
+        <div id="stats-preset-tabs"></div>
+        <div id="stats-preset-actions">
+          <input id="stats-preset-name" type="text" placeholder="Preset name" />
+          <button id="stats-preset-save" type="button" class="sf-chip">Save New</button>
+          <button id="stats-preset-overwrite" type="button" class="sf-chip" disabled>Overwrite</button>
+          <button id="stats-preset-default" type="button" class="sf-chip" disabled>Mark Default</button>
+          <button id="stats-preset-delete" type="button" class="sf-chip" disabled>Delete</button>
+          <span id="stats-preset-status"></span>
+        </div>
+      </div>
       <div id="stats-filters">
         <div class="sf-row sf-primary-row">
           <label class="sf-field">
@@ -482,6 +493,8 @@
               <option value="" selected>Total</option>
               <option value="agent">By Agent</option>
               <option value="agent_session">By Agent · Session Type</option>
+              <option value="topic_agent">By Topic · Agent</option>
+              <option value="topic_agent_session">By Topic · Agent · Session Type</option>
             </select>
           </label>
           <div class="sf-field sf-menu-field">

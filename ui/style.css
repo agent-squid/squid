@@ -2389,6 +2389,48 @@ body {
   flex-shrink: 0;
   font-size: var(--text-sm);
 }
+#stats-presets {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.5rem;
+  padding: 0.45rem 0.65rem;
+  border-bottom: 1px solid var(--surface-3);
+  flex-shrink: 0;
+  font-size: var(--text-sm);
+}
+#stats-preset-tabs,
+#stats-preset-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  min-width: 0;
+}
+#stats-preset-actions {
+  margin-left: auto;
+}
+#stats-preset-name {
+  background: var(--surface-3);
+  border: 1px solid #2a2a36;
+  border-radius: 3px;
+  color: var(--text-lo);
+  font-size: 1em;
+  min-width: 8rem;
+  padding: 0.12rem 0.4rem;
+}
+#stats-preset-name:focus { outline: 1px solid #4a4a70; }
+#stats-preset-status { color: var(--text-ghost); white-space: nowrap; }
+.stats-preset-tab.default::after {
+  content: "*";
+  color: var(--text-ghost);
+  margin-left: 0.25rem;
+}
+.stats-preset-tab.dirty::after {
+  content: " modified";
+  color: var(--text-ghost);
+  margin-left: 0.25rem;
+}
 .sf-row,
 .sf-field {
   display: flex;
@@ -2994,6 +3036,19 @@ button {
   #stats-filters {
     align-items: flex-start;
     gap: 0.35rem 0.45rem;
+  }
+  #stats-presets {
+    align-items: flex-start;
+  }
+  #stats-preset-tabs,
+  #stats-preset-actions {
+    flex: 1 1 100%;
+  }
+  #stats-preset-actions {
+    margin-left: 0;
+  }
+  #stats-preset-name {
+    flex: 1 1 8rem;
   }
   .sf-primary-row {
     display: grid;
