@@ -498,7 +498,7 @@ function searchScopeText(state) {
   if (state.agent) {
     scope += `@${state.agent}`;
     if (state.adhoc === true) scope += '!';
-    else if (state.adhoc === null) scope += '*';
+    else if (state.adhoc === null) scope += '+';
   }
   return scope;
 }
@@ -1069,25 +1069,25 @@ function parseScopeInput(text, { allowAll = false } = {}) {
       : null;
   }
 
-  const topicMatch = scope.match(/^#([\w-]+)(?:@([\w-]+)([!*])?)?$/);
+  const topicMatch = scope.match(/^#([\w-]+)(?:@([\w-]+)([!+])?)?$/);
   if (topicMatch) {
     const agent = topicMatch[2] || null;
     const mode = topicMatch[3] || '';
     return {
       topic: topicMatch[1].toLowerCase(),
       agent,
-      adhoc: agent ? (mode === '*' ? null : mode === '!') : null,
+      adhoc: agent ? (mode === '+' ? null : mode === '!') : null,
       explicitAll: false,
     };
   }
 
-  const agentMatch = scope.match(/^@([\w-]+)([!*])?$/);
+  const agentMatch = scope.match(/^@([\w-]+)([!+])?$/);
   if (agentMatch) {
     const mode = agentMatch[2] || '';
     return {
       topic: null,
       agent: agentMatch[1],
-      adhoc: mode === '*' ? null : mode === '!',
+      adhoc: mode === '+' ? null : mode === '!',
       explicitAll: false,
     };
   }
@@ -7745,7 +7745,7 @@ function formatFilterCommand(state) {
   if (state.agent) {
     scope += '@' + state.agent;
     if (state.adhoc === true) scope += '!';
-    else if (state.adhoc === null) scope += '*';
+    else if (state.adhoc === null) scope += '+';
   }
   return scope ? `/f ${scope}` : '/f reset';
 }
@@ -7832,12 +7832,12 @@ function formatSearchCommand(state) {
     cmd += state.explicitAll ? '#all' : '#' + state.topic;
     if (state.agent) cmd += '@' + state.agent;
     if (state.agent && state.adhoc === true) cmd += '!';
-    else if (state.agent && state.adhoc === null) cmd += '*';
+    else if (state.agent && state.adhoc === null) cmd += '+';
     cmd += ' ';
   } else if (state.agent) {
     cmd += '@' + state.agent;
     if (state.adhoc === true) cmd += '!';
-    else if (state.adhoc === null) cmd += '*';
+    else if (state.adhoc === null) cmd += '+';
     cmd += ' ';
   }
   return (cmd + state.keywords).trim();
