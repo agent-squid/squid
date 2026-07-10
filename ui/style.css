@@ -2399,7 +2399,12 @@ body {
 .sf-field { gap: 0.25rem; }
 .sf-label { color: var(--text-ghost); white-space: nowrap; }
 .sf-sep { width: 1px; height: 1rem; background: #222; margin: 0 0.15rem; }
-.sf-break { display: none; }
+.sf-break {
+  display: block;
+  flex-basis: 100%;
+  width: 100%;
+  height: 0;
+}
 .sf-menu-field { position: relative; }
 .sf-chips { display: flex; gap: 2px; }
 .sf-chip {
