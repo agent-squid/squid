@@ -563,15 +563,22 @@ test('stats breakdown columns can sort by footer totals', async ({ page }) => {
   await page.locator('#sf-breakdown').selectOption('agent');
   await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'clive', 'codex', 'cursor', 'haiku', 'Total']);
   await expect(page.getByRole('button', { name: 'Sort breakdown columns by total' })).toHaveCount(2);
-  await expect(page.locator('#stats-content thead th').first().getByRole('button', { name: 'Sort breakdown columns by total' })).toHaveCount(1);
-  await expect(page.locator('#stats-content tfoot td').first().getByRole('button', { name: 'Sort breakdown columns by total' })).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Sort breakdown columns by name' })).toHaveCount(2);
+  await expect(page.locator('#stats-content thead th').first().getByRole('button', { name: 'Sort breakdown columns by name' })).toHaveCount(2);
+  await expect(page.locator('#stats-content tfoot td').first().getByRole('button', { name: 'Sort breakdown columns by total' })).toHaveCount(2);
   await expect(page.locator('#stats-content thead th').nth(1).getByRole('button')).toHaveCount(0);
+  await expect(page.locator('#stats-content thead th').first().locator('button.active')).toHaveCount(2);
+  await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(0);
 
-  await page.getByRole('button', { name: 'Sort breakdown columns by total' }).first().click();
+  await page.locator('#stats-content tfoot td').first().getByRole('button', { name: 'Sort breakdown columns by total' }).first().click();
   await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'codex', 'clive', 'cursor', 'haiku', 'Total']);
+  await expect(page.locator('#stats-content thead th').first().locator('button.active')).toHaveCount(0);
+  await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(2);
 
   await page.getByRole('button', { name: 'Sort breakdown columns by name' }).first().click();
   await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'clive', 'codex', 'cursor', 'haiku', 'Total']);
+  await expect(page.locator('#stats-content thead th').first().locator('button.active')).toHaveCount(2);
+  await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(0);
 });
 
 test('agent session type breakdown expands selected base agents into session variants', async ({ page }) => {
