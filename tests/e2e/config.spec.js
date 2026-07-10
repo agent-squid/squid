@@ -426,12 +426,17 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect(page.locator('#stats-tabs .st').first()).toHaveText('Hourly');
   await expect(page.locator('#stats-tabs .st').nth(1)).toHaveText('Daily');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('period')).toBe('hourly');
-  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBe('agent');
+  expect(statsRequests.at(-1).searchParams.get('breakdown')).toBeNull();
   expect(statsRequests.at(-1).searchParams.get('days')).toBe('7');
   expect(statsRequests.at(-1).searchParams.get('tz_offset_minutes')).not.toBeNull();
-  await expect(page.locator('#sf-breakdown option')).toHaveCount(2);
-  await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toBeVisible();
+  await expect(page.locator('#sf-breakdown option')).toHaveCount(3);
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (4)');
+  await expect(page.locator('#stats-content th', { hasText: 'Sessions' })).toBeVisible();
+  await expect(page.locator('#stats-content th', { hasText: 'Turns' })).toBeVisible();
+  await expect(page.locator('#stats-content th', { hasText: 'Tokens In' })).toBeVisible();
+  await expect(page.locator('#stats-content th', { hasText: 'Tokens Out' })).toBeVisible();
+  await expect(page.locator('#stats-content th', { hasText: 'Cost' })).toHaveCount(0);
+  await expect(page.locator('#stats-content th', { hasText: 'Quota meter' })).toHaveCount(0);
 
   await page.locator('#sf-topic-toggle').click();
   await page.locator('#sf-topic-menu input[value="squid"]').check();
@@ -450,12 +455,18 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await page.locator('#sf-measures-toggle').click();
   await page.locator('#sf-measures-menu input[value="cost"]').check();
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (5)');
+  await expect(page.locator('#stats-content th', { hasText: 'Cost' })).toBeVisible();
+  await expect(page.locator('#stats-content')).toContainText('$1.2500');
+  await expect(page.locator('#stats-content th', { hasText: 'Quota meter' })).toHaveCount(0);
 
   await page.locator('#sf-measures-menu input[value="quota"]').check();
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (6)');
+  await expect(page.locator('#stats-content th', { hasText: 'Quota meter' })).toBeVisible();
+  await expect(page.locator('#stats-content')).toContainText('+2.5 pp');
 
   await page.locator('#sf-measures-menu input[value="tokens_out"]').uncheck();
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (5)');
+  await expect(page.locator('#stats-content th', { hasText: 'Tokens Out' })).toHaveCount(0);
 
   await page.getByRole('button', { name: 'Daily' }).click();
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('period')).toBe('daily');

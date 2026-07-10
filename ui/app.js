@@ -4513,7 +4513,7 @@ function initCursorQuota() {
 
 let statsPeriod = 'hourly';
 let statsGroup  = 'time';
-let statsBreakdown = 'agent';
+let statsBreakdown = '';
 let statsFilters = { days: 7, agents: [], topics: [], adhoc: 'all' };
 let statsChartY1 = 'turns';
 let statsChartY2 = '';
