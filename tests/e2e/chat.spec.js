@@ -212,7 +212,7 @@ test.describe('response bubble', () => {
 
     await sendMsg(page);
     const href = await page.locator(`${RESPONSE} a`).getAttribute('href');
-    expect(href).toContain('/Users/haebin/.squid/worktrees/ef27c425/sqd-squid-2066-921e61/app.py:12');
+    expect(href).toBe('#');
     expect(href).not.toContain('/localfile?path=');
   });
 
@@ -358,7 +358,7 @@ test.describe('response bubble', () => {
         META,
         { event: 'tool', data: {
           name: 'GitDiff',
-          repo: '/Users/haebin/Work/squid',
+          repo: '/Users/haebin/.squid/worktrees/ef27c425/sqd-squid-2066-921e61',
           source: '/Users/haebin/Work/squid',
           worktree_repo: '/Users/haebin/.squid/worktrees/ef27c425/sqd-squid-2066-921e61',
           file_count: 1,

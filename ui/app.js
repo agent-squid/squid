@@ -135,10 +135,6 @@ function backendModelHint(backend) {
     return /^(\/|~\/)/.test(path) && /\.\w{1,16}$/.test(path);
   }
 
-  function isSquidWorktreePath(path) {
-    return /(^|\/)\.squid\/worktrees\//.test(path || '');
-  }
-
   function localFileUrl(path, line, endLine) {
     const params = new URLSearchParams({ path });
     const token = localStorage.getItem('squid_token');
@@ -154,7 +150,7 @@ function backendModelHint(backend) {
     if (url.startsWith('file://')) rawPath = decodeURIComponent(url.replace(/^file:\/\//, ''));
     const { line, endLine } = extractLine(rawPath);
     const path = stripLineSuffix(rawPath);
-    if (isSquidWorktreePath(path)) return url;
+    if (_isSquidWorktreePath(path)) return '#';
     if (isLocalFilePath(path)) return localFileUrl(path, line, endLine);
     return url;
   }
@@ -2932,8 +2928,16 @@ function _gitDiffDisplayPaths(files) {
   return files.map((file, i) => file.old_path ? `${oldLabels[i]} → ${newLabels[i]}` : newLabels[i]);
 }
 
+function _isSquidWorktreePath(path) {
+  return /(^|\/)\.squid\/worktrees\//.test(path || '');
+}
+
 function _gitDiffSourceRepo(tool) {
-  return tool?.repo || tool?.source || tool?.cwd || '';
+  if (!tool) return '';
+  if (tool.source) return tool.source;
+  if (tool.repo && !_isSquidWorktreePath(tool.repo)) return tool.repo;
+  if (tool.cwd && !_isSquidWorktreePath(tool.cwd)) return tool.cwd;
+  return '';
 }
 
 function makeToolBlock(tool, msgId) {
