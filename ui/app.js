@@ -4779,9 +4779,15 @@ function _updateStatsBreakdownUi() {
   const active = !!statsBreakdown;
   document.getElementById('stats-chart-controls')?.classList.toggle('breakdown-active', active);
   const measures = document.getElementById('sf-measures');
-  if (measures) measures.hidden = active;
-  const measureSep = document.querySelector('.sf-primary-row .sf-sep');
-  if (measureSep) measureSep.hidden = active;
+  if (measures) measures.classList.toggle('disabled', active);
+  const measuresToggle = document.getElementById('sf-measures-toggle');
+  if (measuresToggle) {
+    measuresToggle.disabled = active;
+    measuresToggle.setAttribute('aria-disabled', active ? 'true' : 'false');
+    if (active) measuresToggle.setAttribute('aria-expanded', 'false');
+  }
+  const measuresMenu = document.getElementById('sf-measures-menu');
+  if (active && measuresMenu) measuresMenu.hidden = true;
 }
 
 function _renderStatsMultiMenu(menu, values, selected, prefix) {
@@ -5332,6 +5338,7 @@ function initStats() {
   const measuresMenu = document.getElementById('sf-measures-menu');
   measuresToggle.addEventListener('click', e => {
     e.stopPropagation();
+    if (measuresToggle.disabled) return;
     const open = measuresMenu.hidden;
     measuresMenu.hidden = !open;
     measuresToggle.setAttribute('aria-expanded', open ? 'true' : 'false');

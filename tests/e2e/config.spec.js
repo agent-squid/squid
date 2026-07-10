@@ -424,6 +424,11 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect(page.locator('#sf-breakdown option')).toHaveCount(3);
   await expect(page.locator('#sc-compare-btn')).toBeVisible();
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (4)');
+  await expect.poll(() => page.evaluate(() => {
+    const tops = ['sf-period', 'sf-measures-toggle', 'sf-topic-toggle', 'sf-agent-toggle', 'sf-adhoc']
+      .map(id => document.getElementById(id)?.getBoundingClientRect().top ?? 0);
+    return Math.max(...tops) - Math.min(...tops);
+  })).toBeLessThan(3);
   await expect(page.locator('#stats-content th', { hasText: 'Sessions' })).toBeVisible();
   await expect(page.locator('#stats-content th', { hasText: 'Turns' })).toBeVisible();
   await expect(page.locator('#stats-content th', { hasText: 'Tokens In' })).toBeVisible();
@@ -472,7 +477,9 @@ test('analytics measures dropdown controls cost and quota columns independently'
   expect(statsRequests.at(-1).searchParams.get('agent')).toBe('codex,clive');
   await expect(page.locator('#sf-agent-toggle')).toHaveText('2 Agents');
   await expect(page.locator('#sc-compare-btn')).toBeHidden();
-  await expect(page.locator('#sf-measures')).toBeHidden();
+  await expect(page.locator('#sf-measures')).toBeVisible();
+  await expect(page.locator('#sf-measures-toggle')).toBeDisabled();
+  await expect(page.locator('#stats-filters .sf-sep')).toBeVisible();
   await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toBeVisible();
   await expect(page.getByRole('columnheader', { name: 'clive', exact: true })).toBeVisible();
   await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'clive', 'codex', 'Total']);
@@ -486,6 +493,7 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBeNull();
   await expect(page.locator('#sc-compare-btn')).toBeVisible();
   await expect(page.locator('#sf-measures')).toBeVisible();
+  await expect(page.locator('#sf-measures-toggle')).toBeEnabled();
 });
 
 test('agent breakdown defaults to top three agents when none are selected', async ({ page }) => {

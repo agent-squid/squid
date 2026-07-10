@@ -2400,7 +2400,7 @@ body {
 .sf-label { color: var(--text-ghost); white-space: nowrap; }
 .sf-sep { width: 1px; height: 1rem; background: #222; margin: 0 0.15rem; }
 .sf-break {
-  display: block;
+  display: none;
   flex-basis: 100%;
   width: 100%;
   height: 0;
@@ -2419,6 +2419,14 @@ body {
 }
 .sf-chip.active { background: #2a2a3e; border-color: #4a4a70; color: #9090c0; }
 .sf-chip:hover:not(.active) { border-color: #3a3a50; color: #777; }
+.sf-chip:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+.sf-chip:disabled:hover {
+  border-color: #2a2a36;
+  color: var(--text-dim);
+}
 .sf-multi { position: relative; }
 #sf-topic-toggle,
 #sf-agent-toggle,
