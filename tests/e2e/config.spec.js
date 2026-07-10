@@ -569,32 +569,48 @@ test('stats breakdown caps visible series and keeps edge columns sticky while sc
 
   await expect(page.locator('#stats-content thead th')).toHaveText([
     'Hour',
-    'agent01',
-    'agent02',
     'agent03',
     'agent04',
     'agent05',
     'agent06',
     'agent07',
     'agent08',
+    'agent09',
+    'agent10',
     'Misc',
     'Total',
   ]);
   await expect(page.locator('#stats-content tbody tr').first().locator('td')).toHaveText([
     '06-26 14:00',
-    '1',
-    '2',
     '3',
     '4',
     '5',
     '6',
     '7',
     '8',
-    '19',
+    '9',
+    '10',
+    '3',
     '55',
   ]);
-  await expect(page.getByRole('columnheader', { name: 'agent09', exact: true })).toHaveCount(0);
-  await expect(page.getByRole('columnheader', { name: 'agent10', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('columnheader', { name: 'agent01', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('columnheader', { name: 'agent02', exact: true })).toHaveCount(0);
+  await page.locator('#stats-content tfoot td').first().getByRole('button', { name: 'Sort breakdown columns by total' }).nth(1).click();
+  await expect(page.locator('#stats-content thead th')).toHaveText([
+    'Hour',
+    'agent10',
+    'agent09',
+    'agent08',
+    'agent07',
+    'agent06',
+    'agent05',
+    'agent04',
+    'agent03',
+    'Misc',
+    'Total',
+  ]);
+  await expect(page.locator('#stats-content tbody tr').first().locator('td.stats-misc-col')).toHaveText('3');
+  await expect(page.locator('#stats-content thead th', { hasText: 'Misc' })).toHaveCount(1);
   await expect.poll(() => page.locator('#stats-content').evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true);
 
   const before = await page.locator('#stats-content').evaluate(el => {
