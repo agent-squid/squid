@@ -413,8 +413,8 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await page.goto('/');
   await page.getByRole('button', { name: 'Stats' }).click();
   await expect(page.locator('#stats-content table')).toBeVisible();
-  await expect(page.locator('#stats-tabs .st').first()).toHaveText('Hourly');
-  await expect(page.locator('#stats-tabs .st').nth(1)).toHaveText('Daily');
+  await expect(page.locator('#stats-tabs')).toHaveCount(0);
+  await expect(page.locator('#sf-period')).toHaveValue('hourly');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('period')).toBe('hourly');
   expect(statsRequests.at(-1).searchParams.get('breakdown')).toBeNull();
   expect(statsRequests.at(-1).searchParams.get('days')).toBe('7');
@@ -459,12 +459,12 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (5)');
   await expect(page.locator('#stats-content th', { hasText: 'Tokens Out' })).toHaveCount(0);
 
-  await page.getByRole('button', { name: 'Daily' }).click();
+  await page.locator('#sf-period').selectOption('daily');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('period')).toBe('daily');
   expect(statsRequests.at(-1).searchParams.get('tz_offset_minutes')).not.toBeNull();
   await expect(page.locator('#stats-content tbody td').first()).toHaveText('2026-06-26');
 
-  await page.getByRole('button', { name: 'Hourly' }).click();
+  await page.locator('#sf-period').selectOption('hourly');
   await page.locator('#sf-breakdown').selectOption('agent');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBe('agent');
   expect(statsRequests.at(-1).searchParams.get('agent')).toBeNull();

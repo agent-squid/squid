@@ -2377,26 +2377,7 @@ body {
 }
 
 
-/* stats view header */
-
-#stats-header {
-  display: flex;
-  align-items: center;
-  padding: 0.5rem 0.6rem;
-  border-bottom: 1px solid var(--surface-2);
-  flex-shrink: 0;
-}
-#stats-tabs { display: flex; gap: 2px; }
-.st {
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text-lo);
-  cursor: pointer;
-  font-size: var(--text-sm);
-  padding: 0.2rem 0.55rem;
-}
-.st.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* stats view */
 
 #stats-filters {
   display: flex;
@@ -2469,7 +2450,7 @@ body {
   cursor: pointer;
 }
 .sf-multi-menu label:hover { background: var(--surface-3); }
-#sf-days, #sf-adhoc, #sf-breakdown {
+#sf-period, #sf-days, #sf-adhoc, #sf-breakdown {
   background: var(--surface-3);
   border: 1px solid #2a2a36;
   border-radius: 3px;
@@ -2479,7 +2460,7 @@ body {
   max-width: 9rem;
   min-width: 0;
 }
-#sf-days:focus, #sf-adhoc:focus, #sf-breakdown:focus { outline: 1px solid #4a4a70; }
+#sf-period:focus, #sf-days:focus, #sf-adhoc:focus, #sf-breakdown:focus { outline: 1px solid #4a4a70; }
 
 #stats-chart-wrap {
   flex-shrink: 0;
@@ -2896,30 +2877,6 @@ button {
     min-height: 34px;
   }
 
-  #stats-header {
-    align-items: flex-start;
-    gap: 0.5rem;
-  }
-
-  #stats-tabs {
-    flex: 1;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    padding-bottom: 0.1rem;
-  }
-
-  .st {
-    flex: 0 0 auto;
-    min-height: 34px;
-    padding: 0.25rem 0.65rem;
-    font-size: 0.78rem;
-  }
-
-  #stats-close {
-    flex: 0 0 34px;
-    min-height: 34px;
-  }
-
   #stats-content {
     overflow: auto;
   }
@@ -3044,6 +3001,7 @@ button {
     display: none;
   }
   #sf-days,
+  #sf-period,
   #sf-topic,
   #sf-agent,
   #sf-adhoc,
