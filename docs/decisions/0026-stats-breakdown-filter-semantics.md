@@ -317,9 +317,15 @@ CREATE TABLE IF NOT EXISTS stats_filter_presets (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     name         TEXT NOT NULL UNIQUE COLLATE NOCASE,
     state_json   TEXT NOT NULL,
+    is_default   INTEGER NOT NULL DEFAULT 0,
+    display_order INTEGER NOT NULL DEFAULT 0,
     created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_stats_filter_presets_one_default
+    ON stats_filter_presets(is_default)
+    WHERE is_default = 1;
 ```
 
 `state_json` is a versioned JSON document. It should store all filter dimensions
@@ -400,6 +406,40 @@ Recommended API shape:
 Applying a preset is a UI operation: load the saved state into the existing
 stats controls, then request stats through the normal stats endpoints. Presets
 must not introduce a separate stats query path.
+
+Preset UI behavior:
+
+- Each preset is a named view and may be rendered as a selectable tab, pill, or
+  menu item. One saved row maps to one named UI entry.
+- Selecting a preset applies its state, records that preset as the active preset,
+  and clears the dirty state.
+- Changing any stats control after applying a preset creates a temporary dirty
+  state. The UI should keep the active preset visible but mark it as modified
+  until the user saves, overwrites, switches away, or resets.
+- Save New creates a new preset from the current temporary state.
+- Overwrite updates the active preset's `state_json` with the current temporary
+  state and clears dirty state.
+- Rename changes only `name`.
+- Delete removes the preset. If the deleted preset was active, the current
+  controls may remain as an unsaved temporary state.
+- Mark Default sets `is_default = 1` on exactly one preset. On first Stats tab
+  load, apply the default preset if no explicit URL/query state is present.
+
+The structured `state_json` is the canonical saved form. A URL query string is a
+projection of the same state for sharing and browser navigation. The app may
+derive a URL from `state_json`, and may hydrate controls from URL parameters,
+but should not store only the URL as the preset source of truth.
+
+Reasons to keep structured state instead of URL-only persistence:
+
+- It preserves selection modes such as `auto_top`, `selected`, and `all`.
+- It can round-trip future dimensions without inventing new query syntax first.
+- It is easier to validate and migrate by `version`.
+- It avoids treating presentation labels or expanded series as saved state.
+
+URL/query state takes precedence over the default preset because opening a
+shared link is an explicit user action. Applying a named preset should update
+the controls and may update the URL to the equivalent query representation.
 
 ## Non-Goals
 
