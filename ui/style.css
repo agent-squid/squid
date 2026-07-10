@@ -1824,6 +1824,8 @@ body {
 }
 .fv-line:hover > * { background: rgba(255, 255, 255, 0.025); }
 .fv-target > * { background: rgba(240, 112, 64, 0.12) !important; }
+.fv-changed > * { background: rgba(80, 180, 120, 0.08); }
+.fv-changed .fv-num { color: #5ab87a; box-shadow: inset 2px 0 0 #5ab87a; }
 .fv-num {
   display: table-cell;
   text-align: right;
