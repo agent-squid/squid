@@ -31,6 +31,12 @@ def _link_dependency_dirs(repo_root: Path, wt: Path) -> None:
     add` only materializes tracked files and these are always gitignored.
     Matched by directory name; not recursed into once matched.
     """
+    repo_root = repo_root.resolve()
+    wt = wt.resolve()
+    if wt == repo_root:
+        log.error("refusing to link dependency dirs: worktree path equals repo_root (%s)", repo_root)
+        return
+
     names = set(config.DEPENDENCY_DIRS)
     root_depth = str(repo_root).count(os.sep)
     for dirpath, dirnames, _files in os.walk(repo_root):
@@ -45,6 +51,8 @@ def _link_dependency_dirs(repo_root: Path, wt: Path) -> None:
             dirnames.remove(d)  # dependency dirs don't nest further matches
             src = Path(dirpath) / d
             dst = wt / src.relative_to(repo_root)
+            if src == dst:
+                continue  # defense in depth; unreachable given the wt == repo_root check above
             dst.parent.mkdir(parents=True, exist_ok=True)
             if not dst.exists() and not dst.is_symlink():
                 dst.symlink_to(src, target_is_directory=True)
