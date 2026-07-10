@@ -323,6 +323,37 @@ def test_agent_session_breakdown_keeps_agent_session_variants_separate(tmp_path,
     assert by_agent["codex"]["agent_key"] != by_agent["codex!"]["agent_key"]
 
 
+def test_agent_session_breakdown_includes_message_only_adhoc_turns(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    stats_db.save_stats(
+        "session-1",
+        {"input_tokens": 100, "output_tokens": 10, "cost_usd": 1.0},
+        topic="squid",
+        agent="opencode",
+        backend="opencode",
+        model="gpt-5",
+        cwd="/repo",
+    )
+    for prompt in ("one", "two"):
+        user_id = stats_db.insert_user_message("squid", "opencode", prompt)
+        assistant_id = stats_db.insert_assistant_message("squid", "opencode", user_id, adhoc=True)
+        stats_db.update_assistant_message(assistant_id, "done", None, "done")
+
+    rows = stats_db.get_stats_by_agent_breakdown(
+        days=0,
+        period="daily",
+        agent="opencode",
+        include_session=True,
+    )
+    by_agent = {row["agent"]: row for row in rows}
+
+    assert by_agent["opencode"]["sessions"] == 1
+    assert by_agent["opencode!"]["sessions"] == 0
+    assert by_agent["opencode!"]["total_turns"] == 2
+
+
 def test_agent_breakdown_groups_by_agent_label(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
