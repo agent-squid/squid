@@ -230,15 +230,16 @@ For a breakdown with session type and `Sess + Adhoc`, the session type dimension
 has cardinality two. Therefore default rendered series should usually be even:
 
 - `Agent x Session Type`: two agents x two session types = four series.
-- `Topic x Agent x Session Type`: two topics x one agent x two session types =
-  four series, or one topic x two agents x two session types = four series.
+- `Topic x Agent x Session Type`: one topic x two agents x two session types =
+  four series.
 
 If the session type filter is `Session` or `Adhoc`, the session type cardinality
 is one:
 
 - `Agent x Session Type`: up to four agents x one session type = four series.
-- `Topic x Agent x Session Type`: choose a complete topic/agent combination
-  whose rendered series count stays at or below four.
+- `Topic x Agent x Session Type`: follow the default allocation table; the
+  freed session-type budget may expand the next dimensions while keeping the
+  rendered series count at or below four.
 
 Explicit user selections are not capped by the default budget. If the user adds
 another base agent under `Agent x Session Type` with `Sess + Adhoc`, the rendered
@@ -450,9 +451,10 @@ the controls and may update the URL to the equivalent query representation.
   session type, and measure controls drive all stats projections.
 - No multi-measure breakdown table is introduced here. Breakdown views compare
   one selected measure at a time.
-- No default-selection optimizer is specified beyond the rendered-series budget
-  and complete-combination requirement. Tie-breaking among candidate topics or
-  agents can use existing ranking rules.
+- No exact default-selection optimizer is specified beyond the rendered-series
+  budget, complete-combination requirement, allocation table, and top-by-turns
+  ranking. Tie-breaking among candidate topics or agents can use existing
+  ranking rules.
 - No separate preset table per dimension is introduced. Extensibility comes
   from the versioned `state_json` document, not from schema changes for every
   new stats dimension.
