@@ -4713,7 +4713,15 @@ function _statsSeriesKey(row) {
 }
 
 function _statsSeriesLabel(key) {
-  return String(key).replace('\u0000', ' / ');
+  const raw = String(key);
+  const [topic, agent] = raw.split('\u0000');
+  if (agent != null) {
+    if (statsBreakdown === 'topic_agent') return `#${topic}@${_agentBaseKey(agent)}*`;
+    return `#${topic}@${agent}`;
+  }
+  if (statsBreakdown === 'agent' || statsBreakdown === 'agent_session') return `@${raw}`;
+  if (statsBreakdown === 'topic') return `#${raw}`;
+  return raw;
 }
 
 function _compareStatsSeriesByName(a, b, labels) {
@@ -4759,17 +4767,24 @@ function _breakdownSelection(rows) {
   for (const topic of selectedTopics) {
     for (const agent of selectedAgents) {
       if (statsBreakdown === 'topic_agent_session') {
-        for (const sessionType of sessionTypes) labels.set(`${topic}\u0000${sessionType === 'adhoc' ? `${agent}!` : agent}`, `${topic} / ${sessionType === 'adhoc' ? `${agent}!` : agent}`);
+        for (const sessionType of sessionTypes) {
+          const key = `${topic}\u0000${sessionType === 'adhoc' ? `${agent}!` : agent}`;
+          labels.set(key, _statsSeriesLabel(key));
+        }
       } else if (statsBreakdown === 'topic_agent') {
-        labels.set(`${topic}\u0000${agent}`, `${topic} / ${agent}`);
+        const key = `${topic}\u0000${agent}`;
+        labels.set(key, _statsSeriesLabel(key));
       }
     }
   }
   for (const agent of selectedAgents) {
     if (statsBreakdown === 'agent_session') {
-      for (const sessionType of sessionTypes) labels.set(sessionType === 'adhoc' ? `${agent}!` : agent, sessionType === 'adhoc' ? `${agent}!` : agent);
+      for (const sessionType of sessionTypes) {
+        const key = sessionType === 'adhoc' ? `${agent}!` : agent;
+        labels.set(key, _statsSeriesLabel(key));
+      }
     } else if (statsBreakdown === 'agent') {
-      labels.set(agent, agent);
+      labels.set(agent, _statsSeriesLabel(agent));
     }
   }
 
