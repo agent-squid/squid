@@ -4834,22 +4834,32 @@ function _breakdownPivot(rows) {
     }
     return { period, values, misc, total };
   });
-  if (_statsBreakdownColumnSort.mode === 'total') {
-    allSelected.sort((a, b) => {
-      const totalA = periodRows.reduce((sum, row) => sum + (row.values[a] || 0), 0);
-      const totalB = periodRows.reduce((sum, row) => sum + (row.values[b] || 0), 0);
-      const totalCompare = _statsBreakdownColumnSort.dir === 'asc' ? totalA - totalB : totalB - totalA;
-      return totalCompare || _compareStatsSeriesByName(a, b, labels);
-    });
-  } else if (_statsBreakdownColumnSort.dir === 'desc') {
-    allSelected.sort((a, b) => _compareStatsSeriesByName(b, a, labels));
-  }
-  const visibleSelected = allSelected.slice(0, _STATS_BREAKDOWN_VISIBLE_SERIES_LIMIT);
-  const overflowSelected = allSelected.slice(_STATS_BREAKDOWN_VISIBLE_SERIES_LIMIT);
+  const seriesTotals = new Map(allSelected.map(key => [
+    key,
+    periodRows.reduce((sum, row) => sum + (row.values[key] || 0), 0),
+  ]));
+  const visibleSelected = allSelected
+    .slice()
+    .sort((a, b) => (seriesTotals.get(b) || 0) - (seriesTotals.get(a) || 0) || _compareStatsSeriesByName(a, b, labels))
+    .slice(0, _STATS_BREAKDOWN_VISIBLE_SERIES_LIMIT);
+  const visibleSet = new Set(visibleSelected);
+  const overflowSelected = allSelected.filter(key => !visibleSet.has(key));
   if (overflowSelected.length) {
     for (const row of periodRows) {
       for (const key of overflowSelected) row.misc += row.values[key] || 0;
     }
+  }
+  if (_statsBreakdownColumnSort.mode === 'total') {
+    visibleSelected.sort((a, b) => {
+      const totalA = seriesTotals.get(a) || 0;
+      const totalB = seriesTotals.get(b) || 0;
+      const totalCompare = _statsBreakdownColumnSort.dir === 'asc' ? totalA - totalB : totalB - totalA;
+      return totalCompare || _compareStatsSeriesByName(a, b, labels);
+    });
+  } else if (_statsBreakdownColumnSort.dir === 'asc') {
+    visibleSelected.sort((a, b) => _compareStatsSeriesByName(a, b, labels));
+  } else if (_statsBreakdownColumnSort.dir === 'desc') {
+    visibleSelected.sort((a, b) => _compareStatsSeriesByName(b, a, labels));
   }
   return { selected: visibleSelected, labels, periodRows, overflowCount: overflowSelected.length };
 }
@@ -5572,7 +5582,7 @@ function renderAgentBreakdownStats(rows) {
     totalMisc += row.misc || 0;
     grandTotal += row.total || 0;
   }
-  const hasMisc = totalMisc > 0;
+  const hasMisc = totalMisc > 0 || pivot.overflowCount > 0;
   const headers = pivot.selected.map(key => {
     const label = pivot.labels.get(key) || key;
     return `<th class="stats-series-col" aria-label="${escapeHtml(label)}">${escapeHtml(label)}</th>`;
