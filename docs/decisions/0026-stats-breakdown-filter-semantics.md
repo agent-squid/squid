@@ -6,39 +6,103 @@ date: 2026-07-10
 
 ## Context
 
-The Stats view has independent filters for topic, agent, and session type. It
-also has breakdown projections such as `Agent`, `Agent x Session Type`, and
-future compound projections such as `Topic x Agent x Session Type`.
+The Stats view has independent filters for topic, agent, and session type.
+In the `Total` view, these filters work independently and directly. A user can
+pinpoint a specific grain such as `#squid@codex!` and inspect multiple metrics
+for that filtered slice.
 
-The selectors are intentionally coarse. This is a UX simplification: users
-filter by stable dimensions instead of exact rendered series. The agent selector
-chooses base agents, not individual session lanes. For example, selecting
-`codex` means the base agent `codex`; it does not directly choose only `codex`
-or only `codex!` as chart columns.
+Stats also supports breakdown dimensions. A breakdown changes the analytical
+grain: instead of viewing one filtered total over time, the user views that same
+filtered data split by a dimension or dimension combination, such as:
 
-The session type filter chooses which session lanes are included for the
-selected base agents. This same rule must hold regardless of which breakdown is
-currently projecting the data.
+- `Agent`
+- `Agent x Session Type`
+- `Topic x Agent`
+- `Topic x Agent x Session Type`
 
-Without a clear rule, breakdowns can look inconsistent: the Total view may
-include adhoc data, but a compound breakdown may hide the corresponding
-`agent!` lane if only exact returned series are shown.
+When a breakdown is selected, the table and chart compare breakdown series for
+one measure at a time. The multi-measure selector is disabled because it belongs
+to the `Total` table, where multiple metrics can be shown side by side. The
+chart measure selector remains active and chooses the single measure used for
+both the breakdown chart and breakdown table.
+
+Put differently:
+
+- Filters decide which data is included.
+- Breakdown decides which grain to compare.
+- Measure selector decides which metric is displayed for that grain.
+
+The selectors are intentionally coarse. This simplifies the filter UX and makes
+compound breakdowns extensible. The agent selector chooses base agents, not
+individual rendered series. The session type selector chooses which session
+lanes are included for those base agents.
+
+This means users cannot express every exact lane combination with the standard
+filters. For example, they cannot compare only `codex` and `claude!`. With the
+base agent and session type selectors, selecting `codex` and `claude` with
+`Sess + Adhoc` yields `codex`, `codex!`, `claude`, and `claude!`.
+
+That loss of micro-selection is intentional. The tradeoff is a simpler and more
+predictable filter model that can support complex combinations of dimensions
+without adding a custom selector for every breakdown.
 
 ## Decision
 
-Stats filtering is resolved by this principle:
+Stats filtering follows this principle:
 
 - Filters constrain dimension values.
-- Breakdowns choose how the constrained data is projected into rows/columns or
-  chart series.
+- Breakdowns project the constrained data into a comparison grain.
 - A breakdown must not reinterpret a coarse filter as an exact-series picker.
+- Every independent filter must continue to work under every breakdown.
 
 Resolution order:
 
 1. Apply topic filter.
 2. Resolve base agent selection.
 3. Apply session type filter.
-4. Project the selected rows into the active breakdown.
+4. Select the measure.
+5. Project the selected data into the active breakdown grain.
+
+## Total View
+
+The `Total` view has no breakdown dimension. It shows the filtered aggregate
+over time and can show multiple measures at once.
+
+Examples:
+
+| Filters | Result |
+|---|---|
+| topic = `squid`, agent = `codex`, session type = `Adhoc` | Total metrics for `#squid@codex!` |
+| topic = `squid`, agent = `codex`, session type = `Session` | Total metrics for `#squid@codex` |
+| topic = `squid`, agent = `codex`, session type = `Sess + Adhoc` | Total metrics for both `#squid@codex` and `#squid@codex!` |
+
+## Breakdown Views
+
+When a breakdown is selected, the same filters still apply. The difference is
+only the projection grain.
+
+For example, with breakdown = `Agent`:
+
+- Topic filter still limits the data to selected topics.
+- Agent filter still limits the base agents.
+- Session type filter still limits session, adhoc, or both.
+- The result is split by base agent.
+
+With breakdown = `Agent x Session Type`:
+
+- Topic filter still limits the data to selected topics.
+- Agent filter still limits the base agents.
+- Session type filter still limits session, adhoc, or both.
+- The result is split by base agent and session type.
+
+With breakdown = `Topic x Agent x Session Type`:
+
+- Topic filter limits the topic dimension.
+- Agent filter limits the base agent dimension.
+- Session type filter limits the session type dimension.
+- The result is split by topic, base agent, and session type.
+
+## Session Type Expansion
 
 The session type filter controls lane expansion for each selected base agent:
 
@@ -78,7 +142,10 @@ For breakdowns that do include session type, lane expansion is explicit:
 | `Agent x Session Type` | `agent`, `agent!` | `agent` | `agent!` |
 | `Topic x Agent x Session Type` | `topic / agent`, `topic / agent!` | `topic / agent` | `topic / agent!` |
 
-For example, if the default base agents are `codex`, `claude`, and `opencode`:
+## Examples
+
+If the default base agents are `codex`, `claude`, and `opencode`, then
+`Agent x Session Type` yields:
 
 | Session type filter | Expected lanes |
 |---|---|
@@ -86,9 +153,8 @@ For example, if the default base agents are `codex`, `claude`, and `opencode`:
 | `Session` | `codex`, `claude`, `opencode` |
 | `Adhoc` | `codex!`, `claude!`, `opencode!` |
 
-For a topic-qualified compound breakdown, the same rule applies after topic
-filtering. If the selected topics are `squid` and `ops`, and the selected base
-agents are `codex` and `claude`, then `Topic x Agent x Session Type` yields:
+If the selected topics are `squid` and `ops`, and the selected base agents are
+`codex` and `claude`, then `Topic x Agent x Session Type` yields:
 
 | Session type filter | Expected lanes |
 |---|---|
@@ -107,7 +173,9 @@ lane has zero values.
   `codex!` and `claude` while excluding `codex` and `claude!` through the base
   agent selector.
 - No per-breakdown custom selector is introduced. The same topic, base agent,
-  and session type filters drive all stats projections.
+  session type, and measure controls drive all stats projections.
+- No multi-measure breakdown table is introduced here. Breakdown views compare
+  one selected measure at a time.
 
 ## Consequences
 
@@ -118,5 +186,6 @@ lane has zero values.
 - Session-only and adhoc-only filters must be honored even under
   session-type breakdowns; they reduce the lane count from two per base agent
   to one per base agent.
+- The filter model is simple and extensible for future compound dimensions.
 - Exact mixed-lane comparison requires a future advanced exact-series selector
   or sort/filter control, not overloading the existing base agent selector.
