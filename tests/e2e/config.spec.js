@@ -661,8 +661,7 @@ test('stats breakdown columns can sort by footer totals', async ({ page }) => {
   await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'clive', 'codex', 'cursor', 'haiku', 'Total']);
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown_sort')).toBe('name');
   expect(statsRequests.at(-1).searchParams.get('breakdown_sort_dir')).toBe('asc');
-  expect(new URL(page.url()).searchParams.get('breakdown_sort')).toBe('name');
-  expect(new URL(page.url()).searchParams.get('breakdown_sort_dir')).toBe('asc');
+  expect(new URL(page.url()).search).toBe('');
   await expect(page.getByRole('button', { name: 'Sort breakdown columns by total' })).toHaveCount(2);
   await expect(page.getByRole('button', { name: 'Sort breakdown columns by name' })).toHaveCount(2);
   await expect(page.locator('#stats-content thead th').first().getByRole('button', { name: 'Sort breakdown columns by name' })).toHaveCount(2);
@@ -676,22 +675,19 @@ test('stats breakdown columns can sort by footer totals', async ({ page }) => {
 
   await totalSortButtons.nth(1).click();
   await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'codex', 'clive', 'cursor', 'haiku', 'Total']);
-  expect(new URL(page.url()).searchParams.get('breakdown_sort')).toBe('total');
-  expect(new URL(page.url()).searchParams.get('breakdown_sort_dir')).toBe('desc');
+  expect(new URL(page.url()).search).toBe('');
   await expect(page.locator('#stats-content thead th').first().locator('button.active')).toHaveCount(0);
   await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(1);
 
   await totalSortButtons.nth(0).click();
   await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'haiku', 'cursor', 'clive', 'codex', 'Total']);
-  expect(new URL(page.url()).searchParams.get('breakdown_sort')).toBe('total');
-  expect(new URL(page.url()).searchParams.get('breakdown_sort_dir')).toBe('asc');
+  expect(new URL(page.url()).search).toBe('');
   await expect(page.locator('#stats-content thead th').first().locator('button.active')).toHaveCount(0);
   await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(1);
 
   await nameSortButtons.nth(1).click();
   await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'haiku', 'cursor', 'codex', 'clive', 'Total']);
-  expect(new URL(page.url()).searchParams.get('breakdown_sort')).toBe('name');
-  expect(new URL(page.url()).searchParams.get('breakdown_sort_dir')).toBe('desc');
+  expect(new URL(page.url()).search).toBe('');
   await expect(page.locator('#stats-content thead th').first().locator('button.active')).toHaveCount(1);
   await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(0);
 
@@ -701,7 +697,7 @@ test('stats breakdown columns can sort by footer totals', async ({ page }) => {
   await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(0);
 });
 
-test('stats breakdown sort restores from URL', async ({ page }) => {
+test('legacy stats URL state does not open stats or restore filters', async ({ page }) => {
   await mockApp(page);
   await page.route('**/stats/filters', route => route.fulfill({
     json: { agents: ['codex', 'clive', 'cursor', 'haiku'], topics: [] },
@@ -717,12 +713,15 @@ test('stats breakdown sort restores from URL', async ({ page }) => {
 
   await page.goto('/?view=stats&period=hourly&days=7&breakdown=agent&breakdown_sort=total&breakdown_sort_dir=asc');
 
-  await expect(page.locator('#view-stats')).toHaveClass(/active/);
-  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'haiku', 'cursor', 'clive', 'codex', 'Total']);
-  await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(1);
+  await expect(page.locator('#view-chat')).toHaveClass(/active/);
+  await page.getByRole('button', { name: 'Stats' }).click();
+  await expect(page.locator('#sf-period')).toHaveValue('hourly');
+  await expect(page.locator('#sf-breakdown')).toHaveValue('');
+  await expect(page.locator('#stats-content thead th').first()).toHaveText('Hour');
+  await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(0);
 });
 
-test('leaving stats clears stats URL state so refresh stays on the active tab', async ({ page }) => {
+test('stats interactions do not persist URL state and refresh returns to chat', async ({ page }) => {
   await mockApp(page);
   await page.route('**/stats/filters', route => route.fulfill({
     json: { agents: ['codex'], topics: [] },
@@ -731,11 +730,11 @@ test('leaving stats clears stats URL state so refresh stays on the active tab', 
     json: [{ period: '2026-06-26 14:00', agent_key: 'codex', agent: 'codex', sessions: 1, total_turns: 9 }],
   }));
 
-  await page.goto('/?view=stats&period=hourly&days=7&breakdown=agent&breakdown_sort=total&breakdown_sort_dir=asc');
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
   await expect(page.locator('#view-stats')).toHaveClass(/active/);
-
-  await page.getByRole('button', { name: 'Chat' }).click();
-  await expect(page.locator('#view-chat')).toHaveClass(/active/);
+  await page.locator('#sf-breakdown').selectOption('agent');
+  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'codex', 'Total']);
   expect(new URL(page.url()).search).toBe('');
 
   await page.reload();
