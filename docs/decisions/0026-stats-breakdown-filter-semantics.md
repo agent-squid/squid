@@ -46,6 +46,14 @@ That loss of micro-selection is intentional. The tradeoff is a simpler and more
 predictable filter model that can support complex combinations of dimensions
 without adding a custom selector for every breakdown.
 
+The difficult part is default selection. A default should show complete
+dimension combinations, not a partial set that only makes sense if exact
+micro-series selection exists. For example, `Agent x Session Type` with
+`Sess + Adhoc` expands each selected agent into two lanes, so selecting three
+default agents would produce six rendered lanes. If the UI wants a compact
+default of four rendered lanes, it should select two base agents and both
+session types, not three base agents with an incomplete session-type expansion.
+
 ## Decision
 
 Stats filtering follows this principle:
@@ -54,6 +62,8 @@ Stats filtering follows this principle:
 - Breakdowns project the constrained data into a comparison grain.
 - A breakdown must not reinterpret a coarse filter as an exact-series picker.
 - Every independent filter must continue to work under every breakdown.
+- Default breakdown selections should show complete dimension combinations
+  within a small rendered-series budget.
 
 Resolution order:
 
@@ -118,13 +128,43 @@ This applies to every breakdown that includes the session type dimension:
 - `Topic x Agent x Session Type`
 - Any future compound breakdown containing `Session Type`
 
-When no agents are explicitly selected, the UI chooses the default top base
-agents for the breakdown. The same expansion rule then applies. With the current
-top-three default:
+## Default Breakdown Selection
 
-- `Sess + Adhoc`: three base agents render as six session-type lanes.
-- `Session`: three base agents render as three session lanes.
-- `Adhoc`: three base agents render as three adhoc lanes.
+Default selection is part of the semantics because the filters are coarse. The
+default must choose source dimension values, then render the full Cartesian
+combination implied by the active breakdown and filters.
+
+The default rendered-series budget is four. This keeps the initial chart/table
+readable while preserving complete combinations. The UI may show fewer than four
+series if there are not enough available dimension values.
+
+For a breakdown with session type and `Sess + Adhoc`, the session type dimension
+has cardinality two. Therefore default rendered series should usually be even:
+
+- `Agent x Session Type`: two agents x two session types = four series.
+- `Topic x Agent x Session Type`: two topics x one agent x two session types =
+  four series, or one topic x two agents x two session types = four series.
+
+If the session type filter is `Session` or `Adhoc`, the session type cardinality
+is one:
+
+- `Agent x Session Type`: up to four agents x one session type = four series.
+- `Topic x Agent x Session Type`: choose a complete topic/agent combination
+  whose rendered series count stays at or below four.
+
+Explicit user selections are not capped by the default budget. If the user adds
+another base agent under `Agent x Session Type` with `Sess + Adhoc`, the rendered
+series count doubles by two lanes. For example, two agents render four lanes;
+three agents render six lanes; four agents render eight lanes.
+
+The key rule is: default selection must never drop one side of an implied
+dimension pair merely to hit a target count. It should reduce source dimension
+values instead. For `Agent x Session Type`, prefer two complete agents with both
+session lanes over three agents with incomplete lanes.
+
+A future option may allow hiding empty dimension combinations, such as a
+checkbox for "hide lanes without data." That would be a display option layered
+on top of the coarse filter model, not a change to filter semantics.
 
 For breakdowns that do not include the session type dimension, the same session
 type filter still constrains the data, but it does not create separate session
@@ -144,14 +184,17 @@ For breakdowns that do include session type, lane expansion is explicit:
 
 ## Examples
 
-If the default base agents are `codex`, `claude`, and `opencode`, then
-`Agent x Session Type` yields:
+If the default base agents are `codex` and `claude`, then `Agent x Session Type`
+yields:
 
 | Session type filter | Expected lanes |
 |---|---|
-| `Sess + Adhoc` | `codex`, `codex!`, `claude`, `claude!`, `opencode`, `opencode!` |
-| `Session` | `codex`, `claude`, `opencode` |
-| `Adhoc` | `codex!`, `claude!`, `opencode!` |
+| `Sess + Adhoc` | `codex`, `codex!`, `claude`, `claude!` |
+| `Session` | `codex`, `claude` |
+| `Adhoc` | `codex!`, `claude!` |
+
+If the user explicitly adds `opencode`, then `Sess + Adhoc` expands predictably
+to `codex`, `codex!`, `claude`, `claude!`, `opencode`, and `opencode!`.
 
 If the selected topics are `squid` and `ops`, and the selected base agents are
 `codex` and `claude`, then `Topic x Agent x Session Type` yields:
@@ -176,6 +219,9 @@ lane has zero values.
   session type, and measure controls drive all stats projections.
 - No multi-measure breakdown table is introduced here. Breakdown views compare
   one selected measure at a time.
+- No default-selection optimizer is specified beyond the rendered-series budget
+  and complete-combination requirement. Tie-breaking among candidate topics or
+  agents can use existing ranking rules.
 
 ## Consequences
 
@@ -187,5 +233,8 @@ lane has zero values.
   session-type breakdowns; they reduce the lane count from two per base agent
   to one per base agent.
 - The filter model is simple and extensible for future compound dimensions.
+- Default breakdowns remain readable without implying exact micro-selection.
+- Adding another selected dimension value can multiply rendered series; this is
+  expected because the UI renders complete coarse-filter combinations.
 - Exact mixed-lane comparison requires a future advanced exact-series selector
   or sort/filter control, not overloading the existing base agent selector.
