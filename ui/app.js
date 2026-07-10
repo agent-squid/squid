@@ -4513,7 +4513,7 @@ function initCursorQuota() {
 
 let statsPeriod = 'hourly';
 let statsGroup  = 'time';
-let statsBreakdown = 'none';
+let statsBreakdown = 'agent';
 let statsFilters = { days: 7, agents: [], topics: [], adhoc: 'all' };
 let statsChartY1 = 'turns';
 let statsChartY2 = '';
@@ -4537,7 +4537,7 @@ function _rerenderStats() {
   if (!_lastStatsRows) return;
   if (statsGroup === 'topic') renderTopicStats(_lastStatsRows);
   else if (statsGroup === 'model') renderAgentStats(_lastStatsRows);
-  else if (statsBreakdown === 'agent_profile') { renderAgentProfileBreakdownStats(_lastStatsRows); _renderBreakdownChart(_lastStatsRows); }
+  else if (statsBreakdown) { renderAgentProfileBreakdownStats(_lastStatsRows); _renderBreakdownChart(_lastStatsRows); }
   else { renderTimeStats(_lastStatsRows); _renderChart(_lastStatsRows); }
 }
 
@@ -4653,15 +4653,7 @@ function _statsPeriodLabel(period) {
 }
 
 function _agentProfileLabel(row) {
-  const agent = row.agent || row.backend || 'unknown';
-  const parts = [agent];
-  if (row.backend && row.backend !== agent) parts.push(row.backend);
-  if (row.model) parts.push(row.model);
-  if (row.cwd) {
-    const cwd = String(row.cwd);
-    parts.push(cwd.split('/').filter(Boolean).pop() || cwd);
-  }
-  return parts.join(' · ');
+  return row.agent || row.profile_key || 'unknown';
 }
 
 function _agentProfileKey(row) {
@@ -5068,7 +5060,7 @@ async function loadStats() {
     params.set('group', statsGroup === 'model' ? 'agent' : statsGroup);
   } else {
     params.set('period', statsPeriod);
-    if (statsBreakdown !== 'none') params.set('breakdown', statsBreakdown);
+    if (statsBreakdown) params.set('breakdown', statsBreakdown);
   }
   params.set('days', statsFilters.days);
   params.set('tz_offset_minutes', new Date().getTimezoneOffset());
@@ -5097,13 +5089,13 @@ async function loadStats() {
 
   _lastStatsRows = rows;
   _statsPage = 0;
-  document.getElementById('stats-chart-controls')?.classList.toggle('breakdown-active', statsGroup === 'time' && statsBreakdown !== 'none');
+  document.getElementById('stats-chart-controls')?.classList.toggle('breakdown-active', statsGroup === 'time' && !!statsBreakdown);
 
   if (statsGroup === 'topic') {
     renderTopicStats(rows);
   } else if (statsGroup === 'model') {
     renderAgentStats(rows);
-  } else if (statsBreakdown === 'agent_profile') {
+  } else if (statsBreakdown) {
     renderAgentProfileBreakdownStats(rows);
     _renderBreakdownChart(rows);
   } else {
@@ -5231,9 +5223,6 @@ function initStats() {
     btn.addEventListener('click', () => {
       statsPeriod = btn.dataset.period;
       statsGroup  = btn.dataset.group;
-      if (statsGroup !== 'time') statsBreakdown = 'none';
-      const breakdownSel = document.getElementById('sf-breakdown');
-      if (breakdownSel) breakdownSel.value = statsBreakdown;
       document.querySelectorAll('.st').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       loadStats();
@@ -5270,7 +5259,7 @@ function initStats() {
   });
 
   document.getElementById('sf-breakdown').addEventListener('change', e => {
-    statsBreakdown = statsGroup === 'time' ? e.target.value : 'none';
+    statsBreakdown = e.target.value;
     e.target.value = statsBreakdown;
     loadStats();
   });

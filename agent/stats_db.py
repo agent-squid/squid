@@ -38,6 +38,7 @@ _TABLES = [
         duration_ms          INTEGER,
         quota_before         REAL,
         quota_after          REAL,
+        adhoc                INTEGER DEFAULT 0,
         lookback             INTEGER DEFAULT 0,
         created_at           TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )""",
@@ -177,6 +178,7 @@ _MIGRATIONS: list[str] = [
     "DROP INDEX IF EXISTS idx_chat_messages_session_turns",
     "ALTER TABLE chat_messages ADD COLUMN lookback INTEGER DEFAULT 0",
     "ALTER TABLE chat_messages ADD COLUMN status_raw TEXT",
+    "ALTER TABLE session_stats ADD COLUMN adhoc INTEGER DEFAULT 0",
     # prompts_fts backfill — safe to re-run; inserts only missing rows
     """INSERT INTO prompts_fts(rowid, content)
        SELECT id, content FROM chat_messages
@@ -1312,8 +1314,8 @@ def save_stats(
                    (session_id, topic, agent, backend, model, cwd,
                     input_tokens, output_tokens,
                     cache_read_tokens, cache_write_tokens, history_input_tokens,
-                    cost_usd, duration_ms, lookback, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    cost_usd, duration_ms, adhoc, lookback, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                ON CONFLICT(session_id) DO UPDATE SET
                    topic                = COALESCE(excluded.topic, topic),
                    agent                = COALESCE(excluded.agent, agent),
@@ -1327,6 +1329,7 @@ def save_stats(
                    history_input_tokens = excluded.history_input_tokens,
                    cost_usd             = excluded.cost_usd,
                    duration_ms          = excluded.duration_ms,
+                   adhoc                = excluded.adhoc,
                    lookback             = excluded.lookback""",
             (
                 session_id, topic, agent, backend, model, cwd,
@@ -1334,6 +1337,7 @@ def save_stats(
                 stats.get("cache_read_tokens", 0), stats.get("cache_write_tokens", 0),
                 stats.get("history_input_tokens", 0),
                 stats.get("cost_usd"), stats.get("duration_ms"),
+                1 if stats.get("adhoc") else 0,
                 lookback,
             ),
         )
@@ -1492,6 +1496,7 @@ def get_stats_by_agent_profile_breakdown(
     topic: str = "",
     adhoc: str = "all",
     tz_offset_minutes: int = 0,
+    include_session: bool = False,
 ) -> list:
     tz_shift = f"{-tz_offset_minutes} minutes"
     bucket = (
@@ -1499,6 +1504,9 @@ def get_stats_by_agent_profile_breakdown(
         if period == "hourly"
         else f"strftime('%Y-%m-%d', datetime(created_at, '{tz_shift}'))"
     )
+    base_agent = "COALESCE(agent, backend, 'unknown')"
+    session_suffix = "CASE WHEN COALESCE(adhoc, 0) = 1 THEN '!' ELSE '' END"
+    series_expr = f"{base_agent} || {session_suffix}" if include_session else base_agent
     limit = (days * (24 if period == "hourly" else 1) + 1) if days else 5000
     cutoff = _stats_cutoff(days)
     agents = _stats_filter_values(agent)
@@ -1511,6 +1519,10 @@ def get_stats_by_agent_profile_breakdown(
         params.append(cutoff)
     _append_stats_in_filter(clauses, params, "COALESCE(agent, backend)", agents)
     _append_stats_in_filter(clauses, params, "topic", topics)
+    if adhoc == "session":
+        clauses.append("COALESCE(adhoc, 0) = 0")
+    elif adhoc == "adhoc":
+        clauses.append("COALESCE(adhoc, 0) = 1")
 
     where = " AND ".join(clauses)
 
@@ -1521,14 +1533,8 @@ def get_stats_by_agent_profile_breakdown(
                     FROM (
                         SELECT
                             {bucket} AS period,
-                            COALESCE(agent, backend, 'unknown') AS agent,
-                            COALESCE(backend, '') AS backend,
-                            COALESCE(model, '') AS model,
-                            COALESCE(cwd, '') AS cwd,
-                            COALESCE(agent, backend, 'unknown') || '|' ||
-                                COALESCE(backend, '') || '|' ||
-                                COALESCE(model, '') || '|' ||
-                                COALESCE(cwd, '') AS profile_key,
+                            {series_expr} AS agent,
+                            {series_expr} AS profile_key,
                             COUNT(*) AS sessions,
                             COUNT(*) AS total_turns,
                             SUM(input_tokens) AS input_tokens,

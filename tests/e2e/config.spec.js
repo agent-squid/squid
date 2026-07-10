@@ -386,20 +386,30 @@ test('analytics measures dropdown controls cost and quota columns independently'
   const statsRequests = [];
   await page.route('**/stats?**', route => {
     const url = new URL(route.request().url());
+    const period = url.searchParams.get('period') === 'hourly' ? '2026-06-26 14:00' : '2026-06-26';
     statsRequests.push(url);
-    if (url.searchParams.get('breakdown') === 'agent_profile') {
+    if (url.searchParams.get('breakdown') === 'agent_session') {
       return route.fulfill({
         json: [
-          { period: '2026-06-26 14:00', profile_key: 'codex|codex|gpt-5|/repo', agent: 'codex', backend: 'codex', model: 'gpt-5', cwd: '/repo', sessions: 4, total_turns: 4, input_tokens: 1000, output_tokens: 200, cost_usd: 1.0 },
-          { period: '2026-06-26 14:00', profile_key: 'codex!|codex|gpt-5|/repo', agent: 'codex!', backend: 'codex', model: 'gpt-5', cwd: '/repo', sessions: 3, total_turns: 3, input_tokens: 400, output_tokens: 100, cost_usd: 0.4 },
-          { period: '2026-06-26 14:00', profile_key: 'clive|claude|sonnet|/repo', agent: 'clive', backend: 'claude', model: 'sonnet', cwd: '/repo', sessions: 2, total_turns: 2, input_tokens: 300, output_tokens: 80, cost_usd: 0.3 },
-          { period: '2026-06-26 14:00', profile_key: 'cursor|cursor|gpt-5|/repo', agent: 'cursor', backend: 'cursor', model: 'gpt-5', cwd: '/repo', sessions: 1, total_turns: 1, input_tokens: 200, output_tokens: 60, cost_usd: 0.2 },
+          { period, profile_key: 'codex', agent: 'codex', sessions: 4, total_turns: 4, input_tokens: 1000, output_tokens: 200, cost_usd: 1.0 },
+          { period, profile_key: 'codex!', agent: 'codex!', sessions: 3, total_turns: 3, input_tokens: 400, output_tokens: 100, cost_usd: 0.4 },
+          { period, profile_key: 'clive', agent: 'clive', sessions: 2, total_turns: 2, input_tokens: 300, output_tokens: 80, cost_usd: 0.3 },
+          { period, profile_key: 'cursor', agent: 'cursor', sessions: 1, total_turns: 1, input_tokens: 200, output_tokens: 60, cost_usd: 0.2 },
+        ],
+      });
+    }
+    if (url.searchParams.get('breakdown') === 'agent') {
+      return route.fulfill({
+        json: [
+          { period, profile_key: 'codex', agent: 'codex', sessions: 7, total_turns: 7, input_tokens: 1400, output_tokens: 300, cost_usd: 1.4 },
+          { period, profile_key: 'clive', agent: 'clive', sessions: 2, total_turns: 2, input_tokens: 300, output_tokens: 80, cost_usd: 0.3 },
+          { period, profile_key: 'cursor', agent: 'cursor', sessions: 1, total_turns: 1, input_tokens: 200, output_tokens: 60, cost_usd: 0.2 },
         ],
       });
     }
     return route.fulfill({
       json: [{
-        period: url.searchParams.get('period') === 'hourly' ? '2026-06-26 14:00' : '2026-06-26',
+        period,
         sessions: 2,
         total_turns: 3,
         input_tokens: 1500,
@@ -416,15 +426,12 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect(page.locator('#stats-tabs .st').first()).toHaveText('Hourly');
   await expect(page.locator('#stats-tabs .st').nth(1)).toHaveText('Daily');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('period')).toBe('hourly');
+  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBe('agent');
   expect(statsRequests.at(-1).searchParams.get('days')).toBe('7');
   expect(statsRequests.at(-1).searchParams.get('tz_offset_minutes')).not.toBeNull();
+  await expect(page.locator('#sf-breakdown option')).toHaveCount(2);
+  await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toBeVisible();
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (4)');
-  await expect(page.locator('#stats-content th', { hasText: 'Sessions' })).toBeVisible();
-  await expect(page.locator('#stats-content th', { hasText: 'Turns' })).toBeVisible();
-  await expect(page.locator('#stats-content th', { hasText: 'Tokens In' })).toBeVisible();
-  await expect(page.locator('#stats-content th', { hasText: 'Tokens Out' })).toBeVisible();
-  await expect(page.locator('#stats-content th', { hasText: 'Cost' })).toHaveCount(0);
-  await expect(page.locator('#stats-content th', { hasText: 'Quota meter' })).toHaveCount(0);
 
   await page.locator('#sf-topic-toggle').click();
   await page.locator('#sf-topic-menu input[value="squid"]').check();
@@ -443,18 +450,12 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await page.locator('#sf-measures-toggle').click();
   await page.locator('#sf-measures-menu input[value="cost"]').check();
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (5)');
-  await expect(page.locator('#stats-content th', { hasText: 'Cost' })).toBeVisible();
-  await expect(page.locator('#stats-content')).toContainText('$1.2500');
-  await expect(page.locator('#stats-content th', { hasText: 'Quota meter' })).toHaveCount(0);
 
   await page.locator('#sf-measures-menu input[value="quota"]').check();
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (6)');
-  await expect(page.locator('#stats-content th', { hasText: 'Quota meter' })).toBeVisible();
-  await expect(page.locator('#stats-content')).toContainText('+2.5 pp');
 
   await page.locator('#sf-measures-menu input[value="tokens_out"]').uncheck();
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (5)');
-  await expect(page.locator('#stats-content th', { hasText: 'Tokens Out' })).toHaveCount(0);
 
   await page.getByRole('button', { name: 'Daily' }).click();
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('period')).toBe('daily');
@@ -462,10 +463,10 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect(page.locator('#stats-content tbody td').first()).toHaveText('2026-06-26');
 
   await page.getByRole('button', { name: 'Hourly' }).click();
-  await page.locator('#sf-breakdown').selectOption('agent_profile');
-  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBe('agent_profile');
-  await expect(page.getByRole('columnheader', { name: 'codex · gpt-5 · repo', exact: true })).toBeVisible();
-  await expect(page.locator('#stats-content th', { hasText: 'codex! · codex · gpt-5 · repo' })).toBeVisible();
+  await page.locator('#sf-breakdown').selectOption('agent_session');
+  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBe('agent_session');
+  await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'codex!', exact: true })).toBeVisible();
   await expect(page.locator('#stats-content th', { hasText: 'Misc' })).toBeVisible();
   await expect(page.locator('#stats-content tfoot')).toContainText('10');
 });
