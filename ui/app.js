@@ -4523,6 +4523,7 @@ let _statsPage = 0;
 const _STATS_PAGE_SIZE = 10;
 const _statsMeasures = new Set(['sessions', 'turns', 'tokens_in', 'tokens_out']);
 const _STATS_BREAKDOWN_SERIES_BUDGET = 4;
+const _STATS_BREAKDOWN_VISIBLE_SERIES_LIMIT = 8;
 let _statsPresets = [];
 let _activeStatsPresetId = null;
 let _statsPresetDirty = false;
@@ -4816,9 +4817,10 @@ function _breakdownSelection(rows) {
 
 function _breakdownPivot(rows) {
   const { selected, selectedAgents, selectedTopics, labels } = _breakdownSelection(rows);
+  const allSelected = selected.slice();
   const periods = [...new Set(rows.map(r => r.period))].sort().reverse();
   const periodRows = periods.map(period => {
-    const values = Object.fromEntries(selected.map(key => [key, 0]));
+    const values = Object.fromEntries(allSelected.map(key => [key, 0]));
     let misc = 0, total = 0;
     for (const row of rows) {
       if (row.period !== period) continue;
@@ -4827,22 +4829,29 @@ function _breakdownPivot(rows) {
       const key = _statsSeriesKey(row);
       const selectedAgent = selectedAgents.includes(_agentBaseKey(_agentKey(row)));
       const selectedTopic = !statsBreakdown.startsWith('topic_') || selectedTopics.includes(row.topic || 'unknown');
-      if (selectedAgent && selectedTopic && selected.includes(key)) values[key] += value;
+      if (selectedAgent && selectedTopic && allSelected.includes(key)) values[key] += value;
       else misc += value;
     }
     return { period, values, misc, total };
   });
   if (_statsBreakdownColumnSort.mode === 'total') {
-    selected.sort((a, b) => {
+    allSelected.sort((a, b) => {
       const totalA = periodRows.reduce((sum, row) => sum + (row.values[a] || 0), 0);
       const totalB = periodRows.reduce((sum, row) => sum + (row.values[b] || 0), 0);
       const totalCompare = _statsBreakdownColumnSort.dir === 'asc' ? totalA - totalB : totalB - totalA;
       return totalCompare || _compareStatsSeriesByName(a, b, labels);
     });
   } else if (_statsBreakdownColumnSort.dir === 'desc') {
-    selected.sort((a, b) => _compareStatsSeriesByName(b, a, labels));
+    allSelected.sort((a, b) => _compareStatsSeriesByName(b, a, labels));
   }
-  return { selected, labels, periodRows };
+  const visibleSelected = allSelected.slice(0, _STATS_BREAKDOWN_VISIBLE_SERIES_LIMIT);
+  const overflowSelected = allSelected.slice(_STATS_BREAKDOWN_VISIBLE_SERIES_LIMIT);
+  if (overflowSelected.length) {
+    for (const row of periodRows) {
+      for (const key of overflowSelected) row.misc += row.values[key] || 0;
+    }
+  }
+  return { selected: visibleSelected, labels, periodRows, overflowCount: overflowSelected.length };
 }
 
 function _updateStatsMeasureLabel() {
@@ -5566,37 +5575,38 @@ function renderAgentBreakdownStats(rows) {
   const hasMisc = totalMisc > 0;
   const headers = pivot.selected.map(key => {
     const label = pivot.labels.get(key) || key;
-    return `<th aria-label="${escapeHtml(label)}">${escapeHtml(label)}</th>`;
+    return `<th class="stats-series-col" aria-label="${escapeHtml(label)}">${escapeHtml(label)}</th>`;
   }).join('');
-  const miscHeader = hasMisc ? '<th>Misc</th>' : '';
+  const miscTitle = pivot.overflowCount ? `Includes ${pivot.overflowCount} hidden selected series plus unselected matching data` : 'Unselected matching data';
+  const miscHeader = hasMisc ? `<th class="stats-sticky-right stats-misc-col" title="${escapeHtml(miscTitle)}">Misc</th>` : '';
   const bodyRows = _statsPageSlice(pivot.periodRows).map(row => {
     const cells = pivot.selected
-      .map(key => `<td>${_formatStatsMetricValue(row.values[key] || 0, metric)}</td>`)
+      .map(key => `<td class="stats-series-col">${_formatStatsMetricValue(row.values[key] || 0, metric)}</td>`)
       .join('');
     return `<tr>
-      <td>${_statsPeriodLabel(row.period)}</td>
+      <td class="stats-sticky-left">${_statsPeriodLabel(row.period)}</td>
       ${cells}
-      ${hasMisc ? `<td>${_formatStatsMetricValue(row.misc || 0, metric)}</td>` : ''}
-      <td>${_formatStatsMetricValue(row.total || 0, metric)}</td>
+      ${hasMisc ? `<td class="stats-sticky-right stats-misc-col">${_formatStatsMetricValue(row.misc || 0, metric)}</td>` : ''}
+      <td class="stats-sticky-right stats-total-col">${_formatStatsMetricValue(row.total || 0, metric)}</td>
     </tr>`;
   }).join('');
   const totalCells = pivot.selected
-    .map(key => `<td>${_formatStatsMetricValue(totalExplicit[key] || 0, metric)}</td>`)
+    .map(key => `<td class="stats-series-col">${_formatStatsMetricValue(totalExplicit[key] || 0, metric)}</td>`)
     .join('');
 
-  statsContent.innerHTML = `<table>
+  statsContent.innerHTML = `<table class="stats-breakdown-table${hasMisc ? ' has-misc' : ''}">
     <thead><tr>
-      <th>${_statsBreakdownAxisLabel(statsPeriod === 'hourly' ? 'Hour' : 'Date', 'name')}</th>
+      <th class="stats-sticky-left">${_statsBreakdownAxisLabel(statsPeriod === 'hourly' ? 'Hour' : 'Date', 'name')}</th>
       ${headers}
       ${miscHeader}
-      <th>Total</th>
+      <th class="stats-sticky-right stats-total-col">Total</th>
     </tr></thead>
     <tbody>${bodyRows}</tbody>
     <tfoot><tr>
-      <td>${_statsBreakdownAxisLabel('Total', 'total')}</td>
+      <td class="stats-sticky-left">${_statsBreakdownAxisLabel('Total', 'total')}</td>
       ${totalCells}
-      ${hasMisc ? `<td>${_formatStatsMetricValue(totalMisc, metric)}</td>` : ''}
-      <td>${_formatStatsMetricValue(grandTotal, metric)}</td>
+      ${hasMisc ? `<td class="stats-sticky-right stats-misc-col">${_formatStatsMetricValue(totalMisc, metric)}</td>` : ''}
+      <td class="stats-sticky-right stats-total-col">${_formatStatsMetricValue(grandTotal, metric)}</td>
     </tr></tfoot>
   </table>`;
   _bindStatsBreakdownSort();

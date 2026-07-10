@@ -536,6 +536,85 @@ test('agent breakdown defaults to top four agents when none are selected', async
   await expect(page.locator('#stats-content th', { hasText: 'Misc' })).toHaveCount(0);
 });
 
+test('stats breakdown caps visible series and keeps edge columns sticky while scrolling', async ({ page }) => {
+  await mockApp(page);
+  await page.setViewportSize({ width: 900, height: 720 });
+  const agents = Array.from({ length: 10 }, (_, i) => `agent${String(i + 1).padStart(2, '0')}`);
+  await page.route('**/stats/filters', route => route.fulfill({
+    json: { agents, topics: [] },
+  }));
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get('breakdown') === 'agent') {
+      return route.fulfill({
+        json: agents.map((agent, index) => ({
+          period: '2026-06-26 14:00',
+          agent_key: agent,
+          agent,
+          sessions: 1,
+          total_turns: index + 1,
+        })),
+      });
+    }
+    return route.fulfill({ json: [{ period: '2026-06-26 14:00', sessions: 10, total_turns: 55 }] });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('#sf-agent-toggle').click();
+  for (const agent of agents) {
+    await page.locator(`#sf-agent-menu input[value="${agent}"]`).check();
+  }
+  await page.locator('#sf-breakdown').selectOption('agent');
+
+  await expect(page.locator('#stats-content thead th')).toHaveText([
+    'Hour',
+    'agent01',
+    'agent02',
+    'agent03',
+    'agent04',
+    'agent05',
+    'agent06',
+    'agent07',
+    'agent08',
+    'Misc',
+    'Total',
+  ]);
+  await expect(page.locator('#stats-content tbody tr').first().locator('td')).toHaveText([
+    '06-26 14:00',
+    '1',
+    '2',
+    '3',
+    '4',
+    '5',
+    '6',
+    '7',
+    '8',
+    '19',
+    '55',
+  ]);
+  await expect(page.getByRole('columnheader', { name: 'agent09', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('columnheader', { name: 'agent10', exact: true })).toHaveCount(0);
+  await expect.poll(() => page.locator('#stats-content').evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true);
+
+  const before = await page.locator('#stats-content').evaluate(el => {
+    const first = el.querySelector('tbody td:first-child').getBoundingClientRect();
+    const misc = el.querySelector('tbody td.stats-misc-col').getBoundingClientRect();
+    const total = el.querySelector('tbody td.stats-total-col').getBoundingClientRect();
+    return { firstLeft: first.left, miscRight: misc.right, totalRight: total.right };
+  });
+  await page.locator('#stats-content').evaluate(el => { el.scrollLeft = el.scrollWidth; });
+  const after = await page.locator('#stats-content').evaluate(el => {
+    const first = el.querySelector('tbody td:first-child').getBoundingClientRect();
+    const misc = el.querySelector('tbody td.stats-misc-col').getBoundingClientRect();
+    const total = el.querySelector('tbody td.stats-total-col').getBoundingClientRect();
+    return { firstLeft: first.left, miscRight: misc.right, totalRight: total.right };
+  });
+  expect(Math.abs(after.firstLeft - before.firstLeft)).toBeLessThan(2);
+  expect(Math.abs(after.miscRight - before.miscRight)).toBeLessThan(2);
+  expect(Math.abs(after.totalRight - before.totalRight)).toBeLessThan(2);
+});
+
 test('stats breakdown columns can sort by footer totals', async ({ page }) => {
   await mockApp(page);
   await page.route('**/stats/filters', route => route.fulfill({
