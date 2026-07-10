@@ -6871,6 +6871,7 @@ function showCtxPopup(spanEl) {
       </div>`;
     });
   }
+  if (topic) html += `<div id="ctx-roots-section"></div>`;
   if (!html) html = `<div class="ctx-popup-row"><span class="ctx-popup-key">${spanEl.textContent.trim()}</span></div>`;
 
   popup.innerHTML = html;
@@ -6899,6 +6900,29 @@ function showCtxPopup(spanEl) {
         if (el) el.textContent = 'failed to load';
       });
   });
+
+  if (topic) {
+    fetchMemoryMeta(topic).then(meta => {
+      const roots = meta?.squid?.code_roots || [];
+      const placeholder = document.getElementById('ctx-roots-section');
+      if (!placeholder) return;
+      if (!roots.length) { placeholder.remove(); return; }
+      const frag = document.createDocumentFragment();
+      const divider = document.createElement('div');
+      divider.className = 'ctx-popup-divider';
+      frag.appendChild(divider);
+      roots.forEach((root, i) => {
+        const row = document.createElement('div');
+        row.className = 'ctx-popup-row';
+        row.innerHTML = `<span class="ctx-popup-key">${i === 0 ? 'roots' : ''}</span><span class="ctx-popup-val">${escapeHtml(root)}</span>`;
+        frag.appendChild(row);
+      });
+      placeholder.replaceWith(frag);
+    }).catch(() => {
+      const placeholder = document.getElementById('ctx-roots-section');
+      if (placeholder) placeholder.remove();
+    });
+  }
 
   const rect = spanEl.getBoundingClientRect();
   const appRect = document.getElementById('app').getBoundingClientRect();
