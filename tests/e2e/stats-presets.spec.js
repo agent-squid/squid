@@ -85,6 +85,13 @@ test('stats filter presets save in their own top row and apply saved state', asy
   await expect(page.locator('#sf-topic-toggle')).toHaveText('#squid');
   await expect(page.locator('#sf-agent-toggle')).toHaveText('@codex');
   await expect(page.locator('#stats-preset-select')).toHaveValue('1');
+
+  await page.locator('#stats-preset-delete').click();
+  await expect(page.locator('#stats-preset-select')).toHaveValue('__overall');
+  await expect(page.locator('#sf-topic-toggle')).toHaveText('All Topics');
+  await expect(page.locator('#sf-agent-toggle')).toHaveText('All Agents');
+  await expect(page.locator('#sf-breakdown')).toHaveValue('');
+  await expect(page.locator('#stats-preset-status')).toHaveText('deleted');
 });
 
 test('stats filter preset dropdown shows the default saved view on load', async ({ page }) => {

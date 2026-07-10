@@ -5748,9 +5748,11 @@ function initStats() {
     await fetch(`/stats/filter-presets/${_activeStatsPresetId}`, { method: 'DELETE' });
     _activeStatsPresetId = null;
     _statsPresetDirty = false;
+    _applyStatsState(_overallStatsState());
     await _loadStatsPresets();
     _renderStatsPresetControls();
     _setStatsPresetStatus('deleted');
+    loadStats();
   });
 }
 
