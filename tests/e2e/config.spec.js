@@ -955,7 +955,7 @@ test('topic agent session breakdown expands coarse topic and agent filters into 
   expect(statsRequests.at(-1).searchParams.get('topic')).toBe('squid');
   expect(statsRequests.at(-1).searchParams.get('agent')).toBe('codex,clive');
   await expect(page.locator('#stats-content thead th')).toHaveText([
-    'Hour', '#squid@clive*', '#squid@codex*', 'Misc', 'Total',
+    'Hour', '#squid@clive+', '#squid@codex+', 'Misc', 'Total',
   ]);
 
   await page.locator('#sf-breakdown').selectOption('topic_agent_session');
