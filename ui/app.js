@@ -4657,6 +4657,20 @@ function _agentKey(row) {
   return row.agent_key || row.agent || 'unknown';
 }
 
+function _topBreakdownAgentKeys(rows) {
+  const totals = new Map();
+  const labels = new Map();
+  for (const row of rows) {
+    const key = _agentKey(row);
+    totals.set(key, (totals.get(key) || 0) + _statsMetricValue(row, statsChartY1));
+    if (!labels.has(key)) labels.set(key, _agentLabel(row));
+  }
+  return [...totals.entries()]
+    .sort((a, b) => b[1] - a[1] || (labels.get(a[0]) || '').localeCompare(labels.get(b[0]) || ''))
+    .slice(0, _STATS_BREAKDOWN_TOP_N)
+    .map(([key]) => key);
+}
+
 function _breakdownSelection(rows) {
   const totals = new Map();
   const labels = new Map();
@@ -4672,10 +4686,7 @@ function _breakdownSelection(rows) {
       if (!labels.has(agent)) labels.set(agent, agent);
     }
   } else {
-    selected = [...totals.entries()]
-      .sort((a, b) => b[1] - a[1] || (labels.get(a[0]) || '').localeCompare(labels.get(b[0]) || ''))
-      .slice(0, _STATS_BREAKDOWN_TOP_N)
-      .map(([key]) => key);
+    selected = _topBreakdownAgentKeys(rows);
   }
   return { selected, labels };
 }
@@ -4726,6 +4737,13 @@ function _updateStatsFilterLabels() {
     agentToggle.textContent = _statsMultiLabel(statsFilters.agents, 'All Agents', 'Agent', '@');
     agentToggle.classList.toggle('active', statsFilters.agents.length > 0);
   }
+}
+
+function _syncStatsAgentMenuSelection() {
+  document.querySelectorAll('#sf-agent-menu input[type="checkbox"]').forEach(input => {
+    input.checked = statsFilters.agents.includes(input.value);
+  });
+  _updateStatsFilterLabels();
 }
 
 function _updateStatsBreakdownUi() {
@@ -5096,6 +5114,14 @@ async function loadStats() {
   }
 
   if (chartWrap) chartWrap.hidden = false;
+
+  if (statsBreakdown && !statsFilters.agents.length) {
+    const defaultAgents = _topBreakdownAgentKeys(rows);
+    if (defaultAgents.length) {
+      statsFilters.agents = defaultAgents;
+      _syncStatsAgentMenuSelection();
+    }
+  }
 
   _lastStatsRows = rows;
   _statsPage = 0;

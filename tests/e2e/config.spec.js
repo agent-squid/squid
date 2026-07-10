@@ -468,6 +468,7 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await page.locator('#sf-breakdown').selectOption('agent');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBe('agent');
   expect(statsRequests.at(-1).searchParams.get('agent')).toBeNull();
+  await expect(page.locator('#sf-agent-toggle')).toHaveText('2 Agents');
   await expect(page.locator('#sc-compare-btn')).toBeHidden();
   await expect(page.locator('#sf-measures')).toBeHidden();
   await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toBeVisible();
@@ -482,6 +483,45 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBeNull();
   await expect(page.locator('#sc-compare-btn')).toBeVisible();
   await expect(page.locator('#sf-measures')).toBeVisible();
+});
+
+test('agent breakdown defaults to top three agents when none are selected', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/stats/filters', route => route.fulfill({
+    json: { agents: ['codex', 'clive', 'cursor', 'haiku'], topics: [] },
+  }));
+  const statsRequests = [];
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    statsRequests.push(url);
+    if (url.searchParams.get('breakdown') === 'agent') {
+      return route.fulfill({
+        json: [
+          { period: '2026-06-26 14:00', agent_key: 'codex', agent: 'codex', sessions: 1, total_turns: 9 },
+          { period: '2026-06-26 14:00', agent_key: 'clive', agent: 'clive', sessions: 1, total_turns: 7 },
+          { period: '2026-06-26 14:00', agent_key: 'cursor', agent: 'cursor', sessions: 1, total_turns: 5 },
+          { period: '2026-06-26 14:00', agent_key: 'haiku', agent: 'haiku', sessions: 1, total_turns: 2 },
+        ],
+      });
+    }
+    return route.fulfill({ json: [{ period: '2026-06-26 14:00', sessions: 4, total_turns: 23 }] });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('#sf-breakdown').selectOption('agent');
+  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBe('agent');
+  expect(statsRequests.at(-1).searchParams.get('agent')).toBeNull();
+  await expect(page.locator('#sf-agent-toggle')).toHaveText('3 Agents');
+  await page.locator('#sf-agent-toggle').click();
+  await expect(page.locator('#sf-agent-menu input[value="codex"]')).toBeChecked();
+  await expect(page.locator('#sf-agent-menu input[value="clive"]')).toBeChecked();
+  await expect(page.locator('#sf-agent-menu input[value="cursor"]')).toBeChecked();
+  await expect(page.locator('#sf-agent-menu input[value="haiku"]')).not.toBeChecked();
+  await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'clive', exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'cursor', exact: true })).toBeVisible();
+  await expect(page.locator('#stats-content th', { hasText: 'Misc' })).toBeVisible();
 });
 
 test('/restart clears its persisted draft before the page reloads', async ({ page }) => {
