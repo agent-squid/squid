@@ -526,6 +526,81 @@ def test_claude_interactive_skips_empty_result_after_agent_task_notification():
     _clear()
 
 
+def test_claude_interactive_final_assistant_text_after_agent_is_response_not_status():
+    _clear()
+    task_notification = (
+        "<task-notification>\n"
+        "<tool-use-id>toolu_agent_1</tool-use-id>\n"
+        "<status>completed</status>\n"
+        "</task-notification>"
+    )
+    fake_proc = _FakeProcess(9010, [
+        json.dumps({"type": "system", "session_id": "sess-1"}),
+        json.dumps({"type": "user", "isReplay": True, "message": {"role": "user", "content": "go"}}),
+        json.dumps({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "tool_use", "id": "toolu_agent_1", "name": "Agent"},
+            },
+        }),
+        json.dumps({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": '{"description":"scan panels"}'},
+            },
+        }),
+        json.dumps({"type": "stream_event", "event": {"type": "content_block_stop", "index": 0}}),
+        json.dumps({"type": "result", "result": "Scanning all panels now.", "usage": {}}),
+        json.dumps({"type": "user", "isReplay": True, "message": {"role": "user", "content": task_notification}}),
+        json.dumps({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "thinking", "thinking": "internal only"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 9, "output_tokens": 9},
+            },
+        }),
+        json.dumps({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Both fixes applied."}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 2},
+            },
+            "total_cost_usd": 0.001,
+            "duration_ms": 123,
+        }),
+    ])
+
+    async def fake_create_subprocess_exec(*_cmd, **_kwargs):
+        return fake_proc
+
+    async def collect():
+        return [chunk async for chunk in run_claude_interactive_cli(
+            "go", cwd="/tmp/project", topic="work", agent="claude",
+        )]
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), \
+         patch("agent.runners.asyncio.create_subprocess_exec", fake_create_subprocess_exec):
+        chunks = asyncio.run(collect())
+
+    assert {"_status": "[Agent: scan panels] Scanning all panels now.\n"} in chunks
+    assert "Both fixes applied." in chunks
+    assert {"_status": "[Agent: scan panels] Both fixes applied.\n"} not in chunks
+    stats = next(chunk["_stats"] for chunk in chunks if isinstance(chunk, dict) and "_stats" in chunk)
+    assert stats["input_tokens"] == 1
+    assert stats["output_tokens"] == 2
+    assert stats["cost_usd"] == 0.001
+    assert stats["duration_ms"] == 123
+    _clear()
+
+
 def test_claude_interactive_starts_with_resume_id_and_skips_history_injection():
     _clear()
     fake_proc = _FakeProcess(9002, [
