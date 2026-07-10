@@ -4712,14 +4712,20 @@ function _statsSeriesKey(row) {
   return agentLabel;
 }
 
+function _statsAdhocSuffix() {
+  if (statsFilters.adhoc === 'adhoc') return '!';
+  if (statsFilters.adhoc === 'all') return '+';
+  return '';
+}
+
 function _statsSeriesLabel(key) {
   const raw = String(key);
   const [topic, agent] = raw.split('\u0000');
   if (agent != null) {
-    if (statsBreakdown === 'topic_agent') return `#${topic}@${_agentBaseKey(agent)}+`;
+    if (statsBreakdown === 'topic_agent') return `#${topic}@${_agentBaseKey(agent)}${_statsAdhocSuffix()}`;
     return `#${topic}@${agent}`;
   }
-  if (statsBreakdown === 'agent') return `@${raw}+`;
+  if (statsBreakdown === 'agent') return `@${raw}${_statsAdhocSuffix()}`;
   if (statsBreakdown === 'agent_session') return `@${raw}`;
   if (statsBreakdown === 'topic') return `#${raw}`;
   return raw;

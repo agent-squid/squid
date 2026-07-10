@@ -897,17 +897,17 @@ test('agent breakdown shows agent! columns based on session type filter', async 
   await expect(page.getByRole('columnheader', { name: '@codex+', exact: true })).toBeVisible();
   await expect(page.getByRole('columnheader', { name: '@codex!', exact: true })).toHaveCount(0);
 
-  // session only: only codex column
+  // session only: bare @codex label (no suffix)
   await page.locator('#sf-adhoc').selectOption('session');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('adhoc')).toBe('session');
-  await expect(page.getByRole('columnheader', { name: '@codex+', exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: '@codex', exact: true })).toBeVisible();
   await expect(page.getByRole('columnheader', { name: '@codex!', exact: true })).toHaveCount(0);
 
-  // adhoc only: still base agent column, constrained to adhoc data
+  // adhoc only: @codex! label
   await page.locator('#sf-adhoc').selectOption('adhoc');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('adhoc')).toBe('adhoc');
-  await expect(page.getByRole('columnheader', { name: '@codex+', exact: true })).toBeVisible();
-  await expect(page.getByRole('columnheader', { name: '@codex!', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('columnheader', { name: '@codex!', exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: '@codex+', exact: true })).toHaveCount(0);
 });
 
 test('topic agent session breakdown expands coarse topic and agent filters into session lanes', async ({ page }) => {
