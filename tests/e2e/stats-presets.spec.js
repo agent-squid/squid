@@ -128,3 +128,61 @@ test('stats filter preset dropdown shows the default saved view on load', async 
   await expect(page.locator('#sf-topic-toggle')).toHaveText('#squid');
   await expect(page.locator('#sf-agent-toggle')).toHaveText('@codex');
 });
+
+test('overall view can be set as default to clear the current default preset', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/stats/filters', route => route.fulfill({
+    json: { agents: ['codex'], topics: ['squid'] },
+  }));
+  let presets = [{
+    id: 3,
+    name: 'My Preset',
+    is_default: true,
+    state: {
+      version: 1,
+      time: { period: 'hourly', days: 7 },
+      dimensions: {
+        topic: { mode: 'selected', values: ['squid'] },
+        agent: { mode: 'all', values: [] },
+        session_type: { mode: 'all', values: [] },
+      },
+      breakdown: { key: '' },
+      measure: { primary: 'turns', secondary: null, visible: ['sessions', 'turns'] },
+    },
+  }];
+  await page.route('**/stats/filter-presets', route => route.fulfill({ json: presets }));
+  await page.route('**/stats/filter-presets/**', async route => {
+    const id = Number(new URL(route.request().url()).pathname.split('/').pop());
+    if (route.request().method() === 'PUT') {
+      const body = route.request().postDataJSON();
+      presets = presets.map(p => p.id === id ? { ...p, ...body } : p);
+      return route.fulfill({ json: presets.find(p => p.id === id) });
+    }
+  });
+  await page.route('**/stats?**', route => route.fulfill({
+    json: [{ period: '2026-06-26 14:00', sessions: 1, total_turns: 2 }],
+  }));
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+
+  // Starts on the default preset
+  await expect(page.locator('#stats-preset-select')).toHaveValue('3');
+  await expect(page.locator('#stats-preset-select')).toContainText('My Preset (default)');
+  await expect(page.locator('#stats-preset-default')).toBeEnabled();
+
+  // Switch to Overall View — Set Default should still be enabled (there's a default to clear)
+  await page.locator('#stats-preset-select').selectOption('__overall');
+  await expect(page.locator('#stats-preset-select')).toHaveValue('__overall');
+  await expect(page.locator('#stats-preset-default')).toBeEnabled();
+  await expect(page.locator('#stats-preset-update')).toBeDisabled();
+  await expect(page.locator('#stats-preset-delete')).toBeDisabled();
+
+  // Click Set Default from Overall View to clear the default
+  await page.locator('#stats-preset-default').click();
+  await expect(page.locator('#stats-preset-status')).toHaveText('default cleared');
+  await expect(page.locator('#stats-preset-select')).not.toContainText('(default)');
+
+  // Now Set Default should be disabled (no default to clear, not on a named preset)
+  await expect(page.locator('#stats-preset-default')).toBeDisabled();
+});
