@@ -4694,7 +4694,12 @@ function _breakdownSelection(rows) {
   }
 
   let selected;
-  if (statsBreakdown === 'agent_session' || statsFilters.adhoc === 'all') {
+  if (statsBreakdown === 'agent_session') {
+    selected = [];
+    for (const agent of selectedAgents) {
+      selected.push(agent, `${agent}!`);
+    }
+  } else if (statsFilters.adhoc === 'all') {
     selected = [];
     for (const agent of selectedAgents) {
       for (const key of [agent, `${agent}!`]) {
@@ -4714,7 +4719,11 @@ function _breakdownSelection(rows) {
   selected = selected.slice().sort((a, b) => {
     const labelA = labels.get(a) || a;
     const labelB = labels.get(b) || b;
-    return labelA.localeCompare(labelB) || a.localeCompare(b);
+    const baseA = _agentBaseKey(labelA);
+    const baseB = _agentBaseKey(labelB);
+    const baseCompare = baseA.localeCompare(baseB) || _agentBaseKey(a).localeCompare(_agentBaseKey(b));
+    if (baseCompare) return baseCompare;
+    return (a.endsWith('!') ? 1 : 0) - (b.endsWith('!') ? 1 : 0) || labelA.localeCompare(labelB) || a.localeCompare(b);
   });
   return { selected, selectedAgents, labels };
 }
