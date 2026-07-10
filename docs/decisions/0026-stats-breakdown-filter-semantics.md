@@ -226,6 +226,109 @@ For example, if `opencode` has adhoc turns but no session turns in the selected
 range, `Sess + Adhoc` still shows both `opencode` and `opencode!`; the session
 lane has zero values.
 
+## Saved Filter Presets
+
+Stats must support named saved filter combinations. A saved preset captures the
+current stats view state as coarse selectors, not expanded rendered series. This
+keeps saved views aligned with the filter semantics above and allows future
+dimensions, such as per-session views, without changing the base persistence
+model.
+
+Saved presets are backend-owned durable state, not browser-local storage. They
+belong in the Squid DB because stats history and filter options are already
+backend-owned and the same presets should survive browser changes.
+
+The DB should store one row per named preset:
+
+```sql
+CREATE TABLE IF NOT EXISTS stats_filter_presets (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    state_json   TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+`state_json` is a versioned JSON document. It should store all filter dimensions
+and selected values using dimension keys, rather than one SQL column per
+dimension:
+
+```json
+{
+  "version": 1,
+  "time": {
+    "period": "daily",
+    "days": 30
+  },
+  "dimensions": {
+    "topic": {
+      "mode": "selected",
+      "values": ["squid"]
+    },
+    "agent": {
+      "mode": "selected",
+      "values": ["codex", "clive"]
+    },
+    "session_type": {
+      "mode": "all",
+      "values": []
+    }
+  },
+  "breakdown": {
+    "key": "agent_session"
+  },
+  "measure": {
+    "primary": "turns",
+    "secondary": null,
+    "visible": ["turns"]
+  }
+}
+```
+
+Dimension `values` must store source selector values, not rendered labels. For
+example, save `agent.values = ["codex", "clive"]` with
+`session_type.mode = "all"`, not `["codex", "codex!", "clive", "clive!"]`.
+When the preset is applied, the normal breakdown resolver expands those values
+into the rendered lanes.
+
+Dimension `mode` distinguishes an explicit empty selection from dynamic default
+selection:
+
+| Mode | Meaning |
+|---|---|
+| `selected` | Use exactly the listed source values. |
+| `all` | Include all values allowed by that dimension/filter. |
+| `auto_top` | Recompute the top source values using the default ranking rules. |
+
+The UI should save what the user means:
+
+- If the user explicitly selected values, save `mode = "selected"` and those
+  values.
+- If the user is using the default top selection, save `mode = "auto_top"` so
+  the preset continues to track the most-used source values by turns.
+- If a dimension has an explicit all/both control, such as session type
+  `Sess + Adhoc`, save that as `mode = "all"`.
+
+Future dimensions should be added as new keys under `dimensions`, for example
+`"session"` or `"model"`. Implementations should preserve unknown dimension
+keys when round-tripping presets so older clients do not destroy newer saved
+state. Unsupported dimensions may be ignored when applying a preset, but they
+must not be silently deleted.
+
+Recommended API shape:
+
+| Endpoint | Behavior |
+|---|---|
+| `GET /stats/filter-presets` | List presets with `id`, `name`, `state`, `created_at`, and `updated_at`. |
+| `POST /stats/filter-presets` | Create a preset from `{ "name": "...", "state": { ... } }`. Reject duplicate names. |
+| `PUT /stats/filter-presets/{id}` | Rename and/or replace the saved state. |
+| `DELETE /stats/filter-presets/{id}` | Delete the preset. |
+
+Applying a preset is a UI operation: load the saved state into the existing
+stats controls, then request stats through the normal stats endpoints. Presets
+must not introduce a separate stats query path.
+
 ## Non-Goals
 
 - No exact micro-selection UI is introduced here. Users cannot select only
@@ -238,6 +341,9 @@ lane has zero values.
 - No default-selection optimizer is specified beyond the rendered-series budget
   and complete-combination requirement. Tie-breaking among candidate topics or
   agents can use existing ranking rules.
+- No separate preset table per dimension is introduced. Extensibility comes
+  from the versioned `state_json` document, not from schema changes for every
+  new stats dimension.
 
 ## Consequences
 
@@ -254,3 +360,5 @@ lane has zero values.
   expected because the UI renders complete coarse-filter combinations.
 - Exact mixed-lane comparison requires a future advanced exact-series selector
   or sort/filter control, not overloading the existing base agent selector.
+- Saved presets can reproduce explicit views while still allowing dynamic
+  top-by-turns defaults through `auto_top`.
