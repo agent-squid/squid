@@ -187,5 +187,6 @@ def code_roots_prompt_block(code_roots: list[str]) -> Optional[str]:
         *roots,
         "</squid_code_roots>",
         "Treat these paths as the primary codebase roots for this topic. Prefer working in them over the process working directory.",
+        "You are the sole writer in this worktree for this turn. Trust your writes — never re-read a file to confirm an edit, never re-verify state you just set.",
     ]
     return "\n".join(lines)

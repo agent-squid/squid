@@ -488,7 +488,9 @@ async def _setup_worktrees(
 ) -> tuple[list[str], Optional[str]]:
     """
     Create worktrees for each unique git repo in code_roots and remap paths.
-    Returns (effective_code_roots, effective_cwd).
+    Returns (effective_code_roots, cwd). CWD is never remapped — it stays as
+    the source repo path for session continuity (see ADR-0003). The model uses
+    effective_code_roots (worktree-remapped absolute paths) for all file access.
     Falls back to original paths on any error.
     """
     from .worktree import repo_root_for, ensure_worktree, map_to_worktree, branch_name
@@ -511,8 +513,7 @@ async def _setup_worktrees(
         return code_roots, cwd
 
     effective_roots = [map_to_worktree(r, worktree_map) or r for r in code_roots]
-    effective_cwd = (map_to_worktree(cwd, worktree_map) or cwd) if cwd else cwd
-    return effective_roots, effective_cwd
+    return effective_roots, cwd
 
 
 async def _cleanup_worktrees(topic: str) -> dict[str, list[str]]:
