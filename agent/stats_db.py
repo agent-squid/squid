@@ -1476,6 +1476,75 @@ def get_aggregated_stats(
         return []
 
 
+def get_stats_by_agent_profile_breakdown(
+    period: str = "daily",
+    days: int = 30,
+    agent: str = "",
+    topic: str = "",
+    adhoc: str = "all",
+    tz_offset_minutes: int = 0,
+) -> list:
+    tz_shift = f"{-tz_offset_minutes} minutes"
+    bucket = (
+        f"strftime('%Y-%m-%d %H:00', datetime(created_at, '{tz_shift}'))"
+        if period == "hourly"
+        else f"strftime('%Y-%m-%d', datetime(created_at, '{tz_shift}'))"
+    )
+    limit = (days * (24 if period == "hourly" else 1) + 1) if days else 5000
+    cutoff = _stats_cutoff(days)
+
+    clauses: list[str] = ["created_at IS NOT NULL"]
+    params: list = []
+    if cutoff:
+        clauses.append("created_at >= ?")
+        params.append(cutoff)
+    if agent:
+        clauses.append("COALESCE(agent, backend) = ?")
+        params.append(agent)
+    if topic:
+        clauses.append("topic = ?")
+        params.append(topic)
+
+    where = " AND ".join(clauses)
+
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                f"""SELECT *
+                    FROM (
+                        SELECT
+                            {bucket} AS period,
+                            COALESCE(agent, backend, 'unknown') AS agent,
+                            COALESCE(backend, '') AS backend,
+                            COALESCE(model, '') AS model,
+                            COALESCE(cwd, '') AS cwd,
+                            COALESCE(agent, backend, 'unknown') || '|' ||
+                                COALESCE(backend, '') || '|' ||
+                                COALESCE(model, '') || '|' ||
+                                COALESCE(cwd, '') AS profile_key,
+                            COUNT(*) AS sessions,
+                            COUNT(*) AS total_turns,
+                            SUM(input_tokens) AS input_tokens,
+                            SUM(input_tokens - COALESCE(history_input_tokens, 0)) AS new_input_tokens,
+                            SUM(output_tokens) AS output_tokens,
+                            SUM(cache_read_tokens) AS cache_read_tokens,
+                            SUM(cache_write_tokens) AS cache_write_tokens,
+                            SUM(cost_usd) AS cost_usd,
+                            SUM(CASE WHEN quota_before IS NOT NULL AND quota_after IS NOT NULL
+                                     THEN quota_after - quota_before ELSE NULL END) AS quota_delta
+                        FROM session_stats
+                        WHERE {where}
+                        GROUP BY period, profile_key
+                    )
+                    ORDER BY period DESC, sessions DESC
+                    LIMIT ?""",
+                (*params, limit * 20),
+            ).fetchall()
+        return [dict(r) for r in rows]
+    except sqlite3.OperationalError:
+        return []
+
+
 def get_stats_by_agent(
     days: int = 30, agent: str = "", topic: str = "", adhoc: str = "all"
 ) -> list:
