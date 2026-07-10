@@ -5117,7 +5117,7 @@ async function loadStats() {
   if (statsBreakdown) params.set('breakdown', statsBreakdown);
   params.set('days', statsFilters.days);
   params.set('tz_offset_minutes', new Date().getTimezoneOffset());
-  if (statsFilters.agents.length && !statsBreakdown) params.set('agent', statsFilters.agents.join(','));
+  if (statsFilters.agents.length) params.set('agent', statsFilters.agents.join(','));
   if (statsFilters.topics.length) params.set('topic', statsFilters.topics.join(','));
   if (statsFilters.adhoc !== 'all') params.set('adhoc', statsFilters.adhoc);
 

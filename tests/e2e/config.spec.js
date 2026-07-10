@@ -389,12 +389,14 @@ test('analytics measures dropdown controls cost and quota columns independently'
     const period = url.searchParams.get('period') === 'hourly' ? '2026-06-26 14:00' : '2026-06-26';
     statsRequests.push(url);
     if (url.searchParams.get('breakdown') === 'agent') {
+      const selectedAgents = (url.searchParams.get('agent') || '').split(',').filter(Boolean);
+      const rows = [
+        { period, agent_key: 'codex', agent: 'codex', sessions: 7, total_turns: 7, input_tokens: 1400, output_tokens: 300, cost_usd: 1.4 },
+        { period, agent_key: 'clive', agent: 'clive', sessions: 2, total_turns: 2, input_tokens: 300, output_tokens: 80, cost_usd: 0.3 },
+        { period, agent_key: 'cursor', agent: 'cursor', sessions: 1, total_turns: 1, input_tokens: 200, output_tokens: 60, cost_usd: 0.2 },
+      ].filter(row => !selectedAgents.length || selectedAgents.includes(row.agent));
       return route.fulfill({
-        json: [
-          { period, agent_key: 'codex', agent: 'codex', sessions: 7, total_turns: 7, input_tokens: 1400, output_tokens: 300, cost_usd: 1.4 },
-          { period, agent_key: 'clive', agent: 'clive', sessions: 2, total_turns: 2, input_tokens: 300, output_tokens: 80, cost_usd: 0.3 },
-          { period, agent_key: 'cursor', agent: 'cursor', sessions: 1, total_turns: 1, input_tokens: 200, output_tokens: 60, cost_usd: 0.2 },
-        ],
+        json: rows,
       });
     }
     return route.fulfill({
@@ -467,17 +469,17 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await page.locator('#sf-period').selectOption('hourly');
   await page.locator('#sf-breakdown').selectOption('agent');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBe('agent');
-  expect(statsRequests.at(-1).searchParams.get('agent')).toBeNull();
+  expect(statsRequests.at(-1).searchParams.get('agent')).toBe('codex,clive');
   await expect(page.locator('#sf-agent-toggle')).toHaveText('2 Agents');
   await expect(page.locator('#sc-compare-btn')).toBeHidden();
   await expect(page.locator('#sf-measures')).toBeHidden();
   await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toBeVisible();
   await expect(page.getByRole('columnheader', { name: 'clive', exact: true })).toBeVisible();
-  await expect(page.locator('#stats-content th', { hasText: 'Misc' })).toBeVisible();
-  await expect(page.locator('#stats-content tfoot')).toContainText('10');
+  await expect(page.locator('#stats-content th', { hasText: 'Misc' })).toHaveCount(0);
+  await expect(page.locator('#stats-content tfoot')).toContainText('9');
   await page.locator('#sc-y1').selectOption('cost');
-  await expect(page.locator('#stats-content tfoot')).toContainText('$1.9000');
-  await expect(page.locator('#stats-content tfoot')).not.toContainText('10');
+  await expect(page.locator('#stats-content tfoot')).toContainText('$1.7000');
+  await expect(page.locator('#stats-content tfoot')).not.toContainText('9');
 
   await page.locator('#sf-breakdown').selectOption('');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBeNull();
@@ -534,12 +536,14 @@ test('agent session type breakdown expands selected base agents into session var
     const url = new URL(route.request().url());
     statsRequests.push(url);
     if (url.searchParams.get('breakdown') === 'agent_session') {
+      const selectedAgents = (url.searchParams.get('agent') || '').split(',').filter(Boolean);
+      const rows = [
+        { period: '2026-06-26 14:00', agent_key: 'codex', agent: 'codex', sessions: 4, total_turns: 4 },
+        { period: '2026-06-26 14:00', agent_key: 'codex!', agent: 'codex!', sessions: 3, total_turns: 3 },
+        { period: '2026-06-26 14:00', agent_key: 'clive', agent: 'clive', sessions: 2, total_turns: 2 },
+      ].filter(row => !selectedAgents.length || selectedAgents.includes(row.agent.replace(/!$/, '')));
       return route.fulfill({
-        json: [
-          { period: '2026-06-26 14:00', agent_key: 'codex', agent: 'codex', sessions: 4, total_turns: 4 },
-          { period: '2026-06-26 14:00', agent_key: 'codex!', agent: 'codex!', sessions: 3, total_turns: 3 },
-          { period: '2026-06-26 14:00', agent_key: 'clive', agent: 'clive', sessions: 2, total_turns: 2 },
-        ],
+        json: rows,
       });
     }
     return route.fulfill({ json: [{ period: '2026-06-26 14:00', sessions: 9, total_turns: 9 }] });
@@ -551,13 +555,13 @@ test('agent session type breakdown expands selected base agents into session var
   await page.locator('#sf-agent-menu input[value="codex"]').check();
   await page.locator('#sf-breakdown').selectOption('agent_session');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBe('agent_session');
-  expect(statsRequests.at(-1).searchParams.get('agent')).toBeNull();
+  expect(statsRequests.at(-1).searchParams.get('agent')).toBe('codex');
   await expect(page.locator('#sf-agent-toggle')).toHaveText('@codex');
   await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toBeVisible();
   await expect(page.getByRole('columnheader', { name: 'codex!', exact: true })).toBeVisible();
   await expect(page.getByRole('columnheader', { name: 'clive', exact: true })).toHaveCount(0);
-  await expect(page.locator('#stats-content th', { hasText: 'Misc' })).toBeVisible();
-  await expect(page.locator('#stats-content tfoot')).toContainText('9');
+  await expect(page.locator('#stats-content th', { hasText: 'Misc' })).toHaveCount(0);
+  await expect(page.locator('#stats-content tfoot')).toContainText('7');
 });
 
 test('agent breakdown shows agent! columns based on session type filter', async ({ page }) => {
