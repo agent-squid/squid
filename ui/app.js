@@ -8025,10 +8025,10 @@ function _renderFileViewer(container, text, targetLine, endLine, path, changedLi
 
   rawLines.forEach((content, i) => {
     const n = i + 1;
-    const inRange = targetLine && n >= targetLine && n <= (endLine || targetLine);
     const isChanged = changedLines?.has(n);
+    const inRange = !changedLines && targetLine && n >= targetLine && n <= (endLine || targetLine);
     const row = document.createElement('div');
-    row.className = 'fv-line' + (inRange ? ' fv-target' : isChanged ? ' fv-changed' : '');
+    row.className = 'fv-line' + (isChanged ? ' fv-changed' : inRange ? ' fv-target' : '');
     if (n === targetLine) row.id = 'fv-target';
 
     const num = document.createElement('span');
