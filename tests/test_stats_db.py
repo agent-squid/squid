@@ -315,12 +315,12 @@ def test_agent_session_breakdown_keeps_agent_session_variants_separate(tmp_path,
         cwd="/repo",
     )
 
-    rows = stats_db.get_stats_by_agent_profile_breakdown(days=0, period="daily", include_session=True)
+    rows = stats_db.get_stats_by_agent_breakdown(days=0, period="daily", include_session=True)
     by_agent = {row["agent"]: row for row in rows}
 
     assert by_agent["codex"]["input_tokens"] == 100
     assert by_agent["codex!"]["input_tokens"] == 40
-    assert by_agent["codex"]["profile_key"] != by_agent["codex!"]["profile_key"]
+    assert by_agent["codex"]["agent_key"] != by_agent["codex!"]["agent_key"]
 
 
 def test_agent_breakdown_groups_by_agent_label(tmp_path, monkeypatch):
@@ -346,7 +346,7 @@ def test_agent_breakdown_groups_by_agent_label(tmp_path, monkeypatch):
         cwd="/repo",
     )
 
-    rows = stats_db.get_stats_by_agent_profile_breakdown(days=0, period="daily")
+    rows = stats_db.get_stats_by_agent_breakdown(days=0, period="daily")
     by_agent = {row["agent"]: row for row in rows}
 
     assert list(by_agent) == ["codex"]

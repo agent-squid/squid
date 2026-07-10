@@ -503,9 +503,8 @@
         <div class="sf-row sf-session-row">
           <label class="sf-field">
             <select id="sf-breakdown">
-              <option value="" selected>No Breakdown</option>
-              <option value="agent">Agent</option>
-              <option value="agent_session">Agent · Session</option>
+              <option value="" selected>Total</option>
+              <option value="agent">By Agent</option>
             </select>
           </label>
           <span class="sf-sep"></span>
@@ -532,6 +531,7 @@
             <option value="tokens_in">Tokens In</option>
             <option value="tokens_out">Tokens Out</option>
             <option value="sessions">Sessions</option>
+            <option value="quota">Quota</option>
           </select>
           <button id="sc-compare-btn" type="button">+ Y2</button>
           <select id="sc-y2" hidden>
@@ -541,6 +541,7 @@
             <option value="tokens_in">Tokens In</option>
             <option value="tokens_out">Tokens Out</option>
             <option value="sessions">Sessions</option>
+            <option value="quota">Quota</option>
           </select>
         </div>
         <div id="stats-chart-box"><canvas id="stats-chart"></canvas></div>

@@ -1489,7 +1489,7 @@ def get_aggregated_stats(
         return []
 
 
-def get_stats_by_agent_profile_breakdown(
+def get_stats_by_agent_breakdown(
     period: str = "daily",
     days: int = 30,
     agent: str = "",
@@ -1534,7 +1534,7 @@ def get_stats_by_agent_profile_breakdown(
                         SELECT
                             {bucket} AS period,
                             {series_expr} AS agent,
-                            {series_expr} AS profile_key,
+                            {series_expr} AS agent_key,
                             COUNT(*) AS sessions,
                             COUNT(*) AS total_turns,
                             SUM(input_tokens) AS input_tokens,
@@ -1547,7 +1547,7 @@ def get_stats_by_agent_profile_breakdown(
                                      THEN quota_after - quota_before ELSE NULL END) AS quota_delta
                         FROM session_stats
                         WHERE {where}
-                        GROUP BY period, profile_key
+                        GROUP BY period, agent_key
                     )
                     ORDER BY period DESC, sessions DESC
                     LIMIT ?""",
