@@ -225,6 +225,55 @@ test('agents backend catalog treats keyed DeepSeek as ready without Claude auth 
   await expect(row).not.toContainText('detected');
 });
 
+test('edit button prefills agent form with existing agent values', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/health', r => r.fulfill({ json: {
+    status: 'ok',
+    backends: {
+      claude: { driver: 'claude', label: 'Claude', available: true, protocol: 'interactive-cli', missing_requirements: [], gauge: { type: 'none' } },
+      codex:  { driver: 'codex',  label: 'Codex',  available: true, protocol: 'oneshot-cli',    missing_requirements: [], gauge: { type: 'none' } },
+    },
+  }}));
+  await page.route('**/config/agents', r => r.fulfill({ json: [
+    { name: 'codex', backend: 'codex', model: null, cwd: null },
+    { name: 'haiku', backend: 'claude', model: 'claude-haiku-4-5', cwd: '/tmp/work' },
+  ]}));
+
+  await page.goto('/');
+  await page.locator('.nav-tab[data-view="agents"]').click();
+
+  const row = page.locator('#agents-list tbody tr').filter({ hasText: 'haiku' });
+  await row.locator('.edit-btn').click();
+
+  await expect(page.locator('#af-name')).toHaveValue('haiku');
+  await expect(page.locator('#af-backend')).toHaveValue('claude');
+  await expect(page.locator('#af-model')).toHaveValue('claude-haiku-4-5');
+  await expect(page.locator('#af-cwd')).toHaveValue('/tmp/work');
+});
+
+test('edit button prefills form with empty model and cwd when not set', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/health', r => r.fulfill({ json: {
+    status: 'ok',
+    backends: {
+      codex: { driver: 'codex', label: 'Codex', available: true, protocol: 'oneshot-cli', missing_requirements: [], gauge: { type: 'none' } },
+    },
+  }}));
+  await page.route('**/config/agents', r => r.fulfill({ json: [
+    { name: 'codex', backend: 'codex', model: null, cwd: null },
+  ]}));
+
+  await page.goto('/');
+  await page.locator('.nav-tab[data-view="agents"]').click();
+
+  await page.locator('#agents-list tbody tr .edit-btn').click();
+
+  await expect(page.locator('#af-name')).toHaveValue('codex');
+  await expect(page.locator('#af-backend')).toHaveValue('codex');
+  await expect(page.locator('#af-model')).toHaveValue('');
+  await expect(page.locator('#af-cwd')).toHaveValue('');
+});
+
 test('blocked file viewer lets the user choose a broader parent and retries', async ({ page }) => {
   await mockApp(page);
   let allowed = false;

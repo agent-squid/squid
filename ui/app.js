@@ -6357,6 +6357,7 @@ async function loadAgents() {
       <td class="col-model">${a.model || '<span class="col-default">—</span>'}</td>
       <td>${a.cwd || `<span class="col-default">${_squidHome}</span>`}</td>
       <td>
+        <button class="edit-btn" data-name="${escapeHtml(a.name)}" data-backend="${escapeHtml(a.backend)}" data-model="${escapeHtml(a.model || '')}" data-cwd="${escapeHtml(a.cwd || '')}" title="Edit agent">✎</button>
         <button class="del-btn" data-name="${a.name}" title="Delete agent (does not affect existing messages)">✕</button>
       </td>
     </tr>`).join('');
@@ -6364,6 +6365,17 @@ async function loadAgents() {
     <thead><tr><th>Name</th><th>Backend</th><th class="col-model">Model</th><th>CWD</th><th></th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
+
+  listEl.querySelectorAll('.edit-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.getElementById('af-name').value    = btn.dataset.name;
+      document.getElementById('af-backend').value = btn.dataset.backend;
+      document.getElementById('af-model').value   = btn.dataset.model;
+      document.getElementById('af-cwd').value     = btn.dataset.cwd;
+      document.getElementById('agent-form').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      document.getElementById('af-name').focus();
+    });
+  });
 
   listEl.querySelectorAll('.del-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
