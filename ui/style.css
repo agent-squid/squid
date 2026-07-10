@@ -2415,6 +2415,7 @@ body {
   cursor: pointer;
   font-size: 1em;
   padding: 0.12rem 0.4rem;
+  white-space: nowrap;
 }
 .sf-chip.active { background: #2a2a3e; border-color: #4a4a70; color: #9090c0; }
 .sf-chip:hover:not(.active) { border-color: #3a3a50; color: #777; }
@@ -2983,11 +2984,11 @@ button {
     gap: 0.35rem 0.45rem;
   }
   .sf-primary-row {
+    display: grid;
     flex: 1 1 100%;
-    flex-wrap: nowrap;
-  }
-  .sf-primary-row .sf-field {
-    flex: 1 1 0;
+    grid-template-columns: 4.7rem 4.25rem 5.2rem minmax(6.8rem, 1fr);
+    gap: 0.35rem;
+    align-items: center;
   }
   .sf-primary-row select {
     width: 100%;
