@@ -722,6 +722,27 @@ test('stats breakdown sort restores from URL', async ({ page }) => {
   await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(1);
 });
 
+test('leaving stats clears stats URL state so refresh stays on the active tab', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/stats/filters', route => route.fulfill({
+    json: { agents: ['codex'], topics: [] },
+  }));
+  await page.route('**/stats?**', route => route.fulfill({
+    json: [{ period: '2026-06-26 14:00', agent_key: 'codex', agent: 'codex', sessions: 1, total_turns: 9 }],
+  }));
+
+  await page.goto('/?view=stats&period=hourly&days=7&breakdown=agent&breakdown_sort=total&breakdown_sort_dir=asc');
+  await expect(page.locator('#view-stats')).toHaveClass(/active/);
+
+  await page.getByRole('button', { name: 'Chat' }).click();
+  await expect(page.locator('#view-chat')).toHaveClass(/active/);
+  expect(new URL(page.url()).search).toBe('');
+
+  await page.reload();
+  await expect(page.locator('#view-chat')).toHaveClass(/active/);
+  await expect(page.locator('#view-stats')).not.toHaveClass(/active/);
+});
+
 test('agent session type breakdown expands selected base agents into session variants', async ({ page }) => {
   await mockApp(page);
   await page.route('**/stats/filters', route => route.fulfill({
