@@ -2465,6 +2465,8 @@ body {
   max-width: 9rem;
   min-width: 0;
 }
+#stats-filters #sf-period { width: 4.7rem; }
+#stats-filters #sf-days { width: 4.25rem; }
 #sf-period:focus, #sf-days:focus, #sf-adhoc:focus, #sf-breakdown:focus { outline: 1px solid #4a4a70; }
 
 #stats-chart-wrap {
@@ -3012,6 +3014,7 @@ button {
   #sf-adhoc,
   #sf-breakdown {
     max-width: none;
+    width: 100%;
   }
   #stats-chart-controls {
     flex-wrap: wrap;
