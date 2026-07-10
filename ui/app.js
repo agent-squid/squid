@@ -4879,10 +4879,23 @@ function _statsState() {
   };
 }
 
+function _overallStatsState() {
+  return {
+    version: 1,
+    time: { period: 'hourly', days: 7 },
+    dimensions: {
+      topic: { mode: 'auto_top', values: [] },
+      agent: { mode: 'auto_top', values: [] },
+      session_type: { mode: 'all', values: [] },
+    },
+    breakdown: { key: '' },
+    measure: { primary: 'turns', secondary: null, visible: ['sessions', 'turns', 'tokens_in', 'tokens_out'] },
+  };
+}
+
 function _markStatsPresetDirty() {
-  if (!_activeStatsPresetId) return;
   _statsPresetDirty = true;
-  _renderStatsPresetTabs();
+  _renderStatsPresetControls();
 }
 
 function _applyStatsState(state) {
@@ -4916,19 +4929,21 @@ function _applyStatsState(state) {
   _updateStatsBreakdownUi();
 }
 
-function _renderStatsPresetTabs() {
-  const tabs = document.getElementById('stats-preset-tabs');
-  if (!tabs) return;
-  tabs.innerHTML = _statsPresets.map(preset => {
-    const classes = ['sf-chip', 'stats-preset-tab'];
-    if (preset.id === _activeStatsPresetId) classes.push('active');
-    if (preset.id === _activeStatsPresetId && _statsPresetDirty) classes.push('dirty');
-    if (preset.is_default) classes.push('default');
-    return `<button type="button" class="${classes.join(' ')}" data-id="${preset.id}">${escapeHtml(preset.name)}</button>`;
-  }).join('');
-  document.getElementById('stats-preset-overwrite').disabled = !_activeStatsPresetId;
-  document.getElementById('stats-preset-default').disabled = !_activeStatsPresetId;
-  document.getElementById('stats-preset-delete').disabled = !_activeStatsPresetId;
+function _renderStatsPresetControls() {
+  const select = document.getElementById('stats-preset-select');
+  if (!select) return;
+  const options = ['<option value="__overall">Overall View</option>'];
+  if (_statsPresetDirty) options.push('<option value="__custom">Custom View</option>');
+  options.push(..._statsPresets.map(preset => {
+    const label = `${preset.name}${preset.is_default ? ' (default)' : ''}`;
+    return `<option value="${preset.id}">${escapeHtml(label)}</option>`;
+  }));
+  select.innerHTML = options.join('');
+  select.value = _statsPresetDirty ? '__custom' : (_activeStatsPresetId ? String(_activeStatsPresetId) : '__overall');
+  const hasActivePreset = !!_activeStatsPresetId;
+  document.getElementById('stats-preset-update').disabled = !hasActivePreset;
+  document.getElementById('stats-preset-default').disabled = !hasActivePreset;
+  document.getElementById('stats-preset-delete').disabled = !hasActivePreset;
 }
 
 function _setStatsPresetStatus(text) {
@@ -4939,29 +4954,28 @@ function _setStatsPresetStatus(text) {
 async function _loadStatsPresets({ applyDefault = false } = {}) {
   try {
     _statsPresets = await fetch('/stats/filter-presets').then(r => r.json());
-    _renderStatsPresetTabs();
     const def = _statsPresets.find(preset => preset.is_default);
     if (applyDefault && def && !_activeStatsPresetId) {
       _activeStatsPresetId = def.id;
       _statsPresetDirty = false;
       _applyStatsState(def.state);
     }
+    _renderStatsPresetControls();
   } catch {
     _statsPresets = [];
   }
 }
 
-async function _saveStatsPreset({ overwrite = false, makeDefault = false } = {}) {
-  const nameInput = document.getElementById('stats-preset-name');
+async function _saveStatsPreset({ update = false, makeDefault = false } = {}) {
   const active = _statsPresets.find(preset => preset.id === _activeStatsPresetId);
-  const name = (nameInput.value || active?.name || '').trim();
-  if (!name && !overwrite && !makeDefault) {
+  const name = update || makeDefault ? active?.name : window.prompt('Preset name', active?.name || '');
+  if (!name && !update && !makeDefault) {
     _setStatsPresetStatus('name required');
     return;
   }
-  const url = overwrite || makeDefault ? `/stats/filter-presets/${_activeStatsPresetId}` : '/stats/filter-presets';
-  const method = overwrite || makeDefault ? 'PUT' : 'POST';
-  const body = makeDefault ? { is_default: true } : { name, state: _statsState() };
+  const url = update || makeDefault ? `/stats/filter-presets/${_activeStatsPresetId}` : '/stats/filter-presets';
+  const method = update || makeDefault ? 'PUT' : 'POST';
+  const body = makeDefault ? { is_default: true } : { name: name.trim(), state: _statsState() };
   const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -4972,8 +4986,8 @@ async function _saveStatsPreset({ overwrite = false, makeDefault = false } = {})
   await _loadStatsPresets();
   _activeStatsPresetId = preset.id;
   _statsPresetDirty = false;
-  _renderStatsPresetTabs();
-  _setStatsPresetStatus(makeDefault ? 'default set' : 'saved');
+  _renderStatsPresetControls();
+  _setStatsPresetStatus(makeDefault ? 'default set' : update ? 'updated' : 'saved');
 }
 
 function _destroyChart() {
@@ -5594,21 +5608,30 @@ function initStats() {
     if (!hidden) { statsChartY2 = ''; if (_lastStatsRows) _renderChart(_lastStatsRows); }
   });
 
-  document.getElementById('stats-preset-tabs')?.addEventListener('click', e => {
-    const btn = e.target.closest('.stats-preset-tab');
-    if (!btn) return;
-    const preset = _statsPresets.find(item => String(item.id) === btn.dataset.id);
-    if (!preset) return;
+  document.getElementById('stats-preset-select')?.addEventListener('change', e => {
+    if (e.target.value === '__overall') {
+      _activeStatsPresetId = null;
+      _statsPresetDirty = false;
+      _applyStatsState(_overallStatsState());
+      _renderStatsPresetControls();
+      _setStatsPresetStatus('');
+      loadStats();
+      return;
+    }
+    const preset = _statsPresets.find(item => String(item.id) === e.target.value);
+    if (!preset) {
+      _renderStatsPresetControls();
+      return;
+    }
     _activeStatsPresetId = preset.id;
     _statsPresetDirty = false;
-    document.getElementById('stats-preset-name').value = preset.name;
     _applyStatsState(preset.state);
-    _renderStatsPresetTabs();
+    _renderStatsPresetControls();
     _setStatsPresetStatus('');
     loadStats();
   });
   document.getElementById('stats-preset-save')?.addEventListener('click', () => _saveStatsPreset());
-  document.getElementById('stats-preset-overwrite')?.addEventListener('click', () => _saveStatsPreset({ overwrite: true }));
+  document.getElementById('stats-preset-update')?.addEventListener('click', () => _saveStatsPreset({ update: true }));
   document.getElementById('stats-preset-default')?.addEventListener('click', () => _saveStatsPreset({ makeDefault: true }));
   document.getElementById('stats-preset-delete')?.addEventListener('click', async () => {
     if (!_activeStatsPresetId) return;
@@ -5616,6 +5639,7 @@ function initStats() {
     _activeStatsPresetId = null;
     _statsPresetDirty = false;
     await _loadStatsPresets();
+    _renderStatsPresetControls();
     _setStatsPresetStatus('deleted');
   });
 }

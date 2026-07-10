@@ -462,12 +462,11 @@
     <!-- ── STATS VIEW ────────────────────────────────────────────────── -->
     <div id="view-stats" class="view">
       <div id="stats-presets">
-        <div id="stats-preset-tabs"></div>
+        <select id="stats-preset-select" aria-label="Stats view"></select>
         <div id="stats-preset-actions">
-          <input id="stats-preset-name" type="text" placeholder="Preset name" />
           <button id="stats-preset-save" type="button" class="sf-chip">Save New</button>
-          <button id="stats-preset-overwrite" type="button" class="sf-chip" disabled>Overwrite</button>
-          <button id="stats-preset-default" type="button" class="sf-chip" disabled>Mark Default</button>
+          <button id="stats-preset-update" type="button" class="sf-chip" disabled>Update</button>
+          <button id="stats-preset-default" type="button" class="sf-chip" disabled>Set Default</button>
           <button id="stats-preset-delete" type="button" class="sf-chip" disabled>Delete</button>
           <span id="stats-preset-status"></span>
         </div>
