@@ -227,6 +227,7 @@ class _ClaudeStreamParser:
         return {
             "_stats": {
                 "session_id": self.session_id or event.get("session_id"),
+                "model": event.get("model"),
                 "input_tokens": usage.get("input_tokens", 0),
                 "output_tokens": usage.get("output_tokens", 0),
                 "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
@@ -1098,6 +1099,7 @@ async def run_codex(
             yield {
                 "_stats": {
                     "session_id": thread_id,
+                    "model": event.get("model") or params.get("model"),
                     "input_tokens": total_in,
                     "output_tokens": int(usage.get("output_tokens", 0) or 0),
                     "cache_read_tokens": cached_in,
