@@ -7433,7 +7433,10 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     }
   });
   previewBtn.addEventListener('click', () => {
-    window.open('/localfile?' + new URLSearchParams({ path }), '_blank', 'noopener');
+    const ext = (path.split('.').pop() || '').toLowerCase();
+    const params = { path };
+    if (ext === 'md' || ext === 'markdown') params.render = '1';
+    window.open('/localfile?' + new URLSearchParams(params), '_blank', 'noopener');
   });
   copyBtn.addEventListener('click', () => {
     navigator.clipboard?.writeText(path).then(() => {
