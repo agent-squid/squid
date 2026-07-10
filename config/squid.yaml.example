@@ -17,6 +17,9 @@ worktree:
   # Directories to symlink (not copy) from a code root into each fresh per-turn
   # worktree, so installed dependencies don't need reinstalling there. Matched
   # by directory name; not recursed into once matched; never applied inside .git.
+  # If you add an entry, make sure its .gitignore pattern has no trailing
+  # slash (e.g. "vendor" not "vendor/") — a trailing slash won't match the
+  # symlink, so it'll get tracked into the repo by the turn-end auto-commit.
   dependency_dirs:
     - node_modules
     - .venv
