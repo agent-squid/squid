@@ -5034,9 +5034,9 @@ async function loadStats() {
       const agentSel = document.getElementById('sf-agent');
       const topicSel = document.getElementById('sf-topic');
       const curAgent = agentSel.value, curTopic = topicSel.value;
-      agentSel.innerHTML = '<option value="">All</option>' +
-        data.agents.map(a => `<option value="${escapeHtml(a)}"${a === curAgent ? ' selected' : ''}>${escapeHtml(a)}</option>`).join('');
-      topicSel.innerHTML = '<option value="">All</option>' +
+      agentSel.innerHTML = '<option value="">All Agents</option>' +
+        data.agents.map(a => `<option value="${escapeHtml(a)}"${a === curAgent ? ' selected' : ''}>@${escapeHtml(a)}</option>`).join('');
+      topicSel.innerHTML = '<option value="">All Topics</option>' +
         data.topics.map(t => `<option value="${escapeHtml(t)}"${t === curTopic ? ' selected' : ''}>#${escapeHtml(t)}</option>`).join('');
     }).catch(() => {});
   }
