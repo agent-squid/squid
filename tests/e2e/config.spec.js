@@ -560,6 +560,60 @@ test('agent session type breakdown expands selected base agents into session var
   await expect(page.locator('#stats-content tfoot')).toContainText('9');
 });
 
+test('agent breakdown shows agent! columns based on session type filter', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/stats/filters', route => route.fulfill({
+    json: { agents: ['codex', 'clive'], topics: [] },
+  }));
+  const statsRequests = [];
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    statsRequests.push(url);
+    const adhoc = url.searchParams.get('adhoc');
+    if (adhoc === 'session') {
+      return route.fulfill({
+        json: [
+          { period: '2026-06-26 14:00', agent_key: 'codex', agent: 'codex', sessions: 4, total_turns: 4 },
+        ],
+      });
+    }
+    if (adhoc === 'adhoc') {
+      return route.fulfill({
+        json: [
+          { period: '2026-06-26 14:00', agent_key: 'codex!', agent: 'codex!', sessions: 3, total_turns: 3 },
+        ],
+      });
+    }
+    return route.fulfill({
+      json: [
+        { period: '2026-06-26 14:00', agent_key: 'codex', agent: 'codex', sessions: 4, total_turns: 4 },
+        { period: '2026-06-26 14:00', agent_key: 'codex!', agent: 'codex!', sessions: 3, total_turns: 3 },
+      ],
+    });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('#sf-breakdown').selectOption('agent');
+  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBe('agent');
+
+  // default (all sessions): both codex and codex! columns shown
+  await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'codex!', exact: true })).toBeVisible();
+
+  // session only: only codex column
+  await page.locator('#sf-adhoc').selectOption('session');
+  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('adhoc')).toBe('session');
+  await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'codex!', exact: true })).toHaveCount(0);
+
+  // adhoc only: only codex! column
+  await page.locator('#sf-adhoc').selectOption('adhoc');
+  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('adhoc')).toBe('adhoc');
+  await expect(page.getByRole('columnheader', { name: 'codex!', exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'codex', exact: true })).toHaveCount(0);
+});
+
 test('/restart clears its persisted draft before the page reloads', async ({ page }) => {
   await mockApp(page);
   await page.route('**/cmd', route => route.fulfill({ json: { ok: true } }));
