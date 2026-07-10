@@ -2892,10 +2892,12 @@ function _firstChangedNewRange(chunk) {
 
 function renderUnifiedDiffLines(container, diff) {
   for (const line of (diff || '').split('\n')) {
+    if (line.startsWith('diff --git ') || line.startsWith('index ') ||
+        line.startsWith('--- ') || line.startsWith('+++ ')) continue;
     const el = document.createElement('span');
-    if (line.startsWith('+') && !line.startsWith('+++')) {
+    if (line.startsWith('+')) {
       el.className = 'diff-line diff-add';
-    } else if (line.startsWith('-') && !line.startsWith('---')) {
+    } else if (line.startsWith('-')) {
       el.className = 'diff-line diff-remove';
     } else if (line.startsWith('@@')) {
       el.className = 'diff-line diff-hunk';
