@@ -1795,10 +1795,10 @@ def _looks_like_text_file(path: Path, sample_size: int = 65536) -> bool:
     return bad / len(text) <= 0.01
 
 @app.get("/localfile")
-async def serve_local_file(path: str, request: Request):
+async def serve_local_file(path: str, request: Request, render: bool = False):
     """Serve a local file — only paths under server.localfile_roots are allowed."""
     import mimetypes
-    from fastapi.responses import FileResponse, PlainTextResponse
+    from fastapi.responses import FileResponse, PlainTextResponse, HTMLResponse
     _nocache = {"Cache-Control": "no-store"}
     if not _same_origin(request):
         return JSONResponse({"error": "cross-origin file reads are not allowed"}, status_code=403)
@@ -1824,6 +1824,15 @@ async def serve_local_file(path: str, request: Request):
         return JSONResponse({"type": "directory", "path": str(p), "entries": entry_list}, headers=_nocache)
     if not p.is_file():
         return JSONResponse({"error": "not a file"}, status_code=400)
+    if render and p.suffix.lower() in (".md", ".markdown"):
+        md_content = p.read_text(errors="replace").replace("`", "&#96;").replace("</", "<\\/")
+        html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:860px;margin:40px auto;padding:0 20px;line-height:1.6;color:#24292e}}pre{{background:#f6f8fa;padding:16px;border-radius:6px;overflow:auto}}code{{background:#f6f8fa;padding:.2em .4em;border-radius:3px}}a{{color:#0366d6}}</style>
+</head><body><div id="out"></div>
+<script src="/vendor/marked.min.js"></script>
+<script>document.getElementById('out').innerHTML=marked.parse(`{md_content}`);</script>
+</body></html>"""
+        return HTMLResponse(html, headers=_nocache)
     mime = _LOCALFILE_TEXT_MIME_BY_SUFFIX.get(p.suffix.lower())
     if mime is None:
         mime, _ = mimetypes.guess_type(str(p))
