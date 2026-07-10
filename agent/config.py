@@ -76,6 +76,13 @@ OPENCODE_DEFAULT_MODEL = "opencode/deepseek-v4-flash-free"
 # Per-user tmp dir for context sync — avoids cross-user permission conflicts
 SQUID_HOME = f"/tmp/{os.getlogin()}/squid"
 
+# Directory names to symlink from a code root into each fresh per-turn worktree.
+_worktree_cfg = _cfg.get("worktree", {})
+DEPENDENCY_DIRS: list[str] = _worktree_cfg.get("dependency_dirs", [
+    "node_modules", ".venv", "venv", "env", ".tox", "__pypackages__",
+    "vendor", "target", ".bundle", "Pods", ".cargo", ".stack-work", "elm-stuff",
+])
+
 # Proxy environment to inject into every CLI subprocess, or None if disabled.
 _proxy_cfg = _cfg.get("proxy", {})
 PROXY_ENV: Optional[dict] = None

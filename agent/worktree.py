@@ -8,14 +8,46 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 import subprocess
 from pathlib import Path
 from typing import Optional
 
+from . import config
+
 log = logging.getLogger(__name__)
 
 _WORKTREES_HOME = Path.home() / ".squid" / "worktrees"
+
+# How deep under repo_root to search for dependency directories to symlink.
+_DEPENDENCY_SCAN_MAX_DEPTH = 4
+
+
+def _link_dependency_dirs(repo_root: Path, wt: Path) -> None:
+    """
+    Symlink installed-dependency directories (node_modules, .venv, etc. —
+    see config.DEPENDENCY_DIRS) from repo_root into wt, since `git worktree
+    add` only materializes tracked files and these are always gitignored.
+    Matched by directory name; not recursed into once matched.
+    """
+    names = set(config.DEPENDENCY_DIRS)
+    root_depth = str(repo_root).count(os.sep)
+    for dirpath, dirnames, _files in os.walk(repo_root):
+        if ".git" in dirnames:
+            dirnames.remove(".git")
+        depth = str(dirpath).count(os.sep) - root_depth
+        if depth >= _DEPENDENCY_SCAN_MAX_DEPTH:
+            dirnames.clear()
+            continue
+        matched = [d for d in dirnames if d in names]
+        for d in matched:
+            dirnames.remove(d)  # dependency dirs don't nest further matches
+            src = Path(dirpath) / d
+            dst = wt / src.relative_to(repo_root)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if not dst.exists() and not dst.is_symlink():
+                dst.symlink_to(src, target_is_directory=True)
 
 
 def _run_git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -69,6 +101,7 @@ def ensure_worktree(repo_root: Path, topic: str, agent: str) -> Path:
         _run_git(repo_root, "worktree", "add", str(wt), br)
     else:
         _run_git(repo_root, "worktree", "add", "-b", br, str(wt), "HEAD")
+    _link_dependency_dirs(repo_root, wt)
     log.info("worktree created: %s branch=%s", wt, br)
     return wt
 
