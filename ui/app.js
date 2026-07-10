@@ -178,6 +178,7 @@ function switchView(name) {
     btn.classList.toggle('active', btn.dataset.view === name);
   });
   currentView = name;
+  if (name !== 'stats') _clearStatsBrowserUrl();
   document.getElementById('right-rail')?.classList.toggle('quota-chat-hidden', name !== 'chat');
   if (name !== 'chat') {
     document.querySelectorAll('#quota-creds-popup, #codex-creds-popup, #cursor-creds-popup, #deepseek-max-popup')
@@ -4965,6 +4966,15 @@ function _syncStatsBrowserUrl() {
   const next = `${url.pathname}${url.search}${url.hash}`;
   const current = `${location.pathname}${location.search}${location.hash}`;
   if (next !== current) history.replaceState(null, '', next);
+}
+
+function _clearStatsBrowserUrl() {
+  if (!history.replaceState) return;
+  const url = new URL(location.href);
+  const before = url.search;
+  for (const key of STATS_BROWSER_URL_KEYS) url.searchParams.delete(key);
+  if (url.search === before) return;
+  history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
 }
 
 function _applyStatsUrlState() {
