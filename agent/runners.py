@@ -119,6 +119,15 @@ def get_active_agent_for_topic(topic: str) -> Optional[str]:
     return None
 
 
+def get_active_msg_ids() -> set[int]:
+    """Return msg_ids of all processes currently in the registry (adhoc and non-adhoc)."""
+    return {
+        info["msg_id"]
+        for info in _proc_registry.values()
+        if info.get("msg_id") is not None
+    }
+
+
 def list_active_procs() -> list[dict]:
     now = time.monotonic()
     return [
