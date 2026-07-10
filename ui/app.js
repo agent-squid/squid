@@ -5261,6 +5261,13 @@ function initStats() {
   document.getElementById('sf-breakdown').addEventListener('change', e => {
     statsBreakdown = e.target.value;
     e.target.value = statsBreakdown;
+    if (statsBreakdown) {
+      statsChartY2 = '';
+      const y2Sel = document.getElementById('sc-y2');
+      y2Sel.hidden = true;
+      y2Sel.value = '';
+      document.getElementById('sc-compare-btn').textContent = '+ Y2';
+    }
     loadStats();
   });
 
