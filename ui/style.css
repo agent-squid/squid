@@ -2642,7 +2642,7 @@ body {
   min-width: 100%;
 }
 #stats-content .stats-breakdown-table .stats-series-col {
-  min-width: 7.5rem;
+  min-width: 9.5rem;
 }
 #stats-content .stats-breakdown-table .stats-sticky-left,
 #stats-content .stats-breakdown-table .stats-sticky-right {
