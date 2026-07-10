@@ -574,6 +574,45 @@ test('agent session type breakdown expands selected base agents into session var
   await expect(page.locator('#stats-content tfoot')).toContainText('7');
 });
 
+test('agent session type breakdown defaults three base agents into six session lanes', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/stats/filters', route => route.fulfill({
+    json: { agents: ['codex', 'clive', 'opencode', 'haiku'], topics: [] },
+  }));
+  const statsRequests = [];
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    statsRequests.push(url);
+    if (url.searchParams.get('breakdown') === 'agent_session') {
+      return route.fulfill({
+        json: [
+          { period: '2026-06-26 14:00', agent_key: 'codex', agent: 'codex', sessions: 4, total_turns: 4 },
+          { period: '2026-06-26 14:00', agent_key: 'codex!', agent: 'codex!', sessions: 0, total_turns: 6 },
+          { period: '2026-06-26 14:00', agent_key: 'clive', agent: 'clive', sessions: 8, total_turns: 8 },
+          { period: '2026-06-26 14:00', agent_key: 'opencode!', agent: 'opencode!', sessions: 0, total_turns: 7 },
+          { period: '2026-06-26 14:00', agent_key: 'haiku', agent: 'haiku', sessions: 1, total_turns: 1 },
+        ],
+      });
+    }
+    return route.fulfill({ json: [{ period: '2026-06-26 14:00', sessions: 13, total_turns: 26 }] });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('#sf-breakdown').selectOption('agent_session');
+  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBe('agent_session');
+  expect(statsRequests.at(-1).searchParams.get('agent')).toBeNull();
+  await expect(page.locator('#sf-agent-toggle')).toHaveText('3 Agents');
+  await expect(page.locator('#stats-content thead th')).toHaveText([
+    'Hour', 'clive', 'clive!', 'codex', 'codex!', 'opencode', 'opencode!', 'Misc', 'Total',
+  ]);
+  await page.locator('#sf-agent-toggle').click();
+  await expect(page.locator('#sf-agent-menu input[value="codex"]')).toBeChecked();
+  await expect(page.locator('#sf-agent-menu input[value="clive"]')).toBeChecked();
+  await expect(page.locator('#sf-agent-menu input[value="opencode"]')).toBeChecked();
+  await expect(page.locator('#sf-agent-menu input[value="haiku"]')).not.toBeChecked();
+});
+
 test('agent breakdown shows agent! columns based on session type filter', async ({ page }) => {
   await mockApp(page);
   await page.route('**/stats/filters', route => route.fulfill({
