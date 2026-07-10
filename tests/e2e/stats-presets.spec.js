@@ -38,9 +38,17 @@ test('stats filter presets save in their own top row and apply saved state', asy
       return route.fulfill({ json: { ok: true } });
     }
   });
-  await page.route('**/stats?**', route => route.fulfill({
-    json: [{ period: '2026-06-26 14:00', sessions: 2, total_turns: 3, input_tokens: 1500, output_tokens: 700 }],
-  }));
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get('breakdown') === 'agent') {
+      return route.fulfill({
+        json: [{ period: '2026-06-26 14:00', agent_key: 'codex', agent: 'codex', sessions: 2, total_turns: 3 }],
+      });
+    }
+    return route.fulfill({
+      json: [{ period: '2026-06-26 14:00', sessions: 2, total_turns: 3, input_tokens: 1500, output_tokens: 700 }],
+    });
+  });
 
   await page.goto('/');
   await page.getByRole('button', { name: 'Stats' }).click();
@@ -55,6 +63,8 @@ test('stats filter presets save in their own top row and apply saved state', asy
   await page.locator('#sf-topic-menu input[value="squid"]').check();
   await page.locator('#sf-agent-toggle').click();
   await page.locator('#sf-agent-menu input[value="codex"]').check();
+  await page.locator('#sf-breakdown').selectOption('agent');
+  await page.locator('#stats-content tfoot td').first().getByRole('button', { name: 'Sort breakdown columns by total' }).nth(1).click();
   page.once('dialog', async dialog => {
     expect(dialog.message()).toBe('Preset name');
     await dialog.accept('Squid Codex');
@@ -66,6 +76,7 @@ test('stats filter presets save in their own top row and apply saved state', asy
   await expect(page.locator('#stats-preset-status')).toHaveText('saved');
   expect(presets[0].state.dimensions.topic.values).toEqual(['squid']);
   expect(presets[0].state.dimensions.agent.values).toEqual(['codex']);
+  expect(presets[0].state.breakdown.sort).toEqual({ mode: 'total', dir: 'desc' });
 
   await page.locator('#sf-topic-toggle').click();
   await page.locator('#sf-topic-menu input[value="ops"]').check();
