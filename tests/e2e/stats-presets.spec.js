@@ -65,11 +65,10 @@ test('stats filter presets save in their own top row and apply saved state', asy
   await page.locator('#sf-agent-menu input[value="codex"]').check();
   await page.locator('#sf-breakdown').selectOption('agent');
   await page.locator('#stats-content tfoot td').first().getByRole('button', { name: 'Sort breakdown columns by total' }).nth(1).click();
-  page.once('dialog', async dialog => {
-    expect(dialog.message()).toBe('Preset name');
-    await dialog.accept('Squid Codex');
-  });
   await page.locator('#stats-preset-save').click();
+  await expect(page.locator('#preset-name-modal')).toHaveClass(/open/);
+  await page.locator('#preset-name-input').fill('Squid Codex');
+  await page.locator('#preset-name-confirm').click();
 
   await expect(page.locator('#stats-preset-select')).toHaveValue('1');
   await expect(page.locator('#stats-preset-select')).toContainText('Squid Codex');
