@@ -204,8 +204,27 @@ top four individual topic/agent/session cells, because that would make the
 default set too dynamic and would reintroduce exact-series behavior through the
 back door.
 
-Default dimension counts are allocated under the four-series budget as complete
-combinations:
+Default dimension counts are allocated under the four-series budget using the
+broadest-first principle. Broadest-first means the default should preserve the
+highest-level, most generally useful split before spending budget on narrower
+or more volatile dimensions. Each dimension has a default max count; the
+resolver walks dimensions in broadest-first order for the active breakdown and
+uses the largest count that still keeps the full Cartesian product at or below
+four rendered series.
+
+For the current stats dimensions, the practical order is:
+
+1. `session_type` when present: max two values for `Sess + Adhoc`, otherwise
+   one value.
+2. `agent`: max two values in compound breakdowns.
+3. `topic`: use the remaining budget after broader dimensions are allocated.
+
+This makes session type the broadest current split because it has only two
+global values and users usually want both sides of the session/adhoc comparison
+when the breakdown includes it. Agent is next. Topic is allocated after those
+because topic populations are more dynamic across day ranges and workflows.
+
+Concrete defaults:
 
 | Breakdown | Default source values with `Sess + Adhoc` |
 |---|---|
@@ -219,12 +238,11 @@ cardinality is one and the freed budget may be used by the remaining dimensions.
 For example, `topic_agent_session` with `Session` may select two topics x two
 agents x one session type.
 
-When a breakdown contains more dimensions than fit in the budget, reduce the
-most explosive or dynamic dimension first. Today, topic is treated as broader
-than agent for defaults because topic populations change more with day range and
-workflow, so `topic_agent_session` uses one topic before reducing agents or
-session types. A future session-id dimension should be treated as broader than
-topic and should usually default to one session id in compound breakdowns.
+If a future session-id dimension is added, it becomes the broadest dimension for
+compound breakdowns but should usually have default max count one. Session ids
+are high-cardinality and highly specific, so a default such as one session id x
+two agents x two session types is preferable to chasing the top four individual
+session/agent/session-type cells.
 
 For a breakdown with session type and `Sess + Adhoc`, the session type dimension
 has cardinality two. Therefore default rendered series should usually be even:
