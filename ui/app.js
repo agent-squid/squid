@@ -5057,8 +5057,9 @@ function _renderStatsPresetControls() {
   select.innerHTML = options.join('');
   select.value = _statsPresetDirty ? '__custom' : (_activeStatsPresetId ? String(_activeStatsPresetId) : '__overall');
   const hasActivePreset = !!_activeStatsPresetId;
+  const hasDefaultPreset = _statsPresets.some(p => p.is_default);
   document.getElementById('stats-preset-update').disabled = !hasActivePreset;
-  document.getElementById('stats-preset-default').disabled = !hasActivePreset;
+  document.getElementById('stats-preset-default').disabled = !hasActivePreset && !hasDefaultPreset;
   document.getElementById('stats-preset-delete').disabled = !hasActivePreset;
 }
 
@@ -5104,6 +5105,23 @@ function _closePresetNameModal(name = null) {
 }
 
 async function _saveStatsPreset({ update = false, makeDefault = false } = {}) {
+  if (makeDefault && !_activeStatsPresetId) {
+    const currentDefault = _statsPresets.find(p => p.is_default);
+    if (!currentDefault) return;
+    const res = await fetch(`/stats/filter-presets/${currentDefault.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_default: false }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      _setStatsPresetStatus(err.error || 'save failed');
+      return;
+    }
+    await _loadStatsPresets();
+    _setStatsPresetStatus('default cleared');
+    return;
+  }
   const active = _statsPresets.find(preset => preset.id === _activeStatsPresetId);
   let name;
   if (update || makeDefault) {
