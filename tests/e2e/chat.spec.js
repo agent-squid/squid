@@ -534,6 +534,25 @@ test.describe('response bubble', () => {
     await expect(response).not.toContainText('Checking the code...');
   });
 
+  test('agent-prefixed status appears in the thought bubble', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        META,
+        { event: 'status', data: '[Agent: scan panels] Searching file viewer code...' },
+        { event: 'error', data: 'Backend unavailable' },
+      ),
+    }));
+
+    await sendMsg(page);
+
+    const statusBubble = page.locator('.msg-thinking-done');
+    await expect(statusBubble.locator('.thinking-body')).toContainText('[Agent: scan panels] Searching file viewer code...');
+    const response = page.locator(RESPONSE);
+    await expect(response.locator(MSG_ERROR)).toHaveText('Backend unavailable');
+    await expect(response).not.toContainText('Searching file viewer code...');
+  });
+
   test('terminated response error removes the status bubble', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200, headers: SSE_HEADERS,

@@ -403,7 +403,7 @@ def test_claude_interactive_waits_for_matching_agent_task_notification():
         chunks = asyncio.run(collect())
 
     assert chunks[0] == {"_tool": {"name": "Agent", "tool_use_id": "toolu_agent_1", "description": "scan panels"}}
-    assert "Scanning all panels now." not in chunks
+    assert {"_status": "[Agent: scan panels] Scanning all panels now.\n"} in chunks
     assert "Use Esc for dismissible panels, not confirmation modals." in chunks
     _clear()
 
@@ -457,7 +457,7 @@ def test_claude_interactive_accepts_queue_operation_agent_task_notification():
         chunks = asyncio.run(collect())
 
     assert chunks[0] == {"_tool": {"name": "Agent", "tool_use_id": "toolu_agent_1", "description": "scan panels"}}
-    assert "Scanning all panels now." not in chunks
+    assert {"_status": "[Agent: scan panels] Scanning all panels now.\n"} in chunks
     assert "Final answer after agent completion." in chunks
     _clear()
 
@@ -520,7 +520,7 @@ def test_claude_interactive_skips_empty_result_after_agent_task_notification():
         chunks = asyncio.run(collect())
 
     assert chunks[0] == {"_tool": {"name": "Agent", "tool_use_id": "toolu_agent_1", "description": "scan panels"}}
-    assert "Scanning all panels now." not in chunks
+    assert {"_status": "[Agent: scan panels] Scanning all panels now.\n"} in chunks
     assert "Final answer after agent completion." in chunks
     assert not any(isinstance(chunk, dict) and chunk.get("_stats", {}).get("input_tokens") == 1 for chunk in chunks)
     _clear()
