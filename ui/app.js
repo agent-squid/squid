@@ -4528,6 +4528,8 @@ let _activeStatsPresetId = null;
 let _statsPresetDirty = false;
 let _statsPresetsLoaded = false;
 let _statsBreakdownColumnSort = { mode: 'name', dir: 'asc' };
+let _statsUrlStateApplied = false;
+let _statsUrlOpenRequested = false;
 const STATS_SERIES_COLORS = [
   'rgba(100,160,255,1)',
   'rgba(80,200,120,1)',
@@ -4626,6 +4628,7 @@ function _bindStatsBreakdownSort() {
         mode: btn.dataset.statsColumnSort || 'name',
         dir: btn.dataset.statsColumnDir || 'asc',
       };
+      _syncStatsBrowserUrl();
       _rerenderStats();
     });
   });
@@ -4907,6 +4910,70 @@ function _renderStatsMultiMenu(menu, values, selected, prefix) {
   }).join('') || '<div class="empty">No options.</div>';
 }
 
+function _normalizeStatsBreakdownSort(sort = {}) {
+  const mode = sort.mode === 'total' ? 'total' : 'name';
+  const dir = sort.dir === 'desc' ? 'desc' : 'asc';
+  return { mode, dir };
+}
+
+function _statsQueryParams({ includeTz = false } = {}) {
+  const params = new URLSearchParams();
+  params.set('period', statsPeriod);
+  if (statsBreakdown) {
+    params.set('breakdown', statsBreakdown);
+    params.set('breakdown_sort', _statsBreakdownColumnSort.mode);
+    params.set('breakdown_sort_dir', _statsBreakdownColumnSort.dir);
+  }
+  params.set('days', statsFilters.days);
+  if (includeTz) params.set('tz_offset_minutes', new Date().getTimezoneOffset());
+  if (statsFilters.agents.length) params.set('agent', statsFilters.agents.join(','));
+  if (statsFilters.topics.length) params.set('topic', statsFilters.topics.join(','));
+  if (statsFilters.adhoc !== 'all') params.set('adhoc', statsFilters.adhoc);
+  return params;
+}
+
+const STATS_BROWSER_URL_KEYS = [
+  'view', 'period', 'breakdown', 'breakdown_sort', 'breakdown_sort_dir',
+  'days', 'agent', 'topic', 'adhoc',
+];
+
+function _syncStatsBrowserUrl() {
+  if (currentView !== 'stats' || !history.replaceState) return;
+  const url = new URL(location.href);
+  for (const key of STATS_BROWSER_URL_KEYS) url.searchParams.delete(key);
+  url.searchParams.set('view', 'stats');
+  for (const [key, value] of _statsQueryParams()) url.searchParams.set(key, value);
+  const next = `${url.pathname}${url.search}${url.hash}`;
+  const current = `${location.pathname}${location.search}${location.hash}`;
+  if (next !== current) history.replaceState(null, '', next);
+}
+
+function _applyStatsUrlState() {
+  const params = new URLSearchParams(location.search);
+  const hasStatsState = STATS_BROWSER_URL_KEYS.some(key => params.has(key));
+  if (!hasStatsState) return false;
+  const hasExplicitStatsState = STATS_BROWSER_URL_KEYS.some(key => key !== 'view' && params.has(key));
+  const period = params.get('period');
+  if (period === 'daily' || period === 'hourly') statsPeriod = period;
+  const days = Number(params.get('days'));
+  if (Number.isFinite(days) && days > 0) statsFilters.days = days;
+  statsBreakdown = params.get('breakdown') || '';
+  statsFilters.agents = (params.get('agent') || '').split(',').filter(Boolean);
+  statsFilters.topics = (params.get('topic') || '').split(',').filter(Boolean);
+  const adhoc = params.get('adhoc');
+  statsFilters.adhoc = ['session', 'adhoc'].includes(adhoc) ? adhoc : 'all';
+  _statsBreakdownColumnSort = _normalizeStatsBreakdownSort({
+    mode: params.get('breakdown_sort'),
+    dir: params.get('breakdown_sort_dir'),
+  });
+  document.getElementById('sf-period').value = statsPeriod;
+  document.getElementById('sf-days').value = String(statsFilters.days);
+  document.getElementById('sf-breakdown').value = statsBreakdown;
+  document.getElementById('sf-adhoc').value = statsFilters.adhoc;
+  _statsUrlStateApplied = hasExplicitStatsState;
+  return params.get('view') === 'stats';
+}
+
 function _statsState() {
   return {
     version: 1,
@@ -4916,7 +4983,7 @@ function _statsState() {
       agent: { mode: statsFilters.agents.length ? 'selected' : 'auto_top', values: [...statsFilters.agents] },
       session_type: { mode: statsFilters.adhoc === 'all' ? 'all' : 'selected', values: statsFilters.adhoc === 'all' ? [] : [statsFilters.adhoc] },
     },
-    breakdown: { key: statsBreakdown },
+    breakdown: { key: statsBreakdown, sort: { ..._statsBreakdownColumnSort } },
     measure: { primary: statsChartY1, secondary: statsChartY2 || null, visible: [..._statsMeasures] },
   };
 }
@@ -4930,7 +4997,7 @@ function _overallStatsState() {
       agent: { mode: 'auto_top', values: [] },
       session_type: { mode: 'all', values: [] },
     },
-    breakdown: { key: '' },
+    breakdown: { key: '', sort: { mode: 'name', dir: 'asc' } },
     measure: { primary: 'turns', secondary: null, visible: ['sessions', 'turns', 'tokens_in', 'tokens_out'] },
   };
 }
@@ -4944,6 +5011,7 @@ function _applyStatsState(state) {
   statsPeriod = state?.time?.period || 'hourly';
   statsFilters.days = Number(state?.time?.days ?? 7);
   statsBreakdown = state?.breakdown?.key || '';
+  _statsBreakdownColumnSort = _normalizeStatsBreakdownSort(state?.breakdown?.sort);
   const dims = state?.dimensions || {};
   statsFilters.topics = dims.topic?.mode === 'selected' ? [...(dims.topic.values || [])] : [];
   statsFilters.agents = dims.agent?.mode === 'selected' ? [...(dims.agent.values || [])] : [];
@@ -5351,7 +5419,7 @@ async function loadStats() {
 
   if (!_statsPresetsLoaded) {
     _statsPresetsLoaded = true;
-    await _loadStatsPresets({ applyDefault: true });
+    await _loadStatsPresets({ applyDefault: !_statsUrlStateApplied });
   }
 
   if (!_statsFiltersLoaded) {
@@ -5363,14 +5431,8 @@ async function loadStats() {
     }).catch(() => {});
   }
 
-  const params = new URLSearchParams();
-  params.set('period', statsPeriod);
-  if (statsBreakdown) params.set('breakdown', statsBreakdown);
-  params.set('days', statsFilters.days);
-  params.set('tz_offset_minutes', new Date().getTimezoneOffset());
-  if (statsFilters.agents.length) params.set('agent', statsFilters.agents.join(','));
-  if (statsFilters.topics.length) params.set('topic', statsFilters.topics.join(','));
-  if (statsFilters.adhoc !== 'all') params.set('adhoc', statsFilters.adhoc);
+  const params = _statsQueryParams({ includeTz: true });
+  _syncStatsBrowserUrl();
 
   let rows;
   try {
@@ -5627,6 +5689,7 @@ function initStats() {
       }
     });
   });
+  _statsUrlOpenRequested = _applyStatsUrlState();
   _updateStatsFilterLabels();
   _updateStatsMeasureLabel();
 
@@ -8712,6 +8775,7 @@ document.addEventListener('click', e => {
 initHistoryScroll();
 initPromptHistory();
 initStats();
+if (_statsUrlOpenRequested) switchView('stats');
 initTopicsView();
 initAliases();
 initQuota();

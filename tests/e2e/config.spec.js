@@ -541,8 +541,10 @@ test('stats breakdown columns can sort by footer totals', async ({ page }) => {
   await page.route('**/stats/filters', route => route.fulfill({
     json: { agents: ['codex', 'clive', 'cursor', 'haiku'], topics: [] },
   }));
+  const statsRequests = [];
   await page.route('**/stats?**', route => {
     const url = new URL(route.request().url());
+    statsRequests.push(url);
     if (url.searchParams.get('breakdown') === 'agent') {
       return route.fulfill({
         json: [
@@ -562,6 +564,10 @@ test('stats breakdown columns can sort by footer totals', async ({ page }) => {
 
   await page.locator('#sf-breakdown').selectOption('agent');
   await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'clive', 'codex', 'cursor', 'haiku', 'Total']);
+  await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown_sort')).toBe('name');
+  expect(statsRequests.at(-1).searchParams.get('breakdown_sort_dir')).toBe('asc');
+  expect(new URL(page.url()).searchParams.get('breakdown_sort')).toBe('name');
+  expect(new URL(page.url()).searchParams.get('breakdown_sort_dir')).toBe('asc');
   await expect(page.getByRole('button', { name: 'Sort breakdown columns by total' })).toHaveCount(2);
   await expect(page.getByRole('button', { name: 'Sort breakdown columns by name' })).toHaveCount(2);
   await expect(page.locator('#stats-content thead th').first().getByRole('button', { name: 'Sort breakdown columns by name' })).toHaveCount(2);
@@ -575,16 +581,22 @@ test('stats breakdown columns can sort by footer totals', async ({ page }) => {
 
   await totalSortButtons.nth(1).click();
   await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'codex', 'clive', 'cursor', 'haiku', 'Total']);
+  expect(new URL(page.url()).searchParams.get('breakdown_sort')).toBe('total');
+  expect(new URL(page.url()).searchParams.get('breakdown_sort_dir')).toBe('desc');
   await expect(page.locator('#stats-content thead th').first().locator('button.active')).toHaveCount(0);
   await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(1);
 
   await totalSortButtons.nth(0).click();
   await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'haiku', 'cursor', 'clive', 'codex', 'Total']);
+  expect(new URL(page.url()).searchParams.get('breakdown_sort')).toBe('total');
+  expect(new URL(page.url()).searchParams.get('breakdown_sort_dir')).toBe('asc');
   await expect(page.locator('#stats-content thead th').first().locator('button.active')).toHaveCount(0);
   await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(1);
 
   await nameSortButtons.nth(1).click();
   await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'haiku', 'cursor', 'codex', 'clive', 'Total']);
+  expect(new URL(page.url()).searchParams.get('breakdown_sort')).toBe('name');
+  expect(new URL(page.url()).searchParams.get('breakdown_sort_dir')).toBe('desc');
   await expect(page.locator('#stats-content thead th').first().locator('button.active')).toHaveCount(1);
   await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(0);
 
@@ -592,6 +604,27 @@ test('stats breakdown columns can sort by footer totals', async ({ page }) => {
   await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'clive', 'codex', 'cursor', 'haiku', 'Total']);
   await expect(page.locator('#stats-content thead th').first().locator('button.active')).toHaveCount(1);
   await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(0);
+});
+
+test('stats breakdown sort restores from URL', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/stats/filters', route => route.fulfill({
+    json: { agents: ['codex', 'clive', 'cursor', 'haiku'], topics: [] },
+  }));
+  await page.route('**/stats?**', route => route.fulfill({
+    json: [
+      { period: '2026-06-26 14:00', agent_key: 'codex', agent: 'codex', sessions: 1, total_turns: 9 },
+      { period: '2026-06-26 14:00', agent_key: 'clive', agent: 'clive', sessions: 1, total_turns: 7 },
+      { period: '2026-06-26 14:00', agent_key: 'cursor', agent: 'cursor', sessions: 1, total_turns: 5 },
+      { period: '2026-06-26 14:00', agent_key: 'haiku', agent: 'haiku', sessions: 1, total_turns: 2 },
+    ],
+  }));
+
+  await page.goto('/?view=stats&period=hourly&days=7&breakdown=agent&breakdown_sort=total&breakdown_sort_dir=asc');
+
+  await expect(page.locator('#view-stats')).toHaveClass(/active/);
+  await expect(page.locator('#stats-content thead th')).toHaveText(['Hour', 'haiku', 'cursor', 'clive', 'codex', 'Total']);
+  await expect(page.locator('#stats-content tfoot td').first().locator('button.active')).toHaveCount(1);
 });
 
 test('agent session type breakdown expands selected base agents into session variants', async ({ page }) => {
