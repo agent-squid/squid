@@ -251,6 +251,113 @@ test('edit button prefills agent form with existing agent values', async ({ page
   await expect(page.locator('#af-cwd')).toHaveValue('/tmp/work');
 });
 
+test('mobile agents list hides cwd while edit still exposes it', async ({ page }) => {
+  await mockApp(page);
+  await page.setViewportSize({ width: 390, height: 720 });
+  const longModel = 'claude-sonnet-4-5-20260711-extra-long-mobile-overflow-check';
+  await page.route('**/health', r => r.fulfill({ json: {
+    status: 'ok',
+    backends: {
+      claude: { driver: 'claude', label: 'Claude', available: true, protocol: 'interactive-cli', missing_requirements: [], gauge: { type: 'none' } },
+    },
+  }}));
+  await page.route('**/config/agents', r => r.fulfill({ json: [
+    { name: 'haiku', backend: 'claude', model: longModel, cwd: '/tmp/work' },
+  ]}));
+
+  await page.goto('/');
+  await page.locator('#hamburger-btn').click();
+  await page.locator('#hamburger-menu').getByRole('button', { name: 'Agents' }).click();
+
+  const row = page.locator('#agents-list tbody tr').filter({ hasText: 'haiku' });
+  await expect(row.locator('.col-cwd')).toBeHidden();
+  await expect(row.locator('.agent-model')).toHaveAttribute('title', longModel);
+  await expect(row.locator('.agent-model')).toHaveText(longModel);
+  await expect(row.locator('.agent-model')).toBeVisible();
+  expect(await row.locator('.agent-model').evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true);
+  expect(await page.locator('#agents-list').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+  const saveButton = page.locator('#agent-form button[type="submit"]');
+  await expect(saveButton.locator('.agent-save-icon')).toBeVisible();
+  await expect(saveButton.locator('.agent-save-label')).toBeHidden();
+  const formBoxes = await page.locator('#af-name, #af-backend, #af-model, #af-cwd, #agent-form button[type="submit"]').evaluateAll(elements =>
+    elements.map(el => el.getBoundingClientRect())
+  );
+  expect(Math.max(...formBoxes.map(box => box.top)) - Math.min(...formBoxes.map(box => box.top))).toBeLessThan(2);
+  expect(await page.locator('#agent-form').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+
+  await row.locator('.edit-btn').click();
+  await expect(page.locator('#af-cwd')).toHaveValue('/tmp/work');
+  await expect(page.locator('#af-model')).toHaveValue(longModel);
+});
+
+test('agents tab separates agents and backends sections with a divider', async ({ page }) => {
+  await mockApp(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Agents' }).click();
+
+  const divider = page.locator('#settings-agents > .agents-section-divider');
+  await expect(divider).toBeVisible();
+  await expect(divider).toHaveCSS('border-top-style', 'solid');
+  await expect.poll(() => page.locator('#settings-agents').evaluate(el => {
+    const children = Array.from(el.children);
+    const divider = el.querySelector('.agents-section-divider');
+    const backendsLabel = Array.from(el.querySelectorAll('.settings-label')).find(label => label.textContent.trim() === 'Backends');
+    return {
+      formBeforeDivider: children.indexOf(document.getElementById('agent-form')) < children.indexOf(divider),
+      dividerBeforeBackends: children.indexOf(divider) < children.indexOf(backendsLabel),
+    };
+  })).toEqual({ formBeforeDivider: true, dividerBeforeBackends: true });
+});
+
+test('agents and settings omit redundant section titles', async ({ page }) => {
+  await mockApp(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Agents' }).click();
+
+  await expect(page.locator('#settings-agents > .settings-label')).toHaveText(['Backends']);
+  await expect(page.locator('#settings-agents > .settings-label', { hasText: 'Agents' })).toHaveCount(0);
+
+  await page.locator('#hamburger-btn').click();
+  await page.locator('#hamburger-menu').getByRole('button', { name: 'Settings' }).click();
+  await expect(page.locator('#config-editor-header > .settings-label')).toHaveCount(0);
+  await expect(page.locator('#config-editor-actions')).toBeVisible();
+  await expect.poll(() => page.locator('#config-editor-header').evaluate(header => {
+    const actions = document.getElementById('config-editor-actions').getBoundingClientRect();
+    const headerBox = header.getBoundingClientRect();
+    return Math.abs(headerBox.right - actions.right);
+  })).toBeLessThan(1);
+});
+
+test('files and settings share mobile top spacing below the nav', async ({ page }) => {
+  await mockApp(page);
+  await page.setViewportSize({ width: 390, height: 720 });
+  await page.route('**/config/localfile-roots**', route => route.fulfill({
+    json: { roots: ['/tmp/work'] },
+  }));
+  await page.route('**/config/yaml', route => route.fulfill({
+    json: { content: 'agents: []\n', revision: 'rev-1', path: '/tmp/squid/config.yaml' },
+  }));
+
+  await page.goto('/');
+  await expect(page.locator('#view-chat')).toHaveCSS('padding-top', '0px');
+
+  await page.locator('#hamburger-btn').click();
+  await page.locator('#hamburger-menu').getByRole('button', { name: 'Files' }).click();
+  await expect(page.locator('#file-modal-box')).toBeVisible();
+  const filesTop = await page.locator('#file-modal-box').evaluate(el => el.getBoundingClientRect().top);
+
+  await page.locator('#hamburger-btn').click();
+  await page.locator('#hamburger-menu').getByRole('button', { name: 'Settings' }).click();
+  await expect(page.locator('#config-editor-actions')).toBeVisible();
+  const settingsTop = await page.locator('#config-editor-actions').evaluate(el => el.getBoundingClientRect().top);
+  const topbarBottom = await page.locator('#topbar').evaluate(el => el.getBoundingClientRect().bottom);
+
+  expect(Math.abs(settingsTop - filesTop)).toBeLessThan(2);
+  expect(settingsTop - topbarBottom).toBeGreaterThan(12);
+});
+
 test('edit button prefills form with empty model and cwd when not set', async ({ page }) => {
   await mockApp(page);
   await page.route('**/health', r => r.fulfill({ json: {
@@ -525,7 +632,7 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBe('agent');
   expect(statsRequests.at(-1).searchParams.get('agent')).toBe('codex,clive');
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-  await expect.poll(() => page.locator('#stats-content').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+  await expect.poll(() => page.locator('.stats-table-scroll').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
   await expect.poll(() => page.locator('#stats-content thead th').nth(1).evaluate(el => el.getBoundingClientRect().width)).toBeLessThan(125);
   await expect(page.locator('#sf-agent-toggle')).toHaveText('2 Agents');
   await expect(page.locator('#sc-compare-btn')).toBeHidden();
@@ -696,16 +803,16 @@ test('stats breakdown caps visible series and keeps edge columns sticky while sc
   ]);
   await expect(page.locator('#stats-content tbody tr').first().locator('td.stats-misc-col')).toHaveText('3');
   await expect(page.locator('#stats-content thead th', { hasText: 'Misc' })).toHaveCount(1);
-  await expect.poll(() => page.locator('#stats-content').evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true);
+  await expect.poll(() => page.locator('.stats-table-scroll').evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true);
 
-  const before = await page.locator('#stats-content').evaluate(el => {
+  const before = await page.locator('.stats-table-scroll').evaluate(el => {
     const first = el.querySelector('tbody td:first-child').getBoundingClientRect();
     const misc = el.querySelector('tbody td.stats-misc-col').getBoundingClientRect();
     const total = el.querySelector('tbody td.stats-total-col').getBoundingClientRect();
     return { firstLeft: first.left, miscRight: misc.right, totalRight: total.right };
   });
-  await page.locator('#stats-content').evaluate(el => { el.scrollLeft = el.scrollWidth; });
-  const after = await page.locator('#stats-content').evaluate(el => {
+  await page.locator('.stats-table-scroll').evaluate(el => { el.scrollLeft = el.scrollWidth; });
+  const after = await page.locator('.stats-table-scroll').evaluate(el => {
     const first = el.querySelector('tbody td:first-child').getBoundingClientRect();
     const misc = el.querySelector('tbody td.stats-misc-col').getBoundingClientRect();
     const total = el.querySelector('tbody td.stats-total-col').getBoundingClientRect();
@@ -714,6 +821,51 @@ test('stats breakdown caps visible series and keeps edge columns sticky while sc
   expect(Math.abs(after.firstLeft - before.firstLeft)).toBeLessThan(2);
   expect(Math.abs(after.miscRight - before.miscRight)).toBeLessThan(2);
   expect(Math.abs(after.totalRight - before.totalRight)).toBeLessThan(2);
+});
+
+test('stats breakdown horizontal scroll leaves pager controls fixed', async ({ page }) => {
+  await mockApp(page);
+  await page.setViewportSize({ width: 900, height: 720 });
+  const agents = Array.from({ length: 10 }, (_, i) => `agent${String(i + 1).padStart(2, '0')}`);
+  const periods = Array.from({ length: 11 }, (_, i) => `2026-06-${String(i + 1).padStart(2, '0')} 14:00`);
+  await page.route('**/stats/filters', route => route.fulfill({
+    json: { agents, topics: [] },
+  }));
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get('breakdown') === 'agent') {
+      return route.fulfill({
+        json: periods.flatMap((period, periodIndex) => agents.map((agent, agentIndex) => ({
+          period,
+          agent_key: agent,
+          agent,
+          sessions: 1,
+          total_turns: periodIndex + agentIndex + 1,
+        }))),
+      });
+    }
+    return route.fulfill({ json: [{ period: periods[0], sessions: 10, total_turns: 55 }] });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('#sf-agent-toggle').click();
+  for (const agent of agents) {
+    await page.locator(`#sf-agent-menu input[value="${agent}"]`).check();
+  }
+  await page.locator('#sf-breakdown').selectOption('agent');
+
+  const scroll = page.locator('.stats-table-scroll');
+  const pager = page.locator('.stats-pager');
+  await expect(pager).toBeVisible();
+  await expect.poll(() => scroll.evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true);
+
+  const before = await pager.boundingBox();
+  await scroll.evaluate(el => { el.scrollLeft = el.scrollWidth; });
+  const after = await pager.boundingBox();
+  expect(Math.abs(after.x - before.x)).toBeLessThan(1);
+  expect(Math.abs(after.width - before.width)).toBeLessThan(1);
+  await expect(pager).toContainText('1 / 2');
 });
 
 test('stats breakdown columns can sort by footer totals', async ({ page }) => {

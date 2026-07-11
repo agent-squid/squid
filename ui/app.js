@@ -170,13 +170,31 @@ function backendModelHint(backend) {
 // ── navigation ────────────────────────────────────────────────────────────────
 
 let currentView = 'chat';
+const MOBILE_VIEW_ORDER = ['chat', 'files', 'topics', 'agents', 'stats', 'community', 'settings'];
+const VIEW_LABELS = {
+  chat: 'Chat',
+  files: 'Files',
+  topics: 'Topics',
+  agents: 'Agents',
+  stats: 'Stats',
+  community: 'Community',
+  settings: 'Settings',
+};
+let _mobileViewHistoryDepth = 0;
+
+function isMobileViewport() {
+  return window.matchMedia?.('(max-width: 768px)').matches || window.innerWidth <= 768;
+}
 
 function switchView(name) {
+  if (!MOBILE_VIEW_ORDER.includes(name)) return;
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.getElementById('view-' + name).classList.add('active');
   document.querySelectorAll('.nav-tab, .hmenu-item').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.view === name);
   });
+  const mobileTitle = document.getElementById('mobile-view-title');
+  if (mobileTitle) mobileTitle.textContent = VIEW_LABELS[name] || name;
   currentView = name;
   document.getElementById('right-rail')?.classList.toggle('quota-chat-hidden', name !== 'chat');
   if (name !== 'chat') {
@@ -188,6 +206,62 @@ function switchView(name) {
   if (name === 'stats') loadStats();
   if (name === 'agents') loadAgents();
   if (name === 'settings') loadConfigYaml();
+}
+
+function navigateView(name, { recordHistory = true } = {}) {
+  if (name === currentView) return;
+  switchView(name);
+  if (recordHistory && isMobileViewport() && history.pushState) {
+    history.pushState({ squidView: name }, '', location.href);
+    _mobileViewHistoryDepth += 1;
+  }
+}
+
+function initMobileViewNavigation() {
+  if (history.replaceState) history.replaceState({ squidView: currentView }, '', location.href);
+
+  window.addEventListener('popstate', e => {
+    const name = e.state?.squidView || 'chat';
+    _mobileViewHistoryDepth = Math.max(0, _mobileViewHistoryDepth - 1);
+    switchView(name);
+  });
+
+  const app = document.getElementById('app');
+  if (!app) return;
+
+  let swipeStart = null;
+  const EDGE_EXCLUSION = 24; // px from screen edge reserved for OS back-gesture; don't start our swipe there
+  const ignoredSwipeTarget = target => !!target.closest(
+    'input, textarea, select, button, a, [contenteditable="true"], .cm-editor, #input-area, #stats-content, #file-modal-body, iframe'
+  );
+
+  app.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'mouse') return;
+    if (!isMobileViewport() || ignoredSwipeTarget(e.target)) return;
+    if (e.clientX < EDGE_EXCLUSION || e.clientX > window.innerWidth - EDGE_EXCLUSION) return;
+    swipeStart = { x: e.clientX, y: e.clientY, id: e.pointerId };
+  });
+
+  app.addEventListener('pointerup', e => {
+    if (!swipeStart || (e.pointerId != null && e.pointerId !== swipeStart.id)) return;
+    const dx = e.clientX - swipeStart.x;
+    const dy = e.clientY - swipeStart.y;
+    swipeStart = null;
+    if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+
+    if (dx > 0) {
+      if (_mobileViewHistoryDepth > 0) history.back();
+      else {
+        const prev = MOBILE_VIEW_ORDER.indexOf(currentView) - 1;
+        if (prev >= 0) navigateView(MOBILE_VIEW_ORDER[prev]);
+      }
+    } else {
+      const next = MOBILE_VIEW_ORDER.indexOf(currentView) + 1;
+      if (next < MOBILE_VIEW_ORDER.length) navigateView(MOBILE_VIEW_ORDER[next]);
+    }
+  });
+
+  app.addEventListener('pointercancel', () => { swipeStart = null; });
 }
 
 async function doRefresh() {
@@ -210,7 +284,7 @@ function initSettings() {
     btn.addEventListener('click', () => {
       hamburgerMenu.classList.remove('open');
       hamburgerBtn.classList.remove('active');
-      switchView(btn.dataset.view);
+      navigateView(btn.dataset.view);
     })
   );
   const hamburgerBtn  = document.getElementById('hamburger-btn');
@@ -225,7 +299,7 @@ function initSettings() {
       if (btn.id === 'hmenu-refresh') return;
       hamburgerMenu.classList.remove('open');
       hamburgerBtn.classList.remove('active');
-      switchView(btn.dataset.view);
+      navigateView(btn.dataset.view);
     })
   );
   document.getElementById('hmenu-refresh')?.addEventListener('click', e => {
@@ -4564,6 +4638,10 @@ function _statsAppendPager(totalRows) {
   div.querySelector('#sp-next')?.addEventListener('click', () => { _statsPage++; _rerenderStats(); });
 }
 
+function _setStatsTable(html) {
+  statsContent.innerHTML = `<div class="stats-table-scroll">${html}</div>`;
+}
+
 const CHART_METRICS = {
   turns:      { label: 'Turns',      fn: r => (r.total_turns || 0),                                                     color: 'rgba(100,160,255,1)',  fill: 'rgba(100,160,255,0.08)' },
   cost:       { label: 'Cost ($)',   fn: r => (r.cost_usd || 0),                                                        color: 'rgba(255,160,80,1)',   fill: 'rgba(255,160,80,0.08)'  },
@@ -5637,7 +5715,7 @@ function renderTimeStats(rows) {
     </tr>`;
   }).join('');
 
-  statsContent.innerHTML = `<table>
+  _setStatsTable(`<table>
     <thead><tr>
       <th>${statsPeriod === 'hourly' ? 'Hour' : 'Date'}</th>
       ${_statsMeasureHeaders()}
@@ -5646,7 +5724,7 @@ function renderTimeStats(rows) {
     <tfoot><tr>
       <td>Total</td>${_statsMeasureTotals(totals)}
     </tr></tfoot>
-  </table>`;
+  </table>`);
   _statsAppendPager(rows.length);
 }
 
@@ -5659,7 +5737,7 @@ function renderTopicStats(rows) {
     </tr>`;
   }).join('');
 
-  statsContent.innerHTML = `<table>
+  _setStatsTable(`<table>
     <thead><tr>
       <th>Topic</th>
       ${_statsMeasureHeaders()}
@@ -5668,7 +5746,7 @@ function renderTopicStats(rows) {
     <tfoot><tr>
       <td>Total</td>${_statsMeasureTotals(totals)}
     </tr></tfoot>
-  </table>`;
+  </table>`);
   _statsAppendPager(rows.length);
 }
 
@@ -5681,7 +5759,7 @@ function renderAgentStats(rows) {
     </tr>`;
   }).join('');
 
-  statsContent.innerHTML = `<table>
+  _setStatsTable(`<table>
     <thead><tr>
       <th>Agent</th>
       ${_statsMeasureHeaders()}
@@ -5690,7 +5768,7 @@ function renderAgentStats(rows) {
     <tfoot><tr>
       <td>Total</td>${_statsMeasureTotals(totals)}
     </tr></tfoot>
-  </table>`;
+  </table>`);
   _statsAppendPager(rows.length);
 }
 
@@ -5731,7 +5809,7 @@ function renderAgentBreakdownStats(rows) {
     .map(key => `<td class="stats-series-col">${pivot.canSumTotals ? _formatStatsMetricValue(totalExplicit[key] || 0, metric) : totalText}</td>`)
     .join('');
 
-  statsContent.innerHTML = `<table class="stats-breakdown-table${hasMisc ? ' has-misc' : ''}">
+  _setStatsTable(`<table class="stats-breakdown-table${hasMisc ? ' has-misc' : ''}">
     <thead><tr>
       <th class="stats-sticky-left">${_statsBreakdownAxisLabel(statsPeriod === 'hourly' ? 'Hour' : 'Date', 'name')}</th>
       ${headers}
@@ -5745,7 +5823,7 @@ function renderAgentBreakdownStats(rows) {
       ${hasMisc ? `<td class="stats-sticky-right stats-misc-col">${_formatStatsMetricValue(totalMisc, metric)}</td>` : ''}
       <td class="stats-sticky-right stats-total-col">${pivot.canSumTotals ? _formatStatsMetricValue(grandTotal, metric) : totalText}</td>
     </tr></tfoot>
-  </table>`;
+  </table>`);
   _bindStatsBreakdownSort();
   _statsAppendPager(pivot.periodRows.length);
 }
@@ -6484,19 +6562,25 @@ async function loadAgents() {
     listEl.innerHTML = '<div class="empty">No agents yet. Add one below.</div>';
     return;
   }
-  const rows = agents.map(a => `
+  const rows = agents.map(a => {
+    const model = a.model || '';
+    const modelHtml = model
+      ? `<span class="agent-model" title="${escapeHtml(model)}">${escapeHtml(model)}</span>`
+      : '<span class="col-default">—</span>';
+    return `
     <tr>
       <td><span class="agent-name">${a.name}</span></td>
       <td>${a.backend}</td>
-      <td class="col-model">${a.model || '<span class="col-default">—</span>'}</td>
-      <td>${a.cwd || `<span class="col-default">${_squidHome}</span>`}</td>
+      <td class="col-model">${modelHtml}</td>
+      <td class="col-cwd">${a.cwd || `<span class="col-default">${_squidHome}</span>`}</td>
       <td>
         <button class="edit-btn" data-name="${escapeHtml(a.name)}" data-backend="${escapeHtml(a.backend)}" data-model="${escapeHtml(a.model || '')}" data-cwd="${escapeHtml(a.cwd || '')}" title="Edit agent">✎</button>
         <button class="del-btn" data-name="${a.name}" title="Delete agent (does not affect existing messages)">✕</button>
       </td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
   listEl.innerHTML = `<table>
-    <thead><tr><th>Name</th><th>Backend</th><th class="col-model">Model</th><th>CWD</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Backend</th><th class="col-model">Model</th><th class="col-cwd">CWD</th><th></th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
 
@@ -9006,6 +9090,7 @@ initCodexCreds();
 initCursorQuota();
 updateComposerActionTitles();
 updateActiveQuotaGauge();
+initMobileViewNavigation();
 initPullToRefresh();
 // Discover processes that survived a refresh; polling stops again when idle.
 startProcPoll();

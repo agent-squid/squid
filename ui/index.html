@@ -105,6 +105,7 @@
   <div id="app">
     <header id="topbar">
       <div class="text-logo"><img src="/favicon.png" class="logo-icon" alt="" />AgentSquid</div>
+      <div id="mobile-view-title">Chat</div>
 
       <!-- Desktop nav tabs -->
       <nav id="nav-tabs">
@@ -599,7 +600,6 @@
     <!-- ── AGENTS VIEW ───────────────────────────────────────────────────── -->
     <div id="view-agents" class="view">
       <div id="settings-agents">
-        <span class="settings-label">Agents</span>
         <div id="agents-list"></div>
         <form id="agent-form">
           <div class="agent-form-row">
@@ -607,10 +607,18 @@
             <select id="af-backend"></select>
             <input id="af-model"   type="text" placeholder="e.g. claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7" spellcheck="false" />
             <input id="af-cwd"     type="text"   placeholder="/tmp/<user>/squid/…" spellcheck="false" />
-            <button type="submit">Save</button>
+            <button type="submit" class="agent-save-btn" aria-label="Save agent" title="Save agent">
+              <span class="agent-save-label">Save</span>
+              <svg class="agent-save-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 3h12l2 2v16H5z"></path>
+                <path d="M8 3v6h8"></path>
+                <path d="M8 21v-7h8v7"></path>
+              </svg>
+            </button>
             <span id="agent-form-status"></span>
           </div>
         </form>
+        <div class="agents-section-divider" aria-hidden="true"></div>
         <span class="settings-label">Backends</span>
         <div id="backends-catalog"></div>
       </div>
@@ -624,7 +632,6 @@
     <!-- ── SETTINGS VIEW ────────────────────────────────────────────────────── -->
     <div id="view-settings" class="view">
       <div id="config-editor-header">
-        <span class="settings-label">Configuration</span>
         <div id="config-editor-actions">
           <button id="config-editor-reload" type="button">Reload</button>
           <button id="config-editor-save" type="button">Save YAML</button>

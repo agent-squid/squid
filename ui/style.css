@@ -37,6 +37,8 @@
   --text-md:   0.78em;  /* secondary content, tool blocks, ac items */
   --text-body: 0.85em;  /* hints, button text, secondary body */
   --text-lg:   0.90em;  /* near-base secondary text */
+
+  --mobile-view-top-space: 1.75rem;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -100,6 +102,7 @@ body {
   gap: 1rem;
   position: relative;
   min-height: 0;
+  touch-action: pan-y;
 }
 
 #topbar {
@@ -120,6 +123,10 @@ body {
   align-items: center;
   gap: 0.2rem;
   margin-left: auto;
+}
+
+#mobile-view-title {
+  display: none;
 }
 
 /* nav tabs (desktop) */
@@ -1192,6 +1199,10 @@ body {
   padding: 0.5rem 0.2rem;
 }
 .settings-label { font-weight: 600; color: var(--text); }
+.agents-section-divider {
+  border-top: 1px solid var(--border-faint);
+  margin: 0.6rem 0 0.2rem;
+}
 .settings-hint {
   color: var(--text-dim);
   flex-shrink: 0;
@@ -1202,9 +1213,9 @@ body {
 #config-editor-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 1rem;
-  margin-top: 0.5rem;
+  margin-top: 0;
   flex-shrink: 0;
 }
 #config-editor-actions { flex-shrink: 0; display: flex; align-items: center; gap: 0.5rem; }
@@ -2634,10 +2645,18 @@ body {
 #stats-close:hover { color: var(--text-mid); }
 
 #stats-content {
-  overflow: auto;
-  -webkit-overflow-scrolling: touch;
+  display: flex;
+  flex-direction: column;
   flex: 1;
   font-size: 13px;
+  min-height: 0;
+  overflow: hidden;
+}
+.stats-table-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
 }
 #stats-content table {
   width: 100%;
@@ -3066,6 +3085,18 @@ button {
   }
 
   #nav-tabs { display: none; }
+  #mobile-view-title {
+    display: inline-block;
+    color: var(--text-muted);
+    font-size: var(--text-md);
+    font-weight: 700;
+    line-height: 1;
+    max-width: 7.5rem;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   #hamburger-btn { display: inline-flex; flex: 0 0 40px; min-height: 40px; }
   .hmenu-primary { display: block; }
   #help-btn { width: 40px; height: 40px; }
@@ -3083,7 +3114,7 @@ button {
     min-height: 34px;
   }
 
-  #stats-content {
+  .stats-table-scroll {
     overflow: auto;
   }
 
@@ -3172,7 +3203,8 @@ button {
     bottom: calc(7.25rem + env(safe-area-inset-bottom));
   }
 
-  .view { padding-top: 0.75rem; }
+  .view { padding-top: var(--mobile-view-top-space); }
+  #view-chat { padding-top: 0; }
   #view-community {
     width: calc(100% + 1.5rem);
     margin-left: -0.75rem;
@@ -3203,6 +3235,30 @@ button {
   }
   .sf-primary-row select {
     width: 100%;
+  }
+
+  #agents-list .col-cwd {
+    display: none;
+  }
+  #agents-list table {
+    table-layout: fixed;
+  }
+  #agents-list th,
+  #agents-list td {
+    padding-inline: 0.45rem;
+  }
+  #agents-list .col-model {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #agents-list .agent-model {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #agents-list th:last-child,
+  #agents-list td:last-child {
+    width: 4.4rem;
   }
   .sf-primary-row .sf-multi-toggle {
     width: 100%;
@@ -3320,6 +3376,16 @@ button {
 #af-cwd     { width: 130px; }
 .agent-form-row button[type=submit] { background: var(--raised); font-size: 12px; padding: 0.25rem 0.7rem; }
 .agent-form-row button[type=submit]:hover { color: var(--accent); border-color: var(--accent); }
+.agent-save-icon {
+  display: none;
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
 #agent-form-status { font-size: var(--text-xs); color: var(--text-dim); }
 
 /* autocomplete dropdown */
@@ -3739,15 +3805,43 @@ mark.search-kw-highlight {
     padding: 0.3rem 0 0;
   }
 
+  .agent-form-row {
+    display: grid;
+    grid-template-columns: minmax(0, 4.2rem) minmax(0, 4.6rem) minmax(0, 1fr) minmax(0, 1fr) 32px;
+    gap: 0.3rem;
+  }
+
   .agent-form-row input,
-  .agent-form-row select,
-  .agent-form-row button[type=submit] {
+  .agent-form-row select {
+    min-width: 0;
     min-height: 30px;
     padding: 0.18rem 0.35rem;
+    width: 100%;
+  }
+
+  #af-name,
+  #af-backend,
+  #af-model,
+  #af-cwd {
+    width: 100%;
   }
 
   .agent-form-row button[type=submit] {
-    padding-inline: 0.55rem;
+    align-items: center;
+    display: inline-flex;
+    height: 30px;
+    justify-content: center;
+    min-height: 30px;
+    padding: 0;
+    width: 32px;
+  }
+
+  .agent-save-label {
+    display: none;
+  }
+
+  .agent-save-icon {
+    display: block;
   }
 
   #agent-form-status {

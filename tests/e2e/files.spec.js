@@ -269,3 +269,114 @@ test('desktop burger only shows settings while mobile burger shows primary nav',
   await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Analytics' })).toBeVisible();
   await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Settings' })).toBeVisible();
 });
+
+test('mobile swipes move between views and browser back returns to the previous view', async ({ page }) => {
+  await mockApp(page);
+  await page.setViewportSize({ width: 390, height: 720 });
+  await page.goto('/');
+
+  const swipe = async (fromX, toX) => {
+    await page.locator('#app').evaluate((app, { fromX, toX }) => {
+      app.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        clientX: fromX,
+        clientY: 240,
+        pointerId: 1,
+        pointerType: 'touch',
+      }));
+      app.dispatchEvent(new PointerEvent('pointerup', {
+        bubbles: true,
+        clientX: toX,
+        clientY: 245,
+        pointerId: 1,
+        pointerType: 'touch',
+      }));
+    }, { fromX, toX });
+  };
+
+  await expect(page.locator('#view-chat')).toHaveClass(/active/);
+  await expect(page.locator('#mobile-view-title')).toHaveText('Chat');
+
+  await swipe(350, 60);
+  await expect(page.locator('#view-files')).toHaveClass(/active/);
+  await expect(page.locator('#mobile-view-title')).toHaveText('Files');
+
+  await swipe(350, 60);
+  await expect(page.locator('#view-topics')).toHaveClass(/active/);
+  await expect(page.locator('#mobile-view-title')).toHaveText('Topics');
+
+  await page.evaluate(() => history.back());
+  await expect(page.locator('#view-files')).toHaveClass(/active/);
+  await expect(page.locator('#mobile-view-title')).toHaveText('Files');
+
+  await swipe(60, 350);
+  await expect(page.locator('#view-chat')).toHaveClass(/active/);
+  await expect(page.locator('#mobile-view-title')).toHaveText('Chat');
+
+  await page.locator('#hamburger-btn').click();
+  await page.locator('#hamburger-menu').getByRole('button', { name: 'Agents' }).click();
+  await expect(page.locator('#view-agents')).toHaveClass(/active/);
+  await expect(page.locator('#mobile-view-title')).toHaveText('Agents');
+
+  await page.evaluate(() => history.back());
+  await expect(page.locator('#view-chat')).toHaveClass(/active/);
+  await expect(page.locator('#mobile-view-title')).toHaveText('Chat');
+});
+
+test('swipes starting in the edge-exclusion strip are ignored so the OS back gesture can claim them', async ({ page }) => {
+  await mockApp(page);
+  await page.setViewportSize({ width: 390, height: 720 });
+  await page.goto('/');
+
+  const swipe = async (fromX, toX) => {
+    await page.locator('#app').evaluate((app, { fromX, toX }) => {
+      app.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        clientX: fromX,
+        clientY: 240,
+        pointerId: 1,
+        pointerType: 'touch',
+      }));
+      app.dispatchEvent(new PointerEvent('pointerup', {
+        bubbles: true,
+        clientX: toX,
+        clientY: 245,
+        pointerId: 1,
+        pointerType: 'touch',
+      }));
+    }, { fromX, toX });
+  };
+
+  await expect(page.locator('#view-chat')).toHaveClass(/active/);
+
+  // Starts inside the 24px edge-exclusion strip (left edge) — should not register as an in-app swipe.
+  await swipe(10, 300);
+  await expect(page.locator('#view-chat')).toHaveClass(/active/);
+
+  // Starts inside the 24px edge-exclusion strip (right edge) — should not register as an in-app swipe.
+  await swipe(385, 100);
+  await expect(page.locator('#view-chat')).toHaveClass(/active/);
+
+  // Just outside the strip — swipe still works normally.
+  await swipe(350, 60);
+  await expect(page.locator('#view-files')).toHaveClass(/active/);
+});
+
+test('mouse click-and-drag at a narrow viewport does not trigger view navigation', async ({ page }) => {
+  await mockApp(page);
+  await page.setViewportSize({ width: 390, height: 720 });
+  await page.goto('/');
+
+  await expect(page.locator('#view-chat')).toHaveClass(/active/);
+
+  await page.locator('#app').evaluate(app => {
+    app.dispatchEvent(new PointerEvent('pointerdown', {
+      bubbles: true, clientX: 350, clientY: 240, pointerId: 1, pointerType: 'mouse',
+    }));
+    app.dispatchEvent(new PointerEvent('pointerup', {
+      bubbles: true, clientX: 60, clientY: 245, pointerId: 1, pointerType: 'mouse',
+    }));
+  });
+
+  await expect(page.locator('#view-chat')).toHaveClass(/active/);
+});
