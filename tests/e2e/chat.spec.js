@@ -181,6 +181,76 @@ test.describe('response bubble', () => {
     await expect(page.locator('#ctx-popup')).toContainText('session context18 turns');
   });
 
+  test('ctx popup exposes a thought trace link when tool calls or status text were recorded', async ({ page }) => {
+    await page.route('**/chat/1/events**', r => r.fulfill({
+      status: 200,
+      headers: SSE_HEADERS,
+      body: sse(
+        { event: 'status', data: 'Checking the repo first.' },
+        { event: 'tool', data: { name: 'Bash', command: 'ls -la' } },
+        { event: 'status', data: 'Now reading the target file.' },
+        { data: 'Final answer text' },
+        { event: 'done', data: '' },
+      ),
+    }));
+    await page.route('**/chat', r => r.fulfill({
+      status: 200,
+      headers: SSE_HEADERS,
+      body: sse(
+        META,
+        { event: 'status', data: 'Checking the repo first.' },
+        { event: 'tool', data: { name: 'Bash', command: 'ls -la' } },
+        { event: 'status', data: 'Now reading the target file.' },
+        { data: 'Final answer text' },
+        STATS,
+        DONE,
+      ),
+    }));
+
+    await sendMsg(page);
+    const ctx = page.locator(RESPONSE).locator('.user-ctx');
+    await ctx.click();
+
+    const traceRow = page.locator('#ctx-popup .ctx-popup-trace-row');
+    await expect(traceRow).toBeVisible();
+    await expect(traceRow).toContainText('trace');
+    await expect(traceRow).toContainText('thoughts');
+
+    await traceRow.click();
+    await expect(page.locator('#msg-modal')).toHaveClass(/open/);
+    await expect(page.locator('#msg-modal-title')).toContainText('thought trace');
+
+    // Narration and tool calls render interleaved in true chronological order,
+    // not grouped into two separate blocks — and the final answer text (a
+    // plain 'text' event) is excluded since it's already shown in the bubble.
+    const children = page.locator('#msg-modal-body > *');
+    await expect(children).toHaveCount(3);
+    await expect(children.nth(0)).toHaveClass(/trace-status/);
+    await expect(children.nth(0)).toContainText('Checking the repo first.');
+    await expect(children.nth(1)).toHaveClass(/tool-block/);
+    await expect(children.nth(1)).toContainText('Bash: ls -la');
+    await expect(children.nth(2)).toHaveClass(/trace-status/);
+    await expect(children.nth(2)).toContainText('Now reading the target file.');
+    await expect(page.locator('#msg-modal-body')).not.toContainText('Final answer text');
+
+    await children.nth(1).locator('.tool-toggle').click();
+    await expect(children.nth(1).locator('.trace-tool-pre')).toContainText('"command": "ls -la"');
+  });
+
+  test('ctx popup has no thought trace link when nothing was recorded', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(META, { data: 'Just an answer, no tools used' }, STATS, DONE),
+    }));
+
+    await sendMsg(page);
+    const ctx = page.locator(RESPONSE).locator('.user-ctx');
+    await ctx.click();
+
+    await expect(page.locator('#ctx-popup')).toBeVisible();
+    await expect(page.locator('#ctx-popup .ctx-popup-trace-row')).not.toBeAttached();
+  });
+
   test('content is markdown-rendered in final bubble', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200, headers: SSE_HEADERS,

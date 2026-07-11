@@ -788,6 +788,9 @@ body {
 .ctx-popup-pin:hover .ctx-popup-preview { color: var(--text-muted); }
 .ctx-popup-tag { color: var(--accent-dim); flex-shrink: 0; }
 .ctx-popup-preview { color: var(--text-lo); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ctx-popup-mem-row, .ctx-popup-trace-row { cursor: pointer; }
+.ctx-popup-link { color: var(--accent-light); }
+.ctx-popup-mem-row:hover .ctx-popup-link, .ctx-popup-trace-row:hover .ctx-popup-link { color: #ffb87a; }
 .msg.assistant { background: var(--surface-2); align-self: flex-start; line-height: 1.6; }
 
 /* markdown */
@@ -865,6 +868,17 @@ body {
 .tool-body { display: none; border-radius: 0 0 3px 3px; overflow: hidden; }
 .tool-expanded .tool-body { display: block; }
 .diff-scroll { max-height: 280px; overflow-y: auto; background: var(--bg); }
+.trace-status {
+  white-space: pre-wrap; word-break: break-word;
+  font-size: var(--text-lg); color: var(--text-muted);
+  padding: 0 0 0.6em; margin-bottom: 0.6em;
+  border-bottom: 1px solid var(--surface-2);
+}
+.trace-tool-block { font-size: var(--text-body); }
+.trace-tool-pre {
+  margin: 0; padding: 0.5em 0.8em; white-space: pre-wrap; word-break: break-word;
+  font-family: ui-monospace, monospace; font-size: var(--text-body);
+}
 .diff-line {
   display: block; padding: 0.06em 0.8em;
   white-space: pre; overflow-x: visible; font-size: var(--text-lg); line-height: 1.5;

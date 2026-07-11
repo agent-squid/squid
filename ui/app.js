@@ -2492,6 +2492,7 @@ async function sendMessage(text) {
               if (!Array.isArray(storedTools)) storedTools = [];
             } catch {}
           }
+          liveCtxSpan.dataset.hasTrace = _hasTraceContent(data.status_raw, storedTools.length ? storedTools : liveToolEvents) ? 'true' : 'false';
           renderCompletionTools(storedTools.length ? storedTools : liveToolEvents);
           addCompletionTimestamp();
           scrollToBottom();
@@ -2709,6 +2710,7 @@ async function sendMessage(text) {
             }
             completionRendered = true;
             stopStatusFallback();
+            liveCtxSpan.dataset.hasTrace = (statusBuf.trim() || liveToolEvents.length) ? 'true' : 'false';
             removeThinking();
             invalidateTopicsCache();
             doneTime = new Date().toISOString();
@@ -2913,6 +2915,16 @@ function changeTools(tools) {
   const gitTools = tools.filter(t => t.name === 'GitDiff');
   if (gitTools.length) return gitTools.filter(t => (t.file_count ?? (t.files || []).length) > 0);
   return tools.filter(t => t.name === 'Edit' || t.name === 'Write' || t.name === 'MultiEdit' || t.name === 'Diff');
+}
+
+// Whether a message has anything worth showing in the "thought trace" popup —
+// the free-text status/reasoning stream and/or any recorded tool calls.
+function _hasTraceContent(statusRaw, contextVal) {
+  if (statusRaw && String(statusRaw).trim()) return true;
+  try {
+    const arr = typeof contextVal === 'string' ? JSON.parse(contextVal) : contextVal;
+    return Array.isArray(arr) && arr.length > 0;
+  } catch { return false; }
 }
 
 
@@ -3393,6 +3405,7 @@ function appendHistoryItem(item, container) {
   ctxSpan.dataset.sessionTurnCount = String(sessionTurnCount);
   ctxSpan.dataset.pinnedIds = JSON.stringify(_pc.pins);
   ctxSpan.dataset.mem = _pc.mem ? 'true' : 'false';
+  ctxSpan.dataset.hasTrace = _hasTraceContent(item.status_raw, item.context) ? 'true' : 'false';
   ctxSpan.addEventListener('click', e => { e.stopPropagation(); showCtxPopup(ctxSpan); });
   asstHeader.appendChild(ctxSpan);
 
@@ -7286,6 +7299,7 @@ function showCtxPopup(spanEl) {
   const topic  = spanEl.dataset.topic || '';
   const sessionTurnCount = parseInt(spanEl.dataset.sessionTurnCount || '0', 10) || 0;
   const pinIds = JSON.parse(spanEl.dataset.pinnedIds || '[]');
+  const hasTrace = spanEl.dataset.hasTrace === 'true';
 
   let html = '';
   if (msgId) {
@@ -7302,9 +7316,9 @@ function showCtxPopup(spanEl) {
   }
   if (mem && topic) {
     if (html) html += `<div class="ctx-popup-divider"></div>`;
-    html += `<div class="ctx-popup-pin ctx-popup-mem-row" data-topic="${topic}">
-      <span class="ctx-popup-tag">mem</span>
-      <span class="ctx-popup-preview">#${topic} memory</span>
+    html += `<div class="ctx-popup-row ctx-popup-mem-row" data-topic="${topic}">
+      <span class="ctx-popup-key">memory</span>
+      <span class="ctx-popup-val ctx-popup-link">#${topic}</span>
     </div>`;
   }
   if (pinIds.length) {
@@ -7316,6 +7330,13 @@ function showCtxPopup(spanEl) {
         <span class="ctx-popup-preview" id="ctx-pin-preview-${id}">loading…</span>
       </div>`;
     });
+  }
+  if (msgId && hasTrace) {
+    if (html) html += `<div class="ctx-popup-divider"></div>`;
+    html += `<div class="ctx-popup-row ctx-popup-trace-row" data-msg-id="${msgId}">
+      <span class="ctx-popup-key">trace</span>
+      <span class="ctx-popup-val ctx-popup-link">thoughts</span>
+    </div>`;
   }
   if (topic) html += `<div id="ctx-roots-section"></div>`;
   if (!html) html = `<div class="ctx-popup-row"><span class="ctx-popup-key">${spanEl.textContent.trim()}</span></div>`;
@@ -7333,6 +7354,9 @@ function showCtxPopup(spanEl) {
   popup.querySelectorAll('.ctx-popup-pin[data-pin-id]').forEach(row => {
     row.addEventListener('click', () => openMsgModal(parseInt(row.dataset.pinId)));
   });
+
+  const traceRow = popup.querySelector('.ctx-popup-trace-row');
+  if (traceRow) traceRow.addEventListener('click', () => openTraceModal(parseInt(traceRow.dataset.msgId, 10)));
 
   pinIds.forEach(id => {
     fetch(`/chat/${id}/status`)
@@ -7388,6 +7412,136 @@ async function openMsgModal(msgId) {
     title.textContent = `Message #${msgId} · #${msg.topic || ''}${msg.agent ? ' @' + msg.agent : ''}`;
     body.innerHTML = '';
     appendHistoryItem(msg, body);
+  } catch {
+    body.innerHTML = '<div class="ctx-popup-row" style="padding:1rem"><span class="ctx-popup-key">Failed to load</span></div>';
+  }
+}
+
+function makeTraceToolBlock(tool) {
+  const block = document.createElement('div');
+  block.className = 'tool-block trace-tool-block';
+  const toggle = document.createElement('button');
+  toggle.className = 'tool-toggle';
+  toggle.textContent = toolLabel(tool);
+  const body = document.createElement('div');
+  body.className = 'tool-body';
+  const scroll = document.createElement('div');
+  scroll.className = 'diff-scroll';
+  const pre = document.createElement('pre');
+  pre.className = 'trace-tool-pre';
+  pre.textContent = JSON.stringify(tool, null, 2);
+  scroll.appendChild(pre);
+  body.appendChild(scroll);
+  toggle.addEventListener('click', () => block.classList.toggle('tool-expanded'));
+  block.appendChild(toggle);
+  block.appendChild(body);
+  return block;
+}
+
+// One-shot parse of an SSE response body into an ordered event list. Mirrors
+// the live chat stream parser's line handling (event:/data: fields, multi-line
+// data joined by \n on blank-line boundaries) but returns everything at once
+// instead of driving UI state incrementally.
+function _parseSseEvents(text) {
+  const events = [];
+  let eventName = null;
+  let dataLines = [];
+  const flush = () => {
+    if (eventName !== null || dataLines.length) events.push({ type: eventName, data: dataLines.join('\n') });
+    eventName = null;
+    dataLines = [];
+  };
+  for (const raw of text.split('\n')) {
+    const line = raw.replace(/\r$/, '');
+    if (line.startsWith('event:')) {
+      eventName = line.slice(6).trim();
+    } else if (line.startsWith('data:')) {
+      const field = line.slice(5);
+      dataLines.push(field.startsWith(' ') ? field.slice(1) : field);
+    } else if (line === '') {
+      flush();
+    }
+  }
+  flush();
+  return events;
+}
+
+// Reconstruct the true chronological interleaving of narration and tool calls
+// from the run_events log (shared seq counter across event types — see
+// agent/topic_queue.py) rather than the collapsed status_raw/context fields.
+function renderTraceTimeline(events, container) {
+  const timeline = [];
+  let narration = '';
+  const flushNarration = () => {
+    if (narration.trim()) timeline.push({ kind: 'status', text: narration });
+    narration = '';
+  };
+  for (const ev of events) {
+    if (ev.type === 'status') {
+      narration += ev.data;
+    } else if (ev.type === 'tool') {
+      flushNarration();
+      try { timeline.push({ kind: 'tool', tool: JSON.parse(ev.data) }); } catch {}
+    }
+    // 'text' (default/unnamed event — the final answer), 'stats', 'error', 'done' aren't part of the trace.
+  }
+  flushNarration();
+  if (!timeline.length) return false;
+  for (const item of timeline) {
+    if (item.kind === 'status') {
+      const section = document.createElement('div');
+      section.className = 'trace-status';
+      section.textContent = item.text.trim();
+      container.appendChild(section);
+    } else {
+      container.appendChild(makeTraceToolBlock(item.tool));
+    }
+  }
+  return true;
+}
+
+function renderTraceBody(msg, container) {
+  const statusRaw = (msg.status_raw || '').trim();
+  if (statusRaw) {
+    const section = document.createElement('div');
+    section.className = 'trace-status';
+    section.textContent = statusRaw;
+    container.appendChild(section);
+  }
+  let tools = [];
+  try {
+    const parsed = typeof msg.context === 'string' ? JSON.parse(msg.context) : msg.context;
+    if (Array.isArray(parsed)) tools = parsed;
+  } catch {}
+  if (tools.length) {
+    const toolsWrap = document.createElement('div');
+    toolsWrap.className = 'tool-calls';
+    tools.forEach(tool => toolsWrap.appendChild(makeTraceToolBlock(tool)));
+    container.appendChild(toolsWrap);
+  }
+  if (!statusRaw && !tools.length) {
+    container.innerHTML = '<div class="ctx-popup-row" style="padding:1rem"><span class="ctx-popup-key">No trace recorded</span></div>';
+  }
+}
+
+async function openTraceModal(msgId) {
+  const modal = document.getElementById('msg-modal');
+  const title = document.getElementById('msg-modal-title');
+  const body  = document.getElementById('msg-modal-body');
+  title.textContent = `Message #${msgId} · thought trace`;
+  body.innerHTML = '<div class="ctx-popup-row" style="padding:1rem"><span class="ctx-popup-key">Loading…</span></div>';
+  modal.classList.add('open');
+  try {
+    const eventsText = await fetch(`/chat/${msgId}/events?after_seq=-1`).then(r => r.text());
+    const events = _parseSseEvents(eventsText);
+    body.innerHTML = '';
+    const rendered = renderTraceTimeline(events, body);
+    if (!rendered) {
+      // Older messages predate the run_events log — fall back to the collapsed
+      // status_raw/context fields, which have no cross-type ordering.
+      const msg = await fetch(`/chat/${msgId}/status`).then(r => r.json());
+      renderTraceBody(msg, body);
+    }
   } catch {
     body.innerHTML = '<div class="ctx-popup-row" style="padding:1rem"><span class="ctx-popup-key">Failed to load</span></div>';
   }
