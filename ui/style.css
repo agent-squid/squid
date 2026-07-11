@@ -2459,8 +2459,9 @@ body {
 .topic-btn.danger:hover { color: var(--danger); border-color: var(--danger); }
 .topic-agent-row {
   background: var(--bg);
+  padding-left: 2.1rem;
 }
-.topic-agent-row .topic-agent-main { padding-left: 1.35rem; }
+.topic-agent-row .topic-agent-main { padding-left: 0.5rem; }
 .topic-agent-row.adhoc .topic-agent-label { color: #a98562; }
 .topics-empty {
   padding: 1rem;

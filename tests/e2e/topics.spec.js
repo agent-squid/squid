@@ -82,7 +82,9 @@ test('topics tab renders searchable expandable topic lanes and actions', async (
   await expect(page.locator('.topic-row.hidden')).toContainText('#archive');
 
   await page.locator('.topic-row', { hasText: '#squid' }).click();
-  await expect(page.locator('.topic-agent-row[data-adhoc="0"]', { hasText: '#squid@codex' })).toBeVisible();
+  const sessionLane = page.locator('.topic-agent-row[data-adhoc="0"]', { hasText: '@codex' });
+  await expect(sessionLane).toBeVisible();
+  await expect(sessionLane).not.toContainText('#squid');
   await expect(page.locator('.topic-agent-row.adhoc')).toContainText('adhoc prompt');
 
   await page.fill('#topics-search', 'squ');

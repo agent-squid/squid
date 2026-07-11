@@ -2580,6 +2580,15 @@ async function sendMessage(text) {
     if (!msgId) attachMsgId(res.headers.get('X-Squid-Msg-Id'));
     _lookbackUnselected.clear();
     _lastLookbackSelectionKey = '';
+    if (_contextIds.length && !adhoc) {
+      const pendingKey = `${topic}@${_effectiveAgent || '_'}`;
+      _pendingSessionInjectedIds[pendingKey] = [...new Set([
+        ...(_pendingSessionInjectedIds[pendingKey] || []),
+        ..._contextIds,
+      ])];
+      updatePinCount();
+      if (pinPanel.classList.contains('open')) renderPinPanel();
+    }
     if (_includeTopicMemory && !adhoc) {
       const memoryKey = _memoryInjectedKey(topic, _effectiveAgent);
       _memoryInjectedInto[memoryKey] = _topicMemoryForSend.revision;
@@ -2737,6 +2746,10 @@ async function sendMessage(text) {
                 const _inj = getInjectedInto();
                 _inj[lastSessionId] = [...new Set([...(_inj[lastSessionId] || []), ..._contextIds])];
                 setInjectedInto(_inj);
+              }
+              if (!adhoc) {
+                delete _pendingSessionInjectedIds[`${topic}@${_effectiveAgent || '_'}`];
+                delete _pendingSessionInjectedIds[`${topic}@${resolvedAgent || '_'}`];
               }
               // Session sends are done with this context now — clear the "will inject" badge.
               // Adhoc turns keep it: each adhoc turn re-injects, so it's not "already sent" in the same sense.
@@ -6115,7 +6128,7 @@ function _renderTopicAgents(topic) {
         html += `
         <div class="topic-agent-row adhoc" data-topic="${escapeHtml(topic.name)}" data-agent="${escapeHtml(lane.agent)}" data-adhoc="1">
           <div class="topic-agent-main">
-            <span class="topic-agent-label"><span class="topic-name">#${escapeHtml(topic.name)}</span>${_topicAgentDisplay(lane.agent, backend)}!${lane.adhoc_turns > 0 ? ` <span class="topic-turn-count">${lane.adhoc_turns}</span>` : ''}</span>
+            <span class="topic-agent-label">${_topicAgentDisplay(lane.agent, backend)}!${lane.adhoc_turns > 0 ? ` <span class="topic-turn-count">${lane.adhoc_turns}</span>` : ''}</span>
           </div>
           <div class="topic-prompt">${escapeHtml(truncate(lane.last_adhoc_prompt, 120))}</div>
           <div class="topic-meta">
@@ -6135,7 +6148,7 @@ function _renderTopicAgents(topic) {
     html += `
       <div class="topic-agent-row" data-topic="${escapeHtml(topic.name)}" data-agent="${escapeHtml(lane.agent)}" data-adhoc="0">
         <div class="topic-agent-main">
-          <span class="topic-agent-label"><span class="topic-name">#${escapeHtml(topic.name)}</span>${_topicAgentDisplay(lane.agent, backend)}${turnCount}</span>
+          <span class="topic-agent-label">${_topicAgentDisplay(lane.agent, backend)}${turnCount}</span>
         </div>
         <div class="topic-prompt">${sessionPrompt}</div>
         <div class="topic-meta">
@@ -6149,7 +6162,7 @@ function _renderTopicAgents(topic) {
       html += `
         <div class="topic-agent-row adhoc" data-topic="${escapeHtml(topic.name)}" data-agent="${escapeHtml(lane.agent)}" data-adhoc="1">
           <div class="topic-agent-main">
-            <span class="topic-agent-label"><span class="topic-name">#${escapeHtml(topic.name)}</span>${_topicAgentDisplay(lane.agent, backend)}!${lane.adhoc_turns > 0 ? ` <span class="topic-turn-count">${lane.adhoc_turns}</span>` : ''}</span>
+            <span class="topic-agent-label">${_topicAgentDisplay(lane.agent, backend)}!${lane.adhoc_turns > 0 ? ` <span class="topic-turn-count">${lane.adhoc_turns}</span>` : ''}</span>
           </div>
           <div class="topic-prompt">${escapeHtml(truncate(lane.last_adhoc_prompt, 120))}</div>
           <div class="topic-meta">
@@ -7560,6 +7573,7 @@ const memoryCloseBtn = document.getElementById('memory-modal-close');
 const _memoryCache = {};
 const _sessionLookupCache = {};
 const _memorySelectionOverrides = {};
+const _pendingSessionInjectedIds = {}; // `${topic}@${agent|_}` -> pinned IDs submitted to an in-flight session turn
 let _editingMemoryTopic = null;
 
 function updateMemoryTokenCount() {
@@ -7782,11 +7796,13 @@ function _injectablePinnedIds(topic, agent, adhoc, lookback, items = getPinnedIt
   const taKey = `${topic}@${agent || '_'}`;
   const currentSid = _sessionIds[taKey] || null;
   const injected = getInjectedInto();
+  const pending = _pendingSessionInjectedIds[taKey] || [];
   return items
     .filter(item => {
       const sameSession = item.session_id && currentSid && item.session_id === currentSid;
       if (sameSession && !adhoc) return false;
       if (adhoc && lookback === 0) return true;
+      if (!adhoc && pending.includes(item.id)) return false;
       if (currentSid && (injected[currentSid] || []).includes(item.id)) return false;
       return true;
     })
@@ -7831,6 +7847,7 @@ function _pinStatus(item) {
   const chipTaKey = `${chipTopic}@${chipAgent || '_'}`;
   const currentSid = _sessionIds[chipTaKey] || null;
   const sameSession = item.session_id && currentSid && item.session_id === currentSid;
+  const pending = _pendingSessionInjectedIds[chipTaKey] || [];
 
   // Skip only if the pin is from the exact current session — --resume already covers it
   if (sameSession && !isAdhoc) {
@@ -7842,6 +7859,9 @@ function _pinStatus(item) {
   // Only meaningful for !N lookback where model retains prior context; !0 is always fresh
   const chipLookback = parsed.adhoc ? parsed.lookback : (stickyChip?.lookback ?? 0);
   if (currentSid && (injected[currentSid] || []).includes(item.id) && !(isAdhoc && chipLookback === 0))
+    return { text: 'injected · skip', cls: 'pin-status-done' };
+
+  if (!isAdhoc && pending.includes(item.id))
     return { text: 'injected · skip', cls: 'pin-status-done' };
 
   return { text: 'will inject', cls: 'pin-status-inject' };

@@ -231,6 +231,39 @@ test('session send clears the will-inject pin badge once context is delivered', 
   await expect(page.locator('.pin-item-status')).toContainText('injected');
 });
 
+test('session send clears memory and pinned context count as soon as request starts', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/topics/squid/memory', r => r.fulfill({
+    json: {
+      topic: 'squid', exists: true, content: MEMORY_WITH_SKIP, path: '~/.squid/context/topics/squid/memory.md',
+      squid: { code_roots: [], code_roots_skipped: true, code_roots_missing: false },
+    },
+  }));
+  await page.route('**/topics/squid/session?agent=claude', r => r.fulfill({
+    json: { session_id: null, cwd: null },
+  }));
+  await page.route('**/chat', r => r.fulfill({
+    status: 200, headers: SSE_HEADERS,
+    body: sse(META, STATS),
+  }));
+
+  await page.goto('/');
+  await seedPin(page, { id: 77, topic: 'other', agent: 'codex', content: 'cross-topic context' });
+
+  await page.fill('#input', '#squid@claude hello');
+  await page.click('#pin-btn');
+  await expect(page.locator('#pin-count')).toHaveText('2');
+  await page.click('#pin-btn');
+
+  await page.focus('#input');
+  await page.keyboard.press('Enter');
+
+  await expect(page.locator('#pin-btn')).not.toHaveClass(/has-pins/);
+  await expect(page.locator('#pin-count')).toHaveText('');
+  await page.click('#pin-btn');
+  await expect(page.locator('.pin-item-status')).toContainText('injected');
+});
+
 test('adhoc turn keeps the will-inject pin badge after send', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
   await page.route('**/chat', r => r.fulfill({
