@@ -229,10 +229,14 @@ class TopicWorker:
         async def _emit_git_diff():
             if not git_trackers:
                 return
+            emitted = False
+            no_change_tool: Optional[dict] = None
             for tracker in git_trackers:
                 try:
                     try:
                         tool = await asyncio.to_thread(tracker.build_event)
+                        if not tool and no_change_tool is None:
+                            no_change_tool = tracker.build_no_change_event()
                     finally:
                         await asyncio.to_thread(tracker.cleanup)
                 except Exception:
@@ -240,6 +244,9 @@ class TopicWorker:
                     continue
                 if tool:
                     await _emit_tool(tool)
+                    emitted = True
+            if not emitted and no_change_tool:
+                await _emit_tool(no_change_tool)
 
         async def _stream(prompt, **kw):
             nonlocal run_seq, session_id, raw, status_raw

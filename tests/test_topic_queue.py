@@ -260,6 +260,7 @@ def test_worker_emits_git_diff_tool_event(tmp_path):
             msg_id=456,
         )
         with patch("agent.runners.run_codex", fake_runner), \
+             patch("agent.stats_db.get_worktrees", return_value=[]), \
              patch("agent.stats_db.insert_run_event"), \
              patch("agent.stats_db.update_assistant_message"), \
              patch("agent.stats_db.set_topic_session"), \
@@ -279,6 +280,52 @@ def test_worker_emits_git_diff_tool_event(tmp_path):
     assert [tool["name"] for tool in tools] == ["GitDiff"]
     assert tools[0]["files"] == [{"status": "M", "path": "app.txt"}]
     assert "+changed by agent" in tools[0]["diff"]
+
+
+def test_worker_emits_no_change_git_diff_when_tracked_tree_is_clean(tmp_path):
+    init_repo(tmp_path)
+
+    async def fake_runner(*args, **kwargs):
+        yield {"_tool": {"name": "Edit", "file": str(tmp_path / "app.txt"), "old": "base", "new": "temp"}}
+        yield "done"
+
+    async def run():
+        worker = TopicWorker("work")
+        item = QueueItem(
+            seq=0,
+            topic="work",
+            agent="codex",
+            prompt="hello",
+            context_history=[],
+            backend="codex",
+            model=None,
+            cwd=str(tmp_path),
+            code_roots=[str(tmp_path)],
+            adhoc=True,
+            msg_id=457,
+        )
+        with patch("agent.runners.run_codex", fake_runner), \
+             patch("agent.stats_db.get_worktrees", return_value=[]), \
+             patch("agent.stats_db.insert_run_event"), \
+             patch("agent.stats_db.update_assistant_message"), \
+             patch("agent.stats_db.set_topic_session"), \
+             patch("agent.stats_db.save_stats"):
+            await worker._process(item)
+
+        chunks = []
+        while True:
+            chunk = await item.out_q.get()
+            chunks.append(chunk)
+            if chunk is None:
+                break
+        return chunks
+
+    chunks = asyncio.run(run())
+    tools = [chunk["_tool"] for chunk in chunks if isinstance(chunk, dict) and "_tool" in chunk]
+    assert [tool["name"] for tool in tools] == ["Edit", "GitDiff"]
+    assert tools[1]["no_changes"] is True
+    assert tools[1]["file_count"] == 0
+    assert tools[1]["files"] == []
 
 
 def test_worker_skips_git_tracking_when_code_roots_empty():

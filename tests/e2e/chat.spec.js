@@ -265,6 +265,31 @@ test.describe('response bubble', () => {
     await expect(block.locator('.diff-hunk')).toContainText('@@ -1 +1 @@');
   });
 
+  test('suppresses legacy edit list when GitDiff reports no net changes', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        META,
+        { event: 'tool', data: { name: 'Edit', file: 'ui/app.js', old: 'old', new: 'new' } },
+        { event: 'tool', data: {
+          name: 'GitDiff',
+          file_count: 0,
+          additions: 0,
+          deletions: 0,
+          files: [],
+          diff: '',
+          no_changes: true,
+        } },
+        { data: 'Done' },
+        DONE,
+      ),
+    }));
+
+    await sendMsg(page);
+    await expect(page.locator(RESPONSE)).toContainText('Done');
+    await expect(page.locator('.tool-block-history')).toHaveCount(0);
+  });
+
   test('GitDiff renders text diffs for files with generic trailing suffixes', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200, headers: SSE_HEADERS,

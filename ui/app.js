@@ -2797,7 +2797,7 @@ function toolLabel(tool) {
 
 function changeTools(tools) {
   const gitTools = tools.filter(t => t.name === 'GitDiff');
-  if (gitTools.length) return gitTools;
+  if (gitTools.length) return gitTools.filter(t => (t.file_count ?? (t.files || []).length) > 0);
   return tools.filter(t => t.name === 'Edit' || t.name === 'Write' || t.name === 'MultiEdit' || t.name === 'Diff');
 }
 

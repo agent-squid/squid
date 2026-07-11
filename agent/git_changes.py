@@ -169,6 +169,29 @@ class GitChangeTracker:
             } if self.repo_root != self.event_repo_root else {}),
         }
 
+    def build_no_change_event(self) -> dict:
+        return {
+            "name": "GitDiff",
+            "file_count": 0,
+            "additions": 0,
+            "deletions": 0,
+            "files": [],
+            "stat": "",
+            "diff": "",
+            "base": self.base_tree,
+            "cwd": str(self.event_cwd),
+            "source": str(self.source_cwd),
+            "repo": str(self.event_repo_root),
+            "mode": "direct-watch",
+            "persistent": self.persistent,
+            "truncated": False,
+            "no_changes": True,
+            **({
+                "worktree_cwd": str(self.run_cwd),
+                "worktree_repo": str(self.repo_root),
+            } if self.repo_root != self.event_repo_root else {}),
+        }
+
     def cleanup(self) -> None:
         return None
 
