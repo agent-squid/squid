@@ -195,6 +195,7 @@ body {
 }
 .hmenu-item.active { background: var(--surface-2); color: var(--accent); }
 .hmenu-item:hover:not(.active) { background: var(--surface-3); color: var(--text-muted); }
+.hmenu-item.danger:hover { color: var(--danger); }
 .hmenu-primary { display: none; }
 .hmenu-separator {
   border: none;
@@ -736,6 +737,7 @@ body {
   overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
@@ -872,10 +874,11 @@ body {
 .diff-hunk   { background: rgba(80, 80, 150, 0.16); color: #8080c8; }
 .diff-file   { background: rgba(255, 255, 255, 0.035); color: #aaaabb; }
 .diff-header { margin: 0; }
-.diff-header-summary { cursor: pointer; user-select: none; }
+.diff-header-summary { cursor: pointer; user-select: none; padding-left: 1.6em; }
 .diff-header-summary::-webkit-details-marker { display: none; }
 .diff-header-summary::before { content: '▸ '; font-style: normal; }
 .diff-header[open] .diff-header-summary::before { content: '▾ '; }
+.diff-header > .diff-file:not(.diff-header-summary) { padding-left: 1.6em; }
 .diff-sep    { height: 1px; background: #222; margin: 2px 0; }
 .gitdiff-file-row { border-top: 1px solid var(--surface-3); display: flex; flex-wrap: wrap; align-items: center; }
 .gitdiff-file-row:first-child { border-top: none; }
@@ -2720,7 +2723,6 @@ body {
 }
 #stats-content .stats-breakdown-table {
   --stats-total-col-width: 4.75rem;
-  --stats-misc-col-width: 4.75rem;
   width: max-content;
 }
 #stats-content .stats-breakdown-table th,
@@ -2728,7 +2730,8 @@ body {
   padding-left: 0.5rem;
   padding-right: 0.5rem;
 }
-#stats-content .stats-breakdown-table .stats-series-col {
+#stats-content .stats-breakdown-table .stats-series-col,
+#stats-content .stats-breakdown-table .stats-misc-col {
   min-width: 6rem;
 }
 #stats-content .stats-breakdown-table .stats-sticky-left,
@@ -2752,10 +2755,6 @@ body {
 #stats-content .stats-breakdown-table .stats-total-col {
   right: 0;
   min-width: var(--stats-total-col-width);
-}
-#stats-content .stats-breakdown-table.has-misc .stats-misc-col {
-  right: var(--stats-total-col-width);
-  min-width: var(--stats-misc-col-width);
 }
 #stats-content .stats-breakdown-table tbody tr:hover .stats-sticky-left,
 #stats-content .stats-breakdown-table tbody tr:hover .stats-sticky-right {

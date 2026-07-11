@@ -39,6 +39,12 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (swRefreshing) return;
     swRefreshing = true;
+    // doRefresh() already reloads once it deregisters the old worker; the fresh
+    // worker claiming control here would otherwise trigger a second reload.
+    if (sessionStorage.getItem('squid_skip_sw_reload')) {
+      sessionStorage.removeItem('squid_skip_sw_reload');
+      return;
+    }
     window.location.reload();
   });
 }
@@ -267,6 +273,7 @@ function initMobileViewNavigation() {
 async function doRefresh() {
   /* Clear all Cache API caches, unregister service workers, then reload. */
   try {
+    sessionStorage.setItem('squid_skip_sw_reload', '1');
     if ('caches' in window) {
       const keys = await caches.keys();
       await Promise.all(keys.map(k => caches.delete(k)));
@@ -296,7 +303,7 @@ function initSettings() {
   });
   document.querySelectorAll('.hmenu-item').forEach(btn =>
     btn.addEventListener('click', () => {
-      if (btn.id === 'hmenu-refresh') return;
+      if (btn.id === 'hmenu-refresh' || btn.id === 'hmenu-restart') return;
       hamburgerMenu.classList.remove('open');
       hamburgerBtn.classList.remove('active');
       navigateView(btn.dataset.view);
@@ -307,6 +314,12 @@ function initSettings() {
     hamburgerMenu.classList.remove('open');
     hamburgerBtn.classList.remove('active');
     doRefresh()
+  });
+  document.getElementById('hmenu-restart')?.addEventListener('click', e => {
+    e.stopPropagation();
+    hamburgerMenu.classList.remove('open');
+    hamburgerBtn.classList.remove('active');
+    restartServer();
   });
   document.addEventListener('click', e => {
     if (!hamburgerMenu.contains(e.target) && !hamburgerBtn.contains(e.target)) {
@@ -1546,7 +1559,8 @@ const SQUID_COMMANDS = [
   { name: 'stop',         desc: 'kill running process for current topic',             args: false },
   { name: 'stopall',      desc: 'kill + drain queue for current topic',               args: false },
   { name: 'deq',          desc: 'drain queue (deq N removes Nth item)',               args: true  },
-  { name: 'restart',      desc: 'restart the server',                                 args: false },
+  { name: 'restart',      desc: 'restart the squid server — kills any in-flight prompts (confirms first)', args: false },
+  { name: 'refresh',      desc: 'hard refresh this browser tab — clears cache, server untouched', args: false },
   { name: 'f', alias: 'filter', desc: 'filter — e.g. /f #topic  ·  /f @agent!  ·  /f reset', args: true },
   { name: 's', alias: 'search', desc: 'search — e.g. /s #topic kw  ·  /s @agent! kw  ·  /s #all kw', args: true },
   { name: 'status',       desc: 'show active processes panel',                        args: false },
@@ -1557,6 +1571,7 @@ const SQUID_COMMANDS = [
 function parseCommand(message) {
   const t = message.trim().replace(/^\//, ''); // strip optional leading /
   if (/^restart$/i.test(t))      return { command: 'restart' };
+  if (/^refresh$/i.test(t))      return { command: 'refresh' };
   if (/^stop$/i.test(t))         return { command: 'stop' };
   if (/^stopall$/i.test(t))      return { command: 'stopall' };
   if (/^clear$/i.test(t))        return { command: 'clear' };
@@ -1589,6 +1604,14 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
   }
   if (cmd.command === 'remote') {
     openRemoteQR();
+    return;
+  }
+  if (cmd.command === 'refresh') {
+    doRefresh();
+    return;
+  }
+  if (cmd.command === 'restart') {
+    await restartServer();
     return;
   }
   if (cmd.command === 'filter') {
@@ -1648,15 +1671,6 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
     return;
   }
 
-  if (cmd.command === 'restart') {
-    const runningPrompts = await runningPromptsForRestart();
-    const ok = !runningPrompts.length || await confirmRestartWithRunningPrompts(runningPrompts);
-    if (!ok) {
-      showCmdFeedback('restart cancelled');
-      return;
-    }
-  }
-
   const label = cmd.command === 'deq'
     ? `deq${cmd.pos != null ? ' ' + cmd.pos : ''}`
     : cmd.command;
@@ -1674,20 +1688,6 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
     });
     const data = await res.json();
     if (!data.ok) { feedbackEl.textContent = `${label} failed`; return; }
-
-    if (cmd.command === 'restart') {
-      feedbackEl.textContent = 'restarting…';
-      // Poll /health until server is back up, then hard-refresh
-      const poll = async () => {
-        try {
-          const r = await fetch('/health');
-          if (r.ok) { doRefresh(); return; }
-        } catch {}
-        setTimeout(poll, 500);
-      };
-      setTimeout(poll, 800);
-      return;
-    }
 
     const detail = cmd.command === 'stop'    ? `#${topic} — killed ${data.killed}`
                  : cmd.command === 'stopall' ? `#${topic} — killed ${data.killed}, drained ${data.drained}`
@@ -1726,6 +1726,40 @@ async function runningPromptsForRestart() {
     return rows.filter(row => row && !isIdleProc(row));
   } catch {
     return [];
+  }
+}
+
+// Shared by /restart and the "Restart Server" menu item: confirms if prompts
+// are actively running (they'd be killed), asks the backend to restart, then
+// polls /health and hard-refreshes this tab once it's back.
+async function restartServer() {
+  const runningPrompts = await runningPromptsForRestart();
+  const ok = !runningPrompts.length || await confirmRestartWithRunningPrompts(runningPrompts);
+  if (!ok) {
+    showCmdFeedback('restart cancelled');
+    return;
+  }
+  const feedbackEl = showCmdFeedback('restart…');
+  try {
+    const res = await fetch('/cmd', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'restart', topic: 'default' }),
+    });
+    const data = await res.json();
+    if (!data.ok) { feedbackEl.textContent = 'restart failed'; return; }
+    feedbackEl.textContent = 'restarting…';
+    // Poll /health until server is back up, then hard-refresh this tab.
+    const poll = async () => {
+      try {
+        const r = await fetch('/health');
+        if (r.ok) { doRefresh(); return; }
+      } catch {}
+      setTimeout(poll, 500);
+    };
+    setTimeout(poll, 800);
+  } catch {
+    feedbackEl.textContent = 'restart — request failed';
   }
 }
 
@@ -1807,7 +1841,10 @@ form.addEventListener('submit', async (e) => {
     input.value = '';
     resizeComposer();
     hideAutocomplete();
-    if (cmd.command === 'restart') {
+    if (cmd.command === 'restart' || cmd.command === 'refresh') {
+      // Both reload the page — clear the autosaved draft first, or the
+      // 300ms debounce (below) may have already captured "/restart"/"/refresh"
+      // itself, which initPromptHistory() would then restore into the input.
       clearTimeout(_draftSaveTimer);
       localStorage.removeItem('squid_draft');
     }
@@ -2699,6 +2736,9 @@ async function sendMessage(text) {
                 _inj[lastSessionId] = [...new Set([...(_inj[lastSessionId] || []), ..._contextIds])];
                 setInjectedInto(_inj);
               }
+              // Session sends are done with this context now — clear the "will inject" badge.
+              // Adhoc turns keep it: each adhoc turn re-injects, so it's not "already sent" in the same sense.
+              if (!adhoc) updatePinCount();
               if (pinPanel.classList.contains('open')) renderPinPanel();
             }
             updateInContextMarkers();
@@ -5793,7 +5833,7 @@ function renderAgentBreakdownStats(rows) {
     return `<th class="stats-series-col" aria-label="${escapeHtml(label)}">${escapeHtml(label)}</th>`;
   }).join('');
   const miscTitle = pivot.overflowCount ? `Includes ${pivot.overflowCount} hidden selected series plus unselected matching data` : 'Unselected matching data';
-  const miscHeader = hasMisc ? `<th class="stats-sticky-right stats-misc-col" title="${escapeHtml(miscTitle)}">Misc</th>` : '';
+  const miscHeader = hasMisc ? `<th class="stats-misc-col" title="${escapeHtml(miscTitle)}">Misc</th>` : '';
   const bodyRows = _statsPageSlice(pivot.periodRows).map(row => {
     const cells = pivot.selected
       .map(key => `<td class="stats-series-col">${_formatStatsMetricValue(row.values[key] || 0, metric)}</td>`)
@@ -5801,7 +5841,7 @@ function renderAgentBreakdownStats(rows) {
     return `<tr>
       <td class="stats-sticky-left">${_statsPeriodLabel(row.period)}</td>
       ${cells}
-      ${hasMisc ? `<td class="stats-sticky-right stats-misc-col">${_formatStatsMetricValue(row.misc || 0, metric)}</td>` : ''}
+      ${hasMisc ? `<td class="stats-misc-col">${_formatStatsMetricValue(row.misc || 0, metric)}</td>` : ''}
       <td class="stats-sticky-right stats-total-col">${pivot.canSumTotals ? _formatStatsMetricValue(row.total || 0, metric) : totalText}</td>
     </tr>`;
   }).join('');
@@ -5820,7 +5860,7 @@ function renderAgentBreakdownStats(rows) {
     <tfoot><tr>
       <td class="stats-sticky-left">${_statsBreakdownAxisLabel('Total', 'total')}</td>
       ${totalCells}
-      ${hasMisc ? `<td class="stats-sticky-right stats-misc-col">${_formatStatsMetricValue(totalMisc, metric)}</td>` : ''}
+      ${hasMisc ? `<td class="stats-misc-col">${_formatStatsMetricValue(totalMisc, metric)}</td>` : ''}
       <td class="stats-sticky-right stats-total-col">${pivot.canSumTotals ? _formatStatsMetricValue(grandTotal, metric) : totalText}</td>
     </tr></tfoot>
   </table>`);
@@ -7455,15 +7495,18 @@ function _rememberSessionMemoryRevision(topic, agent, session) {
 
 function _getMemoryMeta(topic) {
   if (_memoryCache[topic]) return _memoryCache[topic];
-  _memoryCache[topic] = { topic, exists: false, content: '', path: `~/.squid/context/topics/${topic}/memory.md`, loading: true };
+  const placeholder = { topic, exists: false, content: '', path: `~/.squid/context/topics/${topic}/memory.md`, loading: true };
+  _memoryCache[topic] = placeholder;
   fetch(`/topics/${encodeURIComponent(topic)}/memory`)
     .then(r => r.ok ? r.json() : null)
     .then(data => {
-      if (data) _memoryCache[topic] = { ...data, loading: false };
+      // A newer write (save, code-roots decision, or a send's own fresh fetch) may have
+      // already replaced the cache entry while this request was in flight — don't clobber it.
+      if (data && _memoryCache[topic] === placeholder) _memoryCache[topic] = { ...data, loading: false };
       updatePinCount();
       if (pinPanel.classList.contains('open')) renderPinPanel();
     })
-    .catch(() => { _memoryCache[topic].loading = false; });
+    .catch(() => { if (_memoryCache[topic] === placeholder) placeholder.loading = false; });
   return _memoryCache[topic];
 }
 

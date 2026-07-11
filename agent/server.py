@@ -25,6 +25,7 @@ import asyncio
 import base64
 import json
 import logging
+import logging.handlers
 import os
 import re
 import subprocess
@@ -92,7 +93,15 @@ BOOT_TIME = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 init_db()
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
+# Rotate daily, keep a week of history — the log previously grew unbounded
+# (shell-appended by bin/start.sh with no timestamps, no cap).
+_LOG_DIR = _USER_CONFIG.parent / "logs"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+_log_handler = logging.handlers.TimedRotatingFileHandler(
+    _LOG_DIR / "server.log", when="midnight", backupCount=7, encoding="utf-8", utc=True,
+)
+_log_handler.setFormatter(logging.Formatter("%(asctime)sZ %(levelname)s  %(message)s"))
+logging.basicConfig(level=logging.INFO, handlers=[_log_handler], force=True)
 log = logging.getLogger(__name__)
 
 dispatcher = TopicDispatcher()
@@ -1943,12 +1952,16 @@ def main():
             f"  tailscale serve --bg --http={port} 127.0.0.1:{port}"
         )
 
-    print(f"Starting squid on http://{host}:{port}")
+    log.info("Starting squid on http://%s:%s", host, port)
     uvicorn.run(
         "agent.server:app",
         host=host,
         port=port,
         reload="--reload" in sys.argv,
+        # Skip uvicorn's own logging config so its loggers (with no handlers
+        # of their own) propagate into our rotating file handler above,
+        # instead of writing to stdout unrotated.
+        log_config=None,
     )
 
 

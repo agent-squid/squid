@@ -58,6 +58,10 @@ fi
 # ── start ────────────────────────────────────────────────────────────────────
 PID_FILE="$ROOT/.squid.pid"
 LOG_FILE="$SQUID_HOME/logs/server.log"
+# agent/server.py owns LOG_FILE directly via a rotating handler (7-day
+# retention). BOOT_LOG only catches crashes before that handler is set up
+# (e.g. import errors) — truncated on every start, never accumulates.
+BOOT_LOG="$SQUID_HOME/logs/boot.log"
 
 FORCE=0
 for arg in "$@"; do [[ "$arg" == "--force" || "$arg" == "--restart" ]] && FORCE=1; done
@@ -93,7 +97,7 @@ RELOAD=""
 [[ "${DEV:-}" == "1" ]] && RELOAD="--reload"
 
 cd "$ROOT"
-nohup "$VENV/bin/python" -m agent.server $RELOAD >> "$LOG_FILE" 2>&1 &
+nohup "$VENV/bin/python" -m agent.server $RELOAD > "$BOOT_LOG" 2>&1 &
 echo $! > "$PID_FILE"
 
 # ── health check ─────────────────────────────────────────────────────────────
@@ -108,4 +112,4 @@ for i in {1..20}; do
   echo -n "."
 done
 echo ""
-echo "warning: squid did not respond within 10 s — check $LOG_FILE"
+echo "warning: squid did not respond within 10 s — check $BOOT_LOG (early failures) or $LOG_FILE"

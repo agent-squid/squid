@@ -162,7 +162,8 @@
           <button class="hmenu-item hmenu-primary" data-view="community">Community</button>
           <button class="hmenu-item" data-view="settings">Settings</button>
           <div class="hmenu-separator"></div>
-          <button class="hmenu-item" id="hmenu-refresh">Hard Refresh</button>
+          <button class="hmenu-item" id="hmenu-refresh" title="Clear this browser tab's cache and reload it. Client-side only — the squid server is untouched.">Refresh Client</button>
+          <button class="hmenu-item danger" id="hmenu-restart" title="Restart the squid server. Kills any in-flight prompts across all topics (confirms first if any are running).">Restart Server</button>
         </div>
       </div>
 
@@ -259,7 +260,8 @@
           <div class="help-row"><code>/f, /filter</code><span>filter history using the same scope syntax as search</span></div>
           <div class="help-row"><code>/filter reset</code><span>clear the active filter</span></div>
           <div class="help-row"><code>/status</code><span>open status popup</span></div>
-          <div class="help-row"><code>/restart</code><span>restart the server</span></div>
+          <div class="help-row"><code>/restart</code><span>restart the squid server — kills any in-flight prompts (confirms first)</span></div>
+          <div class="help-row"><code>/refresh</code><span>hard refresh this browser tab — clears cache, server untouched</span></div>
           <div class="help-row"><code>/remote</code><span>show QR code for mobile / tablet access</span></div>
           <div class="help-row"><code>/s, /search keywords…</code><span>search history — see Search how-to below for scope syntax</span></div>
           <div class="help-row" style="color:#555;font-size:0.85em">Commands also work without <kbd>/</kbd> as exact bare words except /s.</div>

@@ -204,6 +204,64 @@ test('session send includes pinned_ids for cross-topic pins', async ({ page }) =
   expect(capturedBody?.adhoc).toBeFalsy();
 });
 
+test('session send clears the will-inject pin badge once context is delivered', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/chat', r => r.fulfill({
+    status: 200, headers: SSE_HEADERS,
+    body: sse(META, { data: 'session response' }, STATS, DONE),
+  }));
+
+  await page.goto('/');
+  // Pin from a different topic — should be injected into session turn
+  await seedPin(page, { id: 77, topic: 'other', agent: 'codex', content: 'cross-topic context' });
+
+  await page.fill('#input', '#squid@claude hello');
+  await page.click('#pin-btn');
+  await expect(page.locator('.pin-item-status')).toContainText('will inject');
+  await page.click('#pin-btn'); // close panel
+
+  await page.focus('#input');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toBeVisible();
+
+  // Already sent in this session turn — badge should clear, not keep showing "will inject".
+  await expect(page.locator('#pin-btn')).not.toHaveClass(/has-pins/);
+  await expect(page.locator('#pin-count')).toHaveText('');
+  await page.click('#pin-btn');
+  await expect(page.locator('.pin-item-status')).toContainText('injected');
+});
+
+test('adhoc turn keeps the will-inject pin badge after send', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/chat', r => r.fulfill({
+    status: 200, headers: SSE_HEADERS,
+    body: sse(
+      { event: 'meta', data: { agent: 'claude', backend: 'claude', msg_id: 30, adhoc: true } },
+      { data: 'response' },
+      STATS,
+      DONE,
+    ),
+  }));
+
+  await page.goto('/');
+  // Pin from the same topic@agent — adhoc turns always re-inject regardless of prior sends.
+  await seedPin(page, { id: 88, topic: 'squid', agent: 'claude', content: 'cached response' });
+
+  await page.fill('#input', '#squid@claude! hello');
+  await page.click('#pin-btn');
+  await expect(page.locator('.pin-item-status')).toContainText('will inject');
+  await page.click('#pin-btn'); // close panel
+
+  await page.focus('#input');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toBeVisible();
+
+  // Adhoc turns re-inject every time — badge should still show it'll inject again, not clear.
+  await expect(page.locator('#pin-btn')).toHaveClass(/has-pins/);
+  await page.click('#pin-btn');
+  await expect(page.locator('.pin-item-status')).toContainText('will inject');
+});
+
 test('adhoc send includes pinned_ids in POST /chat body', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
 
@@ -507,6 +565,66 @@ test('topic memory editor saves and refreshes preview', async ({ page }) => {
   await page.click('#memory-modal-close');
   await page.click('#pin-btn');
   await expect(page.locator('.memory-item-preview')).toContainText('Prefer transparent context.');
+});
+
+test('a slow first memory fetch does not clobber a newer save (out-of-order response)', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/topics/squid/session?agent=claude', r => r.fulfill({
+    json: { session_id: null, cwd: null },
+  }));
+
+  let savedContent = '';
+  let getCallCount = 0;
+  let releaseFirstGet;
+  const firstGetHeld = new Promise(resolve => { releaseFirstGet = resolve; });
+
+  await page.route('**/topics/squid/memory', async route => {
+    if (route.request().method() === 'PUT') {
+      savedContent = route.request().postDataJSON().content;
+      await route.fulfill({
+        json: { topic: 'squid', exists: true, content: savedContent, path: '~/.squid/context/topics/squid/memory.md' },
+      });
+      return;
+    }
+    getCallCount++;
+    if (getCallCount === 1) {
+      // Simulates the GET fired the moment the chip is created (before memory exists),
+      // which stays in flight and only resolves — with stale, pre-save data — after a
+      // save that happened in the meantime.
+      await firstGetHeld;
+      await route.fulfill({
+        json: { topic: 'squid', exists: false, content: '', path: '~/.squid/context/topics/squid/memory.md' },
+      });
+      return;
+    }
+    await route.fulfill({
+      json: { topic: 'squid', exists: !!savedContent, content: savedContent, path: '~/.squid/context/topics/squid/memory.md' },
+    });
+  });
+
+  await page.goto('/');
+  const firstGetIssued = page.waitForRequest(req =>
+    req.url().includes('/topics/squid/memory') && req.method() === 'GET');
+  // Typing "#squid@claude " promotes the chip, which fires the (held) memory GET above.
+  await page.fill('#input', '#squid@claude ');
+  await firstGetIssued;
+
+  // Add memory content and save while the first GET is still pending.
+  await page.click('#pin-btn');
+  await page.locator('[data-memory-toggle]').click();
+  await expect(page.locator('#memory-modal.open')).toBeVisible();
+  await page.fill('#memory-editor', 'Fresh memory content.');
+  await page.click('#memory-save');
+  await expect(page.locator('#memory-save')).toHaveText('Saved');
+  await page.click('#memory-modal-close');
+
+  // Now let the stale first GET resolve with its old (pre-save) snapshot.
+  releaseFirstGet();
+  await page.waitForTimeout(200);
+
+  await page.click('#pin-btn');
+  await expect(page.locator('.memory-item-preview')).toContainText('Fresh memory content.');
+  await expect(page.locator('[data-memory-toggle]')).toHaveText('On');
 });
 
 test('active session skips topic memory by default', async ({ page }) => {

@@ -728,7 +728,7 @@ test('agent breakdown defaults to top four agents when none are selected', async
   await expect(page.locator('#stats-content th', { hasText: 'Misc' })).toHaveCount(1);
 });
 
-test('stats breakdown caps visible series and keeps edge columns sticky while scrolling', async ({ page }) => {
+test('stats breakdown caps visible series and keeps total column sticky while scrolling', async ({ page }) => {
   await mockApp(page);
   await page.setViewportSize({ width: 900, height: 720 });
   const agents = Array.from({ length: 10 }, (_, i) => `agent${String(i + 1).padStart(2, '0')}`);
@@ -819,8 +819,8 @@ test('stats breakdown caps visible series and keeps edge columns sticky while sc
     return { firstLeft: first.left, miscRight: misc.right, totalRight: total.right };
   });
   expect(Math.abs(after.firstLeft - before.firstLeft)).toBeLessThan(2);
-  expect(Math.abs(after.miscRight - before.miscRight)).toBeLessThan(2);
   expect(Math.abs(after.totalRight - before.totalRight)).toBeLessThan(2);
+  expect(before.miscRight - after.miscRight).toBeGreaterThan(2);
 });
 
 test('stats breakdown horizontal scroll leaves pager controls fixed', async ({ page }) => {
