@@ -6,12 +6,14 @@ so they never appear in the user's project directory.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
 import re
 import subprocess
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -20,6 +22,14 @@ from . import config
 log = logging.getLogger(__name__)
 
 _WORKTREES_HOME = Path.home() / ".squid" / "worktrees"
+
+# Minimum time since a worktree was last touched before cleanup_worktrees()
+# will remove it. A turn's own CLI process is tracked and excluded via
+# get_active_msg_ids(), but a background command it spawned (e.g. a bash
+# tool run in the background) isn't — this grace period gives such
+# processes a chance to finish before their cwd is deleted out from under
+# them, without blocking removal indefinitely.
+_CLEANUP_GRACE_SECONDS = 30
 
 # Serializes commit/merge/rebase against a given repo_root's .git, since it's
 # shared mutable state across every turn (including parallel adhoc turns) of
@@ -241,6 +251,55 @@ def sync_after_turn(
         if main_head:
             _run_git(wt, "rebase", main_head, check=False)
     return []
+
+
+def _seconds_since(iso_ts: str) -> float:
+    dt = datetime.strptime(iso_ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - dt).total_seconds()
+
+
+async def cleanup_worktrees(topic: str) -> dict[str, list[str]]:
+    """
+    Best-effort sweep: sync and remove worktrees left over from finished turns.
+    Called at the start of each new turn dispatch (see TopicDispatcher.dispatch)
+    and at session close (clear/compact/session-delete). Never blocks turn
+    admission — callers should treat failures as non-fatal.
+
+    Skips worktrees whose turn is still running (registered msg_id), and ones
+    touched too recently to safely assume a background process they spawned
+    has wound down. Worktrees with unresolved merge conflicts are kept alive.
+    """
+    from .runners import get_active_msg_ids
+    from .stats_db import get_all_worktrees_for_topic, delete_worktree
+
+    active = get_active_msg_ids()
+    records = await asyncio.to_thread(get_all_worktrees_for_topic, topic)
+    conflicts: dict[str, list[str]] = {}
+
+    for rec in records:
+        repo_root = Path(rec["repo_root"])
+        wt_key = rec["agent"]
+        try:
+            if int(wt_key) in active:
+                log.debug("worktree skip — turn still active: topic=%s key=%s", topic, wt_key)
+                continue
+        except (ValueError, TypeError):
+            pass  # non-numeric wt_key: pre-dates per-turn keying, treat as orphan
+        if _seconds_since(rec["last_used_at"]) < _CLEANUP_GRACE_SECONDS:
+            continue
+        try:
+            conflict_files = await asyncio.to_thread(
+                sync_after_turn, repo_root, topic, wt_key, None
+            )
+            if conflict_files:
+                conflicts[rec["repo_root"]] = conflict_files
+            else:
+                await asyncio.to_thread(remove_worktree, repo_root, topic, wt_key)
+                await asyncio.to_thread(delete_worktree, topic, wt_key, rec["repo_root"])
+        except Exception:
+            log.exception("worktree cleanup failed for %s topic=%s key=%s", repo_root, topic, wt_key)
+
+    return conflicts
 
 
 def map_to_worktree(path: str, worktree_map: dict[Path, Path]) -> Optional[str]:

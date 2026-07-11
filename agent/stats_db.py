@@ -2128,6 +2128,19 @@ def save_worktree(topic: str, agent: str, repo_root: str, wt_path: str, br: str)
         )
 
 
+def mark_worktree_synced(topic: str, agent: str, repo_root: str) -> None:
+    """Record that a turn's changes were merged, without deleting the worktree
+    yet — actual removal is a later best-effort sweep (see worktree.cleanup_worktrees),
+    so a background process the turn spawned isn't left with its cwd yanked out."""
+    with _connect() as conn:
+        conn.execute(
+            """UPDATE worktrees SET status='synced',
+                 last_used_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+               WHERE topic=? AND agent=? AND repo_root=?""",
+            (topic, agent, repo_root),
+        )
+
+
 def get_worktrees(topic: str, agent: str) -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
