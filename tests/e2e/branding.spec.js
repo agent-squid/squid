@@ -13,6 +13,6 @@ test('AgentSquid branding is used for install metadata and header logo', async (
 
   const logo = page.locator('header#topbar .text-logo');
   await expect(logo).toContainText('AgentSquid');
-  await expect(logo).toHaveCSS('font-family', /JetBrains Mono/);
+  await expect(logo).toHaveCSS('font-family', /Rubik/);
   await expect(logo).toHaveCSS('letter-spacing', /0\.2[0-9]+px/);
 });

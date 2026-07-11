@@ -1338,6 +1338,10 @@ async def usage_stats(
     topic: str = "",
     adhoc: str = "all",
     tz_offset_minutes: int = 0,
+    chart_metric: str = "",
+    chart_agg: str = "sum",
+    chart2_metric: str = "",
+    chart2_agg: str = "sum",
 ):
     if group == "time" and breakdown in {"agent", "agent_session", "topic_agent", "topic_agent_session"}:
         return JSONResponse(get_stats_by_breakdown(
@@ -1348,6 +1352,7 @@ async def usage_stats(
             adhoc=adhoc,
             tz_offset_minutes=tz_offset_minutes,
             breakdown=breakdown,
+            chart_series=[{"metric": chart_metric, "agg": chart_agg}],
         ))
     if group == "topic":
         return JSONResponse(get_stats_by_topic(days=days, agent=agent, topic=topic, adhoc=adhoc))
@@ -1360,6 +1365,10 @@ async def usage_stats(
         topic=topic,
         adhoc=adhoc,
         tz_offset_minutes=tz_offset_minutes,
+        chart_series=[
+            {"metric": chart_metric, "agg": chart_agg},
+            {"metric": chart2_metric, "agg": chart2_agg},
+        ],
     ))
 
 

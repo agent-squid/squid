@@ -1408,6 +1408,109 @@ def _append_stats_in_filter(clauses: list[str], params: list, expr: str, values:
     params.extend(values)
 
 
+_STATS_CHART_AGGS = {"sum", "avg", "min", "max", "p50", "p75", "p95"}
+_STATS_CHART_METRIC_EXPR = {
+    "cost": "cost_usd",
+    "tokens_in": """CASE
+        WHEN COALESCE(cache_read_tokens, 0) + COALESCE(cache_write_tokens, 0) > 0
+         AND COALESCE(input_tokens, 0) < COALESCE(cache_read_tokens, 0) + COALESCE(cache_write_tokens, 0)
+        THEN COALESCE(input_tokens, 0) + COALESCE(cache_read_tokens, 0) + COALESCE(cache_write_tokens, 0)
+        ELSE COALESCE(input_tokens, 0)
+    END""",
+    "tokens_out": "output_tokens",
+    "quota": "CASE WHEN quota_before IS NOT NULL AND quota_after IS NOT NULL THEN quota_after - quota_before ELSE NULL END",
+}
+
+
+def _stats_chart_field(metric: str, agg: str) -> str:
+    return f"chart_{metric}_{agg}"
+
+
+def _percentile(values: list[float], percentile: float) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    idx = int(round((len(ordered) - 1) * percentile))
+    return ordered[max(0, min(idx, len(ordered) - 1))]
+
+
+def _aggregate_values(values: list[float], agg: str) -> Optional[float]:
+    values = [v for v in values if v is not None]
+    if not values:
+        return None
+    if agg == "sum":
+        return sum(values)
+    if agg == "avg":
+        return sum(values) / len(values)
+    if agg == "min":
+        return min(values)
+    if agg == "max":
+        return max(values)
+    if agg == "p50":
+        return _percentile(values, 0.50)
+    if agg == "p75":
+        return _percentile(values, 0.75)
+    if agg == "p95":
+        return _percentile(values, 0.95)
+    return None
+
+
+def _merge_chart_aggregates(
+    conn: sqlite3.Connection,
+    rows: list[dict],
+    *,
+    period: str,
+    days: int,
+    agent: str,
+    topic: str,
+    adhoc: str,
+    tz_offset_minutes: int,
+    chart_series: Optional[list[dict]],
+) -> None:
+    if not rows or not chart_series:
+        return
+    tz_shift = f"{-tz_offset_minutes} minutes"
+    bucket = (
+        f"strftime('%Y-%m-%d %H:00', datetime(created_at, '{tz_shift}'))"
+        if period == "hourly"
+        else f"strftime('%Y-%m-%d', datetime(created_at, '{tz_shift}'))"
+    )
+    cutoff = _stats_cutoff(days)
+    agents = _stats_filter_values(agent)
+    topics = _stats_filter_values(topic)
+    clauses: list[str] = ["created_at IS NOT NULL"]
+    params: list = []
+    if cutoff:
+        clauses.append("created_at >= ?")
+        params.append(cutoff)
+    _append_stats_in_filter(clauses, params, "COALESCE(agent, backend)", agents)
+    _append_stats_in_filter(clauses, params, "topic", topics)
+    if adhoc == "session":
+        clauses.append("COALESCE(adhoc, 0) = 0")
+    elif adhoc == "adhoc":
+        clauses.append("COALESCE(adhoc, 0) = 1")
+    where = " AND ".join(clauses)
+
+    for series in chart_series:
+        metric = str(series.get("metric") or "")
+        agg = str(series.get("agg") or "sum").lower()
+        expr = _STATS_CHART_METRIC_EXPR.get(metric)
+        if not expr or agg not in _STATS_CHART_AGGS:
+            continue
+        field = _stats_chart_field(metric, agg)
+        sample_rows = conn.execute(
+            f"""SELECT {bucket} AS period, {expr} AS value
+                FROM session_stats
+                WHERE {where} AND ({expr}) IS NOT NULL""",
+            params,
+        ).fetchall()
+        grouped: dict[str, list[float]] = {}
+        for sample in sample_rows:
+            grouped.setdefault(sample["period"], []).append(sample["value"])
+        for row in rows:
+            row[field] = _aggregate_values(grouped.get(row["period"], []), agg)
+
+
 def get_aggregated_stats(
     period: str = "daily",
     days: int = 30,
@@ -1415,6 +1518,7 @@ def get_aggregated_stats(
     topic: str = "",
     adhoc: str = "all",
     tz_offset_minutes: int = 0,
+    chart_series: Optional[list[dict]] = None,
 ) -> list:
     # Shift UTC timestamps to local time before bucketing so day boundaries
     # reflect the user's clock, not UTC midnight.
@@ -1508,9 +1612,113 @@ def get_aggregated_stats(
                     ORDER BY ss.period DESC""",
                 (*ss_params, limit, *cm_params),
             ).fetchall()
-        return [dict(r) for r in rows]
+            result = [dict(r) for r in rows]
+            _merge_chart_aggregates(
+                conn,
+                result,
+                period=period,
+                days=days,
+                agent=agent,
+                topic=topic,
+                adhoc=adhoc,
+                tz_offset_minutes=tz_offset_minutes,
+                chart_series=chart_series,
+            )
+        return result
     except sqlite3.OperationalError:
         return []
+
+
+def _breakdown_chart_group_key(row: dict, *, include_topic: bool, include_session: bool) -> tuple:
+    key = [row.get("period")]
+    if include_topic:
+        key.append(row.get("topic"))
+    key.append(row.get("agent_key"))
+    if include_session:
+        key.append(row.get("session_type"))
+    return tuple(key)
+
+
+def _merge_breakdown_chart_aggregates(
+    conn: sqlite3.Connection,
+    rows: list[dict],
+    *,
+    period: str,
+    days: int,
+    agent: str,
+    topic: str,
+    adhoc: str,
+    tz_offset_minutes: int,
+    chart_series: Optional[list[dict]],
+    breakdown: str,
+) -> None:
+    if not rows or not chart_series:
+        return
+    tz_shift = f"{-tz_offset_minutes} minutes"
+    bucket = (
+        f"strftime('%Y-%m-%d %H:00', datetime(created_at, '{tz_shift}'))"
+        if period == "hourly"
+        else f"strftime('%Y-%m-%d', datetime(created_at, '{tz_shift}'))"
+    )
+    include_topic = breakdown in {"topic_agent", "topic_agent_session"}
+    include_session = breakdown in {"agent_session", "topic_agent_session"}
+    base_agent = "COALESCE(agent, backend, 'unknown')"
+    agent_key_expr = base_agent
+    if include_session:
+        agent_key_expr = f"{base_agent} || CASE WHEN COALESCE(adhoc, 0) = 1 THEN '!' ELSE '' END"
+    session_type = "CASE WHEN COALESCE(adhoc, 0) = 1 THEN 'adhoc' ELSE 'session' END"
+
+    select_dims = [f"{bucket} AS period"]
+    group_dims = ["period", "agent_key"]
+    if include_topic:
+        select_dims.append("topic")
+        group_dims.append("topic")
+    select_dims.extend([f"{agent_key_expr} AS agent_key", f"{agent_key_expr} AS agent"])
+    if include_session:
+        select_dims.append(f"{session_type} AS session_type")
+        group_dims.append("session_type")
+
+    cutoff = _stats_cutoff(days)
+    agents = _stats_filter_values(agent)
+    topics = _stats_filter_values(topic)
+    clauses: list[str] = ["created_at IS NOT NULL"]
+    params: list = []
+    if cutoff:
+        clauses.append("created_at >= ?")
+        params.append(cutoff)
+    _append_stats_in_filter(clauses, params, "COALESCE(agent, backend)", agents)
+    _append_stats_in_filter(clauses, params, "topic", topics)
+    if adhoc == "session":
+        clauses.append("COALESCE(adhoc, 0) = 0")
+    elif adhoc == "adhoc":
+        clauses.append("COALESCE(adhoc, 0) = 1")
+    where = " AND ".join(clauses)
+
+    for series in chart_series:
+        metric = str(series.get("metric") or "")
+        agg = str(series.get("agg") or "sum").lower()
+        expr = _STATS_CHART_METRIC_EXPR.get(metric)
+        if not expr or agg not in _STATS_CHART_AGGS:
+            continue
+        field = _stats_chart_field(metric, agg)
+        sample_rows = conn.execute(
+            f"""SELECT {', '.join(select_dims)}, {expr} AS value
+                FROM session_stats
+                WHERE {where} AND ({expr}) IS NOT NULL""",
+            params,
+        ).fetchall()
+        grouped: dict[tuple, list[float]] = {}
+        for sample in sample_rows:
+            sample_dict = dict(sample)
+            grouped.setdefault(
+                _breakdown_chart_group_key(sample_dict, include_topic=include_topic, include_session=include_session),
+                [],
+            ).append(sample_dict["value"])
+        for row in rows:
+            row[field] = _aggregate_values(
+                grouped.get(_breakdown_chart_group_key(row, include_topic=include_topic, include_session=include_session), []),
+                agg,
+            )
 
 
 def get_stats_by_agent_breakdown(
@@ -1521,9 +1729,10 @@ def get_stats_by_agent_breakdown(
     adhoc: str = "all",
     tz_offset_minutes: int = 0,
     include_session: bool = False,
+    chart_series: Optional[list[dict]] = None,
 ) -> list:
     breakdown = "agent_session" if include_session else "agent"
-    return get_stats_by_breakdown(period, days, agent, topic, adhoc, tz_offset_minutes, breakdown)
+    return get_stats_by_breakdown(period, days, agent, topic, adhoc, tz_offset_minutes, breakdown, chart_series)
 
 
 def get_stats_by_breakdown(
@@ -1534,6 +1743,7 @@ def get_stats_by_breakdown(
     adhoc: str = "all",
     tz_offset_minutes: int = 0,
     breakdown: str = "agent",
+    chart_series: Optional[list[dict]] = None,
 ) -> list:
     tz_shift = f"{-tz_offset_minutes} minutes"
     bucket = (
@@ -1671,7 +1881,20 @@ def get_stats_by_breakdown(
                     LIMIT ?""",
                 (*ss_params, *cm_params, limit * 20),
             ).fetchall()
-        return [dict(r) for r in rows]
+            result = [dict(r) for r in rows]
+            _merge_breakdown_chart_aggregates(
+                conn,
+                result,
+                period=period,
+                days=days,
+                agent=agent,
+                topic=topic,
+                adhoc=adhoc,
+                tz_offset_minutes=tz_offset_minutes,
+                chart_series=chart_series,
+                breakdown=breakdown,
+            )
+        return result
     except sqlite3.OperationalError:
         return []
 

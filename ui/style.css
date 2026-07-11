@@ -711,8 +711,8 @@ body {
 .text-logo {
   display: flex;
   align-items: center;
-  gap: 0.3em;
-  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  gap: 0.2em;
+  font-family: 'Rubik', ui-sans-serif, system-ui, sans-serif;
   font-size: var(--text-md);
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -2596,7 +2596,7 @@ body {
   margin-bottom: 0.4rem;
   font-size: var(--text-sm);
 }
-#sc-y1, #sc-y2 {
+#sc-y1, #sc-y2, #sc-y1-agg, #sc-y2-agg {
   background: var(--surface-3);
   border: 1px solid #2a2a36;
   border-radius: 3px;
@@ -2604,6 +2604,7 @@ body {
   font-size: 1em;
   padding: 0.1rem 0.3rem;
 }
+#sc-y1-agg, #sc-y2-agg { width: 4.1rem; }
 #sc-compare-btn {
   background: transparent;
   border: 1px solid #2a2a36;
@@ -2615,7 +2616,8 @@ body {
 }
 #sc-compare-btn:hover { border-color: #4a4a70; color: #9090c0; }
 #stats-chart-controls.breakdown-active #sc-compare-btn,
-#stats-chart-controls.breakdown-active #sc-y2 {
+#stats-chart-controls.breakdown-active #sc-y2,
+#stats-chart-controls.breakdown-active #sc-y2-agg {
   display: none;
 }
 #stats-chart-box { position: relative; height: 180px; }

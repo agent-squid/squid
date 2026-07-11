@@ -4517,6 +4517,8 @@ let statsBreakdown = '';
 let statsFilters = { days: 7, agents: [], topics: [], adhoc: 'all' };
 let statsChartY1 = 'turns';
 let statsChartY2 = '';
+let statsChartAggY1 = 'sum';
+let statsChartAggY2 = 'sum';
 let statsChartInstance = null;
 let _lastStatsRows = null;
 let _statsFiltersLoaded = false;
@@ -4568,6 +4570,17 @@ const CHART_METRICS = {
   tokens_in:  { label: 'Tokens In', fn: r => { const raw = r.input_tokens||0, cr = r.cache_read_tokens||0; return (cr>0&&raw<cr)?raw+cr:raw; }, color: 'rgba(80,200,120,1)',   fill: 'rgba(80,200,120,0.08)'  },
   tokens_out: { label: 'Tokens Out',fn: r => (r.output_tokens || 0),                                                   color: 'rgba(200,100,200,1)',  fill: 'rgba(200,100,200,0.08)' },
   sessions:   { label: 'Sessions',  fn: r => (r.sessions || 0),                                                        color: 'rgba(200,200,60,1)',   fill: 'rgba(200,200,60,0.08)'  },
+  quota:      { label: 'Quota',     fn: r => (r.quota_delta || 0),                                                     color: 'rgba(120,200,220,1)',  fill: 'rgba(120,200,220,0.08)' },
+};
+
+const STATS_AGG_LABELS = { sum: 'SUM', avg: 'AVG', min: 'MIN', max: 'MAX', p50: 'P50', p75: 'P75', p95: 'P95' };
+const STATS_METRIC_AGGS = {
+  turns: ['sum'],
+  sessions: ['sum'],
+  cost: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
+  tokens_in: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
+  tokens_out: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
+  quota: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
 };
 
 function _statsMeasureSelected(measure) {
@@ -4601,6 +4614,66 @@ function _formatStatsMetricValue(value, metric) {
   if (metric === 'cost') return _formatCost(value);
   if (metric === 'quota') return _formatQuotaDelta(value);
   return fmtNum(value || 0);
+}
+
+function _defaultStatsAgg(metric) {
+  return (STATS_METRIC_AGGS[metric] || ['sum'])[0];
+}
+
+function _normalizeStatsAgg(metric, agg) {
+  const allowed = STATS_METRIC_AGGS[metric] || ['sum'];
+  return allowed.includes(agg) ? agg : _defaultStatsAgg(metric);
+}
+
+function _statsMetricHasVariableAgg(metric) {
+  return (STATS_METRIC_AGGS[metric] || ['sum']).length > 1;
+}
+
+function _syncStatsAggSelect(select, metric, agg) {
+  if (!select) return;
+  const allowed = STATS_METRIC_AGGS[metric] || ['sum'];
+  select.innerHTML = allowed.map(key => `<option value="${key}">${STATS_AGG_LABELS[key]}</option>`).join('');
+  select.value = _normalizeStatsAgg(metric, agg);
+}
+
+function _statsChartAggField(metric, agg) {
+  return `chart_${metric}_${agg}`;
+}
+
+function _statsChartSeriesValue(row, metric, agg) {
+  if (agg === 'sum') return _statsMetricValue(row, metric);
+  const value = row[_statsChartAggField(metric, agg)];
+  return value == null ? 0 : value;
+}
+
+function _statsChartSeriesLabel(metric, agg) {
+  const m = CHART_METRICS[metric] || CHART_METRICS.turns;
+  return `${STATS_AGG_LABELS[agg] || agg.toUpperCase()} ${m.label}`;
+}
+
+function _statsCompareColor(primaryColor) {
+  return STATS_SERIES_COLORS.find(color => color !== primaryColor) || 'rgba(255,160,80,1)';
+}
+
+function _statsMeasureState(metric, agg) {
+  return { metric, agg: _normalizeStatsAgg(metric, agg) };
+}
+
+function _parseStatsMeasureState(value, fallbackMetric = 'turns') {
+  if (typeof value === 'string') return { metric: value || fallbackMetric, agg: _defaultStatsAgg(value || fallbackMetric) };
+  const metric = value?.metric || fallbackMetric;
+  return { metric, agg: _normalizeStatsAgg(metric, value?.agg || _defaultStatsAgg(metric)) };
+}
+
+function _syncStatsChartAggControls() {
+  statsChartAggY1 = _normalizeStatsAgg(statsChartY1, statsChartAggY1);
+  statsChartAggY2 = _normalizeStatsAgg(statsChartY2, statsChartAggY2);
+  const y1AggSel = document.getElementById('sc-y1-agg');
+  _syncStatsAggSelect(y1AggSel, statsChartY1, statsChartAggY1);
+  if (y1AggSel) y1AggSel.hidden = !_statsMetricHasVariableAgg(statsChartY1);
+  const y2AggSel = document.getElementById('sc-y2-agg');
+  _syncStatsAggSelect(y2AggSel, statsChartY2 || 'turns', statsChartAggY2);
+  if (y2AggSel) y2AggSel.hidden = !statsChartY2 || document.getElementById('sc-y2')?.hidden || !_statsMetricHasVariableAgg(statsChartY2);
 }
 
 const STATS_ICON_LEFT = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M10 3.5 5.5 8l4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -4837,19 +4910,21 @@ function _breakdownSelection(rows) {
 function _breakdownPivot(rows) {
   const { selected, selectedAgents, selectedTopics, labels } = _breakdownSelection(rows);
   const allSelected = selected.slice();
+  const canSumTotals = statsChartAggY1 === 'sum';
   const periods = [...new Set(rows.map(r => r.period))].sort().reverse();
   const periodRows = periods.map(period => {
     const values = Object.fromEntries(allSelected.map(key => [key, 0]));
-    let misc = 0, total = 0;
+    let misc = canSumTotals ? 0 : null;
+    let total = canSumTotals ? 0 : null;
     for (const row of rows) {
       if (row.period !== period) continue;
-      const value = _statsMetricValue(row, statsChartY1);
-      total += value;
+      const value = _statsChartSeriesValue(row, statsChartY1, statsChartAggY1);
+      if (canSumTotals) total += value;
       const key = _statsSeriesKey(row);
       const selectedAgent = selectedAgents.includes(_agentBaseKey(_agentKey(row)));
       const selectedTopic = !statsBreakdown.startsWith('topic_') || selectedTopics.includes(row.topic || 'unknown');
       if (selectedAgent && selectedTopic && allSelected.includes(key)) values[key] += value;
-      else misc += value;
+      else if (canSumTotals) misc += value;
     }
     return { period, values, misc, total };
   });
@@ -4865,6 +4940,7 @@ function _breakdownPivot(rows) {
   const overflowSelected = allSelected.filter(key => !visibleSet.has(key));
   if (overflowSelected.length) {
     for (const row of periodRows) {
+      if (!canSumTotals) continue;
       for (const key of overflowSelected) row.misc += row.values[key] || 0;
     }
   }
@@ -4880,7 +4956,7 @@ function _breakdownPivot(rows) {
   } else if (_statsBreakdownColumnSort.dir === 'desc') {
     visibleSelected.sort((a, b) => _compareStatsSeriesByName(b, a, labels));
   }
-  return { selected: visibleSelected, labels, periodRows, overflowCount: overflowSelected.length };
+  return { selected: visibleSelected, labels, periodRows, overflowCount: overflowSelected.length, canSumTotals };
 }
 
 function _updateStatsMeasureLabel() {
@@ -4976,6 +5052,12 @@ function _statsQueryParams({ includeTz = false } = {}) {
   if (statsFilters.agents.length) params.set('agent', statsFilters.agents.join(','));
   if (statsFilters.topics.length) params.set('topic', statsFilters.topics.join(','));
   if (statsFilters.adhoc !== 'all') params.set('adhoc', statsFilters.adhoc);
+  params.set('chart_metric', statsChartY1);
+  params.set('chart_agg', statsChartAggY1);
+  if (statsChartY2) {
+    params.set('chart2_metric', statsChartY2);
+    params.set('chart2_agg', statsChartAggY2);
+  }
   return params;
 }
 
@@ -4989,7 +5071,11 @@ function _statsState() {
       session_type: { mode: statsFilters.adhoc === 'all' ? 'all' : 'selected', values: statsFilters.adhoc === 'all' ? [] : [statsFilters.adhoc] },
     },
     breakdown: { key: statsBreakdown, sort: { ..._statsBreakdownColumnSort } },
-    measure: { primary: statsChartY1, secondary: statsChartY2 || null, visible: [..._statsMeasures] },
+    measure: {
+      primary: _statsMeasureState(statsChartY1, statsChartAggY1),
+      secondary: statsChartY2 ? _statsMeasureState(statsChartY2, statsChartAggY2) : null,
+      visible: [..._statsMeasures],
+    },
   };
 }
 
@@ -5003,7 +5089,7 @@ function _overallStatsState() {
       session_type: { mode: 'all', values: [] },
     },
     breakdown: { key: '', sort: { mode: 'name', dir: 'asc' } },
-    measure: { primary: 'turns', secondary: null, visible: ['sessions', 'turns', 'tokens_in', 'tokens_out'] },
+    measure: { primary: { metric: 'turns', agg: 'sum' }, secondary: null, visible: ['sessions', 'turns', 'tokens_in', 'tokens_out'] },
   };
 }
 
@@ -5021,8 +5107,12 @@ function _applyStatsState(state) {
   statsFilters.agents = dims.agent?.mode === 'selected' ? [...(dims.agent.values || [])] : [];
   const sessionValues = dims.session_type?.values || [];
   statsFilters.adhoc = dims.session_type?.mode === 'all' ? 'all' : (sessionValues[0] || 'all');
-  statsChartY1 = state?.measure?.primary || 'turns';
-  statsChartY2 = state?.measure?.secondary || '';
+  const primaryMeasure = _parseStatsMeasureState(state?.measure?.primary, 'turns');
+  const secondaryMeasure = state?.measure?.secondary ? _parseStatsMeasureState(state.measure.secondary, '') : { metric: '', agg: 'sum' };
+  statsChartY1 = primaryMeasure.metric || 'turns';
+  statsChartAggY1 = primaryMeasure.agg;
+  statsChartY2 = secondaryMeasure.metric || '';
+  statsChartAggY2 = secondaryMeasure.agg || 'sum';
   _statsMeasures.clear();
   for (const key of state?.measure?.visible || ['sessions', 'turns', 'tokens_in', 'tokens_out']) _statsMeasures.add(key);
   document.getElementById('sf-period').value = statsPeriod;
@@ -5033,7 +5123,9 @@ function _applyStatsState(state) {
   const y2Sel = document.getElementById('sc-y2');
   y2Sel.value = statsChartY2;
   y2Sel.hidden = !statsChartY2;
+  document.getElementById('sc-y2-agg').hidden = !statsChartY2;
   document.getElementById('sc-compare-btn').textContent = statsChartY2 ? '− Y2' : '+ Y2';
+  _syncStatsChartAggControls();
   document.querySelectorAll('#sf-measures-menu input[type="checkbox"]').forEach(input => {
     input.checked = _statsMeasures.has(input.value);
   });
@@ -5152,7 +5244,8 @@ function _renderChart(rows) {
   const labels = chronological.map(r => r.period);
   const m1 = CHART_METRICS[statsChartY1] || CHART_METRICS.turns;
   const datasets = [{
-    label: m1.label, data: chronological.map(m1.fn),
+    label: _statsChartSeriesLabel(statsChartY1, statsChartAggY1),
+    data: chronological.map(r => _statsChartSeriesValue(r, statsChartY1, statsChartAggY1)),
     borderColor: m1.color, backgroundColor: m1.fill,
     yAxisID: 'y1', tension: 0.3, fill: true,
     pointRadius: labels.length > 60 ? 1 : labels.length > 20 ? 2 : 4,
@@ -5165,14 +5258,19 @@ function _renderChart(rows) {
   if (statsChartY2) {
     const m2 = CHART_METRICS[statsChartY2];
     if (m2) {
+      const sharedAxis = statsChartY2 === statsChartY1;
+      const y2Color = sharedAxis ? _statsCompareColor(m1.color) : m2.color;
       datasets.push({
-        label: m2.label, data: chronological.map(m2.fn),
-        borderColor: m2.color, backgroundColor: 'transparent',
-        yAxisID: 'y2', tension: 0.3, fill: false,
+        label: _statsChartSeriesLabel(statsChartY2, statsChartAggY2),
+        data: chronological.map(r => _statsChartSeriesValue(r, statsChartY2, statsChartAggY2)),
+        borderColor: y2Color, backgroundColor: 'transparent',
+        yAxisID: sharedAxis ? 'y1' : 'y2', tension: 0.3, fill: false,
         pointRadius: labels.length > 60 ? 1 : labels.length > 20 ? 2 : 4,
         pointHoverRadius: 5,
       });
-      scales.y2 = { type: 'linear', position: 'right', ticks: { color: '#555', font: { size: 10 }, callback: fmtAxisNum }, grid: { display: false } };
+      if (!sharedAxis) {
+        scales.y2 = { type: 'linear', position: 'right', ticks: { color: '#555', font: { size: 10 }, callback: fmtAxisNum }, grid: { display: false } };
+      }
     }
   }
   _destroyChart();
@@ -5598,13 +5696,17 @@ function renderAgentBreakdownStats(rows) {
   const metric = statsChartY1;
   const totalExplicit = {};
   for (const key of pivot.selected) totalExplicit[key] = 0;
-  let totalMisc = 0, grandTotal = 0;
-  for (const row of pivot.periodRows) {
-    for (const key of pivot.selected) totalExplicit[key] += row.values[key] || 0;
-    totalMisc += row.misc || 0;
-    grandTotal += row.total || 0;
+  let totalMisc = pivot.canSumTotals ? 0 : null;
+  let grandTotal = pivot.canSumTotals ? 0 : null;
+  if (pivot.canSumTotals) {
+    for (const row of pivot.periodRows) {
+      for (const key of pivot.selected) totalExplicit[key] += row.values[key] || 0;
+      totalMisc += row.misc || 0;
+      grandTotal += row.total || 0;
+    }
   }
-  const hasMisc = true;
+  const hasMisc = pivot.canSumTotals;
+  const totalText = pivot.canSumTotals ? null : '—';
   const headers = pivot.selected.map(key => {
     const label = pivot.labels.get(key) || key;
     return `<th class="stats-series-col" aria-label="${escapeHtml(label)}">${escapeHtml(label)}</th>`;
@@ -5619,11 +5721,11 @@ function renderAgentBreakdownStats(rows) {
       <td class="stats-sticky-left">${_statsPeriodLabel(row.period)}</td>
       ${cells}
       ${hasMisc ? `<td class="stats-sticky-right stats-misc-col">${_formatStatsMetricValue(row.misc || 0, metric)}</td>` : ''}
-      <td class="stats-sticky-right stats-total-col">${_formatStatsMetricValue(row.total || 0, metric)}</td>
+      <td class="stats-sticky-right stats-total-col">${pivot.canSumTotals ? _formatStatsMetricValue(row.total || 0, metric) : totalText}</td>
     </tr>`;
   }).join('');
   const totalCells = pivot.selected
-    .map(key => `<td class="stats-series-col">${_formatStatsMetricValue(totalExplicit[key] || 0, metric)}</td>`)
+    .map(key => `<td class="stats-series-col">${pivot.canSumTotals ? _formatStatsMetricValue(totalExplicit[key] || 0, metric) : totalText}</td>`)
     .join('');
 
   statsContent.innerHTML = `<table class="stats-breakdown-table${hasMisc ? ' has-misc' : ''}">
@@ -5638,7 +5740,7 @@ function renderAgentBreakdownStats(rows) {
       <td class="stats-sticky-left">${_statsBreakdownAxisLabel('Total', 'total')}</td>
       ${totalCells}
       ${hasMisc ? `<td class="stats-sticky-right stats-misc-col">${_formatStatsMetricValue(totalMisc, metric)}</td>` : ''}
-      <td class="stats-sticky-right stats-total-col">${_formatStatsMetricValue(grandTotal, metric)}</td>
+      <td class="stats-sticky-right stats-total-col">${pivot.canSumTotals ? _formatStatsMetricValue(grandTotal, metric) : totalText}</td>
     </tr></tfoot>
   </table>`;
   _bindStatsBreakdownSort();
@@ -5692,9 +5794,11 @@ function initStats() {
     _markStatsPresetDirty();
     if (statsBreakdown) {
       statsChartY2 = '';
+      statsChartAggY2 = 'sum';
       const y2Sel = document.getElementById('sc-y2');
       y2Sel.hidden = true;
       y2Sel.value = '';
+      document.getElementById('sc-y2-agg').hidden = true;
       document.getElementById('sc-compare-btn').textContent = '+ Y2';
     } else {
       _resetStatsDimensionFilters();
@@ -5735,30 +5839,57 @@ function initStats() {
   });
   _updateStatsFilterLabels();
   _updateStatsMeasureLabel();
+  _syncStatsChartAggControls();
 
   document.getElementById('sc-y1').addEventListener('change', e => {
     statsChartY1 = e.target.value;
+    statsChartAggY1 = _normalizeStatsAgg(statsChartY1, statsChartAggY1);
+    _syncStatsChartAggControls();
     _markStatsPresetDirty();
-    if (_lastStatsRows) _rerenderStats();
+    loadStats();
+  });
+
+  document.getElementById('sc-y1-agg').addEventListener('change', e => {
+    statsChartAggY1 = _normalizeStatsAgg(statsChartY1, e.target.value);
+    _syncStatsChartAggControls();
+    _markStatsPresetDirty();
+    loadStats();
   });
 
   const y2Sel = document.getElementById('sc-y2');
   y2Sel.addEventListener('change', e => {
     statsChartY2 = e.target.value;
+    statsChartAggY2 = _normalizeStatsAgg(statsChartY2, statsChartAggY2);
+    _syncStatsChartAggControls();
     _markStatsPresetDirty();
     if (!statsChartY2) {
       y2Sel.hidden = true;
+      document.getElementById('sc-y2-agg').hidden = true;
       document.getElementById('sc-compare-btn').textContent = '+ Y2';
     }
-    if (_lastStatsRows) _renderChart(_lastStatsRows);
+    loadStats();
+  });
+
+  document.getElementById('sc-y2-agg').addEventListener('change', e => {
+    statsChartAggY2 = _normalizeStatsAgg(statsChartY2, e.target.value);
+    _syncStatsChartAggControls();
+    _markStatsPresetDirty();
+    loadStats();
   });
 
   document.getElementById('sc-compare-btn').addEventListener('click', () => {
     const hidden = y2Sel.hidden;
     y2Sel.hidden = !hidden;
+    document.getElementById('sc-y2-agg').hidden = !hidden || !statsChartY2;
     document.getElementById('sc-compare-btn').textContent = hidden ? '− Y2' : '+ Y2';
+    _syncStatsChartAggControls();
     _markStatsPresetDirty();
-    if (!hidden) { statsChartY2 = ''; if (_lastStatsRows) _renderChart(_lastStatsRows); }
+    if (!hidden) {
+      statsChartY2 = '';
+      statsChartAggY2 = 'sum';
+      document.getElementById('sc-y2-agg').hidden = true;
+      loadStats();
+    }
   });
 
   document.getElementById('stats-preset-select')?.addEventListener('change', e => {

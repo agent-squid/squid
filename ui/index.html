@@ -17,6 +17,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono&display=swap" />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono&display=swap&text=%E2%96%88%E2%96%84%E2%96%80%E2%95%94%E2%95%90%E2%95%97%E2%95%91%E2%95%9A%E2%95%9D" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Rubik:wght@700&display=swap" />
   <link rel="stylesheet" href="/vendor/atom-one-dark.min.css" />
   <link rel="stylesheet" href="style.css?v=20260709-001" />
   <script src="/vendor/highlight.min.js"></script>
@@ -561,6 +562,15 @@
             <option value="sessions">Sessions</option>
             <option value="quota">Quota</option>
           </select>
+          <select id="sc-y1-agg" aria-label="Y1 aggregation">
+            <option value="sum">SUM</option>
+            <option value="avg">AVG</option>
+            <option value="min">MIN</option>
+            <option value="max">MAX</option>
+            <option value="p50">P50</option>
+            <option value="p75">P75</option>
+            <option value="p95">P95</option>
+          </select>
           <button id="sc-compare-btn" type="button">+ Y2</button>
           <select id="sc-y2" hidden>
             <option value="">— remove —</option>
@@ -570,6 +580,15 @@
             <option value="tokens_out">Tokens Out</option>
             <option value="sessions">Sessions</option>
             <option value="quota">Quota</option>
+          </select>
+          <select id="sc-y2-agg" aria-label="Y2 aggregation" hidden>
+            <option value="sum">SUM</option>
+            <option value="avg">AVG</option>
+            <option value="min">MIN</option>
+            <option value="max">MAX</option>
+            <option value="p50">P50</option>
+            <option value="p75">P75</option>
+            <option value="p95">P95</option>
           </select>
         </div>
         <div id="stats-chart-box"><canvas id="stats-chart"></canvas></div>
