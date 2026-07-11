@@ -786,7 +786,7 @@ body {
 .ctx-popup-divider { border-top: 1px solid #2a2a3a; margin: 0.3rem 0; }
 .ctx-popup-pin { display: flex; gap: 0.4rem; padding: 0.1rem 0; align-items: baseline; cursor: pointer; }
 .ctx-popup-pin:hover .ctx-popup-preview { color: var(--text-muted); }
-.ctx-popup-tag { color: var(--accent-dim); flex-shrink: 0; }
+.ctx-popup-tag { color: var(--accent-light); flex-shrink: 0; }
 .ctx-popup-preview { color: var(--text-lo); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ctx-popup-mem-row, .ctx-popup-trace-row { cursor: pointer; }
 .ctx-popup-link { color: var(--accent-light); }
@@ -894,7 +894,10 @@ body {
 .diff-header[open] .diff-header-summary::before { content: '▾ '; }
 .diff-header > .diff-file:not(.diff-header-summary) { padding-left: 1.6em; }
 .diff-sep    { height: 1px; background: #222; margin: 2px 0; }
-.gitdiff-file-row { border-top: 1px solid var(--surface-3); display: flex; flex-wrap: wrap; align-items: center; }
+.gitdiff-file-row {
+  border-top: 1px solid var(--surface-3); display: flex; flex-wrap: wrap; align-items: center;
+  margin-left: 0.6rem; width: calc(100% - 0.6rem); box-sizing: border-box;
+}
 .gitdiff-file-row:first-child { border-top: none; }
 .gitdiff-file-toggle {
   flex: 1; min-width: 0; background: none; border: none;
@@ -914,7 +917,7 @@ body {
   padding: 0 0.3em;
   vertical-align: middle;
 }
-.gitdiff-file-body { display: none; width: 100%; }
+.gitdiff-file-body { display: none; width: 100%; padding-left: 0.6rem; box-sizing: border-box; }
 .gitdiff-file-expanded .gitdiff-file-body { display: block; }
 .gitdiff-file-row--reverted .gitdiff-file-toggle { opacity: 0.4; text-decoration: line-through; }
 .gitdiff-file-open,

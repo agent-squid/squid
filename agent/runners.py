@@ -538,6 +538,38 @@ def _codex_diff_tool(payload: dict) -> Optional[dict]:
     return {"name": "Diff", "file": file_path, "diff": str(diff)}
 
 
+def _codex_agent_message(payload: dict) -> tuple[Optional[str], Optional[str]]:
+    """Return (text, phase) for Codex agent message event shapes."""
+    if payload.get("type") == "agent_message":
+        text = payload.get("message")
+        if text is None:
+            text = payload.get("text")
+        return (str(text), payload.get("phase")) if text else (None, None)
+
+    if payload.get("type") == "message" and payload.get("role") == "assistant":
+        content = payload.get("content")
+        parts: list[str] = []
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "output_text":
+                    text = item.get("text")
+                    if text:
+                        parts.append(str(text))
+        elif isinstance(content, str):
+            parts.append(content)
+        return ("".join(parts), payload.get("phase")) if parts else (None, None)
+
+    return None, None
+
+
+def _codex_message_chunk(text: str, phase: Optional[str]) -> Union[str, dict]:
+    # Codex emits progress and final answers as assistant messages. The phase is
+    # the reliable separator; missing phase is the legacy CLI response shape.
+    if phase == "commentary":
+        return {"_status": text}
+    return text
+
+
 async def run_claude(
     prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
     model: Optional[str] = None, topic: str = "", agent: str = "",
@@ -1047,6 +1079,16 @@ async def run_codex(
 
     start_ms = time.monotonic() * 1000
     thread_id: Optional[str] = None
+    last_agent_message: Optional[tuple[str, str]] = None
+    pending_unphased_message: Optional[str] = None
+
+    def flush_pending_unphased_as_status() -> Optional[dict]:
+        nonlocal pending_unphased_message
+        if not pending_unphased_message:
+            return None
+        chunk = {"_status": pending_unphased_message}
+        pending_unphased_message = None
+        return chunk
 
     async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, prompt_preview=prompt_preview, extra_env=backend_env):
         if not line:
@@ -1060,23 +1102,48 @@ async def run_codex(
         params = event.get("params") if isinstance(event.get("params"), dict) else {}
         if t == "thread.started":
             thread_id = event.get("thread_id")
+        elif t == "session_meta":
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            thread_id = payload.get("id") or thread_id
+        elif t in ("event_msg", "response_item"):
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            text, phase = _codex_agent_message(payload)
+            if text:
+                key = (phase or "", text)
+                if key != last_agent_message:
+                    last_agent_message = key
+                    if phase:
+                        pending = flush_pending_unphased_as_status()
+                        if pending:
+                            yield pending
+                        yield _codex_message_chunk(text, phase)
+                    else:
+                        pending = flush_pending_unphased_as_status()
+                        if pending:
+                            yield pending
+                        pending_unphased_message = text
         elif t == "item.completed" or method == "item/completed":
             item = event.get("item") or params.get("item") or {}
             if not isinstance(item, dict):
                 item = {}
             if item.get("type") == "agent_message":
-                text = item.get("text", "")
+                text, phase = _codex_agent_message(item)
                 if text:
-                    # Codex emits progress updates and the final answer with the
-                    # same item type. Keep commentary in Squid's status bubble;
-                    # only final_answer belongs in persisted response content.
-                    if item.get("phase") == "commentary":
-                        yield {"_status": str(text)}
+                    last_agent_message = (phase or "", text)
+                    if phase:
+                        pending = flush_pending_unphased_as_status()
+                        if pending:
+                            yield pending
+                        yield _codex_message_chunk(text, phase)
                     else:
-                        # Missing phase is the legacy CLI shape and remains
-                        # response content for backward compatibility.
-                        yield str(text)
+                        pending = flush_pending_unphased_as_status()
+                        if pending:
+                            yield pending
+                        pending_unphased_message = text
             elif item.get("type") == "command_execution":
+                pending = flush_pending_unphased_as_status()
+                if pending:
+                    yield pending
                 cmd_str = item.get("command", "")
                 # Strip /bin/zsh -lc "..." or /bin/bash -lc "..." wrapper
                 if cmd_str and " -lc " in cmd_str:
@@ -1087,12 +1154,21 @@ async def run_codex(
                     yield {"_tool": {"name": "Bash", "command": cmd_str}}
             diff_tool = _codex_diff_tool(item)
             if diff_tool:
+                pending = flush_pending_unphased_as_status()
+                if pending:
+                    yield pending
                 yield {"_tool": diff_tool}
         elif method in ("item/fileChange/patchUpdated", "turn/diff/updated"):
             diff_tool = _codex_diff_tool(params)
             if diff_tool:
+                pending = flush_pending_unphased_as_status()
+                if pending:
+                    yield pending
                 yield {"_tool": diff_tool}
         elif t == "turn.completed" or method == "turn/completed":
+            if pending_unphased_message:
+                yield pending_unphased_message
+                pending_unphased_message = None
             usage = event.get("usage") or params.get("usage") or {}
             # ── Codex token semantics (opposite of Claude — do not conflate) ───────────────
             # Codex reports input_tokens as the FULL total, cache already included.
@@ -1271,17 +1347,21 @@ async def run_cursor(
             if text:
                 yield {"_status": text}
 
-        elif t == "assistant" and "timestamp_ms" in event:
-            # Streaming text delta (has timestamp_ms); final full message does not
+        elif t == "assistant":
             content = event.get("message", {}).get("content", [])
             for block in content:
                 if block.get("type") == "text":
                     text = block.get("text", "")
-                    if text:
+                    if text and ("timestamp_ms" in event or not text_started):
                         text_started = True
                         yield text
 
         elif t == "result":
+            if not text_started:
+                final_text = event.get("result", "")
+                if final_text:
+                    text_started = True
+                    yield final_text
             usage = event.get("usage") or {}
             yield {
                 "_stats": {
@@ -1451,6 +1531,7 @@ async def run_opencode(
     # Accumulate tokens across all steps (opencode emits one step_finish per tool call)
     total_input = total_output = total_cache_read = total_cache_write = 0
     total_cost: float = 0.0
+    pending_text: list[str] = []
 
     async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, prompt_preview=prompt_preview, extra_env=backend_env):
         if not line:
@@ -1468,14 +1549,28 @@ async def run_opencode(
         if t == "text":
             text = event.get("part", {}).get("text", "")
             if text:
-                yield text
+                pending_text.append(text)
 
         elif t == "tool_use":
+            if pending_text:
+                status_text = "".join(pending_text)
+                pending_text = []
+                if status_text.strip():
+                    yield {"_status": status_text}
             tool_dict = _opencode_tool(event.get("part", {}))
             if tool_dict:
                 yield {"_tool": tool_dict}
 
         elif t == "step_finish":
+            reason = event.get("part", {}).get("reason")
+            if pending_text:
+                text = "".join(pending_text)
+                pending_text = []
+                if text.strip():
+                    if reason in (None, "stop"):
+                        yield text
+                    else:
+                        yield {"_status": text}
             tokens = event.get("part", {}).get("tokens", {})
             total_input       += int(tokens.get("input", 0) or 0)
             total_output      += int(tokens.get("output", 0) or 0)
@@ -1488,6 +1583,11 @@ async def run_opencode(
             err = event.get("error", {})
             msg = (err.get("data", {}) or {}).get("message") or err.get("message") or "opencode error"
             raise CLIError(msg)
+
+    if pending_text:
+        text = "".join(pending_text)
+        if text.strip():
+            yield text
 
     yield {
         "_stats": {

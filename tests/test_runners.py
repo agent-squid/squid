@@ -1037,6 +1037,51 @@ def test_codex_routes_commentary_to_status_and_persists_only_final_answer():
     assert chunks[2]["_stats"]["session_id"] == "thread-1"
 
 
+def test_codex_routes_jsonl_commentary_to_status_and_dedupes_response_items():
+    async def fake_stream_lines(*args, **kwargs):
+        yield '{"type":"session_meta","payload":{"id":"thread-jsonl"}}'
+        yield '{"type":"event_msg","payload":{"type":"agent_message","phase":"commentary","message":"Checking the code..."}}'
+        yield '{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Checking the code..."}]}}'
+        yield '{"type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"Fixed and tested."}}'
+        yield '{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Fixed and tested."}]}}'
+        yield '{"type":"turn.completed","usage":{}}'
+
+    async def collect():
+        return [chunk async for chunk in run_codex("fix it", cwd="/tmp")]
+
+    with patch("agent.runners.CODEX_PATH", "codex"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        chunks = asyncio.run(collect())
+
+    assert chunks[0] == {"_status": "Checking the code..."}
+    assert chunks[1] == "Fixed and tested."
+    assert chunks[2]["_stats"]["session_id"] == "thread-jsonl"
+
+
+def test_codex_routes_phase_less_progress_before_tool_to_status():
+    async def fake_stream_lines(*args, **kwargs):
+        yield '{"type":"thread.started","thread_id":"thread-legacy"}'
+        yield '{"type":"turn.started"}'
+        yield '{"type":"item.completed","item":{"type":"agent_message","text":"Checking the code..."}}'
+        yield '{"type":"item.completed","item":{"type":"command_execution","command":"/bin/zsh -lc pwd","aggregated_output":"/tmp","exit_code":0,"status":"completed"}}'
+        yield '{"type":"item.completed","item":{"type":"agent_message","text":"Fixed and tested."}}'
+        yield '{"type":"turn.completed","usage":{}}'
+
+    async def collect():
+        return [chunk async for chunk in run_codex("fix it", cwd="/tmp")]
+
+    with patch("agent.runners.CODEX_PATH", "codex"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        chunks = asyncio.run(collect())
+
+    assert chunks[0] == {"_status": "Checking the code..."}
+    assert chunks[1] == {"_tool": {"name": "Bash", "command": "/bin/zsh -lc pwd"}}
+    assert chunks[2] == "Fixed and tested."
+    assert chunks[3]["_stats"]["session_id"] == "thread-legacy"
+
+
 def test_codex_keeps_legacy_agent_messages_as_response_content():
     async def fake_stream_lines(*args, **kwargs):
         yield '{"type":"item.completed","item":{"type":"agent_message","text":"Legacy response"}}'
@@ -1119,6 +1164,43 @@ def test_cursor_oneshot_resume_uses_structured_print_resume_events():
     assert chunks[1]["_stats"]["session_id"] == "thread-1"
 
 
+def test_cursor_routes_thinking_to_status_and_final_assistant_to_response():
+    async def fake_stream_lines(cmd, **kwargs):
+        yield '{"type":"system","session_id":"thread-1"}'
+        yield '{"type":"thinking","subtype":"delta","text":"Checking files","session_id":"thread-1","timestamp_ms":1}'
+        yield '{"type":"assistant","message":{"content":[{"type":"text","text":"Final answer"}]},"session_id":"thread-1"}'
+        yield '{"type":"result","session_id":"thread-1","result":"Final answer","usage":{"inputTokens":10,"outputTokens":2}}'
+
+    async def collect():
+        return [chunk async for chunk in run_cursor("next", cwd="/tmp")]
+
+    with patch("agent.runners.CURSOR_PATH", "cursor-agent"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        chunks = asyncio.run(collect())
+
+    assert chunks[0] == {"_status": "Checking files"}
+    assert chunks[1] == "Final answer"
+    assert chunks[2]["_stats"]["session_id"] == "thread-1"
+
+
+def test_cursor_uses_result_text_when_no_assistant_text_streamed():
+    async def fake_stream_lines(cmd, **kwargs):
+        yield '{"type":"system","session_id":"thread-1"}'
+        yield '{"type":"result","session_id":"thread-1","result":"Recovered final","usage":{}}'
+
+    async def collect():
+        return [chunk async for chunk in run_cursor("next", cwd="/tmp")]
+
+    with patch("agent.runners.CURSOR_PATH", "cursor-agent"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        chunks = asyncio.run(collect())
+
+    assert chunks[0] == "Recovered final"
+    assert chunks[1]["_stats"]["session_id"] == "thread-1"
+
+
 def test_cursor_oneshot_fresh_vs_resume_command_shape():
     captured = []
 
@@ -1162,6 +1244,58 @@ def test_opencode_oneshot_resume_uses_structured_run_session_events():
 
     assert chunks[0] == "next"
     assert chunks[1]["_stats"]["session_id"] == "thread-1"
+
+
+def test_opencode_routes_tool_call_step_text_to_status_and_stop_text_to_final():
+    async def fake_stream_lines(cmd, **kwargs):
+        yield json.dumps({
+            "type": "tool_use",
+            "sessionID": "thread-1",
+            "part": {
+                "type": "tool",
+                "tool": "bash",
+                "state": {
+                    "status": "completed",
+                    "input": {"command": "pwd"},
+                    "output": "/tmp\n",
+                },
+            },
+        })
+        yield json.dumps({
+            "type": "text",
+            "sessionID": "thread-1",
+            "part": {"text": "Checking the directory."},
+        })
+        yield json.dumps({
+            "type": "step_finish",
+            "sessionID": "thread-1",
+            "part": {"reason": "tool-calls", "tokens": {"input": 10, "output": 2}},
+        })
+        yield json.dumps({
+            "type": "text",
+            "sessionID": "thread-1",
+            "part": {"text": "The current directory is `/tmp`."},
+        })
+        yield json.dumps({
+            "type": "step_finish",
+            "sessionID": "thread-1",
+            "part": {"reason": "stop", "tokens": {"input": 3, "output": 8}},
+        })
+
+    async def collect():
+        return [chunk async for chunk in run_opencode("pwd", cwd="/tmp")]
+
+    with patch("agent.runners.OPENCODE_PATH", "opencode"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        chunks = asyncio.run(collect())
+
+    assert chunks[0] == {"_tool": {"name": "Bash", "command": "pwd"}}
+    assert chunks[1] == {"_status": "Checking the directory."}
+    assert chunks[2] == "The current directory is `/tmp`."
+    assert chunks[3]["_stats"]["session_id"] == "thread-1"
+    assert chunks[3]["_stats"]["input_tokens"] == 13
+    assert chunks[3]["_stats"]["output_tokens"] == 10
 
 
 def test_opencode_oneshot_fresh_vs_resume_command_shape():

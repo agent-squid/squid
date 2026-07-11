@@ -179,6 +179,9 @@ test.describe('response bubble', () => {
 
     await ctx.click();
     await expect(page.locator('#ctx-popup')).toContainText('session context18 turns');
+    const regularLinkColor = await page.locator('#ctx-popup .ctx-popup-link').first()
+      .evaluate(el => getComputedStyle(el).color);
+    await expect(page.locator('#ctx-popup .ctx-popup-tag').first()).toHaveCSS('color', regularLinkColor);
   });
 
   test('ctx popup exposes a thought trace link when tool calls or status text were recorded', async ({ page }) => {
@@ -423,8 +426,15 @@ test.describe('response bubble', () => {
     await expect(blocks).toHaveCount(1);
     const block = blocks.first();
     await expect(block.locator('.tool-toggle')).toContainText('Changed files: 1 file, +1 -1');
-    await block.locator('.tool-toggle').click();
-    await expect(block.locator('.gitdiff-file-toggle')).toContainText('M ui/app.js');
+    const fileToggle = block.locator('.gitdiff-file-toggle');
+    await expect(fileToggle).toContainText('M ui/app.js');
+    await expect(fileToggle).toBeVisible();
+    const topToggleBox = await block.locator('.tool-toggle').boundingBox();
+    const fileToggleBox = await fileToggle.boundingBox();
+    expect(fileToggleBox.x - topToggleBox.x).toBeGreaterThanOrEqual(6);
+    await fileToggle.click();
+    const fileMetaBox = await block.locator('.gitdiff-file-body .diff-header-summary').boundingBox();
+    expect(fileMetaBox.x - fileToggleBox.x).toBeGreaterThanOrEqual(6);
     await expect(block.locator('.diff-hunk')).toContainText('@@ -1 +1 @@');
   });
 
