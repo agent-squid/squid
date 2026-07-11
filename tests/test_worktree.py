@@ -233,6 +233,47 @@ def test_sync_after_turn_is_noop_when_no_worktree(tmp_path):
     assert conflicts == []
 
 
+def test_sync_after_turn_commit_includes_request_and_response(tmp_path):
+    repo = init_repo(tmp_path / "repo")
+    ensure_worktree(repo, "t", "410")
+    wt = worktree_path(repo, "t", "410")
+    (wt / "new.txt").write_text("turn output\n")
+
+    conflicts = sync_after_turn(
+        repo, "t", "410", msg_id=410,
+        request_text="please add new.txt",
+        response_text="Added new.txt with the requested content.",
+    )
+
+    assert conflicts == []
+    # HEAD is the --no-ff merge commit; the turn's own commit (with our
+    # generated message) is its second parent.
+    log = subprocess.run(
+        ["git", "log", "-1", "--format=%B", "HEAD^2"], cwd=str(repo),
+        text=True, stdout=subprocess.PIPE,
+    ).stdout
+    assert "please add new.txt" in log
+    assert "Added new.txt with the requested content." in log
+
+
+def test_merge_worktree_raises_on_failure_without_conflict_markers(tmp_path):
+    """A merge that fails to even run (e.g. lock contention) must not be
+    mistaken for a clean merge — that would silently drop the turn's work."""
+    repo = init_repo(tmp_path / "repo")
+    ensure_worktree(repo, "t", "420")
+    wt = worktree_path(repo, "t", "420")
+    (wt / "new.txt").write_text("turn output\n")
+    commit_worktree(wt, "squid: turn 420")
+
+    lock_file = repo / ".git" / "index.lock"
+    lock_file.write_text("")
+    try:
+        with pytest.raises(RuntimeError):
+            merge_worktree(repo, "t", "420")
+    finally:
+        lock_file.unlink()
+
+
 def test_sync_after_turn_returns_conflicts_on_same_line_edit(tmp_path):
     repo = init_repo(tmp_path / "repo")
 
