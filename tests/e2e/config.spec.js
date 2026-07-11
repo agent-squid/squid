@@ -524,6 +524,9 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await page.locator('#sf-breakdown').selectOption('agent');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('breakdown')).toBe('agent');
   expect(statsRequests.at(-1).searchParams.get('agent')).toBe('codex,clive');
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  await expect.poll(() => page.locator('#stats-content').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+  await expect.poll(() => page.locator('#stats-content thead th').nth(1).evaluate(el => el.getBoundingClientRect().width)).toBeLessThan(125);
   await expect(page.locator('#sf-agent-toggle')).toHaveText('2 Agents');
   await expect(page.locator('#sc-compare-btn')).toBeHidden();
   await expect(page.locator('#sf-measures')).toBeVisible();

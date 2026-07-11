@@ -2581,6 +2581,7 @@ body {
 }
 #stats-filters #sf-period { width: 4.7rem; }
 #stats-filters #sf-days { width: 4.25rem; }
+#stats-filters #sf-breakdown { width: 6rem; }
 #sf-period:focus, #sf-days:focus, #sf-adhoc:focus, #sf-breakdown:focus { outline: 1px solid #4a4a70; }
 
 #stats-chart-wrap {
@@ -2697,13 +2698,17 @@ body {
   font-weight: 600;
 }
 #stats-content .stats-breakdown-table {
-  --stats-total-col-width: 5.75rem;
-  --stats-misc-col-width: 5.75rem;
+  --stats-total-col-width: 4.75rem;
+  --stats-misc-col-width: 4.75rem;
   width: max-content;
-  min-width: 100%;
+}
+#stats-content .stats-breakdown-table th,
+#stats-content .stats-breakdown-table td {
+  padding-left: 0.5rem;
+  padding-right: 0.5rem;
 }
 #stats-content .stats-breakdown-table .stats-series-col {
-  min-width: 9.5rem;
+  min-width: 6rem;
 }
 #stats-content .stats-breakdown-table .stats-sticky-left,
 #stats-content .stats-breakdown-table .stats-sticky-right {
@@ -2717,7 +2722,7 @@ body {
 }
 #stats-content .stats-breakdown-table .stats-sticky-left {
   left: 0;
-  min-width: 8.5rem;
+  min-width: 7rem;
   box-shadow: 1px 0 0 var(--surface-2);
 }
 #stats-content .stats-breakdown-table .stats-sticky-right {
@@ -3190,7 +3195,7 @@ button {
   .sf-primary-row {
     display: grid;
     flex: 1 1 100%;
-    grid-template-columns: 4.7rem 4.25rem 5.2rem minmax(6.8rem, 1fr);
+    grid-template-columns: 4.7rem 4.25rem 3.95rem minmax(6.8rem, 1fr);
     gap: 0.35rem;
     align-items: center;
   }
