@@ -26,6 +26,47 @@ an implementation detail instead of visible history noise. Set
 `worktree.enabled: true` per-machine to opt back in early; the code path is
 still exercised by tests and not being left to rot.
 
+### Re-enabling
+
+Not shipped in `config/squid.yaml.example` — keeping an experimental,
+off-by-default block out of the example file that most users copy from. To
+opt in, add this to `~/.squid/squid.yaml` yourself:
+
+```yaml
+worktree:
+  # Isolate each turn's agent in its own Git worktree. Off by default. When
+  # off, agents write directly to the code root's real working tree and
+  # diffs are unscoped.
+  enabled: true
+
+  # Directories to symlink (not copy) from a code root into each fresh per-turn
+  # worktree, so installed dependencies don't need reinstalling there. Matched
+  # by directory name; not recursed into once matched; never applied inside .git.
+  # If you add an entry, make sure its .gitignore pattern has no trailing
+  # slash (e.g. "vendor" not "vendor/") — a trailing slash won't match the
+  # symlink, so it'll get tracked into the repo by the turn-end auto-commit.
+  dependency_dirs:
+    - node_modules
+    - .venv
+    - venv
+    - env
+    - .tox
+    - __pypackages__
+    - vendor
+    - target
+    - .bundle
+    - Pods
+    - .cargo
+    - .stack-work
+    - elm-stuff
+```
+
+`dependency_dirs` only has any effect when `enabled: true` — both keys live
+under `agent/config.py`'s `_worktree_cfg`, which defaults to `{}` and falls
+back to the list above when the key is omitted, so leaving the whole
+`worktree:` block out of `squid.yaml` (the common case) is equivalent to
+pasting this in with `enabled: false`.
+
 ## Planned follow-up: squash-on-push
 
 Per-turn auto-commits (`"squid: turn N"`, or the request/response-derived

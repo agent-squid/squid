@@ -13,33 +13,6 @@ agent:
   first_byte_timeout: 300
   response_timeout: 1800
 
-worktree:
-  # Isolate each turn's agent in its own Git worktree (see ADR-0025). Off by
-  # default. When off, agents write directly to the code root's real working
-  # tree and diffs are unscoped.
-  enabled: false
-
-  # Directories to symlink (not copy) from a code root into each fresh per-turn
-  # worktree, so installed dependencies don't need reinstalling there. Matched
-  # by directory name; not recursed into once matched; never applied inside .git.
-  # If you add an entry, make sure its .gitignore pattern has no trailing
-  # slash (e.g. "vendor" not "vendor/") — a trailing slash won't match the
-  # symlink, so it'll get tracked into the repo by the turn-end auto-commit.
-  dependency_dirs:
-    - node_modules
-    - .venv
-    - venv
-    - env
-    - .tox
-    - __pypackages__
-    - vendor
-    - target
-    - .bundle
-    - Pods
-    - .cargo
-    - .stack-work
-    - elm-stuff
-
 # A driver is Squid's coded coding-agent integration. A backend is a configured
 # driver instance: endpoint, credentials, gauge, args/settings, color, optional
 # default model, and optional protocol. Named agents then choose backend + model
