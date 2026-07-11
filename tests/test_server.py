@@ -258,6 +258,13 @@ def test_backend_native_chat_command_detection_excludes_squid_commands():
     assert not server._is_backend_native_chat_command("plain prompt")
 
 
+def test_compact_is_no_longer_squid_owned():
+    """/compact was Squid's own clear-alias (ADR-0013); it's now passed through
+    natively so interactive-protocol backends can run their own compaction."""
+    assert server._is_backend_native_chat_command("/compact")
+    assert "compact" not in server._SQUID_CHAT_COMMANDS
+
+
 def test_backend_native_chat_commands_bypass_context_augmentation_for_any_agent():
     cases = [
         ("/usage", "claude-live", Backend("claude-live", "claude", protocol="interactive-cli")),

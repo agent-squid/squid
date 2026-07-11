@@ -262,7 +262,7 @@ async def cleanup_worktrees(topic: str) -> dict[str, list[str]]:
     """
     Best-effort sweep: sync and remove worktrees left over from finished turns.
     Called at the start of each new turn dispatch (see TopicDispatcher.dispatch)
-    and at session close (clear/compact/session-delete). Never blocks turn
+    and at session close (clear / session-delete). Never blocks turn
     admission — callers should treat failures as non-fatal.
 
     Skips worktrees whose turn is still running (registered msg_id), and ones

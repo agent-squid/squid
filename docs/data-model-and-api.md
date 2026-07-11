@@ -215,9 +215,9 @@ Run a topic-scoped control command.
 **Request body**
 ```json
 {
-  "command": "stop | stopall | deq | list | restart | clear | compact | stop_msg",
+  "command": "stop | stopall | deq | list | restart | clear | stop_msg",
   "topic":   "string (default: \"default\")",
-  "agent":   "string | null  — scopes stop/stopall to one agent lane; required for clear/compact if no sticky",
+  "agent":   "string | null  — scopes stop/stopall to one agent lane; required for clear if no sticky",
   "adhoc":   "boolean | null — scopes stop/stopall to adhoc-only turns",
   "pos":     "integer | null  — deq only: null=all, 1=first, -1=last",
   "msg_id":  "integer | null  — stop_msg only: kill the process running this message"
@@ -230,7 +230,7 @@ Run a topic-scoped control command.
 { "ok": true, "killed": true }                 // stop
 { "ok": true, "killed": int, "drained": int }  // stopall
 { "ok": true, "drained": int }                 // deq
-{ "ok": true, "agent": "agent-name" }          // clear / compact
+{ "ok": true, "agent": "agent-name" }          // clear
 { "ok": true, "topics": [...] }                // list
 { "ok": true, "killed": int }                  // stop_msg
 { "ok": false, "error": "..." }                // 400
