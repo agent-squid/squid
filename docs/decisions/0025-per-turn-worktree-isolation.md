@@ -1,8 +1,56 @@
 ---
-status: accepted
+status: accepted, disabled by default
 date: 2026-07-09
+updated: 2026-07-11
 ---
 # ADR-0025: Per-Turn Git Worktree Isolation for Agent Changes
+
+## Status (2026-07-11)
+
+**Disabled by default.** The design below is implemented and unchanged, but
+as of 2026-07-11 it is gated behind `WORKTREE_ISOLATION_ENABLED`
+(`agent/config.py`), driven by `worktree.enabled` in `squid.yaml` (default
+`false`). With the flag off, every turn runs in the "Fallback" mode described
+below — agents write directly to the real working tree, diffs are unscoped,
+and the model is not told it's a sole writer (`code_roots_prompt_block(...,
+isolated=False)` omits that guarantee).
+
+This was turned off, not removed, because the sync/cleanup lifecycle (see
+"Sync now, remove later") was judged more operational complexity than the
+project currently wants to carry — locking, merge-conflict handling, and a
+background grace-period sweep — while the per-turn auto-commits it produces
+just accumulate unsquashed on the source branch with no way to condense them
+back into a normal-looking history. The plan is to re-enable once squash-on-push
+exists (see "Planned follow-up" below), at which point per-turn commits become
+an implementation detail instead of visible history noise. Set
+`worktree.enabled: true` per-machine to opt back in early; the code path is
+still exercised by tests and not being left to rot.
+
+## Planned follow-up: squash-on-push
+
+Per-turn auto-commits (`"squid: turn N"`, or the request/response-derived
+message from `_build_commit_message`) are useful as an audit trail but not as
+permanent history — nobody wants one commit per turn in `git log`. Before
+re-enabling isolation by default, the plan is:
+
+1. **Checkpoint ref.** A plain ref per `(topic, repo_root)`, e.g.
+   `refs/squid/checkpoint/<repo_hash>-<topic>` — git's version of a bookmark —
+   tracking the last point that was squashed/pushed.
+2. **Explicit `push` command.** Added to the existing `/cmd` dispatcher
+   (`agent/server.py`, alongside `stop`/`clear`/`compact`), never routed
+   through the general chat agent, since the agent can't safely touch
+   `repo_root` from its sandboxed worktree.
+3. **Squash on push, git-native.** `git merge --squash` (or `rebase -i
+   --autosquash`) from the checkpoint ref to `HEAD`. Git assembles `SQUASH_MSG`
+   from the per-turn commit messages already being recorded — no separate
+   notes or bookkeeping needed. Optionally, one cheap LLM call polishes just
+   the subject line from that already-concise log.
+4. **Advance the checkpoint** to the new HEAD after a successful push; refuse
+   to squash past the last-known-pushed SHA, so this never needs a
+   force-push or history rewrite of already-published commits.
+
+Not started yet. Tracked here so the "why is this off" question has an answer
+beyond "it got complicated."
 
 ## Context
 
@@ -33,8 +81,10 @@ that turn's changes.
 ## Decision
 
 **Option 2.** Squid creates a Git worktree keyed by `(topic, assistant message
-ID)`, runs the agent inside it, captures a turn-scoped diff, syncs successful
-changes back to the source repository, and removes the worktree on success.
+ID)`, runs the agent inside it, captures a turn-scoped diff, and syncs
+successful changes back to the source repository. Worktree *removal* is
+deferred to a later best-effort sweep rather than happening synchronously at
+turn end — see "Sync now, remove later" below.
 
 ### Naming and paths
 
@@ -169,15 +219,22 @@ turn N ends  [topic_queue.py: _process]
      a. auto-commit any remaining uncommitted changes ("squid: turn N")
      b. merge sqd-<key> → source repository's current branch (--no-ff)
      c. rebase worktree branch onto the new source HEAD
-  3. remove worktree + delete branch (every turn is ephemeral; next turn
-     creates a fresh worktree from the new HEAD)
-  4. delete worktree DB row
+  3. on success, mark_worktree_synced: DB row status → 'synced',
+     last_used_at bumped to now. The worktree directory and branch are
+     left in place — actual removal happens later (see "Sync now, remove
+     later" below).
+
+turn N+1 dispatch  [topic_queue.py: TopicDispatcher.dispatch]
+  → fires worktree.cleanup_worktrees(topic) as a background asyncio task
+  → sweep removes turn N's worktree once it is no longer active and past
+    the grace period; DB row is deleted at that point
 ```
 
 The diff is shown before the auto-commit; it captures the full set of changes
 the agent made in the worktree during the turn, whether or not they have been
 committed yet. After `sync_after_turn` those changes are committed on the
-per-turn branch and merged to the source repository's current branch.
+per-turn branch and merged to the source repository's current branch. The
+worktree itself outlives the turn that produced it until the sweep collects it.
 
 ### Source of truth
 
@@ -205,20 +262,45 @@ path. When old assistant text contains Squid worktree paths or prior
 `<changed_files>` blocks, prompt construction sanitizes that text and appends a
 fresh source-repo summary from the stored `GitDiff`.
 
-### Session close
+### Sync now, remove later
 
-On normal turn completion, `TopicQueue._process` calls `sync_after_turn`,
-`remove_worktree`, and `delete_worktree` for every registry row keyed by
-`str(asst_msg_id)`. Successful turns therefore leave no live worktree behind.
+Removing a worktree synchronously right after its turn's CLI process exits is
+unsafe: if the agent left a background process running with that worktree as
+`cwd` (e.g. a `bash` tool invocation backgrounding `pytest`), deleting the
+directory yanks it out from under that process mid-run. So syncing (merging
+committed changes into the source repo) and removing (deleting the worktree
+directory, branch, and DB row) are split into two separate steps with
+different timing:
 
-On session close or clear, `_cleanup_worktrees(topic)` runs an orphan sweep.
-It first calls `get_active_msg_ids()` to get the set of `msg_id`s for all
-processes currently in the registry (both regular and adhoc). Any worktree
-whose `wt_key` (the `agent` column, which stores `str(asst_msg_id)`) matches
-an active `msg_id` is skipped — the turn is still running and must not be
-interrupted. For remaining worktrees, the sweep syncs any uncommitted changes
-and removes them. This handles leftovers from crashes, cancelled runs,
-exceptions during cleanup, and conflict paths.
+- **Sync — synchronous, at turn end.** `TopicQueue._process` calls
+  `sync_after_turn` for every registry row keyed by `str(asst_msg_id)`. On
+  success it calls `mark_worktree_synced(topic, agent, repo_root)`
+  (`agent/stats_db.py`), which sets the row's `status` to `'synced'` and
+  bumps `last_used_at`, but does **not** delete the row or touch the
+  worktree directory. The source repository already has the turn's changes
+  as commits at this point; only the now-inert worktree copy remains.
+- **Remove — asynchronous, best-effort sweep.** `worktree.cleanup_worktrees(topic)`
+  (`agent/worktree.py`) is the single removal path, shared by two triggers:
+  - `TopicDispatcher._sweep_worktrees` fires it as a background
+    `asyncio.create_task` on every new turn dispatch for that topic
+    (`TopicDispatcher.dispatch`). It never blocks admitting the new turn;
+    exceptions are logged and swallowed.
+  - `server.py` calls it directly (`await cleanup_worktrees(topic)`) on
+    session close/clear, so an idle topic doesn't wait for a future turn to
+    reclaim its worktrees.
+
+  The sweep loads all worktree rows for the topic
+  (`get_all_worktrees_for_topic`) and, for each: skips it if `get_active_msg_ids()`
+  shows its `wt_key` (the `agent` column, storing `str(asst_msg_id)`) is
+  still an active turn; skips it if `last_used_at` is under
+  `_CLEANUP_GRACE_SECONDS` (30s) old, giving a spawned background process
+  more time to finish even after the turn itself has ended; otherwise calls
+  `sync_after_turn` again (a no-op if already synced, but catches rows that
+  were left mid-flight by a crash) and, if clean, `remove_worktree` +
+  `delete_worktree`. This one function now handles both the steady-state
+  per-turn reclaim and the orphan cleanup formerly done only at session
+  close — `server.py` no longer has its own separate `_cleanup_worktrees`
+  implementation.
 
 If a code review or follow-up agent is launched while a turn is active, or
 against an unresolved/stale worktree path, that agent may legitimately inspect
@@ -239,14 +321,19 @@ When `merge --no-ff` fails:
 
 ## Fallback
 
-Worktrees require a git repo with at least one commit. They also fail on
-detached-HEAD state, disk exhaustion, or if the path already exists and is
-corrupt. Non-git directories have no worktree support at all.
+This is now the default mode (see "Status" above), not just an error path.
+`_setup_worktrees` is skipped entirely — and every turn runs this way —
+whenever `WORKTREE_ISOLATION_ENABLED` is `false`.
 
-When `ensure_worktree` raises for any root, `_setup_worktrees` catches the
-exception, logs it, and excludes that root from the worktree map. If no roots
-produce a working worktree map, the function returns the original `code_roots`
-and `cwd` unchanged — the agent runs directly in the real working tree.
+It's also still the error path it always was: worktrees require a git repo
+with at least one commit, and also fail on detached-HEAD state, disk
+exhaustion, or if the path already exists and is corrupt. Non-git directories
+have no worktree support at all. When `ensure_worktree` raises for any root
+(with the flag on), `_setup_worktrees` catches the exception, logs it, and
+excludes that root from the worktree map; if no roots produce a working
+worktree map, the function returns the original `code_roots` and `cwd`
+unchanged — the agent runs directly in the real working tree, same as the
+config-disabled case.
 
 In fallback mode:
 - Changes land directly in the shared working tree (Option 1 behavior).
@@ -264,8 +351,9 @@ In fallback mode:
   isolated from each other via separate worktrees on separate branches.
 - Good: auto-commit at each turn end produces a per-turn commit history on the
   source repo's current branch.
-- Good: successful turns clean up their isolated worktree and branch
-  immediately after sync.
+- Good: successful turns sync their changes into the source repo immediately;
+  worktree/branch removal is deferred to a background sweep so a background
+  process the turn spawned isn't left with its `cwd` deleted out from under it.
 - Good: CWD is stable across all turns (source repo path, not worktree); agent
   CLI session logs accumulate under a single `~/.claude/projects/` entry.
 - Good: installed dependencies (`node_modules`, `.venv`, etc.) are symlinked
@@ -280,6 +368,10 @@ In fallback mode:
 - Bad: if Squid crashes mid-turn, stale `~/.squid/worktrees/` directories and
   `sqd-*` branches can accumulate until topic close/clear or a startup sweep
   prunes them.
+- Bad: a synced worktree lingers on disk for at least `_CLEANUP_GRACE_SECONDS`
+  (30s) after its turn ends, and potentially longer if no new turn is
+  dispatched on that topic before session close — the removal sweep only
+  runs on dispatch or close, not on a standalone timer.
 - Bad: non-git directories and repos without an initial commit fall back to
   direct working-tree mode; bleed is possible until the condition is fixed.
 - Bad: in fallback mode, the diff is not turn-scoped and the user must be told.
