@@ -3,15 +3,18 @@ Tests for agent/worktree.py — per-turn Git worktree isolation.
 
 Each test gets a fresh temp Git repo so there's no shared state.
 """
+import asyncio
 import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from agent import stats_db
 from agent.worktree import (
     _link_dependency_dirs,
     branch_name,
+    cleanup_worktrees,
     commit_worktree,
     ensure_worktree,
     merge_worktree,
@@ -319,6 +322,61 @@ def test_remove_worktree_cleans_up(tmp_path):
         text=True, stdout=subprocess.PIPE,
     )
     assert br not in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# cleanup_worktrees (deferred sweep)
+# ---------------------------------------------------------------------------
+
+def test_cleanup_worktrees_defers_removal_within_grace_period(tmp_path, monkeypatch):
+    """A worktree synced moments ago is left alone — a background process the
+    turn spawned may still be using it as cwd."""
+    monkeypatch.setattr("agent.runners.get_active_msg_ids", lambda: set())
+    stats_db.init_db()
+    repo = init_repo(tmp_path / "repo")
+    ensure_worktree(repo, "sweeptopic", "801")
+    wt = worktree_path(repo, "sweeptopic", "801")
+    stats_db.save_worktree("sweeptopic", "801", str(repo), str(wt), branch_name("sweeptopic", "801"))
+
+    conflicts = asyncio.run(cleanup_worktrees("sweeptopic"))
+
+    assert conflicts == {}
+    assert wt.exists()
+    assert stats_db.get_worktrees("sweeptopic", "801")
+
+
+def test_cleanup_worktrees_removes_once_grace_period_elapses(tmp_path, monkeypatch):
+    monkeypatch.setattr("agent.runners.get_active_msg_ids", lambda: set())
+    monkeypatch.setattr("agent.worktree._CLEANUP_GRACE_SECONDS", 0)
+    stats_db.init_db()
+    repo = init_repo(tmp_path / "repo")
+    ensure_worktree(repo, "sweeptopic", "802")
+    wt = worktree_path(repo, "sweeptopic", "802")
+    stats_db.save_worktree("sweeptopic", "802", str(repo), str(wt), branch_name("sweeptopic", "802"))
+
+    conflicts = asyncio.run(cleanup_worktrees("sweeptopic"))
+
+    assert conflicts == {}
+    assert not wt.exists()
+    assert stats_db.get_worktrees("sweeptopic", "802") == []
+
+
+def test_cleanup_worktrees_skips_worktree_with_active_msg_id(tmp_path, monkeypatch):
+    """Even past the grace period, a worktree whose turn is still running must
+    never be removed out from under it."""
+    monkeypatch.setattr("agent.runners.get_active_msg_ids", lambda: {803})
+    monkeypatch.setattr("agent.worktree._CLEANUP_GRACE_SECONDS", 0)
+    stats_db.init_db()
+    repo = init_repo(tmp_path / "repo")
+    ensure_worktree(repo, "sweeptopic", "803")
+    wt = worktree_path(repo, "sweeptopic", "803")
+    stats_db.save_worktree("sweeptopic", "803", str(repo), str(wt), branch_name("sweeptopic", "803"))
+
+    conflicts = asyncio.run(cleanup_worktrees("sweeptopic"))
+
+    assert conflicts == {}
+    assert wt.exists()
+    assert stats_db.get_worktrees("sweeptopic", "803")
 
 
 # ---------------------------------------------------------------------------

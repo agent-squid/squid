@@ -327,8 +327,8 @@ class TopicWorker:
 
             if item.agent and item.msg_id:
                 wt_key = str(item.msg_id)
-                from .stats_db import delete_worktree
-                from .worktree import sync_after_turn, remove_worktree
+                from .stats_db import mark_worktree_synced
+                from .worktree import sync_after_turn
                 wt_records = await asyncio.to_thread(get_worktrees, item.topic, wt_key)
                 for rec in wt_records:
                     try:
@@ -340,8 +340,11 @@ class TopicWorker:
                         if conflicts:
                             log.warning("worktree merge conflicts after turn msg_id=%s: %s", item.msg_id, conflicts)
                         else:
-                            await asyncio.to_thread(remove_worktree, Path(rec["repo_root"]), item.topic, wt_key)
-                            await asyncio.to_thread(delete_worktree, item.topic, wt_key, rec["repo_root"])
+                            # Merge is done, so the source repo is current — but the worktree
+                            # dir itself is left in place. A tool the turn ran may have spawned
+                            # a background process still using it as cwd; removal happens later
+                            # via worktree.cleanup_worktrees (see TopicDispatcher.dispatch).
+                            await asyncio.to_thread(mark_worktree_synced, item.topic, wt_key, rec["repo_root"])
                     except Exception:
                         log.exception("worktree sync failed after turn msg_id=%s", item.msg_id)
 
@@ -388,6 +391,17 @@ class TopicDispatcher:
             self._workers[key] = worker
         return self._workers[key]
 
+    def _sweep_worktrees(self, topic: str) -> None:
+        """Best-effort, non-blocking sweep of worktrees left over from prior
+        turns of this topic. Never delays admitting the new turn."""
+        async def _run():
+            from .worktree import cleanup_worktrees
+            try:
+                await cleanup_worktrees(topic)
+            except Exception:
+                log.exception("worktree sweep failed for topic=%s", topic)
+        asyncio.create_task(_run(), name=f"squid-worktree-sweep-{topic}")
+
     async def dispatch(
         self,
         topic: str,
@@ -413,6 +427,7 @@ class TopicDispatcher:
         else:
             queue_key = f"{topic}@{agent}" if agent else topic
         worker = self._get_or_create(queue_key, topic)
+        self._sweep_worktrees(topic)
         item = QueueItem(
             seq=0, topic=topic, agent=agent,
             prompt=prompt, display_prompt=display_prompt, context_history=context_history,

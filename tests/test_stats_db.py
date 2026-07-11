@@ -696,3 +696,18 @@ def test_run_event_seq_collision_different_msg_id_allowed(tmp_path, monkeypatch,
     stats_db.insert_run_event(2, 0, "status", "msg2")
 
     assert "run_event seq collision" not in caplog.text
+
+
+def test_mark_worktree_synced_updates_status_and_last_used(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    stats_db.save_worktree("t", "901", "/repo", "/repo-wt", "sqd-t-901")
+    before = stats_db.get_worktrees("t", "901")[0]
+    assert before["status"] == "active"
+
+    stats_db.mark_worktree_synced("t", "901", "/repo")
+
+    after = stats_db.get_worktrees("t", "901")[0]
+    assert after["status"] == "synced"
+    assert after["last_used_at"] >= before["last_used_at"]

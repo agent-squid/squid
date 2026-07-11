@@ -46,7 +46,7 @@ from .config import (
     config_revision, config_text, write_config_text,
 )
 from .backends import BACKENDS, _validate_backend, get_backend, public_backends
-from .runners import list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic, get_active_msg_ids
+from .runners import list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic
 from .history import list_history, list_history_by_ids
 from .topic_queue import TopicDispatcher
 from .context_sync import sync_now, maybe_sync
@@ -81,8 +81,8 @@ from .stats_db import (
     get_recent_prompts,
     save_file_edit, get_file_edit_history, get_file_edit_by_id,
     get_bookmarks, add_bookmark, remove_bookmark,
-    save_worktree, get_worktrees, delete_worktree, delete_all_worktrees,
-    get_all_worktrees_for_topic, delete_all_topic_worktrees,
+    save_worktree, get_worktrees, delete_all_worktrees,
+    delete_all_topic_worktrees,
 )
 from .journal import _generate_journal, _current_week, list_topic_journals, read_journal
 from . import creds
@@ -518,43 +518,6 @@ async def _setup_worktrees(
     return effective_roots, cwd
 
 
-async def _cleanup_worktrees(topic: str) -> dict[str, list[str]]:
-    """
-    Orphan sweep at session close: sync and remove any worktrees still registered
-    for this topic (normally already removed at turn end; these are crash leftovers).
-    Worktrees with unresolved conflicts are kept alive.
-    Worktrees whose turn is still running are skipped entirely.
-    """
-    from .worktree import remove_worktree, sync_after_turn
-
-    active = get_active_msg_ids()
-    records = await asyncio.to_thread(get_all_worktrees_for_topic, topic)
-    conflicts: dict[str, list[str]] = {}
-
-    for rec in records:
-        repo_root = Path(rec["repo_root"])
-        wt_key = rec["agent"]
-        try:
-            if int(wt_key) in active:
-                log.debug("worktree skip — turn still active: topic=%s key=%s", topic, wt_key)
-                continue
-        except (ValueError, TypeError):
-            pass  # non-numeric wt_key: pre-dates per-turn keying, treat as orphan
-        try:
-            conflict_files = await asyncio.to_thread(
-                sync_after_turn, repo_root, topic, wt_key, None
-            )
-            if conflict_files:
-                conflicts[rec["repo_root"]] = conflict_files
-            else:
-                await asyncio.to_thread(remove_worktree, repo_root, topic, wt_key)
-                await asyncio.to_thread(delete_worktree, topic, wt_key, rec["repo_root"])
-        except Exception:
-            log.exception("worktree cleanup failed for %s topic=%s key=%s", repo_root, topic, wt_key)
-
-    return conflicts
-
-
 # ---------------------------------------------------------------------------
 # Streaming response generator
 # ---------------------------------------------------------------------------
@@ -901,7 +864,8 @@ async def run_cmd(req: CmdRequest):
         if not agent:
             return JSONResponse({"ok": False, "error": "no active session"}, status_code=400)
         killed = kill_procs_by_topic(topic, agent=agent, adhoc=False)
-        conflicts = await _cleanup_worktrees(topic)
+        from .worktree import cleanup_worktrees
+        conflicts = await cleanup_worktrees(topic)
         clear_topic_session(topic, agent)
         log.info("cmd %s topic=%s agent=%s killed=%s", req.command, topic, agent, killed)
         result: dict = {"ok": True, "agent": agent}
@@ -1197,7 +1161,8 @@ async def clear_session(topic: str, agent: str):
     topic = _normalize_topic_response(topic)
     if isinstance(topic, JSONResponse):
         return topic
-    conflicts = await _cleanup_worktrees(topic)
+    from .worktree import cleanup_worktrees
+    conflicts = await cleanup_worktrees(topic)
     clear_topic_session(topic, agent)
     result: dict = {"ok": True}
     if conflicts:
