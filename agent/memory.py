@@ -177,7 +177,7 @@ def topic_memory_squid_config(topic: str) -> dict:
     return topic_memory_squid_config_from_content(read_topic_memory(topic)["content"])
 
 
-def code_roots_prompt_block(code_roots: list[str]) -> Optional[str]:
+def code_roots_prompt_block(code_roots: list[str], isolated: bool = False) -> Optional[str]:
     roots = _normalize_code_roots(code_roots)
     if not roots:
         return None
@@ -187,6 +187,9 @@ def code_roots_prompt_block(code_roots: list[str]) -> Optional[str]:
         *roots,
         "</squid_code_roots>",
         "Treat these paths as the primary codebase roots for this topic. Prefer working in them over the process working directory.",
-        "You are the sole writer in this worktree for this turn. Trust your writes — never re-read a file to confirm an edit, never re-verify state you just set.",
     ]
+    if isolated:
+        lines.append(
+            "You are the sole writer in this worktree for this turn. Trust your writes — never re-read a file to confirm an edit, never re-verify state you just set."
+        )
     return "\n".join(lines)
