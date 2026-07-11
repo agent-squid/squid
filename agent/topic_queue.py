@@ -333,7 +333,9 @@ class TopicWorker:
                 for rec in wt_records:
                     try:
                         conflicts = await asyncio.to_thread(
-                            sync_after_turn, Path(rec["repo_root"]), item.topic, wt_key, item.msg_id
+                            sync_after_turn, Path(rec["repo_root"]), item.topic, wt_key, item.msg_id,
+                            request_text=(item.display_prompt or item.prompt),
+                            response_text=raw,
                         )
                         if conflicts:
                             log.warning("worktree merge conflicts after turn msg_id=%s: %s", item.msg_id, conflicts)
