@@ -101,7 +101,7 @@ dispatcher = TopicDispatcher()
 os.environ.pop("SQUID_NATIVE_CLAUDE_TOKEN", None)
 
 _SQUID_CHAT_COMMANDS = frozenset({
-    "clear", "compact", "deq", "f", "filter", "help", "remote", "restart",
+    "clear", "deq", "f", "filter", "help", "remote", "restart",
     "s", "search", "status", "stop", "stopall",
 })
 
@@ -297,7 +297,7 @@ def _codex_bearer_header(token: str) -> Optional[str]:
 
 
 class CmdRequest(BaseModel):
-    command: Literal["stop", "stopall", "deq", "list", "restart", "clear", "compact", "stop_msg", "journal"]
+    command: Literal["stop", "stopall", "deq", "list", "restart", "clear", "stop_msg", "journal"]
     topic: str = "default"
     agent: Optional[str] = None
     adhoc: Optional[bool] = None
@@ -856,7 +856,7 @@ async def run_cmd(req: CmdRequest):
         asyncio.create_task(_restart())
         return JSONResponse({"ok": True})
 
-    if req.command in ("clear", "compact"):
+    if req.command == "clear":
         agent = req.agent or get_active_agent_for_topic(topic)
         if not agent:
             topic_row = get_topic(topic)

@@ -1469,7 +1469,6 @@ async function loadSearchResults() {
 // args:true = takes optional args (insert into input); args:false = execute directly on select.
 const SQUID_COMMANDS = [
   { name: 'clear',        desc: 'clear session — next message starts fresh',         args: false },
-  { name: 'compact',      desc: 'compact session (resets context for Codex)',         args: false },
   { name: 'stop',         desc: 'kill running process for current topic',             args: false },
   { name: 'stopall',      desc: 'kill + drain queue for current topic',               args: false },
   { name: 'deq',          desc: 'drain queue (deq N removes Nth item)',               args: true  },
@@ -1487,7 +1486,6 @@ function parseCommand(message) {
   if (/^stop$/i.test(t))         return { command: 'stop' };
   if (/^stopall$/i.test(t))      return { command: 'stopall' };
   if (/^clear$/i.test(t))        return { command: 'clear' };
-  if (/^compact$/i.test(t))      return { command: 'compact' };
   if (/^status$/i.test(t))       return { command: 'status' };
   if (/^help$/i.test(t))         return { command: 'help' };
   if (/^remote$/i.test(t))       return { command: 'remote' };
@@ -1544,15 +1542,15 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
     return;
   }
 
-  if (cmd.command === 'clear' || cmd.command === 'compact') {
+  if (cmd.command === 'clear') {
     const stoppingRows = await commandWouldStopRunningPrompt(cmd.command, topic, agent);
     if (stoppingRows.length) {
       const route = agent ? `#${topic}@${agent}` : `#${topic}`;
       const ok = await confirmRestartWithRunningPrompts(stoppingRows, {
-        header: cmd.command === 'compact' ? 'Compact Session' : 'Clear Session',
+        header: 'Clear Session',
         title: 'Running prompt will be stopped',
-        copy: `${cmd.command === 'compact' ? 'Compacting' : 'Clearing'} ${route} will stop the prompt currently running before clearing the session.`,
-        confirmLabel: cmd.command === 'compact' ? 'Compact' : 'Clear',
+        copy: `Clearing ${route} will stop the prompt currently running before clearing the session.`,
+        confirmLabel: 'Clear',
       });
       if (!ok) {
         showCmdFeedback(`${cmd.command} cancelled`);
@@ -1627,7 +1625,7 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
 }
 
 async function commandWouldStopRunningPrompt(command, topic, agent) {
-  if (command !== 'clear' && command !== 'compact') return [];
+  if (command !== 'clear') return [];
   try {
     const res = await fetch('/processes');
     if (!res.ok) return [];
@@ -1741,7 +1739,7 @@ form.addEventListener('submit', async (e) => {
     }
     await handleCommand(cmd, topic, agent, adhoc, lookback);
     // Re-set chip after topic-scoped commands so next message stays in context
-    if (['clear', 'compact', 'stop', 'stopall', 'deq'].includes(cmd.command) && (topic !== 'default' || agent)) {
+    if (['clear', 'stop', 'stopall', 'deq'].includes(cmd.command) && (topic !== 'default' || agent)) {
       setTopicChip(topic, agent, adhoc, lookback);
     }
     return;
