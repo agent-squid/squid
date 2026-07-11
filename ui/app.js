@@ -3060,7 +3060,9 @@ function makeToolBlock(tool, msgId) {
       fileToggle.className = 'gitdiff-file-toggle';
       fileToggle.title = fullDisplayPath;
 
-      const isBinary = chunk.includes('Binary files') || !_isTextPath(file.path || '');
+      // git's own content-based binary detection wins when we have diff text to
+      // check; only fall back to the extension guess when there's no chunk to look at
+      const isBinary = chunk ? chunk.includes('Binary files') : !_isTextPath(file.path || '');
       let fileBody = null;
       if (isBinary) {
         fileToggle.textContent = `${status} ${displayPath}`;
@@ -7953,9 +7955,15 @@ const _TEXT_EXTS = new Set(['txt','md','py','js','ts','jsx','tsx','json','yaml',
 
 const _WEB_PREVIEW_EXTS = new Set(['html','htm','svg','pdf','png','jpg','jpeg','gif','webp','avif','md','markdown']);
 
+const _GENERIC_SUFFIXES = new Set(['example', 'sample', 'dist', 'template', 'orig', 'bak']);
+
 function _isTextPath(path) {
   const ext = (path.split('.').pop() || '').toLowerCase();
-  return _TEXT_EXTS.has(ext) || !path.includes('.');
+  if (_TEXT_EXTS.has(ext) || !path.includes('.')) return true;
+  // strip generic trailing suffixes (config.yaml.example, settings.json.sample, …)
+  // and re-check the real extension underneath instead of misreading it as binary
+  if (_GENERIC_SUFFIXES.has(ext)) return _isTextPath(path.slice(0, -(ext.length + 1)));
+  return false;
 }
 
 function _isWebPreviewPath(path) {

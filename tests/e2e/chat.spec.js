@@ -265,6 +265,32 @@ test.describe('response bubble', () => {
     await expect(block.locator('.diff-hunk')).toContainText('@@ -1 +1 @@');
   });
 
+  test('GitDiff renders text diffs for files with generic trailing suffixes', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        META,
+        { event: 'tool', data: {
+          name: 'GitDiff',
+          file_count: 1,
+          additions: 1,
+          deletions: 0,
+          files: [{ status: 'M', path: 'config/squid.yaml.example' }],
+          diff: 'diff --git a/config/squid.yaml.example b/config/squid.yaml.example\n@@ -1 +1,2 @@\n old\n+new',
+        } },
+        { data: 'Done' },
+        DONE,
+      ),
+    }));
+
+    await sendMsg(page);
+    const block = page.locator('.tool-block-history').first();
+    await block.locator('.tool-toggle').click();
+    await expect(block.locator('.gitdiff-file-toggle')).not.toHaveClass(/gitdiff-file-toggle--no-diff/);
+    await expect(block.locator('.gitdiff-binary-badge')).toHaveCount(0);
+    await expect(block.locator('.diff-add')).toContainText('+new');
+  });
+
   test('GitDiff mobile labels use shortest unique file names', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 800 });
     await page.route('**/chat', r => r.fulfill({
