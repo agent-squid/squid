@@ -42,7 +42,8 @@ from pydantic import BaseModel, Field
 
 from .config import (
     CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH,
-    OPENCODE_PATH, SQUID_HOME, RESPONSE_TIMEOUT, _USER_CONFIG, _cfg,
+    OPENCODE_PATH, SQUID_HOME, RESPONSE_TIMEOUT, WORKTREE_ISOLATION_ENABLED,
+    _USER_CONFIG, _cfg,
     config_revision, config_text, write_config_text,
 )
 from .backends import BACKENDS, _validate_backend, get_backend, public_backends
@@ -487,13 +488,13 @@ async def _setup_worktrees(
     cwd: Optional[str],
     topic: str,
     agent: str,
-) -> tuple[list[str], Optional[str]]:
+) -> tuple[list[str], Optional[str], bool]:
     """
     Create worktrees for each unique git repo in code_roots and remap paths.
-    Returns (effective_code_roots, cwd). CWD is never remapped — it stays as
-    the source repo path for session continuity (see ADR-0003). The model uses
-    effective_code_roots (worktree-remapped absolute paths) for all file access.
-    Falls back to original paths on any error.
+    Returns (effective_code_roots, cwd, isolated). CWD is never remapped — it
+    stays as the source repo path for session continuity (see ADR-0003). The
+    model uses effective_code_roots (worktree-remapped absolute paths) for all
+    file access. Falls back to original paths on any error, with isolated=False.
     """
     from .worktree import repo_root_for, ensure_worktree, map_to_worktree, branch_name
 
@@ -512,10 +513,10 @@ async def _setup_worktrees(
             log.exception("worktree setup failed for root=%s topic=%s agent=%s", root, topic, agent)
 
     if not worktree_map:
-        return code_roots, cwd
+        return code_roots, cwd, False
 
     effective_roots = [map_to_worktree(r, worktree_map) or r for r in code_roots]
-    return effective_roots, cwd
+    return effective_roots, cwd, True
 
 
 # ---------------------------------------------------------------------------
@@ -742,8 +743,9 @@ async def chat(req: ChatRequest):
     # worktree keyed by asst_msg_id, so parallel turns never share state.
     effective_code_roots = code_roots
     effective_cwd = cwd
-    if resolved_agent and code_roots:
-        effective_code_roots, effective_cwd = await _setup_worktrees(
+    worktree_isolated = False
+    if WORKTREE_ISOLATION_ENABLED and resolved_agent and code_roots:
+        effective_code_roots, effective_cwd, worktree_isolated = await _setup_worktrees(
             code_roots, cwd, topic, str(asst_msg_id)
         )
 
@@ -751,7 +753,7 @@ async def chat(req: ChatRequest):
     effective_message = req.message
     prefix_blocks: list[str] = []
     if not native_backend_command and effective_code_roots:
-        code_roots_block = code_roots_prompt_block(effective_code_roots)
+        code_roots_block = code_roots_prompt_block(effective_code_roots, isolated=worktree_isolated)
         if code_roots_block:
             prefix_blocks.append(code_roots_block)
     tracking_roots: list[str] = [] if native_backend_command else effective_code_roots
