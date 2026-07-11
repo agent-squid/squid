@@ -53,6 +53,13 @@ async function sendMsg(page, text = 'hello') {
   await page.keyboard.press('Enter');
 }
 
+async function setPageHidden(page, hidden) {
+  await page.evaluate(hiddenValue => {
+    Object.defineProperty(document, 'hidden', { configurable: true, value: hiddenValue });
+    document.dispatchEvent(new Event('visibilitychange'));
+  }, hidden);
+}
+
 // Pause so you can see what's on screen before moving on
 const look = (page, ms = 2500) => page.waitForTimeout(ms);
 
@@ -214,6 +221,92 @@ test.describe('response bubble', () => {
     const href = await page.locator(`${RESPONSE} a`).getAttribute('href');
     expect(href).toBe('#');
     expect(href).not.toContain('/localfile?path=');
+  });
+
+  test('returning from another tab preserves scrolled-up chat position', async ({ page }) => {
+    await page.evaluate(() => {
+      const messages = document.getElementById('messages');
+      messages.innerHTML = '';
+      for (let i = 0; i < 20; i++) {
+        const bubble = document.createElement('div');
+        bubble.className = 'msg assistant';
+        bubble.style.minHeight = '120px';
+        bubble.textContent = `older response ${i} `.repeat(20);
+        messages.appendChild(bubble);
+      }
+      messages.scrollTop = 120;
+    });
+
+    const before = await page.locator('#messages').evaluate(el => el.scrollTop);
+    await setPageHidden(page, true);
+    await setPageHidden(page, false);
+
+    await expect.poll(() => page.locator('#messages').evaluate(el => el.scrollTop)).toBe(before);
+  });
+
+  test('mobile scroll-to-bottom button stays above composer controls', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 800 });
+    await page.evaluate(() => {
+      const messages = document.getElementById('messages');
+      messages.innerHTML = '';
+      for (let i = 0; i < 20; i++) {
+        const bubble = document.createElement('div');
+        bubble.className = 'msg assistant';
+        bubble.style.minHeight = '120px';
+        bubble.textContent = `older response ${i} `.repeat(20);
+        messages.appendChild(bubble);
+      }
+      messages.scrollTop = 0;
+      document.getElementById('topic-chip').classList.add('visible');
+      document.getElementById('topic-chip').textContent = '#squid @claude';
+      messages.dispatchEvent(new Event('scroll'));
+    });
+
+    await expect(page.locator('#scroll-btn')).toBeVisible();
+    const boxes = await page.evaluate(() => {
+      const rect = id => {
+        const { top, bottom, left, right } = document.getElementById(id).getBoundingClientRect();
+        return { top, bottom, left, right };
+      };
+      return {
+        scroll: rect('scroll-btn'),
+        inputArea: rect('input-area'),
+        chipActions: rect('chip-actions'),
+      };
+    });
+
+    expect(boxes.scroll.bottom).toBeLessThanOrEqual(boxes.inputArea.top - 8);
+    expect(boxes.scroll.bottom).toBeLessThanOrEqual(boxes.chipActions.top - 8);
+  });
+
+  test('returning from another tab keeps following chat when already at bottom', async ({ page }) => {
+    await page.evaluate(() => {
+      const messages = document.getElementById('messages');
+      messages.innerHTML = '';
+      for (let i = 0; i < 20; i++) {
+        const bubble = document.createElement('div');
+        bubble.className = 'msg assistant';
+        bubble.style.minHeight = '120px';
+        bubble.textContent = `new response ${i} `.repeat(20);
+        messages.appendChild(bubble);
+      }
+      messages.scrollTop = messages.scrollHeight;
+    });
+
+    await setPageHidden(page, true);
+    await page.evaluate(() => {
+      const messages = document.getElementById('messages');
+      const bubble = document.createElement('div');
+      bubble.className = 'msg assistant';
+      bubble.style.minHeight = '120px';
+      bubble.textContent = 'late update '.repeat(80);
+      messages.appendChild(bubble);
+    });
+    await setPageHidden(page, false);
+
+    await expect.poll(() => page.locator('#messages').evaluate(el => (
+      el.scrollHeight - el.scrollTop - el.clientHeight
+    ))).toBeLessThan(150);
   });
 
   test('renders Codex unified diff tool blocks', async ({ page }) => {

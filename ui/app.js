@@ -5501,9 +5501,12 @@ function renderProcPopup(processes, queued) {
   });
 }
 
+let procPopupOpenedAt = 0;
+
 function toggleProcPopup() {
   const open = procStatusPopup.classList.toggle('open');
   if (open) {
+    procPopupOpenedAt = Date.now();
     renderProcPopup(cachedProcRows, cachedQueueRows);
     startProcPoll();
     for (const backend of Object.keys(_backendMetadata)) {
@@ -8071,7 +8074,10 @@ document.addEventListener('click', e => {
   if (ctxPopup && !ctxPopup.contains(e.target) && !e.target.closest('.user-ctx') && !inSecondary && !secondaryOpen) {
     ctxPopup.classList.remove('open');
   }
-  if (!procStatusPopup.contains(e.target) && e.target !== procStatusBtn && !procStatusBtn.contains(e.target)) {
+  if (
+    !procStatusPopup.contains(e.target) && e.target !== procStatusBtn && !procStatusBtn.contains(e.target)
+    && Date.now() - procPopupOpenedAt > 300
+  ) {
     procStatusPopup.classList.remove('open');
   }
 });
@@ -9023,11 +9029,16 @@ document.querySelectorAll('.creds-bookmarklet').forEach(a => {
 });
 
 // ── tab visibility recovery ───────────────────────────────────────────────────
-// When the user switches away and back, scroll to show the current streaming
-// state and immediately trigger the status poll if we're in recovery mode.
+// When the user switches away and back, keep following the current streaming
+// state only if the user was already reading at the bottom.
+let _messagesAtBottomBeforeHide = true;
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) {
-    messages.scrollTop = messages.scrollHeight;
+  if (document.hidden) {
+    _messagesAtBottomBeforeHide = isAtBottom();
+  } else {
+    if (_messagesAtBottomBeforeHide) {
+      messages.scrollTop = messages.scrollHeight;
+    }
     if (_activePollImmediate) _activePollImmediate();
     startProcPoll();
   }

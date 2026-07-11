@@ -136,6 +136,29 @@ test('status popup closes on Escape', async ({ page }) => {
   await expect(popup).not.toHaveClass(/open/);
 });
 
+test('/status command opens the popup and survives a same-tick outside click (mobile ghost-click)', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+
+  // Mobile browsers can fire a synthetic/ghost click on an unrelated element
+  // in the same tick right after a virtual-keyboard-dismissing submit opens
+  // the popup. Drive both actions inside one evaluate() so there's no
+  // Playwright IPC delay between them, matching that real-world race.
+  const result = await page.evaluate(() => {
+    toggleProcPopup();
+    const openedByCommand = procStatusPopup.classList.contains('open');
+    document.querySelector('#topbar .text-logo').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    return { openedByCommand, openAfterGhostClick: procStatusPopup.classList.contains('open') };
+  });
+  expect(result.openedByCommand).toBe(true);
+  expect(result.openAfterGhostClick).toBe(true);
+
+  // A real outside click well after opening still closes it normally.
+  await page.waitForTimeout(350);
+  await page.locator('#topbar .text-logo').click();
+  await expect(page.locator('#proc-status-popup')).not.toHaveClass(/open/);
+});
+
 test('status popup formats idle live-session durations above a minute', async ({ page }) => {
   await mockBackend(page);
   await page.route('**/processes', r => r.fulfill({ json: [

@@ -3169,7 +3169,7 @@ button {
   }
 
   #scroll-btn {
-    bottom: calc(4.5rem + env(safe-area-inset-bottom));
+    bottom: calc(7.25rem + env(safe-area-inset-bottom));
   }
 
   .view { padding-top: 0.75rem; }
