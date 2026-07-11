@@ -24,6 +24,7 @@ from agent.runners import (
     run_codex,
     run_cursor,
     run_opencode,
+    run_pi,
 )
 from agent.backends import Backend, _validate_backend
 
@@ -86,6 +87,7 @@ def test_runner_for_driver_uses_shared_supported_driver_map():
     assert runner_for_driver("claude") is run_claude
     assert runner_for_driver("codex") is run_codex
     assert runner_for_driver("opencode") is run_opencode
+    assert runner_for_driver("pi") is run_pi
     assert runner_for_driver("missing") is None
 
 
@@ -103,12 +105,16 @@ def test_runner_for_backend_selects_protocol_and_forces_adhoc_oneshot():
     opencode = _validate_backend("opencode", {
         "driver": "opencode",
     })
+    pi = _validate_backend("pi", {
+        "driver": "pi",
+    })
 
     assert runner_for_backend(live) is run_claude_interactive_cli
     assert runner_for_backend(live, adhoc=True) is run_claude
     assert runner_for_backend(codex) is run_codex
     assert runner_for_backend(cursor) is runner_for_driver("cursor")
     assert runner_for_backend(opencode) is run_opencode
+    assert runner_for_backend(pi) is run_pi
 
 
 @pytest.mark.parametrize("driver,oneshot_runner", [
@@ -116,6 +122,7 @@ def test_runner_for_backend_selects_protocol_and_forces_adhoc_oneshot():
     ("codex", run_codex),
     ("cursor", run_cursor),
     ("opencode", run_opencode),
+    ("pi", run_pi),
 ])
 def test_runner_for_backend_selects_oneshot_cli(driver, oneshot_runner):
     oneshot = _validate_backend(f"{driver}-oneshot", {
@@ -135,7 +142,7 @@ def test_runner_for_backend_selects_claude_interactive_cli():
     assert runner_for_backend(interactive) is run_claude_interactive_cli
 
 
-@pytest.mark.parametrize("driver", ["codex", "cursor", "opencode"])
+@pytest.mark.parametrize("driver", ["codex", "cursor", "opencode", "pi"])
 def test_runner_for_backend_does_not_route_non_persistent_interactive_cli(driver):
     backend = Backend(f"{driver}-live", driver, protocol="interactive-cli")
 
@@ -1244,6 +1251,151 @@ def test_opencode_oneshot_resume_uses_structured_run_session_events():
 
     assert chunks[0] == "next"
     assert chunks[1]["_stats"]["session_id"] == "thread-1"
+
+
+def test_pi_oneshot_resume_uses_session_id_and_json_events():
+    async def fake_stream_lines(cmd, **kwargs):
+        assert cmd[:4] == ["pi", "-p", "--mode", "json"]
+        assert cmd[-3:] == ["--session-id", "thread-1", "next"]
+        yield json.dumps({"type": "session", "id": "thread-1"})
+        yield json.dumps({
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "next"}],
+                "model": "openai/gpt-5",
+                "stopReason": "stop",
+                "usage": {
+                    "input": 10,
+                    "output": 2,
+                    "cacheRead": 4,
+                    "cacheWrite": 1,
+                    "cost": {"total": 0.01},
+                },
+            },
+        })
+        yield json.dumps({"type": "agent_end"})
+
+    async def collect():
+        return [chunk async for chunk in run_pi("next", cwd="/tmp", resume_session_id="thread-1")]
+
+    with patch("agent.runners.PI_PATH", "pi"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        chunks = asyncio.run(collect())
+
+    assert chunks[0] == "next"
+    stats = chunks[1]["_stats"]
+    assert stats["session_id"] == "thread-1"
+    assert stats["model"] == "openai/gpt-5"
+    assert stats["input_tokens"] == 10
+    assert stats["output_tokens"] == 2
+    assert stats["cache_read_tokens"] == 4
+    assert stats["cache_write_tokens"] == 1
+    assert stats["cost_usd"] == 0.01
+
+
+def test_pi_oneshot_fresh_vs_resume_command_shape():
+    captured = []
+
+    async def fake_stream_lines(cmd, **kwargs):
+        captured.append(cmd)
+        yield '{"type":"session","id":"thread-1"}'
+        yield '{"type":"message_end","message":{"role":"assistant","content":[],"usage":{}}}'
+        yield '{"type":"agent_end"}'
+
+    async def collect():
+        oneshot = [chunk async for chunk in run_pi("fresh", cwd="/tmp")]
+        resumed = [chunk async for chunk in run_pi("next", cwd="/tmp", resume_session_id="thread-1")]
+        return oneshot, resumed
+
+    with patch("agent.runners.PI_PATH", "pi"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        asyncio.run(collect())
+
+    assert captured[0][:4] == ["pi", "-p", "--mode", "json"]
+    assert "--session-id" not in captured[0]
+    assert captured[0][-1] == "fresh"
+    assert captured[1][:4] == ["pi", "-p", "--mode", "json"]
+    assert captured[1][-3:] == ["--session-id", "thread-1", "next"]
+
+
+def test_pi_passes_provider_and_model():
+    captured = []
+
+    async def fake_stream_lines(cmd, **kwargs):
+        captured.append(cmd)
+        yield '{"type":"session","id":"thread-1"}'
+        yield '{"type":"agent_end"}'
+
+    async def collect():
+        return [chunk async for chunk in run_pi(
+            "fresh", cwd="/tmp", model="gpt-5.5",
+            backend_settings={"provider": "openai"},
+        )]
+
+    with patch("agent.runners.PI_PATH", "pi"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        asyncio.run(collect())
+
+    assert "--provider" in captured[0]
+    assert captured[0][captured[0].index("--provider") + 1] == "openai"
+    assert "--model" in captured[0]
+    assert captured[0][captured[0].index("--model") + 1] == "gpt-5.5"
+
+
+def test_pi_maps_tool_calls_and_waits_for_final_stats():
+    async def fake_stream_lines(cmd, **kwargs):
+        yield json.dumps({"type": "session", "id": "thread-1"})
+        yield json.dumps({
+            "type": "message_update",
+            "assistantMessageEvent": {
+                "type": "toolcall_end",
+                "toolCall": {
+                    "id": "call-1",
+                    "name": "bash",
+                    "arguments": {"command": "pwd"},
+                },
+            },
+        })
+        yield json.dumps({
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "toolCall", "name": "bash", "arguments": {"command": "pwd"}}],
+                "usage": {"input": 5, "output": 6, "cost": {"total": 0.1}},
+                "stopReason": "toolUse",
+            },
+        })
+        yield json.dumps({
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "done"}],
+                "model": "gpt-5.5",
+                "usage": {"input": 7, "output": 8, "cost": {"total": 0.2}},
+                "stopReason": "stop",
+            },
+        })
+        yield json.dumps({"type": "agent_end"})
+
+    async def collect():
+        return [chunk async for chunk in run_pi("next", cwd="/tmp")]
+
+    with patch("agent.runners.PI_PATH", "pi"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        chunks = asyncio.run(collect())
+
+    assert chunks[0] == {"_tool": {"name": "Bash", "tool_use_id": "call-1", "command": "pwd"}}
+    assert chunks[1] == "done"
+    stats = chunks[2]["_stats"]
+    assert stats["model"] == "gpt-5.5"
+    assert stats["input_tokens"] == 12
+    assert stats["output_tokens"] == 14
+    assert stats["cost_usd"] == 0.30000000000000004
 
 
 def test_opencode_routes_tool_call_step_text_to_status_and_stop_text_to_final():

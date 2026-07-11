@@ -1,6 +1,23 @@
 import json
 import sqlite3
+from types import SimpleNamespace
 from agent import stats_db
+
+
+def test_init_db_seeds_pi_agent_when_pi_backend_is_available(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    monkeypatch.setattr(stats_db, "BACKENDS", {
+        "pi": SimpleNamespace(available=True, model=None),
+    })
+
+    stats_db.init_db()
+
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        row = conn.execute(
+            "SELECT name, backend, model, cwd FROM agents WHERE name = 'pi'"
+        ).fetchone()
+
+    assert row == ("pi", "pi", None, None)
 
 
 def test_aggregated_stats_includes_requested_chart_percentile(tmp_path, monkeypatch):

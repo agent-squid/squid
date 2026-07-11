@@ -1431,6 +1431,10 @@ function applyPromptHistoryEntry(entry) {
   resizeComposer();
 }
 
+function routeFromParsedInput(parsed) {
+  return promptHistoryRoute(parsed.topic, parsed.agent, parsed.adhoc);
+}
+
 function currentPromptHistoryRoute() {
   if (!stickyChip) return '';
   return promptHistoryRoute(stickyChip.topic, stickyChip.agent, stickyChip.adhoc);
@@ -1476,6 +1480,85 @@ function promptHistoryAutocompleteItems(entries) {
       ...(routeHtml ? { routeHtml, fullEntry: `${routeKey} ${promptText}` } : {}),
     };
   });
+}
+
+function parseHistoryRouteTarget(route) {
+  const match = String(route || '').match(/^#(\w+)(?:@(\w+))?(!)?$/);
+  if (!match) return null;
+  return {
+    topic: match[1].toLowerCase(),
+    agent: match[2] || null,
+    adhoc: !!match[3],
+    lookback: 0,
+  };
+}
+
+function applyRouteTarget(routeTarget) {
+  if (!routeTarget) return;
+  setTopicChip(routeTarget.topic, routeTarget.agent, routeTarget.adhoc, routeTarget.lookback || 0);
+  input.value = '';
+  input.setSelectionRange(0, 0);
+  resizeComposer();
+}
+
+function routeHistoryAutocompleteItems(currentRoute = '') {
+  const normalizedCurrent = normalizePromptHistoryRoute(currentRoute);
+  const items = [];
+  const seen = new Set();
+
+  const addRoute = (route, prompt = '', current = false) => {
+    const routeKey = normalizePromptHistoryRoute(route);
+    const routeTarget = parseHistoryRouteTarget(routeKey);
+    const dedupeKey = routeKey.toLowerCase();
+    if (!routeKey || !routeTarget || seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
+    items.push({
+      label: _acRouteHtml(routeKey),
+      insert: '',
+      trail: false,
+      routeTarget,
+      currentRoute: current,
+      sub: prompt ? _acLastPrompt(prompt) : '',
+    });
+  };
+
+  addRoute(normalizedCurrent, '', true);
+  for (const entry of promptHistory) {
+    const { route, prompt } = splitPromptHistoryEntry(entry);
+    if (hiddenPromptKeys.has(promptHistoryDedupKey(entry))) continue;
+    addRoute(route, prompt, false);
+    if (items.length >= 9) break;
+  }
+  return items;
+}
+
+function composerHasOnlyRoute() {
+  const value = input.value.trim();
+  if (!value) return true;
+  return /^#\w+(?:@\w+)?(?:!\d*)?$/.test(value);
+}
+
+function composerRouteForRouteHistory() {
+  const value = input.value.trim();
+  if (value) return routeFromParsedInput(parseInput(value));
+  return currentPromptHistoryRoute();
+}
+
+function openRouteHistoryAutocomplete(direction) {
+  const items = routeHistoryAutocompleteItems(composerRouteForRouteHistory());
+  if (items.length <= 1) return false;
+  const currentIndex = Math.max(0, items.findIndex(item => item.currentRoute));
+  _acRender(items, 'Routes');
+  if (direction === 'previous') {
+    acSel = Math.min(currentIndex + 1, acItems.length - 1);
+  } else if (direction === 'next') {
+    acSel = Math.max(currentIndex - 1, 0);
+  } else {
+    acSel = currentIndex;
+  }
+  _acHighlight();
+  if (direction) _acPreview();
+  return true;
 }
 
 async function initPromptHistory() {
@@ -2132,6 +2215,17 @@ input.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Tab' && !sessionAdvisoryEl.hidden) { e.preventDefault(); stashComposerAndEdit('/clear'); return; }
   if (acOpen) {
+    if (acItems[0]?.routeTarget && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+      e.preventDefault();
+      if (e.key === 'ArrowLeft') {
+        acSel = Math.min(acSel + 1, acItems.length - 1);
+      } else {
+        acSel = Math.max(acSel - 1, 0);
+      }
+      _acHighlight();
+      _acPreview();
+      return;
+    }
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       if (acSel <= 0) {
@@ -2152,6 +2246,13 @@ input.addEventListener('keydown', (e) => {
     }
     if (e.key === 'Tab') { e.preventDefault(); _acSelect(acSel >= 0 ? acSel : 0); return; }
     if (e.key === 'Escape') { e.preventDefault(); _acRestoreDraft(); return; }
+  }
+  if (!acOpen && composerHasOnlyRoute() && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    const direction = e.key === 'ArrowLeft' ? 'previous' : 'next';
+    if (openRouteHistoryAutocomplete(direction)) {
+      e.preventDefault();
+      return;
+    }
   }
   if (!acOpen && e.key === 'ArrowUp' && promptHistory.length) {
     const _posBefore = input.selectionStart;
@@ -6892,6 +6993,8 @@ function _acPreview() {
   }
   if (item.fullEntry) {
     applyPromptHistoryEntry(item.fullEntry);
+  } else if (item.routeTarget) {
+    applyRouteTarget(item.routeTarget);
   } else {
     input.value = item.insert;
     input.setSelectionRange(item.insert.length, item.insert.length);
@@ -7022,6 +7125,11 @@ function _acSelect(idx) {
       input.dispatchEvent(new Event('input'));
       return;
     }
+  }
+  if (item.routeTarget) {
+    applyRouteTarget(item.routeTarget);
+    input.focus();
+    return;
   }
   if (item.clearChip && stickyChip) clearTopicChip();
   input.value = item.trail === false ? item.insert : item.insert + ' ';

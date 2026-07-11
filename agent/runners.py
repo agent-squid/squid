@@ -13,7 +13,7 @@ import subprocess
 import time
 from typing import AsyncGenerator, List, Optional, Union
 
-from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, OPENCODE_PATH, FIRST_BYTE_TIMEOUT, RESPONSE_TIMEOUT, PROXY_ENV
+from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, OPENCODE_PATH, PI_PATH, FIRST_BYTE_TIMEOUT, RESPONSE_TIMEOUT, PROXY_ENV
 
 # ---------------------------------------------------------------------------
 # Process registry
@@ -1603,6 +1603,113 @@ async def run_opencode(
     }
 
 
+async def run_pi(
+    prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
+    model: Optional[str] = None, topic: str = "", agent: str = "",
+    response_timeout: Optional[int] = None,
+    resume_session_id: Optional[str] = None,
+    adhoc: bool = False, msg_id: Optional[int] = None,
+    backend_id: str = "pi", backend_env: Optional[dict] = None,
+    backend_settings: Optional[dict] = None,
+    backend_args: tuple[str, ...] = (),
+    prompt_preview: Optional[str] = None,
+) -> AsyncGenerator[Union[str, dict], None]:
+    """Stream text chunks from pi CLI, then yield a stats dict."""
+    if not PI_PATH:
+        raise CLINotFoundError(
+            "pi CLI not found in PATH. Install with: curl -fsSL https://pi.dev/install.sh | sh"
+        )
+
+    cmd = [PI_PATH, "-p", "--mode", "json"]
+    cmd += list(backend_args)
+    provider = (backend_settings or {}).get("provider")
+    if provider:
+        cmd += ["--provider", str(provider)]
+    if model:
+        cmd += ["--model", model]
+    if resume_session_id:
+        cmd += ["--session-id", resume_session_id]
+    cmd.append(prompt if resume_session_id else _build_prompt(prompt, history))
+
+    start_ms = time.monotonic() * 1000
+    session_id: Optional[str] = None
+    final_text_yielded = False
+    final_message: dict = {}
+    total_input = total_output = total_cache_read = total_cache_write = 0
+    total_cost: float = 0.0
+
+    async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, prompt_preview=prompt_preview, extra_env=backend_env):
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        t = event.get("type", "")
+        if t == "session":
+            session_id = event.get("id") or session_id
+        elif t == "message_update":
+            update = event.get("assistantMessageEvent") or {}
+            if not isinstance(update, dict):
+                continue
+            update_type = update.get("type")
+            if update_type == "text_delta":
+                signature = ((update.get("partial") or {}).get("content") or [{}])[-1].get("textSignature")
+                if signature and "final_answer" not in str(signature):
+                    delta = update.get("delta", "")
+                    if delta:
+                        yield {"_status": delta}
+            elif update_type == "toolcall_end":
+                tool_call = update.get("toolCall") or {}
+                if not isinstance(tool_call, dict):
+                    continue
+                name = str(tool_call.get("name", ""))
+                display_name = {"bash": "Bash", "read": "Read", "edit": "Edit", "write": "Write"}.get(name, name)
+                args = tool_call.get("arguments") or {}
+                input_json = json.dumps(args) if isinstance(args, dict) else str(args)
+                yield {"_tool": _tool_data(display_name, input_json, tool_call.get("id"))}
+        elif t == "message_end":
+            message = event.get("message") if isinstance(event.get("message"), dict) else {}
+            if message.get("role") != "assistant":
+                continue
+            usage = message.get("usage") or {}
+            total_input += int(usage.get("input", 0) or 0)
+            total_output += int(usage.get("output", 0) or 0)
+            total_cache_read += int(usage.get("cacheRead", 0) or 0)
+            total_cache_write += int(usage.get("cacheWrite", 0) or 0)
+            cost = usage.get("cost") or {}
+            total_cost += float(cost.get("total", 0) or 0)
+            if message.get("stopReason") != "stop":
+                continue
+            final_message = message
+            content = message.get("content") or []
+            text = "".join(
+                str(part.get("text", ""))
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+            if text and not final_text_yielded:
+                final_text_yielded = True
+                yield text
+        elif t == "agent_end":
+            yield {
+                "_stats": {
+                    "session_id": session_id,
+                    "model": final_message.get("model"),
+                    "input_tokens": total_input,
+                    "output_tokens": total_output,
+                    "cache_read_tokens": total_cache_read,
+                    "cache_write_tokens": total_cache_write,
+                    "history_input_tokens": _estimate_history_tokens(history),
+                    "cost_usd": total_cost if total_cost else None,
+                    "duration_ms": int(time.monotonic() * 1000 - start_ms),
+                }
+            }
+        elif t == "error":
+            raise CLIError(event.get("message", "pi error"))
+
+
 RUNNER_NAMES_BY_DRIVER = {
     "claude": "run_claude",
     "codex": "run_codex",
@@ -1610,6 +1717,7 @@ RUNNER_NAMES_BY_DRIVER = {
     "copilot": "run_copilot",
     "antigravity": "run_antigravity",
     "opencode": "run_opencode",
+    "pi": "run_pi",
 }
 
 RUNNER_NAMES_BY_DRIVER_PROTOCOL = {
@@ -1618,6 +1726,7 @@ RUNNER_NAMES_BY_DRIVER_PROTOCOL = {
     ("codex", "oneshot-cli"): "run_codex",
     ("cursor", "oneshot-cli"): "run_cursor",
     ("opencode", "oneshot-cli"): "run_opencode",
+    ("pi", "oneshot-cli"): "run_pi",
 }
 
 

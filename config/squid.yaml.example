@@ -17,7 +17,7 @@ agent:
 # driver instance: endpoint, credentials, gauge, args/settings, color, optional
 # default model, and optional protocol. Named agents then choose backend + model
 # override + cwd.
-# Supported drivers: claude, codex, cursor, opencode.
+# Supported drivers: claude, codex, cursor, opencode, pi.
 # Supported protocols: oneshot-cli, interactive-cli, interactive-pty.
 # interactive-cli currently requires a driver with a true persistent structured
 # stdin/stdout protocol; among bundled drivers, only claude supports it today.
@@ -52,6 +52,33 @@ backends:
       type: static
       text: Free tier
       title: OpenCode-managed limits
+
+  pi:
+    driver: pi
+    protocol: oneshot-cli
+    label: Pi
+    color: "#F5F5F2"
+    # Pi can route to multiple providers/models (including Anthropic and OpenAI),
+    # but Squid's claude/codex gauges measure Claude.ai and ChatGPT/Codex product
+    # meters, not Anthropic/OpenAI API provider usage. Keep this static unless a
+    # Pi-native or provider-specific API balance gauge is added.
+    gauge:
+      type: static
+      text: Pi-managed
+      title: Pi-managed provider limits
+
+  # Example: a Pi backend pinned to OpenAI. The provider field maps to
+  # `pi --provider`; model maps to `pi --model`.
+  # pi-openai:
+  #   driver: pi
+  #   protocol: oneshot-cli
+  #   label: Pi OpenAI
+  #   color: "#F5F5F2"
+  #   provider: openai
+  #   model: gpt-5.5
+  #   gauge:
+  #     type: static
+  #     text: Pi-managed
 
   # DeepSeek through Claude Code's Anthropic-compatible transport.
   # Get an API key at https://platform.deepseek.com/api_keys, then fill in one of:

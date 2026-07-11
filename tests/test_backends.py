@@ -58,6 +58,7 @@ def test_fresh_home_example_does_not_expose_deepseek_or_deepcla(tmp_path):
     assert backends["codex"]["protocol"] == "oneshot-cli"
     assert backends["cursor"]["protocol"] == "oneshot-cli"
     assert backends["opencode"]["protocol"] == "oneshot-cli"
+    assert backends["pi"]["protocol"] == "oneshot-cli"
 
 
 def test_fresh_home_legacy_deepcla_is_exposed_as_deepseek_only(tmp_path):
@@ -129,7 +130,7 @@ def test_claude_backend_protocol_defaults_to_interactive_cli_and_can_select_ones
     assert claude.interactive.idle_timeout_seconds == DEFAULT_INTERACTIVE_IDLE_TIMEOUT_SECONDS
 
 
-@pytest.mark.parametrize("driver", ["codex", "cursor", "opencode"])
+@pytest.mark.parametrize("driver", ["codex", "cursor", "opencode", "pi"])
 def test_non_persistent_drivers_default_to_oneshot_cli(driver):
     backend = _validate_backend(driver, {"driver": driver})
 
@@ -157,7 +158,7 @@ def test_backend_rejects_invalid_interactive_idle_timeout():
         })
 
 
-@pytest.mark.parametrize("driver", ["codex", "cursor", "opencode"])
+@pytest.mark.parametrize("driver", ["codex", "cursor", "opencode", "pi"])
 def test_non_persistent_drivers_reject_interactive_cli_protocol(driver):
     with pytest.raises(ValueError, match="not supported"):
         _validate_backend(f"{driver}-live", {
@@ -322,6 +323,17 @@ def test_deepseek_opencode_backend_uses_its_own_api_key():
     })
 
     assert backend.execution_env()["DEEPSEEK_API_KEY"] == "separate-key"
+
+
+def test_pi_provider_field_translates_to_driver_settings():
+    backend = _validate_backend("pi-openai", {
+        "driver": "pi",
+        "provider": "openai",
+        "model": "gpt-5.5",
+        "gauge": {"type": "static", "text": "Pi-managed"},
+    })
+
+    assert backend.driver_settings()["provider"] == "openai"
 
 
 def test_static_gauge_requires_display_text():

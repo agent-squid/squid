@@ -77,6 +77,66 @@ test('different-route items show a route chip button; same-route items do not', 
   await expect(page.locator('#autocomplete .ac-item', { hasText: '#squid@haiku!' }).locator('.ac-route-btn')).toContainText('#squid@haiku!');
 });
 
+test('left and right browse recent routes from an empty composer', async ({ page }) => {
+  await mockBackend(page);
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
+  })));
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  await composer.focus();
+  await composer.press('ArrowLeft');
+
+  await expect(page.locator('#autocomplete')).toHaveClass(/open/);
+  await expect(page.locator('#autocomplete .ac-title')).toHaveText('Routes');
+  await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#other@codex');
+  await expect(page.locator('#topic-chip')).toContainText('#other@codex');
+  await expect(composer).toHaveValue('');
+
+  await composer.press('ArrowUp');
+  await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#squid@haiku!');
+  await expect(page.locator('#topic-chip')).toContainText('#squid@haiku!');
+
+  await composer.press('ArrowDown');
+  await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#other@codex');
+  await expect(page.locator('#topic-chip')).toContainText('#other@codex');
+
+  await composer.press('ArrowLeft');
+  await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#squid@haiku!');
+  await expect(page.locator('#topic-chip')).toContainText('#squid@haiku!');
+
+  await composer.press('ArrowRight');
+  await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#other@codex');
+  await expect(page.locator('#topic-chip')).toContainText('#other@codex');
+});
+
+test('left opens route autocomplete when the composer contains only a route', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  await composer.fill('#squid@codex');
+  await composer.press('ArrowLeft');
+
+  await expect(page.locator('#autocomplete')).toHaveClass(/open/);
+  await expect(page.locator('#autocomplete .ac-title')).toHaveText('Routes');
+  await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#other@codex');
+  await expect(page.locator('#topic-chip')).toContainText('#other@codex');
+  await expect(composer).toHaveValue('');
+});
+
+test('help menu documents route history arrow shortcuts', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+
+  await page.locator('#help-btn').click();
+
+  await expect(page.locator('#help-panel')).toHaveClass(/open/);
+  await expect(page.locator('#help-content')).toContainText('with empty input or only a route: browse recent routes');
+  await expect(page.locator('#help-content')).toContainText('navigate autocomplete, route history, or prompt history');
+});
+
 test('default topic prompt history distinguishes agent routes', async ({ page }) => {
   await mockBackend(page);
   await page.route('**/prompts/recent**', route => route.fulfill({ json: { items: [

@@ -49,6 +49,7 @@ CLAUDE_CLI    = "claude"
 CODEX_CLI     = "codex"
 CURSOR_CLI    = "cursor-agent"
 OPENCODE_CLI  = "opencode"
+PI_CLI        = "pi"
 
 # Experimental runners exist for these CLIs but they are not configurable drivers.
 COPILOT_CLI  = "copilot"
@@ -68,6 +69,7 @@ CODEX_PATH     = find_cli(CODEX_CLI)
 COPILOT_PATH   = find_cli(COPILOT_CLI)
 CURSOR_PATH    = find_cli(CURSOR_CLI)
 OPENCODE_PATH  = find_cli(OPENCODE_CLI)
+PI_PATH        = find_cli(PI_CLI)
 AGY_PATH       = find_cli(AGY_CLI)
 
 # OpenCode free provider — no API key required

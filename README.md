@@ -28,6 +28,7 @@ Install at least one supported CLI:
 | OpenAI Codex | `codex` | `curl -fsSL https://chatgpt.com/codex/install.sh | sh` |
 | Cursor Agent | `cursor-agent` | `curl -fsS https://cursor.com/install | bash` |
 | OpenCode | `opencode` | `curl -fsSL https://opencode.ai/install | bash` |
+| Pi | `pi` | `curl -fsSL https://pi.dev/install.sh | sh` |
 
 Create agents in the UI. An agent is a named config:
 ```text
@@ -44,7 +45,7 @@ name + backend + model + working directory
 
 ## Your Local Coding Agents, Unified
 
-Agent-Squid lets you run Claude Code, OpenAI Codex, Cursor Agent, OpenCode with DeepSeek Free, Claude with DeepSeek Pro, and Codex with other local models like Qwen via one browser UI. Your agents still run on your own machine, with your repo, shell tools, credentials, and native CLI sessions. Squid gives those sessions names, history, queues, controls, and phone/tablet access.
+Agent-Squid lets you run Claude Code, OpenAI Codex, Cursor Agent, OpenCode with DeepSeek Free, Pi, Claude with DeepSeek Pro, and Codex with other local models like Qwen via one browser UI. Your agents still run on your own machine, with your repo, shell tools, credentials, and native CLI sessions. Squid gives those sessions names, history, queues, controls, and phone/tablet access.
 
 Use it when your workflow has become a wall of unnamed terminal tabs or you need to use multiple coding agents; a couple of $20 agents alongside a free coding agent.
 
@@ -53,6 +54,7 @@ Use it when your workflow has become a wall of unnamed terminal tabs or you need
 #launch@codex! review the diff for regressions
 #bug@cursor reproduce the auth failure
 #ops@opencode summarize the incident notes
+#research@pi compare the implementation options
 ```
 NOTE: These topics are sticky. Once you are in the topic, no need to type it. :)
 
@@ -143,7 +145,7 @@ Squid is not another general AI chat app. Open WebUI and LibreChat are broad sel
 
 Squid is narrower: it controls real local coding-agent CLIs and preserves their session behavior.
 
-Most chat UIs send messages to a model API and render text back. Even when they support tools or agents, the chat app is usually the runtime. Squid is different: the runtime is still the local CLI agent. Claude Code, Codex, Cursor Agent, OpenCode are the process doing the work on your machine. Squid is the interactive control layer around those processes.
+Most chat UIs send messages to a model API and render text back. Even when they support tools or agents, the chat app is usually the runtime. Squid is different: the runtime is still the local CLI agent. Claude Code, Codex, Cursor Agent, OpenCode, and Pi are the process doing the work on your machine. Squid is the interactive control layer around those processes.
 
 That difference matters:
 
@@ -160,7 +162,7 @@ That difference matters:
 | Category | Examples | Squid's difference |
 |---|---|---|
 | Self-hosted AI chat | Open WebUI, LibreChat | Squid runs local CLI coding agents instead of replacing them with a provider chat UI. |
-| Single-agent CLIs | Claude Code, Codex CLI, Cursor Agent, OpenCode | Squid gives them shared browser/mobile UI, topics, queues, history, controls, and analytics. |
+| Single-agent CLIs | Claude Code, Codex CLI, Cursor Agent, OpenCode, Pi | Squid gives them shared browser/mobile UI, topics, queues, history, controls, and analytics. |
 | IDE agents | Cursor, Cline, VS Code Copilot | Squid is editor-agnostic and works even when the IDE is not open. |
 | Terminal pair programmers | Aider, OpenCode | Squid is an orchestration layer, not a coding engine. |
 
@@ -183,7 +185,7 @@ FastAPI Squid server
               +-- ephemeral worker per adhoc ! turn
         |
         +-- local CLI subprocesses
-              claude / codex / cursor-agent / opencode
+              claude / codex / cursor-agent / opencode / pi
 ```
 
 The CLI owns the real conversation context. Squid stores history, stats, topics, active session IDs, cwd locks, and UI state needed to make the workflow manageable. Session turns use native resume. Adhoc turns build an explicit limited-context prompt, which makes the two modes easy to compare.

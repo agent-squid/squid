@@ -549,11 +549,12 @@ def test_worker_clears_session_on_prompt_too_long_text_response():
             resume_session_id="old-session-789",
             msg_id=526,
         )
-        with patch("agent.runners.run_claude", fake_runner), \
+        with patch("agent.runners.run_claude_interactive_cli", fake_runner), \
              patch("agent.stats_db.insert_run_event"), \
              patch("agent.stats_db.update_assistant_message"), \
              patch("agent.stats_db.set_topic_session"), \
              patch("agent.stats_db.clear_topic_session") as clear_session, \
+             patch("agent.stats_db.get_worktrees", return_value=[]), \
              patch("agent.stats_db.save_stats"):
             await worker._process(item)
 
@@ -596,11 +597,12 @@ def test_worker_retries_fresh_on_prompt_too_long():
             resume_session_id="old-session-123",
             msg_id=500,
         )
-        with patch("agent.runners.run_claude", fake_runner), \
+        with patch("agent.runners.run_claude_interactive_cli", fake_runner), \
              patch("agent.stats_db.insert_run_event"), \
              patch("agent.stats_db.update_assistant_message"), \
              patch("agent.stats_db.set_topic_session"), \
              patch("agent.stats_db.clear_topic_session") as clear_session, \
+             patch("agent.stats_db.get_worktrees", return_value=[]), \
              patch("agent.stats_db.save_stats"):
             await worker._process(item)
 

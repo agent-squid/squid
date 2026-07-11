@@ -14,11 +14,12 @@ from .config import (
     CODEX_PATH,
     CURSOR_PATH,
     OPENCODE_PATH,
+    PI_PATH,
     _cfg,
 )
 
 
-SUPPORTED_DRIVERS = frozenset({"claude", "codex", "cursor", "opencode"})
+SUPPORTED_DRIVERS = frozenset({"claude", "codex", "cursor", "opencode", "pi"})
 SUPPORTED_PROTOCOLS = frozenset({"oneshot-cli", "interactive-cli", "interactive-pty"})
 DEFAULT_INTERACTIVE_IDLE_TIMEOUT_SECONDS = 3600
 SUPPORTED_PROTOCOLS_BY_DRIVER = {
@@ -26,12 +27,14 @@ SUPPORTED_PROTOCOLS_BY_DRIVER = {
     "codex": frozenset({"oneshot-cli"}),
     "cursor": frozenset({"oneshot-cli"}),
     "opencode": frozenset({"oneshot-cli"}),
+    "pi": frozenset({"oneshot-cli"}),
 }
 DEFAULT_PROTOCOL_BY_DRIVER = {
     "claude": "interactive-cli",
     "codex": "oneshot-cli",
     "cursor": "oneshot-cli",
     "opencode": "oneshot-cli",
+    "pi": "oneshot-cli",
 }
 SUPPORTED_GAUGES = frozenset({"claude", "codex", "cursor", "deepseek", "static", "none"})
 _ID_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
@@ -43,6 +46,7 @@ _DRIVER_PATHS = {
     "codex": CODEX_PATH,
     "cursor": CURSOR_PATH,
     "opencode": OPENCODE_PATH,
+    "pi": PI_PATH,
 }
 
 _DEFAULT_BACKENDS: dict[str, dict[str, Any]] = {
@@ -52,6 +56,10 @@ _DEFAULT_BACKENDS: dict[str, dict[str, Any]] = {
     "opencode": {
         "driver": "opencode", "label": "OpenCode", "color": "#CFCECD",
         "gauge": {"type": "static", "text": "Free tier", "title": "OpenCode-managed limits"},
+    },
+    "pi": {
+        "driver": "pi", "label": "Pi", "color": "#F5F5F2",
+        "gauge": {"type": "static", "text": "Pi-managed", "title": "Pi-managed provider limits"},
     },
 }
 
@@ -192,6 +200,9 @@ class Backend:
     def driver_settings(self) -> dict[str, Any]:
         """Merge canonical connection fields into driver-native structured settings."""
         result = dict(self.settings)
+        if self.driver == "pi" and self.provider:
+            result.setdefault("provider", self.provider)
+            return result
         if self.driver != "codex" or not self.base_url:
             return result
         provider_id = re.sub(r"[^a-z0-9_]", "_", (self.provider or self.id).lower())

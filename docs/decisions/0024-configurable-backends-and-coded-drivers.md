@@ -23,7 +23,7 @@ written as `#topic@agent`.
 Squid distinguishes these concepts:
 
 - A **driver** is a coded coding-agent integration. Supported drivers are
-  `claude`, `codex`, `cursor`, and `opencode`. Drivers own command
+  `claude`, `codex`, `cursor`, `opencode`, and `pi`. Drivers own command
   construction, protocol support, stream parsing, tool normalization, session
   resume, and token semantics.
 - A **backend** is a named YAML-configured instance of one driver. Backends own
@@ -71,6 +71,7 @@ configuration changes.
   as `claude: oneshot-cli` and `claude-live: interactive-cli`.
 - Multiple backends may share a gauge implementation without sharing keys.
 - A genuinely different CLI protocol still requires a coded driver.
+- New coded drivers should follow `docs/adding-driver-checklist.md`.
 - Topic identity and execution identity stay separate: `#topic` owns the
   conversation, `@agent` owns `(backend, model, cwd)`, and `#topic@agent`
   selects the route.

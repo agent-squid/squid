@@ -4,13 +4,13 @@
 
 | Term | Meaning |
 |---|---|
-| **driver** | The coded coding-agent integration: `claude`, `codex`, `cursor`, or `opencode`. A driver owns command construction, supported protocols, parsing, resume behavior, and token semantics. |
+| **driver** | The coded coding-agent integration: `claude`, `codex`, `cursor`, `opencode`, or `pi`. A driver owns command construction, supported protocols, parsing, resume behavior, and token semantics. |
 | **backend** | A named YAML configuration of one driver: provider connection, credentials, billing gauge, UI color, driver arguments/settings, default model, and protocol. Must be explicitly set on each agent. |
 | **agent** | A named execution identity: backend, model override, cwd, timeout. Defined by the user and stored in the `agents` table. Referenced by name in the `@agent` input syntax. |
 | **topic** | A named conversation/work thread (e.g. `oncall`, `squid`). Each topic has a sticky agent and zero or more sessions and adhoc turns from multiple agents. |
 | **route** | A topic plus agent selection written as `#topic@agent`. `#topic` owns conversation history; `@agent` owns execution config. |
 | **protocol** | The driver communication shape for a turn/session, such as `oneshot-cli`, `interactive-cli`, or `interactive-pty`. Protocol selection is driver/backend/agent configuration, not model-name inference. |
-| **session** | A resumable CLI process context identified by a `session_id` (from `claude --resume`) or `thread_id` (Codex). Scoped to `(topic, agent)`. |
+| **session** | A resumable CLI process context identified by the native CLI session/thread ID. Scoped to `(topic, agent)`. |
 | **adhoc** | A one-off parallel turn that uses a `lookback` window of recent history as inline context instead of a persistent session. |
 
 ---

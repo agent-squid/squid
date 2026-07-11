@@ -86,6 +86,13 @@ else
   warn "opencode not found — curl -fsSL https://opencode.ai/install | bash"
 fi
 
+if command -v pi &>/dev/null; then
+  ok "pi $(pi --version 2>/dev/null || echo '')"
+  AGENTS_FOUND=$((AGENTS_FOUND + 1))
+else
+  warn "pi not found — curl -fsSL https://pi.dev/install.sh | sh"
+fi
+
 if [[ $AGENTS_FOUND -eq 0 ]]; then
   fail "No coding agents found. Install at least one before starting squid."
   mark_error
