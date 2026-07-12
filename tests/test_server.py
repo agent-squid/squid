@@ -361,20 +361,17 @@ def test_clear_command_kills_only_session_lane():
     clear_session.assert_called_once_with("squid", "codex")
 
 
-def test_health_returns_configured_backend_harness_provider_and_color():
+def test_health_returns_harnesses_and_providers_without_backend_aliases():
     client = TestClient(server.app)
     response = client.get("/health")
 
     assert response.status_code == 200
-    backends = response.json()["backends"]
-    assert backends["claude"]["harness"] == "claudecode"
-    assert backends["claude"]["provider"] == "anthropic"
-    assert backends["claude"]["color"].startswith("#")
-    assert "env" not in backends["claude"]
-    assert "settings" not in backends["claude"]
-    assert backends["claude"]["gauge"]["type"] == "claude"
-    assert "harnesses" in response.json()
-    assert "providers" in response.json()
+    body = response.json()
+    assert "backends" not in body
+    claudecode = next(h for h in body["harnesses"] if h["id"] == "claudecode")
+    assert claudecode["default_provider"] == "anthropic"
+    assert body["providers"]["anthropic"]["gauge"]["type"] == "claude"
+    assert body["providers"]["anthropic"]["color"].startswith("#")
 
 
 def test_public_agent_config_includes_provider_color():
@@ -382,7 +379,6 @@ def test_public_agent_config_includes_provider_color():
         "name": "haiku",
         "harness": "claudecode",
         "provider": "anthropic",
-        "backend": "claudecode:anthropic",
         "model": None,
         "cwd": None,
     })
@@ -390,20 +386,6 @@ def test_public_agent_config_includes_provider_color():
     assert item["color"] == item["provider_color"]
     assert item["color"].startswith("#")
     assert item["provider_label"] == "Claude"
-
-
-def test_backend_static_quota_is_normalized_from_configuration():
-    client = TestClient(server.app)
-    response = client.get("/quota/backend/opencode")
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "status": "static",
-        "text": "Free tier",
-        "title": "no reset",
-        "used_percent": None,
-        "reset_at": None,
-    }
 
 
 def test_provider_static_quota_is_normalized_with_no_harness_involved():
@@ -427,11 +409,11 @@ def test_provider_quota_404s_for_unknown_provider():
     assert response.status_code == 404
 
 
-def test_agent_rejects_unconfigured_backend():
+def test_agent_rejects_unconfigured_harness():
     client = TestClient(server.app)
     response = client.post("/config/agents", json={
-        "name": "invalid-backend-test",
-        "backend": "not-configured",
+        "name": "invalid-harness-test",
+        "harness": "not-configured",
     })
 
     assert response.status_code == 400

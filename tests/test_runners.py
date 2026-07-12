@@ -5,6 +5,7 @@ import asyncio
 import json
 import signal
 import time
+from types import SimpleNamespace
 from unittest.mock import patch, call
 import pytest
 
@@ -26,7 +27,6 @@ from agent.runners import (
     run_opencode,
     run_pi,
 )
-from agent.backends import Backend, _validate_backend
 
 
 def _clear():
@@ -92,22 +92,11 @@ def test_runner_for_driver_uses_shared_supported_driver_map():
 
 
 def test_runner_for_backend_selects_protocol_and_forces_adhoc_oneshot():
-    live = _validate_backend("claude-live", {
-        "driver": "claude",
-        "protocol": "interactive-cli",
-    })
-    codex = _validate_backend("codex", {
-        "driver": "codex",
-    })
-    cursor = _validate_backend("cursor", {
-        "driver": "cursor",
-    })
-    opencode = _validate_backend("opencode", {
-        "driver": "opencode",
-    })
-    pi = _validate_backend("pi", {
-        "driver": "pi",
-    })
+    live = SimpleNamespace(harness="claudecode", protocol="interactive-cli")
+    codex = SimpleNamespace(harness="codex", protocol="oneshot-cli")
+    cursor = SimpleNamespace(harness="cursor", protocol="oneshot-cli")
+    opencode = SimpleNamespace(harness="opencode", protocol="oneshot-cli")
+    pi = SimpleNamespace(harness="pi", protocol="oneshot-cli")
 
     assert runner_for_backend(live) is run_claude_interactive_cli
     assert runner_for_backend(live, adhoc=True) is run_claude
@@ -125,26 +114,21 @@ def test_runner_for_backend_selects_protocol_and_forces_adhoc_oneshot():
     ("pi", run_pi),
 ])
 def test_runner_for_backend_selects_oneshot_cli(driver, oneshot_runner):
-    oneshot = _validate_backend(f"{driver}-oneshot", {
-        "driver": driver,
-        "protocol": "oneshot-cli",
-    })
+    harness = "claudecode" if driver == "claude" else driver
+    oneshot = SimpleNamespace(harness=harness, protocol="oneshot-cli")
 
     assert runner_for_backend(oneshot) is oneshot_runner
 
 
 def test_runner_for_backend_selects_claude_interactive_cli():
-    interactive = _validate_backend("claude-live", {
-        "driver": "claude",
-        "protocol": "interactive-cli",
-    })
+    interactive = SimpleNamespace(harness="claudecode", protocol="interactive-cli")
 
     assert runner_for_backend(interactive) is run_claude_interactive_cli
 
 
 @pytest.mark.parametrize("driver", ["codex", "cursor", "opencode", "pi"])
 def test_runner_for_backend_does_not_route_non_persistent_interactive_cli(driver):
-    backend = Backend(f"{driver}-live", driver, protocol="interactive-cli")
+    backend = SimpleNamespace(harness=driver, protocol="interactive-cli")
 
     assert runner_for_backend(backend) is None
 

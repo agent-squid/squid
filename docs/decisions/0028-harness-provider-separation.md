@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-07-12
+updated: 2026-07-12
 ---
 # ADR-0028: Harness/Provider Separation
 
@@ -26,7 +27,7 @@ Three problems remain past naming:
    `gauge`, and the implicit "does this need an api_key or a browser login"
    question are currently set per-backend, duplicated across every backend
    that happens to hit the same endpoint. There's no place to say once "NIM's
-   quota adapter is X and its model list is Y" and have every `*-nim` backend
+   quota adapter is X and its model list is Y" and have every `*-nvidia` backend
    pick it up.
 3. **Backend is a redundant layer once (1) and (2) are fixed.** A named agent
    already stores `(backend, model, cwd)`. Once a backend is nothing but
@@ -46,12 +47,14 @@ a named entity in favor of agents selecting harness + provider directly.
 
 ### Harness
 
-`driver` is renamed `harness` everywhere: the `SUPPORTED_DRIVERS` constant,
-the `Backend.driver` field, the YAML `driver:` key, and every `driver=`
-reference in runners/server code. Same five values, now spelled out instead
-of abbreviated in code (`claudecode`, `codex`, `cursor`, `opencode`, `pi`); the
-`cc`/`cx`/`cr`/`oc`/`pi` short forms from ADR-0027 remain an ID-prefix
-convention (agent IDs, gauge labels), not the internal field value.
+The primary runtime term is `harness`: `agent/harnesses.py` owns the supported
+harness set, protocol defaults, install paths, install commands, default
+providers, and API compatibility metadata. Same five values, now spelled out
+instead of abbreviated in code (`claudecode`, `codex`, `cursor`, `opencode`,
+`pi`); the `cc`/`cx`/`cr`/`oc`/`pi` short forms from ADR-0027 remain an
+ID-prefix convention (agent IDs, gauge labels), not the internal field value.
+Legacy `driver` names still exist in compatibility code while
+`agent/backends.py` and older API fields are being retired.
 
 The Claude Code harness is renamed from `claude` to `claudecode` — matching
 the existing `opencode` pattern — because `claude` also names a provider
@@ -74,21 +77,25 @@ needed later, it can be added back as an agent field without touching this
 ADR's harness/provider split.
 
 Supported harnesses and default provider. Install commands are unchanged and
-stay defined once, in the README / `_check_deps` table — not duplicated here:
+stay defined once in `agent/harnesses.py`, matching the README table — not
+duplicated here:
 
 | Harness | Value | ID prefix | Protocol | Default provider |
 |---|---|---|---|---|
 | Claude Code | `claudecode` | `cc` | interactive-cli | Claude (anthropic) |
 | Codex | `codex` | `cx` | oneshot-cli | GPT (openai) |
 | Cursor | `cursor` | `cr` | oneshot-cli | Cursor |
-| OpenCode | `opencode` | `oc` | oneshot-cli | NIM (nvidia) |
-| Pi | `pi` | `pi` | oneshot-cli | NIM (nvidia) |
+| OpenCode | `opencode` | `oc` | oneshot-cli | NVIDIA NIM (`nvidia`) |
+| Pi | `pi` | `pi` | oneshot-cli | NVIDIA NIM (`nvidia`) |
 
 "Installed" reuses the existing `shutil.which()` check in `config.py`
-(`CLAUDE_PATH`, `CODEX_PATH`, ...) — no new detection mechanism. This becomes
-queryable, not just startup-logged: `GET /config/harnesses` returns
-`[{id, label, install_cmd, installed}]` for the settings UI to render as an
-install checklist, replacing the log-only `_check_deps` warning.
+(`CLAUDE_PATH`, `CODEX_PATH`, ...) — no new detection mechanism. This is
+queryable through `/health`: its `harnesses` payload contains
+`{id, label, install_cmd, installed, protocol, interactive,
+default_provider, supported_apis, compatible_providers}` for the settings UI.
+The startup `_check_deps()` warning is a thin wrapper around that same
+harness data. There is no separate `/config/harnesses` endpoint in the
+current implementation.
 
 ### Provider
 
@@ -118,8 +125,8 @@ providers:
     auth: {type: api_key, api_key: {env: DEEPSEEK_API_KEY}}
     gauge: deepseek
     models: [deepseek-chat, deepseek-reasoner]
-  nim:
-    label: NVIDIA NIM
+  nvidia:
+    label: NVIDIA
     color: "#76B900"
     base_url: "https://integrate.api.nvidia.com/v1"
     auth: {type: api_key, api_key: "nvapi-..."}
@@ -142,10 +149,18 @@ backend-level `env`/`settings`/`args` escape hatches: they move to the
 provider, since they describe how to reach an endpoint, not which harness is
 asking.
 
+Squid ships only zero-config providers in code defaults
+(`anthropic`, `openai`, `cursor`, `opencode`). Providers requiring user
+credentials, such as `nvidia` and `deepseek`, are documented in
+`config/squid.yaml.example` rather than auto-seeded for existing installs.
+`nvidia` is the canonical provider id for NVIDIA NIM because both Pi and
+OpenCode pass models using a `provider/model` prefix, so the provider id must
+match the CLIs' native provider name.
+
 **Direct vs. aggregator providers.** No new field for this — it falls out of
 `models`. A direct provider (`deepseek`, `anthropic`, `openai`) serves its own
 model line and typically has a short or empty `models` list. An aggregator
-provider (`nim`) fronts many vendors' models behind one endpoint and has a
+provider (`nvidia`) fronts many vendors' models behind one endpoint and has a
 long `models` list. Both are configured the same way.
 
 ### Auth type
@@ -182,16 +197,17 @@ and the quota status row, where it's paired with `color` as one dot-plus-name
 unit identifying which quota pool a gauge belongs to.
 
 Not every harness × provider pair is expected to work, so the UI doesn't
-offer a raw cross-product. Squid ships a small, hand-curated compatibility
-seed list (harness → known-good providers) that filters the provider picker
-once a harness is chosen — this is a generalization of the "default
-provider" column above into a short allow-list per harness, not just one
-entry. Anything outside the seed list is still reachable through a freeform
-provider field, same escape hatch already decided for `models:` — unvalidated
-and unblocked, not hidden. The seed list is hand-maintained, not
-auto-discovered or tested at save time; live "does this combination actually
-work" validation (e.g. a test-connection action) is out of scope for this
-ADR and can be layered on later without changing this shape.
+offer a raw cross-product. The current compatibility list is derived from
+API-shape overlap: each harness declares `supported_apis`, each provider
+declares `supported_apis`, and `/health.harnesses[].compatible_providers`
+contains providers whose sets intersect, plus the harness default provider
+when present. The legacy `compatible_providers` harness config key is still
+accepted as an explicit additive override. Anything outside the list remains
+reachable through the existing freeform provider path in config/API usage;
+the UI uses the list as guidance, not as server-side model validation.
+Live "does this combination actually work" validation (e.g. a test-connection
+action) is out of scope for this ADR and can be layered on later without
+changing this shape.
 
 ### Model catalog stays local, no hosted sync
 
@@ -217,49 +233,45 @@ since a hosted catalog could later populate the same field.
   no composite ID left to disambiguate. Its collision reasoning (`claude` as
   both harness and provider) is resolved more directly here, by renaming the
   harness to `claudecode` rather than relying on string position.
-- `driver` no longer appears in code, config, or API responses — `harness`
-  does. This is a breaking config change: `driver:` → `harness:` wherever it
-  was set.
+- `harness` is the primary config/API field. Legacy `driver` naming still
+  appears in compatibility code and old tests until `agent/backends.py` and
+  legacy backend surfaces are fully removed. For current `squid.yaml`, this
+  is a breaking config change: `driver:` → `harness:` wherever it was set.
 - Per the precedent set for the `deepcla` → `deepseek` cleanup, there is no
   automatic migration or aliasing. Users update `squid.yaml` by hand;
   `config/squid.yaml.example` ships the new shape.
-- `providers:` is a new top-level config section; loading needs a
-  `_configured_providers()` plus a default providers table (`anthropic`,
-  `openai`, `cursor`, `deepseek`, `nim` at minimum) for fresh installs,
-  mirroring today's `_DEFAULT_BACKENDS`.
-- `backends:` and the `Backend` dataclass go away. `agent/backends.py`'s
-  responsibilities split into harness lookup (protocol, install path) and
-  provider resolution (base_url, auth, gauge, models, color). The `agents`
-  SQLite table's `backend TEXT` column becomes `harness TEXT` + `provider
-  TEXT`; `upsert_agent()`, `get_agent()`, and `get_default_agent()` (which
-  today falls back through `for backend in BACKENDS`) change signature to
-  match. `AgentRequest` in `agent/server.py` drops `backend: str = "auto"` in
-  favor of `harness`/`provider` fields, and `create_agent()`'s `backend ==
-  "auto"` resolution logic moves to picking a harness/provider pair instead
-  of a backend id.
+- `providers:` is a new top-level config section. Loading uses
+  `_configured_providers()` plus a zero-config default providers table
+  (`anthropic`, `openai`, `cursor`, `opencode`). API-key providers such as
+  `nvidia` and `deepseek` live in `config/squid.yaml.example`.
+- `backends:` is removed from the primary config shape. New execution uses
+  `agent/harnesses.py`, `agent/providers.py`, and `agent/resolve.py`; the
+  resolved runtime is ephemeral and exposes the same execution surface callers
+  used to get from `Backend` (`execution_env()`, `driver_settings()`, `args`,
+  `protocol`, `interactive`, `fingerprint`, availability, gauge, color).
+  `agent/backends.py` remains as compatibility code while older tests and API
+  surfaces are retired.
+- SQLite stores structured `harness`/`provider` fields directly. It does not
+  store `backend` or `last_backend`; API responses compute those compatibility
+  refs as `harness` or `harness:provider` when older UI/client surfaces still
+  need them. `AgentRequest` accepts `harness`/`provider` first and falls back
+  through legacy `backend` parsing (`split_agent_ref`) when needed.
+- Runtime attribution follows the same rule: logs and durable stats should
+  include `harness` and `provider`; `backend` may be emitted alongside them
+  only as the legacy runtime reference.
 - Session-resume fingerprinting (ADR-0024's "backend configuration
   fingerprint") is computed from the resolved harness + provider + model +
   protocol at execution time instead of `Backend.fingerprint()`. A change to
   a provider's `base_url`/`auth.api_key`/`env` still starts a fresh session
   for every agent using it, same as today.
-- `GET /config/harnesses` is a new endpoint; `_check_deps()`'s startup log
-  becomes a thin wrapper around the same install-check data instead of a
-  separate code path. Pi is currently missing from `_check_deps` entirely —
-  fold it in while touching this.
-- **Historical stats data is backfilled once, not kept dual-column
-  forever.** Squid has no real users yet, so there's no need for the
-  permanent `COALESCE(agent, backend)`-style legacy fallback the `agents`
-  table already carries from an earlier migration. `messages`,
-  `topic_sessions`, `agents`, and `topics` gain `harness`/`provider`
-  columns; a one-time backfill script decomposes every existing `backend`
-  value via a hardcoded lookup built from today's known backend ids (e.g.
-  `claude` → `(claudecode, anthropic)`, `cc-deepseek` → `(claudecode,
-  deepseek)`, the old default-backends fallback `deepseek` → `(claudecode,
-  deepseek)`). Any `backend` value that doesn't match a known id is not
-  dropped — the raw string is stashed in `harness` as-is with `provider`
-  left null, so old rows degrade to an unrecognized-harness display rather
-  than losing data. The old `backend` column is dropped after backfill runs.
-- This ADR is the design; it does not itself change code. Implementation is
-  a follow-up pass through `agent/config.py`, `agent/backends.py`,
-  `agent/stats_db.py`, `agent/server.py`, `config/squid.yaml.example`, and
-  the settings UI.
+- Harness metadata is exposed through `/health.harnesses`; provider metadata
+  is exposed through `/health.providers`. `_check_deps()` includes Pi and uses
+  the same harness install-check data instead of a separate table.
+- Pre-launch schema compaction removed migration/backfill code and legacy
+  backend storage columns. Existing local SQLite files may still contain extra
+  columns from earlier development builds, but current code no longer reads or
+  writes them.
+- This ADR is implemented in the current code for config loading, runtime
+  resolution, harness/provider metadata, and the settings UI. Remaining work
+  is cleanup: retire `agent/backends.py` and remove legacy computed `backend`
+  API fields once dependent UI/tests are updated.

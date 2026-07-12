@@ -4,8 +4,8 @@ async function mockShell(page) {
   await page.route('**/health', route => route.fulfill({
     json: {
       status: 'ok',
-      backends: { claude: { available: true, gauge: { type: 'claude' } } },
-      providers: { claude: { gauge: { type: 'claude' }, gauge_authed: true } },
+      harnesses: [{ id: 'claudecode', installed: true, default_provider: 'anthropic', compatible_providers: ['anthropic'] }],
+      providers: { anthropic: { label: 'Claude', gauge: { type: 'claude' }, gauge_authed: true } },
     },
   }));
   await page.route('**/config/agents', route => route.fulfill({ json: [] }));
@@ -20,7 +20,7 @@ async function mockShell(page) {
 
 test('topbar quota gauge keeps its neutral original treatment', async ({ page }) => {
   await mockShell(page);
-  await page.route('**/quota/backend/*', route => route.fulfill({
+  await page.route('**/quota/provider/*', route => route.fulfill({
     json: { status: 'ok', raw: 42, used_percent: 42 },
   }));
 
@@ -36,7 +36,7 @@ test('topbar quota gauge keeps its neutral original treatment', async ({ page })
 
 test('topbar quota gauge is chat-only while status keeps quota available', async ({ page }) => {
   await mockShell(page);
-  await page.route('**/quota/backend/*', route => route.fulfill({
+  await page.route('**/quota/provider/*', route => route.fulfill({
     json: { status: 'ok', raw: 42, used_percent: 42 },
   }));
   await page.route('**/config/localfile-roots**', route => route.fulfill({ json: { roots: [] } }));
@@ -60,11 +60,11 @@ test('topbar quota gauge is chat-only while status keeps quota available', async
 });
 
 test('status quota rows come from provider catalog', async ({ page }) => {
-  let providerQuotaCalls = 0;
+  const providerQuotaPaths = [];
+  await page.route('**/quota/backend/*', route => route.abort());
   await page.route('**/health', route => route.fulfill({
     json: {
       status: 'ok',
-      backends: {},
       providers: {
         anthropic: {
           label: 'Anthropic',
@@ -75,15 +75,11 @@ test('status quota rows come from provider catalog', async ({ page }) => {
     },
   }));
   await page.route('**/quota/provider/anthropic', route => {
-    providerQuotaCalls++;
+    providerQuotaPaths.push(new URL(route.request().url()).pathname);
     return route.fulfill({
       json: { status: 'ok', raw: 37, used_percent: 37, title: 'Anthropic usage' },
     });
   });
-  await page.route('**/quota/backend/*', route => route.fulfill({
-    status: 500,
-    json: { error: 'backend quota should not be used for provider rows' },
-  }));
   await page.route('**/config/agents', route => route.fulfill({ json: [] }));
   await page.route('**/topics', route => route.fulfill({ json: [] }));
   await page.route('**/history**', route => route.fulfill({
@@ -100,12 +96,13 @@ test('status quota rows come from provider catalog', async ({ page }) => {
   await expect(rows).toHaveCount(1);
   await expect(rows.first()).toContainText('Anthropic');
   await expect(rows.first()).toContainText('37%');
-  expect(providerQuotaCalls).toBe(1);
+  expect(providerQuotaPaths).toContain('/quota/provider/anthropic');
+  expect(providerQuotaPaths.every(path => path === '/quota/provider/anthropic')).toBe(true);
 });
 
 test('quota transient errors retry before showing failure', async ({ page }) => {
   await mockShell(page);
-  await page.route('**/quota/backend/*', route => route.fulfill({
+  await page.route('**/quota/provider/*', route => route.fulfill({
     json: { status: 'ok', raw: 42, used_percent: 42 },
   }));
 
@@ -121,7 +118,7 @@ test('quota transient errors retry before showing failure', async ({ page }) => 
     let quotaCalls = 0;
 
     window.fetch = async (url, options) => {
-      if (String(url).includes('/quota/backend/claude')) {
+      if (String(url).includes('/quota/provider/anthropic')) {
         quotaCalls++;
         return new Response('', { status: 502 });
       }
@@ -135,7 +132,7 @@ test('quota transient errors retry before showing failure', async ({ page }) => 
     window.clearTimeout = () => {};
 
     try {
-      await fetchQuotaForBackend('claude');
+      await fetchQuotaForBackend('anthropic');
       const afterFirst = {
         text: document.getElementById('quota-label').textContent,
         isError: document.getElementById('quota-display').classList.contains('error'),
@@ -162,13 +159,13 @@ test('quota transient errors retry before showing failure', async ({ page }) => 
   expect(result.delays).toEqual([3000, 10000, 30000]);
   expect(result.quotaCalls).toBe(4);
   expect(result.afterFirst).toEqual({ text: '', isError: false });
-  expect(result.finalText).toBe('claude error');
+  expect(result.finalText).toBe('Claude error');
   expect(result.finalIsError).toBe(true);
 });
 
 test('percentage quota gauges retain their reset countdown', async ({ page }) => {
   await mockShell(page);
-  await page.route('**/quota/backend/*', route => {
+  await page.route('**/quota/provider/*', route => {
     const isCursor = route.request().url().endsWith('/cursor');
     return route.fulfill({ json: {
       status: 'ok',
@@ -184,10 +181,10 @@ test('percentage quota gauges retain their reset countdown', async ({ page }) =>
 
   // Selecting a topic must load its backend gauge without requiring a prompt.
   await page.evaluate(async () => {
-    _backendMetadata = { cursor: { gauge: { type: 'cursor' } } };
+    _providerMetadata.cursor = { label: 'Cursor', gauge: { type: 'cursor' } };
     _topicsCache = [{ name: 'work', agent: 'cursor-agent' }];
-    _agentsCache = [{ name: 'cursor-agent', backend: 'cursor' }];
-    activeQuotaBackend = 'claude';
+    _agentsCache = [{ name: 'cursor-agent', harness: 'cursor', provider: 'cursor' }];
+    activeQuotaBackend = 'anthropic';
     input.value = '#work';
     await updateActiveQuotaGauge();
   });
@@ -196,56 +193,54 @@ test('percentage quota gauges retain their reset countdown', async ({ page }) =>
 
   // A late response for another backend must not overwrite a shared gauge.
   await page.evaluate(() => {
-    _backendMetadata = {
-      claude: { gauge: { type: 'claude' } },
-      qwen: { gauge: { type: 'static' } },
-    };
+    _providerMetadata.anthropic = { label: 'Claude', gauge: { type: 'claude' } };
+    _providerMetadata.qwen = { label: 'Qwen', gauge: { type: 'static' } };
     setVisibleQuotaBackend('qwen');
     renderQuotaLoaded('qwen', {
       raw: null, pct: null, resetAt: null, displayText: 'Local', title: 'Local quota',
     });
-    renderQuotaLoaded('claude', {
+    renderQuotaLoaded('anthropic', {
       raw: 55, pct: 55, resetAt: Date.now() + 60 * 60 * 1000, title: 'Claude usage',
     });
   });
   await expect(page.locator('#static-quota-label')).toHaveText('Local');
 
-  for (const backend of ['claude', 'codex', 'cursor']) {
-    await page.evaluate(async backendId => {
-      _backendMetadata = { [backendId]: { gauge: { type: backendId } } };
-      setVisibleQuotaBackend(backendId);
-      await fetchQuotaForBackend(backendId);
-    }, backend);
+  for (const [provider, gauge] of [['anthropic', 'claude'], ['openai', 'codex'], ['cursor', 'cursor']]) {
+    await page.evaluate(async ({ provider, gauge }) => {
+      _providerMetadata[provider] = { gauge: { type: gauge } };
+      setVisibleQuotaBackend(provider);
+      await fetchQuotaForBackend(provider);
+    }, { provider, gauge });
 
-    const labelId = backend === 'claude' ? 'quota-label' : `${backend}-quota-label`;
-    const pctId = backend === 'claude' ? 'quota-5h-pct' : `${backend}-5h-pct`;
-    const expected = backend === 'cursor'
+    const labelId = gauge === 'claude' ? 'quota-label' : `${gauge}-quota-label`;
+    const pctId = gauge === 'claude' ? 'quota-5h-pct' : `${gauge}-5h-pct`;
+    const expected = gauge === 'cursor'
       ? '4.2D'
       : /^4:3[345]$/;
     await expect(page.locator(`#${pctId}`)).toHaveText('100');
     await expect(page.locator(`#${labelId}`)).toHaveText(expected);
 
-    await page.evaluate(backendId => {
-      renderQuotaLoaded(backendId, {
+    await page.evaluate(providerId => {
+      renderQuotaLoaded(providerId, {
         raw: 97,
         pct: 97,
         resetAt: Date.now() + 4.2 * 24 * 60 * 60 * 1000,
       });
-    }, backend);
+    }, provider);
     await expect(page.locator(`#${pctId}`)).toHaveText('97');
     await expect(page.locator(`#${labelId}`)).toHaveText('4.2D');
 
-    await page.evaluate(backendId => {
-      quotaStateFor(backendId).delta = 52;
-      updateGaugeLabel(backendId);
-    }, backend);
+    await page.evaluate(providerId => {
+      quotaStateFor(providerId).delta = 52;
+      updateGaugeLabel(providerId);
+    }, provider);
     await expect(page.locator(`#${labelId}`)).toHaveText('4.2D');
   }
 });
 
 test('dual quota gauges keep 5h and 7d data separate', async ({ page }) => {
   await mockShell(page);
-  await page.route('**/quota/backend/*', route => route.fulfill({
+  await page.route('**/quota/provider/*', route => route.fulfill({
     json: {
       status: 'ok',
       raw: 42,
@@ -264,7 +259,7 @@ test('dual quota gauges keep 5h and 7d data separate', async ({ page }) => {
   await expect(page.locator('#quota-7d-suffix')).toHaveText('3.5D');
 
   await page.evaluate(() => {
-    renderQuotaLoaded('claude', {
+    renderQuotaLoaded('anthropic', {
       raw: 12,
       pct: 12,
       resetAt: Date.now() + 60 * 60 * 1000,

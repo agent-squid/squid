@@ -1,8 +1,16 @@
 ---
 status: accepted
 date: 2026-06-21
+updated: 2026-07-12
 ---
 # ADR-0024: Drivers, Backends, Agents, and Routes
+
+> Reference update: [ADR-0028](0028-harness-provider-separation.md) is the
+> latest decision. It renames coded drivers to **harnesses**, promotes
+> providers to first-class config, and retires named `backends:` as the
+> primary config/API surface. This ADR remains accepted as the historical
+> decision that split coded integrations from user-facing execution profiles,
+> but its `driver`/`backend` terminology has been superseded.
 
 ## Context
 
@@ -78,3 +86,18 @@ configuration changes.
 - Backend IDs and colors are supplied dynamically to the UI.
 - `agy` and `copilot` remain experimental runners and are not configurable
   drivers.
+
+## Superseding Reference
+
+ADR-0028 keeps this ADR's core separation but updates the nouns:
+
+- **driver** → **harness**: the coded CLI integration (`claudecode`, `codex`,
+  `cursor`, `opencode`, `pi`).
+- **backend** as a named YAML object is retired. A named agent now selects
+  `harness` + `provider` directly, with `model`, `cwd`, and timeout remaining
+  agent-owned fields.
+- **provider** owns endpoint/account concerns: label, color, base URL,
+  auth/API key, gauge, model suggestions, env/settings/args escapes.
+- Legacy `backend` fields may still appear in storage and API responses as a
+  compatibility/runtime reference, serialized as `harness:provider`; they are
+  not the source of truth for new config.

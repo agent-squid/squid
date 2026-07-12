@@ -12,6 +12,17 @@ from typing import Optional
 from .harnesses import SUPPORTED_HARNESSES, is_installed
 from .resolve import agent_ref_for_storage, split_agent_ref
 
+# Fresh-install seed models, keyed by harness — only where the harness's CLI
+# default isn't the model we want new users to land on. Pi's own CLI default
+# (nvidia/nemotron-3-ultra-550b-a55b) works, but deepseek-ai/deepseek-v4-pro
+# is the strongest free model NVIDIA NIM currently hosts.
+_SEED_DEFAULT_MODEL_BY_HARNESS: dict[str, str] = {
+    "pi": "deepseek-ai/deepseek-v4-pro",
+}
+_SEED_DEFAULT_PROVIDER_BY_HARNESS: dict[str, str] = {
+    "pi": "nvidia",
+}
+
 # Store database in ~/.squid/ so it persists across installs/updates.
 # Override with SQUID_DB_PATH env var (e.g. for containers).
 _DB_PATH = Path(os.environ.get("SQUID_DB_PATH", Path.home() / ".squid" / "squid.db"))
@@ -29,7 +40,6 @@ _TABLES = [
         agent                TEXT,
         harness              TEXT,
         provider             TEXT,
-        backend              TEXT,
         model                TEXT,
         cwd                  TEXT,
         input_tokens         INTEGER,
@@ -49,7 +59,6 @@ _TABLES = [
         name       TEXT PRIMARY KEY,
         harness    TEXT,
         provider   TEXT,
-        backend    TEXT,
         model      TEXT,
         cwd        TEXT,
         timeout    INTEGER,
@@ -66,7 +75,6 @@ _TABLES = [
         last_model         TEXT,
         last_harness       TEXT,
         last_provider      TEXT,
-        last_backend       TEXT,
         hidden             INTEGER DEFAULT 0,
         created_at         TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         PRIMARY KEY (topic, agent)
@@ -96,7 +104,6 @@ _TABLES = [
         session_id  TEXT NOT NULL,
         cwd         TEXT NOT NULL,
         runtime_fingerprint TEXT,
-        backend_fingerprint TEXT,
         created_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         PRIMARY KEY (topic, agent)
     )""",
@@ -179,109 +186,27 @@ _TABLES = [
        END""",
 ]
 
-# v0.1 baseline — _TABLES above reflects the complete schema.
-# Add future schema changes here as new entries after each release.
-_MIGRATIONS: list[str] = [
-    "ALTER TABLE topic_sessions ADD COLUMN backend_fingerprint TEXT",
-    """CREATE TABLE IF NOT EXISTS worktrees (
-        topic           TEXT NOT NULL,
-        agent           TEXT NOT NULL,
-        repo_root       TEXT NOT NULL,
-        worktree_path   TEXT NOT NULL,
-        branch_name     TEXT NOT NULL,
-        status          TEXT NOT NULL DEFAULT 'active',
-        created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-        last_used_at    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-        PRIMARY KEY (topic, agent, repo_root)
-    )""",
-    "ALTER TABLE chat_messages ADD COLUMN session_turn_index INTEGER",
-    "DROP INDEX IF EXISTS idx_chat_messages_session_turns",
-    "ALTER TABLE chat_messages ADD COLUMN lookback INTEGER DEFAULT 0",
-    "ALTER TABLE chat_messages ADD COLUMN status_raw TEXT",
-    "ALTER TABLE session_stats ADD COLUMN adhoc INTEGER DEFAULT 0",
-    "ALTER TABLE session_stats ADD COLUMN lookback INTEGER DEFAULT 0",
-    "ALTER TABLE session_stats ADD COLUMN harness TEXT",
-    "ALTER TABLE session_stats ADD COLUMN provider TEXT",
-    "ALTER TABLE agents ADD COLUMN harness TEXT",
-    "ALTER TABLE agents ADD COLUMN provider TEXT",
-    "ALTER TABLE topics ADD COLUMN last_harness TEXT",
-    "ALTER TABLE topics ADD COLUMN last_provider TEXT",
-    "ALTER TABLE topic_sessions ADD COLUMN runtime_fingerprint TEXT",
-    # prompts_fts backfill — safe to re-run; inserts only missing rows
-    """INSERT INTO prompts_fts(rowid, content)
-       SELECT id, content FROM chat_messages
-       WHERE role='user' AND content IS NOT NULL
-         AND id NOT IN (SELECT rowid FROM prompts_fts)""",
-    """CREATE TABLE IF NOT EXISTS stats_filter_presets (
-        id            INTEGER PRIMARY KEY AUTOINCREMENT,
-        name          TEXT NOT NULL UNIQUE COLLATE NOCASE,
-        state_json    TEXT NOT NULL,
-        is_default    INTEGER NOT NULL DEFAULT 0,
-        display_order INTEGER NOT NULL DEFAULT 0,
-        created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-        updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-    )""",
-    """CREATE UNIQUE INDEX IF NOT EXISTS idx_stats_filter_presets_one_default
-       ON stats_filter_presets(is_default)
-       WHERE is_default = 1""",
-]
-
-_DATA_MIGRATIONS: list[tuple[str, str]] = [
-    ("backfill_session_turn_index", """WITH ranked AS (
-           SELECT id, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY id) AS rn
-           FROM chat_messages
-           WHERE session_id IS NOT NULL AND role = 'assistant' AND COALESCE(adhoc, 0) = 0
-       )
-       UPDATE chat_messages
-       SET session_turn_index = (SELECT rn FROM ranked WHERE ranked.id = chat_messages.id)
-       WHERE session_turn_index IS NULL AND id IN (SELECT id FROM ranked)"""),
-]
-
-
-def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
-    return any(row["name"] == column for row in conn.execute(f"PRAGMA table_info({table})"))
-
-
-def _backfill_harness_provider(conn: sqlite3.Connection) -> None:
-    if _has_column(conn, "agents", "harness"):
-        for row in conn.execute("SELECT name, backend, harness, provider FROM agents").fetchall():
-            if row["harness"]:
-                continue
-            harness, provider = split_agent_ref(row["backend"], row["provider"])
-            conn.execute(
-                "UPDATE agents SET harness=?, provider=? WHERE name=?",
-                (harness, provider, row["name"]),
-            )
-    if _has_column(conn, "session_stats", "harness"):
-        for row in conn.execute("SELECT session_id, backend, harness, provider FROM session_stats").fetchall():
-            if row["harness"]:
-                continue
-            harness, provider = split_agent_ref(row["backend"], row["provider"])
-            conn.execute(
-                "UPDATE session_stats SET harness=?, provider=? WHERE session_id=?",
-                (harness, provider, row["session_id"]),
-            )
-    if _has_column(conn, "topics", "last_harness"):
-        for row in conn.execute("SELECT topic, agent, last_backend, last_harness, last_provider FROM topics").fetchall():
-            if row["last_harness"] or not row["last_backend"]:
-                continue
-            harness, provider = split_agent_ref(row["last_backend"], row["last_provider"])
-            conn.execute(
-                "UPDATE topics SET last_harness=?, last_provider=? WHERE topic=? AND agent=?",
-                (harness, provider, row["topic"], row["agent"]),
-            )
-    if _has_column(conn, "topic_sessions", "runtime_fingerprint"):
-        conn.execute(
-            """UPDATE topic_sessions
-               SET runtime_fingerprint = COALESCE(runtime_fingerprint, backend_fingerprint)
-               WHERE backend_fingerprint IS NOT NULL"""
-        )
-
-
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(_DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _runtime_ref_expr(harness_col: str = "harness", provider_col: str = "provider") -> str:
+    return (
+        f"CASE WHEN {harness_col} IS NULL THEN NULL "
+        f"WHEN {provider_col} IS NULL OR {provider_col} = '' THEN {harness_col} "
+        f"ELSE {harness_col} || ':' || {provider_col} END"
+    )
+
+
+def _stats_agent_expr(prefix: str = "") -> str:
+    return f"COALESCE({prefix}agent, {_runtime_ref_expr(prefix + 'harness', prefix + 'provider')}, 'unknown')"
+
+
+def _with_backend(item: dict, *, harness_key: str = "harness", provider_key: str = "provider", output_key: str = "backend") -> dict:
+    item[output_key] = agent_ref_for_storage(item[harness_key], item.get(provider_key)) if item.get(harness_key) else None
+    return item
 
 
 def init_db() -> None:
@@ -289,37 +214,18 @@ def init_db() -> None:
     try:
         for ddl in _TABLES:
             conn.execute(ddl)
-        for sql in _MIGRATIONS:
-            try:
-                conn.execute(sql)
-            except sqlite3.OperationalError:
-                pass
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS schema_migrations (
-                name TEXT PRIMARY KEY,
-                applied_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-            )"""
-        )
-        for name, sql in _DATA_MIGRATIONS:
-            applied = conn.execute(
-                "SELECT 1 FROM schema_migrations WHERE name = ?", (name,)
-            ).fetchone()
-            if applied:
-                continue
-            conn.execute(sql)
-            conn.execute("INSERT INTO schema_migrations (name) VALUES (?)", (name,))
-        _backfill_harness_provider(conn)
         # Seed one default agent per installed harness (INSERT OR IGNORE — never overwrites user edits)
         for harness in sorted(SUPPORTED_HARNESSES):
             if harness != "claudecode" and is_installed(harness):
+                provider = _SEED_DEFAULT_PROVIDER_BY_HARNESS.get(harness)
                 conn.execute(
-                    "INSERT OR IGNORE INTO agents (name, harness, provider, backend, model) VALUES (?, ?, ?, ?, ?)",
-                    (harness, harness, None, harness, None),
+                    "INSERT OR IGNORE INTO agents (name, harness, provider, model) VALUES (?, ?, ?, ?)",
+                    (harness, harness, provider, _SEED_DEFAULT_MODEL_BY_HARNESS.get(harness)),
                 )
         if is_installed("claudecode"):
             conn.execute(
-                "INSERT OR IGNORE INTO agents (name, harness, provider, backend, model) VALUES (?, ?, ?, ?, ?)",
-                ("claude", "claudecode", "anthropic", "claudecode:anthropic", None),
+                "INSERT OR IGNORE INTO agents (name, harness, provider, model) VALUES (?, ?, ?, ?)",
+                ("claude", "claudecode", "anthropic", None),
             )
         # FTS repair: remove entries whose content was indexed mid-stream
         # (partial saves) and now differs from the final stored content.
@@ -353,7 +259,7 @@ def list_agents() -> list[dict]:
     for row in rows:
         if not row.get("harness"):
             row["harness"], row["provider"] = split_agent_ref(row.get("backend"), row.get("provider"))
-        row["backend"] = agent_ref_for_storage(row["harness"], row.get("provider"))
+        _with_backend(row)
     return rows
 
 
@@ -366,13 +272,14 @@ def get_default_agent() -> Optional[dict]:
             row = rows[name]
             if not row.get("harness"):
                 row["harness"], row["provider"] = split_agent_ref(row.get("backend"), row.get("provider"))
-            row["backend"] = agent_ref_for_storage(row["harness"], row.get("provider"))
+            _with_backend(row)
             return row
     # Any agent at all
     row = next(iter(rows.values()), None) if rows else None
     if row and not row.get("harness"):
         row["harness"], row["provider"] = split_agent_ref(row.get("backend"), row.get("provider"))
-        row["backend"] = agent_ref_for_storage(row["harness"], row.get("provider"))
+    if row:
+        _with_backend(row)
     return row
 
 
@@ -384,31 +291,29 @@ def get_agent(name: str) -> Optional[dict]:
     item = dict(row)
     if not item.get("harness"):
         item["harness"], item["provider"] = split_agent_ref(item.get("backend"), item.get("provider"))
-    item["backend"] = agent_ref_for_storage(item["harness"], item.get("provider"))
+    _with_backend(item)
     return item
 
 
 def upsert_agent(name: str, harness: str, provider: Optional[str], model: Optional[str],
                  cwd: Optional[str] = None) -> bool:
     """Upsert agent config. Returns True if key attributes changed."""
-    backend = agent_ref_for_storage(harness, provider)
     with _connect() as conn:
-        existing = conn.execute("SELECT harness, provider, backend, model, cwd FROM agents WHERE name = ?", (name,)).fetchone()
+        existing = conn.execute("SELECT harness, provider, model, cwd FROM agents WHERE name = ?", (name,)).fetchone()
         key_changed = existing and (
-            (existing["harness"] or split_agent_ref(existing["backend"], existing["provider"])[0]) != harness or
-            (existing["provider"] or split_agent_ref(existing["backend"], existing["provider"])[1]) != provider or
+            existing["harness"] != harness or
+            existing["provider"] != provider or
             existing["model"] != model or
             existing["cwd"] != cwd
         )
         conn.execute(
-            """INSERT INTO agents (name, harness, provider, backend, model, cwd) VALUES (?, ?, ?, ?, ?, ?)
+            """INSERT INTO agents (name, harness, provider, model, cwd) VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(name) DO UPDATE SET
                  harness = excluded.harness,
                  provider = excluded.provider,
-                 backend = excluded.backend,
                  model   = excluded.model,
                  cwd     = excluded.cwd""",
-            (name, harness, provider, backend, model, cwd),
+            (name, harness, provider, model, cwd),
         )
     return bool(key_changed)
 
@@ -445,10 +350,12 @@ def delete_agent(name: str) -> bool:
 # ── topics ────────────────────────────────────────────────────────────────────
 
 def get_topics_summary() -> list[dict]:
+    last_backend_expr = _runtime_ref_expr("last_harness", "last_provider")
     with _connect() as conn:
         rows = conn.execute(
-            """SELECT topic AS name, sticky_agent AS agent, sticky_adhoc,
-                      last_model, last_backend, last_prompt, last_at
+            f"""SELECT topic AS name, sticky_agent AS agent, sticky_adhoc,
+                      last_model, last_harness, last_provider,
+                      {last_backend_expr} AS last_backend, last_prompt, last_at
                FROM topics
                WHERE agent = '' AND hidden = 0
                ORDER BY last_at DESC NULLS LAST"""
@@ -458,17 +365,20 @@ def get_topics_summary() -> list[dict]:
 
 def get_topics_management_summary(include_hidden: bool = True) -> list[dict]:
     where_hidden = "" if include_hidden else "AND hidden = 0"
+    last_backend_expr = _runtime_ref_expr("last_harness", "last_provider")
     with _connect() as conn:
         topic_rows = conn.execute(
             f"""SELECT topic AS name, sticky_agent AS agent, sticky_adhoc,
-                       last_model, last_backend, last_prompt, last_at, hidden
+                       last_model, last_harness, last_provider,
+                       {last_backend_expr} AS last_backend, last_prompt, last_at, hidden
                 FROM topics
                 WHERE agent = '' {where_hidden}
                 ORDER BY last_at DESC NULLS LAST, topic ASC"""
         ).fetchall()
         agent_rows = conn.execute(
-            """SELECT topic, agent, last_prompt, last_adhoc_prompt, last_at,
-                      last_model, last_backend
+            f"""SELECT topic, agent, last_prompt, last_adhoc_prompt, last_at,
+                      last_model, last_harness, last_provider,
+                      {last_backend_expr} AS last_backend
                FROM topics
                WHERE agent != ''
                ORDER BY last_at DESC NULLS LAST, agent ASC"""
@@ -561,14 +471,13 @@ def upsert_topic(
     last_provider: Optional[str] = None,
     adhoc: bool = False,
 ) -> None:
-    last_backend = agent_ref_for_storage(last_harness, last_provider) if last_harness else None
     now = __import__('time').strftime("%Y-%m-%dT%H:%M:%SZ", __import__('time').gmtime())
     at = now if last_prompt else None
     with _connect() as conn:
         # Topic-level row
         conn.execute(
-            """INSERT INTO topics (topic, agent, sticky_agent, sticky_adhoc, last_prompt, last_at, last_model, last_harness, last_provider, last_backend)
-               VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO topics (topic, agent, sticky_agent, sticky_adhoc, last_prompt, last_at, last_model, last_harness, last_provider)
+               VALUES (?, '', ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(topic, agent) DO UPDATE SET
                  hidden       = 0,
                  sticky_agent = CASE WHEN excluded.sticky_agent IS NOT NULL THEN excluded.sticky_agent ELSE sticky_agent END,
@@ -577,26 +486,24 @@ def upsert_topic(
                  last_at      = COALESCE(excluded.last_at, last_at),
                  last_model   = COALESCE(excluded.last_model, last_model),
                  last_harness = COALESCE(excluded.last_harness, last_harness),
-                 last_provider = COALESCE(excluded.last_provider, last_provider),
-                 last_backend = COALESCE(excluded.last_backend, last_backend)""",
-            (name, agent, 1 if adhoc else 0, last_prompt, at, last_model, last_harness, last_provider, last_backend),
+                 last_provider = COALESCE(excluded.last_provider, last_provider)""",
+            (name, agent, 1 if adhoc else 0, last_prompt, at, last_model, last_harness, last_provider),
         )
         # Agent-level row
         if agent:
             session_prompt = None if adhoc else last_prompt
             adhoc_prompt   = last_prompt if adhoc else None
             conn.execute(
-                """INSERT INTO topics (topic, agent, last_prompt, last_adhoc_prompt, last_at, last_model, last_harness, last_provider, last_backend)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """INSERT INTO topics (topic, agent, last_prompt, last_adhoc_prompt, last_at, last_model, last_harness, last_provider)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(topic, agent) DO UPDATE SET
                      last_prompt        = COALESCE(excluded.last_prompt, last_prompt),
                      last_adhoc_prompt  = COALESCE(excluded.last_adhoc_prompt, last_adhoc_prompt),
                      last_at            = COALESCE(excluded.last_at, last_at),
                      last_model         = COALESCE(excluded.last_model, last_model),
                      last_harness       = COALESCE(excluded.last_harness, last_harness),
-                     last_provider      = COALESCE(excluded.last_provider, last_provider),
-                     last_backend       = COALESCE(excluded.last_backend, last_backend)""",
-                (name, agent, session_prompt, adhoc_prompt, at, last_model, last_harness, last_provider, last_backend),
+                     last_provider      = COALESCE(excluded.last_provider, last_provider)""",
+                (name, agent, session_prompt, adhoc_prompt, at, last_model, last_harness, last_provider),
             )
 
 
@@ -821,14 +728,10 @@ def get_topic_agents(topic: str) -> list[dict]:
 def get_topic_session(topic: str, agent: str) -> Optional[dict]:
     with _connect() as conn:
         row = conn.execute(
-            "SELECT session_id, cwd, runtime_fingerprint, backend_fingerprint FROM topic_sessions WHERE topic=? AND agent=?",
+            "SELECT session_id, cwd, runtime_fingerprint FROM topic_sessions WHERE topic=? AND agent=?",
             (topic, agent),
         ).fetchone()
-    if not row:
-        return None
-    item = dict(row)
-    item["runtime_fingerprint"] = item.get("runtime_fingerprint") or item.get("backend_fingerprint")
-    return item
+    return dict(row) if row else None
 
 
 _invalidated_session_ids: set[str] = set()
@@ -841,12 +744,11 @@ def set_topic_session(topic: str, agent: str, session_id: str, cwd: Optional[str
         return
     with _connect() as conn:
         conn.execute(
-            """INSERT INTO topic_sessions (topic, agent, session_id, cwd, runtime_fingerprint, backend_fingerprint) VALUES (?, ?, ?, ?, ?, ?)
+            """INSERT INTO topic_sessions (topic, agent, session_id, cwd, runtime_fingerprint) VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(topic, agent) DO UPDATE SET session_id=excluded.session_id,
                  cwd=excluded.cwd,
-                 runtime_fingerprint=excluded.runtime_fingerprint,
-                 backend_fingerprint=excluded.backend_fingerprint""",
-            (topic, agent, session_id, cwd, runtime_fingerprint, runtime_fingerprint),
+                 runtime_fingerprint=excluded.runtime_fingerprint""",
+            (topic, agent, session_id, cwd, runtime_fingerprint),
         )
 
 
@@ -1075,13 +977,14 @@ def mark_orphaned_pending(before_created_at: Optional[str] = None) -> int:
 
 
 def get_message(msg_id: int) -> Optional[dict]:
+    backend_expr = _runtime_ref_expr("s.harness", "s.provider")
     stat_keys = {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
                  "history_input_tokens", "cost_usd", "duration_ms", "lookback",
                  "quota_before", "quota_after", "quota_delta",
                  "msg_quota_before", "msg_quota_after", "backend", "model", "cwd"}
     with _connect() as conn:
         row = conn.execute(
-            """SELECT m.id, m.role, m.topic, m.agent,
+            f"""SELECT m.id, m.role, m.topic, m.agent,
                       m.content, m.status, m.adhoc, m.session_id,
                       m.context, m.status_raw, m.created_at AS timestamp, m.reply_to,
                       m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
@@ -1090,7 +993,7 @@ def get_message(msg_id: int) -> Optional[dict]:
                       s.input_tokens, s.output_tokens, s.cache_read_tokens,
                       s.cache_write_tokens, s.history_input_tokens,
                       s.cost_usd, s.duration_ms, s.lookback,
-                      s.quota_before, s.quota_after, s.backend, s.model, s.cwd
+                      s.quota_before, s.quota_after, {backend_expr} AS backend, s.model, s.cwd
                FROM chat_messages m
                LEFT JOIN chat_messages u ON m.reply_to = u.id
                LEFT JOIN session_stats s ON m.session_id = s.session_id
@@ -1109,6 +1012,7 @@ def get_message(msg_id: int) -> Optional[dict]:
 
 def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
                       adhoc: Optional[bool] = None, offset: int = 0, limit: int = 20) -> dict:
+    backend_expr = _runtime_ref_expr("s.harness", "s.provider")
     where = "WHERE m.role = 'assistant'"
     params: list = []
     if topic:
@@ -1135,7 +1039,7 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
                        s.input_tokens, s.output_tokens, s.cache_read_tokens,
                        s.cache_write_tokens, s.history_input_tokens,
                        s.cost_usd, s.duration_ms, s.lookback,
-                       s.quota_before, s.quota_after, s.backend, s.model, s.cwd
+                       s.quota_before, s.quota_after, {backend_expr} AS backend, s.model, s.cwd
                 FROM chat_messages m
                 LEFT JOIN chat_messages u ON m.reply_to = u.id
                 LEFT JOIN session_stats s ON m.session_id = s.session_id
@@ -1167,6 +1071,7 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
 def get_history_items_by_ids(ids: list[int]) -> list[dict]:
     if not ids:
         return []
+    backend_expr = _runtime_ref_expr("s.harness", "s.provider")
     placeholders = ",".join("?" * len(ids))
     stat_keys = {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
                  "history_input_tokens", "cost_usd", "duration_ms", "lookback",
@@ -1183,7 +1088,7 @@ def get_history_items_by_ids(ids: list[int]) -> list[dict]:
                        s.input_tokens, s.output_tokens, s.cache_read_tokens,
                        s.cache_write_tokens, s.history_input_tokens,
                        s.cost_usd, s.duration_ms, s.lookback,
-                       s.quota_before, s.quota_after, s.backend, s.model, s.cwd
+                       s.quota_before, s.quota_after, {backend_expr} AS backend, s.model, s.cwd
                 FROM chat_messages m
                 LEFT JOIN chat_messages u ON m.reply_to = u.id
                 LEFT JOIN session_stats s ON m.session_id = s.session_id
@@ -1213,6 +1118,7 @@ def _build_fts_match(q: str) -> str:
 def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = None,
                     adhoc: Optional[bool] = None, limit: int = 100,
                     bookmarked: bool = False) -> dict:
+    backend_expr = _runtime_ref_expr("s.harness", "s.provider")
     terms = _build_fts_match(q)
     if not terms:
         return {"items": []}
@@ -1248,7 +1154,7 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
                        s.input_tokens, s.output_tokens, s.cache_read_tokens,
                        s.cache_write_tokens, s.history_input_tokens,
                        s.cost_usd, s.duration_ms, s.lookback,
-                       s.quota_before, s.quota_after, s.backend, s.model, s.cwd
+                       s.quota_before, s.quota_after, {backend_expr} AS backend, s.model, s.cwd
                 FROM chat_messages m
                 {bookmark_join}
                 LEFT JOIN chat_messages u ON m.reply_to = u.id
@@ -1277,6 +1183,7 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
 def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = None,
                    adhoc: Optional[bool] = None, limit: int = 100,
                    bookmarked: bool = False) -> dict:
+    backend_expr = _runtime_ref_expr("s.harness", "s.provider")
     """Search user prompts via prompts_fts. Returns assistant reply items (same shape as
     search_messages) so the frontend can render them with appendPromptOnlyHistoryItem."""
     terms = _build_fts_match(q)
@@ -1319,7 +1226,7 @@ def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = N
                        s.input_tokens, s.output_tokens, s.cache_read_tokens,
                        s.cache_write_tokens, s.history_input_tokens,
                        s.cost_usd, s.duration_ms, s.lookback,
-                       s.quota_before, s.quota_after, s.backend, s.model, s.cwd
+                       s.quota_before, s.quota_after, {backend_expr} AS backend, s.model, s.cwd
                 FROM chat_messages m
                 {bookmark_join}
                 LEFT JOIN chat_messages u ON m.reply_to = u.id
@@ -1415,21 +1322,19 @@ def save_stats(
 ) -> None:
     if not harness and backend:
         harness, provider = split_agent_ref(backend, provider)
-    backend = agent_ref_for_storage(harness, provider) if harness else None
     with _connect() as conn:
         conn.execute(
             """INSERT INTO session_stats
-                   (session_id, topic, agent, harness, provider, backend, model, cwd,
+                   (session_id, topic, agent, harness, provider, model, cwd,
                     input_tokens, output_tokens,
                     cache_read_tokens, cache_write_tokens, history_input_tokens,
                     cost_usd, duration_ms, adhoc, lookback, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                ON CONFLICT(session_id) DO UPDATE SET
                    topic                = COALESCE(excluded.topic, topic),
                    agent                = COALESCE(excluded.agent, agent),
                    harness              = COALESCE(excluded.harness, harness),
                    provider             = COALESCE(excluded.provider, provider),
-                   backend              = COALESCE(excluded.backend, backend),
                    model                = COALESCE(excluded.model, model),
                    cwd                  = COALESCE(excluded.cwd, cwd),
                    input_tokens         = excluded.input_tokens,
@@ -1442,7 +1347,7 @@ def save_stats(
                    adhoc                = excluded.adhoc,
                    lookback             = excluded.lookback""",
             (
-                session_id, topic, agent, harness, provider, backend, model, cwd,
+                session_id, topic, agent, harness, provider, model, cwd,
                 stats.get("input_tokens", 0), stats.get("output_tokens", 0),
                 stats.get("cache_read_tokens", 0), stats.get("cache_write_tokens", 0),
                 stats.get("history_input_tokens", 0),
@@ -1569,7 +1474,7 @@ def _merge_chart_aggregates(
     if cutoff:
         clauses.append("created_at >= ?")
         params.append(cutoff)
-    _append_stats_in_filter(clauses, params, "COALESCE(agent, backend)", agents)
+    _append_stats_in_filter(clauses, params, _stats_agent_expr(), agents)
     _append_stats_in_filter(clauses, params, "topic", topics)
     if adhoc == "session":
         clauses.append("COALESCE(adhoc, 0) = 0")
@@ -1631,7 +1536,7 @@ def get_aggregated_stats(
     if cutoff:
         ss_clauses.append("ss_inner.created_at >= ?")
         ss_params.append(cutoff)
-    _append_stats_in_filter(ss_clauses, ss_params, "COALESCE(ss_inner.agent, ss_inner.backend)", agents)
+    _append_stats_in_filter(ss_clauses, ss_params, _stats_agent_expr("ss_inner."), agents)
     _append_stats_in_filter(ss_clauses, ss_params, "ss_inner.topic", topics)
 
     cm_clauses: list[str] = ["cm.role = 'assistant'"]
@@ -1748,7 +1653,7 @@ def _merge_breakdown_chart_aggregates(
     )
     include_topic = breakdown in {"topic_agent", "topic_agent_session"}
     include_session = breakdown in {"agent_session", "topic_agent_session"}
-    base_agent = "COALESCE(agent, backend, 'unknown')"
+    base_agent = _stats_agent_expr()
     agent_key_expr = base_agent
     if include_session:
         agent_key_expr = f"{base_agent} || CASE WHEN COALESCE(adhoc, 0) = 1 THEN '!' ELSE '' END"
@@ -1772,7 +1677,7 @@ def _merge_breakdown_chart_aggregates(
     if cutoff:
         clauses.append("created_at >= ?")
         params.append(cutoff)
-    _append_stats_in_filter(clauses, params, "COALESCE(agent, backend)", agents)
+    _append_stats_in_filter(clauses, params, _stats_agent_expr(), agents)
     _append_stats_in_filter(clauses, params, "topic", topics)
     if adhoc == "session":
         clauses.append("COALESCE(adhoc, 0) = 0")
@@ -1839,7 +1744,7 @@ def get_stats_by_breakdown(
     )
     include_topic = breakdown in {"topic_agent", "topic_agent_session"}
     include_session = breakdown in {"agent_session", "topic_agent_session"}
-    base_agent = "COALESCE(agent, backend, 'unknown')"
+    base_agent = _stats_agent_expr()
     cm_base_agent = "COALESCE(agent, 'unknown')"
     agent_key_expr = base_agent
     cm_agent_key_expr = cm_base_agent
@@ -1861,7 +1766,7 @@ def get_stats_by_breakdown(
     if cutoff:
         ss_clauses.append("created_at >= ?")
         ss_params.append(cutoff)
-    _append_stats_in_filter(ss_clauses, ss_params, "COALESCE(agent, backend)", agents)
+    _append_stats_in_filter(ss_clauses, ss_params, _stats_agent_expr(), agents)
     _append_stats_in_filter(ss_clauses, ss_params, "topic", topics)
 
     cm_clauses: list[str] = ["role = 'assistant'", "created_at IS NOT NULL"]
@@ -2062,7 +1967,7 @@ def get_stats_by_agent(
         ss_clauses.append("created_at >= ?")
         ss_params.append(cutoff)
     _append_stats_in_filter(ss_clauses, ss_params, "topic", topics)
-    _append_stats_in_filter(ss_clauses, ss_params, "COALESCE(agent, backend)", agents)
+    _append_stats_in_filter(ss_clauses, ss_params, _stats_agent_expr(), agents)
 
     cm_clauses: list[str] = ["role = 'assistant'"]
     cm_params: list = []
@@ -2095,7 +2000,7 @@ def get_stats_by_agent(
                           ss.quota_delta,
                           COALESCE(cm.turns, 0) AS total_turns
                    FROM (
-                       SELECT COALESCE(agent, backend, 'unknown') AS agent,
+                       SELECT {_stats_agent_expr()} AS agent,
                               COUNT(*) AS sessions,
                               SUM(input_tokens) AS input_tokens,
                               SUM(output_tokens) AS output_tokens,
@@ -2134,7 +2039,7 @@ def get_stats_by_topic(
     if cutoff:
         ss_clauses.append("created_at >= ?")
         ss_params.append(cutoff)
-    _append_stats_in_filter(ss_clauses, ss_params, "COALESCE(agent, backend)", agents)
+    _append_stats_in_filter(ss_clauses, ss_params, _stats_agent_expr(), agents)
     _append_stats_in_filter(ss_clauses, ss_params, "topic", topics)
 
     cm_clauses: list[str] = ["role = 'assistant'"]
@@ -2198,8 +2103,8 @@ def get_stats_filter_options() -> dict:
         with _connect() as conn:
             agents = [
                 r[0] for r in conn.execute(
-                    "SELECT DISTINCT COALESCE(agent, backend) FROM session_stats"
-                    " WHERE agent IS NOT NULL OR backend IS NOT NULL ORDER BY 1"
+                    f"SELECT DISTINCT {_stats_agent_expr()} FROM session_stats"
+                    f" WHERE agent IS NOT NULL OR harness IS NOT NULL ORDER BY 1"
                 ).fetchall() if r[0]
             ]
             topics = [

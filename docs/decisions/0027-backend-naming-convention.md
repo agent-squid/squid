@@ -9,8 +9,10 @@ superseded: 2026-07-12
 > `{harness}-{provider}` convention below disambiguated a single composite
 > `backends:` YAML key. ADR-0028 removes `backend` as a named entity —
 > harness and provider become separate structured fields on the agent — so
-> there is no composite ID left to disambiguate. Kept here for the
-> collision reasoning, which ADR-0028 builds on directly.
+> there is no composite ID left to disambiguate. The current compatibility
+> `backend` value is a runtime/storage reference (`harness:provider`), not a
+> configured backend name. Kept here for the collision reasoning, which
+> ADR-0028 builds on directly.
 
 ## Context
 
@@ -150,3 +152,20 @@ backends:
 - The convention extends naturally to future harnesses (e.g. `ai` for
   aider, `gh` for GitHub Copilot) and future providers (e.g. `-gemini`
   for Google, `-llama` for Meta).
+
+## Superseded Outcome
+
+ADR-0028 replaces the convention above with structured fields:
+
+```yaml
+agents:
+  - name: cc-deepseek-work
+    harness: claudecode
+    provider: deepseek
+    model: deepseek-chat
+```
+
+For logging and compatibility, Squid may still expose `backend` as
+`harness:provider`, but durable attribution should record `harness` and
+`provider` separately as well. Consumers should prefer those structured fields
+when present.

@@ -42,9 +42,9 @@ LEGACY_BACKEND_AGENT_MAP: dict[str, tuple[str, Optional[str]]] = {
 def split_agent_ref(agent_ref: Optional[str], provider_id: Optional[str] = None) -> tuple[str, Optional[str]]:
     """Resolve a temporary/legacy agent backend field into harness + provider.
 
-    Phase 2 still stores agent identity in the old `agents.backend` column.
-    New values may be `harness` or `harness:provider`; old values such as
-    `claude` and `deepseek` are mapped here until Phase 3 splits the schema.
+    Compatibility API values may be `harness` or `harness:provider`; old
+    values such as `claude` and `deepseek` are mapped here for callers that
+    still send or receive the runtime ref as `backend`.
     """
     if agent_ref and ":" in agent_ref:
         harness_id, parsed_provider = agent_ref.split(":", 1)

@@ -120,6 +120,7 @@ providers:
       text: Free tier
       title: no reset
     models:
+      - deepseek-ai/deepseek-v4-pro
       - nvidia/nemotron-4-340b
       - meta/llama-3.1-405b-instruct
       - deepseek-ai/deepseek-r1

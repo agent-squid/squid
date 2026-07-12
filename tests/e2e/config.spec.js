@@ -360,10 +360,10 @@ test('agent form saves harness and provider fields', async ({ page }) => {
     name: 'nim-agent',
     harness: 'claudecode',
     provider: 'nim',
-    backend: 'claudecode:nim',
     model: 'nvidia/llama',
     cwd: '/tmp/work',
   });
+  expect(saved).not.toHaveProperty('backend');
   await expect(page.locator('#agent-form-status')).toHaveText('saved ✓');
 });
 
@@ -414,6 +414,39 @@ test('agent form model field suggests provider models but accepts a freeform ove
 
   expect(saved).toMatchObject({ name: 'deepseek-agent', model: 'deepseek-v4-pro' });
   await expect(page.locator('#agent-form-status')).toHaveText('saved ✓');
+});
+
+test('agent form switches to default NVIDIA provider and model suggestions for Pi', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/health', r => r.fulfill({ json: {
+    status: 'ok',
+    harnesses: [
+      { id: 'claudecode', label: 'Claude Code', protocol: 'interactive-cli', installed: true, default_provider: 'anthropic', compatible_providers: ['anthropic', 'nvidia'] },
+      { id: 'pi', label: 'Pi', protocol: 'oneshot-cli', installed: true, default_provider: 'nvidia', compatible_providers: ['anthropic', 'nvidia'] },
+    ],
+    providers: {
+      anthropic: { label: 'Claude', color: '#AE5332', gauge: { type: 'claude' }, models: ['claude-sonnet-5'] },
+      nvidia: {
+        label: 'NVIDIA',
+        color: '#76B900',
+        gauge: { type: 'static', text: 'Free tier' },
+        models: ['deepseek-ai/deepseek-v4-pro', 'nvidia/nemotron-4-340b'],
+      },
+    },
+    backends: {},
+  }}));
+  await page.route('**/config/agents', r => r.fulfill({ json: [] }));
+
+  await page.goto('/');
+  await page.locator('.nav-tab[data-view="agents"]').click();
+  await page.locator('#af-harness').selectOption('pi');
+
+  await expect(page.locator('#af-provider')).toHaveValue('nvidia');
+  const providerOptions = await page.locator('#af-provider option').allTextContents();
+  expect(providerOptions).toEqual(['Claude', 'NVIDIA']);
+  await expect(page.locator('#af-model-picker')).toBeVisible();
+  const suggestions = await page.locator('#af-model-picker option:not([disabled])').evaluateAll(opts => opts.map(o => o.value));
+  expect(suggestions).toEqual(['deepseek-ai/deepseek-v4-pro', 'nvidia/nemotron-4-340b']);
 });
 
 test('agent form model picker hides when the provider has no suggested models', async ({ page }) => {

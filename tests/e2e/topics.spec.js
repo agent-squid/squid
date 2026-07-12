@@ -105,3 +105,17 @@ test('topics tab renders searchable expandable topic lanes and actions', async (
   await page.locator('#topic-delete-confirm').click();
   expect(deletedRequests[0]).toContain('/topics/squid');
 });
+
+test('topic open records topics page so browser back returns there', async ({ page }) => {
+  await mockBackend(page);
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Topics' }).click();
+  await expect(page.locator('#view-topics')).toHaveClass(/active/);
+
+  await page.locator('.topic-row', { hasText: '#squid' }).getByRole('button', { name: 'Open' }).click();
+  await expect(page.locator('#view-chat')).toHaveClass(/active/);
+
+  await page.goBack();
+  await expect(page.locator('#view-topics')).toHaveClass(/active/);
+});

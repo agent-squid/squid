@@ -4,12 +4,12 @@
 
 | Term | Meaning |
 |---|---|
-| **driver** | The coded coding-agent integration: `claude`, `codex`, `cursor`, `opencode`, or `pi`. A driver owns command construction, supported protocols, parsing, resume behavior, and token semantics. |
-| **backend** | A named YAML configuration of one driver: provider connection, credentials, billing gauge, UI color, driver arguments/settings, default model, and protocol. Must be explicitly set on each agent. |
-| **agent** | A named execution identity: backend, model override, cwd, timeout. Defined by the user and stored in the `agents` table. Referenced by name in the `@agent` input syntax. |
+| **harness** | The coded coding-agent CLI integration: `claudecode`, `codex`, `cursor`, `opencode`, or `pi`. A harness owns command construction, supported protocols, parsing, resume behavior, and token semantics. |
+| **provider** | A model endpoint/account: label, color, base URL, auth/API key, quota gauge, model suggestions, and env/settings/args escapes. |
+| **agent** | A named execution identity: harness, provider, model override, cwd, timeout. Defined by the user and stored in the `agents` table. Referenced by name in the `@agent` input syntax. |
 | **topic** | A named conversation/work thread (e.g. `oncall`, `squid`). Each topic has a sticky agent and zero or more sessions and adhoc turns from multiple agents. |
 | **route** | A topic plus agent selection written as `#topic@agent`. `#topic` owns conversation history; `@agent` owns execution config. |
-| **protocol** | The driver communication shape for a turn/session, such as `oneshot-cli`, `interactive-cli`, or `interactive-pty`. Protocol selection is driver/backend/agent configuration, not model-name inference. |
+| **protocol** | The harness communication shape for a turn/session, such as `oneshot-cli`, `interactive-cli`, or `interactive-pty`. Protocol selection is harness configuration, not model-name inference. |
 | **session** | A resumable CLI process context identified by the native CLI session/thread ID. Scoped to `(topic, agent)`. |
 | **adhoc** | A one-off parallel turn that uses a `lookback` window of recent history as inline context instead of a persistent session. |
 
@@ -25,8 +25,9 @@ SQLite database at `~/.squid/squid.db` (persists across installs).
 
 ```
 name       TEXT  PK          user-defined short name (e.g. "clawd", "code")
-backend    TEXT  NOT NULL    backend ID from YAML; resolves to a driver
-model      TEXT              model string (e.g. claude-opus-4-5); null = backend default
+harness    TEXT              coded CLI integration; preferred source of truth
+provider   TEXT              provider id; null = harness default provider
+model      TEXT              model string (e.g. claude-opus-4-5); null = provider/harness default
 cwd        TEXT              working directory; null = /tmp/<user>/squid
 timeout    INTEGER           per-agent response timeout in seconds; null = global default
 created_at TEXT              ISO8601
@@ -44,10 +45,13 @@ Two row types share this table:
 topic        TEXT  PK (composite with agent)
 agent        TEXT  PK  '' = topic-level; agent name = agent-level
 sticky_agent TEXT       topic-level only: last-used agent name
+sticky_adhoc INTEGER    topic-level only: last-selected mode; default 0
 last_prompt  TEXT       last user prompt sent
+last_adhoc_prompt TEXT  last adhoc user prompt sent
 last_at      TEXT       ISO8601 — timestamp of last_prompt
 last_model   TEXT       model from agent config at dispatch time
-last_backend TEXT       backend from agent config at dispatch time
+last_harness TEXT       harness from agent config at dispatch time
+last_provider TEXT      provider from agent config at dispatch time
 hidden       INTEGER    1 = soft-deleted (excluded from autocomplete); default 0
 created_at   TEXT       ISO8601
 ```
@@ -82,6 +86,7 @@ topic       TEXT  PK (composite with agent)
 agent       TEXT  PK
 session_id  TEXT  NOT NULL    passed to CLI as --resume
 cwd         TEXT  NOT NULL    locked at session creation; does not change with agent config updates
+runtime_fingerprint TEXT      harness/provider/protocol execution fingerprint
 created_at  TEXT              ISO8601
 ```
 
@@ -93,7 +98,8 @@ created_at  TEXT              ISO8601
 session_id           TEXT  PK
 topic                TEXT
 agent                TEXT    agent name at time of run
-backend              TEXT    resolved backend (claude, codex, …)
+harness              TEXT    harness used for the run
+provider             TEXT    provider used for the run
 model                TEXT    model string reported by CLI
 cwd                  TEXT    working directory used
 input_tokens         INTEGER
@@ -103,8 +109,9 @@ cache_write_tokens   INTEGER
 history_input_tokens INTEGER DEFAULT 0   tokens from injected context history
 cost_usd             REAL
 duration_ms          INTEGER
-quota_before         REAL    observed backend-wide quota percentage at turn start
-quota_after          REAL    observed backend-wide quota percentage after turn completion
+quota_before         REAL    observed provider-wide quota percentage at turn start
+quota_after          REAL    observed provider-wide quota percentage after turn completion
+adhoc                INTEGER DEFAULT 0   1=adhoc turn, 0=session turn
 lookback             INTEGER DEFAULT 0   adhoc lookback window used
 created_at           TEXT    ISO8601 — set on INSERT, never updated (used for date bucketing)
 ```
@@ -114,7 +121,7 @@ created_at           TEXT    ISO8601 — set on INSERT, never updated (used for 
 ## Key Data Flows
 
 ### Session turn (non-adhoc)
-1. `POST /chat` resolves route (`#topic@agent` or sticky topic) → looks up agent config → resolves backend → resolves driver/protocol → looks up `topic_sessions` for `session_id`
+1. `POST /chat` resolves route (`#topic@agent` or sticky topic) → looks up agent config → resolves harness + provider → resolves protocol → looks up `topic_sessions` for `session_id`
 2. `insert_user_message` (with `context=[]`) + `insert_assistant_message` (status=`pending`)
 3. CLI spawned via `TopicDispatcher` (FIFO per topic) with `--resume session_id` if present
 4. If `--resume` fails with "No conversation found": emit `status` event with stale session details, retry as fresh (see ADR-0001 — Stale Session Recovery)
@@ -160,10 +167,10 @@ Stream an AI response. Returns `text/event-stream`.
 
 | Event | Data | When |
 |---|---|---|
-| `meta` | `{"agent": str\|null, "backend": str, "msg_id": int, "adhoc": bool}` | First, always |
+| `meta` | `{"agent": str\|null, "harness": str, "provider": str\|null, "model": str\|null, "msg_id": int, "adhoc": bool}` | First, always |
 | `queued` | `{"topic": str, "position": int}` | When behind another turn in the topic queue |
 | `status` | status line text | When CLI emits non-content output; also emitted for stale session recovery (see below) |
-| `tool` | `{"type": str, "name": str, ...}` | When backend calls a tool |
+| `tool` | `{"type": str, "name": str, ...}` | When the harness/provider runtime calls a tool |
 | `data:` (chunk) | raw text fragment | During content streaming |
 | `stats` | see Stats object below | On session completion |
 | `done` | _(empty)_ | Normal completion |
@@ -171,7 +178,7 @@ Stream an AI response. Returns `text/event-stream`.
 
 **Stale session recovery**: If `--resume` fails with "No conversation found" (e.g. after a
 reboot changes the resolved `cwd`), Squid emits a `status` event describing the lost session
-(`session_id`, `cwd`, `backend`, `model`) then retries the prompt as a fresh turn. The client
+(`session_id`, `cwd`, `harness`, `provider`, `model`) then retries the prompt as a fresh turn. The client
 receives a normal `done`/`stats` at the end. See ADR-0001.
 
 **Client note — deferred response bubble**: The built-in UI withholds the response bubble
@@ -199,7 +206,7 @@ full response once. See ADR-0011.
 ```
 
 `reasoning_tokens` — Codex only; reflects `reasoning_output_tokens` from the Codex response.
-Zero for all other backends. **Not stored in `session_stats`** — SSE event only.
+Zero for all other harnesses. **Not stored in `session_stats`** — SSE event only.
 
 **Error responses**
 ```json
@@ -284,6 +291,8 @@ Run a topic-scoped control command.
     "name":         "string",
     "agent":        "string | null  — sticky agent",
     "last_model":   "string | null",
+    "last_harness": "string | null",
+    "last_provider": "string | null",
     "last_backend": "string | null",
     "last_prompt":  "string | null",
     "last_at":      "ISO8601 | null",
@@ -405,7 +414,10 @@ Poll a single message for status (used when client reconnects mid-stream).
 [
   {
     "name":       "string",
-    "backend":    "configured backend ID",
+    "harness":    "claudecode | codex | cursor | opencode | pi",
+    "provider":   "provider ID | null",
+    "provider_label": "string",
+    "provider_color": "#RRGGBB",
     "model":      "string | null",
     "cwd":        "string | null",
     "timeout":    300,
@@ -419,16 +431,17 @@ Poll a single message for status (used when client reconnects mid-stream).
 ### POST /config/agents
 
 Create or update an agent (upsert by name). An agent is the named execution
-identity used in `#topic@agent`: backend, model override, cwd, and timeout.
+identity used in `#topic@agent`: harness, provider, model override, cwd, and timeout.
 
 **Request body**
 ```json
 {
-  "name":    "string (required)",
-  "backend": "configured backend ID",
-  "model":   "string | null",
-  "cwd":     "string | null  — abs path; null = /tmp/<user>/squid",
-  "timeout": "integer | null  — seconds"
+  "name":     "string (required)",
+  "harness":  "claudecode | codex | cursor | opencode | pi",
+  "provider": "provider ID | null",
+  "model":    "string | null",
+  "cwd":      "string | null  — abs path; null = /tmp/<user>/squid",
+  "timeout":  "integer | null  — seconds"
 }
 ```
 
@@ -438,7 +451,7 @@ identity used in `#topic@agent`: backend, model override, cwd, and timeout.
 { "ok": true, "sessions_cleared": ["topic1", "topic2"] }  // if key attrs changed
 ```
 
-Key attributes: `backend`, `model`, `cwd`. Changing any of these clears existing topic sessions so the next turn starts a fresh CLI session.
+Key attributes: `harness`, `provider`, `model`, `cwd`. Changing any of these clears existing topic sessions so the next turn starts a fresh CLI session.
 
 ---
 
@@ -475,7 +488,7 @@ Delete an agent and its topic sessions.
 injected adhoc context history. Useful for understanding actual prompt cost vs. re-injected context cost.
 
 `quota_delta` is an observational estimate (`quota_after - quota_before`), not
-per-prompt attribution. Concurrent prompts on the same backend have overlapping
+per-prompt attribution. Concurrent prompts on the same provider have overlapping
 measurement windows and can double-count usage when these values are summed.
 Provider reporting delay can also shift usage into a later observation. See
 [ADR-0023](decisions/0023-quota-deltas-are-observational.md).
@@ -490,14 +503,14 @@ Provider reporting delay can also shift usage into a later observation. See
 [{ "agent": "clawd", "sessions": 8, "input_tokens": 32000, "output_tokens": 5000, "cache_read_tokens": 20000, "cache_write_tokens": 5000, "cost_usd": 0.30 }]
 ```
 
-Note: `agent` is `COALESCE(agent, backend, 'unknown')` — groups all sessions under the same agent name regardless of which backend/model was active at the time.
+Note: `agent` is currently the stored agent name, falling back to the computed runtime ref when an agent name is absent.
 
 ---
 
 ### POST /stats/quota-delta
 
-Record observed before/after backend-wide quota percentages for a session. The
-UI records this only for backends with quota integrations. A later write for the
+Record observed before/after provider-wide quota percentages for a session. The
+UI records this only for providers with quota integrations. A later write for the
 same `session_id` replaces the stored pair; this endpoint does not accumulate a
 per-session ledger. Values can include other concurrent prompts and must not be
 treated as exact per-prompt consumption. See
@@ -541,7 +554,7 @@ Fetch current Codex usage. Requires a saved Codex bearer token.
 
 **Response** — array of active CLI processes:
 ```json
-[{ "pid": 1234, "backend": "claude", "topic": "work", "agent": "clawd", "duration_s": 4.2, "started_iso": "ISO8601" }]
+[{ "pid": 1234, "backend": "claudecode:anthropic", "topic": "work", "agent": "clawd", "duration_s": 4.2, "started_iso": "ISO8601" }]
 ```
 
 ---
@@ -553,23 +566,48 @@ Fetch current Codex usage. Requires a saved Codex bearer token.
 {
   "status":    "ok",
   "boot_time": "ISO8601",
-  "backends": {
-    "claude":      { "driver": "claude", "protocol": "oneshot-cli", "interactive": { "idle_timeout_seconds": 3600 }, "available": true,  "path": "/usr/local/bin/claude", "gauge": { "type": "claude" } },
-    "claude-live": { "driver": "claude", "protocol": "interactive-cli", "interactive": { "idle_timeout_seconds": 3600 }, "available": true, "path": "/usr/local/bin/claude", "gauge": { "type": "claude" } },
-    "codex":       { "driver": "codex", "protocol": "oneshot-cli", "interactive": { "idle_timeout_seconds": 3600 }, "available": true,  "path": "/usr/local/bin/codex" }
+  "squid_home": "/Users/me/.squid",
+  "harnesses": [
+    {
+      "id": "claudecode",
+      "label": "Claude Code",
+      "install_cmd": "curl -fsSL https://claude.ai/install.sh | bash",
+      "installed": true,
+      "protocol": "interactive-cli",
+      "interactive": { "idle_timeout_seconds": 3600 },
+      "default_provider": "anthropic",
+      "supported_apis": ["/v1/messages"],
+      "compatible_providers": ["anthropic", "deepseek"]
+    }
+  ],
+  "providers": {
+    "anthropic": {
+      "label": "Claude",
+      "color": "#AE5332",
+      "base_url": null,
+      "auth_type": "subscription",
+      "missing_secrets": [],
+      "gauge": { "type": "claude", "text": null, "title": null },
+      "gauge_authed": true,
+      "models": ["claude-sonnet-4-6"],
+      "supported_apis": ["/v1/messages"]
+    }
   }
 }
 ```
 
-`available` means the driver executable and configured secret references are
-present. It does not probe the provider endpoint. Every backend registered in
-YAML is returned, including unavailable ones.
+`harnesses` and `providers` are the runtime catalogs. Harnesses describe CLI
+integrations; providers describe endpoint/account metadata, auth, models, and
+quota gauges.
 
-### GET /quota/backend/{backend_id}
+`available` means the harness executable and configured provider secret
+references are present. It does not probe the provider endpoint.
 
-Returns a normalized dynamic or static gauge snapshot for the configured
-backend. Gauge routing and credentials come from that backend rather than its
-driver or model name.
+### GET /quota/provider/{provider_id}
+
+Returns a normalized dynamic or static gauge snapshot for one configured
+provider. Gauge routing and credentials come from provider config and are
+independent of which harness is using that provider.
 
 ```json
 { "status": "ok", "text": "$12.34", "raw": 12.34, "used_percent": null, "reset_at": null, "title": "DeepSeek balance" }
@@ -579,5 +617,5 @@ driver or model name.
 
 ## Open Issues
 
-- **`get_stats_by_agent` collapses all runs under the same agent name** even when backend/model changed. Should group by `(agent, backend, model)` and show as separate rows.
+- **`get_stats_by_agent` collapses all runs under the same agent name** even when harness/provider/model changed. Should group by `(agent, harness, provider, model)` and show as separate rows.
 - **`session_stats.model`** is populated from the `_stats` chunk (reported by CLI). May differ from `agents.model` if the CLI auto-selects a model.

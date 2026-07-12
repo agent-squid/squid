@@ -169,10 +169,9 @@ def _is_backend_native_chat_command(message: str) -> bool:
 
 
 def _resolve_agent_runtime(agent_config: dict) -> tuple[str, Optional[str], str, object]:
-    backend_ref = agent_config.get("backend")
-    harness, provider = split_agent_ref(agent_config.get("harness") or backend_ref, agent_config.get("provider"))
+    harness, provider = split_agent_ref(agent_config.get("harness"), agent_config.get("provider"))
     resolved = resolve_agent(harness, provider)
-    return harness, provider, backend_ref or agent_ref_for_storage(harness, provider), resolved
+    return harness, provider, agent_ref_for_storage(harness, provider), resolved
 
 
 def _public_agent_config(agent_config: dict) -> dict:
@@ -182,8 +181,6 @@ def _public_agent_config(agent_config: dict) -> dict:
         item.update({
             "harness": harness,
             "provider": provider,
-            "backend": agent_ref_for_storage(harness, provider),
-            "runtime": backend_ref,
             "color": resolved.color,
             "provider_color": resolved.provider.color,
             "provider_label": resolved.provider.label,
@@ -249,7 +246,6 @@ class TopicHiddenRequest(BaseModel):
 
 class AgentRequest(BaseModel):
     name: str = Field(..., min_length=1)
-    backend: Optional[str] = None
     harness: Optional[str] = None
     provider: Optional[str] = None
     model: Optional[str] = None
@@ -571,7 +567,14 @@ async def stream_response(
     harness: Optional[str] = None,
     provider: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
-    yield sse_event("meta", json.dumps({"agent": agent, "backend": backend, "model": model, "msg_id": asst_msg_id, "adhoc": adhoc}))
+    yield sse_event("meta", json.dumps({
+        "agent": agent,
+        "harness": harness,
+        "provider": provider,
+        "model": model,
+        "msg_id": asst_msg_id,
+        "adhoc": adhoc,
+    }))
 
     effective_cwd = cwd or SQUID_HOME
     dispatch_harness, dispatch_provider = split_agent_ref(harness or backend, provider)
@@ -825,8 +828,8 @@ async def chat(req: ChatRequest):
         effective_message = "\n\n".join(prefix_blocks + [req.message])
 
     log.info(
-        "chat  topic=%s  agent=%s  backend=%s  model=%s  adhoc=%s  resume=%s  ctx=%d  pinned=%d  memory=%s  msg=%.80r",
-        topic, resolved_agent, backend, model, req.adhoc,
+        "chat  topic=%s  agent=%s  harness=%s  provider=%s  backend=%s  model=%s  adhoc=%s  resume=%s  ctx=%d  pinned=%d  memory=%s  msg=%.80r",
+        topic, resolved_agent, harness, provider, backend, model, req.adhoc,
         bool(resume_session_id), len(context_history) // 2,
         len(req.pinned_ids) if req.pinned_ids else 0, req.include_topic_memory, req.message,
     )
@@ -956,30 +959,10 @@ async def health():
     providers = public_providers()
     for provider_id, info in providers.items():
         info["gauge_authed"] = _gauge_authed(info["gauge"]["type"], require_provider(provider_id))
-
-    backend_aliases = {
-        "claude": ("claudecode", "anthropic"),
-        "codex": ("codex", "openai"),
-        "cursor": ("cursor", "cursor"),
-        "opencode": ("opencode", "opencode"),
-        "pi": ("pi", "nvidia"),
-    }
-    backends = {}
-    for backend_id, (harness, provider_id) in backend_aliases.items():
-        try:
-            resolved = resolve_agent(harness, provider_id)
-        except ValueError:
-            continue
-        info = resolved.public_dict()
-        info["driver"] = "claude" if harness == "claudecode" else harness
-        info["provider"] = resolved.provider.id
-        info["gauge_authed"] = providers.get(resolved.provider.id, {}).get("gauge_authed")
-        backends[backend_id] = info
     return JSONResponse({
         "status": "ok",
         "boot_time": BOOT_TIME,
         "squid_home": SQUID_HOME,
-        "backends": backends,
         "harnesses": list_harnesses(),
         "providers": providers,
     })
@@ -1328,10 +1311,9 @@ async def get_agents():
 
 @app.post("/config/agents")
 async def create_agent(req: AgentRequest):
-    if req.harness:
-        harness, provider = req.harness, req.provider
-    else:
-        harness, provider = split_agent_ref(req.backend or req.name, req.provider)
+    if not req.harness:
+        return JSONResponse({"error": "harness is required"}, status_code=400)
+    harness, provider = req.harness, req.provider
     try:
         resolve_agent(harness, provider)
     except ValueError as exc:
@@ -1811,17 +1793,6 @@ async def _quota_snapshot_for_provider(provider: Provider, ref: str) -> JSONResp
         "raw": used, "used_percent": used, "reset_at": data.get("billingCycleEnd"),
         "title": data.get("autoModelSelectedDisplayMessage") or "Cursor usage",
     })
-
-
-@app.get("/quota/backend/{backend_id}")
-async def quota_backend(backend_id: str):
-    """Return a normalized gauge snapshot for one configured (harness, provider) pair."""
-    harness, provider_id = split_agent_ref(backend_id)
-    try:
-        resolved = resolve_agent(harness, provider_id)
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=404)
-    return await _quota_snapshot_for_provider(resolved.provider, backend_id)
 
 
 @app.get("/quota/provider/{provider_id}")

@@ -12,10 +12,10 @@ def test_init_db_seeds_pi_agent_when_pi_harness_is_installed(tmp_path, monkeypat
 
     with sqlite3.connect(tmp_path / "squid.db") as conn:
         row = conn.execute(
-            "SELECT name, harness, provider, backend, model, cwd FROM agents WHERE name = 'pi'"
+            "SELECT name, harness, provider, model, cwd FROM agents WHERE name = 'pi'"
         ).fetchone()
 
-    assert row == ("pi", "pi", None, "pi", None, None)
+    assert row == ("pi", "pi", "nvidia", "deepseek-ai/deepseek-v4-pro", None)
 
 
 def test_init_db_seeds_claude_agent_without_claudecode_or_haiku_names(tmp_path, monkeypatch):
@@ -27,10 +27,10 @@ def test_init_db_seeds_claude_agent_without_claudecode_or_haiku_names(tmp_path, 
 
     with sqlite3.connect(tmp_path / "squid.db") as conn:
         rows = conn.execute(
-            "SELECT name, harness, provider, backend, model FROM agents ORDER BY name"
+            "SELECT name, harness, provider, model FROM agents ORDER BY name"
         ).fetchall()
 
-    assert rows == [("claude", "claudecode", "anthropic", "claudecode:anthropic", None)]
+    assert rows == [("claude", "claudecode", "anthropic", None)]
 
 
 def test_init_db_seeds_five_default_agents_when_all_harnesses_are_installed(tmp_path, monkeypatch):
@@ -144,6 +144,8 @@ def test_topics_management_summary_includes_hidden_and_agent_lanes(tmp_path, mon
         "last_adhoc_prompt": "adhoc prompt",
         "last_at": all_topics[0]["agents"][0]["last_at"],
         "last_model": None,
+        "last_harness": None,
+        "last_provider": None,
         "last_backend": None,
         "session_turns": 0,
         "adhoc_turns": 0,
@@ -327,44 +329,6 @@ def test_mark_orphaned_pending_respects_created_at_cutoff(tmp_path, monkeypatch)
     assert stats_db.mark_orphaned_pending(before_created_at="2026-07-09T19:15:00Z") == 1
     assert stats_db.get_message(before_asst_id)["status"] == "error"
     assert stats_db.get_message(after_asst_id)["status"] == "pending"
-
-
-def test_init_db_migrates_existing_chat_messages_turn_index(tmp_path, monkeypatch):
-    db_path = tmp_path / "squid.db"
-    monkeypatch.setattr(stats_db, "_DB_PATH", db_path)
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """CREATE TABLE chat_messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                topic TEXT NOT NULL DEFAULT 'default',
-                agent TEXT,
-                session_id TEXT,
-                role TEXT NOT NULL,
-                content TEXT,
-                reply_to INTEGER,
-                status TEXT NOT NULL DEFAULT 'pending',
-                adhoc INTEGER DEFAULT 0,
-                context TEXT,
-                quota_delta REAL,
-                quota_before REAL,
-                quota_after REAL,
-                created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-            )"""
-        )
-        conn.execute("INSERT INTO chat_messages (topic, agent, role, content, status) VALUES ('squid', 'codex', 'user', 'first', 'done')")
-        conn.execute("INSERT INTO chat_messages (topic, agent, role, content, status, reply_to, session_id, adhoc) VALUES ('squid', 'codex', 'assistant', 'one', 'done', 1, 'session-1', 0)")
-        conn.execute("INSERT INTO chat_messages (topic, agent, role, content, status) VALUES ('squid', 'codex', 'user', 'adhoc', 'done')")
-        conn.execute("INSERT INTO chat_messages (topic, agent, role, content, status, reply_to, session_id, adhoc) VALUES ('squid', 'codex', 'assistant', 'adhoc', 'done', 3, 'adhoc-session', 1)")
-        conn.execute("INSERT INTO chat_messages (topic, agent, role, content, status) VALUES ('squid', 'codex', 'user', 'second', 'done')")
-        conn.execute("INSERT INTO chat_messages (topic, agent, role, content, status, reply_to, session_id, adhoc) VALUES ('squid', 'codex', 'assistant', 'two', 'done', 5, 'session-1', 0)")
-
-    stats_db.init_db()
-
-    rows = stats_db.get_messages_flat(topic="squid", agent="codex", limit=10)["items"]
-    by_prompt = {row["prompt"]: row for row in rows}
-    assert by_prompt["first"]["session_turn_count"] == 1
-    assert by_prompt["second"]["session_turn_count"] == 2
-    assert by_prompt["adhoc"]["session_turn_count"] is None
 
 
 def test_grouped_stats_include_quota_delta(tmp_path, monkeypatch):

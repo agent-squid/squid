@@ -61,8 +61,8 @@ test('status popup lists quota gauges only for authed providers', async ({ page 
   await page.route('**/health', r => r.fulfill({ json: {
     status: 'ok',
     providers: {
-      claude: { label: 'Claude', gauge: { type: 'claude' }, gauge_authed: true },
-      codex: { label: 'Codex', gauge: { type: 'codex' }, gauge_authed: true },
+      anthropic: { label: 'Claude', gauge: { type: 'claude' }, gauge_authed: true },
+      openai: { label: 'Codex', gauge: { type: 'codex' }, gauge_authed: true },
       deepseek: { label: 'DeepSeek', gauge: { type: 'deepseek' }, gauge_authed: false },
       qwen: { label: 'Qwen', gauge: { type: 'static' }, gauge_authed: false },
       local: { label: 'Local', gauge: { type: 'static' }, gauge_authed: true },
@@ -70,11 +70,11 @@ test('status popup lists quota gauges only for authed providers', async ({ page 
     },
   }}));
   await page.route('**/config/agents', r => r.fulfill({ json: [
-    { name: 'qwen-agent', backend: 'qwen' },
+    { name: 'qwen-agent', harness: 'codex', provider: 'qwen' },
   ] }));
-  await page.route('**/quota/*/*', r => {
-    const backend = r.request().url().split('/').pop();
-    if (backend === 'local' || backend === 'qwen') {
+  await page.route('**/quota/provider/*', r => {
+    const provider = r.request().url().split('/').pop();
+    if (provider === 'local' || provider === 'qwen') {
       return r.fulfill({ json: { status: 'ok', text: 'Local', raw: null, used_percent: null } });
     }
     return r.fulfill({ json: { status: 'ok', raw: 42, used_percent: 42 } });
@@ -105,13 +105,7 @@ test('status popup renders runtime quota snapshots under provider label only', a
     providers: {
       anthropic: { label: 'Anthropic', gauge: { type: 'claude' }, gauge_authed: true },
     },
-    backends: {
-      'claudecode:anthropic': { label: 'Claude Code x Anthropic', gauge: { type: 'claude' } },
-    },
   }}));
-  await page.route('**/quota/backend/*', r => {
-    return r.fulfill({ json: { status: 'ok', raw: 17, used_percent: 17 } });
-  });
   await page.route('**/quota/provider/*', r => {
     return r.fulfill({ json: { status: 'ok', raw: 17, used_percent: 17 } });
   });
@@ -259,7 +253,7 @@ test('an empty pre-chat poll does not stop tracking the newly started process', 
     await r.fulfill({
       status: 200,
       headers: SSE_HEADERS,
-      body: 'event: meta\ndata: {"agent":"claude","backend":"claude","msg_id":42}\n\ndata: done\n\nevent: done\ndata:\n\n',
+      body: 'event: meta\ndata: {"agent":"claude","harness":"claudecode","provider":"anthropic","msg_id":42}\n\ndata: done\n\nevent: done\ndata:\n\n',
     });
   });
 
@@ -308,7 +302,7 @@ function sse(...events) {
   }).join('');
 }
 
-const META  = { event: 'meta',  data: { agent: 'claude', backend: 'claude', msg_id: 1, adhoc: false } };
+const META  = { event: 'meta',  data: { agent: 'claude', harness: 'claudecode', provider: 'anthropic', msg_id: 1, adhoc: false } };
 const STATS = { event: 'stats', data: { session_id: 'test-sid', input_tokens: 10, output_tokens: 5, adhoc: false, lookback: 0 } };
 const DONE  = { event: 'done',  data: '' };
 

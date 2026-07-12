@@ -302,6 +302,21 @@ function navigateView(name, { recordHistory = true } = {}) {
   }
 }
 
+function navigateViewFromHistoryAnchor(anchorName, name) {
+  if (name === currentView) return;
+  if (history.replaceState && history.pushState) {
+    const state = (history.state && typeof history.state === 'object') ? history.state : {};
+    if (state.squidView !== anchorName) {
+      history.replaceState({ ...state, squidView: anchorName }, '', location.href);
+    }
+    switchView(name);
+    history.pushState({ squidView: name }, '', location.href);
+    if (isMobileViewport()) _mobileViewHistoryDepth += 1;
+    return;
+  }
+  switchView(name);
+}
+
 function initMobileViewNavigation() {
   if (history.replaceState) history.replaceState({ squidView: currentView }, '', location.href);
 
@@ -2505,7 +2520,7 @@ async function sendMessage(text) {
 
   let firstDataReceived = false;
 
-  let quotaBackend = await resolveQuotaBackend(topic, agent);
+  let quotaBackend = await resolveQuotaProvider(topic, agent);
   let quotaBeforeSnapshot = await fetchQuotaForBackend(quotaBackend);
   quotaTrackStart(quotaBackend);
   let lastSessionId = null;
@@ -2809,17 +2824,18 @@ async function sendMessage(text) {
           if (eventName === 'meta') {
             try {
               const meta = JSON.parse(data);
-              resolvedAgent = meta.agent || (meta.backend !== 'auto' ? meta.backend : null);
-              if (meta.backend) {
-                quotaBackend = meta.backend;
+              resolvedAgent = meta.agent || null;
+              const metaRuntime = runtimeRef(meta.harness || '', meta.provider || null);
+              if (meta.provider) {
+                quotaBackend = meta.provider;
                 if (quotaBeforeSnapshot?.backend && quotaBeforeSnapshot.backend !== quotaBackend) {
                   quotaBeforeSnapshot = null;
                 }
               }
               const resolvedAdhoc = adhoc; // server echoes back what we sent; use closure as reliable source
-              const newTag = makeTopicTag(topic, resolvedAgent, { adhoc: resolvedAdhoc, clickable: true, lookback, backend: meta.backend || null });
+              const newTag = makeTopicTag(topic, resolvedAgent, { adhoc: resolvedAdhoc, clickable: true, lookback, backend: metaRuntime || null });
               responseHeaderTag.replaceWith(newTag);
-              const newUserTag = makeTopicTag(topic, resolvedAgent, { adhoc: resolvedAdhoc, clickable: true, lookback, backend: meta.backend || null });
+              const newUserTag = makeTopicTag(topic, resolvedAgent, { adhoc: resolvedAdhoc, clickable: true, lookback, backend: metaRuntime || null });
               if (userTopicTag) {
                 userTopicTag.replaceWith(newUserTag);
               } else if (resolvedAgent || topic !== 'default') {
@@ -4288,25 +4304,30 @@ async function resolveActiveQuotaBackend() {
   const topicName = parsed.topic || stickyChip?.topic || null;
   let agentName = parsed.agent || stickyChip?.agent || null;
 
-  return resolveQuotaBackend(topicName, agentName);
+  return resolveQuotaProvider(topicName, agentName);
 }
 
-async function resolveQuotaBackend(topicName, agentName) {
-  if (!Object.keys(_backendMetadata).length) {
+async function resolveQuotaProvider(topicName, agentName) {
+  if (!Object.keys(_providerMetadata).length) {
     try {
       const res = await fetch('/health');
-      if (res.ok) _backendMetadata = (await res.json()).backends || {};
+      if (res.ok) {
+        const health = await res.json();
+        _providerMetadata = health.providers || {};
+        _harnessMetadata = {};
+        for (const h of (health.harnesses || [])) _harnessMetadata[h.id] = h;
+      }
     } catch { /* gauge remains hidden until health is reachable */ }
   }
   if (!agentName && topicName) {
     const topics = await _acTopics();
     agentName = topics.find(t => t.name === topicName)?.agent || null;
   }
-  if (!agentName) return 'claude';
+  if (!agentName) return 'anthropic';
 
   const agents = await _acAgents();
   const agent = agents.find(a => a.name === agentName);
-  return agent?.backend || null;
+  return agent?.provider || splitAgentRef(agent?.backend).provider || null;
 }
 
 async function updateActiveQuotaGauge() {
@@ -4485,23 +4506,19 @@ function showTransientQuotaError(backend, text) {
 }
 
 async function fetchQuotaForBackend(backend) {
-  const cfg = quotaConfigFor(backend);
+  const provider = quotaStatusProviderKey(backend);
+  const cfg = quotaConfigFor(provider);
   if (!cfg) return null;
-  const state = quotaStateFor(backend);
-  if (state.inFlight) return state.raw == null ? null : { backend, ...state };
+  const state = quotaStateFor(provider);
+  if (state.inFlight) return state.raw == null ? null : { backend: provider, ...state };
   state.inFlight = true;
-  const label = backendDisplayName(backend);
+  const label = backendDisplayName(provider);
   try {
-    // A bare provider id (no harness alias, no "harness:provider" ref) routes to
-    // the harness-free endpoint — quota is a provider attribute (ADR-0028).
-    const isBareProvider = !_backendMetadata[backend] && !backend.includes(':') && _providerMetadata[backend];
-    const url = isBareProvider
-      ? `/quota/provider/${encodeURIComponent(backend)}`
-      : `/quota/backend/${encodeURIComponent(backend)}`;
+    const url = `/quota/provider/${encodeURIComponent(provider)}`;
     const res = await fetch(url);
     if (!res.ok) {
-      if (res.status === 400) showQuotaError(backend, `${label} auth`);
-      else showTransientQuotaError(backend, `${label} error`);
+      if (res.status === 400) showQuotaError(provider, `${label} auth`);
+      else showTransientQuotaError(provider, `${label} error`);
       return null;
     }
     const data = await res.json();
@@ -4510,7 +4527,7 @@ async function fetchQuotaForBackend(backend) {
       return null;
     }
     if (!data.status) {
-      showQuotaError(backend, `${label} n/a`);
+      showQuotaError(provider, `${label} n/a`);
       return null;
     }
     const resetAt = typeof data.reset_at === 'number'
@@ -4520,12 +4537,12 @@ async function fetchQuotaForBackend(backend) {
       raw: data.raw ?? null,
       pct: data.used_percent != null
         ? Math.max(0, Math.min(100, Math.round(data.used_percent)))
-        : (gaugeTypeFor(backend) === 'deepseek' && data.max_budget_pct != null
+        : (gaugeTypeFor(provider) === 'deepseek' && data.max_budget_pct != null
           ? Math.max(0, Math.min(100, Math.round(data.max_budget_pct)))
           : null),
       resetAt,
       title: data.title || '',
-      displayText: gaugeTypeFor(backend) === 'deepseek'
+      displayText: gaugeTypeFor(provider) === 'deepseek'
         ? (data.text ?? null)
         : (data.used_percent == null ? (data.text ?? null) : null),
       sevenDay: data.seven_day ? {
@@ -4537,10 +4554,10 @@ async function fetchQuotaForBackend(backend) {
           : null,
       } : null,
     };
-    renderQuotaLoaded(backend, snapshot);
-    return { backend, ...state };
+    renderQuotaLoaded(provider, snapshot);
+    return { backend: provider, ...state };
   } catch {
-    showTransientQuotaError(backend, `${label} error`);
+    showTransientQuotaError(provider, `${label} error`);
     return null;
   } finally {
     state.inFlight = false;
@@ -4548,18 +4565,18 @@ async function fetchQuotaForBackend(backend) {
 }
 
 async function fetchQuota() {
-  return fetchQuotaForBackend('claude');
+  return fetchQuotaForBackend('anthropic');
 }
 
 function initQuota() {
   const cfg = QUOTA_CONFIG.claude;
-  quotaDisplay.style.setProperty('--quota-accent', agentThemeColor('claude'));
-  setVisibleQuotaBackend('claude');
+  quotaDisplay.style.setProperty('--quota-accent', agentThemeColor('anthropic'));
+  setVisibleQuotaBackend('anthropic');
   quotaDisplay.innerHTML = `
     <span class="quota-7d-group">
       <svg id="quota-7d-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
         <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
-        <circle id="${cfg.sevenDayArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('claude')}"
+        <circle id="${cfg.sevenDayArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('anthropic')}"
                 stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
                 transform="rotate(-90 9 9)"/>
         <text id="${cfg.sevenDayLabelId}" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
@@ -4569,7 +4586,7 @@ function initQuota() {
     <span style="display:inline-flex;align-items:center">
       <svg id="quota-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
         <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
-        <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('claude')}"
+        <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('anthropic')}"
                 stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
                 transform="rotate(-90 9 9)"/>
         <text id="${cfg.fiveHourPctId}" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
@@ -4593,7 +4610,7 @@ function initQuota() {
 const codexQuotaDisplay = document.getElementById('codex-quota-display');
 
 async function fetchCodexQuota() {
-  return fetchQuotaForBackend('codex');
+  return fetchQuotaForBackend('openai');
 }
 
 function parseCursorQuota(data) {
@@ -6472,7 +6489,7 @@ function bindTopicsView() {
       const adhoc = btn.dataset.adhocOpen === '1';
       if (agent) filterByAgent(topic, agent, adhoc);
       else filterByTopic(topic);
-      switchView('chat');
+      navigateViewFromHistoryAnchor('topics', 'chat');
     });
   });
   listEl.querySelectorAll('[data-topic-memory]').forEach(btn => {
@@ -6640,20 +6657,9 @@ const GAUGE_CATALOG = Object.freeze({
   claude: 'click gauge in header -> Detect',
   codex: 'click gauge in header -> Detect',
   cursor: 'automatic via cursor-agent',
-  deepseek: 'uses this backend API key',
+  deepseek: 'uses this provider API key',
   none: 'no gauge configured',
 });
-
-function fallbackHarnessesFromBackends(backends) {
-  return Object.entries(backends || {}).map(([id, info]) => ({
-    id: splitAgentRef(info.harness || info.driver || id).harness,
-    label: info.label || id,
-    protocol: info.protocol || 'oneshot-cli',
-    installed: !!info.available,
-    default_provider: info.provider || null,
-    compatible_providers: info.provider ? [info.provider] : [],
-  })).filter((h, index, arr) => h.id && arr.findIndex(other => other.id === h.id) === index);
-}
 
 function ensureRuntimeMetadata(harness, provider = null) {
   if (!harness) return;
@@ -6688,7 +6694,7 @@ function providerOptionsForHarness(harness, selectedProvider = null) {
 
 function setProviderOptions(harness, selectedProvider = null, selectId = 'af-provider') {
   const providerSelect = document.getElementById(selectId);
-  if (!providerSelect) return;
+  if (!providerSelect) return '';
   const hInfo = _harnessMetadata[harness] || {};
   const providerIds = providerOptionsForHarness(harness, selectedProvider);
   providerSelect.innerHTML = providerIds
@@ -6696,21 +6702,28 @@ function setProviderOptions(harness, selectedProvider = null, selectId = 'af-pro
     .join('');
   const value = selectedProvider || hInfo.default_provider || providerIds[0] || '';
   if (value && providerIds.includes(value)) providerSelect.value = value;
+  return providerSelect.value || '';
+}
+
+function syncAgentModelControls(harness, provider, selectPrefix = 'af') {
+  const modelInput = document.getElementById(`${selectPrefix}-model`);
+  const backend = runtimeRef(harness, provider || null);
+  if (modelInput) modelInput.placeholder = backendModelHint(backend);
+  populateModelPicker(`${selectPrefix}-model-picker`, `${selectPrefix}-model`, backend);
 }
 
 function selectedRuntime(selectPrefix = 'af') {
   const harness = document.getElementById(`${selectPrefix}-harness`)?.value || '';
   const provider = document.getElementById(`${selectPrefix}-provider`)?.value || null;
   ensureRuntimeMetadata(harness, provider);
-  return { harness, provider, backend: runtimeRef(harness, provider) };
+  return { harness, provider };
 }
 
 function refreshRuntimeMetadata(health) {
-  const backends = health?.backends || health || {};
-  _backendMetadata = backends || {};
+  _backendMetadata = {};
   _providerMetadata = health?.providers || {};
   _harnessMetadata = {};
-  for (const h of (health?.harnesses || fallbackHarnessesFromBackends(backends))) {
+  for (const h of (health?.harnesses || [])) {
     _harnessMetadata[h.id] = h;
   }
 
@@ -6723,8 +6736,8 @@ function refreshRuntimeMetadata(health) {
     harnessSelect.innerHTML = harnessIds
       .map(id => `<option value="${escapeHtml(id)}">${escapeHtml(_harnessMetadata[id].label || id)}</option>`).join('');
     if (_harnessMetadata[previous]) harnessSelect.value = previous;
-    setProviderOptions(harnessSelect.value);
-    populateModelPicker('af-model-picker', 'af-model', selectedRuntime().backend);
+    const provider = setProviderOptions(harnessSelect.value);
+    syncAgentModelControls(harnessSelect.value, provider);
   }
   refreshAgentSlugColors();
 }
@@ -6969,7 +6982,8 @@ async function loadAgents() {
     btn.addEventListener('click', () => {
       document.getElementById('af-name').value    = btn.dataset.name;
       document.getElementById('af-harness').value = btn.dataset.harness;
-      setProviderOptions(btn.dataset.harness, btn.dataset.provider || null);
+      const provider = setProviderOptions(btn.dataset.harness, btn.dataset.provider || null);
+      syncAgentModelControls(btn.dataset.harness, provider);
       document.getElementById('af-model').value   = btn.dataset.model;
       document.getElementById('af-cwd').value     = btn.dataset.cwd;
       document.getElementById('agent-form').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -6990,15 +7004,12 @@ function initAliases() {
   const statusEl = document.getElementById('agent-form-status');
   const afHarness = document.getElementById('af-harness');
   const afProvider = document.getElementById('af-provider');
-  const afModel   = document.getElementById('af-model');
   afHarness.addEventListener('change', () => {
-    setProviderOptions(afHarness.value);
-    afModel.placeholder = backendModelHint(selectedRuntime().backend);
-    populateModelPicker('af-model-picker', 'af-model', selectedRuntime().backend);
+    const provider = setProviderOptions(afHarness.value);
+    syncAgentModelControls(afHarness.value, provider);
   });
   afProvider.addEventListener('change', () => {
-    afModel.placeholder = backendModelHint(selectedRuntime().backend);
-    populateModelPicker('af-model-picker', 'af-model', selectedRuntime().backend);
+    syncAgentModelControls(afHarness.value, afProvider.value || null);
   });
   document.getElementById('config-editor-reload').addEventListener('click', loadConfigYaml);
   document.getElementById('config-editor-save').addEventListener('click', saveConfigYaml);
@@ -7016,8 +7027,8 @@ function initAliases() {
     // Warn if key attributes changed on an existing agent with active sessions
     const existing = (_agentsCache || []).find(a => a.name === body.name);
     if (existing) {
-      const existingRef = agentBackendRef(existing);
-      const keyChanged = existingRef !== body.backend ||
+      const keyChanged = (existing.harness || '') !== body.harness ||
+                         (existing.provider || null) !== body.provider ||
                          (existing.model || null) !== body.model ||
                          (existing.cwd || null) !== body.cwd;
       if (keyChanged) {
@@ -7571,8 +7582,9 @@ async function showBootBanner() {
     const res = await fetch('/health');
     if (!res.ok) return;
     const data = await res.json();
-    _backendMetadata = data.backends || {};
     _providerMetadata = data.providers || {};
+    _harnessMetadata = {};
+    for (const h of (data.harnesses || [])) _harnessMetadata[h.id] = h;
     await updateActiveQuotaGauge();
     if (activeQuotaBackend) fetchQuotaForBackend(activeQuotaBackend);
     const bootTime = data.boot_time ? fmtTime(data.boot_time) : '';
@@ -7583,8 +7595,7 @@ async function showBootBanner() {
       (!navigator.onLine ? `<div class="boot-offline">no internet — LLM calls will fail</div>` : '');
     messages.appendChild(el);
 
-    const backends = data.backends || {};
-    const anyAvailable = Object.values(backends).some(b => b.available);
+    const anyAvailable = (data.harnesses || []).some(h => h.installed);
     if (!anyAvailable) {
       const setup = document.createElement('div');
       setup.className = 'no-agent-setup';

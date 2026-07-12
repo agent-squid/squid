@@ -1,8 +1,8 @@
 # Adding a Coded Driver Checklist
 
 Use this when adding a genuinely new CLI protocol adapter. If the target can
-run through an existing driver with different endpoint, credentials, args, or
-model, add a backend in `squid.yaml` instead.
+run through an existing harness with a different endpoint, credentials, args,
+or model, add a provider in `squid.yaml` instead.
 
 ## Recon
 
@@ -10,8 +10,8 @@ model, add a backend in `squid.yaml` instead.
 - Verify one-shot command shape, structured output mode, and resumed-session
   flags.
 - Check how model/provider selection works. If the CLI supports `--provider`
-  and `--model` flags, plan to map `backend.provider` and `backend.model` to
-  those in the runner.
+  and `--model` flags, plan to map resolved provider/model values to those in
+  the runner.
 - Distinguish provider/model selection from gauge selection. Gauges measure
   product quotas (e.g. Claude.ai, Codex/ChatGPT), not API provider usage.
   Default to `type: static` unless the CLI exposes a native quota/balance API.
@@ -23,24 +23,25 @@ model, add a backend in `squid.yaml` instead.
 ## Runtime Wiring
 
 - Add CLI executable/path constants in `agent/config.py`.
-- Add driver support in `agent/backends.py`:
-  - `SUPPORTED_DRIVERS`
-  - `SUPPORTED_PROTOCOLS_BY_DRIVER`
-  - `DEFAULT_PROTOCOL_BY_DRIVER`
-  - `_DRIVER_PATHS`
-  - `_DEFAULT_BACKENDS`
-- Add driver-specific `execution_env()` or `driver_settings()` translation only
-  if canonical `api_key`, `base_url`, or provider fields are supported.
+- Add harness support in `agent/harnesses.py`:
+  - `SUPPORTED_HARNESSES`
+  - `SUPPORTED_PROTOCOLS_BY_HARNESS`
+  - `_DEFAULT_PROTOCOL_BY_HARNESS`
+  - `_HARNESS_PATHS`
+  - `_DEFAULT_PROVIDER_BY_HARNESS`
+- Add provider-to-harness translation in `agent/resolve.py` only if canonical
+  `api_key`, `base_url`, or provider fields need harness-specific wiring.
 - Implement the runner in `agent/runners.py`.
-- Register it in `RUNNER_NAMES_BY_DRIVER` and
-  `RUNNER_NAMES_BY_DRIVER_PROTOCOL`.
+- Register it in `RUNNER_NAMES_BY_HARNESS` and
+  `RUNNER_NAMES_BY_HARNESS_PROTOCOL`.
 
 ## Runner Contract
 
 - Build fresh and resumed commands explicitly.
 - Use `_build_prompt(prompt, history)` for fresh one-shot turns.
 - For resumed turns, pass only the new prompt to the native resume/session flag.
-- Pass `backend_args`, `model`, `backend_env`, and `prompt_preview`.
+- Pass `backend_args`, `model`, `backend_env`, and `prompt_preview` through the
+  existing runner contract.
 - Emit normalized chunks:
   - final response text as strings
   - progress as `{"_status": text}`
@@ -53,36 +54,32 @@ model, add a backend in `squid.yaml` instead.
 
 ## Seeding and Docs
 
-- Pick a brand-aligned color for the backend and set it in `agent/backends.py`
-  (the `COLOR` or `_DEFAULT_BACKENDS` entry). Use the CLI's official logo color;
-  avoid placeholder shades.
-- Add the backend to `config/squid.yaml.example` so fresh installs see it. Add
-  commented-out alternative examples if the CLI supports multiple
-  providers/models (e.g. `pi-openai` with `provider: openai`).
-- Confirm `stats_db.init_db()` seeds the default agent row when the backend is
+- Pick brand-aligned colors for any new providers in `config/squid.yaml.example`.
+- Add provider examples if the CLI supports multiple providers/models.
+- Confirm `stats_db.init_db()` seeds the default agent row when the harness is
   available. The generic seed row is:
-  `(name=backend_id, backend=backend_id, model=backend.model, cwd=NULL)`.
+  `(name=harness_id, harness=harness_id, provider=default_provider, model=default_model, cwd=NULL)`.
 - Add CLI detection and install guidance in `bin/install.sh`.
-- Update README supported CLI/backend lists and examples.
-- Update relevant ADR references if they enumerate supported drivers.
+- Update README supported CLI/provider lists and examples.
+- Update relevant ADR references if they enumerate supported harnesses.
 
 Existing `~/.squid/squid.yaml` files are not automatically rewritten. Users with
-older configs need to add the backend block manually or regenerate their config.
+older configs need to add provider settings manually or regenerate their config.
 
 ## Tests
 
-- Backend validation:
+- Harness/provider validation:
   - default protocol
   - unsupported protocols rejected
-  - public backend fields
+  - public harness/provider fields
   - availability/missing requirements where relevant
 - Runner selection:
-  - `runner_for_driver`
-  - `runner_for_backend`
+  - `runner_for_harness`
+  - `runner_for_agent`
   - adhoc behavior if the driver has interactive protocols
 - Runner parsing:
   - fresh and resumed command shape
-  - provider/model CLI flags passed through from backend config
+  - provider/model CLI flags passed through from resolved provider config
   - final text
   - status/progress
   - tool events
@@ -94,11 +91,12 @@ older configs need to add the backend block manually or regenerate their config.
 
 ## Verification
 
-- Run focused Python tests for backend and runner changes.
+- Run focused Python tests for harness/provider and runner changes.
 - Run the full Python suite when DB seeding or shared execution paths change.
 - Run `bash -n` for touched shell scripts.
 - Run a real CLI smoke:
   - final-answer no-tool turn
   - resumed-session continuity
   - harmless tool call
-- Verify a fresh-home config exposes the backend through `public_backends()`.
+- Verify a fresh-home config exposes the harness through `list_harnesses()` and
+  provider through `public_providers()`.
