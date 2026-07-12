@@ -10,17 +10,7 @@
 ```
 ## Quick Start
 
-```bash
-curl -L https://github.com/agent-squid/squid/archive/refs/tags/v0.1.tar.gz | tar xz
-./squid-0.1/bin/start.sh 
-```
-
-Open in your browser:
-```text
-http://127.0.0.1:8000
-```
-
-Install at least one supported CLI:
+1. Install at least one supported CLI and check whether you can use it (/login):
 
 | Backend | CLI | Install |
 |---|---|---|
@@ -30,9 +20,21 @@ Install at least one supported CLI:
 | OpenCode | `opencode` | `curl -fsSL https://opencode.ai/install \| bash` |
 | Pi | `pi` | `curl -fsSL https://pi.dev/install.sh \| sh` |
 
+2. Install and run AgentSquid!
+
+```bash
+curl -L https://github.com/agent-squid/squid/archive/refs/tags/v0.1.tar.gz | tar xz
+./squid-0.1/bin/start.sh 
+```
+
+3. Open in your browser:
+```text
+http://127.0.0.1:8000
+```
+
 Create agents in the UI. An agent is a named config:
 ```text
-name + backend + model + working directory
+agent name (@agent) = harness (Claude Code) + provider (Claude) + model (claude-sonnet-5) + working directory
 ```
 
 ## The Squid Manifesto: EVERY. TOKEN. COUNTS!
