@@ -47,13 +47,16 @@ from .config import (
     _USER_CONFIG, _cfg,
     config_revision, config_text, write_config_text,
 )
-from .backends import BACKENDS, _validate_backend, get_backend, public_backends
+from .harnesses import SUPPORTED_HARNESSES, _validate_harness_config, list_harnesses
+from .providers import Provider, _validate_provider, get_provider, public_providers, require_provider
+from .resolve import agent_ref_for_storage, resolve_agent, split_agent_ref
 from .runners import list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic
 from .history import list_history, list_history_by_ids
 from .topic_queue import TopicDispatcher
 from .context_sync import sync_now, maybe_sync
 from .topics import normalize_topic_slug
 from .memory import (
+    _split_frontmatter,
     code_roots_prompt_block,
     read_topic_memory,
     topic_memory_path,
@@ -140,23 +143,17 @@ def _claude_logged_in() -> bool:
 
 def _check_deps():
     missing, warnings = [], []
-    configured_drivers = {backend.driver for backend in BACKENDS.values()}
-    if "claude" in configured_drivers and not CLAUDE_PATH:
-        missing.append("claude        →  curl -fsSL https://claude.ai/install.sh | bash")
-    elif "claude" in BACKENDS and not _claude_logged_in():
-        warnings.append("claude is installed but not logged in  →  run: claude login")
-    if "codex" in configured_drivers and not CODEX_PATH:
-        missing.append("codex         →  curl -fsSL https://chatgpt.com/codex/install.sh | sh")
-    if "cursor" in configured_drivers and not CURSOR_PATH:
-        missing.append("cursor-agent  →  curl -fsS https://cursor.com/install | bash")
-    if "opencode" in configured_drivers and not OPENCODE_PATH:
-        missing.append("opencode      →  curl -fsSL https://opencode.ai/install | bash")
+    for harness in list_harnesses():
+        if not harness["installed"]:
+            missing.append(f"{harness['id']:<12}  →  {harness['install_cmd']}")
+        elif harness["id"] == "claudecode" and not _claude_logged_in():
+            warnings.append("claudecode is installed but not logged in  →  run: claude login")
     if missing:
         log.warning("Missing CLI tools:\n  " + "\n  ".join(missing))
     if warnings:
         log.warning("Auth issues:\n  " + "\n  ".join(warnings))
     if not missing and not warnings:
-        log.info("claude=%s  codex=%s  cursor=%s  opencode=%s", CLAUDE_PATH, CODEX_PATH, CURSOR_PATH, OPENCODE_PATH)
+        log.info("all harnesses installed: %s", ", ".join(sorted(SUPPORTED_HARNESSES)))
 
 
 def _backend_native_chat_command_name(message: str) -> str:
@@ -171,17 +168,36 @@ def _is_backend_native_chat_command(message: str) -> bool:
     return bool(command_name and command_name not in _SQUID_CHAT_COMMANDS)
 
 
-def _migrate_legacy_deepseek_agent():
-    """Rename the old DeepSeek agent/backend id from deepcla to deepseek."""
-    existing = get_agent("deepcla")
-    backend = get_backend("deepseek")
-    if backend and existing:
-        upsert_agent("deepseek", "deepseek", existing.get("model") or backend.model or "deepseek-chat", existing.get("cwd"))
-        delete_agent("deepcla")
-        log.info("migrated agent: deepcla -> deepseek")
+def _resolve_agent_runtime(agent_config: dict) -> tuple[str, Optional[str], str, object]:
+    backend_ref = agent_config.get("backend")
+    harness, provider = split_agent_ref(agent_config.get("harness") or backend_ref, agent_config.get("provider"))
+    resolved = resolve_agent(harness, provider)
+    return harness, provider, backend_ref or agent_ref_for_storage(harness, provider), resolved
+
+
+def _public_agent_config(agent_config: dict) -> dict:
+    item = dict(agent_config)
+    try:
+        harness, provider, backend_ref, resolved = _resolve_agent_runtime(item)
+        item.update({
+            "harness": harness,
+            "provider": provider,
+            "backend": agent_ref_for_storage(harness, provider),
+            "runtime": backend_ref,
+            "color": resolved.color,
+            "provider_color": resolved.provider.color,
+            "provider_label": resolved.provider.label,
+        })
+    except Exception:
+        pass
+    return item
+
+
+def _public_agent_map() -> dict:
+    return {agent["name"]: agent for agent in (_public_agent_config(a) for a in list_agents()) if agent.get("name")}
+
 
 _check_deps()
-_migrate_legacy_deepseek_agent()
 sync_now()
 
 app = FastAPI(title="Squid", version="0.1.0")
@@ -233,7 +249,9 @@ class TopicHiddenRequest(BaseModel):
 
 class AgentRequest(BaseModel):
     name: str = Field(..., min_length=1)
-    backend: str = "auto"
+    backend: Optional[str] = None
+    harness: Optional[str] = None
+    provider: Optional[str] = None
     model: Optional[str] = None
     cwd: Optional[str] = None
 
@@ -343,12 +361,14 @@ def _validate_config_content(content: str) -> dict:
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"agent.{field} must be a positive integer")
 
-    backends = parsed.get("backends")
-    if backends is not None:
-        if not isinstance(backends, dict) or not backends:
-            raise ValueError("backends must be a non-empty mapping")
-        for backend_id, raw in backends.items():
-            _validate_backend(backend_id, raw)
+    _validate_harness_config(parsed.get("harnesses"))
+
+    providers = parsed.get("providers")
+    if providers is not None:
+        if not isinstance(providers, dict) or not providers:
+            raise ValueError("providers must be a non-empty mapping")
+        for provider_id, raw in providers.items():
+            _validate_provider(provider_id, raw)
     return parsed
 
 
@@ -548,13 +568,17 @@ async def stream_response(
     code_roots: Optional[list[str]] = None,
     display_prompt: Optional[str] = None,
     source_cwd: Optional[str] = None,
+    harness: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     yield sse_event("meta", json.dumps({"agent": agent, "backend": backend, "model": model, "msg_id": asst_msg_id, "adhoc": adhoc}))
 
     effective_cwd = cwd or SQUID_HOME
+    dispatch_harness, dispatch_provider = split_agent_ref(harness or backend, provider)
     out_q, seq, worker = await dispatcher.dispatch(
         topic=topic, prompt=message, context_history=context_history,
-        backend=backend, model=model, agent=agent, cwd=effective_cwd,
+        harness=dispatch_harness, provider=dispatch_provider,
+        model=model, agent=agent, cwd=effective_cwd,
         source_cwd=source_cwd,
         response_timeout=response_timeout,
         resume_session_id=resume_session_id,
@@ -691,12 +715,15 @@ async def chat(req: ChatRequest):
                 resolved_agent = default["name"]
                 agent_config = default
 
-    backend = agent_config.get("backend") or "claude"
+    try:
+        harness, provider, backend, resolved_runtime = _resolve_agent_runtime(agent_config)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     model: Optional[str] = agent_config.get("model") or None
     native_backend_command = _is_backend_native_chat_command(req.message)
 
     upsert_topic(topic, resolved_agent, last_prompt=req.message,
-                 last_backend=backend, last_model=model, adhoc=req.adhoc)
+                 last_harness=harness, last_provider=provider, last_model=model, adhoc=req.adhoc)
     agent_cwd: Optional[str] = agent_config.get("cwd") or None
     response_timeout: int = RESPONSE_TIMEOUT
 
@@ -707,11 +734,10 @@ async def chat(req: ChatRequest):
     if not req.adhoc and resolved_agent:
         stored = get_topic_session(topic, resolved_agent)
         if stored:
-            backend_definition = get_backend(backend)
-            stored_fingerprint = stored.get("backend_fingerprint")
-            if backend_definition and stored_fingerprint and stored_fingerprint != backend_definition.fingerprint:
+            stored_fingerprint = stored.get("runtime_fingerprint")
+            if stored_fingerprint and stored_fingerprint != resolved_runtime.fingerprint:
                 clear_topic_session(topic, resolved_agent)
-                log.info("cleared session after backend config change: topic=%s agent=%s backend=%s", topic, resolved_agent, backend)
+                log.info("cleared session after agent runtime change: topic=%s agent=%s backend=%s", topic, resolved_agent, backend)
             else:
                 resume_session_id = stored["session_id"]
                 cwd = stored["cwd"]
@@ -815,6 +841,8 @@ async def chat(req: ChatRequest):
             code_roots=tracking_roots,
             display_prompt=req.message,
             source_cwd=source_cwd,
+            harness=harness,
+            provider=provider,
         ),
         media_type="text/event-stream",
         headers={
@@ -904,33 +932,56 @@ async def queued():
     return JSONResponse(dispatcher.all_queued_items())
 
 
+def _gauge_authed(gauge_type: str, provider: Provider) -> Optional[bool]:
+    """Whether the account behind a gauge is authenticated — a provider fact
+    (credentials/API key), never a harness one (ADR-0028)."""
+    if gauge_type == "claude":
+        return bool(creds.get_org_id() and creds.get_session_key())
+    if gauge_type == "codex":
+        return bool(creds.get_codex_token())
+    if gauge_type == "cursor":
+        return bool(creds.get_cursor_token())
+    if gauge_type == "deepseek":
+        try:
+            return bool(provider.resolved_api_key())
+        except ValueError:
+            return False
+    if gauge_type == "static":
+        return True
+    return None
+
+
 @app.get("/health")
 async def health():
-    backends = public_backends()
-    for backend_id, info in backends.items():
-        backend = get_backend(backend_id)
-        gauge_type = backend.gauge.type if backend else "none"
-        if gauge_type == "claude":
-            gauge_authed = bool(creds.get_org_id() and creds.get_session_key())
-        elif gauge_type == "codex":
-            gauge_authed = bool(creds.get_codex_token())
-        elif gauge_type == "cursor":
-            gauge_authed = bool(creds.get_cursor_token())
-        elif gauge_type == "deepseek":
-            try:
-                gauge_authed = bool(backend and backend.resolved_api_key())
-            except ValueError:
-                gauge_authed = False
-        elif gauge_type == "static":
-            gauge_authed = True
-        else:
-            gauge_authed = None
-        info["gauge_authed"] = gauge_authed
+    providers = public_providers()
+    for provider_id, info in providers.items():
+        info["gauge_authed"] = _gauge_authed(info["gauge"]["type"], require_provider(provider_id))
+
+    backend_aliases = {
+        "claude": ("claudecode", "anthropic"),
+        "codex": ("codex", "openai"),
+        "cursor": ("cursor", "cursor"),
+        "opencode": ("opencode", "opencode"),
+        "pi": ("pi", "nvidia"),
+    }
+    backends = {}
+    for backend_id, (harness, provider_id) in backend_aliases.items():
+        try:
+            resolved = resolve_agent(harness, provider_id)
+        except ValueError:
+            continue
+        info = resolved.public_dict()
+        info["driver"] = "claude" if harness == "claudecode" else harness
+        info["provider"] = resolved.provider.id
+        info["gauge_authed"] = providers.get(resolved.provider.id, {}).get("gauge_authed")
+        backends[backend_id] = info
     return JSONResponse({
         "status": "ok",
         "boot_time": BOOT_TIME,
         "squid_home": SQUID_HOME,
         "backends": backends,
+        "harnesses": list_harnesses(),
+        "providers": providers,
     })
 
 
@@ -975,7 +1026,7 @@ async def search(q: str, limit: int = 100, topic: Optional[str] = None,
 @app.get("/prompts/recent")
 async def prompts_recent(limit: int = 50):
     limit = min(limit, 200)
-    return JSONResponse({"items": get_recent_prompts(limit=limit)})
+    return JSONResponse({"items": get_recent_prompts(limit=limit), "agents": _public_agent_map()})
 
 
 @app.get("/chat/{msg_id}/status")
@@ -1272,19 +1323,20 @@ async def get_localfile_roots(request: Request):
 
 @app.get("/config/agents")
 async def get_agents():
-    return JSONResponse(list_agents())
+    return JSONResponse([_public_agent_config(agent) for agent in list_agents()])
 
 
 @app.post("/config/agents")
 async def create_agent(req: AgentRequest):
-    backend_id = req.backend
-    if backend_id == "auto":
-        backend_id = req.name if req.name in BACKENDS else next(
-            (name for name, backend in BACKENDS.items() if backend.available), ""
-        )
-    if not get_backend(backend_id):
-        return JSONResponse({"error": f"Backend {backend_id!r} is not configured"}, status_code=400)
-    key_changed = upsert_agent(req.name, backend_id, req.model, req.cwd)
+    if req.harness:
+        harness, provider = req.harness, req.provider
+    else:
+        harness, provider = split_agent_ref(req.backend or req.name, req.provider)
+    try:
+        resolve_agent(harness, provider)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    key_changed = upsert_agent(req.name, harness, provider, req.model, req.cwd)
     sessions_cleared = clear_agent_sessions(req.name) if key_changed else []
     return JSONResponse({"ok": True, "sessions_cleared": sessions_cleared})
 
@@ -1609,9 +1661,9 @@ async def quota_cursor():
 
 @app.get("/quota/deepseek")
 async def quota_deepseek():
-    backend = get_backend("deepseek")
+    provider = get_provider("deepseek")
     try:
-        deepseek_key = (backend.resolved_api_key() if backend else None)
+        deepseek_key = provider.resolved_api_key() if provider else None
     except ValueError:
         deepseek_key = None
     if not deepseek_key:
@@ -1654,13 +1706,10 @@ def _json_response_data(response: JSONResponse) -> dict:
         return {}
 
 
-@app.get("/quota/backend/{backend_id}")
-async def quota_backend(backend_id: str):
-    """Return a normalized gauge snapshot for one configured backend."""
-    backend = get_backend(backend_id)
-    if backend is None:
-        return JSONResponse({"error": "backend not configured"}, status_code=404)
-    gauge = backend.gauge
+async def _quota_snapshot_for_provider(provider: Provider, ref: str) -> JSONResponse:
+    """Return a normalized gauge snapshot for one provider. Quota is a provider
+    attribute (ADR-0028) — this never needs to know which harness is using it."""
+    gauge = provider.gauge
     if gauge.type == "none":
         return JSONResponse({"status": "none"})
     if gauge.type == "static":
@@ -1671,7 +1720,7 @@ async def quota_backend(backend_id: str):
 
     if gauge.type == "deepseek":
         try:
-            api_key = backend.resolved_api_key()
+            api_key = provider.resolved_api_key()
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         if not api_key:
@@ -1687,7 +1736,7 @@ async def quota_backend(backend_id: str):
                 return JSONResponse({"error": f"DeepSeek returned {response.status_code}"}, status_code=502)
             data = response.json()
         except Exception as exc:
-            log.error("deepseek balance fetch failed for %s: %s", backend_id, exc)
+            log.error("deepseek balance fetch failed for %s: %s", ref, exc)
             return JSONResponse({"error": str(exc)}, status_code=502)
         balances = data.get("balance_infos") or []
         info = next((item for item in balances if item.get("currency") == "USD"), None)
@@ -1762,6 +1811,27 @@ async def quota_backend(backend_id: str):
         "raw": used, "used_percent": used, "reset_at": data.get("billingCycleEnd"),
         "title": data.get("autoModelSelectedDisplayMessage") or "Cursor usage",
     })
+
+
+@app.get("/quota/backend/{backend_id}")
+async def quota_backend(backend_id: str):
+    """Return a normalized gauge snapshot for one configured (harness, provider) pair."""
+    harness, provider_id = split_agent_ref(backend_id)
+    try:
+        resolved = resolve_agent(harness, provider_id)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    return await _quota_snapshot_for_provider(resolved.provider, backend_id)
+
+
+@app.get("/quota/provider/{provider_id}")
+async def quota_provider(provider_id: str):
+    """Return a normalized gauge snapshot for one configured provider, with no
+    harness involved — quota is an account fact, not tied to any particular CLI."""
+    provider = get_provider(provider_id)
+    if provider is None:
+        return JSONResponse({"error": f"Unknown provider {provider_id!r}"}, status_code=404)
+    return await _quota_snapshot_for_provider(provider, provider_id)
 
 
 @app.get("/journals/{topic}")
@@ -1861,12 +1931,14 @@ async def serve_local_file(path: str, request: Request, render: bool = False):
     if not p.is_file():
         return JSONResponse({"error": "not a file"}, status_code=400)
     if render and p.suffix.lower() in (".md", ".markdown"):
-        md_content = p.read_text(errors="replace").replace("`", "&#96;").replace("</", "<\\/")
+        raw_content = p.read_text(errors="replace")
+        _frontmatter, markdown_body = _split_frontmatter(raw_content)
+        md_content = json.dumps(markdown_body).replace("</", "<\\/")
         html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <style>body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:860px;margin:40px auto;padding:0 20px;line-height:1.6;color:#24292e}}pre{{background:#f6f8fa;padding:16px;border-radius:6px;overflow:auto}}code{{background:#f6f8fa;padding:.2em .4em;border-radius:3px}}a{{color:#0366d6}}</style>
 </head><body><div id="out"></div>
 <script src="/vendor/marked.min.js"></script>
-<script>document.getElementById('out').innerHTML=marked.parse(`{md_content}`);</script>
+<script>marked.setOptions({{gfm:true,breaks:true}});document.getElementById('out').innerHTML=marked.parse({md_content});</script>
 </body></html>"""
         return HTMLResponse(html, headers=_nocache)
     mime = _LOCALFILE_TEXT_MIME_BY_SUFFIX.get(p.suffix.lower())

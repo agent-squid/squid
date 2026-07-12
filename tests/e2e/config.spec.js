@@ -140,19 +140,21 @@ test('configuration editor shows backend validation errors prominently', async (
   await expect(status).toHaveCSS('border-top-color', 'rgb(255, 77, 77)');
 });
 
-test('agents backend catalog marks unkeyed DeepSeek as unavailable', async ({ page }) => {
+test('agents provider catalog marks unkeyed DeepSeek as unavailable', async ({ page }) => {
   await mockApp(page);
   await page.route('**/health', r => r.fulfill({ json: {
     status: 'ok',
-    backends: {
+    harnesses: [
+      { id: 'claudecode', label: 'Claude Code', protocol: 'interactive-cli', installed: true, default_provider: 'deepseek', compatible_providers: ['deepseek'] },
+    ],
+    providers: {
       deepseek: {
-        driver: 'claude',
-        kind: 'provider',
         label: 'DeepSeek',
-        available: false,
-        missing_requirements: ['api_key'],
+        color: '#4D6BFF',
+        auth_type: 'api_key',
+        missing_secrets: ['api_key'],
         gauge: { type: 'deepseek' },
-        gauge_authed: false,
+        models: [],
       },
     },
   }}));
@@ -160,27 +162,28 @@ test('agents backend catalog marks unkeyed DeepSeek as unavailable', async ({ pa
   await page.goto('/');
   await page.locator('.nav-tab[data-view="agents"]').click();
 
-  const row = page.locator('#backends-catalog .bcat-row').filter({ hasText: 'DeepSeek' });
+  const row = page.locator('#providers-catalog .bcat-row').filter({ hasText: 'DeepSeek' });
   await expect(row).toBeVisible();
-  await expect(row).toContainText('configure DeepSeek API key in backend YAML');
+  await expect(row).toContainText('missing: api_key');
   await expect(row).not.toContainText('curl -fsSL');
-  await expect(row).not.toContainText('detected');
+  await expect(row).not.toContainText('installed');
 });
 
-test('agents backend catalog marks configured provider backends as ready', async ({ page }) => {
+test('agents provider catalog marks configured API-key providers as ready', async ({ page }) => {
   await mockApp(page);
   await page.route('**/health', r => r.fulfill({ json: {
     status: 'ok',
-    backends: {
+    harnesses: [
+      { id: 'codex', label: 'Codex', protocol: 'oneshot-cli', installed: true, default_provider: 'qwen', compatible_providers: ['qwen'] },
+    ],
+    providers: {
       qwen: {
-        driver: 'codex',
-        kind: 'provider',
         label: 'Qwen',
-        available: true,
-        protocol: 'oneshot-cli',
-        missing_requirements: [],
+        color: '#7070A0',
+        auth_type: 'api_key',
+        missing_secrets: [],
         gauge: { type: 'static', text: 'Local' },
-        gauge_authed: true,
+        models: [],
       },
     },
   }}));
@@ -188,27 +191,28 @@ test('agents backend catalog marks configured provider backends as ready', async
   await page.goto('/');
   await page.locator('.nav-tab[data-view="agents"]').click();
 
-  const row = page.locator('#backends-catalog .bcat-row').filter({ hasText: 'Qwen' });
+  const row = page.locator('#providers-catalog .bcat-row').filter({ hasText: 'Qwen' });
   await expect(row).toBeVisible();
-  await expect(row).toContainText('ready');
-  await expect(row).toContainText('configured in YAML');
-  await expect(row).toContainText('protocol: oneshot-cli');
-  await expect(row).not.toContainText('detected');
+  await expect(row).toContainText('API key configured');
+  await expect(row).toContainText('Local');
+  await expect(row).not.toContainText('missing');
 });
 
-test('agents backend catalog treats keyed DeepSeek as ready without Claude auth hint', async ({ page }) => {
+test('agents provider catalog treats keyed DeepSeek as ready without Claude auth hint', async ({ page }) => {
   await mockApp(page);
   await page.route('**/health', r => r.fulfill({ json: {
     status: 'ok',
-    backends: {
+    harnesses: [
+      { id: 'claudecode', label: 'Claude Code', protocol: 'interactive-cli', installed: true, default_provider: 'deepseek', compatible_providers: ['deepseek'] },
+    ],
+    providers: {
       deepseek: {
-        driver: 'claude',
         label: 'DeepSeek',
-        available: true,
-        missing_requirements: [],
-        provider: 'deepseek',
+        color: '#4D6BFF',
+        auth_type: 'api_key',
+        missing_secrets: [],
         gauge: { type: 'deepseek' },
-        gauge_authed: true,
+        models: [],
       },
     },
   }}));
@@ -216,27 +220,93 @@ test('agents backend catalog treats keyed DeepSeek as ready without Claude auth 
   await page.goto('/');
   await page.locator('.nav-tab[data-view="agents"]').click();
 
-  const row = page.locator('#backends-catalog .bcat-row').filter({ hasText: 'DeepSeek' });
+  const row = page.locator('#providers-catalog .bcat-row').filter({ hasText: 'DeepSeek' });
   await expect(row).toBeVisible();
-  await expect(row).toContainText('ready');
-  await expect(row).toContainText('DeepSeek API key configured');
-  await expect(row).toContainText('gauge ✓');
+  await expect(row).toContainText('API key configured');
+  await expect(row).toContainText('uses this backend API key');
   await expect(row).not.toContainText('run claude to authenticate');
-  await expect(row).not.toContainText('detected');
+  await expect(row).not.toContainText('installed');
+});
+
+test('agents provider catalog points Claude and Codex gauges to auto-detect', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/health', r => r.fulfill({ json: {
+    status: 'ok',
+    harnesses: [
+      { id: 'claudecode', label: 'Claude Code', protocol: 'interactive-cli', installed: true, default_provider: 'anthropic', compatible_providers: ['anthropic'] },
+      { id: 'codex', label: 'Codex', protocol: 'oneshot-cli', installed: true, default_provider: 'openai', compatible_providers: ['openai'] },
+    ],
+    providers: {
+      anthropic: { label: 'Claude', color: '#AE5332', auth_type: 'subscription', missing_secrets: [], gauge: { type: 'claude' }, models: [] },
+      openai: { label: 'GPT', color: '#7070A0', auth_type: 'subscription', missing_secrets: [], gauge: { type: 'codex' }, models: [] },
+    },
+    backends: {},
+  }}));
+
+  await page.goto('/');
+  await page.locator('.nav-tab[data-view="agents"]').click();
+
+  await expect(page.locator('#providers-catalog .bcat-row').filter({ hasText: 'Claude' })).toContainText('click gauge in header -> Detect');
+  await expect(page.locator('#providers-catalog .bcat-row').filter({ hasText: 'GPT' })).toContainText('click gauge in header -> Detect');
+  await expect(page.locator('#providers-catalog')).not.toContainText('paste org ID');
+  await expect(page.locator('#providers-catalog')).not.toContainText('bookmarklet');
+});
+
+test('agents harness and provider catalogs and dropdown are sorted alphabetically', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/health', r => r.fulfill({ json: {
+    status: 'ok',
+    harnesses: [
+      { id: 'pi', label: 'Pi', protocol: 'oneshot-cli', installed: true, default_provider: 'nim', compatible_providers: ['nim'] },
+      { id: 'claudecode', label: 'Claude Code', protocol: 'interactive-cli', installed: true, default_provider: 'anthropic', compatible_providers: ['anthropic'] },
+      { id: 'codex', label: 'Codex', protocol: 'oneshot-cli', installed: true, default_provider: 'openai', compatible_providers: ['openai'] },
+    ],
+    providers: {
+      nim: { label: 'NIM', color: '#76B900', gauge: { type: 'none' }, models: [] },
+      anthropic: { label: 'Claude', color: '#AE5332', gauge: { type: 'claude' }, models: [] },
+      openai: { label: 'GPT', color: '#7070A0', gauge: { type: 'codex' }, models: [] },
+    },
+    backends: {
+      pi:     { driver: 'pi',     label: 'Pi',     available: true, protocol: 'oneshot-cli', missing_requirements: [], gauge: { type: 'static', text: 'Pi-managed' } },
+      claude: { driver: 'claude', label: 'Claude', available: true, protocol: 'interactive-cli', missing_requirements: [], gauge: { type: 'none' } },
+      codex:  { driver: 'codex',  label: 'Codex',  available: true, protocol: 'oneshot-cli', missing_requirements: [], gauge: { type: 'none' } },
+    },
+  }}));
+
+  await page.goto('/');
+  await page.locator('.nav-tab[data-view="agents"]').click();
+
+  const harnessRowLabels = await page.locator('#harnesses-catalog .bcat-name').allTextContents();
+  expect(harnessRowLabels).toEqual(['Claude Code', 'Codex', 'Pi']);
+  const providerRowLabels = await page.locator('#providers-catalog .bcat-name').allTextContents();
+  expect(providerRowLabels).toEqual(['Claude', 'GPT', 'NIM']);
+
+  const harnessOptions = await page.locator('#af-harness option').allTextContents();
+  expect(harnessOptions).toEqual(['Claude Code', 'Codex', 'Pi']);
+  const providerOptions = await page.locator('#af-provider option').allTextContents();
+  expect(providerOptions).toEqual(['Claude']);
 });
 
 test('edit button prefills agent form with existing agent values', async ({ page }) => {
   await mockApp(page);
   await page.route('**/health', r => r.fulfill({ json: {
     status: 'ok',
+    harnesses: [
+      { id: 'claudecode', label: 'Claude Code', protocol: 'interactive-cli', installed: true, default_provider: 'anthropic', compatible_providers: ['anthropic'] },
+      { id: 'codex', label: 'Codex', protocol: 'oneshot-cli', installed: true, default_provider: 'openai', compatible_providers: ['openai'] },
+    ],
+    providers: {
+      anthropic: { label: 'Claude', color: '#AE5332', gauge: { type: 'claude' }, models: [] },
+      openai: { label: 'GPT', color: '#7070A0', gauge: { type: 'codex' }, models: [] },
+    },
     backends: {
       claude: { driver: 'claude', label: 'Claude', available: true, protocol: 'interactive-cli', missing_requirements: [], gauge: { type: 'none' } },
       codex:  { driver: 'codex',  label: 'Codex',  available: true, protocol: 'oneshot-cli',    missing_requirements: [], gauge: { type: 'none' } },
     },
   }}));
   await page.route('**/config/agents', r => r.fulfill({ json: [
-    { name: 'codex', backend: 'codex', model: null, cwd: null },
-    { name: 'haiku', backend: 'claude', model: 'claude-haiku-4-5', cwd: '/tmp/work' },
+    { name: 'codex', harness: 'codex', provider: 'openai', backend: 'codex:openai', model: null, cwd: null },
+    { name: 'haiku', harness: 'claudecode', provider: 'anthropic', backend: 'claudecode:anthropic', model: 'claude-haiku-4-5', cwd: '/tmp/work' },
   ]}));
 
   await page.goto('/');
@@ -246,9 +316,124 @@ test('edit button prefills agent form with existing agent values', async ({ page
   await row.locator('.edit-btn').click();
 
   await expect(page.locator('#af-name')).toHaveValue('haiku');
-  await expect(page.locator('#af-backend')).toHaveValue('claude');
+  await expect(page.locator('#af-harness')).toHaveValue('claudecode');
+  await expect(page.locator('#af-provider')).toHaveValue('anthropic');
   await expect(page.locator('#af-model')).toHaveValue('claude-haiku-4-5');
   await expect(page.locator('#af-cwd')).toHaveValue('/tmp/work');
+});
+
+test('agent form saves harness and provider fields', async ({ page }) => {
+  await mockApp(page);
+  let saved;
+  await page.route('**/health', r => r.fulfill({ json: {
+    status: 'ok',
+    harnesses: [
+      { id: 'claudecode', label: 'Claude Code', protocol: 'interactive-cli', installed: true, default_provider: 'anthropic', compatible_providers: ['anthropic', 'nim'] },
+    ],
+    providers: {
+      anthropic: { label: 'Claude', color: '#AE5332', gauge: { type: 'claude' }, models: [] },
+      nim: { label: 'NIM', color: '#76B900', gauge: { type: 'none' }, models: [] },
+    },
+    backends: {
+      claude: { driver: 'claude', label: 'Claude', available: true, protocol: 'interactive-cli', missing_requirements: [], gauge: { type: 'none' } },
+    },
+  }}));
+  await page.route('**/config/agents', route => {
+    if (route.request().method() === 'POST') {
+      saved = route.request().postDataJSON();
+      return route.fulfill({ json: { ok: true, sessions_cleared: [] } });
+    }
+    return route.fulfill({ json: [] });
+  });
+
+  await page.goto('/');
+  await page.locator('.nav-tab[data-view="agents"]').click();
+
+  await page.locator('#af-name').fill('nim-agent');
+  await page.locator('#af-harness').selectOption('claudecode');
+  await page.locator('#af-provider').selectOption('nim');
+  await page.locator('#af-model').fill('nvidia/llama');
+  await page.locator('#af-cwd').fill('/tmp/work');
+  await page.locator('#agent-form button[type="submit"]').click();
+
+  expect(saved).toMatchObject({
+    name: 'nim-agent',
+    harness: 'claudecode',
+    provider: 'nim',
+    backend: 'claudecode:nim',
+    model: 'nvidia/llama',
+    cwd: '/tmp/work',
+  });
+  await expect(page.locator('#agent-form-status')).toHaveText('saved ✓');
+});
+
+test('agent form model field suggests provider models but accepts a freeform override', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/health', r => r.fulfill({ json: {
+    status: 'ok',
+    harnesses: [
+      { id: 'claudecode', label: 'Claude Code', protocol: 'interactive-cli', installed: true, default_provider: 'deepseek', compatible_providers: ['anthropic', 'deepseek'] },
+    ],
+    providers: {
+      anthropic: { label: 'Claude', color: '#AE5332', gauge: { type: 'claude' }, models: [] },
+      deepseek: { label: 'DeepSeek', color: '#4D9DE0', gauge: { type: 'deepseek' }, models: ['deepseek-chat', 'deepseek-reasoner'] },
+    },
+    backends: {
+      'claudecode:deepseek': { driver: 'claude', provider: 'deepseek', label: 'DeepSeek', available: true, protocol: 'interactive-cli', missing_requirements: [], gauge: { type: 'deepseek' } },
+    },
+  }}));
+  let saved;
+  await page.route('**/config/agents', route => {
+    if (route.request().method() === 'POST') {
+      saved = route.request().postDataJSON();
+      return route.fulfill({ json: { ok: true, sessions_cleared: [] } });
+    }
+    return route.fulfill({ json: [] });
+  });
+
+  await page.goto('/');
+  await page.locator('.nav-tab[data-view="agents"]').click();
+  await page.locator('#af-harness').selectOption('claudecode');
+  await page.locator('#af-provider').selectOption('deepseek');
+
+  // the models list is a quick-pick <select> that fills the freeform input,
+  // never an enforced choice
+  await expect(page.locator('#af-model-picker')).toBeVisible();
+  const placeholder = page.locator('#af-model-picker option').first();
+  await expect(placeholder).toHaveText('');
+  await expect(placeholder).toHaveAttribute('hidden', '');
+  const suggestions = await page.locator('#af-model-picker option:not([disabled])').evaluateAll(opts => opts.map(o => o.value));
+  expect(suggestions).toEqual(['deepseek-chat', 'deepseek-reasoner']);
+
+  await page.locator('#af-model-picker').selectOption('deepseek-reasoner');
+  await expect(page.locator('#af-model')).toHaveValue('deepseek-reasoner');
+
+  await page.locator('#af-name').fill('deepseek-agent');
+  await page.locator('#af-model').fill('deepseek-v4-pro');
+  await page.locator('#agent-form button[type="submit"]').click();
+
+  expect(saved).toMatchObject({ name: 'deepseek-agent', model: 'deepseek-v4-pro' });
+  await expect(page.locator('#agent-form-status')).toHaveText('saved ✓');
+});
+
+test('agent form model picker hides when the provider has no suggested models', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/health', r => r.fulfill({ json: {
+    status: 'ok',
+    harnesses: [
+      { id: 'claudecode', label: 'Claude Code', protocol: 'interactive-cli', installed: true, default_provider: 'anthropic', compatible_providers: ['anthropic'] },
+    ],
+    providers: {
+      anthropic: { label: 'Claude', color: '#AE5332', gauge: { type: 'claude' }, models: [] },
+    },
+    backends: {
+      claudecode: { driver: 'claude', label: 'Claude', available: true, protocol: 'interactive-cli', missing_requirements: [], gauge: { type: 'none' } },
+    },
+  }}));
+
+  await page.goto('/');
+  await page.locator('.nav-tab[data-view="agents"]').click();
+  await expect(page.locator('#af-model-picker')).toBeHidden();
 });
 
 test('mobile agents list hides cwd while edit still exposes it', async ({ page }) => {
@@ -281,7 +466,7 @@ test('mobile agents list hides cwd while edit still exposes it', async ({ page }
   const saveButton = page.locator('#agent-form button[type="submit"]');
   await expect(saveButton.locator('.agent-save-icon')).toBeVisible();
   await expect(saveButton.locator('.agent-save-label')).toBeHidden();
-  const formBoxes = await page.locator('#af-name, #af-backend, #af-model, #af-cwd, #agent-form button[type="submit"]').evaluateAll(elements =>
+  const formBoxes = await page.locator('#af-name, #af-harness, #af-provider, #af-model, #af-cwd, #agent-form button[type="submit"]').evaluateAll(elements =>
     elements.map(el => el.getBoundingClientRect())
   );
   expect(Math.max(...formBoxes.map(box => box.top)) - Math.min(...formBoxes.map(box => box.top))).toBeLessThan(2);
@@ -292,7 +477,7 @@ test('mobile agents list hides cwd while edit still exposes it', async ({ page }
   await expect(page.locator('#af-model')).toHaveValue(longModel);
 });
 
-test('agents tab separates agents and backends sections with a divider', async ({ page }) => {
+test('agents tab separates agents and runtime catalogs with a divider', async ({ page }) => {
   await mockApp(page);
   await page.goto('/');
   await page.getByRole('button', { name: 'Agents' }).click();
@@ -303,12 +488,12 @@ test('agents tab separates agents and backends sections with a divider', async (
   await expect.poll(() => page.locator('#settings-agents').evaluate(el => {
     const children = Array.from(el.children);
     const divider = el.querySelector('.agents-section-divider');
-    const backendsLabel = Array.from(el.querySelectorAll('.settings-label')).find(label => label.textContent.trim() === 'Backends');
+    const harnessesLabel = Array.from(el.querySelectorAll('.settings-label')).find(label => label.textContent.trim() === 'Harnesses');
     return {
       formBeforeDivider: children.indexOf(document.getElementById('agent-form')) < children.indexOf(divider),
-      dividerBeforeBackends: children.indexOf(divider) < children.indexOf(backendsLabel),
+      dividerBeforeHarnesses: children.indexOf(divider) < children.indexOf(harnessesLabel),
     };
-  })).toEqual({ formBeforeDivider: true, dividerBeforeBackends: true });
+  })).toEqual({ formBeforeDivider: true, dividerBeforeHarnesses: true });
 });
 
 test('agents and settings omit redundant section titles', async ({ page }) => {
@@ -316,7 +501,7 @@ test('agents and settings omit redundant section titles', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Agents' }).click();
 
-  await expect(page.locator('#settings-agents > .settings-label')).toHaveText(['Backends']);
+  await expect(page.locator('#settings-agents > .settings-label')).toHaveText(['Harnesses', 'Providers']);
   await expect(page.locator('#settings-agents > .settings-label', { hasText: 'Agents' })).toHaveCount(0);
 
   await page.locator('#hamburger-btn').click();
@@ -362,12 +547,18 @@ test('edit button prefills form with empty model and cwd when not set', async ({
   await mockApp(page);
   await page.route('**/health', r => r.fulfill({ json: {
     status: 'ok',
+    harnesses: [
+      { id: 'codex', label: 'Codex', protocol: 'oneshot-cli', installed: true, default_provider: 'openai', compatible_providers: ['openai'] },
+    ],
+    providers: {
+      openai: { label: 'GPT', color: '#7070A0', gauge: { type: 'codex' }, models: [] },
+    },
     backends: {
       codex: { driver: 'codex', label: 'Codex', available: true, protocol: 'oneshot-cli', missing_requirements: [], gauge: { type: 'none' } },
     },
   }}));
   await page.route('**/config/agents', r => r.fulfill({ json: [
-    { name: 'codex', backend: 'codex', model: null, cwd: null },
+    { name: 'codex', harness: 'codex', provider: 'openai', backend: 'codex:openai', model: null, cwd: null },
   ]}));
 
   await page.goto('/');
@@ -376,7 +567,8 @@ test('edit button prefills form with empty model and cwd when not set', async ({
   await page.locator('#agents-list tbody tr .edit-btn').click();
 
   await expect(page.locator('#af-name')).toHaveValue('codex');
-  await expect(page.locator('#af-backend')).toHaveValue('codex');
+  await expect(page.locator('#af-harness')).toHaveValue('codex');
+  await expect(page.locator('#af-provider')).toHaveValue('openai');
   await expect(page.locator('#af-model')).toHaveValue('');
   await expect(page.locator('#af-cwd')).toHaveValue('');
 });

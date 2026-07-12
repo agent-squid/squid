@@ -77,6 +77,32 @@ test('different-route items show a route chip button; same-route items do not', 
   await expect(page.locator('#autocomplete .ac-item', { hasText: '#squid@haiku!' }).locator('.ac-route-btn')).toContainText('#squid@haiku!');
 });
 
+test('route agent tags use provider color from recent prompt metadata', async ({ page }) => {
+  await mockBackend(page);
+  await page.unroute('**/prompts/recent**');
+  await page.route('**/prompts/recent**', r => r.fulfill({ json: {
+    items: ['#squid@haiku! push the changes'],
+    agents: {
+      haiku: {
+        name: 'haiku',
+        harness: 'claudecode',
+        provider: 'deepseek',
+        backend: 'claudecode:deepseek',
+        color: '#4D9DE0',
+        provider_color: '#4D9DE0',
+      },
+    },
+  } }));
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
+  })));
+  await page.goto('/');
+
+  await page.fill('#input', 'push');
+
+  await expect(page.locator('#autocomplete .ac-route-btn .ac-agent')).toHaveCSS('color', 'rgb(77, 157, 224)');
+});
+
 test('left and right browse recent routes from an empty composer', async ({ page }) => {
   await mockBackend(page);
   await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({

@@ -13,104 +13,148 @@ agent:
   first_byte_timeout: 300
   response_timeout: 1800
 
-# A driver is Squid's coded coding-agent integration. A backend is a configured
-# driver instance: endpoint, credentials, gauge, args/settings, color, optional
-# default model, and optional protocol. Named agents then choose backend + model
-# override + cwd.
-# Supported drivers: claude, codex, cursor, opencode, pi.
-# Supported protocols: oneshot-cli, interactive-cli, interactive-pty.
-# interactive-cli currently requires a driver with a true persistent structured
-# stdin/stdout protocol; among bundled drivers, only claude supports it today.
-backends:
-  claude:
-    driver: claude
-    protocol: interactive-cli
-    label: Claude
-    color: "#AE5332"
-    gauge: claude
+# A harness is one of Squid's coded coding-agent CLI integrations. The
+# supported harness set is fixed in code; these YAML entries configure each
+# harness's defaults. A named agent picks harness + provider + model + cwd
+# directly in the UI. There is no `backends:` section anymore.
+harnesses:
+  claudecode:
+    protocol:
+      type: interactive-cli
+      timeout:
+        # Seconds before Squid stops an idle live CLI process. The native
+        # session is preserved and resumed on the next turn. Set to 0 to disable.
+        idle_seconds: 3600
+    default_provider: anthropic
+    supported_apis: [/v1/messages]
 
   codex:
-    driver: codex
-    protocol: oneshot-cli
-    label: Codex
-    color: "#7070A0"
-    gauge: codex
+    protocol:
+      type: oneshot-cli
+    default_provider: openai
+    supported_apis: [/v1/responses]
 
   cursor:
-    driver: cursor
-    protocol: oneshot-cli
-    label: Cursor
-    color: "#8F8D8D"
-    gauge: cursor
+    protocol:
+      type: oneshot-cli
+    default_provider: cursor
+    supported_apis: [/v1/chat/completions]
 
   opencode:
-    driver: opencode
-    protocol: oneshot-cli
+    protocol:
+      type: oneshot-cli
+    default_provider: nvidia
+    supported_apis: [/v1/chat/completions, /v1/messages]
+
+  pi:
+    protocol:
+      type: oneshot-cli
+    default_provider: nvidia
+    supported_apis: [/v1/messages, /v1/responses]
+
+# A provider owns the API endpoint: label, color (also used as the quota-pool
+# identity for its gauge), base_url, auth (api_key or subscription), gauge,
+# and an optional `models:` suggestion list for the agent-creation dropdown
+# (freeform entry always works too — this list is never server-validated).
+providers:
+  # Native Claude Code. Uses the local `claude` CLI subscription/login.
+  anthropic:
+    label: Claude
+    color: "#AE5332"
+    auth: {type: subscription}
+    gauge: claude
+    supported_apis: [/v1/messages]
+    models:
+      - claude-opus-4-8
+      - claude-opus-4-6
+      - claude-sonnet-5
+      - claude-sonnet-4-6
+      - claude-haiku-4-5
+
+  # Native Codex. Uses the local `codex` CLI subscription/login.
+  openai:
+    label: GPT
+    color: "#7070A0"
+    auth: {type: subscription}
+    gauge: codex
+    supported_apis: [/v1/responses]
+
+  cursor:
+    label: Cursor
+    color: "#8F8D8D"
+    auth: {type: subscription}
+    gauge: cursor
+    supported_apis: [/v1/chat/completions]
+
+  # OpenCode's own free-tier routing — zero config, no api key. Not the
+  # default provider for the opencode harness (nvidia is, see below), kept
+  # available for backward compatibility.
+  opencode:
     label: OpenCode
     color: "#CFCECD"
+    auth: {type: subscription}
     gauge:
       type: static
       text: Free tier
-      title: OpenCode-managed limits
+      title: no reset
+    supported_apis: [/v1/chat/completions, /v1/messages]
 
-  pi:
-    driver: pi
-    protocol: oneshot-cli
-    label: Pi
-    color: "#F5F5F2"
-    # Pi can route to multiple providers/models (including Anthropic and OpenAI),
-    # but Squid's claude/codex gauges measure Claude.ai and ChatGPT/Codex product
-    # meters, not Anthropic/OpenAI API provider usage. Keep this static unless a
-    # Pi-native or provider-specific API balance gauge is added.
+  # NVIDIA NIM — free access to top open models via an NVIDIA API key. This
+  # is the default provider for opencode and pi. Get a key at
+  # https://build.nvidia.com, then fill in one of:
+  #   api_key: "nvapi-..."              # inline string
+  #   api_key: {env: NIM_API_KEY}       # read from environment variable
+  nvidia:
+    label: NVIDIA
+    color: "#76B900"
+    base_url: "https://integrate.api.nvidia.com/v1"
+    supported_apis: [/v1/messages, /v1/responses]
+    auth:
+      type: api_key
+      api_key: {env: NIM_API_KEY}
+    # id must stay "nvidia" — the pi harness embeds it as the "provider/model"
+    # prefix in --model (see https://pi.dev/docs/latest/providers), and
+    # opencode's -m uses the same "provider/model" convention.
     gauge:
       type: static
-      text: Pi-managed
-      title: Pi-managed provider limits
-
-  # Example: a Pi backend pinned to OpenAI. The provider field maps to
-  # `pi --provider`; model maps to `pi --model`.
-  # pi-openai:
-  #   driver: pi
-  #   protocol: oneshot-cli
-  #   label: Pi OpenAI
-  #   color: "#F5F5F2"
-  #   provider: openai
-  #   model: gpt-5.5
-  #   gauge:
-  #     type: static
-  #     text: Pi-managed
+      text: Free tier
+      title: no reset
+    models:
+      - nvidia/nemotron-4-340b
+      - meta/llama-3.1-405b-instruct
+      - deepseek-ai/deepseek-r1
 
   # DeepSeek through Claude Code's Anthropic-compatible transport.
-  # Get an API key at https://platform.deepseek.com/api_keys, then fill in one of:
-  #   api_key: "sk-..."                 # inline string
-  #   api_key: {env: DEEPSEEK_API_KEY}  # read from environment variable
+  # Get an API key at https://platform.deepseek.com/api_keys, then set
+  # DEEPSEEK_API_KEY in the environment.
   # deepseek:
-  #   driver: claude
-  #   protocol: oneshot-cli
   #   label: DeepSeek
   #   color: "#4D9DE0"
-  #   provider: deepseek
   #   base_url: "https://api.deepseek.com/anthropic"
-  #   api_key: "sk-..."
-  #   model: deepseek-chat  # backend default; an agent may override it
+  #   supported_apis: [/v1/chat/completions, /v1/messages]
+  #   auth:
+  #     type: api_key
+  #     api_key: {env: DEEPSEEK_API_KEY}
   #   gauge: deepseek
+  #   models: [deepseek-v4-pro]
 
-  # Canonical base_url/api_key fields are translated into driver-specific
-  # environment and settings. Raw env/settings/args remain available as escapes.
+  # Canonical base_url/auth.api_key fields are translated into harness-native
+  # environment and settings. Raw env/settings/args remain available as
+  # escapes.
   #
-  # Example: local model served by vllm-mlx (or any OpenAI-compatible server).
-  #   base_url must point to the server's /v1 endpoint.
-  #   model must match the --served-model-name passed to the server; codex cannot
-  #   auto-discover the model name from a local server's /v1/models response.
-  # qwen:
-  #   driver: codex
-  #   protocol: oneshot-cli
-  #   label: Qwen
+  # Local OpenAI-compatible model server, such as vllm-mlx. base_url must point
+  # to the server's /v1 endpoint. model must match the served model name; codex
+  # cannot auto-discover it from /v1/models.
+  # local:
+  #   label: Local
   #   color: "#10A37F"
-  #   provider: qwen
   #   base_url: "http://127.0.0.1:9000/v1"
-  #   model: qwen2.5-coder-7b-4bit  # must match --served-model-name on the server
+  #   supported_apis: [/v1/responses]
+  #   auth:
+  #     type: api_key
+  #     api_key: {env: LOCAL_API_KEY}
   #   gauge:
   #     type: static
   #     text: Local
-  #     title: No provider quota
+  #     title: no reset
+  #   models: [qwen2.5-coder-7b-4bit]

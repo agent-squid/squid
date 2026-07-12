@@ -216,7 +216,7 @@ def test_claude_interactive_reuses_live_process_for_same_session_key():
         "second prompt",
     ]
     assert list(_claude_interactive_sessions) == [
-        ("claude", "work", "claude", "/tmp/project", None, ()),
+        ("claudecode", "work", "claude", "/tmp/project", None, ()),
     ]
     assert _proc_registry[9001]["msg_id"] is None
     assert _proc_registry[9001]["state"] == "idle"
@@ -676,7 +676,7 @@ def test_claude_interactive_closes_process_after_idle_timeout():
     assert chunks[0] == "done"
     assert fake_proc.terminated is True
     assert 9003 not in _proc_registry
-    session = _claude_interactive_sessions[("claude", "work", "claude", "/tmp/project", None, ())]
+    session = _claude_interactive_sessions[("claudecode", "work", "claude", "/tmp/project", None, ())]
     assert session.proc is None
     _clear()
 
@@ -875,7 +875,7 @@ def test_claude_interactive_soft_completes_on_ask_followup_question():
         chunks = asyncio.run(collect())
 
     assert chunks == ["Which branch should I use?"]
-    session = _claude_interactive_sessions[("claude", "work", "claude", "/tmp/project", None, ())]
+    session = _claude_interactive_sessions[("claudecode", "work", "claude", "/tmp/project", None, ())]
     assert session.pending_followup == {"tool_use_id": "toolu_ask_1"}
     assert session.proc is not None and session.proc.returncode is None  # process kept alive
     _clear()
@@ -1340,10 +1340,32 @@ def test_pi_passes_provider_and_model():
     ):
         asyncio.run(collect())
 
-    assert "--provider" in captured[0]
-    assert captured[0][captured[0].index("--provider") + 1] == "openai"
+    assert "--provider" not in captured[0]
     assert "--model" in captured[0]
-    assert captured[0][captured[0].index("--model") + 1] == "gpt-5.5"
+    assert captured[0][captured[0].index("--model") + 1] == "openai/gpt-5.5"
+
+
+def test_pi_does_not_double_prefix_provider_model():
+    captured = []
+
+    async def fake_stream_lines(cmd, **kwargs):
+        captured.append(cmd)
+        yield '{"type":"session","id":"thread-1"}'
+        yield '{"type":"agent_end"}'
+
+    async def collect():
+        return [chunk async for chunk in run_pi(
+            "fresh", cwd="/tmp", model="nvidia/nemotron-3-super-120b-a12b",
+            backend_settings={"provider": "nvidia"},
+        )]
+
+    with patch("agent.runners.PI_PATH", "pi"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        asyncio.run(collect())
+
+    assert "--model" in captured[0]
+    assert captured[0][captured[0].index("--model") + 1] == "nvidia/nemotron-3-super-120b-a12b"
 
 
 def test_pi_maps_tool_calls_and_waits_for_final_stats():
@@ -1474,6 +1496,28 @@ def test_opencode_oneshot_fresh_vs_resume_command_shape():
     assert captured[1][-3:] == ["--session", "thread-1", "next"]
 
 
+def test_opencode_composes_provider_prefixed_model():
+    captured = []
+
+    async def fake_stream_lines(cmd, **kwargs):
+        captured.append(cmd)
+        yield '{"type":"step_finish","sessionID":"thread-1","part":{"tokens":{}}}'
+
+    async def collect():
+        return [chunk async for chunk in run_opencode(
+            "fresh", cwd="/tmp", model="deepseek-ai/deepseek-v4-pro",
+            backend_settings={"provider": "nvidia"},
+        )]
+
+    with patch("agent.runners.OPENCODE_PATH", "opencode"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        asyncio.run(collect())
+
+    assert "-m" in captured[0]
+    assert captured[0][captured[0].index("-m") + 1] == "nvidia/deepseek-ai/deepseek-v4-pro"
+
+
 def test_native_claude_removes_inherited_anthropic_auth_environment():
     captured = {}
 
@@ -1504,7 +1548,10 @@ def test_claude_gateway_backend_keeps_its_explicit_environment():
 
     async def collect():
         return [chunk async for chunk in run_claude(
-            "hello", cwd="/tmp", backend_id="deepseek",
+            # backend_id is the harness ("claudecode"), not the provider — the
+            # deepseek provider also runs on the claudecode harness, so this
+            # must match what topic_queue.py actually passes in production.
+            "hello", cwd="/tmp", backend_id="claudecode",
             backend_env={
                 "ANTHROPIC_AUTH_TOKEN": "deepseek-token",
                 "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
@@ -1517,6 +1564,8 @@ def test_claude_gateway_backend_keeps_its_explicit_environment():
     assert captured["kwargs"]["extra_env"] == {
         "ANTHROPIC_AUTH_TOKEN": "deepseek-token",
         "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+        "ANTHROPIC_API_KEY": None,
+        "SQUID_NATIVE_CLAUDE_TOKEN": None,
     }
 
 

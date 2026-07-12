@@ -30,8 +30,10 @@ class QueueItem:
     agent: Optional[str]
     prompt: str
     context_history: list[dict]
-    backend: str
-    model: Optional[str]
+    harness: Optional[str] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    backend: Optional[str] = None
     cwd: Optional[str] = None
     source_cwd: Optional[str] = None
     code_roots: Optional[list[str]] = None
@@ -145,9 +147,9 @@ class TopicWorker:
             self.q.task_done()
 
     async def _process(self, item: QueueItem):
-        from .runners import CLIError, runner_for_backend
+        from .runners import CLIError, runner_for_agent
         from .config import SQUID_HOME
-        from .backends import get_backend
+        from .resolve import resolve_agent, split_agent_ref
         from .stats_db import (
             get_completed_run_status_raw,
             get_completed_run_text,
@@ -160,18 +162,20 @@ class TopicWorker:
         )
         from .git_changes import prepare_trackers
 
-        backend = get_backend(item.backend)
-        if backend is None:
-            await item.out_q.put({"_error": f"Backend {item.backend!r} is not configured"})
+        try:
+            harness, provider = split_agent_ref(item.harness or item.backend, item.provider)
+            resolved = resolve_agent(harness, provider)
+        except ValueError as exc:
+            await item.out_q.put({"_error": str(exc)})
             await item.out_q.put(None)
             return
-        runner = runner_for_backend(backend, adhoc=item.adhoc)
+        runner = runner_for_agent(resolved, adhoc=item.adhoc)
         if runner is None:
-            await item.out_q.put({"_error": f"Driver {backend.driver!r} protocol {backend.protocol!r} is not supported"})
+            await item.out_q.put({"_error": f"Harness {resolved.harness!r} protocol {resolved.protocol!r} is not supported"})
             await item.out_q.put(None)
             return
         try:
-            backend_env = backend.execution_env()
+            backend_env = resolved.execution_env()
         except ValueError as exc:
             await item.out_q.put({"_error": str(exc)})
             await item.out_q.put(None)
@@ -182,11 +186,14 @@ class TopicWorker:
         tracking_roots = item.code_roots or []
         worktree_sources: dict[str, str] = {}
         if item.msg_id:
-            wt_records = await asyncio.to_thread(get_worktrees, item.topic, str(item.msg_id))
-            worktree_sources = {
-                rec["worktree_path"]: rec["repo_root"]
-                for rec in wt_records
-            }
+            try:
+                wt_records = await asyncio.to_thread(get_worktrees, item.topic, str(item.msg_id))
+                worktree_sources = {
+                    rec["worktree_path"]: rec["repo_root"]
+                    for rec in wt_records
+                }
+            except Exception:
+                log.debug("worktree lookup skipped topic=%s msg_id=%s", item.topic, item.msg_id, exc_info=True)
         git_trackers = await asyncio.to_thread(
             prepare_trackers,
             tracking_roots,
@@ -205,11 +212,11 @@ class TopicWorker:
             response_timeout=item.timeout,
             adhoc=item.adhoc, msg_id=item.msg_id,
             prompt_preview=item.display_prompt,
-            backend_id=item.backend, backend_env=backend_env,
-            backend_settings=backend.driver_settings(), backend_args=backend.args,
+            backend_id=resolved.harness, backend_env=backend_env,
+            backend_settings=resolved.driver_settings(), backend_args=resolved.args,
         )
-        if backend.protocol.startswith("interactive-") and not item.adhoc:
-            kwargs["interactive_idle_timeout_s"] = backend.interactive.idle_timeout_seconds
+        if resolved.protocol.startswith("interactive-") and not item.adhoc:
+            kwargs["interactive_idle_timeout_s"] = resolved.interactive.idle_timeout_seconds
         if item.resume_session_id:
             kwargs["resume_session_id"] = item.resume_session_id
 
@@ -260,7 +267,7 @@ class TopicWorker:
                         enriched["lookback"] = item.lookback
                         if session_id:
                             save_stats(session_id, enriched, topic=item.topic, agent=item.agent,
-                                       backend=item.backend,
+                                       harness=resolved.harness, provider=resolved.provider.id,
                                        model=enriched.pop("model", None) or item.model,
                                        cwd=display_cwd,
                                        lookback=item.lookback)
@@ -268,7 +275,7 @@ class TopicWorker:
                                 set_topic_session(
                                     item.topic, item.agent, session_id,
                                     display_cwd,
-                                    backend.fingerprint,
+                                    resolved.fingerprint,
                                 )
                             enriched["session_id"] = session_id
                             enriched["cwd"] = display_cwd
@@ -301,7 +308,7 @@ class TopicWorker:
                         f"Session not found — starting fresh\n"
                         f"  session: {item.resume_session_id}\n"
                         f"  cwd: {effective_cwd}\n"
-                        f"  backend: {item.backend}"
+                        f"  harness: {item.harness}"
                         + (f"  model: {item.model}" if item.model else "")
                     )
                     insert_run_event(item.msg_id, run_seq, "status", status)
@@ -316,7 +323,7 @@ class TopicWorker:
                         f"Session context window exceeded — starting fresh\n"
                         f"  session: {item.resume_session_id}\n"
                         f"  cwd: {effective_cwd}\n"
-                        f"  backend: {item.backend}"
+                        f"  harness: {item.harness}"
                         + (f"  model: {item.model}" if item.model else "")
                     )
                     insert_run_event(item.msg_id, run_seq, "status", status)
@@ -336,7 +343,11 @@ class TopicWorker:
                 wt_key = str(item.msg_id)
                 from .stats_db import mark_worktree_synced
                 from .worktree import sync_after_turn
-                wt_records = await asyncio.to_thread(get_worktrees, item.topic, wt_key)
+                try:
+                    wt_records = await asyncio.to_thread(get_worktrees, item.topic, wt_key)
+                except Exception:
+                    wt_records = []
+                    log.debug("worktree sync lookup skipped topic=%s msg_id=%s", item.topic, item.msg_id, exc_info=True)
                 for rec in wt_records:
                     try:
                         conflicts = await asyncio.to_thread(
@@ -414,8 +425,10 @@ class TopicDispatcher:
         topic: str,
         prompt: str,
         context_history: list[dict],
-        backend: str,
-        model: Optional[str],
+        harness: Optional[str] = None,
+        provider: Optional[str] = None,
+        backend: Optional[str] = None,
+        model: Optional[str] = None,
         agent: Optional[str] = None,
         cwd: Optional[str] = None,
         source_cwd: Optional[str] = None,
@@ -435,10 +448,13 @@ class TopicDispatcher:
             queue_key = f"{topic}@{agent}" if agent else topic
         worker = self._get_or_create(queue_key, topic)
         self._sweep_worktrees(topic)
+        from .resolve import split_agent_ref
+        resolved_harness, resolved_provider = split_agent_ref(harness or backend, provider)
         item = QueueItem(
             seq=0, topic=topic, agent=agent,
             prompt=prompt, display_prompt=display_prompt, context_history=context_history,
-            backend=backend, model=model, cwd=cwd, source_cwd=source_cwd,
+            harness=resolved_harness, provider=resolved_provider, backend=backend,
+            model=model, cwd=cwd, source_cwd=source_cwd,
             code_roots=code_roots, timeout=response_timeout,
             resume_session_id=resume_session_id,
             adhoc=adhoc, lookback=lookback, msg_id=msg_id,

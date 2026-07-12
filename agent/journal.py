@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Optional
 
 from .config import SQUID_HOME
-from .backends import get_backend
-from .runners import run_claude, runner_for_backend
+from .resolve import resolve_agent
+from .runners import run_claude, runner_for_agent
 from .stats_db import get_default_agent, get_topic_messages_for_period
 
 log = logging.getLogger(__name__)
@@ -123,17 +123,31 @@ Bullet list of what failed and why, or what worked better than expected. If none
 
 async def _run_generation(prompt: str) -> str:
     agent_cfg = get_default_agent() or {}
-    backend_id = agent_cfg.get("backend") or "claude"
+    harness = agent_cfg.get("harness") or "claudecode"
+    provider = agent_cfg.get("provider")
     gen_agent = agent_cfg.get("name", "claude")
     model = agent_cfg.get("model")
-    backend = get_backend(backend_id)
-    runner = runner_for_backend(backend, adhoc=True) if backend else None
+    try:
+        resolved = resolve_agent(harness, provider)
+    except ValueError:
+        resolved = None
+    runner = runner_for_agent(resolved, adhoc=True) if resolved else None
     runner = runner or run_claude
+
+    runner_kwargs = {}
+    if resolved:
+        runner_kwargs = {
+            "backend_id": resolved.harness,
+            "backend_env": resolved.execution_env(),
+            "backend_settings": resolved.driver_settings(),
+            "backend_args": resolved.args,
+        }
 
     chunks = []
     async for chunk in runner(
         prompt, cwd=SQUID_HOME, model=model,
         topic="_journal", agent=gen_agent, adhoc=True,
+        **runner_kwargs,
     ):
         if isinstance(chunk, str):
             chunks.append(chunk)

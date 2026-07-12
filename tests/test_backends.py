@@ -8,10 +8,9 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from agent import backends as backends_module
 from agent.backends import (
     Backend, DEFAULT_INTERACTIVE_IDLE_TIMEOUT_SECONDS, Gauge,
-    _configured_backends, _validate_backend,
+    _validate_backend,
 )
 from agent.runners import _codex_config_args
 
@@ -39,68 +38,23 @@ def _write_user_config(home: Path, content: str) -> None:
     (squid_dir / "squid.yaml").write_text(content, encoding="utf-8")
 
 
-def test_shipped_default_yaml_does_not_enable_deepseek_backend():
+def test_shipped_default_yaml_does_not_enable_deepseek_provider():
     config = yaml.safe_load(Path("config/squid.yaml.example").read_text())
 
-    assert "deepseek" not in config["backends"]
-    assert "deepcla" not in config["backends"]
+    assert "backends" not in config
+    assert "deepseek" not in config["providers"]
 
 
-def test_fresh_home_example_does_not_expose_deepseek_or_deepcla(tmp_path):
-    home = tmp_path / "home"
-    _write_user_config(home, Path("config/squid.yaml.example").read_text())
+def test_shipped_default_yaml_defines_core_providers():
+    config = yaml.safe_load(Path("config/squid.yaml.example").read_text())
+    providers = config["providers"]
 
-    backends = _public_backends_from_home(home)
-
-    assert "deepseek" not in backends
-    assert "deepcla" not in backends
-    assert backends["claude"]["protocol"] == "interactive-cli"
-    assert backends["codex"]["protocol"] == "oneshot-cli"
-    assert backends["cursor"]["protocol"] == "oneshot-cli"
-    assert backends["opencode"]["protocol"] == "oneshot-cli"
-    assert backends["pi"]["protocol"] == "oneshot-cli"
-
-
-def test_fresh_home_legacy_deepcla_is_exposed_as_deepseek_only(tmp_path):
-    home = tmp_path / "home"
-    _write_user_config(home, """
-server:
-  host: "127.0.0.1"
-  port: 8000
-agent:
-  first_byte_timeout: 300
-  response_timeout: 1800
-backends:
-  deepcla:
-    driver: claude
-    provider: deepseek
-    base_url: "https://api.deepseek.com/anthropic"
-    api_key: "deepseek-secret"
-    gauge: deepseek
-""")
-
-    backends = _public_backends_from_home(home)
-
-    assert "deepseek" in backends
-    assert "deepcla" not in backends
-
-
-def test_legacy_deepcla_backend_config_is_exposed_as_deepseek():
-    with patch.dict(backends_module._cfg, {
-        "backends": {
-            "deepcla": {
-                "driver": "claude",
-                "provider": "deepseek",
-                "base_url": "https://api.deepseek.com/anthropic",
-                "api_key": "deepseek-secret",
-                "gauge": "deepseek",
-            },
-        },
-    }, clear=True):
-        configured = _configured_backends()
-
-    assert "deepseek" in configured
-    assert "deepcla" not in configured
+    assert "deepseek" not in providers
+    assert providers["anthropic"]["gauge"] == "claude"
+    assert providers["openai"]["gauge"] == "codex"
+    assert providers["cursor"]["gauge"] == "cursor"
+    assert providers["opencode"]["gauge"]["type"] == "static"
+    assert providers["nvidia"]["auth"]["type"] == "api_key"
 
 
 def test_multiple_backends_can_share_driver():

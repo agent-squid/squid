@@ -6,7 +6,6 @@ from fastapi.testclient import TestClient
 
 from agent import server
 from agent import stats_db
-from agent.backends import Backend, Gauge
 
 
 def _config_yaml(root: Path) -> str:
@@ -19,10 +18,11 @@ server:
 agent:
   first_byte_timeout: 300
   response_timeout: 1800
-backends:
-  codex:
-    driver: codex
+providers:
+  openai:
+    label: GPT
     color: "#7070A0"
+    auth: {{type: subscription}}
     gauge: codex
 '''
 
@@ -267,12 +267,12 @@ def test_compact_is_no_longer_squid_owned():
 
 def test_backend_native_chat_commands_bypass_context_augmentation_for_any_agent():
     cases = [
-        ("/usage", "claude-live", Backend("claude-live", "claude", protocol="interactive-cli")),
-        ("/cost", "codex", Backend("codex", "codex")),
-        ("/model opus", "opencode", Backend("opencode", "opencode")),
+        ("/usage", "claude-live"),
+        ("/cost", "codex"),
+        ("/model opus", "opencode"),
     ]
 
-    for native_command, backend_id, backend in cases:
+    for native_command, backend_id in cases:
         captured = {}
 
         async def fake_dispatch(**kwargs):
@@ -286,7 +286,6 @@ def test_backend_native_chat_commands_bypass_context_augmentation_for_any_agent(
         with patch("agent.server.get_agent", return_value={
                 "backend": backend_id, "model": None, "cwd": "/tmp/project",
              }), \
-             patch("agent.server.get_backend", return_value=backend), \
              patch("agent.server.upsert_topic"), \
              patch("agent.server.get_topic_session", return_value=None), \
              patch("agent.server.get_context_history") as get_context_history, \
@@ -331,7 +330,6 @@ def test_chat_response_exposes_message_id_header():
     with patch("agent.server.get_agent", return_value={
             "backend": "codex", "model": None, "cwd": "/tmp/project",
          }), \
-         patch("agent.server.get_backend", return_value=Backend("codex", "codex")), \
          patch("agent.server.upsert_topic"), \
          patch("agent.server.get_topic_session", return_value=None), \
          patch("agent.server.topic_memory_squid_config", return_value={}), \
@@ -363,35 +361,70 @@ def test_clear_command_kills_only_session_lane():
     clear_session.assert_called_once_with("squid", "codex")
 
 
-def test_health_returns_configured_backend_driver_and_color():
+def test_health_returns_configured_backend_harness_provider_and_color():
     client = TestClient(server.app)
     response = client.get("/health")
 
     assert response.status_code == 200
     backends = response.json()["backends"]
-    assert backends["claude"]["driver"] == "claude"
+    assert backends["claude"]["harness"] == "claudecode"
+    assert backends["claude"]["provider"] == "anthropic"
     assert backends["claude"]["color"].startswith("#")
     assert "env" not in backends["claude"]
     assert "settings" not in backends["claude"]
     assert backends["claude"]["gauge"]["type"] == "claude"
+    assert "harnesses" in response.json()
+    assert "providers" in response.json()
+
+
+def test_public_agent_config_includes_provider_color():
+    item = server._public_agent_config({
+        "name": "haiku",
+        "harness": "claudecode",
+        "provider": "anthropic",
+        "backend": "claudecode:anthropic",
+        "model": None,
+        "cwd": None,
+    })
+
+    assert item["color"] == item["provider_color"]
+    assert item["color"].startswith("#")
+    assert item["provider_label"] == "Claude"
 
 
 def test_backend_static_quota_is_normalized_from_configuration():
     client = TestClient(server.app)
-    backend = Backend(
-        "qwen", "codex", gauge=Gauge("static", "Local", "No provider quota")
-    )
-    with patch("agent.server.get_backend", return_value=backend):
-        response = client.get("/quota/backend/qwen")
+    response = client.get("/quota/backend/opencode")
 
     assert response.status_code == 200
     assert response.json() == {
         "status": "static",
-        "text": "Local",
-        "title": "No provider quota",
+        "text": "Free tier",
+        "title": "no reset",
         "used_percent": None,
         "reset_at": None,
     }
+
+
+def test_provider_static_quota_is_normalized_with_no_harness_involved():
+    client = TestClient(server.app)
+    response = client.get("/quota/provider/opencode")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "static",
+        "text": "Free tier",
+        "title": "no reset",
+        "used_percent": None,
+        "reset_at": None,
+    }
+
+
+def test_provider_quota_404s_for_unknown_provider():
+    client = TestClient(server.app)
+    response = client.get("/quota/provider/does-not-exist")
+
+    assert response.status_code == 404
 
 
 def test_agent_rejects_unconfigured_backend():
@@ -402,7 +435,7 @@ def test_agent_rejects_unconfigured_backend():
     })
 
     assert response.status_code == 400
-    assert "not configured" in response.json()["error"]
+    assert "Unknown harness" in response.json()["error"]
 
 
 def test_yaml_config_can_be_read_validated_and_atomically_updated(tmp_path):
@@ -523,5 +556,42 @@ def test_localfile_serves_unknown_extension_text_inline(tmp_path):
         binary_res = client.get("/localfile", params={"path": str(binary_file)})
         assert binary_res.status_code == 200
         assert binary_res.headers["content-type"].startswith("application/octet-stream")
+    finally:
+        server._LOCALFILE_ROOTS[:] = original_roots
+
+
+def test_localfile_markdown_preview_strips_frontmatter_and_preserves_escapes(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    md_file = root / "notes.md"
+    md_file.write_text(
+        "---\n"
+        "title: `literal`\n"
+        "---\n\n"
+        "# Heading\n\n"
+        "```js\n"
+        "const value = 'code block';\n"
+        "```\n\n"
+        "Backtick: `code`, pipe: \\|, closing tag: </script>\n\n"
+        "| Col |\n"
+        "| --- |\n"
+        "| A \\| B |\n"
+    )
+    original_roots = list(server._LOCALFILE_ROOTS)
+    client = TestClient(server.app)
+
+    try:
+        server._LOCALFILE_ROOTS[:] = [root.resolve()]
+        res = client.get("/localfile", params={"path": str(md_file), "render": "1"})
+        assert res.status_code == 200
+        assert "marked.parse(" in res.text
+        assert "&#96;" not in res.text
+        assert "title: `literal`" not in res.text
+        assert "marked.setOptions({gfm:true,breaks:true})" in res.text
+        assert '"\\n# Heading\\n\\n```js\\nconst value' in res.text
+        assert "pipe: \\\\|" in res.text
+        assert "| A \\\\| B |" in res.text
+        assert "closing tag: </script>" not in res.text
+        assert "closing tag: <\\/script>" in res.text
     finally:
         server._LOCALFILE_ROOTS[:] = original_roots

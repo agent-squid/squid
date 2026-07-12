@@ -245,6 +245,169 @@ test('plain text file has no preview button', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Preview in browser' })).toBeHidden();
 });
 
+test('file editor keeps controls at top, highlights generic suffix files, discards edits, and shows history diffs', async ({ page }) => {
+  await mockApp(page);
+  await page.route('https://esm.sh/**', route => route.abort());
+  let savedContent = 'server:\n  port: 8000\n';
+  await page.route('**/config/localfile-roots**', r => r.fulfill({
+    json: { roots: ['/tmp/work'] },
+  }));
+  await page.route(url => url.pathname === '/localfile/history', route => route.fulfill({
+    json: {
+      history: [{
+        id: 7,
+        file_path: '/tmp/work/config.yaml.example',
+        edited_at: '2026-07-12T10:00:00Z',
+        before: 'server:\n  port: 8000\n',
+        after: 'server:\n  port: 9000\n',
+      }],
+    },
+  }));
+  await page.route(url => url.pathname === '/localfile/revert-edit', route => route.fulfill({
+    json: { ok: true },
+  }));
+  await page.route(url => url.pathname === '/localfile', route => {
+    const req = route.request();
+    const path = new URL(req.url()).searchParams.get('path');
+    if (req.method() === 'POST') {
+      savedContent = req.postDataJSON().content;
+      return route.fulfill({ json: { ok: true, edit_id: 8 } });
+    }
+    if (path === '/tmp/work') {
+      return route.fulfill({
+        contentType: 'application/json',
+        json: {
+          type: 'directory',
+          path,
+          entries: [
+            { name: 'config.yaml.example', path: '/tmp/work/config.yaml.example', is_dir: false, size: 21, mtime: 1 },
+          ],
+        },
+      });
+    }
+    return route.fulfill({ status: 200, contentType: 'text/plain', body: savedContent });
+  });
+
+  await page.goto('/');
+  await page.evaluate(() => {
+    let yamlRequested = false;
+    const makeDoc = text => {
+      const lines = text.split('\n');
+      return {
+        length: text.length,
+        lines: lines.length,
+        toString: () => text,
+        line: number => {
+          const n = Math.min(Math.max(number, 1), lines.length);
+          const from = lines.slice(0, n - 1).join('\n').length + (n > 1 ? 1 : 0);
+          return { from, to: from + lines[n - 1].length, number: n };
+        },
+        lineAt: pos => {
+          let offset = 0;
+          for (let i = 0; i < lines.length; i++) {
+            const end = offset + lines[i].length;
+            if (pos <= end) return { from: offset, to: end, number: i + 1 };
+            offset = end + 1;
+          }
+          return { from: Math.max(0, text.length - (lines.at(-1)?.length || 0)), to: text.length, number: lines.length };
+        },
+      };
+    };
+    class FakeEditorView {
+      static updateListener = { of: listener => ({ listener }) };
+      constructor({ state, parent }) {
+        this.state = state;
+        this.listeners = state.extensions.filter(ext => ext?.listener).map(ext => ext.listener);
+        const root = document.createElement('div');
+        root.className = 'cm-editor';
+        const input = document.createElement('textarea');
+        input.value = state.doc.toString();
+        input.addEventListener('input', () => {
+          this.state.doc = makeDoc(input.value);
+          this.listeners.forEach(listener => listener({ docChanged: true }));
+        });
+        root.appendChild(input);
+        parent.appendChild(root);
+        this.input = input;
+      }
+      focus() {}
+      destroy() { this.input.closest('.cm-editor')?.remove(); }
+      dispatch(update) {
+        if (update.changes) {
+          this.input.value = update.changes.insert;
+          this.input.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        if (update.selection) this.state.selection = { main: { to: update.selection.head ?? update.selection.anchor } };
+      }
+    }
+    window._cm = {
+      EditorView: FakeEditorView,
+      EditorState: {
+        create: ({ doc, extensions }) => ({
+          doc: makeDoc(doc),
+          extensions,
+        }),
+      },
+      basicSetup: {},
+      oneDark: {},
+      atomOneDarkHighlight: {},
+      LANGS: {
+        yaml: () => { yamlRequested = true; return { name: 'yaml-lang' }; },
+      },
+    };
+    window._cmPromise = Promise.resolve(true);
+    window.__yamlRequested = () => yamlRequested;
+  });
+
+  await page.getByRole('button', { name: 'Files' }).click();
+  await page.getByRole('link', { name: '/tmp/work' }).click();
+  await page.getByRole('link', { name: 'config.yaml.example' }).click();
+  expect(await page.evaluate(() =>
+    Array.from(document.querySelector('.fv-header-actions').children)
+      .map(el => el.getAttribute('aria-label') || el.title || el.id)
+      .slice(-2)
+  )).toEqual(['Copy path', 'Close']);
+  await page.getByRole('button', { name: 'Edit file' }).click();
+
+  await expect(page.locator('.fv-edit-toolbar')).toBeVisible();
+  expect(await page.evaluate(() => {
+    const box = document.querySelector('#file-modal-box');
+    return Array.from(box.children).map(el => el.id || el.className).slice(0, 3);
+  })).toEqual(['file-modal-header', 'fv-edit-toolbar', 'file-modal-body']);
+  expect(await page.evaluate(() => {
+    const actions = document.querySelector('.fv-header-actions');
+    return ['Save', 'Discard changes'].every(label =>
+      actions?.contains(document.querySelector(`[aria-label="${label}"]`))
+    );
+  })).toBe(true);
+  expect(await page.evaluate(() =>
+    Array.from(document.querySelector('.fv-header-actions').children)
+      .map(el => el.getAttribute('aria-label') || el.title || el.id)
+      .slice(-4)
+  )).toEqual(['Discard changes', 'Save', 'Copy path', 'Close']);
+  expect(await page.evaluate(() => window.__yamlRequested())).toBe(true);
+
+  await expect(page.getByRole('button', { name: 'Save' })).toBeDisabled();
+  await page.locator('.cm-editor textarea').fill('server:\n  port: 9000\n');
+  await expect(page.getByRole('button', { name: 'Save' })).toBeEnabled();
+  await page.getByLabel('Find in editor').fill('port');
+  await page.getByRole('button', { name: 'Next match' }).click();
+  await expect(page.locator('.fv-edit-toolbar > .fv-edit-tools')).toBeVisible();
+  await expect(page.locator('.fv-edit-find-popover')).toBeHidden();
+  await page.getByLabel('Line number').fill('2');
+  await page.getByRole('button', { name: 'Go to line' }).click();
+  await expect(page.locator('.fv-edit-toolbar > .fv-edit-tools')).toBeVisible();
+  await expect(page.locator('.fv-edit-find-popover')).toBeHidden();
+  await page.getByRole('button', { name: 'Discard changes' }).click();
+  await expect(page.locator('#file-modal-body')).toContainText('port: 8000');
+
+  await page.getByRole('button', { name: 'Edit history' }).click();
+  await page.getByRole('button', { name: 'Show diff' }).click();
+  await expect(page.locator('.fv-history-diff')).toContainText('-   port: 8000');
+  await expect(page.locator('.fv-history-diff')).toContainText('+   port: 9000');
+  await expect(page.getByRole('button', { name: 'Revert to this' })).toBeVisible();
+});
+
 test('desktop burger only shows settings while mobile burger shows primary nav', async ({ page }) => {
   await mockApp(page);
 
@@ -270,57 +433,74 @@ test('desktop burger only shows settings while mobile burger shows primary nav',
   await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Settings' })).toBeVisible();
 });
 
-test('mobile swipes move between views and browser back returns to the previous view', async ({ page }) => {
+test('mobile right-swipe goes back to the previous view via history', async ({ page }) => {
   await mockApp(page);
   await page.setViewportSize({ width: 390, height: 720 });
   await page.goto('/');
 
-  const swipe = async (fromX, toX) => {
-    await page.locator('#app').evaluate((app, { fromX, toX }) => {
+  const swipeRight = async () => {
+    await page.locator('#app').evaluate(app => {
       app.dispatchEvent(new PointerEvent('pointerdown', {
-        bubbles: true,
-        clientX: fromX,
-        clientY: 240,
-        pointerId: 1,
-        pointerType: 'touch',
+        bubbles: true, clientX: 60, clientY: 240, pointerId: 1, pointerType: 'touch',
       }));
       app.dispatchEvent(new PointerEvent('pointerup', {
-        bubbles: true,
-        clientX: toX,
-        clientY: 245,
-        pointerId: 1,
-        pointerType: 'touch',
+        bubbles: true, clientX: 350, clientY: 245, pointerId: 1, pointerType: 'touch',
       }));
-    }, { fromX, toX });
+    });
   };
 
   await expect(page.locator('#view-chat')).toHaveClass(/active/);
-  await expect(page.locator('#mobile-view-title')).toHaveText('Chat');
 
-  await swipe(350, 60);
+  // Navigate to Files via hamburger → pushes history entry
+  await page.locator('#hamburger-btn').click();
+  await page.locator('#hamburger-menu').getByRole('button', { name: 'Files' }).click();
   await expect(page.locator('#view-files')).toHaveClass(/active/);
-  await expect(page.locator('#mobile-view-title')).toHaveText('Files');
 
-  await swipe(350, 60);
-  await expect(page.locator('#view-topics')).toHaveClass(/active/);
-  await expect(page.locator('#mobile-view-title')).toHaveText('Topics');
-
-  await page.evaluate(() => history.back());
-  await expect(page.locator('#view-files')).toHaveClass(/active/);
-  await expect(page.locator('#mobile-view-title')).toHaveText('Files');
-
-  await swipe(60, 350);
+  // Right-swipe → back to Chat
+  await swipeRight();
   await expect(page.locator('#view-chat')).toHaveClass(/active/);
-  await expect(page.locator('#mobile-view-title')).toHaveText('Chat');
 
+  // Navigate to Agents via hamburger → pushes another history entry
   await page.locator('#hamburger-btn').click();
   await page.locator('#hamburger-menu').getByRole('button', { name: 'Agents' }).click();
   await expect(page.locator('#view-agents')).toHaveClass(/active/);
-  await expect(page.locator('#mobile-view-title')).toHaveText('Agents');
 
+  // history.back() also works
   await page.evaluate(() => history.back());
   await expect(page.locator('#view-chat')).toHaveClass(/active/);
-  await expect(page.locator('#mobile-view-title')).toHaveText('Chat');
+
+  // Left-swipe is a no-op (no forward navigation)
+  await page.locator('#app').evaluate(app => {
+    app.dispatchEvent(new PointerEvent('pointerdown', {
+      bubbles: true, clientX: 350, clientY: 240, pointerId: 2, pointerType: 'touch',
+    }));
+    app.dispatchEvent(new PointerEvent('pointerup', {
+      bubbles: true, clientX: 60, clientY: 245, pointerId: 2, pointerType: 'touch',
+    }));
+  });
+  await expect(page.locator('#view-chat')).toHaveClass(/active/);
+});
+
+test('mobile edit YAML config link returns to Files on browser back', async ({ page }) => {
+  await mockApp(page);
+  await page.setViewportSize({ width: 390, height: 720 });
+  await page.route('**/config/localfile-roots**', r => r.fulfill({
+    json: { roots: ['/tmp/work'] },
+  }));
+  await page.route('**/config/yaml', r => r.fulfill({
+    json: { content: 'agents: []\n', revision: 'rev-1', path: '/tmp/squid/config.yaml' },
+  }));
+
+  await page.goto('/');
+  await page.locator('#hamburger-btn').click();
+  await page.locator('#hamburger-menu').getByRole('button', { name: 'Files' }).click();
+  await expect(page.locator('#view-files')).toHaveClass(/active/);
+
+  await page.getByRole('link', { name: /Edit YAML config/ }).click();
+  await expect(page.locator('#view-settings')).toHaveClass(/active/);
+
+  await page.evaluate(() => history.back());
+  await expect(page.locator('#view-files')).toHaveClass(/active/);
 });
 
 test('swipes starting in the edge-exclusion strip are ignored so the OS back gesture can claim them', async ({ page }) => {
@@ -328,38 +508,29 @@ test('swipes starting in the edge-exclusion strip are ignored so the OS back ges
   await page.setViewportSize({ width: 390, height: 720 });
   await page.goto('/');
 
+  // Navigate to Files first so there's a history entry to go back to
+  await page.locator('#hamburger-btn').click();
+  await page.locator('#hamburger-menu').getByRole('button', { name: 'Files' }).click();
+  await expect(page.locator('#view-files')).toHaveClass(/active/);
+
   const swipe = async (fromX, toX) => {
     await page.locator('#app').evaluate((app, { fromX, toX }) => {
       app.dispatchEvent(new PointerEvent('pointerdown', {
-        bubbles: true,
-        clientX: fromX,
-        clientY: 240,
-        pointerId: 1,
-        pointerType: 'touch',
+        bubbles: true, clientX: fromX, clientY: 240, pointerId: 1, pointerType: 'touch',
       }));
       app.dispatchEvent(new PointerEvent('pointerup', {
-        bubbles: true,
-        clientX: toX,
-        clientY: 245,
-        pointerId: 1,
-        pointerType: 'touch',
+        bubbles: true, clientX: toX, clientY: 245, pointerId: 1, pointerType: 'touch',
       }));
     }, { fromX, toX });
   };
 
-  await expect(page.locator('#view-chat')).toHaveClass(/active/);
-
-  // Starts inside the 24px edge-exclusion strip (left edge) — should not register as an in-app swipe.
+  // Starts inside the 24px edge-exclusion strip (left edge) — should not navigate back.
   await swipe(10, 300);
-  await expect(page.locator('#view-chat')).toHaveClass(/active/);
-
-  // Starts inside the 24px edge-exclusion strip (right edge) — should not register as an in-app swipe.
-  await swipe(385, 100);
-  await expect(page.locator('#view-chat')).toHaveClass(/active/);
-
-  // Just outside the strip — swipe still works normally.
-  await swipe(350, 60);
   await expect(page.locator('#view-files')).toHaveClass(/active/);
+
+  // Starts outside the edge-exclusion strip — right-swipe goes back.
+  await swipe(60, 350);
+  await expect(page.locator('#view-chat')).toHaveClass(/active/);
 });
 
 test('mouse click-and-drag at a narrow viewport does not trigger view navigation', async ({ page }) => {

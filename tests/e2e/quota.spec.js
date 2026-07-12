@@ -2,7 +2,11 @@ const { test, expect } = require('@playwright/test');
 
 async function mockShell(page) {
   await page.route('**/health', route => route.fulfill({
-    json: { status: 'ok', backends: { claude: { available: true, gauge: { type: 'claude' } } } },
+    json: {
+      status: 'ok',
+      backends: { claude: { available: true, gauge: { type: 'claude' } } },
+      providers: { claude: { gauge: { type: 'claude' }, gauge_authed: true } },
+    },
   }));
   await page.route('**/config/agents', route => route.fulfill({ json: [] }));
   await page.route('**/topics', route => route.fulfill({ json: [] }));
@@ -53,6 +57,50 @@ test('topbar quota gauge is chat-only while status keeps quota available', async
 
   await page.getByRole('button', { name: 'Chat' }).click();
   await expect(page.locator('#quota-display')).toBeVisible();
+});
+
+test('status quota rows come from provider catalog', async ({ page }) => {
+  let providerQuotaCalls = 0;
+  await page.route('**/health', route => route.fulfill({
+    json: {
+      status: 'ok',
+      backends: {},
+      providers: {
+        anthropic: {
+          label: 'Anthropic',
+          gauge: { type: 'claude' },
+          gauge_authed: true,
+        },
+      },
+    },
+  }));
+  await page.route('**/quota/provider/anthropic', route => {
+    providerQuotaCalls++;
+    return route.fulfill({
+      json: { status: 'ok', raw: 37, used_percent: 37, title: 'Anthropic usage' },
+    });
+  });
+  await page.route('**/quota/backend/*', route => route.fulfill({
+    status: 500,
+    json: { error: 'backend quota should not be used for provider rows' },
+  }));
+  await page.route('**/config/agents', route => route.fulfill({ json: [] }));
+  await page.route('**/topics', route => route.fulfill({ json: [] }));
+  await page.route('**/history**', route => route.fulfill({
+    json: { items: [], has_more: false },
+  }));
+  await page.route('**/queue', route => route.fulfill({ json: [] }));
+  await page.route('**/processes', route => route.fulfill({ json: [] }));
+  await page.route('**/topics/**', route => route.fulfill({ json: {} }));
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Status' }).click();
+
+  const rows = page.locator('#proc-status-popup .quota-status-row');
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toContainText('Anthropic');
+  await expect(rows.first()).toContainText('37%');
+  expect(providerQuotaCalls).toBe(1);
 });
 
 test('quota transient errors retry before showing failure', async ({ page }) => {
@@ -193,4 +241,37 @@ test('percentage quota gauges retain their reset countdown', async ({ page }) =>
     }, backend);
     await expect(page.locator(`#${labelId}`)).toHaveText('4.2D');
   }
+});
+
+test('dual quota gauges keep 5h and 7d data separate', async ({ page }) => {
+  await mockShell(page);
+  await page.route('**/quota/backend/*', route => route.fulfill({
+    json: {
+      status: 'ok',
+      raw: 42,
+      used_percent: 42,
+      reset_at: Date.now() / 1000 + 34 * 60,
+      seven_day: {
+        used_percent: 73,
+        reset_at: Date.now() / 1000 + 3.5 * 24 * 60 * 60,
+      },
+    },
+  }));
+
+  await page.goto('/');
+  await expect(page.locator('#quota-5h-pct')).toHaveText('42');
+  await expect(page.locator('#quota-7d-label')).toHaveText('73');
+  await expect(page.locator('#quota-7d-suffix')).toHaveText('3.5D');
+
+  await page.evaluate(() => {
+    renderQuotaLoaded('claude', {
+      raw: 12,
+      pct: 12,
+      resetAt: Date.now() + 60 * 60 * 1000,
+      sevenDay: null,
+    });
+  });
+  await expect(page.locator('#quota-5h-pct')).toHaveText('12');
+  await expect(page.locator('#quota-7d-label')).toHaveText('—');
+  await expect(page.locator('#quota-7d-suffix')).toHaveText('7D');
 });

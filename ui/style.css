@@ -1057,8 +1057,9 @@ body {
   border-radius: 3px;
 }
 
-/* ── backends catalog (Agents tab) ───────────────────────────────────────── */
-#backends-catalog {
+/* ── runtime catalogs (Agents tab) ──────────────────────────────────────── */
+#harnesses-catalog,
+#providers-catalog {
   display: flex;
   flex-direction: column;
   margin-bottom: 1.8rem;
@@ -1072,7 +1073,8 @@ body {
   border-bottom: 1px solid var(--border-faint);
   font-size: var(--text-body);
 }
-#backends-catalog .bcat-row:first-child { border-top: 1px solid var(--border-faint); }
+#harnesses-catalog .bcat-row:first-child,
+#providers-catalog .bcat-row:first-child { border-top: 1px solid var(--border-faint); }
 .bcat-name {
   display: flex;
   align-items: center;
@@ -1773,8 +1775,8 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 34px;
+  height: 34px;
   background: transparent;
   border: none;
   color: var(--text-dim);
@@ -1782,7 +1784,7 @@ body {
   padding: 0;
   border-radius: 3px;
 }
-.fv-nav-btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+.fv-nav-btn svg { width: 22px; height: 22px; flex-shrink: 0; }
 .fv-nav-btn:hover:not(:disabled) { background: rgba(255,255,255,0.07); color: #ccc; }
 .fv-nav-btn:disabled { opacity: 0.2; cursor: default; }
 #file-modal-breadcrumb {
@@ -1807,8 +1809,8 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 34px;
+  height: 34px;
   background: transparent;
   border: none;
   color: var(--text-dim);
@@ -1817,14 +1819,14 @@ body {
   border-radius: 3px;
 }
 .fv-action-btn[hidden] { display: none !important; }
-.fv-action-btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+.fv-action-btn svg { width: 22px; height: 22px; flex-shrink: 0; }
 .fv-action-btn:hover { background: rgba(255,255,255,0.07); color: #ccc; }
 #file-modal-close {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 34px;
+  height: 34px;
   background: transparent;
   border: none;
   color: var(--text-dim);
@@ -1833,7 +1835,7 @@ body {
   flex-shrink: 0;
   border-radius: 3px;
 }
-#file-modal-close svg { width: 16px; height: 16px; flex-shrink: 0; }
+#file-modal-close svg { width: 22px; height: 22px; flex-shrink: 0; }
 #file-modal-close:hover { color: #999; }
 #file-modal-body {
   flex: 1;
@@ -1844,7 +1846,7 @@ body {
   color: var(--text-muted);
 }
 #file-modal-box.fv-editing #file-modal-header,
-#file-modal-box.fv-editing .fv-edit-footer {
+#file-modal-box.fv-editing .fv-edit-toolbar {
   background: #15110f;
 }
 #file-modal-box.fv-editing #file-modal-body {
@@ -1988,16 +1990,16 @@ body {
   font-family: 'JetBrains Mono', ui-monospace, monospace !important;
   overflow: auto !important;
 }
-.fv-edit-footer {
+.fv-edit-toolbar {
   display: flex;
   align-items: center;
   gap: 0.5rem;
   padding: 0.35rem 0.6rem;
-  border-top: 1px solid var(--surface-3);
+  border-bottom: 1px solid var(--surface-3);
   flex-shrink: 0;
   background: var(--bg);
 }
-.fv-edit-footer[hidden] { display: none; }
+.fv-edit-toolbar[hidden] { display: none; }
 .fv-edit-status { flex: 1; font-size: var(--text-xs); color: var(--text-dim); }
 .fv-edit-tools {
   display: flex;
@@ -2050,25 +2052,24 @@ body {
   border-color: var(--accent);
   color: var(--accent);
 }
-.fv-save-btn {
-  background: var(--accent);
+.fv-edit-action-btn {
+  background: transparent;
   border: none;
-  border-radius: 5px;
-  color: #fff;
-  cursor: pointer;
-  font-size: var(--text-sm);
-  padding: 0.3rem 0.8rem;
+  color: var(--text-dim);
+}
+.fv-edit-action-btn svg { width: 22px; height: 22px; flex-shrink: 0; }
+.fv-edit-action-btn:hover:not(:disabled) {
+  color: var(--accent);
+}
+.fv-save-btn {
+  background: transparent;
+  border: none;
+}
+.fv-save-btn:not(:disabled) { color: var(--accent); }
+.fv-save-btn:hover:not(:disabled) {
+  color: #ff7f52;
 }
 .fv-save-btn:disabled { opacity: 0.45; cursor: default; }
-.fv-cancel-btn {
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  color: var(--text-dim);
-  cursor: pointer;
-  font-size: var(--text-sm);
-  padding: 0.3rem 0.8rem;
-}
 @media (max-width: 720px) {
   #file-modal { padding: 0; }
   #file-modal-box {
@@ -2077,7 +2078,7 @@ body {
     border-radius: 0;
     border: none;
   }
-  .fv-edit-footer {
+  .fv-edit-toolbar {
     align-items: stretch;
     flex-wrap: wrap;
   }
@@ -2109,14 +2110,27 @@ body {
 }
 .fv-history-item {
   display: flex;
-  align-items: center;
-  gap: 0.7rem;
-  padding: 0.35rem 1.4rem;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.45rem 1.4rem;
   font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   font-size: var(--text-sm);
   border-bottom: 1px solid rgba(255,255,255,0.04);
 }
+.fv-history-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  width: 100%;
+}
 .fv-history-time { color: var(--text-dim); flex: 1; }
+.fv-history-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+.fv-history-diff-btn,
 .fv-history-revert-btn {
   background: none;
   border: 1px solid var(--border);
@@ -2127,8 +2141,18 @@ body {
   padding: 0.15rem 0.5rem;
   white-space: nowrap;
 }
+.fv-history-diff-btn:hover,
 .fv-history-revert-btn:hover { border-color: var(--accent); color: var(--accent); }
 .fv-history-revert-btn:disabled { opacity: 0.4; cursor: default; }
+.fv-history-diff {
+  width: 100%;
+  min-width: 0;
+}
+.fv-history-diff[hidden] { display: none; }
+.fv-history-diff .diff-scroll {
+  max-height: 320px;
+  border: 1px solid rgba(255,255,255,0.06);
+}
 
 #memory-editor {
   flex: 1;
@@ -3027,6 +3051,8 @@ button {
 
 .send-icon { display: none; }
 
+.runtime-short { display: none; }
+
 @media (max-width: 768px) {
   body {
     font-size: 16px;
@@ -3257,12 +3283,22 @@ button {
   #agents-list .col-cwd {
     display: none;
   }
+  .runtime-full { display: none; }
+  .runtime-short { display: inline; }
   #agents-list table {
     table-layout: fixed;
   }
   #agents-list th,
   #agents-list td {
     padding-inline: 0.45rem;
+  }
+  #agents-list .col-runtime {
+    width: 4.4rem;
+  }
+  #agents-list .agent-name {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   #agents-list .col-model {
     overflow: hidden;
@@ -3324,7 +3360,6 @@ button {
   }
 
 }
-
 
 #agents-list {
   overflow-y: auto;
@@ -3388,8 +3423,11 @@ button {
   border-color: var(--text-dim);
 }
 #af-name    { width: 80px; }
-#af-backend { width: 80px; }
+#af-harness { width: 96px; }
+#af-provider { width: 96px; }
 #af-model   { width: 130px; }
+.model-picker { width: 28px; padding: 0.25rem 0.15rem; text-align: center; }
+.model-picker[hidden] { display: none; }
 #af-cwd     { width: 130px; }
 .agent-form-row button[type=submit] { background: var(--raised); font-size: 12px; padding: 0.25rem 0.7rem; }
 .agent-form-row button[type=submit]:hover { color: var(--accent); border-color: var(--accent); }
@@ -3824,9 +3862,22 @@ mark.search-kw-highlight {
 
   .agent-form-row {
     display: grid;
-    grid-template-columns: minmax(0, 4.2rem) minmax(0, 4.6rem) minmax(0, 1fr) minmax(0, 1fr) 32px;
+    grid-template-areas:
+      "name harness provider provider provider provider"
+      "model model picker cwd cwd save"
+      "status status status status status status";
+    grid-template-columns: minmax(0, 5.5rem) minmax(0, 6.6rem) 2rem minmax(0, 1fr) minmax(0, 1fr) 2rem;
     gap: 0.3rem;
   }
+
+  #af-name    { grid-area: name; }
+  #af-harness { grid-area: harness; }
+  #af-provider { grid-area: provider; }
+  #af-model   { grid-area: model; }
+  #af-model-picker { grid-area: picker; }
+  #af-cwd     { grid-area: cwd; }
+  .agent-form-row button[type=submit] { grid-area: save; }
+  #agent-form-status { grid-area: status; }
 
   .agent-form-row input,
   .agent-form-row select {
@@ -3837,10 +3888,17 @@ mark.search-kw-highlight {
   }
 
   #af-name,
-  #af-backend,
+  #af-harness,
+  #af-provider,
   #af-model,
+  #af-model-picker,
   #af-cwd {
     width: 100%;
+  }
+
+  #af-provider {
+    justify-self: start;
+    width: 7rem;
   }
 
   .agent-form-row button[type=submit] {
@@ -3862,7 +3920,6 @@ mark.search-kw-highlight {
   }
 
   #agent-form-status {
-    grid-column: 1 / -1;
     min-height: 0.85rem;
     line-height: 1;
   }

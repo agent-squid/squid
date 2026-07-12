@@ -1,23 +1,53 @@
 import json
 import sqlite3
-from types import SimpleNamespace
 from agent import stats_db
 
 
-def test_init_db_seeds_pi_agent_when_pi_backend_is_available(tmp_path, monkeypatch):
+def test_init_db_seeds_pi_agent_when_pi_harness_is_installed(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
-    monkeypatch.setattr(stats_db, "BACKENDS", {
-        "pi": SimpleNamespace(available=True, model=None),
-    })
+    monkeypatch.setattr(stats_db, "SUPPORTED_HARNESSES", frozenset({"pi"}))
+    monkeypatch.setattr(stats_db, "is_installed", lambda harness: harness == "pi")
 
     stats_db.init_db()
 
     with sqlite3.connect(tmp_path / "squid.db") as conn:
         row = conn.execute(
-            "SELECT name, backend, model, cwd FROM agents WHERE name = 'pi'"
+            "SELECT name, harness, provider, backend, model, cwd FROM agents WHERE name = 'pi'"
         ).fetchone()
 
-    assert row == ("pi", "pi", None, None)
+    assert row == ("pi", "pi", None, "pi", None, None)
+
+
+def test_init_db_seeds_claude_agent_without_claudecode_or_haiku_names(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    monkeypatch.setattr(stats_db, "SUPPORTED_HARNESSES", frozenset({"claudecode"}))
+    monkeypatch.setattr(stats_db, "is_installed", lambda harness: harness == "claudecode")
+
+    stats_db.init_db()
+
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        rows = conn.execute(
+            "SELECT name, harness, provider, backend, model FROM agents ORDER BY name"
+        ).fetchall()
+
+    assert rows == [("claude", "claudecode", "anthropic", "claudecode:anthropic", None)]
+
+
+def test_init_db_seeds_five_default_agents_when_all_harnesses_are_installed(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    monkeypatch.setattr(
+        stats_db,
+        "SUPPORTED_HARNESSES",
+        frozenset({"claudecode", "codex", "cursor", "opencode", "pi"}),
+    )
+    monkeypatch.setattr(stats_db, "is_installed", lambda harness: True)
+
+    stats_db.init_db()
+
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        rows = conn.execute("SELECT name FROM agents ORDER BY name").fetchall()
+
+    assert [row[0] for row in rows] == ["claude", "codex", "cursor", "opencode", "pi"]
 
 
 def test_aggregated_stats_includes_requested_chart_percentile(tmp_path, monkeypatch):

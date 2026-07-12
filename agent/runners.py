@@ -150,16 +150,16 @@ class CLIError(RuntimeError):
 
 def _claude_child_env(backend_id: str, backend_env: Optional[dict]) -> dict:
     env_for_claude = dict(backend_env) if backend_env else {}
-    if backend_id == "claude":
+    if backend_id == "claudecode":
         # Claude Code owns its OAuth credentials and refresh lifecycle. Inherited
         # API/gateway variables take precedence over its claude.ai login, so remove
-        # them only for the native backend. Gateway backends such as deepseek keep
-        # their explicitly resolved child-process environment.
+        # them only for the native harness+provider. Gateway providers such as
+        # deepseek keep their explicitly resolved child-process environment.
         for name in (
             "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL",
             "SQUID_NATIVE_CLAUDE_TOKEN",
         ):
-            env_for_claude[name] = None
+            env_for_claude.setdefault(name, None)
     return env_for_claude
 
 
@@ -576,7 +576,7 @@ async def run_claude(
     response_timeout: Optional[int] = None,
     resume_session_id: Optional[str] = None,
     adhoc: bool = False, msg_id: Optional[int] = None,
-    backend_id: str = "claude", backend_env: Optional[dict] = None,
+    backend_id: str = "claudecode", backend_env: Optional[dict] = None,
     backend_settings: Optional[dict] = None, backend_args: tuple[str, ...] = (),
     prompt_preview: Optional[str] = None,
 ) -> AsyncGenerator[Union[str, dict], None]:
@@ -983,7 +983,7 @@ async def run_claude_interactive_cli(
     response_timeout: Optional[int] = None,
     resume_session_id: Optional[str] = None,
     adhoc: bool = False, msg_id: Optional[int] = None,
-    backend_id: str = "claude", backend_env: Optional[dict] = None,
+    backend_id: str = "claudecode", backend_env: Optional[dict] = None,
     backend_settings: Optional[dict] = None, backend_args: tuple[str, ...] = (),
     interactive_idle_timeout_s: float = 3600,
     prompt_preview: Optional[str] = None,
@@ -1520,8 +1520,9 @@ async def run_opencode(
 
     cmd = [OPENCODE_PATH, "run", "--format", "json", "--dangerously-skip-permissions"]
     cmd += list(backend_args)
+    provider = (backend_settings or {}).get("provider")
     if model:
-        cmd += ["-m", model]
+        cmd += ["-m", f"{provider}/{model}" if provider else model]
     if resume_session_id:
         cmd += ["--session", resume_session_id]
     cmd.append(prompt if resume_session_id else _build_prompt(prompt, history))
@@ -1623,10 +1624,11 @@ async def run_pi(
     cmd = [PI_PATH, "-p", "--mode", "json"]
     cmd += list(backend_args)
     provider = (backend_settings or {}).get("provider")
-    if provider:
-        cmd += ["--provider", str(provider)]
+    # pi resolves the provider straight from the "provider/model" pattern in
+    # --model rather than a separate flag — same convention opencode's -m uses.
     if model:
-        cmd += ["--model", model]
+        pi_model = model if not provider or model.startswith(f"{provider}/") else f"{provider}/{model}"
+        cmd += ["--model", pi_model]
     if resume_session_id:
         cmd += ["--session-id", resume_session_id]
     cmd.append(prompt if resume_session_id else _build_prompt(prompt, history))
@@ -1710,8 +1712,8 @@ async def run_pi(
             raise CLIError(event.get("message", "pi error"))
 
 
-RUNNER_NAMES_BY_DRIVER = {
-    "claude": "run_claude",
+RUNNER_NAMES_BY_HARNESS = {
+    "claudecode": "run_claude",
     "codex": "run_codex",
     "cursor": "run_cursor",
     "copilot": "run_copilot",
@@ -1720,9 +1722,9 @@ RUNNER_NAMES_BY_DRIVER = {
     "pi": "run_pi",
 }
 
-RUNNER_NAMES_BY_DRIVER_PROTOCOL = {
-    ("claude", "oneshot-cli"): "run_claude",
-    ("claude", "interactive-cli"): "run_claude_interactive_cli",
+RUNNER_NAMES_BY_HARNESS_PROTOCOL = {
+    ("claudecode", "oneshot-cli"): "run_claude",
+    ("claudecode", "interactive-cli"): "run_claude_interactive_cli",
     ("codex", "oneshot-cli"): "run_codex",
     ("cursor", "oneshot-cli"): "run_cursor",
     ("opencode", "oneshot-cli"): "run_opencode",
@@ -1730,14 +1732,27 @@ RUNNER_NAMES_BY_DRIVER_PROTOCOL = {
 }
 
 
-def runner_for_driver(driver: str):
-    name = RUNNER_NAMES_BY_DRIVER.get(driver)
+def runner_for_harness(harness: str):
+    name = RUNNER_NAMES_BY_HARNESS.get(harness)
     return globals().get(name) if name else None
+
+
+def runner_for_agent(resolved, *, adhoc: bool = False):
+    protocol = getattr(resolved, "protocol", "oneshot-cli") or "oneshot-cli"
+    if adhoc and protocol != "oneshot-cli":
+        protocol = "oneshot-cli"
+    harness = getattr(resolved, "harness", None)
+    if harness is None:
+        driver = getattr(resolved, "driver", None)
+        harness = "claudecode" if driver == "claude" else driver
+    name = RUNNER_NAMES_BY_HARNESS_PROTOCOL.get((harness, protocol))
+    return globals().get(name) if name else None
+
+
+def runner_for_driver(driver: str):
+    harness = "claudecode" if driver == "claude" else driver
+    return runner_for_harness(harness)
 
 
 def runner_for_backend(backend, *, adhoc: bool = False):
-    protocol = getattr(backend, "protocol", "oneshot-cli") or "oneshot-cli"
-    if adhoc and protocol != "oneshot-cli":
-        protocol = "oneshot-cli"
-    name = RUNNER_NAMES_BY_DRIVER_PROTOCOL.get((backend.driver, protocol))
-    return globals().get(name) if name else None
+    return runner_for_agent(backend, adhoc=adhoc)

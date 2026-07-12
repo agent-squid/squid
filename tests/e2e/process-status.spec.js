@@ -56,23 +56,23 @@ test('opening the tracker restarts polling until an external process finishes', 
   await expect(tracker).not.toHaveClass(/has-procs/, { timeout: 5_000 });
 });
 
-test('status popup lists quota gauges only for available backends', async ({ page }) => {
+test('status popup lists quota gauges only for authed providers', async ({ page }) => {
   await mockBackend(page);
   await page.route('**/health', r => r.fulfill({ json: {
     status: 'ok',
-    backends: {
-      claude: { label: 'Claude', available: true, gauge: { type: 'claude' } },
-      codex: { label: 'Codex', available: true, gauge: { type: 'codex' } },
-      deepseek: { label: 'DeepSeek', available: false, gauge: { type: 'deepseek' } },
-      qwen: { label: 'Qwen', available: false, gauge: { type: 'static' } },
-      local: { label: 'Local', available: true, gauge: { type: 'static' } },
-      bare: { label: 'Bare', available: true, gauge: { type: 'none' } },
+    providers: {
+      claude: { label: 'Claude', gauge: { type: 'claude' }, gauge_authed: true },
+      codex: { label: 'Codex', gauge: { type: 'codex' }, gauge_authed: true },
+      deepseek: { label: 'DeepSeek', gauge: { type: 'deepseek' }, gauge_authed: false },
+      qwen: { label: 'Qwen', gauge: { type: 'static' }, gauge_authed: false },
+      local: { label: 'Local', gauge: { type: 'static' }, gauge_authed: true },
+      bare: { label: 'Bare', gauge: { type: 'none' }, gauge_authed: null },
     },
   }}));
   await page.route('**/config/agents', r => r.fulfill({ json: [
     { name: 'qwen-agent', backend: 'qwen' },
   ] }));
-  await page.route('**/quota/backend/*', r => {
+  await page.route('**/quota/*/*', r => {
     const backend = r.request().url().split('/').pop();
     if (backend === 'local' || backend === 'qwen') {
       return r.fulfill({ json: { status: 'ok', text: 'Local', raw: null, used_percent: null } });
@@ -98,16 +98,80 @@ test('status popup lists quota gauges only for available backends', async ({ pag
   await expect(rows.filter({ hasText: 'Bare' })).toHaveCount(0);
 });
 
-test('fresh install status popup hides unavailable default gauges', async ({ page }) => {
+test('status popup renders runtime quota snapshots under provider label only', async ({ page }) => {
   await mockBackend(page);
   await page.route('**/health', r => r.fulfill({ json: {
     status: 'ok',
+    providers: {
+      anthropic: { label: 'Anthropic', gauge: { type: 'claude' }, gauge_authed: true },
+    },
     backends: {
-      claude: { label: 'Claude', available: false, gauge: { type: 'claude' } },
-      codex: { label: 'Codex', available: false, gauge: { type: 'codex' } },
-      cursor: { label: 'Cursor', available: false, gauge: { type: 'cursor' } },
-      opencode: { label: 'OpenCode', available: true, gauge: { type: 'static', text: 'Free tier' } },
-      local: { label: 'Local', available: true, gauge: { type: 'none' } },
+      'claudecode:anthropic': { label: 'Claude Code x Anthropic', gauge: { type: 'claude' } },
+    },
+  }}));
+  await page.route('**/quota/backend/*', r => {
+    return r.fulfill({ json: { status: 'ok', raw: 17, used_percent: 17 } });
+  });
+  await page.route('**/quota/provider/*', r => {
+    return r.fulfill({ json: { status: 'ok', raw: 17, used_percent: 17 } });
+  });
+  await page.route('**/processes', r => r.fulfill({ json: [] }));
+
+  await page.goto('/');
+  await page.evaluate(() => fetchQuotaForBackend('claudecode:anthropic'));
+  await page.locator('#proc-status').click();
+
+  const rows = page.locator('#proc-status-popup .quota-status-row');
+  await expect(rows).toHaveCount(1);
+  await expect(rows).toContainText(['Anthropic']);
+  await expect(rows).toContainText(['17%']);
+  await expect(page.locator('#proc-status-popup')).not.toContainText('Claude Code x Anthropic');
+});
+
+test('status popup omits DeepSeek budget title detail', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/health', r => r.fulfill({ json: {
+    status: 'ok',
+    providers: {
+      deepseek: { label: 'DeepSeek', gauge: { type: 'deepseek' }, gauge_authed: true },
+    },
+  }}));
+  await page.route('**/quota/provider/deepseek', r => {
+    return r.fulfill({ json: {
+      status: 'ok',
+      text: '$8.00',
+      raw: 8,
+      used_percent: null,
+      reset_at: null,
+      title: 'DeepSeek · $2.00 spent of $10.00',
+      max_budget: 10,
+      max_budget_pct: 20,
+      spent: 2,
+    } });
+  });
+  await page.route('**/processes', r => r.fulfill({ json: [] }));
+
+  await page.goto('/');
+  await page.locator('#proc-status').click();
+
+  const row = page.locator('#proc-status-popup .quota-status-row');
+  await expect(row).toContainText('DeepSeek');
+  await expect(row).toContainText('$8.00');
+  await expect(row).toContainText('no reset');
+  await expect(row).not.toContainText('spent');
+  await expect(row).not.toContainText('$10.00');
+});
+
+test('fresh install status popup hides unauthed default gauges', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/health', r => r.fulfill({ json: {
+    status: 'ok',
+    providers: {
+      claude: { label: 'Claude', gauge: { type: 'claude' }, gauge_authed: false },
+      codex: { label: 'Codex', gauge: { type: 'codex' }, gauge_authed: false },
+      cursor: { label: 'Cursor', gauge: { type: 'cursor' }, gauge_authed: false },
+      opencode: { label: 'OpenCode', gauge: { type: 'static', text: 'Free tier' }, gauge_authed: true },
+      local: { label: 'Local', gauge: { type: 'none' }, gauge_authed: null },
     },
   }}));
   await page.route('**/processes', r => r.fulfill({ json: [] }));

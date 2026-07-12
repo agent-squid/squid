@@ -9,7 +9,8 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from .backends import BACKENDS
+from .harnesses import SUPPORTED_HARNESSES, is_installed
+from .resolve import agent_ref_for_storage, split_agent_ref
 
 # Store database in ~/.squid/ so it persists across installs/updates.
 # Override with SQUID_DB_PATH env var (e.g. for containers).
@@ -26,6 +27,8 @@ _TABLES = [
         session_id           TEXT PRIMARY KEY,
         topic                TEXT,
         agent                TEXT,
+        harness              TEXT,
+        provider             TEXT,
         backend              TEXT,
         model                TEXT,
         cwd                  TEXT,
@@ -44,7 +47,9 @@ _TABLES = [
     )""",
     """CREATE TABLE IF NOT EXISTS agents (
         name       TEXT PRIMARY KEY,
-        backend    TEXT NOT NULL,
+        harness    TEXT,
+        provider   TEXT,
+        backend    TEXT,
         model      TEXT,
         cwd        TEXT,
         timeout    INTEGER,
@@ -59,6 +64,8 @@ _TABLES = [
         last_adhoc_prompt  TEXT,
         last_at            TEXT,
         last_model         TEXT,
+        last_harness       TEXT,
+        last_provider      TEXT,
         last_backend       TEXT,
         hidden             INTEGER DEFAULT 0,
         created_at         TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
@@ -88,6 +95,7 @@ _TABLES = [
         agent       TEXT NOT NULL,
         session_id  TEXT NOT NULL,
         cwd         TEXT NOT NULL,
+        runtime_fingerprint TEXT,
         backend_fingerprint TEXT,
         created_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         PRIMARY KEY (topic, agent)
@@ -191,6 +199,14 @@ _MIGRATIONS: list[str] = [
     "ALTER TABLE chat_messages ADD COLUMN lookback INTEGER DEFAULT 0",
     "ALTER TABLE chat_messages ADD COLUMN status_raw TEXT",
     "ALTER TABLE session_stats ADD COLUMN adhoc INTEGER DEFAULT 0",
+    "ALTER TABLE session_stats ADD COLUMN lookback INTEGER DEFAULT 0",
+    "ALTER TABLE session_stats ADD COLUMN harness TEXT",
+    "ALTER TABLE session_stats ADD COLUMN provider TEXT",
+    "ALTER TABLE agents ADD COLUMN harness TEXT",
+    "ALTER TABLE agents ADD COLUMN provider TEXT",
+    "ALTER TABLE topics ADD COLUMN last_harness TEXT",
+    "ALTER TABLE topics ADD COLUMN last_provider TEXT",
+    "ALTER TABLE topic_sessions ADD COLUMN runtime_fingerprint TEXT",
     # prompts_fts backfill — safe to re-run; inserts only missing rows
     """INSERT INTO prompts_fts(rowid, content)
        SELECT id, content FROM chat_messages
@@ -220,6 +236,46 @@ _DATA_MIGRATIONS: list[tuple[str, str]] = [
        SET session_turn_index = (SELECT rn FROM ranked WHERE ranked.id = chat_messages.id)
        WHERE session_turn_index IS NULL AND id IN (SELECT id FROM ranked)"""),
 ]
+
+
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(row["name"] == column for row in conn.execute(f"PRAGMA table_info({table})"))
+
+
+def _backfill_harness_provider(conn: sqlite3.Connection) -> None:
+    if _has_column(conn, "agents", "harness"):
+        for row in conn.execute("SELECT name, backend, harness, provider FROM agents").fetchall():
+            if row["harness"]:
+                continue
+            harness, provider = split_agent_ref(row["backend"], row["provider"])
+            conn.execute(
+                "UPDATE agents SET harness=?, provider=? WHERE name=?",
+                (harness, provider, row["name"]),
+            )
+    if _has_column(conn, "session_stats", "harness"):
+        for row in conn.execute("SELECT session_id, backend, harness, provider FROM session_stats").fetchall():
+            if row["harness"]:
+                continue
+            harness, provider = split_agent_ref(row["backend"], row["provider"])
+            conn.execute(
+                "UPDATE session_stats SET harness=?, provider=? WHERE session_id=?",
+                (harness, provider, row["session_id"]),
+            )
+    if _has_column(conn, "topics", "last_harness"):
+        for row in conn.execute("SELECT topic, agent, last_backend, last_harness, last_provider FROM topics").fetchall():
+            if row["last_harness"] or not row["last_backend"]:
+                continue
+            harness, provider = split_agent_ref(row["last_backend"], row["last_provider"])
+            conn.execute(
+                "UPDATE topics SET last_harness=?, last_provider=? WHERE topic=? AND agent=?",
+                (harness, provider, row["topic"], row["agent"]),
+            )
+    if _has_column(conn, "topic_sessions", "runtime_fingerprint"):
+        conn.execute(
+            """UPDATE topic_sessions
+               SET runtime_fingerprint = COALESCE(runtime_fingerprint, backend_fingerprint)
+               WHERE backend_fingerprint IS NOT NULL"""
+        )
 
 
 def _connect() -> sqlite3.Connection:
@@ -252,30 +308,18 @@ def init_db() -> None:
                 continue
             conn.execute(sql)
             conn.execute("INSERT INTO schema_migrations (name) VALUES (?)", (name,))
-        # Seed opencode with its free default model so it works out of the box
-        # (must run before the generic loop so the model is set on first insert)
-        opencode_backend = BACKENDS.get("opencode")
-        if opencode_backend and opencode_backend.available:
-            from .config import OPENCODE_DEFAULT_MODEL
-            conn.execute(
-                "INSERT OR IGNORE INTO agents (name, backend, model) VALUES (?, ?, ?)",
-                ("opencode", "opencode", OPENCODE_DEFAULT_MODEL),
-            )
-        # Seed one default agent per installed enabled CLI (INSERT OR IGNORE — never overwrites user edits)
-        for backend, definition in BACKENDS.items():
-            if backend == "claude-live":
-                continue
-            if definition.available:
+        _backfill_harness_provider(conn)
+        # Seed one default agent per installed harness (INSERT OR IGNORE — never overwrites user edits)
+        for harness in sorted(SUPPORTED_HARNESSES):
+            if harness != "claudecode" and is_installed(harness):
                 conn.execute(
-                    "INSERT OR IGNORE INTO agents (name, backend, model) VALUES (?, ?, ?)",
-                    (backend, backend, definition.model),
+                    "INSERT OR IGNORE INTO agents (name, harness, provider, backend, model) VALUES (?, ?, ?, ?, ?)",
+                    (harness, harness, None, harness, None),
                 )
-        # Seed haiku as a cost-comparison agent alongside the default claude agent
-        claude_backend = BACKENDS.get("claude")
-        if claude_backend and claude_backend.available:
+        if is_installed("claudecode"):
             conn.execute(
-                "INSERT OR IGNORE INTO agents (name, backend, model) VALUES (?, ?, ?)",
-                ("haiku", "claude", "claude-haiku-4-5"),
+                "INSERT OR IGNORE INTO agents (name, harness, provider, backend, model) VALUES (?, ?, ?, ?, ?)",
+                ("claude", "claudecode", "anthropic", "claudecode:anthropic", None),
             )
         # FTS repair: remove entries whose content was indexed mid-stream
         # (partial saves) and now differs from the final stored content.
@@ -305,43 +349,66 @@ def init_db() -> None:
 
 def list_agents() -> list[dict]:
     with _connect() as conn:
-        return [dict(r) for r in conn.execute("SELECT * FROM agents ORDER BY name").fetchall()]
+        rows = [dict(r) for r in conn.execute("SELECT * FROM agents ORDER BY name").fetchall()]
+    for row in rows:
+        if not row.get("harness"):
+            row["harness"], row["provider"] = split_agent_ref(row.get("backend"), row.get("provider"))
+        row["backend"] = agent_ref_for_storage(row["harness"], row.get("provider"))
+    return rows
 
 
 def get_default_agent() -> Optional[dict]:
     """Return the first available agent in fallback order: claude → codex → cursor."""
     with _connect() as conn:
         rows = {r["name"]: dict(r) for r in conn.execute("SELECT * FROM agents").fetchall()}
-    for backend in BACKENDS:
-        if backend in rows:
-            return rows[backend]
+    for name in ("claude", "codex", "cursor", "opencode", "pi", "claudecode"):
+        if name in rows:
+            row = rows[name]
+            if not row.get("harness"):
+                row["harness"], row["provider"] = split_agent_ref(row.get("backend"), row.get("provider"))
+            row["backend"] = agent_ref_for_storage(row["harness"], row.get("provider"))
+            return row
     # Any agent at all
-    return next(iter(rows.values()), None) if rows else None
+    row = next(iter(rows.values()), None) if rows else None
+    if row and not row.get("harness"):
+        row["harness"], row["provider"] = split_agent_ref(row.get("backend"), row.get("provider"))
+        row["backend"] = agent_ref_for_storage(row["harness"], row.get("provider"))
+    return row
 
 
 def get_agent(name: str) -> Optional[dict]:
     with _connect() as conn:
         row = conn.execute("SELECT * FROM agents WHERE name = ?", (name,)).fetchone()
-    return dict(row) if row else None
+    if not row:
+        return None
+    item = dict(row)
+    if not item.get("harness"):
+        item["harness"], item["provider"] = split_agent_ref(item.get("backend"), item.get("provider"))
+    item["backend"] = agent_ref_for_storage(item["harness"], item.get("provider"))
+    return item
 
 
-def upsert_agent(name: str, backend: str, model: Optional[str],
+def upsert_agent(name: str, harness: str, provider: Optional[str], model: Optional[str],
                  cwd: Optional[str] = None) -> bool:
-    """Upsert agent config. Returns True if key attributes (backend/model/cwd) changed."""
+    """Upsert agent config. Returns True if key attributes changed."""
+    backend = agent_ref_for_storage(harness, provider)
     with _connect() as conn:
-        existing = conn.execute("SELECT backend, model, cwd FROM agents WHERE name = ?", (name,)).fetchone()
+        existing = conn.execute("SELECT harness, provider, backend, model, cwd FROM agents WHERE name = ?", (name,)).fetchone()
         key_changed = existing and (
-            existing["backend"] != backend or
+            (existing["harness"] or split_agent_ref(existing["backend"], existing["provider"])[0]) != harness or
+            (existing["provider"] or split_agent_ref(existing["backend"], existing["provider"])[1]) != provider or
             existing["model"] != model or
             existing["cwd"] != cwd
         )
         conn.execute(
-            """INSERT INTO agents (name, backend, model, cwd) VALUES (?, ?, ?, ?)
+            """INSERT INTO agents (name, harness, provider, backend, model, cwd) VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(name) DO UPDATE SET
+                 harness = excluded.harness,
+                 provider = excluded.provider,
                  backend = excluded.backend,
                  model   = excluded.model,
                  cwd     = excluded.cwd""",
-            (name, backend, model, cwd),
+            (name, harness, provider, backend, model, cwd),
         )
     return bool(key_changed)
 
@@ -490,16 +557,18 @@ def upsert_topic(
     agent: Optional[str] = None,
     last_prompt: Optional[str] = None,
     last_model: Optional[str] = None,
-    last_backend: Optional[str] = None,
+    last_harness: Optional[str] = None,
+    last_provider: Optional[str] = None,
     adhoc: bool = False,
 ) -> None:
+    last_backend = agent_ref_for_storage(last_harness, last_provider) if last_harness else None
     now = __import__('time').strftime("%Y-%m-%dT%H:%M:%SZ", __import__('time').gmtime())
     at = now if last_prompt else None
     with _connect() as conn:
         # Topic-level row
         conn.execute(
-            """INSERT INTO topics (topic, agent, sticky_agent, sticky_adhoc, last_prompt, last_at, last_model, last_backend)
-               VALUES (?, '', ?, ?, ?, ?, ?, ?)
+            """INSERT INTO topics (topic, agent, sticky_agent, sticky_adhoc, last_prompt, last_at, last_model, last_harness, last_provider, last_backend)
+               VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(topic, agent) DO UPDATE SET
                  hidden       = 0,
                  sticky_agent = CASE WHEN excluded.sticky_agent IS NOT NULL THEN excluded.sticky_agent ELSE sticky_agent END,
@@ -507,23 +576,27 @@ def upsert_topic(
                  last_prompt  = COALESCE(excluded.last_prompt, last_prompt),
                  last_at      = COALESCE(excluded.last_at, last_at),
                  last_model   = COALESCE(excluded.last_model, last_model),
+                 last_harness = COALESCE(excluded.last_harness, last_harness),
+                 last_provider = COALESCE(excluded.last_provider, last_provider),
                  last_backend = COALESCE(excluded.last_backend, last_backend)""",
-            (name, agent, 1 if adhoc else 0, last_prompt, at, last_model, last_backend),
+            (name, agent, 1 if adhoc else 0, last_prompt, at, last_model, last_harness, last_provider, last_backend),
         )
         # Agent-level row
         if agent:
             session_prompt = None if adhoc else last_prompt
             adhoc_prompt   = last_prompt if adhoc else None
             conn.execute(
-                """INSERT INTO topics (topic, agent, last_prompt, last_adhoc_prompt, last_at, last_model, last_backend)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                """INSERT INTO topics (topic, agent, last_prompt, last_adhoc_prompt, last_at, last_model, last_harness, last_provider, last_backend)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(topic, agent) DO UPDATE SET
                      last_prompt        = COALESCE(excluded.last_prompt, last_prompt),
                      last_adhoc_prompt  = COALESCE(excluded.last_adhoc_prompt, last_adhoc_prompt),
                      last_at            = COALESCE(excluded.last_at, last_at),
                      last_model         = COALESCE(excluded.last_model, last_model),
+                     last_harness       = COALESCE(excluded.last_harness, last_harness),
+                     last_provider      = COALESCE(excluded.last_provider, last_provider),
                      last_backend       = COALESCE(excluded.last_backend, last_backend)""",
-                (name, agent, session_prompt, adhoc_prompt, at, last_model, last_backend),
+                (name, agent, session_prompt, adhoc_prompt, at, last_model, last_harness, last_provider, last_backend),
             )
 
 
@@ -748,26 +821,32 @@ def get_topic_agents(topic: str) -> list[dict]:
 def get_topic_session(topic: str, agent: str) -> Optional[dict]:
     with _connect() as conn:
         row = conn.execute(
-            "SELECT session_id, cwd, backend_fingerprint FROM topic_sessions WHERE topic=? AND agent=?",
+            "SELECT session_id, cwd, runtime_fingerprint, backend_fingerprint FROM topic_sessions WHERE topic=? AND agent=?",
             (topic, agent),
         ).fetchone()
-    return dict(row) if row else None
+    if not row:
+        return None
+    item = dict(row)
+    item["runtime_fingerprint"] = item.get("runtime_fingerprint") or item.get("backend_fingerprint")
+    return item
 
 
 _invalidated_session_ids: set[str] = set()
 
 
 def set_topic_session(topic: str, agent: str, session_id: str, cwd: Optional[str],
-                      backend_fingerprint: Optional[str] = None) -> None:
+                      runtime_fingerprint: Optional[str] = None) -> None:
     if session_id in _invalidated_session_ids:
         _invalidated_session_ids.discard(session_id)
         return
     with _connect() as conn:
         conn.execute(
-            """INSERT INTO topic_sessions (topic, agent, session_id, cwd, backend_fingerprint) VALUES (?, ?, ?, ?, ?)
+            """INSERT INTO topic_sessions (topic, agent, session_id, cwd, runtime_fingerprint, backend_fingerprint) VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(topic, agent) DO UPDATE SET session_id=excluded.session_id,
-                 cwd=excluded.cwd, backend_fingerprint=excluded.backend_fingerprint""",
-            (topic, agent, session_id, cwd, backend_fingerprint),
+                 cwd=excluded.cwd,
+                 runtime_fingerprint=excluded.runtime_fingerprint,
+                 backend_fingerprint=excluded.backend_fingerprint""",
+            (topic, agent, session_id, cwd, runtime_fingerprint, runtime_fingerprint),
         )
 
 
@@ -1327,22 +1406,29 @@ def save_stats(
     stats: dict,
     topic: Optional[str] = None,
     agent: Optional[str] = None,
+    harness: Optional[str] = None,
+    provider: Optional[str] = None,
     backend: Optional[str] = None,
     model: Optional[str] = None,
     cwd: Optional[str] = None,
     lookback: int = 0,
 ) -> None:
+    if not harness and backend:
+        harness, provider = split_agent_ref(backend, provider)
+    backend = agent_ref_for_storage(harness, provider) if harness else None
     with _connect() as conn:
         conn.execute(
             """INSERT INTO session_stats
-                   (session_id, topic, agent, backend, model, cwd,
+                   (session_id, topic, agent, harness, provider, backend, model, cwd,
                     input_tokens, output_tokens,
                     cache_read_tokens, cache_write_tokens, history_input_tokens,
                     cost_usd, duration_ms, adhoc, lookback, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                ON CONFLICT(session_id) DO UPDATE SET
                    topic                = COALESCE(excluded.topic, topic),
                    agent                = COALESCE(excluded.agent, agent),
+                   harness              = COALESCE(excluded.harness, harness),
+                   provider             = COALESCE(excluded.provider, provider),
                    backend              = COALESCE(excluded.backend, backend),
                    model                = COALESCE(excluded.model, model),
                    cwd                  = COALESCE(excluded.cwd, cwd),
@@ -1356,7 +1442,7 @@ def save_stats(
                    adhoc                = excluded.adhoc,
                    lookback             = excluded.lookback""",
             (
-                session_id, topic, agent, backend, model, cwd,
+                session_id, topic, agent, harness, provider, backend, model, cwd,
                 stats.get("input_tokens", 0), stats.get("output_tokens", 0),
                 stats.get("cache_read_tokens", 0), stats.get("cache_write_tokens", 0),
                 stats.get("history_input_tokens", 0),
@@ -2248,7 +2334,7 @@ def save_file_edit(file_path: str, before: str, after: str) -> int:
 def get_file_edit_history(file_path: str, limit: int = 20) -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT id, file_path, edited_at FROM file_edit_history WHERE file_path = ? ORDER BY id DESC LIMIT ?",
+            "SELECT id, file_path, before, after, edited_at FROM file_edit_history WHERE file_path = ? ORDER BY id DESC LIMIT ?",
             (file_path, limit),
         ).fetchall()
     return [dict(r) for r in rows]

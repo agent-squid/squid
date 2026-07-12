@@ -87,15 +87,46 @@ const AGENT_THEME_COLORS = Object.freeze({
 });
 
 let _backendMetadata = {};
+let _harnessMetadata = {};
+let _providerMetadata = {};
+
+function splitAgentRef(ref, provider = null) {
+  if (provider) return { harness: ref || '', provider };
+  const raw = String(ref || '');
+  const idx = raw.indexOf(':');
+  if (idx >= 0) return { harness: raw.slice(0, idx), provider: raw.slice(idx + 1) || null };
+  const aliases = { claude: 'claudecode' };
+  return { harness: aliases[raw] || raw, provider: null };
+}
+
+function agentBackendRef(agent) {
+  if (!agent) return null;
+  if (agent.backend) return agent.backend;
+  const harness = agent.harness || '';
+  return agent.provider ? `${harness}:${agent.provider}` : harness;
+}
+
+function runtimeRef(harness, provider = null) {
+  return provider ? `${harness}:${provider}` : harness;
+}
+
+function providerMetadataForBackend(backend) {
+  if (_providerMetadata[backend]) return _providerMetadata[backend]; // backend is already a bare provider id
+  const provider = _backendMetadata[backend]?.provider || splitAgentRef(backend).provider;
+  return provider ? _providerMetadata[provider] : null;
+}
 
 function agentThemeColor(backend) {
-  const configured = _backendMetadata[backend]?.color;
+  const configured = _backendMetadata[backend]?.color || providerMetadataForBackend(backend)?.color;
   if (configured) return configured;
   return AGENT_THEME_COLORS[(backend || '').toLowerCase()] || AGENT_THEME_COLORS.default;
 }
 
 function agentSlugColor(agent, backendFallback = null) {
   const config = (_agentsCache || []).find(a => a.name === agent);
+  if (config?.color) return config.color;
+  if (config?.provider_color) return config.provider_color;
+  if (config?.provider && _providerMetadata[config.provider]?.color) return _providerMetadata[config.provider].color;
   return agentThemeColor(config?.backend || backendFallback || agent);
 }
 
@@ -112,17 +143,65 @@ function refreshAgentSlugColors() {
   });
 }
 
+function mergeAgentCache(agents) {
+  if (!Array.isArray(agents)) return _agentsCache || [];
+  const merged = new Map((_agentsCache || []).map(agent => [agent.name, agent]));
+  for (const agent of agents) {
+    if (!agent?.name) continue;
+    const normalized = { ...agent, backend: agentBackendRef(agent) };
+    merged.set(agent.name, { ...(merged.get(agent.name) || {}), ...normalized });
+  }
+  _agentsCache = Array.from(merged.values());
+  refreshAgentSlugColors();
+  return _agentsCache;
+}
+
 function quotaGaugeColor(backend) {
   return agentThemeColor(backend);
 }
 
 function backendDisplayName(backend) {
-  return _backendMetadata[backend]?.label || backend || 'Agent';
+  return _backendMetadata[backend]?.label || providerMetadataForBackend(backend)?.label || backend || 'Agent';
 }
 
 function backendModelHint(backend) {
   const driver = _backendMetadata[backend]?.driver || backend;
   return DRIVER_MODEL_HINTS[driver] || 'model (optional)';
+}
+
+// Suggestions only — provider.models is a UI convenience list, never
+// enforced server-side, so any model string a user types is accepted.
+function backendModelSuggestions(backend) {
+  return providerMetadataForBackend(backend)?.models || [];
+}
+
+function abbrev3(s) {
+  return (s || '').slice(0, 3);
+}
+
+// Populates the compact "pick a known model" <select> next to a freeform
+// model <input>. Choosing an option fills the input; the picker itself
+// always resets to its placeholder so it never becomes the source of truth.
+function populateModelPicker(pickerId, inputId, backend) {
+  const picker = document.getElementById(pickerId);
+  const input = document.getElementById(inputId);
+  if (!picker) return;
+  const models = backendModelSuggestions(backend);
+  if (!models.length) {
+    picker.hidden = true;
+    picker.innerHTML = '';
+    return;
+  }
+  picker.hidden = false;
+  picker.innerHTML = '<option value="" selected disabled hidden></option>' +
+    models.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
+  picker.onchange = () => {
+    if (picker.value && input) {
+      input.value = picker.value;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    picker.value = '';
+  };
 }
 
 // Rewrite file:// links and images to /localfile?path= so local paths are served.
@@ -1568,7 +1647,11 @@ async function initPromptHistory() {
     const res = await fetch('/prompts/recent?limit=50');
     if (!res.ok) return;
     const data = await res.json();
+    if (data.agents && typeof data.agents === 'object') {
+      mergeAgentCache(Object.values(data.agents));
+    }
     if (Array.isArray(data.items)) promptHistory = mergePromptHistory(getStashedPrompts(), data.items);
+    if (input.value.trim()) updateAutocomplete();
   } catch { /* ignore */ }
 }
 
@@ -4116,7 +4199,7 @@ function quotaStateFor(backend) {
 }
 
 function gaugeTypeFor(backend) {
-  return _backendMetadata[backend]?.gauge?.type || 'none';
+  return _backendMetadata[backend]?.gauge?.type || providerMetadataForBackend(backend)?.gauge?.type || 'none';
 }
 
 function quotaConfigFor(backend) {
@@ -4186,6 +4269,7 @@ function setVisibleQuotaBackend(backend) {
       displayEl?.classList.add('loaded');
       if (displayEl) displayEl.title = snapshot.title ?? '';
       updateGaugeLabel(activeQuotaBackend);
+      updateSevenDayGauge(activeQuotaBackend);
     } else if (snapshot?.status === 'error') {
       displayEl?.classList.add('error');
       if (displayEl) displayEl.title = cfg.errorTitle ?? '';
@@ -4291,10 +4375,10 @@ function updateGaugeLabel(backend) {
 function updateSevenDayGauge(backend) {
   const state = quotaStateFor(backend);
   const cfg = quotaConfigFor(backend);
-  if (!state.sevenDay || !cfg.sevenDayArcId) return;
+  if (!cfg.sevenDayArcId) return;
   const arc = document.getElementById(cfg.sevenDayArcId);
   const label = document.getElementById(cfg.sevenDayLabelId);
-  if (arc && state.sevenDay.pct != null) {
+  if (arc && state.sevenDay?.pct != null) {
     const filled = (state.sevenDay.pct / 100) * cfg.pieC;
     arc.setAttribute('stroke-dasharray', `${filled} ${cfg.pieC}`);
     arc.setAttribute('stroke', quotaGaugeColor(backend, state.sevenDay.pct));
@@ -4302,12 +4386,12 @@ function updateSevenDayGauge(backend) {
     arc.setAttribute('stroke-dasharray', `0 ${cfg.pieC}`);
   }
   if (label) {
-    label.textContent = state.sevenDay.pct != null ? `${state.sevenDay.pct}` : '—';
+    label.textContent = state.sevenDay?.pct != null ? `${state.sevenDay.pct}` : '—';
   }
   // Update 7D suffix with days remaining
   const suffix = document.getElementById(cfg.sevenDaySuffixId);
   if (suffix) {
-    if (state.sevenDay.resetAt) {
+    if (state.sevenDay?.resetAt) {
       const diff = state.sevenDay.resetAt - Date.now();
       const days = Math.max(0, diff / (24 * 60 * 60 * 1000));
       suffix.textContent = `${days.toFixed(1)}D`;
@@ -4350,6 +4434,7 @@ function renderQuotaLoaded(backend, snapshot) {
     resetAt: snapshot.resetAt,
     title: snapshot.title,
     displayText: snapshot.displayText ?? null,
+    sevenDay: snapshot.sevenDay ?? null,
   });
 }
 
@@ -4407,7 +4492,13 @@ async function fetchQuotaForBackend(backend) {
   state.inFlight = true;
   const label = backendDisplayName(backend);
   try {
-    const res = await fetch(`/quota/backend/${encodeURIComponent(backend)}`);
+    // A bare provider id (no harness alias, no "harness:provider" ref) routes to
+    // the harness-free endpoint — quota is a provider attribute (ADR-0028).
+    const isBareProvider = !_backendMetadata[backend] && !backend.includes(':') && _providerMetadata[backend];
+    const url = isBareProvider
+      ? `/quota/provider/${encodeURIComponent(backend)}`
+      : `/quota/backend/${encodeURIComponent(backend)}`;
+    const res = await fetch(url);
     if (!res.ok) {
       if (res.status === 400) showQuotaError(backend, `${label} auth`);
       else showTransientQuotaError(backend, `${label} error`);
@@ -5611,34 +5702,48 @@ function updateProcStatusDot(processes, queued) {
   procStatusBtn.classList.toggle('has-idle', hasIdle);
 }
 
-function shouldShowQuotaStatusBackend(backend) {
-  const info = _backendMetadata[backend];
+function quotaStatusProviderKey(ref) {
+  return splitAgentRef(ref).provider || ref;
+}
+
+function quotaSnapshotForProvider(provider) {
+  return quotaSnapshots[provider] ||
+    Object.values(quotaSnapshots).find(snapshot => quotaStatusProviderKey(snapshot.backend) === provider) ||
+    null;
+}
+
+function shouldShowQuotaStatusProvider(provider) {
+  const info = _providerMetadata[provider] || _backendMetadata[provider];
+  const snapshot = quotaSnapshotForProvider(provider);
+  const snapshotGaugeType = snapshot ? gaugeTypeFor(snapshot.backend) : 'none';
   const gaugeType = info?.gauge?.type || 'none';
-  if (gaugeType === 'none') return false;
-  return !!info?.available;
+  if (gaugeType === 'none' && snapshotGaugeType === 'none') return false;
+  return info?.gauge_authed !== false;
 }
 
 function renderQuotaStatus() {
-  // The status popup is a backend overview, so its rows must come from the
-  // configured backend catalog. quotaSnapshots is populated lazily and only
-  // contains gauges that have already been fetched (usually the active one).
+  // Rows come from the configured provider catalog (providers: in squid.yaml) —
+  // quota is a provider attribute, not a harness one (ADR-0028), so this needs
+  // no hardcoded backend list. quotaSnapshots is unioned in defensively for
+  // gauges fetched before /health populated _providerMetadata.
   const backends = [...new Set([
-    ...Object.keys(_backendMetadata),
-    ...Object.keys(quotaSnapshots),
-  ])].filter(shouldShowQuotaStatusBackend);
+    ...Object.keys(_providerMetadata),
+    ...Object.keys(quotaSnapshots).map(quotaStatusProviderKey),
+  ])].filter(shouldShowQuotaStatusProvider);
   const rows = backends
-    .map(backend => {
-    const q = quotaSnapshots[backend] || {
-      backend,
-      status: quotaConfigFor(backend) ? 'unknown' : 'unsupported',
+    .map(provider => {
+    const snapshot = quotaSnapshotForProvider(provider);
+    const q = snapshot || {
+      backend: provider,
+      status: quotaConfigFor(provider) ? 'unknown' : 'unsupported',
     };
-    const accent = agentThemeColor(backend);
+    const accent = agentThemeColor(provider);
     let value = 'n/a';
     let detail = 'no quota integration';
     if (q.status === 'loaded') {
       value = q.displayText || (q.pct == null ? '—' : `${q.pct}%`);
       const reset = quotaTimeText(q.resetAt);
-      detail = reset ? `resets in ${reset}` : (q.title || 'no reset');
+      detail = reset ? `resets in ${reset}` : (gaugeTypeFor(q.backend) === 'deepseek' ? 'no reset' : (q.title || 'no reset'));
     } else if (q.status === 'error') {
       value = 'error';
       detail = q.text || 'unavailable';
@@ -5647,7 +5752,7 @@ function renderQuotaStatus() {
       detail = 'loading';
     }
     return `<div class="quota-status-row">
-      <span class="quota-status-name"><span class="quota-status-dot" style="background:${accent}"></span>${escapeHtml(backendDisplayName(backend))}</span>
+      <span class="quota-status-name"><span class="quota-status-dot" style="background:${accent}"></span>${escapeHtml(backendDisplayName(provider))}</span>
       <span class="quota-status-value">${value}</span>
       <span class="quota-status-detail">${detail}</span>
     </div>`;
@@ -5754,7 +5859,7 @@ function toggleProcPopup() {
     procPopupOpenedAt = Date.now();
     renderProcPopup(cachedProcRows, cachedQueueRows);
     startProcPoll();
-    for (const backend of Object.keys(_backendMetadata)) {
+    for (const backend of Object.keys(_providerMetadata)) {
       if (quotaConfigFor(backend)) fetchQuotaForBackend(backend);
     }
   }
@@ -6502,20 +6607,20 @@ async function confirmTopicDelete() {
   }
 }
 
-// ── backends catalog ──────────────────────────────────────────────────────────
+// ── runtime catalogs ──────────────────────────────────────────────────────────
 
 const DRIVER_CATALOG = Object.freeze({
   claude: {
     label: 'Claude Code',
     installCmd: 'curl -fsSL https://claude.ai/install.sh | bash',
     authHint: 'run claude to authenticate',
-    gaugeHint: 'click gauge in header → paste org ID + session key',
+    gaugeHint: 'click gauge in header -> Detect',
   },
   codex: {
     label: 'Codex',
     installCmd: 'curl -fsSL https://chatgpt.com/codex/install.sh | sh',
     authHint: 'run codex to authenticate',
-    gaugeHint: 'click gauge in header → use bookmarklet or paste token',
+    gaugeHint: 'click gauge in header -> Detect',
   },
   cursor: {
     label: 'Cursor Agent',
@@ -6532,81 +6637,136 @@ const DRIVER_CATALOG = Object.freeze({
 });
 
 const GAUGE_CATALOG = Object.freeze({
-  claude: 'click gauge in header → paste org ID + session key',
-  codex: 'click gauge in header → use bookmarklet or paste token',
+  claude: 'click gauge in header -> Detect',
+  codex: 'click gauge in header -> Detect',
   cursor: 'automatic via cursor-agent',
   deepseek: 'uses this backend API key',
   none: 'no gauge configured',
 });
 
-function renderBackendsCatalog(backends) {
-  const el = document.getElementById('backends-catalog');
-  if (!el) return;
+function fallbackHarnessesFromBackends(backends) {
+  return Object.entries(backends || {}).map(([id, info]) => ({
+    id: splitAgentRef(info.harness || info.driver || id).harness,
+    label: info.label || id,
+    protocol: info.protocol || 'oneshot-cli',
+    installed: !!info.available,
+    default_provider: info.provider || null,
+    compatible_providers: info.provider ? [info.provider] : [],
+  })).filter((h, index, arr) => h.id && arr.findIndex(other => other.id === h.id) === index);
+}
 
+function ensureRuntimeMetadata(harness, provider = null) {
+  if (!harness) return;
+  const ref = runtimeRef(harness, provider);
+  if (_backendMetadata[ref]) return;
+  const hInfo = _harnessMetadata[harness] || {};
+  const pInfo = provider ? _providerMetadata[provider] : null;
+  _backendMetadata[ref] = {
+    label: provider ? `${hInfo.label || harness} / ${pInfo?.label || provider}` : (hInfo.label || harness),
+    color: pInfo?.color,
+    driver: harness === 'claudecode' ? 'claude' : harness,
+    harness,
+    provider,
+    protocol: hInfo.protocol || 'oneshot-cli',
+    gauge: pInfo?.gauge || { type: 'none' },
+  };
+}
+
+function providerOptionsForHarness(harness, selectedProvider = null) {
+  const hInfo = _harnessMetadata[harness] || {};
+  const ids = [...new Set([
+    ...(hInfo.compatible_providers || []),
+    hInfo.default_provider,
+    selectedProvider,
+  ].filter(Boolean))];
+  return ids.sort((a, b) => {
+    const aLabel = _providerMetadata[a]?.label || a;
+    const bLabel = _providerMetadata[b]?.label || b;
+    return aLabel.localeCompare(bLabel);
+  });
+}
+
+function setProviderOptions(harness, selectedProvider = null, selectId = 'af-provider') {
+  const providerSelect = document.getElementById(selectId);
+  if (!providerSelect) return;
+  const hInfo = _harnessMetadata[harness] || {};
+  const providerIds = providerOptionsForHarness(harness, selectedProvider);
+  providerSelect.innerHTML = providerIds
+    .map(id => `<option value="${escapeHtml(id)}">${escapeHtml(_providerMetadata[id]?.label || id)}</option>`)
+    .join('');
+  const value = selectedProvider || hInfo.default_provider || providerIds[0] || '';
+  if (value && providerIds.includes(value)) providerSelect.value = value;
+}
+
+function selectedRuntime(selectPrefix = 'af') {
+  const harness = document.getElementById(`${selectPrefix}-harness`)?.value || '';
+  const provider = document.getElementById(`${selectPrefix}-provider`)?.value || null;
+  ensureRuntimeMetadata(harness, provider);
+  return { harness, provider, backend: runtimeRef(harness, provider) };
+}
+
+function refreshRuntimeMetadata(health) {
+  const backends = health?.backends || health || {};
   _backendMetadata = backends || {};
-  const backendSelect = document.getElementById('af-backend');
-  if (backendSelect) {
-    const previous = backendSelect.value;
-    backendSelect.innerHTML = Object.keys(_backendMetadata)
-      .map(id => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join('');
-    if (_backendMetadata[previous]) backendSelect.value = previous;
+  _providerMetadata = health?.providers || {};
+  _harnessMetadata = {};
+  for (const h of (health?.harnesses || fallbackHarnessesFromBackends(backends))) {
+    _harnessMetadata[h.id] = h;
+  }
+
+  const harnessSelect = document.getElementById('af-harness');
+  if (harnessSelect) {
+    const previous = harnessSelect.value;
+    const harnessIds = Object.keys(_harnessMetadata).sort((a, b) =>
+      (_harnessMetadata[a].label || a).localeCompare(_harnessMetadata[b].label || b)
+    );
+    harnessSelect.innerHTML = harnessIds
+      .map(id => `<option value="${escapeHtml(id)}">${escapeHtml(_harnessMetadata[id].label || id)}</option>`).join('');
+    if (_harnessMetadata[previous]) harnessSelect.value = previous;
+    setProviderOptions(harnessSelect.value);
+    populateModelPicker('af-model-picker', 'af-model', selectedRuntime().backend);
   }
   refreshAgentSlugColors();
+}
 
-  el.innerHTML = Object.entries(_backendMetadata).map(([id, info]) => {
-    const driverInfo = DRIVER_CATALOG[info.driver] || {};
-    const available   = info.available;
-    const gaugeAuthed = info.gauge_authed;
-    const isProvider  = info.kind === 'provider';
-    const color       = agentThemeColor(id);
-    const label       = info.label;
-    const installCmd  = driverInfo.installCmd || '';
-    const gauge       = info.gauge || { type: 'none' };
-    const usesBackendApiKey = info.provider === 'deepseek' || gauge.type === 'deepseek';
-    const readyViaConfig = isProvider || usesBackendApiKey;
-    const authHint    = usesBackendApiKey
-      ? 'DeepSeek API key configured'
-      : (isProvider ? 'configured in YAML' : (driverInfo.authHint || `uses ${info.driver} driver`));
-    const gaugeHint   = gauge.type === 'static'
-      ? (gauge.text || 'static')
-      : (GAUGE_CATALOG[gauge.type] || '—');
+function renderHarnessesCatalog(health) {
+  const el = document.getElementById('harnesses-catalog');
+  if (!el) return;
+
+  const harnessIds = Object.keys(_harnessMetadata).sort((a, b) =>
+    (_harnessMetadata[a].label || a).localeCompare(_harnessMetadata[b].label || b)
+  );
+  if (!harnessIds.length) {
+    el.innerHTML = '<div class="empty">No harnesses reported.</div>';
+    return;
+  }
+
+  el.innerHTML = harnessIds.map(id => {
+    const info = _harnessMetadata[id] || {};
+    const available = !!info.installed;
+    const label = info.label || id;
+    const installCmd = info.install_cmd || DRIVER_CATALOG[id]?.installCmd || '';
+    const providers = (info.compatible_providers || [])
+      .map(providerId => _providerMetadata[providerId]?.label || providerId)
+      .sort((a, b) => a.localeCompare(b));
+    const providerHint = providers.length ? `providers: ${providers.join(', ')}` : 'providers: none reported';
 
     let codingHtml;
     if (available) {
-      codingHtml = `<span class="bcat-status-ok">✓ ${readyViaConfig ? 'ready' : 'detected'}</span>
-        <span class="bcat-hint">${escapeHtml(authHint)}</span>`;
+      codingHtml = `<span class="bcat-status-ok">✓ installed</span>
+        <span class="bcat-hint">${escapeHtml(providerHint)}</span>`;
     } else {
-      const missingItems = info.missing_requirements || [
-        ...(info.missing_settings || []),
-        ...(info.missing_secrets || []),
-      ];
-      const missing = usesBackendApiKey && missingItems.includes('api_key')
-        ? 'configure DeepSeek API key in backend YAML'
-        : (missingItems.length ? `missing: ${missingItems.join(', ')}` : 'driver not found');
-      codingHtml = `<span class="bcat-status-miss">✗ ${escapeHtml(missing)}</span>` +
-        (installCmd && !missingItems.length ? `<div class="bcat-install">
+      codingHtml = `<span class="bcat-status-miss">✗ CLI not found</span>` +
+        (installCmd ? `<div class="bcat-install">
           <code class="bcat-cmd">${escapeHtml(installCmd)}</code>
           <button class="bcat-copy" data-cmd="${escapeHtml(installCmd)}">copy</button>
         </div>` : '');
     }
 
-    let gaugeHtml;
-    if (!available) {
-      gaugeHtml = `<span class="bcat-gauge-na">—</span>`;
-    } else if (gauge.type === 'none') {
-      gaugeHtml = `<span class="bcat-gauge-na">—</span>`;
-    } else if (gauge.type === 'static') {
-      gaugeHtml = `<span class="bcat-hint">${escapeHtml(gauge.text || '—')}</span>`;
-    } else if (gaugeAuthed) {
-      gaugeHtml = `<span class="bcat-gauge-ok">gauge ✓</span>`;
-    } else {
-      gaugeHtml = `<span class="bcat-hint">${escapeHtml(gaugeHint)}</span>`;
-    }
-
     return `<div class="bcat-row">
-      <div class="bcat-name"><span class="bcat-dot" style="background:${color}"></span>${escapeHtml(label)}</div>
+      <div class="bcat-name">${escapeHtml(label)}</div>
       <div class="bcat-coding">${codingHtml}<span class="bcat-hint">protocol: ${escapeHtml(info.protocol || 'oneshot-cli')}</span></div>
-      <div class="bcat-gauge">${gaugeHtml}</div>
+      <div class="bcat-gauge"><span class="bcat-hint">${escapeHtml(info.default_provider || '')}</span></div>
     </div>`;
   }).join('');
 
@@ -6618,6 +6778,52 @@ function renderBackendsCatalog(backends) {
       });
     });
   });
+}
+
+function renderProvidersCatalog() {
+  const el = document.getElementById('providers-catalog');
+  if (!el) return;
+
+  const providerIds = Object.keys(_providerMetadata).sort((a, b) =>
+    (_providerMetadata[a].label || a).localeCompare(_providerMetadata[b].label || b)
+  );
+  if (!providerIds.length) {
+    el.innerHTML = '<div class="empty">No providers configured.</div>';
+    return;
+  }
+
+  el.innerHTML = providerIds.map(id => {
+    const info = _providerMetadata[id] || {};
+    const gauge = info.gauge || { type: 'none' };
+    const missingSecrets = info.missing_secrets || [];
+    const hasMissingSecrets = missingSecrets.length > 0;
+    const label = info.label || id;
+    const color = info.color || '#888888';
+    const authText = info.auth_type === 'api_key'
+      ? (hasMissingSecrets ? `missing: ${missingSecrets.join(', ')}` : 'API key configured')
+      : 'subscription auth';
+    const statusClass = hasMissingSecrets ? 'bcat-status-miss' : 'bcat-status-ok';
+    const statusMark = hasMissingSecrets ? '✗' : '✓';
+    const gaugeText = gauge.type === 'static'
+      ? (gauge.text || 'static')
+      : (GAUGE_CATALOG[gauge.type] || 'no gauge configured');
+    const models = (info.models || []).length ? `${info.models.length} model${info.models.length === 1 ? '' : 's'}` : 'models: freeform';
+
+    return `<div class="bcat-row">
+      <div class="bcat-name"><span class="bcat-dot" style="background:${escapeHtml(color)}"></span>${escapeHtml(label)}</div>
+      <div class="bcat-coding">
+        <span class="${statusClass}">${statusMark} ${escapeHtml(authText)}</span>
+        <span class="bcat-hint">${escapeHtml(models)}</span>
+      </div>
+      <div class="bcat-gauge"><span class="bcat-hint">${escapeHtml(gaugeText)}</span></div>
+    </div>`;
+  }).join('');
+}
+
+function renderRuntimeCatalogs(health) {
+  refreshRuntimeMetadata(health);
+  renderHarnessesCatalog(health);
+  renderProvidersCatalog();
 }
 
 // ── agent manager ─────────────────────────────────────────────────────────────
@@ -6724,12 +6930,16 @@ async function loadAgents() {
     const cwdInput = document.getElementById('af-cwd');
     if (cwdInput) cwdInput.placeholder = `${_squidHome}/…`;
   }
-  renderBackendsCatalog(health?.backends);
+  renderRuntimeCatalogs(health);
   if (!agents.length) {
     listEl.innerHTML = '<div class="empty">No agents yet. Add one below.</div>';
     return;
   }
   const rows = agents.map(a => {
+    const ref = agentBackendRef(a);
+    const runtime = splitAgentRef(a.harness || ref, a.provider || null);
+    if (!a.backend) a.backend = ref;
+    ensureRuntimeMetadata(runtime.harness, runtime.provider);
     const model = a.model || '';
     const modelHtml = model
       ? `<span class="agent-model" title="${escapeHtml(model)}">${escapeHtml(model)}</span>`
@@ -6737,24 +6947,29 @@ async function loadAgents() {
     return `
     <tr>
       <td><span class="agent-name">${a.name}</span></td>
-      <td>${a.backend}</td>
+      <td class="col-runtime">${(() => {
+        const full = runtime.provider ? `${escapeHtml(runtime.harness)} / ${escapeHtml(runtime.provider)}` : escapeHtml(runtime.harness);
+        const abbr = runtime.provider ? `${escapeHtml(abbrev3(runtime.harness))}:${escapeHtml(abbrev3(runtime.provider))}` : escapeHtml(abbrev3(runtime.harness));
+        return `<span class="runtime-full">${full}</span><span class="runtime-short">${abbr}</span>`;
+      })()}</td>
       <td class="col-model">${modelHtml}</td>
       <td class="col-cwd">${a.cwd || `<span class="col-default">${_squidHome}</span>`}</td>
       <td>
-        <button class="edit-btn" data-name="${escapeHtml(a.name)}" data-backend="${escapeHtml(a.backend)}" data-model="${escapeHtml(a.model || '')}" data-cwd="${escapeHtml(a.cwd || '')}" title="Edit agent">✎</button>
+        <button class="edit-btn" data-name="${escapeHtml(a.name)}" data-harness="${escapeHtml(runtime.harness)}" data-provider="${escapeHtml(runtime.provider || '')}" data-backend="${escapeHtml(ref || '')}" data-model="${escapeHtml(a.model || '')}" data-cwd="${escapeHtml(a.cwd || '')}" title="Edit agent">✎</button>
         <button class="del-btn" data-name="${a.name}" title="Delete agent (does not affect existing messages)">✕</button>
       </td>
     </tr>`;
   }).join('');
   listEl.innerHTML = `<table>
-    <thead><tr><th>Name</th><th>Backend</th><th class="col-model">Model</th><th class="col-cwd">CWD</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th class="col-runtime"><span class="runtime-full">Runtime</span><span class="runtime-short">Run</span></th><th class="col-model">Model</th><th class="col-cwd">CWD</th><th></th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
 
   listEl.querySelectorAll('.edit-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       document.getElementById('af-name').value    = btn.dataset.name;
-      document.getElementById('af-backend').value = btn.dataset.backend;
+      document.getElementById('af-harness').value = btn.dataset.harness;
+      setProviderOptions(btn.dataset.harness, btn.dataset.provider || null);
       document.getElementById('af-model').value   = btn.dataset.model;
       document.getElementById('af-cwd').value     = btn.dataset.cwd;
       document.getElementById('agent-form').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -6773,10 +6988,17 @@ async function loadAgents() {
 
 function initAliases() {
   const statusEl = document.getElementById('agent-form-status');
-  const afBackend = document.getElementById('af-backend');
+  const afHarness = document.getElementById('af-harness');
+  const afProvider = document.getElementById('af-provider');
   const afModel   = document.getElementById('af-model');
-  afBackend.addEventListener('change', () => {
-    afModel.placeholder = backendModelHint(afBackend.value);
+  afHarness.addEventListener('change', () => {
+    setProviderOptions(afHarness.value);
+    afModel.placeholder = backendModelHint(selectedRuntime().backend);
+    populateModelPicker('af-model-picker', 'af-model', selectedRuntime().backend);
+  });
+  afProvider.addEventListener('change', () => {
+    afModel.placeholder = backendModelHint(selectedRuntime().backend);
+    populateModelPicker('af-model-picker', 'af-model', selectedRuntime().backend);
   });
   document.getElementById('config-editor-reload').addEventListener('click', loadConfigYaml);
   document.getElementById('config-editor-save').addEventListener('click', saveConfigYaml);
@@ -6785,7 +7007,7 @@ function initAliases() {
     e.preventDefault();
     const body = {
       name:    document.getElementById('af-name').value.trim(),
-      backend: document.getElementById('af-backend').value,
+      ...selectedRuntime(),
       model:   document.getElementById('af-model').value.trim() || null,
       cwd:     document.getElementById('af-cwd').value.trim()   || null,
     };
@@ -6794,7 +7016,8 @@ function initAliases() {
     // Warn if key attributes changed on an existing agent with active sessions
     const existing = (_agentsCache || []).find(a => a.name === body.name);
     if (existing) {
-      const keyChanged = existing.backend !== body.backend ||
+      const existingRef = agentBackendRef(existing);
+      const keyChanged = existingRef !== body.backend ||
                          (existing.model || null) !== body.model ||
                          (existing.cwd || null) !== body.cwd;
       if (keyChanged) {
@@ -6802,7 +7025,7 @@ function initAliases() {
         const activeTopics = sessions?.topics?.map(s => s.topic) ?? [];
         if (activeTopics.length > 0) {
           const topicList = activeTopics.join(', ');
-          const ok = confirm(`Changing backend, model, or cwd for "${body.name}" will clear active sessions in: ${topicList}.\n\nContinue?`);
+          const ok = confirm(`Changing runtime, model, or cwd for "${body.name}" will clear active sessions in: ${topicList}.\n\nContinue?`);
           if (!ok) return;
         }
       }
@@ -6899,16 +7122,20 @@ function showAgentCreatePrompt(agentName, onSaved) {
   const prompt = document.createElement('div');
   prompt.id = 'agent-create-prompt';
   prompt.className = 'agent-create-prompt';
-  const backendOptions = Object.keys(_backendMetadata).length
-    ? Object.keys(_backendMetadata)
-    : ['claude', 'codex', 'cursor', 'opencode'];
+  const harnessOptions = Object.keys(_harnessMetadata).length
+    ? Object.keys(_harnessMetadata).sort((a, b) => (_harnessMetadata[a].label || a).localeCompare(_harnessMetadata[b].label || b))
+    : ['claudecode', 'codex', 'cursor', 'opencode'];
+  const firstHarness = harnessOptions[0];
+  const firstProvider = _harnessMetadata[firstHarness]?.default_provider || providerOptionsForHarness(firstHarness)[0] || '';
   prompt.innerHTML = `
     <div class="acp-title">Agent <strong>${agentName}</strong> not found — create it?</div>
     <div class="acp-row">
-      <select id="acp-backend">
-        ${backendOptions.map(id => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join('')}
+      <select id="acp-harness">
+        ${harnessOptions.map(id => `<option value="${escapeHtml(id)}">${escapeHtml(_harnessMetadata[id]?.label || id)}</option>`).join('')}
       </select>
-      <input id="acp-model" placeholder="${backendModelHint(backendOptions[0])}" />
+      <select id="acp-provider"></select>
+      <input id="acp-model" placeholder="${backendModelHint(runtimeRef(firstHarness, firstProvider))}" />
+      <select id="acp-model-picker" class="model-picker" title="Pick a known model" aria-label="Pick a known model" hidden></select>
       <input id="acp-cwd" placeholder="cwd (default: ${_squidHome})" />
     </div>
     <div class="acp-actions">
@@ -6920,19 +7147,30 @@ function showAgentCreatePrompt(agentName, onSaved) {
   messages.scrollTop = messages.scrollHeight;
 
   const modelInput = prompt.querySelector('#acp-model');
-  prompt.querySelector('#acp-backend').addEventListener('change', e => {
-    modelInput.placeholder = backendModelHint(e.target.value);
+  const harnessSelect = prompt.querySelector('#acp-harness');
+  const providerSelect = prompt.querySelector('#acp-provider');
+  setProviderOptions(firstHarness, firstProvider, 'acp-provider');
+  populateModelPicker('acp-model-picker', 'acp-model', runtimeRef(firstHarness, providerSelect.value || firstProvider));
+  harnessSelect.addEventListener('change', e => {
+    setProviderOptions(e.target.value, null, 'acp-provider');
+    modelInput.placeholder = backendModelHint(runtimeRef(e.target.value, providerSelect.value || null));
+    populateModelPicker('acp-model-picker', 'acp-model', runtimeRef(e.target.value, providerSelect.value || null));
+  });
+  providerSelect.addEventListener('change', e => {
+    modelInput.placeholder = backendModelHint(runtimeRef(harnessSelect.value, e.target.value || null));
+    populateModelPicker('acp-model-picker', 'acp-model', runtimeRef(harnessSelect.value, e.target.value || null));
   });
 
   prompt.querySelector('#acp-cancel').addEventListener('click', () => prompt.remove());
   prompt.querySelector('#acp-save').addEventListener('click', async () => {
-    const backend = prompt.querySelector('#acp-backend').value;
+    const harness = harnessSelect.value;
+    const provider = providerSelect.value || null;
     const model   = prompt.querySelector('#acp-model').value.trim() || null;
     const cwd     = prompt.querySelector('#acp-cwd').value.trim()   || null;
     const res = await fetch('/config/agents', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: agentName, backend, model, cwd }),
+      body: JSON.stringify({ name: agentName, harness, provider, model, cwd }),
     });
     if (res.ok) {
       _agentsCache = null;  // invalidate autocomplete cache
@@ -6967,9 +7205,7 @@ async function _acAgents() {
       .then(res => res.json())
       .catch(() => [])
       .then(agents => {
-        _agentsCache = agents;
-        refreshAgentSlugColors();
-        return _agentsCache;
+        return mergeAgentCache(agents);
       })
       .finally(() => { _agentsCachePromise = null; });
   }
@@ -7336,6 +7572,7 @@ async function showBootBanner() {
     if (!res.ok) return;
     const data = await res.json();
     _backendMetadata = data.backends || {};
+    _providerMetadata = data.providers || {};
     await updateActiveQuotaGauge();
     if (activeQuotaBackend) fetchQuotaForBackend(activeQuotaBackend);
     const bootTime = data.boot_time ? fmtTime(data.boot_time) : '';
@@ -8515,6 +8752,13 @@ function _isWebPreviewPath(path) {
   return _WEB_PREVIEW_EXTS.has(ext);
 }
 
+function _languageExtForPath(path) {
+  const parts = (path || '').split('.').filter(Boolean);
+  let ext = (parts.pop() || '').toLowerCase();
+  while (_GENERIC_SUFFIXES.has(ext) && parts.length) ext = (parts.pop() || '').toLowerCase();
+  return ext;
+}
+
 let _fvNavigate = null;
 
 function _fmtSize(bytes) {
@@ -8583,6 +8827,8 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   const FV_ICON_HISTORY = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8.5" r="5" stroke="currentColor" stroke-width="1.4"/><path d="M8 5.8v2.9l2 1.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M6 2.2h4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
   const FV_ICON_COPY = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="6" y="6" width="7.5" height="7.5" rx="1.3" stroke="currentColor" stroke-width="1.4"/><path d="M3.8 10.2h-.3A1.5 1.5 0 0 1 2 8.7v-5A1.5 1.5 0 0 1 3.5 2.2h5A1.5 1.5 0 0 1 10 3.7v.3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   const FV_ICON_CHECK = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3.5 8.3l3 3 6-6.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const FV_ICON_SAVE = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 2.5h8.2L13 4.3v8.2A1.5 1.5 0 0 1 11.5 14h-7A1.5 1.5 0 0 1 3 12.5v-10Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M5 2.5V6h5V2.5M5 14v-4h6v4" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>';
+  const FV_ICON_DISCARD = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4.2 5.2A4.8 4.8 0 1 1 3.4 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M4.1 2.5v2.8h2.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   const FV_ICON_CLOSE = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
 
   const navBtns = document.createElement('div');
@@ -8619,19 +8865,36 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   historyBtn.setAttribute('aria-label', 'Edit history');
   historyBtn.innerHTML = FV_ICON_HISTORY;
   historyBtn.hidden = true;
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'fv-action-btn fv-edit-action-btn fv-save-btn';
+  saveBtn.type = 'button';
+  saveBtn.title = 'Save';
+  saveBtn.setAttribute('aria-label', 'Save');
+  saveBtn.innerHTML = FV_ICON_SAVE;
+  saveBtn.hidden = true;
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'fv-action-btn fv-edit-action-btn fv-cancel-btn';
+  cancelBtn.type = 'button';
+  cancelBtn.title = 'Discard changes';
+  cancelBtn.setAttribute('aria-label', 'Discard changes');
+  cancelBtn.innerHTML = FV_ICON_DISCARD;
+  cancelBtn.hidden = true;
   const copyBtn = document.createElement('button');
   copyBtn.className = 'fv-action-btn';
   copyBtn.title = 'Copy path';
+  copyBtn.setAttribute('aria-label', 'Copy path');
   copyBtn.innerHTML = FV_ICON_COPY;
   const closeBtn = document.createElement('button');
   closeBtn.id = 'file-modal-close';
+  closeBtn.title = 'Close';
+  closeBtn.setAttribute('aria-label', 'Close');
   closeBtn.innerHTML = FV_ICON_CLOSE;
-  actions.append(previewBtn, historyBtn, editBtn, copyBtn, closeBtn);
+  actions.append(previewBtn, historyBtn, editBtn, cancelBtn, saveBtn, copyBtn, closeBtn);
 
-  // edit footer (shown only in edit mode, appended to box)
-  const editFooter = document.createElement('div');
-  editFooter.className = 'fv-edit-footer';
-  editFooter.hidden = true;
+  // edit toolbar (shown only in edit mode, directly below the file viewer header)
+  const editToolbar = document.createElement('div');
+  editToolbar.className = 'fv-edit-toolbar';
+  editToolbar.hidden = true;
   const editStatus = document.createElement('span');
   editStatus.className = 'fv-edit-status';
   const editTools = document.createElement('div');
@@ -8669,13 +8932,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   const findPopover = document.createElement('div');
   findPopover.className = 'fv-edit-find-popover';
   findPopover.hidden = true;
-  const saveBtn = document.createElement('button');
-  saveBtn.className = 'fv-save-btn';
-  saveBtn.textContent = 'Save';
-  const cancelBtn = document.createElement('button');
-  cancelBtn.className = 'fv-cancel-btn';
-  cancelBtn.textContent = 'Cancel';
-  editFooter.append(editStatus, editTools, cancelBtn, saveBtn);
+  editToolbar.append(editTools, editStatus);
 
   header.append(navBtns, breadcrumb, actions);
 
@@ -8683,7 +8940,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   body.id = 'file-modal-body';
   body.textContent = 'Loading…';
 
-  box.append(header, body, editFooter);
+  box.append(header, editToolbar, body);
   if (!isInline) {
     modal.appendChild(box);
     document.body.appendChild(modal);
@@ -8694,7 +8951,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     exitEditMode();
     _historyOpen = false;
     historyBtn.style.opacity = '';
-    editFooter.hidden = true;
+    editToolbar.hidden = true;
     navHistory.splice(historyIdx + 1);
     navHistory.push({ path: newPath, line: newLine, endLine: newEndLine });
     historyIdx = navHistory.length - 1;
@@ -8802,6 +9059,13 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   let _editFindCleanup = null;
   let _editFindAnchor = null;
 
+  function updateEditDirtyState() {
+    const view = body._cmView;
+    const dirty = !!view && view.state.doc.toString() !== _editOriginal;
+    saveBtn.disabled = !dirty;
+    editStatus.textContent = dirty ? 'Unsaved changes' : 'No changes';
+  }
+
   function positionFindPopover(clientX = null, clientY = null) {
     if (!body._cmView || findPopover.hidden) return;
     const bodyRect = body.getBoundingClientRect();
@@ -8824,7 +9088,15 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     requestAnimationFrame(() => positionFindPopover(clientX, clientY));
   }
 
+  function shouldFloatEditTools() {
+    return window.matchMedia?.('(max-width: 720px)').matches;
+  }
+
   function showFindPopoverAtPos(pos) {
+    if (!shouldFloatEditTools()) {
+      dockFindTools();
+      return;
+    }
     const view = body._cmView;
     const coords = typeof view?.coordsAtPos === 'function' ? view.coordsAtPos(pos) : null;
     if (coords) showFindPopover(coords.right || coords.left, coords.bottom || coords.top);
@@ -8832,7 +9104,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   }
 
   function dockFindTools() {
-    if (!editFooter.contains(editTools)) editFooter.insertBefore(editTools, cancelBtn);
+    if (!editToolbar.contains(editTools)) editToolbar.insertBefore(editTools, editStatus);
     findPopover.hidden = true;
   }
 
@@ -8903,9 +9175,11 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     body.style.padding = '0';
     body.style.overflow = 'hidden';
 
-    const ext = (path || '').split('.').pop().toLowerCase();
+    const ext = _languageExtForPath(path);
     const lang = LANGS[ext]?.();
-    const extensions = [basicSetup, oneDark];
+    const extensions = [basicSetup, oneDark, EditorView.updateListener.of(update => {
+      if (update.docChanged) updateEditDirtyState();
+    })];
     if (atomOneDarkHighlight) extensions.push(atomOneDarkHighlight);
     if (lang) extensions.push(lang);
 
@@ -8914,14 +9188,16 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     body._cmView = view;
 
     box.classList.add('fv-editing');
-    editFooter.hidden = false;
+    editToolbar.hidden = false;
     editBtn.hidden = true;
     historyBtn.hidden = true;
-    editStatus.textContent = 'Editing';
+    cancelBtn.hidden = false;
+    saveBtn.hidden = false;
+    editStatus.textContent = 'No changes';
     findInput.value = '';
     _editFindPos = -1;
     lineInput.value = line ? String(line) : '';
-    saveBtn.disabled = false;
+    saveBtn.disabled = true;
     const reposition = () => {
       if (_editFindAnchor) positionFindPopover(_editFindAnchor.clientX, _editFindAnchor.clientY);
       else positionFindPopover();
@@ -8944,7 +9220,9 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     body.style.flexDirection = '';
     body.style.padding = '';
     body.style.overflow = '';
-    editFooter.hidden = true;
+    editToolbar.hidden = true;
+    cancelBtn.hidden = true;
+    saveBtn.hidden = true;
     const isText = pathKind === 'file' && path ? (pathIsText || _isTextPath(path)) : false;
     editBtn.hidden = !isText;
     historyBtn.hidden = !isText;
@@ -9003,6 +9281,38 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   // ── History panel ────────────────────────────────────────────────────────────
   let _historyOpen = false;
 
+  function renderTextDiff(container, before, after) {
+    const beforeLines = String(before ?? '').split('\n');
+    const afterLines = String(after ?? '').split('\n');
+    const m = beforeLines.length;
+    const n = afterLines.length;
+    const dp = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+    for (let i = m - 1; i >= 0; i--) {
+      for (let j = n - 1; j >= 0; j--) {
+        dp[i][j] = beforeLines[i] === afterLines[j]
+          ? dp[i + 1][j + 1] + 1
+          : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+    let i = 0;
+    let j = 0;
+    while (i < m || j < n) {
+      const el = document.createElement('div');
+      if (i < m && j < n && beforeLines[i] === afterLines[j]) {
+        el.className = 'diff-line';
+        el.textContent = '  ' + beforeLines[i++];
+        j++;
+      } else if (j < n && (i === m || dp[i][j + 1] >= dp[i + 1]?.[j])) {
+        el.className = 'diff-line diff-add';
+        el.textContent = '+ ' + afterLines[j++];
+      } else {
+        el.className = 'diff-line diff-remove';
+        el.textContent = '- ' + beforeLines[i++];
+      }
+      container.appendChild(el);
+    }
+  }
+
   async function openHistoryPanel() {
     _historyOpen = true;
     historyBtn.style.opacity = '1';
@@ -9023,12 +9333,30 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
       data.history.forEach(item => {
         const row = document.createElement('div');
         row.className = 'fv-history-item';
+        const meta = document.createElement('div');
+        meta.className = 'fv-history-meta';
         const time = document.createElement('span');
         time.className = 'fv-history-time';
         time.textContent = item.edited_at.replace('T', ' ').replace('Z', ' UTC');
+        const rowActions = document.createElement('div');
+        rowActions.className = 'fv-history-actions';
+        const diffBtn = document.createElement('button');
+        diffBtn.className = 'fv-history-diff-btn';
+        diffBtn.textContent = 'Show diff';
         const btn = document.createElement('button');
         btn.className = 'fv-history-revert-btn';
         btn.textContent = 'Revert to this';
+        const diffWrap = document.createElement('div');
+        diffWrap.className = 'fv-history-diff';
+        diffWrap.hidden = true;
+        const diffScroll = document.createElement('div');
+        diffScroll.className = 'diff-scroll';
+        renderTextDiff(diffScroll, item.before, item.after);
+        diffWrap.appendChild(diffScroll);
+        diffBtn.addEventListener('click', () => {
+          diffWrap.hidden = !diffWrap.hidden;
+          diffBtn.textContent = diffWrap.hidden ? 'Show diff' : 'Hide diff';
+        });
         btn.addEventListener('click', async () => {
           btn.disabled = true;
           btn.textContent = 'Reverting…';
@@ -9045,7 +9373,10 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
             btn.textContent = err.message || 'Failed';
           }
         });
-        row.append(time, btn);
+        meta.appendChild(time);
+        rowActions.append(diffBtn, btn);
+        meta.appendChild(rowActions);
+        row.append(meta, diffWrap);
         list.appendChild(row);
       });
     }
@@ -9120,7 +9451,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
       e.preventDefault();
       if (!isInline) modal.remove();
       _fvNavigate = null;
-      switchView('settings');
+      navigateView('settings');
     });
     hint.appendChild(configLink);
     body.appendChild(hint);
@@ -9338,7 +9669,7 @@ function _renderFileViewer(container, text, targetLine, endLine, path, changedLi
   let hlLines = null;
   if (typeof hljs !== 'undefined') {
     try {
-      const ext = (path || '').split('.').pop().toLowerCase();
+      const ext = _languageExtForPath(path);
       const lang = _EXT_LANG[ext];
       const result = lang && hljs.getLanguage(lang)
         ? hljs.highlight(text, { language: lang })
