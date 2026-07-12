@@ -24,11 +24,11 @@ Install at least one supported CLI:
 
 | Backend | CLI | Install |
 |---|---|---|
-| Claude Code | `claude` | `curl -fsSL https://claude.ai/install.sh | bash` |
-| OpenAI Codex | `codex` | `curl -fsSL https://chatgpt.com/codex/install.sh | sh` |
-| Cursor Agent | `cursor-agent` | `curl -fsS https://cursor.com/install | bash` |
-| OpenCode | `opencode` | `curl -fsSL https://opencode.ai/install | bash` |
-| Pi | `pi` | `curl -fsSL https://pi.dev/install.sh | sh` |
+| Claude Code | `claude` | `curl -fsSL https://claude.ai/install.sh \| bash` |
+| OpenAI Codex | `codex` | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` |
+| Cursor Agent | `cursor-agent` | `curl -fsS https://cursor.com/install \| bash` |
+| OpenCode | `opencode` | `curl -fsSL https://opencode.ai/install \| bash` |
+| Pi | `pi` | `curl -fsSL https://pi.dev/install.sh \| sh` |
 
 Create agents in the UI. An agent is a named config:
 ```text
