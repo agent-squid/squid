@@ -34,7 +34,7 @@ http://127.0.0.1:8000
 
 Create agents in the UI. An agent is a named config:
 ```text
-agent name (@agent) = harness (Claude Code) + provider (Claude) + model (claude-sonnet-5) + working directory
+agent name (@agent) = harness (Claude Code) + provider (Claude) + model (claude-sonnet-5) + working directory (CLAUDE.md, etc.)
 ```
 
 ## The Squid Manifesto: EVERY. TOKEN. COUNTS!
