@@ -347,3 +347,65 @@ test('history renders only assistant bubbles — no user bubbles', async ({ page
   // Prompt snippet is visible in the response header
   await expect(page.locator('.response-header-text')).toContainText('What is 2+2?');
 });
+
+test('a live in-flight message stays hidden while a filter is active, then reappears on clear', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/chat/*/status', r => r.fulfill({ json: { status: 'pending', content: '' } }));
+
+  let fulfillChat;
+  const chatIntercepted = new Promise(resolve => {
+    page.route('**/chat', route => {
+      fulfillChat = body => route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' },
+        body,
+      });
+      resolve();
+    });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', 'hello');
+  await page.keyboard.press('Enter');
+  await chatIntercepted;
+  await fulfillChat(`event: meta\ndata: ${JSON.stringify({ agent: 'claude', backend: 'claude', msg_id: 1, adhoc: false })}\n\n`);
+
+  const thinking = page.locator('.msg.assistant.msg-thinking');
+  const userBubble = page.locator('.msg.user').last();
+  await expect(thinking).toBeVisible();
+  await expect(userBubble).toBeVisible();
+
+  await page.fill('#input', '/f #squid');
+  await page.keyboard.press('Enter');
+
+  // Still in the DOM (so streaming keeps updating it) but not shown while filtered
+  await expect(thinking).toBeAttached();
+  await expect(thinking).not.toBeVisible();
+  await expect(userBubble).not.toBeVisible();
+
+  await page.locator('#chip-filter-btn').click();
+  await expect(thinking).toBeVisible();
+  await expect(userBubble).toBeVisible();
+});
+
+test('a recovered pending item is not shown while a filter is active', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/chat/*/status', r => r.fulfill({ json: { status: 'pending', content: '' } }));
+  await page.route('**/history**', r => r.fulfill({ json: {
+    items: [
+      { id: 5, role: 'assistant', topic: 'squid', agent: 'claude', content: '', status: 'pending',
+        adhoc: false, prompt: 'still running', context: null, timestamp: new Date().toISOString() },
+    ],
+    has_more: false,
+  }}));
+
+  await page.goto('/');
+  await page.waitForTimeout(300);
+  await expect(page.locator('.msg-thinking.history-item')).toHaveCount(1);
+
+  await page.fill('#input', '/f #squid');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(300);
+  await expect(page.locator('.msg-thinking.history-item')).toHaveCount(0);
+});

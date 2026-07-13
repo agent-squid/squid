@@ -58,20 +58,21 @@ test('By Turn shows one row per response with its own completion time, no bucket
   // let users pick a mode that would silently be ignored server-side.
   await expect(page.locator('#sf-breakdown')).toBeDisabled();
 
-  // Sessions/Turns are trivially 1 for every row in this view — off by default.
+  // Sessions are redundant in this view, but Turns stays on because it links
+  // to the underlying response.
   await expect(page.locator('#sf-measures-menu input[value="sessions"]')).not.toBeChecked();
-  await expect(page.locator('#sf-measures-menu input[value="turns"]')).not.toBeChecked();
+  await expect(page.locator('#sf-measures-menu input[value="turns"]')).toBeChecked();
 
-  // The chart defaulted to "Turns", which just dropped out of the selected
-  // measures above — it should fall back to the first still-selected measure
-  // (Tokens In) instead of continuing to chart something the table no longer shows.
+  // Turns stays available as a response link column, but it is not the
+  // default chart series in By Turn because every row would plot as 1.
   await expect(page.locator('#sc-y1')).toHaveValue('tokens_in');
 
   // Each row is already one turn, not a time bucket — sum/avg/min/max of a
-  // single value are identical, so the agg picker is pointless here and hidden,
-  // and the chart legend should say "RAW", not silently plot a stale/absent
-  // aggregate as zero.
-  await expect(page.locator('#sc-y1-agg')).toBeHidden();
+  // single value are identical, so the agg picker stays in place with one RAW
+  // option and the chart legend says "RAW", not silently plotting a
+  // stale/absent aggregate as zero.
+  await expect(page.locator('#sc-y1-agg')).toBeVisible();
+  await expect(page.locator('#sc-y1-agg option')).toHaveText(['RAW']);
   await expect.poll(() => page.evaluate(() => {
     const chart = window.Chart?.getChart(document.getElementById('stats-chart'));
     return chart?.data?.datasets?.[0]?.label;
@@ -79,6 +80,8 @@ test('By Turn shows one row per response with its own completion time, no bucket
 
   const rows = page.locator('#stats-content tbody tr');
   await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0).locator('.stats-turn-link')).toHaveText('1');
+  await expect(rows.nth(0).locator('.stats-turn-link')).toHaveAttribute('data-turn-ids', '2');
   // Newest turn first, each with its own duration — not a shared/aggregated value.
   await expect(rows.nth(0)).toContainText('8.0s');
   await expect(rows.nth(1)).toContainText('5.0s');
@@ -111,4 +114,28 @@ test('By Turn shows one row per response with its own completion time, no bucket
   await page.locator('#sf-period').selectOption('hourly');
   await expect(page.locator('#sf-measures-menu input[value="sessions"]')).toBeChecked();
   await expect(page.locator('#sf-measures-menu input[value="turns"]')).toBeChecked();
+});
+
+test('By Turn default table fits mobile width', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockApp(page);
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get('period') !== 'turn') {
+      return route.fulfill({ json: [{ period: '2026-07-10 10:00', sessions: 1, total_turns: 1, input_tokens: 10, output_tokens: 5 }] });
+    }
+    return route.fulfill({
+      json: [{
+        msg_id: 2, period: '2026-07-10T10:05:00Z', topic: 'squid', agent: 'codex-with-long-name', adhoc: 0,
+        sessions: 1, total_turns: 1, input_tokens: 200, output_tokens: 20, duration_ms: 8000,
+      }],
+    });
+  });
+
+  await page.goto('/');
+  await page.evaluate(() => switchView('stats'));
+  await page.locator('#sf-period').selectOption('turn');
+  await page.waitForSelector('.stats-turn-link');
+
+  await expect.poll(() => page.locator('.stats-table-scroll').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
 });

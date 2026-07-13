@@ -950,6 +950,27 @@ def get_messages_by_ids(ids: list[int]) -> list[dict]:
     return result
 
 
+def get_message_previews(ids: list[int], max_chars: int = 120) -> list[dict]:
+    if not ids:
+        return []
+    placeholders = ",".join("?" * len(ids))
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""SELECT m.id,
+                       substr(
+                         COALESCE(NULLIF(trim(m.content), ''), NULLIF(trim(u.content), ''), '(empty)'),
+                         1,
+                         ?
+                       ) AS preview
+                FROM chat_messages m
+                LEFT JOIN chat_messages u ON m.reply_to = u.id
+                WHERE m.id IN ({placeholders})
+                ORDER BY m.id ASC""",
+            [max_chars, *ids],
+        ).fetchall()
+    return [{"id": row["id"], "preview": row["preview"] or "(empty)"} for row in rows]
+
+
 def get_topic_messages_for_period(
     topic: str, since_iso: str, until_iso: str,
     agent: Optional[str] = None,
@@ -1434,15 +1455,17 @@ def _append_stats_in_filter(clauses: list[str], params: list, expr: str, values:
 
 
 _STATS_CHART_AGGS = {"sum", "avg", "min", "max", "p50", "p75", "p95"}
-_STATS_CHART_METRIC_EXPR = {
-    "cost": "cost_usd",
-    "tokens_in": """CASE
+_STATS_TOKENS_IN_EXPR = """CASE
         WHEN COALESCE(cache_read_tokens, 0) + COALESCE(cache_write_tokens, 0) > 0
          AND COALESCE(input_tokens, 0) < COALESCE(cache_read_tokens, 0) + COALESCE(cache_write_tokens, 0)
         THEN COALESCE(input_tokens, 0) + COALESCE(cache_read_tokens, 0) + COALESCE(cache_write_tokens, 0)
         ELSE COALESCE(input_tokens, 0)
-    END""",
+    END"""
+_STATS_CHART_METRIC_EXPR = {
+    "cost": "cost_usd",
+    "tokens_in": _STATS_TOKENS_IN_EXPR,
     "tokens_out": "output_tokens",
+    "tokens_total": f"({_STATS_TOKENS_IN_EXPR}) + COALESCE(output_tokens, 0)",
     "quota": "CASE WHEN quota_before IS NOT NULL AND quota_after IS NOT NULL THEN quota_after - quota_before ELSE NULL END",
     "cache_read": "COALESCE(cache_read_tokens, 0)",
     "cache_write": "COALESCE(cache_write_tokens, 0)",
@@ -1492,6 +1515,9 @@ def _stats_payload_metric_value(stats: dict, metric: str) -> Optional[float]:
     is_split = (cache_read + cache_write) > 0 and raw < (cache_read + cache_write)
     if metric == "tokens_in":
         return raw + cache_read + cache_write if is_split else raw
+    if metric == "tokens_total":
+        tokens_in = raw + cache_read + cache_write if is_split else raw
+        return tokens_in + num("output_tokens")
     if metric == "cache_read":
         return cache_read
     if metric == "cache_write":
@@ -1741,7 +1767,8 @@ def get_aggregated_stats(
                         ss.quota_delta,
                         COALESCE(cm.session_turns, 0) AS session_turns,
                         COALESCE(cm.adhoc_turns, 0) AS adhoc_turns,
-                        COALESCE(cm.session_turns, 0) + COALESCE(cm.adhoc_turns, 0) AS total_turns
+                        COALESCE(cm.session_turns, 0) + COALESCE(cm.adhoc_turns, 0) AS total_turns,
+                        cm.message_ids
                     FROM (
                         SELECT
                             {ss_bucket} AS period,
@@ -1761,7 +1788,8 @@ def get_aggregated_stats(
                     LEFT JOIN (
                         SELECT {cm_bucket} AS period,
                                {s_expr} AS session_turns,
-                               {a_expr} AS adhoc_turns
+                               {a_expr} AS adhoc_turns,
+                               GROUP_CONCAT(cm.id) AS message_ids
                         FROM chat_messages cm
                         WHERE {cm_where}
                         GROUP BY period
@@ -1841,6 +1869,7 @@ def get_stats_by_turn(
             stats = {}
         row["sessions"] = 1
         row["total_turns"] = 1
+        row["message_ids"] = [row["msg_id"]]
         row["input_tokens"] = stats.get("input_tokens") or 0
         row["output_tokens"] = stats.get("output_tokens") or 0
         row["cache_read_tokens"] = stats.get("cache_read_tokens") or 0
@@ -2094,7 +2123,8 @@ def get_stats_by_breakdown(
                         SELECT
                             {cm_bucket} AS period,
                             {', '.join(cm_dims[1:])},
-                            COUNT(*) AS total_turns
+                            COUNT(*) AS total_turns,
+                            GROUP_CONCAT(id) AS message_ids
                         FROM chat_messages
                         WHERE {cm_where}
                         GROUP BY {', '.join(group_dims)}
@@ -2105,6 +2135,7 @@ def get_stats_by_breakdown(
                             {', '.join(select_dims)},
                             ss.sessions,
                             COALESCE(cm.total_turns, ss.sessions, 0) AS total_turns,
+                            cm.message_ids,
                             ss.input_tokens,
                             ss.new_input_tokens,
                             ss.output_tokens,
@@ -2119,6 +2150,7 @@ def get_stats_by_breakdown(
                             {', '.join(union_dims)},
                             0 AS sessions,
                             cm.total_turns,
+                            cm.message_ids,
                             0 AS input_tokens,
                             0 AS new_input_tokens,
                             0 AS output_tokens,

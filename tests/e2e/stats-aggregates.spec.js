@@ -43,7 +43,7 @@ test('stats days filter includes 1d and 3d windows and requests them', async ({ 
   await expect.poll(() => statsRequests.some(req => req.days === '3')).toBe(true);
 });
 
-test('Tokens In, Cache Read/Write, New Input, Cache Hit % and Avg Tokens/Turn compute consistently', async ({ page }) => {
+test('Tokens In/Out/Total, Cache Read/Write, New Input, Cache Hit % and Avg Tokens/Turn compute consistently', async ({ page }) => {
   await mockApp(page);
   // Claude-style split: input_tokens is just the small uncacheable residual;
   // the real content lands in cache_write (new) and cache_read (reused).
@@ -63,31 +63,173 @@ test('Tokens In, Cache Read/Write, New Input, Cache Hit % and Avg Tokens/Turn co
   // Tokens In must be New Input + Cache Read, i.e. it has to include
   // cache_write (100) — not just input_tokens + cache_read (which would
   // wrongly give 350, silently dropping the cache_write tokens).
-  // Columns: period, sessions, turns, tokens_in, tokens_out.
+  // Columns: period, turns, sessions, tokens_in, tokens_out.
   await expect(page.locator('#stats-content tbody td').nth(3)).toHaveText('450');
 
   await page.locator('#sf-measures-toggle').click();
   for (const key of ['sessions', 'turns', 'tokens_in', 'tokens_out']) {
     await page.locator(`#sf-measures-menu input[value="${key}"]`).uncheck();
   }
-  for (const key of ['cache_read', 'cache_write', 'new_input', 'cache_hit_rate', 'avg_tokens_turn']) {
+  for (const key of ['cache_read', 'cache_write', 'new_input', 'cache_hit_rate', 'avg_tokens_turn', 'tokens_total']) {
     await page.locator(`#sf-measures-menu input[value="${key}"]`).check();
   }
 
   const cells = page.locator('#stats-content tbody td');
   // cells.nth(0) is the period column.
-  await expect(cells.nth(1)).toHaveText('300');    // Cache Read
-  await expect(cells.nth(2)).toHaveText('100');    // Cache Write
-  await expect(cells.nth(3)).toHaveText('150');    // New Input (50 residual + 100 cache_write)
-  await expect(cells.nth(4)).toHaveText('66.7%');  // Cache Hit % = 300 / (300+150)
-  await expect(cells.nth(5)).toHaveText('250');    // Avg Tokens/Turn = (450+50) / 2
+  await expect(cells.nth(1)).toHaveText('250');    // Avg Tokens/Turn = (450+50) / 2
+  await expect(cells.nth(2)).toHaveText('66.7%');  // Cache Hit % = 300 / (300+150)
+  await expect(cells.nth(3)).toHaveText('300');    // Cache Read
+  await expect(cells.nth(4)).toHaveText('100');    // Cache Write
+  await expect(cells.nth(5)).toHaveText('150');    // New Input (50 residual + 100 cache_write)
+  await expect(cells.nth(6)).toHaveText('500');    // Total Tokens = Tokens In + Tokens Out
 
   const totals = page.locator('#stats-content tfoot td');
-  await expect(totals.nth(1)).toHaveText('300');
-  await expect(totals.nth(2)).toHaveText('100');
-  await expect(totals.nth(3)).toHaveText('150');
-  await expect(totals.nth(4)).toHaveText('66.7%');
-  await expect(totals.nth(5)).toHaveText('250');
+  await expect(totals.nth(1)).toHaveText('250');
+  await expect(totals.nth(2)).toHaveText('66.7%');
+  await expect(totals.nth(3)).toHaveText('300');
+  await expect(totals.nth(4)).toHaveText('100');
+  await expect(totals.nth(5)).toHaveText('150');
+  await expect(totals.nth(6)).toHaveText('500');
+});
+
+test('stats measures are alphabetical and Turns links open responses', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/stats?**', route => route.fulfill({
+    json: [
+      { period: '2026-07-10 11:00', sessions: 1, total_turns: 1, input_tokens: 10, output_tokens: 5, message_ids: '10' },
+      { period: '2026-07-10 10:00', sessions: 1, total_turns: 2, input_tokens: 20, output_tokens: 10, message_ids: '20,21' },
+    ],
+  }));
+  await page.route('**/chat/*/status', route => {
+    const id = Number(new URL(route.request().url()).pathname.split('/')[2]);
+    return route.fulfill({
+      json: {
+        id,
+        msg_id: id,
+        topic: 'squid',
+        agent: 'codex',
+        role: 'assistant',
+        status: 'done',
+        prompt_context: id === 10 ? JSON.stringify({ pins: [20, 21] }) : null,
+        content: `Response ${id}`,
+      },
+    });
+  });
+
+  await page.goto('/');
+  await page.evaluate(() => switchView('stats'));
+  await page.waitForFunction(() => document.querySelectorAll('.stats-turn-link').length === 2);
+  await page.locator('.stats-turn-link[data-turn-ids="10"]').click();
+  await expect(page.locator('#view-stats')).toHaveClass(/active/);
+  await expect(page.locator('#view-chat')).not.toHaveClass(/active/);
+  await expect(page.locator('#msg-modal')).toHaveClass(/open/);
+  await expect(page.locator('#msg-modal-title')).toContainText('Message #10');
+  await expect(page.locator('#msg-modal-body')).toContainText('Response 10');
+  await page.locator('#msg-modal .user-ctx').click();
+  await expect(page.locator('#ctx-popup')).toHaveClass(/open/);
+  await expect(page.locator('#ctx-popup')).toHaveClass(/modal-context-popup/);
+  await expect(page.locator('#ctx-popup .ctx-popup-pin')).toHaveCount(2);
+  await expect.poll(() => page.evaluate(() => {
+    const popupZ = Number(getComputedStyle(document.getElementById('ctx-popup')).zIndex);
+    const modalZ = Number(getComputedStyle(document.getElementById('msg-modal')).zIndex);
+    return popupZ > modalZ;
+  })).toBe(true);
+  await page.locator('#ctx-popup .ctx-popup-pin[data-pin-id="20"]').click();
+  await expect(page.locator('#msg-modal-title')).toContainText('Message #20');
+  await expect(page.locator('#ctx-popup')).not.toHaveClass(/open/);
+  await page.locator('#msg-modal').evaluate(modal => modal.classList.remove('open'));
+
+  const state = await page.evaluate(async () => {
+    const measureLabels = [...document.querySelectorAll('#sf-measures-menu label')]
+      .map(label => label.textContent.trim().replace(/\s+/g, ' '));
+    const links = [...document.querySelectorAll('.stats-turn-link')]
+      .map(btn => ({ text: btn.textContent.trim(), ids: btn.dataset.turnIds }));
+
+    showStatsTurnsPopup(document.querySelector('.stats-turn-link[data-turn-ids="20,21"]'), [20, 21]);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const popupIds = [...document.querySelectorAll('#stats-turn-popup .ctx-popup-pin')]
+      .map(row => row.dataset.turnId);
+
+    return { measureLabels, links, popupIds };
+  });
+
+  expect(state.measureLabels).toEqual([
+    'Turns',
+    'Avg Tokens/Turn',
+    'Cache Hit %',
+    'Cache Read',
+    'Cache Write',
+    'Cost',
+    'Duration',
+    'New Input',
+    'Quota',
+    'Sessions',
+    'Tokens In',
+    'Tokens Out',
+    'Total Tokens',
+  ]);
+  expect(state.links).toEqual([
+    { text: '1', ids: '10' },
+    { text: '2', ids: '20,21' },
+  ]);
+  expect(state.popupIds).toEqual(['20', '21']);
+});
+
+test('stats turn list popup stays inside the stats view', async ({ page }) => {
+  await mockApp(page);
+  const ids = Array.from({ length: 40 }, (_, i) => i + 1);
+  await page.route('**/stats?**', route => route.fulfill({
+    json: [{
+      period: '2026-07-10 11:00',
+      sessions: 1,
+      total_turns: ids.length,
+      input_tokens: 10,
+      output_tokens: 5,
+      message_ids: ids.join(','),
+    }],
+  }));
+  await page.route('**/chat/*/status', route => {
+    const id = Number(new URL(route.request().url()).pathname.split('/')[2]);
+    return route.fulfill({ json: { id, content: `Response ${id}` } });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('.stats-turn-link').click();
+  await expect(page.locator('#stats-turn-popup')).toHaveClass(/open/);
+  await expect(page.locator('#stats-turn-popup')).toHaveClass(/stats-turn-popup/);
+
+  await expect.poll(() => page.evaluate(() => {
+    const popup = document.getElementById('stats-turn-popup').getBoundingClientRect();
+    const stats = document.getElementById('view-stats').getBoundingClientRect();
+    return {
+      top: popup.top >= stats.top,
+      bottom: popup.bottom <= stats.bottom,
+      left: popup.left >= stats.left,
+      right: popup.right <= stats.right,
+    };
+  })).toEqual({ top: true, bottom: true, left: true, right: true });
+  await expect.poll(() => page.evaluate(() => {
+    const popupZ = Number(getComputedStyle(document.getElementById('stats-turn-popup')).zIndex);
+    const modalZ = Number(getComputedStyle(document.getElementById('msg-modal')).zIndex);
+    return popupZ < modalZ;
+  })).toBe(true);
+
+  await page.locator('#stats-turn-popup .ctx-popup-pin[data-turn-id="1"]').click();
+  await expect(page.locator('#msg-modal')).toHaveClass(/open/);
+  await expect(page.locator('#msg-modal-title')).toContainText('Message #1');
+  await expect(page.locator('#stats-turn-popup')).toHaveClass(/open/);
+  await expect(page.locator('#stats-turn-popup')).toHaveClass(/stats-turn-popup/);
+  await expect.poll(() => page.evaluate(() => {
+    const popupZ = Number(getComputedStyle(document.getElementById('stats-turn-popup')).zIndex);
+    const modalZ = Number(getComputedStyle(document.getElementById('msg-modal')).zIndex);
+    return popupZ < modalZ;
+  })).toBe(true);
+  await page.locator('#msg-modal .user-ctx').click();
+  await expect(page.locator('#ctx-popup')).toHaveClass(/open/);
+  await expect(page.locator('#stats-turn-popup')).toHaveClass(/open/);
+  await page.locator('#ctx-popup .ctx-popup-row').first().click();
+  await expect(page.locator('#stats-turn-popup')).toHaveClass(/open/);
 });
 
 test('cache hit chart requests a non-additive aggregate', async ({ page }) => {
@@ -161,7 +303,8 @@ test('stats chart aggregate chips apply to Y1 and an added series', async ({ pag
   await page.getByRole('button', { name: 'Stats' }).click();
 
   await expect(page.locator('#sc-y1')).toHaveValue('turns');
-  await expect(page.locator('#sc-y1-agg')).toBeHidden();
+  await expect(page.locator('#sc-y1-agg')).toBeVisible();
+  await expect(page.locator('#sc-y1-agg option')).toHaveText(['SUM']);
   await expect(page.locator('#sc-y1-agg')).toHaveValue('sum');
 
   await page.locator('#sc-y1').selectOption('tokens_in');
@@ -169,8 +312,8 @@ test('stats chart aggregate chips apply to Y1 and an added series', async ({ pag
   await page.locator('#sc-y1-agg').selectOption('p50');
   await expect(page.locator('#stats-content thead th')).toContainText([
     'Hour',
-    'Sessions',
     'Turns',
+    'Sessions',
     'P50 Tokens In',
     'Tokens Out',
   ]);
@@ -243,14 +386,14 @@ test('stats chart uses distinct colors for Tokens In and New Input even though t
   await expect(page.locator('.sc-series-pill')).toContainText('P95 New Input · L');
   await expect(page.locator('#stats-content thead th')).toContainText([
     'Hour',
-    'Sessions',
     'Turns',
+    'P95 New Input',
+    'Sessions',
     'Tokens In',
     'Tokens Out',
-    'P95 New Input',
   ]);
-  await expect(page.locator('#stats-content tbody td').nth(5)).toHaveText('125');
-  await expect(page.locator('#stats-content tfoot td').nth(5)).toHaveText('—');
+  await expect(page.locator('#stats-content tbody td').nth(2)).toHaveText('125');
+  await expect(page.locator('#stats-content tfoot td').nth(2)).toHaveText('—');
 
   await expect.poll(() => page.evaluate(() => {
     const chart = window.Chart?.getChart(document.getElementById('stats-chart'));
@@ -342,14 +485,17 @@ test('chart metric options are limited to whatever is checked in Measures', asyn
 
   // Defaults: Sessions/Turns/Tokens In/Tokens Out checked, Cost/Duration not
   // (Duration only ever has data in By Turn, so it isn't on by default here).
-  await expect.poll(y1Options).toEqual(['sessions', 'turns', 'tokens_in', 'tokens_out']);
+  await expect.poll(y1Options).toEqual(['turns', 'sessions', 'tokens_in', 'tokens_out']);
   await expect(page.locator('#sc-y1 option[value="cost"]')).toHaveCount(0);
   await expect(page.locator('#sc-y1 option[value="duration"]')).toHaveCount(0);
+  await expect(page.locator('#sc-y1 option[value="tokens_total"]')).toHaveCount(0);
 
   // Checking Cost in Measures makes it selectable on the chart...
   await page.locator('#sf-measures-toggle').click();
   await page.locator('#sf-measures-menu input[value="cost"]').check();
+  await page.locator('#sf-measures-menu input[value="tokens_total"]').check();
   await expect.poll(y1Options).toContain('cost');
+  await expect.poll(y1Options).toContain('tokens_total');
   const requestsBeforeUncheck = statsRequests.length;
 
   // ...and unrelated toggles (Cost) don't touch the currently-charted metric
@@ -361,8 +507,8 @@ test('chart metric options are limited to whatever is checked in Measures', asyn
   // the next selected measure and *does* require a refetch, since the
   // backend hasn't computed that metric's aggregate yet.
   await page.locator('#sf-measures-menu input[value="turns"]').uncheck();
-  await expect(page.locator('#sc-y1')).toHaveValue('sessions');
-  await expect.poll(() => statsRequests.some(req => req.chart_metrics === 'sessions')).toBe(true);
+  await expect(page.locator('#sc-y1')).toHaveValue('cost');
+  await expect.poll(() => statsRequests.some(req => req.chart_metrics === 'cost')).toBe(true);
   await expect(page.locator('#sc-y1 option[value="turns"]')).toHaveCount(0);
 });
 
@@ -405,10 +551,11 @@ test('stats chart aggregate controls reconcile a legacy preset whose chart metri
   await page.goto('/');
   await page.getByRole('button', { name: 'Stats' }).click();
 
-  // Y1 falls back to the first checked measure ("Sessions"); its only agg is
-  // SUM, so the agg picker for it stays hidden.
-  await expect(page.locator('#sc-y1')).toHaveValue('sessions');
-  await expect(page.locator('#sc-y1-agg')).toBeHidden();
+  // Y1 falls back to the first checked measure ("Turns"); its only agg is
+  // SUM, so the agg picker stays visible with one option.
+  await expect(page.locator('#sc-y1')).toHaveValue('turns');
+  await expect(page.locator('#sc-y1-agg')).toBeVisible();
+  await expect(page.locator('#sc-y1-agg option')).toHaveText(['SUM']);
   // The saved secondary series ("Cost") isn't checked either — dropped
   // rather than forced onto an unrelated selected measure.
   await expect(page.locator('.sc-extra-row')).toHaveCount(0);

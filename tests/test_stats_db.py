@@ -96,7 +96,7 @@ def test_aggregated_chart_average_uses_per_turn_stats_when_available(tmp_path, m
         user_id = stats_db.insert_user_message("squid", "codex", f"turn {i}")
         asst_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
         stats_db.update_assistant_message(asst_id, f"response {i}", "session-1", "done")
-        stats_db.insert_run_event(asst_id, 0, "stats", json.dumps({"input_tokens": input_tokens, "output_tokens": 0}))
+        stats_db.insert_run_event(asst_id, 0, "stats", json.dumps({"input_tokens": input_tokens, "output_tokens": i * 10}))
         with sqlite3.connect(tmp_path / "squid.db") as conn:
             conn.execute(
                 "UPDATE chat_messages SET created_at=? WHERE id=?",
@@ -109,6 +109,8 @@ def test_aggregated_chart_average_uses_per_turn_stats_when_available(tmp_path, m
         chart_series=[
             {"metric": "tokens_in", "agg": "sum"},
             {"metric": "tokens_in", "agg": "avg"},
+            {"metric": "tokens_total", "agg": "sum"},
+            {"metric": "tokens_total", "agg": "avg"},
         ],
     )
 
@@ -116,6 +118,8 @@ def test_aggregated_chart_average_uses_per_turn_stats_when_available(tmp_path, m
     assert rows[0]["total_turns"] == 5
     assert rows[0]["chart_tokens_in_sum"] == 1500
     assert rows[0]["chart_tokens_in_avg"] == 300
+    assert rows[0]["chart_tokens_total_sum"] == 1650
+    assert rows[0]["chart_tokens_total_avg"] == 330
 
 
 def test_aggregated_cache_hit_chart_uses_weighted_rate_not_sum(tmp_path, monkeypatch):
@@ -763,6 +767,23 @@ def test_get_messages_by_ids_includes_compact_gitdiff_context(tmp_path, monkeypa
             "- A test_app.py\n"
             "</changed_files>"
         )},
+    ]
+
+
+def test_get_message_previews_fetches_lightweight_batch(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user_id = stats_db.insert_user_message("squid", "codex", "prompt preview")
+    assistant_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
+    stats_db.update_assistant_message(assistant_id, "assistant response preview", "session-1", "done")
+
+    pending_user_id = stats_db.insert_user_message("squid", "codex", "pending prompt preview")
+    pending_id = stats_db.insert_assistant_message("squid", "codex", pending_user_id, adhoc=False)
+
+    assert stats_db.get_message_previews([assistant_id, pending_id], max_chars=10) == [
+        {"id": assistant_id, "preview": "assistant "},
+        {"id": pending_id, "preview": "pending pr"},
     ]
     assert "full diff should not be injected" not in messages[1]["content"]
     assert "sqd-squid-1234-deadbe" not in messages[1]["content"]

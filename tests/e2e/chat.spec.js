@@ -212,6 +212,49 @@ test.describe('response bubble', () => {
     const regularLinkColor = await page.locator('#ctx-popup .ctx-popup-link').first()
       .evaluate(el => getComputedStyle(el).color);
     await expect(page.locator('#ctx-popup .ctx-popup-tag').first()).toHaveCSS('color', regularLinkColor);
+
+    await page.locator('#ctx-popup .ctx-popup-pin[data-pin-id="7"]').click();
+    await expect(page.locator('#msg-modal')).toHaveClass(/open/);
+    await expect(page.locator('#msg-modal-title')).toContainText('Message #7');
+    await expect(page.locator('#ctx-popup')).not.toHaveClass(/open/);
+  });
+
+  test('ctx popup near the top stays below the topbar on desktop and mobile', async ({ page }) => {
+    for (const viewport of [{ width: 1280, height: 720 }, { width: 390, height: 700 }]) {
+      await page.setViewportSize(viewport);
+      await page.goto('/');
+      await page.evaluate(() => {
+        document.getElementById('top-test-ctx')?.remove();
+        const app = document.getElementById('app');
+        const appRect = app.getBoundingClientRect();
+        const topbarRect = document.getElementById('topbar').getBoundingClientRect();
+        const anchor = document.createElement('span');
+        anchor.id = 'top-test-ctx';
+        anchor.className = 'user-ctx';
+        anchor.textContent = 'ctx: top';
+        anchor.dataset.msgId = '99';
+        anchor.style.position = 'absolute';
+        anchor.style.right = '1rem';
+        anchor.style.top = `${topbarRect.bottom - appRect.top + 2}px`;
+        anchor.addEventListener('click', e => {
+          e.stopPropagation();
+          showCtxPopup(anchor);
+        });
+        app.appendChild(anchor);
+      });
+
+      await page.locator('#top-test-ctx').click();
+      await expect(page.locator('#ctx-popup')).toHaveClass(/open/);
+      await expect.poll(() => page.evaluate(() => {
+        const popup = document.getElementById('ctx-popup').getBoundingClientRect();
+        const topbar = document.getElementById('topbar').getBoundingClientRect();
+        return {
+          belowTopbar: popup.top >= topbar.bottom,
+          insideBottom: popup.bottom <= window.innerHeight,
+        };
+      })).toEqual({ belowTopbar: true, insideBottom: true });
+      await page.locator('#ctx-popup').evaluate(popup => popup.classList.remove('open'));
+    }
   });
 
   test('ctx popup exposes a thought trace link when tool calls or status text were recorded', async ({ page }) => {
@@ -252,6 +295,7 @@ test.describe('response bubble', () => {
     await traceRow.click();
     await expect(page.locator('#msg-modal')).toHaveClass(/open/);
     await expect(page.locator('#msg-modal-title')).toContainText('thought trace');
+    await expect(page.locator('#ctx-popup')).not.toHaveClass(/open/);
 
     // Narration and tool calls render interleaved in true chronological order,
     // not grouped into two separate blocks — and the final answer text (a
@@ -583,6 +627,11 @@ test.describe('response bubble', () => {
     await expect(openButton).toHaveText('view');
     const revertButton = page.getByRole('button', { name: 'revert' });
     await expect(revertButton).toBeVisible();
+    await expect(page.locator('.gitdiff-file-row').locator('button')).toHaveText([
+      'M ui/app.js  +1 -0',
+      'revert',
+      'view',
+    ]);
     const [viewSize, revertSize] = await Promise.all([
       openButton.boundingBox(),
       revertButton.boundingBox(),
@@ -593,7 +642,7 @@ test.describe('response bubble', () => {
 
     await expect(page.locator('#file-modal-breadcrumb')).toContainText('tmp/repo/ui/app.js');
     await expect(page.locator('#file-modal-body')).toContainText('const opened = true;');
-    await expect(page.locator('#file-modal-body .fv-target')).toContainText('const opened = true;');
+    await expect(page.locator('#file-modal-body .fv-changed')).toContainText('const opened = true;');
   });
 
   test('GitDiff file-open uses source repo instead of worktree repo', async ({ page }) => {

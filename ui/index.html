@@ -318,17 +318,6 @@
         <div id="pin-panel-list"></div>
       </div>
 
-
-      <div id="msg-modal">
-        <div id="msg-modal-box">
-          <div id="msg-modal-header">
-            <span id="msg-modal-title" class="settings-label">Message</span>
-            <button id="msg-modal-close" type="button">✕</button>
-          </div>
-          <div id="msg-modal-body"></div>
-        </div>
-      </div>
-
       <div id="restart-modal">
         <div id="restart-modal-box">
           <div id="restart-modal-header">
@@ -411,6 +400,16 @@
       </form>
     </div>
 
+    <div id="msg-modal">
+      <div id="msg-modal-box">
+        <div id="msg-modal-header">
+          <span id="msg-modal-title" class="settings-label">Message</span>
+          <button id="msg-modal-close" type="button">✕</button>
+        </div>
+        <div id="msg-modal-body"></div>
+      </div>
+    </div>
+
     <div id="memory-modal">
       <div id="memory-modal-box">
         <div id="memory-modal-header">
@@ -422,7 +421,7 @@
         </div>
         <textarea id="memory-editor" spellcheck="false"></textarea>
         <div id="memory-modal-footer">
-          <div id="memory-path-group"><span id="memory-path"></span><span id="memory-token-count"></span><span id="memory-token-help" data-tooltip="Tokens are chunks of text a model reads — roughly 1 token ≈ 4 characters or ¾ of a word. Code and punctuation tokenize differently from prose, so this is an estimate."><svg width="12" height="12" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7.5" cy="7.5" r="6.5"/><path d="M5.8 5.8a1.7 1.7 0 0 1 3.4 0c0 1.1-1.7 1.7-1.7 2.9"/><circle cx="7.5" cy="11" r="0.6" fill="currentColor" stroke="none"/></svg></span></div>
+          <div id="memory-path-group"><span id="memory-path"></span><span id="memory-token-count"></span><span id="memory-token-help" class="help-icon" data-tooltip="Tokens are chunks of text a model reads — roughly 1 token ≈ 4 characters or ¾ of a word. Code and punctuation tokenize differently from prose, so this is an estimate."><svg width="12" height="12" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7.5" cy="7.5" r="6.5"/><path d="M5.8 5.8a1.7 1.7 0 0 1 3.4 0c0 1.1-1.7 1.7-1.7 2.9"/><circle cx="7.5" cy="11" r="0.6" fill="currentColor" stroke="none"/></svg></span></div>
           <button id="memory-save" type="button">Save</button>
         </div>
       </div>
@@ -486,10 +485,21 @@
       <div id="stats-presets">
         <select id="stats-preset-select" aria-label="Stats view"></select>
         <div id="stats-preset-actions">
-          <button id="stats-preset-save" type="button" class="sf-chip">Save New</button>
-          <button id="stats-preset-update" type="button" class="sf-chip" disabled>Update</button>
-          <button id="stats-preset-default" type="button" class="sf-chip" disabled>Set Default</button>
-          <button id="stats-preset-delete" type="button" class="sf-chip" disabled>Delete</button>
+          <button id="stats-preset-save" type="button" class="stats-preset-icon-btn" aria-label="Save new view" title="Save new view">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h12l2 2v14H5z"></path><path d="M8 4v6h8"></path><path d="M8 20v-6h8v6"></path></svg>
+          </button>
+          <button id="stats-preset-update" type="button" class="stats-preset-icon-btn" aria-label="Update view" title="Update view" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4v6h6"></path><path d="M20 20v-6h-6"></path><path d="M20 9a7 7 0 0 0-12-3L4 10"></path><path d="M4 15a7 7 0 0 0 12 3l4-4"></path></svg>
+          </button>
+          <button id="stats-preset-default" type="button" class="stats-preset-icon-btn" aria-label="Set default view" title="Set default view" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z"></path></svg>
+          </button>
+          <button id="stats-preset-reset" type="button" class="stats-preset-icon-btn" aria-label="Reset to default view" title="Reset to default view">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7v6h6"></path><path d="M20 17a8 8 0 0 1-14.7-4"></path><path d="M4 13A8 8 0 0 1 18.7 9"></path></svg>
+          </button>
+          <button id="stats-preset-delete" type="button" class="stats-preset-icon-btn" aria-label="Delete view" title="Delete view" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M6 7l1 14h10l1-14"></path><path d="M9 7V4h6v3"></path></svg>
+          </button>
           <span id="stats-preset-status"></span>
         </div>
       </div>
@@ -525,18 +535,19 @@
             <div class="sf-multi" id="sf-measures">
               <button id="sf-measures-toggle" class="sf-chip sf-multi-toggle" type="button" aria-haspopup="true" aria-expanded="false">Measures (4)</button>
               <div id="sf-measures-menu" class="sf-multi-menu" hidden>
-                <label><input type="checkbox" value="sessions" checked> Sessions</label>
                 <label><input type="checkbox" value="turns" checked> Turns</label>
-                <label><input type="checkbox" value="tokens_in" checked> Tokens In</label>
-                <label><input type="checkbox" value="tokens_out" checked> Tokens Out</label>
-                <label><input type="checkbox" value="cost"> Cost</label>
-                <label><input type="checkbox" value="quota"> Quota</label>
-                <label><input type="checkbox" value="duration"> Duration</label>
+                <label><input type="checkbox" value="avg_tokens_turn"> Avg Tokens/Turn</label>
+                <label><input type="checkbox" value="cache_hit_rate"> Cache Hit %</label>
                 <label><input type="checkbox" value="cache_read"> Cache Read</label>
                 <label><input type="checkbox" value="cache_write"> Cache Write</label>
+                <label><input type="checkbox" value="cost"> Cost</label>
+                <label><input type="checkbox" value="duration"> Duration</label>
                 <label><input type="checkbox" value="new_input"> New Input</label>
-                <label><input type="checkbox" value="cache_hit_rate"> Cache Hit %</label>
-                <label><input type="checkbox" value="avg_tokens_turn"> Avg Tokens/Turn</label>
+                <label><input type="checkbox" value="quota"> Quota</label>
+                <label><input type="checkbox" value="sessions" checked> Sessions</label>
+                <label><input type="checkbox" value="tokens_in" checked> Tokens In</label>
+                <label><input type="checkbox" value="tokens_out" checked> Tokens Out</label>
+                <label><input type="checkbox" value="tokens_total"> Total Tokens</label>
               </div>
             </div>
           </div>
@@ -572,6 +583,7 @@
             <option value="cost">Cost ($)</option>
             <option value="tokens_in">Tokens In</option>
             <option value="tokens_out">Tokens Out</option>
+            <option value="tokens_total">Total Tokens</option>
             <option value="sessions">Sessions</option>
             <option value="quota">Quota</option>
             <option value="duration">Duration (s)</option>

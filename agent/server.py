@@ -75,6 +75,7 @@ from .stats_db import (
     insert_user_message, insert_assistant_message, update_assistant_message,
     update_message_quota_snapshot,
     get_context_history, get_messages_by_ids, mark_orphaned_pending, get_message,
+    get_message_previews,
     get_completed_run_text, get_completed_run_status_raw, get_run_events,
     ensure_session_turn_index,
     get_session_injected_context,
@@ -1015,6 +1016,23 @@ async def search(q: str, limit: int = 100, topic: Optional[str] = None,
 async def prompts_recent(limit: int = 50):
     limit = min(limit, 200)
     return JSONResponse({"items": get_recent_prompts(limit=limit), "agents": _public_agent_map()})
+
+
+@app.get("/chat/previews")
+async def chat_previews(ids: str):
+    parsed_ids = []
+    seen = set()
+    for raw in ids.split(","):
+        try:
+            msg_id = int(raw)
+        except ValueError:
+            continue
+        if msg_id > 0 and msg_id not in seen:
+            parsed_ids.append(msg_id)
+            seen.add(msg_id)
+        if len(parsed_ids) >= 200:
+            break
+    return JSONResponse({"items": get_message_previews(parsed_ids)})
 
 
 @app.get("/chat/{msg_id}/status")

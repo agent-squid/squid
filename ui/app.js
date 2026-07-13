@@ -940,6 +940,27 @@ function clearFilter() {
   reloadHistory({});
 }
 
+// A still-in-flight (queued or streaming) thinking bubble, plus the user bubble/timestamp
+// preceding it, form a "live group" — kept in the DOM across filter/search but hidden
+// (rather than shown) while a filter or search scope is active, since it can't be
+// evaluated against that scope until it lands in the DB.
+function collectLiveGroupElements() {
+  const group = new Set();
+  document.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)').forEach(thinking => {
+    group.add(thinking);
+    let el = thinking.previousElementSibling;
+    while (el && (el.classList.contains('msg-time') || (el.classList.contains('msg') && el.classList.contains('user')))) {
+      group.add(el);
+      el = el.previousElementSibling;
+    }
+  });
+  return group;
+}
+
+function setLiveGroupHidden(hidden) {
+  collectLiveGroupElements().forEach(el => el.classList.toggle('live-hidden', hidden));
+}
+
 function reloadHistory(filter = {}) {
   historyFilter = filter;
   historyOffset = 0;
@@ -948,18 +969,11 @@ function reloadHistory(filter = {}) {
   if (topSentinel) { topSentinel.remove(); topSentinel = null; }
   document.querySelectorAll('.history-item, .boot-banner, .tool-block-history').forEach(el => el.remove());
   // Remove live (non-history) messages too — completed ones are in the DB and will reload
-  // Preserve user bubbles and their timestamps that precede an active thinking bubble
-  const preserveForLive = new Set();
-  document.querySelectorAll('#messages > .msg-thinking').forEach(thinking => {
-    let el = thinking.previousElementSibling;
-    while (el && (el.classList.contains('msg-time') || (el.classList.contains('msg') && el.classList.contains('user')))) {
-      preserveForLive.add(el);
-      el = el.previousElementSibling;
-    }
-  });
+  const preserveForLive = collectLiveGroupElements();
   document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats').forEach(el => {
     if (!preserveForLive.has(el)) el.remove();
   });
+  setLiveGroupHidden(hasHistoryFilterScope());
   _updateFilterBadge();
   if (bookmarkOnlyHistory) {
     loadBookmarkHistory();
@@ -1186,6 +1200,8 @@ async function loadHistory() {
     if (!item.content && item.status !== 'pending') continue;
 
     if (item.status === 'pending') {
+      // Queued/in-flight items can't be evaluated against a filter scope yet — skip while filtered.
+      if (hasHistoryFilterScope()) continue;
       const wipBubble = makeWipBubble(item);
       fragment.appendChild(wipBubble);
       reconnectPendingItem(item, wipBubble);
@@ -1381,7 +1397,11 @@ function startSearch(rawArgs) {
 
   // Clear pane
   document.querySelectorAll('.history-item, .boot-banner, .search-result-item, .tool-block-history').forEach(el => el.remove());
-  document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .cmd-feedback').forEach(el => el.remove());
+  const preserveForLive = collectLiveGroupElements();
+  document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .cmd-feedback').forEach(el => {
+    if (!preserveForLive.has(el)) el.remove();
+  });
+  setLiveGroupHidden(true);
 
   _updateSearchBar();
   loadSearchResults();
@@ -1400,6 +1420,7 @@ function clearSearch() {
   historyOffset = 0;
   historyExhausted = false;
   invalidateHistoryLoad();
+  setLiveGroupHidden(hasHistoryFilterScope());
   _updateFilterBadge();
   if (bookmarkOnlyHistory) {
     loadBookmarkHistory();
@@ -2388,11 +2409,18 @@ async function sendMessage(text) {
   const { topic, agent, adhoc, lookback, message } = parseInput(text);
   setTopicChip(topic, agent, adhoc, lookback);
   const sendTime = new Date().toISOString();
+  // A search or filter scope can't be evaluated against a message that isn't in the DB
+  // yet, so keep this whole live group (user bubble + timestamp + thinking bubble) hidden.
+  const liveHiddenByScope = searchActive || hasHistoryFilterScope();
 
   const userBubble = makeUserBubble(message, topic, agent, null, adhoc, lookback);
   const userTopicTag = userBubble.querySelector('.topic-tag');
   messages.appendChild(userBubble);
-  addTimestamp(userBubble, sendTime, true);
+  const userTimeEl = addTimestamp(userBubble, sendTime, true);
+  if (liveHiddenByScope) {
+    userBubble.classList.add('live-hidden');
+    userTimeEl?.classList.add('live-hidden');
+  }
   requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
 
   // Non-blocking nudge — fires async after the message is already in flight
@@ -2401,6 +2429,7 @@ async function sendMessage(text) {
   // ── Thinking bubble (visible immediately, shows status/queue/loader) ──────────
   const thinkingBubble = document.createElement('div');
   thinkingBubble.className = 'msg assistant msg-thinking';
+  if (liveHiddenByScope) thinkingBubble.classList.add('live-hidden');
   const thinkingContent = document.createElement('div');
   thinkingContent.className = 'thinking-live';
   thinkingBubble.appendChild(thinkingContent);
@@ -3514,8 +3543,12 @@ async function fetchRevertEligibility(block) {
           }
         } catch { btn.disabled = false; btn.textContent = 'revert'; }
       });
-      const _fb = row.querySelector('.gitdiff-file-body');
-      if (_fb) row.insertBefore(btn, _fb); else row.appendChild(btn);
+      const openBtn = row.querySelector('.gitdiff-file-open');
+      if (openBtn) row.insertBefore(btn, openBtn);
+      else {
+        const _fb = row.querySelector('.gitdiff-file-body');
+        if (_fb) row.insertBefore(btn, _fb); else row.appendChild(btn);
+      }
     }
   }
 
@@ -4915,11 +4948,12 @@ let _lastStatsRows = null;
 let _statsFiltersLoaded = false;
 let _statsPage = 0;
 const _STATS_PAGE_SIZE = 10;
+const DEFAULT_STATS_MEASURES = ['sessions', 'turns', 'tokens_in', 'tokens_out'];
 // Duration isn't in the base default: Hourly/Daily rows never carry duration_ms
 // (only By Turn's per-row data does), so it'd just show "—" forever there.
 // It's added/removed alongside the Sessions/Turns swap when entering/leaving
 // By Turn — see the sf-period change handler.
-const _statsMeasures = new Set(['sessions', 'turns', 'tokens_in', 'tokens_out']);
+const _statsMeasures = new Set(DEFAULT_STATS_MEASURES);
 const _STATS_BREAKDOWN_SERIES_BUDGET = 4;
 const _STATS_BREAKDOWN_VISIBLE_SERIES_LIMIT = 8;
 let _statsPresets = [];
@@ -4964,11 +4998,130 @@ function _setStatsTable(html) {
   statsContent.innerHTML = `<div class="stats-table-scroll">${html}</div>`;
 }
 
+const CTX_POPUP_LAYER_CLASSES = ['stats-turn-popup', 'page-context-popup', 'modal-context-popup'];
+const CTX_POPUP_MODAL_SCOPE = '#msg-modal, #memory-modal, #topic-delete-modal, #preset-name-modal, #file-modal';
+
+function _setCtxPopupLayer(popup, layerClass) {
+  popup.classList.remove(...CTX_POPUP_LAYER_CLASSES);
+  popup.classList.add(layerClass);
+}
+
+function _closeCtxPopup(popup = document.getElementById('ctx-popup')) {
+  if (!popup) return;
+  popup.classList.remove('open');
+  popup._forSpanEl = null;
+}
+
+function _positionCtxPopupNearAnchor(popup, anchorEl) {
+  const margin = 6;
+  const app = document.getElementById('app');
+  const appRect = app.getBoundingClientRect();
+  const anchorRect = anchorEl.getBoundingClientRect();
+  const topbarRect = document.getElementById('topbar')?.getBoundingClientRect();
+  const inModal = !!anchorEl.closest(CTX_POPUP_MODAL_SCOPE);
+  const minTop = inModal ? Math.max(appRect.top + margin, margin) : Math.max(appRect.top + margin, (topbarRect?.bottom || 0) + margin);
+  const maxBottom = Math.min(window.innerHeight - margin, appRect.bottom - margin);
+  const minLeft = appRect.left + margin;
+  const maxRight = appRect.right - margin;
+
+  popup.style.bottom = '';
+  popup.style.right = '';
+  popup.style.maxHeight = `${Math.max(120, maxBottom - minTop)}px`;
+
+  const popupRect = popup.getBoundingClientRect();
+  let top = anchorRect.top - popupRect.height - margin;
+  if (top < minTop) top = anchorRect.bottom + margin;
+  top = Math.max(minTop, Math.min(top, maxBottom - popupRect.height));
+
+  let left = anchorRect.right - popupRect.width;
+  left = Math.max(minLeft, Math.min(left, maxRight - popupRect.width));
+
+  popup.style.top = `${top - appRect.top}px`;
+  popup.style.left = `${left - appRect.left}px`;
+}
+
+function _positionStatsTurnsPopup(popup, anchorEl) {
+  const margin = 6;
+  const statsRect = document.getElementById('view-stats').getBoundingClientRect();
+  const appRect = document.getElementById('app').getBoundingClientRect();
+  const anchorRect = anchorEl.getBoundingClientRect();
+  popup.style.maxHeight = `${Math.max(120, statsRect.height - margin * 2)}px`;
+  popup.style.bottom = '';
+  popup.style.right = '';
+
+  const popupRect = popup.getBoundingClientRect();
+  const minTop = statsRect.top + margin;
+  const maxTop = statsRect.bottom - popupRect.height - margin;
+  let top = anchorRect.top - popupRect.height - margin;
+  if (top < minTop) top = Math.min(anchorRect.bottom + margin, maxTop);
+  top = Math.max(minTop, Math.min(top, maxTop));
+
+  const minLeft = statsRect.left + margin;
+  const maxLeft = statsRect.right - popupRect.width - margin;
+  const left = Math.max(minLeft, Math.min(anchorRect.right - popupRect.width, maxLeft));
+
+  popup.style.top = `${top - appRect.top}px`;
+  popup.style.left = `${left - appRect.left}px`;
+}
+
+function showStatsTurnsPopup(anchorEl, ids) {
+  if (!ids.length) return;
+  if (ids.length === 1) {
+    openMsgModal(ids[0]);
+    return;
+  }
+
+  let popup = document.getElementById('stats-turn-popup');
+  if (!popup) {
+    popup = document.createElement('div');
+    popup.id = 'stats-turn-popup';
+    document.getElementById('app').appendChild(popup);
+  }
+  if (popup._forStatsTurnsEl === anchorEl && popup.classList.contains('open')) {
+    popup.classList.remove('open');
+    popup._forStatsTurnsEl = null;
+    return;
+  }
+  popup._forSpanEl = null;
+  popup._forStatsTurnsEl = anchorEl;
+  _setCtxPopupLayer(popup, 'stats-turn-popup');
+  popup.innerHTML = `<div class="ctx-popup-row"><span class="ctx-popup-key">turns</span></div>` +
+    ids.map(id => `<div class="ctx-popup-pin" data-turn-id="${id}">
+      <span class="ctx-popup-tag">#${id}</span>
+      <span class="ctx-popup-preview" id="stats-turn-preview-${id}">loading…</span>
+    </div>`).join('');
+  popup.classList.add('open');
+
+  popup.querySelectorAll('.ctx-popup-pin[data-turn-id]').forEach(row => {
+    row.addEventListener('click', () => {
+      openMsgModal(parseInt(row.dataset.turnId, 10));
+    });
+  });
+  fetch(`/chat/previews?ids=${encodeURIComponent(ids.join(','))}`)
+    .then(r => r.ok ? r.json() : Promise.reject())
+    .then(payload => {
+      const previews = new Map((payload.items || []).map(item => [Number(item.id), item.preview || '(empty)']));
+      ids.forEach(id => {
+        const el = document.getElementById(`stats-turn-preview-${id}`);
+        if (el) el.textContent = (previews.get(id) || '(missing)').slice(0, 80);
+      });
+    })
+    .catch(() => {
+      ids.forEach(id => {
+        const el = document.getElementById(`stats-turn-preview-${id}`);
+        if (el) el.textContent = 'failed to load';
+      });
+    });
+
+  _positionStatsTurnsPopup(popup, anchorEl);
+}
+
 const CHART_METRICS = {
   turns:          { label: 'Turns',          fn: r => (r.total_turns || 0),      color: 'rgba(100,160,255,1)',  fill: 'rgba(100,160,255,0.08)' },
   cost:           { label: 'Cost ($)',       fn: r => (r.cost_usd || 0),         color: 'rgba(255,160,80,1)',   fill: 'rgba(255,160,80,0.08)'  },
   tokens_in:      { label: 'Tokens In',      fn: r => _statsInputTokens(r),      color: 'rgba(80,200,120,1)',   fill: 'rgba(80,200,120,0.08)'  },
   tokens_out:     { label: 'Tokens Out',     fn: r => (r.output_tokens || 0),    color: 'rgba(200,100,200,1)',  fill: 'rgba(200,100,200,0.08)' },
+  tokens_total:   { label: 'Total Tokens',   fn: r => _statsInputTokens(r) + (r.output_tokens || 0), color: 'rgba(120,210,180,1)', fill: 'rgba(120,210,180,0.08)' },
   sessions:       { label: 'Sessions',       fn: r => (r.sessions || 0),         color: 'rgba(200,200,60,1)',   fill: 'rgba(200,200,60,0.08)'  },
   quota:          { label: 'Quota',          fn: r => (r.quota_delta || 0),      color: 'rgba(120,200,220,1)',  fill: 'rgba(120,200,220,0.08)' },
   duration:       { label: 'Duration (s)',   fn: r => (r.duration_ms || 0) / 1000, color: 'rgba(255,120,120,1)', fill: 'rgba(255,120,120,0.08)' },
@@ -4986,6 +5139,7 @@ const STATS_METRIC_AGGS = {
   cost: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
   tokens_in: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
   tokens_out: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
+  tokens_total: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
   quota: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
   duration: ['sum'],
   cache_read: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
@@ -5044,6 +5198,7 @@ function _statsMetricValue(row, metric) {
   if (metric === 'cost') return row.cost_usd || 0;
   if (metric === 'tokens_in') return _statsInputTokens(row);
   if (metric === 'tokens_out') return row.output_tokens || 0;
+  if (metric === 'tokens_total') return _statsInputTokens(row) + (row.output_tokens || 0);
   if (metric === 'sessions') return row.sessions || 0;
   if (metric === 'quota') return row.quota_delta || 0;
   if (metric === 'duration') return (row.duration_ms || 0) / 1000;
@@ -5063,6 +5218,24 @@ function _formatStatsMetricValue(value, metric) {
   return fmtNum(value || 0);
 }
 
+function _statsTurnMessageIds(row) {
+  const raw = row?.message_ids ?? row?.msg_ids ?? row?.msg_id ?? '';
+  if (Array.isArray(raw)) return raw.map(id => parseInt(id, 10)).filter(Number.isFinite);
+  if (typeof raw === 'number') return Number.isFinite(raw) ? [raw] : [];
+  return String(raw || '')
+    .split(',')
+    .map(id => parseInt(id, 10))
+    .filter(Number.isFinite);
+}
+
+function _statsTurnsCell(row) {
+  const count = row.total_turns || 0;
+  if (!count) return '—';
+  const ids = _statsTurnMessageIds(row);
+  if (!ids.length) return fmtNum(count);
+  return `<button type="button" class="stats-turn-link" data-turn-ids="${escapeHtml(ids.join(','))}">${fmtNum(count)}</button>`;
+}
+
 function _defaultStatsAgg(metric) {
   return (STATS_METRIC_AGGS[metric] || ['sum'])[0];
 }
@@ -5072,19 +5245,17 @@ function _normalizeStatsAgg(metric, agg) {
   return allowed.includes(agg) ? agg : _defaultStatsAgg(metric);
 }
 
-function _statsMetricHasVariableAgg(metric) {
-  // By Turn is one row per turn, not grouped by a time bucket — sum/avg/min/max/
-  // percentile of a single value are all the same number, so there's nothing to
-  // pick between.
-  if (statsPeriod === 'turn') return false;
-  return (STATS_METRIC_AGGS[metric] || ['sum']).length > 1;
-}
-
 function _syncStatsAggSelect(select, metric, agg) {
   if (!select) return;
   const allowed = STATS_METRIC_AGGS[metric] || ['sum'];
+  const value = _normalizeStatsAgg(metric, agg);
+  if (statsPeriod === 'turn') {
+    select.innerHTML = `<option value="${value}">RAW</option>`;
+    select.value = value;
+    return;
+  }
   select.innerHTML = allowed.map(key => `<option value="${key}">${STATS_AGG_LABELS[key]}</option>`).join('');
-  select.value = _normalizeStatsAgg(metric, agg);
+  select.value = value;
 }
 
 function _statsChartAggField(metric, agg) {
@@ -5123,7 +5294,6 @@ function _syncStatsChartAggControls() {
   statsChartAggY1 = _normalizeStatsAgg(statsChartY1, statsChartAggY1);
   const y1AggSel = document.getElementById('sc-y1-agg');
   _syncStatsAggSelect(y1AggSel, statsChartY1, statsChartAggY1);
-  if (y1AggSel) y1AggSel.hidden = !_statsMetricHasVariableAgg(statsChartY1);
   _renderStatsChartExtraRows();
 }
 
@@ -5161,16 +5331,12 @@ function _bindStatsBreakdownSort() {
 }
 
 const STATS_TABLE_MEASURES = [
-  { key: 'sessions', label: 'Sessions', row: r => r.sessions || 0, total: t => t.sessions || 0 },
-  { key: 'turns', label: 'Turns', row: r => r.total_turns || '—', total: t => t.turns || '—' },
-  { key: 'tokens_in', label: 'Tokens In', row: r => fmtNum(_statsInputTokens(r)), total: t => fmtNum(t.tokens_in || 0) },
-  { key: 'tokens_out', label: 'Tokens Out', row: r => fmtNum(r.output_tokens || 0), total: t => fmtNum(t.tokens_out || 0) },
-  { key: 'cost', label: 'Cost', row: r => _formatCost(r.cost_usd), total: t => _formatCost(t.cost || 0) },
-  { key: 'quota', label: 'Quota meter Δ', title: 'Observed account meter change; not exact attributed usage', row: r => _formatQuotaDelta(r.quota_delta), total: t => _formatQuotaDelta(t.quota) },
-  { key: 'duration', label: 'Duration', row: r => r.duration_ms != null ? `${(r.duration_ms / 1000).toFixed(1)}s` : '—', total: t => t.duration != null ? `${(t.duration / 1000).toFixed(1)}s` : '—' },
-  { key: 'cache_read', label: 'Cache Read', row: r => fmtNum(_splitInputTokens(r).cacheRead), total: t => fmtNum(t.cache_read || 0) },
-  { key: 'cache_write', label: 'Cache Write', row: r => fmtNum(_splitInputTokens(r).cacheWrite), total: t => fmtNum(t.cache_write || 0) },
-  { key: 'new_input', label: 'New Input', row: r => fmtNum(_splitInputTokens(r).newInput), total: t => fmtNum(t.new_input || 0) },
+  { key: 'turns', label: 'Turns', row: r => _statsTurnsCell(r), total: t => t.turns || '—' },
+  {
+    key: 'avg_tokens_turn', label: 'Avg Tokens/Turn',
+    row: r => { const v = _avgTokensPerTurn(r); return v != null ? fmtNum(v) : '—'; },
+    total: t => t.turns ? fmtNum((t.tokens_in + t.tokens_out) / t.turns) : '—',
+  },
   {
     key: 'cache_hit_rate', label: 'Cache Hit %', title: 'Cache reads as a share of total input tokens',
     row: r => _formatStatsMetricValue(_cacheHitRate(r), 'cache_hit_rate'),
@@ -5179,15 +5345,25 @@ const STATS_TABLE_MEASURES = [
       return denom > 0 ? `${((t.cache_read / denom) * 100).toFixed(1)}%` : '—';
     },
   },
-  {
-    key: 'avg_tokens_turn', label: 'Avg Tokens/Turn',
-    row: r => { const v = _avgTokensPerTurn(r); return v != null ? fmtNum(v) : '—'; },
-    total: t => t.turns ? fmtNum((t.tokens_in + t.tokens_out) / t.turns) : '—',
-  },
+  { key: 'cache_read', label: 'Cache Read', row: r => fmtNum(_splitInputTokens(r).cacheRead), total: t => fmtNum(t.cache_read || 0) },
+  { key: 'cache_write', label: 'Cache Write', row: r => fmtNum(_splitInputTokens(r).cacheWrite), total: t => fmtNum(t.cache_write || 0) },
+  { key: 'cost', label: 'Cost', row: r => _formatCost(r.cost_usd), total: t => _formatCost(t.cost || 0) },
+  { key: 'duration', label: 'Duration', row: r => r.duration_ms != null ? `${(r.duration_ms / 1000).toFixed(1)}s` : '—', total: t => t.duration != null ? `${(t.duration / 1000).toFixed(1)}s` : '—' },
+  { key: 'new_input', label: 'New Input', row: r => fmtNum(_splitInputTokens(r).newInput), total: t => fmtNum(t.new_input || 0) },
+  { key: 'quota', label: 'Quota meter Δ', title: 'Observed account meter change; not exact attributed usage', row: r => _formatQuotaDelta(r.quota_delta), total: t => _formatQuotaDelta(t.quota) },
+  { key: 'sessions', label: 'Sessions', row: r => r.sessions || 0, total: t => t.sessions || 0 },
+  { key: 'tokens_in', label: 'Tokens In', row: r => fmtNum(_statsInputTokens(r)), total: t => fmtNum(t.tokens_in || 0) },
+  { key: 'tokens_out', label: 'Tokens Out', row: r => fmtNum(r.output_tokens || 0), total: t => fmtNum(t.tokens_out || 0) },
+  { key: 'tokens_total', label: 'Total Tokens', row: r => fmtNum(_statsInputTokens(r) + (r.output_tokens || 0)), total: t => fmtNum((t.tokens_in || 0) + (t.tokens_out || 0)) },
 ];
 
 function _firstSelectedMeasure() {
   return (STATS_TABLE_MEASURES.find(m => _statsMeasureSelected(m.key)) || STATS_TABLE_MEASURES[0]).key;
+}
+
+function _firstSelectedNonTurnMeasure() {
+  const preferred = DEFAULT_STATS_MEASURES.find(key => key !== 'turns' && key !== 'sessions' && _statsMeasureSelected(key));
+  return preferred || (STATS_TABLE_MEASURES.find(m => m.key !== 'turns' && _statsMeasureSelected(m.key)) || STATS_TABLE_MEASURES[0]).key;
 }
 
 function _statsChartMetricKeys() {
@@ -5261,15 +5437,16 @@ function _renderStatsChartExtraRows() {
     return `<option value="${key}"${key === entry.metric ? ' selected' : ''}>${label}</option>`;
   }).join('');
   const allowedAggs = STATS_METRIC_AGGS[entry.metric] || ['sum'];
-  const aggOptions = allowedAggs.map(key => `<option value="${key}"${key === entry.agg ? ' selected' : ''}>${STATS_AGG_LABELS[key]}</option>`).join('');
-  const aggHidden = !_statsMetricHasVariableAgg(entry.metric);
+  const aggOptions = statsPeriod === 'turn'
+    ? `<option value="${entry.agg}" selected>RAW</option>`
+    : allowedAggs.map(key => `<option value="${key}"${key === entry.agg ? ' selected' : ''}>${STATS_AGG_LABELS[key]}</option>`).join('');
   const axisLabel = _statsChartAxisLabel(entry.axis);
   wrap.innerHTML = `${pills}<div class="sc-series-popover sc-extra-row" data-index="${statsChartEditIndex}">
     <label>
       <span>Metric</span>
       <select class="sc-extra-metric" aria-label="Series ${statsChartEditIndex + 2} metric">${metricOptions}</select>
     </label>
-    <label${aggHidden ? ' hidden' : ''}>
+    <label>
       <span>Agg</span>
       <select class="sc-extra-agg" aria-label="Series ${statsChartEditIndex + 2} aggregation">${aggOptions}</select>
     </label>
@@ -5692,7 +5869,7 @@ function _overallStatsState() {
       session_type: { mode: 'all', values: [] },
     },
     breakdown: { key: '', sort: { mode: 'name', dir: 'asc' } },
-    measure: { primary: { metric: 'turns', agg: 'sum' }, series: [], visible: ['sessions', 'turns', 'tokens_in', 'tokens_out'] },
+    measure: { primary: { metric: 'turns', agg: 'sum' }, series: [], visible: [...DEFAULT_STATS_MEASURES] },
   };
 }
 
@@ -5730,7 +5907,7 @@ function _applyStatsState(state) {
     })
     .filter(Boolean);
   _statsMeasures.clear();
-  for (const key of state?.measure?.visible || ['sessions', 'turns', 'tokens_in', 'tokens_out']) _statsMeasures.add(key);
+  for (const key of state?.measure?.visible || DEFAULT_STATS_MEASURES) _statsMeasures.add(key);
   document.getElementById('sf-period').value = statsPeriod;
   document.getElementById('sf-days').value = String(statsFilters.days);
   document.getElementById('sf-breakdown').value = statsBreakdown;
@@ -6054,39 +6231,36 @@ function renderProcPopup(processes, queued) {
     if (running.length) {
       const rows = running.map(r => `
         <tr>
-          <td><span class="proc-dot"></span>#${r.topic || '—'}</td>
-          <td>@${r.agent || '—'}</td>
+          <td><span class="proc-dot"></span>#${r.topic || '—'}@${r.agent || '—'}</td>
           <td class="proc-queue-preview">${r.prompt_preview || '—'}</td>
           <td>${r.duration_s}s</td>
           <td>${procStopButton(r)}</td>
         </tr>`).join('');
       body += `<div class="proc-section-label">Running</div>
-        <table><thead><tr><th>Topic</th><th>Agent</th><th>Prompt</th><th>Time</th><th></th></tr></thead>
-        <tbody>${rows}</tbody></table>`;
-    }
-    if (idle.length) {
-      const rows = idle.map(r => `
-        <tr>
-          <td><span class="proc-dot proc-dot-idle"></span>#${r.topic || '—'}</td>
-          <td>@${r.agent || '—'}</td>
-          <td class="proc-queue-preview">${r.prompt_preview || 'warm session'}</td>
-          <td>${formatIdleDuration(r.state_duration_s ?? r.duration_s)}</td>
-          <td>${procStopButton(r)}</td>
-        </tr>`).join('');
-      body += `<div class="proc-section-label">Idle Live Sessions</div>
-        <table><thead><tr><th>Topic</th><th>Agent</th><th>Last prompt</th><th>Idle</th><th></th></tr></thead>
+        <table><thead><tr><th>Route</th><th>Prompt</th><th>Time</th><th></th></tr></thead>
         <tbody>${rows}</tbody></table>`;
     }
     if (queued.length) {
       const rows = queued.map(r => `
         <tr>
-          <td>#${r.topic || '—'}</td>
-          <td>@${r.agent || '—'}</td>
+          <td>#${r.topic || '—'}@${r.agent || '—'}</td>
           <td class="proc-queue-preview">${r.prompt_preview || '—'}</td>
           <td><button class="proc-deq-btn" data-topic="${r.topic || ''}" data-pos="${r.position}">✕</button></td>
         </tr>`).join('');
       body += `<div class="proc-section-label">Queued</div>
-        <table><thead><tr><th>Topic</th><th>Agent</th><th>Prompt</th><th></th></tr></thead>
+        <table><thead><tr><th>Route</th><th>Prompt</th><th></th></tr></thead>
+        <tbody>${rows}</tbody></table>`;
+    }
+    if (idle.length) {
+      const rows = idle.map(r => `
+        <tr>
+          <td><span class="proc-dot proc-dot-idle"></span>#${r.topic || '—'}@${r.agent || '—'}</td>
+          <td class="proc-queue-preview">${r.prompt_preview || 'warm session'}</td>
+          <td>${formatIdleDuration(r.state_duration_s ?? r.duration_s)}</td>
+          <td>${procStopButton(r)}</td>
+        </tr>`).join('');
+      body += `<div class="proc-section-label">Idle Live Sessions <span class="help-icon" data-tooltip="Idle sessions stay warm between prompts. Currently, only Claude Code supports the interactive-cli protocol that keeps them alive."><svg width="12" height="12" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7.5" cy="7.5" r="6.5"/><path d="M5.8 5.8a1.7 1.7 0 0 1 3.4 0c0 1.1-1.7 1.7-1.7 2.9"/><circle cx="7.5" cy="11" r="0.6" fill="currentColor" stroke="none"/></svg></span></div>
+        <table><thead><tr><th>Route</th><th>Last prompt</th><th>Idle</th><th></th></tr></thead>
         <tbody>${rows}</tbody></table>`;
     }
   }
@@ -6257,15 +6431,15 @@ function renderTurnStats(rows) {
   const totals = _statsTotals(rows);
   const bodyRows = _statsPageSlice(rows).map(r => {
     return `<tr>
-      <td class="stats-col-compact">${_turnTimeLabel(r.period)}</td>
+      <td class="stats-col-compact stats-time-col">${_turnTimeLabel(r.period)}</td>
       <td class="stats-col-compact stats-route-col">${escapeHtml(_turnRouteLabel(r))}</td>
       ${_statsMeasureCells(r)}
     </tr>`;
   }).join('');
 
-  _setStatsTable(`<table>
+  _setStatsTable(`<table class="stats-turn-table">
     <thead><tr>
-      <th class="stats-col-compact">Time</th>
+      <th class="stats-col-compact stats-time-col">Time</th>
       <th class="stats-col-compact stats-route-col">Route</th>
       ${_statsMeasureHeaders()}
     </tr></thead>
@@ -6401,6 +6575,17 @@ function renderAgentBreakdownStats(rows) {
 
 
 function initStats() {
+  statsContent.addEventListener('click', e => {
+    const btn = e.target.closest('.stats-turn-link[data-turn-ids]');
+    if (!btn || !statsContent.contains(btn)) return;
+    e.stopPropagation();
+    const ids = String(btn.dataset.turnIds || '')
+      .split(',')
+      .map(id => parseInt(id, 10))
+      .filter(Number.isFinite);
+    showStatsTurnsPopup(btn, ids);
+  });
+
   document.getElementById('sf-period').addEventListener('change', e => {
     const prevPeriod = statsPeriod;
     statsPeriod = e.target.value;
@@ -6410,14 +6595,17 @@ function initStats() {
         statsBreakdown = '';
         document.getElementById('sf-breakdown').value = '';
       }
-      // Every row is exactly one session/turn in this view — selected by default
-      // elsewhere, but redundant here, so start with them off. Duration is the
-      // opposite: only By Turn's rows carry it, so turn it on here.
+      // Every row is exactly one session in this view, so start sessions off.
+      // Keep turns on because that column links to the underlying response.
+      // Duration is the opposite: only By Turn's rows carry it, so turn it on.
       const removedSessions = _statsMeasures.delete('sessions');
-      const removedTurns = _statsMeasures.delete('turns');
       const addedDuration = !_statsMeasures.has('duration');
       _statsMeasures.add('duration');
-      measuresChanged = removedSessions || removedTurns || addedDuration;
+      measuresChanged = removedSessions || addedDuration;
+      if (statsChartY1 === 'turns') {
+        statsChartY1 = _firstSelectedNonTurnMeasure();
+        statsChartAggY1 = _normalizeStatsAgg(statsChartY1, statsChartAggY1);
+      }
     } else if (statsPeriod !== 'turn' && prevPeriod === 'turn') {
       _statsMeasures.add('sessions');
       _statsMeasures.add('turns');
@@ -6431,7 +6619,7 @@ function initStats() {
       _updateStatsMeasureLabel();
     }
     // Keeps the chart pinned to a metric that's still checked in Measures
-    // (e.g. Turns/Sessions just got auto-unchecked above).
+    // (e.g. Sessions just got auto-unchecked above).
     _syncStatsChartMetricSelects();
     _updateStatsBreakdownUi();
     _markStatsPresetDirty();
@@ -6645,6 +6833,13 @@ function initStats() {
   document.getElementById('stats-preset-save')?.addEventListener('click', () => _saveStatsPreset());
   document.getElementById('stats-preset-update')?.addEventListener('click', () => _saveStatsPreset({ update: true }));
   document.getElementById('stats-preset-default')?.addEventListener('click', () => _saveStatsPreset({ makeDefault: true }));
+  document.getElementById('stats-preset-reset')?.addEventListener('click', () => {
+    _activeStatsPresetId = null;
+    _applyStatsState(_overallStatsState());
+    _renderStatsPresetControls();
+    _setStatsPresetStatus('');
+    loadStats();
+  });
   document.getElementById('stats-preset-delete')?.addEventListener('click', async () => {
     if (!_activeStatsPresetId) return;
     await fetch(`/stats/filter-presets/${_activeStatsPresetId}`, { method: 'DELETE' });
@@ -8060,6 +8255,8 @@ function showCtxPopup(spanEl) {
     return;
   }
   popup._forSpanEl = spanEl;
+  popup._forStatsTurnsEl = null;
+  _setCtxPopupLayer(popup, spanEl.closest(CTX_POPUP_MODAL_SCOPE) ? 'modal-context-popup' : 'page-context-popup');
 
   const sid    = spanEl.dataset.sessionId || '';
   const msgId  = spanEl.dataset.msgId || '';
@@ -8116,16 +8313,25 @@ function showCtxPopup(spanEl) {
   const memRow = popup.querySelector('.ctx-popup-mem-row');
   if (memRow) {
     memRow.addEventListener('click', () => {
+      _closeCtxPopup(popup);
       openMemoryEditor(memRow.dataset.topic);
     });
   }
 
   popup.querySelectorAll('.ctx-popup-pin[data-pin-id]').forEach(row => {
-    row.addEventListener('click', () => openMsgModal(parseInt(row.dataset.pinId)));
+    row.addEventListener('click', () => {
+      _closeCtxPopup(popup);
+      openMsgModal(parseInt(row.dataset.pinId));
+    });
   });
 
   const traceRow = popup.querySelector('.ctx-popup-trace-row');
-  if (traceRow) traceRow.addEventListener('click', () => openTraceModal(parseInt(traceRow.dataset.msgId, 10)));
+  if (traceRow) {
+    traceRow.addEventListener('click', () => {
+      _closeCtxPopup(popup);
+      openTraceModal(parseInt(traceRow.dataset.msgId, 10));
+    });
+  }
 
   pinIds.forEach(id => {
     fetch(`/chat/${id}/status`)
@@ -8163,10 +8369,7 @@ function showCtxPopup(spanEl) {
     });
   }
 
-  const rect = spanEl.getBoundingClientRect();
-  const appRect = document.getElementById('app').getBoundingClientRect();
-  popup.style.bottom = (appRect.bottom - rect.top + 6) + 'px';
-  popup.style.right  = (appRect.right  - rect.right + 0) + 'px';
+  _positionCtxPopupNearAnchor(popup, spanEl);
 }
 
 async function openMsgModal(msgId) {
@@ -9123,13 +9326,19 @@ document.addEventListener('click', e => {
   if (!acEl.contains(e.target) && e.target !== input) hideAutocomplete();
   if (!pinPanel.contains(e.target) && !pinBtn.contains(e.target)) closePinPanel();
   const ctxPopup = document.getElementById('ctx-popup');
+  const statsTurnPopup = document.getElementById('stats-turn-popup');
   const inSecondary = e.target.closest('#msg-modal, #memory-modal, #topic-delete-modal, #preset-name-modal');
+  const inCtxPopup = ctxPopup?.contains(e.target);
   const secondaryOpen = document.getElementById('msg-modal')?.classList.contains('open')
     || document.getElementById('memory-modal')?.classList.contains('open')
     || document.getElementById('topic-delete-modal')?.classList.contains('open')
     || document.getElementById('preset-name-modal')?.classList.contains('open');
-  if (ctxPopup && !ctxPopup.contains(e.target) && !e.target.closest('.user-ctx') && !inSecondary && !secondaryOpen) {
+  if (ctxPopup && !inCtxPopup && !e.target.closest('.user-ctx') && !inSecondary && !secondaryOpen) {
     ctxPopup.classList.remove('open');
+  }
+  if (statsTurnPopup && !statsTurnPopup.contains(e.target) && !e.target.closest('.stats-turn-link') && !inCtxPopup && !inSecondary && !secondaryOpen) {
+    statsTurnPopup.classList.remove('open');
+    statsTurnPopup._forStatsTurnsEl = null;
   }
   if (
     !procStatusPopup.contains(e.target) && e.target !== procStatusBtn && !procStatusBtn.contains(e.target)

@@ -401,3 +401,44 @@ test('bookmark search clear does not restore filter removed during search', asyn
   await expect(page.locator('#search-bar')).not.toHaveClass(/active/);
   await expect(page.locator('#filter-badge')).not.toHaveClass(/active/);
 });
+
+test('a live in-flight message stays hidden while searching, then reappears on clear', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/chat/*/status', r => r.fulfill({ json: { status: 'pending', content: '' } }));
+
+  let fulfillChat;
+  const chatIntercepted = new Promise(resolve => {
+    page.route('**/chat', route => {
+      fulfillChat = body => route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' },
+        body,
+      });
+      resolve();
+    });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', 'hello');
+  await page.keyboard.press('Enter');
+  await chatIntercepted;
+  await fulfillChat(`event: meta\ndata: ${JSON.stringify({ agent: 'claude', backend: 'claude', msg_id: 1, adhoc: false })}\n\n`);
+
+  const thinking = page.locator('.msg.assistant.msg-thinking');
+  const userBubble = page.locator('.msg.user').last();
+  await expect(thinking).toBeVisible();
+  await expect(userBubble).toBeVisible();
+
+  await page.fill('#input', '/s claude login');
+  await page.keyboard.press('Enter');
+
+  // Still in the DOM (so streaming keeps updating it) but not shown while searching —
+  // search results only ever reflect what's already persisted in the DB.
+  await expect(thinking).toBeAttached();
+  await expect(thinking).not.toBeVisible();
+  await expect(userBubble).not.toBeVisible();
+
+  await page.locator('#chip-search-btn').click();
+  await expect(thinking).toBeVisible();
+  await expect(userBubble).toBeVisible();
+});
