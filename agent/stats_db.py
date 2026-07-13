@@ -557,7 +557,6 @@ def delete_topic(name: str) -> bool:
             (name,),
         )
         conn.execute("DELETE FROM topic_sessions WHERE topic = ?", (name,))
-        conn.execute("DELETE FROM session_stats WHERE topic = ?", (name,))
         conn.execute("DELETE FROM chat_messages WHERE topic = ?", (name,))
         cur = conn.execute("DELETE FROM topics WHERE topic = ?", (name,))
     return cur.rowcount > 0
@@ -572,18 +571,10 @@ def delete_topic_agent(topic: str, agent: str, adhoc: Optional[bool] = None) -> 
             )
             conn.execute("DELETE FROM chat_messages WHERE topic=? AND agent=?", (topic, agent))
             conn.execute("DELETE FROM topic_sessions WHERE topic=? AND agent=?", (topic, agent))
-            conn.execute("DELETE FROM session_stats WHERE topic=? AND agent=?", (topic, agent))
             conn.execute("DELETE FROM topics WHERE topic=? AND agent=?", (topic, agent))
         elif adhoc:
             conn.execute(
                 "DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM chat_messages WHERE topic=? AND agent=? AND adhoc=1 AND role='assistant')",
-                (topic, agent),
-            )
-            conn.execute(
-                """DELETE FROM session_stats WHERE session_id IN (
-                       SELECT DISTINCT session_id FROM chat_messages
-                       WHERE topic=? AND agent=? AND adhoc=1 AND session_id IS NOT NULL
-                   )""",
                 (topic, agent),
             )
             conn.execute(
@@ -608,13 +599,6 @@ def delete_topic_agent(topic: str, agent: str, adhoc: Optional[bool] = None) -> 
                 (topic, agent),
             )
             conn.execute("DELETE FROM topic_sessions WHERE topic=? AND agent=?", (topic, agent))
-            conn.execute(
-                """DELETE FROM session_stats WHERE session_id IN (
-                       SELECT DISTINCT session_id FROM chat_messages
-                       WHERE topic=? AND agent=? AND (adhoc=0 OR adhoc IS NULL) AND session_id IS NOT NULL
-                   )""",
-                (topic, agent),
-            )
             conn.execute(
                 "UPDATE topics SET last_prompt=NULL WHERE topic=? AND agent=?",
                 (topic, agent),

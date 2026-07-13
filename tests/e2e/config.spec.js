@@ -844,7 +844,7 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect(page.locator('#sf-period')).toHaveValue('hourly');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('period')).toBe('hourly');
   expect(statsRequests.at(-1).searchParams.get('breakdown')).toBeNull();
-  expect(statsRequests.at(-1).searchParams.get('days')).toBe('7');
+  expect(statsRequests.at(-1).searchParams.get('days')).toBe('1');
   expect(statsRequests.at(-1).searchParams.get('tz_offset_minutes')).not.toBeNull();
   await expect(page.locator('#sf-breakdown option')).toHaveCount(5);
   await expect(page.locator('#sc-add-series')).toBeVisible();
@@ -859,7 +859,7 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect(page.locator('#stats-content th', { hasText: 'Tokens In' })).toBeVisible();
   await expect(page.locator('#stats-content th', { hasText: 'Tokens Out' })).toBeVisible();
   await expect(page.locator('#stats-content th', { hasText: 'Cost' })).toHaveCount(0);
-  await expect(page.locator('#stats-content th', { hasText: 'Quota meter' })).toHaveCount(0);
+  await expect(page.locator('#stats-content th', { hasText: 'Quota Delta' })).toHaveCount(0);
 
   await page.locator('#sf-topic-toggle').click();
   await page.locator('#sf-topic-menu input[value="squid"]').check();
@@ -880,11 +880,11 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (5)');
   await expect(page.locator('#stats-content th', { hasText: 'Cost' })).toBeVisible();
   await expect(page.locator('#stats-content')).toContainText('$1.2500');
-  await expect(page.locator('#stats-content th', { hasText: 'Quota meter' })).toHaveCount(0);
+  await expect(page.locator('#stats-content th', { hasText: 'Quota Delta' })).toHaveCount(0);
 
   await page.locator('#sf-measures-menu input[value="quota"]').check();
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (6)');
-  await expect(page.locator('#stats-content th', { hasText: 'Quota meter' })).toBeVisible();
+  await expect(page.locator('#stats-content th', { hasText: 'Quota Delta' })).toBeVisible();
   await expect(page.locator('#stats-content')).toContainText('+2.5 pp');
 
   await page.locator('#sf-measures-menu input[value="tokens_out"]').uncheck();

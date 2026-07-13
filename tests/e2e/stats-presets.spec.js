@@ -190,7 +190,7 @@ test('stats presets save chart micro settings and reset restores overall view', 
   await expect(page.locator('#stats-preset-select')).toHaveValue('__overall');
   await expect(page.locator('#stats-preset-status')).toHaveText('');
   await expect(page.locator('#sf-period')).toHaveValue('hourly');
-  await expect(page.locator('#sf-days')).toHaveValue('7');
+  await expect(page.locator('#sf-days')).toHaveValue('1');
   await expect(page.locator('#sf-breakdown')).toHaveValue('');
   await expect(page.locator('#sf-breakdown')).toBeEnabled();
   await expect(page.locator('#sf-topic-toggle')).toHaveText('All Topics');

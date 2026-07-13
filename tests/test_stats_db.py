@@ -296,6 +296,70 @@ def test_topics_management_summary_includes_hidden_and_agent_lanes(tmp_path, mon
     }]
 
 
+def test_delete_topic_preserves_session_stats_for_consumption_history(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    stats_db.upsert_topic("squid", "codex", last_prompt="keep stats", adhoc=False)
+    user_id = stats_db.insert_user_message("squid", "codex", "prompt")
+    asst_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
+    stats_db.update_assistant_message(asst_id, "response", "session-1", "done")
+    stats_db.insert_run_event(asst_id, 0, "stats", json.dumps({"input_tokens": 100, "output_tokens": 20}))
+    stats_db.save_stats(
+        "session-1",
+        {"input_tokens": 100, "output_tokens": 20, "cost_usd": 0.25},
+        topic="squid",
+        agent="codex",
+        backend="codex",
+    )
+    stats_db.set_topic_session("squid", "codex", "session-1", "/repo", None)
+
+    assert stats_db.delete_topic("squid") is True
+
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        conn.row_factory = sqlite3.Row
+        assert conn.execute("SELECT COUNT(*) FROM chat_messages WHERE topic='squid'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM topic_sessions WHERE topic='squid'").fetchone()[0] == 0
+        stat = conn.execute("SELECT topic, agent, input_tokens FROM session_stats WHERE session_id='session-1'").fetchone()
+
+    assert dict(stat) == {"topic": "squid", "agent": "codex", "input_tokens": 100}
+    assert stats_db.get_stats_filter_options() == {"agents": ["codex"], "topics": ["squid"]}
+    rows = stats_db.get_aggregated_stats(period="daily", days=0, topic="squid")
+    assert rows[0]["input_tokens"] == 100
+    assert rows[0]["output_tokens"] == 20
+    assert stats_db.get_stats_by_turn(days=0, topic="squid") == []
+
+
+def test_delete_topic_agent_preserves_stats_for_all_modes(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    stats_db.upsert_topic("squid", "codex", last_prompt="session prompt", adhoc=False)
+    stats_db.upsert_topic("squid", "codex", last_prompt="adhoc prompt", adhoc=True)
+    for session_id, adhoc, tokens in [
+        ("session-1", False, 100),
+        ("adhoc-1", True, 40),
+    ]:
+        user_id = stats_db.insert_user_message("squid", "codex", f"{session_id} prompt")
+        asst_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=adhoc)
+        stats_db.update_assistant_message(asst_id, "response", session_id, "done")
+        stats_db.save_stats(
+            session_id,
+            {"input_tokens": tokens, "output_tokens": 1, "adhoc": adhoc},
+            topic="squid",
+            agent="codex",
+            backend="codex",
+        )
+
+    stats_db.delete_topic_agent("squid", "codex", adhoc=True)
+    stats_db.delete_topic_agent("squid", "codex", adhoc=False)
+
+    rows = stats_db.get_stats_by_agent(days=0, topic="squid", agent="codex")
+    assert rows[0]["input_tokens"] == 140
+    assert rows[0]["sessions"] == 2
+    assert stats_db.get_stats_filter_options() == {"agents": ["codex"], "topics": ["squid"]}
+
+
 def test_recent_prompts_returns_limit_unique_routed_prompts(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

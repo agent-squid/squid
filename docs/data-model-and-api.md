@@ -346,7 +346,11 @@ Sets whether a topic is hidden from autocomplete without deleting its messages o
 
 ### DELETE /topics/{topic}
 
-Hard-delete a topic. Removes all topic rows, topic sessions, chat messages, and session stats. Irreversible.
+Delete a topic from active workflow state. Removes topic rows, topic sessions,
+chat messages, and associated message search rows. Retains `session_stats` so
+Squid-attributed consumption history remains stable. Irreversible for deleted
+chat history; retained aggregate stats may still appear in Stats filters and
+totals. See ADR-0029.
 
 **Response**: `{ "ok": true | false }`
 

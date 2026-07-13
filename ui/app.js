@@ -4934,7 +4934,7 @@ function initCursorQuota() {
 
 let statsPeriod = 'hourly';
 let statsBreakdown = '';
-let statsFilters = { days: 7, agents: [], topics: [], adhoc: 'all' };
+let statsFilters = { days: 1, agents: [], topics: [], adhoc: 'all' };
 let statsChartY1 = 'turns';
 let statsChartAggY1 = 'sum';
 // Additional chart series beyond the primary (Y1) one — each entry is
@@ -5123,7 +5123,7 @@ const CHART_METRICS = {
   tokens_out:     { label: 'Tokens Out',     fn: r => (r.output_tokens || 0),    color: 'rgba(200,100,200,1)',  fill: 'rgba(200,100,200,0.08)' },
   tokens_total:   { label: 'Total Tokens',   fn: r => _statsInputTokens(r) + (r.output_tokens || 0), color: 'rgba(120,210,180,1)', fill: 'rgba(120,210,180,0.08)' },
   sessions:       { label: 'Sessions',       fn: r => (r.sessions || 0),         color: 'rgba(200,200,60,1)',   fill: 'rgba(200,200,60,0.08)'  },
-  quota:          { label: 'Quota',          fn: r => (r.quota_delta || 0),      color: 'rgba(120,200,220,1)',  fill: 'rgba(120,200,220,0.08)' },
+  quota:          { label: 'Quota Delta',    fn: r => (r.quota_delta || 0),      color: 'rgba(120,200,220,1)',  fill: 'rgba(120,200,220,0.08)' },
   duration:       { label: 'Duration (s)',   fn: r => (r.duration_ms || 0) / 1000, color: 'rgba(255,120,120,1)', fill: 'rgba(255,120,120,0.08)' },
   cache_read:     { label: 'Cache Read',     fn: r => _splitInputTokens(r).cacheRead,  color: 'rgba(90,180,255,1)',   fill: 'rgba(90,180,255,0.08)'  },
   cache_write:    { label: 'Cache Write',    fn: r => _splitInputTokens(r).cacheWrite, color: 'rgba(180,140,255,1)',  fill: 'rgba(180,140,255,0.08)' },
@@ -5350,7 +5350,7 @@ const STATS_TABLE_MEASURES = [
   { key: 'cost', label: 'Cost', row: r => _formatCost(r.cost_usd), total: t => _formatCost(t.cost || 0) },
   { key: 'duration', label: 'Duration', row: r => r.duration_ms != null ? `${(r.duration_ms / 1000).toFixed(1)}s` : '—', total: t => t.duration != null ? `${(t.duration / 1000).toFixed(1)}s` : '—' },
   { key: 'new_input', label: 'New Input', row: r => fmtNum(_splitInputTokens(r).newInput), total: t => fmtNum(t.new_input || 0) },
-  { key: 'quota', label: 'Quota meter Δ', title: 'Observed account meter change; not exact attributed usage', row: r => _formatQuotaDelta(r.quota_delta), total: t => _formatQuotaDelta(t.quota) },
+  { key: 'quota', label: 'Quota Delta', title: 'Observed account meter change; not exact attributed usage', row: r => _formatQuotaDelta(r.quota_delta), total: t => _formatQuotaDelta(t.quota) },
   { key: 'sessions', label: 'Sessions', row: r => r.sessions || 0, total: t => t.sessions || 0 },
   { key: 'tokens_in', label: 'Tokens In', row: r => fmtNum(_statsInputTokens(r)), total: t => fmtNum(t.tokens_in || 0) },
   { key: 'tokens_out', label: 'Tokens Out', row: r => fmtNum(r.output_tokens || 0), total: t => fmtNum(t.tokens_out || 0) },
@@ -5862,7 +5862,7 @@ function _statsState() {
 function _overallStatsState() {
   return {
     version: 1,
-    time: { period: 'hourly', days: 7 },
+    time: { period: 'hourly', days: 1 },
     dimensions: {
       topic: { mode: 'auto_top', values: [] },
       agent: { mode: 'auto_top', values: [] },
@@ -5879,7 +5879,7 @@ function _markStatsPresetDirty() {
 
 function _applyStatsState(state) {
   statsPeriod = state?.time?.period || 'hourly';
-  statsFilters.days = Number(state?.time?.days ?? 7);
+  statsFilters.days = Number(state?.time?.days ?? 1);
   statsBreakdown = state?.breakdown?.key || '';
   _statsBreakdownColumnSort = _normalizeStatsBreakdownSort(state?.breakdown?.sort);
   const dims = state?.dimensions || {};

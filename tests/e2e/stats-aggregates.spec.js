@@ -162,7 +162,7 @@ test('stats measures are alphabetical and Turns links open responses', async ({ 
     'Cost',
     'Duration',
     'New Input',
-    'Quota',
+    'Quota Delta',
     'Sessions',
     'Tokens In',
     'Tokens Out',
