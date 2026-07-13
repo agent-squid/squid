@@ -90,6 +90,36 @@ test('Tokens In, Cache Read/Write, New Input, Cache Hit % and Avg Tokens/Turn co
   await expect(totals.nth(5)).toHaveText('250');
 });
 
+test('cache hit chart requests a non-additive aggregate', async ({ page }) => {
+  await mockApp(page);
+  const statsRequests = [];
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    statsRequests.push(Object.fromEntries(url.searchParams.entries()));
+    route.fulfill({
+      json: [{
+        period: '2026-07-10 10:00',
+        sessions: 2,
+        total_turns: 2,
+        input_tokens: 100,
+        output_tokens: 0,
+        cache_read_tokens: 150,
+        cache_write_tokens: 0,
+        chart_cache_hit_rate_avg: 75,
+      }],
+    });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('#sf-measures-toggle').click();
+  await page.locator('#sf-measures-menu input[value="cache_hit_rate"]').check();
+  await page.locator('#sc-y1').selectOption('cache_hit_rate');
+
+  await expect.poll(() => statsRequests.at(-1)?.chart_metrics).toBe('cache_hit_rate');
+  expect(statsRequests.at(-1).chart_aggs).toBe('avg');
+});
+
 test('stats chart aggregate chips apply to Y1 and an added series', async ({ page }) => {
   await mockApp(page);
   const statsRequests = [];

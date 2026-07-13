@@ -492,6 +492,32 @@ test('mobile right-swipe goes back to the previous view via history', async ({ p
   await expect(page.locator('#view-chat')).toHaveClass(/active/);
 });
 
+test('mobile swipes do not traverse views without history', async ({ page }) => {
+  await mockApp(page);
+  await page.setViewportSize({ width: 390, height: 720 });
+  await page.goto('/');
+
+  const swipe = async (fromX, toX) => {
+    await page.locator('#app').evaluate((app, { fromX, toX }) => {
+      app.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true, clientX: fromX, clientY: 240, pointerId: 1, pointerType: 'touch',
+      }));
+      app.dispatchEvent(new PointerEvent('pointerup', {
+        bubbles: true, clientX: toX, clientY: 245, pointerId: 1, pointerType: 'touch',
+      }));
+    }, { fromX, toX });
+  };
+
+  await page.evaluate(() => switchView('files'));
+  await expect(page.locator('#view-files')).toHaveClass(/active/);
+
+  await swipe(350, 60);
+  await expect(page.locator('#view-files')).toHaveClass(/active/);
+
+  await swipe(60, 350);
+  await expect(page.locator('#view-files')).toHaveClass(/active/);
+});
+
 test('mobile edit YAML config link returns to Files on browser back', async ({ page }) => {
   await mockApp(page);
   await page.setViewportSize({ width: 390, height: 720 });

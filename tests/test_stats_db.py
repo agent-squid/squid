@@ -118,6 +118,45 @@ def test_aggregated_chart_average_uses_per_turn_stats_when_available(tmp_path, m
     assert rows[0]["chart_tokens_in_avg"] == 300
 
 
+def test_aggregated_cache_hit_chart_uses_weighted_rate_not_sum(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    stats_db.save_stats(
+        "session-1",
+        {"input_tokens": 100, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0},
+        topic="squid",
+        agent="codex",
+    )
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        conn.execute(
+            "UPDATE session_stats SET created_at=? WHERE session_id=?",
+            ("2026-07-13T10:00:00Z", "session-1"),
+        )
+
+    for i, payload in enumerate([
+        {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 100, "cache_write_tokens": 0},
+        {"input_tokens": 100, "output_tokens": 0, "cache_read_tokens": 50, "cache_write_tokens": 0},
+    ], start=1):
+        user_id = stats_db.insert_user_message("squid", "codex", f"turn {i}")
+        asst_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
+        stats_db.update_assistant_message(asst_id, f"response {i}", "session-1", "done")
+        stats_db.insert_run_event(asst_id, 0, "stats", json.dumps(payload))
+        with sqlite3.connect(tmp_path / "squid.db") as conn:
+            conn.execute(
+                "UPDATE chat_messages SET created_at=? WHERE id=?",
+                ("2026-07-13T10:00:00Z", asst_id),
+            )
+
+    rows = stats_db.get_aggregated_stats(
+        period="daily",
+        days=0,
+        chart_series=[{"metric": "cache_hit_rate", "agg": "sum"}],
+    )
+
+    assert rows[0]["chart_cache_hit_rate_sum"] == 75
+
+
 def test_aggregated_stats_cutoff_ignores_created_at_string_format(tmp_path, monkeypatch):
     """session_stats.created_at is written via SQLite's CURRENT_TIMESTAMP
     ('YYYY-MM-DD HH:MM:SS'), not the 'YYYY-MM-DDTHH:MM:SSZ' format _stats_cutoff
@@ -177,6 +216,32 @@ def test_breakdown_stats_includes_requested_chart_percentile(tmp_path, monkeypat
     by_agent = {row["agent"]: row for row in rows}
     assert by_agent["codex"]["chart_tokens_in_p50"] == 20
     assert by_agent["claude"]["chart_tokens_in_p50"] == 100
+
+
+def test_breakdown_cache_hit_chart_uses_weighted_rate_not_sum(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        conn.executemany(
+            """INSERT INTO session_stats(
+                   session_id, topic, agent, input_tokens, output_tokens,
+                   cache_read_tokens, cache_write_tokens, cost_usd, created_at
+               ) VALUES (?, 'squid', 'codex', ?, 0, ?, 0, 0, ?)""",
+            [
+                ("s1", 0, 100, "2026-07-10T10:00:00Z"),
+                ("s2", 100, 50, "2026-07-10T10:10:00Z"),
+            ],
+        )
+
+    rows = stats_db.get_stats_by_breakdown(
+        period="daily",
+        days=0,
+        breakdown="agent",
+        chart_series=[{"metric": "cache_hit_rate", "agg": "sum"}],
+    )
+
+    assert rows[0]["chart_cache_hit_rate_sum"] == 75
 
 
 

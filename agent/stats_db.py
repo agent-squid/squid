@@ -1463,6 +1463,12 @@ def _stats_chart_field(metric: str, agg: str) -> str:
     return f"chart_{metric}_{agg}"
 
 
+def _cache_hit_components(raw: float, cache_read: float, cache_write: float) -> tuple[float, float]:
+    is_split = (cache_read + cache_write) > 0 and raw < (cache_read + cache_write)
+    new_input = raw + cache_write if is_split else max(0, raw - cache_read)
+    return cache_read, cache_read + new_input
+
+
 def _stats_payload_metric_value(stats: dict, metric: str) -> Optional[float]:
     def num(key: str) -> float:
         value = stats.get(key)
@@ -1493,9 +1499,8 @@ def _stats_payload_metric_value(stats: dict, metric: str) -> Optional[float]:
     if metric == "new_input":
         return raw + cache_write if is_split else max(0, raw - cache_read)
     if metric == "cache_hit_rate":
-        new_input = raw + cache_write if is_split else max(0, raw - cache_read)
-        total = cache_read + new_input
-        return (cache_read / total) * 100 if total > 0 else None
+        cache_hits, total = _cache_hit_components(raw, cache_read, cache_write)
+        return (cache_hits / total) * 100 if total > 0 else None
     if metric == "avg_tokens_turn":
         return raw + num("output_tokens")
     return None
@@ -1597,6 +1602,44 @@ def _merge_chart_aggregates(
         if agg not in _STATS_CHART_AGGS:
             continue
         field = _stats_chart_field(metric, agg)
+        if metric == "cache_hit_rate":
+            grouped_hits: dict[str, list[float]] = {}
+            grouped_totals: dict[str, list[float]] = {}
+            for turn in turn_rows:
+                try:
+                    stats = json.loads(turn["payload"] or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                hits, total = _cache_hit_components(
+                    float(stats.get("input_tokens") or 0),
+                    float(stats.get("cache_read_tokens") or 0),
+                    float(stats.get("cache_write_tokens") or 0),
+                )
+                if total > 0:
+                    grouped_hits.setdefault(turn["period"], []).append(hits)
+                    grouped_totals.setdefault(turn["period"], []).append(total)
+            if not grouped_hits:
+                sample_rows = conn.execute(
+                    f"""SELECT {bucket} AS period,
+                              input_tokens, cache_read_tokens, cache_write_tokens
+                        FROM session_stats
+                        WHERE {where}""",
+                    params,
+                ).fetchall()
+                for sample in sample_rows:
+                    hits, total = _cache_hit_components(
+                        float(sample["input_tokens"] or 0),
+                        float(sample["cache_read_tokens"] or 0),
+                        float(sample["cache_write_tokens"] or 0),
+                    )
+                    if total > 0:
+                        grouped_hits.setdefault(sample["period"], []).append(hits)
+                        grouped_totals.setdefault(sample["period"], []).append(total)
+            for row in rows:
+                hits = sum(grouped_hits.get(row["period"], []))
+                total = sum(grouped_totals.get(row["period"], []))
+                row[field] = (hits / total) * 100 if total > 0 else None
+            continue
         grouped: dict[str, list[float]] = {}
         for turn in turn_rows:
             try:
@@ -1877,9 +1920,40 @@ def _merge_breakdown_chart_aggregates(
         metric = str(series.get("metric") or "")
         agg = str(series.get("agg") or "sum").lower()
         expr = _STATS_CHART_METRIC_EXPR.get(metric)
-        if not expr or agg not in _STATS_CHART_AGGS:
+        if agg not in _STATS_CHART_AGGS:
             continue
         field = _stats_chart_field(metric, agg)
+        if metric == "cache_hit_rate":
+            sample_rows = conn.execute(
+                f"""SELECT {', '.join(select_dims)},
+                          input_tokens, cache_read_tokens, cache_write_tokens
+                    FROM session_stats
+                    WHERE {where}""",
+                params,
+            ).fetchall()
+            grouped_hits: dict[tuple, list[float]] = {}
+            grouped_totals: dict[tuple, list[float]] = {}
+            for sample in sample_rows:
+                sample_dict = dict(sample)
+                hits, total = _cache_hit_components(
+                    float(sample_dict.get("input_tokens") or 0),
+                    float(sample_dict.get("cache_read_tokens") or 0),
+                    float(sample_dict.get("cache_write_tokens") or 0),
+                )
+                if total > 0:
+                    key = _breakdown_chart_group_key(
+                        sample_dict, include_topic=include_topic, include_session=include_session
+                    )
+                    grouped_hits.setdefault(key, []).append(hits)
+                    grouped_totals.setdefault(key, []).append(total)
+            for row in rows:
+                key = _breakdown_chart_group_key(row, include_topic=include_topic, include_session=include_session)
+                hits = sum(grouped_hits.get(key, []))
+                total = sum(grouped_totals.get(key, []))
+                row[field] = (hits / total) * 100 if total > 0 else None
+            continue
+        if not expr:
+            continue
         sample_rows = conn.execute(
             f"""SELECT {', '.join(select_dims)}, {expr} AS value
                 FROM session_stats

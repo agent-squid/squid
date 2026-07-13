@@ -351,13 +351,6 @@ function initMobileViewNavigation() {
 
     if (dx > 0) {
       if (_mobileViewHistoryDepth > 0) history.back();
-      else {
-        const prev = MOBILE_VIEW_ORDER.indexOf(currentView) - 1;
-        if (prev >= 0) navigateView(MOBILE_VIEW_ORDER[prev]);
-      }
-    } else {
-      const next = MOBILE_VIEW_ORDER.indexOf(currentView) + 1;
-      if (next < MOBILE_VIEW_ORDER.length) navigateView(MOBILE_VIEW_ORDER[next]);
     }
   });
 
@@ -4999,7 +4992,7 @@ const STATS_METRIC_AGGS = {
   cache_write: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
   new_input: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
   // Ratios/derived-per-bucket values — there's nothing to vary the aggregation over.
-  cache_hit_rate: ['sum'],
+  cache_hit_rate: ['avg'],
   avg_tokens_turn: ['sum'],
 };
 
