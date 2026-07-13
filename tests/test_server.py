@@ -387,6 +387,7 @@ def test_health_returns_harnesses_and_providers_without_backend_aliases():
     assert response.status_code == 200
     body = response.json()
     assert "backends" not in body
+    assert body["version"] == server.SQUID_VERSION
     claudecode = next(h for h in body["harnesses"] if h["id"] == "claudecode")
     assert claudecode["default_provider"] == "anthropic"
     assert body["providers"]["anthropic"]["gauge"]["type"] == "claude"

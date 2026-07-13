@@ -368,7 +368,7 @@ test('thinking bubble is removed on done when no status text was streamed', asyn
   await expect(page.locator(THINKING)).not.toBeAttached();
 });
 
-test('history item shows thinking toggle when status_raw is present', async ({ page }) => {
+test('history item shows trace row when status_raw is present', async ({ page }) => {
   await mockBackend(page);
   // Return a completed item with status_raw in the history
   await page.route('**/history**', r => r.fulfill({
@@ -392,14 +392,37 @@ test('history item shows thinking toggle when status_raw is present', async ({ p
 
   await page.goto('/');
 
-  // The history item should show the thinking toggle
-  const toggle = page.locator('.msg-thinking-done.history-item .thinking-toggle');
-  await expect(toggle).toBeVisible();
-  await expect(toggle).toHaveText('Done');
+  await page.locator('.history-item .user-ctx').click();
+  const traceRow = page.locator('#ctx-popup .ctx-popup-trace-row');
+  await expect(traceRow).toBeVisible();
+  await expect(traceRow).toContainText('trace');
+});
 
-  // Click to expand and verify full status text
-  await toggle.click();
-  await expect(page.locator('.msg-thinking-done.history-item .thinking-body')).toContainText('Reading files');
+test('history item hides trace row when status_raw only duplicates final response', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/history**', r => r.fulfill({
+    json: {
+      items: [{
+        id: 51,
+        role: 'assistant',
+        topic: 'squid',
+        agent: 'claude',
+        content: 'The response content.',
+        status: 'done',
+        status_raw: 'The response content.The response content.',
+        session_id: 'sess-1',
+        timestamp: new Date().toISOString(),
+        prompt: 'test prompt',
+        adhoc: false,
+      }],
+      has_more: false,
+    },
+  }));
+
+  await page.goto('/');
+
+  await page.locator('.history-item .user-ctx').click();
+  await expect(page.locator('#ctx-popup .ctx-popup-trace-row')).not.toBeAttached();
 });
 
 test('status recovery uses persisted status_raw in polling fallback', async ({ page }) => {

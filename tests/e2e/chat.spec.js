@@ -138,6 +138,19 @@ test.describe('response bubble', () => {
     await look(page);  // pause — observe: stats line is last child, bubble above it
   });
 
+  test('renders response tildes literally instead of strikethrough', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200,
+      headers: SSE_HEADERS,
+      body: sse(META, { data: 'Use ~/Work/squid and ~~do not strike~~ here.' }, DONE),
+    }));
+
+    await sendMsg(page);
+    const response = page.locator(RESPONSE);
+    await expect(response).toContainText('Use ~/Work/squid and ~~do not strike~~ here.');
+    await expect(response.locator('del')).toHaveCount(0);
+  });
+
   test('context indicator exposes the Squid message ID', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200, headers: SSE_HEADERS,

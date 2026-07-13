@@ -850,10 +850,15 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect(page.locator('#sc-add-series')).toBeVisible();
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (4)');
   await expect.poll(() => page.evaluate(() => {
-    const tops = ['sf-period', 'sf-measures-toggle', 'sf-topic-toggle', 'sf-agent-toggle', 'sf-adhoc']
+    const tops = ['sf-period', 'sf-topic-toggle', 'sf-agent-toggle', 'sf-adhoc']
       .map(id => document.getElementById(id)?.getBoundingClientRect().top ?? 0);
     return Math.max(...tops) - Math.min(...tops);
   })).toBeLessThan(3);
+  await expect.poll(() => page.evaluate(() => {
+    const measures = document.getElementById('sf-measures-toggle').getBoundingClientRect();
+    const y1 = document.getElementById('sc-y1').getBoundingClientRect();
+    return Math.abs(measures.top - y1.top) <= 1 && measures.right <= y1.left;
+  })).toBe(true);
   await expect(page.locator('#stats-content th', { hasText: 'Sessions' })).toBeVisible();
   await expect(page.locator('#stats-content th', { hasText: 'Turns' })).toBeVisible();
   await expect(page.locator('#stats-content th', { hasText: 'Tokens In' })).toBeVisible();

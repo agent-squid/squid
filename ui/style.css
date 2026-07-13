@@ -157,6 +157,7 @@ body {
 /* hamburger (desktop settings; mobile app nav) */
 #hamburger-btn {
   display: inline-flex;
+  position: relative;
   width: 32px;
   height: 32px;
   background: transparent;
@@ -170,6 +171,16 @@ body {
   justify-content: center;
 }
 #hamburger-btn.active { color: var(--accent); border-color: var(--accent); }
+#hamburger-btn.has-update::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
 
 #hamburger-menu {
   display: none;
@@ -188,6 +199,7 @@ body {
 }
 #hamburger-menu.open { display: flex; }
 .hmenu-item {
+  position: relative;
   background: transparent;
   border: none;
   border-radius: 5px;
@@ -201,6 +213,17 @@ body {
 .hmenu-item.active { background: var(--surface-2); color: var(--accent); }
 .hmenu-item:hover:not(.active) { background: var(--surface-3); color: var(--text-muted); }
 .hmenu-item.danger:hover { color: var(--danger); }
+.hmenu-item.has-update::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  right: 0.6rem;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
 .hmenu-primary { display: none; }
 .hmenu-separator {
   border: none;
@@ -1079,6 +1102,35 @@ body {
   padding: 0 0.35em;
   border-radius: 3px;
 }
+
+.settings-update-notice {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: var(--surface-2);
+  border: 1px solid #2a2a40;
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.6rem;
+}
+.settings-update-notice[hidden] { display: none; }
+#settings-update-text {
+  font-size: var(--text-sm);
+  color: var(--text-mid);
+  flex-shrink: 0;
+}
+#settings-update-cmd { flex: 1; min-width: 0; }
+#settings-update-dismiss {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: var(--text-body);
+  line-height: 1;
+  padding: 0 0.2rem;
+  flex-shrink: 0;
+}
+#settings-update-dismiss:hover { color: var(--text-mid); }
 
 /* ── runtime catalogs (Agents tab) ──────────────────────────────────────── */
 #harnesses-catalog,

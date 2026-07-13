@@ -68,6 +68,60 @@ scrollBtn.addEventListener('mouseleave', () => {
 
 marked.setOptions({ breaks: true });
 
+function escapeMarkdownTildes(text) {
+  const src = String(text || '');
+  let inFence = false;
+  let fenceChar = '';
+  let fenceLen = 0;
+  let out = '';
+
+  for (const line of src.match(/[^\n]*(?:\n|$)/g) || []) {
+    if (!line) continue;
+    const fence = line.match(/^[ \t]{0,3}(`{3,}|~{3,})/);
+    const isFenceLine = !!fence && (!inFence || (fence[1][0] === fenceChar && fence[1].length >= fenceLen));
+    const protectLine = inFence || isFenceLine;
+
+    if (isFenceLine) {
+      if (inFence) {
+        inFence = false;
+      } else {
+        inFence = true;
+        fenceChar = fence[1][0];
+        fenceLen = fence[1].length;
+      }
+    }
+
+    if (protectLine) {
+      out += line;
+      continue;
+    }
+
+    let i = 0;
+    let inlineTicks = 0;
+    while (i < line.length) {
+      const ch = line[i];
+      if (ch === '`') {
+        let j = i + 1;
+        while (line[j] === '`') j++;
+        const runLen = j - i;
+        if (!inlineTicks) inlineTicks = runLen;
+        else if (runLen === inlineTicks) inlineTicks = 0;
+        out += line.slice(i, j);
+        i = j;
+      } else {
+        out += ch === '~' && !inlineTicks ? '\\~' : ch;
+        i++;
+      }
+    }
+  }
+
+  return out;
+}
+
+function renderAssistantMarkdown(content) {
+  return marked.parse(escapeMarkdownTildes(content));
+}
+
 const DRIVER_MODEL_HINTS = Object.freeze({
   claude:   'e.g. claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7',
   codex:    'e.g. o4-mini, o3',
@@ -89,6 +143,71 @@ const AGENT_THEME_COLORS = Object.freeze({
 let _backendMetadata = {};
 let _harnessMetadata = {};
 let _providerMetadata = {};
+
+// ── update notice (ADR-0030) ─────────────────────────────────────────────────
+const UPDATE_CHECK_URL = 'https://raw.githubusercontent.com/agent-squid/squid/main/pyproject.toml';
+const UPDATE_CACHE_KEY = 'squid_update_check_cache';
+const UPDATE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const UPDATE_DISMISS_KEY = 'squid_update_dismissed_version';
+let _updateInfo = null; // { current, latest } once a newer version is confirmed available
+
+function _versionParts(v) {
+  return String(v).split('.').map(n => parseInt(n, 10) || 0);
+}
+
+function _isNewerVersion(latest, current) {
+  const a = _versionParts(latest), b = _versionParts(current);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i] || 0, y = b[i] || 0;
+    if (x !== y) return x > y;
+  }
+  return false;
+}
+
+async function _fetchLatestSquidVersion() {
+  try {
+    const cached = JSON.parse(localStorage.getItem(UPDATE_CACHE_KEY) || 'null');
+    if (cached && Date.now() - cached.checkedAt < UPDATE_CACHE_TTL_MS) return cached.version;
+  } catch {}
+  try {
+    const res = await fetch(UPDATE_CHECK_URL);
+    if (!res.ok) return null;
+    const text = await res.text();
+    const match = text.match(/^version\s*=\s*"([^"]+)"/m);
+    if (!match) return null;
+    localStorage.setItem(UPDATE_CACHE_KEY, JSON.stringify({ version: match[1], checkedAt: Date.now() }));
+    return match[1];
+  } catch {
+    return null;
+  }
+}
+
+function setUpdateAvailable(info) {
+  _updateInfo = info;
+  const hasUpdate = !!info;
+  document.getElementById('hamburger-btn')?.classList.toggle('has-update', hasUpdate);
+  document.querySelector('.hmenu-item[data-view="settings"]')?.classList.toggle('has-update', hasUpdate);
+  renderSettingsUpdateNotice();
+}
+
+function renderSettingsUpdateNotice() {
+  const el = document.getElementById('settings-update-notice');
+  if (!el) return;
+  if (!_updateInfo) { el.hidden = true; return; }
+  el.hidden = false;
+  document.getElementById('settings-update-text').textContent =
+    `Squid v${_updateInfo.current} → v${_updateInfo.latest} available`;
+  document.getElementById('settings-update-cmd').textContent =
+    `curl -L https://github.com/agent-squid/squid/archive/refs/tags/v${_updateInfo.latest}.tar.gz | tar xz && ./squid-${_updateInfo.latest}/bin/start.sh --restart`;
+}
+
+async function checkForSquidUpdate(currentVersion) {
+  if (!currentVersion) return;
+  const latest = await _fetchLatestSquidVersion();
+  if (!latest || !_isNewerVersion(latest, currentVersion)) { setUpdateAvailable(null); return; }
+  if (localStorage.getItem(UPDATE_DISMISS_KEY) === latest) { setUpdateAvailable(null); return; }
+  setUpdateAvailable({ current: currentVersion, latest });
+}
 
 function splitAgentRef(ref, provider = null) {
   if (provider) return { harness: ref || '', provider };
@@ -407,6 +526,18 @@ function initSettings() {
     hamburgerMenu.classList.remove('open');
     hamburgerBtn.classList.remove('active');
     restartServer();
+  });
+  document.getElementById('settings-update-copy')?.addEventListener('click', e => {
+    const btn = e.currentTarget;
+    const cmd = document.getElementById('settings-update-cmd').textContent;
+    navigator.clipboard.writeText(cmd).then(() => {
+      btn.textContent = 'copied';
+      setTimeout(() => { btn.textContent = 'copy'; }, 1500);
+    });
+  });
+  document.getElementById('settings-update-dismiss')?.addEventListener('click', () => {
+    if (_updateInfo) localStorage.setItem(UPDATE_DISMISS_KEY, _updateInfo.latest);
+    setUpdateAvailable(null);
   });
   document.addEventListener('click', e => {
     if (!hamburgerMenu.contains(e.target) && !hamburgerBtn.contains(e.target)) {
@@ -2644,7 +2775,7 @@ async function sendMessage(text) {
   function showStoredResponse(content) {
     if (!bubble.parentNode) messages.appendChild(bubble);
     raw = content || '';
-    contentDiv.innerHTML = marked.parse(raw);
+    contentDiv.innerHTML = renderAssistantMarkdown(raw);
     scrollToBottom();
   }
 
@@ -2718,7 +2849,7 @@ async function sendMessage(text) {
               if (!Array.isArray(storedTools)) storedTools = [];
             } catch {}
           }
-          liveCtxSpan.dataset.hasTrace = _hasTraceContent(data.status_raw, storedTools.length ? storedTools : liveToolEvents) ? 'true' : 'false';
+          liveCtxSpan.dataset.hasTrace = _hasTraceContent(data.status_raw, storedTools.length ? storedTools : liveToolEvents, data.content || '') ? 'true' : 'false';
           renderCompletionTools(storedTools.length ? storedTools : liveToolEvents);
           addCompletionTimestamp();
           scrollToBottom();
@@ -2951,7 +3082,7 @@ async function sendMessage(text) {
             invalidateTopicsCache();
             doneTime = new Date().toISOString();
             if (firstDataReceived) {
-              contentDiv.innerHTML = marked.parse(raw);
+              contentDiv.innerHTML = renderAssistantMarkdown(raw);
               bubble.classList.add('history-item');
               messages.appendChild(bubble);
               if (searchActive && searchState) {
@@ -3164,8 +3295,22 @@ function changeTools(tools) {
 
 // Whether a message has anything worth showing in the "thought trace" popup —
 // the free-text status/reasoning stream and/or any recorded tool calls.
-function _hasTraceContent(statusRaw, contextVal) {
-  if (statusRaw && String(statusRaw).trim()) return true;
+function _traceStatusText(statusRaw, finalContent) {
+  const trace = String(statusRaw || '').trim();
+  const finalText = String(finalContent || '').trim();
+  if (!trace || !finalText) return trace;
+  if (trace === finalText) return '';
+  let stripped = trace;
+  while (stripped.endsWith(finalText)) {
+    stripped = stripped.slice(0, -finalText.length).trimEnd();
+    if (!stripped) return '';
+  }
+  if (stripped !== trace) return stripped;
+  return trace;
+}
+
+function _hasTraceContent(statusRaw, contextVal, finalContent = '') {
+  if (_traceStatusText(statusRaw, finalContent)) return true;
   try {
     const arr = typeof contextVal === 'string' ? JSON.parse(contextVal) : contextVal;
     return Array.isArray(arr) && arr.length > 0;
@@ -3686,7 +3831,7 @@ function appendHistoryItem(item, container) {
   ctxSpan.dataset.sessionTurnCount = String(sessionTurnCount);
   ctxSpan.dataset.pinnedIds = JSON.stringify(_pc.pins);
   ctxSpan.dataset.mem = _pc.mem ? 'true' : 'false';
-  ctxSpan.dataset.hasTrace = _hasTraceContent(item.status_raw, item.context) ? 'true' : 'false';
+  ctxSpan.dataset.hasTrace = _hasTraceContent(item.status_raw, item.context, item.content || '') ? 'true' : 'false';
   ctxSpan.addEventListener('click', e => { e.stopPropagation(); showCtxPopup(ctxSpan); });
   asstHeader.appendChild(ctxSpan);
 
@@ -3698,7 +3843,7 @@ function appendHistoryItem(item, container) {
     const raw = (item.content || '').split('\n')[0].replace(/^CLI exited \d+:\s*/, '').trim();
     asstContent.innerHTML = `<span class="msg-error">${raw || 'Response interrupted.'}</span>`;
   } else {
-    asstContent.innerHTML = marked.parse(item.content || '');
+    asstContent.innerHTML = renderAssistantMarkdown(item.content || '');
   }
   asstBubble.appendChild(asstContent);
   if (item.timestamp) asstBubble.dataset.ts = item.timestamp;
@@ -3925,7 +4070,7 @@ async function pollMessageStatus(msgId, contentEl, bubbleEl, stopBtn = null) {
         clearInterval(timer);
         if (stopBtn) stopBtn.remove();
         contentEl.style.paddingRight = '';
-        contentEl.innerHTML = marked.parse(data.content || '');
+        contentEl.innerHTML = renderAssistantMarkdown(data.content || '');
       } else if (data.status === 'error') {
         clearInterval(timer);
         if (stopBtn) stopBtn.remove();
@@ -3937,7 +4082,7 @@ async function pollMessageStatus(msgId, contentEl, bubbleEl, stopBtn = null) {
         if (stopBtn) stopBtn.remove();
         contentEl.innerHTML = '<span class="msg-error">Response timed out.</span>';
       } else if (data.content) {
-        contentEl.innerHTML = marked.parse(data.content);
+        contentEl.innerHTML = renderAssistantMarkdown(data.content);
         addLoader(contentEl);
       }
     } catch {
@@ -4203,7 +4348,7 @@ function addMessage(role, content) {
   const div = document.createElement('div');
   div.className = `msg ${role}`;
   if (content) {
-    if (role === 'assistant') div.innerHTML = marked.parse(content);
+    if (role === 'assistant') div.innerHTML = renderAssistantMarkdown(content);
     else div.textContent = content;
   }
   messages.appendChild(div);
@@ -8208,6 +8353,7 @@ async function showBootBanner() {
     _providerMetadata = data.providers || {};
     _harnessMetadata = {};
     for (const h of (data.harnesses || [])) _harnessMetadata[h.id] = h;
+    checkForSquidUpdate(data.version);
     await updateActiveQuotaGauge();
     if (activeQuotaBackend) fetchQuotaForBackend(activeQuotaBackend);
     const bootTime = data.boot_time ? fmtTime(data.boot_time) : '';
@@ -8472,8 +8618,13 @@ function _parseSseEvents(text) {
 function renderTraceTimeline(events, container) {
   const timeline = [];
   let narration = '';
+  const finalText = events
+    .filter(ev => ev.type === null || ev.type === 'text')
+    .map(ev => ev.data || '')
+    .join('');
   const flushNarration = () => {
-    if (narration.trim()) timeline.push({ kind: 'status', text: narration });
+    const text = _traceStatusText(narration, finalText);
+    if (text) timeline.push({ kind: 'status', text });
     narration = '';
   };
   for (const ev of events) {
@@ -8501,7 +8652,7 @@ function renderTraceTimeline(events, container) {
 }
 
 function renderTraceBody(msg, container) {
-  const statusRaw = (msg.status_raw || '').trim();
+  const statusRaw = _traceStatusText(msg.status_raw, msg.content || '');
   if (statusRaw) {
     const section = document.createElement('div');
     section.className = 'trace-status';

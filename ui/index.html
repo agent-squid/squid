@@ -531,26 +531,6 @@
               <option value="topic_agent_session">By Topic · Agent · Session Type</option>
             </select>
           </label>
-          <div class="sf-field sf-menu-field">
-            <div class="sf-multi" id="sf-measures">
-              <button id="sf-measures-toggle" class="sf-chip sf-multi-toggle" type="button" aria-haspopup="true" aria-expanded="false">Measures (4)</button>
-              <div id="sf-measures-menu" class="sf-multi-menu" hidden>
-                <label><input type="checkbox" value="turns" checked> Turns</label>
-                <label><input type="checkbox" value="avg_tokens_turn"> Avg Tokens/Turn</label>
-                <label><input type="checkbox" value="cache_hit_rate"> Cache Hit %</label>
-                <label><input type="checkbox" value="cache_read"> Cache Read</label>
-                <label><input type="checkbox" value="cache_write"> Cache Write</label>
-                <label><input type="checkbox" value="cost"> Cost</label>
-                <label><input type="checkbox" value="duration"> Duration</label>
-                <label><input type="checkbox" value="new_input"> New Input</label>
-                <label><input type="checkbox" value="quota"> Quota Delta</label>
-                <label><input type="checkbox" value="sessions" checked> Sessions</label>
-                <label><input type="checkbox" value="tokens_in" checked> Tokens In</label>
-                <label><input type="checkbox" value="tokens_out" checked> Tokens Out</label>
-                <label><input type="checkbox" value="tokens_total"> Total Tokens</label>
-              </div>
-            </div>
-          </div>
           <span class="sf-sep"></span>
         </div>
         <span class="sf-break"></span>
@@ -578,6 +558,26 @@
       </div>
       <div id="stats-chart-wrap">
         <div id="stats-chart-controls">
+          <div class="sf-field sf-menu-field">
+            <div class="sf-multi" id="sf-measures">
+              <button id="sf-measures-toggle" class="sf-chip sf-multi-toggle" type="button" aria-haspopup="true" aria-expanded="false">Measures (4)</button>
+              <div id="sf-measures-menu" class="sf-multi-menu" hidden>
+                <label><input type="checkbox" value="turns" checked> Turns</label>
+                <label><input type="checkbox" value="avg_tokens_turn"> Avg Tokens/Turn</label>
+                <label><input type="checkbox" value="cache_hit_rate"> Cache Hit %</label>
+                <label><input type="checkbox" value="cache_read"> Cache Read</label>
+                <label><input type="checkbox" value="cache_write"> Cache Write</label>
+                <label><input type="checkbox" value="cost"> Cost</label>
+                <label><input type="checkbox" value="duration"> Duration</label>
+                <label><input type="checkbox" value="new_input"> New Input</label>
+                <label><input type="checkbox" value="quota"> Quota Delta</label>
+                <label><input type="checkbox" value="sessions" checked> Sessions</label>
+                <label><input type="checkbox" value="tokens_in" checked> Tokens In</label>
+                <label><input type="checkbox" value="tokens_out" checked> Tokens Out</label>
+                <label><input type="checkbox" value="tokens_total"> Total Tokens</label>
+              </div>
+            </div>
+          </div>
           <select id="sc-y1">
             <option value="turns">Turns</option>
             <option value="cost">Cost ($)</option>
@@ -648,6 +648,12 @@
 
     <!-- ── SETTINGS VIEW ────────────────────────────────────────────────────── -->
     <div id="view-settings" class="view">
+      <div id="settings-update-notice" class="settings-update-notice" hidden>
+        <span id="settings-update-text"></span>
+        <code id="settings-update-cmd" class="no-agent-cmd"></code>
+        <button id="settings-update-copy" class="no-agent-copy" type="button">copy</button>
+        <button id="settings-update-dismiss" type="button" aria-label="Dismiss update notice" title="Dismiss">×</button>
+      </div>
       <div id="config-editor-header">
         <div id="config-editor-actions">
           <button id="config-editor-reload" type="button">Reload</button>

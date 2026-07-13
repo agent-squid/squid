@@ -987,6 +987,68 @@ def test_status_raw_preserved_across_partial_updates(tmp_path, monkeypatch):
     assert row["status_raw"] == "Working...\nThinking\nDone"
 
 
+def test_status_raw_exact_final_response_is_dropped_on_done(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user_id = stats_db.insert_user_message("squid", "codex", "test")
+    assistant_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
+
+    stats_db.update_assistant_message(
+        assistant_id, "final response", "session-1", "done",
+        status_raw=" final response\n",
+    )
+
+    row = stats_db.get_message(assistant_id)
+    assert row["status_raw"] is None
+
+
+def test_status_raw_trailing_final_response_is_stripped_on_done(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user_id = stats_db.insert_user_message("squid", "codex", "test")
+    assistant_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
+
+    stats_db.update_assistant_message(
+        assistant_id, "final response", "session-1", "done",
+        status_raw="Working...\nfinal response",
+    )
+
+    row = stats_db.get_message(assistant_id)
+    assert row["status_raw"] == "Working..."
+
+
+def test_status_raw_repeated_final_response_is_dropped_on_done(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user_id = stats_db.insert_user_message("squid", "codex", "test")
+    assistant_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
+
+    stats_db.update_assistant_message(
+        assistant_id, "final response", "session-1", "done",
+        status_raw="final response\nfinal response",
+    )
+
+    row = stats_db.get_message(assistant_id)
+    assert row["status_raw"] is None
+
+
+def test_completed_run_status_raw_strips_trailing_final_response(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user_id = stats_db.insert_user_message("squid", "codex", "test")
+    assistant_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
+    stats_db.insert_run_event(assistant_id, 0, "status", "Working...\n")
+    stats_db.insert_run_event(assistant_id, 1, "status", "final response")
+    stats_db.insert_run_event(assistant_id, 2, "text", "final response")
+    stats_db.insert_run_event(assistant_id, 3, "done", None)
+
+    assert stats_db.get_completed_run_status_raw(assistant_id) == "Working..."
+
+
 def test_status_raw_null_preserved(tmp_path, monkeypatch):
     """Null status_raw shouldn't crash — old callers may not pass it."""
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")

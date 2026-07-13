@@ -704,6 +704,8 @@ def update_assistant_message(
     status_raw: Optional[str] = None,
     only_if_pending: bool = False,
 ) -> None:
+    if status == "done":
+        status_raw = _sanitize_status_raw(content, status_raw)
     with _connect() as conn:
         if only_if_pending:
             cur = conn.execute(
@@ -720,6 +722,26 @@ def update_assistant_message(
             )
             if status == "done":
                 _ensure_session_turn_index(conn, msg_id, session_id)
+
+
+def _sanitize_status_raw(content: Optional[str], status_raw: Optional[str]) -> Optional[str]:
+    if not content or not status_raw:
+        return status_raw
+    final_text = content.strip()
+    trace_text = status_raw.strip()
+    if not final_text or not trace_text:
+        return status_raw
+    if trace_text == final_text:
+        return None
+    stripped = False
+    while trace_text.endswith(final_text):
+        trace_text = trace_text[: -len(final_text)].rstrip()
+        stripped = True
+        if not trace_text:
+            return None
+    if stripped:
+        return trace_text or None
+    return status_raw
 
 
 def update_message_quota_snapshot(msg_id: int, before: float, after: float) -> None:
@@ -2564,7 +2586,7 @@ def _completed_run_snapshot(conn: sqlite3.Connection, msg_id: int) -> Optional[t
         return None
     text = "".join(row["payload"] or "" for row in rows if row["event_type"] == "text")
     status_raw = "".join(row["payload"] or "" for row in rows if row["event_type"] == "status")
-    return text, status_raw or None
+    return text, _sanitize_status_raw(text, status_raw) or None
 
 
 def _completed_run_text(conn: sqlite3.Connection, msg_id: int) -> Optional[str]:

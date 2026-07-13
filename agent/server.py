@@ -31,6 +31,7 @@ import re
 import subprocess
 import sys
 import time
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import AsyncGenerator, Literal, Optional, Union
 
@@ -94,6 +95,7 @@ from .journal import _generate_journal, _current_week, list_topic_journals, read
 from . import creds
 
 BOOT_TIME = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+SQUID_VERSION = _pkg_version("squid")
 
 init_db()
 
@@ -198,7 +200,7 @@ def _public_agent_map() -> dict:
 _check_deps()
 sync_now()
 
-app = FastAPI(title="Squid", version="0.1.0")
+app = FastAPI(title="Squid", version=SQUID_VERSION)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
@@ -968,6 +970,7 @@ async def health():
     return JSONResponse({
         "status": "ok",
         "boot_time": BOOT_TIME,
+        "version": SQUID_VERSION,
         "squid_home": SQUID_HOME,
         "harnesses": list_harnesses(),
         "providers": providers,
