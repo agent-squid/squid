@@ -4949,11 +4949,10 @@ let _statsFiltersLoaded = false;
 let _statsPage = 0;
 const _STATS_PAGE_SIZE = 10;
 const DEFAULT_STATS_MEASURES = ['sessions', 'turns', 'tokens_in', 'tokens_out'];
-// Duration isn't in the base default: Hourly/Daily rows never carry duration_ms
-// (only By Turn's per-row data does), so it'd just show "—" forever there.
-// It's added/removed alongside the Sessions/Turns swap when entering/leaving
-// By Turn — see the sf-period change handler.
+// Duration is available in aggregate views too, but stays out of the base
+// default to keep the initial table compact. It is auto-added in By Turn.
 const _statsMeasures = new Set(DEFAULT_STATS_MEASURES);
+let _statsDurationAutoAddedForTurn = false;
 const _STATS_BREAKDOWN_SERIES_BUDGET = 4;
 const _STATS_BREAKDOWN_VISIBLE_SERIES_LIMIT = 8;
 let _statsPresets = [];
@@ -5045,7 +5044,9 @@ function _positionStatsTurnsPopup(popup, anchorEl) {
   const statsRect = document.getElementById('view-stats').getBoundingClientRect();
   const appRect = document.getElementById('app').getBoundingClientRect();
   const anchorRect = anchorEl.getBoundingClientRect();
-  popup.style.maxHeight = `${Math.max(120, statsRect.height - margin * 2)}px`;
+  const availableHeight = Math.max(120, statsRect.height - margin * 2);
+  const readableMaxHeight = Math.round(window.innerHeight * 0.55);
+  popup.style.maxHeight = `${Math.max(120, Math.min(availableHeight, readableMaxHeight))}px`;
   popup.style.bottom = '';
   popup.style.right = '';
 
@@ -5141,7 +5142,7 @@ const STATS_METRIC_AGGS = {
   tokens_out: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
   tokens_total: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
   quota: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
-  duration: ['sum'],
+  duration: ['avg', 'sum', 'min', 'max', 'p50', 'p75', 'p95'],
   cache_read: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
   cache_write: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
   new_input: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
@@ -5269,6 +5270,7 @@ function _statsChartSeriesValue(row, metric, agg) {
   if (statsPeriod === 'turn') return _statsMetricValue(row, metric);
   const field = _statsChartAggField(metric, agg);
   if (Object.prototype.hasOwnProperty.call(row, field)) return row[field] == null ? 0 : row[field];
+  if (metric === 'duration' && agg === 'avg' && row.duration_ms != null) return row.duration_ms / 1000;
   if (agg === 'sum') return _statsMetricValue(row, metric);
   const value = row[_statsChartAggField(metric, agg)];
   return value == null ? 0 : value;
@@ -5367,6 +5369,7 @@ function _firstSelectedNonTurnMeasure() {
 }
 
 function _statsChartMetricKeys() {
+  if (statsBreakdown) return STATS_TABLE_MEASURES.map(m => m.key);
   const keys = STATS_TABLE_MEASURES.filter(m => _statsMeasureSelected(m.key)).map(m => m.key);
   // Nothing checked in Measures — fall back to the full metric list rather
   // than leaving the chart pickers with no options at all.
@@ -5390,8 +5393,12 @@ function _syncStatsChartMetricSelects() {
   let changed = false;
 
   if (!keys.includes(statsChartY1)) {
+    const prevMetric = statsChartY1;
+    const prevAgg = statsChartAggY1;
     statsChartY1 = _firstSelectedMeasure();
-    statsChartAggY1 = _normalizeStatsAgg(statsChartY1, statsChartAggY1);
+    statsChartAggY1 = prevAgg === _defaultStatsAgg(prevMetric)
+      ? _defaultStatsAgg(statsChartY1)
+      : _normalizeStatsAgg(statsChartY1, prevAgg);
     changed = true;
   }
   const y1Sel = document.getElementById('sc-y1');
@@ -5458,7 +5465,7 @@ function _statsTableAggForMeasure(metric) {
   if (statsPeriod === 'turn') return 'sum';
   if (statsChartY1 === metric) return statsChartAggY1;
   const entry = statsChartExtra.find(s => s.metric === metric);
-  return entry ? entry.agg : 'sum';
+  return entry ? entry.agg : _defaultStatsAgg(metric);
 }
 
 function _statsTableMeasureLabel(measure) {
@@ -5743,6 +5750,11 @@ function _breakdownPivot(rows) {
 function _updateStatsMeasureLabel() {
   const toggle = document.getElementById('sf-measures-toggle');
   if (!toggle) return;
+  if (statsBreakdown) {
+    toggle.textContent = 'Measures';
+    toggle.classList.remove('active');
+    return;
+  }
   const labels = STATS_TABLE_MEASURES
     .filter(m => _statsMeasureSelected(m.key))
     .map(m => m.label.replace(' meter Δ', ''));
@@ -5796,6 +5808,7 @@ function _updateStatsBreakdownUi() {
   const active = !!statsBreakdown;
   const breakdownSel = document.getElementById('sf-breakdown');
   if (breakdownSel) breakdownSel.disabled = statsPeriod === 'turn';
+  _updateStatsMeasureLabel();
   document.getElementById('stats-chart-controls')?.classList.toggle('breakdown-active', active);
   const measures = document.getElementById('sf-measures');
   if (measures) measures.classList.toggle('disabled', active);
@@ -5881,6 +5894,7 @@ function _applyStatsState(state) {
   statsPeriod = state?.time?.period || 'hourly';
   statsFilters.days = Number(state?.time?.days ?? 1);
   statsBreakdown = state?.breakdown?.key || '';
+  _statsDurationAutoAddedForTurn = false;
   _statsBreakdownColumnSort = _normalizeStatsBreakdownSort(state?.breakdown?.sort);
   const dims = state?.dimensions || {};
   statsFilters.topics = dims.topic?.mode === 'selected' ? [...(dims.topic.values || [])] : [];
@@ -6597,10 +6611,12 @@ function initStats() {
       }
       // Every row is exactly one session in this view, so start sessions off.
       // Keep turns on because that column links to the underlying response.
-      // Duration is the opposite: only By Turn's rows carry it, so turn it on.
       const removedSessions = _statsMeasures.delete('sessions');
       const addedDuration = !_statsMeasures.has('duration');
-      _statsMeasures.add('duration');
+      if (addedDuration) {
+        _statsMeasures.add('duration');
+        _statsDurationAutoAddedForTurn = true;
+      }
       measuresChanged = removedSessions || addedDuration;
       if (statsChartY1 === 'turns') {
         statsChartY1 = _firstSelectedNonTurnMeasure();
@@ -6609,7 +6625,8 @@ function initStats() {
     } else if (statsPeriod !== 'turn' && prevPeriod === 'turn') {
       _statsMeasures.add('sessions');
       _statsMeasures.add('turns');
-      _statsMeasures.delete('duration');
+      if (_statsDurationAutoAddedForTurn) _statsMeasures.delete('duration');
+      _statsDurationAutoAddedForTurn = false;
       measuresChanged = true;
     }
     if (measuresChanged) {
@@ -6671,6 +6688,8 @@ function initStats() {
     } else {
       _resetStatsDimensionFilters();
     }
+    _syncStatsChartMetricSelects();
+    _updateStatsMeasureLabel();
     loadStats();
   });
 
@@ -6686,6 +6705,7 @@ function initStats() {
   });
   measuresMenu.querySelectorAll('input[type="checkbox"]').forEach(input => {
     input.addEventListener('change', () => {
+      if (input.value === 'duration') _statsDurationAutoAddedForTurn = false;
       if (input.checked) _statsMeasures.add(input.value);
       else _statsMeasures.delete(input.value);
       _markStatsPresetDirty();
@@ -6715,8 +6735,12 @@ function initStats() {
   _syncStatsChartAggControls();
 
   document.getElementById('sc-y1').addEventListener('change', e => {
+    const prevMetric = statsChartY1;
+    const prevAgg = statsChartAggY1;
     statsChartY1 = e.target.value;
-    statsChartAggY1 = _normalizeStatsAgg(statsChartY1, statsChartAggY1);
+    statsChartAggY1 = prevAgg === _defaultStatsAgg(prevMetric)
+      ? _defaultStatsAgg(statsChartY1)
+      : _normalizeStatsAgg(statsChartY1, prevAgg);
     _syncStatsChartAggControls();
     _markStatsPresetDirty();
     loadStats();
@@ -6737,8 +6761,12 @@ function initStats() {
     const entry = statsChartExtra[i];
     if (!entry) return;
     if (e.target.classList.contains('sc-extra-metric')) {
+      const prevMetric = entry.metric;
+      const prevAgg = entry.agg;
       entry.metric = e.target.value;
-      entry.agg = _normalizeStatsAgg(entry.metric, entry.agg);
+      entry.agg = prevAgg === _defaultStatsAgg(prevMetric)
+        ? _defaultStatsAgg(entry.metric)
+        : _normalizeStatsAgg(entry.metric, prevAgg);
       // Same-metric chips (e.g. P50/P95 of one measure) almost always belong
       // on the same axis — align to an existing chip with that metric first.
       const match = statsChartExtra.find((s, j) => j !== i && s.metric === entry.metric);

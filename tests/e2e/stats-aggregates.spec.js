@@ -209,6 +209,7 @@ test('stats turn list popup stays inside the stats view', async ({ page }) => {
       right: popup.right <= stats.right,
     };
   })).toEqual({ top: true, bottom: true, left: true, right: true });
+  await expect.poll(() => page.locator('#stats-turn-popup').evaluate(el => el.scrollHeight > el.clientHeight)).toBe(true);
   await expect.poll(() => page.evaluate(() => {
     const popupZ = Number(getComputedStyle(document.getElementById('stats-turn-popup')).zIndex);
     const modalZ = Number(getComputedStyle(document.getElementById('msg-modal')).zIndex);
@@ -464,6 +465,40 @@ test('same measure can be added multiple times with different aggregations, and 
   expect(statsRequests.length).toBe(requestsBeforeToggle);
 });
 
+test('duration measure defaults to average in aggregate stats', async ({ page }) => {
+  await mockApp(page);
+  const statsRequests = [];
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    const params = Object.fromEntries(url.searchParams.entries());
+    statsRequests.push(params);
+    route.fulfill({
+      json: [{
+        period: '2026-07-10 10:00',
+        sessions: 2,
+        total_turns: 2,
+        input_tokens: 60,
+        output_tokens: 30,
+        duration_ms: 6500,
+        chart_duration_avg: 6.5,
+      }],
+    });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('#sf-measures-toggle').click();
+  await page.locator('#sf-measures-menu input[value="duration"]').check();
+  await expect(page.locator('#stats-content thead th')).toContainText(['AVG Duration']);
+  await expect(page.locator('#stats-content tbody')).toContainText('6.5s');
+
+  await page.locator('#sc-y1').selectOption('duration');
+  await expect(page.locator('#sc-y1-agg')).toHaveValue('avg');
+  await expect.poll(() => statsRequests.some(req => req.chart_metrics === 'duration' && req.chart_aggs === 'avg')).toBe(true);
+  await expect(page.locator('#stats-content thead th')).toContainText(['AVG Duration']);
+  await expect(page.locator('#stats-content tbody')).toContainText('6.5s');
+});
+
 test('chart metric options are limited to whatever is checked in Measures', async ({ page }) => {
   await mockApp(page);
   const statsRequests = [];
@@ -483,8 +518,7 @@ test('chart metric options are limited to whatever is checked in Measures', asyn
 
   const y1Options = () => page.locator('#sc-y1 option').evaluateAll(opts => opts.map(o => o.value));
 
-  // Defaults: Sessions/Turns/Tokens In/Tokens Out checked, Cost/Duration not
-  // (Duration only ever has data in By Turn, so it isn't on by default here).
+  // Defaults: Sessions/Turns/Tokens In/Tokens Out checked, Cost/Duration not.
   await expect.poll(y1Options).toEqual(['turns', 'sessions', 'tokens_in', 'tokens_out']);
   await expect(page.locator('#sc-y1 option[value="cost"]')).toHaveCount(0);
   await expect(page.locator('#sc-y1 option[value="duration"]')).toHaveCount(0);

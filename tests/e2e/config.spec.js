@@ -907,6 +907,8 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect(page.locator('#sc-add-series')).toBeHidden();
   await expect(page.locator('#sf-measures')).toBeVisible();
   await expect(page.locator('#sf-measures-toggle')).toBeDisabled();
+  await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures');
+  await expect(page.locator('#sc-y1 option[value="tokens_out"]')).toHaveCount(1);
   const disabledMeasuresStyle = await page.locator('#sf-measures-toggle').evaluate(el => {
     const style = getComputedStyle(el);
     return {
@@ -955,6 +957,8 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect(page.locator('#sc-add-series')).toBeVisible();
   await expect(page.locator('#sf-measures')).toBeVisible();
   await expect(page.locator('#sf-measures-toggle')).toBeEnabled();
+  await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (5)');
+  await expect(page.locator('#sc-y1 option[value="tokens_out"]')).toHaveCount(0);
 });
 
 test('agent breakdown defaults to top four agents when none are selected', async ({ page }) => {

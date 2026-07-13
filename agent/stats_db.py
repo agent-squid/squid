@@ -1451,6 +1451,7 @@ _STATS_CHART_METRIC_EXPR = {
     "tokens_out": "output_tokens",
     "tokens_total": f"({_STATS_TOKENS_IN_EXPR}) + COALESCE(output_tokens, 0)",
     "quota": "CASE WHEN quota_before IS NOT NULL AND quota_after IS NOT NULL THEN quota_after - quota_before ELSE NULL END",
+    "duration": "duration_ms / 1000.0",
     "cache_read": "COALESCE(cache_read_tokens, 0)",
     "cache_write": "COALESCE(cache_write_tokens, 0)",
     # Mirrors ui/app.js _splitInputTokens(): the split (Claude-style) case adds
@@ -1749,6 +1750,7 @@ def get_aggregated_stats(
                         ss.cache_write_tokens,
                         ss.cost_usd,
                         ss.quota_delta,
+                        ss.duration_ms,
                         COALESCE(cm.session_turns, 0) AS session_turns,
                         COALESCE(cm.adhoc_turns, 0) AS adhoc_turns,
                         COALESCE(cm.session_turns, 0) + COALESCE(cm.adhoc_turns, 0) AS total_turns,
@@ -1764,7 +1766,8 @@ def get_aggregated_stats(
                             SUM(cache_write_tokens) AS cache_write_tokens,
                             SUM(cost_usd) AS cost_usd,
                             SUM(CASE WHEN quota_before IS NOT NULL AND quota_after IS NOT NULL
-                                     THEN quota_after - quota_before ELSE NULL END) AS quota_delta
+                                     THEN quota_after - quota_before ELSE NULL END) AS quota_delta,
+                            AVG(duration_ms) AS duration_ms
                         FROM session_stats ss_inner
                         WHERE {ss_where}
                         GROUP BY period ORDER BY period DESC LIMIT ?
@@ -2099,7 +2102,8 @@ def get_stats_by_breakdown(
                             SUM(cache_write_tokens) AS cache_write_tokens,
                             SUM(cost_usd) AS cost_usd,
                             SUM(CASE WHEN quota_before IS NOT NULL AND quota_after IS NOT NULL
-                                     THEN quota_after - quota_before ELSE NULL END) AS quota_delta
+                                     THEN quota_after - quota_before ELSE NULL END) AS quota_delta,
+                            AVG(duration_ms) AS duration_ms
                         FROM session_stats
                         WHERE {ss_where}
                         GROUP BY {', '.join(group_dims)}
@@ -2126,7 +2130,8 @@ def get_stats_by_breakdown(
                             ss.cache_read_tokens,
                             ss.cache_write_tokens,
                             ss.cost_usd,
-                            ss.quota_delta
+                            ss.quota_delta,
+                            ss.duration_ms
                         FROM ss
                         LEFT JOIN cm ON {' AND '.join(join_dims)}
                         UNION ALL
@@ -2141,7 +2146,8 @@ def get_stats_by_breakdown(
                             0 AS cache_read_tokens,
                             0 AS cache_write_tokens,
                             0 AS cost_usd,
-                            NULL AS quota_delta
+                            NULL AS quota_delta,
+                            NULL AS duration_ms
                         FROM cm
                         LEFT JOIN ss ON {' AND '.join(join_dims)}
                         WHERE ss.period IS NULL
@@ -2276,6 +2282,7 @@ def get_stats_by_agent(
                           ss.cache_write_tokens,
                           ss.cost_usd,
                           ss.quota_delta,
+                          ss.duration_ms,
                           COALESCE(cm.turns, 0) AS total_turns
                    FROM (
                        SELECT {_stats_agent_expr()} AS agent,
@@ -2286,7 +2293,8 @@ def get_stats_by_agent(
                               SUM(cache_write_tokens) AS cache_write_tokens,
                               SUM(cost_usd) AS cost_usd,
                               SUM(CASE WHEN quota_before IS NOT NULL AND quota_after IS NOT NULL
-                                       THEN quota_after - quota_before ELSE NULL END) AS quota_delta
+                                       THEN quota_after - quota_before ELSE NULL END) AS quota_delta,
+                              AVG(duration_ms) AS duration_ms
                        FROM session_stats
                        WHERE {ss_where}
                        GROUP BY agent
@@ -2348,6 +2356,7 @@ def get_stats_by_topic(
                           ss.cache_read_tokens,
                           ss.cost_usd,
                           ss.quota_delta,
+                          ss.duration_ms,
                           COALESCE(cm.turns, 0) AS total_turns
                    FROM (
                        SELECT topic,
@@ -2357,7 +2366,8 @@ def get_stats_by_topic(
                               SUM(cache_read_tokens) AS cache_read_tokens,
                               SUM(cost_usd) AS cost_usd,
                               SUM(CASE WHEN quota_before IS NOT NULL AND quota_after IS NOT NULL
-                                       THEN quota_after - quota_before ELSE NULL END) AS quota_delta
+                                       THEN quota_after - quota_before ELSE NULL END) AS quota_delta,
+                              AVG(duration_ms) AS duration_ms
                        FROM session_stats
                        WHERE {ss_where}
                        GROUP BY topic
