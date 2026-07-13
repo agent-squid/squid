@@ -13,10 +13,12 @@ moving between versions, checking for new ones, or telling the user one
 exists. There is also no migration system: DB tables are created via
 `CREATE TABLE IF NOT EXISTS` only (`agent/stats_db.py`), and config is
 bootstrapped into `~/.squid/squid.yaml` only if missing (ADR-0014); neither
-reconciles a shape change into an existing install. `PID_FILE` was also
+reconciles a shape change into an existing install. `PID_FILE` is also
 directory-scoped (`bin/start.sh`, `bin/stop.sh`) even though the port/config
-it depends on is shared via `~/.squid/squid.yaml` — moved to `~/.squid/` as
-part of this work so cross-version restarts detect the right process.
+it depends on is shared via `~/.squid/squid.yaml` — this needs to move to
+`~/.squid/` so cross-version restarts (running from a new `squid-X.Y/`
+sibling directory) can find and kill the old version's process. Not done yet;
+see Implementation status below.
 
 Squid has no installed user base yet (pre-1.0, no released state to stay
 backward compatible with), so the immediate need is narrower than "handle
@@ -46,11 +48,13 @@ without building a migration system ahead of any real need for one.
   `FastAPI(title="Squid", version="0.1.0")` reads it instead of duplicating it.
 - **`/health` reports version.** Added alongside the existing `boot_time`,
   `harnesses`, `providers` fields.
-- **`bin/update.sh`.** Downloads the target tag's tarball into a sibling
-  `squid-X.Y/` directory (the layout `README.md` already documents), runs its
-  `install.sh`, then its `start.sh --restart` — reusing the existing
-  port-based old-process kill and active-prompt confirmation already in
-  `bin/start.sh` rather than writing new kill/confirm logic.
+- **`bin/update.sh`** (not yet written — see Implementation status). Will
+  download the target tag's tarball into a sibling `squid-X.Y/` directory (the
+  layout `README.md` already documents), run its `install.sh`, then its
+  `start.sh --restart` — reusing the existing port-based old-process kill and
+  active-prompt confirmation already in `bin/start.sh` rather than writing new
+  kill/confirm logic. Depends on the `PID_FILE` move above, otherwise the new
+  version's `start.sh --restart` can't find the old version's process to kill.
 - **In-app notice, checked via a static file, not the GitHub API.** The
   frontend fetches `raw.githubusercontent.com/<org>/squid/main/pyproject.toml`
   directly (cached in `localStorage`, ~24h TTL) and regexes out the `version`
@@ -84,6 +88,20 @@ on — a restart kills in-flight CLI sessions, so it must stay a deliberate,
 confirmed action either way.
 
 Option 4 (full migration system) is deferred, not rejected — see below.
+
+## Implementation status
+
+Landed in `46efdc9`: `/health` version field, the hamburger badge, and the
+Settings notice (copy command + dismiss). **Not yet built:** `bin/update.sh`,
+and moving `PID_FILE` to `~/.squid/`. Until both land, the copy-pasted command
+in the Settings notice is the only way to actually update — there is no
+`bin/update.sh` for it to invoke yet, so it currently points at the manual
+`curl | tar xz` + `start.sh --restart` sequence directly.
+
+Dismissal (`localStorage['squid_update_dismissed_version']`) is scoped to the
+specific `latest` version seen at dismiss time, not permanent — if a newer
+release ships later, `checkForSquidUpdate` re-nags since the stored dismissed
+version no longer matches (`ui/app.js`, `UPDATE_DISMISS_KEY`).
 
 ## Deferred: version-gated migrations
 
