@@ -10,8 +10,8 @@ server:
     - "/tmp/squid"
 
 agent:
-  first_byte_timeout: 300
-  response_timeout: 1800
+  first_byte_timeout: 600
+  response_timeout: 3600
 
 # A harness is one of Squid's coded coding-agent CLI integrations. The
 # supported harness set is fixed in code; these YAML entries configure each

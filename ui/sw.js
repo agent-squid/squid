@@ -34,6 +34,7 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url);
 
   if (request.method !== 'GET' || url.origin !== self.location.origin) return;
+  if (request.mode === 'navigate') return;
   if (url.pathname === '/manifest.webmanifest' || url.pathname.startsWith('/icons/')) return;
   if (
     url.pathname.startsWith('/chat')

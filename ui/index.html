@@ -497,12 +497,15 @@
         <div class="sf-row sf-primary-row">
           <label class="sf-field">
             <select id="sf-period">
+              <option value="turn">By Turn</option>
               <option value="hourly" selected>Hourly</option>
               <option value="daily">Daily</option>
             </select>
           </label>
           <label class="sf-field">
             <select id="sf-days">
+              <option value="1">1d</option>
+              <option value="3">3d</option>
               <option value="7" selected>7d</option>
               <option value="30">30d</option>
               <option value="90">90d</option>
@@ -528,6 +531,12 @@
                 <label><input type="checkbox" value="tokens_out" checked> Tokens Out</label>
                 <label><input type="checkbox" value="cost"> Cost</label>
                 <label><input type="checkbox" value="quota"> Quota</label>
+                <label><input type="checkbox" value="duration"> Duration</label>
+                <label><input type="checkbox" value="cache_read"> Cache Read</label>
+                <label><input type="checkbox" value="cache_write"> Cache Write</label>
+                <label><input type="checkbox" value="new_input"> New Input</label>
+                <label><input type="checkbox" value="cache_hit_rate"> Cache Hit %</label>
+                <label><input type="checkbox" value="avg_tokens_turn"> Avg Tokens/Turn</label>
               </div>
             </div>
           </div>
@@ -565,6 +574,12 @@
             <option value="tokens_out">Tokens Out</option>
             <option value="sessions">Sessions</option>
             <option value="quota">Quota</option>
+            <option value="duration">Duration (s)</option>
+            <option value="cache_read">Cache Read</option>
+            <option value="cache_write">Cache Write</option>
+            <option value="new_input">New Input</option>
+            <option value="cache_hit_rate">Cache Hit %</option>
+            <option value="avg_tokens_turn">Avg Tokens/Turn</option>
           </select>
           <select id="sc-y1-agg" aria-label="Y1 aggregation">
             <option value="sum">SUM</option>
@@ -584,6 +599,12 @@
             <option value="tokens_out">Tokens Out</option>
             <option value="sessions">Sessions</option>
             <option value="quota">Quota</option>
+            <option value="duration">Duration (s)</option>
+            <option value="cache_read">Cache Read</option>
+            <option value="cache_write">Cache Write</option>
+            <option value="new_input">New Input</option>
+            <option value="cache_hit_rate">Cache Hit %</option>
+            <option value="avg_tokens_turn">Avg Tokens/Turn</option>
           </select>
           <select id="sc-y2-agg" aria-label="Y2 aggregation" hidden>
             <option value="sum">SUM</option>

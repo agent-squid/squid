@@ -385,6 +385,17 @@ test('file editor keeps controls at top, highlights generic suffix files, discar
       .map(el => el.getAttribute('aria-label') || el.title || el.id)
       .slice(-4)
   )).toEqual(['Discard changes', 'Save', 'Copy path', 'Close']);
+  await expect(page.getByLabel('Find in editor')).toBeVisible();
+  await expect(page.getByLabel('Line number')).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 720 });
+  expect(await page.evaluate(() => {
+    const actions = document.querySelector('.fv-header-actions');
+    const labels = ['Discard changes', 'Save', 'Copy path', 'Close'];
+    return labels.map(label => {
+      const rect = actions.querySelector(`[aria-label="${label}"]`).getBoundingClientRect();
+      return { label, left: rect.left, visible: rect.width > 0 && rect.height > 0 };
+    }).filter(item => item.visible).sort((a, b) => a.left - b.left).map(item => item.label);
+  })).toEqual(['Discard changes', 'Save', 'Copy path']);
   expect(await page.evaluate(() => window.__yamlRequested())).toBe(true);
 
   await expect(page.getByRole('button', { name: 'Save' })).toBeDisabled();

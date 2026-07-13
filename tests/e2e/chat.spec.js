@@ -94,6 +94,36 @@ test.describe('response bubble', () => {
     await look(page);  // pause — observe: response bubble now at bottom
   });
 
+  test('thinking bubble height can be doubled', async ({ page }) => {
+    const { intercepted } = holdChat(page);
+
+    await sendMsg(page);
+    await intercepted;
+
+    const thinking = page.locator(THINKING);
+    const live = thinking.locator('.thinking-live');
+    const normalMax = await live.evaluate(el => parseFloat(getComputedStyle(el).maxHeight));
+    const heightBtn = thinking.getByRole('button', { name: 'Double thinking height' });
+    await expect(heightBtn).not.toBeVisible();
+    await thinking.evaluate(el => {
+      const liveEl = el.querySelector('.thinking-live');
+      liveEl.textContent = Array.from({ length: 16 }, (_, i) => `thinking line ${i + 1}`).join('\n');
+      window.updateThinkingHeightButton(el);
+    });
+    await expect(heightBtn).toBeVisible();
+    expect(await thinking.evaluate(el => {
+      const bubble = el.getBoundingClientRect();
+      const btn = el.querySelector('.thinking-height-btn').getBoundingClientRect();
+      return btn.bottom <= bubble.bottom && btn.bottom >= bubble.bottom - 12 && btn.right <= bubble.right;
+    })).toBe(true);
+    await heightBtn.click();
+
+    await expect(thinking).toHaveClass(/thinking-tall/);
+    await expect(thinking.getByRole('button', { name: 'Normal thinking height' })).toBeVisible();
+    const tallMax = await live.evaluate(el => parseFloat(getComputedStyle(el).maxHeight));
+    expect(tallMax).toBeGreaterThan(normalMax * 1.8);
+  });
+
   test('appears at bottom of #messages on done', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200, headers: SSE_HEADERS,
@@ -683,6 +713,45 @@ test.describe('response bubble', () => {
     await expect(page.locator(MSG_ERROR)).not.toBeAttached();
   });
 
+  test('stream error with message id keeps polling until final completion', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200,
+      headers: { ...SSE_HEADERS, 'X-Squid-Msg-Id': '92' },
+      body: sse(
+        { event: 'meta', data: { agent: 'claude', backend: 'claude', msg_id: 92, adhoc: false } },
+        { event: 'status', data: 'Wrapping up...' },
+        { event: 'error', data: 'Connection lost' },
+      ),
+    }));
+
+    let statusCalls = 0;
+    await page.route('**/chat/92/status', r => {
+      statusCalls++;
+      if (statusCalls === 1) {
+        return r.fulfill({ json: { id: 92, status: 'pending', content: '' } });
+      }
+      if (statusCalls === 2) {
+        return r.fulfill({ json: { id: 92, status: 'error', content: '' } });
+      }
+      return r.fulfill({ json: {
+        id: 92,
+        topic: 'default',
+        agent: 'claude',
+        backend: 'claude',
+        status: 'done',
+        content: 'Recovered final response',
+        adhoc: false,
+        timestamp: new Date().toISOString(),
+      }});
+    });
+
+    await sendMsg(page);
+
+    await expect(page.locator(RESPONSE).filter({ hasText: 'Recovered final response' })).toBeVisible({ timeout: 8_000 });
+    await expect(page.locator(MSG_ERROR).filter({ hasText: 'Connection lost' })).not.toBeAttached();
+    expect(statusCalls).toBeGreaterThanOrEqual(3);
+  });
+
   test('polling error after partial content keeps partial in thinking bubble only', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200,
@@ -740,11 +809,15 @@ test.describe('response bubble', () => {
   });
 
   test('partial status remains in status bubble when the response errors', async ({ page }) => {
+    const statusEvents = Array.from({ length: 40 }, (_, i) => ({
+      event: 'status',
+      data: `Checking the code ${i + 1}...`,
+    }));
     await page.route('**/chat', r => r.fulfill({
       status: 200, headers: SSE_HEADERS,
       body: sse(
         META,
-        { event: 'status', data: 'Checking the code...' },
+        ...statusEvents,
         { event: 'error', data: 'Backend unavailable' },
       ),
     }));
@@ -752,7 +825,15 @@ test.describe('response bubble', () => {
     await sendMsg(page);
 
     const statusBubble = page.locator('.msg-thinking-done');
-    await expect(statusBubble.locator('.thinking-body')).toContainText('Checking the code...');
+    await expect(statusBubble.locator('.thinking-body')).toContainText('Checking the code 1...');
+    await expect(statusBubble.getByRole('button', { name: 'Double thinking height' })).not.toBeVisible();
+    await statusBubble.locator('.thinking-toggle').click();
+    await expect(statusBubble.getByRole('button', { name: 'Double thinking height' })).toBeVisible();
+    const normalMax = await statusBubble.locator('.thinking-body').evaluate(el => parseFloat(getComputedStyle(el).maxHeight));
+    await statusBubble.getByRole('button', { name: 'Double thinking height' }).click();
+    await expect(statusBubble).toHaveClass(/thinking-tall/);
+    const tallMax = await statusBubble.locator('.thinking-body').evaluate(el => parseFloat(getComputedStyle(el).maxHeight));
+    expect(tallMax).toBeGreaterThan(normalMax * 1.8);
     const response = page.locator(RESPONSE);
     await expect(response.locator(MSG_ERROR)).toHaveText('Backend unavailable');
     await expect(response).not.toContainText('Checking the code...');

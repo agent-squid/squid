@@ -500,14 +500,58 @@ test('mobile agents list hides cwd while edit still exposes it', async ({ page }
   await expect(saveButton.locator('.agent-save-icon')).toBeVisible();
   await expect(saveButton.locator('.agent-save-label')).toBeHidden();
   const formBoxes = await page.locator('#af-name, #af-harness, #af-provider, #af-model, #af-cwd, #agent-form button[type="submit"]').evaluateAll(elements =>
-    elements.map(el => el.getBoundingClientRect())
+    elements.map(el => ({ selector: el.id ? `#${el.id}` : 'save', top: Math.round(el.getBoundingClientRect().top) }))
   );
-  expect(Math.max(...formBoxes.map(box => box.top)) - Math.min(...formBoxes.map(box => box.top))).toBeLessThan(2);
+  const formTops = Object.fromEntries(formBoxes.map(box => [box.selector, box.top]));
+  expect(formTops['#af-name']).toBe(formTops['#af-harness']);
+  expect(formTops['#af-model']).toBe(formTops['#af-cwd']);
+  expect(formTops['#af-cwd']).toBe(formTops.save);
+  expect(formTops['#af-name']).toBeLessThan(formTops['#af-model']);
   expect(await page.locator('#agent-form').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
 
   await row.locator('.edit-btn').click();
   await expect(page.locator('#af-cwd')).toHaveValue('/tmp/work');
   await expect(page.locator('#af-model')).toHaveValue(longModel);
+});
+
+test('agents table sorts by runtime by default and by clickable name/runtime headers', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/health', r => r.fulfill({ json: {
+    status: 'ok',
+    harnesses: [
+      { id: 'claudecode', label: 'Claude Code', protocol: 'interactive-cli', installed: true, default_provider: 'anthropic', compatible_providers: ['anthropic'] },
+      { id: 'codex', label: 'Codex', protocol: 'oneshot-cli', installed: true, default_provider: 'openai', compatible_providers: ['openai'] },
+    ],
+    providers: {
+      anthropic: { label: 'Claude', color: '#AE5332', gauge: { type: 'claude' } },
+      openai: { label: 'OpenAI', color: '#57BFA7', gauge: { type: 'codex' } },
+    },
+    backends: {},
+  }}));
+  await page.route('**/config/agents', r => r.fulfill({ json: [
+    { name: 'zeta', harness: 'codex', provider: 'openai', model: '', cwd: '' },
+    { name: 'bravo', harness: 'claudecode', provider: 'anthropic', model: '', cwd: '' },
+    { name: 'alpha', harness: 'codex', provider: 'openai', model: '', cwd: '' },
+  ]}));
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Agents' }).click();
+
+  const rowNames = () => page.locator('#agents-list tbody tr .agent-name').evaluateAll(nodes => nodes.map(node => node.textContent.trim()));
+  await expect.poll(rowNames).toEqual(['bravo', 'alpha', 'zeta']);
+  await expect(page.locator('#agents-list th').nth(1)).toHaveAttribute('aria-sort', 'ascending');
+
+  await page.locator('#agents-list .agent-sort-btn[data-sort="name"]').click();
+  await expect.poll(rowNames).toEqual(['alpha', 'bravo', 'zeta']);
+  await expect(page.locator('#agents-list th').first()).toHaveAttribute('aria-sort', 'ascending');
+
+  await page.locator('#agents-list .agent-sort-btn[data-sort="name"]').click();
+  await expect.poll(rowNames).toEqual(['zeta', 'bravo', 'alpha']);
+  await expect(page.locator('#agents-list th').first()).toHaveAttribute('aria-sort', 'descending');
+
+  await page.locator('#agents-list .agent-sort-btn[data-sort="runtime"]').click();
+  await expect.poll(rowNames).toEqual(['bravo', 'alpha', 'zeta']);
+  await expect(page.locator('#agents-list th').nth(1)).toHaveAttribute('aria-sort', 'ascending');
 });
 
 test('agents tab separates agents and runtime catalogs with a divider', async ({ page }) => {

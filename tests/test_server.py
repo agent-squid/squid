@@ -249,6 +249,25 @@ def test_drain_to_completion_continues_after_idle_timeout():
     assert update_call.args[3] == "done"
 
 
+def test_drain_timeout_keeps_message_pending_instead_of_empty_error():
+    async def run():
+        with patch("agent.server.update_assistant_message") as update_message:
+            await server._drain_to_completion(
+                asyncio.Queue(),
+                123,
+                "",
+                "Still working...",
+                None,
+                drain_timeout=0,
+            )
+            return update_message.call_args
+
+    update_call = asyncio.run(run())
+    assert update_call.args[1] == ""
+    assert update_call.args[3] == "pending"
+    assert update_call.kwargs["only_if_pending"] is True
+
+
 def test_backend_native_chat_command_detection_excludes_squid_commands():
     assert server._is_backend_native_chat_command("/usage")
     assert server._is_backend_native_chat_command("/cost")

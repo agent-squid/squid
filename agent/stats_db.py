@@ -1410,6 +1410,18 @@ _STATS_CHART_METRIC_EXPR = {
     END""",
     "tokens_out": "output_tokens",
     "quota": "CASE WHEN quota_before IS NOT NULL AND quota_after IS NOT NULL THEN quota_after - quota_before ELSE NULL END",
+    "cache_read": "COALESCE(cache_read_tokens, 0)",
+    "cache_write": "COALESCE(cache_write_tokens, 0)",
+    # Mirrors ui/app.js _splitInputTokens(): the split (Claude-style) case adds
+    # cache_write back in since input_tokens there is just the small residual;
+    # the non-split (Codex-style) case subtracts cache_read since it's already
+    # counted inside input_tokens.
+    "new_input": """CASE
+        WHEN COALESCE(cache_read_tokens, 0) + COALESCE(cache_write_tokens, 0) > 0
+         AND COALESCE(input_tokens, 0) < COALESCE(cache_read_tokens, 0) + COALESCE(cache_write_tokens, 0)
+        THEN COALESCE(input_tokens, 0) + COALESCE(cache_write_tokens, 0)
+        ELSE MAX(0, COALESCE(input_tokens, 0) - COALESCE(cache_read_tokens, 0))
+    END""",
 }
 
 
@@ -1472,7 +1484,7 @@ def _merge_chart_aggregates(
     clauses: list[str] = ["created_at IS NOT NULL"]
     params: list = []
     if cutoff:
-        clauses.append("created_at >= ?")
+        clauses.append("datetime(created_at) >= datetime(?)")
         params.append(cutoff)
     _append_stats_in_filter(clauses, params, _stats_agent_expr(), agents)
     _append_stats_in_filter(clauses, params, "topic", topics)
@@ -1534,7 +1546,7 @@ def get_aggregated_stats(
     ss_clauses: list[str] = ["ss_inner.created_at IS NOT NULL"]
     ss_params: list = []
     if cutoff:
-        ss_clauses.append("ss_inner.created_at >= ?")
+        ss_clauses.append("datetime(ss_inner.created_at) >= datetime(?)")
         ss_params.append(cutoff)
     _append_stats_in_filter(ss_clauses, ss_params, _stats_agent_expr("ss_inner."), agents)
     _append_stats_in_filter(ss_clauses, ss_params, "ss_inner.topic", topics)
@@ -1542,7 +1554,7 @@ def get_aggregated_stats(
     cm_clauses: list[str] = ["cm.role = 'assistant'"]
     cm_params: list = []
     if cutoff:
-        cm_clauses.append("cm.created_at >= ?")
+        cm_clauses.append("datetime(cm.created_at) >= datetime(?)")
         cm_params.append(cutoff)
     _append_stats_in_filter(cm_clauses, cm_params, "cm.agent", agents)
     _append_stats_in_filter(cm_clauses, cm_params, "cm.topic", topics)
@@ -1620,6 +1632,71 @@ def get_aggregated_stats(
         return []
 
 
+def get_stats_by_turn(
+    days: int = 30, agent: str = "", topic: str = "", adhoc: str = "all",
+    limit: int = 2000,
+) -> list:
+    # One row per completed turn, sourced from run_events rather than session_stats:
+    # session_stats is keyed by session_id and gets overwritten on every resumed
+    # turn of a multi-turn conversation, so it only ever holds the *latest* turn's
+    # numbers. The per-turn "stats" event recorded in run_events at completion time
+    # is the only place a given turn's own duration/cost/tokens survive later turns.
+    cutoff = _stats_cutoff(days)
+    agents = _stats_filter_values(agent)
+    topics = _stats_filter_values(topic)
+
+    clauses: list[str] = ["cm.role = 'assistant'"]
+    params: list = []
+    if cutoff:
+        clauses.append("datetime(cm.created_at) >= datetime(?)")
+        params.append(cutoff)
+    _append_stats_in_filter(clauses, params, "cm.agent", agents)
+    _append_stats_in_filter(clauses, params, "cm.topic", topics)
+    if adhoc == "session":
+        clauses.append("COALESCE(cm.adhoc, 0) = 0")
+    elif adhoc == "adhoc":
+        clauses.append("COALESCE(cm.adhoc, 0) = 1")
+    where = " AND ".join(clauses)
+
+    try:
+        with _connect() as conn:
+            rows = conn.execute(
+                f"""SELECT cm.id AS msg_id, cm.created_at AS period, cm.topic,
+                           cm.agent, cm.adhoc, cm.quota_delta, re.payload
+                    FROM chat_messages cm
+                    JOIN run_events re
+                        ON re.id = (
+                            SELECT MAX(re2.id) FROM run_events re2
+                            WHERE re2.msg_id = cm.id AND re2.event_type = 'stats'
+                        )
+                    WHERE {where}
+                    ORDER BY cm.id DESC
+                    LIMIT ?""",
+                (*params, limit),
+            ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+    result = []
+    for r in rows:
+        row = dict(r)
+        payload = row.pop("payload")
+        try:
+            stats = json.loads(payload) if payload else {}
+        except (json.JSONDecodeError, TypeError):
+            stats = {}
+        row["sessions"] = 1
+        row["total_turns"] = 1
+        row["input_tokens"] = stats.get("input_tokens") or 0
+        row["output_tokens"] = stats.get("output_tokens") or 0
+        row["cache_read_tokens"] = stats.get("cache_read_tokens") or 0
+        row["cache_write_tokens"] = stats.get("cache_write_tokens") or 0
+        row["cost_usd"] = stats.get("cost_usd")
+        row["duration_ms"] = stats.get("duration_ms")
+        result.append(row)
+    return result
+
+
 def _breakdown_chart_group_key(row: dict, *, include_topic: bool, include_session: bool) -> tuple:
     key = [row.get("period")]
     if include_topic:
@@ -1675,7 +1752,7 @@ def _merge_breakdown_chart_aggregates(
     clauses: list[str] = ["created_at IS NOT NULL"]
     params: list = []
     if cutoff:
-        clauses.append("created_at >= ?")
+        clauses.append("datetime(created_at) >= datetime(?)")
         params.append(cutoff)
     _append_stats_in_filter(clauses, params, _stats_agent_expr(), agents)
     _append_stats_in_filter(clauses, params, "topic", topics)
@@ -1764,7 +1841,7 @@ def get_stats_by_breakdown(
     ss_clauses: list[str] = ["created_at IS NOT NULL"]
     ss_params: list = []
     if cutoff:
-        ss_clauses.append("created_at >= ?")
+        ss_clauses.append("datetime(created_at) >= datetime(?)")
         ss_params.append(cutoff)
     _append_stats_in_filter(ss_clauses, ss_params, _stats_agent_expr(), agents)
     _append_stats_in_filter(ss_clauses, ss_params, "topic", topics)
@@ -1772,7 +1849,7 @@ def get_stats_by_breakdown(
     cm_clauses: list[str] = ["role = 'assistant'", "created_at IS NOT NULL"]
     cm_params: list = []
     if cutoff:
-        cm_clauses.append("created_at >= ?")
+        cm_clauses.append("datetime(created_at) >= datetime(?)")
         cm_params.append(cutoff)
     _append_stats_in_filter(cm_clauses, cm_params, "agent", agents)
     _append_stats_in_filter(cm_clauses, cm_params, "topic", topics)
@@ -1964,7 +2041,7 @@ def get_stats_by_agent(
     ss_clauses: list[str] = ["1=1"]
     ss_params: list = []
     if cutoff:
-        ss_clauses.append("created_at >= ?")
+        ss_clauses.append("datetime(created_at) >= datetime(?)")
         ss_params.append(cutoff)
     _append_stats_in_filter(ss_clauses, ss_params, "topic", topics)
     _append_stats_in_filter(ss_clauses, ss_params, _stats_agent_expr(), agents)
@@ -1972,7 +2049,7 @@ def get_stats_by_agent(
     cm_clauses: list[str] = ["role = 'assistant'"]
     cm_params: list = []
     if cutoff:
-        cm_clauses.append("created_at >= ?")
+        cm_clauses.append("datetime(created_at) >= datetime(?)")
         cm_params.append(cutoff)
     _append_stats_in_filter(cm_clauses, cm_params, "topic", topics)
     _append_stats_in_filter(cm_clauses, cm_params, "agent", agents)
@@ -2037,7 +2114,7 @@ def get_stats_by_topic(
     ss_clauses: list[str] = ["topic IS NOT NULL"]
     ss_params: list = []
     if cutoff:
-        ss_clauses.append("created_at >= ?")
+        ss_clauses.append("datetime(created_at) >= datetime(?)")
         ss_params.append(cutoff)
     _append_stats_in_filter(ss_clauses, ss_params, _stats_agent_expr(), agents)
     _append_stats_in_filter(ss_clauses, ss_params, "topic", topics)
@@ -2045,7 +2122,7 @@ def get_stats_by_topic(
     cm_clauses: list[str] = ["role = 'assistant'"]
     cm_params: list = []
     if cutoff:
-        cm_clauses.append("created_at >= ?")
+        cm_clauses.append("datetime(created_at) >= datetime(?)")
         cm_params.append(cutoff)
     _append_stats_in_filter(cm_clauses, cm_params, "agent", agents)
     _append_stats_in_filter(cm_clauses, cm_params, "topic", topics)

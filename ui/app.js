@@ -520,6 +520,7 @@ const _memoryInjectedInto = {}; // `${topic}@${agent|_}` → topic memory revisi
 let _agentsCache = null;
 let _agentsCachePromise = null;
 let _squidHome = '/tmp/squid'; // updated from /health on first loadAgents()
+let agentTableSort = { key: 'runtime', dir: 'asc' };
 let _activePollImmediate = null; // fn to trigger an immediate status poll for the active stream
 
 function clearCachedSessionId(topic, agent) {
@@ -2444,6 +2445,7 @@ async function sendMessage(text) {
     }
   });
   thinkingBubble.appendChild(killBtn);
+  addThinkingHeightButton(thinkingBubble);
 
   function setThinkingText(text) {
     if (thinkingFrozen) return;
@@ -2457,6 +2459,7 @@ async function sendMessage(text) {
     const text = (statusBuf ? statusBuf.trimEnd() + (raw ? '\n\n' : '') : '') + raw;
     thinkingContent.textContent = text.trim();
     thinkingContent.scrollTop = thinkingContent.scrollHeight;
+    updateThinkingHeightButton(thinkingBubble);
     thinkingBubble.style.display = '';
     scrollToBottom();
   }
@@ -2480,8 +2483,10 @@ async function sendMessage(text) {
       thinkingContent.appendChild(toggle);
       thinkingContent.appendChild(body);
       toggle.addEventListener('click', () => thinkingBubble.classList.toggle('thinking-expanded'));
+      toggle.addEventListener('click', () => requestAnimationFrame(() => updateThinkingHeightButton(thinkingBubble)));
       thinkingBubble.style.display = '';
       thinkingBubble.classList.add('msg-thinking-done');
+      updateThinkingHeightButton(thinkingBubble);
     } else {
       thinkingBubble.remove();
     }
@@ -2961,14 +2966,19 @@ async function sendMessage(text) {
 
           } else if (eventName === 'error') {
             stopStatusFallback();
-            completedFromStatus = true;
-            completionRendered = true;
             const errLine = data.trim();
             if (raw || firstDataReceived) {
               parkInterruptedPartial(null, errLine || 'Connection interrupted.');
             } else {
               discardInterruptedStatusBubble(errLine) || freezeThinking();
               showError(errLine);
+            }
+            if (msgId && !userAborted) {
+              detachedPolling = true;
+              startStatusFallback(msgId);
+            } else {
+              completedFromStatus = true;
+              completionRendered = true;
             }
             eventName = null;
 
@@ -3542,12 +3552,16 @@ function refreshAllRevertButtons() {
   document.querySelectorAll('.tool-block[data-msg-id][data-repo]').forEach(fetchRevertEligibility);
 }
 
+function historyPromptTruncateLimit() {
+  return window.matchMedia?.('(max-width: 600px)').matches ? 24 : 55;
+}
+
 function makeHistoryPromptToggle(prompt) {
   const promptToggle = document.createElement('span');
   promptToggle.className = 'history-prompt';
   const promptToggleText = document.createElement('span');
   promptToggleText.className = 'history-prompt-truncated';
-  promptToggleText.textContent = truncate(prompt || '', 55);
+  promptToggleText.textContent = truncate(prompt || '', historyPromptTruncateLimit());
   const promptCaret = document.createElement('span');
   promptCaret.className = 'history-prompt-caret';
   promptCaret.textContent = '▼';
@@ -3563,6 +3577,34 @@ function makeHistoryPromptToggle(prompt) {
   };
   promptToggle.addEventListener('click', togglePrompt);
   return { promptToggle, promptFullDiv };
+}
+
+function addThinkingHeightButton(bubble) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'thinking-height-btn hidden';
+  btn.title = 'Double thinking height';
+  btn.setAttribute('aria-label', 'Double thinking height');
+  btn.textContent = '▼';
+  btn.addEventListener('click', e => {
+    e.stopPropagation();
+    const expanded = bubble.classList.toggle('thinking-tall');
+    btn.title = expanded ? 'Normal thinking height' : 'Double thinking height';
+    btn.setAttribute('aria-label', btn.title);
+    btn.textContent = expanded ? '▲' : '▼';
+    updateThinkingHeightButton(bubble);
+  });
+  bubble.appendChild(btn);
+  requestAnimationFrame(() => updateThinkingHeightButton(bubble));
+  return btn;
+}
+
+function updateThinkingHeightButton(bubble) {
+  const btn = bubble.querySelector('.thinking-height-btn');
+  if (!btn) return;
+  const target = bubble.querySelector('.thinking-live, .thinking-expanded .thinking-body');
+  const canGrow = !!target && (bubble.classList.contains('thinking-tall') || target.scrollHeight > target.clientHeight + 1);
+  btn.classList.toggle('hidden', !canGrow);
 }
 
 
@@ -3705,6 +3747,7 @@ function makeWipBubble(item) {
       body: JSON.stringify({ command: 'stop_msg', msg_id: item.id }) }).catch(() => {});
   });
   bubble.appendChild(killBtn);
+  addThinkingHeightButton(bubble);
   return bubble;
 }
 
@@ -3747,11 +3790,13 @@ function reconnectPendingItem(item, wipBubble) {
     const text = (statusBuf ? statusBuf.trimEnd() + (raw ? '\n\n' : '') : '') + raw;
     live.textContent = text.trim();
     live.scrollTop = live.scrollHeight;
+    updateThinkingHeightButton(wipBubble);
   };
 
   if (item.content && live) {
     if (loader?.parentNode) loader.remove();
     live.textContent = item.content;
+    updateThinkingHeightButton(wipBubble);
   }
 
   const es = new EventSource(`/chat/${item.id}/events`);
@@ -3787,6 +3832,7 @@ function reconnectPendingItem(item, wipBubble) {
     pendingPollTimers.delete(wipBubble);
     if (event.data) {
       if (live) live.innerHTML = `<span class="msg-error">${event.data}</span>`;
+      updateThinkingHeightButton(wipBubble);
       await replacePendingWithStoredItem(item, wipBubble);
       return;
     }
@@ -3814,6 +3860,7 @@ async function pollPendingItem(item, wipBubble) {
         clearInterval(timer);
         const content = wipBubble.querySelector('.thinking-live');
         if (content) content.innerHTML += '<br><span class="msg-error">Timed out.</span>';
+        updateThinkingHeightButton(wipBubble);
       } else if (data.content) {
         // Show partial content while still generating, as a growing/scrolling
         // block (mirrors the live SSE preview) rather than a single truncated
@@ -3831,6 +3878,7 @@ async function pollPendingItem(item, wipBubble) {
           }
           stream.textContent = data.content;
           live.scrollTop = live.scrollHeight;
+          updateThinkingHeightButton(wipBubble);
         }
       }
     } catch { clearInterval(timer); }
@@ -3946,8 +3994,6 @@ function addStats(bubble, stats, timestamp) {
   const el = document.createElement('div');
   el.className = 'stats';
 
-  const cacheRead  = stats.cache_read_tokens  || 0;
-  const cacheWrite = stats.cache_write_tokens || 0;
   const input      = stats.input_tokens       || 0;
   const out        = stats.output_tokens      || 0;
   // ── Token semantics differ by backend (authoritative source: runners.py) ────────────
@@ -3957,11 +4003,10 @@ function addStats(bubble, stats, timestamp) {
   // Codex: input_tokens is the FULL total; cache_read is a subset already inside it.
   //   Adding cache_read would double-count. output_tokens already includes reasoning.
   // We have gone back and forth on this — do not "fix" by treating input alone as total.
-  // Heuristic to tell them apart: Claude has input < (cacheRead + cacheWrite).
+  // Heuristic to tell them apart (see _splitInputTokens): Claude has
+  // input < (cacheRead + cacheWrite).
   // ─────────────────────────────────────────────────────────────────────────────────────
-  const isSplit    = (cacheRead + cacheWrite) > 0 && input < (cacheRead + cacheWrite);
-  const inp        = isSplit ? input + cacheRead + cacheWrite : input;
-  const newThis    = isSplit ? input + cacheWrite : (cacheRead > 0 ? input - cacheRead : 0);
+  const { isSplit, newInput: newThis, cacheRead, cacheWrite, total: inp } = _splitInputTokens(stats);
   const detailLabel = isSplit ? ` (${fmtNum(newThis)} new)`
                     : cacheRead > 0 ? ` (${fmtNum(newThis)} uncached)`
                     : '';
@@ -4873,6 +4918,10 @@ let _lastStatsRows = null;
 let _statsFiltersLoaded = false;
 let _statsPage = 0;
 const _STATS_PAGE_SIZE = 10;
+// Duration isn't in the base default: Hourly/Daily rows never carry duration_ms
+// (only By Turn's per-row data does), so it'd just show "—" forever there.
+// It's added/removed alongside the Sessions/Turns swap when entering/leaving
+// By Turn — see the sf-period change handler.
 const _statsMeasures = new Set(['sessions', 'turns', 'tokens_in', 'tokens_out']);
 const _STATS_BREAKDOWN_SERIES_BUDGET = 4;
 const _STATS_BREAKDOWN_VISIBLE_SERIES_LIMIT = 8;
@@ -4891,7 +4940,8 @@ const STATS_SERIES_COLORS = [
 
 function _rerenderStats() {
   if (!_lastStatsRows) return;
-  if (statsBreakdown) { renderAgentBreakdownStats(_lastStatsRows); _renderBreakdownChart(_lastStatsRows); }
+  if (statsPeriod === 'turn') { renderTurnStats(_lastStatsRows); _renderChart(_lastStatsRows); }
+  else if (statsBreakdown) { renderAgentBreakdownStats(_lastStatsRows); _renderBreakdownChart(_lastStatsRows); }
   else { renderTimeStats(_lastStatsRows); _renderChart(_lastStatsRows); }
 }
 
@@ -4918,12 +4968,18 @@ function _setStatsTable(html) {
 }
 
 const CHART_METRICS = {
-  turns:      { label: 'Turns',      fn: r => (r.total_turns || 0),                                                     color: 'rgba(100,160,255,1)',  fill: 'rgba(100,160,255,0.08)' },
-  cost:       { label: 'Cost ($)',   fn: r => (r.cost_usd || 0),                                                        color: 'rgba(255,160,80,1)',   fill: 'rgba(255,160,80,0.08)'  },
-  tokens_in:  { label: 'Tokens In', fn: r => { const raw = r.input_tokens||0, cr = r.cache_read_tokens||0; return (cr>0&&raw<cr)?raw+cr:raw; }, color: 'rgba(80,200,120,1)',   fill: 'rgba(80,200,120,0.08)'  },
-  tokens_out: { label: 'Tokens Out',fn: r => (r.output_tokens || 0),                                                   color: 'rgba(200,100,200,1)',  fill: 'rgba(200,100,200,0.08)' },
-  sessions:   { label: 'Sessions',  fn: r => (r.sessions || 0),                                                        color: 'rgba(200,200,60,1)',   fill: 'rgba(200,200,60,0.08)'  },
-  quota:      { label: 'Quota',     fn: r => (r.quota_delta || 0),                                                     color: 'rgba(120,200,220,1)',  fill: 'rgba(120,200,220,0.08)' },
+  turns:          { label: 'Turns',          fn: r => (r.total_turns || 0),      color: 'rgba(100,160,255,1)',  fill: 'rgba(100,160,255,0.08)' },
+  cost:           { label: 'Cost ($)',       fn: r => (r.cost_usd || 0),         color: 'rgba(255,160,80,1)',   fill: 'rgba(255,160,80,0.08)'  },
+  tokens_in:      { label: 'Tokens In',      fn: r => _statsInputTokens(r),      color: 'rgba(80,200,120,1)',   fill: 'rgba(80,200,120,0.08)'  },
+  tokens_out:     { label: 'Tokens Out',     fn: r => (r.output_tokens || 0),    color: 'rgba(200,100,200,1)',  fill: 'rgba(200,100,200,0.08)' },
+  sessions:       { label: 'Sessions',       fn: r => (r.sessions || 0),         color: 'rgba(200,200,60,1)',   fill: 'rgba(200,200,60,0.08)'  },
+  quota:          { label: 'Quota',          fn: r => (r.quota_delta || 0),      color: 'rgba(120,200,220,1)',  fill: 'rgba(120,200,220,0.08)' },
+  duration:       { label: 'Duration (s)',   fn: r => (r.duration_ms || 0) / 1000, color: 'rgba(255,120,120,1)', fill: 'rgba(255,120,120,0.08)' },
+  cache_read:     { label: 'Cache Read',     fn: r => _splitInputTokens(r).cacheRead,  color: 'rgba(90,180,255,1)',   fill: 'rgba(90,180,255,0.08)'  },
+  cache_write:    { label: 'Cache Write',    fn: r => _splitInputTokens(r).cacheWrite, color: 'rgba(180,140,255,1)',  fill: 'rgba(180,140,255,0.08)' },
+  new_input:      { label: 'New Input',      fn: r => _splitInputTokens(r).newInput,   color: 'rgba(80,200,120,1)',   fill: 'rgba(80,200,120,0.08)'  },
+  cache_hit_rate: { label: 'Cache Hit %',    fn: r => (_cacheHitRate(r) || 0),   color: 'rgba(230,200,80,1)',   fill: 'rgba(230,200,80,0.08)'  },
+  avg_tokens_turn:{ label: 'Avg Tokens/Turn',fn: r => (_avgTokensPerTurn(r) || 0), color: 'rgba(150,150,255,1)', fill: 'rgba(150,150,255,0.08)' },
 };
 
 const STATS_AGG_LABELS = { sum: 'SUM', avg: 'AVG', min: 'MIN', max: 'MAX', p50: 'P50', p75: 'P75', p95: 'P95' };
@@ -4934,6 +4990,13 @@ const STATS_METRIC_AGGS = {
   tokens_in: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
   tokens_out: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
   quota: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
+  duration: ['sum'],
+  cache_read: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
+  cache_write: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
+  new_input: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
+  // Ratios/derived-per-bucket values — there's nothing to vary the aggregation over.
+  cache_hit_rate: ['sum'],
+  avg_tokens_turn: ['sum'],
 };
 
 function _statsMeasureSelected(measure) {
@@ -4948,9 +5011,35 @@ function _formatQuotaDelta(value) {
   return value != null ? `${value >= 0 ? '+' : ''}${value.toFixed(1)} pp` : '—';
 }
 
+// Same categorization the per-message tooltip uses (see addStats()): Claude-style
+// backends report a tiny uncacheable "input_tokens" residual plus cache_write/
+// cache_read, so input < cache_read+cache_write signals a split; Codex-style
+// backends report input_tokens as the full total with cache_read as a subset
+// already inside it. Single source of truth so "Tokens In" and the separate
+// Cache Read/Cache Write/New Input measures always add up to the same total.
+function _splitInputTokens(row) {
+  const raw = row.input_tokens || 0;
+  const cacheRead = row.cache_read_tokens || 0;
+  const cacheWrite = row.cache_write_tokens || 0;
+  const isSplit = (cacheRead + cacheWrite) > 0 && raw < (cacheRead + cacheWrite);
+  const newInput = isSplit ? raw + cacheWrite : Math.max(0, raw - cacheRead);
+  return { isSplit, newInput, cacheRead, cacheWrite, total: newInput + cacheRead };
+}
+
 function _statsInputTokens(row) {
-  const raw = row.input_tokens || 0, cr = row.cache_read_tokens || 0;
-  return (cr > 0 && raw < cr) ? raw + cr : raw;
+  return _splitInputTokens(row).total;
+}
+
+function _cacheHitRate(row) {
+  const { cacheRead, newInput } = _splitInputTokens(row);
+  const total = cacheRead + newInput;
+  return total > 0 ? (cacheRead / total) * 100 : null;
+}
+
+function _avgTokensPerTurn(row) {
+  const turns = row.total_turns || 0;
+  if (!turns) return null;
+  return (_statsInputTokens(row) + (row.output_tokens || 0)) / turns;
 }
 
 function _statsMetricValue(row, metric) {
@@ -4960,12 +5049,20 @@ function _statsMetricValue(row, metric) {
   if (metric === 'tokens_out') return row.output_tokens || 0;
   if (metric === 'sessions') return row.sessions || 0;
   if (metric === 'quota') return row.quota_delta || 0;
+  if (metric === 'duration') return (row.duration_ms || 0) / 1000;
+  if (metric === 'cache_read') return _splitInputTokens(row).cacheRead;
+  if (metric === 'cache_write') return _splitInputTokens(row).cacheWrite;
+  if (metric === 'new_input') return _splitInputTokens(row).newInput;
+  if (metric === 'cache_hit_rate') return _cacheHitRate(row);
+  if (metric === 'avg_tokens_turn') return _avgTokensPerTurn(row);
   return row.total_turns || 0;
 }
 
 function _formatStatsMetricValue(value, metric) {
   if (metric === 'cost') return _formatCost(value);
   if (metric === 'quota') return _formatQuotaDelta(value);
+  if (metric === 'duration') return `${(value || 0).toFixed(1)}s`;
+  if (metric === 'cache_hit_rate') return value == null ? '—' : `${value.toFixed(1)}%`;
   return fmtNum(value || 0);
 }
 
@@ -4979,6 +5076,10 @@ function _normalizeStatsAgg(metric, agg) {
 }
 
 function _statsMetricHasVariableAgg(metric) {
+  // By Turn is one row per turn, not grouped by a time bucket — sum/avg/min/max/
+  // percentile of a single value are all the same number, so there's nothing to
+  // pick between.
+  if (statsPeriod === 'turn') return false;
   return (STATS_METRIC_AGGS[metric] || ['sum']).length > 1;
 }
 
@@ -4994,14 +5095,18 @@ function _statsChartAggField(metric, agg) {
 }
 
 function _statsChartSeriesValue(row, metric, agg) {
-  if (agg === 'sum') return _statsMetricValue(row, metric);
+  // Raw per-turn rows have no chart_<metric>_<agg> field (nothing was grouped
+  // to aggregate) — always use the row's own value rather than a stale/absent
+  // aggregate, regardless of whatever agg was last selected in another view.
+  if (statsPeriod === 'turn' || agg === 'sum') return _statsMetricValue(row, metric);
   const value = row[_statsChartAggField(metric, agg)];
   return value == null ? 0 : value;
 }
 
 function _statsChartSeriesLabel(metric, agg) {
   const m = CHART_METRICS[metric] || CHART_METRICS.turns;
-  return `${STATS_AGG_LABELS[agg] || agg.toUpperCase()} ${m.label}`;
+  const aggLabel = statsPeriod === 'turn' ? 'RAW' : (STATS_AGG_LABELS[agg] || agg.toUpperCase());
+  return `${aggLabel} ${m.label}`;
 }
 
 function _statsCompareColor(primaryColor) {
@@ -5065,7 +5170,77 @@ const STATS_TABLE_MEASURES = [
   { key: 'tokens_out', label: 'Tokens Out', row: r => fmtNum(r.output_tokens || 0), total: t => fmtNum(t.tokens_out || 0) },
   { key: 'cost', label: 'Cost', row: r => _formatCost(r.cost_usd), total: t => _formatCost(t.cost || 0) },
   { key: 'quota', label: 'Quota meter Δ', title: 'Observed account meter change; not exact attributed usage', row: r => _formatQuotaDelta(r.quota_delta), total: t => _formatQuotaDelta(t.quota) },
+  { key: 'duration', label: 'Duration', row: r => r.duration_ms != null ? `${(r.duration_ms / 1000).toFixed(1)}s` : '—', total: t => t.duration != null ? `${(t.duration / 1000).toFixed(1)}s` : '—' },
+  { key: 'cache_read', label: 'Cache Read', row: r => fmtNum(_splitInputTokens(r).cacheRead), total: t => fmtNum(t.cache_read || 0) },
+  { key: 'cache_write', label: 'Cache Write', row: r => fmtNum(_splitInputTokens(r).cacheWrite), total: t => fmtNum(t.cache_write || 0) },
+  { key: 'new_input', label: 'New Input', row: r => fmtNum(_splitInputTokens(r).newInput), total: t => fmtNum(t.new_input || 0) },
+  {
+    key: 'cache_hit_rate', label: 'Cache Hit %', title: 'Cache reads as a share of total input tokens',
+    row: r => _formatStatsMetricValue(_cacheHitRate(r), 'cache_hit_rate'),
+    total: t => {
+      const denom = (t.cache_read || 0) + (t.new_input || 0);
+      return denom > 0 ? `${((t.cache_read / denom) * 100).toFixed(1)}%` : '—';
+    },
+  },
+  {
+    key: 'avg_tokens_turn', label: 'Avg Tokens/Turn',
+    row: r => { const v = _avgTokensPerTurn(r); return v != null ? fmtNum(v) : '—'; },
+    total: t => t.turns ? fmtNum((t.tokens_in + t.tokens_out) / t.turns) : '—',
+  },
 ];
+
+function _firstSelectedMeasure() {
+  return (STATS_TABLE_MEASURES.find(m => _statsMeasureSelected(m.key)) || STATS_TABLE_MEASURES[0]).key;
+}
+
+function _statsChartMetricKeys() {
+  const keys = STATS_TABLE_MEASURES.filter(m => _statsMeasureSelected(m.key)).map(m => m.key);
+  // Nothing checked in Measures — fall back to the full metric list rather
+  // than leaving the chart pickers with no options at all.
+  return keys.length ? keys : STATS_TABLE_MEASURES.map(m => m.key);
+}
+
+function _populateStatsChartMetricSelect(select, keys, { includeBlank = false } = {}) {
+  if (!select) return;
+  const blank = includeBlank ? '<option value="">— remove —</option>' : '';
+  select.innerHTML = blank + keys.map(key => {
+    const label = (CHART_METRICS[key] || {}).label || key;
+    return `<option value="${key}">${label}</option>`;
+  }).join('');
+}
+
+// The chart can only plot a metric that's checked in the Measures menu — keeps
+// the dropdown options and the table columns in sync. Returns whether Y1
+// changed, since that requires a refetch (its backend chart_<metric>_<agg>
+// aggregate wouldn't exist yet for a metric no request has asked for).
+function _syncStatsChartMetricSelects() {
+  const keys = _statsChartMetricKeys();
+  let y1Changed = false;
+
+  if (!keys.includes(statsChartY1)) {
+    statsChartY1 = _firstSelectedMeasure();
+    statsChartAggY1 = _normalizeStatsAgg(statsChartY1, statsChartAggY1);
+    y1Changed = true;
+  }
+  const y1Sel = document.getElementById('sc-y1');
+  _populateStatsChartMetricSelect(y1Sel, keys);
+  if (y1Sel) y1Sel.value = statsChartY1;
+
+  const y2Sel = document.getElementById('sc-y2');
+  if (statsChartY2 && !keys.includes(statsChartY2)) {
+    statsChartY2 = '';
+    if (y2Sel) y2Sel.hidden = true;
+    const y2AggSel = document.getElementById('sc-y2-agg');
+    if (y2AggSel) y2AggSel.hidden = true;
+    const compareBtn = document.getElementById('sc-compare-btn');
+    if (compareBtn) compareBtn.textContent = '+ Y2';
+  }
+  _populateStatsChartMetricSelect(y2Sel, keys, { includeBlank: true });
+  if (y2Sel) y2Sel.value = statsChartY2;
+
+  _syncStatsChartAggControls();
+  return y1Changed;
+}
 
 function _statsMeasureHeaders() {
   return STATS_TABLE_MEASURES
@@ -5089,16 +5264,32 @@ function _statsMeasureTotals(totals) {
 }
 
 function _statsTotals(rows) {
-  const totals = { sessions: 0, turns: 0, tokens_in: 0, tokens_out: 0, cost: 0, quota: null };
+  const totals = {
+    sessions: 0, turns: 0, tokens_in: 0, tokens_out: 0, cost: 0, quota: null, duration: null,
+    cache_read: 0, cache_write: 0, new_input: 0,
+  };
   for (const r of rows) {
+    const split = _splitInputTokens(r);
     totals.sessions += r.sessions || 0;
     totals.turns += r.total_turns || 0;
-    totals.tokens_in += _statsInputTokens(r);
+    totals.tokens_in += split.total;
     totals.tokens_out += r.output_tokens || 0;
     totals.cost += r.cost_usd || 0;
     if (r.quota_delta != null) totals.quota = (totals.quota || 0) + r.quota_delta;
+    if (r.duration_ms != null) totals.duration = (totals.duration || 0) + r.duration_ms;
+    totals.cache_read += split.cacheRead;
+    totals.cache_write += split.cacheWrite;
+    totals.new_input += split.newInput;
   }
   return totals;
+}
+
+function _turnTimeLabel(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  const pad = n => String(n).padStart(2, '0');
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 function _statsPeriodLabel(period) {
@@ -5136,6 +5327,12 @@ function _statsSeriesKey(row) {
     return `${row.topic || 'unknown'}\u0000${agentLabel}`;
   }
   return agentLabel;
+}
+
+function _turnRouteLabel(row) {
+  const topic = row.topic || 'unknown';
+  const agent = _agentLabel(row);
+  return `#${topic}@${agent}${row.adhoc ? '!' : ''}`;
 }
 
 function _statsAdhocSuffix() {
@@ -5366,6 +5563,8 @@ function _resetStatsDimensionFilters() {
 
 function _updateStatsBreakdownUi() {
   const active = !!statsBreakdown;
+  const breakdownSel = document.getElementById('sf-breakdown');
+  if (breakdownSel) breakdownSel.disabled = statsPeriod === 'turn';
   document.getElementById('stats-chart-controls')?.classList.toggle('breakdown-active', active);
   const measures = document.getElementById('sf-measures');
   if (measures) measures.classList.toggle('disabled', active);
@@ -5472,13 +5671,14 @@ function _applyStatsState(state) {
   document.getElementById('sf-days').value = String(statsFilters.days);
   document.getElementById('sf-breakdown').value = statsBreakdown;
   document.getElementById('sf-adhoc').value = statsFilters.adhoc;
-  document.getElementById('sc-y1').value = statsChartY1;
   const y2Sel = document.getElementById('sc-y2');
-  y2Sel.value = statsChartY2;
   y2Sel.hidden = !statsChartY2;
   document.getElementById('sc-y2-agg').hidden = !statsChartY2;
   document.getElementById('sc-compare-btn').textContent = statsChartY2 ? '− Y2' : '+ Y2';
-  _syncStatsChartAggControls();
+  // A saved preset's chart metric might not be in its saved visible measures
+  // (older presets could chart something the table didn't show) — reconcile
+  // to whatever's actually checked, same as any other measures change.
+  _syncStatsChartMetricSelects();
   document.querySelectorAll('#sf-measures-menu input[type="checkbox"]').forEach(input => {
     input.checked = _statsMeasures.has(input.value);
   });
@@ -5594,7 +5794,7 @@ function _destroyChart() {
 function _renderChart(rows) {
   if (!rows || !rows.length || typeof Chart === 'undefined') { _destroyChart(); return; }
   const chronological = [...rows].reverse();
-  const labels = chronological.map(r => r.period);
+  const labels = chronological.map(r => statsPeriod === 'turn' ? fmtTime(r.period) : r.period);
   const m1 = CHART_METRICS[statsChartY1] || CHART_METRICS.turns;
   const datasets = [{
     label: _statsChartSeriesLabel(statsChartY1, statsChartAggY1),
@@ -5612,7 +5812,7 @@ function _renderChart(rows) {
     const m2 = CHART_METRICS[statsChartY2];
     if (m2) {
       const sharedAxis = statsChartY2 === statsChartY1;
-      const y2Color = sharedAxis ? _statsCompareColor(m1.color) : m2.color;
+      const y2Color = m2.color === m1.color ? _statsCompareColor(m1.color) : m2.color;
       datasets.push({
         label: _statsChartSeriesLabel(statsChartY2, statsChartAggY2),
         data: chronological.map(r => _statsChartSeriesValue(r, statsChartY2, statsChartAggY2)),
@@ -5986,13 +6186,40 @@ async function loadStats() {
   _statsPage = 0;
   _updateStatsBreakdownUi();
 
-  if (statsBreakdown) {
+  if (statsPeriod === 'turn') {
+    renderTurnStats(rows);
+    _renderChart(rows);
+  } else if (statsBreakdown) {
     renderAgentBreakdownStats(rows);
     _renderBreakdownChart(rows);
   } else {
     renderTimeStats(rows);
     _renderChart(rows);
   }
+}
+
+function renderTurnStats(rows) {
+  const totals = _statsTotals(rows);
+  const bodyRows = _statsPageSlice(rows).map(r => {
+    return `<tr>
+      <td class="stats-col-compact">${_turnTimeLabel(r.period)}</td>
+      <td class="stats-col-compact stats-route-col">${escapeHtml(_turnRouteLabel(r))}</td>
+      ${_statsMeasureCells(r)}
+    </tr>`;
+  }).join('');
+
+  _setStatsTable(`<table>
+    <thead><tr>
+      <th class="stats-col-compact">Time</th>
+      <th class="stats-col-compact stats-route-col">Route</th>
+      ${_statsMeasureHeaders()}
+    </tr></thead>
+    <tbody>${bodyRows}</tbody>
+    <tfoot><tr>
+      <td colspan="2">Total</td>${_statsMeasureTotals(totals)}
+    </tr></tfoot>
+  </table>`);
+  _statsAppendPager(rows.length);
 }
 
 function renderTimeStats(rows) {
@@ -6120,7 +6347,38 @@ function renderAgentBreakdownStats(rows) {
 
 function initStats() {
   document.getElementById('sf-period').addEventListener('change', e => {
+    const prevPeriod = statsPeriod;
     statsPeriod = e.target.value;
+    let measuresChanged = false;
+    if (statsPeriod === 'turn' && prevPeriod !== 'turn') {
+      if (statsBreakdown) {
+        statsBreakdown = '';
+        document.getElementById('sf-breakdown').value = '';
+      }
+      // Every row is exactly one session/turn in this view — selected by default
+      // elsewhere, but redundant here, so start with them off. Duration is the
+      // opposite: only By Turn's rows carry it, so turn it on here.
+      const removedSessions = _statsMeasures.delete('sessions');
+      const removedTurns = _statsMeasures.delete('turns');
+      const addedDuration = !_statsMeasures.has('duration');
+      _statsMeasures.add('duration');
+      measuresChanged = removedSessions || removedTurns || addedDuration;
+    } else if (statsPeriod !== 'turn' && prevPeriod === 'turn') {
+      _statsMeasures.add('sessions');
+      _statsMeasures.add('turns');
+      _statsMeasures.delete('duration');
+      measuresChanged = true;
+    }
+    if (measuresChanged) {
+      document.querySelectorAll('#sf-measures-menu input[type="checkbox"]').forEach(input => {
+        input.checked = _statsMeasures.has(input.value);
+      });
+      _updateStatsMeasureLabel();
+    }
+    // Keeps the chart pinned to a metric that's still checked in Measures
+    // (e.g. Turns/Sessions just got auto-unchecked above).
+    _syncStatsChartMetricSelects();
+    _updateStatsBreakdownUi();
     _markStatsPresetDirty();
     loadStats();
   });
@@ -6192,7 +6450,12 @@ function initStats() {
       else _statsMeasures.delete(input.value);
       _markStatsPresetDirty();
       _updateStatsMeasureLabel();
-      _rerenderStats();
+      // Unchecking the metric currently charted moves the chart to another
+      // selected measure, which needs a refetch (its aggregate wasn't
+      // requested from the backend yet); otherwise just re-render the table.
+      const chartMetricChanged = _syncStatsChartMetricSelects();
+      if (chartMetricChanged) loadStats();
+      else _rerenderStats();
     });
   });
   document.addEventListener('click', e => {
@@ -6295,6 +6558,16 @@ function initStats() {
     _setStatsPresetStatus('deleted');
     loadStats();
   });
+
+  // Static HTML checkbox markup is just an authoring convenience — the JS
+  // defaults in _statsMeasures are the source of truth, and _applyStatsState
+  // only runs here if a saved default preset exists. Sync unconditionally so
+  // a fresh install (no presets) can't drift from what's actually checked.
+  document.querySelectorAll('#sf-measures-menu input[type="checkbox"]').forEach(input => {
+    input.checked = _statsMeasures.has(input.value);
+  });
+  _updateStatsMeasureLabel();
+  _syncStatsChartMetricSelects();
 }
 
 // ── topic manager ─────────────────────────────────────────────────────────────
@@ -6948,35 +7221,65 @@ async function loadAgents() {
     listEl.innerHTML = '<div class="empty">No agents yet. Add one below.</div>';
     return;
   }
-  const rows = agents.map(a => {
+  const sortAgentRows = rows => rows.sort((left, right) => {
+    const nameCmp = left.name.localeCompare(right.name, undefined, { sensitivity: 'base', numeric: true });
+    const runtimeCmp = left.runtimeSort.localeCompare(right.runtimeSort, undefined, { sensitivity: 'base', numeric: true });
+    const cmp = agentTableSort.key === 'name'
+      ? nameCmp || runtimeCmp
+      : runtimeCmp || nameCmp;
+    return agentTableSort.dir === 'desc' ? -cmp : cmp;
+  });
+  const agentRows = sortAgentRows(agents.map(a => {
     const ref = agentBackendRef(a);
     const runtime = splitAgentRef(a.harness || ref, a.provider || null);
     if (!a.backend) a.backend = ref;
     ensureRuntimeMetadata(runtime.harness, runtime.provider);
+    const runtimeText = runtime.provider ? `${runtime.harness} / ${runtime.provider}` : runtime.harness;
+    return { a, ref, runtime, runtimeText, runtimeSort: runtimeText || '', name: a.name || '' };
+  }));
+  const rows = agentRows.map(({ a, ref, runtime, runtimeText }) => {
     const model = a.model || '';
     const modelHtml = model
       ? `<span class="agent-model" title="${escapeHtml(model)}">${escapeHtml(model)}</span>`
       : '<span class="col-default">—</span>';
     return `
     <tr>
-      <td><span class="agent-name">${a.name}</span></td>
+      <td><span class="agent-name">${escapeHtml(a.name)}</span></td>
       <td class="col-runtime">${(() => {
-        const full = runtime.provider ? `${escapeHtml(runtime.harness)} / ${escapeHtml(runtime.provider)}` : escapeHtml(runtime.harness);
+        const full = escapeHtml(runtimeText);
         const abbr = runtime.provider ? `${escapeHtml(abbrev3(runtime.harness))}:${escapeHtml(abbrev3(runtime.provider))}` : escapeHtml(abbrev3(runtime.harness));
         return `<span class="runtime-full">${full}</span><span class="runtime-short">${abbr}</span>`;
       })()}</td>
       <td class="col-model">${modelHtml}</td>
-      <td class="col-cwd">${a.cwd || `<span class="col-default">${_squidHome}</span>`}</td>
+      <td class="col-cwd">${a.cwd ? escapeHtml(a.cwd) : `<span class="col-default">${escapeHtml(_squidHome)}</span>`}</td>
       <td>
         <button class="edit-btn" data-name="${escapeHtml(a.name)}" data-harness="${escapeHtml(runtime.harness)}" data-provider="${escapeHtml(runtime.provider || '')}" data-backend="${escapeHtml(ref || '')}" data-model="${escapeHtml(a.model || '')}" data-cwd="${escapeHtml(a.cwd || '')}" title="Edit agent">✎</button>
-        <button class="del-btn" data-name="${a.name}" title="Delete agent (does not affect existing messages)">✕</button>
+        <button class="del-btn" data-name="${escapeHtml(a.name)}" title="Delete agent (does not affect existing messages)">✕</button>
       </td>
     </tr>`;
   }).join('');
+  const sortIndicator = key => agentTableSort.key === key ? (agentTableSort.dir === 'desc' ? 'v' : '^') : '';
+  const ariaSort = key => agentTableSort.key === key ? (agentTableSort.dir === 'desc' ? 'descending' : 'ascending') : 'none';
   listEl.innerHTML = `<table>
-    <thead><tr><th>Name</th><th class="col-runtime"><span class="runtime-full">Runtime</span><span class="runtime-short">Run</span></th><th class="col-model">Model</th><th class="col-cwd">CWD</th><th></th></tr></thead>
+    <thead><tr>
+      <th aria-sort="${ariaSort('name')}"><button class="agent-sort-btn" data-sort="name" type="button">Name <span class="sort-indicator">${sortIndicator('name')}</span></button></th>
+      <th class="col-runtime" aria-sort="${ariaSort('runtime')}"><button class="agent-sort-btn" data-sort="runtime" type="button"><span class="runtime-full">Runtime</span><span class="runtime-short">Run</span> <span class="sort-indicator">${sortIndicator('runtime')}</span></button></th>
+      <th class="col-model">Model</th><th class="col-cwd">CWD</th><th></th>
+    </tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
+
+  listEl.querySelectorAll('.agent-sort-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.sort;
+      if (agentTableSort.key === key) {
+        agentTableSort = { key, dir: agentTableSort.dir === 'asc' ? 'desc' : 'asc' };
+      } else {
+        agentTableSort = { key, dir: 'asc' };
+      }
+      loadAgents();
+    });
+  });
 
   listEl.querySelectorAll('.edit-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -9100,7 +9403,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   }
 
   function shouldFloatEditTools() {
-    return window.matchMedia?.('(max-width: 720px)').matches;
+    return false;
   }
 
   function showFindPopoverAtPos(pos) {

@@ -76,6 +76,37 @@ def test_aggregated_stats_includes_requested_chart_percentile(tmp_path, monkeypa
     assert rows[0]["chart_tokens_in_p50"] == 20
 
 
+def test_aggregated_stats_cutoff_ignores_created_at_string_format(tmp_path, monkeypatch):
+    """session_stats.created_at is written via SQLite's CURRENT_TIMESTAMP
+    ('YYYY-MM-DD HH:MM:SS'), not the 'YYYY-MM-DDTHH:MM:SSZ' format _stats_cutoff
+    produces. Comparing them as raw strings sorts ' ' before 'T', so any row on
+    the same calendar day as the cutoff was silently dropped regardless of its
+    actual time of day (this is why selecting "1 day" showed only a few hours)
+    — the days filter must compare via datetime(), not lexicographically."""
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    monkeypatch.setattr(stats_db, "_stats_cutoff", lambda days: "2026-07-12T05:36:00Z")
+    stats_db.init_db()
+
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        conn.executemany(
+            """INSERT INTO session_stats(
+                   session_id, topic, agent, input_tokens, output_tokens,
+                   cache_read_tokens, cache_write_tokens, cost_usd, created_at
+               ) VALUES (?, 'squid', 'codex', ?, 0, 0, 0, 0, ?)""",
+            [
+                # Same calendar day as the cutoff, but later in the day — must be included.
+                ("late-same-day", 100, "2026-07-12 23:59:00"),
+                # Entirely before the cutoff's day — must be excluded.
+                ("before-cutoff", 999, "2026-07-11 23:59:00"),
+            ],
+        )
+
+    rows = stats_db.get_aggregated_stats(period="daily", days=1)
+
+    total_in = sum(r.get("input_tokens") or 0 for r in rows)
+    assert total_in == 100
+
+
 def test_breakdown_stats_includes_requested_chart_percentile(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
@@ -357,6 +388,69 @@ def test_grouped_stats_include_quota_delta(tmp_path, monkeypatch):
     assert by_topic[0]["quota_delta"] == 3.0
     assert by_agent[0]["cost_usd"] == 0.75
     assert by_agent[0]["quota_delta"] == 3.0
+
+
+def test_get_stats_by_turn_uses_per_turn_stats_not_stale_session_row(tmp_path, monkeypatch):
+    """A resumed session shares one session_stats row across turns, so session_stats
+    only ever holds the *latest* turn's numbers. get_stats_by_turn must instead read
+    each turn's own duration/tokens/cost from its run_events "stats" snapshot."""
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user1 = stats_db.insert_user_message("squid", "codex", "first")
+    asst1 = stats_db.insert_assistant_message("squid", "codex", user1, adhoc=False)
+    stats_db.update_assistant_message(asst1, "first response", "session-1", "done")
+    stats_db.insert_run_event(asst1, 0, "stats", json.dumps(
+        {"input_tokens": 100, "output_tokens": 10, "cost_usd": 0.1, "duration_ms": 5000}
+    ))
+    stats_db.update_message_quota_snapshot(asst1, 40.0, 41.0)
+
+    user2 = stats_db.insert_user_message("squid", "codex", "second")
+    asst2 = stats_db.insert_assistant_message("squid", "codex", user2, adhoc=False)
+    stats_db.update_assistant_message(asst2, "second response", "session-1", "done")
+    # Same session_id resumed for turn 2 — an interim stats event followed by the final one.
+    stats_db.insert_run_event(asst2, 0, "stats", json.dumps(
+        {"input_tokens": 150, "output_tokens": 5, "cost_usd": 0.05, "duration_ms": 1000}
+    ))
+    stats_db.insert_run_event(asst2, 1, "stats", json.dumps(
+        {"input_tokens": 200, "output_tokens": 20, "cost_usd": 0.2, "duration_ms": 8000}
+    ))
+    stats_db.update_message_quota_snapshot(asst2, 41.0, 41.5)
+
+    rows = stats_db.get_stats_by_turn(days=0)
+    by_msg = {r["msg_id"]: r for r in rows}
+
+    assert len(rows) == 2
+    assert by_msg[asst1]["duration_ms"] == 5000
+    assert by_msg[asst1]["cost_usd"] == 0.1
+    assert by_msg[asst1]["quota_delta"] == 1.0
+    # Turn 2 keeps its own (later, larger) numbers — not turn 1's, and not the
+    # interim stats event, only the final one for that turn.
+    assert by_msg[asst2]["duration_ms"] == 8000
+    assert by_msg[asst2]["input_tokens"] == 200
+    assert by_msg[asst2]["quota_delta"] == 0.5
+    # Newest turn first.
+    assert [r["msg_id"] for r in rows] == [asst2, asst1]
+
+
+def test_get_stats_by_turn_filters_by_agent_topic_and_adhoc(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    codex_user = stats_db.insert_user_message("squid", "codex", "codex turn")
+    codex_asst = stats_db.insert_assistant_message("squid", "codex", codex_user, adhoc=False)
+    stats_db.update_assistant_message(codex_asst, "ok", "session-codex", "done")
+    stats_db.insert_run_event(codex_asst, 0, "stats", json.dumps({"duration_ms": 111}))
+
+    other_user = stats_db.insert_user_message("other-topic", "claude", "claude turn")
+    other_asst = stats_db.insert_assistant_message("other-topic", "claude", other_user, adhoc=True)
+    stats_db.update_assistant_message(other_asst, "ok", "session-claude", "done")
+    stats_db.insert_run_event(other_asst, 0, "stats", json.dumps({"duration_ms": 222}))
+
+    assert [r["msg_id"] for r in stats_db.get_stats_by_turn(days=0, agent="codex")] == [codex_asst]
+    assert [r["msg_id"] for r in stats_db.get_stats_by_turn(days=0, topic="other-topic")] == [other_asst]
+    assert [r["msg_id"] for r in stats_db.get_stats_by_turn(days=0, adhoc="adhoc")] == [other_asst]
+    assert [r["msg_id"] for r in stats_db.get_stats_by_turn(days=0, adhoc="session")] == [codex_asst]
 
 
 def test_agent_session_breakdown_keeps_agent_session_variants_separate(tmp_path, monkeypatch):

@@ -66,7 +66,7 @@ from .memory import (
 )
 from .stats_db import (
     init_db, get_aggregated_stats, save_quota_delta, get_stats_by_topic, get_stats_by_agent,
-    get_stats_by_agent_breakdown, get_stats_by_breakdown, get_stats_filter_options,
+    get_stats_by_agent_breakdown, get_stats_by_breakdown, get_stats_by_turn, get_stats_filter_options,
     list_stats_filter_presets, create_stats_filter_preset, update_stats_filter_preset,
     delete_stats_filter_preset,
     get_topics_summary, get_topics_management_summary,
@@ -464,16 +464,19 @@ async def _drain_to_completion(
     cwd: Optional[str] = None,
     adhoc: bool = False,
     lookback: int = 0,
+    drain_timeout: Optional[int] = None,
 ) -> None:
     """Drain the worker queue after client disconnect; save final content to DB."""
     loop = asyncio.get_event_loop()
-    deadline = loop.time() + 300.0
+    deadline = loop.time() + float(drain_timeout if drain_timeout is not None else RESPONSE_TIMEOUT)
     tool_events = list(tool_events or [])
+    timed_out = False
     try:
         while True:
             left = deadline - loop.time()
             if left <= 0:
                 log.warning("drain timeout msg_id=%s, saving partial", msg_id)
+                timed_out = True
                 break
             try:
                 chunk = await asyncio.wait_for(out_q.get(), timeout=min(left, 30.0))
@@ -499,7 +502,8 @@ async def _drain_to_completion(
     content = raw
     context_json = json.dumps(tool_events) if tool_events else None
     try:
-        update_assistant_message(msg_id, content, session_id, "done" if content else "error", context=context_json, status_raw=status_raw, only_if_pending=True)
+        status = "pending" if timed_out else ("done" if content else "error")
+        update_assistant_message(msg_id, content, session_id, status, context=context_json, status_raw=status_raw, only_if_pending=True)
         log.info("drain complete msg_id=%s len=%d tools=%d sid=%s", msg_id, len(content), len(tool_events), session_id)
     except Exception:
         log.exception("drain save failed msg_id=%s", msg_id)
@@ -681,6 +685,7 @@ async def stream_response(
                     out_q, asst_msg_id, raw, status_raw, session_id, tool_events,
                     topic=topic, agent=agent, backend=backend, model=model,
                     cwd=effective_cwd, adhoc=adhoc, lookback=lookback,
+                    drain_timeout=response_timeout,
                 ),
                 name=f"squid-drain-{asst_msg_id}",
             )
@@ -1386,6 +1391,8 @@ async def usage_stats(
     chart2_metric: str = "",
     chart2_agg: str = "sum",
 ):
+    if period == "turn":
+        return JSONResponse(get_stats_by_turn(days=days, agent=agent, topic=topic, adhoc=adhoc))
     if group == "time" and breakdown in {"agent", "agent_session", "topic_agent", "topic_agent_session"}:
         return JSONResponse(get_stats_by_breakdown(
             period=period,

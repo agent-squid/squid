@@ -823,7 +823,7 @@ body {
   font-size: var(--text-md);
   font-style: italic;
   color: #555566;
-  padding: 0.45rem 1.8rem 0.45rem 0.9rem;
+  padding: 0.45rem 1.8rem 1.35rem 0.9rem;
   background: var(--bg);
 }
 .msg.assistant.msg-thinking .response-header,
@@ -840,6 +840,7 @@ body {
   scrollbar-width: thin;
   scrollbar-color: #2a2a40 transparent;
 }
+.msg-thinking.thinking-tall .thinking-live { max-height: 12em; }
 .thinking-toggle {
   background: none; border: none; cursor: pointer;
   color: inherit; font: inherit; padding: 0;
@@ -848,8 +849,17 @@ body {
 .thinking-toggle::before { content: '▸ '; }
 .thinking-expanded .thinking-toggle::before { content: '▾ '; }
 .thinking-stream { margin-top: 0.4em; }
-.thinking-body { display: none; margin-top: 0.5em; white-space: pre-wrap; }
+.thinking-body {
+  display: none;
+  margin-top: 0.5em;
+  max-height: 6em;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  scrollbar-width: thin;
+  scrollbar-color: #2a2a40 transparent;
+}
 .thinking-expanded .thinking-body { display: block; }
+.msg-thinking.thinking-tall .thinking-body { max-height: 12em; }
 
 /* tool call blocks inside response bubble */
 .tool-calls { display: flex; flex-direction: column; gap: 1px; margin-bottom: 0.4em; }
@@ -2000,10 +2010,11 @@ body {
   background: var(--bg);
 }
 .fv-edit-toolbar[hidden] { display: none; }
-.fv-edit-status { flex: 1; font-size: var(--text-xs); color: var(--text-dim); }
+.fv-edit-status { flex: 1; min-width: 0; font-size: var(--text-xs); color: var(--text-dim); }
 .fv-edit-tools {
   display: flex;
   align-items: center;
+  flex: 0 0 auto;
   gap: 0.25rem;
   min-width: 0;
 }
@@ -2087,8 +2098,6 @@ body {
     width: min(100%, 22rem);
   }
   .fv-edit-find { flex: 1; width: auto; }
-  .fv-cancel-btn,
-  .fv-save-btn { order: 3; }
 }
 
 /* file viewer — history panel */
@@ -2224,23 +2233,65 @@ body {
 }
 
 /* pin button on assistant bubbles */
+:root {
+  --triangle-icon-size: 0.58rem;
+}
+
+.thinking-kill-btn,
+.thinking-height-btn {
+  font-size: var(--triangle-icon-size);
+}
 .thinking-kill-btn {
   position: absolute;
   top: 0.25rem;
   right: 0.3rem;
+  width: 1.45rem;
+  height: 1.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background: none;
   border: none;
   color: var(--remove-mark);
   cursor: pointer;
   font-size: 1rem;
   line-height: 1;
-  padding: 0.1rem 0.25rem;
+  padding: 0;
   border-radius: 3px;
   opacity: 0.85;
   transition: opacity 0.15s, color 0.15s;
 }
 .thinking-kill-btn:hover { opacity: 1; color: var(--danger); }
 .thinking-kill-btn:disabled { opacity: 0.3; cursor: default; }
+.thinking-height-btn {
+  position: absolute;
+  right: 0.3rem;
+  bottom: 0.25rem;
+  width: 1.45rem;
+  height: 1.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-style: normal;
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  line-height: 1;
+  padding: 0;
+  border-radius: 3px;
+  opacity: 0.8;
+  transition: opacity 0.15s, color 0.15s;
+}
+.thinking-height-btn.hidden {
+  display: none;
+}
+.thinking-height-btn:hover,
+.thinking-tall .thinking-height-btn {
+  color: var(--text-mid);
+  opacity: 1;
+}
 
 .msg-pin-btn {
   background: none;
@@ -2421,6 +2472,9 @@ body {
 }
 .topic-caret {
   color: var(--text-dim);
+  font-size: 1rem;
+  line-height: 1;
+  text-align: center;
   width: 0.8rem;
   flex-shrink: 0;
 }
@@ -2714,6 +2768,8 @@ body {
   color: var(--text-mid);
 }
 #stats-content th:first-child, #stats-content td:first-child { text-align: left; }
+#stats-content .stats-col-compact { width: 1%; padding-right: 0.4rem; }
+#stats-content .stats-route-col { text-align: left; }
 #stats-content thead th {
   color: var(--text-dim);
   font-weight: normal;
@@ -3383,6 +3439,22 @@ button {
   top: 0;
   background: var(--surface);
 }
+#agents-list .agent-sort-btn {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+}
+#agents-list .agent-sort-btn:hover {
+  color: var(--text);
+}
+#agents-list .sort-indicator {
+  display: inline-block;
+  min-width: 0.7em;
+  color: var(--text-ghost);
+}
 #agents-list tbody tr:hover td { background: var(--surface-3); }
 #agents-list .edit-btn, #agents-list .del-btn {
   background: transparent;
@@ -3770,16 +3842,27 @@ mark.search-kw-highlight {
   display: inline-flex;
   align-items: baseline;
   gap: 0.3em;
+  max-width: min(55ch, calc(100% - 1rem));
+  vertical-align: bottom;
 }
 .history-prompt:hover {
   opacity: 1;
 }
 .history-prompt-truncated {
+  min-width: 0;
+  overflow: hidden;
   opacity: 0.85;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .history-prompt-caret {
-  font-size: 1em;
+  font-size: var(--triangle-icon-size);
   flex-shrink: 0;
+}
+@media (max-width: 600px) {
+  .history-prompt {
+    max-width: min(24ch, calc(100vw - 10rem));
+  }
 }
 .history-prompt-full {
   display: none;

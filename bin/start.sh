@@ -113,3 +113,4 @@ for i in {1..20}; do
 done
 echo ""
 echo "warning: squid did not respond within 10 s — check $BOOT_LOG (early failures) or $LOG_FILE"
+exit 1
