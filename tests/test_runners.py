@@ -1502,6 +1502,28 @@ def test_opencode_composes_provider_prefixed_model():
     assert captured[0][captured[0].index("-m") + 1] == "nvidia/deepseek-ai/deepseek-v4-pro"
 
 
+def test_opencode_does_not_double_prefix_provider_qualified_model():
+    captured = []
+
+    async def fake_stream_lines(cmd, **kwargs):
+        captured.append(cmd)
+        yield '{"type":"step_finish","sessionID":"thread-1","part":{"tokens":{}}}'
+
+    async def collect():
+        return [chunk async for chunk in run_opencode(
+            "fresh", cwd="/tmp", model="opencode/deepseek-v4-flash-free",
+            backend_settings={"provider": "opencode"},
+        )]
+
+    with patch("agent.runners.OPENCODE_PATH", "opencode"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        asyncio.run(collect())
+
+    assert "-m" in captured[0]
+    assert captured[0][captured[0].index("-m") + 1] == "opencode/deepseek-v4-flash-free"
+
+
 def test_native_claude_removes_inherited_anthropic_auth_environment():
     captured = {}
 

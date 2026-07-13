@@ -209,24 +209,45 @@ def _with_backend(item: dict, *, harness_key: str = "harness", provider_key: str
     return item
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
 def init_db() -> None:
     conn = _connect()
     try:
         for ddl in _TABLES:
             conn.execute(ddl)
+        agent_columns = _table_columns(conn, "agents")
+        has_legacy_backend = "backend" in agent_columns
         # Seed one default agent per installed harness (INSERT OR IGNORE — never overwrites user edits)
         for harness in sorted(SUPPORTED_HARNESSES):
             if harness != "claudecode" and is_installed(harness):
                 provider = _SEED_DEFAULT_PROVIDER_BY_HARNESS.get(harness)
+                model = _SEED_DEFAULT_MODEL_BY_HARNESS.get(harness)
+                if has_legacy_backend:
+                    conn.execute(
+                        """INSERT OR IGNORE INTO agents
+                           (name, backend, harness, provider, model) VALUES (?, ?, ?, ?, ?)""",
+                        (harness, agent_ref_for_storage(harness, provider), harness, provider, model),
+                    )
+                else:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO agents (name, harness, provider, model) VALUES (?, ?, ?, ?)",
+                        (harness, harness, provider, model),
+                    )
+        if is_installed("claudecode"):
+            if has_legacy_backend:
+                conn.execute(
+                    """INSERT OR IGNORE INTO agents
+                       (name, backend, harness, provider, model) VALUES (?, ?, ?, ?, ?)""",
+                    ("claude", "claudecode:anthropic", "claudecode", "anthropic", None),
+                )
+            else:
                 conn.execute(
                     "INSERT OR IGNORE INTO agents (name, harness, provider, model) VALUES (?, ?, ?, ?)",
-                    (harness, harness, provider, _SEED_DEFAULT_MODEL_BY_HARNESS.get(harness)),
+                    ("claude", "claudecode", "anthropic", None),
                 )
-        if is_installed("claudecode"):
-            conn.execute(
-                "INSERT OR IGNORE INTO agents (name, harness, provider, model) VALUES (?, ?, ?, ?)",
-                ("claude", "claudecode", "anthropic", None),
-            )
         # FTS repair: remove entries whose content was indexed mid-stream
         # (partial saves) and now differs from the final stored content.
         conn.execute("""
@@ -306,15 +327,28 @@ def upsert_agent(name: str, harness: str, provider: Optional[str], model: Option
             existing["model"] != model or
             existing["cwd"] != cwd
         )
-        conn.execute(
-            """INSERT INTO agents (name, harness, provider, model, cwd) VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(name) DO UPDATE SET
-                 harness = excluded.harness,
-                 provider = excluded.provider,
-                 model   = excluded.model,
-                 cwd     = excluded.cwd""",
-            (name, harness, provider, model, cwd),
-        )
+        if "backend" in _table_columns(conn, "agents"):
+            conn.execute(
+                """INSERT INTO agents (name, backend, harness, provider, model, cwd)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(name) DO UPDATE SET
+                     backend  = excluded.backend,
+                     harness  = excluded.harness,
+                     provider = excluded.provider,
+                     model    = excluded.model,
+                     cwd      = excluded.cwd""",
+                (name, agent_ref_for_storage(harness, provider), harness, provider, model, cwd),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO agents (name, harness, provider, model, cwd) VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(name) DO UPDATE SET
+                     harness = excluded.harness,
+                     provider = excluded.provider,
+                     model   = excluded.model,
+                     cwd     = excluded.cwd""",
+                (name, harness, provider, model, cwd),
+            )
     return bool(key_changed)
 
 
@@ -1429,6 +1463,44 @@ def _stats_chart_field(metric: str, agg: str) -> str:
     return f"chart_{metric}_{agg}"
 
 
+def _stats_payload_metric_value(stats: dict, metric: str) -> Optional[float]:
+    def num(key: str) -> float:
+        value = stats.get(key)
+        return value if isinstance(value, (int, float)) else 0
+
+    if metric == "cost":
+        value = stats.get("cost_usd")
+        return value if isinstance(value, (int, float)) else None
+    if metric == "tokens_out":
+        return num("output_tokens")
+    if metric == "quota":
+        value = stats.get("quota_delta")
+        return value if isinstance(value, (int, float)) else None
+    if metric == "duration":
+        value = stats.get("duration_ms")
+        return (value / 1000) if isinstance(value, (int, float)) else None
+
+    raw = num("input_tokens")
+    cache_read = num("cache_read_tokens")
+    cache_write = num("cache_write_tokens")
+    is_split = (cache_read + cache_write) > 0 and raw < (cache_read + cache_write)
+    if metric == "tokens_in":
+        return raw + cache_read + cache_write if is_split else raw
+    if metric == "cache_read":
+        return cache_read
+    if metric == "cache_write":
+        return cache_write
+    if metric == "new_input":
+        return raw + cache_write if is_split else max(0, raw - cache_read)
+    if metric == "cache_hit_rate":
+        new_input = raw + cache_write if is_split else max(0, raw - cache_read)
+        total = cache_read + new_input
+        return (cache_read / total) * 100 if total > 0 else None
+    if metric == "avg_tokens_turn":
+        return raw + num("output_tokens")
+    return None
+
+
 def _percentile(values: list[float], percentile: float) -> Optional[float]:
     if not values:
         return None
@@ -1494,13 +1566,52 @@ def _merge_chart_aggregates(
         clauses.append("COALESCE(adhoc, 0) = 1")
     where = " AND ".join(clauses)
 
+    cm_clauses: list[str] = ["cm.role = 'assistant'"]
+    cm_params: list = []
+    if cutoff:
+        cm_clauses.append("datetime(cm.created_at) >= datetime(?)")
+        cm_params.append(cutoff)
+    _append_stats_in_filter(cm_clauses, cm_params, "cm.agent", agents)
+    _append_stats_in_filter(cm_clauses, cm_params, "cm.topic", topics)
+    if adhoc == "session":
+        cm_clauses.append("COALESCE(cm.adhoc, 0) = 0")
+    elif adhoc == "adhoc":
+        cm_clauses.append("COALESCE(cm.adhoc, 0) = 1")
+    cm_where = " AND ".join(cm_clauses)
+    turn_rows = conn.execute(
+        f"""SELECT {bucket.replace('created_at', 'cm.created_at')} AS period, re.payload
+            FROM chat_messages cm
+            JOIN run_events re
+                ON re.id = (
+                    SELECT MAX(re2.id) FROM run_events re2
+                    WHERE re2.msg_id = cm.id AND re2.event_type = 'stats'
+                )
+            WHERE {cm_where}""",
+        cm_params,
+    ).fetchall()
+
     for series in chart_series:
         metric = str(series.get("metric") or "")
         agg = str(series.get("agg") or "sum").lower()
         expr = _STATS_CHART_METRIC_EXPR.get(metric)
-        if not expr or agg not in _STATS_CHART_AGGS:
+        if agg not in _STATS_CHART_AGGS:
             continue
         field = _stats_chart_field(metric, agg)
+        grouped: dict[str, list[float]] = {}
+        for turn in turn_rows:
+            try:
+                stats = json.loads(turn["payload"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            value = _stats_payload_metric_value(stats, metric)
+            if value is not None:
+                grouped.setdefault(turn["period"], []).append(value)
+        if grouped:
+            for row in rows:
+                row[field] = _aggregate_values(grouped.get(row["period"], []), agg)
+            continue
+        if not expr:
+            continue
         sample_rows = conn.execute(
             f"""SELECT {bucket} AS period, {expr} AS value
                 FROM session_stats

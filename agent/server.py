@@ -1376,6 +1376,15 @@ async def delete_stats_preset(preset_id: int):
     return JSONResponse({"ok": delete_stats_filter_preset(preset_id)})
 
 
+def _parse_chart_series(chart_metrics: str, chart_aggs: str) -> list[dict]:
+    metrics = [m for m in chart_metrics.split(",") if m]
+    aggs = chart_aggs.split(",") if chart_aggs else []
+    return [
+        {"metric": metric, "agg": aggs[i] if i < len(aggs) else "sum"}
+        for i, metric in enumerate(metrics)
+    ]
+
+
 @app.get("/stats")
 async def usage_stats(
     period: str = "daily",
@@ -1386,11 +1395,10 @@ async def usage_stats(
     topic: str = "",
     adhoc: str = "all",
     tz_offset_minutes: int = 0,
-    chart_metric: str = "",
-    chart_agg: str = "sum",
-    chart2_metric: str = "",
-    chart2_agg: str = "sum",
+    chart_metrics: str = "",
+    chart_aggs: str = "",
 ):
+    chart_series = _parse_chart_series(chart_metrics, chart_aggs)
     if period == "turn":
         return JSONResponse(get_stats_by_turn(days=days, agent=agent, topic=topic, adhoc=adhoc))
     if group == "time" and breakdown in {"agent", "agent_session", "topic_agent", "topic_agent_session"}:
@@ -1402,7 +1410,9 @@ async def usage_stats(
             adhoc=adhoc,
             tz_offset_minutes=tz_offset_minutes,
             breakdown=breakdown,
-            chart_series=[{"metric": chart_metric, "agg": chart_agg}],
+            # Breakdown series are dimension values (topic/agent), not metrics —
+            # only the first requested metric is meaningful here.
+            chart_series=chart_series[:1],
         ))
     if group == "topic":
         return JSONResponse(get_stats_by_topic(days=days, agent=agent, topic=topic, adhoc=adhoc))
@@ -1415,10 +1425,7 @@ async def usage_stats(
         topic=topic,
         adhoc=adhoc,
         tz_offset_minutes=tz_offset_minutes,
-        chart_series=[
-            {"metric": chart_metric, "agg": chart_agg},
-            {"metric": chart2_metric, "agg": chart2_agg},
-        ],
+        chart_series=chart_series,
     ))
 
 

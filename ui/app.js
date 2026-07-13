@@ -4910,9 +4910,13 @@ let statsPeriod = 'hourly';
 let statsBreakdown = '';
 let statsFilters = { days: 7, agents: [], topics: [], adhoc: 'all' };
 let statsChartY1 = 'turns';
-let statsChartY2 = '';
 let statsChartAggY1 = 'sum';
-let statsChartAggY2 = 'sum';
+// Additional chart series beyond the primary (Y1) one — each entry is
+// { metric, agg, axis } where axis is 'y1' (shares Y1's scale) or 'y2' (its
+// own right-hand scale). Unlike Y1, the same metric can appear more than
+// once here (e.g. P50 and P95 of the same measure).
+let statsChartExtra = [];
+let statsChartEditIndex = null;
 let statsChartInstance = null;
 let _lastStatsRows = null;
 let _statsFiltersLoaded = false;
@@ -5098,7 +5102,10 @@ function _statsChartSeriesValue(row, metric, agg) {
   // Raw per-turn rows have no chart_<metric>_<agg> field (nothing was grouped
   // to aggregate) — always use the row's own value rather than a stale/absent
   // aggregate, regardless of whatever agg was last selected in another view.
-  if (statsPeriod === 'turn' || agg === 'sum') return _statsMetricValue(row, metric);
+  if (statsPeriod === 'turn') return _statsMetricValue(row, metric);
+  const field = _statsChartAggField(metric, agg);
+  if (Object.prototype.hasOwnProperty.call(row, field)) return row[field] == null ? 0 : row[field];
+  if (agg === 'sum') return _statsMetricValue(row, metric);
   const value = row[_statsChartAggField(metric, agg)];
   return value == null ? 0 : value;
 }
@@ -5107,10 +5114,6 @@ function _statsChartSeriesLabel(metric, agg) {
   const m = CHART_METRICS[metric] || CHART_METRICS.turns;
   const aggLabel = statsPeriod === 'turn' ? 'RAW' : (STATS_AGG_LABELS[agg] || agg.toUpperCase());
   return `${aggLabel} ${m.label}`;
-}
-
-function _statsCompareColor(primaryColor) {
-  return STATS_SERIES_COLORS.find(color => color !== primaryColor) || 'rgba(255,160,80,1)';
 }
 
 function _statsMeasureState(metric, agg) {
@@ -5125,13 +5128,14 @@ function _parseStatsMeasureState(value, fallbackMetric = 'turns') {
 
 function _syncStatsChartAggControls() {
   statsChartAggY1 = _normalizeStatsAgg(statsChartY1, statsChartAggY1);
-  statsChartAggY2 = _normalizeStatsAgg(statsChartY2, statsChartAggY2);
   const y1AggSel = document.getElementById('sc-y1-agg');
   _syncStatsAggSelect(y1AggSel, statsChartY1, statsChartAggY1);
   if (y1AggSel) y1AggSel.hidden = !_statsMetricHasVariableAgg(statsChartY1);
-  const y2AggSel = document.getElementById('sc-y2-agg');
-  _syncStatsAggSelect(y2AggSel, statsChartY2 || 'turns', statsChartAggY2);
-  if (y2AggSel) y2AggSel.hidden = !statsChartY2 || document.getElementById('sc-y2')?.hidden || !_statsMetricHasVariableAgg(statsChartY2);
+  _renderStatsChartExtraRows();
+}
+
+function _statsChartAxisLabel(axis) {
+  return axis === 'y2' ? 'R' : 'L';
 }
 
 const STATS_ICON_LEFT = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M10 3.5 5.5 8l4.5 4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -5200,66 +5204,123 @@ function _statsChartMetricKeys() {
   return keys.length ? keys : STATS_TABLE_MEASURES.map(m => m.key);
 }
 
-function _populateStatsChartMetricSelect(select, keys, { includeBlank = false } = {}) {
+function _populateStatsChartMetricSelect(select, keys) {
   if (!select) return;
-  const blank = includeBlank ? '<option value="">— remove —</option>' : '';
-  select.innerHTML = blank + keys.map(key => {
+  select.innerHTML = keys.map(key => {
     const label = (CHART_METRICS[key] || {}).label || key;
     return `<option value="${key}">${label}</option>`;
   }).join('');
 }
 
 // The chart can only plot a metric that's checked in the Measures menu — keeps
-// the dropdown options and the table columns in sync. Returns whether Y1
-// changed, since that requires a refetch (its backend chart_<metric>_<agg>
-// aggregate wouldn't exist yet for a metric no request has asked for).
+// the pickers and the table columns in sync. Returns whether the set of
+// requested (metric, agg) pairs changed, since that requires a refetch (a
+// newly-added one's backend chart_<metric>_<agg> aggregate wouldn't exist yet).
 function _syncStatsChartMetricSelects() {
   const keys = _statsChartMetricKeys();
-  let y1Changed = false;
+  let changed = false;
 
   if (!keys.includes(statsChartY1)) {
     statsChartY1 = _firstSelectedMeasure();
     statsChartAggY1 = _normalizeStatsAgg(statsChartY1, statsChartAggY1);
-    y1Changed = true;
+    changed = true;
   }
   const y1Sel = document.getElementById('sc-y1');
   _populateStatsChartMetricSelect(y1Sel, keys);
   if (y1Sel) y1Sel.value = statsChartY1;
 
-  const y2Sel = document.getElementById('sc-y2');
-  if (statsChartY2 && !keys.includes(statsChartY2)) {
-    statsChartY2 = '';
-    if (y2Sel) y2Sel.hidden = true;
-    const y2AggSel = document.getElementById('sc-y2-agg');
-    if (y2AggSel) y2AggSel.hidden = true;
-    const compareBtn = document.getElementById('sc-compare-btn');
-    if (compareBtn) compareBtn.textContent = '+ Y2';
-  }
-  _populateStatsChartMetricSelect(y2Sel, keys, { includeBlank: true });
-  if (y2Sel) y2Sel.value = statsChartY2;
+  const before = statsChartExtra.length;
+  statsChartExtra = statsChartExtra.filter(entry => keys.includes(entry.metric));
+  if (statsChartExtra.length !== before) changed = true;
 
   _syncStatsChartAggControls();
-  return y1Changed;
+  return changed;
+}
+
+// Renders the repeatable "extra series" chip row list into #sc-extra. Each
+// chip is an independent (metric, agg, axis) triple — the same metric can
+// appear in more than one chip (e.g. P50 and P95 of Tokens In side by side).
+function _renderStatsChartExtraRows() {
+  const wrap = document.getElementById('sc-extra');
+  if (!wrap) return;
+  const keys = _statsChartMetricKeys();
+  if (statsChartEditIndex != null && !statsChartExtra[statsChartEditIndex]) statsChartEditIndex = null;
+  const pills = statsChartExtra.map((entry, i) => {
+    entry.agg = _normalizeStatsAgg(entry.metric, entry.agg);
+    const label = _statsChartSeriesLabel(entry.metric, entry.agg);
+    const axisLabel = _statsChartAxisLabel(entry.axis);
+    return `<span class="sc-series-pill-wrap" data-index="${i}">
+      <button type="button" class="sc-series-pill${statsChartEditIndex === i ? ' active' : ''}" aria-expanded="${statsChartEditIndex === i ? 'true' : 'false'}" aria-label="Edit series ${i + 2}">
+        <span class="sc-series-pill-text">${escapeHtml(label)} · ${axisLabel}</span>
+      </button>
+      <button type="button" class="sc-series-remove" aria-label="Remove series ${i + 2}">×</button>
+    </span>`;
+  }).join('');
+
+  const entry = statsChartEditIndex == null ? null : statsChartExtra[statsChartEditIndex];
+  if (!entry) {
+    wrap.innerHTML = pills;
+    return;
+  }
+  entry.agg = _normalizeStatsAgg(entry.metric, entry.agg);
+  const metricOptions = keys.map(key => {
+    const label = (CHART_METRICS[key] || {}).label || key;
+    return `<option value="${key}"${key === entry.metric ? ' selected' : ''}>${label}</option>`;
+  }).join('');
+  const allowedAggs = STATS_METRIC_AGGS[entry.metric] || ['sum'];
+  const aggOptions = allowedAggs.map(key => `<option value="${key}"${key === entry.agg ? ' selected' : ''}>${STATS_AGG_LABELS[key]}</option>`).join('');
+  const aggHidden = !_statsMetricHasVariableAgg(entry.metric);
+  const axisLabel = _statsChartAxisLabel(entry.axis);
+  wrap.innerHTML = `${pills}<div class="sc-series-popover sc-extra-row" data-index="${statsChartEditIndex}">
+    <label>
+      <span>Metric</span>
+      <select class="sc-extra-metric" aria-label="Series ${statsChartEditIndex + 2} metric">${metricOptions}</select>
+    </label>
+    <label${aggHidden ? ' hidden' : ''}>
+      <span>Agg</span>
+      <select class="sc-extra-agg" aria-label="Series ${statsChartEditIndex + 2} aggregation">${aggOptions}</select>
+    </label>
+    <button type="button" class="sc-extra-axis" title="Plotted on the ${entry.axis === 'y2' ? 'right' : 'left'} axis — click to switch">${axisLabel}</button>
+  </div>`;
+}
+
+function _statsTableAggForMeasure(metric) {
+  if (statsPeriod === 'turn') return 'sum';
+  if (statsChartY1 === metric) return statsChartAggY1;
+  const entry = statsChartExtra.find(s => s.metric === metric);
+  return entry ? entry.agg : 'sum';
+}
+
+function _statsTableMeasureLabel(measure) {
+  const agg = _statsTableAggForMeasure(measure.key);
+  if (agg === 'sum') return measure.label;
+  return `${STATS_AGG_LABELS[agg] || agg.toUpperCase()} ${measure.label}`;
+}
+
+function _statsTableMeasureValue(row, measure) {
+  const agg = _statsTableAggForMeasure(measure.key);
+  if (agg === 'sum' && !Object.prototype.hasOwnProperty.call(row, _statsChartAggField(measure.key, agg))) return measure.row(row);
+  return _formatStatsMetricValue(_statsChartSeriesValue(row, measure.key, agg), measure.key);
 }
 
 function _statsMeasureHeaders() {
   return STATS_TABLE_MEASURES
     .filter(m => _statsMeasureSelected(m.key))
-    .map(m => `<th${m.title ? ` title="${m.title}"` : ''}>${m.label}</th>`)
+    .map(m => `<th${m.title ? ` title="${m.title}"` : ''}>${_statsTableMeasureLabel(m)}</th>`)
     .join('');
 }
 
 function _statsMeasureCells(row) {
   return STATS_TABLE_MEASURES
     .filter(m => _statsMeasureSelected(m.key))
-    .map(m => `<td>${m.row(row)}</td>`)
+    .map(m => `<td>${_statsTableMeasureValue(row, m)}</td>`)
     .join('');
 }
 
 function _statsMeasureTotals(totals) {
   return STATS_TABLE_MEASURES
     .filter(m => _statsMeasureSelected(m.key))
-    .map(m => `<td>${m.total(totals)}</td>`)
+    .map(m => `<td>${_statsTableAggForMeasure(m.key) === 'sum' ? m.total(totals) : '—'}</td>`)
     .join('');
 }
 
@@ -5604,12 +5665,9 @@ function _statsQueryParams({ includeTz = false } = {}) {
   if (statsFilters.agents.length) params.set('agent', statsFilters.agents.join(','));
   if (statsFilters.topics.length) params.set('topic', statsFilters.topics.join(','));
   if (statsFilters.adhoc !== 'all') params.set('adhoc', statsFilters.adhoc);
-  params.set('chart_metric', statsChartY1);
-  params.set('chart_agg', statsChartAggY1);
-  if (statsChartY2) {
-    params.set('chart2_metric', statsChartY2);
-    params.set('chart2_agg', statsChartAggY2);
-  }
+  const series = [{ metric: statsChartY1, agg: statsChartAggY1 }, ...statsChartExtra];
+  params.set('chart_metrics', series.map(s => s.metric).join(','));
+  params.set('chart_aggs', series.map(s => s.agg).join(','));
   return params;
 }
 
@@ -5625,7 +5683,7 @@ function _statsState() {
     breakdown: { key: statsBreakdown, sort: { ..._statsBreakdownColumnSort } },
     measure: {
       primary: _statsMeasureState(statsChartY1, statsChartAggY1),
-      secondary: statsChartY2 ? _statsMeasureState(statsChartY2, statsChartAggY2) : null,
+      series: statsChartExtra.map(s => ({ metric: s.metric, agg: s.agg, axis: s.axis })),
       visible: [..._statsMeasures],
     },
   };
@@ -5641,7 +5699,7 @@ function _overallStatsState() {
       session_type: { mode: 'all', values: [] },
     },
     breakdown: { key: '', sort: { mode: 'name', dir: 'asc' } },
-    measure: { primary: { metric: 'turns', agg: 'sum' }, secondary: null, visible: ['sessions', 'turns', 'tokens_in', 'tokens_out'] },
+    measure: { primary: { metric: 'turns', agg: 'sum' }, series: [], visible: ['sessions', 'turns', 'tokens_in', 'tokens_out'] },
   };
 }
 
@@ -5660,21 +5718,30 @@ function _applyStatsState(state) {
   const sessionValues = dims.session_type?.values || [];
   statsFilters.adhoc = dims.session_type?.mode === 'all' ? 'all' : (sessionValues[0] || 'all');
   const primaryMeasure = _parseStatsMeasureState(state?.measure?.primary, 'turns');
-  const secondaryMeasure = state?.measure?.secondary ? _parseStatsMeasureState(state.measure.secondary, '') : { metric: '', agg: 'sum' };
   statsChartY1 = primaryMeasure.metric || 'turns';
   statsChartAggY1 = primaryMeasure.agg;
-  statsChartY2 = secondaryMeasure.metric || '';
-  statsChartAggY2 = secondaryMeasure.agg || 'sum';
+  // Older presets saved a single "secondary" measure (always its own right
+  // axis unless it matched the primary metric) rather than a series list.
+  const rawSeries = state?.measure?.series
+    || (state?.measure?.secondary ? [state.measure.secondary] : []);
+  statsChartExtra = rawSeries
+    .map(raw => {
+      const parsed = _parseStatsMeasureState(raw, '');
+      if (!parsed.metric) return null;
+      // New-format entries carry an explicit axis; legacy "secondary" entries
+      // don't, so fall back to the old rule (shared axis only if same metric).
+      const axis = (raw && typeof raw === 'object' && (raw.axis === 'y1' || raw.axis === 'y2'))
+        ? raw.axis
+        : (parsed.metric === statsChartY1 ? 'y1' : 'y2');
+      return { metric: parsed.metric, agg: parsed.agg, axis };
+    })
+    .filter(Boolean);
   _statsMeasures.clear();
   for (const key of state?.measure?.visible || ['sessions', 'turns', 'tokens_in', 'tokens_out']) _statsMeasures.add(key);
   document.getElementById('sf-period').value = statsPeriod;
   document.getElementById('sf-days').value = String(statsFilters.days);
   document.getElementById('sf-breakdown').value = statsBreakdown;
   document.getElementById('sf-adhoc').value = statsFilters.adhoc;
-  const y2Sel = document.getElementById('sc-y2');
-  y2Sel.hidden = !statsChartY2;
-  document.getElementById('sc-y2-agg').hidden = !statsChartY2;
-  document.getElementById('sc-compare-btn').textContent = statsChartY2 ? '− Y2' : '+ Y2';
   // A saved preset's chart metric might not be in its saved visible measures
   // (older presets could chart something the table didn't show) — reconcile
   // to whatever's actually checked, same as any other measures change.
@@ -5795,36 +5862,31 @@ function _renderChart(rows) {
   if (!rows || !rows.length || typeof Chart === 'undefined') { _destroyChart(); return; }
   const chronological = [...rows].reverse();
   const labels = chronological.map(r => statsPeriod === 'turn' ? fmtTime(r.period) : r.period);
-  const m1 = CHART_METRICS[statsChartY1] || CHART_METRICS.turns;
-  const datasets = [{
-    label: _statsChartSeriesLabel(statsChartY1, statsChartAggY1),
-    data: chronological.map(r => _statsChartSeriesValue(r, statsChartY1, statsChartAggY1)),
-    borderColor: m1.color, backgroundColor: m1.fill,
-    yAxisID: 'y1', tension: 0.3, fill: true,
-    pointRadius: labels.length > 60 ? 1 : labels.length > 20 ? 2 : 4,
-    pointHoverRadius: 5,
-  }];
+  const pointRadius = labels.length > 60 ? 1 : labels.length > 20 ? 2 : 4;
+  const series = [{ metric: statsChartY1, agg: statsChartAggY1, axis: 'y1' }, ...statsChartExtra];
+  const usedColors = new Set();
+  const datasets = series.map((s, i) => {
+    const m = CHART_METRICS[s.metric] || CHART_METRICS.turns;
+    // Some metrics share a base color (e.g. Tokens In / New Input are both
+    // green) — fall back to the series palette on collision so two charted
+    // measures are never visually indistinguishable.
+    let color = m.color;
+    if (usedColors.has(color)) color = STATS_SERIES_COLORS.find(c => !usedColors.has(c)) || color;
+    usedColors.add(color);
+    return {
+      label: _statsChartSeriesLabel(s.metric, s.agg),
+      data: chronological.map(r => _statsChartSeriesValue(r, s.metric, s.agg)),
+      borderColor: color, backgroundColor: i === 0 ? m.fill : 'transparent',
+      yAxisID: s.axis, tension: 0.3, fill: i === 0,
+      pointRadius, pointHoverRadius: 5,
+    };
+  });
   const scales = {
     x: { ticks: { color: '#555', font: { size: 10 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 12 }, grid: { color: '#1a1a24' } },
     y1: { type: 'linear', position: 'left', ticks: { color: '#555', font: { size: 10 }, callback: fmtAxisNum }, grid: { color: '#1a1a24' } },
   };
-  if (statsChartY2) {
-    const m2 = CHART_METRICS[statsChartY2];
-    if (m2) {
-      const sharedAxis = statsChartY2 === statsChartY1;
-      const y2Color = m2.color === m1.color ? _statsCompareColor(m1.color) : m2.color;
-      datasets.push({
-        label: _statsChartSeriesLabel(statsChartY2, statsChartAggY2),
-        data: chronological.map(r => _statsChartSeriesValue(r, statsChartY2, statsChartAggY2)),
-        borderColor: y2Color, backgroundColor: 'transparent',
-        yAxisID: sharedAxis ? 'y1' : 'y2', tension: 0.3, fill: false,
-        pointRadius: labels.length > 60 ? 1 : labels.length > 20 ? 2 : 4,
-        pointHoverRadius: 5,
-      });
-      if (!sharedAxis) {
-        scales.y2 = { type: 'linear', position: 'right', ticks: { color: '#555', font: { size: 10 }, callback: fmtAxisNum }, grid: { display: false } };
-      }
-    }
+  if (series.some(s => s.axis === 'y2')) {
+    scales.y2 = { type: 'linear', position: 'right', ticks: { color: '#555', font: { size: 10 }, callback: fmtAxisNum }, grid: { display: false } };
   }
   _destroyChart();
   statsChartInstance = new Chart(document.getElementById('stats-chart'), {
@@ -6421,13 +6483,10 @@ function initStats() {
     e.target.value = statsBreakdown;
     _markStatsPresetDirty();
     if (statsBreakdown) {
-      statsChartY2 = '';
-      statsChartAggY2 = 'sum';
-      const y2Sel = document.getElementById('sc-y2');
-      y2Sel.hidden = true;
-      y2Sel.value = '';
-      document.getElementById('sc-y2-agg').hidden = true;
-      document.getElementById('sc-compare-btn').textContent = '+ Y2';
+      // Breakdown series are dimension values (topic/agent), not metrics —
+      // only the primary (Y1) metric applies while it's active.
+      statsChartExtra = [];
+      _renderStatsChartExtraRows();
     } else {
       _resetStatsDimensionFilters();
     }
@@ -6489,40 +6548,85 @@ function initStats() {
     loadStats();
   });
 
-  const y2Sel = document.getElementById('sc-y2');
-  y2Sel.addEventListener('change', e => {
-    statsChartY2 = e.target.value;
-    statsChartAggY2 = _normalizeStatsAgg(statsChartY2, statsChartAggY2);
-    _syncStatsChartAggControls();
-    _markStatsPresetDirty();
-    if (!statsChartY2) {
-      y2Sel.hidden = true;
-      document.getElementById('sc-y2-agg').hidden = true;
-      document.getElementById('sc-compare-btn').textContent = '+ Y2';
+  const extraWrap = document.getElementById('sc-extra');
+  extraWrap.addEventListener('change', e => {
+    const row = e.target.closest('.sc-series-popover');
+    if (!row) return;
+    const i = Number(row.dataset.index);
+    const entry = statsChartExtra[i];
+    if (!entry) return;
+    if (e.target.classList.contains('sc-extra-metric')) {
+      entry.metric = e.target.value;
+      entry.agg = _normalizeStatsAgg(entry.metric, entry.agg);
+      // Same-metric chips (e.g. P50/P95 of one measure) almost always belong
+      // on the same axis — align to an existing chip with that metric first.
+      const match = statsChartExtra.find((s, j) => j !== i && s.metric === entry.metric);
+      if (match) entry.axis = match.axis;
+    } else if (e.target.classList.contains('sc-extra-agg')) {
+      entry.agg = e.target.value;
+    } else {
+      return;
     }
+    _renderStatsChartExtraRows();
+    _markStatsPresetDirty();
     loadStats();
   });
+  extraWrap.addEventListener('click', e => {
+    e.stopPropagation();
+    const remove = e.target.closest('.sc-series-remove');
+    if (remove) {
+      const pill = remove.closest('.sc-series-pill-wrap');
+      const i = Number(pill?.dataset.index);
+      if (!statsChartExtra[i]) return;
+      statsChartExtra.splice(i, 1);
+      if (statsChartEditIndex === i) statsChartEditIndex = null;
+      else if (statsChartEditIndex != null && statsChartEditIndex > i) statsChartEditIndex--;
+      _renderStatsChartExtraRows();
+      _markStatsPresetDirty();
+      _rerenderStats();
+      return;
+    }
+    const pill = e.target.closest('.sc-series-pill');
+    if (pill) {
+      const i = Number(pill.closest('.sc-series-pill-wrap')?.dataset.index);
+      statsChartEditIndex = statsChartEditIndex === i ? null : i;
+      _renderStatsChartExtraRows();
+      return;
+    }
+    const popover = e.target.closest('.sc-series-popover');
+    if (!popover) return;
+    const i = Number(popover.dataset.index);
+    const entry = statsChartExtra[i];
+    if (!entry) return;
+    if (e.target.classList.contains('sc-extra-axis')) {
+      entry.axis = entry.axis === 'y2' ? 'y1' : 'y2';
+      _renderStatsChartExtraRows();
+      _markStatsPresetDirty();
+      _rerenderStats();
+    }
+  });
 
-  document.getElementById('sc-y2-agg').addEventListener('change', e => {
-    statsChartAggY2 = _normalizeStatsAgg(statsChartY2, e.target.value);
-    _syncStatsChartAggControls();
+  document.getElementById('sc-add-series').addEventListener('click', () => {
+    const keys = _statsChartMetricKeys();
+    const used = new Set([statsChartY1, ...statsChartExtra.map(s => s.metric)]);
+    const metric = keys.find(key => !used.has(key)) || keys[0] || 'turns';
+    const match = statsChartExtra.find(s => s.metric === metric);
+    statsChartExtra.push({ metric, agg: _defaultStatsAgg(metric), axis: match ? match.axis : 'y1' });
+    statsChartEditIndex = statsChartExtra.length - 1;
+    _renderStatsChartExtraRows();
     _markStatsPresetDirty();
     loadStats();
   });
-
-  document.getElementById('sc-compare-btn').addEventListener('click', () => {
-    const hidden = y2Sel.hidden;
-    y2Sel.hidden = !hidden;
-    document.getElementById('sc-y2-agg').hidden = !hidden || !statsChartY2;
-    document.getElementById('sc-compare-btn').textContent = hidden ? '− Y2' : '+ Y2';
-    _syncStatsChartAggControls();
-    _markStatsPresetDirty();
-    if (!hidden) {
-      statsChartY2 = '';
-      statsChartAggY2 = 'sum';
-      document.getElementById('sc-y2-agg').hidden = true;
-      loadStats();
-    }
+  document.addEventListener('click', e => {
+    if (statsChartEditIndex == null) return;
+    if (extraWrap.contains(e.target) || document.getElementById('sc-add-series')?.contains(e.target)) return;
+    statsChartEditIndex = null;
+    _renderStatsChartExtraRows();
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape' || statsChartEditIndex == null) return;
+    statsChartEditIndex = null;
+    _renderStatsChartExtraRows();
   });
 
   document.getElementById('stats-preset-select')?.addEventListener('change', e => {

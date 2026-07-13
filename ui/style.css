@@ -2702,11 +2702,13 @@ body {
 #stats-chart-controls {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.4rem;
+  row-gap: 0.3rem;
   margin-bottom: 0.4rem;
   font-size: var(--text-sm);
 }
-#sc-y1, #sc-y2, #sc-y1-agg, #sc-y2-agg {
+#sc-y1, #sc-y1-agg, .sc-extra-metric, .sc-extra-agg {
   background: var(--surface-3);
   border: 1px solid #2a2a36;
   border-radius: 3px;
@@ -2714,8 +2716,77 @@ body {
   font-size: 1em;
   padding: 0.1rem 0.3rem;
 }
-#sc-y1-agg, #sc-y2-agg { width: 4.1rem; }
-#sc-compare-btn {
+#sc-y1-agg, .sc-extra-agg { width: 4.1rem; }
+#sc-extra {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  row-gap: 0.3rem;
+}
+.sc-series-pill-wrap {
+  display: inline-flex;
+  align-items: center;
+  max-width: 13rem;
+}
+.sc-series-pill,
+.sc-series-remove {
+  background: var(--surface-2);
+  border: 1px solid #2a2a36;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.92em;
+}
+.sc-series-pill {
+  min-width: 0;
+  max-width: 11rem;
+  border-radius: 999px 0 0 999px;
+  padding: 0.1rem 0.45rem 0.1rem 0.55rem;
+}
+.sc-series-pill-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sc-series-remove {
+  align-self: stretch;
+  border-left: 0;
+  border-radius: 0 999px 999px 0;
+  line-height: 1;
+  padding: 0 0.38rem;
+}
+.sc-series-pill:hover,
+.sc-series-pill.active,
+.sc-series-remove:hover {
+  border-color: #4a4a70;
+  color: #a8a8d8;
+}
+.sc-series-popover {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 0.35rem);
+  z-index: 30;
+  display: flex;
+  align-items: end;
+  gap: 0.35rem;
+  padding: 0.45rem;
+  background: #15151d;
+  border: 1px solid #34344a;
+  border-radius: 6px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+}
+.sc-series-popover label {
+  display: grid;
+  gap: 0.16rem;
+  color: var(--text-ghost);
+  font-size: 0.78rem;
+}
+.sc-series-popover .sc-extra-metric {
+  width: 9.4rem;
+}
+#sc-add-series, .sc-extra-axis, .sc-extra-remove {
   background: transparent;
   border: 1px solid #2a2a36;
   border-radius: 3px;
@@ -2724,10 +2795,10 @@ body {
   font-size: 1em;
   padding: 0.1rem 0.4rem;
 }
-#sc-compare-btn:hover { border-color: #4a4a70; color: #9090c0; }
-#stats-chart-controls.breakdown-active #sc-compare-btn,
-#stats-chart-controls.breakdown-active #sc-y2,
-#stats-chart-controls.breakdown-active #sc-y2-agg {
+.sc-extra-axis, .sc-extra-remove { font-size: 0.9em; line-height: 1; }
+#sc-add-series:hover, .sc-extra-axis:hover, .sc-extra-remove:hover { border-color: #4a4a70; color: #9090c0; }
+#stats-chart-controls.breakdown-active #sc-add-series,
+#stats-chart-controls.breakdown-active #sc-extra {
   display: none;
 }
 #stats-chart-box { position: relative; height: 180px; }

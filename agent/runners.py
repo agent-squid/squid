@@ -1522,7 +1522,7 @@ async def run_opencode(
     cmd += list(backend_args)
     provider = (backend_settings or {}).get("provider")
     if model:
-        cmd += ["-m", f"{provider}/{model}" if provider else model]
+        cmd += ["-m", model if not provider or model.startswith(f"{provider}/") else f"{provider}/{model}"]
     if resume_session_id:
         cmd += ["--session", resume_session_id]
     cmd.append(prompt if resume_session_id else _build_prompt(prompt, history))

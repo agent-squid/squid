@@ -76,6 +76,48 @@ def test_aggregated_stats_includes_requested_chart_percentile(tmp_path, monkeypa
     assert rows[0]["chart_tokens_in_p50"] == 20
 
 
+def test_aggregated_chart_average_uses_per_turn_stats_when_available(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    stats_db.save_stats(
+        "session-1",
+        {"input_tokens": 3_160_000, "output_tokens": 0, "cost_usd": 0},
+        topic="squid",
+        agent="codex",
+    )
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        conn.execute(
+            "UPDATE session_stats SET created_at=? WHERE session_id=?",
+            ("2026-07-13T10:00:00Z", "session-1"),
+        )
+
+    for i, input_tokens in enumerate([100, 200, 300, 400, 500], start=1):
+        user_id = stats_db.insert_user_message("squid", "codex", f"turn {i}")
+        asst_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
+        stats_db.update_assistant_message(asst_id, f"response {i}", "session-1", "done")
+        stats_db.insert_run_event(asst_id, 0, "stats", json.dumps({"input_tokens": input_tokens, "output_tokens": 0}))
+        with sqlite3.connect(tmp_path / "squid.db") as conn:
+            conn.execute(
+                "UPDATE chat_messages SET created_at=? WHERE id=?",
+                ("2026-07-13T10:00:00Z", asst_id),
+            )
+
+    rows = stats_db.get_aggregated_stats(
+        period="daily",
+        days=0,
+        chart_series=[
+            {"metric": "tokens_in", "agg": "sum"},
+            {"metric": "tokens_in", "agg": "avg"},
+        ],
+    )
+
+    assert rows[0]["input_tokens"] == 3_160_000
+    assert rows[0]["total_turns"] == 5
+    assert rows[0]["chart_tokens_in_sum"] == 1500
+    assert rows[0]["chart_tokens_in_avg"] == 300
+
+
 def test_aggregated_stats_cutoff_ignores_created_at_string_format(tmp_path, monkeypatch):
     """session_stats.created_at is written via SQLite's CURRENT_TIMESTAMP
     ('YYYY-MM-DD HH:MM:SS'), not the 'YYYY-MM-DDTHH:MM:SSZ' format _stats_cutoff

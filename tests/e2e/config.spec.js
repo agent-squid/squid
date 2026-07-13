@@ -847,7 +847,7 @@ test('analytics measures dropdown controls cost and quota columns independently'
   expect(statsRequests.at(-1).searchParams.get('days')).toBe('7');
   expect(statsRequests.at(-1).searchParams.get('tz_offset_minutes')).not.toBeNull();
   await expect(page.locator('#sf-breakdown option')).toHaveCount(5);
-  await expect(page.locator('#sc-compare-btn')).toBeVisible();
+  await expect(page.locator('#sc-add-series')).toBeVisible();
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (4)');
   await expect.poll(() => page.evaluate(() => {
     const tops = ['sf-period', 'sf-measures-toggle', 'sf-topic-toggle', 'sf-agent-toggle', 'sf-adhoc']
@@ -904,7 +904,7 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect.poll(() => page.locator('.stats-table-scroll').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
   await expect.poll(() => page.locator('#stats-content thead th').nth(1).evaluate(el => el.getBoundingClientRect().width)).toBeLessThan(125);
   await expect(page.locator('#sf-agent-toggle')).toHaveText('2 Agents');
-  await expect(page.locator('#sc-compare-btn')).toBeHidden();
+  await expect(page.locator('#sc-add-series')).toBeHidden();
   await expect(page.locator('#sf-measures')).toBeVisible();
   await expect(page.locator('#sf-measures-toggle')).toBeDisabled();
   const disabledMeasuresStyle = await page.locator('#sf-measures-toggle').evaluate(el => {
@@ -952,7 +952,7 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await page.locator('#sf-agent-toggle').click();
   await expect(page.locator('#sf-agent-menu input[value="codex"]')).not.toBeChecked();
   await expect(page.locator('#sf-agent-menu input[value="clive"]')).not.toBeChecked();
-  await expect(page.locator('#sc-compare-btn')).toBeVisible();
+  await expect(page.locator('#sc-add-series')).toBeVisible();
   await expect(page.locator('#sf-measures')).toBeVisible();
   await expect(page.locator('#sf-measures-toggle')).toBeEnabled();
 });

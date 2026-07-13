@@ -439,6 +439,38 @@ def test_agent_rejects_unconfigured_harness():
     assert "Unknown harness" in response.json()["error"]
 
 
+def test_agent_save_supports_legacy_backend_not_null_schema(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    with stats_db._connect() as conn:
+        conn.execute("""
+            CREATE TABLE agents (
+                name TEXT PRIMARY KEY,
+                backend TEXT NOT NULL,
+                harness TEXT,
+                provider TEXT,
+                model TEXT,
+                cwd TEXT,
+                timeout INTEGER,
+                created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )
+        """)
+
+    changed = stats_db.upsert_agent(
+        "oc",
+        "opencode",
+        "opencode",
+        "opencode/deepseek-v4-flash-free",
+        None,
+    )
+
+    assert changed is False
+    saved = stats_db.get_agent("oc")
+    assert saved["backend"] == "opencode:opencode"
+    assert saved["harness"] == "opencode"
+    assert saved["provider"] == "opencode"
+    assert saved["model"] == "opencode/deepseek-v4-flash-free"
+
+
 def test_yaml_config_can_be_read_validated_and_atomically_updated(tmp_path):
     state_dir = tmp_path / "state"
     state_dir.mkdir()
