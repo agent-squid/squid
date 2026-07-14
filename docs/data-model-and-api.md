@@ -577,8 +577,8 @@ Fetch current Codex usage. Requires a saved Codex bearer token.
       "label": "Claude Code",
       "install_cmd": "curl -fsSL https://claude.ai/install.sh | bash",
       "installed": true,
-      "protocol": "interactive-cli",
-      "interactive": { "idle_timeout_seconds": 3600 },
+      "protocol": "oneshot-cli",
+      "interactive": { "idle_timeout_seconds": 0 },
       "default_provider": "anthropic",
       "supported_apis": ["/v1/messages"],
       "compatible_providers": ["anthropic", "deepseek"]

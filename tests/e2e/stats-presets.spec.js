@@ -215,6 +215,71 @@ test('stats presets save chart micro settings and reset restores overall view', 
   await expect(page.locator('#sf-measures-menu input[value="cost"]')).toBeChecked();
 });
 
+test('saving a duplicate view name shows the conflict in the modal and can overwrite', async ({ page }) => {
+  await mockApp(page);
+  let presets = [{
+    id: 1,
+    name: 'Squid Codex',
+    is_default: false,
+    state: {
+      version: 1,
+      time: { period: 'hourly', days: 14 },
+      dimensions: {
+        topic: { mode: 'all', values: [] },
+        agent: { mode: 'all', values: [] },
+        session_type: { mode: 'all', values: [] },
+      },
+      breakdown: { key: '' },
+      measure: { primary: 'turns', secondary: null, visible: ['sessions', 'turns'] },
+    },
+  }];
+  await page.route('**/stats/filters', route => route.fulfill({
+    json: { agents: ['codex'], topics: ['squid'] },
+  }));
+  await page.route('**/stats/filter-presets', async route => {
+    if (route.request().method() === 'POST') {
+      const body = route.request().postDataJSON();
+      if (presets.some(p => p.name.toLowerCase() === body.name.toLowerCase())) {
+        return route.fulfill({ status: 400, json: { error: `A view named "${body.name}" already exists.` } });
+      }
+      const preset = { id: 2, name: body.name, state: body.state, is_default: false };
+      presets.push(preset);
+      return route.fulfill({ json: preset });
+    }
+    return route.fulfill({ json: presets });
+  });
+  await page.route('**/stats/filter-presets/**', async route => {
+    const id = Number(new URL(route.request().url()).pathname.split('/').pop());
+    if (route.request().method() === 'PUT') {
+      const body = route.request().postDataJSON();
+      presets = presets.map(p => p.id === id ? { ...p, ...body } : p);
+      return route.fulfill({ json: presets.find(p => p.id === id) });
+    }
+  });
+  await page.route('**/stats?**', route => route.fulfill({
+    json: [{ period: '2026-06-26 14:00', sessions: 2, total_turns: 3 }],
+  }));
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+
+  await page.locator('#stats-preset-save').click();
+  await page.locator('#preset-name-input').fill('Squid Codex');
+  await page.locator('#preset-name-confirm').click();
+
+  // Error appears inside the modal, not in the status span behind the icons.
+  await expect(page.locator('#preset-name-modal')).toHaveClass(/open/);
+  await expect(page.locator('#preset-name-modal-error')).toHaveText('A view named "Squid Codex" already exists.');
+  await expect(page.locator('#stats-preset-status')).toHaveText('');
+  await expect(page.locator('#preset-name-overwrite')).toBeVisible();
+
+  await page.locator('#preset-name-overwrite').click();
+
+  await expect(page.locator('#preset-name-modal')).not.toHaveClass(/open/);
+  await expect(page.locator('#stats-preset-select')).toHaveValue('1');
+  await expect(page.locator('#stats-preset-status')).toHaveText('saved');
+});
+
 test('overall view can be set as default to clear the current default preset', async ({ page }) => {
   await mockApp(page);
   await page.route('**/stats/filters', route => route.fulfill({

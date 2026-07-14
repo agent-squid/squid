@@ -1019,6 +1019,45 @@ body {
   height: auto;
   margin: 0 auto 0.65rem;
 }
+.boot-logo-lockup {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 160px;
+  min-width: min(28rem, 86vw);
+  gap: 0.75rem;
+  margin: 0 auto 0.65rem;
+}
+.boot-logo-lockup .boot-logo-icon {
+  margin: 0;
+}
+.boot-logo-bubble {
+  position: relative;
+  max-width: min(15rem, 58vw);
+  padding: 0.55rem 0.75rem;
+  border: 1px solid #313149;
+  border-radius: 8px;
+  background: #171721;
+  color: var(--accent-dim);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: var(--text-sm);
+  line-height: 1.25;
+  letter-spacing: 0;
+  text-align: left;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+}
+.boot-logo-talking-squid .boot-logo-bubble::before {
+  content: "";
+  position: absolute;
+  left: -7px;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  background: #171721;
+  border-left: 1px solid #313149;
+  border-bottom: 1px solid #313149;
+  transform: translateY(-50%) rotate(45deg);
+}
 .boot-meta {
   font-family: ui-monospace, monospace;
   font-size: var(--text-xs);
@@ -3440,6 +3479,19 @@ button {
     width: 104px;
     max-width: 34vw;
     margin-bottom: 0.5rem;
+  }
+  .boot-logo-lockup {
+    min-height: 120px;
+    min-width: 0;
+    gap: 0.5rem;
+  }
+  .boot-logo-lockup .boot-logo-icon {
+    margin: 0;
+  }
+  .boot-logo-bubble {
+    max-width: min(11rem, 50vw);
+    font-size: var(--text-xs);
+    padding: 0.45rem 0.6rem;
   }
 
   #pin-btn,

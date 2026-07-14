@@ -82,7 +82,7 @@ duplicated here:
 
 | Harness | Value | ID prefix | Protocol | Default provider |
 |---|---|---|---|---|
-| Claude Code | `claudecode` | `cc` | interactive-cli | Claude (anthropic) |
+| Claude Code | `claudecode` | `cc` | oneshot-cli | Claude (anthropic) |
 | Codex | `codex` | `cx` | oneshot-cli | GPT (openai) |
 | Cursor | `cursor` | `cr` | oneshot-cli | Cursor |
 | OpenCode | `opencode` | `oc` | oneshot-cli | NVIDIA NIM (`nvidia`) |

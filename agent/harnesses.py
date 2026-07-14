@@ -30,7 +30,7 @@ SUPPORTED_PROTOCOLS_BY_HARNESS: dict[str, frozenset[str]] = {
     "pi": frozenset({"oneshot-cli"}),
 }
 _DEFAULT_PROTOCOL_BY_HARNESS: dict[str, str] = {
-    "claudecode": "interactive-cli",
+    "claudecode": "oneshot-cli",
     "codex": "oneshot-cli",
     "cursor": "oneshot-cli",
     "opencode": "oneshot-cli",

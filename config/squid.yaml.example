@@ -20,11 +20,7 @@ agent:
 harnesses:
   claudecode:
     protocol:
-      type: interactive-cli
-      timeout:
-        # Seconds before Squid stops an idle live CLI process. The native
-        # session is preserved and resumed on the next turn. Set to 0 to disable.
-        idle_seconds: 3600
+      type: oneshot-cli
     default_provider: anthropic
     supported_apis: [/v1/messages]
 

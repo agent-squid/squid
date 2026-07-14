@@ -53,6 +53,7 @@ from .providers import Provider, _validate_provider, get_provider, public_provid
 from .resolve import agent_ref_for_storage, resolve_agent, split_agent_ref
 from .runners import list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic
 from .history import list_history, list_history_by_ids
+from .stats_db import get_usage_stats
 from .topic_queue import TopicDispatcher
 from .context_sync import sync_now, maybe_sync
 from .topics import normalize_topic_slug
@@ -974,6 +975,7 @@ async def health():
         "squid_home": SQUID_HOME,
         "harnesses": list_harnesses(),
         "providers": providers,
+        **get_usage_stats(),
     })
 
 
@@ -1378,6 +1380,8 @@ async def create_stats_preset(req: StatsFilterPresetRequest):
     try:
         return JSONResponse(create_stats_filter_preset(req.name, req.state))
     except Exception as exc:
+        if "UNIQUE constraint failed" in str(exc):
+            return JSONResponse({"error": f'A view named "{req.name}" already exists.'}, status_code=400)
         return JSONResponse({"error": str(exc)}, status_code=400)
 
 
@@ -1386,6 +1390,8 @@ async def update_stats_preset(preset_id: int, req: StatsFilterPresetRequest):
     try:
         preset = update_stats_filter_preset(preset_id, req.name, req.state, req.is_default)
     except Exception as exc:
+        if "UNIQUE constraint failed" in str(exc):
+            return JSONResponse({"error": f'A view named "{req.name}" already exists.'}, status_code=400)
         return JSONResponse({"error": str(exc)}, status_code=400)
     if not preset:
         return JSONResponse({"error": "preset not found"}, status_code=404)

@@ -19,7 +19,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono&display=swap&text=%E2%96%88%E2%96%84%E2%96%80%E2%95%94%E2%95%90%E2%95%97%E2%95%91%E2%95%9A%E2%95%9D" />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Rubik:wght@700&display=swap" />
   <link rel="stylesheet" href="/vendor/atom-one-dark.min.css" />
-  <link rel="stylesheet" href="style.css?v=20260712-001" />
+  <link rel="stylesheet" href="style.css?v=20260714-001" />
   <script src="/vendor/highlight.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/vendor/qrcode.min.js"></script>
@@ -452,8 +452,10 @@
         </div>
         <div id="preset-name-modal-body">
           <input id="preset-name-input" type="text" placeholder="Preset name" spellcheck="false" autocomplete="off" />
+          <div id="preset-name-modal-error"></div>
         </div>
         <div id="preset-name-modal-footer">
+          <button id="preset-name-overwrite" type="button" hidden>Overwrite existing</button>
           <button id="preset-name-cancel" type="button">Cancel</button>
           <button id="preset-name-confirm" type="button">Save</button>
         </div>

@@ -6121,12 +6121,20 @@ async function _loadStatsPresets({ applyDefault = false } = {}) {
 }
 
 let _presetNameResolve = null;
+let _presetNameConflict = null;
+
+function _setPresetNameModalError(text, conflict = null) {
+  document.getElementById('preset-name-modal-error').textContent = text || '';
+  document.getElementById('preset-name-overwrite').hidden = !conflict;
+  _presetNameConflict = conflict;
+}
 
 function _openPresetNameModal(defaultName) {
   return new Promise(resolve => {
     _presetNameResolve = resolve;
     const input = document.getElementById('preset-name-input');
     input.value = defaultName || '';
+    _setPresetNameModalError('');
     document.getElementById('preset-name-confirm').disabled = !input.value.trim();
     document.getElementById('preset-name-modal').classList.add('open');
     input.focus();
@@ -6134,11 +6142,49 @@ function _openPresetNameModal(defaultName) {
   });
 }
 
-function _closePresetNameModal(name = null) {
+function _closePresetNameModal(preset = null) {
   document.getElementById('preset-name-modal').classList.remove('open');
+  _setPresetNameModalError('');
   const resolve = _presetNameResolve;
   _presetNameResolve = null;
-  if (resolve) resolve(name);
+  if (resolve) resolve(preset);
+}
+
+async function _submitPresetName() {
+  const name = document.getElementById('preset-name-input').value.trim();
+  if (!name) return;
+  const conflict = _statsPresets.find(p => p.name.toLowerCase() === name.toLowerCase());
+  if (conflict) {
+    _setPresetNameModalError(`A view named "${conflict.name}" already exists.`, conflict);
+    return;
+  }
+  const res = await fetch('/stats/filter-presets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, state: _statsState() }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    _setPresetNameModalError(err.error || 'Save failed.');
+    return;
+  }
+  _closePresetNameModal(await res.json());
+}
+
+async function _overwritePresetFromModal() {
+  const conflict = _presetNameConflict;
+  if (!conflict) return;
+  const res = await fetch(`/stats/filter-presets/${conflict.id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ state: _statsState() }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    _setPresetNameModalError(err.error || 'Save failed.', conflict);
+    return;
+  }
+  _closePresetNameModal(await res.json());
 }
 
 async function _saveStatsPreset({ update = false, makeDefault = false } = {}) {
@@ -6159,18 +6205,22 @@ async function _saveStatsPreset({ update = false, makeDefault = false } = {}) {
     _setStatsPresetStatus('default cleared');
     return;
   }
-  const active = _statsPresets.find(preset => preset.id === _activeStatsPresetId);
-  let name;
-  if (update || makeDefault) {
-    name = active?.name;
-  } else {
-    name = await _openPresetNameModal(active?.name || '');
-    if (!name) return;
+  if (!update && !makeDefault) {
+    const active = _statsPresets.find(preset => preset.id === _activeStatsPresetId);
+    const preset = await _openPresetNameModal(active?.name || '');
+    if (!preset) return;
+    await _loadStatsPresets();
+    _activeStatsPresetId = preset.id;
+    _renderStatsPresetControls();
+    _setStatsPresetStatus('saved');
+    return;
   }
-  const url = update || makeDefault ? `/stats/filter-presets/${_activeStatsPresetId}` : '/stats/filter-presets';
-  const method = update || makeDefault ? 'PUT' : 'POST';
-  const body = makeDefault ? { is_default: true } : { name: name.trim(), state: _statsState() };
-  const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const body = makeDefault ? { is_default: true } : { state: _statsState() };
+  const res = await fetch(`/stats/filter-presets/${_activeStatsPresetId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     _setStatsPresetStatus(err.error || 'save failed');
@@ -6180,7 +6230,7 @@ async function _saveStatsPreset({ update = false, makeDefault = false } = {}) {
   await _loadStatsPresets();
   _activeStatsPresetId = preset.id;
   _renderStatsPresetControls();
-  _setStatsPresetStatus(makeDefault ? 'default set' : update ? 'updated' : 'saved');
+  _setStatsPresetStatus(makeDefault ? 'default set' : 'updated');
 }
 
 function _destroyChart() {
@@ -6596,7 +6646,14 @@ function renderTurnStats(rows) {
     </tr>`;
   }).join('');
 
-  _setStatsTable(`<table class="stats-turn-table">
+  // The mobile layout squeezes measure columns to fit the viewport width,
+  // which works fine for the default handful but crushes columns unreadably
+  // once several more measures are selected — past that count, let the table
+  // grow past the viewport and scroll instead of shrinking every column.
+  const visibleMeasureCount = STATS_TABLE_MEASURES.filter(m => _statsMeasureSelected(m.key)).length;
+  const wideClass = visibleMeasureCount > DEFAULT_STATS_MEASURES.length ? ' stats-turn-table-wide' : '';
+
+  _setStatsTable(`<table class="stats-turn-table${wideClass}">
     <thead><tr>
       <th class="stats-col-compact stats-time-col">Time</th>
       <th class="stats-col-compact stats-route-col">Route</th>
@@ -8327,6 +8384,9 @@ function initPullToRefresh() {
 
 // ── boot banner ──────────────────────────────────────────────────────────────
 
+const BOOT_FALLBACK_TEXT = 'More Done, Less Tokens';
+const INSIGHTS_URL = 'https://agentsquid.ai/insights.json';
+
 const BOOT_LOGO_ART = ` 🦑 AGENT
  ██████╗ ██████╗ ██╗   ██╗██╗██████╗
 ██╔════╝██╔═══██╗██║   ██║██║██╔══██╗
@@ -8337,12 +8397,85 @@ const BOOT_LOGO_ART = ` 🦑 AGENT
 
 const BOOT_LOGO_MOBILE = '🦑 AGENT-SQUID';
 
-function bootLogoHtml() {
-  if (Math.random() < 0.5) {
-    return '<img class="boot-logo-icon" src="/favicon.png" alt="" />';
+// ── streak ──────────────────────────────────────────────────────────────────
+
+function _todayKey() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function getStreak() {
+  try {
+    const dates = JSON.parse(localStorage.getItem('squid_active_days') || '[]');
+    const set = new Set(dates);
+    set.add(_todayKey());
+    localStorage.setItem('squid_active_days', JSON.stringify([...set].sort().slice(-400)));
+    let streak = 0;
+    const d = new Date();
+    while (true) {
+      const k = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      if (set.has(k)) { streak++; d.setDate(d.getDate() - 1); }
+      else break;
+    }
+    return streak;
+  } catch { return 1; }
+}
+
+// ── insights fetch ─────────────────────────────────────────────────────────
+
+async function fetchInsights() {
+  try {
+    const res = await fetch(INSIGHTS_URL);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    localStorage.setItem('squid_insights', JSON.stringify(data));
+    return data;
+  } catch {
+    try {
+      return JSON.parse(localStorage.getItem('squid_insights'));
+    } catch {}
+    return null;
   }
-  return `<pre class="boot-art">${BOOT_LOGO_ART}</pre>` +
-    `<div class="boot-art-mobile">${BOOT_LOGO_MOBILE}</div>`;
+}
+
+// ── message picker ─────────────────────────────────────────────────────────
+
+function pickBootMessage(insights, stats) {
+  const section = insights?.boot;
+  if (!section || !section.templates) return section?.default || BOOT_FALLBACK_TEXT;
+  for (const t of section.templates) {
+    const w = t.when || {};
+    if (w.streak != null && stats.streak !== w.streak) continue;
+    if (w.sessions?.milestone) {
+      const hit = w.sessions.milestone.filter(n => stats.totalSessions >= n).pop();
+      if (!hit) continue;
+      return t.text.replace('{hit}', String(hit)).replace(/\{(\w+)\}/g, (_, k) => String(stats[k] ?? ''));
+    }
+    if (w.hour) { const [s, e] = w.hour; if (stats.hour < s || stats.hour >= e) continue; }
+    if (w.dow && !w.dow.includes(stats.dow)) continue;
+    if (w.random != null && Math.random() > w.random) continue;
+    return t.text.replace(/\{(\w+)\}/g, (_, k) => String(stats[k] ?? ''));
+  }
+  return section.default || BOOT_FALLBACK_TEXT;
+}
+
+// ── render ──────────────────────────────────────────────────────────────────
+
+function bootLogoHtml(bubbleText) {
+  const forced = Number(window.__squidBootLogoVariant);
+  const variant = Number.isInteger(forced) && forced >= 0 && forced <= 2
+    ? forced
+    : Math.floor(Math.random() * 3);
+  const logo = '<img class="boot-logo-icon" src="/favicon.png" alt="" />';
+  const bubble = bubbleText ? `<div class="boot-logo-bubble">${bubbleText}</div>` : '';
+  if (variant === 0) {
+    return `<pre class="boot-art">${BOOT_LOGO_ART}</pre>` +
+      `<div class="boot-art-mobile">${BOOT_LOGO_MOBILE}</div>`;
+  }
+  if (variant === 1) {
+    return `<div class="boot-logo-lockup boot-logo-squid-only">${logo}</div>`;
+  }
+  return `<div class="boot-logo-lockup boot-logo-talking-squid">${logo}${bubble}</div>`;
 }
 
 async function showBootBanner() {
@@ -8357,9 +8490,23 @@ async function showBootBanner() {
     await updateActiveQuotaGauge();
     if (activeQuotaBackend) fetchQuotaForBackend(activeQuotaBackend);
     const bootTime = data.boot_time ? fmtTime(data.boot_time) : '';
+
+    // Dynamic boot message
+    const insightsPromise = fetchInsights();
+    const streak = getStreak();
+    const now = new Date();
+    const insights = await insightsPromise;
+    const bubbleText = pickBootMessage(insights, {
+      streak,
+      totalSessions: data.total_sessions || 0,
+      firstSeen: data.first_seen || null,
+      hour: now.getHours(),
+      dow: now.getDay(),
+    });
+
     const el = document.createElement('div');
     el.className = 'boot-banner';
-    el.innerHTML = bootLogoHtml() +
+    el.innerHTML = bootLogoHtml(bubbleText) +
       `<div class="boot-meta">AgentSquid${bootTime ? `  ·  started ${bootTime}` : ''}</div>` +
       (!navigator.onLine ? `<div class="boot-offline">no internet — LLM calls will fail</div>` : '');
     messages.appendChild(el);
@@ -8407,7 +8554,7 @@ async function showBootBanner() {
         : 'server unreachable — check Tailscale';
     const el = document.createElement('div');
     el.className = 'boot-banner';
-    el.innerHTML = bootLogoHtml() +
+    el.innerHTML = bootLogoHtml(BOOT_FALLBACK_TEXT) +
       `<div class="boot-offline">${msg}</div>`;
     messages.appendChild(el);
     messages.scrollTop = messages.scrollHeight;
@@ -9354,18 +9501,16 @@ function initPin() {
   });
   document.getElementById('preset-name-modal-close').addEventListener('click', () => _closePresetNameModal(null));
   document.getElementById('preset-name-cancel').addEventListener('click', () => _closePresetNameModal(null));
-  document.getElementById('preset-name-confirm').addEventListener('click', () => {
-    const name = document.getElementById('preset-name-input').value.trim();
-    if (name) _closePresetNameModal(name);
-  });
+  document.getElementById('preset-name-confirm').addEventListener('click', () => { _submitPresetName(); });
+  document.getElementById('preset-name-overwrite').addEventListener('click', () => { _overwritePresetFromModal(); });
   document.getElementById('preset-name-input').addEventListener('input', e => {
     document.getElementById('preset-name-confirm').disabled = !e.target.value.trim();
+    _setPresetNameModalError('');
   });
   document.getElementById('preset-name-input').addEventListener('keydown', e => {
     if (e.key === 'Enter') {
       e.preventDefault();
-      const name = document.getElementById('preset-name-input').value.trim();
-      if (name) _closePresetNameModal(name);
+      _submitPresetName();
     } else if (e.key === 'Escape') {
       e.preventDefault();
       _closePresetNameModal(null);

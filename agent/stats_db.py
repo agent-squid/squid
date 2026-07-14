@@ -192,6 +192,22 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def get_usage_stats() -> dict:
+    """Return total sessions and first-seen date from chat history."""
+    try:
+        db = _connect()
+        total = db.execute(
+            "SELECT COUNT(DISTINCT session_id) FROM chat_messages WHERE session_id IS NOT NULL"
+        ).fetchone()[0]
+        first = db.execute(
+            "SELECT MIN(created_at) FROM chat_messages"
+        ).fetchone()[0]
+        db.close()
+        return {"total_sessions": total, "first_seen": first}
+    except Exception:
+        return {"total_sessions": 0, "first_seen": None}
+
+
 def _runtime_ref_expr(harness_col: str = "harness", provider_col: str = "provider") -> str:
     return (
         f"CASE WHEN {harness_col} IS NULL THEN NULL "
