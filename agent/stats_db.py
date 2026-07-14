@@ -1602,7 +1602,7 @@ def _merge_chart_aggregates(
     if period == "hourly":
         bucket = f"strftime('%Y-%m-%d %H:00', datetime(created_at, '{tz_shift}'))"
     elif period == "weekly":
-        bucket = f"strftime('%Y-%W', datetime(created_at, '{tz_shift}'))"
+        bucket = f"strftime('%Y-%m-%d', datetime(created_at, '{tz_shift}'), '-' || ((strftime('%w', datetime(created_at, '{tz_shift}')) + 6) % 7) || ' days')"
     else:
         bucket = f"strftime('%Y-%m-%d', datetime(created_at, '{tz_shift}'))"
     cutoff = _stats_cutoff(days)
@@ -1736,8 +1736,8 @@ def get_aggregated_stats(
         ss_bucket = f"strftime('%Y-%m-%d %H:00', datetime(ss_inner.created_at, '{tz_shift}'))"
         cm_bucket = f"strftime('%Y-%m-%d %H:00', datetime(cm.created_at, '{tz_shift}'))"
     elif period == "weekly":
-        ss_bucket = f"strftime('%Y-%W', datetime(ss_inner.created_at, '{tz_shift}'))"
-        cm_bucket = f"strftime('%Y-%W', datetime(cm.created_at, '{tz_shift}'))"
+        ss_bucket = f"strftime('%Y-%m-%d', datetime(ss_inner.created_at, '{tz_shift}'), '-' || ((strftime('%w', datetime(ss_inner.created_at, '{tz_shift}')) + 6) % 7) || ' days')"
+        cm_bucket = f"strftime('%Y-%m-%d', datetime(cm.created_at, '{tz_shift}'), '-' || ((strftime('%w', datetime(cm.created_at, '{tz_shift}')) + 6) % 7) || ' days')"
     else:
         ss_bucket = f"strftime('%Y-%m-%d', datetime(ss_inner.created_at, '{tz_shift}'))"
         cm_bucket = f"strftime('%Y-%m-%d', datetime(cm.created_at, '{tz_shift}'))"
@@ -1941,7 +1941,7 @@ def _merge_breakdown_chart_aggregates(
     if period == "hourly":
         bucket = f"strftime('%Y-%m-%d %H:00', datetime(created_at, '{tz_shift}'))"
     elif period == "weekly":
-        bucket = f"strftime('%Y-%W', datetime(created_at, '{tz_shift}'))"
+        bucket = f"strftime('%Y-%m-%d', datetime(created_at, '{tz_shift}'), '-' || ((strftime('%w', datetime(created_at, '{tz_shift}')) + 6) % 7) || ' days')"
     else:
         bucket = f"strftime('%Y-%m-%d', datetime(created_at, '{tz_shift}'))"
     include_topic = breakdown in {"topic_agent", "topic_agent_session"}
@@ -2064,7 +2064,7 @@ def get_stats_by_breakdown(
     if period == "hourly":
         bucket = f"strftime('%Y-%m-%d %H:00', datetime(created_at, '{tz_shift}'))"
     elif period == "weekly":
-        bucket = f"strftime('%Y-%W', datetime(created_at, '{tz_shift}'))"
+        bucket = f"strftime('%Y-%m-%d', datetime(created_at, '{tz_shift}'), '-' || ((strftime('%w', datetime(created_at, '{tz_shift}')) + 6) % 7) || ' days')"
     else:
         bucket = f"strftime('%Y-%m-%d', datetime(created_at, '{tz_shift}'))"
     include_topic = breakdown in {"topic_agent", "topic_agent_session"}
@@ -2079,7 +2079,7 @@ def get_stats_by_breakdown(
     if period == "hourly":
         cm_bucket = f"strftime('%Y-%m-%d %H:00', datetime(created_at, '{tz_shift}'))"
     elif period == "weekly":
-        cm_bucket = f"strftime('%Y-%W', datetime(created_at, '{tz_shift}'))"
+        cm_bucket = f"strftime('%Y-%m-%d', datetime(created_at, '{tz_shift}'), '-' || ((strftime('%w', datetime(created_at, '{tz_shift}')) + 6) % 7) || ' days')"
     else:
         cm_bucket = f"strftime('%Y-%m-%d', datetime(created_at, '{tz_shift}'))"
     if not days:

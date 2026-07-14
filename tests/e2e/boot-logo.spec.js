@@ -46,8 +46,8 @@ async function mockBoot(page, variant, opts = {}) {
         default: 'More Done, Less Tokens.',
         templates: [
           { text: '7 days on a roll.', when: { streak: 7 } },
-          { text: '{turns} turns this week! {turns_wow} from last week. 🦑', when: { turns: { gte: 50 } } },
-          { text: 'Cache hit {cache} — {cache_wow} vs last week!', when: { cache: { gte: 80 }, cache_wow: { gte: 1 } } },
+          { text: '{turns} turns last 7d, {turns_wow} from before 🦑', when: { turns: { gte: 50 } } },
+          { text: 'Cache hit {cache} — {cache_wow} vs last 7d', when: { cache: { gte: 80 }, cache_wow: { gte: 1 } } },
         ],
       },
     },
@@ -94,17 +94,17 @@ test('talking squid shows turns milestone with WoW', async ({ page }) => {
   await mockBoot(page, 2, {
     streak: 1,
     statsRows: [
-      { period: '2026-28', total_turns: 228, sessions: 5, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0, quota_delta: 0, duration_ms: 0 },
-      { period: '2026-27', total_turns: 180, sessions: 4, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0, quota_delta: 0, duration_ms: 0 },
+      { period: '2026-07-13', total_turns: 228, sessions: 5, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0, quota_delta: 0, duration_ms: 0 },
+      { period: '2026-07-06', total_turns: 180, sessions: 4, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0, quota_delta: 0, duration_ms: 0 },
     ],
   });
   await page.goto('/');
-  await expect(page.locator('.boot-logo-talking-squid .boot-logo-bubble')).toHaveText('228 turns this week! +48 from last week. 🦑');
+  await expect(page.locator('.boot-logo-talking-squid .boot-logo-bubble')).toHaveText('228 turns last 7d, +48 from before 🦑');
 });
 
 test('talking squid falls back to default when no match', async ({ page }) => {
   await mockBoot(page, 2, { streak: 1, statsRows: [
-    { period: '2026-28', total_turns: 5, sessions: 1, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0, quota_delta: 0, duration_ms: 0 },
+    { period: '2026-07-13', total_turns: 5, sessions: 1, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0, quota_delta: 0, duration_ms: 0 },
   ]});
   await page.goto('/');
   await expect(page.locator('.boot-logo-talking-squid .boot-logo-bubble')).toHaveText('More Done, Less Tokens.');

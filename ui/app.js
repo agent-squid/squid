@@ -8425,7 +8425,8 @@ function getStreak() {
 
 async function fetchInsights() {
   try {
-    const res = await fetch(INSIGHTS_URL);
+    // Cache-bust to avoid stale CDN edge cache
+    const res = await fetch(`${INSIGHTS_URL}?_=${Date.now()}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     localStorage.setItem('squid_insights', JSON.stringify(data));
@@ -8607,13 +8608,20 @@ function pickBootMessage(insights, values) {
   const measureByKey = {};
   for (const m of measures) measureByKey[m.key] = m;
 
-  for (const t of section.templates) {
+  // Fisher-Yates shuffle so every matching template gets equal probability.
+  // `random` weights on individual templates still act as a per-template gate.
+  const templates = [...section.templates];
+  for (let i = templates.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [templates[i], templates[j]] = [templates[j], templates[i]];
+  }
+
+  for (const t of templates) {
     const w = t.when || {};
 
-    // Handle random separately (not a measure key)
+    // Per-template random gate (optional — omit for equal distribution)
     if (w.random != null && Math.random() > w.random) continue;
 
-    // Evaluate all other conditions
     let match = true;
     for (const [key, cond] of Object.entries(w)) {
       if (key === 'random') continue;
@@ -8622,7 +8630,6 @@ function pickBootMessage(insights, values) {
     }
     if (!match) continue;
 
-    // Substitute {key} placeholders with formatted values
     return t.text.replace(/\{(\w+)\}/g, (_, k) => {
       const raw = values[k];
       if (raw === undefined || raw === null) return `{${k}}`;
