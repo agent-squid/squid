@@ -2983,6 +2983,10 @@ body {
 #stats-content th:first-child, #stats-content td:first-child { text-align: left; }
 #stats-content .stats-col-compact { width: 1%; padding-right: 0.4rem; }
 #stats-content .stats-route-col { text-align: left; }
+#stats-content .stats-turn-table {
+  min-width: 100%;
+  width: max-content;
+}
 #stats-content thead th {
   color: var(--text-dim);
   font-weight: normal;
@@ -3439,7 +3443,7 @@ button {
     width: 100%;
   }
   #stats-content .stats-turn-table.stats-turn-table-wide {
-    width: auto;
+    width: max-content;
   }
   #stats-content .stats-turn-table th,
   #stats-content .stats-turn-table td {
