@@ -177,3 +177,47 @@ test('By Turn default table fits mobile width', async ({ page }) => {
 
   await expect.poll(() => page.locator('.stats-table-scroll').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
 });
+
+test('By Turn table scrolls horizontally on desktop when columns exceed viewport', async ({ page }) => {
+  // Desktop viewport — the turn table must use width:max-content so it can
+  // grow past the container and trigger horizontal scroll.  A plain width:100%
+  // (the default for other stats tables) would crush all columns to fit, which
+  // is the regression this test guards against.
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await mockApp(page);
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get('period') !== 'turn') {
+      return route.fulfill({ json: [{ period: '2026-07-10 10:00', sessions: 1, total_turns: 1, input_tokens: 10, output_tokens: 5 }] });
+    }
+    return route.fulfill({
+      json: [{
+        msg_id: 2, period: '2026-07-10T10:05:00Z', topic: 'squid', agent: 'codex', adhoc: 0,
+        sessions: 1, total_turns: 1, input_tokens: 200, output_tokens: 20, duration_ms: 8000,
+        cache_read_tokens: 900000, cache_write_tokens: 20000, cost_usd: 12.34,
+      }],
+    });
+  });
+
+  await page.goto('/');
+  await page.evaluate(() => switchView('stats'));
+  await page.locator('#sf-period').selectOption('turn');
+  await page.waitForSelector('.stats-turn-link');
+
+  // Select enough extra measures that the row content must exceed the viewport.
+  await page.locator('#sf-measures-toggle').click();
+  for (const v of ['cost', 'cache_read', 'cache_write', 'cache_hit_rate']) {
+    await page.locator(`#sf-measures-menu input[value="${v}"]`).check();
+  }
+  await page.locator('#sf-measures-toggle').click();
+
+  const scroll = page.locator('.stats-table-scroll');
+  await expect.poll(() => scroll.evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true);
+
+  // Columns must stay readable — the crushed-column variant of this bug
+  // would show scrollWidth == clientWidth with every column squeezed to ~0.
+  const headerWidths = await page.locator('.stats-turn-table thead th').evaluateAll(
+    ths => ths.map(th => th.getBoundingClientRect().width)
+  );
+  for (const w of headerWidths) expect(w).toBeGreaterThan(30);
+});
