@@ -74,6 +74,17 @@ message from `_build_commit_message`) are useful as an audit trail but not as
 permanent history — nobody wants one commit per turn in `git log`. Before
 re-enabling isolation by default, the plan is:
 
+Note this is not a silent fix layered invisibly under the existing sync
+path — it's a deliberate procedural addition. Per-turn auto-commit keeps
+happening on every turn exactly as it does today; squashing that history
+down only happens when something explicitly calls the new `push` command
+(point 2 below). Nothing about turn-end sync changes to make the commit
+trail disappear on its own; a user (or some other explicit trigger) has to
+invoke the squash. This is also why it can't be done from inside the chat
+agent itself — the agent is sandboxed to its per-turn worktree and has no
+access to `repo_root`, so the squash has to live in its own privileged
+command path outside the normal turn loop.
+
 1. **Checkpoint ref.** A plain ref per `(topic, repo_root)`, e.g.
    `refs/squid/checkpoint/<repo_hash>-<topic>` — git's version of a bookmark —
    tracking the last point that was squashed/pushed.
@@ -92,6 +103,85 @@ re-enabling isolation by default, the plan is:
 
 Not started yet. Tracked here so the "why is this off" question has an answer
 beyond "it got complicated."
+
+### Alternative considered: stash-based no-commit merge
+
+Instead of auto-committing on `sqd-<key>` and `merge --no-ff`, sync could
+bundle the worktree's changes into a stash and pop it onto the source repo,
+producing zero commits instead of one per turn:
+
+```bash
+# in the worktree, at turn end
+git stash push -u -m "turn <asst_msg_id>"
+
+# in the source repo
+git stash pop stash@{0}
+```
+
+`-u` is required so untracked files the agent created are included. This
+sidesteps the squash-on-push problem entirely — there's no `"squid: turn N"`
+commit trail to squash because nothing was ever committed.
+
+The stack-index race (`stash@{0}` shifting if another topic pushes onto the
+same source repo's stash concurrently) is avoidable: capture
+`git rev-parse refs/stash` immediately after the `push`, store that SHA in
+the worktree registry row already keyed by `str(asst_msg_id)`, and use the
+hash — not `stash@{N}` — at sync time. Tested directly (`git` 2.x):
+
+- `git stash apply <sha>` **works** — apply resolves its `<stash>` argument
+  as an arbitrary commit-ish, not just a `stash@{N}` ref, so it's immune to
+  the stack shifting from other topics' concurrent pushes/pops.
+- `git stash pop <sha>` and `git stash drop <sha>` **fail** —
+  `error: '<sha>' is not a stash reference`. Both require a live
+  `stash@{N}` ref; the underlying commit existing (even reachable from
+  `refs/stash`'s reflog) isn't enough.
+
+So the safe sequence is apply-by-hash, then drop-by-rescanned-index: after
+applying, scan `git stash list` and `git rev-parse stash@{i}` for each `i`
+until one matches the stored SHA, then `git stash drop stash@{i}`. This
+still can't mis-drop another topic's entry, because the match is by exact
+hash, not position — worst case if the entry is already gone (raced away by
+something else) the drop is just skipped, leaking a stash entry rather than
+corrupting one. `-m "turn <asst_msg_id>"` on push remains useful as a
+human-readable label in `git stash list`, but the actual lookup key Squid
+would store and act on is the hash, not the message text.
+
+What this doesn't fix, and why it's not adopted despite the race being
+solvable:
+
+- **Breaks turn-chaining.** `ensure_worktree` creates each turn's worktree
+  with `git worktree add -b sqd-<key> <path> HEAD` (see "How the worktree
+  becomes the agent's working directory"), which only materializes
+  *committed* tree state. Today, `sync_after_turn`'s commit + `merge --no-ff`
+  is what advances the source branch's HEAD every turn, so turn N+1's fresh
+  worktree correctly includes turn N's changes. `stash apply` alone never
+  commits, so HEAD never moves — turn N+1's worktree would branch from stale
+  history, silently missing turn N's changes entirely rather than merely
+  showing them as unscoped. That's worse than the bleed problem this ADR
+  exists to prevent, not a variant of it.
+- **Reintroduces bleed at the source repo.** The applied-but-uncommitted
+  changes land directly in the source repo's own working tree — exactly
+  "Option 1: No isolation," at the layer worktrees were built to keep clean.
+  If another topic or session shares that code root, it now collides with
+  turn N's uncommitted output sitting in the shared tree.
+- **No net win even if you patch around both.** Avoiding these means
+  committing immediately after the apply anyway — at which point stash has
+  bought nothing over today's `merge --no-ff` (same one-commit-per-turn
+  outcome), while adding SHA-capture, index-rescanning, and drop-by-hash
+  bookkeeping for it.
+- Separately, same-line conflicts still halt with markers (no data loss),
+  but changes to *different* lines of the same file auto-merge silently with
+  no merge commit produced, so there's no artifact to inspect afterward —
+  this is the same underlying 3-way-merge behavior `git merge` already has
+  for non-overlapping hunks, the difference is only that a merge commit
+  leaves a reviewable record and a stash apply leaves none. (Revert itself
+  doesn't depend on this trail — `/chat/{msg_id}/revert`
+  (`agent/server.py`) reverts by applying the stored `GitDiff` text as a
+  reverse patch (`apply_reverse_patch`), not by referencing a commit.)
+
+The HEAD/worktree-chaining dependency, not the stack-index race or revert,
+is the actual reason auto-commit + `merge --no-ff` is still the adopted
+mechanism (see "Sync now, remove later").
 
 ## Context
 
@@ -180,6 +270,106 @@ and CWD is the source repo (not shared with any running turn), the agent is
 the only process writing to `effective_code_roots` during that turn. This is
 surfaced to the model in the `<squid_code_roots>` context block so it can skip
 redundant re-reads and existence checks.
+
+### Considered: seeding a fresh worktree with the source repo's dirty state
+
+Today `git worktree add -b sqd-<key> <path> HEAD` only ever materializes
+*committed* state — if the user has uncommitted edits sitting in the source
+repo when a turn starts, the agent never sees them. Whether that's desired
+is a product question, not addressed here; this section only covers whether
+it's mechanically possible and what it costs. Verified directly (`git`
+2.50.1):
+
+**Mechanism.** `git stash create` builds a commit object representing the
+current index + working tree diff against HEAD **without touching the
+source repo's index, working tree, or `refs/stash`** — unlike `stash push`,
+which does mutate the source repo and would need a guaranteed `pop` to
+restore it. That snapshot commit can then be applied inside the *new*
+worktree instead:
+
+```bash
+# unchanged: worktree still built from HEAD
+git worktree add -b sqd-<key> <path> HEAD
+
+# read-only snapshot of the source repo's dirty tracked state
+SHA=$(git -C <repo_root> stash create -m "turn <asst_msg_id> seed")
+
+# apply it into the worktree, not the source repo
+git -C <path> stash apply --index "$SHA"
+```
+
+**Footgun: `-u`/`--include-untracked` is not a valid flag for `stash
+create`** (only for `stash push`) — git does not error on it, it silently
+folds `-u`/`-m` into the stash's commit message text as literal characters.
+Confirmed via `git cat-file -p`: a snapshot created with `stash create -u -m
+"snapshot"` came out with only 2 parents (no untracked-tree parent) and a
+message of literally `"On main: -u -m snapshot"`. So `stash create` alone
+**never captures untracked files**, regardless of flags passed — untracked
+files need a second, separate step:
+
+```bash
+git -C <repo_root> ls-files --others --exclude-standard -z |
+  xargs -0 -I{} cp --parents {} <path>/
+```
+
+This is also read-only on the source repo (`ls-files` doesn't touch
+anything; `cp` only reads the source path).
+
+**Races, and how each is handled:**
+
+- **HEAD drifts between the `worktree add` and the `stash create`.** If
+  another turn's `sync_after_turn` (or a `push`/squash) advances the source
+  branch's HEAD in that gap, the worktree was built from the old HEAD but
+  the stash's recorded parent is the new one — `stash apply` then does a
+  3-way merge against a base the worktree wasn't actually built from.
+  Not silent (conflicts still surface exactly as any `git merge` would
+  produce them), but nothing flags that the base moved. **Mitigation:**
+  resolve HEAD to a concrete SHA once, pass that same SHA to both
+  `worktree add <path> <sha>` and compare it against `git rev-parse
+  "$SHA^1"` (the stash's first parent) before applying; on mismatch, retry
+  the whole capture against the new HEAD rather than applying blind.
+- **Torn snapshot across the two-part capture.** Tracked state comes from
+  `stash create` (one instant); untracked files come from a separate
+  `ls-files` + copy (a later instant). If the user's editor or a formatter
+  is mid-save across several files exactly then, the combined snapshot can
+  mix pre-edit and post-edit state across files. No mitigation beyond
+  narrowing the window between the two calls as much as possible — this is
+  inherent to capturing dirty state from a repo that is not sole-writer.
+- **Read-during-write on individual files.** Same root cause as above, one
+  level down: both `stash create`'s hashing and the untracked-file copy are
+  plain reads of a live working tree, so either can observe a torn/partial
+  write from an in-progress save. The rest of this ADR's design sidesteps
+  this entirely via the sole-writer guarantee above — nothing but that
+  turn's own agent ever writes to *its* worktree. The source repo has no
+  such guarantee; the user's own editor is the whole reason this feature
+  would exist, so this hazard can't be engineered away, only accepted.
+- **Concurrent captures across topics sharing a code root are *not* a
+  problem.** `stash create` touches no shared git state (`.git/index`,
+  `refs/stash`) — unlike `push`/`pop`, it can't lock-contend on
+  `index.lock`. N topics can each call it concurrently against the same
+  source repo with zero interference between them.
+- **Snapshot racing an in-flight `sync_after_turn` on the same repo.** The
+  ADR already names topics sharing a code root as a bleed vector (see
+  "Context" below). If Topic B's turn-start capture runs while Topic A's
+  `merge --no-ff` from a previous turn is still applying on that same
+  source repo, the repo can transiently be in a conflicted-merge state
+  (`MERGE_HEAD` present, unmerged index stages). `stash create`'s behavior
+  there isn't something to rely on. **Mitigation:** check for `MERGE_HEAD`
+  (or a non-empty `git status --porcelain` unmerged-entry prefix) before
+  capturing, and skip/retry rather than proceeding against a repo mid-merge.
+- **Untracked file vanishes or moves between listing and copying.** The
+  `ls-files --others` walk and the `cp` are a second TOCTOU window —
+  editors that save via temp-file-then-rename can make a path transiently
+  disappear. **Mitigation:** treat each file's copy failure as a soft
+  per-file skip+log, not an abort of the whole capture.
+
+None of these lose data silently — the failure modes are conflict markers
+or an outright missing-file error, matching the safety bar the rest of this
+ADR holds sync to. What they cost is *consistency*: the source repo's dirty
+state has none of the guarantees the worktree's own pre-turn snapshot has,
+because the source repo isn't sole-writer. Not implemented; recorded here
+in case "should a turn see the user's uncommitted source-repo edits" comes
+up as a real feature request.
 
 ### Dependency directories
 

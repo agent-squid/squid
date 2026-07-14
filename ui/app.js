@@ -8583,10 +8583,6 @@ async function resolveInsightMeasures(insights) {
 
 function _evalCondition(value, cond) {
   if (cond === null || cond === undefined) return true;
-  if (typeof cond === 'number' && cond >= 0 && cond <= 1 && Object.keys(cond).length === 0) {
-    // This path shouldn't normally be reached for random — handled in pickBootMessage
-    return true;
-  }
   if (typeof cond === 'object' && cond !== null && !Array.isArray(cond)) {
     if ('eq' in cond) return value === cond.eq;
     if ('gte' in cond) return value >= cond.gte;
