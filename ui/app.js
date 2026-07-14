@@ -3489,7 +3489,18 @@ function _gitDiffSourceRepo(tool) {
   return '';
 }
 
-function makeToolBlock(tool, msgId) {
+// Revert is "undo what I just saw," not time travel — past this window other
+// work has almost certainly built on top of the file, so the eligibility
+// check (which scans every later message in the topic) is skipped entirely.
+const REVERT_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+function _withinRevertWindow(timestamp) {
+  if (!timestamp) return true;  // no timestamp (e.g. a just-finished live response) is always "now"
+  const t = new Date(timestamp).getTime();
+  return Number.isFinite(t) && Date.now() - t < REVERT_WINDOW_MS;
+}
+
+function makeToolBlock(tool, msgId, timestamp) {
   const name = tool.name || '';
   const block = document.createElement('div');
   block.className = 'tool-block';
@@ -3546,7 +3557,8 @@ function makeToolBlock(tool, msgId) {
     toggle.textContent = `Changed files: ${count} file${count !== 1 ? 's' : ''}, +${additions} -${deletions}`;
 
     const sourceRepo = _gitDiffSourceRepo(tool);
-    if (msgId && sourceRepo) {
+    const revertEligible = msgId && sourceRepo && _withinRevertWindow(timestamp);
+    if (revertEligible) {
       block.dataset.msgId = String(msgId);
       block.dataset.repo = sourceRepo;
       const revertBar = document.createElement('div');
@@ -3568,7 +3580,7 @@ function makeToolBlock(tool, msgId) {
 
       const row = document.createElement('div');
       row.className = 'gitdiff-file-row';
-      if (msgId && sourceRepo) row.dataset.file = file.path;
+      if (revertEligible) row.dataset.file = file.path;
 
       const fileToggle = document.createElement('button');
       fileToggle.className = 'gitdiff-file-toggle';
@@ -3656,6 +3668,10 @@ async function fetchRevertEligibility(block) {
   const msgId = block.dataset.msgId;
   const repo = block.dataset.repo;
   if (!msgId || !repo) return;
+  // Marked synchronously (before the fetch even starts) so an overlapping
+  // refreshAllRevertButtons() call in the same tick sees it as claimed and
+  // skips it, instead of firing a duplicate request for the same block.
+  block.dataset.revertChecked = '1';
 
   let eligibility;
   try {
@@ -3681,7 +3697,7 @@ async function fetchRevertEligibility(block) {
         try {
           const data = await _doRevert(msgId, repo, fpath);
           if (data.ok && data.reverted?.length) {
-            refreshAllRevertButtons();
+            refreshAllRevertButtons({ force: true });
           } else {
             btn.disabled = false; btn.textContent = 'revert';
             btn.title = data.failed?.[0]?.error || data.error || 'failed';
@@ -3711,7 +3727,7 @@ async function fetchRevertEligibility(block) {
       btn.disabled = true; btn.textContent = '…';
       try {
         const data = await _doRevert(msgId, repo, null);
-        if (data.ok) { refreshAllRevertButtons(); }
+        if (data.ok) { refreshAllRevertButtons({ force: true }); }
         else { btn.disabled = false; btn.textContent = `Revert all`; btn.title = data.error || 'failed'; }
       } catch { btn.disabled = false; }
     });
@@ -3719,8 +3735,14 @@ async function fetchRevertEligibility(block) {
   }
 }
 
-function refreshAllRevertButtons() {
-  document.querySelectorAll('.tool-block[data-msg-id][data-repo]').forEach(fetchRevertEligibility);
+// Revert-eligibility is per-block static info (does a git diff exist / is it
+// still revertable) except right after an actual revert, where the working
+// tree changed and every block's eligibility may have shifted - hence `force`.
+function refreshAllRevertButtons({ force = false } = {}) {
+  for (const block of document.querySelectorAll('.tool-block[data-msg-id][data-repo]')) {
+    if (!force && block.dataset.revertChecked === '1') continue;
+    fetchRevertEligibility(block);
+  }
 }
 
 function historyPromptTruncateLimit() {
@@ -3866,7 +3888,7 @@ function appendHistoryItem(item, container) {
       const diffTools = changeTools(tools);
       let lastEl = asstBubble;
       for (const tool of diffTools) {
-        const block = makeToolBlock(tool, item.id);
+        const block = makeToolBlock(tool, item.id, item.timestamp);
         block.classList.add('history-item', 'tool-block-history');
         if (container) container.appendChild(block);
         else { lastEl.after(block); lastEl = block; }
@@ -5080,6 +5102,43 @@ function initCursorQuota() {
 let statsPeriod = 'hourly';
 let statsBreakdown = '';
 let statsFilters = { days: 1, agents: [], topics: [], adhoc: 'all' };
+// statsFilters.days doubles as an hours flag: negative values mean
+// "-days" hours (e.g. -3 = 3h). Only the 'turn' grain offers sub-day ranges,
+// since coarser grains bucket by hour/day/week and hours would be meaningless there.
+const STATS_DAY_OPTIONS_DEFAULT = [
+  { value: 1, label: '1d' },
+  { value: 3, label: '3d' },
+  { value: 7, label: '7d' },
+  { value: 14, label: '14d' },
+  { value: 28, label: '28d' },
+  { value: 90, label: '90d' },
+  { value: 0, label: 'All Time' },
+];
+// Capped at 7d: per-turn points are dense enough that longer ranges are mostly noise.
+const STATS_DAY_OPTIONS_TURN = [
+  { value: -1, label: '1h' },
+  { value: -3, label: '3h' },
+  { value: -6, label: '6h' },
+  { value: -12, label: '12h' },
+  { value: 1, label: '1d' },
+  { value: 3, label: '3d' },
+  { value: 7, label: '7d' },
+];
+
+function _statsDayOptionsFor(period) {
+  return period === 'turn' ? STATS_DAY_OPTIONS_TURN : STATS_DAY_OPTIONS_DEFAULT;
+}
+
+function _syncStatsDayOptions(period) {
+  const options = _statsDayOptionsFor(period);
+  const select = document.getElementById('sf-days');
+  const valid = new Set(options.map(o => o.value));
+  if (!valid.has(statsFilters.days)) {
+    statsFilters.days = period === 'turn' ? 7 : 1;
+  }
+  select.innerHTML = options.map(o => `<option value="${o.value}">${o.label}</option>`).join('');
+  select.value = String(statsFilters.days);
+}
 let statsChartY1 = 'turns';
 let statsChartAggY1 = 'sum';
 // Additional chart series beyond the primary (Y1) one — each entry is
@@ -5988,7 +6047,12 @@ function _statsQueryParams({ includeTz = false } = {}) {
     params.set('breakdown_sort', _statsBreakdownColumnSort.mode);
     params.set('breakdown_sort_dir', _statsBreakdownColumnSort.dir);
   }
-  params.set('days', statsFilters.days);
+  if (statsFilters.days < 0) {
+    params.set('days', 0);
+    params.set('hours', -statsFilters.days);
+  } else {
+    params.set('days', statsFilters.days);
+  }
   if (includeTz) params.set('tz_offset_minutes', new Date().getTimezoneOffset());
   if (statsFilters.agents.length) params.set('agent', statsFilters.agents.join(','));
   if (statsFilters.topics.length) params.set('topic', statsFilters.topics.join(','));
@@ -6068,7 +6132,7 @@ function _applyStatsState(state) {
   _statsMeasures.clear();
   for (const key of state?.measure?.visible || DEFAULT_STATS_MEASURES) _statsMeasures.add(key);
   document.getElementById('sf-period').value = statsPeriod;
-  document.getElementById('sf-days').value = String(statsFilters.days);
+  _syncStatsDayOptions(statsPeriod);
   document.getElementById('sf-breakdown').value = statsBreakdown;
   document.getElementById('sf-adhoc').value = statsFilters.adhoc;
   // A saved preset's chart metric might not be in its saved visible measures
@@ -6805,6 +6869,7 @@ function initStats() {
   document.getElementById('sf-period').addEventListener('change', e => {
     const prevPeriod = statsPeriod;
     statsPeriod = e.target.value;
+    _syncStatsDayOptions(statsPeriod);
     let measuresChanged = false;
     if (statsPeriod === 'turn' && prevPeriod !== 'turn') {
       if (statsBreakdown) {

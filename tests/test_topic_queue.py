@@ -74,6 +74,36 @@ def test_queue_preview_uses_display_prompt_not_augmented_prompt():
     assert asyncio.run(run())[0]["prompt_preview"] == "fix app"
 
 
+def _make_item(seq, msg_id):
+    return QueueItem(
+        seq=seq, topic="work", agent="codex", prompt="p", display_prompt=None,
+        context_history=[], backend="codex", model=None, msg_id=msg_id,
+    )
+
+
+def test_position_of_reflects_live_queue_after_earlier_item_cancelled():
+    # Regression: position_of used to subtract seq numbers directly, which
+    # overcounts once an earlier-queued item is drained — its seq is never
+    # reassigned to the items behind it, so the queue "shrinks" without the
+    # remaining items' seq values shifting down to match.
+    async def run():
+        worker = TopicWorker("work")
+        worker._processing_seq = 0  # something is currently running with seq 0
+        first = _make_item(seq=1, msg_id=101)
+        second = _make_item(seq=2, msg_id=102)
+        worker.q.put_nowait(first)
+        worker.q.put_nowait(second)
+
+        before = (worker.position_of(1), worker.position_of(2))
+        worker.drain(pos=1)  # cancel the first queued item (position 1)
+        after = worker.position_of(2)
+        return before, after
+
+    (pos_first, pos_second), pos_second_after_cancel = asyncio.run(run())
+    assert (pos_first, pos_second) == (1, 2)
+    assert pos_second_after_cancel == 1
+
+
 def test_worker_persists_stats_with_item_lookback():
     async def fake_runner(*args, **kwargs):
         yield {"_stats": {"session_id": "thread-1", "input_tokens": 10, "output_tokens": 5}}

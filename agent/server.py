@@ -1418,6 +1418,7 @@ async def usage_stats(
     group: str = "time",
     breakdown: str = "",
     days: int = 30,
+    hours: int = 0,
     agent: str = "",
     topic: str = "",
     adhoc: str = "all",
@@ -1427,7 +1428,7 @@ async def usage_stats(
 ):
     chart_series = _parse_chart_series(chart_metrics, chart_aggs)
     if period == "turn":
-        return JSONResponse(get_stats_by_turn(days=days, agent=agent, topic=topic, adhoc=adhoc))
+        return JSONResponse(get_stats_by_turn(days=days, hours=hours, agent=agent, topic=topic, adhoc=adhoc))
     if group == "time" and breakdown in {"agent", "agent_session", "topic_agent", "topic_agent_session"}:
         return JSONResponse(get_stats_by_breakdown(
             period=period,

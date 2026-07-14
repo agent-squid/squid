@@ -1835,6 +1835,12 @@ body {
   width: 100%;
   box-sizing: border-box;
 }
+#preset-name-modal-error {
+  margin-top: 0.5rem;
+  color: var(--danger);
+  font-size: var(--text-body);
+}
+#preset-name-overwrite,
 #preset-name-cancel,
 #preset-name-confirm {
   border-radius: 6px;

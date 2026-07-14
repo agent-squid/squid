@@ -57,10 +57,17 @@ class TopicWorker:
         asyncio.create_task(self._run(), name=f"squid-worker-{self.topic}")
 
     def position_of(self, seq: int) -> int:
-        """Returns 0 if the item is being processed (or worker is idle), N if N items are ahead."""
-        if self._processing_seq is None:
-            return 0  # worker is idle, item will start immediately
-        return seq - self._processing_seq
+        """Returns 0 if the item is being processed (or worker is idle), N if N items are ahead.
+        Counts actual live queue entries rather than subtracting seq numbers — a
+        cancelled/drained item's seq isn't reassigned to the items behind it, so
+        seq arithmetic overcounts by however many ahead-of-it items were removed.
+        """
+        if self._processing_seq is None or seq == self._processing_seq:
+            return 0  # worker is idle, or this is the item currently running
+        for idx, item in enumerate(self.q._queue):
+            if item is not None and item.seq == seq:
+                return idx + 1
+        return 0
 
     def queue_depth(self) -> int:
         return self.q.qsize()

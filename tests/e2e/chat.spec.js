@@ -696,6 +696,52 @@ test.describe('response bubble', () => {
     expect(openedPaths[0]).not.toContain('/.squid/worktrees/');
   });
 
+  test('revert eligibility is not re-fetched for already-checked blocks, but is after a revert', async ({ page }) => {
+    const statusRequests = [];
+    await page.route('**/chat/*/diff-revert-status**', route => {
+      const msgId = route.request().url().match(/\/chat\/(\d+)\//)[1];
+      statusRequests.push(msgId);
+      route.fulfill({ json: { 'ui/app.js': 'revertable' } });
+    });
+    await page.route('**/chat/1/revert', route => route.fulfill({ json: { ok: true, reverted: ['ui/app.js'] } }));
+
+    const gitDiffTool = {
+      name: 'GitDiff', repo: '/tmp/repo', file_count: 1, additions: 1, deletions: 0,
+      files: [{ status: 'M', path: 'ui/app.js' }],
+      diff: 'diff --git a/ui/app.js b/ui/app.js\n@@ -1 +1 @@\n+const opened = true;',
+    };
+
+    // First message completes with a GitDiff tool block (msg_id 1).
+    await page.route('**/chat', route => route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(META, { event: 'tool', data: gitDiffTool }, { data: 'Done' }, DONE),
+    }), { times: 1 });
+    await sendMsg(page, 'first');
+    await expect(page.locator('.tool-block-history')).toHaveCount(1);
+    await expect.poll(() => statusRequests).toEqual(['1']);
+
+    // Second message completes with its own GitDiff tool block (msg_id 2).
+    // Rendering it re-triggers refreshAllRevertButtons() over the whole DOM,
+    // but block 1 was already checked, so only block 2 should fire a request.
+    await page.route('**/chat', route => route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        { event: 'meta', data: { agent: 'claude', backend: 'claude', msg_id: 2, adhoc: false } },
+        { event: 'tool', data: gitDiffTool },
+        { data: 'Done' },
+        DONE,
+      ),
+    }));
+    await sendMsg(page, 'second');
+    await expect(page.locator('.tool-block-history')).toHaveCount(2);
+    await expect.poll(() => statusRequests).toEqual(['1', '2']);
+
+    // Reverting changes the working tree, so eligibility for every block -
+    // including the already-checked one - needs a fresh check.
+    await page.locator('.tool-block-history').first().getByRole('button', { name: 'revert' }).click();
+    await expect.poll(() => statusRequests).toEqual(['1', '2', '1', '2']);
+  });
+
   test('recovered completion restores GitDiff and renders one end timestamp', async ({ page }) => {
     const gitDiff = {
       name: 'GitDiff',

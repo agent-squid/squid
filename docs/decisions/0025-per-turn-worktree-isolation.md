@@ -145,12 +145,15 @@ turn N runs
 
 turn N ends
   → diff = seeded-snapshot vs. current worktree state (turn-scoped, as today)
-  → drain: relay the worktree's changes back into repo_root's dirty tree
-  → on success: mark_worktree_synced (unchanged); worktree removal deferred
-    to the same background sweep as today ("sync now, remove later")
-  → on conflict: repo_root is restored to its pre-drain state exactly;
-    the worktree (and its changes) is left intact, not removed; conflicting
-    files are surfaced to the UI
+  → drain: pull repo_root's current dirty state into the worktree and merge
+    it there (repo_root itself is not written to yet)
+  → on clean merge: promote the worktree's merged tree into repo_root;
+    mark_worktree_synced; worktree removal deferred to the same background
+    sweep as today ("sync now, remove later")
+  → on conflict: repo_root is untouched (nothing was ever written to it);
+    the worktree is left intact, not removed, with conflict markers in
+    place; the base/ours/theirs list is surfaced to the user or to a
+    follow-up LLM turn for resolution, still scoped to the same worktree
 ```
 
 ### Seed: relaying repo_root's dirty state into a fresh worktree
@@ -175,6 +178,12 @@ SHA=$(git -C <repo_root> stash create -m "turn <asst_msg_id> seed")
 # apply into the new worktree, not repo_root
 git -C <path> stash apply --index "$SHA"
 ```
+
+`SHA` is retained for the rest of the turn (in the worktree registry row,
+alongside the path/branch already stored there) as `BASE` — the common
+ancestor the drain step's 3-way merge needs later. Without it, drain would
+have no way to tell "what repo_root already had when this turn started"
+apart from "what the turn itself changed."
 
 `stash create` never captures untracked files, regardless of flags passed
 (confirmed directly: passing `-u` silently becomes literal text in the
@@ -222,52 +231,323 @@ None of these lose data silently — worst case is a slightly stale seed, not
 corruption, and the sole-writer guarantee for the worktree itself (below)
 is untouched.
 
-### Drain: relaying the worktree's changes back into repo_root
+### Drain, revised: merge in the worktree, promote to repo_root only once clean
 
-The reverse of seeding, run at turn end instead of turn start, and it
-**writes** to repo_root instead of only reading it — so it needs the
-per-repo lock for its full duration, not just to avoid observing a
-mid-drain state but because it causes one:
+An earlier draft of this design applied the worktree's changes *onto*
+repo_root and, on conflict, restored repo_root back to a pre-drain
+snapshot (kept below as "Superseded" for the record). That works, but it
+means every conflict writes a failed 3-way merge attempt directly into the
+user's real, live directory before undoing it — and undoing it is manual
+reconstruction (index reset, orphan-file cleanup, re-copying untracked
+files) rather than one atomic Git command, because `stash apply` has no
+`--abort` the way `merge` does.
+
+The fix is to **never let a conflict touch repo_root at all.** Invert the
+direction: instead of pushing the worktree's drain onto repo_root, pull
+repo_root's current dirty state into the worktree. The worktree is already
+disposable and sole-writer; repo_root isn't. Doing the risky merge in the
+disposable side and only copying the result over once it's fully resolved
+means repo_root is either read-only or written-to-with-a-known-clean-result
+— never mid-conflict.
 
 ```bash
-# under _lock_for(repo_root):
+# brief hold of _lock_for(repo_root) — just to read, not to write:
+BASE = <the seed snapshot SHA this worktree started from, captured at turn start>
+PRE  = $(git -C <repo_root> stash create -m "pre-drain read")   # read-only
+# lock released here — resolution below may take arbitrarily long
 
-# 1. safety snapshot of repo_root's current dirty state, read-only
-PRE = $(git -C <repo_root> stash create -m "pre-drain safety snapshot")
-
-# 2. snapshot of the worktree's changes since it was seeded, read-only
-SHA = $(git -C <path> stash create -m "turn <asst_msg_id> drain")
-
-# 3. apply into repo_root
-git -C <repo_root> stash apply --index "$SHA"
-# + copy the worktree's untracked files into repo_root the same way
-#   seeding does it, in reverse
+git -C <wt> stash apply --index "$PRE"
+# 3-way merge: base=BASE, ours=worktree's own tree (this turn's output),
+# theirs=PRE (repo_root's current dirty state)
 ```
 
-If step 3 applies cleanly, repo_root's working tree now holds the turn's
-changes, dirty and uncommitted — deliberately: this is the whole point of
-dropping commits from the design. No commit trail accumulates on the
-source branch; the user's own `git commit`, whenever they choose to run it,
-is what turns these changes into history, same as if they'd typed them.
+**If this applies cleanly:** the worktree's tree now equals "repo_root's
+latest dirty state plus this turn's changes," fully merged — and repo_root
+itself was never written to during the attempt.
 
-If step 3 conflicts (a same-line overlap between what the worktree started
-from and what's now sitting in repo_root — e.g. the user hand-edited the
-same lines mid-turn, or a concurrent topic's drain landed first): restore
-repo_root's tree to `PRE` exactly (`git checkout <tree of PRE> -- .`, plus
-re-copying `PRE`'s untracked set) so repo_root is never left mid-conflict or
-partially applied. Surface the conflicting file list to the UI. The turn's
-actual changes are not lost — they remain in the still-intact worktree,
-which is not removed, so the user can resolve and retry the drain manually.
+**If it conflicts:** the conflict markers land inside the worktree's own
+files — a disposable, isolated location — not in repo_root. repo_root is
+simply left exactly as it was; there is nothing to restore, because nothing
+there was ever touched. This is what makes the whole "restore to snapshot"
+problem disappear rather than solving it: the earlier design needed a safe
+undo path *because* it risked mutating repo_root first and asking questions
+later. This design never risks it.
 
-Non-conflicting hunks in the same file still auto-merge silently via the
-same 3-way logic `git apply`/`stash apply` always uses — that's inherent to
-3-way merge, not new to this design, and matches how `git merge` already
-behaved for non-overlapping hunks in the shipped implementation.
+### The 3-way conflict list — for the user, or for an LLM's next turn
+
+Once the merge lands in the worktree, git's own index already has
+everything needed to describe each conflict as a clean three-way payload —
+nothing here is invented, it's plain plumbing on state git already wrote:
+
+For every path in `git -C <wt> diff --name-only --diff-filter=U`:
+
+| side | source | meaning |
+|---|---|---|
+| base | `git show :1:<path>` | the seed snapshot's version — what neither side had changed yet |
+| ours | `git show :2:<path>` | this turn's output (the worktree's own change) |
+| theirs | `git show :3:<path>` | repo_root's concurrent version — the user's hand edit, or another topic's already-drained turn |
+| marked-up | the file on disk in `<wt>` | git's own conflict markers, already written by `stash apply`; re-running `git -C <wt> checkout --conflict=diff3 -- <path>` upgrades these to include the base line (`\|\|\|\|\|\|\|`) as well, not just ours/theirs |
+
+That `{path, base, ours, theirs, marked-up file}` tuple per conflicting path
+is the entire conflict artifact. It can go to either resolver, unchanged:
+
+- **User-resolved.** Surface the conflict list in the UI the same way any
+  diff is shown; the marked-up files are editable directly, in place, in
+  the worktree (still isolated — nothing else writes there while resolution
+  is pending). "Confirm" is just re-checking
+  `git -C <wt> status --porcelain` for zero remaining `U`-staged paths — a
+  plain git-native check, not new bookkeeping.
+- **LLM-resolved.** Feed the identical `{base, ours, theirs}` triples to a
+  follow-up turn scoped to the same worktree, with an instruction to
+  reconcile the two sides and remove the markers. The sole-writer guarantee
+  still holds — it's the same worktree, still exclusive to this turn's
+  resolution. Confirmation is the identical `status --porcelain` check.
+
+Either path converges on the same state: once no unmerged entries remain,
+the worktree's tree *is* the fully resolved result, ready to promote.
+
+Non-conflicting hunks in the same file still auto-merge silently, same as
+`git merge` always does for non-overlapping hunks — that's inherent to
+3-way merge, not new here.
+
+### Promoting the resolved worktree into repo_root
+
+repo_root was only ever read (for `PRE`), never written, during resolution
+— but resolution has no time bound (a human or an LLM turn may take a
+while), so repo_root may have drifted since `PRE` was captured. Re-acquire
+`_lock_for(repo_root)` for the promotion and check whether repo_root still
+matches `PRE`:
+
+- **Unchanged:** apply the worktree's now-clean tree onto repo_root
+  (`stash create` on the worktree relative to `BASE`, `stash apply` into
+  repo_root, plus untracked files). This is guaranteed conflict-free — the
+  worktree already merged `PRE` into itself before repo_root could move
+  again, so there's nothing left to reconcile.
+- **Drifted:** the resolution was computed against a `PRE` that's now
+  stale. Loop: capture the new `PRE'`, re-apply it into the worktree
+  (repeating the exact same 3-way merge from "Drain, revised" — same
+  function, same conflict-list mechanism, not a special case) against
+  repo_root's current state.
+
+**Yes — a second drift is handled exactly like the first, not silently
+absorbed.** This falls out of the merge being content-based rather than
+step-counted, and it's worth walking through why it's actually guaranteed,
+not just hoped for:
+
+- `BASE` stays anchored at the original seed snapshot (`BASE`/`SEED`) for
+  every retry — it never shifts to `PRE` or `PRE'`. That's safe because
+  `HEAD` never advances in this design (nothing commits), so every
+  `stash create` against repo_root — `PRE`, `PRE'`, `PRE''`, however many —
+  is a snapshot of the *same* accumulating diff off the *same* frozen
+  `HEAD`. `PRE'` is `PRE` plus whatever changed since, not a disjoint
+  snapshot, so diffing everything against the one fixed `BASE` is
+  consistent across retries.
+- On retry, "ours" is the worktree's *current* tree — which, after a first
+  conflict was resolved, already contains that resolution merged in. It is
+  not the raw, pre-resolution turn output. So the second merge is
+  `(BASE=SEED, ours=turn output + first resolution, theirs=PRE')`, and the
+  portion of `PRE'` that's identical to already-merged `PRE` content
+  produces no conflict at all — git resolves "both sides independently
+  arrived at the same hunk" trivially. Only the genuinely new drift
+  (`PRE'` minus `PRE`) has to reconcile against `ours`, which is exactly
+  the comparison that should happen.
+- If that new drift touches lines the first resolution already decided,
+  it's a real second conflict — `ours` and `theirs` disagree and neither
+  matches `BASE` — and it's reported through the identical
+  `{path, base, ours, theirs, marked-up file}` list, resolved the same way
+  (user or a follow-up LLM turn), then re-checked for drift again on the
+  next promotion attempt. There's no separate "second-round" code path;
+  it's the same function called again, so nothing about the mechanism gets
+  weaker or more ad hoc the more times it retries.
+
+**What this doesn't fully solve: unbounded contention.** If repo_root
+keeps drifting faster than resolution completes — a pathological case, not
+the ordinary "one more edit landed while this was stuck resolving" case —
+the promotion loop has no built-in retry cap and could in principle keep
+finding fresh drift indefinitely. Worth a practical bound in the actual
+implementation (e.g., cap retries and escalate to the user as a stuck-sync
+error past N attempts) rather than looping forever; not solved by the
+design above, just not silently mishandled by it either — every retry
+still goes through the same safe merge-and-report path, it just might do
+so more times than is useful.
+
+This keeps the lock's job narrow: held only for the cheap
+read-then-compare-then-apply step, never across an open-ended resolution.
+Conflict resolution, however long it takes, never blocks another topic from
+using the same repo_root in the meantime.
 
 Worktree removal is unaffected: still deferred to the existing background
-sweep ("sync now, remove later" in Reference), since the worktree is safe to
-discard once drained, same reasoning as today (a spawned background process
-might still have it as `cwd`).
+sweep ("sync now, remove later" in Reference) once promotion succeeds.
+
+### Diff-viewer implications of a deferred promotion
+
+Worth checking directly, since it's easy to assume the diff viewer reads
+from repo_root and would therefore go stale during a pending conflict: it
+doesn't, and it wouldn't. Two things are true here and they cut in opposite
+directions.
+
+**The diff itself is Squid's own output, not the model's, and isn't
+affected.** `GitChangeTracker.build_event()` (`agent/git_changes.py`)
+builds the `GitDiff` tool event entirely from git plumbing — `base_tree`
+is snapshotted at turn start (`_snapshot_tree`, a scratch-index
+`read-tree`/`add -A`/`write-tree` against `self.repo_root`, which under
+isolation *is* the worktree's own repo root) and `head_tree` the same way
+at turn end; `diff`/`stat`/`files` are `git diff` between those two tree
+objects. None of it reads repo_root, none of it is LLM-generated text, and
+none of it depends on whether drain/promotion has run yet. So the diff
+itself — the thing that answers "what did this turn change" — is fully
+computed and durable the moment the turn ends, conflict or not. There's no
+window where it fails to show up.
+
+**But `revert` and "open file" resolve to repo_root specifically, and
+that's exactly what promotion can leave stale during a pending conflict.**
+The UI's `_gitDiffSourceRepo()` (`ui/app.js:3484`) picks `source`, falling
+back to `repo`/`cwd`, and explicitly rejects anything under
+`.squid/worktrees/` (`_isSquidWorktreePath`) — by design, so a displayed
+path always survives worktree cleanup. `revert_diff` (`agent/server.py`)
+takes that resolved path as `repo_root` and reverse-applies the stored
+diff text directly against it. Under the shipped commit+merge
+implementation this was never a problem, because sync is synchronous —
+by the time a turn's response (and its diff) reaches the user, repo_root
+already has the merge, or the merge was aborted and repo_root was
+untouched from the start. There was never a gap between "diff is visible"
+and "repo_root matches it."
+
+The stash/promote design opens that gap on purpose, for exactly as long as
+a conflict takes to resolve: the diff is visible immediately, but repo_root
+doesn't have the change until promotion succeeds. In that window:
+
+- **Revert would correctly fail, not corrupt anything** — `apply_reverse_patch`
+  runs `git apply --reverse --check` first, and reversing a patch against
+  content that was never forward-applied fails that check cleanly. But the
+  UI has no reason today to know *why* it failed, since
+  `get_diff_revert_eligibility` (`agent/stats_db.py`) only knows about
+  `revertable`/`conflicting`/`reverted` — it has no concept of "not synced
+  yet," so a pending-conflict file would likely present as `revertable`
+  right up until the revert call itself fails.
+- **"Open file" against repo_root would show pre-turn content** that
+  doesn't match the diff being displayed — again not wrong data, just a
+  view that looks inconsistent with what's on screen, for as long as the
+  conflict is open.
+
+**Fix: give sync state its own field, not just conflict/no-conflict.**
+Extend the stored `GitDiff` event (or the worktree registry row it's
+derived from) with a `sync_status` of `pending` / `promoted`, set to
+`pending` at drain time and flipped to `promoted` only when the promotion
+step in the previous section actually succeeds. Two call sites then read
+it:
+
+- `get_diff_revert_eligibility` gains a fourth state, `pending`, checked
+  before `revertable`/`conflicting`/`reverted` — a file can't be reverted
+  out of repo_root before it was ever applied to repo_root.
+- The UI shows a "pending — resolve conflict to apply" indicator on the
+  `GitDiff` block in place of (or alongside) the revert bar while
+  `sync_status === 'pending'`, and skips rendering an "open file" link
+  that would otherwise point at stale content.
+
+This is new, small plumbing — a status field and two call sites reading it
+— not a rework of how the diff is captured or displayed. It exists because
+this design deliberately widens the window between "turn produced a diff"
+and "repo_root reflects it" from zero (shipped implementation) to
+"however long resolution takes," and that widening is real UI surface, not
+just a backend concern.
+
+### Carrying a conflict across turns: capturing the list, reusing the worktree, and the UI actions
+
+Three follow-up questions worth answering precisely, since none of them are
+"obviously fine" without checking against the actual code: is the conflict
+list captured anywhere an LLM turn could see it; does a follow-up "please
+resolve this" turn actually run against the *same* worktree; and what does
+the user click.
+
+**Is the conflict list captured by the response, so a next turn can use
+it? Not today — but there's an exact existing pattern to copy.** Right
+now nothing like this design's conflict artifact exists in the codebase.
+The closest analog is how `GitDiff` already flows forward:
+`_gitdiff_context_summary()` (`agent/stats_db.py:892`) reads a stored
+`GitDiff` tool event back out of `chat_messages.context` and renders it as
+a plain `<changed_files>` text block, which prompt construction threads
+into later turns (`get_messages_by_ids`, `agent/stats_db.py:965`) — that's
+literally how a later turn learns what an earlier one changed, without the
+model needing to re-read every file. The conflict list needs the identical
+treatment: store it as its own event (call it `MergeConflict`, same shape
+as the per-file tuple from "The 3-way conflict list" —
+`{path, base, ours, theirs, marked-up file}`, plus `repo` and the
+still-live worktree path) on the assistant message that hit the conflict,
+and add a sibling `_conflict_context_summary()` that renders it as a
+`<merge_conflict>` block the same way `_gitdiff_context_summary` renders
+`<changed_files>`. Once that exists, "hey, merge it" in the next turn isn't
+special — the model already has the file list and the three-way content in
+context, the same way it already has prior diffs.
+
+**Does the resolution turn actually reuse the existing worktree, or does
+it get a fresh one? Not for free — this needs an explicit special case.**
+Checking `_setup_worktrees` (`agent/server.py:519`): every turn calls
+`ensure_worktree(repo_root, topic, agent)` with `agent = str(asst_msg_id)`
+— and every turn has a *new* assistant message id, so by construction this
+mints a brand-new worktree path and branch every time (`ensure_worktree`
+only reuses a path if it already exists on disk, which it never does for a
+key that's never been used before). Left alone, a follow-up "resolve the
+conflict" turn would get its own fresh worktree — seeded from repo_root
+same as any other turn — not the one that's sitting there with conflict
+markers in it. That fresh worktree wouldn't have the conflict at all; it'd
+just silently redo the original turn's work from scratch against whatever
+repo_root looks like now, which is exactly the kind of silent-wrong-thing
+this whole design exists to avoid.
+
+So resolution turns need to be recognized as a distinct case in
+`_setup_worktrees`: before minting a new key for a repo root, check whether
+that `(topic, repo_root)` has an open worktree registry row with
+`sync_status = 'conflict'`. If so, reuse *that* row's existing
+`(wt_path, branch)` for this turn instead of calling `ensure_worktree` with
+the new turn's own id. The registry row's key — stored in the `agent`
+column, per the existing "predates per-turn keys" caveat — stays pinned to
+the *original* conflicted turn's id across as many resolution attempts as
+it takes; only once promotion finally succeeds does that row get deleted
+and the next ordinary turn go back to getting a fresh worktree and key.
+This means several assistant messages (the original turn, plus however
+many resolution turns) can share one worktree row — a deliberate,
+narrow exception to "every turn gets a fresh worktree," scoped only to
+the conflict window.
+
+**Explicit UI action, distinct from revert.** The existing revert bar
+(`gitdiff-revert-bar`, `ui/app.js:3552`) undoes an *already-promoted*
+change — it doesn't apply here, since a conflicted turn was never promoted
+in the first place. This needs its own affordance, shown only when
+`sync_status === 'conflict'`:
+
+- **"Ask AI to resolve"** — dispatches a follow-up turn scoped to the
+  existing worktree (via the reuse mechanism above), with the
+  `<merge_conflict>` summary as context and an instruction to reconcile
+  the marked files. Ordinary turn otherwise — same sole-writer worktree,
+  same streaming, same everything.
+- **"Retry merge"** — for manual resolution: the user has edited the
+  marked-up files directly (in an editor pointed at the worktree path, or
+  a future in-UI conflict view), and this button tells Squid to re-check
+  `git -C <wt> status --porcelain` for zero remaining unmerged entries and,
+  if clean, run the promotion step (which itself may loop once more on
+  drift, per "Promoting the resolved worktree into repo_root"). If markers
+  are still present, this should report that plainly rather than silently
+  no-op-ing or generating a fresh conflict list from nothing having
+  changed.
+
+Both actions end at the same place — a clean worktree tree, promotion
+attempted, `sync_status` flipped to `promoted` on success or back to
+`conflict` (with a fresh base/ours/theirs list) if new drift collided.
+
+### Superseded: repo_root-side apply + restore-to-snapshot
+
+Kept for the record, not adopted. The original version of this section had
+the worktree's drain applied directly onto repo_root, with conflicts
+handled by restoring repo_root to a pre-drain snapshot. That restore was
+real, hand-rolled work with no `merge --abort` equivalent to lean on:
+`stash apply` has no abort of its own, so undoing a conflicting apply meant
+manually resetting the index/tree to the snapshot, deleting stray files the
+failed apply created, and re-copying the snapshot's untracked set — three
+sequential steps with their own crash window, instead of one atomic Git
+call. The inverted design above doesn't do that recovery better; it removes
+the need for it, by never giving a conflict a chance to land in repo_root
+in the first place.
 
 ### What this changes vs. the shipped implementation
 
@@ -278,9 +558,12 @@ might still have it as `cwd`).
 - repo_root now stays dirty across turns until the user commits, instead of
   gaining one commit per turn automatically. This is an intentional product
   choice, not a gap: it's the same state a user editing by hand would be in.
-- Conflict handling moves from "abort a merge" to "restore repo_root to its
-  pre-drain snapshot" — same guarantee (nothing is lost, nothing is left
-  half-applied), different mechanism.
+- Conflict handling moves from "abort a merge in repo_root" to "merge inside
+  the worktree, only promote to repo_root once clean" — repo_root is never
+  at risk of ending up mid-conflict, so there's no restore path to build at
+  all. Conflicts, when they happen, surface as a structured base/ours/theirs
+  list per file (see "The 3-way conflict list"), resolvable by the user or
+  by an LLM in a follow-up turn, still scoped to the same worktree.
 - Turn-chaining no longer depends on `HEAD` advancing (it doesn't, since
   nothing commits) — it depends on the seed step explicitly relaying
   whatever's dirty in repo_root into the next fresh worktree. This is what
@@ -300,10 +583,15 @@ might still have it as `cwd`).
 - The sole-writer guarantee during a turn: only that turn's agent writes to
   its worktree while the turn is in flight, whether sync happens via merge
   or via stash relay.
-- `GitDiff` storage, revert (`apply_reverse_patch`), and the "source repo is
-  canonical, not the DB" rule are unaffected — they only depend on there
-  being a stored diff and a source repo path, not on how sync moves changes
-  between them.
+- `GitDiff` capture and storage, and the "source repo is canonical, not the
+  DB" rule, are unaffected — `GitChangeTracker.build_event()` computes the
+  diff from tree snapshots regardless of how or when sync moves changes
+  between worktree and repo_root (see "Diff-viewer implications" above).
+- Revert (`apply_reverse_patch`) is *not* fully unaffected — it still
+  reverse-applies stored diff text against repo_root exactly as today, but
+  now needs the new `sync_status` gating (see "Diff-viewer implications")
+  so it doesn't present as available before repo_root actually has the
+  change to revert.
 - Fallback behavior (below) and the sync/error semantics around it.
 
 ## Fallback
@@ -338,6 +626,22 @@ directly against the real working tree, same as Option 1:
 - Good (target design): repo_root ends each turn in the same kind of state
   a human editing it directly would leave it in — dirty, uncommitted,
   ready for the user's own `git commit` whenever they choose.
+- Good (target design): conflicts are never written into repo_root — the
+  merge happens entirely inside the disposable worktree, so a conflict
+  leaves the user's real directory untouched rather than mid-merge.
+- Good (target design): conflict resolution has a structured base/ours/
+  theirs form per file, so it can be handed to the user *or* to an LLM in a
+  follow-up turn — resolution isn't limited to a human reading raw
+  conflict markers.
+- Good (target design): the diff shown to the user is computed by Squid
+  from git tree snapshots at turn end regardless of conflict/promotion
+  status — it's never blocked on, or generated from, anything the model
+  outputs (see "Diff-viewer implications").
+- Bad (target design): revert and "open file" resolve to repo_root, which
+  can lag the displayed diff for as long as a conflict takes to resolve —
+  a gap that doesn't exist in the shipped synchronous commit+merge design.
+  Needs an explicit `sync_status` (`pending`/`promoted`) so the UI doesn't
+  offer revert against a file repo_root doesn't have yet.
 - Bad (target design): repo_root is dirty more of the time than under the
   shipped commit+merge design, which gave each turn a clean commit boundary
   automatically. There is no longer an automatic point-in-time marker for
@@ -352,8 +656,24 @@ directly against the real working tree, same as Option 1:
   fixed.
 - Bad (both designs): in fallback mode, the diff is not turn-scoped and the
   user must be told.
-- Bad (target design): conflicts at drain time require user intervention
-  before the worktree is removed, same as merge conflicts do today.
+- Bad (target design): conflicts still require resolution (by the user or an
+  LLM turn) before the worktree is promoted and removed — this design
+  changes where a conflict is safe to sit, not whether one can happen.
+- Bad (target design): promotion re-checks repo_root for drift since `PRE`
+  was captured, so a long-running resolution can loop (re-merge against a
+  newer `PRE'`) rather than promote on the first attempt.
+- Bad (target design): a resolution turn must not get the normal fresh
+  per-turn worktree — `_setup_worktrees` needs a new special case that
+  detects an open `sync_status = 'conflict'` row for `(topic, repo_root)`
+  and reuses its worktree/branch instead of minting one for the new
+  message id. Without it, "ask AI to resolve" would silently redo the
+  original turn's work in a brand-new worktree that never saw the conflict
+  at all (see "Carrying a conflict across turns").
+- Bad (target design): the conflict list needs its own stored event and
+  prompt-summary function (`MergeConflict` / `_conflict_context_summary`,
+  mirroring `GitDiff` / `_gitdiff_context_summary`) before a follow-up LLM
+  turn can be handed it as context — not implemented today, since neither
+  the event type nor the worktree-reuse path above currently exist.
 
 ---
 

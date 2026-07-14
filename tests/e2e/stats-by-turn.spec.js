@@ -116,6 +116,44 @@ test('By Turn shows one row per response with its own completion time, no bucket
   await expect(page.locator('#sf-measures-menu input[value="turns"]')).toBeChecked();
 });
 
+test('By Turn offers sub-day ranges capped at 7d, other grains keep the full range', async ({ page }) => {
+  await mockApp(page);
+  const statsRequests = [];
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    statsRequests.push(Object.fromEntries(url.searchParams.entries()));
+    if (url.searchParams.get('period') !== 'turn') {
+      return route.fulfill({ json: [{ period: '2026-07-10 10:00', sessions: 1, total_turns: 1, input_tokens: 10, output_tokens: 5 }] });
+    }
+    route.fulfill({ json: [] });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+
+  await expect(page.locator('#sf-days option')).toHaveText(['1d', '3d', '7d', '14d', '28d', '90d', 'All Time']);
+
+  // 90d is only meaningful for the hourly/daily/weekly grains - pick it here
+  // so we can confirm By Turn doesn't inherit an out-of-range value from it.
+  await page.locator('#sf-days').selectOption('90');
+
+  await page.locator('#sf-period').selectOption('turn');
+  await expect(page.locator('#sf-days option')).toHaveText(['1h', '3h', '6h', '12h', '1d', '3d', '7d']);
+  // 90d isn't offered for By Turn, so the selection clamps down to the 7d cap
+  // rather than leaving an option selected that no longer exists in the list.
+  await expect(page.locator('#sf-days')).toHaveValue('7');
+
+  await page.locator('#sf-days').selectOption({ label: '1h' });
+  await expect.poll(() => statsRequests.some(req => req.period === 'turn' && req.hours === '1')).toBe(true);
+  const hourReq = statsRequests.find(req => req.period === 'turn' && req.hours === '1');
+  expect(hourReq.days).toBe('0');
+
+  // Switching back out of By Turn drops the sub-day options and the hour selection.
+  await page.locator('#sf-period').selectOption('hourly');
+  await expect(page.locator('#sf-days option')).toHaveText(['1d', '3d', '7d', '14d', '28d', '90d', 'All Time']);
+  await expect(page.locator('#sf-days')).toHaveValue('1');
+});
+
 test('By Turn default table fits mobile width', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await mockApp(page);

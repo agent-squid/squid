@@ -1454,11 +1454,11 @@ def get_stats(session_id: str) -> Optional[dict]:
         return None
 
 
-def _stats_cutoff(days: int) -> Optional[str]:
-    if not days:
+def _stats_cutoff(days: int, hours: int = 0) -> Optional[str]:
+    if not days and not hours:
         return None
     from datetime import datetime, timedelta, timezone
-    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    return (datetime.now(timezone.utc) - timedelta(days=days, hours=hours)).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
 def _stats_filter_values(value: str) -> list[str]:
@@ -1847,7 +1847,7 @@ def get_aggregated_stats(
 
 
 def get_stats_by_turn(
-    days: int = 30, agent: str = "", topic: str = "", adhoc: str = "all",
+    days: int = 30, hours: int = 0, agent: str = "", topic: str = "", adhoc: str = "all",
     limit: int = 2000,
 ) -> list:
     # One row per completed turn, sourced from run_events rather than session_stats:
@@ -1855,7 +1855,7 @@ def get_stats_by_turn(
     # turn of a multi-turn conversation, so it only ever holds the *latest* turn's
     # numbers. The per-turn "stats" event recorded in run_events at completion time
     # is the only place a given turn's own duration/cost/tokens survive later turns.
-    cutoff = _stats_cutoff(days)
+    cutoff = _stats_cutoff(days, hours)
     agents = _stats_filter_values(agent)
     topics = _stats_filter_values(topic)
 
