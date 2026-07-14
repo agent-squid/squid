@@ -193,19 +193,19 @@ def _connect() -> sqlite3.Connection:
 
 
 def get_usage_stats() -> dict:
-    """Return total sessions and first-seen date from chat history."""
+    """Return total prompts and first-seen date from chat history."""
     try:
         db = _connect()
         total = db.execute(
-            "SELECT COUNT(DISTINCT session_id) FROM chat_messages WHERE session_id IS NOT NULL"
+            "SELECT COUNT(*) FROM chat_messages WHERE role = 'user'"
         ).fetchone()[0]
         first = db.execute(
             "SELECT MIN(created_at) FROM chat_messages"
         ).fetchone()[0]
         db.close()
-        return {"total_sessions": total, "first_seen": first}
+        return {"total_prompts": total, "first_seen": first}
     except Exception:
-        return {"total_sessions": 0, "first_seen": None}
+        return {"total_prompts": 0, "first_seen": None}
 
 
 def _runtime_ref_expr(harness_col: str = "harness", provider_col: str = "provider") -> str:
@@ -1599,11 +1599,12 @@ def _merge_chart_aggregates(
     if not rows or not chart_series:
         return
     tz_shift = f"{-tz_offset_minutes} minutes"
-    bucket = (
-        f"strftime('%Y-%m-%d %H:00', datetime(created_at, '{tz_shift}'))"
-        if period == "hourly"
-        else f"strftime('%Y-%m-%d', datetime(created_at, '{tz_shift}'))"
-    )
+    if period == "hourly":
+        bucket = f"strftime('%Y-%m-%d %H:00', datetime(created_at, '{tz_shift}'))"
+    elif period == "weekly":
+        bucket = f"strftime('%Y-%W', datetime(created_at, '{tz_shift}'))"
+    else:
+        bucket = f"strftime('%Y-%m-%d', datetime(created_at, '{tz_shift}'))"
     cutoff = _stats_cutoff(days)
     agents = _stats_filter_values(agent)
     topics = _stats_filter_values(topic)
@@ -1731,17 +1732,23 @@ def get_aggregated_stats(
     # getTimezoneOffset() returns minutes to subtract from local to get UTC,
     # so negating it gives the offset to add to UTC to get local.
     tz_shift = f"{-tz_offset_minutes} minutes"
-    ss_bucket = (
-        f"strftime('%Y-%m-%d %H:00', datetime(ss_inner.created_at, '{tz_shift}'))"
-        if period == "hourly"
-        else f"strftime('%Y-%m-%d', datetime(ss_inner.created_at, '{tz_shift}'))"
-    )
-    cm_bucket = (
-        f"strftime('%Y-%m-%d %H:00', datetime(cm.created_at, '{tz_shift}'))"
-        if period == "hourly"
-        else f"strftime('%Y-%m-%d', datetime(cm.created_at, '{tz_shift}'))"
-    )
-    limit = (days * (24 if period == "hourly" else 1) + 1) if days else 5000
+    if period == "hourly":
+        ss_bucket = f"strftime('%Y-%m-%d %H:00', datetime(ss_inner.created_at, '{tz_shift}'))"
+        cm_bucket = f"strftime('%Y-%m-%d %H:00', datetime(cm.created_at, '{tz_shift}'))"
+    elif period == "weekly":
+        ss_bucket = f"strftime('%Y-%W', datetime(ss_inner.created_at, '{tz_shift}'))"
+        cm_bucket = f"strftime('%Y-%W', datetime(cm.created_at, '{tz_shift}'))"
+    else:
+        ss_bucket = f"strftime('%Y-%m-%d', datetime(ss_inner.created_at, '{tz_shift}'))"
+        cm_bucket = f"strftime('%Y-%m-%d', datetime(cm.created_at, '{tz_shift}'))"
+    if not days:
+        limit = 5000
+    elif period == "hourly":
+        limit = days * 24 + 1
+    elif period == "weekly":
+        limit = max(days // 7, 1) + 1
+    else:
+        limit = days + 1
     cutoff = _stats_cutoff(days)
     agents = _stats_filter_values(agent)
     topics = _stats_filter_values(topic)
@@ -1931,11 +1938,12 @@ def _merge_breakdown_chart_aggregates(
     if not rows or not chart_series:
         return
     tz_shift = f"{-tz_offset_minutes} minutes"
-    bucket = (
-        f"strftime('%Y-%m-%d %H:00', datetime(created_at, '{tz_shift}'))"
-        if period == "hourly"
-        else f"strftime('%Y-%m-%d', datetime(created_at, '{tz_shift}'))"
-    )
+    if period == "hourly":
+        bucket = f"strftime('%Y-%m-%d %H:00', datetime(created_at, '{tz_shift}'))"
+    elif period == "weekly":
+        bucket = f"strftime('%Y-%W', datetime(created_at, '{tz_shift}'))"
+    else:
+        bucket = f"strftime('%Y-%m-%d', datetime(created_at, '{tz_shift}'))"
     include_topic = breakdown in {"topic_agent", "topic_agent_session"}
     include_session = breakdown in {"agent_session", "topic_agent_session"}
     base_agent = _stats_agent_expr()
@@ -2053,11 +2061,12 @@ def get_stats_by_breakdown(
     chart_series: Optional[list[dict]] = None,
 ) -> list:
     tz_shift = f"{-tz_offset_minutes} minutes"
-    bucket = (
-        f"strftime('%Y-%m-%d %H:00', datetime(created_at, '{tz_shift}'))"
-        if period == "hourly"
-        else f"strftime('%Y-%m-%d', datetime(created_at, '{tz_shift}'))"
-    )
+    if period == "hourly":
+        bucket = f"strftime('%Y-%m-%d %H:00', datetime(created_at, '{tz_shift}'))"
+    elif period == "weekly":
+        bucket = f"strftime('%Y-%W', datetime(created_at, '{tz_shift}'))"
+    else:
+        bucket = f"strftime('%Y-%m-%d', datetime(created_at, '{tz_shift}'))"
     include_topic = breakdown in {"topic_agent", "topic_agent_session"}
     include_session = breakdown in {"agent_session", "topic_agent_session"}
     base_agent = _stats_agent_expr()
@@ -2067,12 +2076,20 @@ def get_stats_by_breakdown(
     if include_session:
         agent_key_expr = f"{base_agent} || CASE WHEN COALESCE(adhoc, 0) = 1 THEN '!' ELSE '' END"
         cm_agent_key_expr = f"{cm_base_agent} || CASE WHEN COALESCE(adhoc, 0) = 1 THEN '!' ELSE '' END"
-    cm_bucket = (
-        f"strftime('%Y-%m-%d %H:00', datetime(created_at, '{tz_shift}'))"
-        if period == "hourly"
-        else f"strftime('%Y-%m-%d', datetime(created_at, '{tz_shift}'))"
-    )
-    limit = (days * (24 if period == "hourly" else 1) + 1) if days else 5000
+    if period == "hourly":
+        cm_bucket = f"strftime('%Y-%m-%d %H:00', datetime(created_at, '{tz_shift}'))"
+    elif period == "weekly":
+        cm_bucket = f"strftime('%Y-%W', datetime(created_at, '{tz_shift}'))"
+    else:
+        cm_bucket = f"strftime('%Y-%m-%d', datetime(created_at, '{tz_shift}'))"
+    if not days:
+        limit = 5000
+    elif period == "hourly":
+        limit = days * 24 + 1
+    elif period == "weekly":
+        limit = max(days // 7, 1) + 1
+    else:
+        limit = days + 1
     cutoff = _stats_cutoff(days)
     agents = _stats_filter_values(agent)
     topics = _stats_filter_values(topic)

@@ -6678,7 +6678,7 @@ function renderTimeStats(rows) {
 
   _setStatsTable(`<table>
     <thead><tr>
-      <th>${statsPeriod === 'hourly' ? 'Hour' : 'Date'}</th>
+      <th>${statsPeriod === 'hourly' ? 'Hour' : statsPeriod === 'weekly' ? 'Week' : 'Date'}</th>
       ${_statsMeasureHeaders()}
     </tr></thead>
     <tbody>${bodyRows}</tbody>
@@ -6772,7 +6772,7 @@ function renderAgentBreakdownStats(rows) {
 
   _setStatsTable(`<table class="stats-breakdown-table${hasMisc ? ' has-misc' : ''}">
     <thead><tr>
-      <th class="stats-sticky-left">${_statsBreakdownAxisLabel(statsPeriod === 'hourly' ? 'Hour' : 'Date', 'name')}</th>
+      <th class="stats-sticky-left">${_statsBreakdownAxisLabel(statsPeriod === 'hourly' ? 'Hour' : statsPeriod === 'weekly' ? 'Week' : 'Date', 'name')}</th>
       ${headers}
       ${miscHeader}
       <th class="stats-sticky-right stats-total-col">Total</th>
@@ -8440,21 +8440,195 @@ async function fetchInsights() {
 
 // ── message picker ─────────────────────────────────────────────────────────
 
-function pickBootMessage(insights, stats) {
+const MEASURE_DEFAULT_AGG = {
+  turns: 'sum', sessions: 'sum', cost: 'sum',
+  tokens_in: 'sum', tokens_out: 'sum', tokens_total: 'sum',
+  cache_read: 'sum', cache_write: 'sum', new_input: 'sum',
+  quota: 'sum', duration: 'sum',
+  cache_hit_rate: 'avg', avg_tokens_turn: 'sum',
+};
+
+function _measureRowValue(row, measure) {
+  // Map measure name to the column in a /stats row.
+  // Rows from get_aggregated_stats have fields like total_turns, cost_usd, etc.
+  // Chart series values are in chart_{measure}_{agg} columns.
+  switch (measure) {
+    case 'turns': return row.total_turns || 0;
+    case 'sessions': return row.sessions || 0;
+    case 'cost': return row.cost_usd || 0;
+    case 'tokens_in': return _statsInputTokens(row);
+    case 'tokens_out': return row.output_tokens || 0;
+    case 'tokens_total': return _statsInputTokens(row) + (row.output_tokens || 0);
+    case 'cache_read': return _splitInputTokens(row).cacheRead;
+    case 'cache_write': return _splitInputTokens(row).cacheWrite;
+    case 'new_input': return _splitInputTokens(row).newInput;
+    case 'cache_hit_rate': return _cacheHitRate(row) || 0;
+    case 'avg_tokens_turn': return _avgTokensPerTurn(row) || 0;
+    case 'quota': return row.quota_delta || 0;
+    case 'duration': return (row.duration_ms || 0) / 1000;
+    default: return 0;
+  }
+}
+
+function _aggregateRows(rows, measure, agg) {
+  if (!rows.length) return 0;
+  const vals = rows.map(r => _measureRowValue(r, measure)).filter(v => v != null);
+  if (!vals.length) return 0;
+  switch (agg) {
+    case 'sum': return vals.reduce((a, b) => a + b, 0);
+    case 'avg': return vals.reduce((a, b) => a + b, 0) / vals.length;
+    case 'min': return Math.min(...vals);
+    case 'max': return Math.max(...vals);
+    default: return vals.reduce((a, b) => a + b, 0);
+  }
+}
+
+function _fmtValue(raw, measure, fmt) {
+  if (fmt === 'delta') {
+    const sign = raw >= 0 ? '+' : '';
+    return `${sign}${Math.round(raw)}`;
+  }
+  if (fmt === 'pp') {
+    const sign = raw >= 0 ? '+' : '';
+    return `${sign}${raw.toFixed(1)} pp`;
+  }
+  if (fmt === 'pct') {
+    const sign = raw >= 0 ? '+' : '';
+    return `${sign}${raw.toFixed(1)}%`;
+  }
+  // Default formatting by measure type
+  if (measure === 'cache_hit_rate') return `${raw.toFixed(1)}%`;
+  if (measure === 'cost') return `$${raw.toFixed(2)}`;
+  if (measure === 'duration') {
+    const m = Math.floor(raw / 60);
+    const s = Math.round(raw % 60);
+    return m > 0 ? `${m}m ${s}s` : `${s}s`;
+  }
+  return String(Math.round(raw));
+}
+
+async function resolveInsightMeasures(insights) {
+  const measures = insights?.measures?.values;
+  if (!measures || !measures.length) return null;
+
+  const defaultPeriod = insights.measures.period || '7d';
+  const dbMeasures = measures.filter(m => m.measure);
+
+  if (!dbMeasures.length) return null;
+
+  // Group by period to minimize API calls
+  const groups = new Map();
+  for (const m of dbMeasures) {
+    const period = m.period || defaultPeriod;
+    const hasCompare = !!m.compare;
+    const key = `${period}|${hasCompare}`;
+    if (!groups.has(key)) groups.set(key, { period, hasCompare, measures: [] });
+    groups.get(key).measures.push(m);
+  }
+
+  const values = {};
+  // Seed local/clock sources
+  for (const m of measures) {
+    if (m.source === 'local' && m.key === 'streak') values[m.key] = getStreak();
+    if (m.source === 'clock' && m.key === 'hour') values[m.key] = new Date().getHours();
+    if (m.source === 'clock' && m.key === 'dow') values[m.key] = new Date().getDay();
+  }
+
+  for (const [, group] of groups) {
+    const days = parseInt(group.period) || 7;
+    const fetchDays = group.hasCompare ? days * 2 : days;
+
+    const params = new URLSearchParams();
+    // Use weekly bucketing — clean WoW splits with minimal rows
+    params.set('period', fetchDays <= 14 ? 'weekly' : 'daily');
+    params.set('days', String(Math.max(fetchDays, 7)));
+    if (group.measures[0].filter?.agent) params.set('agent', group.measures[0].filter.agent);
+    if (group.measures[0].filter?.topic) params.set('topic', group.measures[0].filter.topic);
+    if (group.measures[0].filter?.adhoc) params.set('adhoc', group.measures[0].filter.adhoc);
+
+    let rows;
+    try {
+      const res = await fetch(`/stats?${params}`);
+      if (!res.ok) continue;
+      rows = await res.json();
+    } catch { continue; }
+
+    for (const m of group.measures) {
+      const agg = m.agg || MEASURE_DEFAULT_AGG[m.measure] || 'sum';
+      let currentValue;
+
+      if (m.compare === 'prev_period') {
+        // With weekly bucketing and 2*N days: rows are ordered period DESC.
+        // First half of rows = current period, second half = previous.
+        const mid = Math.ceil(rows.length / 2);
+        const currentRows = rows.slice(0, mid);
+        const prevRows = rows.slice(mid);
+        const cur = _aggregateRows(currentRows, m.measure, agg);
+        const prev = _aggregateRows(prevRows, m.measure, agg);
+        values[m.key] = cur - prev;  // raw delta for conditions
+        values[`_${m.key}_cur`] = cur;   // current period raw value
+        values[`_${m.key}_prev`] = prev;  // previous period raw value
+      } else {
+        currentValue = _aggregateRows(rows, m.measure, agg);
+        values[m.key] = currentValue;
+      }
+    }
+  }
+
+  // Attach measure metadata for formatting during substitution
+  values._measures = measures;
+  return values;
+}
+
+function _evalCondition(value, cond) {
+  if (cond === null || cond === undefined) return true;
+  if (typeof cond === 'number' && cond >= 0 && cond <= 1 && Object.keys(cond).length === 0) {
+    // This path shouldn't normally be reached for random — handled in pickBootMessage
+    return true;
+  }
+  if (typeof cond === 'object' && cond !== null && !Array.isArray(cond)) {
+    if ('eq' in cond) return value === cond.eq;
+    if ('gte' in cond) return value >= cond.gte;
+    if ('lte' in cond) return value <= cond.lte;
+    if ('gt' in cond) return value > cond.gt;
+    if ('lt' in cond) return value < cond.lt;
+    if ('in' in cond) return cond.in.includes(value);
+    if ('between' in cond) return value >= cond.between[0] && value < cond.between[1];
+  }
+  // Bare value: exact match
+  return value === cond;
+}
+
+function pickBootMessage(insights, values) {
   const section = insights?.boot;
   if (!section || !section.templates) return section?.default || BOOT_FALLBACK_TEXT;
+
+  const measures = values?._measures || [];
+  const measureByKey = {};
+  for (const m of measures) measureByKey[m.key] = m;
+
   for (const t of section.templates) {
     const w = t.when || {};
-    if (w.streak != null && stats.streak !== w.streak) continue;
-    if (w.sessions?.milestone) {
-      const hit = w.sessions.milestone.filter(n => stats.totalSessions >= n).pop();
-      if (!hit) continue;
-      return t.text.replace('{hit}', String(hit)).replace(/\{(\w+)\}/g, (_, k) => String(stats[k] ?? ''));
-    }
-    if (w.hour) { const [s, e] = w.hour; if (stats.hour < s || stats.hour >= e) continue; }
-    if (w.dow && !w.dow.includes(stats.dow)) continue;
+
+    // Handle random separately (not a measure key)
     if (w.random != null && Math.random() > w.random) continue;
-    return t.text.replace(/\{(\w+)\}/g, (_, k) => String(stats[k] ?? ''));
+
+    // Evaluate all other conditions
+    let match = true;
+    for (const [key, cond] of Object.entries(w)) {
+      if (key === 'random') continue;
+      const raw = values[key];
+      if (!_evalCondition(raw, cond)) { match = false; break; }
+    }
+    if (!match) continue;
+
+    // Substitute {key} placeholders with formatted values
+    return t.text.replace(/\{(\w+)\}/g, (_, k) => {
+      const raw = values[k];
+      if (raw === undefined || raw === null) return `{${k}}`;
+      const m = measureByKey[k];
+      return _fmtValue(raw, m?.measure, m?.fmt);
+    }) + (t.encore || '');
   }
   return section.default || BOOT_FALLBACK_TEXT;
 }
@@ -8496,13 +8670,12 @@ async function showBootBanner() {
     const streak = getStreak();
     const now = new Date();
     const insights = await insightsPromise;
-    const bubbleText = pickBootMessage(insights, {
-      streak,
-      totalSessions: data.total_sessions || 0,
-      firstSeen: data.first_seen || null,
-      hour: now.getHours(),
-      dow: now.getDay(),
-    });
+    const values = (await resolveInsightMeasures(insights)) || {};
+    // Always seed clock sources even if measures block is absent
+    if (!values.streak) values.streak = streak;
+    if (values.hour === undefined) values.hour = now.getHours();
+    if (values.dow === undefined) values.dow = now.getDay();
+    const bubbleText = pickBootMessage(insights, values);
 
     const el = document.createElement('div');
     el.className = 'boot-banner';
