@@ -3432,6 +3432,9 @@ button {
     table-layout: fixed;
     width: 100%;
   }
+  #stats-content .stats-turn-table.stats-turn-table-wide {
+    width: auto;
+  }
   #stats-content .stats-turn-table th,
   #stats-content .stats-turn-table td {
     overflow: hidden;
