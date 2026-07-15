@@ -385,6 +385,7 @@ const VIEW_LABELS = {
   settings: 'Settings',
 };
 let _mobileViewHistoryDepth = 0;
+let _mobileViewHistorySkip = 0;
 
 function isMobileViewport() {
   return window.matchMedia?.('(max-width: 768px)').matches || window.innerWidth <= 768;
@@ -414,6 +415,14 @@ function switchView(name) {
 
 function navigateView(name, { recordHistory = true } = {}) {
   if (name === currentView) return;
+  if (recordHistory && name === 'chat' && isMobileViewport() && _mobileViewHistoryDepth > 0 && history.go) {
+    const depth = _mobileViewHistoryDepth;
+    _mobileViewHistorySkip = depth;
+    _mobileViewHistoryDepth = 0;
+    switchView(name);
+    history.go(-depth);
+    return;
+  }
   switchView(name);
   if (recordHistory && isMobileViewport() && history.pushState) {
     history.pushState({ squidView: name }, '', location.href);
@@ -423,6 +432,14 @@ function navigateView(name, { recordHistory = true } = {}) {
 
 function navigateViewFromHistoryAnchor(anchorName, name) {
   if (name === currentView) return;
+  if (name === 'chat' && isMobileViewport() && _mobileViewHistoryDepth > 0 && history.go) {
+    const depth = _mobileViewHistoryDepth;
+    _mobileViewHistorySkip = depth;
+    _mobileViewHistoryDepth = 0;
+    switchView(name);
+    history.go(-depth);
+    return;
+  }
   if (history.replaceState && history.pushState) {
     const state = (history.state && typeof history.state === 'object') ? history.state : {};
     if (state.squidView !== anchorName) {
@@ -441,7 +458,11 @@ function initMobileViewNavigation() {
 
   window.addEventListener('popstate', e => {
     const name = e.state?.squidView || 'chat';
-    _mobileViewHistoryDepth = Math.max(0, _mobileViewHistoryDepth - 1);
+    if (_mobileViewHistorySkip > 0) {
+      _mobileViewHistorySkip = 0;
+    } else {
+      _mobileViewHistoryDepth = Math.max(0, _mobileViewHistoryDepth - 1);
+    }
     switchView(name);
   });
 
