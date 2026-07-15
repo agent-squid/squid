@@ -175,6 +175,14 @@ test('By Turn default table fits mobile width', async ({ page }) => {
   await page.locator('#sf-period').selectOption('turn');
   await page.waitForSelector('.stats-turn-link');
 
+  // The Deep Dive default now selects most measures (see stats-mobile.spec.js),
+  // so pare down to a small set to exercise the compact/unscrolled path.
+  await page.locator('#sf-measures-toggle').click();
+  for (const v of ['avg_tokens_turn', 'cache_hit_rate', 'cache_read', 'cache_write', 'duration', 'new_input', 'tokens_total']) {
+    await page.locator(`#sf-measures-menu input[value="${v}"]`).uncheck();
+  }
+  await page.locator('#sf-measures-toggle').click();
+
   await expect.poll(() => page.locator('.stats-table-scroll').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
 });
 

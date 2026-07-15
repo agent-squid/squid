@@ -1277,6 +1277,22 @@ body {
   cursor: default;
 }
 
+.stats-deep-dive-btn {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  margin-left: 0.5rem;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent-light);
+  cursor: pointer;
+  opacity: 1;
+  transition: color 0.15s;
+}
+.stats-deep-dive-btn .material-symbols-outlined { font-size: 14px; font-variation-settings: 'FILL' 0, 'wght' 600, 'GRAD' 0, 'opsz' 20; }
+.stats-deep-dive-btn:hover { color: var(--accent); }
+
 .stats-tooltip {
   display: none;
   position: absolute;
@@ -2698,7 +2714,7 @@ body {
   padding: 0.16rem 0.35rem;
 }
 #stats-preset-select:focus { outline: 1px solid #4a4a70; }
-#stats-preset-status { color: var(--text-ghost); white-space: nowrap; }
+
 .stats-preset-icon-btn {
   display: inline-flex;
   align-items: center;
@@ -2721,6 +2737,8 @@ body {
   stroke-width: 1.8;
 }
 .stats-preset-icon-btn:hover { color: var(--accent-light); }
+#stats-preset-default.active { color: var(--accent-dim); }
+#stats-preset-default.active svg { fill: currentColor; }
 .stats-preset-icon-btn:disabled {
   color: var(--text-ghost);
   cursor: default;
@@ -2983,10 +3001,75 @@ body {
 #stats-content th:first-child, #stats-content td:first-child { text-align: left; }
 #stats-content .stats-col-compact { width: 1%; padding-right: 0.4rem; }
 #stats-content .stats-route-col { text-align: left; }
+/* Turn table: freeze the first 3 columns (time, route, turn) */
 #stats-content .stats-turn-table {
   min-width: 100%;
   width: max-content;
 }
+#stats-content .stats-turn-table .stats-time-col {
+  width: 4.7rem;
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: var(--surface);
+}
+#stats-content .stats-turn-table .stats-route-col {
+  width: 5.6rem;
+  position: sticky;
+  left: 4.7rem;
+  z-index: 2;
+  background: var(--surface);
+}
+#stats-content .stats-turn-table th:nth-child(3),
+#stats-content .stats-turn-table td:nth-child(3) {
+  position: sticky;
+  left: 10.3rem;
+  z-index: 2;
+  background: var(--surface);
+}
+#stats-content .stats-turn-table thead th:nth-child(1),
+#stats-content .stats-turn-table thead th:nth-child(2),
+#stats-content .stats-turn-table thead th:nth-child(3) {
+  z-index: 4;
+}
+#stats-content .stats-turn-table tbody tr:hover td:nth-child(1),
+#stats-content .stats-turn-table tbody tr:hover td:nth-child(2),
+#stats-content .stats-turn-table tbody tr:hover td:nth-child(3) {
+  background: var(--surface-3);
+}
+#stats-content .stats-turn-table tfoot td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: var(--surface);
+}
+/* Hourly / Daily / Weekly table: freeze the time column and turns column */
+.stats-time-table .stats-time-col {
+  width: 4.7rem;
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: var(--surface);
+}
+.stats-time-table .stats-sticky-left {
+  position: sticky;
+  left: 4.7rem;
+  z-index: 2;
+  background: var(--surface);
+}
+.stats-time-table tr:hover .stats-time-col,
+.stats-time-table tr:hover .stats-sticky-left {
+  background: var(--surface-3);
+}
+.stats-time-table thead .stats-time-col,
+.stats-time-table thead .stats-sticky-left {
+  z-index: 4;
+}
+.stats-time-table tfoot .stats-time-col,
+.stats-time-table tfoot .stats-sticky-left {
+  background: var(--surface);
+}
+
 #stats-content thead th {
   color: var(--text-dim);
   font-weight: normal;
@@ -3451,10 +3534,39 @@ button {
     padding: 0.45rem 0.25rem;
     text-overflow: ellipsis;
   }
-  #stats-content .stats-turn-table .stats-time-col { width: 4.7rem; }
-  #stats-content .stats-turn-table .stats-route-col { width: 5.6rem; }
+  #stats-content .stats-turn-table .stats-time-col {
+    width: 4.7rem;
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    background: var(--surface);
+  }
+  #stats-content .stats-turn-table .stats-route-col {
+    width: 5.6rem;
+    position: sticky;
+    left: 4.7rem;
+    z-index: 2;
+    background: var(--surface);
+  }
   #stats-content .stats-turn-table th:nth-child(3),
-  #stats-content .stats-turn-table td:nth-child(3) { width: 2.5rem; }
+  #stats-content .stats-turn-table td:nth-child(3) {
+    width: 2.5rem;
+    position: sticky;
+    left: 10.3rem;
+    z-index: 2;
+    background: var(--surface);
+  }
+  #stats-content .stats-turn-table thead th:nth-child(1),
+  #stats-content .stats-turn-table thead th:nth-child(2),
+  #stats-content .stats-turn-table thead th:nth-child(3) {
+    z-index: 4;
+  }
+  #stats-content .stats-turn-table tfoot td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    background: var(--surface);
+  }
   #stats-content .stats-turn-table th:nth-child(4),
   #stats-content .stats-turn-table td:nth-child(4) { width: 3.7rem; }
 
@@ -3575,9 +3687,8 @@ button {
     flex: 0 0 auto;
     margin-left: 0;
   }
-  #stats-preset-status {
-    display: none;
-  }
+
+
   .sf-primary-row {
     display: grid;
     flex: 1 1 100%;
@@ -3650,9 +3761,11 @@ button {
     flex-wrap: wrap;
     align-items: flex-start;
   }
+  /* Measures toggle + Y1 measure/agg stay together on one row; adding an
+     extra series is a secondary action, so #sc-extra wraps below instead. */
   #sc-y1 {
-    flex-basis: 100%;
-    max-width: 12rem;
+    flex: 0 1 auto;
+    max-width: 7rem;
   }
   .topic-row,
   .topic-agent-row {

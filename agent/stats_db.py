@@ -761,6 +761,10 @@ def _sanitize_status_raw(content: Optional[str], status_raw: Optional[str]) -> O
 
 
 def update_message_quota_snapshot(msg_id: int, before: float, after: float) -> None:
+    # Balance-based gauges (DeepSeek) report a decreasing balance, so
+    # before > after when usage occurs. Swap so quota_delta is positive.
+    if before > after:
+        before, after = after, before
     delta = round(after - before, 4)
     with _connect() as conn:
         conn.execute(
@@ -1436,6 +1440,11 @@ def save_stats(
 
 
 def save_quota_delta(session_id: str, before: float, after: float) -> None:
+    # Balance-based gauges (DeepSeek) report a decreasing balance, so
+    # before > after when usage occurs. Swap so quota_after - quota_before
+    # is always positive for usage (same direction as utilization % gauges).
+    if before > after:
+        before, after = after, before
     with _connect() as conn:
         conn.execute(
             "UPDATE session_stats SET quota_before=?, quota_after=? WHERE session_id=?",

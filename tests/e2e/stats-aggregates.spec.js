@@ -23,6 +23,8 @@ test('stats days filter includes 1d and 3d windows and requests them', async ({ 
 
   await page.goto('/');
   await page.getByRole('button', { name: 'Stats' }).click();
+  // Default is now By Turn — switch to hourly for aggregate tests.
+  await page.locator('#sf-period').selectOption('hourly');
 
   const dayOptions = await page.locator('#sf-days option').evaluateAll(
     opts => opts.map(o => ({ value: o.value, text: o.textContent }))
@@ -31,7 +33,8 @@ test('stats days filter includes 1d and 3d windows and requests them', async ({ 
     { value: '1', text: '1d' },
     { value: '3', text: '3d' },
     { value: '7', text: '7d' },
-    { value: '30', text: '30d' },
+    { value: '14', text: '14d' },
+    { value: '28', text: '28d' },
     { value: '90', text: '90d' },
     { value: '0', text: 'All Time' },
   ]);
@@ -59,6 +62,15 @@ test('Tokens In/Out/Total, Cache Read/Write, New Input, Cache Hit % and Avg Toke
 
   await page.goto('/');
   await page.getByRole('button', { name: 'Stats' }).click();
+  await expect(page.locator('#stats-content table')).toBeVisible();
+
+  // Uncheck all but the basic four so column indices are predictable.
+  await page.locator('#sf-measures-toggle').click();
+  for (const key of ['avg_tokens_turn', 'cache_hit_rate', 'cache_read', 'cache_write', 'duration', 'new_input', 'tokens_total']) {
+    await page.locator(`#sf-measures-menu input[value="${key}"]`).uncheck();
+  }
+  // Close the measures menu so the next toggle-click opens it again.
+  await page.locator('#sf-measures-toggle').click();
 
   // Tokens In must be New Input + Cache Read, i.e. it has to include
   // cache_write (100) — not just input_tokens + cache_read (which would
@@ -85,7 +97,7 @@ test('Tokens In/Out/Total, Cache Read/Write, New Input, Cache Hit % and Avg Toke
 
   const totals = page.locator('#stats-content tfoot td');
   await expect(totals.nth(1)).toHaveText('250');
-  await expect(totals.nth(2)).toHaveText('66.7%');
+  await expect(totals.nth(2)).toHaveText('—');  // cache_hit_rate uses avg agg, no meaningful total
   await expect(totals.nth(3)).toHaveText('300');
   await expect(totals.nth(4)).toHaveText('100');
   await expect(totals.nth(5)).toHaveText('150');
@@ -302,6 +314,7 @@ test('stats chart aggregate chips apply to Y1 and an added series', async ({ pag
 
   await page.goto('/');
   await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('#sf-period').selectOption('hourly');
 
   await expect(page.locator('#sc-y1')).toHaveValue('turns');
   await expect(page.locator('#sc-y1-agg')).toBeVisible();
@@ -373,6 +386,7 @@ test('stats chart uses distinct colors for Tokens In and New Input even though t
 
   await page.goto('/');
   await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('#sf-period').selectOption('hourly');
 
   await page.locator('#sf-measures-toggle').click();
   await page.locator('#sf-measures-menu input[value="new_input"]').check();
@@ -423,6 +437,7 @@ test('same measure can be added multiple times with different aggregations, and 
 
   await page.goto('/');
   await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('#sf-period').selectOption('hourly');
 
   await page.locator('#sc-y1').selectOption('tokens_in');
   await page.locator('#sc-y1-agg').selectOption('p50');
@@ -487,6 +502,7 @@ test('duration measure defaults to average in aggregate stats', async ({ page })
 
   await page.goto('/');
   await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('#sf-period').selectOption('hourly');
   await page.locator('#sf-measures-toggle').click();
   await page.locator('#sf-measures-menu input[value="duration"]').check();
   await expect(page.locator('#stats-content thead th')).toContainText(['AVG Duration']);
@@ -515,10 +531,11 @@ test('chart metric options are limited to whatever is checked in Measures', asyn
 
   await page.goto('/');
   await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('#sf-period').selectOption('hourly');
 
   const y1Options = () => page.locator('#sc-y1 option').evaluateAll(opts => opts.map(o => o.value));
 
-  // Defaults: Sessions/Turns/Tokens In/Tokens Out checked, Cost/Duration not.
+  // Defaults: Sessions/Turns/Tokens In/Tokens Out checked.
   await expect.poll(y1Options).toEqual(['turns', 'sessions', 'tokens_in', 'tokens_out']);
   await expect(page.locator('#sc-y1 option[value="cost"]')).toHaveCount(0);
   await expect(page.locator('#sc-y1 option[value="duration"]')).toHaveCount(0);

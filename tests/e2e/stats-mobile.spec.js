@@ -15,7 +15,7 @@ async function mockApp(page) {
 test.describe('stats view — mobile', () => {
   test.use({ viewport: { width: 390, height: 844 } }); // iPhone 14 size
 
-  test('By Turn table stays compact and unscrolled with the default measure count', async ({ page }) => {
+  test('By Turn table stays compact and unscrolled with a small measure count', async ({ page }) => {
     await mockApp(page);
     await page.route('**/stats?**', route => {
       const url = new URL(route.request().url());
@@ -35,11 +35,20 @@ test.describe('stats view — mobile', () => {
     await page.locator('#sf-period').selectOption('turn');
     await page.waitForSelector('.stats-turn-link');
 
+    // The Deep Dive default already selects most measures, so explicitly
+    // pare down to a small set (turns, sessions, tokens_in, tokens_out) to
+    // exercise the compact/unscrolled path.
+    await page.locator('#sf-measures-toggle').click();
+    for (const v of ['avg_tokens_turn', 'cache_hit_rate', 'cache_read', 'cache_write', 'duration', 'new_input', 'tokens_total']) {
+      await page.locator(`#sf-measures-menu input[value="${v}"]`).uncheck();
+    }
+    await page.locator('#sf-measures-toggle').click();
+
     await expect(page.locator('.stats-turn-table')).not.toHaveClass(/stats-turn-table-wide/);
     await expect.poll(() => page.locator('.stats-table-scroll').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
   });
 
-  test('By Turn table grows and scrolls instead of crushing columns once many measures are selected', async ({ page }) => {
+  test('By Turn table grows and scrolls instead of crushing columns with the default (many-measure) Deep Dive view', async ({ page }) => {
     await mockApp(page);
     await page.route('**/stats?**', route => {
       const url = new URL(route.request().url());
@@ -60,12 +69,8 @@ test.describe('stats view — mobile', () => {
     await page.locator('#sf-period').selectOption('turn');
     await page.waitForSelector('.stats-turn-link');
 
-    await page.locator('#sf-measures-toggle').click();
-    for (const v of ['cost', 'cache_read', 'cache_write', 'cache_hit_rate']) {
-      await page.locator(`#sf-measures-menu input[value="${v}"]`).check();
-    }
-    await page.locator('#sf-measures-toggle').click();
-
+    // No manual measure toggling: the Deep Dive default view itself already
+    // selects most measures, and this exact case is what regressed before.
     await expect(page.locator('.stats-turn-table')).toHaveClass(/stats-turn-table-wide/);
     const scroll = page.locator('.stats-table-scroll');
     await expect.poll(() => scroll.evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true);

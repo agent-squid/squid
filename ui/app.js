@@ -2834,7 +2834,7 @@ async function sendMessage(text) {
           addPinButton(bubble, msgId, topic, resolvedAgent, data.session_id || null);
           addBookmarkButton(bubble, msgId, topic, resolvedAgent);
           if (!statsEl && data.stats) statsEl = addStats(bubble, data.stats, doneTime);
-          if (statsEl) messages.appendChild(statsEl);
+          if (statsEl) { messages.appendChild(statsEl); addDeepDiveButton(bubble, topic, resolvedAgent, !!adhoc, statsEl); }
           liveSessionTurnCount = parseInt(data.session_turn_count || '0', 10) || liveSessionTurnCount;
           _advisoryTurnCount = liveSessionTurnCount;
           if (data.session_id && !adhoc) _sessionIds[`${topic}@${resolvedAgent || '_'}`] = data.session_id;
@@ -3034,6 +3034,7 @@ async function sendMessage(text) {
                 bubble.dataset.sessionId = stats.session_id;
               }
               statsEl = addStats(bubble, stats, new Date().toISOString());
+              addDeepDiveButton(bubble, topic, resolvedAgent, !!adhoc, statsEl);
               if (completionTimestampEl) {
                 completionTimestampEl.remove();
                 completionTimestampEl = null;
@@ -3198,10 +3199,17 @@ async function sendMessage(text) {
   // See ADR-0023.
   await new Promise(r => setTimeout(r, 1000));
   const quotaAfterSnapshot = await fetchQuotaForBackend(quotaBackend);
-  const quotaBefore = quotaBeforeSnapshot?.raw ?? null;
-  const quotaAfter = quotaAfterSnapshot?.raw ?? null;
+  // Balance-based gauges (DeepSeek) with a max budget: use the computed
+  // percentage so the delta represents budget-% change, not raw dollars.
+  const usePct = gaugeTypeFor(quotaBackend) === 'deepseek'
+    && quotaBeforeSnapshot?.pct != null && quotaAfterSnapshot?.pct != null;
+  const quotaBefore = usePct ? quotaBeforeSnapshot.pct : (quotaBeforeSnapshot?.raw ?? null);
+  const quotaAfter = usePct ? quotaAfterSnapshot.pct : (quotaAfterSnapshot?.raw ?? null);
   if (quotaBefore !== null && quotaAfter !== null && quotaAfter !== quotaBefore) {
-    const d = Math.round((quotaAfter - quotaBefore) * 10) / 10;
+    // Balance-based gauges report a decreasing balance; flip sign so usage
+    // always shows as positive (consistent with utilization % gauges).
+    const rawDiff = quotaAfter - quotaBefore;
+    const d = Math.round(((usePct || gaugeTypeFor(quotaBackend) !== 'deepseek') ? rawDiff : -rawDiff) * 10) / 10;
     if (statsEl && d > 0) {
       const deltaEl = statsEl.querySelector('.stats-quota-delta');
       deltaEl.textContent = `  ·  +${d} pp`;
@@ -3877,6 +3885,7 @@ function appendHistoryItem(item, container) {
   if (item.stats) {
     const statsEl = addStats(asstBubble, item.stats, item.timestamp);
     statsEl.classList.add('history-item');
+    addDeepDiveButton(asstBubble, item.topic || 'default', item.agent || null, !!item.adhoc);
   } else if (item.timestamp) {
     const tsEl = addTimestamp(asstBubble, item.timestamp);
     if (tsEl) tsEl.classList.add('history-item');
@@ -5099,9 +5108,9 @@ function initCursorQuota() {
 
 // ── usage stats panel ─────────────────────────────────────────────────────────
 
-let statsPeriod = 'hourly';
+let statsPeriod = 'turn';
 let statsBreakdown = '';
-let statsFilters = { days: 1, agents: [], topics: [], adhoc: 'all' };
+let statsFilters = { days: -3, agents: [], topics: [], adhoc: 'all' };
 // statsFilters.days doubles as an hours flag: negative values mean
 // "-days" hours (e.g. -3 = 3h). Only the 'turn' grain offers sub-day ranges,
 // since coarser grains bucket by hour/day/week and hours would be meaningless there.
@@ -5139,20 +5148,24 @@ function _syncStatsDayOptions(period) {
   select.innerHTML = options.map(o => `<option value="${o.value}">${o.label}</option>`).join('');
   select.value = String(statsFilters.days);
 }
-let statsChartY1 = 'turns';
+let statsChartY1 = 'tokens_in';
 let statsChartAggY1 = 'sum';
 // Additional chart series beyond the primary (Y1) one — each entry is
 // { metric, agg, axis } where axis is 'y1' (shares Y1's scale) or 'y2' (its
 // own right-hand scale). Unlike Y1, the same metric can appear more than
 // once here (e.g. P50 and P95 of the same measure).
-let statsChartExtra = [];
+let statsChartExtra = [{ metric: 'cache_hit_rate', agg: 'avg', axis: 'y2' }];
 let statsChartEditIndex = null;
 let statsChartInstance = null;
 let _lastStatsRows = null;
 let _statsFiltersLoaded = false;
 let _statsPage = 0;
 const _STATS_PAGE_SIZE = 10;
-const DEFAULT_STATS_MEASURES = ['sessions', 'turns', 'tokens_in', 'tokens_out'];
+const DEFAULT_STATS_MEASURES = ['turns', 'avg_tokens_turn', 'cache_hit_rate', 'cache_read', 'cache_write', 'duration', 'new_input', 'sessions', 'tokens_in', 'tokens_out', 'tokens_total'];
+// How many measure columns the By Turn table's mobile CSS can squeeze to
+// 100% width and keep readable. Independent of DEFAULT_STATS_MEASURES,
+// which is how many measures are *pre-selected*, not how many fit compact.
+const _STATS_TURN_TABLE_COMPACT_LIMIT = 4;
 // Duration is available in aggregate views too, but stays out of the base
 // default to keep the initial table compact. It is auto-added in By Turn.
 const _statsMeasures = new Set(DEFAULT_STATS_MEASURES);
@@ -5680,28 +5693,42 @@ function _statsTableMeasureLabel(measure) {
 
 function _statsTableMeasureValue(row, measure) {
   const agg = _statsTableAggForMeasure(measure.key);
-  if (agg === 'sum' && !Object.prototype.hasOwnProperty.call(row, _statsChartAggField(measure.key, agg))) return measure.row(row);
+  if (!Object.prototype.hasOwnProperty.call(row, _statsChartAggField(measure.key, agg))) return measure.row(row);
   return _formatStatsMetricValue(_statsChartSeriesValue(row, measure.key, agg), measure.key);
 }
 
-function _statsMeasureHeaders() {
-  return STATS_TABLE_MEASURES
-    .filter(m => _statsMeasureSelected(m.key))
-    .map(m => `<th${m.title ? ` title="${m.title}"` : ''}>${_statsTableMeasureLabel(m)}</th>`)
+function _statsSelectedMeasures() {
+  return STATS_TABLE_MEASURES.filter(m => _statsMeasureSelected(m.key));
+}
+
+function _statsMeasureHeaders(extra) {
+  return _statsSelectedMeasures()
+    .map((m, i) => {
+      var cls = '';
+      if (extra && extra.colClass) cls = ` class="${extra.colClass(m, i)}"`;
+      return `<th${cls}${m.title ? ` title="${m.title}"` : ''}>${_statsTableMeasureLabel(m)}</th>`;
+    })
     .join('');
 }
 
-function _statsMeasureCells(row) {
-  return STATS_TABLE_MEASURES
-    .filter(m => _statsMeasureSelected(m.key))
-    .map(m => `<td>${_statsTableMeasureValue(row, m)}</td>`)
+function _statsMeasureCells(row, extra) {
+  return _statsSelectedMeasures()
+    .map((m, i) => {
+      var cls = '';
+      if (extra && extra.colClass) cls = ` class="${extra.colClass(m, i)}"`;
+      return `<td${cls}>${_statsTableMeasureValue(row, m)}</td>`;
+    })
     .join('');
 }
 
-function _statsMeasureTotals(totals) {
+function _statsMeasureTotals(totals, extra) {
   return STATS_TABLE_MEASURES
     .filter(m => _statsMeasureSelected(m.key))
-    .map(m => `<td>${_statsTableAggForMeasure(m.key) === 'sum' ? m.total(totals) : '—'}</td>`)
+    .map((m, i) => {
+      var cls = '';
+      if (extra && extra.colClass) cls = ` class="${extra.colClass(m, i)}"`;
+      return `<td${cls}>${_statsTableAggForMeasure(m.key) === 'sum' ? m.total(totals) : '—'}</td>`;
+    })
     .join('');
 }
 
@@ -6095,6 +6122,24 @@ function _overallStatsState() {
   };
 }
 
+function _deepDiveStatsState() {
+  return {
+    version: 1,
+    time: { period: 'turn', days: -3 },
+    dimensions: {
+      topic: { mode: 'auto_top', values: [] },
+      agent: { mode: 'auto_top', values: [] },
+      session_type: { mode: 'all', values: [] },
+    },
+    breakdown: { key: '', sort: { mode: 'name', dir: 'asc' } },
+    measure: {
+      primary: { metric: 'tokens_in', agg: 'sum' },
+      series: [{ metric: 'cache_hit_rate', agg: 'avg', axis: 'y2' }],
+      visible: [...DEFAULT_STATS_MEASURES],
+    },
+  };
+}
+
 function _markStatsPresetDirty() {
   _renderStatsPresetControls();
 }
@@ -6151,29 +6196,50 @@ function _applyStatsState(state) {
 function _renderStatsPresetControls() {
   const select = document.getElementById('stats-preset-select');
   if (!select) return;
-  const options = ['<option value="__overall">Overall View</option>'];
-  options.push(..._statsPresets.map(preset => {
-    const label = `${preset.name}${preset.is_default ? ' (default)' : ''}`;
-    return `<option value="${preset.id}">${escapeHtml(label)}</option>`;
-  }));
+  const options = [
+    '<option value="__overall">Overview</option>',
+    '<option value="__deepdive">Deep Dive by Turns</option>',
+  ];
+  options.push(..._statsPresets
+    .filter(p => p.name !== 'Overview' && p.name !== 'Deep Dive by Turns')
+    .map(preset => {
+      return `<option value="${preset.id}">${escapeHtml(preset.name)}</option>`;
+    }));
   select.innerHTML = options.join('');
-  select.value = _activeStatsPresetId ? String(_activeStatsPresetId) : '__overall';
+  // If the active preset has a reserved system name, treat it as the
+  // matching hardcoded entry so the select doesn't show an empty value.
+  if (_activeStatsPresetId) {
+    const active = _statsPresets.find(p => p.id === _activeStatsPresetId);
+    if (active && (active.name === 'Overview' || active.name === 'Deep Dive by Turns')) _activeStatsPresetId = null;
+  }
+  const systemView = !_activeStatsPresetId
+    ? (statsPeriod === 'turn' ? '__deepdive' : '__overall') : null;
+  select.value = _activeStatsPresetId ? String(_activeStatsPresetId) : systemView;
   const hasActivePreset = !!_activeStatsPresetId;
-  const hasDefaultPreset = _statsPresets.some(p => p.is_default);
-  document.getElementById('stats-preset-update').disabled = !hasActivePreset;
-  document.getElementById('stats-preset-default').disabled = !hasActivePreset && !hasDefaultPreset;
+  const hasAnyDefault = _statsPresets.some(p => p.is_default);
+  const deepDivePreset = _statsPresets.find(p => p.name === 'Deep Dive by Turns');
+  const overviewPreset = _statsPresets.find(p => p.name === 'Overview');
+  // Deep Dive is the built-in fallback default when no user preset is marked
+  // default at all; Overview only shows as default when explicitly saved as one.
+  const activeIsDefault = hasActivePreset
+    ? _statsPresets.find(p => p.id === _activeStatsPresetId)?.is_default
+    : systemView === '__deepdive' ? (!hasAnyDefault || !!deepDivePreset?.is_default)
+    : systemView === '__overall' ? !!overviewPreset?.is_default
+    : false;
+  document.getElementById('stats-preset-default').classList.toggle('active', activeIsDefault);
+  document.getElementById('stats-preset-default').disabled = false;
   document.getElementById('stats-preset-delete').disabled = !hasActivePreset;
 }
 
-function _setStatsPresetStatus(text) {
-  const status = document.getElementById('stats-preset-status');
-  if (status) status.textContent = text || '';
+
+function _defaultStatsPreset() {
+  return _statsPresets.find(preset => preset.is_default);
 }
 
 async function _loadStatsPresets({ applyDefault = false } = {}) {
   try {
     _statsPresets = await fetch('/stats/filter-presets').then(r => r.json());
-    const def = _statsPresets.find(preset => preset.is_default);
+    const def = _defaultStatsPreset();
     if (applyDefault && def && !_activeStatsPresetId) {
       _activeStatsPresetId = def.id;
       _applyStatsState(def.state);
@@ -6181,6 +6247,7 @@ async function _loadStatsPresets({ applyDefault = false } = {}) {
     _renderStatsPresetControls();
   } catch {
     _statsPresets = [];
+    _renderStatsPresetControls();
   }
 }
 
@@ -6217,6 +6284,11 @@ function _closePresetNameModal(preset = null) {
 async function _submitPresetName() {
   const name = document.getElementById('preset-name-input').value.trim();
   if (!name) return;
+  const reserved = name.toLowerCase();
+  if (reserved === 'overview' || reserved === 'deep dive by turns') {
+    _setPresetNameModalError(`"${name}" is a reserved system view.`);
+    return;
+  }
   const conflict = _statsPresets.find(p => p.name.toLowerCase() === name.toLowerCase());
   if (conflict) {
     _setPresetNameModalError(`A view named "${conflict.name}" already exists.`, conflict);
@@ -6253,21 +6325,56 @@ async function _overwritePresetFromModal() {
 
 async function _saveStatsPreset({ update = false, makeDefault = false } = {}) {
   if (makeDefault && !_activeStatsPresetId) {
-    const currentDefault = _statsPresets.find(p => p.is_default);
-    if (!currentDefault) return;
-    const res = await fetch(`/stats/filter-presets/${currentDefault.id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ is_default: false }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      _setStatsPresetStatus(err.error || 'save failed');
-      return;
+    // Neither system view (Overview / Deep Dive) is a real preset until the
+    // user marks it default — upsert a reserved-name preset row so the
+    // choice survives reload. The backend's unique-default index clears any
+    // other row's is_default automatically, so no manual cleanup is needed.
+    const isDeepDive = statsPeriod === 'turn';
+    const name = isDeepDive ? 'Deep Dive by Turns' : 'Overview';
+    const buildState = isDeepDive ? _deepDiveStatsState : _overallStatsState;
+    const existing = _statsPresets.find(p => p.name === name);
+    if (existing?.is_default) {
+      // Toggle off: clicking an already-default system view unsets it.
+      await fetch(`/stats/filter-presets/${existing.id}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_default: false }),
+      });
+    } else if (existing) {
+      await fetch(`/stats/filter-presets/${existing.id}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_default: true, state: buildState() }),
+      });
+    } else {
+      const res = await fetch('/stats/filter-presets', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, state: buildState() }),
+      });
+      if (res.ok) {
+        const p = await res.json();
+        await fetch(`/stats/filter-presets/${p.id}`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ is_default: true }),
+        });
+      }
     }
     await _loadStatsPresets();
-    _setStatsPresetStatus('default cleared');
+    _renderStatsPresetControls();
     return;
+  }
+  if (makeDefault && _activeStatsPresetId) {
+    const preset = _statsPresets.find(p => p.id === _activeStatsPresetId);
+    if (preset?.is_default) {
+      // Toggle off: clicking an already-default preset unsets it.
+      const res = await fetch(`/stats/filter-presets/${_activeStatsPresetId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_default: false }),
+      });
+      if (!res.ok) return;
+      await _loadStatsPresets();
+      _renderStatsPresetControls();
+      return;
+    }
   }
   if (!update && !makeDefault) {
     const active = _statsPresets.find(preset => preset.id === _activeStatsPresetId);
@@ -6276,7 +6383,6 @@ async function _saveStatsPreset({ update = false, makeDefault = false } = {}) {
     await _loadStatsPresets();
     _activeStatsPresetId = preset.id;
     _renderStatsPresetControls();
-    _setStatsPresetStatus('saved');
     return;
   }
   const body = makeDefault ? { is_default: true } : { state: _statsState() };
@@ -6287,14 +6393,12 @@ async function _saveStatsPreset({ update = false, makeDefault = false } = {}) {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    _setStatsPresetStatus(err.error || 'save failed');
     return;
   }
   const preset = await res.json();
   await _loadStatsPresets();
   _activeStatsPresetId = preset.id;
   _renderStatsPresetControls();
-  _setStatsPresetStatus(makeDefault ? 'default set' : 'updated');
 }
 
 function _destroyChart() {
@@ -6711,11 +6815,14 @@ function renderTurnStats(rows) {
   }).join('');
 
   // The mobile layout squeezes measure columns to fit the viewport width,
-  // which works fine for the default handful but crushes columns unreadably
+  // which works fine for a small handful but crushes columns unreadably
   // once several more measures are selected — past that count, let the table
   // grow past the viewport and scroll instead of shrinking every column.
+  // This must NOT be compared against DEFAULT_STATS_MEASURES.length: that
+  // list is the rich Deep Dive default (11 measures) and is already past
+  // the point columns stay readable when squeezed to 100% width.
   const visibleMeasureCount = STATS_TABLE_MEASURES.filter(m => _statsMeasureSelected(m.key)).length;
-  const wideClass = visibleMeasureCount > DEFAULT_STATS_MEASURES.length ? ' stats-turn-table-wide' : '';
+  const wideClass = visibleMeasureCount > _STATS_TURN_TABLE_COMPACT_LIMIT ? ' stats-turn-table-wide' : '';
 
   _setStatsTable(`<table class="stats-turn-table${wideClass}">
     <thead><tr>
@@ -6732,22 +6839,33 @@ function renderTurnStats(rows) {
 }
 
 function renderTimeStats(rows) {
+  // Sticky column classes: time column is always frozen; turns column is
+  // frozen when it is the first selected measure.
+  const firstMeasure = _statsSelectedMeasures()[0];
+  const freezeTurns = firstMeasure && firstMeasure.key === 'turns';
+  const extra = {
+    colClass: function (m, i) {
+      if (i === 0 && freezeTurns) return 'stats-sticky-left';
+      return '';
+    },
+  };
+
   const totals = _statsTotals(rows);
   const bodyRows = _statsPageSlice(rows).map(r => {
     return `<tr>
-      <td>${_statsPeriodLabel(r.period)}</td>
-      ${_statsMeasureCells(r)}
+      <td class="stats-time-col">${_statsPeriodLabel(r.period)}</td>
+      ${_statsMeasureCells(r, extra)}
     </tr>`;
   }).join('');
 
-  _setStatsTable(`<table>
+  _setStatsTable(`<table class="stats-time-table">
     <thead><tr>
-      <th>${statsPeriod === 'hourly' ? 'Hour' : statsPeriod === 'weekly' ? 'Week' : 'Date'}</th>
-      ${_statsMeasureHeaders()}
+      <th class="stats-time-col">${statsPeriod === 'hourly' ? 'Hour' : statsPeriod === 'weekly' ? 'Week' : 'Date'}</th>
+      ${_statsMeasureHeaders(extra)}
     </tr></thead>
     <tbody>${bodyRows}</tbody>
     <tfoot><tr>
-      <td>Total</td>${_statsMeasureTotals(totals)}
+      <td class="stats-time-col">Total</td>${_statsMeasureTotals(totals, extra)}
     </tr></tfoot>
   </table>`);
   _statsAppendPager(rows.length);
@@ -7110,7 +7228,13 @@ function initStats() {
       _activeStatsPresetId = null;
       _applyStatsState(_overallStatsState());
       _renderStatsPresetControls();
-      _setStatsPresetStatus('');
+      loadStats();
+      return;
+    }
+    if (e.target.value === '__deepdive') {
+      _activeStatsPresetId = null;
+      _applyStatsState(_deepDiveStatsState());
+      _renderStatsPresetControls();
       loadStats();
       return;
     }
@@ -7122,27 +7246,30 @@ function initStats() {
     _activeStatsPresetId = preset.id;
     _applyStatsState(preset.state);
     _renderStatsPresetControls();
-    _setStatsPresetStatus('');
     loadStats();
   });
   document.getElementById('stats-preset-save')?.addEventListener('click', () => _saveStatsPreset());
-  document.getElementById('stats-preset-update')?.addEventListener('click', () => _saveStatsPreset({ update: true }));
+
   document.getElementById('stats-preset-default')?.addEventListener('click', () => _saveStatsPreset({ makeDefault: true }));
   document.getElementById('stats-preset-reset')?.addEventListener('click', () => {
-    _activeStatsPresetId = null;
-    _applyStatsState(_overallStatsState());
+    // "Reset to default view" means whatever is actually marked default
+    // (custom preset, Overview, or Deep Dive) — not hardcoded to Deep Dive.
+    // Falls back to Deep Dive only when nothing is marked default at all.
+    const def = _defaultStatsPreset();
+    _activeStatsPresetId = def ? def.id : null;
+    _applyStatsState(def ? def.state : _deepDiveStatsState());
     _renderStatsPresetControls();
-    _setStatsPresetStatus('');
     loadStats();
   });
   document.getElementById('stats-preset-delete')?.addEventListener('click', async () => {
     if (!_activeStatsPresetId) return;
     await fetch(`/stats/filter-presets/${_activeStatsPresetId}`, { method: 'DELETE' });
     _activeStatsPresetId = null;
-    _applyStatsState(_overallStatsState());
     await _loadStatsPresets();
+    const def = _defaultStatsPreset();
+    _activeStatsPresetId = def ? def.id : null;
+    _applyStatsState(def ? def.state : _deepDiveStatsState());
     _renderStatsPresetControls();
-    _setStatsPresetStatus('deleted');
     loadStats();
   });
 
@@ -7153,8 +7280,13 @@ function initStats() {
   document.querySelectorAll('#sf-measures-menu input[type="checkbox"]').forEach(input => {
     input.checked = _statsMeasures.has(input.value);
   });
+  const periodSel = document.getElementById('sf-period');
+  if (periodSel) periodSel.value = statsPeriod;
+  _syncStatsDayOptions(statsPeriod);
   _updateStatsMeasureLabel();
   _syncStatsChartMetricSelects();
+  // Populate the preset dropdown immediately so it's never empty.
+  _renderStatsPresetControls();
 }
 
 // ── topic manager ─────────────────────────────────────────────────────────────
@@ -9708,6 +9840,57 @@ function addPinButton(bubbleEl, msgId, topic, agent, sessionId = null) {
   });
   const header = bubbleEl.querySelector('.response-header');
   (header || bubbleEl).appendChild(btn);
+}
+
+function addDeepDiveButton(bubbleEl, topic, agent, adhoc, statsEl) {
+  if (!statsEl) statsEl = bubbleEl.nextElementSibling;
+  if (!statsEl || !statsEl.classList.contains('stats')) return;
+  const existing = statsEl.querySelector('.stats-deep-dive-btn');
+  if (existing) return existing;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'stats-deep-dive-btn';
+  btn.title = 'Deep Dive by Turns';
+  btn.innerHTML = `<span class="material-symbols-outlined">ssid_chart</span>`;
+  btn.addEventListener('click', e => {
+    e.stopPropagation();
+    _navigateToDeepDive(topic, agent, adhoc);
+  });
+  statsEl.appendChild(btn);
+  return btn;
+}
+
+function _navigateToDeepDive(topic, agent, adhoc) {
+  var skipPresets = !_statsPresetsLoaded;
+  _statsPresetsLoaded = true;
+
+  statsPeriod = 'turn';
+  statsBreakdown = '';
+  statsFilters.days = -3;
+  statsFilters.topics = (topic && topic !== 'default') ? [topic] : [];
+  statsFilters.agents = agent ? [agent] : [];
+  statsFilters.adhoc = adhoc ? 'adhoc' : 'session';
+  _activeStatsPresetId = null;
+  statsChartY1 = 'tokens_in';
+  statsChartAggY1 = 'sum';
+  statsChartExtra = [{ metric: 'cache_hit_rate', agg: 'avg', axis: 'y2' }];
+
+  document.getElementById('sf-period').value = 'turn';
+  document.getElementById('sf-breakdown').value = '';
+  document.getElementById('sf-adhoc').value = statsFilters.adhoc;
+  _syncStatsDayOptions('turn');
+  _syncStatsTopicMenuSelection();
+  _syncStatsAgentMenuSelection();
+  _updateStatsBreakdownUi();
+  _renderStatsPresetControls();
+
+  if (currentView !== 'stats') {
+    navigateView('stats');
+  } else {
+    loadStats();
+  }
+
+  if (skipPresets) _statsPresetsLoaded = false;
 }
 
 function initPin() {

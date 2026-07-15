@@ -18,6 +18,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono&display=swap" />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono&display=swap&text=%E2%96%88%E2%96%84%E2%96%80%E2%95%94%E2%95%90%E2%95%97%E2%95%91%E2%95%9A%E2%95%9D" />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Rubik:wght@700&display=swap" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,400,0,0" />
   <link rel="stylesheet" href="/vendor/atom-one-dark.min.css" />
   <link rel="stylesheet" href="style.css?v=20260714-001" />
   <script src="/vendor/highlight.min.js"></script>
@@ -490,9 +491,7 @@
           <button id="stats-preset-save" type="button" class="stats-preset-icon-btn" aria-label="Save new view" title="Save new view">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h12l2 2v14H5z"></path><path d="M8 4v6h8"></path><path d="M8 20v-6h8v6"></path></svg>
           </button>
-          <button id="stats-preset-update" type="button" class="stats-preset-icon-btn" aria-label="Update view" title="Update view" disabled>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4v6h6"></path><path d="M20 20v-6h-6"></path><path d="M20 9a7 7 0 0 0-12-3L4 10"></path><path d="M4 15a7 7 0 0 0 12 3l4-4"></path></svg>
-          </button>
+
           <button id="stats-preset-default" type="button" class="stats-preset-icon-btn" aria-label="Set default view" title="Set default view" disabled>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3l-5.6 2.9 1.1-6.2L3 9.6l6.2-.9z"></path></svg>
           </button>
@@ -502,7 +501,6 @@
           <button id="stats-preset-delete" type="button" class="stats-preset-icon-btn" aria-label="Delete view" title="Delete view" disabled>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M6 7l1 14h10l1-14"></path><path d="M9 7V4h6v3"></path></svg>
           </button>
-          <span id="stats-preset-status"></span>
         </div>
       </div>
       <div id="stats-filters">
@@ -510,7 +508,7 @@
           <label class="sf-field">
             <select id="sf-period">
               <option value="turn">By Turn</option>
-              <option value="hourly" selected>Hourly</option>
+              <option value="hourly">Hourly</option>
               <option value="daily">Daily</option>
               <option value="weekly">Weekly</option>
             </select>
@@ -567,18 +565,18 @@
               <button id="sf-measures-toggle" class="sf-chip sf-multi-toggle" type="button" aria-haspopup="true" aria-expanded="false">Measures (4)</button>
               <div id="sf-measures-menu" class="sf-multi-menu" hidden>
                 <label><input type="checkbox" value="turns" checked> Turns</label>
-                <label><input type="checkbox" value="avg_tokens_turn"> Avg Tokens/Turn</label>
-                <label><input type="checkbox" value="cache_hit_rate"> Cache Hit %</label>
-                <label><input type="checkbox" value="cache_read"> Cache Read</label>
-                <label><input type="checkbox" value="cache_write"> Cache Write</label>
+                <label><input type="checkbox" value="avg_tokens_turn" checked> Avg Tokens/Turn</label>
+                <label><input type="checkbox" value="cache_hit_rate" checked> Cache Hit %</label>
+                <label><input type="checkbox" value="cache_read" checked> Cache Read</label>
+                <label><input type="checkbox" value="cache_write" checked> Cache Write</label>
                 <label><input type="checkbox" value="cost"> Cost</label>
-                <label><input type="checkbox" value="duration"> Duration</label>
-                <label><input type="checkbox" value="new_input"> New Input</label>
+                <label><input type="checkbox" value="duration" checked> Duration</label>
+                <label><input type="checkbox" value="new_input" checked> New Input</label>
                 <label><input type="checkbox" value="quota"> Quota Delta</label>
                 <label><input type="checkbox" value="sessions" checked> Sessions</label>
                 <label><input type="checkbox" value="tokens_in" checked> Tokens In</label>
                 <label><input type="checkbox" value="tokens_out" checked> Tokens Out</label>
-                <label><input type="checkbox" value="tokens_total"> Total Tokens</label>
+                <label><input type="checkbox" value="tokens_total" checked> Total Tokens</label>
               </div>
             </div>
           </div>

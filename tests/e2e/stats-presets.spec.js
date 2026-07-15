@@ -52,6 +52,7 @@ test('stats filter presets save in their own top row and apply saved state', asy
 
   await page.goto('/');
   await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('#sf-period').selectOption('hourly');
   await expect(page.locator('#stats-presets')).toBeVisible();
   await expect.poll(() => page.evaluate(() => {
     const presetsTop = document.getElementById('stats-presets').getBoundingClientRect().top;
@@ -72,7 +73,6 @@ test('stats filter presets save in their own top row and apply saved state', asy
 
   await expect(page.locator('#stats-preset-select')).toHaveValue('1');
   await expect(page.locator('#stats-preset-select')).toContainText('Squid Codex');
-  await expect(page.locator('#stats-preset-status')).toHaveText('saved');
   expect(presets[0].state.dimensions.topic.values).toEqual(['squid']);
   expect(presets[0].state.dimensions.agent.values).toEqual(['codex']);
   expect(presets[0].state.breakdown.sort).toEqual({ mode: 'total', dir: 'desc' });
@@ -86,11 +86,10 @@ test('stats filter presets save in their own top row and apply saved state', asy
   await expect(page.locator('#stats-preset-select')).toHaveValue('1');
 
   await page.locator('#stats-preset-delete').click();
-  await expect(page.locator('#stats-preset-select')).toHaveValue('__overall');
+  await expect(page.locator('#stats-preset-select')).toHaveValue('__deepdive');
   await expect(page.locator('#sf-topic-toggle')).toHaveText('All Topics');
   await expect(page.locator('#sf-agent-toggle')).toHaveText('All Agents');
   await expect(page.locator('#sf-breakdown')).toHaveValue('');
-  await expect(page.locator('#stats-preset-status')).toHaveText('deleted');
 });
 
 test('stats filter preset dropdown shows the default saved view on load', async ({ page }) => {
@@ -124,7 +123,7 @@ test('stats filter preset dropdown shows the default saved view on load', async 
   await page.getByRole('button', { name: 'Stats' }).click();
 
   await expect(page.locator('#stats-preset-select')).toHaveValue('7');
-  await expect(page.locator('#stats-preset-select')).toContainText('Squid Codex (default)');
+  await expect(page.locator('#stats-preset-default')).toHaveClass(/active/);
   await expect(page.locator('#sf-topic-toggle')).toHaveText('#squid');
   await expect(page.locator('#sf-agent-toggle')).toHaveText('@codex');
 });
@@ -160,11 +159,16 @@ test('stats presets save chart micro settings and reset restores overall view', 
 
   await page.goto('/');
   await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('#sf-period').selectOption('hourly');
 
   await page.locator('#sf-measures-toggle').click();
   await page.locator('#sf-measures-menu input[value="cost"]').check();
   await page.locator('#sc-y1').selectOption('cost');
   await page.locator('#sc-y1-agg').selectOption('avg');
+  // Remove the default extra series (cache_hit_rate) so the new one is alone.
+  const removeBtns = page.locator('.sc-series-remove');
+  const count = await removeBtns.count();
+  for (let i = 0; i < count; i++) await removeBtns.nth(0).click();
   await page.locator('#sc-add-series').click();
   await page.locator('.sc-extra-metric').selectOption('tokens_in');
   await page.locator('.sc-extra-agg').selectOption('p95');
@@ -187,26 +191,19 @@ test('stats presets save chart micro settings and reset restores overall view', 
   await page.locator('#sf-adhoc').selectOption('adhoc');
 
   await page.locator('#stats-preset-reset').click();
-  await expect(page.locator('#stats-preset-select')).toHaveValue('__overall');
-  await expect(page.locator('#stats-preset-status')).toHaveText('');
-  await expect(page.locator('#sf-period')).toHaveValue('hourly');
-  await expect(page.locator('#sf-days')).toHaveValue('1');
+  await expect(page.locator('#stats-preset-select')).toHaveValue('__deepdive');
+  // Reset goes to Deep Dive: turn, 3h, tokens_in + cache_hit_rate
+  await expect(page.locator('#sf-period')).toHaveValue('turn');
+  await expect(page.locator('#sf-days')).toHaveValue('-3');
   await expect(page.locator('#sf-breakdown')).toHaveValue('');
-  await expect(page.locator('#sf-breakdown')).toBeEnabled();
+  await expect(page.locator('#sf-breakdown')).toBeDisabled();
   await expect(page.locator('#sf-topic-toggle')).toHaveText('All Topics');
   await expect(page.locator('#sf-agent-toggle')).toHaveText('All Agents');
   await expect(page.locator('#sf-adhoc')).toHaveValue('all');
-  await expect(page.locator('#sc-y1')).toHaveValue('turns');
+  await expect(page.locator('#sc-y1')).toHaveValue('tokens_in');
   await expect(page.locator('#sc-y1-agg')).toHaveValue('sum');
-  await expect(page.locator('#sc-y1-agg option')).toHaveText(['SUM']);
-  await expect(page.locator('#sc-extra .sc-series-pill-wrap')).toHaveCount(0);
-  await expect.poll(() => page.locator('#sf-measures-menu input:checked').evaluateAll(inputs => inputs.map(input => input.value))).toEqual([
-    'turns',
-    'sessions',
-    'tokens_in',
-    'tokens_out',
-  ]);
-  await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (4)');
+  await expect(page.locator('#sf-measures-menu input[value="cost"]')).not.toBeChecked();
+  await expect(page.locator('#sf-measures-menu input[value="quota"]')).not.toBeChecked();
 
   await page.locator('#stats-preset-select').selectOption('1');
   await expect(page.locator('#sc-y1')).toHaveValue('cost');
@@ -270,17 +267,15 @@ test('saving a duplicate view name shows the conflict in the modal and can overw
   // Error appears inside the modal, not in the status span behind the icons.
   await expect(page.locator('#preset-name-modal')).toHaveClass(/open/);
   await expect(page.locator('#preset-name-modal-error')).toHaveText('A view named "Squid Codex" already exists.');
-  await expect(page.locator('#stats-preset-status')).toHaveText('');
   await expect(page.locator('#preset-name-overwrite')).toBeVisible();
 
   await page.locator('#preset-name-overwrite').click();
 
   await expect(page.locator('#preset-name-modal')).not.toHaveClass(/open/);
   await expect(page.locator('#stats-preset-select')).toHaveValue('1');
-  await expect(page.locator('#stats-preset-status')).toHaveText('saved');
 });
 
-test('overall view can be set as default to clear the current default preset', async ({ page }) => {
+test('star toggles default on a named preset', async ({ page }) => {
   await mockApp(page);
   await page.route('**/stats/filters', route => route.fulfill({
     json: { agents: ['codex'], topics: ['squid'] },
@@ -301,11 +296,23 @@ test('overall view can be set as default to clear the current default preset', a
       measure: { primary: 'turns', secondary: null, visible: ['sessions', 'turns'] },
     },
   }];
-  await page.route('**/stats/filter-presets', route => route.fulfill({ json: presets }));
+  let nextId = 4;
+  await page.route('**/stats/filter-presets', async route => {
+    if (route.request().method() === 'POST') {
+      const body = route.request().postDataJSON();
+      const preset = { id: nextId++, name: body.name, state: body.state, is_default: false };
+      presets.push(preset);
+      return route.fulfill({ json: preset });
+    }
+    return route.fulfill({ json: presets });
+  });
   await page.route('**/stats/filter-presets/**', async route => {
     const id = Number(new URL(route.request().url()).pathname.split('/').pop());
     if (route.request().method() === 'PUT') {
       const body = route.request().postDataJSON();
+      // Mirrors the backend's unique-default index: setting is_default=true
+      // on one row clears it on every other row.
+      if (body.is_default === true) presets = presets.map(p => ({ ...p, is_default: p.id === id }));
       presets = presets.map(p => p.id === id ? { ...p, ...body } : p);
       return route.fulfill({ json: presets.find(p => p.id === id) });
     }
@@ -317,23 +324,31 @@ test('overall view can be set as default to clear the current default preset', a
   await page.goto('/');
   await page.getByRole('button', { name: 'Stats' }).click();
 
-  // Starts on the default preset
+  // Starts on the default preset — star button is lit
   await expect(page.locator('#stats-preset-select')).toHaveValue('3');
-  await expect(page.locator('#stats-preset-select')).toContainText('My Preset (default)');
   await expect(page.locator('#stats-preset-default')).toBeEnabled();
+  await expect(page.locator('#stats-preset-default')).toHaveClass(/active/);
 
-  // Switch to Overall View — Set Default should still be enabled (there's a default to clear)
+  // Click star to unset default
+  await page.locator('#stats-preset-default').click();
+  await expect(page.locator('#stats-preset-default')).not.toHaveClass(/active/);
+
+  // Click star again to set as default
+  await page.locator('#stats-preset-default').click();
+  await expect(page.locator('#stats-preset-default')).toHaveClass(/active/);
+
+  // Switch to Overall View — star is enabled but inactive (another preset is default).
   await page.locator('#stats-preset-select').selectOption('__overall');
-  await expect(page.locator('#stats-preset-select')).toHaveValue('__overall');
   await expect(page.locator('#stats-preset-default')).toBeEnabled();
-  await expect(page.locator('#stats-preset-update')).toBeDisabled();
+  await expect(page.locator('#stats-preset-default')).not.toHaveClass(/active/);
   await expect(page.locator('#stats-preset-delete')).toBeDisabled();
 
-  // Click Set Default from Overall View to clear the default
+  // Click star on Overview — saves Overview itself as the persistent default
+  // (clearing the other preset's default), so its own star lights up.
   await page.locator('#stats-preset-default').click();
-  await expect(page.locator('#stats-preset-status')).toHaveText('default cleared');
-  await expect(page.locator('#stats-preset-select')).not.toContainText('(default)');
+  await expect(page.locator('#stats-preset-default')).toHaveClass(/active/);
 
-  // Now Set Default should be disabled (no default to clear, not on a named preset)
-  await expect(page.locator('#stats-preset-default')).toBeDisabled();
+  // Switch to Deep Dive — star is inactive; Overview is the saved default now.
+  await page.locator('#stats-preset-select').selectOption('__deepdive');
+  await expect(page.locator('#stats-preset-default')).not.toHaveClass(/active/);
 });
