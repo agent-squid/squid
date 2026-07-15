@@ -161,6 +161,10 @@ test('help menu documents route history arrow shortcuts', async ({ page }) => {
   await expect(page.locator('#help-panel')).toHaveClass(/open/);
   await expect(page.locator('#help-content')).toContainText('with empty input or only a route: browse recent routes');
   await expect(page.locator('#help-content')).toContainText('navigate autocomplete, route history, or prompt history');
+  await expect(page.locator('#help-content')).toContainText('/bookmarks, /bm');
+  await expect(page.locator('#help-content')).toContainText('toggle to show only bookmarked responses');
+  await expect(page.locator('#help-content')).toContainText('/prompts');
+  await expect(page.locator('#help-content')).toContainText('toggle to show only your prompts in history');
 });
 
 test('default topic prompt history distinguishes agent routes', async ({ page }) => {
@@ -379,8 +383,11 @@ test('mobile composer actions stay compact', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
 
-  await expect(page.locator('#chip-actions .composer-tool-btn').first()).toHaveCSS('width', '28px');
-  await expect(page.locator('#chip-actions .composer-tool-btn').first()).toHaveCSS('height', '28px');
+  await expect(page.locator('#chip-bookmark-btn')).toBeHidden();
+  await expect(page.locator('#chip-prompts-btn')).toBeHidden();
+  await expect(page.locator('#chip-filter-btn')).toBeVisible();
+  await expect(page.locator('#chip-filter-btn')).toHaveCSS('width', '28px');
+  await expect(page.locator('#chip-filter-btn')).toHaveCSS('height', '28px');
   const inputPaddingBottom = await page.locator('#input').evaluate(el => parseFloat(getComputedStyle(el).paddingBottom));
   expect(inputPaddingBottom).toBeLessThanOrEqual(5);
 });

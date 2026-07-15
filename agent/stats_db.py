@@ -72,6 +72,8 @@ _TABLES = [
         last_prompt        TEXT,
         last_adhoc_prompt  TEXT,
         last_at            TEXT,
+        last_session_at    TEXT,
+        last_adhoc_at      TEXT,
         last_model         TEXT,
         last_harness       TEXT,
         last_provider      TEXT,
@@ -234,6 +236,11 @@ def init_db() -> None:
     try:
         for ddl in _TABLES:
             conn.execute(ddl)
+        topic_columns = _table_columns(conn, "topics")
+        if "last_session_at" not in topic_columns:
+            conn.execute("ALTER TABLE topics ADD COLUMN last_session_at TEXT")
+        if "last_adhoc_at" not in topic_columns:
+            conn.execute("ALTER TABLE topics ADD COLUMN last_adhoc_at TEXT")
         agent_columns = _table_columns(conn, "agents")
         has_legacy_backend = "backend" in agent_columns
         # Seed one default agent per installed harness (INSERT OR IGNORE — never overwrites user edits)
@@ -427,6 +434,8 @@ def get_topics_management_summary(include_hidden: bool = True) -> list[dict]:
         ).fetchall()
         agent_rows = conn.execute(
             f"""SELECT topic, agent, last_prompt, last_adhoc_prompt, last_at,
+                      COALESCE(last_session_at, CASE WHEN last_prompt IS NOT NULL THEN last_at END) AS last_session_at,
+                      COALESCE(last_adhoc_at, CASE WHEN last_adhoc_prompt IS NOT NULL THEN last_at END) AS last_adhoc_at,
                       last_model, last_harness, last_provider,
                       {last_backend_expr} AS last_backend
                FROM topics
@@ -443,6 +452,18 @@ def get_topics_management_summary(include_hidden: bool = True) -> list[dict]:
         ).fetchall()
         adhoc_turn_rows = conn.execute(
             """SELECT topic, agent, COUNT(*) AS adhoc_turns
+               FROM chat_messages
+               WHERE role = 'assistant' AND adhoc = 1
+               GROUP BY topic, agent"""
+        ).fetchall()
+        session_time_rows = conn.execute(
+            """SELECT topic, agent, MAX(created_at) AS last_session_at
+               FROM chat_messages
+               WHERE role = 'assistant' AND (adhoc = 0 OR adhoc IS NULL)
+               GROUP BY topic, agent"""
+        ).fetchall()
+        adhoc_time_rows = conn.execute(
+            """SELECT topic, agent, MAX(created_at) AS last_adhoc_at
                FROM chat_messages
                WHERE role = 'assistant' AND adhoc = 1
                GROUP BY topic, agent"""
@@ -472,6 +493,12 @@ def get_topics_management_summary(include_hidden: bool = True) -> list[dict]:
     adhoc_turns_by_key: dict[tuple, int] = {
         (r["topic"], r["agent"]): r["adhoc_turns"] for r in adhoc_turn_rows
     }
+    session_at_by_key: dict[tuple, str] = {
+        (r["topic"], r["agent"]): r["last_session_at"] for r in session_time_rows
+    }
+    adhoc_at_by_key: dict[tuple, str] = {
+        (r["topic"], r["agent"]): r["last_adhoc_at"] for r in adhoc_time_rows
+    }
     live_turns_by_key: dict[tuple, int] = {
         (r["topic"], r["agent"]): r["live_turns"] for r in live_turn_rows
     }
@@ -480,6 +507,9 @@ def get_topics_management_summary(include_hidden: bool = True) -> list[dict]:
     for row in agent_rows:
         item = dict(row)
         topic = item.pop("topic")
+        key = (topic, item["agent"])
+        item["last_session_at"] = session_at_by_key.get(key) or item.get("last_session_at")
+        item["last_adhoc_at"] = adhoc_at_by_key.get(key) or item.get("last_adhoc_at")
         item["session_turns"] = session_turns_by_key.get((topic, item["agent"]), 0)
         item["adhoc_turns"] = adhoc_turns_by_key.get((topic, item["agent"]), 0)
         item["agent_turns"] = agent_turns_by_key.get((topic, item["agent"]), 0)
@@ -543,17 +573,21 @@ def upsert_topic(
         if agent:
             session_prompt = None if adhoc else last_prompt
             adhoc_prompt   = last_prompt if adhoc else None
+            session_at = at if session_prompt else None
+            adhoc_at = at if adhoc_prompt else None
             conn.execute(
-                """INSERT INTO topics (topic, agent, last_prompt, last_adhoc_prompt, last_at, last_model, last_harness, last_provider)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """INSERT INTO topics (topic, agent, last_prompt, last_adhoc_prompt, last_at, last_session_at, last_adhoc_at, last_model, last_harness, last_provider)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(topic, agent) DO UPDATE SET
                      last_prompt        = COALESCE(excluded.last_prompt, last_prompt),
                      last_adhoc_prompt  = COALESCE(excluded.last_adhoc_prompt, last_adhoc_prompt),
                      last_at            = COALESCE(excluded.last_at, last_at),
+                     last_session_at    = COALESCE(excluded.last_session_at, last_session_at),
+                     last_adhoc_at      = COALESCE(excluded.last_adhoc_at, last_adhoc_at),
                      last_model         = COALESCE(excluded.last_model, last_model),
                      last_harness       = COALESCE(excluded.last_harness, last_harness),
                      last_provider      = COALESCE(excluded.last_provider, last_provider)""",
-                (name, agent, session_prompt, adhoc_prompt, at, last_model, last_harness, last_provider),
+                (name, agent, session_prompt, adhoc_prompt, at, session_at, adhoc_at, last_model, last_harness, last_provider),
             )
 
 
@@ -598,7 +632,7 @@ def delete_topic_agent(topic: str, agent: str, adhoc: Optional[bool] = None) -> 
                 (topic, agent),
             )
             conn.execute(
-                "UPDATE topics SET last_adhoc_prompt=NULL WHERE topic=? AND agent=?",
+                "UPDATE topics SET last_adhoc_prompt=NULL, last_adhoc_at=NULL WHERE topic=? AND agent=?",
                 (topic, agent),
             )
             conn.execute(
@@ -616,7 +650,7 @@ def delete_topic_agent(topic: str, agent: str, adhoc: Optional[bool] = None) -> 
             )
             conn.execute("DELETE FROM topic_sessions WHERE topic=? AND agent=?", (topic, agent))
             conn.execute(
-                "UPDATE topics SET last_prompt=NULL WHERE topic=? AND agent=?",
+                "UPDATE topics SET last_prompt=NULL, last_session_at=NULL WHERE topic=? AND agent=?",
                 (topic, agent),
             )
             conn.execute(
@@ -761,10 +795,6 @@ def _sanitize_status_raw(content: Optional[str], status_raw: Optional[str]) -> O
 
 
 def update_message_quota_snapshot(msg_id: int, before: float, after: float) -> None:
-    # Balance-based gauges (DeepSeek) report a decreasing balance, so
-    # before > after when usage occurs. Swap so quota_delta is positive.
-    if before > after:
-        before, after = after, before
     delta = round(after - before, 4)
     with _connect() as conn:
         conn.execute(
@@ -1440,11 +1470,6 @@ def save_stats(
 
 
 def save_quota_delta(session_id: str, before: float, after: float) -> None:
-    # Balance-based gauges (DeepSeek) report a decreasing balance, so
-    # before > after when usage occurs. Swap so quota_after - quota_before
-    # is always positive for usage (same direction as utilization % gauges).
-    if before > after:
-        before, after = after, before
     with _connect() as conn:
         conn.execute(
             "UPDATE session_stats SET quota_before=?, quota_after=? WHERE session_id=?",

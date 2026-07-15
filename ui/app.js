@@ -1072,9 +1072,10 @@ function clearFilter() {
 }
 
 // A still-in-flight (queued or streaming) thinking bubble, plus the user bubble/timestamp
-// preceding it, form a "live group" — kept in the DOM across filter/search but hidden
-// (rather than shown) while a filter or search scope is active, since it can't be
-// evaluated against that scope until it lands in the DB.
+// preceding it, form a "live group" — kept in the DOM across filter/search. While a search
+// scope is active they stay hidden (can't be evaluated against keywords until it lands in
+// the DB), but while a filter scope is active each group is shown or hidden based on whether
+// its own topic/agent/adhoc (tracked on the thinking bubble's dataset) matches the filter.
 function collectLiveGroupElements() {
   const group = new Set();
   document.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)').forEach(thinking => {
@@ -1089,7 +1090,23 @@ function collectLiveGroupElements() {
 }
 
 function setLiveGroupHidden(hidden) {
-  collectLiveGroupElements().forEach(el => el.classList.toggle('live-hidden', hidden));
+  document.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)').forEach(thinking => {
+    const group = [thinking];
+    let el = thinking.previousElementSibling;
+    while (el && (el.classList.contains('msg-time') || (el.classList.contains('msg') && el.classList.contains('user')))) {
+      group.push(el);
+      el = el.previousElementSibling;
+    }
+    // Search scope can't be matched client-side (keywords aren't tracked on the live
+    // bubble), so a search in progress forces the whole group hidden. A filter scope can
+    // be matched — only hide groups that don't belong to it.
+    const stayHidden = hidden && (searchActive || !itemMatchesFilter({
+      topic: thinking.dataset.topic || 'default',
+      agent: thinking.dataset.agent || null,
+      adhoc: thinking.dataset.adhoc === '1',
+    }, historyFilter));
+    group.forEach(node => node.classList.toggle('live-hidden', stayHidden));
+  });
 }
 
 function reloadHistory(filter = {}) {
@@ -1291,6 +1308,13 @@ function createTopSentinel() {
 
 async function loadHistory() {
   if (bookmarkOnlyHistory) return;
+  // #view-chat is display:none while another tab is active, which collapses every
+  // descendant's getBoundingClientRect() to zero — including the sentinel visibility
+  // check below, which would then read as "still in view" no matter what and chain-load
+  // the entire history in the background. Bail here so a page in flight when the user
+  // switches tabs doesn't keep pulling more; the IntersectionObserver re-evaluates and
+  // resumes normally once #view-chat becomes visible again.
+  if (currentView !== 'chat') return;
   if (historyExhausted || historyLoading) return;
   historyLoading = true;
   const generation = historyGeneration;
@@ -1331,8 +1355,9 @@ async function loadHistory() {
     if (!item.content && item.status !== 'pending') continue;
 
     if (item.status === 'pending') {
-      // Queued/in-flight items can't be evaluated against a filter scope yet — skip while filtered.
-      if (hasHistoryFilterScope()) continue;
+      // Queued/in-flight items already carry topic/agent/adhoc from the DB row, so a
+      // filter scope can be checked directly — only skip ones that don't belong to it.
+      if (!itemMatchesFilter(item, historyFilter)) continue;
       const wipBubble = makeWipBubble(item);
       fragment.appendChild(wipBubble);
       reconnectPendingItem(item, wipBubble);
@@ -1890,6 +1915,8 @@ const SQUID_COMMANDS = [
   { name: 'refresh',      desc: 'hard refresh this browser tab — clears cache, server untouched', args: false },
   { name: 'f', alias: 'filter', desc: 'filter — e.g. /f #topic  ·  /f @agent!  ·  /f reset', args: true },
   { name: 's', alias: 'search', desc: 'search — e.g. /s #topic kw  ·  /s @agent! kw  ·  /s #all kw', args: true },
+  { name: 'bookmarks', alias: 'bm', desc: 'toggle bookmarked responses only',         args: false },
+  { name: 'prompts',     desc: 'toggle user prompts only',                            args: false },
   { name: 'status',       desc: 'show active processes panel',                        args: false },
   { name: 'help',         desc: 'show help panel',                                    args: false },
   { name: 'remote',       desc: 'show QR code for mobile / tablet access',            args: false },
@@ -1902,6 +1929,8 @@ function parseCommand(message) {
   if (/^stop$/i.test(t))         return { command: 'stop' };
   if (/^stopall$/i.test(t))      return { command: 'stopall' };
   if (/^clear$/i.test(t))        return { command: 'clear' };
+  if (/^(?:bookmarks|bm)$/i.test(t)) return { command: 'bookmarks' };
+  if (/^prompts$/i.test(t))      return { command: 'prompts' };
   if (/^status$/i.test(t))       return { command: 'status' };
   if (/^help$/i.test(t))         return { command: 'help' };
   if (/^remote$/i.test(t))       return { command: 'remote' };
@@ -1935,6 +1964,14 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
   }
   if (cmd.command === 'refresh') {
     doRefresh();
+    return;
+  }
+  if (cmd.command === 'prompts') {
+    togglePromptOnlyHistory();
+    return;
+  }
+  if (cmd.command === 'bookmarks') {
+    toggleBookmarkOnlyHistory();
     return;
   }
   if (cmd.command === 'restart') {
@@ -2187,6 +2224,7 @@ form.addEventListener('submit', async (e) => {
   hideAutocomplete();
   if (searchActive) clearSearch();
   invalidateTopicsCache();
+  invalidateTopicsManageCache();
   recordPrompt(formatPromptHistoryEntry(topic, agent, adhoc, lookback, message));
   localStorage.removeItem('squid_draft');
   sendMessage(text);
@@ -2540,9 +2578,11 @@ async function sendMessage(text) {
   const { topic, agent, adhoc, lookback, message } = parseInput(text);
   setTopicChip(topic, agent, adhoc, lookback);
   const sendTime = new Date().toISOString();
-  // A search or filter scope can't be evaluated against a message that isn't in the DB
-  // yet, so keep this whole live group (user bubble + timestamp + thinking bubble) hidden.
-  const liveHiddenByScope = searchActive || hasHistoryFilterScope();
+  // A search scope can't be evaluated against a message that isn't in the DB yet, so keep
+  // the live group hidden while searching. A filter scope, on the other hand, can be checked
+  // client-side against this message's own topic/agent/adhoc — show it if it matches.
+  const liveHiddenByScope = searchActive ||
+    (hasHistoryFilterScope() && !itemMatchesFilter({ topic, agent, adhoc }, historyFilter));
 
   const userBubble = makeUserBubble(message, topic, agent, null, adhoc, lookback);
   const userTopicTag = userBubble.querySelector('.topic-tag');
@@ -2560,6 +2600,9 @@ async function sendMessage(text) {
   // ── Thinking bubble (visible immediately, shows status/queue/loader) ──────────
   const thinkingBubble = document.createElement('div');
   thinkingBubble.className = 'msg assistant msg-thinking';
+  thinkingBubble.dataset.topic = topic;
+  if (agent) thinkingBubble.dataset.agent = agent;
+  if (adhoc) thinkingBubble.dataset.adhoc = '1';
   if (liveHiddenByScope) thinkingBubble.classList.add('live-hidden');
   const thinkingContent = document.createElement('div');
   thinkingContent.className = 'thinking-live';
@@ -3009,7 +3052,13 @@ async function sendMessage(text) {
                 attachMsgId(meta.msg_id);
                 setCtxLabel(liveCtxSpan, adhoc);
                 bubble.dataset.topic = topic;
-                if (resolvedAgent) bubble.dataset.agent = resolvedAgent;
+                if (resolvedAgent) {
+                  bubble.dataset.agent = resolvedAgent;
+                  thinkingBubble.dataset.agent = resolvedAgent;
+                  // Agent wasn't known at send time (e.g. default agent) — now that it's
+                  // resolved, re-check whether this live group matches the active filter.
+                  if (!searchActive && hasHistoryFilterScope()) setLiveGroupHidden(true);
+                }
                 addPinButton(bubble, msgId, topic, resolvedAgent);
                 addBookmarkButton(bubble, msgId, topic, resolvedAgent);
               }
@@ -3081,6 +3130,7 @@ async function sendMessage(text) {
             liveCtxSpan.dataset.hasTrace = (statusBuf.trim() || liveToolEvents.length) ? 'true' : 'false';
             removeThinking();
             invalidateTopicsCache();
+            invalidateTopicsManageCache();
             doneTime = new Date().toISOString();
             if (firstDataReceived) {
               contentDiv.innerHTML = renderAssistantMarkdown(raw);
@@ -3208,27 +3258,32 @@ async function sendMessage(text) {
   if (quotaBefore !== null && quotaAfter !== null && quotaAfter !== quotaBefore) {
     // Balance-based gauges report a decreasing balance; flip sign so usage
     // always shows as positive (consistent with utilization % gauges).
+    const isDeepSeekBalance = gaugeTypeFor(quotaBackend) === 'deepseek' && !usePct;
     const rawDiff = quotaAfter - quotaBefore;
-    const d = Math.round(((usePct || gaugeTypeFor(quotaBackend) !== 'deepseek') ? rawDiff : -rawDiff) * 10) / 10;
+    const d = Math.round((isDeepSeekBalance ? -rawDiff : rawDiff) * 10) / 10;
     if (statsEl && d > 0) {
       const deltaEl = statsEl.querySelector('.stats-quota-delta');
       deltaEl.textContent = `  ·  +${d} pp`;
       deltaEl.title = 'Observed account quota-meter change; not exact message usage';
     }
+    // Persist the sign exactly as intended. The DB layer has no backend/gauge
+    // context, so DeepSeek balance snapshots are normalized here instead.
+    const recordQuotaBefore = isDeepSeekBalance && quotaBefore > quotaAfter ? quotaAfter : quotaBefore;
+    const recordQuotaAfter = isDeepSeekBalance && quotaBefore > quotaAfter ? quotaBefore : quotaAfter;
     if (msgId) {
       fetch(`/chat/${msgId}/quota-delta`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ before: quotaBefore, after: quotaAfter }),
+        body: JSON.stringify({ before: recordQuotaBefore, after: recordQuotaAfter }),
       }).catch(() => {});
     }
-  }
-  if (lastSessionId && quotaBefore !== null && quotaAfter !== null) {
-    fetch('/stats/quota-delta', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: lastSessionId, before: quotaBefore, after: quotaAfter }),
-    }).catch(() => {});
+    if (lastSessionId) {
+      fetch('/stats/quota-delta', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: lastSessionId, before: recordQuotaBefore, after: recordQuotaAfter }),
+      }).catch(() => {});
+    }
   }
   quotaTrackEnd(quotaBackend);
 }
@@ -7336,7 +7391,8 @@ function _renderTopicAgents(topic) {
     const backend = lane.last_backend || topic.last_backend || null;
     const isDefaultTopic = topic.name === 'default';
     const sessionPrompt = lane.last_prompt ? escapeHtml(truncate(lane.last_prompt, 120)) : '<span class="col-default">No session prompt</span>';
-    const laneTime = lane.last_at ? `<span class="topic-badge time">${escapeHtml(fmtTime(lane.last_at))}</span>` : '';
+    const sessionLaneTime = (lane.last_session_at || lane.last_at) ? `<span class="topic-badge time">${escapeHtml(fmtTime(lane.last_session_at || lane.last_at))}</span>` : '';
+    const adhocLaneTime = (lane.last_adhoc_at || lane.last_at) ? `<span class="topic-badge time">${escapeHtml(fmtTime(lane.last_adhoc_at || lane.last_at))}</span>` : '';
     // Default topic: skip session lane if no session history — adhoc is the normal mode there
     if (isDefaultTopic && !lane.last_prompt) {
       if (lane.last_adhoc_prompt) {
@@ -7348,7 +7404,7 @@ function _renderTopicAgents(topic) {
           <div class="topic-prompt">${escapeHtml(truncate(lane.last_adhoc_prompt, 120))}</div>
           <div class="topic-meta">
             <span class="topic-badge">adhoc</span>
-            ${laneTime}
+            ${adhocLaneTime}
             <button class="topic-btn" data-topic-open="${escapeHtml(topic.name)}" data-agent-open="${escapeHtml(lane.agent)}" data-adhoc-open="1" type="button">Open</button>
           </div>
         </div>`;
@@ -7367,7 +7423,7 @@ function _renderTopicAgents(topic) {
         </div>
         <div class="topic-prompt">${sessionPrompt}</div>
         <div class="topic-meta">
-          ${laneTime}
+          ${sessionLaneTime}
           <button class="topic-btn" data-topic-open="${escapeHtml(topic.name)}" data-agent-open="${escapeHtml(lane.agent)}" data-adhoc-open="0" type="button">Open</button>
           ${lane.last_prompt ? `<button class="topic-btn danger" data-agent-del-topic="${escapeHtml(topic.name)}" data-agent-del-agent="${escapeHtml(lane.agent)}" data-agent-del-adhoc="0" type="button">Delete</button>` : ''}
         </div>
@@ -7382,7 +7438,7 @@ function _renderTopicAgents(topic) {
           <div class="topic-prompt">${escapeHtml(truncate(lane.last_adhoc_prompt, 120))}</div>
           <div class="topic-meta">
             <span class="topic-badge">adhoc</span>
-            ${laneTime}
+            ${adhocLaneTime}
             <button class="topic-btn" data-topic-open="${escapeHtml(topic.name)}" data-agent-open="${escapeHtml(lane.agent)}" data-adhoc-open="1" type="button">Open</button>
             ${!isDefaultTopic ? `<button class="topic-btn danger" data-agent-del-topic="${escapeHtml(topic.name)}" data-agent-del-agent="${escapeHtml(lane.agent)}" data-agent-del-adhoc="1" type="button">Delete</button>` : ''}
           </div>
@@ -7394,7 +7450,6 @@ function _renderTopicAgents(topic) {
 
 function _renderTopicRows(topic) {
   const expanded = _topicsExpanded.has(topic.name);
-  const agentLabel = _topicAgentDisplay(topic.agent, topic.last_backend || null);
   const prompt = topic.last_prompt ? escapeHtml(truncate(topic.last_prompt, 120)) : '<span class="col-default">No prompt yet</span>';
   const memoryLabel = topic.memory?.exists ? 'Memory' : 'Add memory';
   const hideLabel = topic.name !== 'default' ? (topic.hidden ? 'Show' : 'Hide') : '';
@@ -7402,7 +7457,7 @@ function _renderTopicRows(topic) {
     <div class="topic-row${topic.hidden ? ' hidden' : ''}${expanded ? ' expanded' : ''}" data-topic="${escapeHtml(topic.name)}">
       <div class="topic-main">
         <span class="topic-caret">${expanded ? '▾' : '▸'}</span>
-        <span class="topic-identity"><span class="topic-name">#${escapeHtml(topic.name)}</span>${agentLabel}${topic.total_turns > 0 ? `<span class="topic-turn-count">${topic.total_turns}</span>` : ''}</span>
+        <span class="topic-identity"><span class="topic-name">#${escapeHtml(topic.name)}</span>${topic.total_turns > 0 ? `<span class="topic-turn-count">${topic.total_turns}</span>` : ''}</span>
       </div>
       <div class="topic-prompt">${prompt}</div>
       <div class="topic-meta">
@@ -9860,28 +9915,19 @@ function addDeepDiveButton(bubbleEl, topic, agent, adhoc, statsEl) {
   return btn;
 }
 
-function _navigateToDeepDive(topic, agent, adhoc) {
-  var skipPresets = !_statsPresetsLoaded;
-  _statsPresetsLoaded = true;
+async function _navigateToDeepDive(topic, agent, adhoc) {
+  const state = _deepDiveStatsState();
+  if (topic && topic !== 'default') state.dimensions.topic = { mode: 'selected', values: [topic] };
+  if (agent) state.dimensions.agent = { mode: 'selected', values: [agent] };
+  state.dimensions.session_type = { mode: 'selected', values: [adhoc ? 'adhoc' : 'session'] };
 
-  statsPeriod = 'turn';
-  statsBreakdown = '';
-  statsFilters.days = -3;
-  statsFilters.topics = (topic && topic !== 'default') ? [topic] : [];
-  statsFilters.agents = agent ? [agent] : [];
-  statsFilters.adhoc = adhoc ? 'adhoc' : 'session';
   _activeStatsPresetId = null;
-  statsChartY1 = 'tokens_in';
-  statsChartAggY1 = 'sum';
-  statsChartExtra = [{ metric: 'cache_hit_rate', agg: 'avg', axis: 'y2' }];
+  _applyStatsState(state);
 
-  document.getElementById('sf-period').value = 'turn';
-  document.getElementById('sf-breakdown').value = '';
-  document.getElementById('sf-adhoc').value = statsFilters.adhoc;
-  _syncStatsDayOptions('turn');
-  _syncStatsTopicMenuSelection();
-  _syncStatsAgentMenuSelection();
-  _updateStatsBreakdownUi();
+  if (!_statsPresetsLoaded) {
+    _statsPresetsLoaded = true;
+    await _loadStatsPresets({ applyDefault: false });
+  }
   _renderStatsPresetControls();
 
   if (currentView !== 'stats') {
@@ -9889,8 +9935,6 @@ function _navigateToDeepDive(topic, agent, adhoc) {
   } else {
     loadStats();
   }
-
-  if (skipPresets) _statsPresetsLoaded = false;
 }
 
 function initPin() {

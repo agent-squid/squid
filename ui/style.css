@@ -2955,7 +2955,13 @@ body {
   font-size: 1em;
   padding: 0.1rem 0.4rem;
 }
-.sc-extra-axis, .sc-extra-remove { font-size: 0.9em; line-height: 1; }
+.sc-extra-axis {
+  box-sizing: border-box;
+  height: 1.325rem;
+  display: inline-flex;
+  align-items: center;
+}
+.sc-extra-remove { font-size: 0.9em; line-height: 1; }
 #sc-add-series:hover, .sc-extra-axis:hover, .sc-extra-remove:hover { border-color: #4a4a70; color: #9090c0; }
 #stats-chart-controls.breakdown-active #sc-add-series,
 #stats-chart-controls.breakdown-active #sc-extra {
@@ -3657,6 +3663,11 @@ button {
   .composer-tool-btn {
     width: 28px;
     height: 28px;
+  }
+
+  #chip-bookmark-btn,
+  #chip-prompts-btn {
+    display: none;
   }
 
   #scroll-btn {

@@ -298,6 +298,28 @@ test('user prompts only keeps the active history filter', async ({ page }) => {
   expect(last).toMatch(/adhoc=true/);
 });
 
+test('/prompts toggles user prompts only like the composer prompt icon', async ({ page }) => {
+  await mockBackend(page);
+
+  const urls = [];
+  await page.route('**/history**', route => {
+    urls.push(route.request().url());
+    return route.fulfill({ json: { items: [], has_more: false } });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '/f #squid@claude!');
+  await page.keyboard.press('Enter');
+  await page.fill('#input', '/prompts');
+  await page.keyboard.press('Enter');
+
+  await expect(page.locator('#chip-prompts-btn')).toHaveAttribute('aria-pressed', 'true');
+  const last = urls[urls.length - 1];
+  expect(last).toMatch(/topic=squid/);
+  expect(last).toMatch(/agent=claude/);
+  expect(last).toMatch(/adhoc=true/);
+});
+
 test('bookmarked only applies the active filter to fetched bookmark rows', async ({ page }) => {
   await mockBackend(page);
   await page.unroute('**/history**');
@@ -324,6 +346,37 @@ test('bookmarked only applies the active filter to fetched bookmark rows', async
   await expect(page.locator('.msg.assistant.history-item')).not.toContainText('other bookmark');
 });
 
+test('/bookmarks and /bm toggle bookmarked only like the composer bookmark icon', async ({ page }) => {
+  await mockBackend(page);
+  await page.unroute('**/history**');
+  await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/history/by-ids**', route => route.fulfill({ json: { items: [
+    { id: 10, role: 'assistant', topic: 'squid', agent: 'claude', content: 'matching bookmark', status: 'done', adhoc: false, prompt: 'match', timestamp: new Date().toISOString() },
+    { id: 11, role: 'assistant', topic: 'other', agent: 'claude', content: 'other bookmark', status: 'done', adhoc: false, prompt: 'other', timestamp: new Date().toISOString() },
+  ] }}));
+
+  await page.goto('/');
+  await page.evaluate(() => {
+    _bookmarkItems = [
+      { id: 10, topic: 'squid', agent: 'claude', content: 'matching bookmark' },
+      { id: 11, topic: 'other', agent: 'claude', content: 'other bookmark' },
+    ];
+    _bookmarkIds = new Set(_bookmarkItems.map(i => i.id));
+  });
+  await page.fill('#input', '/f #squid');
+  await page.keyboard.press('Enter');
+  await page.fill('#input', '/bookmarks');
+  await page.keyboard.press('Enter');
+
+  await expect(page.locator('#chip-bookmark-btn')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('.msg.assistant.history-item')).toHaveCount(1);
+  await expect(page.locator('.msg.assistant.history-item')).toContainText('matching bookmark');
+
+  await page.fill('#input', '/bm');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#chip-bookmark-btn')).toHaveAttribute('aria-pressed', 'false');
+});
+
 test('history renders only assistant bubbles — no user bubbles', async ({ page }) => {
   await mockBackend(page);
 
@@ -348,7 +401,7 @@ test('history renders only assistant bubbles — no user bubbles', async ({ page
   await expect(page.locator('.response-header-text')).toContainText('What is 2+2?');
 });
 
-test('a live in-flight message stays hidden while a filter is active, then reappears on clear', async ({ page }) => {
+test('a live in-flight message not matching the filter stays hidden, then reappears on clear', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
   await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
   await page.route('**/chat/*/status', r => r.fulfill({ json: { status: 'pending', content: '' } }));
@@ -366,6 +419,7 @@ test('a live in-flight message stays hidden while a filter is active, then reapp
   });
 
   await page.goto('/');
+  // No "#topic" prefix and no sticky chip → sends under #default, which the #squid filter below won't match.
   await page.fill('#input', 'hello');
   await page.keyboard.press('Enter');
   await chatIntercepted;
@@ -379,7 +433,8 @@ test('a live in-flight message stays hidden while a filter is active, then reapp
   await page.fill('#input', '/f #squid');
   await page.keyboard.press('Enter');
 
-  // Still in the DOM (so streaming keeps updating it) but not shown while filtered
+  // Still in the DOM (so streaming keeps updating it) but not shown while filtered to a
+  // different topic than the one this live message belongs to.
   await expect(thinking).toBeAttached();
   await expect(thinking).not.toBeVisible();
   await expect(userBubble).not.toBeVisible();
@@ -389,7 +444,47 @@ test('a live in-flight message stays hidden while a filter is active, then reapp
   await expect(userBubble).toBeVisible();
 });
 
-test('a recovered pending item is not shown while a filter is active', async ({ page }) => {
+test('a live in-flight message matching the filter stays visible', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/chat/*/status', r => r.fulfill({ json: { status: 'pending', content: '' } }));
+
+  let fulfillChat;
+  const chatIntercepted = new Promise(resolve => {
+    page.route('**/chat', route => {
+      fulfillChat = body => route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' },
+        body,
+      });
+      resolve();
+    });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '#squid hello');
+  await page.keyboard.press('Enter');
+  await chatIntercepted;
+  await fulfillChat(`event: meta\ndata: ${JSON.stringify({ agent: 'claude', backend: 'claude', msg_id: 1, adhoc: false })}\n\n`);
+
+  const thinking = page.locator('.msg.assistant.msg-thinking');
+  const userBubble = page.locator('.msg.user').last();
+  await expect(thinking).toBeVisible();
+  await expect(userBubble).toBeVisible();
+
+  await page.fill('#input', '/f #squid');
+  await page.keyboard.press('Enter');
+
+  // Filtering to the same topic this live message belongs to should keep it visible.
+  await expect(thinking).toBeVisible();
+  await expect(userBubble).toBeVisible();
+
+  await page.fill('#input', '/f #other');
+  await page.keyboard.press('Enter');
+  await expect(thinking).not.toBeVisible();
+});
+
+test('a recovered pending item is shown only while it matches the active filter', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
   await page.route('**/chat/*/status', r => r.fulfill({ json: { status: 'pending', content: '' } }));
   await page.route('**/history**', r => r.fulfill({ json: {
@@ -404,7 +499,14 @@ test('a recovered pending item is not shown while a filter is active', async ({ 
   await page.waitForTimeout(300);
   await expect(page.locator('.msg-thinking.history-item')).toHaveCount(1);
 
+  // Filtering to the same topic as the pending item keeps it visible.
   await page.fill('#input', '/f #squid');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(300);
+  await expect(page.locator('.msg-thinking.history-item')).toHaveCount(1);
+
+  // Filtering to a different topic hides it.
+  await page.fill('#input', '/f #other');
   await page.keyboard.press('Enter');
   await page.waitForTimeout(300);
   await expect(page.locator('.msg-thinking.history-item')).toHaveCount(0);

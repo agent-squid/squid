@@ -183,6 +183,120 @@ test('deep dive button click on session response sets session filter', async ({ 
   await expect(page.locator('#sf-adhoc')).toHaveValue('session');
 });
 
+test('deep dive button is not overwritten by saved default preset on first stats refresh', async ({ page }) => {
+  await mockApp(page);
+
+  const defaultPreset = {
+    id: 7,
+    name: 'Saved Default',
+    is_default: true,
+    state: {
+      version: 1,
+      time: { period: 'hourly', days: 7 },
+      dimensions: {
+        topic: { mode: 'all', values: [] },
+        agent: { mode: 'all', values: [] },
+        session_type: { mode: 'all', values: [] },
+      },
+      breakdown: { key: '', sort: { mode: 'name', dir: 'asc' } },
+      measure: { primary: { metric: 'turns', agg: 'sum' }, series: [], visible: ['turns', 'sessions'] },
+    },
+  };
+  await page.route('**/stats/filter-presets', r => r.fulfill({ json: [defaultPreset] }));
+  await page.route('**/history**', r => r.fulfill({
+    json: {
+      items: [{
+        id: 1,
+        topic: 'squid',
+        agent: 'claude',
+        adhoc: true,
+        prompt: 'test prompt',
+        content: 'test response',
+        timestamp: '2026-07-10T10:00:00Z',
+        session_id: 'sid-1',
+        stats: { input_tokens: 100, output_tokens: 50, duration_ms: 3000 },
+      }],
+      has_more: false,
+    },
+  }));
+
+  const statsRequests = [];
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    statsRequests.push(Object.fromEntries(url.searchParams.entries()));
+    return route.fulfill({
+      json: [{
+        msg_id: 1, period: '2026-07-10T10:00:00Z', topic: 'squid', agent: 'claude', adhoc: 1,
+        sessions: 1, total_turns: 1, input_tokens: 100, output_tokens: 50, duration_ms: 3000,
+      }],
+    });
+  });
+
+  await page.goto('/');
+  await page.locator('.stats-deep-dive-btn').click();
+
+  await expect(page.locator('#view-stats')).toHaveClass(/active/);
+  await expect(page.locator('#sf-period')).toHaveValue('turn');
+  await expect(page.locator('#sf-topic-toggle')).toContainText('squid');
+  await expect(page.locator('#sf-agent-toggle')).toContainText('claude');
+  await expect(page.locator('#sf-adhoc')).toHaveValue('adhoc');
+
+  await page.locator('#sf-days').selectOption('1');
+  await expect.poll(() => statsRequests.filter(r => r.period === 'turn').length).toBeGreaterThan(1);
+  const last = statsRequests.at(-1);
+  expect(last.period).toBe('turn');
+  expect(last.topic).toBe('squid');
+  expect(last.agent).toBe('claude');
+  expect(last.adhoc).toBe('adhoc');
+});
+
+test('deep dive button resets stale measures and chart controls to Deep Dive defaults', async ({ page }) => {
+  await mockApp(page);
+
+  await page.route('**/history**', r => r.fulfill({
+    json: {
+      items: [{
+        id: 1,
+        topic: 'squid',
+        agent: 'claude',
+        adhoc: false,
+        prompt: 'test prompt',
+        content: 'test response',
+        timestamp: '2026-07-10T10:00:00Z',
+        session_id: 'sid-1',
+        stats: { input_tokens: 100, output_tokens: 50, duration_ms: 3000 },
+      }],
+      has_more: false,
+    },
+  }));
+  await page.route('**/stats?**', route => route.fulfill({
+    json: [{
+      msg_id: 1, period: '2026-07-10T10:00:00Z', topic: 'squid', agent: 'claude', adhoc: 0,
+      sessions: 1, total_turns: 1, input_tokens: 100, output_tokens: 50, duration_ms: 3000,
+    }],
+  }));
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+  await expect(page.locator('#stats-content table')).toBeVisible();
+
+  await page.locator('#sf-measures-toggle').click();
+  await page.locator('#sf-measures-menu input[value="cache_read"]').uncheck();
+  await page.locator('#sf-measures-menu input[value="tokens_total"]').uncheck();
+  await page.locator('#sf-measures-toggle').click();
+  await page.locator('#sc-y1').selectOption('tokens_out');
+
+  await page.getByRole('button', { name: 'Chat' }).click();
+  await page.locator('.stats-deep-dive-btn').click();
+
+  await expect(page.locator('#sf-period')).toHaveValue('turn');
+  await expect(page.locator('#sf-days')).toHaveValue('-3');
+  await expect(page.locator('#sc-y1')).toHaveValue('tokens_in');
+  await expect(page.locator('#sf-measures-menu input[value="cache_read"]')).toBeChecked();
+  await expect(page.locator('#sf-measures-menu input[value="tokens_total"]')).toBeChecked();
+  await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (11)');
+});
+
 test('stats view defaults to Deep Dive by Turns out of the box', async ({ page }) => {
   await mockApp(page);
 

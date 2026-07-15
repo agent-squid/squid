@@ -301,6 +301,14 @@ def test_topics_management_summary_includes_hidden_and_agent_lanes(tmp_path, mon
 
     stats_db.upsert_topic("squid", "codex", last_prompt="session prompt", adhoc=False)
     stats_db.upsert_topic("squid", "codex", last_prompt="adhoc prompt", adhoc=True)
+    with stats_db._connect() as conn:
+        conn.execute(
+            """UPDATE topics
+               SET last_session_at='2026-06-12T12:00:00Z',
+                   last_adhoc_at='2026-06-13T12:00:00Z',
+                   last_at='2026-06-13T12:00:00Z'
+               WHERE topic='squid' AND agent='codex'"""
+        )
     stats_db.set_topic_hidden("squid", True)
 
     visible = stats_db.get_topics_management_summary(include_hidden=False)
@@ -316,6 +324,8 @@ def test_topics_management_summary_includes_hidden_and_agent_lanes(tmp_path, mon
         "last_prompt": "session prompt",
         "last_adhoc_prompt": "adhoc prompt",
         "last_at": all_topics[0]["agents"][0]["last_at"],
+        "last_session_at": "2026-06-12T12:00:00Z",
+        "last_adhoc_at": "2026-06-13T12:00:00Z",
         "last_model": None,
         "last_harness": None,
         "last_provider": None,
@@ -325,6 +335,39 @@ def test_topics_management_summary_includes_hidden_and_agent_lanes(tmp_path, mon
         "agent_turns": 0,
         "live_turns": 0,
     }]
+
+
+def test_topics_management_summary_backfills_lane_times_from_messages(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    stats_db.upsert_topic("squid", "codex", last_prompt="session prompt", adhoc=False)
+    stats_db.upsert_topic("squid", "codex", last_prompt="adhoc prompt", adhoc=True)
+    session_user_id = stats_db.insert_user_message("squid", "codex", "session prompt")
+    adhoc_user_id = stats_db.insert_user_message("squid", "codex", "adhoc prompt")
+    session_msg_id = stats_db.insert_assistant_message("squid", "codex", session_user_id, adhoc=False)
+    adhoc_msg_id = stats_db.insert_assistant_message("squid", "codex", adhoc_user_id, adhoc=True)
+    with stats_db._connect() as conn:
+        conn.execute(
+            """UPDATE topics
+               SET last_session_at=NULL,
+                   last_adhoc_at=NULL,
+                   last_at='2026-06-13T12:00:00Z'
+               WHERE topic='squid' AND agent='codex'"""
+        )
+        conn.execute(
+            "UPDATE chat_messages SET created_at='2026-06-12T12:00:00Z' WHERE id=?",
+            (session_msg_id,),
+        )
+        conn.execute(
+            "UPDATE chat_messages SET created_at='2026-06-13T12:00:00Z' WHERE id=?",
+            (adhoc_msg_id,),
+        )
+
+    lane = stats_db.get_topics_management_summary(include_hidden=True)[0]["agents"][0]
+
+    assert lane["last_session_at"] == "2026-06-12T12:00:00Z"
+    assert lane["last_adhoc_at"] == "2026-06-13T12:00:00Z"
 
 
 def test_delete_topic_preserves_session_stats_for_consumption_history(tmp_path, monkeypatch):
@@ -594,6 +637,31 @@ def test_grouped_stats_include_quota_delta(tmp_path, monkeypatch):
     assert by_topic[0]["quota_delta"] == 3.0
     assert by_agent[0]["cost_usd"] == 0.75
     assert by_agent[0]["quota_delta"] == 3.0
+
+
+def test_quota_delta_preserves_negative_meter_changes(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    stats_db.save_stats(
+        "session-1",
+        {"input_tokens": 10, "output_tokens": 5, "cost_usd": 0.25},
+        topic="squid",
+        agent="codex",
+    )
+    stats_db.save_quota_delta("session-1", 42.5, 40.0)
+
+    user_id = stats_db.insert_user_message("squid", "codex", "hello")
+    asst_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
+    stats_db.update_assistant_message(asst_id, "response", "session-1", "done")
+    stats_db.insert_run_event(asst_id, 0, "stats", json.dumps(
+        {"input_tokens": 10, "output_tokens": 5, "cost_usd": 0.25}
+    ))
+    stats_db.update_message_quota_snapshot(asst_id, 42.5, 40.0)
+
+    assert stats_db.get_stats_by_topic(days=0)[0]["quota_delta"] == -2.5
+    by_msg = {row["msg_id"]: row for row in stats_db.get_stats_by_turn(days=0)}
+    assert by_msg[asst_id]["quota_delta"] == -2.5
 
 
 def test_get_stats_by_turn_uses_per_turn_stats_not_stale_session_row(tmp_path, monkeypatch):
