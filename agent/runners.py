@@ -91,6 +91,22 @@ def kill_procs_by_topic(topic: str, agent: Optional[str] = None,
     return killed
 
 
+def active_msg_ids_by_topic(topic: str, agent: Optional[str] = None,
+                            adhoc: Optional[bool] = None, lifo: bool = False) -> list[int]:
+    matching = [
+        info for _pid, info in list(_proc_registry.items())
+        if info.get("topic") == topic
+        and (agent is None or info.get("agent") == agent)
+        and (adhoc is None or bool(info.get("adhoc")) == adhoc)
+        and info.get("msg_id") is not None
+    ]
+    if not matching:
+        return []
+    if lifo:
+        matching = [max(matching, key=lambda info: info["started_at"])]
+    return [int(info["msg_id"]) for info in matching]
+
+
 def kill_proc_by_msg_id(msg_id: int) -> int:
     """Send SIGTERM to the process registered with msg_id. Returns 1 if killed, 0 if not found."""
     for pid, info in list(_proc_registry.items()):

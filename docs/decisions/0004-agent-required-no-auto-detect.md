@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-05-25
-updated: 2026-05-28
+updated: 2026-07-15
 ---
 # ADR-0004: Agent Must Exist — No Auto-detect Fallback
 
@@ -20,11 +20,12 @@ prompt the user to create an agent.
 ## Decision Outcome
 
 **Option 2.** If `@name` does not match a known agent, the request is rejected. The UI prompts
-the user to create the agent with the name pre-filled, requiring explicit backend, model, and cwd.
+the user to create the agent with the name pre-filled, requiring explicit harness, provider,
+model, and cwd (the agent-creation form's harness/provider selects — see ADR-0028).
 
 Auto-detection undermines ADR-0002 and ADR-0003: it would create an invisible implicit agent
 with an implicit `cwd`, hiding the identity and cwd that get locked at session creation. Model
-name → backend mapping is also fragile (ambiguous names, future model releases).
+name → harness mapping is also fragile (ambiguous names, future model releases).
 
 ## Consequences
 

@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-13
-updated: 2026-07-14
+updated: 2026-07-15
 ---
 # ADR-0031: Central Comms via `insights.json` on the Homepage Domain
 
@@ -84,8 +84,9 @@ Each entry is a key–measure–period–aggregation tuple. Templates reference 
 with `{key}` placeholders. Conditions use the same keys.
 
 The measure keys (`turns`, `cache_hit_rate`, `cost`, etc.) are the **same
-measures the stats page already defines** in `CHART_METRICS` (app.js line 5265)
-and `STATS_METRIC_AGGS` (app.js line 5282). This is squid's existing semantic
+measures the stats page already defines** in `CHART_METRICS` and
+`STATS_METRIC_AGGS` (`ui/app.js`, near line 5441 as of 2026-07-15 — check
+current line numbers rather than relying on this citation). This is squid's existing semantic
 layer — each measure has a fixed set of valid aggregations determined by its
 semantic type:
 

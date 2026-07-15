@@ -98,6 +98,7 @@ _TABLES = [
         quota_delta  REAL,
         quota_before REAL,
         quota_after  REAL,
+        completed_at TEXT,
         created_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )""",
     """CREATE TABLE IF NOT EXISTS topic_sessions (
@@ -241,6 +242,9 @@ def init_db() -> None:
             conn.execute("ALTER TABLE topics ADD COLUMN last_session_at TEXT")
         if "last_adhoc_at" not in topic_columns:
             conn.execute("ALTER TABLE topics ADD COLUMN last_adhoc_at TEXT")
+        message_columns = _table_columns(conn, "chat_messages")
+        if "completed_at" not in message_columns:
+            conn.execute("ALTER TABLE chat_messages ADD COLUMN completed_at TEXT")
         agent_columns = _table_columns(conn, "agents")
         has_legacy_backend = "backend" in agent_columns
         # Seed one default agent per installed harness (INSERT OR IGNORE — never overwrites user edits)
@@ -748,6 +752,19 @@ def ensure_session_turn_index(msg_id: int, session_id: Optional[str]) -> Optiona
         return _ensure_session_turn_index(conn, msg_id, session_id)
 
 
+def attach_assistant_session(msg_id: int, session_id: Optional[str]) -> bool:
+    if not session_id:
+        return False
+    with _connect() as conn:
+        cur = conn.execute(
+            """UPDATE chat_messages
+               SET session_id = COALESCE(session_id, ?)
+               WHERE id = ? AND role = 'assistant'""",
+            (session_id, msg_id),
+        )
+        return cur.rowcount > 0
+
+
 def update_assistant_message(
     msg_id: int, content: str, session_id: Optional[str], status: str = "done",
     context: Optional[str] = None,
@@ -756,22 +773,79 @@ def update_assistant_message(
 ) -> None:
     if status == "done":
         status_raw = _sanitize_status_raw(content, status_raw)
+    terminal = status in {"done", "error", "cancelled"}
     with _connect() as conn:
         if only_if_pending:
             cur = conn.execute(
-                "UPDATE chat_messages SET content=?, session_id=?, status=?, context=?, status_raw=?"
+                "UPDATE chat_messages SET content=?, session_id=?, status=?, context=?, status_raw=?,"
+                " completed_at=CASE WHEN ? THEN COALESCE(completed_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')) ELSE completed_at END"
                 " WHERE id=? AND status='pending'",
-                (content, session_id, status, context, status_raw, msg_id),
+                (content, session_id, status, context, status_raw, 1 if terminal else 0, msg_id),
             )
             if cur.rowcount:
                 _ensure_session_turn_index(conn, msg_id, session_id)
         else:
             conn.execute(
-                "UPDATE chat_messages SET content=?, session_id=?, status=?, context=?, status_raw=? WHERE id=?",
-                (content, session_id, status, context, status_raw, msg_id),
+                "UPDATE chat_messages SET content=?, session_id=?, status=?, context=?, status_raw=?,"
+                " completed_at=CASE WHEN ? THEN COALESCE(completed_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')) ELSE completed_at END"
+                " WHERE id=?",
+                (content, session_id, status, context, status_raw, 1 if terminal else 0, msg_id),
             )
             if status == "done":
                 _ensure_session_turn_index(conn, msg_id, session_id)
+
+
+def _run_event_cancel_snapshot(conn: sqlite3.Connection, msg_id: int) -> dict:
+    rows = conn.execute(
+        "SELECT event_type, payload FROM run_events WHERE msg_id=? ORDER BY seq",
+        (msg_id,),
+    ).fetchall()
+    text = "".join(row["payload"] or "" for row in rows if row["event_type"] == "text")
+    status_raw = "".join(row["payload"] or "" for row in rows if row["event_type"] == "status")
+    tools = []
+    session_id = None
+    for row in rows:
+        payload = row["payload"]
+        if row["event_type"] == "tool" and payload:
+            try:
+                tools.append(json.loads(payload))
+            except Exception:
+                tools.append(payload)
+        elif row["event_type"] == "stats" and payload and not session_id:
+            try:
+                stats = json.loads(payload)
+            except Exception:
+                stats = {}
+            session_id = stats.get("session_id") or None
+    return {
+        "text": text or None,
+        "status_raw": _sanitize_status_raw(text, status_raw) or status_raw or None,
+        "context": json.dumps(tools) if tools else None,
+        "session_id": session_id,
+    }
+
+
+def mark_assistant_cancelled(msg_id: int, reason: str = "Cancelled") -> bool:
+    with _connect() as conn:
+        snapshot = _run_event_cancel_snapshot(conn, msg_id)
+        cur = conn.execute(
+            """UPDATE chat_messages
+               SET content = COALESCE(NULLIF(content, ''), ?, ?),
+                   session_id = COALESCE(session_id, ?),
+                   context = COALESCE(context, ?),
+                   status = 'cancelled',
+                   status_raw = COALESCE(NULLIF(status_raw, ''), ?, ?),
+                   completed_at = COALESCE(completed_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+               WHERE id = ? AND role = 'assistant' AND status = 'pending'""",
+            (
+                snapshot["text"], reason,
+                snapshot["session_id"],
+                snapshot["context"],
+                snapshot["status_raw"], reason,
+                msg_id,
+            ),
+        )
+        return cur.rowcount > 0
 
 
 def _sanitize_status_raw(content: Optional[str], status_raw: Optional[str]) -> Optional[str]:
@@ -1648,6 +1722,9 @@ def _stats_bucket_expr(column: str, period: str, tz_shift: str) -> str:
 def _stats_empty_aggregate() -> dict:
     return {
         "sessions": 0,
+        "done_turns": 0,
+        "error_turns": 0,
+        "cancelled_turns": 0,
         "input_tokens": 0,
         "new_input_tokens": 0,
         "output_tokens": 0,
@@ -1670,6 +1747,7 @@ def _stats_add_payload_to_aggregate(
     *,
     msg_id: Optional[int] = None,
     adhoc: bool = False,
+    status: str = "done",
     quota_delta: Optional[float] = None,
     chart_series: Optional[list[dict]] = None,
 ) -> None:
@@ -1696,6 +1774,12 @@ def _stats_add_payload_to_aggregate(
         agg["adhoc_turns"] += 1
     else:
         agg["session_turns"] += 1
+    if status == "cancelled":
+        agg["cancelled_turns"] += 1
+    elif status == "error":
+        agg["error_turns"] += 1
+    else:
+        agg["done_turns"] += 1
     if msg_id is not None:
         agg["message_ids"].append(str(msg_id))
 
@@ -1725,11 +1809,17 @@ def _stats_add_payload_to_aggregate(
             agg["chart_values"].setdefault(metric, []).append(value)
 
 
-def _stats_add_turn_count_to_aggregate(agg: dict, *, msg_id: Optional[int], adhoc: bool) -> None:
+def _stats_add_turn_count_to_aggregate(agg: dict, *, msg_id: Optional[int], adhoc: bool, status: str = "done") -> None:
     if adhoc:
         agg["adhoc_turns"] += 1
     else:
         agg["session_turns"] += 1
+    if status == "cancelled":
+        agg["cancelled_turns"] += 1
+    elif status == "error":
+        agg["error_turns"] += 1
+    else:
+        agg["done_turns"] += 1
     if msg_id is not None:
         agg["message_ids"].append(str(msg_id))
 
@@ -1748,6 +1838,9 @@ def _stats_finalize_aggregate(agg: dict, chart_series: Optional[list[dict]] = No
             sum(agg["duration_values"]) / len(agg["duration_values"])
             if agg["duration_values"] else None
         ),
+        "done_turns": agg["done_turns"],
+        "error_turns": agg["error_turns"],
+        "cancelled_turns": agg["cancelled_turns"],
         "session_turns": agg["session_turns"],
         "adhoc_turns": agg["adhoc_turns"],
         "total_turns": agg["session_turns"] + agg["adhoc_turns"],
@@ -1847,7 +1940,7 @@ def _merge_chart_aggregates(
         clauses.append("COALESCE(adhoc, 0) = 1")
     where = " AND ".join(clauses)
 
-    cm_clauses: list[str] = ["cm.role = 'assistant'"]
+    cm_clauses: list[str] = ["cm.role = 'assistant'", "cm.status IN ('done', 'error', 'cancelled')"]
     cm_params: list = []
     if cutoff:
         cm_clauses.append("datetime(re.created_at) >= datetime(?)")
@@ -1861,7 +1954,7 @@ def _merge_chart_aggregates(
         cm_clauses.append("COALESCE(cm.adhoc, 0) = 1")
     cm_where = " AND ".join(cm_clauses)
 
-    count_clauses: list[str] = ["cm.role = 'assistant'"]
+    count_clauses: list[str] = ["cm.role = 'assistant'", "cm.status IN ('done', 'error', 'cancelled')"]
     count_params: list = []
     if cutoff:
         count_clauses.append("datetime(cm.created_at) >= datetime(?)")
@@ -1975,7 +2068,8 @@ def get_aggregated_stats(
     # so negating it gives the offset to add to UTC to get local.
     tz_shift = f"{-tz_offset_minutes} minutes"
     re_bucket = _stats_bucket_expr("re.created_at", period, tz_shift)
-    cm_bucket = _stats_bucket_expr("cm.created_at", period, tz_shift)
+    cm_time_expr = "COALESCE(cm.completed_at, cm.created_at)"
+    cm_bucket = _stats_bucket_expr(cm_time_expr, period, tz_shift)
     ss_bucket = _stats_bucket_expr("ss.created_at", period, tz_shift)
     if not days:
         limit = 5000
@@ -1989,7 +2083,7 @@ def get_aggregated_stats(
     agents = _stats_filter_values(agent)
     topics = _stats_filter_values(topic)
 
-    cm_clauses: list[str] = ["cm.role = 'assistant'"]
+    cm_clauses: list[str] = ["cm.role = 'assistant'", "cm.status IN ('done', 'error', 'cancelled')"]
     cm_params: list = []
     if cutoff:
         cm_clauses.append("datetime(re.created_at) >= datetime(?)")
@@ -2004,12 +2098,12 @@ def get_aggregated_stats(
         cm_clauses.append("COALESCE(cm.adhoc, 0) = 1")
     cm_where = " AND ".join(cm_clauses)
 
-    count_clauses: list[str] = ["cm.role = 'assistant'"]
+    count_clauses: list[str] = ["cm.role = 'assistant'", "cm.status IN ('done', 'error', 'cancelled')"]
     count_params: list = []
     if cutoff:
-        count_clauses.append("datetime(cm.created_at) >= datetime(?)")
+        count_clauses.append("datetime(COALESCE(cm.completed_at, cm.created_at)) >= datetime(?)")
         count_params.append(cutoff)
-    _append_stats_anchor_upper(count_clauses, count_params, "cm.created_at", anchor)
+    _append_stats_anchor_upper(count_clauses, count_params, "COALESCE(cm.completed_at, cm.created_at)", anchor)
     _append_stats_in_filter(count_clauses, count_params, "cm.agent", agents)
     _append_stats_in_filter(count_clauses, count_params, "cm.topic", topics)
     if adhoc == "session":
@@ -2036,7 +2130,7 @@ def get_aggregated_stats(
         with _connect() as conn:
             event_rows = conn.execute(
                 f"""SELECT {re_bucket} AS period, cm.id AS msg_id,
-                          COALESCE(cm.adhoc, 0) AS adhoc, cm.quota_delta, re.payload
+                          COALESCE(cm.adhoc, 0) AS adhoc, cm.status, cm.quota_delta, re.payload
                     FROM chat_messages cm
                     {_latest_stats_event_join()}
                     WHERE {cm_where}""",
@@ -2060,7 +2154,7 @@ def get_aggregated_stats(
             ).fetchall()
             count_rows = conn.execute(
                 f"""SELECT {cm_bucket} AS period, cm.id AS msg_id,
-                          COALESCE(cm.adhoc, 0) AS adhoc
+                          COALESCE(cm.adhoc, 0) AS adhoc, cm.status
                     FROM chat_messages cm
                     WHERE {count_where}
                       AND NOT EXISTS (
@@ -2081,6 +2175,7 @@ def get_aggregated_stats(
                     agg, stats,
                     msg_id=event["msg_id"],
                     adhoc=bool(event["adhoc"]),
+                    status=event["status"],
                     quota_delta=event["quota_delta"],
                     chart_series=chart_series,
                 )
@@ -2089,6 +2184,7 @@ def get_aggregated_stats(
                     grouped.setdefault(count["period"], _stats_empty_aggregate()),
                     msg_id=count["msg_id"],
                     adhoc=bool(count["adhoc"]),
+                    status=count["status"],
                 )
             for legacy in legacy_rows:
                 stats = dict(legacy)
@@ -2099,6 +2195,7 @@ def get_aggregated_stats(
                 _stats_add_payload_to_aggregate(
                     agg, stats,
                     adhoc=bool(legacy["adhoc"]),
+                    status="done",
                     quota_delta=qd,
                     chart_series=chart_series,
                 )
@@ -2126,12 +2223,13 @@ def get_stats_by_turn(
     agents = _stats_filter_values(agent)
     topics = _stats_filter_values(topic)
 
-    clauses: list[str] = ["cm.role = 'assistant'"]
+    turn_time_expr = "COALESCE(re.created_at, cm.completed_at, cm.created_at)"
+    clauses: list[str] = ["cm.role = 'assistant'", "cm.status IN ('done', 'error', 'cancelled')"]
     params: list = []
     if cutoff:
-        clauses.append("datetime(re.created_at) >= datetime(?)")
+        clauses.append(f"datetime({turn_time_expr}) >= datetime(?)")
         params.append(cutoff)
-    _append_stats_anchor_upper(clauses, params, "re.created_at", anchor)
+    _append_stats_anchor_upper(clauses, params, turn_time_expr, anchor)
     _append_stats_in_filter(clauses, params, "cm.agent", agents)
     _append_stats_in_filter(clauses, params, "cm.topic", topics)
     if adhoc == "session":
@@ -2143,16 +2241,16 @@ def get_stats_by_turn(
     try:
         with _connect() as conn:
             rows = conn.execute(
-                f"""SELECT cm.id AS msg_id, re.created_at AS period, cm.topic,
-                           cm.agent, cm.adhoc, cm.quota_delta, re.payload
+                f"""SELECT cm.id AS msg_id, {turn_time_expr} AS period, cm.topic,
+                           cm.agent, cm.adhoc, cm.status, cm.quota_delta, re.payload
                     FROM chat_messages cm
-                    JOIN run_events re
+                    LEFT JOIN run_events re
                         ON re.id = (
                             SELECT MAX(re2.id) FROM run_events re2
                             WHERE re2.msg_id = cm.id AND re2.event_type = 'stats'
                         )
                     WHERE {where}
-                    ORDER BY re.created_at DESC, re.id DESC
+                    ORDER BY datetime({turn_time_expr}) DESC, COALESCE(re.id, cm.id) DESC
                     LIMIT ?""",
                 (*params, limit),
             ).fetchall()
@@ -2169,6 +2267,9 @@ def get_stats_by_turn(
             stats = {}
         row["sessions"] = 1
         row["total_turns"] = 1
+        row["done_turns"] = 1 if row.get("status") == "done" else 0
+        row["error_turns"] = 1 if row.get("status") == "error" else 0
+        row["cancelled_turns"] = 1 if row.get("status") == "cancelled" else 0
         row["message_ids"] = [row["msg_id"]]
         row["input_tokens"] = stats.get("input_tokens") or 0
         row["output_tokens"] = stats.get("output_tokens") or 0
@@ -2333,7 +2434,8 @@ def get_stats_by_breakdown(
 ) -> list:
     tz_shift = f"{-tz_offset_minutes} minutes"
     re_bucket = _stats_bucket_expr("re.created_at", period, tz_shift)
-    cm_bucket = _stats_bucket_expr("cm.created_at", period, tz_shift)
+    cm_time_expr = "COALESCE(cm.completed_at, cm.created_at)"
+    cm_bucket = _stats_bucket_expr(cm_time_expr, period, tz_shift)
     ss_bucket = _stats_bucket_expr("ss.created_at", period, tz_shift)
     include_topic = breakdown in {"topic_agent", "topic_agent_session"}
     include_session = breakdown in {"agent_session", "topic_agent_session"}
@@ -2350,7 +2452,7 @@ def get_stats_by_breakdown(
     agents = _stats_filter_values(agent)
     topics = _stats_filter_values(topic)
 
-    cm_clauses: list[str] = ["cm.role = 'assistant'", "cm.created_at IS NOT NULL"]
+    cm_clauses: list[str] = ["cm.role = 'assistant'", "cm.status IN ('done', 'error', 'cancelled')", "cm.created_at IS NOT NULL"]
     cm_params: list = []
     if cutoff:
         cm_clauses.append("datetime(re.created_at) >= datetime(?)")
@@ -2379,12 +2481,12 @@ def get_stats_by_breakdown(
 
     cm_where = " AND ".join(cm_clauses)
 
-    count_clauses: list[str] = ["cm.role = 'assistant'", "cm.created_at IS NOT NULL"]
+    count_clauses: list[str] = ["cm.role = 'assistant'", "cm.status IN ('done', 'error', 'cancelled')", "cm.created_at IS NOT NULL"]
     count_params: list = []
     if cutoff:
-        count_clauses.append("datetime(cm.created_at) >= datetime(?)")
+        count_clauses.append("datetime(COALESCE(cm.completed_at, cm.created_at)) >= datetime(?)")
         count_params.append(cutoff)
-    _append_stats_anchor_upper(count_clauses, count_params, "cm.created_at", anchor)
+    _append_stats_anchor_upper(count_clauses, count_params, "COALESCE(cm.completed_at, cm.created_at)", anchor)
     _append_stats_in_filter(count_clauses, count_params, "cm.agent", agents)
     _append_stats_in_filter(count_clauses, count_params, "cm.topic", topics)
     if adhoc == "session":
@@ -2399,7 +2501,7 @@ def get_stats_by_breakdown(
             event_rows = conn.execute(
                 f"""SELECT {re_bucket} AS period, cm.id AS msg_id, cm.topic,
                           COALESCE(cm.agent, 'unknown') AS agent,
-                          COALESCE(cm.adhoc, 0) AS adhoc, cm.quota_delta, re.payload
+                          COALESCE(cm.adhoc, 0) AS adhoc, cm.status, cm.quota_delta, re.payload
                     FROM chat_messages cm
                     {_latest_stats_event_join()}
                     WHERE {cm_where}""",
@@ -2425,7 +2527,7 @@ def get_stats_by_breakdown(
             count_rows = conn.execute(
                 f"""SELECT {cm_bucket} AS period, cm.id AS msg_id, cm.topic,
                           COALESCE(cm.agent, 'unknown') AS agent,
-                          COALESCE(cm.adhoc, 0) AS adhoc
+                          COALESCE(cm.adhoc, 0) AS adhoc, cm.status
                     FROM chat_messages cm
                     WHERE {count_where}
                       AND NOT EXISTS (
@@ -2466,6 +2568,7 @@ def get_stats_by_breakdown(
                     stats,
                     msg_id=event["msg_id"],
                     adhoc=adhoc_value,
+                    status=event["status"],
                     quota_delta=event["quota_delta"],
                     chart_series=chart_series,
                 )
@@ -2483,6 +2586,7 @@ def get_stats_by_breakdown(
                     grouped.setdefault(key, _stats_empty_aggregate()),
                     msg_id=count["msg_id"],
                     adhoc=adhoc_value,
+                    status=count["status"],
                 )
             for legacy in legacy_rows:
                 adhoc_value = bool(legacy["adhoc"])
@@ -2502,6 +2606,7 @@ def get_stats_by_breakdown(
                     grouped.setdefault(key, _stats_empty_aggregate()),
                     dict(legacy),
                     adhoc=adhoc_value,
+                    status="done",
                     quota_delta=qd,
                     chart_series=chart_series,
                 )
@@ -2620,7 +2725,7 @@ def get_stats_by_agent(
         with _connect() as conn:
             event_rows = conn.execute(
                 f"""SELECT COALESCE(cm.agent, 'unknown') AS agent,
-                          cm.id AS msg_id, COALESCE(cm.adhoc, 0) AS adhoc,
+                          cm.id AS msg_id, COALESCE(cm.adhoc, 0) AS adhoc, cm.status,
                           cm.quota_delta, re.payload
                     FROM chat_messages cm
                     {_latest_stats_event_join()}
@@ -2642,6 +2747,17 @@ def get_stats_by_agent(
                       )""",
                 ss_params,
             ).fetchall()
+            count_rows = conn.execute(
+                f"""SELECT COALESCE(cm.agent, 'unknown') AS agent,
+                          cm.id AS msg_id, COALESCE(cm.adhoc, 0) AS adhoc, cm.status
+                    FROM chat_messages cm
+                    WHERE {cm_where}
+                      AND NOT EXISTS (
+                        SELECT 1 FROM run_events re
+                        WHERE re.msg_id = cm.id AND re.event_type = 'stats'
+                      )""",
+                cm_params,
+            ).fetchall()
             grouped: dict[str, dict] = {}
             for event in event_rows:
                 try:
@@ -2653,7 +2769,15 @@ def get_stats_by_agent(
                     stats,
                     msg_id=event["msg_id"],
                     adhoc=bool(event["adhoc"]),
+                    status=event["status"],
                     quota_delta=event["quota_delta"],
+                )
+            for count in count_rows:
+                _stats_add_turn_count_to_aggregate(
+                    grouped.setdefault(count["agent"], _stats_empty_aggregate()),
+                    msg_id=count["msg_id"],
+                    adhoc=bool(count["adhoc"]),
+                    status=count["status"],
                 )
             for legacy in legacy_rows:
                 qd = None
@@ -2663,6 +2787,7 @@ def get_stats_by_agent(
                     grouped.setdefault(legacy["agent_label"] or "unknown", _stats_empty_aggregate()),
                     dict(legacy),
                     adhoc=bool(legacy["adhoc"]),
+                    status="done",
                     quota_delta=qd,
                 )
         result = [{"agent": key, **_stats_finalize_aggregate(agg)} for key, agg in grouped.items()]
@@ -2679,7 +2804,7 @@ def get_stats_by_topic(
     agents = _stats_filter_values(agent)
     topics = _stats_filter_values(topic)
 
-    cm_clauses: list[str] = ["cm.role = 'assistant'"]
+    cm_clauses: list[str] = ["cm.role = 'assistant'", "cm.status IN ('done', 'error', 'cancelled')"]
     cm_params: list = []
     if cutoff:
         cm_clauses.append("datetime(re.created_at) >= datetime(?)")
@@ -2712,7 +2837,7 @@ def get_stats_by_topic(
         with _connect() as conn:
             event_rows = conn.execute(
                 f"""SELECT COALESCE(cm.topic, 'unknown') AS topic,
-                          cm.id AS msg_id, COALESCE(cm.adhoc, 0) AS adhoc,
+                          cm.id AS msg_id, COALESCE(cm.adhoc, 0) AS adhoc, cm.status,
                           cm.quota_delta, re.payload
                     FROM chat_messages cm
                     {_latest_stats_event_join()}
@@ -2734,6 +2859,17 @@ def get_stats_by_topic(
                       )""",
                 ss_params,
             ).fetchall()
+            count_rows = conn.execute(
+                f"""SELECT COALESCE(cm.topic, 'unknown') AS topic,
+                          cm.id AS msg_id, COALESCE(cm.adhoc, 0) AS adhoc, cm.status
+                    FROM chat_messages cm
+                    WHERE {cm_where}
+                      AND NOT EXISTS (
+                        SELECT 1 FROM run_events re
+                        WHERE re.msg_id = cm.id AND re.event_type = 'stats'
+                      )""",
+                cm_params,
+            ).fetchall()
             grouped: dict[str, dict] = {}
             for event in event_rows:
                 try:
@@ -2745,7 +2881,15 @@ def get_stats_by_topic(
                     stats,
                     msg_id=event["msg_id"],
                     adhoc=bool(event["adhoc"]),
+                    status=event["status"],
                     quota_delta=event["quota_delta"],
+                )
+            for count in count_rows:
+                _stats_add_turn_count_to_aggregate(
+                    grouped.setdefault(count["topic"], _stats_empty_aggregate()),
+                    msg_id=count["msg_id"],
+                    adhoc=bool(count["adhoc"]),
+                    status=count["status"],
                 )
             for legacy in legacy_rows:
                 qd = None
@@ -2755,6 +2899,7 @@ def get_stats_by_topic(
                     grouped.setdefault(legacy["topic"] or "unknown", _stats_empty_aggregate()),
                     dict(legacy),
                     adhoc=bool(legacy["adhoc"]),
+                    status="done",
                     quota_delta=qd,
                 )
         result = [{"topic": key, **_stats_finalize_aggregate(agg)} for key, agg in grouped.items()]
@@ -2769,13 +2914,30 @@ def get_stats_filter_options() -> dict:
         with _connect() as conn:
             agents = [
                 r[0] for r in conn.execute(
-                    f"SELECT DISTINCT {_stats_agent_expr()} FROM session_stats"
-                    f" WHERE agent IS NOT NULL OR harness IS NOT NULL ORDER BY 1"
+                    f"""SELECT DISTINCT agent_value FROM (
+                          SELECT {_stats_agent_expr()} AS agent_value
+                          FROM session_stats
+                          WHERE agent IS NOT NULL OR harness IS NOT NULL
+                          UNION
+                          SELECT agent AS agent_value
+                          FROM chat_messages
+                          WHERE role='assistant' AND agent IS NOT NULL
+                            AND status IN ('done', 'error', 'cancelled')
+                        ) WHERE agent_value IS NOT NULL ORDER BY 1"""
                 ).fetchall() if r[0]
             ]
             topics = [
                 r[0] for r in conn.execute(
-                    "SELECT DISTINCT topic FROM session_stats WHERE topic IS NOT NULL ORDER BY 1"
+                    """SELECT DISTINCT topic_value FROM (
+                         SELECT topic AS topic_value
+                         FROM session_stats
+                         WHERE topic IS NOT NULL
+                         UNION
+                         SELECT topic AS topic_value
+                         FROM chat_messages
+                         WHERE role='assistant' AND topic IS NOT NULL
+                           AND status IN ('done', 'error', 'cancelled')
+                       ) WHERE topic_value IS NOT NULL ORDER BY 1"""
                 ).fetchall()
             ]
         return {"agents": agents, "topics": topics}

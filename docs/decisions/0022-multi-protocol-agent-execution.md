@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-06-18
+updated: 2026-07-15
 ---
 # ADR-0022: Multi-Protocol Agent Execution
 
@@ -23,7 +24,7 @@ communication protocol used to run it.
 
 ## Decision Outcome
 
-Squid supports multiple driver protocols. A **protocol** defines process
+Squid supports multiple protocols per harness. A **protocol** defines process
 lifetime, input shape, output shape, streaming behavior, turn boundary
 detection, session/resume behavior, terminal attach support, and stats strategy.
 
@@ -35,18 +36,23 @@ Supported protocol names:
 | `interactive-cli` | Long-lived | Structured CLI stdin/stdout/stderr | Structured done event | Preferred interactive protocol when a CLI exposes it |
 | `interactive-pty` | Long-lived | Terminal bytes / ANSI | Terminal heuristic | Fallback for interactive CLIs that only expose terminal UI |
 
-Drivers declare supported protocols. Backends may provide a default protocol,
-and agents may override it when Squid exposes that setting. Protocol selection
-is never inferred from model name.
+Harnesses declare supported protocols and a default (`SUPPORTED_PROTOCOLS_BY_HARNESS`,
+`_DEFAULT_PROTOCOL_BY_HARNESS` in `agent/harnesses.py`), and agents may override
+it when Squid exposes that setting. Protocol selection is never inferred from
+model name.
 
 ## Selection Policy
 
+**Update (2026-07-15):** the "backend default protocol" step below predates
+[ADR-0028](0028-harness-provider-separation.md), which retired `backends:` as
+a config layer. `protocol_for()` (`agent/harnesses.py`) now only implements
+steps 1 and 2 — there is no intermediate backend-level override anymore, since
+protocol is purely a harness property.
+
 Default selection order for normal session turns:
 
-1. Agent protocol override, if present.
-2. Backend default protocol, if present.
-3. Driver default protocol.
-4. `oneshot-cli` where available.
+1. Agent protocol override, if present and supported by the harness.
+2. Harness default protocol (`_DEFAULT_PROTOCOL_BY_HARNESS`).
 
 Preferred protocols by workload:
 
@@ -63,7 +69,7 @@ gives each adhoc turn an isolated process/session.
 
 ## Protocol Responsibilities
 
-Every driver protocol implementation must define:
+Every harness protocol implementation must define:
 
 - how the process starts, stops, and resumes
 - how prompts and slash commands are sent
@@ -71,7 +77,8 @@ Every driver protocol implementation must define:
 - how a session ID is created or discovered
 - whether idle-kill-resume is supported
 - whether terminal attach is available
-- how `/clear`, `/compact`, and backend-native usage commands are handled
+- how `/clear` and harness-native usage commands are handled (`/compact` was
+  removed — see ADR-0013)
 
 The server still exposes one SSE surface to the browser. Protocol-specific
 events are normalized to Squid's event stream: `meta`, text chunks, `status`,
@@ -91,12 +98,13 @@ Benefits over PTY:
 - easier deterministic tests and replay
 - warm sessions and native slash commands if the CLI protocol accepts them
 
-Squid should prefer `interactive-cli` over PTY whenever a driver can
+Squid should prefer `interactive-cli` over PTY whenever a harness can
 implement it without losing native interactive behavior.
 
-Among bundled drivers, `claude` currently has the only `interactive-cli`
-implementation that keeps a structured process alive across turns. Other
-drivers remain `oneshot-cli` until they expose or Squid implements an equivalent
+Among bundled harnesses, `claudecode` currently has the only `interactive-cli`
+implementation that keeps a structured process alive across turns
+(`SUPPORTED_PROTOCOLS_BY_HARNESS` in `agent/harnesses.py`). Other harnesses
+remain `oneshot-cli` until they expose or Squid implements an equivalent
 long-lived structured transport.
 
 ## Interactive PTY
@@ -119,7 +127,7 @@ State is tracked per `(topic, agent)` alongside `topic_sessions`. The PTY PID is
 registered in the normal process registry so existing stop/timeout controls
 still target the agent process group.
 
-Turn boundary detection is heuristic and driver-specific. The default layered
+Turn boundary detection is heuristic and harness-specific. The default layered
 strategy is:
 
 1. terminal cursor-show or equivalent completion sequence
@@ -128,12 +136,12 @@ strategy is:
 
 Raw PTY output contains ANSI escape sequences, cursor movement, and formatting
 codes. A PTY protocol implementation may use a virtual terminal emulator such
-as `pyte` or a lighter ANSI-stripping path if the driver's output is simple
+as `pyte` or a lighter ANSI-stripping path if the harness's output is simple
 enough.
 
 Idle-kill-resume remains part of the PTY design. When a PTY session is waiting
 and exceeds its idle timeout, Squid kills the process group but keeps the
-session ID in `topic_sessions`. The next message respawns the driver in the
+session ID in `topic_sessions`. The next message respawns the harness in the
 locked cwd and resumes the native session.
 
 ## Stats and Usage
@@ -142,11 +150,11 @@ Stats are protocol-specific:
 
 - `oneshot-cli`: use structured result events when the CLI emits them.
 - `interactive-cli`: use structured stats or usage events when available.
-- `interactive-pty`: send backend-native local commands such as `/cost` or
+- `interactive-pty`: send harness-native local commands such as `/cost` or
   `/usage`, run a sidecar local stats command, or omit stats if no reliable
   local source exists.
 
-Drivers must not invent token or cost values. Missing stats are acceptable for
+Harnesses must not invent token or cost values. Missing stats are acceptable for
 protocols that cannot expose them reliably.
 
 ## Comparison
@@ -166,7 +174,7 @@ protocols that cannot expose them reliably.
 
 ## Consequences
 
-- Good: Squid can support more than one execution protocol per driver/backend.
+- Good: Squid can support more than one execution protocol per harness.
 - Good: structured interactive CLI protocols are preferred when available, avoiding
   PTY parsing while keeping warm sessions.
 - Good: one-shot CLI execution remains available for deterministic,
@@ -174,7 +182,7 @@ protocols that cannot expose them reliably.
 - Good: PTY still covers CLIs whose real interactive behavior only exists in a
   terminal and enables a web terminal toggle.
 - Good: interactive processes are treated as a warm cache; Squid can stop them
-  after a backend-configured idle timeout while keeping the durable session ID
+  after a harness-configured idle timeout while keeping the durable session ID
   for native resume.
 - Neutral: token stats are protocol-specific; PTY may need command scraping or
   sidecars.

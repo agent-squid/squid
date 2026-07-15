@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-06-09
-updated: 2026-06-10
+updated: 2026-07-15
 ---
 # ADR-0018: CLI Subprocess Lifecycle, Queues, and Run Persistence
 
@@ -44,8 +44,12 @@ stream is a transport surface and fallback partial saver.
 
 All CLI backends go through `_stream_lines()` in `agent/runners.py`.
 
-`_stream_lines()` starts each CLI with `start_new_session=True`, creating a new
-session and process group for the top-level CLI:
+`_stream_lines()` starts each CLI with `preexec_fn=os.setpgrp`, creating a new
+**process group** for the top-level CLI without a new session. `setsid` /
+`start_new_session=True` is deliberately not used: a new session would detach
+the child from the user's session keyring, breaking keychain-backed CLI auth
+(e.g. Claude Code's native login). Process-group isolation alone is enough for
+`killpg`-based termination:
 
 ```
 squid server process group

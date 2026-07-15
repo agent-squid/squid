@@ -1,8 +1,11 @@
 # Squid — DB Schema
 
-This is the clean install schema used by `agent/stats_db.py`. Squid currently
-has no schema migration path; `init_db()` creates the current tables and seeds
-default agents for installed harnesses.
+This is the schema used by `agent/stats_db.py`. `init_db()` creates all
+tables/indexes with `CREATE ... IF NOT EXISTS` and seeds default agents for
+installed harnesses. Squid has no versioned migration framework; instead,
+`init_db()` runs a few idempotent `ALTER TABLE ... ADD COLUMN` guarded by
+`PRAGMA table_info` checks on every boot to backfill newer columns onto
+existing databases (see "Column backfills" below).
 
 ---
 
@@ -21,6 +24,11 @@ CREATE TABLE agents (
 );
 ```
 
+On databases created before the harness/provider split, a legacy `backend`
+column (e.g. `"claudecode:anthropic"`) may still exist; `init_db()` detects it
+via `PRAGMA table_info` and keeps it populated on insert/upsert for backward
+compat, but it is not part of the current DDL.
+
 ### `topics`
 ```sql
 CREATE TABLE topics (
@@ -31,6 +39,8 @@ CREATE TABLE topics (
     last_prompt  TEXT,                     -- last user prompt sent to this topic/agent
     last_adhoc_prompt TEXT,                -- last adhoc prompt sent to this topic/agent
     last_at      TEXT,                     -- timestamp of last_prompt
+    last_session_at TEXT,                  -- timestamp of last non-adhoc (session) prompt
+    last_adhoc_at   TEXT,                  -- timestamp of last adhoc prompt
     last_model   TEXT,                     -- model from agent config at dispatch time
     last_harness TEXT,                     -- harness from agent config at dispatch time
     last_provider TEXT,                    -- provider from agent config at dispatch time
@@ -42,7 +52,7 @@ CREATE TABLE topics (
 
 Two row types per topic:
 - `(topic, '')` — topic-level: holds `sticky_agent`, `sticky_adhoc`, `hidden`, and last-run metadata across all agents
-- `(topic, 'agentname')` — agent-level: holds `last_prompt`, `last_adhoc_prompt`, `last_model`, `last_harness`, and `last_provider` for that specific agent (drives `#topic@agent` autocomplete)
+- `(topic, 'agentname')` — agent-level: holds `last_prompt`, `last_adhoc_prompt`, `last_session_at`, `last_adhoc_at`, `last_model`, `last_harness`, and `last_provider` for that specific agent (drives `#topic@agent` autocomplete)
 
 ### `chat_messages`
 ```sql
@@ -50,11 +60,11 @@ CREATE TABLE chat_messages (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     topic       TEXT NOT NULL DEFAULT 'default',
     agent       TEXT,                      -- agent name at time of message
-    session_id  TEXT,                      -- set after _stats arrive
+    session_id  TEXT,                      -- known resume id at dispatch; otherwise set after _stats arrive
     role        TEXT NOT NULL,             -- user | assistant
     content     TEXT,                      -- null while pending
     reply_to    INTEGER REFERENCES chat_messages(id),
-    status      TEXT NOT NULL DEFAULT 'pending',  -- pending | done | error
+    status      TEXT NOT NULL DEFAULT 'pending',  -- pending | done | error | cancelled
     adhoc       INTEGER DEFAULT 0,         -- 1 = adhoc turn
     context     TEXT,                      -- user: JSON [msg_id, …]; assistant: JSON tool_use events
     status_raw  TEXT,                      -- raw harness status/debug text
@@ -63,9 +73,14 @@ CREATE TABLE chat_messages (
     quota_delta  REAL,
     quota_before REAL,
     quota_after  REAL,
+    completed_at TEXT,                     -- timestamp status became done|error|cancelled
     created_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 ```
+
+`cancelled` and `completed_at` capture terminal outcomes for killed/dequeued
+turns so they're visible in Stats without a restart. See
+[ADR-0033](decisions/0033-cancelled-and-error-turn-capture.md).
 
 ### `topic_sessions`
 ```sql
@@ -185,6 +200,47 @@ CREATE UNIQUE INDEX idx_stats_filter_presets_one_default
 ON stats_filter_presets(is_default)
 WHERE is_default = 1;
 ```
+
+### `messages_fts` / `prompts_fts` — full-text search
+Standalone FTS5 tables (not external-content), kept in sync by triggers. See ADR-0021.
+
+```sql
+CREATE VIRTUAL TABLE messages_fts USING fts5(content, tokenize='unicode61');
+
+CREATE TRIGGER messages_fts_sync
+AFTER UPDATE OF content ON chat_messages
+WHEN NEW.role = 'assistant' AND NEW.content IS NOT NULL AND NEW.status = 'done'
+BEGIN
+    DELETE FROM messages_fts WHERE rowid = NEW.id;
+    INSERT INTO messages_fts(rowid, content) VALUES (NEW.id, NEW.content);
+END;
+
+CREATE VIRTUAL TABLE prompts_fts USING fts5(content, tokenize='unicode61');
+
+CREATE TRIGGER prompts_fts_sync
+AFTER INSERT ON chat_messages
+WHEN NEW.role = 'user' AND NEW.content IS NOT NULL
+BEGIN
+    INSERT INTO prompts_fts(rowid, content) VALUES (NEW.id, NEW.content);
+END;
+```
+
+The `messages_fts_sync` trigger fires on the `status='done'` update (final
+content), not the first partial-content save, so the index always holds the
+complete response. `init_db()` also repairs `messages_fts` on every boot:
+it deletes rows whose indexed content no longer matches the final
+`chat_messages.content`, and backfills any `done` assistant messages missing
+from the index.
+
+---
+
+## Column backfills (run every boot, guarded by `PRAGMA table_info`)
+
+`init_db()` adds these columns via `ALTER TABLE ... ADD COLUMN` if a database
+predates them — additive-only, no down migration:
+- `topics.last_session_at TEXT`
+- `topics.last_adhoc_at TEXT`
+- `chat_messages.completed_at TEXT`
 
 ---
 

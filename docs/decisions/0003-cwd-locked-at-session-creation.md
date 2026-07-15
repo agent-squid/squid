@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-05-25
-updated: 2026-05-28
+updated: 2026-07-15
 ---
 # ADR-0003: `cwd` Locked at Session Creation
 
@@ -35,7 +35,7 @@ Three tables each serve a distinct purpose:
 
 | Table | What it stores | Scope |
 |---|---|---|
-| `agents` | Config: backend, model, cwd, timeout | Per agent name (global) |
+| `agents` | Config: harness, provider, model, cwd, timeout | Per agent name (global) |
 | `topics` | Autocomplete: sticky_agent, last_prompt, last_at | Per topic (display/nav) |
 | `topic_sessions` | Runtime state: session_id + locked cwd | Per (topic, agent) pair |
 
@@ -51,7 +51,7 @@ what `--resume` needs — the session ID and the cwd it was created with.
 
 ## Changing `cwd` mid-flight — DELETE not NULL
 
-Changing an agent's `cwd` (or `backend`/`model`) via `POST /config/agents` is detected as
+Changing an agent's `cwd` (or `harness`/`provider`/`model`) via `POST /config/agents` is detected as
 a key attribute change. Squid immediately **deletes** all `topic_sessions` rows for that
 agent (`clear_agent_sessions` → `DELETE FROM topic_sessions WHERE agent = ?`).
 
@@ -77,5 +77,5 @@ deletes the `topic_sessions` row for that `(topic, agent)` pair — same mechani
 - Good: `--resume` always succeeds within a session; no cwd mismatch
 - Good: changing agent cwd is safe — sessions are auto-cleared, no stale resume attempts
 - Good: autocomplete (`topics` table) is completely independent of session state
-- Bad: changing any key agent attribute (backend/model/cwd) clears all active sessions for that agent
+- Bad: changing any key agent attribute (harness/provider/model/cwd) clears all active sessions for that agent
 - Bad: `cwd` must be stored in `topic_sessions` separately from agent config

@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-05-25
-updated: 2026-05-28
+updated: 2026-07-15
 ---
 # ADR-0001: Session Management — Resumable and Adhoc Modes
 
@@ -56,17 +56,28 @@ The UI shows which messages will be included before sending:
 
 **Contract tests**: `tests/e2e/pin.spec.js`
 
-## Backend Support
+## Harness Support
 
-| Backend     | Resumable flag          | Session ID field  |
+Configured harnesses (`SUPPORTED_HARNESSES` in `agent/harnesses.py`, selectable
+in the agent-creation UI):
+
+| Harness     | Resumable flag          | Session ID field  |
 |-------------|-------------------------|-------------------|
-| Claude      | `--resume SESSION_ID`   | `system.session_id` |
-| Codex       | `exec resume SESSION_ID`| `thread.started.thread_id` |
-| Cursor      | `--resume SESSION_ID`   | `system.session_id` |
-| Copilot     | `--resume=SESSION_ID`   | `result.sessionId` |
-| Antigravity | `--conversation ID`     | `system.session_id` |
+| Claude Code (`claudecode`) | `--resume SESSION_ID`   | `system.session_id` |
+| Codex (`codex`)            | `exec resume SESSION_ID`| `thread.started.thread_id` |
+| Cursor (`cursor`)          | `--resume SESSION_ID`   | `system.session_id` |
+| OpenCode (`opencode`)      | `--resume SESSION_ID`   | `system.session_id` |
+| Pi (`pi`)                  | `--resume SESSION_ID`   | `system.session_id` |
 
-All backends emit a session/thread identifier in their first event. Squid
+Copilot and Antigravity (`run_copilot`/`run_antigravity` in `agent/runners.py`)
+remain experimental runners — implemented but not part of
+`SUPPORTED_HARNESSES` and not selectable as a configured agent harness (see
+ADR-0024's "Consequences"). Their resume mechanics (`--resume=SESSION_ID` /
+`result.sessionId` for Copilot; `--conversation ID` / `system.session_id` for
+Antigravity) still work the same way if invoked directly, but aren't exposed
+through the harness catalog.
+
+All harnesses emit a session/thread identifier in their first event. Squid
 captures this and stores it after every response, so a `/clear` followed by a
 new message immediately establishes a fresh session_id for the next turn.
 
@@ -77,7 +88,7 @@ commonly after a reboot changes the resolved `cwd` (e.g. `/tmp/<user>/squid`
 was previously a symlink to a different path) — Squid recovers automatically:
 
 1. A `_status` event is emitted with the stale session details (session_id,
-   cwd, backend, model) so the user sees what was lost.
+   cwd, harness, provider, model) so the user sees what was lost.
 2. The prompt is retried immediately as a fresh invocation (no `--resume`).
 3. The new `session_id` from the fresh run is stored via `set_topic_session`,
    replacing the stale record. Subsequent turns resume normally.
@@ -116,12 +127,14 @@ silently and become increasingly expensive per turn.
 An alternative execution model for resumable sessions is a long-lived
 interactive protocol with idle-kill-resume (ADR-0022). Instead of spawning a
 fresh subprocess per turn, Squid may hold one interactive process across
-multiple user turns. When idle for a backend-configured period, the process is
+multiple user turns. When idle for a harness-level configured period
+(`DEFAULT_INTERACTIVE_IDLE_TIMEOUT_SECONDS` in `agent/harnesses.py`, per
+ADR-0028 — not a per-agent/per-backend override), the process is
 killed; the session_id in `topic_sessions` is preserved. The default idle
 timeout is one hour, following Claude Code's background-agent lifecycle more
 closely than a full-workday process cache. The next user message spawns a new
 process with native resume arguments, reloading the conversation from the
-driver's on-disk session state.
+harness's on-disk session state.
 
 This achieves the same session continuity guarantee as the per-turn batch model,
 with two differences:

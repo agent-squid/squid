@@ -12,6 +12,7 @@
 | **protocol** | The harness communication shape for a turn/session, such as `oneshot-cli`, `interactive-cli`, or `interactive-pty`. Protocol selection is harness configuration, not model-name inference. |
 | **session** | A resumable CLI process context identified by the native CLI session/thread ID. Scoped to `(topic, agent)`. |
 | **adhoc** | A one-off parallel turn that uses a `lookback` window of recent history as inline context instead of a persistent session. |
+| **worktree** | An isolated git worktree checked out per `(topic, agent, repo)` so parallel turns don't collide on the same working tree. Tracked in the `worktrees` table. |
 
 ---
 
@@ -49,6 +50,8 @@ sticky_adhoc INTEGER    topic-level only: last-selected mode; default 0
 last_prompt  TEXT       last user prompt sent
 last_adhoc_prompt TEXT  last adhoc user prompt sent
 last_at      TEXT       ISO8601 — timestamp of last_prompt
+last_session_at TEXT    ISO8601 — timestamp of last non-adhoc (session) prompt
+last_adhoc_at   TEXT    ISO8601 — timestamp of last adhoc prompt
 last_model   TEXT       model from agent config at dispatch time
 last_harness TEXT       harness from agent config at dispatch time
 last_provider TEXT      provider from agent config at dispatch time
@@ -64,16 +67,31 @@ created_at   TEXT       ISO8601
 id         INTEGER  PK  AUTOINCREMENT
 topic      TEXT     NOT NULL   default: "default"
 agent      TEXT                agent name at time of message
-session_id TEXT                CLI session_id (set after stats arrive)
+session_id TEXT                CLI session_id (known resume id at dispatch; otherwise set after stats arrive)
 role       TEXT     NOT NULL   user | assistant
 content    TEXT                message body (null while pending)
 reply_to   INTEGER  FK → id    assistant rows point to their user message
-status     TEXT     NOT NULL   pending | done | error
+status     TEXT     NOT NULL   pending | done | error | cancelled
 adhoc      INTEGER  DEFAULT 0  1=adhoc turn, 0=session turn
 context    TEXT                user rows: JSON array of context message IDs [id, …]
                                assistant rows: JSON array of tool_use events
+status_raw TEXT                raw harness status/debug text
+session_turn_index INTEGER     ordinal assistant turn within a non-adhoc session
+lookback   INTEGER  DEFAULT 0  adhoc lookback window used for this turn
+quota_delta  REAL              quota_after - quota_before, if recorded
+quota_before REAL              per-message quota snapshot (see POST /chat/{msg_id}/quota-delta)
+quota_after  REAL              per-message quota snapshot
+completed_at TEXT              ISO8601 — set when status becomes done|error|cancelled
 created_at TEXT                ISO8601
 ```
+
+`cancelled` is written by `mark_assistant_cancelled` at stop-request time
+(before the process is killed), not inferred afterward, and only ever applies
+to a still-`pending` row. See [ADR-0033](decisions/0033-cancelled-and-error-turn-capture.md).
+For cancelled assistant rows, Squid reconstructs durable partial response,
+status trace, tool context, and stats-derived `session_id` from `run_events`.
+Pinned prompt context and memory metadata remain on the linked user row's
+`context` field and are exposed as `prompt_context`.
 
 ---
 
@@ -118,11 +136,111 @@ created_at           TEXT    ISO8601 — set on INSERT, never updated (used for 
 
 ---
 
+### `run_events` — per-message SSE event log
+
+Replayable log of every SSE event emitted for a message, keyed by `(msg_id, seq)`.
+Backs `GET /chat/{msg_id}/events` for reconnecting clients.
+
+```
+id         INTEGER  PK  AUTOINCREMENT
+msg_id     INTEGER  NOT NULL   chat_messages.id (not FK-enforced)
+seq        INTEGER  NOT NULL   monotonic per msg_id
+event_type TEXT     NOT NULL   text | tool | status | stats | done | error
+payload    TEXT                event data
+created_at TEXT                ISO8601
+UNIQUE(msg_id, seq)
+```
+
+---
+
+### `git_diff_reverts` — reverted-file ledger
+
+Tracks which files from a captured GitDiff tool call have already been
+reverted, so `POST /chat/{msg_id}/revert` doesn't double-apply.
+
+```
+msg_id      INTEGER  PK (composite)
+repo        TEXT     PK (composite)
+file_path   TEXT     PK (composite)
+reverted_at TEXT     ISO8601
+```
+
+---
+
+### `file_edit_history` — localfile editor undo log
+
+Before/after snapshots for edits made via `POST /localfile`. Backs
+`GET /localfile/history` and `POST /localfile/revert-edit`.
+
+```
+id        INTEGER  PK  AUTOINCREMENT
+file_path TEXT     NOT NULL
+before    TEXT     NOT NULL
+after     TEXT     NOT NULL
+edited_at TEXT      ISO8601
+```
+Indexed on `(file_path, id DESC)`.
+
+---
+
+### `bookmarks` — saved messages
+
+```
+msg_id   INTEGER  PK
+topic    TEXT
+agent    TEXT
+content  TEXT
+saved_at TEXT     ISO8601
+```
+
+---
+
+### `worktrees` — per-(topic, agent, repo) git worktree isolation
+
+One row per repo a topic/agent has an isolated worktree in. Cleaned up on
+session clear; see `agent/worktree.py`.
+
+```
+topic         TEXT  PK (composite)
+agent         TEXT  PK (composite)
+repo_root     TEXT  PK (composite)
+worktree_path TEXT  NOT NULL
+branch_name   TEXT  NOT NULL
+status        TEXT  NOT NULL  DEFAULT 'active'
+created_at    TEXT            ISO8601
+last_used_at  TEXT            ISO8601
+```
+
+---
+
+### `stats_filter_presets` — saved Stats-tab filter presets
+
+```
+id            INTEGER  PK  AUTOINCREMENT
+name          TEXT     NOT NULL  UNIQUE (case-insensitive)
+state_json    TEXT     NOT NULL  serialized filter state
+is_default    INTEGER  NOT NULL  DEFAULT 0  (unique when 1, i.e. at most one default)
+display_order INTEGER  NOT NULL  DEFAULT 0
+created_at    TEXT     NOT NULL  ISO8601
+updated_at    TEXT     NOT NULL  ISO8601
+```
+
+---
+
+### `messages_fts` / `prompts_fts` — full-text search indexes
+
+Standalone SQLite FTS5 tables kept in sync with `chat_messages` via triggers
+(not external-content tables). `messages_fts` indexes final assistant content
+(synced on the `status='done'` update); `prompts_fts` indexes user prompts
+(synced on insert). Back `GET /search`. See ADR-0021.
+
+---
+
 ## Key Data Flows
 
 ### Session turn (non-adhoc)
 1. `POST /chat` resolves route (`#topic@agent` or sticky topic) → looks up agent config → resolves harness + provider → resolves protocol → looks up `topic_sessions` for `session_id`
-2. `insert_user_message` (with `context=[]`) + `insert_assistant_message` (status=`pending`)
+2. `insert_user_message` (with `context=[]`) + `insert_assistant_message` (status=`pending`), then attach any known resumed `session_id`
 3. CLI spawned via `TopicDispatcher` (FIFO per topic) with `--resume session_id` if present
 4. If `--resume` fails with "No conversation found": emit `status` event with stale session details, retry as fresh (see ADR-0001 — Stale Session Recovery)
 5. `_stats` chunk arrives → `save_stats()` → `set_topic_session()`
@@ -150,7 +268,9 @@ Base URL: `http://localhost:8000`
 
 ### POST /chat
 
-Stream an AI response. Returns `text/event-stream`.
+Stream an AI response. Returns `text/event-stream` with response header
+`X-Squid-Msg-Id` (the assistant message id, available before the stream body
+completes).
 
 **Request body**
 ```json
@@ -159,7 +279,10 @@ Stream an AI response. Returns `text/event-stream`.
   "topic":    "string (default: \"default\")",
   "agent":    "string | null  — agent name; null = use topic sticky",
   "lookback": "integer (default: 0) — adhoc context window",
-  "adhoc":    "boolean (default: false)"
+  "lookback_via_pins": "boolean (default: false) — use pinned_ids instead of last-N history",
+  "adhoc":    "boolean (default: false)",
+  "pinned_ids": "integer[] | null — explicit message IDs to inject as context when lookback_via_pins",
+  "include_topic_memory": "boolean (default: false) — inject the topic's memory.md as context"
 }
 ```
 
@@ -222,7 +345,7 @@ Run a topic-scoped control command.
 **Request body**
 ```json
 {
-  "command": "stop | stopall | deq | list | restart | clear | stop_msg",
+  "command": "stop | stopall | deq | list | restart | clear | stop_msg | journal",
   "topic":   "string (default: \"default\")",
   "agent":   "string | null  — scopes stop/stopall to one agent lane; required for clear if no sticky",
   "adhoc":   "boolean | null — scopes stop/stopall to adhoc-only turns",
@@ -237,11 +360,75 @@ Run a topic-scoped control command.
 { "ok": true, "killed": true }                 // stop
 { "ok": true, "killed": int, "drained": int }  // stopall
 { "ok": true, "drained": int }                 // deq
-{ "ok": true, "agent": "agent-name" }          // clear
+{ "ok": true, "agent": "agent-name", "worktree_conflicts": [...] }  // clear
 { "ok": true, "topics": [...] }                // list
 { "ok": true, "killed": int }                  // stop_msg
+{ "ok": true, "file": "path" }                 // journal
 { "ok": false, "error": "..." }                // 400
 ```
+
+---
+
+### GET /processes
+
+**Response** — array of active CLI processes:
+```json
+[{ "pid": 1234, "backend": "claudecode:anthropic", "topic": "work", "agent": "clawd", "duration_s": 4.2, "started_iso": "ISO8601" }]
+```
+
+---
+
+### GET /queue
+
+**Response** — all queued (not-yet-dispatched) turns across all topics, from `TopicDispatcher.all_queued_items()`.
+
+---
+
+### GET /health
+
+**Response**
+```json
+{
+  "status":    "ok",
+  "boot_time": "ISO8601",
+  "version":   "string",
+  "squid_home": "/Users/me/.squid",
+  "total_prompts": 0,
+  "first_seen": "ISO8601 | null",
+  "harnesses": [
+    {
+      "id": "claudecode",
+      "label": "Claude Code",
+      "install_cmd": "curl -fsSL https://claude.ai/install.sh | bash",
+      "installed": true,
+      "protocol": "oneshot-cli",
+      "interactive": { "idle_timeout_seconds": 0 },
+      "default_provider": "anthropic",
+      "supported_apis": ["/v1/messages"],
+      "compatible_providers": ["anthropic", "deepseek"]
+    }
+  ],
+  "providers": {
+    "anthropic": {
+      "label": "Claude",
+      "color": "#AE5332",
+      "base_url": null,
+      "auth_type": "subscription",
+      "missing_secrets": [],
+      "gauge": { "type": "claude", "text": null, "title": null },
+      "gauge_authed": true,
+      "models": ["claude-sonnet-4-6"],
+      "supported_apis": ["/v1/messages"]
+    }
+  }
+}
+```
+
+`harnesses` and `providers` are the runtime catalogs. Harnesses describe CLI
+integrations; providers describe endpoint/account metadata, auth, models, and
+quota gauges. `available` means the harness executable and configured
+provider secret references are present; it does not probe the provider
+endpoint.
 
 ---
 
@@ -279,6 +466,40 @@ Run a topic-scoped control command.
   "has_more": true
 }
 ```
+
+---
+
+### GET /history/by-ids?ids={csv}
+
+Fetch specific message rows by id (comma-separated, capped at 200), same row shape as `GET /history` items.
+
+**Response**: `{ "items": [...] }`
+
+---
+
+### GET /search
+
+Full-text search over messages via `messages_fts`/`prompts_fts`.
+
+**Query params**: `q` (required), `limit` (default 100), `topic`, `agent`, `adhoc`, `role` (default `"assistant"`), `bookmarked` (default `false`)
+
+**Response**: `{ "items": [...] }`
+
+---
+
+### GET /prompts/recent
+
+**Query params**: `limit` (default 50, capped 200)
+
+**Response**: `{ "items": [...recent user prompts...], "agents": {...public agent configs by name...} }`
+
+---
+
+### GET /chat/previews?ids={csv}
+
+Short content previews for a set of message IDs (comma-separated, capped at 200).
+
+**Response**: `{ "items": [...] }`
 
 ---
 
@@ -367,6 +588,25 @@ Returns agents previously used in a topic, ordered by most recent use. Used to p
 
 ---
 
+### GET /topics/{topic}/memory
+
+Returns the topic's memory document (frontmatter-parsed `memory.md`).
+
+### PUT /topics/{topic}/memory
+
+**Request body**: `{ "content": "string" }`
+
+**Response**: result of writing the topic memory file.
+
+### PUT /topics/{topic}/memory/squid/code-roots
+
+Updates the `squid.code_roots` list in the topic's memory frontmatter (see the
+`<squid_code_roots>` block injected into this conversation).
+
+**Request body**: `{ "code_roots": ["string", ...], "code_roots_skipped": false }`
+
+---
+
 ### GET /topics/{topic}/sessions
 
 Returns all agents with active sessions for a topic.
@@ -382,18 +622,30 @@ Returns the active session state for a `(topic, agent)` pair.
 **Response**
 ```json
 {
-  "session_id": "string | null",
-  "cwd":        "string | null"
+  "session_id":      "string | null",
+  "cwd":             "string | null",
+  "injected_ids":    [1, 2],
+  "memory_injected": false,
+  "memory_revision": "string | null"
 }
 ```
 
 ---
 
-### DELETE /topics/{topic}/session?agent={agent}
+### DELETE /topics/{topic}/agent?agent={agent}&adhoc={bool}
 
-Clears the active session for `(topic, agent)`. Next message starts fresh.
+Deletes a topic/agent's messages and sessions. If `adhoc` is given, scopes
+deletion to adhoc-only or session-only turns.
 
 **Response**: `{ "ok": true }`
+
+---
+
+### DELETE /topics/{topic}/session?agent={agent}
+
+Clears the active session for `(topic, agent)`. Next message starts fresh. Also cleans up any associated worktrees.
+
+**Response**: `{ "ok": true, "worktree_conflicts": [...] }`
 
 ---
 
@@ -406,8 +658,26 @@ Same as `GET /topics/{topic}/session`.
 ### GET /chat/{msg_id}/status
 
 Poll a single message for status (used when client reconnects mid-stream).
+Recovers content from the `run_events` log if the row is still `pending` but
+the run actually completed.
 
 **Response**: `{ "id": int, "status": "pending | done | error", "content": str | null }`
+
+---
+
+### GET /chat/{msg_id}/events?after_seq={int}
+
+Replays `run_events` for a message as `text/event-stream` (text/stats/status/tool/done/error),
+polling every 0.5s until the message reaches a terminal status. Used by
+clients reconnecting mid-stream.
+
+---
+
+### GET /config/agents/{name}/sessions
+
+Returns all active `topic_sessions` rows for an agent, across topics.
+
+**Response**: `{ "topics": [...] }`
 
 ---
 
@@ -467,9 +737,76 @@ Delete an agent and its topic sessions.
 
 ---
 
+### GET /config/yaml
+
+Same-origin only. Returns the raw config YAML text for the built-in config editor.
+
+**Response**: `{ "content": "string", "revision": "string", "path": "string" }`
+
+### PUT /config/yaml
+
+Same-origin only. Validates and writes the config YAML. Uses `revision` for
+optimistic concurrency — 409 if the file changed since it was read.
+
+**Request body**: `{ "content": "string", "revision": "string | null" }`
+
+**Response**: `{ "ok": true, "revision": "string", "restart_required": bool, "backup": "path" }`
+
+---
+
+### GET /config/localfile-roots
+
+Same-origin only. Returns the current allowed localfile roots.
+
+**Response**: `{ "roots": [...] }`
+
+### POST /config/localfile-roots
+
+Same-origin only. Appends a new allowed root for `GET/POST /localfile`.
+
+**Request body**: `{ "path": "string", "root": "string" }`
+
+**Response**: `{ "ok": true, "root": "string", "added": bool }`
+
+---
+
+### GET /stats/filters
+
+**Response**: available filter dimensions/values for the Stats tab.
+
+---
+
+### GET /stats/filter-presets
+
+**Response**: saved `stats_filter_presets` rows.
+
+### POST /stats/filter-presets
+
+**Request body**: `{ "name": "string", "state": {...}, "is_default": bool }`
+
+**Response**: created preset, or `{ "error": "..." }` (400 on duplicate name).
+
+### PUT /stats/filter-presets/{preset_id}
+
+**Request body**: same as POST. **Response**: updated preset, 404 if missing.
+
+### DELETE /stats/filter-presets/{preset_id}
+
+**Response**: `{ "ok": true }`
+
+---
+
 ### GET /stats
 
-**Query params**: `period` (`daily` | `hourly`, default `daily`), `group` (`time` | `topic` | `agent`, default `time`)
+**Query params**: `period` (`daily` | `hourly`, default `daily`), `group` (`time` | `topic` | `agent`, default `time`),
+`breakdown` (default `""`), `days` (default 30), `hours` (default 0), `agent` (default `""`),
+`topic` (default `""`), `adhoc` (`all` | `true` | `false`, default `all`), `tz_offset_minutes` (default 0),
+`chart_metrics`, `chart_aggs` (comma-separated), `anchor`.
+
+The response shape varies by `group`/`breakdown` combination — turn-level
+stats, time-bucketed breakdowns, by-topic, by-agent, or aggregated
+chart-ready time-series. The three documented shapes below (`group=time`,
+`group=topic`, `group=agent`) are the common cases.
 
 **Response — group=time**
 ```json
@@ -526,11 +863,78 @@ treated as exact per-prompt consumption. See
 
 ---
 
+### POST /chat/{msg_id}/quota-delta
+
+Record a per-message quota before/after snapshot (distinct from the
+session-level `POST /stats/quota-delta`). Stored in `chat_messages.quota_before`/`quota_after`/`quota_delta`.
+
+**Request body**: `{ "before": 0.0, "after": 0.0 }`
+
+**Response**: `{ "ok": true }`
+
+---
+
+### GET /chat/{msg_id}/diff-revert-status?repo={repo}
+
+Returns per-file revert eligibility for a captured GitDiff tool call on this
+message (checked against `git_diff_reverts`). 400 on an invalid repo path,
+404 if no diff was captured for this message.
+
+---
+
+### POST /chat/{msg_id}/revert
+
+Reverse-applies a git diff captured from an earlier GitDiff tool call, for one
+file or (if `file_path` omitted) all files in the diff. Recorded in
+`git_diff_reverts` to prevent double-reverting.
+
+**Request body**: `{ "repo": "string", "file_path": "string | null" }`
+
+**Response**: `{ "ok": true, "reverted": [...], "failed": [...] }`
+
+---
+
+### GET /bookmarks
+
+**Response**: `{ "items": [...] }` — all saved bookmarks.
+
+### POST /bookmarks
+
+**Request body**: `{ "msg_id": int, "topic": "string | null", "agent": "string | null", "content": "string | null" }`
+
+**Response**: `{ "ok": true }`
+
+### DELETE /bookmarks/{msg_id}
+
+**Response**: `{ "ok": true }`
+
+---
+
 ### POST /config/creds
 
 Save claude.ai session credentials (org ID + session key).
 
 **Request body**: `{ "org_id": "string", "session_key": "string" }`
+
+**Response**: `{ "ok": true }`
+
+### POST /config/creds/auto
+
+Auto-detect Claude web credentials from local Chrome cookies. No request body.
+
+**Response**: `{ "ok": true, "claude_org_id": "string" }` or `{ "error": "..." }`
+
+### POST /config/creds/codex/auto
+
+Auto-detect a Codex bearer token from the local Codex CLI install. No request body.
+
+**Response**: `{ "ok": true }`
+
+### POST /config/creds/codex
+
+Save a Codex bearer token directly.
+
+**Request body**: `{ "token": "string" }`
 
 **Response**: `{ "ok": true }`
 
@@ -552,70 +956,95 @@ Fetch current Codex usage. Requires a saved Codex bearer token.
 
 **Response**: proxied Codex account usage JSON, or `{ "error": "..." }` (400/502).
 
+### GET /quota/cursor
+
+Fetch current Cursor usage.
+
+**Response**: proxied cursor.sh usage-summary JSON, or `{ "error": "..." }` (400/502).
+
+### GET /quota/deepseek
+
+Fetch current DeepSeek account balance.
+
+**Response**: proxied DeepSeek balance JSON, or `{ "error": "..." }` (400/502).
+
 ---
 
-### GET /processes
+### POST /config/deepseek/max-budget
 
-**Response** — array of active CLI processes:
-```json
-[{ "pid": 1234, "backend": "claudecode:anthropic", "topic": "work", "agent": "clawd", "duration_s": 4.2, "started_iso": "ISO8601" }]
-```
+Set a soft spend cap used by the DeepSeek quota gauge.
+
+**Request body**: `{ "amount": 0.0 }`
+
+**Response**: `{ "status": "ok" }` or 400.
+
+### DELETE /config/deepseek/max-budget
+
+Clear the DeepSeek spend cap.
+
+**Response**: `{ "status": "ok" }`
 
 ---
-
-### GET /health
-
-**Response**
-```json
-{
-  "status":    "ok",
-  "boot_time": "ISO8601",
-  "squid_home": "/Users/me/.squid",
-  "harnesses": [
-    {
-      "id": "claudecode",
-      "label": "Claude Code",
-      "install_cmd": "curl -fsSL https://claude.ai/install.sh | bash",
-      "installed": true,
-      "protocol": "oneshot-cli",
-      "interactive": { "idle_timeout_seconds": 0 },
-      "default_provider": "anthropic",
-      "supported_apis": ["/v1/messages"],
-      "compatible_providers": ["anthropic", "deepseek"]
-    }
-  ],
-  "providers": {
-    "anthropic": {
-      "label": "Claude",
-      "color": "#AE5332",
-      "base_url": null,
-      "auth_type": "subscription",
-      "missing_secrets": [],
-      "gauge": { "type": "claude", "text": null, "title": null },
-      "gauge_authed": true,
-      "models": ["claude-sonnet-4-6"],
-      "supported_apis": ["/v1/messages"]
-    }
-  }
-}
-```
-
-`harnesses` and `providers` are the runtime catalogs. Harnesses describe CLI
-integrations; providers describe endpoint/account metadata, auth, models, and
-quota gauges.
-
-`available` means the harness executable and configured provider secret
-references are present. It does not probe the provider endpoint.
 
 ### GET /quota/provider/{provider_id}
 
 Returns a normalized dynamic or static gauge snapshot for one configured
 provider. Gauge routing and credentials come from provider config and are
-independent of which harness is using that provider.
+independent of which harness is using that provider. Internally delegates to
+the claude/codex/cursor/deepseek/static logic above based on the provider's
+gauge type.
 
 ```json
-{ "status": "ok", "text": "$12.34", "raw": 12.34, "used_percent": null, "reset_at": null, "title": "DeepSeek balance" }
+{ "status": "ok", "text": "$12.34", "raw": 12.34, "used_percent": null, "reset_at": null, "title": "DeepSeek balance", "seven_day": null, "max_budget": null }
 ```
+
+---
+
+### GET /journals/{topic}
+
+**Response**: list of available weekly journal entries for a topic.
+
+### GET /journals/{topic}/{week}?agent={agent}
+
+**Response**: `text/markdown` journal content for that topic/week. 404 if not found.
+
+---
+
+### GET /remote
+
+Returns the Tailscale HTTPS URL for this Squid instance, via `tailscale status --json`.
+
+**Response**: `{ "url": "string" }` or `{ "url": null, "reason": "string" }`
+
+---
+
+### GET /localfile?path={path}&render={bool}
+
+Read a file or list a directory, gated by same-origin requests and the
+`server.localfile_roots` allowlist (see `PUT/POST /config/localfile-roots`).
+Returns a JSON directory listing, rendered HTML (for markdown when
+`render=true`), plain text, or a raw file response depending on path/params.
+
+### POST /localfile
+
+Write a file under an allowed root. Records a before/after snapshot in
+`file_edit_history`.
+
+**Request body**: `{ "path": "string", "content": "string" }`
+
+**Response**: `{ "ok": true, "edit_id": int }`
+
+### GET /localfile/history?path={path}
+
+**Response**: `{ "history": [...] }` — edit history rows for a path, from `file_edit_history`.
+
+### POST /localfile/revert-edit
+
+Revert a file to the `before` snapshot of a given edit.
+
+**Request body**: `{ "edit_id": int }`
+
+**Response**: `{ "ok": true }`
 
 ---
 

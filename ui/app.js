@@ -5449,7 +5449,9 @@ const CHART_METRICS = {
   duration:       { label: 'Duration (s)',   fn: r => (r.duration_ms || 0) / 1000, color: 'rgba(255,120,120,1)', fill: 'rgba(255,120,120,0.08)' },
   cache_read:     { label: 'Cache Read',     fn: r => _splitInputTokens(r).cacheRead,  color: 'rgba(90,180,255,1)',   fill: 'rgba(90,180,255,0.08)'  },
   cache_write:    { label: 'Cache Write',    fn: r => _splitInputTokens(r).cacheWrite, color: 'rgba(180,140,255,1)',  fill: 'rgba(180,140,255,0.08)' },
+  cancelled_turns:{ label: 'Cancelled',      fn: r => (r.cancelled_turns || 0), color: 'rgba(190,150,90,1)', fill: 'rgba(190,150,90,0.08)' },
   new_input:      { label: 'New Input',      fn: r => _splitInputTokens(r).newInput,   color: 'rgba(80,200,120,1)',   fill: 'rgba(80,200,120,0.08)'  },
+  error_turns:    { label: 'Errors',         fn: r => (r.error_turns || 0),     color: 'rgba(255,100,100,1)',  fill: 'rgba(255,100,100,0.08)' },
   cache_hit_rate: { label: 'Cache Hit %',    fn: r => (_cacheHitRate(r) || 0),   color: 'rgba(230,200,80,1)',   fill: 'rgba(230,200,80,0.08)'  },
   avg_tokens_turn:{ label: 'Avg Tokens/Turn',fn: r => (_avgTokensPerTurn(r) || 0), color: 'rgba(150,150,255,1)', fill: 'rgba(150,150,255,0.08)' },
 };
@@ -5466,7 +5468,9 @@ const STATS_METRIC_AGGS = {
   duration: ['avg', 'sum', 'min', 'max', 'p50', 'p75', 'p95'],
   cache_read: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
   cache_write: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
+  cancelled_turns: ['sum'],
   new_input: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
+  error_turns: ['sum'],
   // Ratios/derived-per-bucket values — there's nothing to vary the aggregation over.
   cache_hit_rate: ['avg'],
   avg_tokens_turn: ['sum'],
@@ -5526,7 +5530,9 @@ function _statsMetricValue(row, metric) {
   if (metric === 'duration') return (row.duration_ms || 0) / 1000;
   if (metric === 'cache_read') return _splitInputTokens(row).cacheRead;
   if (metric === 'cache_write') return _splitInputTokens(row).cacheWrite;
+  if (metric === 'cancelled_turns') return row.cancelled_turns || 0;
   if (metric === 'new_input') return _splitInputTokens(row).newInput;
+  if (metric === 'error_turns') return row.error_turns || 0;
   if (metric === 'cache_hit_rate') return _cacheHitRate(row);
   if (metric === 'avg_tokens_turn') return _avgTokensPerTurn(row);
   return row.total_turns || 0;
@@ -5724,8 +5730,10 @@ const STATS_TABLE_MEASURES = [
   },
   { key: 'cache_read', label: 'Cache Read', row: r => fmtNum(_splitInputTokens(r).cacheRead), total: t => fmtNum(t.cache_read || 0) },
   { key: 'cache_write', label: 'Cache Write', row: r => fmtNum(_splitInputTokens(r).cacheWrite), total: t => fmtNum(t.cache_write || 0) },
+  { key: 'cancelled_turns', label: 'Cancelled', row: r => fmtNum(r.cancelled_turns || 0), total: t => fmtNum(t.cancelled_turns || 0) },
   { key: 'cost', label: 'Cost', row: r => _formatCost(r.cost_usd), total: t => _formatCost(t.cost || 0) },
   { key: 'duration', label: 'Duration', row: r => r.duration_ms != null ? `${(r.duration_ms / 1000).toFixed(1)}s` : '—', total: t => t.duration != null ? `${(t.duration / 1000).toFixed(1)}s` : '—' },
+  { key: 'error_turns', label: 'Errors', row: r => fmtNum(r.error_turns || 0), total: t => fmtNum(t.error_turns || 0) },
   { key: 'new_input', label: 'New Input', row: r => fmtNum(_splitInputTokens(r).newInput), total: t => fmtNum(t.new_input || 0) },
   { key: 'quota', label: 'Quota Delta', title: 'Observed account meter change; not exact attributed usage', row: r => _formatQuotaDelta(r.quota_delta), total: t => _formatQuotaDelta(t.quota) },
   { key: 'sessions', label: 'Sessions', row: r => r.sessions || 0, total: t => t.sessions || 0 },
@@ -5871,13 +5879,17 @@ function _statsMeasureTotals(totals, extra) {
 
 function _statsTotals(rows) {
   const totals = {
-    sessions: 0, turns: 0, tokens_in: 0, tokens_out: 0, cost: 0, quota: null, duration: null,
+    sessions: 0, turns: 0, done_turns: 0, error_turns: 0, cancelled_turns: 0,
+    tokens_in: 0, tokens_out: 0, cost: 0, quota: null, duration: null,
     cache_read: 0, cache_write: 0, new_input: 0,
   };
   for (const r of rows) {
     const split = _splitInputTokens(r);
     totals.sessions += r.sessions || 0;
     totals.turns += r.total_turns || 0;
+    totals.done_turns += r.done_turns || 0;
+    totals.error_turns += r.error_turns || 0;
+    totals.cancelled_turns += r.cancelled_turns || 0;
     totals.tokens_in += split.total;
     totals.tokens_out += r.output_tokens || 0;
     totals.cost += r.cost_usd || 0;
@@ -10062,7 +10074,7 @@ function addDeepDiveButton(bubbleEl, topic, agent, adhoc, statsEl, msgId, timest
 
 async function _navigateToDeepDive(topic, agent, adhoc) {
   const state = _deepDiveStatsState();
-  if (topic && topic !== 'default') state.dimensions.topic = { mode: 'selected', values: [topic] };
+  if (topic) state.dimensions.topic = { mode: 'selected', values: [topic] };
   if (agent) state.dimensions.agent = { mode: 'selected', values: [agent] };
   state.dimensions.session_type = { mode: 'selected', values: [adhoc ? 'adhoc' : 'session'] };
 
@@ -10084,7 +10096,7 @@ async function _navigateToDeepDive(topic, agent, adhoc) {
 
 async function _navigateToAnchoredStats(topic, agent, adhoc, msgId, timestamp) {
   const state = _deepDiveStatsState();
-  if (topic && topic !== 'default') state.dimensions.topic = { mode: 'selected', values: [topic] };
+  if (topic) state.dimensions.topic = { mode: 'selected', values: [topic] };
   if (agent) state.dimensions.agent = { mode: 'selected', values: [agent] };
   state.dimensions.session_type = { mode: 'selected', values: [adhoc ? 'adhoc' : 'session'] };
   // Keep Deep Dive's normal range and anchor that window at this turn's end

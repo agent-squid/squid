@@ -79,7 +79,7 @@ configuration changes.
   as `claude: oneshot-cli` and `claude-live: interactive-cli`.
 - Multiple backends may share a gauge implementation without sharing keys.
 - A genuinely different CLI protocol still requires a coded driver.
-- New coded drivers should follow `docs/adding-driver-checklist.md`.
+- New coded drivers should follow `docs/adding-harness-checklist.md`.
 - Topic identity and execution identity stay separate: `#topic` owns the
   conversation, `@agent` owns `(backend, model, cwd)`, and `#topic@agent`
   selects the route.

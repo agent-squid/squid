@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-06-10
+updated: 2026-07-15
 ---
 # ADR-0019: One-Shot CLI Subprocess Over Tmux Session Reading
 
@@ -69,8 +70,8 @@ multiplexing. They are complementary, not competing.
 ## Alternative: Multi-Protocol Interactive Execution (ADR-0022)
 
 A third approach not considered in the original tmux analysis: support multiple
-driver protocols. A CLI may run as `oneshot-cli`, `interactive-cli`, or
-`interactive-pty`. A direct PTY (no tmux
+protocols per harness (`agent/harnesses.py`, per ADR-0028). A CLI may run as
+`oneshot-cli`, `interactive-cli`, or `interactive-pty`. A direct PTY (no tmux
 intermediary) preserves process group control, enables a web terminal toggle by
 connecting xterm.js to the same PTY, and supports long-running sessions with
 idle-kill-resume lifecycle management.
@@ -81,8 +82,8 @@ events and turn boundaries.
 
 This differs from the tmux model in three key ways:
 
-- **Session ID**: created or discovered by the driver through native flags,
-  structured metadata, or backend session files, not inferred from terminal
+- **Session ID**: created or discovered by the harness through native flags,
+  structured metadata, or its own session files, not inferred from terminal
   content.
 - **Process control**: Squid holds the PTY fd directly; `kill_procs_by_topic()`
   still works without routing through a tmux intermediary.

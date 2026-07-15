@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-05-30
-updated: 2026-06-18
+updated: 2026-07-15
 ---
 # ADR-0014: Single YAML Config File for Infrastructure Constants
 
@@ -57,9 +57,12 @@ Agent-specific config (model, cwd, timeout) stays in the DB, writable at
 runtime without a server restart.
 
 Backend definitions were subsequently added to this infrastructure file by
-ADR-0024. They describe reusable CLI driver instances; agents remain in SQLite
-and reference a backend ID, so there is still one source of truth for each
-agent.
+ADR-0024 as reusable `{harness}` × endpoint instances that agents referenced
+by ID. [ADR-0028](0028-harness-provider-separation.md) later retired
+`backends:` entirely: `squid.yaml` now has `harnesses:`/`providers:` sections
+instead, and agents in SQLite reference `harness`/`provider` fields directly
+rather than a backend ID. There is still one source of truth for each agent —
+it's just structured as two fields instead of one.
 
 Storing config in `~/.squid/` means it survives tarball installs/updates —
 users never need to re-edit their config after upgrading.

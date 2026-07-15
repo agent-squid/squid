@@ -103,6 +103,7 @@ class TopicWorker:
         pos=N<0   → remove Nth item from end (-1=last, -2=second-to-last, …)
         Cancelled items get an error sentinel so waiting SSE clients close cleanly.
         """
+        from .stats_db import mark_assistant_cancelled
         pending = []
         while not self.q.empty():
             try:
@@ -111,6 +112,8 @@ class TopicWorker:
                 break
 
         def _cancel(item):
+            if item.msg_id:
+                mark_assistant_cancelled(item.msg_id, "Cancelled before start")
             item.out_q.put_nowait({"_error": "Cancelled"})
             item.out_q.put_nowait(None)
 
@@ -380,7 +383,7 @@ class TopicWorker:
             context_json = json.dumps(tool_events) if tool_events else None
             update_assistant_message(item.msg_id, content, session_id,
                                      "done" if content else "error", context=context_json,
-                                     status_raw=status_raw)
+                                     status_raw=status_raw, only_if_pending=True)
             insert_run_event(item.msg_id, run_seq, "done", None)
 
         except Exception as exc:
@@ -397,7 +400,8 @@ class TopicWorker:
             try:
                 update_assistant_message(item.msg_id, content, session_id,
                                          "done" if raw or recovered_content else "error", context=context_json,
-                                         status_raw=status_raw or get_completed_run_status_raw(item.msg_id))
+                                         status_raw=status_raw or get_completed_run_status_raw(item.msg_id),
+                                         only_if_pending=True)
                 insert_run_event(item.msg_id, run_seq, "error", err_text)
             except Exception:
                 pass
@@ -480,13 +484,19 @@ class TopicDispatcher:
                    adhoc: Optional[bool] = None) -> int:
         """Kill running processes matching topic + optional agent/adhoc filters.
         Adhoc stop is LIFO — kills only the most recently started adhoc process."""
-        from .runners import kill_procs_by_topic
+        from .runners import active_msg_ids_by_topic, kill_procs_by_topic
+        from .stats_db import mark_assistant_cancelled
+        for msg_id in active_msg_ids_by_topic(topic, agent=agent, adhoc=adhoc, lifo=(adhoc is True)):
+            mark_assistant_cancelled(msg_id, "Cancelled")
         return kill_procs_by_topic(topic, agent=agent, adhoc=adhoc, lifo=(adhoc is True))
 
     def stopall_topic(self, topic: str, agent: Optional[str] = None,
                       adhoc: Optional[bool] = None) -> dict:
         """Kill running processes + drain queues for topic (scoped by agent/adhoc)."""
-        from .runners import kill_procs_by_topic
+        from .runners import active_msg_ids_by_topic, kill_procs_by_topic
+        from .stats_db import mark_assistant_cancelled
+        for msg_id in active_msg_ids_by_topic(topic, agent=agent, adhoc=adhoc):
+            mark_assistant_cancelled(msg_id, "Cancelled")
         killed = kill_procs_by_topic(topic, agent=agent, adhoc=adhoc)
         drained = sum(w.drain() for w in self._workers_for_topic(topic))
         return {"killed": killed, "drained": drained}

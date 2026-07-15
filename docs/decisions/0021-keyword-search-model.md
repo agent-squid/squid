@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-06-16
+updated: 2026-07-15
 ---
 # ADR-0021: Keyword Search Model and Conventions
 
@@ -21,15 +22,25 @@ Search is backed by a SQLite FTS5 virtual table (`messages_fts`) using the
 stores a copy of assistant content in its own shadow tables.
 
 An `AFTER UPDATE OF content` trigger is the **primary indexing path** — it
-inserts each assistant response into `messages_fts` when the content column
-transitions from NULL to a value (i.e. when a streaming response completes).
+fires only when `NEW.role = 'assistant' AND NEW.content IS NOT NULL AND
+NEW.status = 'done'` (`messages_fts_sync` in `agent/stats_db.py`), i.e. on the
+final content write when a streaming response completes, not the first
+partial-content save. The trigger also deletes any existing FTS row for that
+id first, so a message that gets re-finalized (e.g. after a cancel/error race,
+see ADR-0033) never leaves a stale partial-text entry behind.
 
-On startup, an **incremental population** INSERT runs as error correction:
+On startup, `init_db()` runs two error-correction passes:
 
 ```sql
+-- 1. Repair: drop FTS rows whose indexed content no longer matches the
+--    final chat_messages content (catches partial-content rows indexed
+--    before the status='done' trigger condition existed).
+DELETE FROM messages_fts WHERE rowid IN (...content mismatch...)
+
+-- 2. Backfill: insert any done assistant messages missing from the index.
 INSERT INTO messages_fts(rowid, content)
 SELECT id, content FROM chat_messages
-WHERE role = 'assistant' AND content IS NOT NULL
+WHERE role = 'assistant' AND status = 'done' AND content IS NOT NULL
   AND id NOT IN (SELECT rowid FROM messages_fts)
 ```
 
@@ -103,16 +114,17 @@ controls which topic, agent, and session type is searched.
 | `#topic` | specified | all | none (session + adhoc) |
 | `#topic@agent` | specified | exact | session-only |
 | `#topic@agent!` | specified | exact | adhoc-only |
-| `#topic@agent*` | specified | exact | none (session + adhoc) |
+| `#topic@agent+` | specified | exact | none (session + adhoc) |
 | `#all` | none | all | none |
 | `@agent` | none | exact | session-only |
 | `@agent!` | none | exact | adhoc-only |
-| `@agent*` | none | exact | none (session + adhoc) |
+| `@agent+` | none | exact | none (session + adhoc) |
 
 Agent suffixes select execution mode: no suffix means the resumable session
-lane, `!` means the adhoc lane, and `*` means both. `*` does not prefix-match
-agent names and is not valid on a topic. A bare `#topic` is already the whole
-topic across every agent and execution mode.
+lane, `!` means the adhoc lane, and `+` means both (`parseScopeInput` in
+`ui/app.js`). `+` does not prefix-match agent names and is not valid on a
+topic. A bare `#topic` is already the whole topic across every agent and
+execution mode.
 
 When no explicit scope is given, scope resolution follows this priority:
 

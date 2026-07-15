@@ -1,4 +1,4 @@
-# Adding a Coded Driver Checklist
+# Adding a Coded Harness Checklist
 
 Use this when adding a genuinely new CLI protocol adapter. If the target can
 run through an existing harness with a different endpoint, credentials, args,
@@ -76,7 +76,7 @@ older configs need to add provider settings manually or regenerate their config.
 - Runner selection:
   - `runner_for_harness`
   - `runner_for_agent`
-  - adhoc behavior if the driver has interactive protocols
+  - adhoc behavior if the harness has interactive protocols
 - Runner parsing:
   - fresh and resumed command shape
   - provider/model CLI flags passed through from resolved provider config

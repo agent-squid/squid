@@ -8,7 +8,7 @@ async function mockApp(page) {
   await page.route('**/topics', r => r.fulfill({ json: [] }));
   await page.route('**/topics/**', r => r.fulfill({ json: {} }));
   await page.route('**/quota', r => r.fulfill({ json: {} }));
-  await page.route('**/stats/filters', r => r.fulfill({ json: { agents: ['claude'], topics: ['squid'] } }));
+  await page.route('**/stats/filters', r => r.fulfill({ json: { agents: ['claude'], topics: ['default', 'squid'] } }));
   await page.route('**/stats/filter-presets', r => r.fulfill({ json: [] }));
   await page.route('**/bookmarks', r => r.fulfill({ json: [] }));
 }
@@ -174,15 +174,62 @@ test('deep dive button click on session response sets session filter', async ({ 
 
   await page.locator('.stats-deep-dive-btn').click();
 
-  // Default topic should not set a topic filter
+  await expect(page.locator('#sf-topic-toggle')).toContainText('default');
+
   const turnReq = statsRequests.find(r => r.period === 'turn');
-  expect(turnReq.topic).toBeUndefined();
+  expect(turnReq.topic).toBe('default');
 
   // Agent filter should be 'codex'
   expect(turnReq.agent).toBe('codex');
 
   // Should be session type, not adhoc
   await expect(page.locator('#sf-adhoc')).toHaveValue('session');
+});
+
+test('deep dive button click on default adhoc response selects default topic', async ({ page }) => {
+  await mockApp(page);
+
+  const statsRequests = [];
+  await page.route('**/history**', r => r.fulfill({
+    json: {
+      items: [{
+        id: 1,
+        topic: 'default',
+        agent: 'claude',
+        adhoc: true,
+        prompt: 'hello',
+        content: 'hi there',
+        timestamp: '2026-07-10T10:00:00Z',
+        session_id: 'sid-1',
+        stats: { input_tokens: 50, output_tokens: 25, duration_ms: 1500 },
+      }],
+      has_more: false,
+    },
+  }));
+
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    statsRequests.push(Object.fromEntries(url.searchParams.entries()));
+    return route.fulfill({
+      json: [{
+        msg_id: 1, period: '2026-07-10T10:00:00Z', topic: 'default', agent: 'claude', adhoc: 1,
+        sessions: 1, total_turns: 1, input_tokens: 50, output_tokens: 25, duration_ms: 1500,
+      }],
+    });
+  });
+
+  await page.goto('/');
+
+  await page.locator('.stats-deep-dive-btn').click();
+
+  await expect(page.locator('#sf-topic-toggle')).toContainText('default');
+  await expect(page.locator('#sf-agent-toggle')).toContainText('claude');
+  await expect(page.locator('#sf-adhoc')).toHaveValue('adhoc');
+
+  const turnReq = statsRequests.find(r => r.period === 'turn');
+  expect(turnReq.topic).toBe('default');
+  expect(turnReq.agent).toBe('claude');
+  expect(turnReq.adhoc).toBe('adhoc');
 });
 
 test('deep dive button is not overwritten by saved default preset on first stats refresh', async ({ page }) => {

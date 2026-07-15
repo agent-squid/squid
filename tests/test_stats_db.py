@@ -884,6 +884,106 @@ def test_get_stats_by_turn_filters_by_agent_topic_and_adhoc(tmp_path, monkeypatc
     assert [r["msg_id"] for r in stats_db.get_stats_by_turn(days=0, adhoc="session")] == [codex_asst]
 
 
+def test_terminal_non_success_turns_are_stats_rows_without_usage(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user1 = stats_db.insert_user_message("squid", "codex", "stop this")
+    cancelled_asst = stats_db.insert_assistant_message("squid", "codex", user1, adhoc=False)
+    assert stats_db.mark_assistant_cancelled(cancelled_asst, "Cancelled")
+
+    user2 = stats_db.insert_user_message("squid", "claude", "fail this")
+    error_asst = stats_db.insert_assistant_message("squid", "claude", user2, adhoc=True)
+    stats_db.update_assistant_message(error_asst, "boom", None, "error")
+
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        conn.execute(
+            "UPDATE chat_messages SET completed_at='2026-07-15T10:00:00Z' WHERE id=?",
+            (cancelled_asst,),
+        )
+        conn.execute(
+            "UPDATE chat_messages SET completed_at='2026-07-15T10:05:00Z' WHERE id=?",
+            (error_asst,),
+        )
+
+    by_turn = {row["msg_id"]: row for row in stats_db.get_stats_by_turn(days=0)}
+    assert by_turn[cancelled_asst]["status"] == "cancelled"
+    assert by_turn[cancelled_asst]["cancelled_turns"] == 1
+    assert by_turn[cancelled_asst]["error_turns"] == 0
+    assert by_turn[cancelled_asst]["input_tokens"] == 0
+    assert by_turn[error_asst]["status"] == "error"
+    assert by_turn[error_asst]["error_turns"] == 1
+
+    aggregate = stats_db.get_aggregated_stats(period="daily", days=0)[0]
+    assert aggregate["total_turns"] == 2
+    assert aggregate["cancelled_turns"] == 1
+    assert aggregate["error_turns"] == 1
+    assert aggregate["done_turns"] == 0
+
+
+def test_stats_filters_include_terminal_rows_without_session_stats(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user = stats_db.insert_user_message("squid", "codex", "stop this")
+    asst = stats_db.insert_assistant_message("squid", "codex", user, adhoc=False)
+    stats_db.mark_assistant_cancelled(asst, "Cancelled")
+
+    assert stats_db.get_stats_filter_options() == {"agents": ["codex"], "topics": ["squid"]}
+
+
+def test_cancelled_resumed_turn_keeps_session_id_before_stats(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user = stats_db.insert_user_message("squid", "codex", "stop this")
+    asst = stats_db.insert_assistant_message("squid", "codex", user, adhoc=False)
+
+    assert stats_db.attach_assistant_session(asst, "session-1")
+    assert stats_db.mark_assistant_cancelled(asst, "Cancelled")
+
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        row = conn.execute(
+            "SELECT session_id, session_turn_index, status FROM chat_messages WHERE id=?",
+            (asst,),
+        ).fetchone()
+
+    assert row == ("session-1", None, "cancelled")
+
+
+def test_cancelled_turn_recovers_available_run_event_attributes(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user = stats_db.insert_user_message(
+        "squid",
+        "codex",
+        "stop this",
+        context_ids=[7, 8],
+        mem=True,
+        mem_revision="rev-1",
+    )
+    asst = stats_db.insert_assistant_message("squid", "codex", user, adhoc=False)
+    stats_db.insert_run_event(asst, 0, "status", "Thinking\n")
+    stats_db.insert_run_event(asst, 1, "text", "partial answer")
+    stats_db.insert_run_event(asst, 2, "tool", json.dumps({"name": "Read", "path": "app.py"}))
+    stats_db.insert_run_event(asst, 3, "stats", json.dumps({"session_id": "session-1"}))
+
+    assert stats_db.mark_assistant_cancelled(asst, "Cancelled")
+
+    row = stats_db.get_message(asst)
+    assert row["status"] == "cancelled"
+    assert row["content"] == "partial answer"
+    assert row["session_id"] == "session-1"
+    assert row["status_raw"] == "Thinking\n"
+    assert json.loads(row["context"]) == [{"name": "Read", "path": "app.py"}]
+    assert json.loads(row["prompt_context"]) == {
+        "pins": [7, 8],
+        "mem": True,
+        "mem_revision": "rev-1",
+    }
+
+
 def test_agent_session_breakdown_keeps_agent_session_variants_separate(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

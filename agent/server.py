@@ -75,6 +75,7 @@ from .stats_db import (
     get_agent, upsert_agent, delete_agent, list_agents, get_default_agent,
     get_topic, upsert_topic, list_topics,
     insert_user_message, insert_assistant_message, update_assistant_message,
+    attach_assistant_session, mark_assistant_cancelled,
     update_message_quota_snapshot,
     get_context_history, get_messages_by_ids, mark_orphaned_pending, get_message,
     get_message_previews,
@@ -785,6 +786,7 @@ async def chat(req: ChatRequest):
                                       mem_revision=memory_revision,
                                       lookback=lookback)
     asst_msg_id = insert_assistant_message(topic, resolved_agent, user_msg_id, adhoc=req.adhoc)
+    attach_assistant_session(asst_msg_id, resume_session_id)
 
     # Set up per-turn worktree isolation. Every turn (adhoc or not) gets its own
     # worktree keyed by asst_msg_id, so parallel turns never share state.
@@ -872,6 +874,8 @@ async def run_cmd(req: CmdRequest):
         return topic
 
     if req.command == "stop_msg":
+        if req.msg_id:
+            mark_assistant_cancelled(req.msg_id, "Cancelled")
         killed = kill_proc_by_msg_id(req.msg_id) if req.msg_id else 0
         log.info("cmd stop_msg topic=%s msg_id=%s killed=%s", req.topic, req.msg_id, killed)
         return JSONResponse({"ok": True, "killed": killed})
@@ -1100,6 +1104,9 @@ async def message_events(msg_id: int, after_seq: int = -1):
                 return
             if current.get("status") == "done":
                 yield sse_event("done")
+                return
+            if current.get("status") == "cancelled":
+                yield sse_event("error", current.get("content") or "Cancelled")
                 return
             if current.get("status") == "error":
                 yield sse_event("error", current.get("content") or "Response interrupted.")
