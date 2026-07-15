@@ -133,6 +133,12 @@ def test_aggregated_chart_average_uses_per_turn_stats_when_available(tmp_path, m
                 "UPDATE chat_messages SET created_at=? WHERE id=?",
                 ("2026-07-13T10:00:00Z", asst_id),
             )
+            # Turn bucketing keys off the stats event's own created_at (when the
+            # turn actually ended), not the chat_messages row's — stamp both.
+            conn.execute(
+                "UPDATE run_events SET created_at=? WHERE msg_id=? AND event_type='stats'",
+                ("2026-07-13T10:00:00Z", asst_id),
+            )
 
     rows = stats_db.get_aggregated_stats(
         period="daily",
@@ -145,7 +151,7 @@ def test_aggregated_chart_average_uses_per_turn_stats_when_available(tmp_path, m
         ],
     )
 
-    assert rows[0]["input_tokens"] == 3_160_000
+    assert rows[0]["input_tokens"] == 1500
     assert rows[0]["total_turns"] == 5
     assert rows[0]["chart_tokens_in_sum"] == 1500
     assert rows[0]["chart_tokens_in_avg"] == 300
@@ -200,7 +206,7 @@ def test_aggregated_stats_cutoff_ignores_created_at_string_format(tmp_path, monk
     actual time of day (this is why selecting "1 day" showed only a few hours)
     — the days filter must compare via datetime(), not lexicographically."""
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
-    monkeypatch.setattr(stats_db, "_stats_cutoff", lambda days: "2026-07-12T05:36:00Z")
+    monkeypatch.setattr(stats_db, "_stats_cutoff", lambda days, *a, **kw: "2026-07-12T05:36:00Z")
     stats_db.init_db()
 
     with sqlite3.connect(tmp_path / "squid.db") as conn:
@@ -221,6 +227,110 @@ def test_aggregated_stats_cutoff_ignores_created_at_string_format(tmp_path, monk
 
     total_in = sum(r.get("input_tokens") or 0 for r in rows)
     assert total_in == 100
+
+
+def test_aggregated_stats_weekly_bucket_starts_on_sunday(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        conn.executemany(
+            """INSERT INTO session_stats(
+                   session_id, topic, agent, input_tokens, output_tokens,
+                   cache_read_tokens, cache_write_tokens, cost_usd, created_at
+               ) VALUES (?, 'squid', 'codex', ?, 0, 0, 0, 0, ?)""",
+            [
+                # Sunday 2026-07-12 through Saturday 2026-07-18 is one week.
+                ("s1", 10, "2026-07-12T00:00:00Z"),
+                ("s2", 20, "2026-07-18T23:00:00Z"),
+                # Next week starts Sunday 2026-07-19.
+                ("s3", 100, "2026-07-19T00:00:00Z"),
+            ],
+        )
+
+    rows = stats_db.get_aggregated_stats(period="weekly", days=0)
+
+    by_period = {row["period"]: row for row in rows}
+    assert by_period["2026-07-12"]["input_tokens"] == 30
+    assert by_period["2026-07-19"]["input_tokens"] == 100
+
+
+def test_aggregated_stats_attributes_each_turn_to_its_own_day_bucket(tmp_path, monkeypatch):
+    """Regression test: turn counts and token/cost sums used to be bucketed by two
+    different timestamps — chat_messages.created_at (a turn's start) for counts,
+    and session_stats.created_at for tokens. The latter was never updated past a
+    session's first-ever save, so a session resumed days later would have every
+    turn's tokens attributed to whichever day its *first* turn happened to land
+    on, and any day with only an earlier turn (no matching session_stats period)
+    was silently dropped entirely."""
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user1 = stats_db.insert_user_message("squid", "codex", "turn 1")
+    asst1 = stats_db.insert_assistant_message("squid", "codex", user1, adhoc=False)
+    stats_db.update_assistant_message(asst1, "response 1", "session-1", "done")
+    stats_db.insert_run_event(asst1, 0, "stats", json.dumps({"input_tokens": 100}))
+    stats_db.save_stats("session-1", {"input_tokens": 100, "output_tokens": 0, "cost_usd": 0.01},
+                         topic="squid", agent="codex")
+
+    user2 = stats_db.insert_user_message("squid", "codex", "turn 2")
+    asst2 = stats_db.insert_assistant_message("squid", "codex", user2, adhoc=False)
+    stats_db.update_assistant_message(asst2, "response 2", "session-1", "done")
+    stats_db.insert_run_event(asst2, 0, "stats", json.dumps({"input_tokens": 900}))
+    # Same session resumed 3 days later — session_stats is a single upserted row,
+    # so its snapshot now carries turn 2's (larger, cumulative) numbers.
+    stats_db.save_stats("session-1", {"input_tokens": 1000, "output_tokens": 0, "cost_usd": 0.10},
+                         topic="squid", agent="codex")
+
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        conn.execute("UPDATE chat_messages SET created_at=? WHERE id=?", ("2026-07-10T10:00:00Z", asst1))
+        conn.execute("UPDATE run_events SET created_at=? WHERE msg_id=? AND event_type='stats'",
+                     ("2026-07-10T10:00:00Z", asst1))
+        conn.execute("UPDATE chat_messages SET created_at=? WHERE id=?", ("2026-07-13T10:00:00Z", asst2))
+        conn.execute("UPDATE run_events SET created_at=? WHERE msg_id=? AND event_type='stats'",
+                     ("2026-07-13T10:00:00Z", asst2))
+        # save_stats now bumps created_at on every upsert, so this reflects the
+        # session's latest activity (turn 2's day), not its first turn's.
+        conn.execute("UPDATE session_stats SET created_at=? WHERE session_id=?",
+                     ("2026-07-13T10:00:00Z", "session-1"))
+
+    rows = stats_db.get_aggregated_stats(period="daily", days=0)
+    by_period = {r["period"]: r for r in rows}
+
+    # Turn 1's day still shows up with its own turn count — previously dropped
+    # entirely, since only periods present on the session_stats side ever
+    # appeared in the result.
+    assert by_period["2026-07-10"]["total_turns"] == 1
+    assert by_period["2026-07-10"]["input_tokens"] == 100
+    # Turn 2's day carries turn 2's own stats event payload, not the latest
+    # session_stats snapshot for the whole resumed session.
+    assert by_period["2026-07-13"]["total_turns"] == 1
+    assert by_period["2026-07-13"]["input_tokens"] == 900
+
+
+def test_get_aggregated_stats_anchor_windows_relative_to_anchor_not_now(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        conn.executemany(
+            """INSERT INTO session_stats(
+                   session_id, topic, agent, input_tokens, output_tokens,
+                   cache_read_tokens, cache_write_tokens, cost_usd, created_at
+               ) VALUES (?, 'squid', 'codex', ?, 0, 0, 0, 0, ?)""",
+            [
+                ("in-window", 10, "2026-07-10T10:00:00Z"),
+                # After the anchor — must be excluded even though it's "in the past" now.
+                ("after-anchor", 999, "2026-07-14T10:00:00Z"),
+                # More than 7d before the anchor — excluded by the lower bound.
+                ("before-window", 999, "2026-07-01T10:00:00Z"),
+            ],
+        )
+
+    rows = stats_db.get_aggregated_stats(period="daily", days=7, anchor="2026-07-12T00:00:00Z")
+
+    total_in = sum(r.get("input_tokens") or 0 for r in rows)
+    assert total_in == 10
 
 
 def test_breakdown_stats_includes_requested_chart_percentile(tmp_path, monkeypatch):
@@ -564,6 +674,53 @@ def test_history_items_include_session_turn_count(tmp_path, monkeypatch):
     assert by_prompt["pending"]["session_turn_count"] is None
     assert stats_db.ensure_session_turn_index(pending_asst_id, "session-1") == 3
     assert stats_db.get_message(pending_asst_id)["session_turn_count"] == 3
+
+
+def test_history_items_include_stats_event_completed_at(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user_id = stats_db.insert_user_message("squid", "codex", "long turn")
+    asst_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
+    stats_db.update_assistant_message(asst_id, "response", "session-1", "done")
+    stats_db.insert_run_event(asst_id, 0, "stats", json.dumps({"input_tokens": 10}))
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        conn.execute("UPDATE chat_messages SET created_at=? WHERE id=?", ("2026-07-15T10:50:07Z", asst_id))
+        conn.execute(
+            "UPDATE run_events SET created_at=? WHERE msg_id=? AND event_type='stats'",
+            ("2026-07-15T11:06:43Z", asst_id),
+        )
+
+    item = stats_db.get_messages_flat(topic="squid", agent="codex", limit=1)["items"][0]
+    status = stats_db.get_message(asst_id)
+
+    assert item["timestamp"] == "2026-07-15T10:50:07Z"
+    assert item["completed_at"] == "2026-07-15T11:06:43Z"
+    assert status["completed_at"] == "2026-07-15T11:06:43Z"
+
+
+def test_history_orders_by_completed_at_not_message_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    slow_user_id = stats_db.insert_user_message("squid", "codex", "slow")
+    slow_asst_id = stats_db.insert_assistant_message("squid", "codex", slow_user_id, adhoc=False)
+    stats_db.update_assistant_message(slow_asst_id, "slow response", "session-slow", "done")
+    stats_db.insert_run_event(slow_asst_id, 0, "stats", json.dumps({"input_tokens": 10}), created_at="2026-07-15T12:15:25Z")
+
+    fast_user_id = stats_db.insert_user_message("squid", "deepseek", "fast")
+    fast_asst_id = stats_db.insert_assistant_message("squid", "deepseek", fast_user_id, adhoc=False)
+    stats_db.update_assistant_message(fast_asst_id, "fast response", "session-fast", "done")
+    stats_db.insert_run_event(fast_asst_id, 0, "stats", json.dumps({"input_tokens": 10}), created_at="2026-07-15T12:10:28Z")
+
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        conn.execute("UPDATE chat_messages SET created_at=? WHERE id=?", ("2026-07-15T12:06:46Z", slow_asst_id))
+        conn.execute("UPDATE chat_messages SET created_at=? WHERE id=?", ("2026-07-15T12:09:14Z", fast_asst_id))
+
+    history = stats_db.get_messages_flat(topic="squid", limit=10)["items"]
+
+    assert [item["id"] for item in history[:2]] == [slow_asst_id, fast_asst_id]
+    assert slow_asst_id < fast_asst_id
 
 
 def test_mark_orphaned_pending_recovers_only_completed_run_text(tmp_path, monkeypatch):

@@ -61,6 +61,7 @@ test('deep dive button appears on history responses with stats', async ({ page }
 
   // Verify the button has the correct title
   await expect(deepDiveBtn).toHaveAttribute('title', 'Deep Dive by Turns');
+  await expect(page.locator('.stats-anchor-btn')).toHaveCount(0);
 });
 
 test('deep dive button click navigates to stats by turn with filters', async ({ page }) => {
@@ -128,9 +129,10 @@ test('deep dive button click navigates to stats by turn with filters', async ({ 
   expect(turnReq.topic).toBe('squid');
   expect(turnReq.agent).toBe('claude');
   expect(turnReq.adhoc).toBe('adhoc');
-  // 3h default range for Deep Dive
+  // Footer stats links anchor Deep Dive's normal 3h window to the turn's completion timestamp.
   expect(turnReq.days).toBe('0');
   expect(turnReq.hours).toBe('3');
+  expect(turnReq.anchor).toBe('2026-07-10T10:00:00Z');
   // Left axis: Input Tokens (sum), Right axis: Cache Hit % (avg)
   expect(turnReq.chart_metrics).toBe('tokens_in,cache_hit_rate');
   expect(turnReq.chart_aggs).toBe('sum,avg');
@@ -295,6 +297,55 @@ test('deep dive button resets stale measures and chart controls to Deep Dive def
   await expect(page.locator('#sf-measures-menu input[value="cache_read"]')).toBeChecked();
   await expect(page.locator('#sf-measures-menu input[value="tokens_total"]')).toBeChecked();
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (11)');
+});
+
+test('stats footer button jumps to this turn anchored and highlighted', async ({ page }) => {
+  await mockApp(page);
+
+  await page.route('**/history**', r => r.fulfill({
+    json: {
+      items: [{
+        id: 42,
+        topic: 'squid',
+        agent: 'claude',
+        adhoc: false,
+        prompt: 'test prompt',
+        content: 'test response',
+        timestamp: '2026-07-14T09:00:05Z',
+        completed_at: '2026-07-14T09:16:43Z',
+        session_id: 'sid-1',
+        stats: { input_tokens: 500, output_tokens: 100, duration_ms: 3000 },
+      }],
+      has_more: false,
+    },
+  }));
+
+  const statsRequests = [];
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    statsRequests.push(Object.fromEntries(url.searchParams.entries()));
+    route.fulfill({ json: [
+      { msg_id: 42, period: '2026-07-14T09:00:00Z', topic: 'squid', agent: 'claude',
+        total_turns: 1, message_ids: [42], input_tokens: 500, output_tokens: 100 },
+      { msg_id: 41, period: '2026-07-14T08:00:00Z', topic: 'squid', agent: 'claude',
+        total_turns: 1, message_ids: [41], input_tokens: 300, output_tokens: 50 },
+    ] });
+  });
+
+  await page.goto('/');
+
+  // One stats footer button only; it anchors to this exact turn.
+  await expect(page.locator('.stats-deep-dive-btn')).toHaveAttribute('title', 'Deep Dive by Turns');
+  await expect(page.locator('.stats-anchor-btn')).toHaveCount(0);
+
+  await page.locator('.stats-deep-dive-btn').click();
+
+  await expect(page.locator('#view-stats')).toHaveClass(/active/);
+  await expect(page.locator('#sf-period')).toHaveValue('turn');
+  await expect.poll(() => statsRequests.some(req => req.anchor === '2026-07-14T09:16:43Z')).toBe(true);
+
+  // The row for this exact message is highlighted, not just any row.
+  await expect(page.locator('tr.stats-row-highlight')).toHaveAttribute('data-msg-ids', '42');
 });
 
 test('stats view defaults to Deep Dive by Turns out of the box', async ({ page }) => {

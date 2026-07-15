@@ -2829,6 +2829,57 @@ body {
   cursor: pointer;
 }
 .sf-multi-menu label:hover { background: var(--surface-3); }
+.sf-anchor-menu {
+  left: auto;
+  right: 0;
+  box-sizing: border-box;
+  width: 14rem;
+  min-width: 0;
+  max-width: calc(100vw - 1.5rem);
+  padding: 0.45rem;
+  background: #15151d;
+  border-color: #34344a;
+  border-radius: 6px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+}
+.sf-anchor-menu:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.sf-multi-menu .sf-anchor-datetime-label {
+  display: grid;
+  gap: 0.16rem;
+  color: var(--text-ghost);
+  font-size: 0.78rem;
+  cursor: default;
+  white-space: normal;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0;
+}
+.sf-anchor-datetime-label input {
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
+  background: var(--surface-3);
+  border: 1px solid #2a2a36;
+  border-radius: 3px;
+  color: var(--text-lo);
+  font-size: 1em;
+  padding: 0.1rem 0.3rem;
+}
+.sf-anchor-datetime-label input:focus { outline: 1px solid #4a4a70; }
+.sf-anchor-actions { display: flex; gap: 0.35rem; padding: 0; }
+.sf-anchor-actions .sf-chip {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  font-size: 1em;
+  padding: 0.1rem 0.4rem;
+  text-align: center;
+}
+#sf-anchor-toggle.anchored { background: var(--surface-3); border-color: #4a4a70; color: var(--text-lo); }
 .stats-turn-link {
   background: transparent;
   border: 0;
@@ -3007,6 +3058,12 @@ body {
 #stats-content th:first-child, #stats-content td:first-child { text-align: left; }
 #stats-content .stats-col-compact { width: 1%; padding-right: 0.4rem; }
 #stats-content .stats-route-col { text-align: left; }
+#stats-content tbody tr.stats-row-highlight td {
+  background: rgba(255, 255, 255, 0.025);
+}
+#stats-content tbody tr.stats-row-highlight td:first-child {
+  box-shadow: inset 2px 0 0 #4a4a70;
+}
 /* Turn table: freeze the first 3 columns (time, route, turn) */
 #stats-content .stats-turn-table {
   min-width: 100%;
@@ -3703,8 +3760,9 @@ button {
   .sf-primary-row {
     display: grid;
     flex: 1 1 100%;
-    grid-template-columns: 4.7rem 4.25rem 3.95rem minmax(6.8rem, 1fr);
-    gap: 0.35rem;
+    grid-template-columns: 4.7rem 4.25rem minmax(4.9rem, 5.2rem) minmax(7rem, 1fr);
+    column-gap: 0.65rem;
+    row-gap: 0.35rem;
     align-items: center;
   }
   .sf-primary-row select {
@@ -3745,6 +3803,10 @@ button {
     width: 4.4rem;
   }
   .sf-primary-row .sf-multi-toggle {
+    width: 100%;
+  }
+  .sf-primary-row #sf-anchor-toggle {
+    min-width: 0;
     width: 100%;
   }
   .sf-session-row {

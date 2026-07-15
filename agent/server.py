@@ -1425,10 +1425,11 @@ async def usage_stats(
     tz_offset_minutes: int = 0,
     chart_metrics: str = "",
     chart_aggs: str = "",
+    anchor: str = "",
 ):
     chart_series = _parse_chart_series(chart_metrics, chart_aggs)
     if period == "turn":
-        return JSONResponse(get_stats_by_turn(days=days, hours=hours, agent=agent, topic=topic, adhoc=adhoc))
+        return JSONResponse(get_stats_by_turn(days=days, hours=hours, agent=agent, topic=topic, adhoc=adhoc, anchor=anchor or None))
     if group == "time" and breakdown in {"agent", "agent_session", "topic_agent", "topic_agent_session"}:
         return JSONResponse(get_stats_by_breakdown(
             period=period,
@@ -1441,11 +1442,12 @@ async def usage_stats(
             # Breakdown series are dimension values (topic/agent), not metrics —
             # only the first requested metric is meaningful here.
             chart_series=chart_series[:1],
+            anchor=anchor or None,
         ))
     if group == "topic":
-        return JSONResponse(get_stats_by_topic(days=days, agent=agent, topic=topic, adhoc=adhoc))
+        return JSONResponse(get_stats_by_topic(days=days, agent=agent, topic=topic, adhoc=adhoc, anchor=anchor or None))
     if group == "agent":
-        return JSONResponse(get_stats_by_agent(days=days, agent=agent, topic=topic, adhoc=adhoc))
+        return JSONResponse(get_stats_by_agent(days=days, agent=agent, topic=topic, adhoc=adhoc, anchor=anchor or None))
     return JSONResponse(get_aggregated_stats(
         period=period,
         days=days,
@@ -1454,6 +1456,7 @@ async def usage_stats(
         adhoc=adhoc,
         tz_offset_minutes=tz_offset_minutes,
         chart_series=chart_series,
+        anchor=anchor or None,
     ))
 
 

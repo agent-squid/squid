@@ -46,6 +46,125 @@ test('stats days filter includes 1d and 3d windows and requests them', async ({ 
   await expect.poll(() => statsRequests.some(req => req.days === '3')).toBe(true);
 });
 
+test('weekly period floors the days filter at 14d', async ({ page }) => {
+  await mockApp(page);
+  const statsRequests = [];
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    statsRequests.push(Object.fromEntries(url.searchParams.entries()));
+    route.fulfill({ json: [] });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('#sf-period').selectOption('hourly');
+  await page.locator('#sf-days').selectOption('3');
+
+  await page.locator('#sf-period').selectOption('weekly');
+
+  const dayOptions = await page.locator('#sf-days option').evaluateAll(
+    opts => opts.map(o => ({ value: o.value, text: o.textContent }))
+  );
+  expect(dayOptions).toEqual([
+    { value: '14', text: '14d' },
+    { value: '28', text: '28d' },
+    { value: '90', text: '90d' },
+    { value: '0', text: 'All Time' },
+  ]);
+  // Switching to weekly while a sub-14d range (3d) was selected snaps to 14d.
+  await expect(page.locator('#sf-days')).toHaveValue('14');
+  await expect.poll(() => statsRequests.some(req => req.period === 'weekly' && req.days === '14')).toBe(true);
+});
+
+test('anchor control sets a fixed end-of-window timestamp and can reset to Now', async ({ page }) => {
+  await mockApp(page);
+  const statsRequests = [];
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    statsRequests.push(Object.fromEntries(url.searchParams.entries()));
+    route.fulfill({ json: [] });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+
+  await expect(page.locator('#sf-anchor-toggle')).toHaveText('Now');
+  await page.locator('#sf-anchor-toggle').click();
+  await page.locator('#sf-anchor-input').fill('2026-07-10 09:30:12');
+  await page.locator('#sf-anchor-apply').click();
+
+  // Menu closes and the toggle reflects the picked timestamp.
+  await expect(page.locator('#sf-anchor-menu')).toBeHidden();
+  await expect(page.locator('#sf-anchor-toggle')).toHaveText('09:30:12');
+  await expect(page.locator('#sf-anchor-toggle')).not.toContainText('AM');
+  await expect(page.locator('#sf-anchor-toggle')).not.toContainText('PM');
+  await expect(page.locator('#sf-anchor-toggle')).not.toContainText('Jul');
+  await expect.poll(() => statsRequests.some(req => req.anchor)).toBe(true);
+  const anchoredReq = statsRequests.find(req => req.anchor);
+  expect(anchoredReq.anchor).toContain('2026-07-10');
+
+  // Reopening shows the full date/time in the picker.
+  await page.locator('#sf-anchor-toggle').click();
+  await expect(page.locator('#sf-anchor-input')).toHaveValue('2026-07-10 09:30:12');
+
+  // Reset to Now clears the anchor param entirely.
+  await page.locator('#sf-anchor-clear').click();
+  await expect(page.locator('#sf-anchor-toggle')).toHaveText('Now');
+  await expect.poll(() => statsRequests[statsRequests.length - 1].anchor).toBeUndefined();
+});
+
+test('anchor control has mobile spacing and themed datetime input', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 800 });
+  await mockApp(page);
+  await page.route('**/stats?**', route => route.fulfill({ json: [] }));
+
+  await page.goto('/');
+  await page.evaluate(() => navigateView('stats'));
+  await expect(page.locator('#view-stats')).toHaveClass(/active/);
+
+  await page.locator('#sf-anchor-toggle').click();
+  await page.locator('#sf-anchor-input').fill('2026-07-10 09:30:12');
+  await page.locator('#sf-anchor-apply').click();
+
+  const anchorBox = await page.locator('#sf-anchor-toggle').boundingBox();
+  const daysBox = await page.locator('#sf-days').boundingBox();
+  const breakdownBox = await page.locator('#sf-breakdown').boundingBox();
+  expect(anchorBox).not.toBeNull();
+  expect(daysBox).not.toBeNull();
+  expect(breakdownBox).not.toBeNull();
+  expect(anchorBox.height).toBeLessThanOrEqual(daysBox.height + 2);
+  expect(breakdownBox.x - (anchorBox.x + anchorBox.width)).toBeGreaterThanOrEqual(6);
+
+  await page.locator('#sf-anchor-toggle').click();
+  const anchorMenuStyles = await page.locator('#sf-anchor-menu').evaluate(el => {
+    const style = getComputedStyle(el);
+    return {
+      background: style.backgroundColor,
+      border: style.borderColor,
+      radius: style.borderRadius,
+      fontSize: getComputedStyle(el.querySelector('.sf-anchor-datetime-label')).fontSize,
+      padding: style.padding,
+    };
+  });
+  expect(anchorMenuStyles).toEqual({
+    background: 'rgb(21, 21, 29)',
+    border: 'rgb(52, 52, 74)',
+    radius: '6px',
+    fontSize: '12.48px',
+    padding: '7.2px',
+  });
+  const inputStyles = await page.locator('#sf-anchor-input').evaluate(el => {
+    const style = getComputedStyle(el);
+    return {
+      background: style.backgroundColor,
+      border: style.borderColor,
+      color: style.color,
+    };
+  });
+  expect(inputStyles.background).not.toBe('rgb(255, 255, 255)');
+  expect(inputStyles.border).not.toBe('rgb(255, 255, 255)');
+});
+
 test('Tokens In/Out/Total, Cache Read/Write, New Input, Cache Hit % and Avg Tokens/Turn compute consistently', async ({ page }) => {
   await mockApp(page);
   // Claude-style split: input_tokens is just the small uncacheable residual;

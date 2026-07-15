@@ -2876,8 +2876,9 @@ async function sendMessage(text) {
           resolvedAgent = data.agent || resolvedAgent;
           addPinButton(bubble, msgId, topic, resolvedAgent, data.session_id || null);
           addBookmarkButton(bubble, msgId, topic, resolvedAgent);
-          if (!statsEl && data.stats) statsEl = addStats(bubble, data.stats, doneTime);
-          if (statsEl) { messages.appendChild(statsEl); addDeepDiveButton(bubble, topic, resolvedAgent, !!adhoc, statsEl); }
+          const completedAt = data.completed_at || data.stats?.completed_at || doneTime;
+          if (!statsEl && data.stats) statsEl = addStats(bubble, data.stats, completedAt);
+          if (statsEl) { messages.appendChild(statsEl); addDeepDiveButton(bubble, topic, resolvedAgent, !!adhoc, statsEl, msgId, completedAt); }
           liveSessionTurnCount = parseInt(data.session_turn_count || '0', 10) || liveSessionTurnCount;
           _advisoryTurnCount = liveSessionTurnCount;
           if (data.session_id && !adhoc) _sessionIds[`${topic}@${resolvedAgent || '_'}`] = data.session_id;
@@ -3082,8 +3083,9 @@ async function sendMessage(text) {
                 _sessionIds[`${topic}@${resolvedAgent || '_'}`] = stats.session_id;
                 bubble.dataset.sessionId = stats.session_id;
               }
-              statsEl = addStats(bubble, stats, new Date().toISOString());
-              addDeepDiveButton(bubble, topic, resolvedAgent, !!adhoc, statsEl);
+              const statsTimestamp = stats.completed_at || new Date().toISOString();
+              statsEl = addStats(bubble, stats, statsTimestamp);
+              addDeepDiveButton(bubble, topic, resolvedAgent, !!adhoc, statsEl, msgId, statsTimestamp);
               if (completionTimestampEl) {
                 completionTimestampEl.remove();
                 completionTimestampEl = null;
@@ -3938,9 +3940,10 @@ function appendHistoryItem(item, container) {
   if (container) container.appendChild(asstBubble);
 
   if (item.stats) {
-    const statsEl = addStats(asstBubble, item.stats, item.timestamp);
+    const completedAt = item.completed_at || item.stats?.completed_at || item.timestamp;
+    const statsEl = addStats(asstBubble, item.stats, completedAt);
     statsEl.classList.add('history-item');
-    addDeepDiveButton(asstBubble, item.topic || 'default', item.agent || null, !!item.adhoc);
+    addDeepDiveButton(asstBubble, item.topic || 'default', item.agent || null, !!item.adhoc, statsEl, item.id, completedAt);
   } else if (item.timestamp) {
     const tsEl = addTimestamp(asstBubble, item.timestamp);
     if (tsEl) tsEl.classList.add('history-item');
@@ -5165,7 +5168,8 @@ function initCursorQuota() {
 
 let statsPeriod = 'turn';
 let statsBreakdown = '';
-let statsFilters = { days: -3, agents: [], topics: [], adhoc: 'all' };
+// anchor: null means "now"; otherwise an ISO timestamp the days/hours window ends at.
+let statsFilters = { days: -3, agents: [], topics: [], adhoc: 'all', anchor: null };
 // statsFilters.days doubles as an hours flag: negative values mean
 // "-days" hours (e.g. -3 = 3h). Only the 'turn' grain offers sub-day ranges,
 // since coarser grains bucket by hour/day/week and hours would be meaningless there.
@@ -5188,9 +5192,13 @@ const STATS_DAY_OPTIONS_TURN = [
   { value: 3, label: '3d' },
   { value: 7, label: '7d' },
 ];
+// Floored at 14d: fewer than two weekly buckets makes week-over-week comparison meaningless.
+const STATS_DAY_OPTIONS_WEEKLY = STATS_DAY_OPTIONS_DEFAULT.filter(o => o.value === 0 || o.value >= 14);
 
 function _statsDayOptionsFor(period) {
-  return period === 'turn' ? STATS_DAY_OPTIONS_TURN : STATS_DAY_OPTIONS_DEFAULT;
+  if (period === 'turn') return STATS_DAY_OPTIONS_TURN;
+  if (period === 'weekly') return STATS_DAY_OPTIONS_WEEKLY;
+  return STATS_DAY_OPTIONS_DEFAULT;
 }
 
 function _syncStatsDayOptions(period) {
@@ -5198,7 +5206,7 @@ function _syncStatsDayOptions(period) {
   const select = document.getElementById('sf-days');
   const valid = new Set(options.map(o => o.value));
   if (!valid.has(statsFilters.days)) {
-    statsFilters.days = period === 'turn' ? 7 : 1;
+    statsFilters.days = period === 'turn' ? 7 : (period === 'weekly' ? 14 : 1);
   }
   select.innerHTML = options.map(o => `<option value="${o.value}">${o.label}</option>`).join('');
   select.value = String(statsFilters.days);
@@ -5216,6 +5224,23 @@ let _lastStatsRows = null;
 let _statsFiltersLoaded = false;
 let _statsPage = 0;
 const _STATS_PAGE_SIZE = 10;
+// One-shot: the msg_id to highlight+scroll to on the next render, set when
+// navigating in from a message's footer stats link. Cleared once applied —
+// not "the top row" in general, since concurrent topics can put a later-
+// finishing turn after it within the same window.
+let _statsHighlightMsgId = null;
+
+function _applyStatsHighlight() {
+  if (_statsHighlightMsgId == null) return;
+  const target = _statsHighlightMsgId;
+  _statsHighlightMsgId = null;
+  const row = [...statsContent.querySelectorAll('tbody tr[data-msg-ids]')].find(tr =>
+    String(tr.dataset.msgIds || '').split(',').map(id => parseInt(id, 10)).includes(target)
+  );
+  if (!row) return;
+  row.classList.add('stats-row-highlight');
+  row.scrollIntoView({ block: 'center' });
+}
 const DEFAULT_STATS_MEASURES = ['turns', 'avg_tokens_turn', 'cache_hit_rate', 'cache_read', 'cache_write', 'duration', 'new_input', 'sessions', 'tokens_in', 'tokens_out', 'tokens_total'];
 // How many measure columns the By Turn table's mobile CSS can squeeze to
 // 100% width and keep readable. Independent of DEFAULT_STATS_MEASURES,
@@ -6121,6 +6146,48 @@ function _normalizeStatsBreakdownSort(sort = {}) {
   return { mode, dir };
 }
 
+// Anchor inputs display local wall time explicitly; submitted filters still use ISO.
+function _isoToLocalInputValue(iso) {
+  const d = new Date(iso);
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function _localAnchorInputToIso(value) {
+  const match = String(value || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return null;
+  const [, y, mo, d, h, mi, s = '00'] = match;
+  const parsed = new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s));
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString();
+}
+
+function _anchorChipTime(iso) {
+  const d = new Date(iso);
+  const pad = n => String(n).padStart(2, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function _anchorFullDateTime(iso) {
+  const d = new Date(iso);
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function _updateStatsAnchorLabel() {
+  const toggle = document.getElementById('sf-anchor-toggle');
+  if (!toggle) return;
+  if (statsFilters.anchor) {
+    toggle.textContent = _anchorChipTime(statsFilters.anchor);
+    toggle.title = _anchorFullDateTime(statsFilters.anchor);
+    toggle.classList.add('anchored');
+  } else {
+    toggle.textContent = 'Now';
+    toggle.title = '';
+    toggle.classList.remove('anchored');
+  }
+}
+
 function _statsQueryParams({ includeTz = false } = {}) {
   const params = new URLSearchParams();
   params.set('period', statsPeriod);
@@ -6136,6 +6203,7 @@ function _statsQueryParams({ includeTz = false } = {}) {
     params.set('days', statsFilters.days);
   }
   if (includeTz) params.set('tz_offset_minutes', new Date().getTimezoneOffset());
+  if (statsFilters.anchor) params.set('anchor', statsFilters.anchor);
   if (statsFilters.agents.length) params.set('agent', statsFilters.agents.join(','));
   if (statsFilters.topics.length) params.set('topic', statsFilters.topics.join(','));
   if (statsFilters.adhoc !== 'all') params.set('adhoc', statsFilters.adhoc);
@@ -6148,7 +6216,7 @@ function _statsQueryParams({ includeTz = false } = {}) {
 function _statsState() {
   return {
     version: 1,
-    time: { period: statsPeriod, days: statsFilters.days },
+    time: { period: statsPeriod, days: statsFilters.days, anchor: statsFilters.anchor || null },
     dimensions: {
       topic: { mode: statsFilters.topics.length ? 'selected' : 'auto_top', values: [...statsFilters.topics] },
       agent: { mode: statsFilters.agents.length ? 'selected' : 'auto_top', values: [...statsFilters.agents] },
@@ -6202,6 +6270,7 @@ function _markStatsPresetDirty() {
 function _applyStatsState(state) {
   statsPeriod = state?.time?.period || 'hourly';
   statsFilters.days = Number(state?.time?.days ?? 1);
+  statsFilters.anchor = state?.time?.anchor || null;
   statsBreakdown = state?.breakdown?.key || '';
   _statsDurationAutoAddedForTurn = false;
   _statsBreakdownColumnSort = _normalizeStatsBreakdownSort(state?.breakdown?.sort);
@@ -6235,6 +6304,7 @@ function _applyStatsState(state) {
   _syncStatsDayOptions(statsPeriod);
   document.getElementById('sf-breakdown').value = statsBreakdown;
   document.getElementById('sf-adhoc').value = statsFilters.adhoc;
+  _updateStatsAnchorLabel();
   // A saved preset's chart metric might not be in its saved visible measures
   // (older presets could chart something the table didn't show) — reconcile
   // to whatever's actually checked, same as any other measures change.
@@ -6857,12 +6927,13 @@ async function loadStats() {
     renderTimeStats(rows);
     _renderChart(rows);
   }
+  _applyStatsHighlight();
 }
 
 function renderTurnStats(rows) {
   const totals = _statsTotals(rows);
   const bodyRows = _statsPageSlice(rows).map(r => {
-    return `<tr>
+    return `<tr data-msg-ids="${escapeHtml(_statsTurnMessageIds(r).join(','))}">
       <td class="stats-col-compact stats-time-col">${_turnTimeLabel(r.period)}</td>
       <td class="stats-col-compact stats-route-col">${escapeHtml(_turnRouteLabel(r))}</td>
       ${_statsMeasureCells(r)}
@@ -6907,7 +6978,7 @@ function renderTimeStats(rows) {
 
   const totals = _statsTotals(rows);
   const bodyRows = _statsPageSlice(rows).map(r => {
-    return `<tr>
+    return `<tr data-msg-ids="${escapeHtml(_statsTurnMessageIds(r).join(','))}">
       <td class="stats-time-col">${_statsPeriodLabel(r.period)}</td>
       ${_statsMeasureCells(r, extra)}
     </tr>`;
@@ -7095,6 +7166,39 @@ function initStats() {
     loadStats();
   });
 
+  const anchorWrap = document.getElementById('sf-anchor-filter');
+  const anchorToggle = document.getElementById('sf-anchor-toggle');
+  const anchorMenu = document.getElementById('sf-anchor-menu');
+  const anchorInput = document.getElementById('sf-anchor-input');
+  anchorToggle.addEventListener('click', e => {
+    e.stopPropagation();
+    const open = anchorMenu.hidden;
+    if (open) anchorInput.value = _isoToLocalInputValue(statsFilters.anchor || new Date().toISOString());
+    anchorMenu.hidden = !open;
+    anchorToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+  document.getElementById('sf-anchor-apply').addEventListener('click', e => {
+    e.stopPropagation();
+    if (!anchorInput.value) return;
+    const parsed = _localAnchorInputToIso(anchorInput.value);
+    if (!parsed) return;
+    statsFilters.anchor = parsed;
+    anchorMenu.hidden = true;
+    anchorToggle.setAttribute('aria-expanded', 'false');
+    _updateStatsAnchorLabel();
+    _markStatsPresetDirty();
+    loadStats();
+  });
+  document.getElementById('sf-anchor-clear').addEventListener('click', e => {
+    e.stopPropagation();
+    statsFilters.anchor = null;
+    anchorMenu.hidden = true;
+    anchorToggle.setAttribute('aria-expanded', 'false');
+    _updateStatsAnchorLabel();
+    _markStatsPresetDirty();
+    loadStats();
+  });
+
   const filterMenus = [
     { wrap: document.getElementById('sf-topic-filter'), toggle: document.getElementById('sf-topic-toggle'), menu: document.getElementById('sf-topic-menu'), key: 'topics' },
     { wrap: document.getElementById('sf-agent-filter'), toggle: document.getElementById('sf-agent-toggle'), menu: document.getElementById('sf-agent-menu'), key: 'agents' },
@@ -7163,6 +7267,10 @@ function initStats() {
       measuresMenu.hidden = true;
       measuresToggle.setAttribute('aria-expanded', 'false');
     }
+    if (!anchorWrap.contains(e.target)) {
+      anchorMenu.hidden = true;
+      anchorToggle.setAttribute('aria-expanded', 'false');
+    }
     filterMenus.forEach(({ wrap, toggle, menu }) => {
       if (!wrap.contains(e.target)) {
         menu.hidden = true;
@@ -7172,6 +7280,7 @@ function initStats() {
   });
   _updateStatsFilterLabels();
   _updateStatsMeasureLabel();
+  _updateStatsAnchorLabel();
   _syncStatsChartAggControls();
 
   document.getElementById('sc-y1').addEventListener('change', e => {
@@ -9897,22 +10006,24 @@ function addPinButton(bubbleEl, msgId, topic, agent, sessionId = null) {
   (header || bubbleEl).appendChild(btn);
 }
 
-function addDeepDiveButton(bubbleEl, topic, agent, adhoc, statsEl) {
+function addDeepDiveButton(bubbleEl, topic, agent, adhoc, statsEl, msgId, timestamp) {
   if (!statsEl) statsEl = bubbleEl.nextElementSibling;
   if (!statsEl || !statsEl.classList.contains('stats')) return;
   const existing = statsEl.querySelector('.stats-deep-dive-btn');
-  if (existing) return existing;
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'stats-deep-dive-btn';
-  btn.title = 'Deep Dive by Turns';
-  btn.innerHTML = `<span class="material-symbols-outlined">ssid_chart</span>`;
-  btn.addEventListener('click', e => {
-    e.stopPropagation();
-    _navigateToDeepDive(topic, agent, adhoc);
-  });
-  statsEl.appendChild(btn);
-  return btn;
+  if (!existing) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'stats-deep-dive-btn';
+    btn.title = 'Deep Dive by Turns';
+    btn.innerHTML = `<span class="material-symbols-outlined">ssid_chart</span>`;
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      if (msgId) _navigateToAnchoredStats(topic, agent, adhoc, msgId, timestamp);
+      else _navigateToDeepDive(topic, agent, adhoc);
+    });
+    statsEl.appendChild(btn);
+  }
+  return statsEl.querySelector('.stats-deep-dive-btn');
 }
 
 async function _navigateToDeepDive(topic, agent, adhoc) {
@@ -9923,6 +10034,32 @@ async function _navigateToDeepDive(topic, agent, adhoc) {
 
   _activeStatsPresetId = null;
   _applyStatsState(state);
+
+  if (!_statsPresetsLoaded) {
+    _statsPresetsLoaded = true;
+    await _loadStatsPresets({ applyDefault: false });
+  }
+  _renderStatsPresetControls();
+
+  if (currentView !== 'stats') {
+    navigateView('stats');
+  } else {
+    loadStats();
+  }
+}
+
+async function _navigateToAnchoredStats(topic, agent, adhoc, msgId, timestamp) {
+  const state = _deepDiveStatsState();
+  if (topic && topic !== 'default') state.dimensions.topic = { mode: 'selected', values: [topic] };
+  if (agent) state.dimensions.agent = { mode: 'selected', values: [agent] };
+  state.dimensions.session_type = { mode: 'selected', values: [adhoc ? 'adhoc' : 'session'] };
+  // Keep Deep Dive's normal range and anchor that window at this turn's end
+  // time, then flag its row once the table renders.
+  state.time = { ...state.time, anchor: timestamp || new Date().toISOString() };
+
+  _activeStatsPresetId = null;
+  _applyStatsState(state);
+  _statsHighlightMsgId = msgId;
 
   if (!_statsPresetsLoaded) {
     _statsPresetsLoaded = true;

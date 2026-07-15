@@ -161,6 +161,7 @@ class TopicWorker:
             get_completed_run_status_raw,
             get_completed_run_text,
             insert_run_event,
+            _utc_now_iso,
             update_assistant_message,
             save_stats,
             set_topic_session,
@@ -286,7 +287,9 @@ class TopicWorker:
                                 )
                             enriched["session_id"] = session_id
                             enriched["cwd"] = display_cwd
-                        insert_run_event(item.msg_id, run_seq, "stats", json.dumps(enriched))
+                        completed_at = _utc_now_iso()
+                        enriched["completed_at"] = completed_at
+                        insert_run_event(item.msg_id, run_seq, "stats", json.dumps(enriched), created_at=completed_at)
                         await item.out_q.put({"_stats": enriched})
                     elif "_tool" in chunk:
                         await _emit_tool(chunk["_tool"])

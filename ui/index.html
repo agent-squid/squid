@@ -526,6 +526,21 @@
               <option value="0">All Time</option>
             </select>
           </label>
+          <div class="sf-field sf-menu-field">
+            <div class="sf-multi" id="sf-anchor-filter">
+              <button id="sf-anchor-toggle" class="sf-chip sf-multi-toggle" type="button" aria-haspopup="true" aria-expanded="false">Now</button>
+              <div id="sf-anchor-menu" class="sf-multi-menu sf-anchor-menu" hidden>
+                <label class="sf-anchor-datetime-label">
+                  Anchor at
+                  <input type="text" id="sf-anchor-input" inputmode="numeric" placeholder="YYYY-MM-DD HH:mm:ss">
+                </label>
+                <div class="sf-anchor-actions">
+                  <button type="button" id="sf-anchor-apply" class="sf-chip">Apply</button>
+                  <button type="button" id="sf-anchor-clear" class="sf-chip">Reset to Now</button>
+                </div>
+              </div>
+            </div>
+          </div>
           <label class="sf-field">
             <select id="sf-breakdown">
               <option value="" selected>Total</option>
