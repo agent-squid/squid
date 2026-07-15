@@ -2900,6 +2900,11 @@ body {
   max-width: 9rem;
   min-width: 0;
 }
+#sf-adhoc.active {
+  background: #2a2a3e;
+  border-color: #4a4a70;
+  color: #9090c0;
+}
 #stats-filters #sf-period { width: 4.7rem; }
 #stats-filters #sf-days { width: 4.25rem; }
 #stats-filters #sf-breakdown { width: 6rem; }
@@ -2919,7 +2924,7 @@ body {
   margin-bottom: 0.4rem;
   font-size: var(--text-sm);
 }
-#sc-y1, #sc-y1-agg, .sc-extra-metric, .sc-extra-agg {
+.sc-extra-metric, .sc-extra-agg {
   background: var(--surface-3);
   border: 1px solid #2a2a36;
   border-radius: 3px;
@@ -2927,12 +2932,13 @@ body {
   font-size: 1em;
   padding: 0.1rem 0.3rem;
 }
-#sc-y1-agg, .sc-extra-agg { width: 4.1rem; }
+.sc-extra-agg { width: 4.1rem; }
 #sc-extra {
   position: relative;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
+  min-width: 0;
   gap: 0.4rem;
   row-gap: 0.3rem;
 }
@@ -3014,8 +3020,7 @@ body {
 }
 .sc-extra-remove { font-size: 0.9em; line-height: 1; }
 #sc-add-series:hover, .sc-extra-axis:hover, .sc-extra-remove:hover { border-color: #4a4a70; color: #9090c0; }
-#stats-chart-controls.breakdown-active #sc-add-series,
-#stats-chart-controls.breakdown-active #sc-extra {
+#stats-chart-controls.breakdown-active #sc-add-series {
   display: none;
 }
 #stats-chart-box { position: relative; height: 180px; }
@@ -3834,11 +3839,8 @@ button {
     flex-wrap: wrap;
     align-items: flex-start;
   }
-  /* Measures toggle + Y1 measure/agg stay together on one row; adding an
-     extra series is a secondary action, so #sc-extra wraps below instead. */
-  #sc-y1 {
-    flex: 0 1 auto;
-    max-width: 7rem;
+  #sc-extra {
+    flex: 1 1 12rem;
   }
   .topic-row,
   .topic-agent-row {

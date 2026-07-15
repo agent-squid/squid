@@ -286,14 +286,15 @@ test('deep dive button resets stale measures and chart controls to Deep Dive def
   await page.locator('#sf-measures-menu input[value="cache_read"]').uncheck();
   await page.locator('#sf-measures-menu input[value="tokens_total"]').uncheck();
   await page.locator('#sf-measures-toggle').click();
-  await page.locator('#sc-y1').selectOption('tokens_out');
+  await page.locator('.sc-series-pill').first().click();
+  await page.locator('.sc-extra-row .sc-extra-metric').selectOption('tokens_out');
 
   await page.getByRole('button', { name: 'Chat' }).click();
   await page.locator('.stats-deep-dive-btn').click();
 
   await expect(page.locator('#sf-period')).toHaveValue('turn');
   await expect(page.locator('#sf-days')).toHaveValue('-3');
-  await expect(page.locator('#sc-y1')).toHaveValue('tokens_in');
+  await expect(page.locator('.sc-series-pill').first()).toContainText('RAW Tokens In · L');
   await expect(page.locator('#sf-measures-menu input[value="cache_read"]')).toBeChecked();
   await expect(page.locator('#sf-measures-menu input[value="tokens_total"]')).toBeChecked();
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (11)');
@@ -370,8 +371,7 @@ test('stats view defaults to Deep Dive by Turns out of the box', async ({ page }
   await expect(page.locator('#sf-days option')).toHaveText(['1h', '3h', '6h', '12h', '1d', '3d', '7d']);
 
   // Default chart: tokens_in (left Y1), cache_hit_rate (right Y2)
-  await expect(page.locator('#sc-y1')).toHaveValue('tokens_in');
-  await expect(page.locator('#sc-y1-agg')).toHaveValue('sum');
+  await expect(page.locator('.sc-series-pill').first()).toContainText('RAW Tokens In · L');
   // cache_hit_rate should be in extra series with y2 axis
   await expect(page.locator('#sc-extra')).toBeVisible();
 });

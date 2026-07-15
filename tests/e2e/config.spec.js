@@ -856,8 +856,8 @@ test('analytics measures dropdown controls cost and quota columns independently'
   })).toBeLessThan(3);
   await expect.poll(() => page.evaluate(() => {
     const measures = document.getElementById('sf-measures-toggle').getBoundingClientRect();
-    const y1 = document.getElementById('sc-y1').getBoundingClientRect();
-    return Math.abs(measures.top - y1.top) <= 1 && measures.right <= y1.left;
+    const series = document.querySelector('#sc-extra .sc-series-pill')?.getBoundingClientRect();
+    return !!series && Math.abs(measures.top - series.top) <= 1 && measures.right <= series.left;
   })).toBe(true);
   await expect(page.locator('#stats-content th', { hasText: 'Sessions' })).toBeVisible();
   await expect(page.locator('#stats-content th', { hasText: 'Turns' })).toBeVisible();
@@ -913,7 +913,8 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect(page.locator('#sf-measures')).toBeVisible();
   await expect(page.locator('#sf-measures-toggle')).toBeDisabled();
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures');
-  await expect(page.locator('#sc-y1 option[value="tokens_out"]')).toHaveCount(1);
+  await page.locator('.sc-series-pill').first().click();
+  await expect(page.locator('.sc-extra-row .sc-extra-metric option[value="tokens_out"]')).toHaveCount(1);
   const disabledMeasuresStyle = await page.locator('#sf-measures-toggle').evaluate(el => {
     const style = getComputedStyle(el);
     return {
@@ -941,7 +942,7 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect(page.locator('#stats-content tfoot')).toContainText('9');
   await page.locator('#sf-adhoc').selectOption('session');
   await expect.poll(() => statsRequests.at(-1)?.searchParams.get('adhoc')).toBe('session');
-  await page.locator('#sc-y1').selectOption('cost');
+  await page.locator('.sc-extra-row .sc-extra-metric').selectOption('cost');
   await expect(page.locator('#stats-content tfoot')).toContainText('$1.7000');
   await expect(page.locator('#stats-content tfoot')).not.toContainText('9');
 
@@ -963,7 +964,8 @@ test('analytics measures dropdown controls cost and quota columns independently'
   await expect(page.locator('#sf-measures')).toBeVisible();
   await expect(page.locator('#sf-measures-toggle')).toBeEnabled();
   await expect(page.locator('#sf-measures-toggle')).toHaveText('Measures (5)');
-  await expect(page.locator('#sc-y1 option[value="tokens_out"]')).toHaveCount(0);
+  await page.locator('.sc-series-pill').first().click();
+  await expect(page.locator('.sc-extra-row .sc-extra-metric option[value="tokens_out"]')).toHaveCount(1);
 });
 
 test('agent breakdown defaults to top four agents when none are selected', async ({ page }) => {

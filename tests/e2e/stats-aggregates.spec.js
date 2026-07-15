@@ -165,6 +165,22 @@ test('anchor control has mobile spacing and themed datetime input', async ({ pag
   expect(inputStyles.border).not.toBe('rgb(255, 255, 255)');
 });
 
+test('session type filter highlights when scoped to session or adhoc', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/stats?**', route => route.fulfill({ json: [] }));
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+
+  await expect(page.locator('#sf-adhoc')).not.toHaveClass(/active/);
+  await page.locator('#sf-adhoc').selectOption('session');
+  await expect(page.locator('#sf-adhoc')).toHaveClass(/active/);
+  await page.locator('#sf-adhoc').selectOption('adhoc');
+  await expect(page.locator('#sf-adhoc')).toHaveClass(/active/);
+  await page.locator('#sf-adhoc').selectOption('all');
+  await expect(page.locator('#sf-adhoc')).not.toHaveClass(/active/);
+});
+
 test('Tokens In/Out/Total, Cache Read/Write, New Input, Cache Hit % and Avg Tokens/Turn compute consistently', async ({ page }) => {
   await mockApp(page);
   // Claude-style split: input_tokens is just the small uncacheable residual;
@@ -181,6 +197,7 @@ test('Tokens In/Out/Total, Cache Read/Write, New Input, Cache Hit % and Avg Toke
 
   await page.goto('/');
   await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('#sf-period').selectOption('hourly');
   await expect(page.locator('#stats-content table')).toBeVisible();
 
   // Uncheck all but the basic four so column indices are predictable.
@@ -388,7 +405,8 @@ test('cache hit chart requests a non-additive aggregate', async ({ page }) => {
   await page.getByRole('button', { name: 'Stats' }).click();
   await page.locator('#sf-measures-toggle').click();
   await page.locator('#sf-measures-menu input[value="cache_hit_rate"]').check();
-  await page.locator('#sc-y1').selectOption('cache_hit_rate');
+  await page.locator('.sc-series-pill').first().click();
+  await page.locator('.sc-extra-row .sc-extra-metric').selectOption('cache_hit_rate');
 
   await expect.poll(() => statsRequests.at(-1)?.chart_metrics).toBe('cache_hit_rate');
   expect(statsRequests.at(-1).chart_aggs).toBe('avg');
@@ -435,14 +453,12 @@ test('stats chart aggregate chips apply to Y1 and an added series', async ({ pag
   await page.getByRole('button', { name: 'Stats' }).click();
   await page.locator('#sf-period').selectOption('hourly');
 
-  await expect(page.locator('#sc-y1')).toHaveValue('turns');
-  await expect(page.locator('#sc-y1-agg')).toBeVisible();
-  await expect(page.locator('#sc-y1-agg option')).toHaveText(['SUM']);
-  await expect(page.locator('#sc-y1-agg')).toHaveValue('sum');
+  await expect(page.locator('.sc-series-pill').first()).toContainText('SUM Tokens In · L');
 
-  await page.locator('#sc-y1').selectOption('tokens_in');
-  await expect(page.locator('#sc-y1-agg')).toBeVisible();
-  await page.locator('#sc-y1-agg').selectOption('p50');
+  await page.locator('.sc-series-pill').first().click();
+  await page.locator('.sc-extra-row .sc-extra-metric').selectOption('tokens_in');
+  await page.locator('.sc-extra-row .sc-extra-agg').selectOption('p50');
+  await page.locator('.sc-series-remove').nth(1).click();
   await expect(page.locator('#stats-content thead th')).toContainText([
     'Hour',
     'Turns',
@@ -450,18 +466,26 @@ test('stats chart aggregate chips apply to Y1 and an added series', async ({ pag
     'P50 Tokens In',
     'Tokens Out',
   ]);
-  await expect(page.locator('#stats-content tbody td').nth(3)).toHaveText('20');
-  await expect(page.locator('#stats-content tfoot td').nth(3)).toHaveText('—');
-  await expect.poll(() => statsRequests.some(req => (
-    req.chart_metrics === 'tokens_in' && req.chart_aggs === 'p50'
-  ))).toBe(true);
-  await page.locator('#sc-y1-agg').selectOption('avg');
-  await expect(page.locator('#stats-content thead th').nth(3)).toHaveText('AVG Tokens In');
-  await expect(page.locator('#stats-content tbody td').nth(3)).toHaveText('15');
-  await page.locator('#sc-y1-agg').selectOption('p50');
+  const p50TokensCol = await page.locator('#stats-content thead th').evaluateAll(ths =>
+    ths.findIndex(th => th.textContent.trim() === 'P50 Tokens In')
+  );
+  await expect(page.locator('#stats-content tbody tr').first().locator('td').nth(p50TokensCol)).toHaveText('20');
+  await expect(page.locator('#stats-content tfoot tr').first().locator('td').nth(p50TokensCol)).toHaveText('—');
+  await expect.poll(() => statsRequests.some(req => {
+    const metrics = (req.chart_metrics || '').split(',');
+    const aggs = (req.chart_aggs || '').split(',');
+    return metrics.some((metric, i) => metric === 'tokens_in' && aggs[i] === 'p50');
+  })).toBe(true);
+  await page.locator('.sc-extra-row .sc-extra-agg').selectOption('avg');
+  const avgTokensCol = await page.locator('#stats-content thead th').evaluateAll(ths =>
+    ths.findIndex(th => th.textContent.trim() === 'AVG Tokens In')
+  );
+  expect(avgTokensCol).toBeGreaterThan(-1);
+  await expect(page.locator('#stats-content tbody tr').first().locator('td').nth(avgTokensCol)).toHaveText('15');
+  await page.locator('.sc-extra-row .sc-extra-agg').selectOption('p50');
 
   await page.locator('#sc-add-series').click();
-  await expect(page.locator('.sc-series-pill')).toHaveCount(1);
+  await expect(page.locator('.sc-series-pill')).toHaveCount(2);
   await expect(page.locator('.sc-extra-row')).toBeVisible();
   const extraRow = page.locator('.sc-extra-row').first();
   await extraRow.locator('.sc-extra-metric').selectOption('tokens_in');
@@ -480,8 +504,8 @@ test('stats chart aggregate chips apply to Y1 and an added series', async ({ pag
 
   await page.locator('#sf-breakdown').selectOption('agent');
   await expect(page.locator('#stats-chart-controls')).toHaveClass(/breakdown-active/);
-  await expect(page.locator('#sc-y1-agg')).toBeVisible();
-  await expect(page.locator('#sc-extra')).toBeEmpty();
+  await expect(page.locator('.sc-series-pill')).toHaveCount(1);
+  await expect(page.locator('.sc-series-pill').first()).toContainText('P50 Tokens In · L');
   await expect.poll(() => statsRequests.some(req => (
     req.breakdown === 'agent' &&
     req.chart_metrics === 'tokens_in' &&
@@ -510,14 +534,16 @@ test('stats chart uses distinct colors for Tokens In and New Input even though t
   await page.locator('#sf-measures-toggle').click();
   await page.locator('#sf-measures-menu input[value="new_input"]').check();
 
-  await page.locator('#sc-y1').selectOption('tokens_in');
+  await page.locator('.sc-series-pill').first().click();
+  await page.locator('.sc-extra-row .sc-extra-metric').selectOption('tokens_in');
+  await page.locator('.sc-series-remove').nth(1).click();
   await page.locator('#sc-add-series').click();
   const newInputRow = page.locator('.sc-extra-row').first();
   await newInputRow.locator('.sc-extra-metric').selectOption('new_input');
   await newInputRow.locator('.sc-extra-agg').selectOption('p95');
   await page.keyboard.press('Escape');
   await expect(page.locator('.sc-extra-row')).toHaveCount(0);
-  await expect(page.locator('.sc-series-pill')).toContainText('P95 New Input · L');
+  await expect(page.locator('.sc-series-pill').nth(1)).toContainText('P95 New Input · L');
   await expect(page.locator('#stats-content thead th')).toContainText([
     'Hour',
     'Turns',
@@ -526,8 +552,11 @@ test('stats chart uses distinct colors for Tokens In and New Input even though t
     'Tokens In',
     'Tokens Out',
   ]);
-  await expect(page.locator('#stats-content tbody td').nth(2)).toHaveText('125');
-  await expect(page.locator('#stats-content tfoot td').nth(2)).toHaveText('—');
+  const p95NewInputCol = await page.locator('#stats-content thead th').evaluateAll(ths =>
+    ths.findIndex(th => th.textContent.trim() === 'P95 New Input')
+  );
+  await expect(page.locator('#stats-content tbody tr').first().locator('td').nth(p95NewInputCol)).toHaveText('125');
+  await expect(page.locator('#stats-content tfoot tr').first().locator('td').nth(p95NewInputCol)).toHaveText('—');
 
   await expect.poll(() => page.evaluate(() => {
     const chart = window.Chart?.getChart(document.getElementById('stats-chart'));
@@ -558,8 +587,10 @@ test('same measure can be added multiple times with different aggregations, and 
   await page.getByRole('button', { name: 'Stats' }).click();
   await page.locator('#sf-period').selectOption('hourly');
 
-  await page.locator('#sc-y1').selectOption('tokens_in');
-  await page.locator('#sc-y1-agg').selectOption('p50');
+  await page.locator('.sc-series-pill').first().click();
+  await page.locator('.sc-extra-row .sc-extra-metric').selectOption('tokens_in');
+  await page.locator('.sc-extra-row .sc-extra-agg').selectOption('p50');
+  await page.locator('.sc-series-remove').nth(1).click();
 
   // Add a second series charting the *same* measure at a different
   // percentile — this is the whole point of independent chips.
@@ -568,10 +599,10 @@ test('same measure can be added multiple times with different aggregations, and 
   await expect(row).toBeVisible();
   await row.locator('.sc-extra-metric').selectOption('tokens_in');
   await row.locator('.sc-extra-agg').selectOption('p95');
-  await page.locator('.sc-series-pill').click();
+  await page.locator('.sc-series-pill').nth(1).click();
   await expect(page.locator('.sc-extra-row')).toHaveCount(0);
-  await expect(page.locator('.sc-series-pill')).toContainText('P95 Tokens In · L');
-  await page.locator('.sc-series-pill').click();
+  await expect(page.locator('.sc-series-pill').nth(1)).toContainText('P95 Tokens In · L');
+  await page.locator('.sc-series-pill').nth(1).click();
   await expect(page.locator('.sc-extra-row')).toBeVisible();
 
   await expect.poll(() => statsRequests.some(req => (
@@ -590,12 +621,12 @@ test('same measure can be added multiple times with different aggregations, and 
     const chart = window.Chart?.getChart(document.getElementById('stats-chart'));
     return chart?.data?.datasets?.[1]?.yAxisID;
   })).toBe('y2');
-  await expect(page.locator('.sc-series-pill')).toContainText('P95 Tokens In · R');
+  await expect(page.locator('.sc-series-pill').nth(1)).toContainText('P95 Tokens In · R');
 
   // Removing it drops the chip without a refetch.
-  await page.locator('.sc-series-remove').click();
+  await page.locator('.sc-series-remove').nth(1).click();
   await expect(page.locator('.sc-extra-row')).toHaveCount(0);
-  await expect(page.locator('.sc-series-pill')).toHaveCount(0);
+  await expect(page.locator('.sc-series-pill')).toHaveCount(1);
   expect(statsRequests.length).toBe(requestsBeforeToggle);
 });
 
@@ -627,14 +658,18 @@ test('duration measure defaults to average in aggregate stats', async ({ page })
   await expect(page.locator('#stats-content thead th')).toContainText(['AVG Duration']);
   await expect(page.locator('#stats-content tbody')).toContainText('6.5s');
 
-  await page.locator('#sc-y1').selectOption('duration');
-  await expect(page.locator('#sc-y1-agg')).toHaveValue('avg');
-  await expect.poll(() => statsRequests.some(req => req.chart_metrics === 'duration' && req.chart_aggs === 'avg')).toBe(true);
+  await page.locator('.sc-series-pill').first().click();
+  await page.locator('.sc-extra-row .sc-extra-metric').selectOption('duration');
+  await expect(page.locator('.sc-extra-row .sc-extra-agg')).toHaveValue('avg');
+  await expect.poll(() => statsRequests.some(req => (
+    (req.chart_metrics || '').split(',').includes('duration') &&
+    (req.chart_aggs || '').split(',').includes('avg')
+  ))).toBe(true);
   await expect(page.locator('#stats-content thead th')).toContainText(['AVG Duration']);
   await expect(page.locator('#stats-content tbody')).toContainText('6.5s');
 });
 
-test('chart metric options are limited to whatever is checked in Measures', async ({ page }) => {
+test('chart metric options are independent from table Measures', async ({ page }) => {
   await mockApp(page);
   const statsRequests = [];
   await page.route('**/stats?**', route => {
@@ -652,37 +687,28 @@ test('chart metric options are limited to whatever is checked in Measures', asyn
   await page.getByRole('button', { name: 'Stats' }).click();
   await page.locator('#sf-period').selectOption('hourly');
 
-  const y1Options = () => page.locator('#sc-y1 option').evaluateAll(opts => opts.map(o => o.value));
+  await page.locator('.sc-series-pill').first().click();
+  const metricOptions = () => page.locator('.sc-extra-row .sc-extra-metric option').evaluateAll(opts => opts.map(o => o.value));
 
-  // Defaults: Sessions/Turns/Tokens In/Tokens Out checked.
-  await expect.poll(y1Options).toEqual(['turns', 'sessions', 'tokens_in', 'tokens_out']);
-  await expect(page.locator('#sc-y1 option[value="cost"]')).toHaveCount(0);
-  await expect(page.locator('#sc-y1 option[value="duration"]')).toHaveCount(0);
-  await expect(page.locator('#sc-y1 option[value="tokens_total"]')).toHaveCount(0);
+  await expect.poll(metricOptions).toContain('cost');
+  await expect.poll(metricOptions).toContain('duration');
+  await expect.poll(metricOptions).toContain('tokens_total');
 
-  // Checking Cost in Measures makes it selectable on the chart...
   await page.locator('#sf-measures-toggle').click();
   await page.locator('#sf-measures-menu input[value="cost"]').check();
   await page.locator('#sf-measures-menu input[value="tokens_total"]').check();
-  await expect.poll(y1Options).toContain('cost');
-  await expect.poll(y1Options).toContain('tokens_total');
   const requestsBeforeUncheck = statsRequests.length;
 
-  // ...and unrelated toggles (Cost) don't touch the currently-charted metric
-  // (Turns), so no refetch is needed — just a table re-render.
-  await expect(page.locator('#sc-y1')).toHaveValue('turns');
+  await expect(page.locator('.sc-series-pill').first()).toContainText('SUM Tokens In · L');
   expect(statsRequests.length).toBe(requestsBeforeUncheck);
 
-  // Unchecking the metric actually being charted (Turns) moves the chart to
-  // the next selected measure and *does* require a refetch, since the
-  // backend hasn't computed that metric's aggregate yet.
+  // Table measure changes no longer mutate chart series.
   await page.locator('#sf-measures-menu input[value="turns"]').uncheck();
-  await expect(page.locator('#sc-y1')).toHaveValue('cost');
-  await expect.poll(() => statsRequests.some(req => req.chart_metrics === 'cost')).toBe(true);
-  await expect(page.locator('#sc-y1 option[value="turns"]')).toHaveCount(0);
+  await expect(page.locator('.sc-series-pill').first()).toContainText('SUM Tokens In · L');
+  expect(statsRequests.length).toBe(requestsBeforeUncheck);
 });
 
-test('stats chart aggregate controls reconcile a legacy preset whose chart metric is not a visible measure', async ({ page }) => {
+test('stats chart aggregate controls keep legacy preset chart metrics even when table-hidden', async ({ page }) => {
   await mockApp(page);
   await page.unroute('**/stats/filter-presets');
   await page.route('**/stats/filter-presets', route => route.fulfill({
@@ -700,9 +726,8 @@ test('stats chart aggregate controls reconcile a legacy preset whose chart metri
         },
         breakdown: { key: '' },
         // Older presets could save a chart metric ("tokens_in"/"cost") that
-        // wasn't in the visible measures ("sessions"/"turns") — the chart is
-        // now constrained to whatever's checked in Measures, so loading this
-        // should fall back rather than chart something the table doesn't show.
+        // wasn't in the visible measures ("sessions"/"turns"). Chart series
+        // are now independent from table measures, so keep those metrics.
         measure: { primary: 'tokens_in', secondary: 'cost', visible: ['sessions', 'turns'] },
       },
     }],
@@ -721,12 +746,7 @@ test('stats chart aggregate controls reconcile a legacy preset whose chart metri
   await page.goto('/');
   await page.getByRole('button', { name: 'Stats' }).click();
 
-  // Y1 falls back to the first checked measure ("Turns"); its only agg is
-  // SUM, so the agg picker stays visible with one option.
-  await expect(page.locator('#sc-y1')).toHaveValue('turns');
-  await expect(page.locator('#sc-y1-agg')).toBeVisible();
-  await expect(page.locator('#sc-y1-agg option')).toHaveText(['SUM']);
-  // The saved secondary series ("Cost") isn't checked either — dropped
-  // rather than forced onto an unrelated selected measure.
+  await expect(page.locator('.sc-series-pill').first()).toContainText('SUM Tokens In · L');
+  await expect(page.locator('.sc-series-pill').nth(1)).toContainText('SUM Cost ($) · R');
   await expect(page.locator('.sc-extra-row')).toHaveCount(0);
 });

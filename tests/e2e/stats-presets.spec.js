@@ -163,17 +163,16 @@ test('stats presets save chart micro settings and reset restores overall view', 
 
   await page.locator('#sf-measures-toggle').click();
   await page.locator('#sf-measures-menu input[value="cost"]').check();
-  await page.locator('#sc-y1').selectOption('cost');
-  await page.locator('#sc-y1-agg').selectOption('avg');
+  await page.locator('.sc-series-pill').first().click();
+  await page.locator('.sc-extra-row .sc-extra-metric').selectOption('cost');
+  await page.locator('.sc-extra-row .sc-extra-agg').selectOption('avg');
   // Remove the default extra series (cache_hit_rate) so the new one is alone.
-  const removeBtns = page.locator('.sc-series-remove');
-  const count = await removeBtns.count();
-  for (let i = 0; i < count; i++) await removeBtns.nth(0).click();
+  await page.locator('.sc-series-remove').nth(1).click();
   await page.locator('#sc-add-series').click();
   await page.locator('.sc-extra-metric').selectOption('tokens_in');
   await page.locator('.sc-extra-agg').selectOption('p95');
   await page.locator('.sc-extra-axis').click();
-  await expect(page.locator('.sc-series-pill-text')).toHaveText('P95 Tokens In · R');
+  await expect(page.locator('.sc-series-pill-text').nth(1)).toHaveText('P95 Tokens In · R');
 
   await page.locator('#stats-preset-save').click();
   await page.locator('#preset-name-input').fill('Chart Shape');
@@ -200,15 +199,13 @@ test('stats presets save chart micro settings and reset restores overall view', 
   await expect(page.locator('#sf-topic-toggle')).toHaveText('All Topics');
   await expect(page.locator('#sf-agent-toggle')).toHaveText('All Agents');
   await expect(page.locator('#sf-adhoc')).toHaveValue('all');
-  await expect(page.locator('#sc-y1')).toHaveValue('tokens_in');
-  await expect(page.locator('#sc-y1-agg')).toHaveValue('sum');
+  await expect(page.locator('.sc-series-pill').first()).toContainText('RAW Tokens In · L');
   await expect(page.locator('#sf-measures-menu input[value="cost"]')).not.toBeChecked();
   await expect(page.locator('#sf-measures-menu input[value="quota"]')).not.toBeChecked();
 
   await page.locator('#stats-preset-select').selectOption('1');
-  await expect(page.locator('#sc-y1')).toHaveValue('cost');
-  await expect(page.locator('#sc-y1-agg')).toHaveValue('avg');
-  await expect(page.locator('.sc-series-pill-text')).toHaveText('P95 Tokens In · R');
+  await expect(page.locator('.sc-series-pill').first()).toContainText('AVG Cost ($) · L');
+  await expect(page.locator('.sc-series-pill-text').nth(1)).toHaveText('P95 Tokens In · R');
   await expect(page.locator('#sf-measures-menu input[value="cost"]')).toBeChecked();
 });
 

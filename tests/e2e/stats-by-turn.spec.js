@@ -43,7 +43,7 @@ test('By Turn shows one row per response with its own completion time, no bucket
 
   // By Turn is the smallest grain, so it sorts before Hourly and Daily.
   const periodOptions = await page.locator('#sf-period option').allTextContents();
-  expect(periodOptions).toEqual(['By Turn', 'Hourly', 'Daily']);
+  expect(periodOptions).toEqual(['By Turn', 'Hourly', 'Daily', 'Weekly']);
 
   await expect(page.locator('#sf-measures-menu input[value="sessions"]')).toBeChecked();
   await expect(page.locator('#sf-measures-menu input[value="turns"]')).toBeChecked();
@@ -58,21 +58,20 @@ test('By Turn shows one row per response with its own completion time, no bucket
   // let users pick a mode that would silently be ignored server-side.
   await expect(page.locator('#sf-breakdown')).toBeDisabled();
 
-  // Sessions are redundant in this view, but Turns stays on because it links
-  // to the underlying response.
-  await expect(page.locator('#sf-measures-menu input[value="sessions"]')).not.toBeChecked();
+  // Deep Dive starts with its full default measure set in By Turn.
+  await expect(page.locator('#sf-measures-menu input[value="sessions"]')).toBeChecked();
   await expect(page.locator('#sf-measures-menu input[value="turns"]')).toBeChecked();
 
   // Turns stays available as a response link column, but it is not the
   // default chart series in By Turn because every row would plot as 1.
-  await expect(page.locator('#sc-y1')).toHaveValue('tokens_in');
+  await expect(page.locator('.sc-series-pill').first()).toContainText('RAW Tokens In · L');
 
   // Each row is already one turn, not a time bucket — sum/avg/min/max of a
   // single value are identical, so the agg picker stays in place with one RAW
   // option and the chart legend says "RAW", not silently plotting a
   // stale/absent aggregate as zero.
-  await expect(page.locator('#sc-y1-agg')).toBeVisible();
-  await expect(page.locator('#sc-y1-agg option')).toHaveText(['RAW']);
+  await page.locator('.sc-series-pill').first().click();
+  await expect(page.locator('.sc-extra-row .sc-extra-agg option')).toHaveText(['RAW']);
   await expect.poll(() => page.evaluate(() => {
     const chart = window.Chart?.getChart(document.getElementById('stats-chart'));
     return chart?.data?.datasets?.[0]?.label;
@@ -130,6 +129,7 @@ test('By Turn offers sub-day ranges capped at 7d, other grains keep the full ran
 
   await page.goto('/');
   await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('#sf-period').selectOption('hourly');
 
   await expect(page.locator('#sf-days option')).toHaveText(['1d', '3d', '7d', '14d', '28d', '90d', 'All Time']);
 

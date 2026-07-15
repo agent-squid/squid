@@ -5239,6 +5239,9 @@ let statsChartAggY1 = 'sum';
 // own right-hand scale). Unlike Y1, the same metric can appear more than
 // once here (e.g. P50 and P95 of the same measure).
 let statsChartExtra = [{ metric: 'cache_hit_rate', agg: 'avg', axis: 'y2' }];
+// Null when no popover is open; otherwise the zero-based chart series index.
+// Index 0 is persisted as measure.primary for backward compatibility, but the
+// UI treats it like any other series chip.
 let statsChartEditIndex = null;
 let statsChartInstance = null;
 let _lastStatsRows = null;
@@ -5577,6 +5580,62 @@ function _syncStatsAggSelect(select, metric, agg) {
   select.value = value;
 }
 
+function _statsChartSeries() {
+  return [{ metric: statsChartY1, agg: statsChartAggY1, axis: 'y1' }, ...statsChartExtra];
+}
+
+function _setStatsChartSeries(series) {
+  const seen = new Set();
+  const normalized = (series || [])
+    .map((entry, i) => {
+      const metric = entry?.metric && CHART_METRICS[entry.metric] ? entry.metric : 'turns';
+      return {
+        metric,
+        agg: _normalizeStatsAgg(metric, entry?.agg || _defaultStatsAgg(metric)),
+        axis: i === 0 ? 'y1' : (entry?.axis === 'y2' ? 'y2' : 'y1'),
+      };
+    })
+    .filter(entry => {
+      const key = `${entry.metric}:${entry.agg}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  if (!normalized.length) normalized.push({ metric: 'turns', agg: 'sum', axis: 'y1' });
+  statsChartY1 = normalized[0].metric;
+  statsChartAggY1 = normalized[0].agg;
+  statsChartExtra = normalized.slice(1);
+}
+
+function _statsChartEntry(index) {
+  if (index === 0) return { metric: statsChartY1, agg: statsChartAggY1, axis: 'y1' };
+  const entry = statsChartExtra[index - 1];
+  return entry ? { ...entry } : null;
+}
+
+function _updateStatsChartEntry(index, patch) {
+  const entry = { ..._statsChartEntry(index), ...patch };
+  if (!entry.metric) return;
+  entry.agg = _normalizeStatsAgg(entry.metric, entry.agg || _defaultStatsAgg(entry.metric));
+  entry.axis = index === 0 ? 'y1' : (entry.axis === 'y2' ? 'y2' : 'y1');
+  if (index === 0) {
+    statsChartY1 = entry.metric;
+    statsChartAggY1 = entry.agg;
+  } else if (statsChartExtra[index - 1]) {
+    statsChartExtra[index - 1] = entry;
+  }
+  _setStatsChartSeries(_statsChartSeries());
+}
+
+function _removeStatsChartEntry(index) {
+  const series = _statsChartSeries();
+  if (series.length <= 1) return;
+  series.splice(index, 1);
+  _setStatsChartSeries(series);
+  if (statsChartEditIndex === index) statsChartEditIndex = null;
+  else if (statsChartEditIndex != null && statsChartEditIndex > index) statsChartEditIndex--;
+}
+
 function _statsChartAggField(metric, agg) {
   return `chart_${metric}_${agg}`;
 }
@@ -5611,9 +5670,7 @@ function _parseStatsMeasureState(value, fallbackMetric = 'turns') {
 }
 
 function _syncStatsChartAggControls() {
-  statsChartAggY1 = _normalizeStatsAgg(statsChartY1, statsChartAggY1);
-  const y1AggSel = document.getElementById('sc-y1-agg');
-  _syncStatsAggSelect(y1AggSel, statsChartY1, statsChartAggY1);
+  _setStatsChartSeries(_statsChartSeries());
   _renderStatsChartExtraRows();
 }
 
@@ -5677,57 +5734,32 @@ const STATS_TABLE_MEASURES = [
   { key: 'tokens_total', label: 'Total Tokens', row: r => fmtNum(_statsInputTokens(r) + (r.output_tokens || 0)), total: t => fmtNum((t.tokens_in || 0) + (t.tokens_out || 0)) },
 ];
 
-function _firstSelectedMeasure() {
-  return (STATS_TABLE_MEASURES.find(m => _statsMeasureSelected(m.key)) || STATS_TABLE_MEASURES[0]).key;
-}
-
 function _firstSelectedNonTurnMeasure() {
   const preferred = DEFAULT_STATS_MEASURES.find(key => key !== 'turns' && key !== 'sessions' && _statsMeasureSelected(key));
   return preferred || (STATS_TABLE_MEASURES.find(m => m.key !== 'turns' && _statsMeasureSelected(m.key)) || STATS_TABLE_MEASURES[0]).key;
 }
 
 function _statsChartMetricKeys() {
-  if (statsBreakdown) return STATS_TABLE_MEASURES.map(m => m.key);
-  const keys = STATS_TABLE_MEASURES.filter(m => _statsMeasureSelected(m.key)).map(m => m.key);
-  // Nothing checked in Measures — fall back to the full metric list rather
-  // than leaving the chart pickers with no options at all.
-  return keys.length ? keys : STATS_TABLE_MEASURES.map(m => m.key);
+  return STATS_TABLE_MEASURES.map(m => m.key);
 }
 
-function _populateStatsChartMetricSelect(select, keys) {
-  if (!select) return;
-  select.innerHTML = keys.map(key => {
-    const label = (CHART_METRICS[key] || {}).label || key;
-    return `<option value="${key}">${label}</option>`;
-  }).join('');
-}
-
-// The chart can only plot a metric that's checked in the Measures menu — keeps
-// the pickers and the table columns in sync. Returns whether the set of
-// requested (metric, agg) pairs changed, since that requires a refetch (a
-// newly-added one's backend chart_<metric>_<agg> aggregate wouldn't exist yet).
+// Returns whether the requested (metric, agg) pairs changed, since that
+// requires a refetch (a newly-added one's backend chart_<metric>_<agg>
+// aggregate wouldn't exist yet).
 function _syncStatsChartMetricSelects() {
   const keys = _statsChartMetricKeys();
+  const before = _statsChartSeries().map(s => `${s.metric}:${s.agg}:${s.axis}`).join('|');
   let changed = false;
 
   if (!keys.includes(statsChartY1)) {
-    const prevMetric = statsChartY1;
-    const prevAgg = statsChartAggY1;
-    statsChartY1 = _firstSelectedMeasure();
-    statsChartAggY1 = prevAgg === _defaultStatsAgg(prevMetric)
-      ? _defaultStatsAgg(statsChartY1)
-      : _normalizeStatsAgg(statsChartY1, prevAgg);
-    changed = true;
+    statsChartY1 = 'turns';
+    statsChartAggY1 = 'sum';
   }
-  const y1Sel = document.getElementById('sc-y1');
-  _populateStatsChartMetricSelect(y1Sel, keys);
-  if (y1Sel) y1Sel.value = statsChartY1;
-
-  const before = statsChartExtra.length;
   statsChartExtra = statsChartExtra.filter(entry => keys.includes(entry.metric));
-  if (statsChartExtra.length !== before) changed = true;
 
   _syncStatsChartAggControls();
+  const after = _statsChartSeries().map(s => `${s.metric}:${s.agg}:${s.axis}`).join('|');
+  changed = before !== after;
   return changed;
 }
 
@@ -5738,20 +5770,24 @@ function _renderStatsChartExtraRows() {
   const wrap = document.getElementById('sc-extra');
   if (!wrap) return;
   const keys = _statsChartMetricKeys();
-  if (statsChartEditIndex != null && !statsChartExtra[statsChartEditIndex]) statsChartEditIndex = null;
-  const pills = statsChartExtra.map((entry, i) => {
+  const series = statsBreakdown ? _statsChartSeries().slice(0, 1) : _statsChartSeries();
+  if (statsChartEditIndex != null && !series[statsChartEditIndex]) statsChartEditIndex = null;
+  const pills = series.map((entry, i) => {
     entry.agg = _normalizeStatsAgg(entry.metric, entry.agg);
     const label = _statsChartSeriesLabel(entry.metric, entry.agg);
     const axisLabel = _statsChartAxisLabel(entry.axis);
+    const remove = series.length > 1
+      ? `<button type="button" class="sc-series-remove" aria-label="Remove series ${i + 1}">×</button>`
+      : '';
     return `<span class="sc-series-pill-wrap" data-index="${i}">
-      <button type="button" class="sc-series-pill${statsChartEditIndex === i ? ' active' : ''}" aria-expanded="${statsChartEditIndex === i ? 'true' : 'false'}" aria-label="Edit series ${i + 2}">
+      <button type="button" class="sc-series-pill${statsChartEditIndex === i ? ' active' : ''}" aria-expanded="${statsChartEditIndex === i ? 'true' : 'false'}" aria-label="Edit series ${i + 1}">
         <span class="sc-series-pill-text">${escapeHtml(label)} · ${axisLabel}</span>
       </button>
-      <button type="button" class="sc-series-remove" aria-label="Remove series ${i + 2}">×</button>
+      ${remove}
     </span>`;
   }).join('');
 
-  const entry = statsChartEditIndex == null ? null : statsChartExtra[statsChartEditIndex];
+  const entry = statsChartEditIndex == null ? null : series[statsChartEditIndex];
   if (!entry) {
     wrap.innerHTML = pills;
     return;
@@ -5769,13 +5805,13 @@ function _renderStatsChartExtraRows() {
   wrap.innerHTML = `${pills}<div class="sc-series-popover sc-extra-row" data-index="${statsChartEditIndex}">
     <label>
       <span>Metric</span>
-      <select class="sc-extra-metric" aria-label="Series ${statsChartEditIndex + 2} metric">${metricOptions}</select>
+      <select class="sc-extra-metric" aria-label="Series ${statsChartEditIndex + 1} metric">${metricOptions}</select>
     </label>
     <label>
       <span>Agg</span>
-      <select class="sc-extra-agg" aria-label="Series ${statsChartEditIndex + 2} aggregation">${aggOptions}</select>
+      <select class="sc-extra-agg" aria-label="Series ${statsChartEditIndex + 1} aggregation">${aggOptions}</select>
     </label>
-    <button type="button" class="sc-extra-axis" title="Plotted on the ${entry.axis === 'y2' ? 'right' : 'left'} axis — click to switch">${axisLabel}</button>
+    <button type="button" class="sc-extra-axis" title="Plotted on the ${entry.axis === 'y2' ? 'right' : 'left'} axis — click to switch" ${statsChartEditIndex === 0 ? 'disabled' : ''}>${axisLabel}</button>
   </div>`;
 }
 
@@ -6103,6 +6139,7 @@ function _statsMultiLabel(values, allLabel, singular, prefix) {
 function _updateStatsFilterLabels() {
   const topicToggle = document.getElementById('sf-topic-toggle');
   const agentToggle = document.getElementById('sf-agent-toggle');
+  const adhocSelect = document.getElementById('sf-adhoc');
   if (topicToggle) {
     topicToggle.textContent = _statsMultiLabel(statsFilters.topics, 'All Topics', 'Topic', '#');
     topicToggle.classList.toggle('active', statsFilters.topics.length > 0);
@@ -6111,6 +6148,7 @@ function _updateStatsFilterLabels() {
     agentToggle.textContent = _statsMultiLabel(statsFilters.agents, 'All Agents', 'Agent', '@');
     agentToggle.classList.toggle('active', statsFilters.agents.length > 0);
   }
+  if (adhocSelect) adhocSelect.classList.toggle('active', statsFilters.adhoc !== 'all');
 }
 
 function _syncStatsAgentMenuSelection() {
@@ -6228,7 +6266,7 @@ function _statsQueryParams({ includeTz = false } = {}) {
   if (statsFilters.agents.length) params.set('agent', statsFilters.agents.join(','));
   if (statsFilters.topics.length) params.set('topic', statsFilters.topics.join(','));
   if (statsFilters.adhoc !== 'all') params.set('adhoc', statsFilters.adhoc);
-  const series = [{ metric: statsChartY1, agg: statsChartAggY1 }, ...statsChartExtra];
+  const series = _statsChartSeries();
   params.set('chart_metrics', series.map(s => s.metric).join(','));
   params.set('chart_aggs', series.map(s => s.agg).join(','));
   return params;
@@ -6556,7 +6594,7 @@ function _renderChart(rows) {
   const chronological = [...rows].reverse();
   const labels = chronological.map(r => statsPeriod === 'turn' ? fmtTime(r.period) : r.period);
   const pointRadius = labels.length > 60 ? 1 : labels.length > 20 ? 2 : 4;
-  const series = [{ metric: statsChartY1, agg: statsChartAggY1, axis: 'y1' }, ...statsChartExtra];
+  const series = _statsChartSeries();
   const usedColors = new Set();
   const datasets = series.map((s, i) => {
     const m = CHART_METRICS[s.metric] || CHART_METRICS.turns;
@@ -7167,8 +7205,6 @@ function initStats() {
       });
       _updateStatsMeasureLabel();
     }
-    // Keeps the chart pinned to a metric that's still checked in Measures
-    // (e.g. Sessions just got auto-unchecked above).
     _syncStatsChartMetricSelects();
     _updateStatsBreakdownUi();
     _markStatsPresetDirty();
@@ -7183,6 +7219,7 @@ function initStats() {
 
   document.getElementById('sf-adhoc').addEventListener('change', e => {
     statsFilters.adhoc = e.target.value;
+    _updateStatsFilterLabels();
     _markStatsPresetDirty();
     loadStats();
   });
@@ -7275,12 +7312,7 @@ function initStats() {
       else _statsMeasures.delete(input.value);
       _markStatsPresetDirty();
       _updateStatsMeasureLabel();
-      // Unchecking the metric currently charted moves the chart to another
-      // selected measure, which needs a refetch (its aggregate wasn't
-      // requested from the backend yet); otherwise just re-render the table.
-      const chartMetricChanged = _syncStatsChartMetricSelects();
-      if (chartMetricChanged) loadStats();
-      else _rerenderStats();
+      _rerenderStats();
     });
   });
   document.addEventListener('click', e => {
@@ -7304,31 +7336,12 @@ function initStats() {
   _updateStatsAnchorLabel();
   _syncStatsChartAggControls();
 
-  document.getElementById('sc-y1').addEventListener('change', e => {
-    const prevMetric = statsChartY1;
-    const prevAgg = statsChartAggY1;
-    statsChartY1 = e.target.value;
-    statsChartAggY1 = prevAgg === _defaultStatsAgg(prevMetric)
-      ? _defaultStatsAgg(statsChartY1)
-      : _normalizeStatsAgg(statsChartY1, prevAgg);
-    _syncStatsChartAggControls();
-    _markStatsPresetDirty();
-    loadStats();
-  });
-
-  document.getElementById('sc-y1-agg').addEventListener('change', e => {
-    statsChartAggY1 = _normalizeStatsAgg(statsChartY1, e.target.value);
-    _syncStatsChartAggControls();
-    _markStatsPresetDirty();
-    loadStats();
-  });
-
   const extraWrap = document.getElementById('sc-extra');
   extraWrap.addEventListener('change', e => {
     const row = e.target.closest('.sc-series-popover');
     if (!row) return;
     const i = Number(row.dataset.index);
-    const entry = statsChartExtra[i];
+    const entry = _statsChartEntry(i);
     if (!entry) return;
     if (e.target.classList.contains('sc-extra-metric')) {
       const prevMetric = entry.metric;
@@ -7339,13 +7352,14 @@ function initStats() {
         : _normalizeStatsAgg(entry.metric, prevAgg);
       // Same-metric chips (e.g. P50/P95 of one measure) almost always belong
       // on the same axis — align to an existing chip with that metric first.
-      const match = statsChartExtra.find((s, j) => j !== i && s.metric === entry.metric);
+      const match = _statsChartSeries().find((s, j) => j !== i && s.metric === entry.metric);
       if (match) entry.axis = match.axis;
     } else if (e.target.classList.contains('sc-extra-agg')) {
       entry.agg = e.target.value;
     } else {
       return;
     }
+    _updateStatsChartEntry(i, entry);
     _renderStatsChartExtraRows();
     _markStatsPresetDirty();
     loadStats();
@@ -7356,10 +7370,7 @@ function initStats() {
     if (remove) {
       const pill = remove.closest('.sc-series-pill-wrap');
       const i = Number(pill?.dataset.index);
-      if (!statsChartExtra[i]) return;
-      statsChartExtra.splice(i, 1);
-      if (statsChartEditIndex === i) statsChartEditIndex = null;
-      else if (statsChartEditIndex != null && statsChartEditIndex > i) statsChartEditIndex--;
+      _removeStatsChartEntry(i);
       _renderStatsChartExtraRows();
       _markStatsPresetDirty();
       _rerenderStats();
@@ -7375,10 +7386,12 @@ function initStats() {
     const popover = e.target.closest('.sc-series-popover');
     if (!popover) return;
     const i = Number(popover.dataset.index);
-    const entry = statsChartExtra[i];
+    const entry = _statsChartEntry(i);
     if (!entry) return;
     if (e.target.classList.contains('sc-extra-axis')) {
+      if (i === 0) return;
       entry.axis = entry.axis === 'y2' ? 'y1' : 'y2';
+      _updateStatsChartEntry(i, entry);
       _renderStatsChartExtraRows();
       _markStatsPresetDirty();
       _rerenderStats();
@@ -7387,11 +7400,11 @@ function initStats() {
 
   document.getElementById('sc-add-series').addEventListener('click', () => {
     const keys = _statsChartMetricKeys();
-    const used = new Set([statsChartY1, ...statsChartExtra.map(s => s.metric)]);
+    const used = new Set(_statsChartSeries().map(s => s.metric));
     const metric = keys.find(key => !used.has(key)) || keys[0] || 'turns';
-    const match = statsChartExtra.find(s => s.metric === metric);
+    const match = _statsChartSeries().find(s => s.metric === metric);
     statsChartExtra.push({ metric, agg: _defaultStatsAgg(metric), axis: match ? match.axis : 'y1' });
-    statsChartEditIndex = statsChartExtra.length - 1;
+    statsChartEditIndex = _statsChartSeries().length - 1;
     _renderStatsChartExtraRows();
     _markStatsPresetDirty();
     loadStats();
