@@ -118,6 +118,25 @@ The chain itself is the transaction. Each downstream step receives the previous
 step's output as explicit chain input and does not consult global recent-message
 lookback.
 
+## Relationship to Parallel Execution
+
+This is closer to parallel workflow isolation than to adhoc history injection.
+
+ADR-0025 isolates filesystem changes so a turn can run without bleeding writes
+into other turns. Chained `>@agent!` applies the same idea to conversation
+state for concurrent workflows: the route step gets explicit input from the
+chain, runs in a fresh native session, and does not inherit hidden prior context
+from the persistent `(topic, agent)` session.
+
+This matters because Squid may have direct prompts, adhoc prompts, and chained
+workflow steps all running at the same time. A route step cannot safely define
+its context by asking for "the recent N messages" from a shared topic list while
+other work is appending to that list. The chain must carry its own explicit
+inputs.
+
+That makes `!` in a chain a parallel-workflow isolation marker, not a lookback
+marker.
+
 ## Why `!` Does Not Take `N` in Chains
 
 Adhoc lookback is relative to the topic's message list. For example,
