@@ -679,6 +679,8 @@ function clearCachedSessionId(topic, agent) {
   }
   delete _sessionIds[taKey];
   delete _memoryInjectedInto[taKey];
+  delete _pendingSessionMemoryRevisions[taKey];
+  delete _pendingSessionInjectedIds[taKey];
   delete _sessionLookupCache[taKey];
   if (agent) delete _sessionLookupCache[`${topic}@${agent}`];
   delete _memorySelectionOverrides[_memoryOverrideKey(topic, agent, false)];
@@ -2490,7 +2492,7 @@ function closeEscSurfaces() {
   let closed = false;
   if (searchActive) { clearSearch(); closed = true; }
   if (procStatusPopup?.classList.contains('open')) { procStatusPopup.classList.remove('open'); closed = true; }
-  if (pinPanel.classList.contains('open')) { closePinPanel(); closed = true; }
+  if (pinPanel.classList.contains('open')) { closePinPanel({ restoreFocus: true }); closed = true; }
   if (helpPanel.classList.contains('open')) { closeHelp(); closed = true; }
   const msgModal = document.getElementById('msg-modal');
   if (msgModal?.classList.contains('open')) { msgModal.classList.remove('open'); closed = true; }
@@ -3013,7 +3015,7 @@ async function sendMessage(text) {
     }
     if (_includeTopicMemory && !adhoc) {
       const memoryKey = _memoryInjectedKey(topic, _effectiveAgent);
-      _memoryInjectedInto[memoryKey] = _topicMemoryForSend.revision;
+      _pendingSessionMemoryRevisions[memoryKey] = _topicMemoryForSend.revision;
       delete _memorySelectionOverrides[_memoryOverrideKey(topic, _effectiveAgent, false)];
       updatePinCount();
       if (pinPanel.classList.contains('open')) renderPinPanel();
@@ -3188,6 +3190,13 @@ async function sendMessage(text) {
               if (!adhoc) updatePinCount();
               if (pinPanel.classList.contains('open')) renderPinPanel();
             }
+            if (_includeTopicMemory && !adhoc) {
+              const memoryKey = _memoryInjectedKey(topic, _effectiveAgent);
+              _memoryInjectedInto[memoryKey] = _topicMemoryForSend.revision;
+              delete _pendingSessionMemoryRevisions[memoryKey];
+              updatePinCount();
+              if (pinPanel.classList.contains('open')) renderPinPanel();
+            }
             updateInContextMarkers();
             eventName = null;
 
@@ -3257,6 +3266,14 @@ async function sendMessage(text) {
           }
         }
       }
+    }
+    if (!adhoc && !completionRendered && !detachedPolling) {
+      delete _pendingSessionInjectedIds[`${topic}@${_effectiveAgent || '_'}`];
+      delete _pendingSessionInjectedIds[`${topic}@${resolvedAgent || '_'}`];
+      delete _pendingSessionMemoryRevisions[_memoryInjectedKey(topic, _effectiveAgent)];
+      delete _pendingSessionMemoryRevisions[_memoryInjectedKey(topic, resolvedAgent)];
+      updatePinCount();
+      if (pinPanel.classList.contains('open')) renderPinPanel();
     }
     if (!detachedPolling && !userAborted && !firstDataReceived && !completedFromStatus) {
       if (!bubble.parentNode) messages.appendChild(bubble);
@@ -5652,7 +5669,7 @@ function _statsChartSeriesValue(row, metric, agg) {
   // aggregate, regardless of whatever agg was last selected in another view.
   if (statsPeriod === 'turn') return _statsMetricValue(row, metric);
   const field = _statsChartAggField(metric, agg);
-  if (Object.prototype.hasOwnProperty.call(row, field)) return row[field] == null ? 0 : row[field];
+  if (Object.prototype.hasOwnProperty.call(row, field) && row[field] != null) return row[field];
   if (metric === 'duration' && agg === 'avg' && row.duration_ms != null) return row.duration_ms / 1000;
   if (agg === 'sum') return _statsMetricValue(row, metric);
   const value = row[_statsChartAggField(metric, agg)];
@@ -8943,42 +8960,43 @@ async function resolveInsightMeasures(insights) {
   }
 
   for (const [, group] of groups) {
-    const days = parseInt(group.period) || 7;
-    const fetchDays = group.hasCompare ? days * 2 : days;
+    const days = Math.max(parseInt(group.period) || 7, 7);
 
-    const params = new URLSearchParams();
-    // Use weekly bucketing — clean WoW splits with minimal rows
-    params.set('period', fetchDays <= 14 ? 'weekly' : 'daily');
-    params.set('days', String(Math.max(fetchDays, 7)));
-    if (group.measures[0].filter?.agent) params.set('agent', group.measures[0].filter.agent);
-    if (group.measures[0].filter?.topic) params.set('topic', group.measures[0].filter.topic);
-    if (group.measures[0].filter?.adhoc) params.set('adhoc', group.measures[0].filter.adhoc);
+    const fetchRows = async (anchor) => {
+      const params = new URLSearchParams();
+      params.set('period', days <= 14 ? 'weekly' : 'daily');
+      params.set('days', String(days));
+      if (anchor) params.set('anchor', anchor);
+      if (group.measures[0].filter?.agent) params.set('agent', group.measures[0].filter.agent);
+      if (group.measures[0].filter?.topic) params.set('topic', group.measures[0].filter.topic);
+      if (group.measures[0].filter?.adhoc) params.set('adhoc', group.measures[0].filter.adhoc);
+      try {
+        const res = await fetch(`/stats?${params}`);
+        return res.ok ? await res.json() : [];
+      } catch { return []; }
+    };
 
-    let rows;
-    try {
-      const res = await fetch(`/stats?${params}`);
-      if (!res.ok) continue;
-      rows = await res.json();
-    } catch { continue; }
+    const currentRows = await fetchRows();
+    // Fetch the previous window as its own exact N-day query (anchored to
+    // N days ago) instead of doubling the range and splitting rows in half —
+    // weekly buckets are calendar-aligned (Sunday-start), not aligned to the
+    // request's day count, so a 2N-day fetch can split into an uneven number
+    // of buckets and a naive halfway slice mismatches window sizes badly.
+    const prevRows = group.hasCompare
+      ? await fetchRows(new Date(Date.now() - days * 86400000).toISOString())
+      : null;
 
     for (const m of group.measures) {
       const agg = m.agg || MEASURE_DEFAULT_AGG[m.measure] || 'sum';
-      let currentValue;
 
       if (m.compare === 'prev_period') {
-        // With weekly bucketing and 2*N days: rows are ordered period DESC.
-        // First half of rows = current period, second half = previous.
-        const mid = Math.ceil(rows.length / 2);
-        const currentRows = rows.slice(0, mid);
-        const prevRows = rows.slice(mid);
         const cur = _aggregateRows(currentRows, m.measure, agg);
         const prev = _aggregateRows(prevRows, m.measure, agg);
         values[m.key] = cur - prev;  // raw delta for conditions
         values[`_${m.key}_cur`] = cur;   // current period raw value
         values[`_${m.key}_prev`] = prev;  // previous period raw value
       } else {
-        currentValue = _aggregateRows(rows, m.measure, agg);
-        values[m.key] = currentValue;
+        values[m.key] = _aggregateRows(currentRows, m.measure, agg);
       }
     }
   }
@@ -9442,6 +9460,7 @@ const _memoryCache = {};
 const _sessionLookupCache = {};
 const _memorySelectionOverrides = {};
 const _pendingSessionInjectedIds = {}; // `${topic}@${agent|_}` -> pinned IDs submitted to an in-flight session turn
+const _pendingSessionMemoryRevisions = {}; // `${topic}@${agent|_}` -> topic memory revision submitted to an in-flight session turn
 let _editingMemoryTopic = null;
 
 function updateMemoryTokenCount() {
@@ -9627,13 +9646,16 @@ function _topicMemoryState() {
   const session = _getSessionMeta(topic, agent);
   const exists = !!(meta.exists && (meta.content || '').trim());
   const key = _memoryOverrideKey(topic, agent, adhoc);
+  const injectedKey = _memoryInjectedKey(topic, agent);
   const revision = _memoryRevision(meta);
-  const injectedRevision = _memoryInjectedInto[_memoryInjectedKey(topic, agent)];
+  const pendingRevision = !adhoc ? _pendingSessionMemoryRevisions[injectedKey] : null;
+  const pending = !!pendingRevision && pendingRevision === revision;
+  const injectedRevision = _memoryInjectedInto[injectedKey];
   const injected = !adhoc && !!injectedRevision && injectedRevision === revision;
   const stale = !adhoc && !!injectedRevision && injectedRevision !== revision;
-  const defaultSelected = exists && (adhoc || stale || (!injectedRevision && !session.loading && !session.session_id));
+  const defaultSelected = exists && !pending && (adhoc || stale || (!injectedRevision && !session.loading && !session.session_id));
   const selected = exists && (_memorySelectionOverrides[key] ?? defaultSelected);
-  return { topic, agent, adhoc, meta, session, exists, selected, key, injected, stale, revision };
+  return { topic, agent, adhoc, meta, session, exists, selected, key, injected, stale, pending, revision };
 }
 
 async function _topicMemoryStateForSend(topic, agent, adhoc) {
@@ -9679,16 +9701,22 @@ function _injectablePinnedIds(topic, agent, adhoc, lookback, items = getPinnedIt
 
 function updatePinCount() {
   const { topic, agent, adhoc, lookback } = _currentContextTarget();
-  const ids = [
+  const taKey = `${topic}@${agent || '_'}`;
+  const selectedIds = [
     ..._activeLookbackItems(adhoc, lookback).map(item => item.id),
     ..._injectablePinnedIds(topic, agent, adhoc, lookback),
   ];
-  const n = new Set(ids).size;
-  const memorySelected = _topicMemoryState().selected;
-  const total = n + (memorySelected ? 1 : 0);
-  pinCountEl.textContent = total || '';
-  pinCountEl.classList.toggle('visible', total > 0);
-  pinBtn.classList.toggle('has-pins', total > 0);
+  const pendingIds = !adhoc ? (_pendingSessionInjectedIds[taKey] || []) : [];
+  const memoryState = _topicMemoryState();
+  const selectedCount = new Set(selectedIds).size + (memoryState.selected ? 1 : 0);
+  const pendingCount = new Set(pendingIds).size + (memoryState.pending ? 1 : 0);
+  const savedPins = getPinnedItems().length;
+  const badgeCount = selectedCount || pendingCount || savedPins;
+  pinCountEl.textContent = badgeCount || '';
+  pinCountEl.classList.toggle('visible', badgeCount > 0);
+  pinBtn.classList.toggle('has-context', selectedCount > 0);
+  pinBtn.classList.toggle('has-context-pending', selectedCount === 0 && pendingCount > 0);
+  pinBtn.classList.toggle('has-saved-pins', selectedCount === 0 && pendingCount === 0 && savedPins > 0);
 }
 
 function _pinTagStr(item) {
@@ -9719,18 +9747,17 @@ function _pinStatus(item) {
 
   // Skip only if the pin is from the exact current session — --resume already covers it
   if (sameSession && !isAdhoc) {
-    const qual = chipAgent ? ` · #${chipTopic}@${chipAgent}` : '';
-    return { text: `in session${qual} · skip`, cls: 'pin-status-session' };
+    return { text: 'in session · skip', cls: 'pin-status-session' };
   }
 
-  // Already injected into this topic@agent via a previous adhoc turn
+  // Already available in this topic@agent session via a previous injected turn
   // Only meaningful for !N lookback where model retains prior context; !0 is always fresh
   const chipLookback = parsed.adhoc ? parsed.lookback : (stickyChip?.lookback ?? 0);
   if (currentSid && (injected[currentSid] || []).includes(item.id) && !(isAdhoc && chipLookback === 0))
-    return { text: 'injected · skip', cls: 'pin-status-done' };
+    return { text: 'in session · skip', cls: 'pin-status-session' };
 
   if (!isAdhoc && pending.includes(item.id))
-    return { text: 'injected · skip', cls: 'pin-status-done' };
+    return { text: 'sending', cls: 'pin-status-session' };
 
   return { text: 'will inject', cls: 'pin-status-inject' };
 }
@@ -9738,6 +9765,7 @@ function _pinStatus(item) {
 function _memoryStatus(state) {
   if (state.meta.loading || state.session.loading) return { text: 'checking', cls: 'pin-status-session' };
   if (!state.exists) return { text: 'no memory', cls: 'pin-status-empty' };
+  if (state.pending) return { text: 'sending', cls: 'pin-status-session' };
   if (state.selected) return { text: 'will inject', cls: 'pin-status-inject' };
   if (state.injected) return { text: 'in session · skip', cls: 'pin-status-session' };
   if (!state.adhoc && state.session.session_id) return { text: 'in session · skip', cls: 'pin-status-session' };
@@ -9764,11 +9792,13 @@ function renderPinPanel() {
   const preview = memoryState.exists
     ? (memoryState.meta.content || '').trim().replace(/\s+/g, ' ').slice(0, 90)
     : 'No memory yet';
+  const memoryToggleActive = memoryState.selected || memoryState.pending;
+  const memoryToggleText = memoryToggleActive ? 'On' : (memoryState.exists ? 'Off' : 'Add');
   html += `<div class="memory-item">
     <span class="pin-item-tag">#${escapeHtml(memoryState.topic)}</span>
     <span class="memory-item-preview" data-memory-edit="1">Topic memory · ${escapeHtml(preview)}</span>
     <span class="memory-item-status ${memoryStatus.cls}">${memoryStatus.text}</span>
-    <button class="pin-item-toggle${memoryState.selected ? ' active' : ''}" data-memory-toggle="1" type="button">${memoryState.selected ? 'On' : (memoryState.exists ? 'Off' : 'Add')}</button>
+    <button class="pin-item-toggle${memoryToggleActive ? ' active' : ''}" data-memory-toggle="1" type="button"${memoryState.pending ? ' disabled' : ''}>${memoryToggleText}</button>
   </div>`;
 
   if (mergedItems.length) {
@@ -9905,8 +9935,9 @@ function openPinPanel() {
   renderPinPanel();
   pinPanel.classList.add('open');
 }
-function closePinPanel() {
+function closePinPanel({ restoreFocus = false } = {}) {
   pinPanel.classList.remove('open');
+  if (restoreFocus) input.focus({ preventScroll: true });
 }
 
 // ── Bookmarks ─────────────────────────────────────────────────────────────
@@ -10414,17 +10445,23 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   const header = document.createElement('div');
   header.id = 'file-modal-header';
 
-  // SVG icon set for the file viewer header (16x16, stroke-based, matches #send-btn's line style)
-  const FV_ICON_CHEVRON_LEFT = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M10 3.5L5.5 8l4.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-  const FV_ICON_CHEVRON_RIGHT = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-  const FV_ICON_EXTERNAL_LINK = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M7 3H4.5A1.5 1.5 0 0 0 3 4.5v7A1.5 1.5 0 0 0 4.5 13h7a1.5 1.5 0 0 0 1.5-1.5V9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.5 3H13v3.5M13 3 7.5 8.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-  const FV_ICON_PENCIL = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M11.4 2.4a1.4 1.4 0 0 1 2 2L5.6 12.2l-2.7.7.7-2.7 7.8-7.8Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-  const FV_ICON_HISTORY = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8.5" r="5" stroke="currentColor" stroke-width="1.4"/><path d="M8 5.8v2.9l2 1.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M6 2.2h4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
-  const FV_ICON_COPY = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="6" y="6" width="7.5" height="7.5" rx="1.3" stroke="currentColor" stroke-width="1.4"/><path d="M3.8 10.2h-.3A1.5 1.5 0 0 1 2 8.7v-5A1.5 1.5 0 0 1 3.5 2.2h5A1.5 1.5 0 0 1 10 3.7v.3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-  const FV_ICON_CHECK = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3.5 8.3l3 3 6-6.6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-  const FV_ICON_SAVE = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 2.5h8.2L13 4.3v8.2A1.5 1.5 0 0 1 11.5 14h-7A1.5 1.5 0 0 1 3 12.5v-10Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M5 2.5V6h5V2.5M5 14v-4h6v4" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>';
-  const FV_ICON_DISCARD = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4.2 5.2A4.8 4.8 0 1 1 3.4 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M4.1 2.5v2.8h2.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-  const FV_ICON_CLOSE = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+  const fvIcon = name => `<span class="material-symbols-outlined" aria-hidden="true">${name}</span>`;
+  const FV_ICON_CHEVRON_LEFT = fvIcon('chevron_left');
+  const FV_ICON_CHEVRON_RIGHT = fvIcon('chevron_right');
+  const FV_ICON_HOME = fvIcon('home');
+  const FV_ICON_EXTERNAL_LINK = fvIcon('open_in_new');
+  const FV_ICON_PENCIL = fvIcon('edit');
+  const FV_ICON_HISTORY = fvIcon('history');
+  const FV_ICON_COPY = fvIcon('content_copy');
+  const FV_ICON_CHECK = fvIcon('check');
+  const FV_ICON_SAVE = fvIcon('save');
+  const FV_ICON_DISCARD = fvIcon('undo');
+  const FV_ICON_CLOSE = fvIcon('close');
+  const FV_ICON_RENAME = fvIcon('drive_file_rename');
+  const FV_ICON_UPLOAD = fvIcon('upload_file');
+  const FV_ICON_FILE_PLUS = fvIcon('note_add');
+  const FV_ICON_FOLDER_PLUS = fvIcon('create_new_folder');
+  const FV_ICON_DELETE = fvIcon('delete');
 
   const navBtns = document.createElement('div');
   navBtns.className = 'fv-nav-btns';
@@ -10436,7 +10473,12 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   fwdBtn.className = 'fv-nav-btn';
   fwdBtn.setAttribute('aria-label', 'Forward');
   fwdBtn.innerHTML = FV_ICON_CHEVRON_RIGHT;
-  navBtns.append(backBtn, fwdBtn);
+  const homeBtn = document.createElement('button');
+  homeBtn.className = 'fv-nav-btn';
+  homeBtn.setAttribute('aria-label', 'File roots');
+  homeBtn.title = 'File roots';
+  homeBtn.innerHTML = FV_ICON_HOME;
+  navBtns.append(backBtn, fwdBtn, homeBtn);
 
   const breadcrumb = document.createElement('div');
   breadcrumb.id = 'file-modal-breadcrumb';
@@ -10460,6 +10502,40 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   historyBtn.setAttribute('aria-label', 'Edit history');
   historyBtn.innerHTML = FV_ICON_HISTORY;
   historyBtn.hidden = true;
+  const renameBtn = document.createElement('button');
+  renameBtn.className = 'fv-action-btn';
+  renameBtn.title = 'Rename';
+  renameBtn.setAttribute('aria-label', 'Rename');
+  renameBtn.innerHTML = FV_ICON_RENAME;
+  renameBtn.hidden = true;
+  const deleteBtn = document.createElement('button');
+  deleteBtn.className = 'fv-action-btn fv-danger-btn';
+  deleteBtn.title = 'Delete file';
+  deleteBtn.setAttribute('aria-label', 'Delete file');
+  deleteBtn.innerHTML = FV_ICON_DELETE;
+  deleteBtn.hidden = true;
+  const newFileBtn = document.createElement('button');
+  newFileBtn.className = 'fv-action-btn';
+  newFileBtn.title = 'Create file';
+  newFileBtn.setAttribute('aria-label', 'Create file');
+  newFileBtn.innerHTML = FV_ICON_FILE_PLUS;
+  newFileBtn.hidden = true;
+  const newFolderBtn = document.createElement('button');
+  newFolderBtn.className = 'fv-action-btn';
+  newFolderBtn.title = 'Add folder';
+  newFolderBtn.setAttribute('aria-label', 'Add folder');
+  newFolderBtn.innerHTML = FV_ICON_FOLDER_PLUS;
+  newFolderBtn.hidden = true;
+  const uploadBtn = document.createElement('button');
+  uploadBtn.className = 'fv-action-btn';
+  uploadBtn.title = 'Upload file';
+  uploadBtn.setAttribute('aria-label', 'Upload file');
+  uploadBtn.innerHTML = FV_ICON_UPLOAD;
+  uploadBtn.hidden = true;
+  const uploadInput = document.createElement('input');
+  uploadInput.type = 'file';
+  uploadInput.multiple = true;
+  uploadInput.hidden = true;
   const saveBtn = document.createElement('button');
   saveBtn.className = 'fv-action-btn fv-edit-action-btn fv-save-btn';
   saveBtn.type = 'button';
@@ -10484,7 +10560,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   closeBtn.title = 'Close';
   closeBtn.setAttribute('aria-label', 'Close');
   closeBtn.innerHTML = FV_ICON_CLOSE;
-  actions.append(previewBtn, historyBtn, editBtn, cancelBtn, saveBtn, copyBtn, closeBtn);
+  actions.append(newFolderBtn, newFileBtn, uploadBtn, previewBtn, historyBtn, editBtn, renameBtn, deleteBtn, cancelBtn, saveBtn, copyBtn, closeBtn);
 
   // edit toolbar (shown only in edit mode, directly below the file viewer header)
   const editToolbar = document.createElement('div');
@@ -10535,7 +10611,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   body.id = 'file-modal-body';
   body.textContent = 'Loading…';
 
-  box.append(header, editToolbar, body);
+  box.append(header, editToolbar, body, uploadInput);
   if (!isInline) {
     modal.appendChild(box);
     document.body.appendChild(modal);
@@ -10560,18 +10636,30 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   function updateNav() {
     backBtn.disabled = historyIdx === 0;
     fwdBtn.disabled = historyIdx === navHistory.length - 1;
+    homeBtn.disabled = !path;
     if (!path) {
       pathKind = 'roots';
       pathIsText = false;
       previewBtn.hidden = true;
       editBtn.hidden = true;
       historyBtn.hidden = true;
+      renameBtn.hidden = true;
+      newFileBtn.hidden = true;
+      newFolderBtn.hidden = true;
+      uploadBtn.hidden = true;
       copyBtn.hidden = true;
+      deleteBtn.hidden = true;
       breadcrumb.textContent = 'Files';
       return;
     }
     copyBtn.hidden = false;
     const isFile = pathKind === 'file';
+    const isDirectory = pathKind === 'directory';
+    newFileBtn.hidden = !isDirectory;
+    newFolderBtn.hidden = !isDirectory;
+    uploadBtn.hidden = !isDirectory;
+    renameBtn.hidden = false;
+    deleteBtn.hidden = !isFile;
     previewBtn.hidden = !isFile || !_isWebPreviewPath(path);
     const isText = isFile && (pathIsText || _isTextPath(path));
     editBtn.hidden = !isText;
@@ -10627,6 +10715,9 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
       updateNav(); loadFile();
     }
   });
+  homeBtn.addEventListener('click', () => {
+    if (path) navigate(null);
+  });
   previewBtn.addEventListener('click', () => {
     const ext = (path.split('.').pop() || '').toLowerCase();
     const params = { path };
@@ -10638,6 +10729,105 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
       copyBtn.innerHTML = FV_ICON_CHECK;
       setTimeout(() => { copyBtn.innerHTML = FV_ICON_COPY; }, 1500);
     });
+  });
+  async function createLocalChild(kind) {
+    if (pathKind !== 'directory') return;
+    const label = kind === 'folder' ? 'Folder name' : 'File name';
+    const name = window.prompt(label);
+    if (name == null) return;
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const endpoint = kind === 'folder' ? '/localfile/create-folder' : '/localfile/create-file';
+    const btn = kind === 'folder' ? newFolderBtn : newFileBtn;
+    btn.disabled = true;
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ parent: path, name: trimmed }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Create failed');
+      navigate(data.path);
+    } catch (err) {
+      window.alert(err.message || 'Create failed');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+  async function renameLocalPath(targetPath, currentName, afterRename = null) {
+    const name = window.prompt('Rename to', currentName);
+    if (name == null) return;
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === currentName) return;
+    try {
+      const res = await fetch('/localfile/rename', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: targetPath, name: trimmed }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Rename failed');
+      if (afterRename) afterRename(data.path);
+      else navigate(data.path);
+    } catch (err) {
+      window.alert(err.message || 'Rename failed');
+    }
+  }
+  async function deleteLocalFile(targetPath, name, afterDelete = null) {
+    if (!window.confirm(`Delete ${name}?`)) return;
+    try {
+      const res = await fetch('/localfile/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: targetPath }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Delete failed');
+      if (afterDelete) afterDelete();
+      else navigate(targetPath.split('/').slice(0, -1).join('/') || null);
+    } catch (err) {
+      window.alert(err.message || 'Delete failed');
+    }
+  }
+  async function uploadLocalFiles(parentPath, files, setStatus) {
+    const uploadFiles = Array.from(files || []).filter(file => file?.name);
+    if (!uploadFiles.length) return;
+    for (let i = 0; i < uploadFiles.length; i++) {
+      const file = uploadFiles[i];
+      setStatus?.(`Uploading ${i + 1}/${uploadFiles.length}: ${file.name}`);
+      const res = await fetch('/localfile/upload?' + new URLSearchParams({ parent: parentPath, name: file.name }), {
+        method: 'POST',
+        body: file,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Upload failed: ${file.name}`);
+    }
+    setStatus?.('Upload complete');
+    loadFile();
+  }
+  newFolderBtn.addEventListener('click', () => createLocalChild('folder'));
+  newFileBtn.addEventListener('click', () => createLocalChild('file'));
+  uploadBtn.addEventListener('click', () => uploadInput.click());
+  uploadInput.addEventListener('change', async () => {
+    if (pathKind !== 'directory' || !uploadInput.files?.length) return;
+    uploadBtn.disabled = true;
+    try {
+      await uploadLocalFiles(path, uploadInput.files);
+    } catch (err) {
+      window.alert(err.message || 'Upload failed');
+    } finally {
+      uploadInput.value = '';
+      uploadBtn.disabled = false;
+    }
+  });
+  renameBtn.addEventListener('click', () => {
+    if (!path) return;
+    renameLocalPath(path, path.split('/').filter(Boolean).pop() || path);
+  });
+  deleteBtn.addEventListener('click', () => {
+    if (!path || pathKind !== 'file') return;
+    deleteLocalFile(path, path.split('/').filter(Boolean).pop() || path);
   });
   const closeModal = () => { if (!isInline) modal.remove(); _fvNavigate = null; };
   closeBtn.hidden = isInline;
@@ -10786,6 +10976,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     editToolbar.hidden = false;
     editBtn.hidden = true;
     historyBtn.hidden = true;
+    renameBtn.hidden = true;
     cancelBtn.hidden = false;
     saveBtn.hidden = false;
     editStatus.textContent = 'No changes';
@@ -10821,6 +11012,11 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     const isText = pathKind === 'file' && path ? (pathIsText || _isTextPath(path)) : false;
     editBtn.hidden = !isText;
     historyBtn.hidden = !isText;
+    renameBtn.hidden = !path;
+    deleteBtn.hidden = pathKind !== 'file';
+    newFileBtn.hidden = pathKind !== 'directory';
+    newFolderBtn.hidden = pathKind !== 'directory';
+    uploadBtn.hidden = pathKind !== 'directory';
   }
 
   editBtn.addEventListener('click', async () => {
@@ -11128,7 +11324,13 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
             pathIsText = false;
             if (data.path !== path) path = data.path;
             updateNav();
-            _renderDirListing(body, data);
+            _renderDirListing(body, data, {
+              renameIcon: FV_ICON_RENAME,
+              deleteIcon: FV_ICON_DELETE,
+              onRename: entry => renameLocalPath(entry.path, entry.name, () => loadFile()),
+              onDelete: entry => deleteLocalFile(entry.path, entry.name, () => loadFile()),
+              onUploadFiles: (files, setStatus) => uploadLocalFiles(data.path, files, setStatus),
+            });
             return;
           }
         } catch {}
@@ -11187,7 +11389,7 @@ function _splitHighlightedLines(html) {
   return lines;
 }
 
-function _renderDirListing(container, data) {
+function _renderDirListing(container, data, opts = {}) {
   container.innerHTML = '';
 
   const filterWrap = document.createElement('div');
@@ -11198,6 +11400,10 @@ function _renderDirListing(container, data) {
   filterInput.placeholder = 'Filter…';
   filterInput.setAttribute('aria-label', 'Filter files');
   filterWrap.appendChild(filterInput);
+  const uploadStatus = document.createElement('div');
+  uploadStatus.className = 'fv-upload-status';
+  uploadStatus.hidden = true;
+  filterWrap.appendChild(uploadStatus);
   container.appendChild(filterWrap);
 
   const list = document.createElement('div');
@@ -11205,6 +11411,37 @@ function _renderDirListing(container, data) {
   container.appendChild(list);
 
   const hasMeta = data.entries.some(e => e.size != null || e.mtime != null);
+  const setUploadStatus = text => {
+    uploadStatus.textContent = text || '';
+    uploadStatus.hidden = !text;
+  };
+
+  if (opts.onUploadFiles) {
+    container.ondragover = e => {
+      if (!Array.from(e.dataTransfer?.types || []).includes('Files')) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      container.classList.add('fv-drop-active');
+    };
+    container.ondragleave = e => {
+      if (!container.contains(e.relatedTarget)) container.classList.remove('fv-drop-active');
+    };
+    container.ondrop = async e => {
+      if (!e.dataTransfer?.files?.length) return;
+      e.preventDefault();
+      container.classList.remove('fv-drop-active');
+      try {
+        await opts.onUploadFiles(e.dataTransfer.files, setUploadStatus);
+        setTimeout(() => setUploadStatus(''), 1200);
+      } catch (err) {
+        setUploadStatus(err.message || 'Upload failed');
+      }
+    };
+  } else {
+    container.ondragover = null;
+    container.ondragleave = null;
+    container.ondrop = null;
+  }
 
   function renderEntries(entries) {
     list.innerHTML = '';
@@ -11216,8 +11453,10 @@ function _renderDirListing(container, data) {
       return;
     }
     entries.forEach(entry => {
+      const row = document.createElement('div');
+      row.className = 'fv-dir-entry' + (entry.is_dir ? ' fv-dir-entry--dir' : '');
       const a = document.createElement('a');
-      a.className = 'fv-dir-entry' + (entry.is_dir ? ' fv-dir-entry--dir' : '');
+      a.className = 'fv-dir-entry-link';
       a.href = '/localfile?' + new URLSearchParams({ path: entry.path });
       a.addEventListener('click', e => {
         e.preventDefault();
@@ -11230,20 +11469,51 @@ function _renderDirListing(container, data) {
       nameSpan.className = 'fv-dir-name';
       nameSpan.textContent = entry.is_dir ? entry.name + '/' : entry.name;
       a.appendChild(nameSpan);
+      row.appendChild(a);
 
       if (hasMeta) {
         const sizeSpan = document.createElement('span');
         sizeSpan.className = 'fv-dir-meta';
         sizeSpan.textContent = entry.is_dir ? '' : _fmtSize(entry.size);
-        a.appendChild(sizeSpan);
+        row.appendChild(sizeSpan);
 
         const mtimeSpan = document.createElement('span');
         mtimeSpan.className = 'fv-dir-meta';
         mtimeSpan.textContent = _fmtMtime(entry.mtime);
-        a.appendChild(mtimeSpan);
+        row.appendChild(mtimeSpan);
       }
 
-      list.appendChild(a);
+      if (opts.onRename) {
+        const renameBtn = document.createElement('button');
+        renameBtn.className = 'fv-dir-action';
+        renameBtn.type = 'button';
+        renameBtn.title = 'Rename';
+        renameBtn.setAttribute('aria-label', `Rename ${entry.name}`);
+        renameBtn.innerHTML = opts.renameIcon || '';
+        renameBtn.addEventListener('click', e => {
+          e.preventDefault();
+          e.stopPropagation();
+          opts.onRename(entry);
+        });
+        row.appendChild(renameBtn);
+      }
+
+      if (opts.onDelete && !entry.is_dir) {
+        const deleteBtn = document.createElement('button');
+        deleteBtn.className = 'fv-dir-action fv-dir-danger-action';
+        deleteBtn.type = 'button';
+        deleteBtn.title = 'Delete';
+        deleteBtn.setAttribute('aria-label', `Delete ${entry.name}`);
+        deleteBtn.innerHTML = opts.deleteIcon || '';
+        deleteBtn.addEventListener('click', e => {
+          e.preventDefault();
+          e.stopPropagation();
+          opts.onDelete(entry);
+        });
+        row.appendChild(deleteBtn);
+      }
+
+      list.appendChild(row);
     });
   }
 

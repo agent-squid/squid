@@ -41,7 +41,7 @@ test('Files menu opens configured roots and browses into files', async ({ page }
   await page.goto('/');
   await page.getByRole('button', { name: 'Files' }).click();
 
-  await expect(page.locator('#file-modal')).toBeVisible();
+  await expect(page.locator('#file-modal-box')).toBeVisible();
   await expect(page.locator('#file-modal-breadcrumb')).toHaveText('Files');
   await expect(page.getByRole('button', { name: 'Back' })).toBeDisabled();
   await expect(page.locator('#file-modal-body')).toContainText('/tmp/work/project');
@@ -65,6 +65,252 @@ test('Files menu opens configured roots and browses into files', async ({ page }
   await expect(page.locator('#file-modal-breadcrumb')).toContainText('README.md');
   await expect(page.locator('#file-modal-body')).toContainText('Editable file');
   await expect(page.getByRole('button', { name: 'Edit file' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'File roots' }).click();
+  await expect(page.locator('#file-modal-breadcrumb')).toHaveText('Files');
+  await expect(page.getByRole('button', { name: 'File roots' })).toBeDisabled();
+  await expect(page.getByRole('link', { name: '/tmp/work/project' })).toBeVisible();
+  await expect(page.getByRole('link', { name: '/tmp/notes' })).toBeVisible();
+});
+
+test('Files menu creates folders, creates files, and renames entries', async ({ page }) => {
+  await mockApp(page);
+  const calls = [];
+  const entries = [
+    { name: 'src', path: '/tmp/work/project/src', is_dir: true, size: null, mtime: 1 },
+    { name: 'README.md', path: '/tmp/work/project/README.md', is_dir: false, size: 12, mtime: 1 },
+  ];
+  await page.route('**/config/localfile-roots**', r => r.fulfill({
+    json: { roots: ['/tmp/work/project'] },
+  }));
+  await page.route(url => url.pathname.startsWith('/localfile'), async route => {
+    const req = route.request();
+    const url = new URL(req.url());
+    if (url.pathname === '/localfile/create-folder') {
+      const body = req.postDataJSON();
+      calls.push({ endpoint: 'create-folder', body });
+      const path = `${body.parent}/${body.name}`;
+      entries.push({ name: body.name, path, is_dir: true, size: null, mtime: 2 });
+      return route.fulfill({ json: { ok: true, path } });
+    }
+    if (url.pathname === '/localfile/upload') {
+      const parent = url.searchParams.get('parent');
+      const name = url.searchParams.get('name');
+      calls.push({ endpoint: 'upload', parent, name, body: req.postData() });
+      const path = `${parent}/${name}`;
+      entries.push({ name, path, is_dir: false, size: req.postData()?.length || 0, mtime: 2 });
+      return route.fulfill({ json: { ok: true, path } });
+    }
+    if (url.pathname === '/localfile/create-file') {
+      const body = req.postDataJSON();
+      calls.push({ endpoint: 'create-file', body });
+      const path = `${body.parent}/${body.name}`;
+      entries.push({ name: body.name, path, is_dir: false, size: 0, mtime: 3 });
+      return route.fulfill({ json: { ok: true, path } });
+    }
+    if (url.pathname === '/localfile/rename') {
+      const body = req.postDataJSON();
+      calls.push({ endpoint: 'rename', body });
+      const entry = entries.find(e => e.path === body.path);
+      const parent = body.path.split('/').slice(0, -1).join('/');
+      const path = `${parent}/${body.name}`;
+      if (entry) {
+        entry.name = body.name;
+        entry.path = path;
+      }
+      return route.fulfill({ json: { ok: true, path } });
+    }
+    const path = url.searchParams.get('path');
+    if (path === '/tmp/work/project') {
+      return route.fulfill({
+        contentType: 'application/json',
+        json: { type: 'directory', path, entries },
+      });
+    }
+    if (path === '/tmp/work/project/src' || path === '/tmp/work/project/lib') {
+      return route.fulfill({
+        contentType: 'application/json',
+        json: { type: 'directory', path, entries: [] },
+      });
+    }
+    return route.fulfill({ status: 200, contentType: 'text/plain', body: '' });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Files' }).click();
+  await page.getByRole('link', { name: '/tmp/work/project' }).click();
+
+  await page.locator('#file-modal-body').dispatchEvent('drop', {
+    dataTransfer: await page.evaluateHandle(() => {
+      const dt = new DataTransfer();
+      dt.items.add(new File(['uploaded body'], 'upload.txt', { type: 'text/plain' }));
+      return dt;
+    }),
+  });
+  await expect(page.getByRole('link', { name: 'upload.txt' })).toBeVisible();
+
+  const chooserPromise = page.waitForEvent('filechooser');
+  await page.getByRole('button', { name: 'Upload file' }).click();
+  const chooser = await chooserPromise;
+  await chooser.setFiles({
+    name: 'picked.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('picked body'),
+  });
+  await expect(page.getByRole('link', { name: 'picked.txt' })).toBeVisible();
+
+  page.once('dialog', async dialog => {
+    expect(dialog.message()).toBe('Folder name');
+    await dialog.accept('lib');
+  });
+  await page.getByRole('button', { name: 'Add folder' }).click();
+  await expect(page.locator('#file-modal-breadcrumb')).toContainText('lib');
+
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect(page.getByRole('link', { name: 'lib/' })).toBeVisible();
+
+  page.once('dialog', async dialog => {
+    expect(dialog.message()).toBe('File name');
+    await dialog.accept('notes.txt');
+  });
+  await page.getByRole('button', { name: 'Create file' }).click();
+  await expect(page.locator('#file-modal-breadcrumb')).toContainText('notes.txt');
+
+  await page.getByRole('button', { name: 'Back' }).click();
+  page.once('dialog', async dialog => {
+    expect(dialog.message()).toBe('Rename to');
+    expect(dialog.defaultValue()).toBe('README.md');
+    await dialog.accept('GUIDE.md');
+  });
+  await page.getByRole('button', { name: 'Rename README.md' }).click();
+  await expect(page.getByRole('link', { name: 'GUIDE.md' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'README.md' })).toHaveCount(0);
+
+  expect(calls).toEqual([
+    { endpoint: 'upload', parent: '/tmp/work/project', name: 'upload.txt', body: 'uploaded body' },
+    { endpoint: 'upload', parent: '/tmp/work/project', name: 'picked.txt', body: 'picked body' },
+    { endpoint: 'create-folder', body: { parent: '/tmp/work/project', name: 'lib' } },
+    { endpoint: 'create-file', body: { parent: '/tmp/work/project', name: 'notes.txt' } },
+    { endpoint: 'rename', body: { path: '/tmp/work/project/README.md', name: 'GUIDE.md' } },
+  ]);
+});
+
+test('Files menu deletes files from rows and the open file view', async ({ page }) => {
+  await mockApp(page);
+  const calls = [];
+  const entries = [
+    { name: 'README.md', path: '/tmp/work/project/README.md', is_dir: false, size: 12, mtime: 1 },
+    { name: 'notes.txt', path: '/tmp/work/project/notes.txt', is_dir: false, size: 5, mtime: 1 },
+    { name: 'src', path: '/tmp/work/project/src', is_dir: true, size: null, mtime: 1 },
+  ];
+  await page.route('**/config/localfile-roots**', r => r.fulfill({
+    json: { roots: ['/tmp/work/project'] },
+  }));
+  await page.route(url => url.pathname.startsWith('/localfile'), async route => {
+    const req = route.request();
+    const url = new URL(req.url());
+    if (url.pathname === '/localfile/delete') {
+      const body = req.postDataJSON();
+      calls.push({ endpoint: 'delete', body });
+      const idx = entries.findIndex(e => e.path === body.path);
+      if (idx >= 0) entries.splice(idx, 1);
+      return route.fulfill({ json: { ok: true, path: body.path } });
+    }
+    const path = url.searchParams.get('path');
+    if (path === '/tmp/work/project') {
+      return route.fulfill({
+        contentType: 'application/json',
+        json: { type: 'directory', path, entries },
+      });
+    }
+    if (path === '/tmp/work/project/src') {
+      return route.fulfill({
+        contentType: 'application/json',
+        json: { type: 'directory', path, entries: [] },
+      });
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: 'text/plain',
+      body: path?.endsWith('README.md') ? 'readme body' : 'notes',
+    });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Files' }).click();
+  await page.getByRole('link', { name: '/tmp/work/project' }).click();
+
+  await expect(page.getByRole('button', { name: 'Delete src' })).toHaveCount(0);
+  page.once('dialog', async dialog => {
+    expect(dialog.message()).toBe('Delete notes.txt?');
+    await dialog.accept();
+  });
+  await page.getByRole('button', { name: 'Delete notes.txt' }).click();
+  await expect(page.getByRole('link', { name: 'notes.txt' })).toHaveCount(0);
+
+  await page.getByRole('link', { name: 'README.md' }).click();
+  await expect(page.locator('#file-modal-body')).toContainText('readme body');
+  await expect(page.getByRole('button', { name: 'Delete file' })).toBeVisible();
+
+  page.once('dialog', async dialog => {
+    expect(dialog.message()).toBe('Delete README.md?');
+    await dialog.accept();
+  });
+  await page.getByRole('button', { name: 'Delete file' }).click();
+  await expect(page.locator('#file-modal-breadcrumb')).toContainText('tmp/work/project');
+  await expect(page.getByRole('link', { name: 'README.md' })).toHaveCount(0);
+
+  expect(calls).toEqual([
+    { endpoint: 'delete', body: { path: '/tmp/work/project/notes.txt' } },
+    { endpoint: 'delete', body: { path: '/tmp/work/project/README.md' } },
+  ]);
+});
+
+test('mobile file browser header icons match compact editor action sizing', async ({ page }) => {
+  await mockApp(page);
+  await page.setViewportSize({ width: 390, height: 720 });
+  await page.route('**/config/localfile-roots**', r => r.fulfill({
+    json: { roots: ['/tmp/work/project'] },
+  }));
+  await page.route(url => url.pathname === '/localfile', route => {
+    const path = new URL(route.request().url()).searchParams.get('path');
+    if (path === '/tmp/work/project') {
+      return route.fulfill({
+        contentType: 'application/json',
+        json: {
+          type: 'directory',
+          path,
+          entries: [
+            { name: 'README.md', path: '/tmp/work/project/README.md', is_dir: false, size: 12, mtime: 1 },
+          ],
+        },
+      });
+    }
+    return route.fulfill({ status: 200, contentType: 'text/plain', body: 'hello' });
+  });
+
+  await page.goto('/');
+  await page.locator('#hamburger-btn').click();
+  await page.locator('#hamburger-menu').getByRole('button', { name: 'Files' }).click();
+  await page.getByRole('link', { name: '/tmp/work/project' }).click();
+
+  const sizes = await page.evaluate(() => {
+    const sizeFor = label => {
+      const btn = document.querySelector(`#file-modal-header [aria-label="${label}"]`);
+      const icon = btn?.querySelector('.material-symbols-outlined');
+      const btnStyle = getComputedStyle(btn);
+      const iconStyle = getComputedStyle(icon);
+      return { width: btnStyle.width, height: btnStyle.height, fontSize: iconStyle.fontSize };
+    };
+    return {
+      create: sizeFor('Create file'),
+      upload: sizeFor('Upload file'),
+      save: sizeFor('Save'),
+    };
+  });
+  expect(sizes.create).toEqual({ width: '30px', height: '30px', fontSize: '20px' });
+  expect(sizes.upload).toEqual(sizes.create);
+  expect(sizes.save).toEqual(sizes.create);
 });
 
 test('Files menu falls back to squid_home when roots endpoint is missing', async ({ page }) => {
@@ -80,7 +326,7 @@ test('Files menu falls back to squid_home when roots endpoint is missing', async
   await page.goto('/');
   await page.getByRole('button', { name: 'Files' }).click();
 
-  await expect(page.locator('#file-modal')).toBeVisible();
+  await expect(page.locator('#file-modal-box')).toBeVisible();
   await expect(page.locator('#file-modal-breadcrumb')).toHaveText('Files');
   await expect(page.getByRole('link', { name: '/tmp/fresh/squid' })).toBeVisible();
 });
@@ -96,7 +342,7 @@ test('Files menu reports when opened against static UI without Squid API', async
   await page.goto('/');
   await page.getByRole('button', { name: 'Files' }).click();
 
-  await expect(page.locator('#file-modal')).toBeVisible();
+  await expect(page.locator('#file-modal-box')).toBeVisible();
   await expect(page.locator('#file-modal-body')).toContainText('Squid server API not available');
   await expect(page.locator('#file-modal-body')).not.toContainText('/tmp/squid');
 });
@@ -431,7 +677,7 @@ test('desktop burger only shows settings while mobile burger shows primary nav',
   await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Topics' })).toBeHidden();
   await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Files' })).toBeHidden();
   await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Agents' })).toBeHidden();
-  await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Analytics' })).toBeHidden();
+  await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Stats' })).toBeHidden();
 
   await page.setViewportSize({ width: 390, height: 720 });
   await page.locator('#hamburger-btn').click();
@@ -440,7 +686,7 @@ test('desktop burger only shows settings while mobile burger shows primary nav',
   await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Topics' })).toBeVisible();
   await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Files' })).toBeVisible();
   await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Agents' })).toBeVisible();
-  await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Analytics' })).toBeVisible();
+  await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Stats' })).toBeVisible();
   await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Settings' })).toBeVisible();
 });
 

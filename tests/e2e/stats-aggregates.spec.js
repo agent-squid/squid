@@ -76,6 +76,30 @@ test('weekly period floors the days filter at 14d', async ({ page }) => {
   await expect.poll(() => statsRequests.some(req => req.period === 'weekly' && req.days === '14')).toBe(true);
 });
 
+test('Overview turns chart falls back from null chart field to total_turns', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/stats?**', route => route.fulfill({
+    json: [{
+      period: '2026-07-10 10:00',
+      sessions: 3,
+      total_turns: 7,
+      chart_turns_sum: null,
+      input_tokens: 100,
+      output_tokens: 20,
+    }],
+  }));
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('#stats-preset-select').selectOption('__overall');
+  await expect(page.locator('#stats-content table')).toBeVisible();
+
+  await expect.poll(() => page.evaluate(() => {
+    const chart = window.Chart?.getChart(document.getElementById('stats-chart'));
+    return chart?.data?.datasets?.[0]?.data || null;
+  })).toEqual([7]);
+});
+
 test('anchor control sets a fixed end-of-window timestamp and can reset to Now', async ({ page }) => {
   await mockApp(page);
   const statsRequests = [];
@@ -307,8 +331,10 @@ test('stats measures are alphabetical and Turns links open responses', async ({ 
     'Cache Hit %',
     'Cache Read',
     'Cache Write',
+    'Cancelled',
     'Cost',
     'Duration',
+    'Errors',
     'New Input',
     'Quota Delta',
     'Sessions',

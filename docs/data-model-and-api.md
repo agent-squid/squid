@@ -1034,6 +1034,38 @@ Write a file under an allowed root. Records a before/after snapshot in
 
 **Response**: `{ "ok": true, "edit_id": int }`
 
+### POST /localfile/create-file
+
+Create an empty file under an allowed root. Fails if the path already exists.
+
+**Request body**: `{ "parent": "string", "name": "string" }`
+
+**Response**: `{ "ok": true, "path": "string" }`
+
+### POST /localfile/create-folder
+
+Create a directory under an allowed root. Fails if the path already exists.
+
+**Request body**: `{ "parent": "string", "name": "string" }`
+
+**Response**: `{ "ok": true, "path": "string" }`
+
+### POST /localfile/upload?parent={path}&name={filename}
+
+Upload a file under an allowed root using the raw request body as file bytes.
+Fails if the path already exists.
+
+**Response**: `{ "ok": true, "path": "string" }`
+
+### POST /localfile/rename
+
+Rename a file or directory within its current parent directory. Fails if the
+target path already exists.
+
+**Request body**: `{ "path": "string", "name": "string" }`
+
+**Response**: `{ "ok": true, "path": "string" }`
+
 ### GET /localfile/history?path={path}
 
 **Response**: `{ "history": [...] }` — edit history rows for a path, from `file_edit_history`.

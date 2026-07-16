@@ -76,6 +76,36 @@ def test_aggregated_stats_includes_requested_chart_percentile(tmp_path, monkeypa
     assert rows[0]["chart_tokens_in_p50"] == 20
 
 
+def test_aggregated_stats_includes_count_chart_fields(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        conn.executemany(
+            """INSERT INTO session_stats(
+                   session_id, topic, agent, input_tokens, output_tokens,
+                   cache_read_tokens, cache_write_tokens, cost_usd, created_at
+               ) VALUES (?, 'squid', 'codex', 0, 0, 0, 0, 0, ?)""",
+            [
+                ("s1", "2026-07-10T10:00:00Z"),
+                ("s2", "2026-07-10T10:10:00Z"),
+            ],
+        )
+
+    rows = stats_db.get_aggregated_stats(
+        period="daily",
+        days=0,
+        chart_series=[
+            {"metric": "turns", "agg": "sum"},
+            {"metric": "sessions", "agg": "sum"},
+        ],
+    )
+
+    assert rows[0]["total_turns"] == 2
+    assert rows[0]["chart_turns_sum"] == 2
+    assert rows[0]["chart_sessions_sum"] == 2
+
+
 def test_aggregated_stats_returns_average_duration_and_duration_chart_aggs(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

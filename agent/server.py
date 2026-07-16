@@ -272,6 +272,20 @@ class LocalfileWriteRequest(BaseModel):
     content: str
 
 
+class LocalfileCreateRequest(BaseModel):
+    parent: str = Field(..., min_length=1)
+    name: str = Field(..., min_length=1)
+
+
+class LocalfileRenameRequest(BaseModel):
+    path: str = Field(..., min_length=1)
+    name: str = Field(..., min_length=1)
+
+
+class LocalfileDeleteRequest(BaseModel):
+    path: str = Field(..., min_length=1)
+
+
 class LocalfileRevertEditRequest(BaseModel):
     edit_id: int
 
@@ -1905,6 +1919,19 @@ _LOCALFILE_TEXT_MIME_BY_SUFFIX = {
     ".markdown": "text/markdown",
 }
 
+def _localfile_allowed(path: Path) -> bool:
+    return any(path.is_relative_to(root) for root in _LOCALFILE_ROOTS)
+
+def _localfile_child(parent: Path, name: str) -> Union[Path, JSONResponse]:
+    if not name or name in {".", ".."} or Path(name).name != name:
+        return JSONResponse({"error": "invalid name"}, status_code=400)
+    child = (parent / name).resolve()
+    if child.parent != parent:
+        return JSONResponse({"error": "invalid name"}, status_code=400)
+    if not _localfile_allowed(child):
+        return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
+    return child
+
 def _looks_like_text_file(path: Path, sample_size: int = 65536) -> bool:
     try:
         sample = path.read_bytes()[:sample_size]
@@ -1934,7 +1961,7 @@ async def serve_local_file(path: str, request: Request, render: bool = False):
     if not _LOCALFILE_ROOTS:
         return JSONResponse({"error": "localfile not enabled (set server.localfile_roots in ~/.squid/squid.yaml)"}, status_code=403)
     p = Path(path).expanduser().resolve()
-    if not any(p.is_relative_to(root) for root in _LOCALFILE_ROOTS):
+    if not _localfile_allowed(p):
         return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
     if not p.exists():
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -1981,7 +2008,7 @@ async def write_local_file(req: LocalfileWriteRequest, request: Request):
     if not _LOCALFILE_ROOTS:
         return JSONResponse({"error": "localfile not enabled"}, status_code=403)
     p = Path(req.path).expanduser().resolve()
-    if not any(p.is_relative_to(root) for root in _LOCALFILE_ROOTS):
+    if not _localfile_allowed(p):
         return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
     if not p.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -1991,6 +2018,103 @@ async def write_local_file(req: LocalfileWriteRequest, request: Request):
     return JSONResponse({"ok": True, "edit_id": edit_id})
 
 
+@app.post("/localfile/create-file")
+async def create_local_file(req: LocalfileCreateRequest, request: Request):
+    if not _same_origin(request):
+        return JSONResponse({"error": "cross-origin writes are not allowed"}, status_code=403)
+    if not _LOCALFILE_ROOTS:
+        return JSONResponse({"error": "localfile not enabled"}, status_code=403)
+    parent = Path(req.parent).expanduser().resolve()
+    if not _localfile_allowed(parent):
+        return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
+    if not parent.is_dir():
+        return JSONResponse({"error": "parent is not a directory"}, status_code=400)
+    child = _localfile_child(parent, req.name.strip())
+    if isinstance(child, JSONResponse):
+        return child
+    if child.exists():
+        return JSONResponse({"error": "path already exists"}, status_code=409)
+    child.write_text("")
+    return JSONResponse({"ok": True, "path": str(child)})
+
+
+@app.post("/localfile/create-folder")
+async def create_local_folder(req: LocalfileCreateRequest, request: Request):
+    if not _same_origin(request):
+        return JSONResponse({"error": "cross-origin writes are not allowed"}, status_code=403)
+    if not _LOCALFILE_ROOTS:
+        return JSONResponse({"error": "localfile not enabled"}, status_code=403)
+    parent = Path(req.parent).expanduser().resolve()
+    if not _localfile_allowed(parent):
+        return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
+    if not parent.is_dir():
+        return JSONResponse({"error": "parent is not a directory"}, status_code=400)
+    child = _localfile_child(parent, req.name.strip())
+    if isinstance(child, JSONResponse):
+        return child
+    if child.exists():
+        return JSONResponse({"error": "path already exists"}, status_code=409)
+    child.mkdir()
+    return JSONResponse({"ok": True, "path": str(child)})
+
+
+@app.post("/localfile/upload")
+async def upload_local_file(parent: str, name: str, request: Request):
+    if not _same_origin(request):
+        return JSONResponse({"error": "cross-origin writes are not allowed"}, status_code=403)
+    if not _LOCALFILE_ROOTS:
+        return JSONResponse({"error": "localfile not enabled"}, status_code=403)
+    parent_path = Path(parent).expanduser().resolve()
+    if not _localfile_allowed(parent_path):
+        return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
+    if not parent_path.is_dir():
+        return JSONResponse({"error": "parent is not a directory"}, status_code=400)
+    child = _localfile_child(parent_path, name.strip())
+    if isinstance(child, JSONResponse):
+        return child
+    if child.exists():
+        return JSONResponse({"error": "path already exists"}, status_code=409)
+    child.write_bytes(await request.body())
+    return JSONResponse({"ok": True, "path": str(child)})
+
+
+@app.post("/localfile/rename")
+async def rename_local_path(req: LocalfileRenameRequest, request: Request):
+    if not _same_origin(request):
+        return JSONResponse({"error": "cross-origin writes are not allowed"}, status_code=403)
+    if not _LOCALFILE_ROOTS:
+        return JSONResponse({"error": "localfile not enabled"}, status_code=403)
+    p = Path(req.path).expanduser().resolve()
+    if not _localfile_allowed(p):
+        return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
+    if not p.exists():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    target = _localfile_child(p.parent, req.name.strip())
+    if isinstance(target, JSONResponse):
+        return target
+    if target.exists():
+        return JSONResponse({"error": "path already exists"}, status_code=409)
+    p.rename(target)
+    return JSONResponse({"ok": True, "path": str(target)})
+
+
+@app.post("/localfile/delete")
+async def delete_local_file(req: LocalfileDeleteRequest, request: Request):
+    if not _same_origin(request):
+        return JSONResponse({"error": "cross-origin writes are not allowed"}, status_code=403)
+    if not _LOCALFILE_ROOTS:
+        return JSONResponse({"error": "localfile not enabled"}, status_code=403)
+    p = Path(req.path).expanduser().resolve()
+    if not _localfile_allowed(p):
+        return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
+    if not p.exists():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if not p.is_file():
+        return JSONResponse({"error": "not a file"}, status_code=400)
+    p.unlink()
+    return JSONResponse({"ok": True, "path": str(p)})
+
+
 @app.get("/localfile/history")
 async def local_file_history(path: str, request: Request):
     if not _same_origin(request):
@@ -1998,7 +2122,7 @@ async def local_file_history(path: str, request: Request):
     if not _LOCALFILE_ROOTS:
         return JSONResponse({"error": "localfile not enabled"}, status_code=403)
     p = Path(path).expanduser().resolve()
-    if not any(p.is_relative_to(root) for root in _LOCALFILE_ROOTS):
+    if not _localfile_allowed(p):
         return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
     rows = await asyncio.to_thread(get_file_edit_history, str(p))
     return JSONResponse({"history": rows})
@@ -2014,7 +2138,7 @@ async def revert_file_edit(req: LocalfileRevertEditRequest, request: Request):
     if not edit:
         return JSONResponse({"error": "edit not found"}, status_code=404)
     p = Path(edit["file_path"]).resolve()
-    if not any(p.is_relative_to(root) for root in _LOCALFILE_ROOTS):
+    if not _localfile_allowed(p):
         return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
     before = p.read_text(errors="replace")
     p.write_text(edit["before"])

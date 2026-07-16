@@ -1856,6 +1856,13 @@ def _stats_finalize_aggregate(agg: dict, chart_series: Optional[list[dict]] = No
                 result[_stats_chart_field(metric, agg_name)] = (
                     (hit.get("hits", 0) / total) * 100 if total > 0 else None
                 )
+            elif agg_name == "sum" and metric in {"turns", "sessions", "cancelled_turns", "error_turns"}:
+                result[_stats_chart_field(metric, agg_name)] = {
+                    "turns": result["total_turns"],
+                    "sessions": result["sessions"],
+                    "cancelled_turns": result["cancelled_turns"],
+                    "error_turns": result["error_turns"],
+                }[metric]
             else:
                 result[_stats_chart_field(metric, agg_name)] = _aggregate_values(
                     agg["chart_values"].get(metric, []),

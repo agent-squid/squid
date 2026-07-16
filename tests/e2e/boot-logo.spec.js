@@ -52,8 +52,16 @@ async function mockBoot(page, variant, opts = {}) {
       },
     },
   }));
-  // Mock /stats — used by resolveInsightMeasures
-  await page.route('**/stats**', route => route.fulfill({ json: statsRows }));
+  // Mock /stats — used by resolveInsightMeasures. resolveInsightMeasures now
+  // issues a separate request per window (current: no anchor, previous:
+  // anchor=N-days-ago) instead of one combined range split in half, so route
+  // by presence of `anchor` to hand back the right slice of statsRows
+  // (index 0 = current period, index 1 = previous period).
+  await page.route('**/stats**', route => {
+    const url = new URL(route.request().url());
+    const rows = url.searchParams.has('anchor') ? statsRows.slice(1) : statsRows.slice(0, 1);
+    route.fulfill({ json: rows });
+  });
   await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
   await page.route('**/quota**', route => route.fulfill({ json: {} }));
   await page.route('**/topics', route => route.fulfill({ json: [] }));
