@@ -1,6 +1,9 @@
 # Restart required for all changes: bin/start.sh --restart
 
 server:
+  # Must stay loopback-only. Do not set this to 0.0.0.0, a public IP, LAN IP,
+  # or Tailscale IP; Squid rejects non-loopback hosts at startup and in the
+  # config editor.
   host: "127.0.0.1"
   port: 8000
   # Additional directories the file viewer may serve from. ~/.squid is always allowed.

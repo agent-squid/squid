@@ -276,6 +276,9 @@ test('session send marks memory and pinned context as sending while request is p
 
   await expect(page.locator('#pin-count')).toHaveText('2');
   await expect(page.locator('#pin-btn')).toHaveClass(/has-context-pending/);
+  await expect(page.locator('#pin-count')).toHaveCSS('animation-name', 'pin-badge-pending-pulse');
+  await expect(page.locator('#pin-count')).toHaveCSS('animation-duration', '1.8s');
+  await expect(page.locator('#pin-count')).toHaveCSS('transform', 'none');
   await page.click('#pin-btn');
   await expect(page.locator('.memory-item-status')).toContainText('sending');
   await expect(page.locator('.pin-item-status')).toContainText('sending');

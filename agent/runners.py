@@ -1335,6 +1335,9 @@ async def run_cursor(
         "--stream-partial-output",
         "--trust",
     ]
+    has_workspace_arg = any(arg == "--workspace" or arg.startswith("--workspace=") for arg in backend_args)
+    if cwd and not has_workspace_arg:
+        cmd += ["--workspace", cwd]
     cmd += list(backend_args)
     if resume_session_id:
         cmd += ["--resume", resume_session_id]
@@ -1535,6 +1538,9 @@ async def run_opencode(
         )
 
     cmd = [OPENCODE_PATH, "run", "--format", "json", "--dangerously-skip-permissions"]
+    has_dir_arg = any(arg == "--dir" or arg.startswith("--dir=") for arg in backend_args)
+    if cwd and not has_dir_arg:
+        cmd += ["--dir", cwd]
     cmd += list(backend_args)
     provider = (backend_settings or {}).get("provider")
     if model:

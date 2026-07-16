@@ -34,6 +34,22 @@ test('topbar quota gauge keeps its neutral original treatment', async ({ page })
   await expect(page.locator('#quota-creds-popup')).toHaveClass(/open/);
 });
 
+test('credential auto-detect notes that remote browser cookies are unavailable', async ({ page }) => {
+  await mockShell(page);
+  await page.route('**/quota/provider/*', route => route.fulfill({
+    json: { status: 'ok', raw: 42, used_percent: 42 },
+  }));
+
+  await page.goto('/');
+  await page.locator('#quota-display').click();
+  await expect(page.locator('#quota-creds-popup')).toContainText('Runs on this Squid server machine only');
+  await expect(page.locator('#quota-creds-popup')).toContainText('remote phone/tablet browsers cannot share their cookies');
+
+  await page.evaluate(() => document.getElementById('codex-creds-popup').classList.add('open'));
+  await expect(page.locator('#codex-creds-popup')).toContainText('Runs on this Squid server machine only');
+  await expect(page.locator('#codex-creds-popup')).toContainText('remote phone/tablet browsers cannot share their cookies');
+});
+
 test('topbar quota gauge is chat-only while status keeps quota available', async ({ page }) => {
   await mockShell(page);
   await page.route('**/quota/provider/*', route => route.fulfill({

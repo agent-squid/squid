@@ -457,6 +457,7 @@ function initMobileViewNavigation() {
   if (history.replaceState) history.replaceState({ squidView: currentView }, '', location.href);
 
   window.addEventListener('popstate', e => {
+    if (_fvHandlePopState?.(e)) return;
     const name = e.state?.squidView || 'chat';
     if (_mobileViewHistorySkip > 0) {
       _mobileViewHistorySkip = 0;
@@ -694,22 +695,32 @@ const chipFilterBtn = document.getElementById('chip-filter-btn');
 const chipSearchBtn = document.getElementById('chip-search-btn');
 const chipClearBtn = document.getElementById('chip-clear-btn');
 const chipStashBtn = document.getElementById('chip-stash-btn');
-let stickyChip = null; // { topic, agent, adhoc } | null
+let stickyChip = null; // { topic, agent, adhoc, chainTarget?, chainTargetFresh?, route? } | null
 let editingExpandedSlug = false;
 let expandedSlugEditToken = 0;
 let composerActionTitleSeq = 0;
 
-function setTopicChip(topic, agent, adhoc = false, lookback = 0) {
+function _chainRouteText(topic, originAgent, targetAgent, targetFresh = false, originFresh = false) {
+  return `#${topic}@${originAgent}${originFresh ? '!' : ''}>@${targetAgent}${targetFresh ? '!' : ''}`;
+}
+
+function setTopicChip(topic, agent, adhoc = false, lookback = 0, opts = {}) {
   editingExpandedSlug = false;
   expandedSlugEditToken++;
-  stickyChip = { topic, agent, adhoc, lookback };
+  const chainTarget = opts.chainTarget || null;
+  const chainTargetFresh = !!opts.chainTargetFresh;
+  const suppressTurnCount = !!opts.suppressTurnCount;
+  const route = chainTarget && agent ? _chainRouteText(topic, agent, chainTarget, chainTargetFresh, adhoc) : null;
+  stickyChip = { topic, agent, adhoc, lookback, suppressTurnCount, ...(route ? { route, chainTarget, chainTargetFresh } : {}) };
   _advisoryTurnCount = 0;
   // Don't persist a sessioned default chip — #default is adhoc-first; session there is ephemeral
   if (topic !== 'default' || adhoc) {
-    localStorage.setItem('squid_sticky_chip', JSON.stringify({ topic, agent, adhoc, lookback }));
+    const { suppressTurnCount: _omit, ...storedChip } = stickyChip;
+    localStorage.setItem('squid_sticky_chip', JSON.stringify(storedChip));
   }
 
   topicChipEl.innerHTML = '';
+  topicChipEl.classList.toggle('route-chain', !!route);
   const tSpan = document.createElement('span');
   tSpan.className = 'chip-topic';
   tSpan.textContent = '#' + topic;
@@ -721,13 +732,37 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0) {
     setAgentSlugColor(aSpan, agent);
     topicChipEl.appendChild(aSpan);
   }
-  if (adhoc) {
+  if (route) {
+    if (adhoc) {
+      const originFreshSpan = document.createElement('span');
+      originFreshSpan.className = 'chip-adhoc chip-chain-origin-fresh';
+      originFreshSpan.textContent = '!';
+      if (agent) setAgentSlugColor(originFreshSpan, agent);
+      topicChipEl.appendChild(originFreshSpan);
+    }
+    const arrowSpan = document.createElement('span');
+    arrowSpan.className = 'chip-route-arrow';
+    arrowSpan.textContent = '>';
+    topicChipEl.appendChild(arrowSpan);
+    const targetSpan = document.createElement('span');
+    targetSpan.className = 'chip-agent chip-chain-target';
+    targetSpan.textContent = '@' + chainTarget;
+    setAgentSlugColor(targetSpan, chainTarget);
+    topicChipEl.appendChild(targetSpan);
+    if (chainTargetFresh) {
+      const freshSpan = document.createElement('span');
+      freshSpan.className = 'chip-adhoc chip-chain-fresh';
+      freshSpan.textContent = '!';
+      setAgentSlugColor(freshSpan, chainTarget);
+      topicChipEl.appendChild(freshSpan);
+    }
+  } else if (adhoc) {
     const adSpan = document.createElement('span');
     adSpan.className = 'chip-adhoc';
     adSpan.textContent = lookback > 0 ? `!${lookback}` : '!';
     if (agent) setAgentSlugColor(adSpan, agent);
     topicChipEl.appendChild(adSpan);
-  } else {
+  } else if (!suppressTurnCount) {
     clearTimeout(_chipTurnCountTimer);
     _chipTurnCountTimer = null;
     const sid = _sessionIds[`${topic}@${agent || '_'}`];
@@ -737,6 +772,10 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0) {
     } else {
       _scheduleChipTurnCountUpdate(topic, agent);
     }
+  } else {
+    clearTimeout(_chipTurnCountTimer);
+    _chipTurnCountTimer = null;
+    _renderChipTurnCount(0);
   }
   topicChipEl.classList.add('visible');
   topicChipEl.classList.remove('needs-agent');
@@ -753,7 +792,7 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0) {
 function clearTopicChip() {
   stickyChip = null;
   localStorage.removeItem('squid_sticky_chip');
-  topicChipEl.classList.remove('visible', 'needs-agent');
+  topicChipEl.classList.remove('visible', 'needs-agent', 'route-chain');
   input.placeholder = '#topic or #topic@agent message…';
   updateComposerActionTitles();
   updateActiveQuotaGauge();
@@ -763,6 +802,7 @@ function clearTopicChip() {
 
 function _renderChipTurnCount(count) {
   let tcSpan = topicChipEl.querySelector('.chip-turn-count');
+  if (stickyChip?.suppressTurnCount) count = 0;
   if (count <= 0) { tcSpan?.remove(); return; }
   if (!tcSpan) {
     tcSpan = document.createElement('span');
@@ -776,7 +816,7 @@ function _renderChipTurnCount(count) {
 
 function _updateChipTurnCount(topic, agent, sessionId, count) {
   if (sessionId && count > 0) _sessionTurnCounts[sessionId] = count;
-  if (!stickyChip || stickyChip.adhoc || stickyChip.topic !== topic || (stickyChip.agent || null) !== (agent || null)) return;
+  if (!stickyChip || stickyChip.adhoc || stickyChip.suppressTurnCount || stickyChip.topic !== topic || (stickyChip.agent || null) !== (agent || null)) return;
   _renderChipTurnCount(count);
 }
 
@@ -786,7 +826,7 @@ function _scheduleChipTurnCountUpdate(topic, agent) {
   clearTimeout(_chipTurnCountTimer);
   _chipTurnCountTimer = setTimeout(() => {
     _chipTurnCountTimer = null;
-    if (!stickyChip || stickyChip.adhoc || stickyChip.topic !== topic || (stickyChip.agent || null) !== (agent || null)) return;
+    if (!stickyChip || stickyChip.adhoc || stickyChip.suppressTurnCount || stickyChip.topic !== topic || (stickyChip.agent || null) !== (agent || null)) return;
     const sid = _sessionIds[`${topic}@${agent || '_'}`];
     if (!sid) return;
     const count = _sessionTurnCounts[sid] || 0;
@@ -797,9 +837,11 @@ function _scheduleChipTurnCountUpdate(topic, agent) {
 topicChipEl.addEventListener('click', () => {
   if (!stickyChip) return;
   const prompt = input.value;
-  let tag = `#${stickyChip.topic}`;
-  if (stickyChip.agent) tag += `@${stickyChip.agent}`;
-  if (stickyChip.adhoc) tag += `!${stickyChip.lookback || ''}`;
+  let tag = stickyChip.route || `#${stickyChip.topic}`;
+  if (!stickyChip.route) {
+    if (stickyChip.agent) tag += `@${stickyChip.agent}`;
+    if (stickyChip.adhoc) tag += `!${stickyChip.lookback || ''}`;
+  }
   clearTopicChip();
   editingExpandedSlug = true;
   expandedSlugEditToken++;
@@ -810,6 +852,7 @@ topicChipEl.addEventListener('click', () => {
 });
 
 function routeScopeText(route) {
+  if (route?.route) return route.route;
   const topic = route?.topic || 'default';
   let scope = `#${topic}`;
   if (route?.agent) {
@@ -839,7 +882,13 @@ function activeHistoryFilterScope() {
 async function resolveEffectiveComposerRoute() {
   if (input.value.trimStart().startsWith('#')) {
     const parsed = parseInput(input.value);
-    return { topic: parsed.topic || 'default', agent: parsed.agent || null, adhoc: !!parsed.adhoc, lookback: parsed.lookback || 0 };
+    return {
+      topic: parsed.topic || 'default',
+      agent: parsed.agent || null,
+      adhoc: !!parsed.adhoc,
+      lookback: parsed.lookback || 0,
+      ...(parsed.route ? { route: parsed.route, chainTarget: parsed.chainTarget, chainTargetFresh: parsed.chainTargetFresh } : {}),
+    };
   }
   if (stickyChip) return { ...stickyChip };
 
@@ -919,7 +968,7 @@ chipStashBtn.addEventListener('click', async e => {
     return;
   }
   const route = await resolveEffectiveComposerRoute();
-  const entry = formatPromptHistoryEntry(route.topic, route.agent, route.adhoc, route.lookback || 0, message);
+  const entry = route.route ? `${route.route} ${message}` : formatPromptHistoryEntry(route.topic, route.agent, route.adhoc, route.lookback || 0, message);
   recordPrompt(entry);
   saveStashedPrompt(entry);
   input.value = '';
@@ -934,7 +983,34 @@ chipStashBtn.addEventListener('click', async e => {
 function parseInput(text) {
   if (stickyChip && !text.startsWith('#')) {
     const adhoc = !!stickyChip.adhoc;
-    return { topic: stickyChip.topic, agent: stickyChip.agent, adhoc, lookback: stickyChip.lookback || 0, message: text.trim() || text };
+    return {
+      topic: stickyChip.topic,
+      agent: stickyChip.agent,
+      adhoc,
+      lookback: stickyChip.lookback || 0,
+      ...(stickyChip.route ? {
+        route: stickyChip.route,
+        chainTarget: stickyChip.chainTarget,
+        chainTargetFresh: stickyChip.chainTargetFresh,
+      } : {}),
+      message: text.trim() || text,
+    };
+  }
+  const mc = text.match(/^(#(\w+)@(\w+)(!)?>@(\w+)(!)?)\s+([\s\S]*)$/);
+  if (mc && mc[7].trim()) {
+    const originFresh = !!mc[4];
+    const targetFresh = !!mc[6];
+    const targetAgent = mc[5];
+    return {
+      topic: mc[2].toLowerCase(),
+      agent: mc[3],
+      adhoc: originFresh,
+      lookback: 0,
+      route: _chainRouteText(mc[2].toLowerCase(), mc[3], targetAgent, targetFresh, originFresh),
+      chainTarget: targetAgent,
+      chainTargetFresh: targetFresh,
+      message: mc[7].trim(),
+    };
   }
   // adhoc: #topic!N or #topic@agent!N (N optional, defaults to 0 = no lookback)
   const ma = text.match(/^#(\w+)(?:@(\w+))?!(\d*)\s+([\s\S]*)$/);
@@ -948,6 +1024,24 @@ function parseInput(text) {
   }
   // bare topic switch: #topic, #topic@agent, #topic!N, or #topic@agent!N with no message
   // switches chip only.
+  const mcb = text.match(/^#(\w+)@(\w+)(!)?>@(\w+)(!)?$/);
+  if (mcb) {
+    const topic = mcb[1].toLowerCase();
+    const agent = mcb[2];
+    const chainOriginFresh = !!mcb[3];
+    const chainTarget = mcb[4];
+    const chainTargetFresh = !!mcb[5];
+    return {
+      topic,
+      agent,
+      adhoc: chainOriginFresh,
+      lookback: 0,
+      route: _chainRouteText(topic, agent, chainTarget, chainTargetFresh, chainOriginFresh),
+      chainTarget,
+      chainTargetFresh,
+      message: '',
+    };
+  }
   const mb = text.match(/^#(\w+)(?:@(\w+))?(?:!(\d*))?$/);
   if (mb) {
     return {
@@ -1104,7 +1198,7 @@ function collectLiveGroupElements() {
   document.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)').forEach(thinking => {
     group.add(thinking);
     let el = thinking.previousElementSibling;
-    while (el && (el.classList.contains('msg-time') || (el.classList.contains('msg') && el.classList.contains('user')))) {
+    while (el && isLiveGroupPreviousElement(el)) {
       group.add(el);
       el = el.previousElementSibling;
     }
@@ -1112,11 +1206,18 @@ function collectLiveGroupElements() {
   return group;
 }
 
+function isLiveGroupPreviousElement(el) {
+  return el.classList.contains('msg-time')
+    || el.classList.contains('route-chain-marker')
+    || el.id === 'code-roots-prompt'
+    || (el.classList.contains('msg') && el.classList.contains('user'));
+}
+
 function setLiveGroupHidden(hidden) {
   document.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)').forEach(thinking => {
     const group = [thinking];
     let el = thinking.previousElementSibling;
-    while (el && (el.classList.contains('msg-time') || (el.classList.contains('msg') && el.classList.contains('user')))) {
+    while (el && isLiveGroupPreviousElement(el)) {
       group.push(el);
       el = el.previousElementSibling;
     }
@@ -1141,7 +1242,7 @@ function reloadHistory(filter = {}) {
   document.querySelectorAll('.history-item, .boot-banner, .tool-block-history').forEach(el => el.remove());
   // Remove live (non-history) messages too — completed ones are in the DB and will reload
   const preserveForLive = collectLiveGroupElements();
-  document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats').forEach(el => {
+  document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .route-chain-marker').forEach(el => {
     if (!preserveForLive.has(el)) el.remove();
   });
   setLiveGroupHidden(hasHistoryFilterScope());
@@ -1677,7 +1778,7 @@ function formatPromptHistoryEntry(topic, agent, adhoc, _lookback, message) {
 
 function splitPromptHistoryEntry(entry) {
   const text = String(entry || '').trim();
-  const match = text.match(/^(#\w+(?:@\w+)?(?:!\d*)?)\s+([\s\S]+)$/);
+  const match = text.match(/^(#\w+@\w+!?>@\w+!?|#\w+(?:@\w+)?(?:!\d*)?)\s+([\s\S]+)$/);
   if (!match) return { route: '', prompt: text };
   return { route: match[1], prompt: match[2].trim() };
 }
@@ -1696,6 +1797,8 @@ function promptHistoryRoute(topic, agent, adhoc) {
 }
 
 function normalizePromptHistoryRoute(route) {
+  const chain = String(route || '').match(/^#(\w+)@(\w+)(!)?>@(\w+)(!)?$/);
+  if (chain) return _chainRouteText(chain[1].toLowerCase(), chain[2], chain[4], !!chain[5], !!chain[3]);
   const match = String(route || '').match(/^#(\w+)(?:@(\w+))?(!)?\d*$/);
   if (!match) return '';
   return promptHistoryRoute(match[1].toLowerCase(), match[2] || null, !!match[3]);
@@ -1704,8 +1807,15 @@ function normalizePromptHistoryRoute(route) {
 function applyPromptHistoryEntry(entry) {
   const { route, prompt } = splitPromptHistoryEntry(entry);
   if (route) {
+    const chain = route.match(/^#(\w+)@(\w+)(!)?>@(\w+)(!)?$/);
+    if (chain) {
+      setTopicChip(chain[1].toLowerCase(), chain[2], !!chain[3], 0, {
+        chainTarget: chain[4],
+        chainTargetFresh: !!chain[5],
+      });
+    }
     const match = route.match(/^#(\w+)(?:@(\w+))?(!(?:(\d+))?)?$/);
-    if (match) {
+    if (!chain && match) {
       setTopicChip(
         match[1].toLowerCase(),
         match[2] || null,
@@ -1720,11 +1830,13 @@ function applyPromptHistoryEntry(entry) {
 }
 
 function routeFromParsedInput(parsed) {
+  if (parsed.route) return parsed.route;
   return promptHistoryRoute(parsed.topic, parsed.agent, parsed.adhoc);
 }
 
 function currentPromptHistoryRoute() {
   if (!stickyChip) return '';
+  if (stickyChip.route) return stickyChip.route;
   return promptHistoryRoute(stickyChip.topic, stickyChip.agent, stickyChip.adhoc);
 }
 
@@ -1771,6 +1883,18 @@ function promptHistoryAutocompleteItems(entries) {
 }
 
 function parseHistoryRouteTarget(route) {
+  const chain = String(route || '').match(/^#(\w+)@(\w+)(!)?>@(\w+)(!)?$/);
+  if (chain) {
+    return {
+      topic: chain[1].toLowerCase(),
+      agent: chain[2],
+      adhoc: !!chain[3],
+      lookback: 0,
+      route: _chainRouteText(chain[1].toLowerCase(), chain[2], chain[4], !!chain[5], !!chain[3]),
+      chainTarget: chain[4],
+      chainTargetFresh: !!chain[5],
+    };
+  }
   const match = String(route || '').match(/^#(\w+)(?:@(\w+))?(!)?$/);
   if (!match) return null;
   return {
@@ -1783,7 +1907,10 @@ function parseHistoryRouteTarget(route) {
 
 function applyRouteTarget(routeTarget) {
   if (!routeTarget) return;
-  setTopicChip(routeTarget.topic, routeTarget.agent, routeTarget.adhoc, routeTarget.lookback || 0);
+  setTopicChip(routeTarget.topic, routeTarget.agent, routeTarget.adhoc, routeTarget.lookback || 0, {
+    chainTarget: routeTarget.chainTarget,
+    chainTargetFresh: routeTarget.chainTargetFresh,
+  });
   input.value = '';
   input.setSelectionRange(0, 0);
   resizeComposer();
@@ -1823,7 +1950,7 @@ function routeHistoryAutocompleteItems(currentRoute = '') {
 function composerHasOnlyRoute() {
   const value = input.value.trim();
   if (!value) return true;
-  return /^#\w+(?:@\w+)?(?:!\d*)?$/.test(value);
+  return /^#\w+(?:@\w+)?(?:!\d*)?$/.test(value) || /^#\w+@\w+!?>@\w+!?$/.test(value);
 }
 
 function composerRouteForRouteHistory() {
@@ -2215,12 +2342,12 @@ form.addEventListener('submit', async (e) => {
   const text = input.value.trim();
   if (!text) return;
   commandEditRestore = null;
-  const { topic, agent, adhoc, lookback, message } = parseInput(text);
+  const { topic, agent, adhoc, lookback, route, chainTarget, chainTargetFresh, message } = parseInput(text);
   if (!message) {
     input.value = '';
     resizeComposer();
     hideAutocomplete();
-    setTopicChip(topic, agent, adhoc, lookback);
+    setTopicChip(topic, agent, adhoc, lookback, { chainTarget, chainTargetFresh });
     return;
   }
   const cmd = parseCommand(message);
@@ -2238,7 +2365,7 @@ form.addEventListener('submit', async (e) => {
     await handleCommand(cmd, topic, agent, adhoc, lookback);
     // Re-set chip after topic-scoped commands so next message stays in context
     if (['clear', 'stop', 'stopall', 'deq'].includes(cmd.command) && (topic !== 'default' || agent)) {
-      setTopicChip(topic, agent, adhoc, lookback);
+      setTopicChip(topic, agent, adhoc, lookback, { chainTarget, chainTargetFresh });
     }
     return;
   }
@@ -2248,7 +2375,7 @@ form.addEventListener('submit', async (e) => {
   if (searchActive) clearSearch();
   invalidateTopicsCache();
   invalidateTopicsManageCache();
-  recordPrompt(formatPromptHistoryEntry(topic, agent, adhoc, lookback, message));
+  recordPrompt(route ? `${route} ${message}` : formatPromptHistoryEntry(topic, agent, adhoc, lookback, message));
   localStorage.removeItem('squid_draft');
   sendMessage(text);
 });
@@ -2364,6 +2491,17 @@ function refreshContextIndicators({ force = false } = {}) {
 }
 
 async function _maybePromoteSlug(val) {
+  const chain = val.match(/^#(\w+)@(\w+)(!)?>@(\w+)(!)? $/);
+  if (chain) {
+    setTopicChip(chain[1].toLowerCase(), chain[2], !!chain[3], 0, {
+      chainTarget: chain[4],
+      chainTargetFresh: !!chain[5],
+    });
+    input.value = '';
+    hideAutocomplete();
+    resizeComposer();
+    return;
+  }
   const m = val.match(/^#(\w+)(?:@(\w+))?(!\d*)? $/);
   if (!m) return;
   const topic = m[1].toLowerCase();
@@ -2392,6 +2530,22 @@ async function _maybeCollapseExpandedSlug(force = false, allowCompletedPrompt = 
   if (!editingExpandedSlug && !allowCompletedPrompt) return;
 
   const val = input.value;
+  const chain = val.match(/^#(\w+)@(\w+)(!)?>@(\w+)(!)? ([\s\S]+)$/);
+  if (chain) {
+    const prompt = chain[6];
+    const promptStart = val.length - prompt.length;
+    if (!force && (input.selectionStart < promptStart || input.selectionEnd < promptStart)) return;
+    const selectionStart = Math.max(0, input.selectionStart - promptStart);
+    const selectionEnd = Math.max(0, input.selectionEnd - promptStart);
+    setTopicChip(chain[1].toLowerCase(), chain[2], !!chain[3], 0, {
+      chainTarget: chain[4],
+      chainTargetFresh: !!chain[5],
+    });
+    input.value = prompt;
+    input.setSelectionRange(selectionStart, selectionEnd);
+    input.dispatchEvent(new Event('input'));
+    return;
+  }
   const m = val.match(/^#(\w+)(?:@(\w+))?(!(\d*))? ([\s\S]+)$/);
   if (!m) return;
 
@@ -2432,6 +2586,7 @@ input.addEventListener('input', () => {
   if (!input.value.trimStart().startsWith('#')) refreshContextIndicators();
   updateActiveQuotaGauge();
   _maybePromoteSlug(input.value);
+  _maybeCollapseExpandedSlug(false, true);
   clearTimeout(_draftSaveTimer);
   _draftSaveTimer = setTimeout(() => localStorage.setItem('squid_draft', input.value), 300);
   if (promptHistoryPos !== -1 && input.value !== promptHistory[promptHistoryPos]) {
@@ -2471,8 +2626,19 @@ function semanticRouteBackspace() {
     const before = route.slice(0, caret);
     const after = route.slice(caret);
     const agentMatch = before.match(/^(#\w+@)\w+$/);
+    const chainTargetMatch = before.match(/^(#\w+@\w+!?>@)\w+$/);
+    const chainOriginMatch = before.match(/^(#\w+@)\w+$/);
 
-    if (agentMatch && (caret === routeEnd || after.startsWith('!'))) {
+    if (chainTargetMatch && (caret === routeEnd || after.startsWith('!'))) {
+      nextRoute = chainTargetMatch[1] + after;
+      nextCaret = chainTargetMatch[1].length;
+    } else if (before.endsWith('@') && /^#\w+@\w+!?>@$/.test(before) && (caret === routeEnd || after.startsWith('!'))) {
+      nextRoute = before.slice(0, -2) + after;
+      nextCaret = before.length - 2;
+    } else if (chainOriginMatch && (after.startsWith('>@') || after.startsWith('!>@'))) {
+      nextRoute = chainOriginMatch[1] + after;
+      nextCaret = chainOriginMatch[1].length;
+    } else if (agentMatch && (caret === routeEnd || after.startsWith('!'))) {
       nextRoute = agentMatch[1] + after;
       nextCaret = agentMatch[1].length;
     } else if (before.endsWith('@') && /^#\w+@$/.test(before) && (caret === routeEnd || after.startsWith('!'))) {
@@ -2585,9 +2751,11 @@ input.addEventListener('keydown', (e) => {
   ) {
     e.preventDefault();
     const prompt = input.value;
-    let tag = `#${stickyChip.topic}`;
-    if (stickyChip.agent) tag += `@${stickyChip.agent}`;
-    if (stickyChip.adhoc) tag += `!${stickyChip.lookback || ''}`;
+    let tag = stickyChip.route || `#${stickyChip.topic}`;
+    if (!stickyChip.route) {
+      if (stickyChip.agent) tag += `@${stickyChip.agent}`;
+      if (stickyChip.adhoc) tag += `!${stickyChip.lookback || ''}`;
+    }
     clearTopicChip();
     editingExpandedSlug = true;
     expandedSlugEditToken++;
@@ -2597,9 +2765,14 @@ input.addEventListener('keydown', (e) => {
   }
 });
 
-async function sendMessage(text) {
-  const { topic, agent, adhoc, lookback, message } = parseInput(text);
-  setTopicChip(topic, agent, adhoc, lookback);
+async function sendMessage(text, opts = {}) {
+  const source = opts.source === 'system' ? 'system' : 'human';
+  const updateComposerRoute = source !== 'system';
+  const suppressChipTurnCount = !!opts.suppressChipTurnCount;
+  const { topic, agent, adhoc, lookback, route, chainTarget, chainTargetFresh, message } = parseInput(text);
+  if (updateComposerRoute) {
+    setTopicChip(topic, agent, adhoc, lookback, { chainTarget, chainTargetFresh, suppressTurnCount: suppressChipTurnCount });
+  }
   const sendTime = new Date().toISOString();
   // A search scope can't be evaluated against a message that isn't in the DB yet, so keep
   // the live group hidden while searching. A filter scope, on the other hand, can be checked
@@ -2607,10 +2780,19 @@ async function sendMessage(text) {
   const liveHiddenByScope = searchActive ||
     (hasHistoryFilterScope() && !itemMatchesFilter({ topic, agent, adhoc }, historyFilter));
 
-  const userBubble = makeUserBubble(message, topic, agent, null, adhoc, lookback);
+  let chainMarker = null;
+  if (source === 'human' && route && chainTarget) {
+    chainMarker = makeRouteChainMarker(route);
+    chainMarker.dataset.topic = topic;
+    if (agent) chainMarker.dataset.agent = agent;
+    if (adhoc) chainMarker.dataset.adhoc = '1';
+    if (liveHiddenByScope) chainMarker.classList.add('live-hidden');
+  }
+  const userBubble = makeUserBubble(message, topic, agent, null, adhoc, lookback, source);
   const userTopicTag = userBubble.querySelector('.topic-tag');
   messages.appendChild(userBubble);
   const userTimeEl = addTimestamp(userBubble, sendTime, true);
+  if (chainMarker) messages.appendChild(chainMarker);
   if (liveHiddenByScope) {
     userBubble.classList.add('live-hidden');
     userTimeEl?.classList.add('live-hidden');
@@ -2759,6 +2941,7 @@ async function sendMessage(text) {
   let detachedPolling = false;
   let raw = '';
   let resolvedAgent = agent;  // updated by meta event
+  let chainContinuationStarted = false;
   let liveSessionTurnCount = 0;
   const liveToolEvents = [];
   const controller = new AbortController();
@@ -2875,6 +3058,59 @@ async function sendMessage(text) {
     refreshAllRevertButtons();
   }
 
+  function chainContextPinId() {
+    if (!msgId || !raw.trim()) return null;
+    const id = Number(msgId);
+    const items = getPinnedItems();
+    const existing = items.find(item => item.id === id);
+    const chainItem = {
+      id,
+      topic,
+      agent: resolvedAgent || agent || null,
+      session_id: lastSessionId || bubble.dataset.sessionId || null,
+      content: raw,
+      context_tag: 'previous_step_output',
+      source: 'route-chain',
+    };
+    if (existing) {
+      setPinnedItems(items.map(item => item.id === id ? { ...item, ...chainItem } : item));
+    } else {
+      setPinnedItems([...items, chainItem]);
+    }
+    updatePinCount();
+    if (pinPanel.classList.contains('open')) renderPinPanel();
+    return id;
+  }
+
+  function chainHandoffPrompt() {
+    if (!route || !chainTarget || !raw.trim()) return null;
+    const targetSuffix = chainTargetFresh ? '!' : '';
+    return [
+      'Squid route chain handoff.',
+      `Route: ${route}`,
+      `Previous step: @${resolvedAgent || agent || ''}`,
+      `Current step: @${chainTarget}${targetSuffix}`,
+      `Original prompt: ${message}`,
+      'Previous output: injected context <previous_step_output>. Use it to continue.',
+    ].join('\n');
+  }
+
+  function startChainContinuation() {
+    if (chainContinuationStarted) return;
+    const handoff = chainHandoffPrompt();
+    if (!handoff) return;
+    chainContinuationStarted = true;
+    const targetSuffix = chainTargetFresh ? '!' : '';
+    const contextId = chainContextPinId();
+    setTimeout(() => {
+      sendMessage(`#${topic}@${chainTarget}${targetSuffix} ${handoff}`, {
+        source: 'system',
+        extraPinnedIds: contextId ? [contextId] : [],
+        suppressChipTurnCount: true,
+      });
+    }, 0);
+  }
+
   function startStatusFallback(id) {
     if (statusTimer || !id) return;
     const doPoll = async () => {
@@ -2907,7 +3143,7 @@ async function sendMessage(text) {
           if (data.session_id && !adhoc) _sessionIds[`${topic}@${resolvedAgent || '_'}`] = data.session_id;
           liveCtxSpan.dataset.sessionTurnCount = String(liveSessionTurnCount);
           setCtxLabel(liveCtxSpan, !!data.adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
-          if (!adhoc) _updateChipTurnCount(topic, resolvedAgent || null, data.session_id || null, liveSessionTurnCount);
+          if (!adhoc && !suppressChipTurnCount) _updateChipTurnCount(topic, resolvedAgent || null, data.session_id || null, liveSessionTurnCount);
           evaluateAdvisory();
           let storedTools = [];
           if (data.context) {
@@ -2975,7 +3211,8 @@ async function sendMessage(text) {
   const _lookbackItems = _activeLookbackItems(adhoc, lookback);
   const _lookbackIds = _lookbackItems.map(item => item.id);
   const _pinnedIds = _injectablePinnedIds(topic, _effectiveAgent, adhoc, lookback);
-  const _contextIds = [...new Set([..._lookbackIds, ..._pinnedIds])];
+  const _extraPinnedIds = Array.isArray(opts.extraPinnedIds) ? opts.extraPinnedIds : [];
+  const _contextIds = [...new Set([..._lookbackIds, ..._pinnedIds, ..._extraPinnedIds])];
 
   try {
     startProcPoll({ hold: true });
@@ -2983,7 +3220,7 @@ async function sendMessage(text) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        message, topic, agent, lookback, adhoc,
+        message, topic, agent, lookback, adhoc, source,
         ...(adhoc && lookback > 0 ? { lookback_via_pins: true } : {}),
         ...(_includeTopicMemory ? { include_topic_memory: true } : {}),
         ...(_contextIds.length ? { pinned_ids: _contextIds } : {}),
@@ -3070,7 +3307,13 @@ async function sendMessage(text) {
                   content.insertBefore(newUserTag, content.firstChild);
                 }
               }
-              setTopicChip(topic, resolvedAgent, resolvedAdhoc, lookback);
+              if (updateComposerRoute) {
+                setTopicChip(topic, resolvedAgent, resolvedAdhoc, lookback, {
+                  chainTarget,
+                  chainTargetFresh,
+                  suppressTurnCount: suppressChipTurnCount,
+                });
+              }
               if (meta.msg_id) {
                 queuePosition = null;
                 attachMsgId(meta.msg_id);
@@ -3118,7 +3361,7 @@ async function sendMessage(text) {
               setCtxLabel(liveCtxSpan, !!stats.adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
               liveCtxSpan.dataset.sessionTurnCount = String(liveSessionTurnCount);
               if (stats.session_id) liveCtxSpan.dataset.sessionId = stats.session_id;
-              if (!adhoc) _updateChipTurnCount(topic, resolvedAgent || null, stats.session_id || null, liveSessionTurnCount);
+              if (!adhoc && !suppressChipTurnCount) _updateChipTurnCount(topic, resolvedAgent || null, stats.session_id || null, liveSessionTurnCount);
               if (stats.cwd) liveCtxSpan.dataset.cwd = stats.cwd;
               if (stats.session_id && !adhoc && stickyChip && !stickyChip.adhoc) {
                 localStorage.setItem(`squid_adv_lta_${stickyChip.topic}_${stickyChip.agent||'_'}_${stats.session_id}`, String(Date.now()));
@@ -3169,6 +3412,7 @@ async function sendMessage(text) {
               renderCompletionTools(liveToolEvents);
               scrollToBottom();
             }
+            startChainContinuation();
             // Update ctx label with pin count and store IDs for popup
             setCtxLabel(liveCtxSpan, adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
             liveCtxSpan.dataset.pinnedIds = JSON.stringify(_contextIds);
@@ -4218,9 +4462,17 @@ async function pollMessageStatus(msgId, contentEl, bubbleEl, stopBtn = null) {
   }, 2000);
 }
 
-function makeUserBubble(text, topic, agent, backendFallback = null, adhoc = false, lookback = 0) {
+function makeUserBubble(text, topic, agent, backendFallback = null, adhoc = false, lookback = 0, source = 'human') {
   const div = document.createElement('div');
   div.className = 'msg user';
+  if (source === 'system') {
+    div.classList.add('user-system-generated');
+    div.dataset.source = 'system';
+    const label = document.createElement('div');
+    label.className = 'user-source-label';
+    label.textContent = 'SYSTEM';
+    div.appendChild(label);
+  }
   const content = document.createElement('div');
   const showTag = topic && (topic !== 'default' || agent || adhoc);
   if (showTag) {
@@ -4234,6 +4486,13 @@ function makeUserBubble(text, topic, agent, backendFallback = null, adhoc = fals
   return div;
 }
 
+function makeRouteChainMarker(route) {
+  const div = document.createElement('div');
+  div.className = 'route-chain-marker';
+  div.textContent = `Squid Flow: ${route}`;
+  return div;
+}
+
 function appendPromptOnlyHistoryItem(item, container) {
   if (!String(item.prompt || '').trim()) return null;
   const bubble = makeUserBubble(
@@ -4243,6 +4502,7 @@ function appendPromptOnlyHistoryItem(item, container) {
     item.backend || null,
     !!item.adhoc,
     item.stats?.lookback ?? 0,
+    item.prompt_source || 'human',
   );
   bubble.classList.add('history-item', 'prompt-only-history-item');
   if (item.id) bubble.dataset.msgId = String(item.id);
@@ -8503,7 +8763,12 @@ function _acRestoreDraft() {
   hideAutocomplete();
   if (had) {
     input.value = promptDraft;
-    if (promptDraftChip) setTopicChip(promptDraftChip.topic, promptDraftChip.agent, promptDraftChip.adhoc, promptDraftChip.lookback || 0);
+    if (promptDraftChip) {
+      setTopicChip(promptDraftChip.topic, promptDraftChip.agent, promptDraftChip.adhoc, promptDraftChip.lookback || 0, {
+        chainTarget: promptDraftChip.chainTarget,
+        chainTargetFresh: promptDraftChip.chainTargetFresh,
+      });
+    }
     else clearTopicChip();
     promptDraft = '';
     promptDraftChip = null;
@@ -8646,6 +8911,12 @@ function _acRouteLabel(topic, agent = '', backendFallback = null) {
 }
 
 function _acRouteHtml(route) {
+  const cm = String(route || '').match(/^#(\w+)@(\w+)(!)?>@(\w+)(!)?$/);
+  if (cm) {
+    return _acRouteLabel(cm[1], cm[2] + (cm[3] || '')) +
+      `<span class="ac-route-chain-arrow">&gt;</span>` +
+      `<span class="ac-agent"${_agentStyleAttr(cm[4])}>@${escapeHtml(cm[4])}${cm[5] || ''}</span>`;
+  }
   const rm = String(route || '').match(/^#(\w+)(?:@(\w+))?(!\d*)?$/);
   if (!rm) return '';
   return _acRouteLabel(rm[1], (rm[2] || '') + (rm[3] || ''));
@@ -9720,6 +9991,7 @@ function updatePinCount() {
 }
 
 function _pinTagStr(item) {
+  if (item.context_tag === 'previous_step_output') return '<previous_step_output>';
   return item.agent ? `#${item.topic}@${item.agent}` : `#${item.topic}`;
 }
 
@@ -10378,6 +10650,11 @@ function _isWebPreviewPath(path) {
   return _WEB_PREVIEW_EXTS.has(ext);
 }
 
+function _isMarkdownPath(path) {
+  const ext = (path.split('.').pop() || '').toLowerCase();
+  return ext === 'md' || ext === 'markdown';
+}
+
 function _languageExtForPath(path) {
   const parts = (path || '').split('.').filter(Boolean);
   let ext = (parts.pop() || '').toLowerCase();
@@ -10386,6 +10663,7 @@ function _languageExtForPath(path) {
 }
 
 let _fvNavigate = null;
+let _fvHandlePopState = null;
 
 function _fmtSize(bytes) {
   if (bytes == null) return '';
@@ -10415,6 +10693,7 @@ function openFilesTabView() {
 function openFileViewer(initialPath, initialLine, initialEndLine, inlineContainer = null, initialChangedLines = null) {
   document.getElementById('file-modal')?.remove();
   _fvNavigate = null;
+  _fvHandlePopState = null;
 
   const isInline = !!inlineContainer;
 
@@ -10426,6 +10705,10 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   let changedLines = initialChangedLines;
   let pathKind = initialPath ? null : 'roots';
   let pathIsText = false;
+  let fileText = '';
+  let markdownPreview = false;
+  let webPreview = false;
+  let pushedFileViewerHistory = false;
 
   // ── DOM ──────────────────────────────────────────────────────────────────────
   let modal, box;
@@ -10450,6 +10733,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   const FV_ICON_CHEVRON_RIGHT = fvIcon('chevron_right');
   const FV_ICON_HOME = fvIcon('home');
   const FV_ICON_EXTERNAL_LINK = fvIcon('open_in_new');
+  const FV_ICON_SOURCE = fvIcon('code');
   const FV_ICON_PENCIL = fvIcon('edit');
   const FV_ICON_HISTORY = fvIcon('history');
   const FV_ICON_COPY = fvIcon('content_copy');
@@ -10487,8 +10771,8 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   actions.className = 'fv-header-actions';
   const previewBtn = document.createElement('button');
   previewBtn.className = 'fv-action-btn';
-  previewBtn.title = 'Preview in browser';
-  previewBtn.setAttribute('aria-label', 'Preview in browser');
+  previewBtn.title = 'Preview';
+  previewBtn.setAttribute('aria-label', 'Preview');
   previewBtn.innerHTML = FV_ICON_EXTERNAL_LINK;
   const editBtn = document.createElement('button');
   editBtn.className = 'fv-action-btn';
@@ -10629,8 +10913,23 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     path = newPath; line = newLine; endLine = newEndLine;
     pathKind = path ? null : 'roots';
     pathIsText = false;
+    fileText = '';
+    markdownPreview = false;
+    webPreview = false;
     updateNav();
     loadFile();
+  }
+
+  function updatePreviewButtonLabel() {
+    if (_isMarkdownPath(path || '')) {
+      previewBtn.title = markdownPreview ? 'Show Markdown source' : 'Preview Markdown';
+      previewBtn.setAttribute('aria-label', previewBtn.title);
+      previewBtn.innerHTML = markdownPreview ? FV_ICON_SOURCE : FV_ICON_EXTERNAL_LINK;
+      return;
+    }
+    previewBtn.title = webPreview ? 'Show source' : 'Preview';
+    previewBtn.setAttribute('aria-label', previewBtn.title);
+    previewBtn.innerHTML = webPreview ? FV_ICON_SOURCE : FV_ICON_EXTERNAL_LINK;
   }
 
   function updateNav() {
@@ -10640,6 +10939,9 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     if (!path) {
       pathKind = 'roots';
       pathIsText = false;
+      fileText = '';
+      markdownPreview = false;
+      webPreview = false;
       previewBtn.hidden = true;
       editBtn.hidden = true;
       historyBtn.hidden = true;
@@ -10661,6 +10963,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     renameBtn.hidden = false;
     deleteBtn.hidden = !isFile;
     previewBtn.hidden = !isFile || !_isWebPreviewPath(path);
+    updatePreviewButtonLabel();
     const isText = isFile && (pathIsText || _isTextPath(path));
     editBtn.hidden = !isText;
     historyBtn.hidden = !isText;
@@ -10695,34 +10998,69 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   }
 
   // ── Events ───────────────────────────────────────────────────────────────────
+  function applyHistoryEntry(entry) {
+    ({ path, line, endLine } = entry);
+    webPreview = entry.preview === 'web';
+    markdownPreview = false;
+    pathKind = path ? null : 'roots';
+    pathIsText = false;
+    fileText = '';
+    updateNav();
+    loadFile();
+  }
+
+  function goFileHistory(delta) {
+    const nextIdx = historyIdx + delta;
+    if (nextIdx < 0 || nextIdx >= navHistory.length) return false;
+    exitEditMode();
+    historyIdx = nextIdx;
+    applyHistoryEntry(navHistory[historyIdx]);
+    return true;
+  }
+
   backBtn.addEventListener('click', () => {
     if (historyIdx > 0) {
-      exitEditMode();
-      historyIdx--;
-      ({ path, line, endLine } = navHistory[historyIdx]);
-      pathKind = path ? null : 'roots';
-      pathIsText = false;
-      updateNav(); loadFile();
+      if (webPreview && isMobileViewport() && history.state?.squidFilePreview) {
+        history.back();
+        return;
+      }
+      goFileHistory(-1);
     }
   });
   fwdBtn.addEventListener('click', () => {
     if (historyIdx < navHistory.length - 1) {
-      exitEditMode();
-      historyIdx++;
-      ({ path, line, endLine } = navHistory[historyIdx]);
-      pathKind = path ? null : 'roots';
-      pathIsText = false;
-      updateNav(); loadFile();
+      goFileHistory(1);
     }
   });
   homeBtn.addEventListener('click', () => {
     if (path) navigate(null);
   });
   previewBtn.addEventListener('click', () => {
-    const ext = (path.split('.').pop() || '').toLowerCase();
-    const params = { path };
-    if (ext === 'md' || ext === 'markdown') params.render = '1';
-    window.open('/localfile?' + new URLSearchParams(params), '_blank', 'noopener');
+    if (_isMarkdownPath(path || '')) {
+      markdownPreview = !markdownPreview;
+      if (markdownPreview) {
+        _renderMarkdownFilePreview(body, fileText);
+      } else {
+        _renderFileViewer(body, fileText, line, endLine, path, changedLines);
+      }
+      updatePreviewButtonLabel();
+      return;
+    }
+    if (webPreview) {
+      if (isMobileViewport() && history.state?.squidFilePreview) history.back();
+      else goFileHistory(-1);
+      return;
+    }
+    navHistory.splice(historyIdx + 1);
+    navHistory.push({ path, line, endLine, preview: 'web' });
+    historyIdx = navHistory.length - 1;
+    webPreview = true;
+    updateNav();
+    _renderWebFilePreview(body, path);
+    if (isMobileViewport() && history.pushState) {
+      const state = (history.state && typeof history.state === 'object') ? history.state : {};
+      history.pushState({ ...state, squidView: currentView, squidFilePreview: true }, '', location.href);
+    }
   });
   copyBtn.addEventListener('click', () => {
     navigator.clipboard?.writeText(path).then(() => {
@@ -10829,7 +11167,15 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     if (!path || pathKind !== 'file') return;
     deleteLocalFile(path, path.split('/').filter(Boolean).pop() || path);
   });
-  const closeModal = () => { if (!isInline) modal.remove(); _fvNavigate = null; };
+  const closeModal = ({ fromHistory = false } = {}) => {
+    if (!fromHistory && pushedFileViewerHistory && isMobileViewport() && history.state?.squidFileViewer) {
+      history.back();
+      return;
+    }
+    if (!isInline) modal.remove();
+    _fvNavigate = null;
+    _fvHandlePopState = null;
+  };
   closeBtn.hidden = isInline;
   closeBtn.addEventListener('click', closeModal);
   if (!isInline) {
@@ -11186,10 +11532,24 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   });
 
   _fvNavigate = navigate;
+  _fvHandlePopState = () => {
+    if (webPreview) return goFileHistory(-1);
+    if (!isInline && document.getElementById('file-modal')) {
+      closeModal({ fromHistory: true });
+      return true;
+    }
+    return false;
+  };
+  if (!isInline && isMobileViewport() && history.pushState) {
+    const state = (history.state && typeof history.state === 'object') ? history.state : {};
+    history.pushState({ ...state, squidView: currentView, squidFileViewer: true }, '', location.href);
+    pushedFileViewerHistory = true;
+  }
 
   // ── Content ──────────────────────────────────────────────────────────────────
   function showAllowRoot() {
     const hint = path.split('/').slice(0, -1).join('/') || '/';
+    body.classList.remove('fv-web-preview-body');
     body.innerHTML = '';
     const panel = document.createElement('div');
     panel.className = 'fv-config-hint';
@@ -11231,6 +11591,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   }
 
   function renderFileRoots(data) {
+    body.classList.remove('fv-web-preview-body');
     body.innerHTML = '';
     const hint = document.createElement('p');
     hint.className = 'fv-roots-hint';
@@ -11242,6 +11603,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
       e.preventDefault();
       if (!isInline) modal.remove();
       _fvNavigate = null;
+      _fvHandlePopState = null;
       navigateView('settings');
     });
     hint.appendChild(configLink);
@@ -11293,6 +11655,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
       if (!path) {
         pathKind = 'roots';
         pathIsText = false;
+        webPreview = false;
         updateNav();
         renderFileRoots(await loadFileRoots());
         return;
@@ -11310,7 +11673,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
       }
       const ct = res.headers.get('content-type') || '';
       if (!ct.includes('text/') && !ct.includes('application/json') && !_isTextPath(path)) {
-        if (!isInline) { modal.remove(); _fvNavigate = null; }
+        if (!isInline) { modal.remove(); _fvNavigate = null; _fvHandlePopState = null; }
         window.open('/localfile?' + new URLSearchParams({ path, _t: Date.now() }), '_blank');
         if (isInline) { body.textContent = 'Opened in new tab'; }
         return;
@@ -11322,6 +11685,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
           if (data.type === 'directory') {
             pathKind = 'directory';
             pathIsText = false;
+            webPreview = false;
             if (data.path !== path) path = data.path;
             updateNav();
             _renderDirListing(body, data, {
@@ -11337,8 +11701,11 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
       }
       pathKind = 'file';
       pathIsText = ct.includes('text/') || ct.includes('application/json');
+      fileText = text;
+      markdownPreview = false;
       updateNav();
-      _renderFileViewer(body, text, line, endLine, path, changedLines);
+      if (webPreview) _renderWebFilePreview(body, path);
+      else _renderFileViewer(body, text, line, endLine, path, changedLines);
     } catch (err) {
       body.textContent = err?.message || 'Failed to load file.';
     }
@@ -11390,6 +11757,7 @@ function _splitHighlightedLines(html) {
 }
 
 function _renderDirListing(container, data, opts = {}) {
+  container.classList.remove('fv-web-preview-body');
   container.innerHTML = '';
 
   const filterWrap = document.createElement('div');
@@ -11527,6 +11895,7 @@ function _renderDirListing(container, data, opts = {}) {
 }
 
 function _renderFileViewer(container, text, targetLine, endLine, path, changedLines = null) {
+  container.classList.remove('fv-web-preview-body');
   const rawLines = text.split('\n');
   if (rawLines.length && rawLines[rawLines.length - 1] === '') rawLines.pop();
   const numWidth = String(rawLines.length).length;
@@ -11579,6 +11948,25 @@ function _renderFileViewer(container, text, targetLine, endLine, path, changedLi
   });
 }
 
+function _renderMarkdownFilePreview(container, text) {
+  container.classList.remove('fv-web-preview-body');
+  container.innerHTML = '';
+  const preview = document.createElement('div');
+  preview.className = 'fv-md-preview';
+  preview.innerHTML = renderAssistantMarkdown(text || '');
+  container.appendChild(preview);
+}
+
+function _renderWebFilePreview(container, path) {
+  container.classList.add('fv-web-preview-body');
+  container.innerHTML = '';
+  const frame = document.createElement('iframe');
+  frame.className = 'fv-web-preview';
+  frame.title = 'File preview';
+  frame.src = '/localfile?' + new URLSearchParams({ path });
+  container.appendChild(frame);
+}
+
 document.addEventListener('click', e => {
   const a = e.target.closest('a');
   if (!a) return;
@@ -11619,7 +12007,10 @@ showBootBanner();
 try {
   const saved = JSON.parse(localStorage.getItem('squid_sticky_chip') || 'null');
   if (saved?.topic) {
-    setTopicChip(saved.topic, saved.agent || null, saved.adhoc || false, saved.lookback || 0);
+    setTopicChip(saved.topic, saved.agent || null, saved.adhoc || false, saved.lookback || 0, {
+      chainTarget: saved.chainTarget,
+      chainTargetFresh: saved.chainTargetFresh,
+    });
   } else {
     _acAgents().then(agents => {
       if (stickyChip) return;

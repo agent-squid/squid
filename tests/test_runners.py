@@ -1137,6 +1137,8 @@ def test_codex_oneshot_fresh_vs_resume_command_shape():
 def test_cursor_oneshot_resume_uses_structured_print_resume_events():
     async def fake_stream_lines(cmd, **kwargs):
         assert cmd[:4] == ["cursor-agent", "--print", "--output-format", "stream-json"]
+        assert "--workspace" in cmd
+        assert cmd[cmd.index("--workspace") + 1] == "/tmp"
         assert "--resume" in cmd
         assert cmd[-2:] == ["thread-1", "next"]
         yield '{"type":"system","session_id":"thread-1"}'
@@ -1211,9 +1213,11 @@ def test_cursor_oneshot_fresh_vs_resume_command_shape():
         asyncio.run(collect())
 
     assert captured[0][:4] == ["cursor-agent", "--print", "--output-format", "stream-json"]
+    assert captured[0][captured[0].index("--workspace") + 1] == "/tmp"
     assert "--resume" not in captured[0]
     assert captured[0][-1] == "fresh"
     assert captured[1][:4] == ["cursor-agent", "--print", "--output-format", "stream-json"]
+    assert captured[1][captured[1].index("--workspace") + 1] == "/tmp"
     assert "--resume" in captured[1]
     assert captured[1][-2:] == ["thread-1", "next"]
 
@@ -1221,6 +1225,7 @@ def test_cursor_oneshot_fresh_vs_resume_command_shape():
 def test_opencode_oneshot_resume_uses_structured_run_session_events():
     async def fake_stream_lines(cmd, **kwargs):
         assert cmd[:4] == ["opencode", "run", "--format", "json"]
+        assert cmd[4:7] == ["--dangerously-skip-permissions", "--dir", "/tmp"]
         assert cmd[-3:] == ["--session", "thread-1", "next"]
         yield '{"type":"text","sessionID":"thread-1","part":{"text":"next"}}'
         yield '{"type":"step_finish","sessionID":"thread-1","part":{"tokens":{"input":10,"output":2,"cache":{"read":4,"write":0}},"cost":0}}'
@@ -1281,9 +1286,11 @@ def test_pi_oneshot_resume_uses_session_id_and_json_events():
 
 def test_pi_oneshot_fresh_vs_resume_command_shape():
     captured = []
+    captured_cwd = []
 
     async def fake_stream_lines(cmd, **kwargs):
         captured.append(cmd)
+        captured_cwd.append(kwargs["cwd"])
         yield '{"type":"session","id":"thread-1"}'
         yield '{"type":"message_end","message":{"role":"assistant","content":[],"usage":{}}}'
         yield '{"type":"agent_end"}'
@@ -1299,9 +1306,11 @@ def test_pi_oneshot_fresh_vs_resume_command_shape():
         asyncio.run(collect())
 
     assert captured[0][:4] == ["pi", "-p", "--mode", "json"]
+    assert captured_cwd[0] == "/tmp"
     assert "--session-id" not in captured[0]
     assert captured[0][-1] == "fresh"
     assert captured[1][:4] == ["pi", "-p", "--mode", "json"]
+    assert captured_cwd[1] == "/tmp"
     assert captured[1][-3:] == ["--session-id", "thread-1", "next"]
 
 
@@ -1474,9 +1483,11 @@ def test_opencode_oneshot_fresh_vs_resume_command_shape():
         asyncio.run(collect())
 
     assert captured[0][:4] == ["opencode", "run", "--format", "json"]
+    assert captured[0][4:7] == ["--dangerously-skip-permissions", "--dir", "/tmp"]
     assert "--session" not in captured[0]
     assert captured[0][-1] == "fresh"
     assert captured[1][:4] == ["opencode", "run", "--format", "json"]
+    assert captured[1][4:7] == ["--dangerously-skip-permissions", "--dir", "/tmp"]
     assert captured[1][-3:] == ["--session", "thread-1", "next"]
 
 

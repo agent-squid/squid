@@ -75,6 +75,7 @@ from .stats_db import (
     get_agent, upsert_agent, delete_agent, list_agents, get_default_agent,
     get_topic, upsert_topic, list_topics,
     insert_user_message, insert_assistant_message, update_assistant_message,
+    update_assistant_content_preserve_session,
     attach_assistant_session, mark_assistant_cancelled,
     update_message_quota_snapshot,
     get_context_history, get_messages_by_ids, mark_orphaned_pending, get_message,
@@ -229,6 +230,8 @@ class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
     topic: str = Field("default")
     agent: Optional[str] = None
+    route: Optional[str] = None
+    source: str = Field("human")
     lookback: int = Field(0)
     lookback_via_pins: bool = Field(False)
     adhoc: bool = Field(False)
@@ -387,13 +390,63 @@ def _validate_config_content(content: str) -> dict:
     return parsed
 
 
+def _origin_candidates(request: Request) -> set[str]:
+    candidates = {str(request.base_url).rstrip("/")}
+    host = request.headers.get("host")
+    forwarded_host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    if host:
+        candidates.add(f"{request.url.scheme}://{host}".rstrip("/"))
+    if forwarded_proto and host:
+        candidates.add(f"{forwarded_proto}://{host}".rstrip("/"))
+    if forwarded_host:
+        candidates.add(f"{forwarded_proto or request.url.scheme}://{forwarded_host}".rstrip("/"))
+    return candidates
+
+
 def _same_origin(request: Request) -> bool:
-    if request.headers.get("sec-fetch-site") == "cross-site":
+    fetch_site = request.headers.get("sec-fetch-site")
+    if fetch_site == "cross-site":
         return False
+    if fetch_site == "same-origin":
+        return True
     origin = request.headers.get("origin")
     if not origin:
         return True
-    return origin.rstrip("/") == str(request.base_url).rstrip("/")
+    return origin.rstrip("/") in _origin_candidates(request)
+
+
+def _safe_browser_navigation(request: Request) -> bool:
+    if request.method not in {"GET", "HEAD"}:
+        return False
+    fetch_site = request.headers.get("sec-fetch-site")
+    fetch_mode = request.headers.get("sec-fetch-mode")
+    fetch_dest = request.headers.get("sec-fetch-dest")
+    if fetch_site not in {"same-origin", "same-site", "cross-site", "none"}:
+        return False
+    if fetch_site != "cross-site":
+        return fetch_mode in {None, "navigate"} and fetch_dest in {None, "document"}
+    return fetch_mode == "navigate" and fetch_dest == "document"
+
+
+_LOCALFILE_DOCUMENT_PREVIEW_SUFFIXES = {
+    ".html", ".htm", ".svg", ".pdf",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif",
+}
+
+
+def _safe_document_preview_request(request: Request, *, render: bool, path: Path) -> bool:
+    suffix = path.suffix.lower()
+    if suffix in {".md", ".markdown"}:
+        if not render:
+            return False
+    elif suffix not in _LOCALFILE_DOCUMENT_PREVIEW_SUFFIXES:
+        return False
+    if request.method not in {"GET", "HEAD"}:
+        return False
+    if request.headers.get("sec-fetch-site") == "cross-site":
+        return False
+    return "text/html" in request.headers.get("accept", "")
 
 
 def _localfile_roots_from(config: dict) -> list[Path]:
@@ -464,6 +517,209 @@ def _normalize_topic_response(topic: str) -> Union[str, JSONResponse]:
         return normalize_topic_slug(topic)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+def _parse_simple_oneway_chain(route: Optional[str]) -> Optional[dict]:
+    if not route:
+        return None
+    route = route.strip()
+    if ">" not in route:
+        return None
+    m = re.fullmatch(r"#(\w+)@(\w+)(!)?>@(\w+)(!)?", route)
+    if not m:
+        raise ValueError("Only #topic@origin[!]>@target[!] route chains are supported right now.")
+    topic = normalize_topic_slug(m.group(1))
+    return {"topic": topic, "origin": m.group(2), "origin_fresh": bool(m.group(3)), "target": m.group(4), "target_fresh": bool(m.group(5)), "route": route}
+
+
+def _chain_envelope(route: str, origin_agent: str, target_agent: str, target_fresh: bool, user_prompt: str, origin_output: str) -> str:
+    target_suffix = "!" if target_fresh else ""
+    return "\n\n".join([
+        "Squid route chain handoff.",
+        f"Route: {route}",
+        f"Previous step: @{origin_agent}",
+        f"Current step: @{target_agent}{target_suffix}",
+        "Original user prompt:",
+        user_prompt,
+        f"Output from @{origin_agent}:",
+        origin_output,
+    ])
+
+
+def _sse_plain_data(payload: str) -> str:
+    if not payload.startswith("data:"):
+        return ""
+    lines = payload.splitlines()
+    data_lines = []
+    for line in lines:
+        if line.startswith("data:"):
+            data_lines.append(line[5:])
+    return "\n".join(data_lines)
+
+
+async def _prepare_chat_turn(
+    *,
+    message: str,
+    topic: str,
+    agent: Optional[str],
+    adhoc: bool = False,
+    lookback: int = 0,
+    lookback_via_pins: bool = False,
+    pinned_ids: Optional[list[int]] = None,
+    include_topic_memory: bool = False,
+    source: str = "human",
+) -> Union[dict, JSONResponse]:
+    # 1. Resolve agent — explicit wins, else use topic sticky
+    resolved_agent: Optional[str] = agent
+    agent_config: dict = {}
+
+    if agent:
+        agent_config = get_agent(agent) or {}
+        if not agent_config:
+            return JSONResponse(
+                {"error": f"Agent '{agent}' not found. Create it first via /config/agents."},
+                status_code=400,
+            )
+    else:
+        topic_row = get_topic(topic)
+        if topic_row:
+            resolved_agent = topic_row.get("agent")
+            if resolved_agent:
+                agent_config = get_agent(resolved_agent) or {}
+        if not agent_config:
+            default = get_default_agent()
+            if default:
+                resolved_agent = default["name"]
+                agent_config = default
+
+    try:
+        harness, provider, backend, resolved_runtime = _resolve_agent_runtime(agent_config)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    model: Optional[str] = agent_config.get("model") or None
+    native_backend_command = _is_backend_native_chat_command(message)
+
+    upsert_topic(topic, resolved_agent, last_prompt=message,
+                 last_harness=harness, last_provider=provider, last_model=model, adhoc=adhoc)
+    agent_cwd: Optional[str] = agent_config.get("cwd") or None
+    response_timeout: int = RESPONSE_TIMEOUT
+
+    # 2. Resumable session lookup (skipped for adhoc turns)
+    resume_session_id: Optional[str] = None
+    cwd: Optional[str] = agent_cwd
+
+    if not adhoc and resolved_agent:
+        stored = get_topic_session(topic, resolved_agent)
+        if stored:
+            stored_fingerprint = stored.get("runtime_fingerprint")
+            if stored_fingerprint and stored_fingerprint != resolved_runtime.fingerprint:
+                clear_topic_session(topic, resolved_agent)
+                log.info("cleared session after agent runtime change: topic=%s agent=%s backend=%s", topic, resolved_agent, backend)
+            else:
+                resume_session_id = stored["session_id"]
+                cwd = stored["cwd"]
+
+    # 3. Context history for adhoc turns
+    lookback = int(lookback) if lookback else 0
+    context_history: list[dict] = []
+    context_ids: Optional[list[int]] = None
+
+    if not native_backend_command and adhoc and lookback > 0 and not lookback_via_pins:
+        context_history, context_ids = get_context_history(
+            topic, lookback, agent=resolved_agent
+        )
+
+    memory_config = topic_memory_squid_config(topic)
+    code_roots = memory_config.get("code_roots") or []
+    source_cwd = cwd
+
+    memory_revision: Optional[str] = None
+    memory_data_for_prompt: Optional[dict] = None
+    if not native_backend_command and include_topic_memory:
+        memory_data_for_prompt = read_topic_memory(topic)
+        if memory_data_for_prompt["content"].strip():
+            memory_revision = memory_data_for_prompt.get("revision")
+
+    stored_context_ids = list({*(context_ids or []), *(pinned_ids or [])}) or None
+    user_msg_id = insert_user_message(topic, resolved_agent, message,
+                                      context_ids=stored_context_ids,
+                                      mem=bool(memory_revision),
+                                      mem_revision=memory_revision,
+                                      lookback=lookback,
+                                      source=source)
+    asst_msg_id = insert_assistant_message(topic, resolved_agent, user_msg_id, adhoc=adhoc)
+    attach_assistant_session(asst_msg_id, resume_session_id)
+
+    effective_code_roots = code_roots
+    effective_cwd = cwd
+    worktree_isolated = False
+    if WORKTREE_ISOLATION_ENABLED and resolved_agent and code_roots:
+        effective_code_roots, effective_cwd, worktree_isolated = await _setup_worktrees(
+            code_roots, cwd, topic, str(asst_msg_id)
+        )
+
+    effective_message = message
+    prefix_blocks: list[str] = []
+    if not native_backend_command and effective_code_roots:
+        code_roots_block = code_roots_prompt_block(effective_code_roots, isolated=worktree_isolated)
+        if code_roots_block:
+            prefix_blocks.append(code_roots_block)
+    tracking_roots: list[str] = [] if native_backend_command else effective_code_roots
+
+    if memory_data_for_prompt:
+        memory_content = memory_data_for_prompt["content"].strip()
+        if memory_content:
+            prefix_blocks.append("\n".join([
+                "Persistent user-editable topic memory:",
+                f'<topic_memory topic="{memory_data_for_prompt["topic"]}">',
+                memory_content,
+                "</topic_memory>",
+            ]))
+
+    if not native_backend_command and pinned_ids:
+        lookback_id_set = set(context_ids or [])
+        filtered = [pid for pid in pinned_ids if pid not in lookback_id_set]
+        if filtered:
+            pinned_context = get_messages_by_ids(filtered)
+            if pinned_context:
+                if adhoc:
+                    context_history = pinned_context + context_history
+                else:
+                    lines = ["Relevant context from other sessions:\n<referenced_context>"]
+                    for msg in pinned_context:
+                        role = "User" if msg["role"] == "user" else "Assistant"
+                        lines.append(f"{role}: {msg['content'].strip()}")
+                    lines.append("</referenced_context>\n")
+                    prefix_blocks.append("\n".join(lines))
+
+    if prefix_blocks:
+        effective_message = "\n\n".join(prefix_blocks + [message])
+
+    log.info(
+        "chat  topic=%s  agent=%s  harness=%s  provider=%s  backend=%s  model=%s  adhoc=%s  resume=%s  ctx=%d  pinned=%d  memory=%s  msg=%.80r",
+        topic, resolved_agent, harness, provider, backend, model, adhoc,
+        bool(resume_session_id), len(context_history) // 2,
+        len(pinned_ids) if pinned_ids else 0, include_topic_memory, message,
+    )
+    return {
+        "effective_message": effective_message,
+        "topic": topic,
+        "agent": resolved_agent,
+        "backend": backend,
+        "model": model,
+        "cwd": effective_cwd,
+        "context_history": context_history,
+        "asst_msg_id": asst_msg_id,
+        "response_timeout": response_timeout,
+        "resume_session_id": resume_session_id,
+        "adhoc": adhoc,
+        "lookback": lookback,
+        "code_roots": tracking_roots,
+        "display_prompt": message,
+        "source_cwd": source_cwd,
+        "harness": harness,
+        "provider": provider,
+    }
 
 # ---------------------------------------------------------------------------
 # Background drain — runs after client disconnects mid-stream
@@ -715,168 +971,151 @@ async def stream_response(
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
-    topic = _normalize_topic_response(req.topic)
+    if req.route:
+        return JSONResponse({"error": "route chains are executed as explicit UI turns"}, status_code=400)
+
+    try:
+        chain = _parse_simple_oneway_chain(req.route)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    topic = _normalize_topic_response(chain["topic"] if chain else req.topic)
     if isinstance(topic, JSONResponse):
         return topic
 
-    # 1. Resolve agent — explicit wins, else use topic sticky
-    resolved_agent: Optional[str] = req.agent
-    agent_config: dict = {}
+    if chain:
+        if get_agent(chain["origin"]) is None:
+            return JSONResponse({"error": f"Agent '{chain['origin']}' not found. Create it first via /config/agents."}, status_code=400)
+        if get_agent(chain["target"]) is None:
+            return JSONResponse({"error": f"Agent '{chain['target']}' not found. Create it first via /config/agents."}, status_code=400)
+        origin = await _prepare_chat_turn(
+            message=req.message,
+            topic=topic,
+            agent=chain["origin"],
+            adhoc=chain["origin_fresh"],
+            pinned_ids=req.pinned_ids,
+            include_topic_memory=req.include_topic_memory,
+        )
+        if isinstance(origin, JSONResponse):
+            return origin
 
-    if req.agent:
-        agent_config = get_agent(req.agent) or {}
-        if not agent_config:
-            return JSONResponse(
-                {"error": f"Agent '{req.agent}' not found. Create it first via /config/agents."},
-                status_code=400,
+        async def chain_stream() -> AsyncGenerator[str, None]:
+            log.info("route chain start route=%s origin=%s target=%s target_fresh=%s", chain["route"], chain["origin"], chain["target"], chain["target_fresh"])
+            yield sse_event("status", f"route {chain['route']}: running @{chain['origin']}")
+            origin_output = ""
+            async for event in stream_response(
+                origin["effective_message"], origin["topic"], origin["agent"], origin["backend"], origin["model"], origin["cwd"],
+                origin["context_history"], origin["asst_msg_id"], origin["response_timeout"],
+                resume_session_id=origin["resume_session_id"],
+                adhoc=origin["adhoc"],
+                lookback=origin["lookback"],
+                code_roots=origin["code_roots"],
+                display_prompt=origin["display_prompt"],
+                source_cwd=origin["source_cwd"],
+                harness=origin["harness"],
+                provider=origin["provider"],
+            ):
+                if event.startswith("data:"):
+                    origin_output += _sse_plain_data(event)
+                elif event.startswith("event: error"):
+                    yield event
+                    return
+                elif event.startswith(": ping"):
+                    yield event
+
+            log.info("route chain origin complete route=%s origin=%s output_len=%d", chain["route"], chain["origin"], len(origin_output))
+            yield sse_event("status", f"route {chain['route']}: @{chain['origin']} complete; starting @{chain['target']}{'!' if chain['target_fresh'] else ''}")
+            envelope = _chain_envelope(chain["route"], chain["origin"], chain["target"], chain["target_fresh"], req.message, origin_output)
+            yield sse_event("status", f"route {chain['route']}: preparing @{chain['target']}{'!' if chain['target_fresh'] else ''}")
+            target = await _prepare_chat_turn(
+                message=envelope,
+                topic=topic,
+                agent=chain["target"],
+                adhoc=chain["target_fresh"],
+                lookback=0,
+                source="system",
             )
-    else:
-        topic_row = get_topic(topic)
-        if topic_row:
-            resolved_agent = topic_row.get("agent")
-            if resolved_agent:
-                agent_config = get_agent(resolved_agent) or {}
-        if not agent_config:
-            default = get_default_agent()
-            if default:
-                resolved_agent = default["name"]
-                agent_config = default
-
-    try:
-        harness, provider, backend, resolved_runtime = _resolve_agent_runtime(agent_config)
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    model: Optional[str] = agent_config.get("model") or None
-    native_backend_command = _is_backend_native_chat_command(req.message)
-
-    upsert_topic(topic, resolved_agent, last_prompt=req.message,
-                 last_harness=harness, last_provider=provider, last_model=model, adhoc=req.adhoc)
-    agent_cwd: Optional[str] = agent_config.get("cwd") or None
-    response_timeout: int = RESPONSE_TIMEOUT
-
-    # 2. Resumable session lookup (skipped for adhoc turns)
-    resume_session_id: Optional[str] = None
-    cwd: Optional[str] = agent_cwd
-
-    if not req.adhoc and resolved_agent:
-        stored = get_topic_session(topic, resolved_agent)
-        if stored:
-            stored_fingerprint = stored.get("runtime_fingerprint")
-            if stored_fingerprint and stored_fingerprint != resolved_runtime.fingerprint:
-                clear_topic_session(topic, resolved_agent)
-                log.info("cleared session after agent runtime change: topic=%s agent=%s backend=%s", topic, resolved_agent, backend)
+            if isinstance(target, JSONResponse):
+                err = json.loads(target.body).get("error", "chain target failed")
+                log.warning("route chain target prepare failed route=%s target=%s error=%s", chain["route"], chain["target"], err)
+                yield sse_event("error", err)
+                return
+            target_suffix = "!" if chain["target_fresh"] else ""
+            target_status = f"route {chain['route']}: running @{chain['target']}{target_suffix}"
+            log.info("route chain target start route=%s target=%s msg_id=%s", chain["route"], chain["target"], target["asst_msg_id"])
+            yield sse_event("status", target_status)
+            target_output = ""
+            target_status_raw = target_status
+            async for event in stream_response(
+                target["effective_message"], target["topic"], target["agent"], target["backend"], target["model"], target["cwd"],
+                target["context_history"], target["asst_msg_id"], target["response_timeout"],
+                resume_session_id=target["resume_session_id"],
+                adhoc=target["adhoc"],
+                lookback=target["lookback"],
+                code_roots=target["code_roots"],
+                display_prompt=req.message,
+                source_cwd=target["source_cwd"],
+                harness=target["harness"],
+                provider=target["provider"],
+            ):
+                if event.startswith("event: meta"):
+                    continue
+                if event.startswith("data:"):
+                    target_output += _sse_plain_data(event)
+                elif event.startswith("event: status"):
+                    target_status_raw += "\n" + _sse_plain_data(event.split("\n", 1)[1] if "\n" in event else event)
+                elif event.startswith("event: error"):
+                    update_assistant_content_preserve_session(origin["asst_msg_id"], _sse_plain_data(event.split("\n", 1)[1] if "\n" in event else event), "error", status_raw=target_status_raw)
+                yield event
+            if target_output:
+                update_assistant_content_preserve_session(origin["asst_msg_id"], target_output, "done", status_raw=target_status_raw)
+                log.info("route chain complete route=%s target=%s output_len=%d", chain["route"], chain["target"], len(target_output))
             else:
-                resume_session_id = stored["session_id"]
-                cwd = stored["cwd"]
+                log.warning("route chain target completed with no output route=%s target=%s", chain["route"], chain["target"])
 
-    # 3. Context history for adhoc turns
-    lookback = int(req.lookback) if req.lookback else 0
-    context_history: list[dict] = []
-    context_ids: Optional[list[int]] = None
-
-    if not native_backend_command and req.adhoc and lookback > 0 and not req.lookback_via_pins:
-        context_history, context_ids = get_context_history(
-            topic, lookback, agent=resolved_agent
+        await maybe_sync()
+        return StreamingResponse(
+            chain_stream(),
+            media_type="text/event-stream",
+            headers={
+                "X-Accel-Buffering": "no",
+                "Cache-Control": "no-cache",
+                "X-Squid-Msg-Id": str(origin["asst_msg_id"]),
+            },
         )
 
-    memory_config = topic_memory_squid_config(topic)
-    code_roots = memory_config.get("code_roots") or []
-    source_cwd = cwd  # original cwd before worktree remapping
-
-    # Load memory early so memory_revision is available for message insertion.
-    memory_revision: Optional[str] = None
-    memory_data_for_prompt: Optional[dict] = None
-    if not native_backend_command and req.include_topic_memory:
-        memory_data_for_prompt = read_topic_memory(topic)
-        if memory_data_for_prompt["content"].strip():
-            memory_revision = memory_data_for_prompt.get("revision")
-
-    # Insert user and assistant message rows before worktree setup so asst_msg_id
-    # is available as the per-turn worktree key.
-    stored_context_ids = list({*(context_ids or []), *(req.pinned_ids or [])}) or None
-    user_msg_id = insert_user_message(topic, resolved_agent, req.message,
-                                      context_ids=stored_context_ids,
-                                      mem=bool(memory_revision),
-                                      mem_revision=memory_revision,
-                                      lookback=lookback)
-    asst_msg_id = insert_assistant_message(topic, resolved_agent, user_msg_id, adhoc=req.adhoc)
-    attach_assistant_session(asst_msg_id, resume_session_id)
-
-    # Set up per-turn worktree isolation. Every turn (adhoc or not) gets its own
-    # worktree keyed by asst_msg_id, so parallel turns never share state.
-    effective_code_roots = code_roots
-    effective_cwd = cwd
-    worktree_isolated = False
-    if WORKTREE_ISOLATION_ENABLED and resolved_agent and code_roots:
-        effective_code_roots, effective_cwd, worktree_isolated = await _setup_worktrees(
-            code_roots, cwd, topic, str(asst_msg_id)
-        )
-
-    # Build prefix blocks in injection order: code roots → memory → pinned context.
-    effective_message = req.message
-    prefix_blocks: list[str] = []
-    if not native_backend_command and effective_code_roots:
-        code_roots_block = code_roots_prompt_block(effective_code_roots, isolated=worktree_isolated)
-        if code_roots_block:
-            prefix_blocks.append(code_roots_block)
-    tracking_roots: list[str] = [] if native_backend_command else effective_code_roots
-
-    if memory_data_for_prompt:
-        memory_content = memory_data_for_prompt["content"].strip()
-        if memory_content:
-            prefix_blocks.append("\n".join([
-                "Persistent user-editable topic memory:",
-                f'<topic_memory topic="{memory_data_for_prompt["topic"]}">',
-                memory_content,
-                "</topic_memory>",
-            ]))
-
-    if not native_backend_command and req.pinned_ids:
-        lookback_id_set = set(context_ids or [])
-        filtered = [pid for pid in req.pinned_ids if pid not in lookback_id_set]
-        if filtered:
-            pinned_context = get_messages_by_ids(filtered)
-            if pinned_context:
-                if req.adhoc:
-                    # Adhoc: prepend to context_history for _build_prompt
-                    context_history = pinned_context + context_history
-                else:
-                    # Session: prepend as referenced_context block in the prompt
-                    lines = ["Relevant context from other sessions:\n<referenced_context>"]
-                    for msg in pinned_context:
-                        role = "User" if msg["role"] == "user" else "Assistant"
-                        lines.append(f"{role}: {msg['content'].strip()}")
-                    lines.append("</referenced_context>\n")
-                    prefix_blocks.append("\n".join(lines))
-
-    if prefix_blocks:
-        effective_message = "\n\n".join(prefix_blocks + [req.message])
-
-    log.info(
-        "chat  topic=%s  agent=%s  harness=%s  provider=%s  backend=%s  model=%s  adhoc=%s  resume=%s  ctx=%d  pinned=%d  memory=%s  msg=%.80r",
-        topic, resolved_agent, harness, provider, backend, model, req.adhoc,
-        bool(resume_session_id), len(context_history) // 2,
-        len(req.pinned_ids) if req.pinned_ids else 0, req.include_topic_memory, req.message,
+    prepared = await _prepare_chat_turn(
+        message=req.message,
+        topic=topic,
+        agent=req.agent,
+        adhoc=req.adhoc,
+        lookback=req.lookback,
+        lookback_via_pins=req.lookback_via_pins,
+        pinned_ids=req.pinned_ids,
+        include_topic_memory=req.include_topic_memory,
+        source=req.source,
     )
+    if isinstance(prepared, JSONResponse):
+        return prepared
     await maybe_sync()
     return StreamingResponse(
         stream_response(
-            effective_message, topic, resolved_agent, backend, model, effective_cwd,
-            context_history, asst_msg_id, response_timeout,
-            resume_session_id=resume_session_id,
-            adhoc=req.adhoc,
-            lookback=lookback,
-            code_roots=tracking_roots,
-            display_prompt=req.message,
-            source_cwd=source_cwd,
-            harness=harness,
-            provider=provider,
+            prepared["effective_message"], prepared["topic"], prepared["agent"], prepared["backend"], prepared["model"], prepared["cwd"],
+            prepared["context_history"], prepared["asst_msg_id"], prepared["response_timeout"],
+            resume_session_id=prepared["resume_session_id"],
+            adhoc=prepared["adhoc"],
+            lookback=prepared["lookback"],
+            code_roots=prepared["code_roots"],
+            display_prompt=prepared["display_prompt"],
+            source_cwd=prepared["source_cwd"],
+            harness=prepared["harness"],
+            provider=prepared["provider"],
         ),
         media_type="text/event-stream",
         headers={
             "X-Accel-Buffering": "no",
             "Cache-Control": "no-cache",
-            "X-Squid-Msg-Id": str(asst_msg_id),
+            "X-Squid-Msg-Id": str(prepared["asst_msg_id"]),
         },
     )
 
@@ -1956,11 +2195,15 @@ async def serve_local_file(path: str, request: Request, render: bool = False):
     import mimetypes
     from fastapi.responses import FileResponse, PlainTextResponse, HTMLResponse
     _nocache = {"Cache-Control": "no-store"}
-    if not _same_origin(request):
+    p = Path(path).expanduser().resolve()
+    if (
+        not _same_origin(request)
+        and not _safe_browser_navigation(request)
+        and not _safe_document_preview_request(request, render=render, path=p)
+    ):
         return JSONResponse({"error": "cross-origin file reads are not allowed"}, status_code=403)
     if not _LOCALFILE_ROOTS:
         return JSONResponse({"error": "localfile not enabled (set server.localfile_roots in ~/.squid/squid.yaml)"}, status_code=403)
-    p = Path(path).expanduser().resolve()
     if not _localfile_allowed(p):
         return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
     if not p.exists():

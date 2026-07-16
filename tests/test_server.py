@@ -284,6 +284,55 @@ def test_compact_is_no_longer_squid_owned():
     assert "compact" not in server._SQUID_CHAT_COMMANDS
 
 
+def test_simple_oneway_chain_parser_accepts_only_initial_shape():
+    assert server._parse_simple_oneway_chain("#squid@codex>@revucla!") == {
+        "topic": "squid",
+        "origin": "codex",
+        "origin_fresh": False,
+        "target": "revucla",
+        "target_fresh": True,
+        "route": "#squid@codex>@revucla!",
+    }
+    assert server._parse_simple_oneway_chain("#squid@codex>@revucla") == {
+        "topic": "squid",
+        "origin": "codex",
+        "origin_fresh": False,
+        "target": "revucla",
+        "target_fresh": False,
+        "route": "#squid@codex>@revucla",
+    }
+    assert server._parse_simple_oneway_chain("#squid@codex!>@revucla!") == {
+        "topic": "squid",
+        "origin": "codex",
+        "origin_fresh": True,
+        "target": "revucla",
+        "target_fresh": True,
+        "route": "#squid@codex!>@revucla!",
+    }
+    assert server._parse_simple_oneway_chain(None) is None
+    assert server._parse_simple_oneway_chain("#squid@codex") is None
+
+    try:
+        server._parse_simple_oneway_chain("#squid@codex<>@revucla!")
+    except ValueError as exc:
+        assert "#topic@origin[!]>@target[!]" in str(exc)
+    else:
+        raise AssertionError("expected unsupported chain syntax to fail")
+
+
+def test_chat_rejects_server_side_hidden_route_chain():
+    client = TestClient(server.app)
+    res = client.post("/chat", json={
+        "route": "#squid@codex>@revucla",
+        "message": "review this",
+        "topic": "squid",
+        "agent": "codex",
+    })
+
+    assert res.status_code == 400
+    assert res.json()["error"] == "route chains are executed as explicit UI turns"
+
+
 def test_backend_native_chat_commands_bypass_context_augmentation_for_any_agent():
     cases = [
         ("/usage", "claude-live"),
@@ -352,7 +401,7 @@ def test_chat_response_exposes_message_id_header():
          patch("agent.server.upsert_topic"), \
          patch("agent.server.get_topic_session", return_value=None), \
          patch("agent.server.topic_memory_squid_config", return_value={}), \
-         patch("agent.server.insert_user_message", return_value=201), \
+         patch("agent.server.insert_user_message", return_value=201) as insert_user_message, \
          patch("agent.server.insert_assistant_message", return_value=202), \
          patch("agent.server.update_assistant_message"), \
          patch.object(server.dispatcher, "dispatch", fake_dispatch):
@@ -360,10 +409,12 @@ def test_chat_response_exposes_message_id_header():
             "message": "hello",
             "topic": "squid",
             "agent": "codex",
+            "source": "system",
         })
 
     assert res.status_code == 200
     assert res.headers["X-Squid-Msg-Id"] == "202"
+    assert insert_user_message.call_args.kwargs["source"] == "system"
 
 
 def test_clear_command_kills_only_session_lane():
@@ -627,5 +678,215 @@ def test_localfile_markdown_preview_strips_frontmatter_and_preserves_escapes(tmp
         assert "| A \\\\| B |" in res.text
         assert "closing tag: </script>" not in res.text
         assert "closing tag: <\\/script>" in res.text
+    finally:
+        server._LOCALFILE_ROOTS[:] = original_roots
+
+
+def test_localfile_same_origin_fetch_metadata_allows_proxy_origin_mismatch(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    md_file = root / "notes.md"
+    md_file.write_text("# Heading\n")
+    original_roots = list(server._LOCALFILE_ROOTS)
+    client = TestClient(server.app)
+
+    try:
+        server._LOCALFILE_ROOTS[:] = [root.resolve()]
+        allowed = client.get(
+            "/localfile",
+            params={"path": str(md_file), "render": "1"},
+            headers={
+                "sec-fetch-site": "same-origin",
+                "origin": "https://squid.example.test",
+            },
+        )
+        assert allowed.status_code == 200
+        assert "marked.parse(" in allowed.text
+
+        blocked = client.get(
+            "/localfile",
+            params={"path": str(md_file), "render": "1"},
+            headers={
+                "sec-fetch-site": "cross-site",
+                "origin": "https://evil.example.test",
+            },
+        )
+        assert blocked.status_code == 403
+        assert blocked.json()["error"] == "cross-origin file reads are not allowed"
+
+    finally:
+        server._LOCALFILE_ROOTS[:] = original_roots
+
+
+def test_localfile_allows_forwarded_origin_match(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    md_file = root / "notes.md"
+    md_file.write_text("# Heading\n")
+    original_roots = list(server._LOCALFILE_ROOTS)
+    client = TestClient(server.app)
+
+    try:
+        server._LOCALFILE_ROOTS[:] = [root.resolve()]
+        res = client.get(
+            "/localfile",
+            params={"path": str(md_file), "render": "1"},
+            headers={
+                "origin": "https://squid.example.test",
+                "x-forwarded-proto": "https",
+                "x-forwarded-host": "squid.example.test",
+            },
+        )
+        assert res.status_code == 200
+        assert "marked.parse(" in res.text
+    finally:
+        server._LOCALFILE_ROOTS[:] = original_roots
+
+
+def test_localfile_markdown_preview_allows_same_site_document_navigation(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    md_file = root / "notes.md"
+    md_file.write_text("# Heading\n")
+    original_roots = list(server._LOCALFILE_ROOTS)
+    client = TestClient(server.app)
+
+    try:
+        server._LOCALFILE_ROOTS[:] = [root.resolve()]
+        allowed = client.get(
+            "/localfile",
+            params={"path": str(md_file), "render": "1"},
+            headers={
+                "sec-fetch-site": "same-site",
+                "sec-fetch-mode": "navigate",
+                "sec-fetch-dest": "document",
+                "origin": "https://squid.example.test",
+            },
+        )
+        assert allowed.status_code == 200
+        assert "marked.parse(" in allowed.text
+
+        minimal_metadata = client.get(
+            "/localfile",
+            params={"path": str(md_file), "render": "1"},
+            headers={
+                "sec-fetch-site": "same-site",
+                "origin": "https://squid.example.test",
+            },
+        )
+        assert minimal_metadata.status_code == 200
+        assert "marked.parse(" in minimal_metadata.text
+
+        cross_site_navigation = client.get(
+            "/localfile",
+            params={"path": str(md_file), "render": "1"},
+            headers={
+                "sec-fetch-site": "cross-site",
+                "sec-fetch-mode": "navigate",
+                "sec-fetch-dest": "document",
+                "origin": "https://evil.example.test",
+            },
+        )
+        assert cross_site_navigation.status_code == 200
+        assert "marked.parse(" in cross_site_navigation.text
+
+    finally:
+        server._LOCALFILE_ROOTS[:] = original_roots
+
+
+def test_localfile_markdown_preview_allows_document_accept_without_fetch_metadata(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    md_file = root / "notes.md"
+    html_file = root / "community.html"
+    txt_file = root / "notes.txt"
+    md_file.write_text("# Heading\n")
+    html_file.write_text("<!doctype html><title>Community</title><h1>Community</h1>\n")
+    txt_file.write_text("plain text\n")
+    original_roots = list(server._LOCALFILE_ROOTS)
+    client = TestClient(server.app)
+
+    try:
+        server._LOCALFILE_ROOTS[:] = [root.resolve()]
+        allowed = client.get(
+            "/localfile",
+            params={"path": str(md_file), "render": "1"},
+            headers={
+                "origin": "https://squid.example.test",
+                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+        )
+        assert allowed.status_code == 200
+        assert "marked.parse(" in allowed.text
+
+        html_preview = client.get(
+            "/localfile",
+            params={"path": str(html_file)},
+            headers={
+                "origin": "https://squid.example.test",
+                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+        )
+        assert html_preview.status_code == 200
+        assert "Community" in html_preview.text
+        assert html_preview.headers["content-type"].startswith("text/html")
+
+        html_cross_site_navigation = client.get(
+            "/localfile",
+            params={"path": str(html_file)},
+            headers={
+                "sec-fetch-site": "cross-site",
+                "sec-fetch-mode": "navigate",
+                "sec-fetch-dest": "document",
+                "origin": "https://evil.example.test",
+                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+        )
+        assert html_cross_site_navigation.status_code == 200
+        assert "Community" in html_cross_site_navigation.text
+
+        raw_md = client.get(
+            "/localfile",
+            params={"path": str(md_file)},
+            headers={
+                "origin": "https://squid.example.test",
+                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+        )
+        assert raw_md.status_code == 403
+
+        rendered_txt = client.get(
+            "/localfile",
+            params={"path": str(txt_file), "render": "1"},
+            headers={
+                "origin": "https://squid.example.test",
+                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+        )
+        assert rendered_txt.status_code == 403
+
+        blocked = client.get(
+            "/localfile",
+            params={"path": str(md_file), "render": "1"},
+            headers={
+                "sec-fetch-site": "cross-site",
+                "origin": "https://evil.example.test",
+                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+        )
+        assert blocked.status_code == 403
+        assert blocked.json()["error"] == "cross-origin file reads are not allowed"
+
+        blocked_html = client.get(
+            "/localfile",
+            params={"path": str(html_file)},
+            headers={
+                "sec-fetch-site": "cross-site",
+                "origin": "https://evil.example.test",
+                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+        )
+        assert blocked_html.status_code == 403
+        assert blocked_html.json()["error"] == "cross-origin file reads are not allowed"
     finally:
         server._LOCALFILE_ROOTS[:] = original_roots

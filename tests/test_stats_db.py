@@ -33,6 +33,62 @@ def test_init_db_seeds_claude_agent_without_claudecode_or_haiku_names(tmp_path, 
     assert rows == [("claude", "claudecode", "anthropic", None)]
 
 
+def test_chat_messages_source_defaults_and_can_mark_system(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    human_user = stats_db.insert_user_message("squid", "codex", "human prompt")
+    system_user = stats_db.insert_user_message("squid", "codex", "handoff prompt", source="system")
+    system_asst = stats_db.insert_assistant_message("squid", "codex", system_user)
+
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        rows = conn.execute(
+            "SELECT id, source FROM chat_messages WHERE role='user' ORDER BY id"
+        ).fetchall()
+
+    assert rows == [(human_user, "human"), (system_user, "system")]
+    assert stats_db.get_message(system_asst)["prompt_source"] == "system"
+
+
+def test_init_db_backfills_source_for_existing_chat_messages(tmp_path, monkeypatch):
+    db_path = tmp_path / "squid.db"
+    monkeypatch.setattr(stats_db, "_DB_PATH", db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """CREATE TABLE chat_messages (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   topic TEXT NOT NULL DEFAULT 'default',
+                   agent TEXT,
+                   session_id TEXT,
+                   role TEXT NOT NULL,
+                   content TEXT,
+                   reply_to INTEGER,
+                   status TEXT NOT NULL DEFAULT 'pending',
+                   adhoc INTEGER DEFAULT 0,
+                   context TEXT,
+                   status_raw TEXT,
+                   session_turn_index INTEGER,
+                   lookback INTEGER DEFAULT 0,
+                   quota_delta REAL,
+                   quota_before REAL,
+                   quota_after REAL,
+                   completed_at TEXT,
+                   created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+               )"""
+        )
+        conn.execute(
+            "INSERT INTO chat_messages (topic, role, content, status) VALUES ('squid', 'user', 'old prompt', 'done')"
+        )
+
+    stats_db.init_db()
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute("SELECT source FROM chat_messages WHERE content='old prompt'").fetchone()
+
+    assert row == ("human",)
+
+
 def test_init_db_seeds_five_default_agents_when_all_harnesses_are_installed(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     monkeypatch.setattr(

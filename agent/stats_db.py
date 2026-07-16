@@ -87,6 +87,7 @@ _TABLES = [
         agent       TEXT,
         session_id  TEXT,
         role        TEXT NOT NULL,
+        source      TEXT NOT NULL DEFAULT 'human',
         content     TEXT,
         reply_to    INTEGER REFERENCES chat_messages(id),
         status      TEXT NOT NULL DEFAULT 'pending',
@@ -243,6 +244,9 @@ def init_db() -> None:
         if "last_adhoc_at" not in topic_columns:
             conn.execute("ALTER TABLE topics ADD COLUMN last_adhoc_at TEXT")
         message_columns = _table_columns(conn, "chat_messages")
+        if "source" not in message_columns:
+            conn.execute("ALTER TABLE chat_messages ADD COLUMN source TEXT NOT NULL DEFAULT 'human'")
+            conn.execute("UPDATE chat_messages SET source = 'human' WHERE source IS NULL OR source = ''")
         if "completed_at" not in message_columns:
             conn.execute("ALTER TABLE chat_messages ADD COLUMN completed_at TEXT")
         agent_columns = _table_columns(conn, "agents")
@@ -684,7 +688,10 @@ def insert_user_message(
     mem: bool = False,
     mem_revision: Optional[str] = None,
     lookback: int = 0,
+    source: str = "human",
 ) -> int:
+    if source not in {"human", "system"}:
+        source = "human"
     if context_ids or mem or mem_revision:
         context = {"pins": context_ids or [], "mem": mem}
         if mem_revision:
@@ -694,9 +701,9 @@ def insert_user_message(
         context_json = None
     with _connect() as conn:
         cur = conn.execute(
-            """INSERT INTO chat_messages (topic, agent, role, content, status, context, lookback)
-               VALUES (?, ?, 'user', ?, 'done', ?, ?)""",
-            (topic, agent, content, context_json, lookback),
+            """INSERT INTO chat_messages (topic, agent, role, source, content, status, context, lookback)
+               VALUES (?, ?, 'user', ?, ?, 'done', ?, ?)""",
+            (topic, agent, source, content, context_json, lookback),
         )
         return cur.lastrowid
 
@@ -793,6 +800,24 @@ def update_assistant_message(
             )
             if status == "done":
                 _ensure_session_turn_index(conn, msg_id, session_id)
+
+
+def update_assistant_content_preserve_session(
+    msg_id: int,
+    content: str,
+    status: str = "done",
+    status_raw: Optional[str] = None,
+) -> None:
+    if status == "done":
+        status_raw = _sanitize_status_raw(content, status_raw)
+    terminal = status in {"done", "error", "cancelled"}
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE chat_messages SET content=?, status=?, status_raw=?,"
+            " completed_at=CASE WHEN ? THEN COALESCE(completed_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')) ELSE completed_at END"
+            " WHERE id=? AND role='assistant'",
+            (content, status, status_raw, 1 if terminal else 0, msg_id),
+        )
 
 
 def _run_event_cancel_snapshot(conn: sqlite3.Connection, msg_id: int) -> dict:
@@ -1170,11 +1195,11 @@ def get_message(msg_id: int) -> Optional[dict]:
     with _connect() as conn:
         row = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
-                      m.content, m.status, m.adhoc, m.session_id,
+                      m.content, m.status, m.source, m.adhoc, m.session_id,
                       m.context, m.status_raw, m.created_at AS timestamp,
                       {_turn_end_expr("m")} AS completed_at, m.reply_to,
                       m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
-                      u.content AS prompt, u.context AS prompt_context,
+                      u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
                       m.session_turn_index AS session_turn_count,
                       s.input_tokens, s.output_tokens, s.cache_read_tokens,
                       s.cache_write_tokens, s.history_input_tokens,
@@ -1217,11 +1242,11 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
         ).fetchone()[0]
         rows = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
-                       m.content, m.status, m.adhoc, m.session_id,
+                       m.content, m.status, m.source, m.adhoc, m.session_id,
                        m.context, m.status_raw, m.created_at AS timestamp,
                        {_turn_end_expr("m")} AS completed_at, m.reply_to,
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
-                       u.content AS prompt, u.context AS prompt_context,
+                       u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
                        m.session_turn_index AS session_turn_count,
                        s.input_tokens, s.output_tokens, s.cache_read_tokens,
                        s.cache_write_tokens, s.history_input_tokens,
@@ -1267,11 +1292,11 @@ def get_history_items_by_ids(ids: list[int]) -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
-                       m.content, m.status, m.adhoc, m.session_id,
+                       m.content, m.status, m.source, m.adhoc, m.session_id,
                        m.context, m.status_raw, m.created_at AS timestamp,
                        {_turn_end_expr("m")} AS completed_at, m.reply_to,
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
-                       u.content AS prompt, u.context AS prompt_context,
+                       u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
                        m.session_turn_index AS session_turn_count,
                        s.input_tokens, s.output_tokens, s.cache_read_tokens,
                        s.cache_write_tokens, s.history_input_tokens,
@@ -1334,11 +1359,11 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
     with _connect() as conn:
         rows = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
-                       m.content, m.status, m.adhoc, m.session_id,
+                       m.content, m.status, m.source, m.adhoc, m.session_id,
                        m.context, m.status_raw, m.created_at AS timestamp,
                        {_turn_end_expr("m")} AS completed_at, m.reply_to,
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
-                       u.content AS prompt, u.context AS prompt_context,
+                       u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
                        m.session_turn_index AS session_turn_count,
                        s.input_tokens, s.output_tokens, s.cache_read_tokens,
                        s.cache_write_tokens, s.history_input_tokens,
@@ -1407,11 +1432,11 @@ def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = N
     with _connect() as conn:
         rows = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
-                       m.content, m.status, m.adhoc, m.session_id,
+                       m.content, m.status, m.source, m.adhoc, m.session_id,
                        m.context, m.status_raw, m.created_at AS timestamp,
                        {_turn_end_expr("m")} AS completed_at, m.reply_to,
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
-                       u.content AS prompt, u.context AS prompt_context,
+                       u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
                        m.session_turn_index AS session_turn_count,
                        s.input_tokens, s.output_tokens, s.cache_read_tokens,
                        s.cache_write_tokens, s.history_input_tokens,
@@ -1456,6 +1481,7 @@ def get_recent_prompts(limit: int = 50) -> list:
                           u.lookback
                    FROM chat_messages u
                    WHERE u.role = 'user'
+                     AND COALESCE(u.source, 'human') = 'human'
                      AND u.content IS NOT NULL
                      AND TRIM(u.content) != ''
                ), latest_unique AS (

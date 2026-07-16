@@ -658,6 +658,43 @@ test.describe('response bubble', () => {
     await expect(page.locator('#file-modal-body .fv-changed')).toContainText('const opened = true;');
   });
 
+  test('mobile browser back closes GitDiff file viewer back to diff list', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 800 });
+    await page.route('**/chat/1/diff-revert-status**', route => route.fulfill({
+      json: { 'ui/app.js': 'revertable' },
+    }));
+    await page.route('**/localfile**', route => route.fulfill({
+      status: 200, contentType: 'text/plain', body: 'const opened = true;',
+    }));
+    await page.route('**/chat', route => route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        META,
+        { event: 'tool', data: {
+          name: 'GitDiff',
+          repo: '/tmp/repo',
+          file_count: 1,
+          additions: 1,
+          deletions: 0,
+          files: [{ status: 'M', path: 'ui/app.js' }],
+          diff: 'diff --git a/ui/app.js b/ui/app.js\n@@ -1 +1 @@\n+const opened = true;',
+        } },
+        { data: 'Done' },
+        DONE,
+      ),
+    }));
+
+    await sendMsg(page);
+    await page.getByRole('button', { name: 'Open ui/app.js in file viewer' }).click();
+    await expect(page.locator('#file-modal-box')).toBeVisible();
+    await expect(page.locator('#file-modal-body')).toContainText('const opened = true;');
+
+    await page.evaluate(() => history.back());
+    await expect(page.locator('#file-modal-box')).toHaveCount(0);
+    await expect(page.locator('.gitdiff-file-row')).toContainText('M app.js');
+    await expect(page.locator('#view-chat')).toHaveClass(/active/);
+  });
+
   test('GitDiff file-open uses source repo instead of worktree repo', async ({ page }) => {
     const openedPaths = [];
     await page.route('**/chat/1/diff-revert-status**', route => route.fulfill({

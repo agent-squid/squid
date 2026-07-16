@@ -411,7 +411,7 @@ test('yaml example files open inline from the browser instead of downloading', a
   expect(await downloadPromise).toBe(false);
 });
 
-test('md file shows preview button and opens rendered preview with render=1', async ({ page }) => {
+test('md file shows preview button and renders preview inline', async ({ page }) => {
   await mockApp(page);
   await page.route('**/config/localfile-roots**', r => r.fulfill({
     json: { roots: ['/tmp/work'] },
@@ -447,17 +447,83 @@ test('md file shows preview button and opens rendered preview with render=1', as
   await expect(page.locator('#file-modal-body')).toContainText('# Hello');
 
   // Preview button is visible for md files
-  await expect(page.getByRole('button', { name: 'Preview in browser' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Preview Markdown' })).toBeVisible();
 
-  // Preview opens /localfile with render=1
+  // Preview renders inline instead of opening /localfile?render=1 in a new tab.
   await page.evaluate(() => {
-    window._openedUrl = null;
+    window._openedUrl = 'not-opened';
     window.open = (url) => { window._openedUrl = url; };
   });
-  await page.getByRole('button', { name: 'Preview in browser' }).click();
+  await page.getByRole('button', { name: 'Preview Markdown' }).click();
   const openedUrl = await page.evaluate(() => window._openedUrl);
-  expect(openedUrl).toContain('render=1');
-  expect(openedUrl).toContain('/localfile');
+  expect(openedUrl).toBe('not-opened');
+  await expect(page.locator('#file-modal-body .fv-md-preview h1')).toHaveText('Hello');
+  await expect(page.locator('#file-modal-body')).toContainText('World');
+  await expect(page.getByRole('button', { name: 'Show Markdown source' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Show Markdown source' }).click();
+  await expect(page.locator('#file-modal-body')).toContainText('# Hello');
+});
+
+test('html preview stays in file viewer and back returns to source', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/config/localfile-roots**', r => r.fulfill({
+    json: { roots: ['/tmp/work'] },
+  }));
+  await page.route(url => url.pathname === '/localfile', route => {
+    const url = new URL(route.request().url());
+    const path = url.searchParams.get('path');
+    if (path === '/tmp/work') {
+      return route.fulfill({
+        contentType: 'application/json',
+        json: {
+          type: 'directory',
+          path,
+          entries: [
+            { name: 'community.html', path: '/tmp/work/community.html', is_dir: false, size: 44, mtime: 1 },
+          ],
+        },
+      });
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: 'text/html',
+      body: '<!doctype html><title>Community</title><h1>Community</h1>',
+    });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Files' }).click();
+  await page.getByRole('link', { name: '/tmp/work' }).click();
+  await page.getByRole('link', { name: 'community.html' }).click();
+
+  await expect(page.locator('#file-modal-body')).toContainText('<h1>Community</h1>');
+  await page.setViewportSize({ width: 390, height: 800 });
+
+  await page.evaluate(() => {
+    window._openedUrl = 'not-opened';
+    window.open = url => { window._openedUrl = url; };
+  });
+  await page.getByRole('button', { name: 'Preview' }).click();
+  expect(await page.evaluate(() => window._openedUrl)).toBe('not-opened');
+  await expect(page.locator('#file-modal-body iframe.fv-web-preview')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Show source' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Show source' }).click();
+  await expect(page.locator('#file-modal-body iframe.fv-web-preview')).toHaveCount(0);
+  await expect(page.locator('#file-modal-body')).toContainText('<h1>Community</h1>');
+
+  await page.getByRole('button', { name: 'Preview' }).click();
+  await expect(page.locator('#file-modal-body iframe.fv-web-preview')).toBeVisible();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect(page.locator('#file-modal-body iframe.fv-web-preview')).toHaveCount(0);
+  await expect(page.locator('#file-modal-body')).toContainText('<h1>Community</h1>');
+
+  await page.getByRole('button', { name: 'Preview' }).click();
+  await expect(page.locator('#file-modal-body iframe.fv-web-preview')).toBeVisible();
+  await page.evaluate(() => history.back());
+  await expect(page.locator('#file-modal-body iframe.fv-web-preview')).toHaveCount(0);
+  await expect(page.locator('#file-modal-body')).toContainText('<h1>Community</h1>');
 });
 
 test('plain text file has no preview button', async ({ page }) => {
