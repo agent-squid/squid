@@ -47,7 +47,7 @@ agent name (@agent) = harness (Claude Code) + provider (Claude) + model (claude-
 
 ## Your Local Coding Agents, Unified
 
-Agent-Squid is a **meta harness** tool which lets you run Claude Code, OpenAI Codex, Cursor Agent, OpenCode, Pi **coding agents** with **multiple providers**, such as, Claude, GPT, Cursor, OpenCode, NVIDIA, DeepSeek, local LLMs via **one browser UI**. Your agents still run on your own machine, with your repo, shell tools, credentials, and native CLI sessions. Squid gives those sessions names, history, queues, controls, and phone/tablet access.
+Agent-Squid is a **meta harness orchestrator** which lets you run Claude Code, OpenAI Codex, Cursor Agent, OpenCode, Pi **coding agents** with **multiple providers**, such as, Claude, GPT, Cursor, OpenCode, NVIDIA, DeepSeek, local LLMs via **one browser UI**. Your agents still run on your own machine, with your repo, shell tools, credentials, and native CLI sessions. Squid gives those sessions names, history, queues, controls, and phone/tablet access.
 
 Use it when your workflow has become a wall of unnamed terminal tabs or you need to use multiple coding agents; a couple of $20 agents alongside a free coding agent.
 
