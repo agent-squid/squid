@@ -1,9 +1,9 @@
 ---
 status: accepted
 date: 2026-06-01
-updated: 2026-06-17
+updated: 2026-07-16
 ---
-# ADR-0016: Security Model — Network Isolation + Path Allowlist
+# ADR-0016: Security Model — Network Isolation
 
 ## Context and Problem Statement
 
@@ -20,9 +20,7 @@ personal, single-user tool.
 
 ## Decision Outcome
 
-Two complementary layers, each enforced at startup or in middleware:
-
-### Layer 1 — Host binding restricted to loopback
+### Host binding restricted to loopback
 
 `main()` validates `server.host` at startup and exits with an error if the
 address is not in `127.0.0.0/8`:
@@ -38,15 +36,6 @@ Tailscale network to `127.0.0.1:<port>`.
 
 This means only processes on the local machine can reach squid directly.
 Tailscale's own device-level authentication handles who can reach the tailnet.
-
-### Layer 2 — `/localfile` path allowlist
-
-`server.localfile_roots` in `~/.squid/squid.yaml` is an explicit list of directories
-that `/localfile` is permitted to serve from. Requests for paths outside the
-list return 403. An empty list disables the endpoint entirely.
-
-This prevents `/localfile` (the highest-risk endpoint — arbitrary file reads)
-from being used to read SSH keys, credentials, or other sensitive files.
 
 ### Tailscale + MagicDNS setup
 
@@ -71,8 +60,29 @@ server:
   host: "127.0.0.1"   # must be loopback; use tailscale serve for remote access
   port: 8000
   localfile_roots:
-    - "/tmp/<user>/squid"   # add other paths as needed (e.g. ~/clawd)
+    - "/tmp/<user>/squid"   # starting points shown in the file viewer, not an access restriction
 ```
+
+## Why the `/localfile` path allowlist was removed (2026-07-16)
+
+An earlier version of this ADR had `server.localfile_roots` enforced as a
+second security layer: `/localfile` returned 403 for any path outside the
+configured list. That allowlist was removed:
+
+- **It didn't restrict what the agent could reach, only the viewer.** The
+  agent's own tools (shell, file edit, etc.) already run as the local OS user
+  with no allowlist, so anything reachable via `/localfile` was already
+  reachable through the agent regardless of the list. The allowlist gave a
+  false sense of a security boundary that didn't exist.
+- **The real boundary is Layer 1 plus OS file permissions.** `/localfile`
+  is unreachable from outside the machine (loopback binding), and once on the
+  machine, standard OS file permissions of the logged-in user decide what's
+  readable — the same boundary the agent's tools already operate under.
+
+`server.localfile_roots` still exists in `~/.squid/squid.yaml`, but purely as
+the list of starting points shown in the file viewer's root view — a
+favorites list, not an allowlist. `/localfile` will serve any path the OS
+user can read.
 
 ## Why bearer token auth was removed (2026-06-17)
 
@@ -90,11 +100,14 @@ removed for these reasons:
 
 ## Consequences
 
-- Good: two independent layers — network binding and path allowlist — each
-  stops a different class of attacker
 - Good: startup validation prevents accidental public-IP binding
-- Good: `/localfile` risk is scoped to explicitly allowed directories
 - Good: no first-run auth friction on fresh installs
+- Good: the file viewer's access matches the agent's actual reach instead of
+  pretending to be narrower
 - Bad: any Tailscale-enrolled device on your tailnet can reach all squid
   endpoints — there is no per-device ACL within the tailnet
 - Bad: Tailscale account compromise collapses the network layer
+- Bad: loopback binding is now the only thing standing between `/localfile`
+  and the filesystem — if that binding were ever relaxed, `/localfile` would
+  become a raw filesystem-read/write oracle for anyone who could reach the
+  port

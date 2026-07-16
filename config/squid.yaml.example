@@ -6,7 +6,10 @@ server:
   # config editor.
   host: "127.0.0.1"
   port: 8000
-  # Additional directories the file viewer may serve from. ~/.squid is always allowed.
+  # Frequently visited directories shown in the file viewer's root list. The
+  # file browser can reach any path you have OS access to, same as the agent;
+  # this list is just for quick access, not an access restriction. ~/.squid
+  # is always included.
   # /tmp/squid is substituted with /tmp/<your-username>/squid by start.sh on first run.
   localfile_roots:
     - "~/.squid"

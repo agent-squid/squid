@@ -170,8 +170,17 @@ test('/f @agent* filters both modes for one exact agent', async ({ page }) => {
   await expect(page.locator('#filter-badge-label')).toContainText('#squid@claude*');
 });
 
-test('/f #all is rejected; reset is the explicit way to clear filters', async ({ page }) => {
+test('/f #all is treated as a chat prompt; reset is the explicit way to clear filters', async ({ page }) => {
   await mockBackend(page);
+  let chatBody = null;
+  await page.route('**/chat', route => {
+    chatBody = route.request().postDataJSON();
+    return route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+      body: 'event: done\ndata: \n\n',
+    });
+  });
   await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
   await page.goto('/');
 
@@ -181,7 +190,54 @@ test('/f #all is rejected; reset is the explicit way to clear filters', async ({
   await page.keyboard.press('Enter');
 
   await expect(page.locator('.filter-scope-topic')).toContainText('#squid');
-  await expect(page.locator('.cmd-feedback').last()).toContainText('Usage: /f');
+  await expect.poll(() => chatBody?.message).toBe('/f #all');
+});
+
+test('/filter with prose is sent as chat instead of becoming a filter command', async ({ page }) => {
+  await mockBackend(page);
+  const historyUrls = [];
+  let chatBody = null;
+  await page.route('**/history**', route => {
+    historyUrls.push(route.request().url());
+    return route.fulfill({ json: { items: [], has_more: false } });
+  });
+  await page.route('**/chat', route => {
+    chatBody = route.request().postDataJSON();
+    return route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+      body: 'event: done\ndata: \n\n',
+    });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '/filter this list by severity');
+  await page.keyboard.press('Enter');
+
+  await expect.poll(() => chatBody?.message).toBe('/filter this list by severity');
+  expect(historyUrls.at(-1)).not.toMatch(/topic=/);
+});
+
+test('/f supports a route-chain flow filter', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'codex' });
+
+  const historyUrls = [];
+  await page.route('**/history**', route => {
+    historyUrls.push(route.request().url());
+    return route.fulfill({ json: { items: [], has_more: false } });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '/f #squid@codex>@revuqwen');
+  await page.keyboard.press('Enter');
+
+  await expect(page.locator('#filter-badge')).toHaveClass(/active/);
+  await expect(page.locator('#filter-badge-label')).toContainText('#squid@codex>@revuqwen');
+  await expect(page.locator('#topic-chip')).toContainText('#squid@codex>@revuqwen');
+  await expect.poll(() => historyUrls.some(url =>
+    url.includes('flow_route=%23squid%40codex%3E%40revuqwen')
+  )).toBe(true);
+  expect(historyUrls.at(-1)).toContain('flow_route=%23squid%40codex%3E%40revuqwen');
 });
 
 test('filter badge segments can be removed independently and clicked to edit', async ({ page }) => {

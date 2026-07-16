@@ -67,6 +67,43 @@ test('search composer action inherits active filter scope over composer route', 
   await expect(page.locator('#input')).toHaveValue('/s #squid needle');
 });
 
+test('flow route filter and search use flow_route scope', async ({ page }) => {
+  await mockBackend(page);
+  await page.unroute('**/history**');
+  await page.unroute('**/search**');
+  const historyUrls = [];
+  const searchUrls = [];
+  await page.route('**/history**', route => {
+    historyUrls.push(route.request().url());
+    return route.fulfill({ json: { items: [], has_more: false } });
+  });
+  await page.route('**/search**', route => {
+    searchUrls.push(route.request().url());
+    return route.fulfill({ json: { items: [] } });
+  });
+  await page.goto('/');
+
+  await page.fill('#input', '/f #squid@codex>@revu');
+  await page.keyboard.press('Enter');
+
+  await expect(page.locator('#filter-badge')).toHaveClass(/active/);
+  await expect(page.locator('#filter-badge-label')).toHaveText('#squid@codex>@revu');
+  await expect(page.locator('#topic-chip')).toHaveClass(/route-chain/);
+  await expect.poll(() => historyUrls.some(url => url.includes('flow_route=%23squid%40codex%3E%40revu'))).toBe(true);
+  const flowHistoryUrl = historyUrls.find(url => url.includes('flow_route=%23squid%40codex%3E%40revu'));
+  expect(flowHistoryUrl).not.toMatch(/[?&]topic=/);
+  expect(flowHistoryUrl).not.toMatch(/[?&]agent=/);
+
+  await page.fill('#input', '/s needle');
+  await page.keyboard.press('Enter');
+
+  await expect(page.locator('#search-bar')).toHaveClass(/active/);
+  await expect.poll(() => searchUrls.some(url => url.includes('flow_route=%23squid%40codex%3E%40revu'))).toBe(true);
+  const flowSearchUrl = searchUrls.find(url => url.includes('flow_route=%23squid%40codex%3E%40revu'));
+  expect(flowSearchUrl).not.toMatch(/[?&]topic=/);
+  expect(flowSearchUrl).not.toMatch(/[?&]agent=/);
+});
+
 test('unscoped global search does not display or restore #all', async ({ page }) => {
   await mockBackend(page);
   await page.goto('/');

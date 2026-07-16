@@ -1465,6 +1465,101 @@ def test_opencode_routes_tool_call_step_text_to_status_and_stop_text_to_final():
     assert chunks[3]["_stats"]["output_tokens"] == 10
 
 
+def test_opencode_preserves_answer_text_before_tool_use():
+    async def fake_stream_lines(cmd, **kwargs):
+        yield json.dumps({
+            "type": "text",
+            "sessionID": "thread-1",
+            "part": {"text": "## Review\n\n**1. First issue.**"},
+        })
+        yield json.dumps({
+            "type": "tool_use",
+            "sessionID": "thread-1",
+            "part": {
+                "type": "tool",
+                "tool": "bash",
+                "state": {
+                    "status": "completed",
+                    "input": {"command": "git diff"},
+                    "output": "",
+                },
+            },
+        })
+        yield json.dumps({
+            "type": "text",
+            "sessionID": "thread-1",
+            "part": {"text": "\n\n**2. Second issue.**"},
+        })
+        yield json.dumps({
+            "type": "step_finish",
+            "sessionID": "thread-1",
+            "part": {"reason": "stop", "tokens": {"input": 4, "output": 5}},
+        })
+
+    async def collect():
+        return [chunk async for chunk in run_opencode("review", cwd="/tmp")]
+
+    with patch("agent.runners.OPENCODE_PATH", "opencode"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        chunks = asyncio.run(collect())
+
+    assert chunks[0] == "## Review\n\n**1. First issue.**"
+    assert chunks[1] == {"_tool": {"name": "Bash", "command": "git diff"}}
+    assert chunks[2] == "\n\n**2. Second issue.**"
+    assert chunks[3]["_stats"]["session_id"] == "thread-1"
+
+
+def test_opencode_preserves_markdown_answer_text_from_tool_call_step():
+    async def fake_stream_lines(cmd, **kwargs):
+        yield json.dumps({
+            "type": "tool_use",
+            "sessionID": "thread-1",
+            "part": {
+                "type": "tool",
+                "tool": "bash",
+                "state": {
+                    "status": "completed",
+                    "input": {"command": "git diff"},
+                    "output": "",
+                },
+            },
+        })
+        yield json.dumps({
+            "type": "text",
+            "sessionID": "thread-1",
+            "part": {"text": "## Summary\n\nThe change is sound.\n\n## Critical Issues\n\n**1. First issue.**"},
+        })
+        yield json.dumps({
+            "type": "step_finish",
+            "sessionID": "thread-1",
+            "part": {"reason": "tool-calls", "tokens": {"input": 8, "output": 10}},
+        })
+        yield json.dumps({
+            "type": "text",
+            "sessionID": "thread-1",
+            "part": {"text": "\n\n**2. Second issue.**"},
+        })
+        yield json.dumps({
+            "type": "step_finish",
+            "sessionID": "thread-1",
+            "part": {"reason": "stop", "tokens": {"input": 3, "output": 4}},
+        })
+
+    async def collect():
+        return [chunk async for chunk in run_opencode("review", cwd="/tmp")]
+
+    with patch("agent.runners.OPENCODE_PATH", "opencode"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        chunks = asyncio.run(collect())
+
+    assert chunks[0] == {"_tool": {"name": "Bash", "command": "git diff"}}
+    assert chunks[1] == "## Summary\n\nThe change is sound.\n\n## Critical Issues\n\n**1. First issue.**"
+    assert chunks[2] == "\n\n**2. Second issue.**"
+    assert chunks[3]["_stats"]["session_id"] == "thread-1"
+
+
 def test_opencode_oneshot_fresh_vs_resume_command_shape():
     captured = []
 

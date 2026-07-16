@@ -50,6 +50,15 @@ def test_chat_messages_source_defaults_and_can_mark_system(tmp_path, monkeypatch
     assert stats_db.get_message(system_asst)["prompt_source"] == "system"
 
 
+def test_allocate_id_returns_incrementing_values_per_namespace(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    assert stats_db.allocate_id("flow_run") == "1"
+    assert stats_db.allocate_id("flow_run") == "2"
+    assert stats_db.allocate_id("other") == "1"
+
+
 def test_init_db_backfills_source_for_existing_chat_messages(tmp_path, monkeypatch):
     db_path = tmp_path / "squid.db"
     monkeypatch.setattr(stats_db, "_DB_PATH", db_path)
@@ -1372,6 +1381,83 @@ def test_search_prompts_uses_prompt_fts_before_limit(tmp_path, monkeypatch):
     search = stats_db.search_prompts("needle", topic="squid", agent="codex", limit=1)
 
     assert [item["id"] for item in search["items"]] == [prompt_match_id]
+
+
+def test_flow_route_filters_history_and_search(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    flow_route = "#squid@codex>@revu"
+    flow_run_id = "flow-test"
+    origin_user = stats_db.insert_user_message(
+        "squid", "codex", "needle origin prompt",
+        flow_run_id=flow_run_id, flow_route=flow_route,
+    )
+    origin_asst = stats_db.insert_assistant_message(
+        "squid", "codex", origin_user, adhoc=False,
+        flow_run_id=flow_run_id, flow_route=flow_route,
+    )
+    stats_db.update_assistant_message(origin_asst, "needle origin response", "origin-session", "done")
+
+    target_user = stats_db.insert_user_message(
+        "squid", "revu", "needle target prompt",
+        flow_run_id=flow_run_id, flow_route=flow_route,
+    )
+    target_asst = stats_db.insert_assistant_message(
+        "squid", "revu", target_user, adhoc=False,
+        flow_run_id=flow_run_id, flow_route=flow_route,
+    )
+    stats_db.update_assistant_message(target_asst, "needle target response", "target-session", "done")
+
+    other_user = stats_db.insert_user_message("squid", "revu", "needle unrelated prompt")
+    other_asst = stats_db.insert_assistant_message("squid", "revu", other_user, adhoc=False)
+    stats_db.update_assistant_message(other_asst, "needle unrelated response", "other-session", "done")
+
+    history = stats_db.get_messages_flat(flow_route=flow_route, limit=10)
+    assert {item["id"] for item in history["items"]} == {origin_asst, target_asst}
+    assert all(item["flow_run_id"] == flow_run_id for item in history["items"])
+
+    content_search = stats_db.search_messages("needle", flow_route=flow_route, limit=10)
+    assert {item["id"] for item in content_search["items"]} == {origin_asst, target_asst}
+
+    prompt_search = stats_db.search_prompts("needle", flow_route=flow_route, limit=10)
+    assert {item["id"] for item in prompt_search["items"]} == {origin_asst, target_asst}
+
+
+def test_flow_route_filter_matches_legacy_handoff_prompt_variants(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    route = "#squid@codex!>@revuqwen!"
+    origin_user = stats_db.insert_user_message("squid", "codex", "needle origin prompt")
+    origin_asst = stats_db.insert_assistant_message("squid", "codex", origin_user, adhoc=True)
+    stats_db.update_assistant_message(origin_asst, "needle origin response", "origin-session", "done")
+
+    handoff = "\n".join([
+        "Squid route chain handoff.",
+        f"Route: {route}",
+        "Previous step: @codex",
+        "Current step: @revuqwen!",
+        "Original prompt: needle origin prompt",
+    ])
+    target_user = stats_db.insert_user_message("squid", "revuqwen", handoff, source="system")
+    target_asst = stats_db.insert_assistant_message("squid", "revuqwen", target_user, adhoc=True)
+    stats_db.update_assistant_message(target_asst, "needle target response", "target-session", "done")
+
+    other_user = stats_db.insert_user_message("squid", "revuqwen", "needle unrelated prompt")
+    other_asst = stats_db.insert_assistant_message("squid", "revuqwen", other_user, adhoc=True)
+    stats_db.update_assistant_message(other_asst, "needle unrelated response", "other-session", "done")
+
+    history = stats_db.get_messages_flat(flow_route="#squid@codex>@revuqwen", limit=10)
+    assert {item["id"] for item in history["items"]} == {origin_asst, target_asst}
+    origin_item = next(item for item in history["items"] if item["id"] == origin_asst)
+    assert origin_item["flow_route"] == route
+
+    content_search = stats_db.search_messages("needle", flow_route="#squid@codex>@revuqwen", limit=10)
+    assert {item["id"] for item in content_search["items"]} == {origin_asst, target_asst}
+
+    prompt_search = stats_db.search_prompts("needle", flow_route="#squid@codex>@revuqwen", limit=10)
+    assert {item["id"] for item in prompt_search["items"]} == {origin_asst, target_asst}
 
 
 def test_status_raw_preserved_across_partial_updates(tmp_path, monkeypatch):

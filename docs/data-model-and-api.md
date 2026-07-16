@@ -76,6 +76,8 @@ adhoc      INTEGER  DEFAULT 0  1=adhoc turn, 0=session turn
 context    TEXT                user rows: JSON array of context message IDs [id, …]
                                assistant rows: JSON array of tool_use events
 status_raw TEXT                raw harness status/debug text
+flow_run_id TEXT               short id for one Squid Flow route execution
+flow_route  TEXT               canonical Squid Flow route expression
 session_turn_index INTEGER     ordinal assistant turn within a non-adhoc session
 lookback   INTEGER  DEFAULT 0  adhoc lookback window used for this turn
 quota_delta  REAL              quota_after - quota_before, if recorded
@@ -92,6 +94,20 @@ For cancelled assistant rows, Squid reconstructs durable partial response,
 status trace, tool context, and stats-derived `session_id` from `run_events`.
 Pinned prompt context and memory metadata remain on the linked user row's
 `context` field and are exposed as `prompt_context`.
+
+---
+
+### `id_counters` — generic short id allocator
+
+```
+namespace TEXT  PK
+next_id   INTEGER  NOT NULL
+```
+
+Used for human-readable local ids that do not need global uniqueness. Squid
+Flow uses namespace `flow_run`; `chat_messages.flow_run_id` stores the
+allocated value as text (`"1"`, `"2"`, `"3"`, ...). Existing UUID-style flow
+run ids remain valid legacy values.
 
 ---
 
@@ -270,7 +286,8 @@ Base URL: `http://localhost:8000`
 
 Stream an AI response. Returns `text/event-stream` with response header
 `X-Squid-Msg-Id` (the assistant message id, available before the stream body
-completes).
+completes). Routed turns also return `X-Squid-Flow-Run-Id`, allocated by the
+server when `flow_route` is present and `flow_run_id` is omitted.
 
 **Request body**
 ```json
@@ -282,7 +299,9 @@ completes).
   "lookback_via_pins": "boolean (default: false) — use pinned_ids instead of last-N history",
   "adhoc":    "boolean (default: false)",
   "pinned_ids": "integer[] | null — explicit message IDs to inject as context when lookback_via_pins",
-  "include_topic_memory": "boolean (default: false) — inject the topic's memory.md as context"
+  "include_topic_memory": "boolean (default: false) — inject the topic's memory.md as context",
+  "flow_route": "string | null — canonical Squid Flow route expression",
+  "flow_run_id": "string | null — existing flow run id to reuse; omit to allocate a short id"
 }
 ```
 
@@ -434,7 +453,11 @@ endpoint.
 
 ### GET /history
 
-**Query params**: `topic`, `agent`, `offset` (default 0), `limit` (default 5)
+Supports `flow_route` as an alternative scope to `topic`/`agent` for Squid Flow
+history. `flow_route` is canonicalized by removing whitespace and sorting
+semicolon-separated clauses before querying.
+
+**Query params**: `topic`, `agent`, `adhoc`, `flow_route`, `offset` (default 0), `limit` (default 5)
 
 **Response**
 ```json
@@ -450,6 +473,8 @@ endpoint.
       "status":     "done | pending | error",
       "adhoc":      0,
       "context":    "json string | null",
+      "flow_run_id": "string | null",
+      "flow_route":  "string | null",
       "timestamp":  "ISO8601",
       "reply_to":   1,
       "prompt":     "user message text (for assistant rows)",
@@ -480,6 +505,7 @@ Fetch specific message rows by id (comma-separated, capped at 200), same row sha
 ### GET /search
 
 Full-text search over messages via `messages_fts`/`prompts_fts`.
+Supports `flow_route` for Squid Flow scoped search.
 
 **Query params**: `q` (required), `limit` (default 100), `topic`, `agent`, `adhoc`, `role` (default `"assistant"`), `bookmarked` (default `false`)
 
@@ -756,17 +782,11 @@ optimistic concurrency — 409 if the file changed since it was read.
 
 ### GET /config/localfile-roots
 
-Same-origin only. Returns the current allowed localfile roots.
+Same-origin only. Returns the starting points shown in the file viewer's root
+view (from `server.localfile_roots`) — a favorites list, not an access
+restriction; see ADR-0016.
 
 **Response**: `{ "roots": [...] }`
-
-### POST /config/localfile-roots
-
-Same-origin only. Appends a new allowed root for `GET/POST /localfile`.
-
-**Request body**: `{ "path": "string", "root": "string" }`
-
-**Response**: `{ "ok": true, "root": "string", "added": bool }`
 
 ---
 
@@ -1020,15 +1040,16 @@ Returns the Tailscale HTTPS URL for this Squid instance, via `tailscale status -
 
 ### GET /localfile?path={path}&render={bool}
 
-Read a file or list a directory, gated by same-origin requests and the
-`server.localfile_roots` allowlist (see `PUT/POST /config/localfile-roots`).
-Returns a JSON directory listing, rendered HTML (for markdown when
-`render=true`), plain text, or a raw file response depending on path/params.
+Read a file or list a directory. Gated by same-origin requests (see
+ADR-0016) and otherwise limited only by the server's OS-user file
+permissions — not by `server.localfile_roots`, which is just the favorites
+list for the viewer's root view (`GET /config/localfile-roots`). Returns a
+JSON directory listing, rendered HTML (for markdown when `render=true`),
+plain text, or a raw file response depending on path/params.
 
 ### POST /localfile
 
-Write a file under an allowed root. Records a before/after snapshot in
-`file_edit_history`.
+Write a file. Records a before/after snapshot in `file_edit_history`.
 
 **Request body**: `{ "path": "string", "content": "string" }`
 
@@ -1036,7 +1057,7 @@ Write a file under an allowed root. Records a before/after snapshot in
 
 ### POST /localfile/create-file
 
-Create an empty file under an allowed root. Fails if the path already exists.
+Create an empty file. Fails if the path already exists.
 
 **Request body**: `{ "parent": "string", "name": "string" }`
 
@@ -1044,7 +1065,7 @@ Create an empty file under an allowed root. Fails if the path already exists.
 
 ### POST /localfile/create-folder
 
-Create a directory under an allowed root. Fails if the path already exists.
+Create a directory. Fails if the path already exists.
 
 **Request body**: `{ "parent": "string", "name": "string" }`
 
@@ -1052,7 +1073,7 @@ Create a directory under an allowed root. Fails if the path already exists.
 
 ### POST /localfile/upload?parent={path}&name={filename}
 
-Upload a file under an allowed root using the raw request body as file bytes.
+Upload a file using the raw request body as file bytes.
 Fails if the path already exists.
 
 **Response**: `{ "ok": true, "path": "string" }`

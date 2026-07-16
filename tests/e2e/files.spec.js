@@ -112,10 +112,10 @@ test('Files menu creates folders, creates files, and renames entries', async ({ 
       const body = req.postDataJSON();
       calls.push({ endpoint: 'rename', body });
       const entry = entries.find(e => e.path === body.path);
-      const parent = body.path.split('/').slice(0, -1).join('/');
-      const path = `${parent}/${body.name}`;
+      const path = body.to_path || `${body.path.split('/').slice(0, -1).join('/')}/${body.name}`;
+      const name = path.split('/').pop();
       if (entry) {
-        entry.name = body.name;
+        entry.name = name;
         entry.path = path;
       }
       return route.fulfill({ json: { ok: true, path } });
@@ -124,13 +124,13 @@ test('Files menu creates folders, creates files, and renames entries', async ({ 
     if (path === '/tmp/work/project') {
       return route.fulfill({
         contentType: 'application/json',
-        json: { type: 'directory', path, entries },
+        json: { type: 'directory', path, entries: entries.filter(e => e.path.split('/').slice(0, -1).join('/') === path) },
       });
     }
     if (path === '/tmp/work/project/src' || path === '/tmp/work/project/lib') {
       return route.fulfill({
         contentType: 'application/json',
-        json: { type: 'directory', path, entries: [] },
+        json: { type: 'directory', path, entries: entries.filter(e => e.path.split('/').slice(0, -1).join('/') === path) },
       });
     }
     return route.fulfill({ status: 200, contentType: 'text/plain', body: '' });
@@ -159,39 +159,47 @@ test('Files menu creates folders, creates files, and renames entries', async ({ 
   });
   await expect(page.getByRole('link', { name: 'picked.txt' })).toBeVisible();
 
-  page.once('dialog', async dialog => {
-    expect(dialog.message()).toBe('Folder name');
-    await dialog.accept('lib');
-  });
   await page.getByRole('button', { name: 'Add folder' }).click();
+  await expect(page.locator('.fv-path-modal')).toBeVisible();
+  await expect(page.locator('.fv-path-modal')).toContainText('New folder');
+  await page.getByLabel('Destination path').fill('lib');
+  await page.locator('.fv-path-modal').getByRole('button', { name: 'Create' }).click();
   await expect(page.locator('#file-modal-breadcrumb')).toContainText('lib');
 
   await page.getByRole('button', { name: 'Back' }).click();
   await expect(page.getByRole('link', { name: 'lib/' })).toBeVisible();
 
-  page.once('dialog', async dialog => {
-    expect(dialog.message()).toBe('File name');
-    await dialog.accept('notes.txt');
-  });
   await page.getByRole('button', { name: 'Create file' }).click();
+  await expect(page.locator('.fv-path-modal')).toBeVisible();
+  await expect(page.locator('.fv-path-modal')).toContainText('New file');
+  await page.getByLabel('Destination path').fill('notes.txt');
+  await page.locator('.fv-path-modal').getByRole('button', { name: 'Create' }).click();
   await expect(page.locator('#file-modal-breadcrumb')).toContainText('notes.txt');
 
   await page.getByRole('button', { name: 'Back' }).click();
-  page.once('dialog', async dialog => {
-    expect(dialog.message()).toBe('Rename to');
-    expect(dialog.defaultValue()).toBe('README.md');
-    await dialog.accept('GUIDE.md');
-  });
   await page.getByRole('button', { name: 'Rename README.md' }).click();
+  await expect(page.locator('.fv-path-modal')).toBeVisible();
+  await expect(page.locator('.fv-path-modal')).toContainText('Rename or move');
+  await expect(page.getByLabel('Destination path')).toHaveValue('/tmp/work/project/README.md');
+  await page.getByLabel('Destination path').fill('/tmp/work/project/GUIDE.md');
+  await page.locator('.fv-path-modal').getByRole('button', { name: 'Rename' }).click();
   await expect(page.getByRole('link', { name: 'GUIDE.md' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'README.md' })).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Rename GUIDE.md' }).click();
+  await page.getByLabel('Destination path').fill('/tmp/work/project/src/GUIDE.md');
+  await page.locator('.fv-path-modal').getByRole('button', { name: 'Rename' }).click();
+  await expect(page.getByRole('link', { name: 'GUIDE.md' })).toHaveCount(0);
+  await page.getByRole('link', { name: 'src/' }).click();
+  await expect(page.getByRole('link', { name: 'GUIDE.md' })).toBeVisible();
 
   expect(calls).toEqual([
     { endpoint: 'upload', parent: '/tmp/work/project', name: 'upload.txt', body: 'uploaded body' },
     { endpoint: 'upload', parent: '/tmp/work/project', name: 'picked.txt', body: 'picked body' },
     { endpoint: 'create-folder', body: { parent: '/tmp/work/project', name: 'lib' } },
     { endpoint: 'create-file', body: { parent: '/tmp/work/project', name: 'notes.txt' } },
-    { endpoint: 'rename', body: { path: '/tmp/work/project/README.md', name: 'GUIDE.md' } },
+    { endpoint: 'rename', body: { path: '/tmp/work/project/README.md', to_path: '/tmp/work/project/GUIDE.md' } },
+    { endpoint: 'rename', body: { path: '/tmp/work/project/GUIDE.md', to_path: '/tmp/work/project/src/GUIDE.md' } },
   ]);
 });
 
@@ -459,6 +467,8 @@ test('md file shows preview button and renders preview inline', async ({ page })
   expect(openedUrl).toBe('not-opened');
   await expect(page.locator('#file-modal-body .fv-md-preview h1')).toHaveText('Hello');
   await expect(page.locator('#file-modal-body')).toContainText('World');
+  const previewFontSize = await page.locator('#file-modal-body .fv-md-preview').evaluate(el => parseFloat(getComputedStyle(el).fontSize));
+  expect(previewFontSize).toBeGreaterThanOrEqual(15.5);
   await expect(page.getByRole('button', { name: 'Show Markdown source' })).toBeVisible();
 
   await page.getByRole('button', { name: 'Show Markdown source' }).click();

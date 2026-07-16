@@ -68,6 +68,8 @@ CREATE TABLE chat_messages (
     adhoc       INTEGER DEFAULT 0,         -- 1 = adhoc turn
     context     TEXT,                      -- user: JSON [msg_id, …]; assistant: JSON tool_use events
     status_raw  TEXT,                      -- raw harness status/debug text
+    flow_run_id TEXT,                      -- short id for one Squid Flow route execution
+    flow_route  TEXT,                      -- canonical Squid Flow route expression
     session_turn_index INTEGER,            -- ordinal assistant turn within a non-adhoc session
     lookback    INTEGER DEFAULT 0,
     quota_delta  REAL,
@@ -81,6 +83,21 @@ CREATE TABLE chat_messages (
 `cancelled` and `completed_at` capture terminal outcomes for killed/dequeued
 turns so they're visible in Stats without a restart. See
 [ADR-0033](decisions/0033-cancelled-and-error-turn-capture.md).
+
+Squid Flow run ids are allocated from `id_counters` namespace `flow_run` and
+stored as text (`"1"`, `"2"`, `"3"`, ...). Existing UUID-style values are valid
+legacy data.
+
+### `id_counters`
+```sql
+CREATE TABLE id_counters (
+    namespace TEXT PRIMARY KEY,
+    next_id   INTEGER NOT NULL
+);
+```
+
+Generic allocator for local human-readable ids. `next_id` is the next value to
+return for that namespace.
 
 ### `topic_sessions`
 ```sql
@@ -241,6 +258,8 @@ predates them — additive-only, no down migration:
 - `topics.last_session_at TEXT`
 - `topics.last_adhoc_at TEXT`
 - `chat_messages.completed_at TEXT`
+- `chat_messages.flow_run_id TEXT`
+- `chat_messages.flow_route TEXT`
 
 ---
 

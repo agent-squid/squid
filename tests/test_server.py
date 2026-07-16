@@ -333,6 +333,12 @@ def test_chat_rejects_server_side_hidden_route_chain():
     assert res.json()["error"] == "route chains are executed as explicit UI turns"
 
 
+def test_canonical_flow_route_sorts_comma_clauses():
+    route = " #squid@codex>@test , @review>@codex "
+
+    assert server.canonical_flow_route(route) == "#squid@codex>@test,@review>@codex"
+
+
 def test_backend_native_chat_commands_bypass_context_augmentation_for_any_agent():
     cases = [
         ("/usage", "claude-live"),
@@ -415,6 +421,39 @@ def test_chat_response_exposes_message_id_header():
     assert res.status_code == 200
     assert res.headers["X-Squid-Msg-Id"] == "202"
     assert insert_user_message.call_args.kwargs["source"] == "system"
+
+
+def test_chat_allocates_short_flow_run_id_for_routed_turn():
+    async def fake_dispatch(**kwargs):
+        out_q = asyncio.Queue()
+        await out_q.put(None)
+        return out_q, 1, FinishedWorker()
+
+    client = TestClient(server.app)
+
+    with patch("agent.server.allocate_id", return_value="1") as allocate_id, \
+         patch("agent.server.get_agent", return_value={
+            "backend": "codex", "model": None, "cwd": "/tmp/project",
+         }), \
+         patch("agent.server.upsert_topic"), \
+         patch("agent.server.get_topic_session", return_value=None), \
+         patch("agent.server.topic_memory_squid_config", return_value={}), \
+         patch("agent.server.insert_user_message", return_value=201) as insert_user_message, \
+         patch("agent.server.insert_assistant_message", return_value=202) as insert_assistant_message, \
+         patch("agent.server.update_assistant_message"), \
+         patch.object(server.dispatcher, "dispatch", fake_dispatch):
+        res = client.post("/chat", json={
+            "message": "hello",
+            "topic": "squid",
+            "agent": "codex",
+            "flow_route": "#squid@codex>@revuqwen",
+        })
+
+    assert res.status_code == 200
+    assert res.headers["X-Squid-Flow-Run-Id"] == "1"
+    allocate_id.assert_called_once_with("flow_run")
+    assert insert_user_message.call_args.kwargs["flow_run_id"] == "1"
+    assert insert_assistant_message.call_args.kwargs["flow_run_id"] == "1"
 
 
 def test_clear_command_kills_only_session_lane():
@@ -575,49 +614,23 @@ def test_api_routes_are_registered_before_static_ui():
     assert "roots" in roots.json()
 
 
-def test_file_root_can_expand_to_an_edited_parent_and_applies_immediately(tmp_path):
+def test_localfile_serves_paths_outside_configured_roots(tmp_path):
     existing_root = tmp_path / "existing"
     existing_root.mkdir()
     project = tmp_path / "workspace" / "project"
     project.mkdir(parents=True)
     requested = project / "notes.md"
     requested.write_text("visible now")
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-    config_path = state_dir / "squid.yaml"
-    config_path.write_text(_config_yaml(existing_root))
-    client = TestClient(server.app)
-    original_cfg = dict(server._cfg)
     original_roots = list(server._LOCALFILE_ROOTS)
+    client = TestClient(server.app)
 
     try:
-        with patch("agent.config._USER_CONFIG", config_path), \
-             patch.object(server, "_USER_CONFIG", config_path):
-            server._LOCALFILE_ROOTS[:] = server._localfile_roots_from(
-                server._validate_config_content(config_path.read_text())
-            )
-            blocked = client.get("/localfile", params={"path": str(requested)})
-            assert blocked.status_code == 403
-
-            allowed = client.post("/config/localfile-roots", json={
-                "path": str(requested),
-                "root": str(tmp_path / "workspace"),
-            })
-            assert allowed.status_code == 200
-            assert allowed.json()["added"] is True
-            roots = client.get("/config/localfile-roots")
-            assert roots.status_code == 200
-            assert str(tmp_path / "workspace") in roots.json()["roots"]
-            assert '# retained comment' in config_path.read_text()
-            assert f'- "{tmp_path / "workspace"}"' in config_path.read_text()
-
-            visible = client.get("/localfile", params={"path": str(requested)})
-            assert visible.status_code == 200
-            assert visible.headers["content-type"].startswith("text/markdown")
-            assert visible.text == "visible now"
+        server._LOCALFILE_ROOTS[:] = [existing_root.resolve()]
+        visible = client.get("/localfile", params={"path": str(requested)})
+        assert visible.status_code == 200
+        assert visible.headers["content-type"].startswith("text/markdown")
+        assert visible.text == "visible now"
     finally:
-        server._cfg.clear()
-        server._cfg.update(original_cfg)
         server._LOCALFILE_ROOTS[:] = original_roots
 
 
@@ -641,6 +654,38 @@ def test_localfile_serves_unknown_extension_text_inline(tmp_path):
         binary_res = client.get("/localfile", params={"path": str(binary_file)})
         assert binary_res.status_code == 200
         assert binary_res.headers["content-type"].startswith("application/octet-stream")
+    finally:
+        server._LOCALFILE_ROOTS[:] = original_roots
+
+
+def test_localfile_rename_can_move_across_directories(tmp_path):
+    root = tmp_path / "workspace"
+    src = root / "src"
+    src.mkdir(parents=True)
+    note = root / "notes.txt"
+    note.write_text("move me")
+    original_roots = list(server._LOCALFILE_ROOTS)
+    client = TestClient(server.app)
+
+    try:
+        server._LOCALFILE_ROOTS[:] = [root.resolve()]
+        moved = src / "notes.txt"
+        res = client.post("/localfile/rename", json={
+            "path": str(note),
+            "to_path": str(moved),
+        })
+        assert res.status_code == 200
+        assert res.json()["path"] == str(moved.resolve())
+        assert not note.exists()
+        assert moved.read_text() == "move me"
+
+        outside = tmp_path / "outside.txt"
+        res2 = client.post("/localfile/rename", json={
+            "path": str(moved),
+            "to_path": str(outside),
+        })
+        assert res2.status_code == 200
+        assert outside.read_text() == "move me"
     finally:
         server._LOCALFILE_ROOTS[:] = original_roots
 

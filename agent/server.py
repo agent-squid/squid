@@ -93,6 +93,7 @@ from .stats_db import (
     get_bookmarks, add_bookmark, remove_bookmark,
     save_worktree, get_worktrees, delete_all_worktrees,
     delete_all_topic_worktrees,
+    allocate_id,
 )
 from .journal import _generate_journal, _current_week, list_topic_journals, read_journal
 from . import creds
@@ -112,6 +113,28 @@ _log_handler = logging.handlers.TimedRotatingFileHandler(
 _log_handler.setFormatter(logging.Formatter("%(asctime)sZ %(levelname)s  %(message)s"))
 logging.basicConfig(level=logging.INFO, handlers=[_log_handler], force=True)
 log = logging.getLogger(__name__)
+
+
+class _AccessLogNoiseFilter(logging.Filter):
+    """Drop routine polling GETs (health checks, /queue, /processes, static
+    assets, etc.) from the access log — they fire every second or two per
+    open browser tab and bury the entries that actually matter. POSTs and
+    any non-2xx/3xx response still get through."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if not isinstance(args, tuple) or len(args) != 5:
+            return True
+        _client_addr, method, _path, _http_version, status_code = args
+        if method != "GET":
+            return True
+        try:
+            return int(status_code) >= 400
+        except (TypeError, ValueError):
+            return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_AccessLogNoiseFilter())
 
 dispatcher = TopicDispatcher()
 
@@ -237,6 +260,8 @@ class ChatRequest(BaseModel):
     adhoc: bool = Field(False)
     pinned_ids: Optional[list[int]] = None
     include_topic_memory: bool = Field(False)
+    flow_run_id: Optional[str] = None
+    flow_route: Optional[str] = None
 
 
 class TopicMemoryRequest(BaseModel):
@@ -265,11 +290,6 @@ class ConfigRequest(BaseModel):
     revision: Optional[str] = None
 
 
-class LocalfileRootRequest(BaseModel):
-    path: str = Field(..., min_length=1)
-    root: str = Field(..., min_length=1)
-
-
 class LocalfileWriteRequest(BaseModel):
     path: str = Field(..., min_length=1)
     content: str
@@ -282,7 +302,8 @@ class LocalfileCreateRequest(BaseModel):
 
 class LocalfileRenameRequest(BaseModel):
     path: str = Field(..., min_length=1)
-    name: str = Field(..., min_length=1)
+    name: Optional[str] = Field(default=None, min_length=1)
+    to_path: Optional[str] = Field(default=None, min_length=1)
 
 
 class LocalfileDeleteRequest(BaseModel):
@@ -459,36 +480,6 @@ def _localfile_roots_from(config: dict) -> list[Path]:
     return list(dict.fromkeys([squid_state, *configured]))
 
 
-def _append_localfile_root(content: str, root: str) -> str:
-    """Append a root while preserving the rest of the user's YAML verbatim."""
-    lines = content.splitlines(keepends=True)
-    server_index = next((i for i, line in enumerate(lines) if re.match(r"^server:\s*(?:#.*)?$", line)), None)
-    if server_index is None:
-        raise ValueError("server must use a block mapping to add a root from the file viewer")
-    server_end = next(
-        (i for i in range(server_index + 1, len(lines)) if lines[i].strip() and not lines[i].startswith((" ", "\t", "#"))),
-        len(lines),
-    )
-    roots_index = next(
-        (i for i in range(server_index + 1, server_end) if re.match(r"^  localfile_roots:\s*", lines[i])),
-        None,
-    )
-    item = f"    - {json.dumps(root)}\n"
-    if roots_index is None:
-        lines[server_index + 1:server_index + 1] = ["  localfile_roots:\n", item]
-    elif re.match(r"^  localfile_roots:\s*\[\s*\]\s*(?:#.*)?$", lines[roots_index]):
-        lines[roots_index:roots_index + 1] = ["  localfile_roots:\n", item]
-    elif re.match(r"^  localfile_roots:\s*(?:#.*)?$", lines[roots_index]):
-        roots_end = next(
-            (i for i in range(roots_index + 1, server_end) if lines[i].strip() and not lines[i].startswith("    ")),
-            server_end,
-        )
-        lines.insert(roots_end, item)
-    else:
-        raise ValueError("localfile_roots must use block-list syntax to add a root from the file viewer")
-    return "".join(lines)
-
-
 # ---------------------------------------------------------------------------
 # SSE helpers
 # ---------------------------------------------------------------------------
@@ -532,6 +523,16 @@ def _parse_simple_oneway_chain(route: Optional[str]) -> Optional[dict]:
     return {"topic": topic, "origin": m.group(2), "origin_fresh": bool(m.group(3)), "target": m.group(4), "target_fresh": bool(m.group(5)), "route": route}
 
 
+def canonical_flow_route(route: Optional[str]) -> Optional[str]:
+    text = re.sub(r"\s+", "", (route or "").strip())
+    if not text:
+        return None
+    parts = [part for part in text.split(",") if part]
+    if len(parts) > 1:
+        parts.sort()
+    return ",".join(parts)
+
+
 def _chain_envelope(route: str, origin_agent: str, target_agent: str, target_fresh: bool, user_prompt: str, origin_output: str) -> str:
     target_suffix = "!" if target_fresh else ""
     return "\n\n".join([
@@ -568,6 +569,8 @@ async def _prepare_chat_turn(
     pinned_ids: Optional[list[int]] = None,
     include_topic_memory: bool = False,
     source: str = "human",
+    flow_run_id: Optional[str] = None,
+    flow_route: Optional[str] = None,
 ) -> Union[dict, JSONResponse]:
     # 1. Resolve agent — explicit wins, else use topic sticky
     resolved_agent: Optional[str] = agent
@@ -646,8 +649,10 @@ async def _prepare_chat_turn(
                                       mem=bool(memory_revision),
                                       mem_revision=memory_revision,
                                       lookback=lookback,
-                                      source=source)
-    asst_msg_id = insert_assistant_message(topic, resolved_agent, user_msg_id, adhoc=adhoc)
+                                      source=source,
+                                      flow_run_id=flow_run_id,
+                                      flow_route=flow_route)
+    asst_msg_id = insert_assistant_message(topic, resolved_agent, user_msg_id, adhoc=adhoc, flow_run_id=flow_run_id, flow_route=flow_route)
     attach_assistant_session(asst_msg_id, resume_session_id)
 
     effective_code_roots = code_roots
@@ -974,6 +979,11 @@ async def chat(req: ChatRequest):
     if req.route:
         return JSONResponse({"error": "route chains are executed as explicit UI turns"}, status_code=400)
 
+    flow_route = canonical_flow_route(req.flow_route)
+    flow_run_id = req.flow_run_id if flow_route else None
+    if flow_route and not flow_run_id:
+        flow_run_id = allocate_id("flow_run")
+
     try:
         chain = _parse_simple_oneway_chain(req.route)
     except ValueError as exc:
@@ -995,6 +1005,8 @@ async def chat(req: ChatRequest):
             adhoc=chain["origin_fresh"],
             pinned_ids=req.pinned_ids,
             include_topic_memory=req.include_topic_memory,
+            flow_run_id=flow_run_id,
+            flow_route=flow_route,
         )
         if isinstance(origin, JSONResponse):
             return origin
@@ -1034,6 +1046,8 @@ async def chat(req: ChatRequest):
                 adhoc=chain["target_fresh"],
                 lookback=0,
                 source="system",
+                flow_run_id=flow_run_id,
+                flow_route=flow_route,
             )
             if isinstance(target, JSONResponse):
                 err = json.loads(target.body).get("error", "chain target failed")
@@ -1081,6 +1095,7 @@ async def chat(req: ChatRequest):
                 "X-Accel-Buffering": "no",
                 "Cache-Control": "no-cache",
                 "X-Squid-Msg-Id": str(origin["asst_msg_id"]),
+                "X-Squid-Flow-Run-Id": flow_run_id or "",
             },
         )
 
@@ -1094,6 +1109,8 @@ async def chat(req: ChatRequest):
         pinned_ids=req.pinned_ids,
         include_topic_memory=req.include_topic_memory,
         source=req.source,
+        flow_run_id=flow_run_id,
+        flow_route=flow_route,
     )
     if isinstance(prepared, JSONResponse):
         return prepared
@@ -1116,6 +1133,7 @@ async def chat(req: ChatRequest):
             "X-Accel-Buffering": "no",
             "Cache-Control": "no-cache",
             "X-Squid-Msg-Id": str(prepared["asst_msg_id"]),
+            "X-Squid-Flow-Run-Id": flow_run_id or "",
         },
     )
 
@@ -1238,13 +1256,14 @@ async def health():
 
 @app.get("/history")
 async def history(offset: int = 0, limit: int = 5, topic: Optional[str] = None,
-                  agent: Optional[str] = None, adhoc: Optional[bool] = None):
+                  agent: Optional[str] = None, adhoc: Optional[bool] = None,
+                  flow_route: Optional[str] = None):
     if topic is not None:
         normalized = _normalize_topic_response(topic)
         if isinstance(normalized, JSONResponse):
             return normalized
         topic = normalized
-    return JSONResponse(list_history(topic=topic, agent=agent, adhoc=adhoc, offset=offset, limit=limit))
+    return JSONResponse(list_history(topic=topic, agent=agent, adhoc=adhoc, offset=offset, limit=limit, flow_route=canonical_flow_route(flow_route)))
 
 
 @app.get("/history/by-ids")
@@ -1262,16 +1281,18 @@ async def history_by_ids(ids: str = ""):
 @app.get("/search")
 async def search(q: str, limit: int = 100, topic: Optional[str] = None,
                  agent: Optional[str] = None, adhoc: Optional[bool] = None,
-                 role: str = "assistant", bookmarked: bool = False):
+                 role: str = "assistant", bookmarked: bool = False,
+                 flow_route: Optional[str] = None):
     if topic is not None:
         normalized = _normalize_topic_response(topic)
         if isinstance(normalized, JSONResponse):
             return normalized
         topic = normalized
     limit = min(limit, 100)
+    flow_route = canonical_flow_route(flow_route)
     if role == "user":
-        return JSONResponse(search_prompts(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit, bookmarked=bookmarked))
-    return JSONResponse(search_messages(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit, bookmarked=bookmarked))
+        return JSONResponse(search_prompts(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit, bookmarked=bookmarked, flow_route=flow_route))
+    return JSONResponse(search_messages(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit, bookmarked=bookmarked, flow_route=flow_route))
 
 
 @app.get("/prompts/recent")
@@ -1554,35 +1575,6 @@ async def update_config_yaml(req: ConfigRequest, request: Request):
         "restart_required": True,
         "backup": str(_USER_CONFIG.with_suffix(_USER_CONFIG.suffix + ".bak")),
     })
-
-
-@app.post("/config/localfile-roots")
-async def add_localfile_root(req: LocalfileRootRequest, request: Request):
-    if not _same_origin(request):
-        return JSONResponse({"error": "cross-origin configuration writes are not allowed"}, status_code=403)
-    requested_path = Path(req.path).expanduser().resolve()
-    root = Path(req.root).expanduser().resolve()
-    if not root.is_dir():
-        return JSONResponse({"error": "allowed root must be an existing directory"}, status_code=400)
-    if not requested_path.is_relative_to(root):
-        return JSONResponse({"error": "allowed root must contain the requested file"}, status_code=400)
-
-    if root in _LOCALFILE_ROOTS:
-        return JSONResponse({"ok": True, "root": str(root), "added": False})
-    try:
-        current = config_text()
-        updated = _append_localfile_root(current, str(root))
-        parsed = _validate_config_content(updated)
-        write_config_text(updated, config_revision(current))
-    except RuntimeError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=409)
-    except (OSError, ValueError) as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-
-    _cfg.clear()
-    _cfg.update(parsed)
-    _LOCALFILE_ROOTS[:] = _localfile_roots_from(parsed)
-    return JSONResponse({"ok": True, "root": str(root), "added": True})
 
 
 @app.get("/config/localfile-roots")
@@ -2158,17 +2150,12 @@ _LOCALFILE_TEXT_MIME_BY_SUFFIX = {
     ".markdown": "text/markdown",
 }
 
-def _localfile_allowed(path: Path) -> bool:
-    return any(path.is_relative_to(root) for root in _LOCALFILE_ROOTS)
-
 def _localfile_child(parent: Path, name: str) -> Union[Path, JSONResponse]:
     if not name or name in {".", ".."} or Path(name).name != name:
         return JSONResponse({"error": "invalid name"}, status_code=400)
     child = (parent / name).resolve()
     if child.parent != parent:
         return JSONResponse({"error": "invalid name"}, status_code=400)
-    if not _localfile_allowed(child):
-        return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
     return child
 
 def _looks_like_text_file(path: Path, sample_size: int = 65536) -> bool:
@@ -2191,7 +2178,7 @@ def _looks_like_text_file(path: Path, sample_size: int = 65536) -> bool:
 
 @app.get("/localfile")
 async def serve_local_file(path: str, request: Request, render: bool = False):
-    """Serve a local file — only paths under server.localfile_roots are allowed."""
+    """Serve a local file — any path readable by the server's OS user is allowed."""
     import mimetypes
     from fastapi.responses import FileResponse, PlainTextResponse, HTMLResponse
     _nocache = {"Cache-Control": "no-store"}
@@ -2202,10 +2189,6 @@ async def serve_local_file(path: str, request: Request, render: bool = False):
         and not _safe_document_preview_request(request, render=render, path=p)
     ):
         return JSONResponse({"error": "cross-origin file reads are not allowed"}, status_code=403)
-    if not _LOCALFILE_ROOTS:
-        return JSONResponse({"error": "localfile not enabled (set server.localfile_roots in ~/.squid/squid.yaml)"}, status_code=403)
-    if not _localfile_allowed(p):
-        return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
     if not p.exists():
         return JSONResponse({"error": "not found"}, status_code=404)
     if p.is_dir():
@@ -2248,11 +2231,7 @@ async def serve_local_file(path: str, request: Request, render: bool = False):
 async def write_local_file(req: LocalfileWriteRequest, request: Request):
     if not _same_origin(request):
         return JSONResponse({"error": "cross-origin writes are not allowed"}, status_code=403)
-    if not _LOCALFILE_ROOTS:
-        return JSONResponse({"error": "localfile not enabled"}, status_code=403)
     p = Path(req.path).expanduser().resolve()
-    if not _localfile_allowed(p):
-        return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
     if not p.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)
     before = p.read_text(errors="replace")
@@ -2265,11 +2244,7 @@ async def write_local_file(req: LocalfileWriteRequest, request: Request):
 async def create_local_file(req: LocalfileCreateRequest, request: Request):
     if not _same_origin(request):
         return JSONResponse({"error": "cross-origin writes are not allowed"}, status_code=403)
-    if not _LOCALFILE_ROOTS:
-        return JSONResponse({"error": "localfile not enabled"}, status_code=403)
     parent = Path(req.parent).expanduser().resolve()
-    if not _localfile_allowed(parent):
-        return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
     if not parent.is_dir():
         return JSONResponse({"error": "parent is not a directory"}, status_code=400)
     child = _localfile_child(parent, req.name.strip())
@@ -2285,11 +2260,7 @@ async def create_local_file(req: LocalfileCreateRequest, request: Request):
 async def create_local_folder(req: LocalfileCreateRequest, request: Request):
     if not _same_origin(request):
         return JSONResponse({"error": "cross-origin writes are not allowed"}, status_code=403)
-    if not _LOCALFILE_ROOTS:
-        return JSONResponse({"error": "localfile not enabled"}, status_code=403)
     parent = Path(req.parent).expanduser().resolve()
-    if not _localfile_allowed(parent):
-        return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
     if not parent.is_dir():
         return JSONResponse({"error": "parent is not a directory"}, status_code=400)
     child = _localfile_child(parent, req.name.strip())
@@ -2305,11 +2276,7 @@ async def create_local_folder(req: LocalfileCreateRequest, request: Request):
 async def upload_local_file(parent: str, name: str, request: Request):
     if not _same_origin(request):
         return JSONResponse({"error": "cross-origin writes are not allowed"}, status_code=403)
-    if not _LOCALFILE_ROOTS:
-        return JSONResponse({"error": "localfile not enabled"}, status_code=403)
     parent_path = Path(parent).expanduser().resolve()
-    if not _localfile_allowed(parent_path):
-        return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
     if not parent_path.is_dir():
         return JSONResponse({"error": "parent is not a directory"}, status_code=400)
     child = _localfile_child(parent_path, name.strip())
@@ -2325,16 +2292,21 @@ async def upload_local_file(parent: str, name: str, request: Request):
 async def rename_local_path(req: LocalfileRenameRequest, request: Request):
     if not _same_origin(request):
         return JSONResponse({"error": "cross-origin writes are not allowed"}, status_code=403)
-    if not _LOCALFILE_ROOTS:
-        return JSONResponse({"error": "localfile not enabled"}, status_code=403)
     p = Path(req.path).expanduser().resolve()
-    if not _localfile_allowed(p):
-        return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
     if not p.exists():
         return JSONResponse({"error": "not found"}, status_code=404)
-    target = _localfile_child(p.parent, req.name.strip())
-    if isinstance(target, JSONResponse):
-        return target
+    if req.to_path:
+        target = Path(req.to_path).expanduser().resolve()
+        if not target.parent.is_dir():
+            return JSONResponse({"error": "target parent is not a directory"}, status_code=400)
+    elif req.name:
+        target = _localfile_child(p.parent, req.name.strip())
+        if isinstance(target, JSONResponse):
+            return target
+    else:
+        return JSONResponse({"error": "name or to_path is required"}, status_code=400)
+    if target == p:
+        return JSONResponse({"ok": True, "path": str(target)})
     if target.exists():
         return JSONResponse({"error": "path already exists"}, status_code=409)
     p.rename(target)
@@ -2345,11 +2317,7 @@ async def rename_local_path(req: LocalfileRenameRequest, request: Request):
 async def delete_local_file(req: LocalfileDeleteRequest, request: Request):
     if not _same_origin(request):
         return JSONResponse({"error": "cross-origin writes are not allowed"}, status_code=403)
-    if not _LOCALFILE_ROOTS:
-        return JSONResponse({"error": "localfile not enabled"}, status_code=403)
     p = Path(req.path).expanduser().resolve()
-    if not _localfile_allowed(p):
-        return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
     if not p.exists():
         return JSONResponse({"error": "not found"}, status_code=404)
     if not p.is_file():
@@ -2362,11 +2330,7 @@ async def delete_local_file(req: LocalfileDeleteRequest, request: Request):
 async def local_file_history(path: str, request: Request):
     if not _same_origin(request):
         return JSONResponse({"error": "cross-origin reads are not allowed"}, status_code=403)
-    if not _LOCALFILE_ROOTS:
-        return JSONResponse({"error": "localfile not enabled"}, status_code=403)
     p = Path(path).expanduser().resolve()
-    if not _localfile_allowed(p):
-        return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
     rows = await asyncio.to_thread(get_file_edit_history, str(p))
     return JSONResponse({"history": rows})
 
@@ -2375,14 +2339,10 @@ async def local_file_history(path: str, request: Request):
 async def revert_file_edit(req: LocalfileRevertEditRequest, request: Request):
     if not _same_origin(request):
         return JSONResponse({"error": "cross-origin writes are not allowed"}, status_code=403)
-    if not _LOCALFILE_ROOTS:
-        return JSONResponse({"error": "localfile not enabled"}, status_code=403)
     edit = await asyncio.to_thread(get_file_edit_by_id, req.edit_id)
     if not edit:
         return JSONResponse({"error": "edit not found"}, status_code=404)
     p = Path(edit["file_path"]).resolve()
-    if not _localfile_allowed(p):
-        return JSONResponse({"error": "path outside allowed roots"}, status_code=403)
     before = p.read_text(errors="replace")
     p.write_text(edit["before"])
     await asyncio.to_thread(save_file_edit, str(p), before, edit["before"])

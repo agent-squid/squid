@@ -367,6 +367,61 @@ test('agent form saves harness and provider fields', async ({ page }) => {
   await expect(page.locator('#agent-form-status')).toHaveText('saved ✓');
 });
 
+test('agent form confirms session-clearing changes with themed modal', async ({ page }) => {
+  await mockApp(page);
+  let saved = null;
+  let nativeDialogs = 0;
+  page.on('dialog', async dialog => {
+    nativeDialogs++;
+    await dialog.dismiss();
+  });
+  await page.route('**/health', r => r.fulfill({ json: {
+    status: 'ok',
+    harnesses: [
+      { id: 'claudecode', label: 'Claude Code', protocol: 'interactive-cli', installed: true, default_provider: 'anthropic', compatible_providers: ['anthropic'] },
+    ],
+    providers: {
+      anthropic: { label: 'Claude', color: '#AE5332', gauge: { type: 'claude' }, models: [] },
+    },
+    backends: {
+      claude: { driver: 'claude', label: 'Claude', available: true, protocol: 'interactive-cli', missing_requirements: [], gauge: { type: 'none' } },
+    },
+  }}));
+  await page.route('**/config/agents/haiku/sessions', r => r.fulfill({
+    json: { topics: [{ topic: 'squid' }, { topic: 'docs' }] },
+  }));
+  await page.route('**/config/agents', route => {
+    if (route.request().method() === 'POST') {
+      saved = route.request().postDataJSON();
+      return route.fulfill({ json: { ok: true, sessions_cleared: ['squid', 'docs'] } });
+    }
+    return route.fulfill({ json: [
+      { name: 'haiku', harness: 'claudecode', provider: 'anthropic', backend: 'claudecode:anthropic', model: 'claude-haiku-4-5', cwd: '/tmp/work' },
+    ] });
+  });
+
+  await page.goto('/');
+  await page.locator('.nav-tab[data-view="agents"]').click();
+  await page.locator('#agents-list tbody tr .edit-btn').click();
+  await page.locator('#af-cwd').fill('/tmp/new-work');
+  await page.locator('#agent-form button[type="submit"]').click();
+
+  await expect(page.locator('#agent-session-modal')).toHaveClass(/open/);
+  await expect(page.locator('#agent-session-modal-title')).toHaveText('Save changes to "haiku"?');
+  await expect(page.locator('#agent-session-modal-topics')).toHaveText('#squid, #docs');
+  expect(saved).toBeNull();
+  expect(nativeDialogs).toBe(0);
+
+  await page.locator('#agent-session-cancel').click();
+  await expect(page.locator('#agent-session-modal')).not.toHaveClass(/open/);
+  expect(saved).toBeNull();
+
+  await page.locator('#agent-form button[type="submit"]').click();
+  await page.locator('#agent-session-confirm').click();
+  expect(saved).toMatchObject({ name: 'haiku', cwd: '/tmp/new-work' });
+  await expect(page.locator('#agent-form-status')).toContainText('cleared sessions: squid, docs');
+});
+
 test('agent form model field suggests provider models but accepts a freeform override', async ({ page }) => {
   await mockApp(page);
   await page.route('**/health', r => r.fulfill({ json: {

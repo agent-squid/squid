@@ -700,8 +700,25 @@ let editingExpandedSlug = false;
 let expandedSlugEditToken = 0;
 let composerActionTitleSeq = 0;
 
-function _chainRouteText(topic, originAgent, targetAgent, targetFresh = false, originFresh = false) {
-  return `#${topic}@${originAgent}${originFresh ? '!' : ''}>@${targetAgent}${targetFresh ? '!' : ''}`;
+function _chainRouteText(topic, originAgent, targetAgent, targetFresh = false, originFresh = false, operator = '>') {
+  return `#${topic}@${originAgent}${originFresh ? '!' : ''}${operator}@${targetAgent}${targetFresh ? '!' : ''}`;
+}
+
+function parseRouteChain(route) {
+  const match = String(route || '').match(/^#(\w+)@(\w+)(!?)((?:<>)|>)@(\w+)(!?)$/);
+  if (!match) return null;
+  const operator = match[4] === '>' ? '>' : '<>';
+  const rounds = operator === '>' ? 0 : 1;
+  return {
+    topic: match[1].toLowerCase(),
+    origin: match[2],
+    originFresh: !!match[3],
+    operator,
+    rounds,
+    target: match[5],
+    targetFresh: !!match[6],
+    route: _chainRouteText(match[1].toLowerCase(), match[2], match[5], !!match[6], !!match[3], operator),
+  };
 }
 
 function setTopicChip(topic, agent, adhoc = false, lookback = 0, opts = {}) {
@@ -709,9 +726,11 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0, opts = {}) {
   expandedSlugEditToken++;
   const chainTarget = opts.chainTarget || null;
   const chainTargetFresh = !!opts.chainTargetFresh;
+  const chainOperator = opts.chainOperator || '>';
+  const chainRounds = opts.chainRounds || (chainOperator === '<>' ? 1 : 0);
   const suppressTurnCount = !!opts.suppressTurnCount;
-  const route = chainTarget && agent ? _chainRouteText(topic, agent, chainTarget, chainTargetFresh, adhoc) : null;
-  stickyChip = { topic, agent, adhoc, lookback, suppressTurnCount, ...(route ? { route, chainTarget, chainTargetFresh } : {}) };
+  const route = chainTarget && agent ? _chainRouteText(topic, agent, chainTarget, chainTargetFresh, adhoc, chainOperator) : null;
+  stickyChip = { topic, agent, adhoc, lookback, suppressTurnCount, ...(route ? { route, chainTarget, chainTargetFresh, chainOperator, chainRounds } : {}) };
   _advisoryTurnCount = 0;
   // Don't persist a sessioned default chip — #default is adhoc-first; session there is ephemeral
   if (topic !== 'default' || adhoc) {
@@ -742,7 +761,7 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0, opts = {}) {
     }
     const arrowSpan = document.createElement('span');
     arrowSpan.className = 'chip-route-arrow';
-    arrowSpan.textContent = '>';
+    arrowSpan.textContent = chainOperator;
     topicChipEl.appendChild(arrowSpan);
     const targetSpan = document.createElement('span');
     targetSpan.className = 'chip-agent chip-chain-target';
@@ -802,7 +821,7 @@ function clearTopicChip() {
 
 function _renderChipTurnCount(count) {
   let tcSpan = topicChipEl.querySelector('.chip-turn-count');
-  if (stickyChip?.suppressTurnCount) count = 0;
+  if (stickyChip?.suppressTurnCount || stickyChip?.route) count = 0;
   if (count <= 0) { tcSpan?.remove(); return; }
   if (!tcSpan) {
     tcSpan = document.createElement('span');
@@ -816,7 +835,7 @@ function _renderChipTurnCount(count) {
 
 function _updateChipTurnCount(topic, agent, sessionId, count) {
   if (sessionId && count > 0) _sessionTurnCounts[sessionId] = count;
-  if (!stickyChip || stickyChip.adhoc || stickyChip.suppressTurnCount || stickyChip.topic !== topic || (stickyChip.agent || null) !== (agent || null)) return;
+  if (!stickyChip || stickyChip.adhoc || stickyChip.suppressTurnCount || stickyChip.route || stickyChip.topic !== topic || (stickyChip.agent || null) !== (agent || null)) return;
   _renderChipTurnCount(count);
 }
 
@@ -826,12 +845,25 @@ function _scheduleChipTurnCountUpdate(topic, agent) {
   clearTimeout(_chipTurnCountTimer);
   _chipTurnCountTimer = setTimeout(() => {
     _chipTurnCountTimer = null;
-    if (!stickyChip || stickyChip.adhoc || stickyChip.suppressTurnCount || stickyChip.topic !== topic || (stickyChip.agent || null) !== (agent || null)) return;
+    if (!stickyChip || stickyChip.adhoc || stickyChip.suppressTurnCount || stickyChip.route || stickyChip.topic !== topic || (stickyChip.agent || null) !== (agent || null)) return;
     const sid = _sessionIds[`${topic}@${agent || '_'}`];
     if (!sid) return;
     const count = _sessionTurnCounts[sid] || 0;
     if (count > 0) _renderChipTurnCount(count);
   }, 700);
+}
+
+function _sessionTurnCountForRouteStep(topic, agent, fresh = false) {
+  if (!agent || fresh) return 0;
+  const sid = _sessionIds[`${topic}@${agent}`];
+  return sid ? (_sessionTurnCounts[sid] || 0) : 0;
+}
+
+function _routeChainTurnCounts(topic, originAgent, originFresh, targetAgent, targetFresh) {
+  return {
+    origin: _sessionTurnCountForRouteStep(topic, originAgent, originFresh),
+    target: _sessionTurnCountForRouteStep(topic, targetAgent, targetFresh),
+  };
 }
 
 topicChipEl.addEventListener('click', () => {
@@ -862,21 +894,30 @@ function routeScopeText(route) {
   return scope;
 }
 
+function canonicalFlowRoute(route) {
+  const text = String(route || '').trim().replace(/\s+/g, '');
+  if (!text) return '';
+  const parts = text.split(',').filter(Boolean);
+  if (parts.length > 1) parts.sort();
+  return parts.join(',');
+}
+
 function searchScopeText(state) {
   if (!state) return '';
+  if (state.flow_route) return state.flow_route;
   let scope = '';
   if (state.explicitAll) scope = '#all';
   else if (state.topic) scope = `#${state.topic}`;
   if (state.agent) {
     scope += `@${state.agent}`;
     if (state.adhoc === true) scope += '!';
-    else if (state.adhoc === null) scope += '+';
+    else if (state.adhoc === null) scope += '*';
   }
   return scope;
 }
 
 function activeHistoryFilterScope() {
-  return (historyFilter.topic || historyFilter.agent) ? searchScopeText(historyFilter) : '';
+  return (historyFilter.flow_route || historyFilter.topic || historyFilter.agent) ? searchScopeText(historyFilter) : '';
 }
 
 async function resolveEffectiveComposerRoute() {
@@ -887,7 +928,13 @@ async function resolveEffectiveComposerRoute() {
       agent: parsed.agent || null,
       adhoc: !!parsed.adhoc,
       lookback: parsed.lookback || 0,
-      ...(parsed.route ? { route: parsed.route, chainTarget: parsed.chainTarget, chainTargetFresh: parsed.chainTargetFresh } : {}),
+      ...(parsed.route ? {
+        route: parsed.route,
+        chainTarget: parsed.chainTarget,
+        chainTargetFresh: parsed.chainTargetFresh,
+        chainOperator: parsed.chainOperator || '>',
+        chainRounds: parsed.chainRounds || 0,
+      } : {}),
     };
   }
   if (stickyChip) return { ...stickyChip };
@@ -926,12 +973,13 @@ async function updateComposerActionTitles() {
 chipFilterBtn.addEventListener('click', async e => {
   e.stopPropagation();
   const active = (searchActive && searchState) ? searchState : historyFilter;
-  if (active?.topic || active?.agent || active?.explicitAll) {
+  if (active?.flow_route || active?.topic || active?.agent || active?.explicitAll) {
     clearFilter();
     return;
   }
   const route = await resolveEffectiveComposerRoute();
-  if (route.agent) filterByAgent(route.topic, route.agent, route.adhoc, route.lookback || 0);
+  if (route.route) filterByFlowRoute(route.route, route);
+  else if (route.agent) filterByAgent(route.topic, route.agent, route.adhoc, route.lookback || 0);
   else filterByTopic(route.topic);
 });
 
@@ -992,24 +1040,26 @@ function parseInput(text) {
         route: stickyChip.route,
         chainTarget: stickyChip.chainTarget,
         chainTargetFresh: stickyChip.chainTargetFresh,
+        chainOperator: stickyChip.chainOperator || '>',
+        chainRounds: stickyChip.chainRounds || 0,
       } : {}),
       message: text.trim() || text,
     };
   }
-  const mc = text.match(/^(#(\w+)@(\w+)(!)?>@(\w+)(!)?)\s+([\s\S]*)$/);
-  if (mc && mc[7].trim()) {
-    const originFresh = !!mc[4];
-    const targetFresh = !!mc[6];
-    const targetAgent = mc[5];
+  const chainWithMessage = text.match(/^(#\w+@\w+!?((?:<>)|>)@\w+!?)\s+([\s\S]*)$/);
+  const parsedChainWithMessage = chainWithMessage ? parseRouteChain(chainWithMessage[1]) : null;
+  if (parsedChainWithMessage && chainWithMessage[3].trim()) {
     return {
-      topic: mc[2].toLowerCase(),
-      agent: mc[3],
-      adhoc: originFresh,
+      topic: parsedChainWithMessage.topic,
+      agent: parsedChainWithMessage.origin,
+      adhoc: parsedChainWithMessage.originFresh,
       lookback: 0,
-      route: _chainRouteText(mc[2].toLowerCase(), mc[3], targetAgent, targetFresh, originFresh),
-      chainTarget: targetAgent,
-      chainTargetFresh: targetFresh,
-      message: mc[7].trim(),
+      route: parsedChainWithMessage.route,
+      chainTarget: parsedChainWithMessage.target,
+      chainTargetFresh: parsedChainWithMessage.targetFresh,
+      chainOperator: parsedChainWithMessage.operator,
+      chainRounds: parsedChainWithMessage.rounds,
+      message: chainWithMessage[3].trim(),
     };
   }
   // adhoc: #topic!N or #topic@agent!N (N optional, defaults to 0 = no lookback)
@@ -1024,21 +1074,18 @@ function parseInput(text) {
   }
   // bare topic switch: #topic, #topic@agent, #topic!N, or #topic@agent!N with no message
   // switches chip only.
-  const mcb = text.match(/^#(\w+)@(\w+)(!)?>@(\w+)(!)?$/);
-  if (mcb) {
-    const topic = mcb[1].toLowerCase();
-    const agent = mcb[2];
-    const chainOriginFresh = !!mcb[3];
-    const chainTarget = mcb[4];
-    const chainTargetFresh = !!mcb[5];
+  const parsedChainBare = parseRouteChain(text);
+  if (parsedChainBare) {
     return {
-      topic,
-      agent,
-      adhoc: chainOriginFresh,
+      topic: parsedChainBare.topic,
+      agent: parsedChainBare.origin,
+      adhoc: parsedChainBare.originFresh,
       lookback: 0,
-      route: _chainRouteText(topic, agent, chainTarget, chainTargetFresh, chainOriginFresh),
-      chainTarget,
-      chainTargetFresh,
+      route: parsedChainBare.route,
+      chainTarget: parsedChainBare.target,
+      chainTargetFresh: parsedChainBare.targetFresh,
+      chainOperator: parsedChainBare.operator,
+      chainRounds: parsedChainBare.rounds,
       message: '',
     };
   }
@@ -1102,7 +1149,7 @@ function makeTopicTag(topic, agent, { clickable = false, adhoc = false, lookback
 
 // ── history filter ─────────────────────────────────────────────────────────────
 
-let historyFilter = { topic: null, agent: null, adhoc: null };
+let historyFilter = { topic: null, agent: null, adhoc: null, flow_route: null };
 let promptOnlyHistory = false;
 
 function updatePromptOnlyButton() {
@@ -1115,7 +1162,7 @@ function updatePromptOnlyButton() {
 
 function updateFilterButton() {
   const active = (searchActive && searchState) ? searchState : historyFilter;
-  const isFiltered = !!(active?.topic || active?.agent || active?.explicitAll);
+  const isFiltered = !!(active?.flow_route || active?.topic || active?.agent || active?.explicitAll);
   chipFilterBtn?.classList.toggle('active', isFiltered);
   chipFilterBtn?.setAttribute('aria-pressed', isFiltered ? 'true' : 'false');
 }
@@ -1126,15 +1173,16 @@ function updateSearchButton() {
 }
 
 function hasHistoryFilterScope() {
-  return !!(historyFilter.topic || historyFilter.agent || historyFilter.explicitAll);
+  return !!(historyFilter.flow_route || historyFilter.topic || historyFilter.agent || historyFilter.explicitAll);
 }
 
 function persistSearchFilterScope(state) {
   if (!hasHistoryFilterScope()) return;
   historyFilter = {
-    topic: state.topic || null,
-    agent: state.agent || null,
-    adhoc: state.adhoc ?? null,
+    flow_route: state.flow_route || null,
+    topic: state.flow_route ? null : (state.topic || null),
+    agent: state.flow_route ? null : (state.agent || null),
+    adhoc: state.flow_route ? null : (state.adhoc ?? null),
     explicitAll: !!state.explicitAll,
   };
 }
@@ -1155,12 +1203,24 @@ function togglePromptOnlyHistory() {
 
 function filterByTopic(topic) {
   setTopicChip(topic, null);
-  applyHistoryFilter({ topic, agent: null, adhoc: null });
+  applyHistoryFilter({ topic, agent: null, adhoc: null, flow_route: null });
 }
 
 function filterByAgent(topic, agent, adhoc = false, lookback = 0) {
   setTopicChip(topic, agent, adhoc, lookback);
-  applyHistoryFilter({ topic, agent, adhoc });
+  applyHistoryFilter({ topic, agent, adhoc, flow_route: null });
+}
+
+function filterByFlowRoute(route, routeParts = null) {
+  const flowRoute = canonicalFlowRoute(route);
+  const parsed = routeParts?.route ? routeParts : parseInput(flowRoute);
+  setTopicChip(parsed.topic, parsed.agent, parsed.adhoc, parsed.lookback || 0, {
+    chainTarget: parsed.chainTarget,
+    chainTargetFresh: parsed.chainTargetFresh,
+    chainOperator: parsed.chainOperator || '>',
+    chainRounds: parsed.chainRounds || 0,
+  });
+  applyHistoryFilter({ flow_route: flowRoute, topic: null, agent: null, adhoc: null });
 }
 
 function applyHistoryFilter(filter) {
@@ -1176,7 +1236,7 @@ function applyHistoryFilter(filter) {
 
 function clearFilter() {
   if (searchActive && searchState) {
-    searchState = { ...searchState, topic: null, agent: null, adhoc: null, explicitAll: false };
+    searchState = { ...searchState, flow_route: null, topic: null, agent: null, adhoc: null, explicitAll: false };
     persistSearchFilterScope(searchState);
     searchLoading = false;
     document.querySelectorAll('.search-result-item').forEach(el => el.remove());
@@ -1228,6 +1288,7 @@ function setLiveGroupHidden(hidden) {
       topic: thinking.dataset.topic || 'default',
       agent: thinking.dataset.agent || null,
       adhoc: thinking.dataset.adhoc === '1',
+      flow_route: thinking.dataset.flowRoute || null,
     }, historyFilter));
     group.forEach(node => node.classList.toggle('live-hidden', stayHidden));
   });
@@ -1287,10 +1348,10 @@ function _updateFilterBadge() {
   const badge = document.getElementById('filter-badge');
   const labelEl = document.getElementById('filter-badge-label');
   const activeState = (searchActive && searchState) ? searchState : historyFilter;
-  const { topic, agent, adhoc } = activeState;
+  const { topic, agent, adhoc, flow_route } = activeState;
   const explicitAll = !!activeState.explicitAll;
 
-  if (!topic && !agent && !explicitAll) {
+  if (!flow_route && !topic && !agent && !explicitAll) {
     badge.classList.remove('active');
     updateFilterButton();
     return;
@@ -1311,7 +1372,12 @@ function _updateFilterBadge() {
     labelEl.appendChild(segment);
   };
 
-  if (topic || explicitAll) {
+  if (flow_route) {
+    const route = document.createElement('span');
+    route.className = 'tag-topic';
+    route.textContent = flow_route;
+    addSegment('flow', route, () => removeFilterSegment('flow'));
+  } else if (topic || explicitAll) {
     const t = document.createElement('span');
     t.className = 'tag-topic';
     t.textContent = '#' + (explicitAll ? 'all' : topic);
@@ -1345,6 +1411,7 @@ function _updateFilterBadge() {
 
 function itemMatchesFilter(item, filter) {
   if (!filter) return true;
+  if (filter.flow_route && (item.flow_route || item.flowRoute || null) !== filter.flow_route) return false;
   if (filter.topic && (item.topic || 'default') !== filter.topic) return false;
   if (filter.agent && (item.agent || null) !== filter.agent) return false;
   if (filter.adhoc !== null && filter.adhoc !== undefined && !!item.adhoc !== filter.adhoc) return false;
@@ -1357,6 +1424,8 @@ function removeFilterSegment(kind) {
   if (kind === 'topic') {
     next.topic = null;
     next.explicitAll = false;
+  } else if (kind === 'flow') {
+    next.flow_route = null;
   } else {
     next.agent = null;
     next.adhoc = null;
@@ -1370,7 +1439,7 @@ function removeFilterSegment(kind) {
     _updateFilterBadge();
     loadSearchResults();
   } else {
-    reloadHistory({ topic: next.topic || null, agent: next.agent || null, adhoc: next.adhoc ?? null });
+    reloadHistory({ flow_route: next.flow_route || null, topic: next.topic || null, agent: next.agent || null, adhoc: next.adhoc ?? null });
   }
 }
 
@@ -1447,6 +1516,7 @@ async function loadHistory() {
   try {
     let url = `/history?offset=${historyOffset}&limit=5`;
     const applyRouteFilter = !bookmarkOnlyHistory;
+    if (applyRouteFilter && historyFilter.flow_route) url += `&flow_route=${encodeURIComponent(historyFilter.flow_route)}`;
     if (applyRouteFilter && historyFilter.topic) url += `&topic=${encodeURIComponent(historyFilter.topic)}`;
     if (applyRouteFilter && historyFilter.agent) url += `&agent=${encodeURIComponent(historyFilter.agent)}`;
     if (applyRouteFilter && historyFilter.adhoc != null) url += `&adhoc=${historyFilter.adhoc}`;
@@ -1464,7 +1534,9 @@ async function loadHistory() {
   const prevHeight = messages.scrollHeight;
   const fragment = document.createDocumentFragment();
 
-  for (const item of [...items].reverse()) {
+  const chronologicalItems = [...items].reverse();
+  for (let i = 0; i < chronologicalItems.length; i += 1) {
+    const item = chronologicalItems[i];
     // Skip if a bubble for this message is already in the DOM — e.g. an
     // in-progress live (SSE) bubble that survived a search → back round-trip.
     // Without this, loadHistory would render a second, polling-driven bubble
@@ -1488,6 +1560,8 @@ async function loadHistory() {
       continue;
     }
 
+    const routeMarker = historyRouteChainMarkerForItem(item, chronologicalItems[i + 1], chronologicalItems[i - 1]);
+    appendHistoryRouteChainMarker(routeMarker, item, fragment);
     appendHistoryItem(item, fragment);
   }
 
@@ -1540,25 +1614,32 @@ function parseScopeInput(text, { allowAll = false } = {}) {
       : null;
   }
 
-  const topicMatch = scope.match(/^#([\w-]+)(?:@([\w-]+)([!+])?)?$/);
+  if (/^#.+>|,/.test(scope)) {
+    const flowRoute = canonicalFlowRoute(scope);
+    return flowRoute
+      ? { flow_route: flowRoute, topic: null, agent: null, adhoc: null, explicitAll: false }
+      : null;
+  }
+
+  const topicMatch = scope.match(/^#([\w-]+)(?:@([\w-]+)([!+*])?)?$/);
   if (topicMatch) {
     const agent = topicMatch[2] || null;
     const mode = topicMatch[3] || '';
     return {
       topic: topicMatch[1].toLowerCase(),
       agent,
-      adhoc: agent ? (mode === '+' ? null : mode === '!') : null,
+      adhoc: agent ? (mode === '+' || mode === '*' ? null : mode === '!') : null,
       explicitAll: false,
     };
   }
 
-  const agentMatch = scope.match(/^@([\w-]+)([!+])?$/);
+  const agentMatch = scope.match(/^@([\w-]+)([!+*])?$/);
   if (agentMatch) {
     const mode = agentMatch[2] || '';
     return {
       topic: null,
       agent: agentMatch[1],
-      adhoc: mode === '+' ? null : mode === '!',
+      adhoc: mode === '+' || mode === '*' ? null : mode === '!',
       explicitAll: false,
     };
   }
@@ -1572,7 +1653,7 @@ function parseSearchInput(text) {
     const scope = parseScopeInput(match[1], { allowAll: true });
     if (scope) return { ...scope, explicitScope: true, keywords: match[2].trim() };
   }
-  return { topic: null, agent: null, adhoc: null, explicitAll: false, explicitScope: false, keywords: rest };
+  return { flow_route: null, topic: null, agent: null, adhoc: null, explicitAll: false, explicitScope: false, keywords: rest };
 }
 
 function _updateSearchBar() {
@@ -1644,30 +1725,33 @@ function startSearch(rawArgs) {
   const parsed = parseSearchInput(rawArgs);
 
   if (!parsed.keywords) {
-    showCmdFeedback('Usage: /s [#topic[@agent[!|*]] | @agent[!|*] | #all] keywords…');
+    showCmdFeedback('Usage: /s [#topic[@agent[!|*]] | #topic@agent>@agent | @agent[!|*] | #all] keywords…');
     return;
   }
 
-  let topic, agent, adhoc;
+  let flow_route, topic, agent, adhoc;
   const explicitAll = parsed.explicitAll;
   if (parsed.explicitScope) {
     // explicit scope typed in command overrides the active filter
+    flow_route = parsed.flow_route || null;
     topic = parsed.topic;
     agent = parsed.agent || null;
     adhoc = parsed.adhoc;
-  } else if (historyFilter.topic || historyFilter.agent) {
+  } else if (historyFilter.flow_route || historyFilter.topic || historyFilter.agent) {
     // active history filter (set by /filter or tag click)
+    flow_route = historyFilter.flow_route || null;
     topic = historyFilter.topic || null;
     agent = historyFilter.agent || null;
     adhoc = historyFilter.adhoc ?? null;
   } else {
     // fall back to sticky chip (current chat context)
-    topic = stickyChip?.topic || null;
-    agent = stickyChip?.agent || null;
-    adhoc = stickyChip?.adhoc ? true : false;
+    flow_route = stickyChip?.route ? canonicalFlowRoute(stickyChip.route) : null;
+    topic = flow_route ? null : (stickyChip?.topic || null);
+    agent = flow_route ? null : (stickyChip?.agent || null);
+    adhoc = flow_route ? null : (stickyChip?.adhoc ? true : false);
   }
 
-  searchState = { topic, agent, adhoc, explicitAll, keywords: parsed.keywords };
+  searchState = { flow_route, topic, agent, adhoc, explicitAll, keywords: parsed.keywords };
   searchActive = true;
   searchLoading = false;
 
@@ -1778,7 +1862,7 @@ function formatPromptHistoryEntry(topic, agent, adhoc, _lookback, message) {
 
 function splitPromptHistoryEntry(entry) {
   const text = String(entry || '').trim();
-  const match = text.match(/^(#\w+@\w+!?>@\w+!?|#\w+(?:@\w+)?(?:!\d*)?)\s+([\s\S]+)$/);
+  const match = text.match(/^(#\w+@\w+!?(?:(?:<>)|>)@\w+!?|#\w+(?:@\w+)?(?:!\d*)?)\s+([\s\S]+)$/);
   if (!match) return { route: '', prompt: text };
   return { route: match[1], prompt: match[2].trim() };
 }
@@ -1797,8 +1881,8 @@ function promptHistoryRoute(topic, agent, adhoc) {
 }
 
 function normalizePromptHistoryRoute(route) {
-  const chain = String(route || '').match(/^#(\w+)@(\w+)(!)?>@(\w+)(!)?$/);
-  if (chain) return _chainRouteText(chain[1].toLowerCase(), chain[2], chain[4], !!chain[5], !!chain[3]);
+  const chain = parseRouteChain(route);
+  if (chain) return chain.route;
   const match = String(route || '').match(/^#(\w+)(?:@(\w+))?(!)?\d*$/);
   if (!match) return '';
   return promptHistoryRoute(match[1].toLowerCase(), match[2] || null, !!match[3]);
@@ -1807,11 +1891,13 @@ function normalizePromptHistoryRoute(route) {
 function applyPromptHistoryEntry(entry) {
   const { route, prompt } = splitPromptHistoryEntry(entry);
   if (route) {
-    const chain = route.match(/^#(\w+)@(\w+)(!)?>@(\w+)(!)?$/);
+    const chain = parseRouteChain(route);
     if (chain) {
-      setTopicChip(chain[1].toLowerCase(), chain[2], !!chain[3], 0, {
-        chainTarget: chain[4],
-        chainTargetFresh: !!chain[5],
+      setTopicChip(chain.topic, chain.origin, chain.originFresh, 0, {
+        chainTarget: chain.target,
+        chainTargetFresh: chain.targetFresh,
+        chainOperator: chain.operator,
+        chainRounds: chain.rounds,
       });
     }
     const match = route.match(/^#(\w+)(?:@(\w+))?(!(?:(\d+))?)?$/);
@@ -1883,16 +1969,18 @@ function promptHistoryAutocompleteItems(entries) {
 }
 
 function parseHistoryRouteTarget(route) {
-  const chain = String(route || '').match(/^#(\w+)@(\w+)(!)?>@(\w+)(!)?$/);
+  const chain = parseRouteChain(route);
   if (chain) {
     return {
-      topic: chain[1].toLowerCase(),
-      agent: chain[2],
-      adhoc: !!chain[3],
+      topic: chain.topic,
+      agent: chain.origin,
+      adhoc: chain.originFresh,
       lookback: 0,
-      route: _chainRouteText(chain[1].toLowerCase(), chain[2], chain[4], !!chain[5], !!chain[3]),
-      chainTarget: chain[4],
-      chainTargetFresh: !!chain[5],
+      route: chain.route,
+      chainTarget: chain.target,
+      chainTargetFresh: chain.targetFresh,
+      chainOperator: chain.operator,
+      chainRounds: chain.rounds,
     };
   }
   const match = String(route || '').match(/^#(\w+)(?:@(\w+))?(!)?$/);
@@ -1910,6 +1998,8 @@ function applyRouteTarget(routeTarget) {
   setTopicChip(routeTarget.topic, routeTarget.agent, routeTarget.adhoc, routeTarget.lookback || 0, {
     chainTarget: routeTarget.chainTarget,
     chainTargetFresh: routeTarget.chainTargetFresh,
+    chainOperator: routeTarget.chainOperator,
+    chainRounds: routeTarget.chainRounds,
   });
   input.value = '';
   input.setSelectionRange(0, 0);
@@ -1950,7 +2040,7 @@ function routeHistoryAutocompleteItems(currentRoute = '') {
 function composerHasOnlyRoute() {
   const value = input.value.trim();
   if (!value) return true;
-  return /^#\w+(?:@\w+)?(?:!\d*)?$/.test(value) || /^#\w+@\w+!?>@\w+!?$/.test(value);
+  return /^#\w+(?:@\w+)?(?:!\d*)?$/.test(value) || !!parseRouteChain(value);
 }
 
 function composerRouteForRouteHistory() {
@@ -2001,6 +2091,7 @@ async function loadSearchResults() {
   if (searchState.topic) url += `&topic=${encodeURIComponent(searchState.topic)}`;
   if (searchState.agent) url += `&agent=${encodeURIComponent(searchState.agent)}`;
   if (searchState.adhoc !== null && searchState.adhoc !== undefined) url += `&adhoc=${searchState.adhoc}`;
+  if (searchState.flow_route) url += `&flow_route=${encodeURIComponent(searchState.flow_route)}`;
 
   let data;
   try {
@@ -2073,7 +2164,9 @@ const SQUID_COMMANDS = [
 ];
 
 function parseCommand(message) {
-  const t = message.trim().replace(/^\//, ''); // strip optional leading /
+  const trimmed = message.trim();
+  if (!trimmed.startsWith('/')) return null; // commands must be slash-prefixed
+  const t = trimmed.slice(1);
   if (/^restart$/i.test(t))      return { command: 'restart' };
   if (/^refresh$/i.test(t))      return { command: 'refresh' };
   if (/^stop$/i.test(t))         return { command: 'stop' };
@@ -2088,14 +2181,13 @@ function parseCommand(message) {
   if (mf) {
     const args = (mf[1] || '').trim();
     if (/^reset$/i.test(args)) return { command: 'filter_reset' };
+    if (args && parseScopeInput(args) === null) return null;
     return { command: 'filter', args };
   }
   const m = t.match(/^deq(?:\s+(-?\d+))?$/i);
   if (m) return { command: 'deq', pos: m[1] != null ? parseInt(m[1]) : null };
-  if (message.trim().startsWith('/')) {
-    const ms = t.match(/^s(?:earch)?(?:\s+([\s\S]*))?$/i);
-    if (ms) return { command: 'search', args: (ms[1] || '').trim() };
-  }
+  const ms = t.match(/^s(?:earch)?(?:\s+([\s\S]*))?$/i);
+  if (ms) return { command: 'search', args: (ms[1] || '').trim() };
   return null;
 }
 
@@ -2131,10 +2223,11 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
   if (cmd.command === 'filter') {
     const scope = parseScopeInput(cmd.args);
     if (scope === null) {
-      showCmdFeedback('Usage: /f [#topic[@agent[!|*]] | @agent[!|*] | reset]');
+      showCmdFeedback('Usage: /f [#topic[@agent[!|*]] | #topic@agent>@agent | @agent[!|*] | reset]');
       return;
     }
-    if (scope) applyHistoryFilter(scope);
+    if (scope?.flow_route) filterByFlowRoute(scope.flow_route);
+    else if (scope) applyHistoryFilter(scope);
     else if (agent) applyHistoryFilter({ topic, agent, adhoc });
     else applyHistoryFilter({ topic, agent: null, adhoc: null });
     return;
@@ -2146,7 +2239,7 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
 
   if (cmd.command === 'search') {
     if (!cmd.args) {
-      showCmdFeedback('Usage: /s [#topic[@agent[!|*]] | @agent[!|*] | #all] keywords…');
+      showCmdFeedback('Usage: /s [#topic[@agent[!|*]] | #topic@agent>@agent | @agent[!|*] | #all] keywords…');
       return;
     }
     startSearch(cmd.args);
@@ -2321,6 +2414,35 @@ function closeRestartModal(ok = false) {
   if (resolve) resolve(ok);
 }
 
+function confirmAgentSessionClear(agentName, topics) {
+  return new Promise(resolve => {
+    const modal = document.getElementById('agent-session-modal');
+    const confirmBtn = document.getElementById('agent-session-confirm');
+    const title = document.getElementById('agent-session-modal-title');
+    const copy = document.getElementById('agent-session-modal-copy');
+    const topicList = document.getElementById('agent-session-modal-topics');
+    title.textContent = `Save changes to "${agentName}"?`;
+    copy.textContent = 'Changing runtime, model, or cwd will clear active sessions for this agent.';
+    topicList.textContent = (topics || []).map(topic => `#${topic}`).join(', ');
+    const close = (ok) => {
+      modal.classList.remove('open');
+      resolve(ok);
+    };
+    modal._resolveAgentSession = close;
+    modal.classList.add('open');
+    confirmBtn.focus();
+  });
+}
+
+function closeAgentSessionModal(ok = false) {
+  const modal = document.getElementById('agent-session-modal');
+  if (!modal) return;
+  const resolve = modal._resolveAgentSession;
+  modal._resolveAgentSession = null;
+  modal.classList.remove('open');
+  if (resolve) resolve(ok);
+}
+
 function showCmdFeedback(text) {
   const el = document.createElement('div');
   el.className = 'cmd-feedback';
@@ -2342,12 +2464,12 @@ form.addEventListener('submit', async (e) => {
   const text = input.value.trim();
   if (!text) return;
   commandEditRestore = null;
-  const { topic, agent, adhoc, lookback, route, chainTarget, chainTargetFresh, message } = parseInput(text);
+  const { topic, agent, adhoc, lookback, route, chainTarget, chainTargetFresh, chainOperator, chainRounds, message } = parseInput(text);
   if (!message) {
     input.value = '';
     resizeComposer();
     hideAutocomplete();
-    setTopicChip(topic, agent, adhoc, lookback, { chainTarget, chainTargetFresh });
+    setTopicChip(topic, agent, adhoc, lookback, { chainTarget, chainTargetFresh, chainOperator, chainRounds });
     return;
   }
   const cmd = parseCommand(message);
@@ -2365,7 +2487,7 @@ form.addEventListener('submit', async (e) => {
     await handleCommand(cmd, topic, agent, adhoc, lookback);
     // Re-set chip after topic-scoped commands so next message stays in context
     if (['clear', 'stop', 'stopall', 'deq'].includes(cmd.command) && (topic !== 'default' || agent)) {
-      setTopicChip(topic, agent, adhoc, lookback, { chainTarget, chainTargetFresh });
+      setTopicChip(topic, agent, adhoc, lookback, { chainTarget, chainTargetFresh, chainOperator, chainRounds });
     }
     return;
   }
@@ -2491,11 +2613,14 @@ function refreshContextIndicators({ force = false } = {}) {
 }
 
 async function _maybePromoteSlug(val) {
-  const chain = val.match(/^#(\w+)@(\w+)(!)?>@(\w+)(!)? $/);
+  const chainText = val.endsWith(' ') ? val.trim() : '';
+  const chain = parseRouteChain(chainText);
   if (chain) {
-    setTopicChip(chain[1].toLowerCase(), chain[2], !!chain[3], 0, {
-      chainTarget: chain[4],
-      chainTargetFresh: !!chain[5],
+    setTopicChip(chain.topic, chain.origin, chain.originFresh, 0, {
+      chainTarget: chain.target,
+      chainTargetFresh: chain.targetFresh,
+      chainOperator: chain.operator,
+      chainRounds: chain.rounds,
     });
     input.value = '';
     hideAutocomplete();
@@ -2530,16 +2655,19 @@ async function _maybeCollapseExpandedSlug(force = false, allowCompletedPrompt = 
   if (!editingExpandedSlug && !allowCompletedPrompt) return;
 
   const val = input.value;
-  const chain = val.match(/^#(\w+)@(\w+)(!)?>@(\w+)(!)? ([\s\S]+)$/);
+  const chainMatch = val.match(/^(#\w+@\w+!?(?:(?:<>)|>)@\w+!?)\s+([\s\S]+)$/);
+  const chain = chainMatch ? parseRouteChain(chainMatch[1]) : null;
   if (chain) {
-    const prompt = chain[6];
+    const prompt = chainMatch[2];
     const promptStart = val.length - prompt.length;
     if (!force && (input.selectionStart < promptStart || input.selectionEnd < promptStart)) return;
     const selectionStart = Math.max(0, input.selectionStart - promptStart);
     const selectionEnd = Math.max(0, input.selectionEnd - promptStart);
-    setTopicChip(chain[1].toLowerCase(), chain[2], !!chain[3], 0, {
-      chainTarget: chain[4],
-      chainTargetFresh: !!chain[5],
+    setTopicChip(chain.topic, chain.origin, chain.originFresh, 0, {
+      chainTarget: chain.target,
+      chainTargetFresh: chain.targetFresh,
+      chainOperator: chain.operator,
+      chainRounds: chain.rounds,
     });
     input.value = prompt;
     input.setSelectionRange(selectionStart, selectionEnd);
@@ -2626,16 +2754,16 @@ function semanticRouteBackspace() {
     const before = route.slice(0, caret);
     const after = route.slice(caret);
     const agentMatch = before.match(/^(#\w+@)\w+$/);
-    const chainTargetMatch = before.match(/^(#\w+@\w+!?>@)\w+$/);
+    const chainTargetMatch = before.match(/^(#\w+@\w+!?(?:(?:<>)|>)@)\w+$/);
     const chainOriginMatch = before.match(/^(#\w+@)\w+$/);
 
     if (chainTargetMatch && (caret === routeEnd || after.startsWith('!'))) {
       nextRoute = chainTargetMatch[1] + after;
       nextCaret = chainTargetMatch[1].length;
-    } else if (before.endsWith('@') && /^#\w+@\w+!?>@$/.test(before) && (caret === routeEnd || after.startsWith('!'))) {
+    } else if (before.endsWith('@') && /^#\w+@\w+!?(?:(?:<>)|>)@$/.test(before) && (caret === routeEnd || after.startsWith('!'))) {
       nextRoute = before.slice(0, -2) + after;
       nextCaret = before.length - 2;
-    } else if (chainOriginMatch && (after.startsWith('>@') || after.startsWith('!>@'))) {
+    } else if (chainOriginMatch && (after.startsWith('>@') || after.startsWith('<>@') || after.startsWith('!>@') || after.startsWith('!<>@'))) {
       nextRoute = chainOriginMatch[1] + after;
       nextCaret = chainOriginMatch[1].length;
     } else if (agentMatch && (caret === routeEnd || after.startsWith('!'))) {
@@ -2664,6 +2792,7 @@ function closeEscSurfaces() {
   if (msgModal?.classList.contains('open')) { msgModal.classList.remove('open'); closed = true; }
   const restartModal = document.getElementById('restart-modal');
   if (restartModal?.classList.contains('open')) { closeRestartModal(false); closed = true; }
+  if (document.getElementById('agent-session-modal')?.classList.contains('open')) { closeAgentSessionModal(false); closed = true; }
   if (document.getElementById('memory-modal')?.classList.contains('open')) { closeMemoryEditor(); closed = true; }
   if (document.getElementById('topic-delete-modal')?.classList.contains('open')) { closeTopicDeleteModal(); closed = true; }
   if (document.getElementById('preset-name-modal')?.classList.contains('open')) { _closePresetNameModal(null); closed = true; }
@@ -2769,30 +2898,35 @@ async function sendMessage(text, opts = {}) {
   const source = opts.source === 'system' ? 'system' : 'human';
   const updateComposerRoute = source !== 'system';
   const suppressChipTurnCount = !!opts.suppressChipTurnCount;
-  const { topic, agent, adhoc, lookback, route, chainTarget, chainTargetFresh, message } = parseInput(text);
+  const { topic, agent, adhoc, lookback, route, chainTarget, chainTargetFresh, chainOperator, chainRounds, message } = parseInput(text);
+  const flowRoute = route ? canonicalFlowRoute(route) : canonicalFlowRoute(opts.flowRoute);
+  let flowRunId = flowRoute ? (opts.flowRunId || null) : null;
   if (updateComposerRoute) {
-    setTopicChip(topic, agent, adhoc, lookback, { chainTarget, chainTargetFresh, suppressTurnCount: suppressChipTurnCount });
+    setTopicChip(topic, agent, adhoc, lookback, { chainTarget, chainTargetFresh, chainOperator, chainRounds, suppressTurnCount: suppressChipTurnCount });
   }
   const sendTime = new Date().toISOString();
   // A search scope can't be evaluated against a message that isn't in the DB yet, so keep
   // the live group hidden while searching. A filter scope, on the other hand, can be checked
   // client-side against this message's own topic/agent/adhoc — show it if it matches.
   const liveHiddenByScope = searchActive ||
-    (hasHistoryFilterScope() && !itemMatchesFilter({ topic, agent, adhoc }, historyFilter));
+    (hasHistoryFilterScope() && !itemMatchesFilter({ topic, agent, adhoc, flow_route: flowRoute }, historyFilter));
 
   let chainMarker = null;
   if (source === 'human' && route && chainTarget) {
-    chainMarker = makeRouteChainMarker(route);
+    chainMarker = makeRouteChainMarker(route, {
+      turnCounts: _routeChainTurnCounts(topic, agent, adhoc, chainTarget, chainTargetFresh),
+    });
     chainMarker.dataset.topic = topic;
+    chainMarker.dataset.flowRoute = flowRoute;
     if (agent) chainMarker.dataset.agent = agent;
     if (adhoc) chainMarker.dataset.adhoc = '1';
     if (liveHiddenByScope) chainMarker.classList.add('live-hidden');
   }
   const userBubble = makeUserBubble(message, topic, agent, null, adhoc, lookback, source);
   const userTopicTag = userBubble.querySelector('.topic-tag');
+  if (chainMarker) messages.appendChild(chainMarker);
   messages.appendChild(userBubble);
   const userTimeEl = addTimestamp(userBubble, sendTime, true);
-  if (chainMarker) messages.appendChild(chainMarker);
   if (liveHiddenByScope) {
     userBubble.classList.add('live-hidden');
     userTimeEl?.classList.add('live-hidden');
@@ -2806,6 +2940,7 @@ async function sendMessage(text, opts = {}) {
   const thinkingBubble = document.createElement('div');
   thinkingBubble.className = 'msg assistant msg-thinking';
   thinkingBubble.dataset.topic = topic;
+  if (flowRoute) thinkingBubble.dataset.flowRoute = flowRoute;
   if (agent) thinkingBubble.dataset.agent = agent;
   if (adhoc) thinkingBubble.dataset.adhoc = '1';
   if (liveHiddenByScope) thinkingBubble.classList.add('live-hidden');
@@ -2905,6 +3040,7 @@ async function sendMessage(text, opts = {}) {
   const bubble = document.createElement('div');
   bubble.className = 'msg assistant';
   bubble.dataset.topic = topic;
+  if (flowRoute) bubble.dataset.flowRoute = flowRoute;
   if (agent) bubble.dataset.agent = agent;
   const responseHeader = document.createElement('div');
   responseHeader.className = 'response-header';
@@ -2918,6 +3054,7 @@ async function sendMessage(text, opts = {}) {
   liveCtxSpan.className = 'user-ctx';
   setCtxLabel(liveCtxSpan, adhoc);
   liveCtxSpan.dataset.topic = topic;
+  if (flowRunId) liveCtxSpan.dataset.flowRunId = flowRunId;
   liveCtxSpan.addEventListener('click', e => { e.stopPropagation(); showCtxPopup(liveCtxSpan); });
   responseHeader.appendChild(liveCtxSpan);
   bubble.appendChild(responseHeader);
@@ -3060,37 +3197,23 @@ async function sendMessage(text, opts = {}) {
 
   function chainContextPinId() {
     if (!msgId || !raw.trim()) return null;
-    const id = Number(msgId);
-    const items = getPinnedItems();
-    const existing = items.find(item => item.id === id);
-    const chainItem = {
-      id,
-      topic,
-      agent: resolvedAgent || agent || null,
-      session_id: lastSessionId || bubble.dataset.sessionId || null,
-      content: raw,
-      context_tag: 'previous_step_output',
-      source: 'route-chain',
-    };
-    if (existing) {
-      setPinnedItems(items.map(item => item.id === id ? { ...item, ...chainItem } : item));
-    } else {
-      setPinnedItems([...items, chainItem]);
-    }
-    updatePinCount();
-    if (pinPanel.classList.contains('open')) renderPinPanel();
-    return id;
+    return Number(msgId);
   }
 
   function chainHandoffPrompt() {
-    if (!route || !chainTarget || !raw.trim()) return null;
-    const targetSuffix = chainTargetFresh ? '!' : '';
+    const returnStep = opts.chainReturn || null;
+    const currentRoute = route || flowRoute;
+    const nextAgent = returnStep?.agent || chainTarget;
+    const nextFresh = returnStep ? !!returnStep.fresh : chainTargetFresh;
+    if (!currentRoute || !nextAgent || !raw.trim()) return null;
+    const targetSuffix = nextFresh ? '!' : '';
+    const originalPrompt = opts.chainOriginalPrompt || message;
     return [
       'Squid route chain handoff.',
-      `Route: ${route}`,
+      `Route: ${currentRoute}`,
       `Previous step: @${resolvedAgent || agent || ''}`,
-      `Current step: @${chainTarget}${targetSuffix}`,
-      `Original prompt: ${message}`,
+      `Current step: @${nextAgent}${targetSuffix}`,
+      `Original prompt: ${originalPrompt}`,
       'Previous output: injected context <previous_step_output>. Use it to continue.',
     ].join('\n');
   }
@@ -3100,13 +3223,23 @@ async function sendMessage(text, opts = {}) {
     const handoff = chainHandoffPrompt();
     if (!handoff) return;
     chainContinuationStarted = true;
-    const targetSuffix = chainTargetFresh ? '!' : '';
+    const returnStep = opts.chainReturn || null;
+    const nextAgent = returnStep?.agent || chainTarget;
+    const nextFresh = returnStep ? !!returnStep.fresh : chainTargetFresh;
+    const targetSuffix = nextFresh ? '!' : '';
     const contextId = chainContextPinId();
+    const nextReturn = !returnStep && chainOperator === '<>' && (chainRounds || 0) > 0
+      ? { agent: agent, fresh: adhoc, remainingRounds: (chainRounds || 1) - 1 }
+      : null;
     setTimeout(() => {
-      sendMessage(`#${topic}@${chainTarget}${targetSuffix} ${handoff}`, {
+      sendMessage(`#${topic}@${nextAgent}${targetSuffix} ${handoff}`, {
         source: 'system',
         extraPinnedIds: contextId ? [contextId] : [],
         suppressChipTurnCount: true,
+        flowRunId,
+        flowRoute,
+        chainOriginalPrompt: opts.chainOriginalPrompt || message,
+        ...(nextReturn ? { chainReturn: nextReturn } : {}),
       });
     }, 0);
   }
@@ -3221,6 +3354,7 @@ async function sendMessage(text, opts = {}) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         message, topic, agent, lookback, adhoc, source,
+        ...(flowRoute ? { flow_route: flowRoute, ...(flowRunId ? { flow_run_id: flowRunId } : {}) } : {}),
         ...(adhoc && lookback > 0 ? { lookback_via_pins: true } : {}),
         ...(_includeTopicMemory ? { include_topic_memory: true } : {}),
         ...(_contextIds.length ? { pinned_ids: _contextIds } : {}),
@@ -3238,6 +3372,14 @@ async function sendMessage(text, opts = {}) {
       throw new Error(err.error || `HTTP 400`);
     }
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+    const responseFlowRunId = res.headers.get('X-Squid-Flow-Run-Id');
+    if (flowRoute && responseFlowRunId) {
+      flowRunId = responseFlowRunId;
+      liveCtxSpan.dataset.flowRunId = flowRunId;
+      if (chainMarker) chainMarker.dataset.flowRunId = flowRunId;
+      thinkingBubble.dataset.flowRunId = flowRunId;
+      bubble.dataset.flowRunId = flowRunId;
+    }
     if (!msgId) attachMsgId(res.headers.get('X-Squid-Msg-Id'));
     _lookbackUnselected.clear();
     _lastLookbackSelectionKey = '';
@@ -3311,6 +3453,8 @@ async function sendMessage(text, opts = {}) {
                 setTopicChip(topic, resolvedAgent, resolvedAdhoc, lookback, {
                   chainTarget,
                   chainTargetFresh,
+                  chainOperator,
+                  chainRounds,
                   suppressTurnCount: suppressChipTurnCount,
                 });
               }
@@ -4119,6 +4263,48 @@ function makeHistoryPromptToggle(prompt) {
   return { promptToggle, promptFullDiv };
 }
 
+function historyRouteChainFromPrompt(prompt) {
+  const match = String(prompt || '').match(/(?:^|\n)Route:\s*(#\w+@\w+!?(?:(?:<>)|>)@\w+!?)(?:\s|$)/);
+  return match ? normalizePromptHistoryRoute(match[1]) : '';
+}
+
+function routeChainParts(route) {
+  return parseRouteChain(route);
+}
+
+function historyItemMatchesRouteOrigin(item, parts) {
+  return !!parts
+    && (item?.topic || 'default') === parts.topic
+    && (item?.agent || null) === parts.origin
+    && !!item?.adhoc === parts.originFresh;
+}
+
+function historyRouteChainMarkerForItem(item, nextItem, prevItem) {
+  const ownRoute = normalizePromptHistoryRoute(item?.flow_route || item?.flowRoute || '');
+  if (historyItemMatchesRouteOrigin(item, routeChainParts(ownRoute))) {
+    return ownRoute;
+  }
+  const nextRoute = nextItem?.prompt_source === 'system'
+    ? historyRouteChainFromPrompt(nextItem.prompt)
+    : '';
+  const nextParts = routeChainParts(nextRoute);
+  if (historyItemMatchesRouteOrigin(item, nextParts)) {
+    return nextRoute;
+  }
+  return '';
+}
+
+function appendHistoryRouteChainMarker(route, item, container) {
+  if (!route || !container) return null;
+  const marker = makeRouteChainMarker(route);
+  marker.classList.add('history-item');
+  marker.dataset.topic = item.topic || 'default';
+  if (item.agent) marker.dataset.agent = item.agent;
+  if (item.adhoc) marker.dataset.adhoc = '1';
+  container.appendChild(marker);
+  return marker;
+}
+
 function addThinkingHeightButton(bubble) {
   const btn = document.createElement('button');
   btn.type = 'button';
@@ -4187,6 +4373,7 @@ function appendHistoryItem(item, container) {
       _sessionTurnCounts[item.session_id] = sessionTurnCount;
       const taKey = `${item.topic || 'default'}@${item.agent || '_'}`;
       if (stickyChip && !stickyChip.adhoc && stickyChip.topic === (item.topic || 'default') &&
+          !stickyChip.route &&
           (stickyChip.agent || null) === (item.agent || null) &&
           _sessionIds[taKey] === item.session_id) {
         _renderChipTurnCount(sessionTurnCount);
@@ -4195,6 +4382,7 @@ function appendHistoryItem(item, container) {
   }
   setCtxLabel(ctxSpan, !!item.adhoc, _pc.pins.length, _pc.mem, sessionTurnCount);
   ctxSpan.dataset.sessionId = item.session_id || '';
+  ctxSpan.dataset.flowRunId = item.flow_run_id || '';
   ctxSpan.dataset.cwd = item.stats?.cwd || '';
   ctxSpan.dataset.topic = item.topic || '';
   ctxSpan.dataset.sessionTurnCount = String(sessionTurnCount);
@@ -4486,10 +4674,64 @@ function makeUserBubble(text, topic, agent, backendFallback = null, adhoc = fals
   return div;
 }
 
-function makeRouteChainMarker(route) {
+function appendRouteChainTurnCount(parent, count) {
+  if (!count || count <= 0) return;
+  const countSpan = document.createElement('span');
+  countSpan.className = 'chip-turn-count route-chain-turn-count';
+  countSpan.textContent = `·${count}t`;
+  countSpan.classList.toggle('mid', count > 10 && count <= 20);
+  countSpan.classList.toggle('high', count > 20);
+  parent.appendChild(countSpan);
+}
+
+function makeRouteChainMarker(route, opts = {}) {
   const div = document.createElement('div');
   div.className = 'route-chain-marker';
-  div.textContent = `Squid Flow: ${route}`;
+  const chain = parseRouteChain(route);
+  if (!chain) {
+    div.textContent = route || '';
+    return div;
+  }
+  const { topic, origin: originAgent, originFresh, operator, target: targetAgent, targetFresh } = chain;
+  const topicSpan = document.createElement('span');
+  topicSpan.className = 'tag-topic';
+  topicSpan.textContent = `#${topic}`;
+  div.appendChild(topicSpan);
+
+  const originSpan = document.createElement('span');
+  originSpan.className = 'tag-agent';
+  originSpan.textContent = `@${originAgent}`;
+  setAgentSlugColor(originSpan, originAgent);
+  div.appendChild(originSpan);
+
+  if (originFresh) {
+    const freshSpan = document.createElement('span');
+    freshSpan.className = 'tag-adhoc';
+    freshSpan.textContent = '!';
+    setAgentSlugColor(freshSpan, originAgent);
+    div.appendChild(freshSpan);
+  }
+  appendRouteChainTurnCount(div, opts.turnCounts?.origin || 0);
+
+  const arrowSpan = document.createElement('span');
+  arrowSpan.className = 'route-chain-arrow';
+  arrowSpan.textContent = operator;
+  div.appendChild(arrowSpan);
+
+  const targetSpan = document.createElement('span');
+  targetSpan.className = 'tag-agent';
+  targetSpan.textContent = `@${targetAgent}`;
+  setAgentSlugColor(targetSpan, targetAgent);
+  div.appendChild(targetSpan);
+
+  if (targetFresh) {
+    const freshSpan = document.createElement('span');
+    freshSpan.className = 'tag-adhoc';
+    freshSpan.textContent = '!';
+    setAgentSlugColor(freshSpan, targetAgent);
+    div.appendChild(freshSpan);
+  }
+  appendRouteChainTurnCount(div, opts.turnCounts?.target || 0);
   return div;
 }
 
@@ -5596,7 +5838,7 @@ function _setStatsTable(html) {
 }
 
 const CTX_POPUP_LAYER_CLASSES = ['stats-turn-popup', 'page-context-popup', 'modal-context-popup'];
-const CTX_POPUP_MODAL_SCOPE = '#msg-modal, #memory-modal, #topic-delete-modal, #preset-name-modal, #file-modal';
+const CTX_POPUP_MODAL_SCOPE = '#msg-modal, #memory-modal, #topic-delete-modal, #agent-session-modal, #preset-name-modal, #file-modal';
 
 function _setCtxPopupLayer(popup, layerClass) {
   popup.classList.remove(...CTX_POPUP_LAYER_CLASSES);
@@ -8544,8 +8786,7 @@ function initAliases() {
         const sessions = await fetch(`/config/agents/${encodeURIComponent(body.name)}/sessions`).then(r => r.ok ? r.json() : null).catch(() => null);
         const activeTopics = sessions?.topics?.map(s => s.topic) ?? [];
         if (activeTopics.length > 0) {
-          const topicList = activeTopics.join(', ');
-          const ok = confirm(`Changing runtime, model, or cwd for "${body.name}" will clear active sessions in: ${topicList}.\n\nContinue?`);
+          const ok = await confirmAgentSessionClear(body.name, activeTopics);
           if (!ok) return;
         }
       }
@@ -8767,6 +9008,8 @@ function _acRestoreDraft() {
       setTopicChip(promptDraftChip.topic, promptDraftChip.agent, promptDraftChip.adhoc, promptDraftChip.lookback || 0, {
         chainTarget: promptDraftChip.chainTarget,
         chainTargetFresh: promptDraftChip.chainTargetFresh,
+        chainOperator: promptDraftChip.chainOperator,
+        chainRounds: promptDraftChip.chainRounds,
       });
     }
     else clearTopicChip();
@@ -8911,11 +9154,11 @@ function _acRouteLabel(topic, agent = '', backendFallback = null) {
 }
 
 function _acRouteHtml(route) {
-  const cm = String(route || '').match(/^#(\w+)@(\w+)(!)?>@(\w+)(!)?$/);
+  const cm = parseRouteChain(route);
   if (cm) {
-    return _acRouteLabel(cm[1], cm[2] + (cm[3] || '')) +
-      `<span class="ac-route-chain-arrow">&gt;</span>` +
-      `<span class="ac-agent"${_agentStyleAttr(cm[4])}>@${escapeHtml(cm[4])}${cm[5] || ''}</span>`;
+    return _acRouteLabel(cm.topic, cm.origin + (cm.originFresh ? '!' : '')) +
+      `<span class="ac-route-chain-arrow">${escapeHtml(cm.operator)}</span>` +
+      `<span class="ac-agent"${_agentStyleAttr(cm.target)}>@${escapeHtml(cm.target)}${cm.targetFresh ? '!' : ''}</span>`;
   }
   const rm = String(route || '').match(/^#(\w+)(?:@(\w+))?(!\d*)?$/);
   if (!rm) return '';
@@ -8958,6 +9201,7 @@ async function updateAutocomplete() {
   }
 
   const mTopic = slugVal.match(/^#(\w*)[!]?$/);
+  const mChainAlias = slugVal.match(/^#(\w+)@(\w+)(!)?((?:<>)|>)(?:@?)(\w*)(!)?$/);
   const mAlias = slugVal.match(/^#(\w+)@(\w*)(!\d*)?$/);
   if (mTopic) {
     const prefix = mTopic[1].toLowerCase();
@@ -8975,6 +9219,51 @@ async function updateAutocomplete() {
         })),
       'Routes'
     );
+  } else if (mChainAlias) {
+    const topic = mChainAlias[1];
+    const originAgent = mChainAlias[2];
+    const originFresh = mChainAlias[3] || '';
+    const operator = mChainAlias[4];
+    const prefix = mChainAlias[5].toLowerCase();
+    const targetFreshTyped = mChainAlias[6] !== undefined;
+    const [agents, history] = await Promise.all([
+      _acAgents(),
+      fetch(`/topics/${encodeURIComponent(topic)}/agents/history`).then(r => r.ok ? r.json() : []).catch(() => []),
+    ]);
+    if (input.value !== val) return;
+
+    const usedNames = new Set(history.map(h => h.agent));
+    const backendByAgent = new Map(agents.map(a => [a.name, a.backend]));
+    const items = [];
+    const routePrefix = `#${topic}@${originAgent}${originFresh}${operator}@`;
+    const addChainItem = (agentName, fresh, sub, meta) => {
+      const route = `${routePrefix}${agentName}${fresh ? '!' : ''}`;
+      items.push({
+        label: _acRouteHtml(route),
+        insert: route,
+        replaceSlug: replacingSlug,
+        sub,
+        meta,
+      });
+    };
+
+    for (const h of history) {
+      if (!h.agent.toLowerCase().startsWith(prefix)) continue;
+      if (targetFreshTyped) {
+        addChainItem(h.agent, true, h.last_adhoc_prompt ? _acLastPrompt(h.last_adhoc_prompt) : '', 'fresh');
+        continue;
+      }
+      addChainItem(h.agent, false, h.last_prompt ? _acLastPrompt(h.last_prompt) : '', backendByAgent.get(h.agent) || null);
+      addChainItem(h.agent, true, h.last_adhoc_prompt ? _acLastPrompt(h.last_adhoc_prompt) : '', 'fresh');
+    }
+
+    for (const a of agents) {
+      if (usedNames.has(a.name)) continue;
+      if (!a.name.toLowerCase().startsWith(prefix)) continue;
+      addChainItem(a.name, targetFreshTyped, '', targetFreshTyped ? 'fresh' : a.backend);
+    }
+
+    _acRender(items.slice(0, 10), 'Routes');
   } else if (mAlias) {
     const topic  = mAlias[1];
     const prefix = mAlias[2].toLowerCase();
@@ -9452,6 +9741,7 @@ function showCtxPopup(spanEl) {
   _setCtxPopupLayer(popup, spanEl.closest(CTX_POPUP_MODAL_SCOPE) ? 'modal-context-popup' : 'page-context-popup');
 
   const sid    = spanEl.dataset.sessionId || '';
+  const flowRunId = spanEl.dataset.flowRunId || '';
   const msgId  = spanEl.dataset.msgId || '';
   const cwd    = spanEl.dataset.cwd || '';
   const mem    = spanEl.dataset.mem === 'true';
@@ -9463,6 +9753,9 @@ function showCtxPopup(spanEl) {
   let html = '';
   if (msgId) {
     html += `<div class="ctx-popup-row"><span class="ctx-popup-key">message</span><span class="ctx-popup-val">#${msgId}</span></div>`;
+  }
+  if (flowRunId) {
+    html += `<div class="ctx-popup-row"><span class="ctx-popup-key">flow run</span><span class="ctx-popup-val">${escapeHtml(flowRunId)}</span></div>`;
   }
   if (sid || cwd) {
     html += `<div class="ctx-popup-row"><span class="ctx-popup-key">session</span><span class="ctx-popup-val">${sid}</span></div>`;
@@ -9897,7 +10190,7 @@ function _getSessionMeta(topic, agent) {
           setInjectedInto(inj);
         }
       }
-      if (!_acStashedForNav && data?.session_id && stickyChip && !stickyChip.adhoc &&
+      if (!_acStashedForNav && data?.session_id && stickyChip && !stickyChip.adhoc && !stickyChip.route &&
           stickyChip.topic === topic && stickyChip.agent === agent) {
         const count = _sessionTurnCounts[data.session_id] || 0;
         if (count > 0) _renderChipTurnCount(count);
@@ -10447,6 +10740,12 @@ function initPin() {
   document.getElementById('restart-modal').addEventListener('mousedown', e => {
     if (e.target === document.getElementById('restart-modal')) closeRestartModal(false);
   });
+  document.getElementById('agent-session-modal-close').addEventListener('click', () => closeAgentSessionModal(false));
+  document.getElementById('agent-session-cancel').addEventListener('click', () => closeAgentSessionModal(false));
+  document.getElementById('agent-session-confirm').addEventListener('click', () => closeAgentSessionModal(true));
+  document.getElementById('agent-session-modal').addEventListener('mousedown', e => {
+    if (e.target === document.getElementById('agent-session-modal')) closeAgentSessionModal(false);
+  });
   document.getElementById('topic-delete-modal-close').addEventListener('click', closeTopicDeleteModal);
   document.getElementById('topic-delete-cancel').addEventListener('click', closeTopicDeleteModal);
   document.getElementById('topic-delete-confirm').addEventListener('click', confirmTopicDelete);
@@ -10487,12 +10786,13 @@ updatePromptOnlyButton();
 updateSearchButton();
 
 function formatFilterCommand(state) {
+  if (state.flow_route) return `/f ${state.flow_route}`;
   let scope = '';
   if (state.topic) scope = '#' + state.topic;
   if (state.agent) {
     scope += '@' + state.agent;
     if (state.adhoc === true) scope += '!';
-    else if (state.adhoc === null) scope += '+';
+    else if (state.adhoc === null) scope += '*';
   }
   return scope ? `/f ${scope}` : '/f reset';
 }
@@ -10503,7 +10803,7 @@ function hideAdvisory() {
 }
 
 function evaluateAdvisory() {
-  if (!stickyChip || stickyChip.adhoc) { hideAdvisory(); return; }
+  if (!stickyChip || stickyChip.adhoc || stickyChip.route) { hideAdvisory(); return; }
   const { topic, agent } = stickyChip;
   const sessionId = _sessionIds[`${topic}@${agent || '_'}`];
   if (!sessionId) { hideAdvisory(); return; }
@@ -10575,16 +10875,18 @@ function editActiveFilter() {
 
 function formatSearchCommand(state) {
   let cmd = '/s ';
-  if (state.explicitAll || state.topic) {
+  if (state.flow_route) {
+    cmd += state.flow_route + ' ';
+  } else if (state.explicitAll || state.topic) {
     cmd += state.explicitAll ? '#all' : '#' + state.topic;
     if (state.agent) cmd += '@' + state.agent;
     if (state.agent && state.adhoc === true) cmd += '!';
-    else if (state.agent && state.adhoc === null) cmd += '+';
+    else if (state.agent && state.adhoc === null) cmd += '*';
     cmd += ' ';
   } else if (state.agent) {
     cmd += '@' + state.agent;
     if (state.adhoc === true) cmd += '!';
-    else if (state.adhoc === null) cmd += '+';
+    else if (state.adhoc === null) cmd += '*';
     cmd += ' ';
   }
   return (cmd + state.keywords).trim();
@@ -10605,11 +10907,12 @@ document.addEventListener('click', e => {
   if (!pinPanel.contains(e.target) && !pinBtn.contains(e.target)) closePinPanel();
   const ctxPopup = document.getElementById('ctx-popup');
   const statsTurnPopup = document.getElementById('stats-turn-popup');
-  const inSecondary = e.target.closest('#msg-modal, #memory-modal, #topic-delete-modal, #preset-name-modal');
+  const inSecondary = e.target.closest('#msg-modal, #memory-modal, #topic-delete-modal, #agent-session-modal, #preset-name-modal');
   const inCtxPopup = ctxPopup?.contains(e.target);
   const secondaryOpen = document.getElementById('msg-modal')?.classList.contains('open')
     || document.getElementById('memory-modal')?.classList.contains('open')
     || document.getElementById('topic-delete-modal')?.classList.contains('open')
+    || document.getElementById('agent-session-modal')?.classList.contains('open')
     || document.getElementById('preset-name-modal')?.classList.contains('open');
   if (ctxPopup && !inCtxPopup && !e.target.closest('.user-ctx') && !inSecondary && !secondaryOpen) {
     ctxPopup.classList.remove('open');
@@ -10895,7 +11198,46 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   body.id = 'file-modal-body';
   body.textContent = 'Loading…';
 
-  box.append(header, editToolbar, body, uploadInput);
+  const pathModal = document.createElement('div');
+  pathModal.className = 'fv-path-modal';
+  pathModal.hidden = true;
+  const pathModalBox = document.createElement('form');
+  pathModalBox.className = 'fv-path-modal-box';
+  const pathModalHeader = document.createElement('div');
+  pathModalHeader.className = 'fv-path-modal-header';
+  const pathModalTitle = document.createElement('span');
+  pathModalTitle.className = 'settings-label';
+  const pathModalClose = document.createElement('button');
+  pathModalClose.type = 'button';
+  pathModalClose.className = 'fv-path-modal-close';
+  pathModalClose.textContent = '✕';
+  pathModalHeader.append(pathModalTitle, pathModalClose);
+  const pathModalBody = document.createElement('div');
+  pathModalBody.className = 'fv-path-modal-body';
+  const pathModalInput = document.createElement('input');
+  pathModalInput.type = 'text';
+  pathModalInput.spellcheck = false;
+  pathModalInput.autocomplete = 'off';
+  pathModalInput.setAttribute('aria-label', 'Destination path');
+  const pathModalHint = document.createElement('div');
+  pathModalHint.className = 'fv-path-modal-hint';
+  pathModalHint.textContent = 'Edit the filename or destination path.';
+  const pathModalError = document.createElement('div');
+  pathModalError.className = 'fv-path-modal-error';
+  pathModalBody.append(pathModalInput, pathModalHint, pathModalError);
+  const pathModalFooter = document.createElement('div');
+  pathModalFooter.className = 'fv-path-modal-footer';
+  const pathModalCancel = document.createElement('button');
+  pathModalCancel.type = 'button';
+  pathModalCancel.textContent = 'Cancel';
+  const pathModalConfirm = document.createElement('button');
+  pathModalConfirm.type = 'submit';
+  pathModalConfirm.textContent = 'Rename';
+  pathModalFooter.append(pathModalCancel, pathModalConfirm);
+  pathModalBox.append(pathModalHeader, pathModalBody, pathModalFooter);
+  pathModal.appendChild(pathModalBox);
+
+  box.append(header, editToolbar, body, uploadInput, pathModal);
   if (!isInline) {
     modal.appendChild(box);
     document.body.appendChild(modal);
@@ -11068,10 +11410,60 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
       setTimeout(() => { copyBtn.innerHTML = FV_ICON_COPY; }, 1500);
     });
   });
+
+  let _pathModalResolve = null;
+  function closePathModal(value = null) {
+    pathModal.hidden = true;
+    pathModalError.textContent = '';
+    const resolve = _pathModalResolve;
+    _pathModalResolve = null;
+    if (resolve) resolve(value);
+  }
+
+  function openPathModal({ title, value, confirmLabel, hint }) {
+    pathModalTitle.textContent = title;
+    pathModalInput.value = value || '';
+    pathModalConfirm.textContent = confirmLabel || 'Save';
+    pathModalHint.textContent = hint || 'Edit the filename or destination path.';
+    pathModalError.textContent = '';
+    pathModal.hidden = false;
+    requestAnimationFrame(() => {
+      pathModalInput.focus();
+      pathModalInput.select();
+    });
+    return new Promise(resolve => { _pathModalResolve = resolve; });
+  }
+
+  pathModal.addEventListener('mousedown', e => {
+    if (e.target === pathModal) closePathModal(null);
+  });
+  pathModalBox.addEventListener('mousedown', e => e.stopPropagation());
+  pathModalClose.addEventListener('click', () => closePathModal(null));
+  pathModalCancel.addEventListener('click', () => closePathModal(null));
+  pathModalBox.addEventListener('submit', e => {
+    e.preventDefault();
+    const value = pathModalInput.value.trim();
+    if (!value) {
+      pathModalError.textContent = 'Destination is required.';
+      return;
+    }
+    closePathModal(value);
+  });
+  pathModalInput.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closePathModal(null);
+    }
+  });
+
   async function createLocalChild(kind) {
     if (pathKind !== 'directory') return;
-    const label = kind === 'folder' ? 'Folder name' : 'File name';
-    const name = window.prompt(label);
+    const name = await openPathModal({
+      title: kind === 'folder' ? 'New folder' : 'New file',
+      value: '',
+      confirmLabel: 'Create',
+      hint: `Enter a name for the new ${kind === 'folder' ? 'folder' : 'file'}.`,
+    });
     if (name == null) return;
     const trimmed = name.trim();
     if (!trimmed) return;
@@ -11094,15 +11486,22 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     }
   }
   async function renameLocalPath(targetPath, currentName, afterRename = null) {
-    const name = window.prompt('Rename to', currentName);
-    if (name == null) return;
-    const trimmed = name.trim();
-    if (!trimmed || trimmed === currentName) return;
+    const dest = await openPathModal({
+      title: 'Rename or move',
+      value: targetPath,
+      confirmLabel: 'Rename',
+    });
+    if (dest == null) return;
+    const trimmed = dest.trim();
+    if (!trimmed || trimmed === targetPath || trimmed === currentName) return;
+    const body = trimmed.includes('/') || trimmed.startsWith('~')
+      ? { path: targetPath, to_path: trimmed }
+      : { path: targetPath, name: trimmed };
     try {
       const res = await fetch('/localfile/rename', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: targetPath, name: trimmed }),
+        body: JSON.stringify(body),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Rename failed');
@@ -11180,7 +11579,13 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   closeBtn.addEventListener('click', closeModal);
   if (!isInline) {
     modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
-    const escHandler = e => { if (e.key === 'Escape') { closeModal(); document.removeEventListener('keydown', escHandler); } };
+    const escHandler = e => {
+      if (e.key === 'Escape' && !pathModal.hidden) {
+        closePathModal(null);
+        return;
+      }
+      if (e.key === 'Escape') { closeModal(); document.removeEventListener('keydown', escHandler); }
+    };
     document.addEventListener('keydown', escHandler);
   }
 
@@ -11547,55 +11952,12 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   }
 
   // ── Content ──────────────────────────────────────────────────────────────────
-  function showAllowRoot() {
-    const hint = path.split('/').slice(0, -1).join('/') || '/';
-    body.classList.remove('fv-web-preview-body');
-    body.innerHTML = '';
-    const panel = document.createElement('div');
-    panel.className = 'fv-config-hint';
-    panel.innerHTML = '<strong>Path not in allowed roots</strong>' +
-      '<p>Choose an existing parent directory to add to <code>server.localfile_roots</code>.</p>' +
-      '<p>All files beneath the selected directory will become readable in the Squid web UI.</p>';
-    const row = document.createElement('div');
-    row.className = 'fv-root-row';
-    const rootInput = document.createElement('input');
-    rootInput.value = hint;
-    rootInput.spellcheck = false;
-    rootInput.setAttribute('aria-label', 'Directory to allow');
-    const allowBtn = document.createElement('button');
-    allowBtn.type = 'button';
-    allowBtn.textContent = 'Allow directory';
-    const status = document.createElement('div');
-    status.className = 'fv-root-status';
-    row.append(rootInput, allowBtn);
-    panel.append(row, status);
-    body.appendChild(panel);
-    allowBtn.addEventListener('click', async () => {
-      allowBtn.disabled = true;
-      status.textContent = 'Updating configuration…';
-      try {
-        const res = await fetch('/config/localfile-roots', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path, root: rootInput.value.trim() }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Failed to allow directory');
-        status.textContent = 'Allowed. Loading file…';
-        await loadFile();
-      } catch (err) {
-        status.textContent = err.message || 'Failed to update configuration.';
-        allowBtn.disabled = false;
-      }
-    });
-  }
-
   function renderFileRoots(data) {
     body.classList.remove('fv-web-preview-body');
     body.innerHTML = '';
     const hint = document.createElement('p');
     hint.className = 'fv-roots-hint';
-    hint.appendChild(document.createTextNode('Only directories listed in the YAML config are shown. '));
+    hint.appendChild(document.createTextNode('Frequently visited directories from the YAML config. The file browser can reach any path you have OS access to, same as the agent. '));
     const configLink = document.createElement('a');
     configLink.href = '#';
     configLink.textContent = 'Edit YAML config →';
@@ -11612,7 +11974,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     if (!roots.length) {
       const empty = document.createElement('div');
       empty.className = 'fv-dir-empty';
-      empty.textContent = 'No local file roots configured';
+      empty.textContent = 'No frequently visited directories configured';
       body.appendChild(empty);
       return;
     }
@@ -11663,12 +12025,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
       const res = await fetch('/localfile?' + new URLSearchParams({ path, _t: Date.now() }));
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        const err = errData.error || '';
-        if (res.status === 403 && (err.includes('localfile_roots') || err.includes('outside allowed roots'))) {
-          showAllowRoot();
-        } else {
-          body.textContent = err || `Error ${res.status}`;
-        }
+        body.textContent = errData.error || `Error ${res.status}`;
         return;
       }
       const ct = res.headers.get('content-type') || '';
@@ -12010,6 +12367,8 @@ try {
     setTopicChip(saved.topic, saved.agent || null, saved.adhoc || false, saved.lookback || 0, {
       chainTarget: saved.chainTarget,
       chainTargetFresh: saved.chainTargetFresh,
+      chainOperator: saved.chainOperator,
+      chainRounds: saved.chainRounds,
     });
   } else {
     _acAgents().then(agents => {

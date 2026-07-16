@@ -1,8 +1,8 @@
 ---
-status: proposed
+status: accepted
 date: 2026-07-15
 ---
-# ADR-0032: Route Chains and Flow Graphs with CWD-Profile Agents
+# ADR-0032: Route Chains and Squid Flow with CWD-Profile Agents
 
 ## Context and Problem Statement
 
@@ -26,6 +26,24 @@ This keeps Squid responsible for routing only. The agent CLI remains responsible
 for reading `AGENTS.md`, `CLAUDE.md`, `.claude/`, `.cursor/rules`, or any other
 native profile files from its process cwd.
 
+## Current Implementation
+
+As of 2026-07-16, Squid implements the first linear subset:
+
+```text
+#topic@origin[!]>@target[!]
+```
+
+The broader Squid Flow syntax in this ADR remains the accepted direction, but
+joins, scheduled edges, cycles, `<>`, and `<N>` request/response loops are not
+implemented yet.
+
+The implemented chain is executed by the UI as explicit turns: the origin prompt
+is sent first, then Squid synthesizes and sends the target prompt after the
+origin response completes. The backend rejects route-chain expressions sent
+directly to `/chat`; this keeps the chain visible as normal message rows rather
+than a hidden backend-only transaction.
+
 ## Decision Drivers
 
 - Avoid introducing Squid-owned roles, role registries, or role-specific prompt
@@ -41,7 +59,7 @@ native profile files from its process cwd.
 - Make chained execution deterministic even while unrelated adhoc prompts are
   running in parallel.
 
-## Proposed Route Syntax
+## Accepted Route Syntax
 
 Route autocomplete should understand chained route expressions:
 
@@ -52,6 +70,15 @@ Route autocomplete should understand chained route expressions:
 #topic@agent<2>@next
 #topic@agent<2>@next!
 #topic@agent!<>@next!
+```
+
+The current implementation accepts only:
+
+```text
+#topic@agent>@next
+#topic@agent>@next!
+#topic@agent!>@next
+#topic@agent!>@next!
 ```
 
 `>` means pass the previous response forward to the next route step. `=>` is
@@ -97,16 +124,26 @@ native session. Therefore `#squid@codex<2>@review!` uses two independent fresh
 `@review!` sessions; review state passes between rounds only through the chain
 envelope.
 
-## Flow Graphs
+## Squid Flow
 
-Route chains are the first supported subset of a flow graph. A linear chain is
-a graph with one active path and no joins, cycles, or scheduled edges. The same
-execution model should handle both simple chains and fuller graph expressions.
+The workflow graph feature is named **Squid Flow**. User-facing docs and UI
+should use "Squid Flow" rather than "workflow graph" or "flow graph". Route
+chains are the first supported subset of Squid Flow. A linear chain is a graph
+with one active path and no joins, cycles, or scheduled edges. The same
+execution model should handle both simple chains and fuller Squid Flow
+expressions.
 
-Flow graphs list directed lineage clauses:
+In the UI, a Squid Flow linear-chain start marker is shown above the originating
+user message in live history and restored history. The marker displays the route
+itself, without a `Squid Flow:` text prefix, and colors route pieces using the
+same route tag styling as other route chips. When persistent lanes are involved,
+the marker can show per-agent turn-count snapshots; the composer route chip does
+not show a single aggregate count because multiple agents may be involved.
+
+Squid Flow expressions list directed lineage clauses:
 
 ```text
-#topic@origin>@review!,@origin>@test!,@review!+@test!>@origin
+#topic@origin>@review!;@origin>@test!;@review!+@test!>@origin
 ```
 
 The intended reading would be:
@@ -120,15 +157,15 @@ The intended reading would be:
 The first full route establishes the topic for the graph expression. Later bare
 `@agent` steps inherit that topic, so `@review!` means `#topic@review!`.
 
-Commas separate lineage clauses. `>` and `=>` remain directed handoffs. `+` is
+`;` separates lineage clauses. `>` and `=>` remain directed handoffs. `+` is
 an explicit join operator: the downstream step runs after every listed upstream
 step has completed, and Squid synthesizes one combined chain envelope from the
 joined outputs.
 
-Implicit joins are not part of the flow syntax. For example:
+Implicit joins are not part of Squid Flow syntax. For example:
 
 ```text
-@review!>@origin,@test!>@origin
+@review!>@origin;@test!>@origin
 ```
 
 would mean two independent executions of `@origin`, not one joined execution.
@@ -137,6 +174,86 @@ A true join must be written explicitly:
 ```text
 @review!+@test!>@origin
 ```
+
+### Clause Separator: `;` Between Clauses, `,` Within a List
+
+`,` is reserved for a list of peers that share one edge or one origin
+declaration; it never separates independent clauses. This is one rule applied
+in two positions, not two grammars: `,` always lists items that share one
+input, and `;` always separates items whose inputs differ.
+
+```text
+#topic@a,@b;@a>@c;@b>@d;@c+@d>@e
+```
+
+Reading:
+
+```text
+@a and @b are independent origins on the literal user prompt
+@a > @c
+@b > @d
+@c + @d > @e   (join: @e runs once both @c and @d complete)
+```
+
+Within a single `;`-delimited clause: if the clause has no operator, `,` lists
+parallel origins (see Origin Broadcast below). If the clause has an operator,
+`,` after `>` lists parallel targets fed by the same source, e.g. `@a>@b,@c`
+means `@a`'s output goes to both `@b` and `@c` independently, with no join
+between them.
+
+An earlier draft of this ADR used `,` for both roles. That was ambiguous: a
+comma-separated clause opening with a bare `@agent` could be read either as a
+new independent clause or as a continuation of the previous clause's target
+list, and it could silently mean either a parallel fan-out or a sequential
+continuation depending on which node the reader assumed the omitted source
+was. Splitting the two roles across `,` and `;` removes that ambiguity: a bare
+`@agent` list can never start mid-expression, only as an origin declaration.
+
+### Origin Broadcast (Multiple Origins)
+
+A clause with no operator is a bare, comma-separated agent list. Each listed
+agent receives the literal user prompt directly, unwrapped, as an independent
+origin:
+
+```text
+#topic@a,@b
+```
+
+`@a` and `@b` each run as independent origins on the same literal prompt;
+neither receives the other's output and no chain envelope is created for
+either. This is equivalent to sending `#topic@a` and `#topic@b` separately
+with identical text, displayed as one Squid Flow start instead of two
+unrelated messages — useful for asking multiple agents the same question for
+comparison.
+
+A bare no-operator clause is only legal as one of the graph's origin clauses.
+Every downstream clause requires an operator (`>`, `+`, `<>`, `<N>`), so a bare
+list can never be confused with a downstream step.
+
+Autocomplete should prefer `!` on broadcast origins (`@a!,@b!`), for the same
+reason it prefers `!` on chained request/response targets: comparing agents
+usually wants independent fresh takes rather than each mutating its persistent
+lane.
+
+### Related Prior Art
+
+Squid Flow's shape mirrors existing DAG expression conventions rather than
+inventing a new one:
+
+- Graphviz DOT separates edge statements with `;` (or newlines) and groups
+  nodes with `{a b}` for fan-out/fan-in, e.g. `a -> b; a -> {c d};`.
+- Apache Airflow's DAG bitshift operators compose the same fan-out/fan-in
+  shapes with lists: `task >> [b, c]` (fan-out) and `[b, c] >> task` (join).
+- Mermaid flowchart syntax uses `-->` for edges and `&` to chain multiple
+  sources/targets on one statement, with newlines separating statements.
+
+All of these use one token for "new edge/clause" and a different token for "a
+list of peers on the same edge." Squid Flow's `;` and `,` follow the same
+pattern instead of reusing one delimiter for both. A bracket-grouped
+alternative closer to Airflow/DOT (`[@a,@b]>@c`) was considered and set aside
+for now to keep expressions terser and consistent with Squid Flow's existing
+single-character operators (`>`, `+`, `<>`, `<N>`); it remains an option if
+comma/semicolon overloading proves confusing in practice.
 
 The same operator family supports bounded request/response loops and scheduled
 one-way handoffs:
@@ -156,34 +273,34 @@ one-way handoff. `=N:T>` means `N` delayed one-way handoffs spaced by duration
 timezone, so `=5:1d/1400>` means five one-way handoffs, once per day at 14:00.
 Without `/HHMM`, the duration is relative to the triggering completion time.
 
-Unbounded graph cycles are invalid. A cyclic flow must include an explicit
-bound or schedule, such as `@c=5:1d>@a`. Delayed edges create future flow runs
-with lineage metadata; Squid must persist the pending handoff rather than keep
-an in-memory chain suspended for the delay.
+Unbounded graph cycles are invalid. A cyclic Squid Flow must include an
+explicit bound or schedule, such as `@c=5:1d>@a`. Delayed edges create future
+Squid Flow runs with lineage metadata; Squid must persist the pending handoff
+rather than keep an in-memory chain suspended for the delay.
 
 The first implementation can support only linear chains while using the same
-flow representation internally. Joins, scheduled edges, and cyclic flows can
-land incrementally without redefining the route syntax.
+Squid Flow representation internally. Joins, scheduled edges, and cyclic flows
+can land incrementally without redefining the route syntax.
 
 Complex graph expressions should also have a named alias form so the composer
 does not need to display or edit the full lineage list for common workflows.
-The preferred alias suffix is `.flow`:
+The convention is to put `.flow` in the agent position, as an agent-name suffix:
 
 ```text
 #topic@review.flow
 ```
 
-The suffix keeps autocomplete name-first: users can type the meaningful flow
-name, such as `review`, before choosing the `.flow` type. A future config might
-define the alias as:
+The suffix keeps autocomplete name-first: users type the meaningful Squid Flow
+name, such as `review`, in the same place they would type an agent, then choose
+the `.flow` type. A future config might define the alias as:
 
 ```yaml
 flows:
   review:
-    route: "@codex>@review!,@codex>@test!,@review!+@test!>@codex"
+    route: "@codex>@review!;@codex>@test!;@review!+@test!>@codex"
 ```
 
-In this form, `#topic@review.flow` would expand to the configured flow graph
+In this form, `#topic@review.flow` would expand to the configured Squid Flow
 with all bare `@agent` steps inheriting `#topic`.
 
 ## CWD-Profile Agents
@@ -309,31 +426,23 @@ completes, Squid sends an automated user prompt to `#squid@review!` containing:
 - Squid-observed changed files, when included, are hints for the downstream
   agent. If worktree isolation is disabled, they may include unrelated parallel
   edits and must not be treated as an authoritative scope.
-- A generic collaboration contract: follow the downstream agent's configured
-  instructions when they define a specific role; otherwise act as an independent
-  collaborator on the original request using the previous output as explicit
-  context.
+- Future versions may include a generic collaboration contract: follow the
+  downstream agent's configured instructions when they define a specific role;
+  otherwise act as an independent collaborator on the original request using
+  the previous output as explicit context.
 
-Example shape:
+Implemented one-way shape:
 
 ```text
-You are a downstream agent in a Squid request/response chain.
+Squid route chain handoff.
+Route: #squid@codex>@review!
+Previous step: @codex
+Current step: @review!
+Original prompt: implement the feature
 
-Follow your configured agent instructions. If they define a specific role, use
-it. Otherwise, act as an independent collaborator on the original user request,
-using the previous step as explicit context.
-
-<chain_input>
-Original user prompt:
-implement the feature
-
-Previous step:
-Route: #squid@codex
-Final output:
+<previous_step_output>
 ...
-</chain_input>
-
-Return a response useful to the originating agent. Do not assume hidden context.
+</previous_step_output>
 ```
 
 The previous step's output is therefore delivered as a new user prompt to the
@@ -390,6 +499,11 @@ inspect it and decide whether to retry that step or rerun the chain. Squid does
 not silently skip a failed step, synthesize a successful response, or continue
 the chain with an empty output.
 
+For the implemented UI-driven linear chain, the target step is started only
+after the origin assistant output has completed and produced final content. A
+failed or empty origin output therefore leaves only the origin turn visible and
+does not synthesize the target handoff.
+
 Scheduled flow edges use the same fail-stop default. If the source step fails,
 no scheduled handoff is created. If a scheduled target run fails, Squid marks
 that scheduled edge failed and does not enqueue remaining repetitions. For
@@ -429,8 +543,8 @@ input.
 
 Plain `!` is still useful in chains because it asks for a fresh native session,
 not relative history lookback. Repetition already belongs to `<N>`, so
-`#squid@codex<2>@review!` is the supported form for two request/response rounds
-with fresh review sessions.
+`#squid@codex<2>@review!` is the accepted future form for two request/response
+rounds with fresh review sessions.
 
 At the chain start, `#topic@agent!<>@review!` is valid and means the originating
 step is also fresh. `#topic@agent!2<>@review!` is not valid for the first
@@ -496,26 +610,39 @@ For the first implementation:
   `#topic@agent!N` remains ordinary adhoc lookback only for standalone prompts.
 - Every bare chained `>@agent` step uses the persistent `(topic, agent)` session.
 - Every chained `>@agent!` step starts a fresh native session for that chain run.
-- Every repeated chained `>@agent!` execution gets a separate fresh native
+- Repeated chain execution is not implemented yet; when `<N>` lands, every
+  repeated chained `>@agent!` execution must get a separate fresh native
   session.
 - Numbers after chained `!` are unsupported.
 - If any step fails, the chain stops and later steps are not run.
-- Route autocomplete supports `#squid@codex<2>@review!`.
+- Route autocomplete supports the implemented one-way forms and should grow to
+  support `#squid@codex<2>@review!` when request/response loops land.
 - No Squid-owned roles or profile registry are added.
 
 Fresh chain sessions are ephemeral workflow sessions. They should not update or
 replace the persistent `(topic, agent)` session row used by normal direct
 messages.
 
+`/clear` remains scoped to the origin lane in a route expression. For example,
+`#squid@codex>@review /clear` clears `#squid@codex`, not both lanes. Clearing
+the target lane requires an explicit target route such as `#squid@review /clear`.
+The generic single-session `/clear` advisory is suppressed on Squid Flow route
+chips because one turn count or one clear target is misleading when the composer
+route contains multiple agents.
+
 ## Consequences
 
 - Good: enables cwd-profile review agents without adding Squid role concepts.
-- Good: autocomplete can expose the full workflow immediately.
+- Good: autocomplete can expose the implemented workflow now and grow into the
+  full Squid Flow syntax incrementally.
 - Good: chained reviews are deterministic because they consume explicit chain
   input.
 - Good: bare `@agent` consistently means the persistent `(topic, agent)` lane.
-- Good: `<>@agent!` gives a fresh request/response round without global
-  recent-message lookback.
+- Good: `>@agent!` gives a fresh one-way handoff without global recent-message
+  lookback; `<>@agent!` extends that model when request/response loops land.
+- Good: `;` as the clause separator and `,` reserved for same-input peer lists
+  (targets after `>`, or origins in a bare broadcast clause) removes the
+  ambiguity between independent clauses and continuation of a prior clause.
 - Bad: chained execution needs fresh-session handling that is separate from
   both resumed sessions and adhoc lookback.
 - Constraint: `!N` remains valid for standalone adhoc turns only. In chained

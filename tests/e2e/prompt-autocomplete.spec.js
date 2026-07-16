@@ -730,6 +730,63 @@ test('agent autocomplete supports an empty agent slot before adhoc lookback', as
   await expect(page.locator('#topic-chip')).toContainText('#squid@claude!12');
 });
 
+test('route chain target autocomplete opens while typing squid flow route', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/config/agents', route => route.fulfill({ json: [
+    { name: 'codex', backend: 'codex' },
+    { name: 'revuopen', backend: 'opencode' },
+    { name: 'revucla', backend: 'claude' },
+  ] }));
+  await page.route('**/topics/squid/agents/history', route => route.fulfill({ json: [
+    { agent: 'revuopen', last_prompt: 'review lane prompt', last_adhoc_prompt: 'fresh review prompt' },
+  ] }));
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  await composer.fill('#squid@codex>@revu');
+
+  await expect(page.locator('#autocomplete')).toHaveClass(/open/);
+  await expect(page.locator('#autocomplete .ac-title')).toHaveText('Routes');
+  await expect.poll(async () => page.locator('#autocomplete .ac-item').evaluateAll(items => {
+    const text = items.map(item => item.innerText.replace(/\s+/g, ''));
+    return {
+      persistent: text.some(row => row.startsWith('#squid@codex>@revuopenlast')),
+      fresh: text.some(row => row.startsWith('#squid@codex>@revuopen!last')),
+    };
+  })).toEqual({ persistent: true, fresh: true });
+
+  await page.locator('#autocomplete .ac-item', { hasText: '#squid@codex>@revuopen!' }).click();
+
+  await expect(composer).toHaveValue('');
+  await expect(page.locator('#topic-chip')).toHaveClass(/route-chain/);
+  await expect(page.locator('#topic-chip')).toContainText('#squid@codex>@revuopen!');
+});
+
+test('route chain target autocomplete opens immediately after chain separator', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/config/agents', route => route.fulfill({ json: [
+    { name: 'codex', backend: 'codex' },
+    { name: 'revuopen', backend: 'opencode' },
+  ] }));
+  await page.route('**/topics/squid/agents/history', route => route.fulfill({ json: [
+    { agent: 'revuopen', last_prompt: 'review lane prompt', last_adhoc_prompt: 'fresh review prompt' },
+  ] }));
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  await composer.fill('#squid@codex>');
+
+  await expect(page.locator('#autocomplete')).toHaveClass(/open/);
+  await expect(page.locator('#autocomplete .ac-title')).toHaveText('Routes');
+  await expect(page.locator('#autocomplete .ac-item', { hasText: '#squid@codex>@revuopen' })).toHaveCount(2);
+
+  await page.locator('#autocomplete .ac-item', { hasText: '#squid@codex>@revuopen!' }).click();
+
+  await expect(composer).toHaveValue('');
+  await expect(page.locator('#topic-chip')).toHaveClass(/route-chain/);
+  await expect(page.locator('#topic-chip')).toContainText('#squid@codex>@revuopen!');
+});
+
 test('an invalid edited slug remains expanded on blur', async ({ page }) => {
   await mockBackend(page);
   await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({

@@ -232,6 +232,35 @@ test.describe('response bubble', () => {
     await expect(page.locator('#ctx-popup')).not.toHaveClass(/open/);
   });
 
+  test('context popup shows flow run id when present', async ({ page }) => {
+    await page.unroute('**/history**');
+    await page.route('**/history**', r => r.fulfill({ json: {
+      items: [{
+        id: 42,
+        role: 'assistant',
+        topic: 'squid',
+        agent: 'codex',
+        adhoc: false,
+        status: 'done',
+        content: 'Flow response',
+        prompt: 'Flow prompt',
+        prompt_source: 'human',
+        flow_run_id: 'flow-test-123',
+        flow_route: '#squid@codex>@review',
+        timestamp: '2026-07-16T12:00:00Z',
+      }],
+      has_more: false,
+    }}));
+    await page.reload();
+
+    const ctx = page.locator('.msg.assistant.history-item .user-ctx');
+    await expect(ctx).toBeVisible();
+    await ctx.click();
+
+    await expect(page.locator('#ctx-popup')).toContainText('flow run');
+    await expect(page.locator('#ctx-popup')).toContainText('flow-test-123');
+  });
+
   test('ctx popup near the top stays below the topbar on desktop and mobile', async ({ page }) => {
     for (const viewport of [{ width: 1280, height: 720 }, { width: 390, height: 700 }]) {
       await page.setViewportSize(viewport);

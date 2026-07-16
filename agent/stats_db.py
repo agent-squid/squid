@@ -94,6 +94,8 @@ _TABLES = [
         adhoc       INTEGER DEFAULT 0,
         context     TEXT,
         status_raw  TEXT,
+        flow_run_id TEXT,
+        flow_route  TEXT,
         session_turn_index INTEGER,
         lookback    INTEGER DEFAULT 0,
         quota_delta  REAL,
@@ -101,6 +103,10 @@ _TABLES = [
         quota_after  REAL,
         completed_at TEXT,
         created_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )""",
+    """CREATE TABLE IF NOT EXISTS id_counters (
+        namespace TEXT PRIMARY KEY,
+        next_id   INTEGER NOT NULL
     )""",
     """CREATE TABLE IF NOT EXISTS topic_sessions (
         topic       TEXT NOT NULL,
@@ -233,6 +239,35 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
+def allocate_id(namespace: str) -> str:
+    namespace = (namespace or "").strip()
+    if not namespace:
+        raise ValueError("namespace is required")
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT OR IGNORE INTO id_counters (namespace, next_id) VALUES (?, 1)",
+            (namespace,),
+        )
+        row = conn.execute(
+            "SELECT next_id FROM id_counters WHERE namespace = ?",
+            (namespace,),
+        ).fetchone()
+        next_id = int(row["next_id"])
+        conn.execute(
+            "UPDATE id_counters SET next_id = ? WHERE namespace = ?",
+            (next_id + 1, namespace),
+        )
+        conn.commit()
+        return str(next_id)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def init_db() -> None:
     conn = _connect()
     try:
@@ -249,6 +284,12 @@ def init_db() -> None:
             conn.execute("UPDATE chat_messages SET source = 'human' WHERE source IS NULL OR source = ''")
         if "completed_at" not in message_columns:
             conn.execute("ALTER TABLE chat_messages ADD COLUMN completed_at TEXT")
+        if "flow_run_id" not in message_columns:
+            conn.execute("ALTER TABLE chat_messages ADD COLUMN flow_run_id TEXT")
+        if "flow_route" not in message_columns:
+            conn.execute("ALTER TABLE chat_messages ADD COLUMN flow_route TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_flow_route ON chat_messages(flow_route, completed_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_flow_run ON chat_messages(flow_run_id, id)")
         agent_columns = _table_columns(conn, "agents")
         has_legacy_backend = "backend" in agent_columns
         # Seed one default agent per installed harness (INSERT OR IGNORE — never overwrites user edits)
@@ -682,6 +723,109 @@ def get_topic_agent_history(topic: str) -> list[dict]:
 
 # ── chat messages ─────────────────────────────────────────────────────────────
 
+def _like_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _flow_route_variants(flow_route: str) -> list[str]:
+    route = (flow_route or "").strip()
+    match = re.fullmatch(r"#(\w+)@(\w+)(!)?>@(\w+)(!)?", route)
+    if not match:
+        return [route] if route else []
+    if match.group(3) or match.group(5):
+        return [route]
+    topic, origin, target = match.group(1), match.group(2), match.group(4)
+    return [
+        f"#{topic}@{origin}>@{target}",
+        f"#{topic}@{origin}!>@{target}",
+        f"#{topic}@{origin}>@{target}!",
+        f"#{topic}@{origin}!>@{target}!",
+    ]
+
+
+def _flow_route_filter_clause(flow_route: str, msg_alias: str = "m") -> tuple[str, list]:
+    routes = _flow_route_variants(flow_route)
+    if not routes:
+        return "0", []
+
+    params: list = []
+    placeholders = ",".join("?" for _ in routes)
+    clauses = [f"{msg_alias}.flow_route IN ({placeholders})"]
+    params.extend(routes)
+
+    target_clauses = []
+    target_params: list = []
+    origin_clauses = []
+    origin_params: list = []
+    for route in routes:
+        route_like = f"%Route: {_like_escape(route)}%"
+        target_clauses.append(
+            f"""EXISTS (
+                SELECT 1 FROM chat_messages pu
+                WHERE pu.id = {msg_alias}.reply_to
+                  AND pu.source = 'system'
+                  AND pu.content LIKE ? ESCAPE '\\'
+            )"""
+        )
+        target_params.append(route_like)
+
+        match = re.fullmatch(r"#(\w+)@(\w+)(!)?>@(\w+)(!)?", route)
+        if match:
+            origin_clauses.append(
+                f"""({msg_alias}.topic = ? AND {msg_alias}.agent = ?
+                    AND COALESCE({msg_alias}.adhoc, 0) = ?
+                    AND EXISTS (
+                        SELECT 1 FROM chat_messages su
+                        WHERE su.role = 'user'
+                          AND su.source = 'system'
+                          AND su.topic = {msg_alias}.topic
+                          AND su.content LIKE ? ESCAPE '\\'
+                          AND su.id > {msg_alias}.id
+                    ))"""
+            )
+            origin_params.extend([match.group(1).lower(), match.group(2), 1 if match.group(3) else 0, route_like])
+
+    clauses.extend(target_clauses)
+    clauses.extend(origin_clauses)
+    params.extend(target_params)
+    params.extend(origin_params)
+    return "(" + " OR ".join(clauses) + ")", params
+
+
+def _route_from_handoff_prompt(prompt: Optional[str]) -> Optional[str]:
+    match = re.search(r"(?:^|\n)Route:\s*(#\w+@\w+!?>@\w+!?)(?:\s|$)", prompt or "")
+    return match.group(1) if match else None
+
+
+def _infer_origin_flow_route(conn: sqlite3.Connection, row: dict) -> Optional[str]:
+    if row.get("flow_route") or row.get("prompt_source") == "system":
+        return row.get("flow_route")
+    if row.get("id") is None or not row.get("topic") or not row.get("agent"):
+        return row.get("flow_route")
+    route_rows = conn.execute(
+        """SELECT content
+           FROM chat_messages
+           WHERE role = 'user'
+             AND source = 'system'
+             AND topic = ?
+             AND id > ?
+             AND content LIKE '%Route: %'
+           ORDER BY id ASC
+           LIMIT 20""",
+        (row["topic"], row["id"]),
+    ).fetchall()
+    for route_row in route_rows:
+        route = _route_from_handoff_prompt(route_row["content"])
+        parts = re.fullmatch(r"#(\w+)@(\w+)(!)?>@(\w+)(!)?", route or "")
+        if (
+            parts
+            and parts.group(1).lower() == row["topic"]
+            and parts.group(2) == row["agent"]
+            and bool(parts.group(3)) == bool(row.get("adhoc"))
+        ):
+            return route
+    return row.get("flow_route")
+
 def insert_user_message(
     topic: str, agent: Optional[str],
     content: str, context_ids: Optional[list[int]] = None,
@@ -689,6 +833,8 @@ def insert_user_message(
     mem_revision: Optional[str] = None,
     lookback: int = 0,
     source: str = "human",
+    flow_run_id: Optional[str] = None,
+    flow_route: Optional[str] = None,
 ) -> int:
     if source not in {"human", "system"}:
         source = "human"
@@ -701,9 +847,9 @@ def insert_user_message(
         context_json = None
     with _connect() as conn:
         cur = conn.execute(
-            """INSERT INTO chat_messages (topic, agent, role, source, content, status, context, lookback)
-               VALUES (?, ?, 'user', ?, ?, 'done', ?, ?)""",
-            (topic, agent, source, content, context_json, lookback),
+            """INSERT INTO chat_messages (topic, agent, role, source, content, status, context, lookback, flow_run_id, flow_route)
+               VALUES (?, ?, 'user', ?, ?, 'done', ?, ?, ?, ?)""",
+            (topic, agent, source, content, context_json, lookback, flow_run_id, flow_route),
         )
         return cur.lastrowid
 
@@ -711,12 +857,14 @@ def insert_user_message(
 def insert_assistant_message(
     topic: str, agent: Optional[str],
     reply_to: int, adhoc: bool = False,
+    flow_run_id: Optional[str] = None,
+    flow_route: Optional[str] = None,
 ) -> int:
     with _connect() as conn:
         cur = conn.execute(
-            """INSERT INTO chat_messages (topic, agent, role, reply_to, status, adhoc)
-               VALUES (?, ?, 'assistant', ?, 'pending', ?)""",
-            (topic, agent, reply_to, 1 if adhoc else 0),
+            """INSERT INTO chat_messages (topic, agent, role, reply_to, status, adhoc, flow_run_id, flow_route)
+               VALUES (?, ?, 'assistant', ?, 'pending', ?, ?, ?)""",
+            (topic, agent, reply_to, 1 if adhoc else 0, flow_run_id, flow_route),
         )
         return cur.lastrowid
 
@@ -1222,7 +1370,8 @@ def get_message(msg_id: int) -> Optional[dict]:
 
 
 def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
-                      adhoc: Optional[bool] = None, offset: int = 0, limit: int = 20) -> dict:
+                      adhoc: Optional[bool] = None, offset: int = 0, limit: int = 20,
+                      flow_route: Optional[str] = None) -> dict:
     backend_expr = _runtime_ref_expr("s.harness", "s.provider")
     where = "WHERE m.role = 'assistant'"
     params: list = []
@@ -1235,6 +1384,10 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
     if adhoc is not None:
         where += " AND COALESCE(m.adhoc, 0) = ?"
         params.append(1 if adhoc else 0)
+    if flow_route:
+        clause, clause_params = _flow_route_filter_clause(flow_route)
+        where += f" AND {clause}"
+        params.extend(clause_params)
 
     with _connect() as conn:
         total = conn.execute(
@@ -1243,6 +1396,7 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
         rows = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
                        m.content, m.status, m.source, m.adhoc, m.session_id,
+                       m.flow_run_id, m.flow_route,
                        m.context, m.status_raw, m.created_at AS timestamp,
                        {_turn_end_expr("m")} AS completed_at, m.reply_to,
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
@@ -1259,14 +1413,16 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
                 ORDER BY completed_at DESC, m.id DESC LIMIT ? OFFSET ?""",
             params + [limit, offset],
         ).fetchall()
+        raw_items = [dict(r) for r in rows]
+        for row in raw_items:
+            row["flow_route"] = _infer_origin_flow_route(conn, row)
 
     stat_keys = {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
                  "history_input_tokens", "cost_usd", "duration_ms", "lookback",
                  "quota_before", "quota_after", "quota_delta",
                  "msg_quota_before", "msg_quota_after", "backend", "model", "cwd"}
     items = []
-    for r in rows:
-        row = dict(r)
+    for row in raw_items:
         stats = {k: row.pop(k) for k in stat_keys}
         if row.get("session_id") and any(v is not None for v in stats.values()):
             stats["session_id"] = row["session_id"]
@@ -1293,6 +1449,7 @@ def get_history_items_by_ids(ids: list[int]) -> list[dict]:
         rows = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
                        m.content, m.status, m.source, m.adhoc, m.session_id,
+                       m.flow_run_id, m.flow_route,
                        m.context, m.status_raw, m.created_at AS timestamp,
                        {_turn_end_expr("m")} AS completed_at, m.reply_to,
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
@@ -1330,7 +1487,7 @@ def _build_fts_match(q: str) -> str:
 
 def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = None,
                     adhoc: Optional[bool] = None, limit: int = 100,
-                    bookmarked: bool = False) -> dict:
+                    bookmarked: bool = False, flow_route: Optional[str] = None) -> dict:
     backend_expr = _runtime_ref_expr("s.harness", "s.provider")
     terms = _build_fts_match(q)
     if not terms:
@@ -1352,6 +1509,10 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
     if adhoc is not None:
         where_parts.append("COALESCE(m.adhoc, 0) = ?")
         params.append(1 if adhoc else 0)
+    if flow_route:
+        clause, clause_params = _flow_route_filter_clause(flow_route)
+        where_parts.append(clause)
+        params.extend(clause_params)
 
     where = "WHERE " + " AND ".join(where_parts)
     bookmark_join = "JOIN bookmarks b ON b.msg_id = m.id" if bookmarked else ""
@@ -1360,6 +1521,7 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
         rows = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
                        m.content, m.status, m.source, m.adhoc, m.session_id,
+                       m.flow_run_id, m.flow_route,
                        m.context, m.status_raw, m.created_at AS timestamp,
                        {_turn_end_expr("m")} AS completed_at, m.reply_to,
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
@@ -1396,7 +1558,7 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
 
 def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = None,
                    adhoc: Optional[bool] = None, limit: int = 100,
-                   bookmarked: bool = False) -> dict:
+                   bookmarked: bool = False, flow_route: Optional[str] = None) -> dict:
     backend_expr = _runtime_ref_expr("s.harness", "s.provider")
     """Search user prompts via prompts_fts. Returns assistant reply items (same shape as
     search_messages) so the frontend can render them with appendPromptOnlyHistoryItem."""
@@ -1420,6 +1582,10 @@ def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = N
     if adhoc is not None:
         where_parts.append("COALESCE(m.adhoc, 0) = ?")
         params.append(1 if adhoc else 0)
+    if flow_route:
+        clause, clause_params = _flow_route_filter_clause(flow_route)
+        where_parts.append(clause)
+        params.extend(clause_params)
 
     where = "WHERE " + " AND ".join(where_parts)
     bookmark_join = "JOIN bookmarks b ON b.msg_id = m.id" if bookmarked else ""
@@ -1433,6 +1599,7 @@ def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = N
         rows = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
                        m.content, m.status, m.source, m.adhoc, m.session_id,
+                       m.flow_run_id, m.flow_route,
                        m.context, m.status_raw, m.created_at AS timestamp,
                        {_turn_end_expr("m")} AS completed_at, m.reply_to,
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,

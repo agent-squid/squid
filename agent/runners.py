@@ -8,6 +8,7 @@ as the last item when usage data is available (claude only).
 import asyncio
 import json
 import os
+import re
 import signal
 import subprocess
 import time
@@ -1521,6 +1522,19 @@ def _opencode_tool(part: dict) -> Optional[dict]:
     return {"name": tool}
 
 
+def _opencode_text_is_likely_answer(text: str) -> bool:
+    value = (text or "").strip()
+    if not value:
+        return False
+    if re.search(r"(?m)^#{1,6}\s+\S", value):
+        return True
+    if re.search(r"(?m)^\*\*\d+\.", value):
+        return True
+    if re.search(r"(?m)^##\s+\S", value):
+        return True
+    return len(value) >= 350 and "\n\n" in value
+
+
 async def run_opencode(
     prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
     model: Optional[str] = None, topic: str = "", agent: str = "",
@@ -1576,10 +1590,10 @@ async def run_opencode(
 
         elif t == "tool_use":
             if pending_text:
-                status_text = "".join(pending_text)
+                text = "".join(pending_text)
                 pending_text = []
-                if status_text.strip():
-                    yield {"_status": status_text}
+                if text.strip():
+                    yield text
             tool_dict = _opencode_tool(event.get("part", {}))
             if tool_dict:
                 yield {"_tool": tool_dict}
@@ -1590,7 +1604,7 @@ async def run_opencode(
                 text = "".join(pending_text)
                 pending_text = []
                 if text.strip():
-                    if reason in (None, "stop"):
+                    if reason in (None, "stop") or _opencode_text_is_likely_answer(text):
                         yield text
                     else:
                         yield {"_status": text}
