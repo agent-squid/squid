@@ -787,6 +787,32 @@ test('route chain target autocomplete opens immediately after chain separator', 
   await expect(page.locator('#topic-chip')).toContainText('#squid@codex>@revuopen!');
 });
 
+test('route chain target autocomplete opens right after a bare "<", before ">" is typed', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/config/agents', route => route.fulfill({ json: [
+    { name: 'codex', backend: 'codex' },
+    { name: 'revuopen', backend: 'opencode' },
+  ] }));
+  await page.route('**/topics/squid/agents/history', route => route.fulfill({ json: [
+    { agent: 'revuopen', last_prompt: 'review lane prompt', last_adhoc_prompt: 'fresh review prompt' },
+  ] }));
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  await composer.fill('#squid@codex<');
+
+  await expect(page.locator('#autocomplete')).toHaveClass(/open/);
+  await expect(page.locator('#autocomplete .ac-title')).toHaveText('Routes');
+  // "<" auto-closes to "<>" in suggested completions since numbered rounds aren't accepted yet.
+  await expect(page.locator('#autocomplete .ac-item', { hasText: '#squid@codex<>@revuopen' })).toHaveCount(2);
+
+  await page.locator('#autocomplete .ac-item', { hasText: '#squid@codex<>@revuopen!' }).click();
+
+  await expect(composer).toHaveValue('');
+  await expect(page.locator('#topic-chip')).toHaveClass(/route-chain/);
+  await expect(page.locator('#topic-chip')).toContainText('#squid@codex<>@revuopen!');
+});
+
 test('an invalid edited slug remains expanded on blur', async ({ page }) => {
   await mockBackend(page);
   await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({

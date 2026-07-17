@@ -229,3 +229,38 @@ test('By Turn table scrolls horizontally on desktop when columns exceed viewport
   );
   for (const w of headerWidths) expect(w).toBeGreaterThan(30);
 });
+
+test('By Turn footer has no colspan, so the frozen rail matches the body columns', async ({ page }) => {
+  // Regression test: the tfoot used to open with <td colspan="2">Total</td>,
+  // which shifted every later footer cell one position left of its matching
+  // body column. The sticky-column CSS freezes by nth-child position, so
+  // Avg Tokens/Turn's total ended up pinned in the rail meant for the Turns
+  // total. Emitting two separate Time/Route cells keeps footer and body
+  // column counts identical.
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await mockApp(page);
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get('period') !== 'turn') {
+      return route.fulfill({ json: [{ period: '2026-07-10 10:00', sessions: 1, total_turns: 1, input_tokens: 10, output_tokens: 5 }] });
+    }
+    return route.fulfill({
+      json: [{
+        msg_id: 2, period: '2026-07-10T10:05:00Z', topic: 'squid', agent: 'codex', adhoc: 0,
+        sessions: 1, total_turns: 3, input_tokens: 200, output_tokens: 20, duration_ms: 8000,
+      }],
+    });
+  });
+
+  await page.goto('/');
+  await page.evaluate(() => switchView('stats'));
+  await page.locator('#sf-period').selectOption('turn');
+  await page.waitForSelector('.stats-turn-link');
+
+  const bodyCellCount = await page.locator('.stats-turn-table tbody tr').first().locator('td').count();
+  const footerCellCount = await page.locator('.stats-turn-table tfoot tr').locator('td').count();
+  expect(footerCellCount).toBe(bodyCellCount);
+
+  await expect(page.locator('.stats-turn-table thead th').nth(2)).toHaveText('Turns');
+  await expect(page.locator('.stats-turn-table tfoot td').nth(2)).toHaveText('3');
+});

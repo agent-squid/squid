@@ -1074,7 +1074,7 @@ function parseInput(text) {
   }
   // bare topic switch: #topic, #topic@agent, #topic!N, or #topic@agent!N with no message
   // switches chip only.
-  const parsedChainBare = parseRouteChain(text);
+  const parsedChainBare = parseRouteChain(text.trim());
   if (parsedChainBare) {
     return {
       topic: parsedChainBare.topic,
@@ -2616,13 +2616,13 @@ async function _maybePromoteSlug(val) {
   const chainText = val.endsWith(' ') ? val.trim() : '';
   const chain = parseRouteChain(chainText);
   if (chain) {
+    input.value = '';
     setTopicChip(chain.topic, chain.origin, chain.originFresh, 0, {
       chainTarget: chain.target,
       chainTargetFresh: chain.targetFresh,
       chainOperator: chain.operator,
       chainRounds: chain.rounds,
     });
-    input.value = '';
     hideAutocomplete();
     resizeComposer();
     return;
@@ -3078,7 +3078,6 @@ async function sendMessage(text, opts = {}) {
   let detachedPolling = false;
   let raw = '';
   let resolvedAgent = agent;  // updated by meta event
-  let chainContinuationStarted = false;
   let liveSessionTurnCount = 0;
   const liveToolEvents = [];
   const controller = new AbortController();
@@ -3193,55 +3192,6 @@ async function sendMessage(text, opts = {}) {
       messages.appendChild(block);
     }
     refreshAllRevertButtons();
-  }
-
-  function chainContextPinId() {
-    if (!msgId || !raw.trim()) return null;
-    return Number(msgId);
-  }
-
-  function chainHandoffPrompt() {
-    const returnStep = opts.chainReturn || null;
-    const currentRoute = route || flowRoute;
-    const nextAgent = returnStep?.agent || chainTarget;
-    const nextFresh = returnStep ? !!returnStep.fresh : chainTargetFresh;
-    if (!currentRoute || !nextAgent || !raw.trim()) return null;
-    const targetSuffix = nextFresh ? '!' : '';
-    const originalPrompt = opts.chainOriginalPrompt || message;
-    return [
-      'Squid route chain handoff.',
-      `Route: ${currentRoute}`,
-      `Previous step: @${resolvedAgent || agent || ''}`,
-      `Current step: @${nextAgent}${targetSuffix}`,
-      `Original prompt: ${originalPrompt}`,
-      'Previous output: injected context <previous_step_output>. Use it to continue.',
-    ].join('\n');
-  }
-
-  function startChainContinuation() {
-    if (chainContinuationStarted) return;
-    const handoff = chainHandoffPrompt();
-    if (!handoff) return;
-    chainContinuationStarted = true;
-    const returnStep = opts.chainReturn || null;
-    const nextAgent = returnStep?.agent || chainTarget;
-    const nextFresh = returnStep ? !!returnStep.fresh : chainTargetFresh;
-    const targetSuffix = nextFresh ? '!' : '';
-    const contextId = chainContextPinId();
-    const nextReturn = !returnStep && chainOperator === '<>' && (chainRounds || 0) > 0
-      ? { agent: agent, fresh: adhoc, remainingRounds: (chainRounds || 1) - 1 }
-      : null;
-    setTimeout(() => {
-      sendMessage(`#${topic}@${nextAgent}${targetSuffix} ${handoff}`, {
-        source: 'system',
-        extraPinnedIds: contextId ? [contextId] : [],
-        suppressChipTurnCount: true,
-        flowRunId,
-        flowRoute,
-        chainOriginalPrompt: opts.chainOriginalPrompt || message,
-        ...(nextReturn ? { chainReturn: nextReturn } : {}),
-      });
-    }, 0);
   }
 
   function startStatusFallback(id) {
@@ -3556,7 +3506,11 @@ async function sendMessage(text, opts = {}) {
               renderCompletionTools(liveToolEvents);
               scrollToBottom();
             }
-            startChainContinuation();
+            // Later chain steps (target handoff, "<>" return) are dispatched
+            // server-side (agent/flow.py) — not sent from here anymore, so a
+            // refresh mid-chain can't strand it. Just watch for them to keep
+            // rendering live while this tab stays open.
+            if (flowRunId && msgId) watchFlowRun(flowRunId, msgId);
             // Update ctx label with pin count and store IDs for popup
             setCtxLabel(liveCtxSpan, adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
             liveCtxSpan.dataset.pinnedIds = JSON.stringify(_contextIds);
@@ -4500,6 +4454,64 @@ async function replacePendingWithStoredItem(item, wipBubble) {
     refreshAllRevertButtons();
     scrollToBottom();
   } catch {}
+}
+
+const _flowRunWatchers = new Set();
+
+async function attachFlowStep(msgId) {
+  if (messages.querySelector(`[data-msg-id="${msgId}"]`)) return;
+  try {
+    const res = await fetch(`/chat/${msgId}/status`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (messages.querySelector(`[data-msg-id="${msgId}"]`)) return;
+    if (data.status === 'pending') {
+      const wipBubble = makeWipBubble(data);
+      messages.appendChild(wipBubble);
+      reconnectPendingItem(data, wipBubble);
+    } else {
+      appendHistoryItem(data, messages);
+    }
+    scrollToBottom();
+  } catch {}
+}
+
+// Squid Flow route chain steps after the origin (target handoff, "<>" return)
+// are dispatched server-side (agent/flow.py) with no client request involved —
+// poll for them while this tab is open so they render live, same as a step
+// this tab sent itself. Purely cosmetic: the chain completes server-side
+// with or without a watcher.
+function watchFlowRun(flowRunId, afterId) {
+  if (!flowRunId || _flowRunWatchers.has(flowRunId)) return;
+  _flowRunWatchers.add(flowRunId);
+  let cursor = afterId;
+  let polls = 0;
+  const MAX_POLLS = 400; // ~10 min at 1.5s — well past any single-step timeout
+  const timer = setInterval(tick, 1500);
+
+  async function tick() {
+    polls++;
+    try {
+      const res = await fetch(`/chat/flow/${encodeURIComponent(flowRunId)}/steps?after_id=${cursor}`);
+      if (res.ok) {
+        const data = await res.json();
+        for (const row of data.messages || []) {
+          cursor = Math.max(cursor, row.id);
+          if (row.role === 'assistant') await attachFlowStep(row.id);
+        }
+        if (data.complete) {
+          clearInterval(timer);
+          _flowRunWatchers.delete(flowRunId);
+          return;
+        }
+      }
+    } catch {}
+    if (polls >= MAX_POLLS) {
+      clearInterval(timer);
+      _flowRunWatchers.delete(flowRunId);
+    }
+  }
+  tick();
 }
 
 function reconnectPendingItem(item, wipBubble) {
@@ -7548,7 +7560,9 @@ function renderTurnStats(rows) {
     </tr></thead>
     <tbody>${bodyRows}</tbody>
     <tfoot><tr>
-      <td colspan="2">Total</td>${_statsMeasureTotals(totals)}
+      <td class="stats-col-compact stats-time-col">Total</td>
+      <td class="stats-col-compact stats-route-col"></td>
+      ${_statsMeasureTotals(totals)}
     </tr></tfoot>
   </table>`);
   _statsAppendPager(rows.length);
@@ -9201,7 +9215,7 @@ async function updateAutocomplete() {
   }
 
   const mTopic = slugVal.match(/^#(\w*)[!]?$/);
-  const mChainAlias = slugVal.match(/^#(\w+)@(\w+)(!)?((?:<>)|>)(?:@?)(\w*)(!)?$/);
+  const mChainAlias = slugVal.match(/^#(\w+)@(\w+)(!)?(<>?|>)(?:@?)(\w*)(!)?$/);
   const mAlias = slugVal.match(/^#(\w+)@(\w*)(!\d*)?$/);
   if (mTopic) {
     const prefix = mTopic[1].toLowerCase();
@@ -9223,7 +9237,10 @@ async function updateAutocomplete() {
     const topic = mChainAlias[1];
     const originAgent = mChainAlias[2];
     const originFresh = mChainAlias[3] || '';
-    const operator = mChainAlias[4];
+    // Autocomplete offers agents as soon as the operator starts (e.g. a bare
+    // "<"), not just once it's fully typed as "<>" — auto-close the bracket
+    // since numbered rounds ("<N>") aren't accepted yet.
+    const operator = mChainAlias[4].startsWith('<') ? '<>' : mChainAlias[4];
     const prefix = mChainAlias[5].toLowerCase();
     const targetFreshTyped = mChainAlias[6] !== undefined;
     const [agents, history] = await Promise.all([

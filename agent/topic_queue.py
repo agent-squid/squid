@@ -156,6 +156,18 @@ class TopicWorker:
                 self._processing_seq = None
             self.q.task_done()
 
+    def _trigger_chain_continuation(self, msg_id: int) -> None:
+        """Fire-and-forget: if msg_id is a step in a Squid Flow route chain
+        with more steps to run, dispatch the next one server-side. Runs
+        independent of this worker's own queue so it never blocks the next
+        queued item. See agent/flow.py."""
+        from . import flow
+
+        async def _run():
+            await flow.continue_chain(msg_id)
+
+        asyncio.create_task(_run(), name=f"squid-chain-{msg_id}")
+
     async def _process(self, item: QueueItem):
         from .runners import CLIError, runner_for_agent
         from .config import SQUID_HOME
@@ -385,6 +397,8 @@ class TopicWorker:
                                      "done" if content else "error", context=context_json,
                                      status_raw=status_raw, only_if_pending=True)
             insert_run_event(item.msg_id, run_seq, "done", None)
+            if content and item.msg_id:
+                self._trigger_chain_continuation(item.msg_id)
 
         except Exception as exc:
             err_text = str(exc)

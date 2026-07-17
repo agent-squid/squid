@@ -28,21 +28,49 @@ native profile files from its process cwd.
 
 ## Current Implementation
 
-As of 2026-07-16, Squid implements the first linear subset:
+As of 2026-07-16, Squid implements the one-way handoff and the single-round
+request/response form:
 
 ```text
 #topic@origin[!]>@target[!]
+#topic@origin[!]<>@target[!]
 ```
 
 The broader Squid Flow syntax in this ADR remains the accepted direction, but
-joins, scheduled edges, cycles, `<>`, and `<N>` request/response loops are not
-implemented yet.
+joins, scheduled edges, cycles, the `=>` one-way alias, and `<N>` for any round
+count other than one (including `<N:T>` scheduled rounds) are not implemented
+yet. `<N>` route text is not recognized as a chain and falls back to ordinary
+route parsing.
 
-The implemented chain is executed by the UI as explicit turns: the origin prompt
-is sent first, then Squid synthesizes and sends the target prompt after the
-origin response completes. The backend rejects route-chain expressions sent
-directly to `/chat`; this keeps the chain visible as normal message rows rather
-than a hidden backend-only transaction.
+The client only ever sends the origin turn. Every step after that is
+dispatched by the server (`agent/flow.py`), not the browser: `TopicWorker`
+(`agent/topic_queue.py`) already runs each turn to completion independent of
+any connected client, persisting through to `chat_messages`/`run_events`, so
+the moment a step's message is marked done, that same completion hook decides
+whether a Squid Flow chain has a next step and — if so — dispatches it
+in-process, with no HTTP round trip. This means a chain keeps running (and
+completing) even if the browser tab that started it is refreshed or closed
+mid-chain; earlier, continuation was a client-side JS closure tied to that
+tab's SSE stream, so a refresh mid-chain silently stranded the chain with no
+later step ever sent. A boot-time sweep also resumes any chain whose last step
+finished but had no next step dispatched (e.g. the server itself restarted
+mid-chain, or a chain stranded by the old client-driven behavior before this
+fix). The browser polls `GET /chat/flow/{flow_run_id}/steps` to discover
+server-dispatched steps and render them live while a tab is open, purely for
+UX — the chain's correctness never depends on a client being connected.
+
+For `>`, the origin prompt is sent first, then Squid synthesizes and sends the
+target prompt after the origin response completes. For `<>`, Squid
+additionally synthesizes and sends one return prompt back to the origin route
+step after the target response completes, then the chain ends — repeated
+rounds (`<N>` for N > 1) are not implemented, so a second round is never
+started. Both the forward and return handoff prompts reuse the same generic
+template described under "Downstream Prompt Synthesis" below (Route / Previous
+step / Current step / Original prompt); the differentiated reconciliation-style
+return prompt shown later in this ADR is the target direction, not yet
+implemented. The backend still rejects route-chain expressions sent directly
+to `/chat` via the legacy `route` field; this keeps the chain visible as normal
+message rows rather than a hidden backend-only transaction.
 
 ## Decision Drivers
 
@@ -79,10 +107,18 @@ The current implementation accepts only:
 #topic@agent>@next!
 #topic@agent!>@next
 #topic@agent!>@next!
+#topic@agent<>@next
+#topic@agent<>@next!
+#topic@agent!<>@next
+#topic@agent!<>@next!
 ```
 
+`=>` and `<N>` (for any N, including `<1>`) are not recognized yet; only the
+literal `<>` token parses as the request/response operator.
+
 `>` means pass the previous response forward to the next route step. `=>` is
-accepted as the same one-way handoff operator.
+meant to be accepted as the same one-way handoff operator, but is not
+implemented yet (see "current implementation accepts only" above).
 
 `<>` means one request/response round: pass the previous response forward to
 the next route step, then pass that step's response back to the original route
@@ -457,7 +493,10 @@ not infer an agent-specific role. The returned-to agent should follow its
 configured instructions, incorporate valid points, ignore incorrect ones, and
 produce the next best answer or work result for the original request.
 
-Example return shape:
+Example return shape (target direction, not yet implemented — the current
+`<>` return step reuses the same one-way handoff template shown above under
+"Implemented one-way shape", with `Previous step`/`Current step` swapped back
+to the origin):
 
 ```text
 You are the originating agent in a Squid request/response chain.

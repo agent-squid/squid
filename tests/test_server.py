@@ -284,42 +284,6 @@ def test_compact_is_no_longer_squid_owned():
     assert "compact" not in server._SQUID_CHAT_COMMANDS
 
 
-def test_simple_oneway_chain_parser_accepts_only_initial_shape():
-    assert server._parse_simple_oneway_chain("#squid@codex>@revucla!") == {
-        "topic": "squid",
-        "origin": "codex",
-        "origin_fresh": False,
-        "target": "revucla",
-        "target_fresh": True,
-        "route": "#squid@codex>@revucla!",
-    }
-    assert server._parse_simple_oneway_chain("#squid@codex>@revucla") == {
-        "topic": "squid",
-        "origin": "codex",
-        "origin_fresh": False,
-        "target": "revucla",
-        "target_fresh": False,
-        "route": "#squid@codex>@revucla",
-    }
-    assert server._parse_simple_oneway_chain("#squid@codex!>@revucla!") == {
-        "topic": "squid",
-        "origin": "codex",
-        "origin_fresh": True,
-        "target": "revucla",
-        "target_fresh": True,
-        "route": "#squid@codex!>@revucla!",
-    }
-    assert server._parse_simple_oneway_chain(None) is None
-    assert server._parse_simple_oneway_chain("#squid@codex") is None
-
-    try:
-        server._parse_simple_oneway_chain("#squid@codex<>@revucla!")
-    except ValueError as exc:
-        assert "#topic@origin[!]>@target[!]" in str(exc)
-    else:
-        raise AssertionError("expected unsupported chain syntax to fail")
-
-
 def test_chat_rejects_server_side_hidden_route_chain():
     client = TestClient(server.app)
     res = client.post("/chat", json={

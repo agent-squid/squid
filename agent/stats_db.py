@@ -950,24 +950,6 @@ def update_assistant_message(
                 _ensure_session_turn_index(conn, msg_id, session_id)
 
 
-def update_assistant_content_preserve_session(
-    msg_id: int,
-    content: str,
-    status: str = "done",
-    status_raw: Optional[str] = None,
-) -> None:
-    if status == "done":
-        status_raw = _sanitize_status_raw(content, status_raw)
-    terminal = status in {"done", "error", "cancelled"}
-    with _connect() as conn:
-        conn.execute(
-            "UPDATE chat_messages SET content=?, status=?, status_raw=?,"
-            " completed_at=CASE WHEN ? THEN COALESCE(completed_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')) ELSE completed_at END"
-            " WHERE id=? AND role='assistant'",
-            (content, status, status_raw, 1 if terminal else 0, msg_id),
-        )
-
-
 def _run_event_cancel_snapshot(conn: sqlite3.Connection, msg_id: int) -> dict:
     rows = conn.execute(
         "SELECT event_type, payload FROM run_events WHERE msg_id=? ORDER BY seq",
@@ -1303,6 +1285,45 @@ def get_topic_messages_for_period(
         result.append({"role": "user",      "content": r["user_content"] or ""})
         result.append({"role": "assistant", "content": r["asst_content"] or ""})
     return result
+
+
+def get_flow_run_messages(flow_run_id: str) -> list[dict]:
+    """All chat_messages rows for one Squid Flow run, ascending by id — the
+    full step sequence used to derive what (if anything) runs next."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT id, role, topic, agent, content, status, flow_route, created_at
+               FROM chat_messages
+               WHERE flow_run_id = ?
+               ORDER BY id""",
+            (flow_run_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_flow_run_id_for_message(msg_id: int) -> Optional[str]:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT flow_run_id FROM chat_messages WHERE id = ?",
+            (msg_id,),
+        ).fetchone()
+        return row["flow_run_id"] if row else None
+
+
+def get_flow_run_ids_with_row_counts(counts: tuple[int, ...]) -> list[str]:
+    """Distinct flow_run_ids whose total message count matches one of `counts` —
+    used to cheaply narrow a boot-time sweep to runs that look mid-chain rather
+    than complete."""
+    placeholders = ",".join("?" * len(counts))
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""SELECT flow_run_id FROM chat_messages
+                WHERE flow_run_id IS NOT NULL
+                GROUP BY flow_run_id
+                HAVING COUNT(*) IN ({placeholders})""",
+            counts,
+        ).fetchall()
+        return [row["flow_run_id"] for row in rows]
 
 
 def mark_orphaned_pending(before_created_at: Optional[str] = None) -> int:

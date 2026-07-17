@@ -75,11 +75,10 @@ from .stats_db import (
     get_agent, upsert_agent, delete_agent, list_agents, get_default_agent,
     get_topic, upsert_topic, list_topics,
     insert_user_message, insert_assistant_message, update_assistant_message,
-    update_assistant_content_preserve_session,
     attach_assistant_session, mark_assistant_cancelled,
     update_message_quota_snapshot,
     get_context_history, get_messages_by_ids, mark_orphaned_pending, get_message,
-    get_message_previews,
+    get_message_previews, get_flow_run_messages,
     get_completed_run_text, get_completed_run_status_raw, get_run_events,
     ensure_session_turn_index,
     get_session_injected_context,
@@ -235,6 +234,14 @@ async def _recover_orphaned_pending_on_startup():
     orphaned = mark_orphaned_pending(before_created_at=BOOT_TIME)
     if orphaned:
         log.warning("Marked %d orphaned pending messages as error", orphaned)
+
+
+@app.on_event("startup")
+async def _resume_stalled_flows_on_startup():
+    from .flow import sweep_incomplete_flows
+    resumed = await sweep_incomplete_flows()
+    if resumed:
+        log.warning("Resumed %d stalled Squid Flow chain(s) on startup", resumed)
 
 
 UI_DIR = Path(__file__).parent.parent / "ui"
@@ -510,19 +517,6 @@ def _normalize_topic_response(topic: str) -> Union[str, JSONResponse]:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
 
-def _parse_simple_oneway_chain(route: Optional[str]) -> Optional[dict]:
-    if not route:
-        return None
-    route = route.strip()
-    if ">" not in route:
-        return None
-    m = re.fullmatch(r"#(\w+)@(\w+)(!)?>@(\w+)(!)?", route)
-    if not m:
-        raise ValueError("Only #topic@origin[!]>@target[!] route chains are supported right now.")
-    topic = normalize_topic_slug(m.group(1))
-    return {"topic": topic, "origin": m.group(2), "origin_fresh": bool(m.group(3)), "target": m.group(4), "target_fresh": bool(m.group(5)), "route": route}
-
-
 def canonical_flow_route(route: Optional[str]) -> Optional[str]:
     text = re.sub(r"\s+", "", (route or "").strip())
     if not text:
@@ -531,31 +525,6 @@ def canonical_flow_route(route: Optional[str]) -> Optional[str]:
     if len(parts) > 1:
         parts.sort()
     return ",".join(parts)
-
-
-def _chain_envelope(route: str, origin_agent: str, target_agent: str, target_fresh: bool, user_prompt: str, origin_output: str) -> str:
-    target_suffix = "!" if target_fresh else ""
-    return "\n\n".join([
-        "Squid route chain handoff.",
-        f"Route: {route}",
-        f"Previous step: @{origin_agent}",
-        f"Current step: @{target_agent}{target_suffix}",
-        "Original user prompt:",
-        user_prompt,
-        f"Output from @{origin_agent}:",
-        origin_output,
-    ])
-
-
-def _sse_plain_data(payload: str) -> str:
-    if not payload.startswith("data:"):
-        return ""
-    lines = payload.splitlines()
-    data_lines = []
-    for line in lines:
-        if line.startswith("data:"):
-            data_lines.append(line[5:])
-    return "\n".join(data_lines)
 
 
 async def _prepare_chat_turn(
@@ -984,121 +953,14 @@ async def chat(req: ChatRequest):
     if flow_route and not flow_run_id:
         flow_run_id = allocate_id("flow_run")
 
-    try:
-        chain = _parse_simple_oneway_chain(req.route)
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-
-    topic = _normalize_topic_response(chain["topic"] if chain else req.topic)
+    topic = _normalize_topic_response(req.topic)
     if isinstance(topic, JSONResponse):
         return topic
 
-    if chain:
-        if get_agent(chain["origin"]) is None:
-            return JSONResponse({"error": f"Agent '{chain['origin']}' not found. Create it first via /config/agents."}, status_code=400)
-        if get_agent(chain["target"]) is None:
-            return JSONResponse({"error": f"Agent '{chain['target']}' not found. Create it first via /config/agents."}, status_code=400)
-        origin = await _prepare_chat_turn(
-            message=req.message,
-            topic=topic,
-            agent=chain["origin"],
-            adhoc=chain["origin_fresh"],
-            pinned_ids=req.pinned_ids,
-            include_topic_memory=req.include_topic_memory,
-            flow_run_id=flow_run_id,
-            flow_route=flow_route,
-        )
-        if isinstance(origin, JSONResponse):
-            return origin
-
-        async def chain_stream() -> AsyncGenerator[str, None]:
-            log.info("route chain start route=%s origin=%s target=%s target_fresh=%s", chain["route"], chain["origin"], chain["target"], chain["target_fresh"])
-            yield sse_event("status", f"route {chain['route']}: running @{chain['origin']}")
-            origin_output = ""
-            async for event in stream_response(
-                origin["effective_message"], origin["topic"], origin["agent"], origin["backend"], origin["model"], origin["cwd"],
-                origin["context_history"], origin["asst_msg_id"], origin["response_timeout"],
-                resume_session_id=origin["resume_session_id"],
-                adhoc=origin["adhoc"],
-                lookback=origin["lookback"],
-                code_roots=origin["code_roots"],
-                display_prompt=origin["display_prompt"],
-                source_cwd=origin["source_cwd"],
-                harness=origin["harness"],
-                provider=origin["provider"],
-            ):
-                if event.startswith("data:"):
-                    origin_output += _sse_plain_data(event)
-                elif event.startswith("event: error"):
-                    yield event
-                    return
-                elif event.startswith(": ping"):
-                    yield event
-
-            log.info("route chain origin complete route=%s origin=%s output_len=%d", chain["route"], chain["origin"], len(origin_output))
-            yield sse_event("status", f"route {chain['route']}: @{chain['origin']} complete; starting @{chain['target']}{'!' if chain['target_fresh'] else ''}")
-            envelope = _chain_envelope(chain["route"], chain["origin"], chain["target"], chain["target_fresh"], req.message, origin_output)
-            yield sse_event("status", f"route {chain['route']}: preparing @{chain['target']}{'!' if chain['target_fresh'] else ''}")
-            target = await _prepare_chat_turn(
-                message=envelope,
-                topic=topic,
-                agent=chain["target"],
-                adhoc=chain["target_fresh"],
-                lookback=0,
-                source="system",
-                flow_run_id=flow_run_id,
-                flow_route=flow_route,
-            )
-            if isinstance(target, JSONResponse):
-                err = json.loads(target.body).get("error", "chain target failed")
-                log.warning("route chain target prepare failed route=%s target=%s error=%s", chain["route"], chain["target"], err)
-                yield sse_event("error", err)
-                return
-            target_suffix = "!" if chain["target_fresh"] else ""
-            target_status = f"route {chain['route']}: running @{chain['target']}{target_suffix}"
-            log.info("route chain target start route=%s target=%s msg_id=%s", chain["route"], chain["target"], target["asst_msg_id"])
-            yield sse_event("status", target_status)
-            target_output = ""
-            target_status_raw = target_status
-            async for event in stream_response(
-                target["effective_message"], target["topic"], target["agent"], target["backend"], target["model"], target["cwd"],
-                target["context_history"], target["asst_msg_id"], target["response_timeout"],
-                resume_session_id=target["resume_session_id"],
-                adhoc=target["adhoc"],
-                lookback=target["lookback"],
-                code_roots=target["code_roots"],
-                display_prompt=req.message,
-                source_cwd=target["source_cwd"],
-                harness=target["harness"],
-                provider=target["provider"],
-            ):
-                if event.startswith("event: meta"):
-                    continue
-                if event.startswith("data:"):
-                    target_output += _sse_plain_data(event)
-                elif event.startswith("event: status"):
-                    target_status_raw += "\n" + _sse_plain_data(event.split("\n", 1)[1] if "\n" in event else event)
-                elif event.startswith("event: error"):
-                    update_assistant_content_preserve_session(origin["asst_msg_id"], _sse_plain_data(event.split("\n", 1)[1] if "\n" in event else event), "error", status_raw=target_status_raw)
-                yield event
-            if target_output:
-                update_assistant_content_preserve_session(origin["asst_msg_id"], target_output, "done", status_raw=target_status_raw)
-                log.info("route chain complete route=%s target=%s output_len=%d", chain["route"], chain["target"], len(target_output))
-            else:
-                log.warning("route chain target completed with no output route=%s target=%s", chain["route"], chain["target"])
-
-        await maybe_sync()
-        return StreamingResponse(
-            chain_stream(),
-            media_type="text/event-stream",
-            headers={
-                "X-Accel-Buffering": "no",
-                "Cache-Control": "no-cache",
-                "X-Squid-Msg-Id": str(origin["asst_msg_id"]),
-                "X-Squid-Flow-Run-Id": flow_run_id or "",
-            },
-        )
-
+    # Only the origin step of a Squid Flow route chain (ADR-0032) is ever
+    # posted by a client. Every step after that — the target handoff, and the
+    # return handoff for a "<>" round — is dispatched by agent/flow.py once
+    # the prior step finishes, entirely server-side (see continue_chain()).
     prepared = await _prepare_chat_turn(
         message=req.message,
         topic=topic,
@@ -1393,6 +1255,41 @@ async def message_events(msg_id: int, after_seq: int = -1):
         media_type="text/event-stream",
         headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
     )
+
+
+@app.get("/chat/flow/{flow_run_id}/steps")
+async def flow_run_steps(flow_run_id: str, after_id: int = 0):
+    """Poll target for a Squid Flow route chain (ADR-0032): steps now run
+    server-side (agent/flow.py) without any client request, so a client
+    watching an in-progress chain polls this to discover new steps and
+    attach to them via /chat/{msg_id}/events, same as a step it sent itself."""
+    from .flow import parse_route_chain
+    rows = get_flow_run_messages(flow_run_id)
+    new_rows = [r for r in rows if r["id"] > after_id]
+
+    chain = parse_route_chain(rows[0]["flow_route"]) if rows else None
+    expected_rows = (6 if chain["operator"] == "<>" else 4) if chain else 0
+    last_status = rows[-1]["status"] if rows else None
+    complete = (
+        not rows
+        or last_status in ("error", "cancelled")
+        or (not chain)
+        or len(rows) >= expected_rows
+    )
+
+    return JSONResponse({
+        "messages": [
+            {
+                "id": r["id"],
+                "role": r["role"],
+                "topic": r["topic"],
+                "agent": r["agent"],
+                "status": r["status"],
+            }
+            for r in new_rows
+        ],
+        "complete": complete,
+    })
 
 
 @app.get("/topics")
