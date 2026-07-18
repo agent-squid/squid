@@ -374,7 +374,7 @@ function populateModelPicker(pickerId, inputId, backend) {
 // ── navigation ────────────────────────────────────────────────────────────────
 
 let currentView = 'chat';
-const MOBILE_VIEW_ORDER = ['chat', 'files', 'topics', 'agents', 'stats', 'community', 'settings'];
+const MOBILE_VIEW_ORDER = ['chat', 'files', 'topics', 'agents', 'stats', 'community', 'settings', 'flow'];
 const VIEW_LABELS = {
   chat: 'Chat',
   files: 'Files',
@@ -383,6 +383,7 @@ const VIEW_LABELS = {
   stats: 'Stats',
   community: 'Community',
   settings: 'Settings',
+  flow: 'Squid Flow',
 };
 let _mobileViewHistoryDepth = 0;
 let _mobileViewHistorySkip = 0;
@@ -411,6 +412,7 @@ function switchView(name) {
   if (name === 'stats') loadStats();
   if (name === 'agents') loadAgents();
   if (name === 'settings') loadConfigYaml();
+  if (name === 'flow') initFlowView();
 }
 
 function navigateView(name, { recordHistory = true } = {}) {
@@ -964,9 +966,9 @@ async function updateComposerActionTitles() {
   const route = await resolveEffectiveComposerRoute();
   if (seq !== composerActionTitleSeq) return;
   const scope = routeScopeText(route);
-  chipFilterBtn.title = `Filter history by ${scope}`;
-  chipSearchBtn.title = `Search ${scope}`;
-  chipClearBtn.title = 'Insert /clear';
+  chipFilterBtn.title = `filter topic: /f ${scope}`;
+  chipSearchBtn.title = `search: /s ${scope} kw1 kw2…`;
+  chipClearBtn.title = 'clear context: /clear';
   chipStashBtn.title = `Stash prompt for autocomplete (${scope})`;
 }
 
@@ -1157,7 +1159,7 @@ function updatePromptOnlyButton() {
   if (!btn) return;
   btn.classList.toggle('active', promptOnlyHistory);
   btn.setAttribute('aria-pressed', promptOnlyHistory ? 'true' : 'false');
-  btn.title = promptOnlyHistory ? 'Show full thread' : 'User prompts only';
+  btn.title = promptOnlyHistory ? 'show full thread: /prompts' : 'prompts only: /prompts';
 }
 
 function updateFilterButton() {
@@ -4745,6 +4747,152 @@ function makeRouteChainMarker(route, opts = {}) {
   }
   appendRouteChainTurnCount(div, opts.turnCounts?.target || 0);
   return div;
+}
+
+// ---- Squid Flow playground view (ui/flow-lang.js) ------------------------
+// Standalone grammar/compiler for Squid Flow route expressions — see
+// docs/decisions/0032-route-chains-with-cwd-profile-agents.md. Not wired
+// into the composer or backend yet; this view is for exploring the syntax.
+
+const FLOW_EXAMPLES = [
+  '#squid@codex<2>@review!',
+  '#squid@codex>@review!',
+  '#topic1@agent1,#topic2@agent1>#topic3',
+  '#topic1@agent1,#topic2@agent2<>#topic3,#topic4@agentx',
+  '#topic1@agent1+#topic2@agent1>#topic3',
+  '#squid@codex>#hive@review!',
+  '#squid@codex>#hive',
+  '#topic1@agent1=5:1d>@agent2',
+];
+
+let _flowViewInitialized = false;
+
+function flowRouteLineEl(text, note, continuation) {
+  const div = document.createElement('div');
+  div.className = continuation ? 'flow-route-line flow-route-line-continuation' : 'flow-route-line';
+  const tokenRe = /(#[A-Za-z0-9_.-]+)|(@[A-Za-z0-9_.-]+!?)|(<[^>]*>)|(=[^>]*>)|(>)|(\+)|(,)|(;)|(…)/g;
+  let m;
+  while ((m = tokenRe.exec(text))) {
+    const span = document.createElement('span');
+    if (m[1]) {
+      span.className = 'tag-topic';
+      span.textContent = m[1];
+    } else if (m[2]) {
+      const fresh = m[2].endsWith('!');
+      const agentName = m[2].replace(/^@/, '').replace(/!$/, '');
+      span.className = 'tag-agent';
+      span.textContent = fresh ? `@${agentName}` : m[2];
+      setAgentSlugColor(span, agentName);
+      div.appendChild(span);
+      if (fresh) {
+        const freshSpan = document.createElement('span');
+        freshSpan.className = 'tag-adhoc';
+        freshSpan.textContent = '!';
+        setAgentSlugColor(freshSpan, agentName);
+        div.appendChild(freshSpan);
+      }
+      continue;
+    } else if (m[3] || m[4]) {
+      span.className = 'route-chain-arrow';
+      span.textContent = m[0];
+    } else if (m[5]) {
+      span.className = 'route-chain-arrow';
+      span.textContent = '>';
+    } else if (m[6]) {
+      span.className = 'route-chain-arrow';
+      span.textContent = '+';
+    } else if (m[7]) {
+      span.className = 'route-chain-arrow';
+      span.textContent = ',';
+    } else if (m[8]) {
+      span.className = 'route-chain-arrow';
+      span.textContent = ';';
+    } else if (m[9]) {
+      span.className = 'route-chain-arrow';
+      span.textContent = '…';
+    }
+    div.appendChild(span);
+  }
+  if (note) {
+    const noteSpan = document.createElement('span');
+    noteSpan.className = 'flow-route-note';
+    noteSpan.textContent = ` · ${note}`;
+    div.appendChild(noteSpan);
+  }
+  return div;
+}
+
+function renderFlowView() {
+  const input = document.getElementById('flow-input');
+  const statusEl = document.getElementById('flow-status');
+  const keyLine = document.getElementById('flow-key-line');
+  const canonicalList = document.getElementById('flow-canonical-list');
+  const expandedList = document.getElementById('flow-expanded-list');
+  const canonicalCount = document.getElementById('flow-canonical-count');
+  const expandedCount = document.getElementById('flow-expanded-count');
+  if (!input) return;
+
+  const text = input.value.trim();
+  keyLine.innerHTML = '';
+  canonicalList.innerHTML = '';
+  expandedList.innerHTML = '';
+  canonicalCount.textContent = '';
+  expandedCount.textContent = '';
+
+  if (!text) {
+    statusEl.className = 'flow-status idle';
+    statusEl.textContent = 'Type an expression above.';
+    return;
+  }
+
+  const result = SquidFlow.parse(text);
+  if (!result.ok) {
+    statusEl.className = 'flow-status err';
+    statusEl.textContent = result.error;
+    return;
+  }
+
+  statusEl.className = 'flow-status ok';
+  statusEl.textContent = `Valid — ${result.canonical.length} independent branch${result.canonical.length === 1 ? '' : 'es'}.`;
+  const keyEl = flowRouteLineEl(result.key);
+  keyEl.classList.add('flow-key-line');
+  keyLine.appendChild(keyEl);
+  canonicalCount.textContent = `(${result.canonical.length})`;
+  expandedCount.textContent = `(${result.expanded.length})`;
+  for (const c of result.canonical) canonicalList.appendChild(flowRouteLineEl(c));
+  for (const e of result.expanded) expandedList.appendChild(flowRouteLineEl(e.text, e.note, e.continuation));
+}
+
+// Pre-fills the Squid Flow view with a route and switches to it — for a
+// future composer icon that sends the current route in for validation.
+function openFlowView(routeText) {
+  navigateView('flow');
+  const input = document.getElementById('flow-input');
+  if (input && routeText) {
+    input.value = routeText;
+    renderFlowView();
+  }
+}
+
+function initFlowView() {
+  if (_flowViewInitialized) return;
+  _flowViewInitialized = true;
+  const input = document.getElementById('flow-input');
+  const examplesEl = document.getElementById('flow-examples');
+  for (const ex of FLOW_EXAMPLES) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'flow-example-btn';
+    btn.textContent = ex;
+    btn.addEventListener('click', () => {
+      input.value = ex;
+      renderFlowView();
+    });
+    examplesEl.appendChild(btn);
+  }
+  input.addEventListener('input', renderFlowView);
+  input.value = FLOW_EXAMPLES[0];
+  renderFlowView();
 }
 
 function appendPromptOnlyHistoryItem(item, container) {
@@ -10572,7 +10720,7 @@ let bookmarkOnlyHistory = false;
 
 function updateBookmarkButton() {
   bookmarkBtn.setAttribute('aria-pressed', bookmarkOnlyHistory ? 'true' : 'false');
-  bookmarkBtn.title = bookmarkOnlyHistory ? 'Show full thread' : 'Bookmarked only';
+  bookmarkBtn.title = bookmarkOnlyHistory ? 'show full thread: /bm' : 'bookmarks only: /bm';
 }
 
 function toggleBookmarkOnlyHistory() {

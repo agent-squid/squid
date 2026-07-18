@@ -1356,11 +1356,6 @@ def mark_orphaned_pending(before_created_at: Optional[str] = None) -> int:
 
 
 def get_message(msg_id: int) -> Optional[dict]:
-    backend_expr = _runtime_ref_expr("s.harness", "s.provider")
-    stat_keys = {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
-                 "history_input_tokens", "cost_usd", "duration_ms", "lookback",
-                 "quota_before", "quota_after", "quota_delta",
-                 "msg_quota_before", "msg_quota_after", "backend", "model", "cwd"}
     with _connect() as conn:
         row = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
@@ -1370,30 +1365,23 @@ def get_message(msg_id: int) -> Optional[dict]:
                       m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
                       u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
                       m.session_turn_index AS session_turn_count,
-                      s.input_tokens, s.output_tokens, s.cache_read_tokens,
-                      s.cache_write_tokens, s.history_input_tokens,
-                      s.cost_usd, s.duration_ms, s.lookback,
-                      s.quota_before, s.quota_after, {backend_expr} AS backend, s.model, s.cwd
+                      re.payload AS stats_payload
                FROM chat_messages m
                LEFT JOIN chat_messages u ON m.reply_to = u.id
-               LEFT JOIN session_stats s ON m.session_id = s.session_id
+               {_latest_stats_event_join(msg_alias="m", outer=True)}
                WHERE m.id=?""",
             (msg_id,)
         ).fetchone()
     if not row:
         return None
     result = dict(row)
-    stats = {k: result.pop(k) for k in stat_keys}
-    if result.get("session_id") and any(v is not None for v in stats.values()):
-        stats["session_id"] = result["session_id"]
-        result["stats"] = stats
+    _attach_turn_stats(result)
     return result
 
 
 def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
                       adhoc: Optional[bool] = None, offset: int = 0, limit: int = 20,
                       flow_route: Optional[str] = None) -> dict:
-    backend_expr = _runtime_ref_expr("s.harness", "s.provider")
     where = "WHERE m.role = 'assistant'"
     params: list = []
     if topic:
@@ -1423,13 +1411,10 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
                        u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
                        m.session_turn_index AS session_turn_count,
-                       s.input_tokens, s.output_tokens, s.cache_read_tokens,
-                       s.cache_write_tokens, s.history_input_tokens,
-                       s.cost_usd, s.duration_ms, s.lookback,
-                       s.quota_before, s.quota_after, {backend_expr} AS backend, s.model, s.cwd
+                       re.payload AS stats_payload
                 FROM chat_messages m
                 LEFT JOIN chat_messages u ON m.reply_to = u.id
-                LEFT JOIN session_stats s ON m.session_id = s.session_id
+                {_latest_stats_event_join(msg_alias="m", outer=True)}
                 {where}
                 ORDER BY completed_at DESC, m.id DESC LIMIT ? OFFSET ?""",
             params + [limit, offset],
@@ -1438,16 +1423,9 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
         for row in raw_items:
             row["flow_route"] = _infer_origin_flow_route(conn, row)
 
-    stat_keys = {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
-                 "history_input_tokens", "cost_usd", "duration_ms", "lookback",
-                 "quota_before", "quota_after", "quota_delta",
-                 "msg_quota_before", "msg_quota_after", "backend", "model", "cwd"}
     items = []
     for row in raw_items:
-        stats = {k: row.pop(k) for k in stat_keys}
-        if row.get("session_id") and any(v is not None for v in stats.values()):
-            stats["session_id"] = row["session_id"]
-            row["stats"] = stats
+        _attach_turn_stats(row)
         items.append(row)
 
     return {
@@ -1460,12 +1438,7 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
 def get_history_items_by_ids(ids: list[int]) -> list[dict]:
     if not ids:
         return []
-    backend_expr = _runtime_ref_expr("s.harness", "s.provider")
     placeholders = ",".join("?" * len(ids))
-    stat_keys = {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
-                 "history_input_tokens", "cost_usd", "duration_ms", "lookback",
-                 "quota_before", "quota_after", "quota_delta",
-                 "msg_quota_before", "msg_quota_after", "backend", "model", "cwd"}
     with _connect() as conn:
         rows = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
@@ -1476,13 +1449,10 @@ def get_history_items_by_ids(ids: list[int]) -> list[dict]:
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
                        u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
                        m.session_turn_index AS session_turn_count,
-                       s.input_tokens, s.output_tokens, s.cache_read_tokens,
-                       s.cache_write_tokens, s.history_input_tokens,
-                       s.cost_usd, s.duration_ms, s.lookback,
-                       s.quota_before, s.quota_after, {backend_expr} AS backend, s.model, s.cwd
+                       re.payload AS stats_payload
                 FROM chat_messages m
                 LEFT JOIN chat_messages u ON m.reply_to = u.id
-                LEFT JOIN session_stats s ON m.session_id = s.session_id
+                {_latest_stats_event_join(msg_alias="m", outer=True)}
                 WHERE m.id IN ({placeholders})
                 ORDER BY m.id ASC""",
             ids,
@@ -1490,10 +1460,7 @@ def get_history_items_by_ids(ids: list[int]) -> list[dict]:
     items = []
     for r in rows:
         row = dict(r)
-        stats = {k: row.pop(k) for k in stat_keys}
-        if row.get("session_id") and any(v is not None for v in stats.values()):
-            stats["session_id"] = row["session_id"]
-            row["stats"] = stats
+        _attach_turn_stats(row)
         items.append(row)
     return items
 
@@ -1509,7 +1476,6 @@ def _build_fts_match(q: str) -> str:
 def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = None,
                     adhoc: Optional[bool] = None, limit: int = 100,
                     bookmarked: bool = False, flow_route: Optional[str] = None) -> dict:
-    backend_expr = _runtime_ref_expr("s.harness", "s.provider")
     terms = _build_fts_match(q)
     if not terms:
         return {"items": []}
@@ -1548,30 +1514,20 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
                        u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
                        m.session_turn_index AS session_turn_count,
-                       s.input_tokens, s.output_tokens, s.cache_read_tokens,
-                       s.cache_write_tokens, s.history_input_tokens,
-                       s.cost_usd, s.duration_ms, s.lookback,
-                       s.quota_before, s.quota_after, {backend_expr} AS backend, s.model, s.cwd
+                       re.payload AS stats_payload
                 FROM chat_messages m
                 {bookmark_join}
                 LEFT JOIN chat_messages u ON m.reply_to = u.id
-                LEFT JOIN session_stats s ON m.session_id = s.session_id
+                {_latest_stats_event_join(msg_alias="m", outer=True)}
                 {where}
                 ORDER BY m.id DESC LIMIT ?""",
             params + [limit],
         ).fetchall()
 
-    stat_keys = {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
-                 "history_input_tokens", "cost_usd", "duration_ms", "lookback",
-                 "quota_before", "quota_after", "quota_delta",
-                 "msg_quota_before", "msg_quota_after", "backend", "model", "cwd"}
     items = []
     for r in rows:
         row = dict(r)
-        stats = {k: row.pop(k) for k in stat_keys}
-        if row.get("session_id") and any(v is not None for v in stats.values()):
-            stats["session_id"] = row["session_id"]
-            row["stats"] = stats
+        _attach_turn_stats(row)
         items.append(row)
 
     return {"items": items}
@@ -1580,7 +1536,6 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
 def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = None,
                    adhoc: Optional[bool] = None, limit: int = 100,
                    bookmarked: bool = False, flow_route: Optional[str] = None) -> dict:
-    backend_expr = _runtime_ref_expr("s.harness", "s.provider")
     """Search user prompts via prompts_fts. Returns assistant reply items (same shape as
     search_messages) so the frontend can render them with appendPromptOnlyHistoryItem."""
     terms = _build_fts_match(q)
@@ -1611,11 +1566,6 @@ def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = N
     where = "WHERE " + " AND ".join(where_parts)
     bookmark_join = "JOIN bookmarks b ON b.msg_id = m.id" if bookmarked else ""
 
-    stat_keys = {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
-                 "history_input_tokens", "cost_usd", "duration_ms", "lookback",
-                 "quota_before", "quota_after", "quota_delta",
-                 "msg_quota_before", "msg_quota_after", "backend", "model", "cwd"}
-
     with _connect() as conn:
         rows = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
@@ -1626,14 +1576,11 @@ def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = N
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
                        u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
                        m.session_turn_index AS session_turn_count,
-                       s.input_tokens, s.output_tokens, s.cache_read_tokens,
-                       s.cache_write_tokens, s.history_input_tokens,
-                       s.cost_usd, s.duration_ms, s.lookback,
-                       s.quota_before, s.quota_after, {backend_expr} AS backend, s.model, s.cwd
+                       re.payload AS stats_payload
                 FROM chat_messages m
                 {bookmark_join}
                 LEFT JOIN chat_messages u ON m.reply_to = u.id
-                LEFT JOIN session_stats s ON m.session_id = s.session_id
+                {_latest_stats_event_join(msg_alias="m", outer=True)}
                 {where}
                 ORDER BY m.id DESC LIMIT ?""",
             params + [limit],
@@ -1642,10 +1589,7 @@ def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = N
     items = []
     for r in rows:
         row = dict(r)
-        stats = {k: row.pop(k) for k in stat_keys}
-        if row.get("session_id") and any(v is not None for v in stats.values()):
-            stats["session_id"] = row["session_id"]
-            row["stats"] = stats
+        _attach_turn_stats(row)
         items.append(row)
 
     return {"items": items}
@@ -2085,12 +2029,49 @@ def _stats_finalize_aggregate(agg: dict, chart_series: Optional[list[dict]] = No
     return result
 
 
-def _latest_stats_event_join() -> str:
-    return """JOIN run_events re
+def _latest_stats_event_join(msg_alias: str = "cm", *, outer: bool = False) -> str:
+    join_kind = "LEFT JOIN" if outer else "JOIN"
+    return f"""{join_kind} run_events re
                 ON re.id = (
                     SELECT MAX(re2.id) FROM run_events re2
-                    WHERE re2.msg_id = cm.id AND re2.event_type = 'stats'
+                    WHERE re2.msg_id = {msg_alias}.id AND re2.event_type = 'stats'
                 )"""
+
+
+def _attach_turn_stats(row: dict) -> None:
+    """Parse the per-turn run_events 'stats' payload (row['stats_payload']) into
+    row['stats']. Each turn's own numbers live in run_events keyed by msg_id;
+    session_stats is keyed by session_id and only ever holds the latest turn's
+    numbers, so it cannot be used here for a specific historical message."""
+    payload_raw = row.pop("stats_payload", None)
+    try:
+        payload = json.loads(payload_raw) if payload_raw else {}
+    except (json.JSONDecodeError, TypeError):
+        payload = {}
+    msg_quota_before = row.pop("msg_quota_before", None)
+    msg_quota_after = row.pop("msg_quota_after", None)
+    quota_delta = row.pop("quota_delta", None)
+    if not payload:
+        return
+    harness = payload.get("harness")
+    provider = payload.get("provider")
+    row["stats"] = {
+        "input_tokens": payload.get("input_tokens"),
+        "output_tokens": payload.get("output_tokens"),
+        "cache_read_tokens": payload.get("cache_read_tokens"),
+        "cache_write_tokens": payload.get("cache_write_tokens"),
+        "history_input_tokens": payload.get("history_input_tokens"),
+        "cost_usd": payload.get("cost_usd"),
+        "duration_ms": payload.get("duration_ms"),
+        "lookback": payload.get("lookback"),
+        "backend": agent_ref_for_storage(harness, provider) if harness else None,
+        "model": payload.get("model"),
+        "cwd": payload.get("cwd"),
+        "session_id": payload.get("session_id") or row.get("session_id"),
+        "quota_delta": quota_delta,
+        "msg_quota_before": msg_quota_before,
+        "msg_quota_after": msg_quota_after,
+    }
 
 
 def _percentile(values: list[float], percentile: float) -> Optional[float]:

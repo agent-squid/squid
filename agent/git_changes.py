@@ -201,10 +201,17 @@ def extract_file_diff(full_diff: str, file_path: str) -> str:
     current_path: Optional[str] = None
     current_lines: list[str] = []
 
+    def _chunk() -> str:
+        # git apply rejects a patch whose last line has no trailing newline
+        # ("corrupt patch"), which happens when the chunk is cut at the next
+        # `diff --git` boundary.
+        text = '\n'.join(current_lines)
+        return text if text.endswith('\n') else text + '\n'
+
     for line in full_diff.split('\n'):
         if line.startswith('diff --git '):
             if current_path == file_path:
-                return '\n'.join(current_lines)
+                return _chunk()
             m = re.match(r'^diff --git a/.+ b/(.+)$', line)
             current_path = m.group(1) if m else None
             current_lines = [line]
@@ -212,7 +219,7 @@ def extract_file_diff(full_diff: str, file_path: str) -> str:
             current_lines.append(line)
 
     if current_path == file_path:
-        return '\n'.join(current_lines)
+        return _chunk()
     return ''
 
 

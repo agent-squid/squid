@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-07-15
+updated: 2026-07-18
 ---
 # ADR-0032: Route Chains and Squid Flow with CWD-Profile Agents
 
@@ -41,6 +42,13 @@ joins, scheduled edges, cycles, the `=>` one-way alias, and `<N>` for any round
 count other than one (including `<N:T>` scheduled rounds) are not implemented
 yet. `<N>` route text is not recognized as a chain and falls back to ordinary
 route parsing.
+
+Also targeted for v0.1: a chain target may be a full `#topic@agent` route, not
+only a bare `@agent`. Today every target is implicitly on the origin's topic
+(`#topic@origin>@target` — `@target` is always `#topic`'s own agent); there is
+no way to hand off to a different topic mid-chain. `#topic@origin>#other@target`
+should be accepted so a chain step can cross into a different topic. See
+"Accepted Route Syntax" and "Squid Flow" below.
 
 The client only ever sends the origin turn. Every step after that is
 dispatched by the server (`agent/flow.py`), not the browser: `TopicWorker`
@@ -149,6 +157,72 @@ using the latest returned output.
 Bare `@review` inside a chain resumes the same persistent session as
 `#squid@review`.
 
+A chained route step may instead be a full `#topic@agent`, switching the
+active topic for that step (and any later bare `@agent` steps, which then
+inherit the new topic):
+
+```text
+#squid@codex>#hive@review!
+```
+
+This hands off from `#squid@codex` to a fresh `@review!` session on `#hive`,
+not `#squid`. `#topic@agent` targets are v0.1, not yet implemented — today
+every target is implicitly on the origin's topic.
+
+A graph clause step is its own parse context, separate from an ordinary
+standalone message, so ADR-0005's sticky-agent rule for a bare `#topic` does
+not apply here. Within a graph clause, whichever half of `#topic@agent` a step
+omits is inherited from the root, symmetrically in both directions: a bare
+`@agent` inherits the root's topic (as above), and a bare `#topic` inherits the
+root's agent. So `#squid@codex>#hive` means `#hive@codex` — same agent,
+switched to `#hive` — not `#hive`'s own sticky agent. Writing `#hive` as a
+complete standalone message elsewhere still resolves via ADR-0005 as always;
+only its meaning as an omitted-agent graph-clause step is different, and that
+difference is disambiguated by parse position, not by the text itself.
+
+Canonicalization reuses this inheritance rule rather than inventing a
+grouping notation. Given `#t1@a1,#t2@a1>#t3@a1`, the reduced form is
+`#t1@a1,#t2>#t3` — `#t2` and `#t3` both inherit `a1` from the root, so
+repeating `@a1` is redundant. The reduced form is never a bracket/group
+shorthand like `#t1,t2@a1>#t3` (one shared `@agent` applying backward over a
+list of bare topics) — that would be a second way to spell the same meaning
+via a new grammar shape, and canonicalization must produce exactly one shape
+per meaning, using rules that already exist.
+
+Within an origin list, at least one atom must be a full `#topic@agent` — that
+one becomes the root every other atom in the list borrows its missing half
+from, independently per atom and per field. It does not have to be
+positionally first: `#t3,#t2@a1` is valid (`#t2@a1` is the only complete
+atom, so `#t3` borrows `a1` from it), and a single root can donate its topic
+to one atom and its agent to a different atom in the same list at once
+(`#t3,@a2,#t1@a1` → `#t1` donates both halves: `#t3` becomes `#t3@a1`, `@a2`
+becomes `#t1@a2`). What it cannot do is let two atoms disagree on which is
+the root by position — `#t1@a1,#t3,#t2@a2` and `#t2@a2,#t1@a1,#t3` are
+different graphs, not the same one written two ways: in the first, `#t3`
+borrows from `#t1@a1` (the first complete atom in *that* text) and ends up
+`@a1`; in the second, `#t3` borrows from `#t2@a2` and ends up `@a2`. The
+anchor is always "whichever atom is first fully-explicit in the text as
+written," so reordering a list that contains more than one fully-explicit
+atom can change which one wins and therefore change the meaning — this is
+the one place order isn't free to change without changing the graph.
+
+A comma-list source always decomposes into independent branches before any
+inheritance is resolved (unchanged from Origin Broadcast) — so each branch
+keeps its own single root and inheritance is never ambiguous here, even when
+the origins disagree. `#t1@a1,#t2@a2>#t3` decomposes into two independent
+edges first, `#t1@a1>#t3` and `#t2@a2>#t3`, and only then does each `#t3`
+inherit its own branch's agent: `#t1@a1>#t3@a1, #t2@a2>#t3@a2`.
+
+`+` is different: a join does not decompose — that is the entire point of an
+explicit join, one envelope feeding one downstream step. So an omitted-half
+step downstream of a join has no single root to inherit from unless the
+joined origins agree. `#t1@a+#t2@a>#t3` is unambiguous (both agree the agent
+is `a`, so `#t3` resolves to `#t3@a`). `#t1@a1+#t2@a2>#t3` is **not** valid:
+the joined origins disagree, there is no single root value for `#t3` to
+inherit, and Squid must reject it rather than guess — the user must resolve
+the target's topic/agent explicitly: `#t1@a1+#t2@a2>#t3@a1` (or whichever
+agent the joined step should actually run as).
+
 `!` on a chained route step means fresh native workflow session for that step.
 It is a boolean suffix and does not accept a numeric argument.
 
@@ -191,7 +265,19 @@ The intended reading would be:
 ```
 
 The first full route establishes the topic for the graph expression. Later bare
-`@agent` steps inherit that topic, so `@review!` means `#topic@review!`.
+`@agent` steps inherit that topic, so `@review!` means `#topic@review!`. A later
+step may instead write its own full `#topic@agent`, which switches the active
+topic from that step onward — bare `@agent` steps after it inherit the new
+topic, not the original one. This is the same escape hatch as chain targets
+(see "Accepted Route Syntax"), extended to graph clauses generally.
+
+The first origin must be a full `#topic@agent` — both halves explicit, no
+inheritance. There is no ambient fallback inside a graph clause (ADR-0005's
+sticky-agent lookup does not apply here; see "Accepted Route Syntax"), and
+inheritance only ever pulls the omitted half from an already-resolved root.
+The first origin *is* what establishes that root, so it has nothing to
+inherit from yet. A bare `@agent` or bare `#topic` as the first origin is
+invalid.
 
 `;` separates lineage clauses. `>` and `=>` remain directed handoffs. `+` is
 an explicit join operator: the downstream step runs after every listed upstream
@@ -297,17 +383,51 @@ one-way handoffs:
 ```text
 @a<5>@b
 @a<5:1d>@b
-@c=1d>@a
+@c=2>@a
+@c=2:1d>@a
+@c=*:1d>@a
 @c=5:1d>@a
-@c=5:1d/1400>@a
 ```
 
 `<N:T>` means run `N` request/response rounds with the next route step, waiting
-duration `T` between rounds. `=>` is equivalent to `>`. `=T>` means one delayed
-one-way handoff. `=N:T>` means `N` delayed one-way handoffs spaced by duration
-`T`. A `/HHMM` suffix anchors the schedule to a wall-clock time in the user's
-timezone, so `=5:1d/1400>` means five one-way handoffs, once per day at 14:00.
-Without `/HHMM`, the duration is relative to the triggering completion time.
+duration `T` between every hop — the out-hop and the return-hop of each round
+alike, symmetrically in both directions, not just between successive rounds.
+A round is two hops (out, back), so `N` rounds are `2N` hops. Matching the
+scheduled edge's rule below (every repeat, including the first, is a full `T`
+after the trigger — never immediate), hop `k` fires at `k*T` after the
+origin: hop 1 (round 1's out-hop) is `T` after the trigger, hop 2 (round 1's
+return) is `2T` after the trigger, and so on through hop `2N`. `<1:T>` is
+therefore not degenerate: its one round still has two hops, at `T` and `2T`.
+If the two directions need different delays, that isn't expressed on
+`<N:T>` — write the round out explicitly as chained one-way edges instead,
+e.g. `@a=1:1h>@b=>@a` (an hour out, no delay back) or `@a=1:1h>@b=1:2h>@a` (a
+different delay each way). Unlike `=*:T>` below, there is no unbounded
+`<*:T>` form: a round trip's natural stopping point is semantic (e.g. "until
+the reviewer approves"), which Squid Flow has no conditional edges to
+express, so an unbounded agent-to-agent loop has no way to terminate and is
+intentionally not supported — use a large bounded `N` instead.
+
+`=>` is equivalent to `>`. The count always comes first, same as `<N>` —
+`=N>` repeats the one-way handoff `N` times back to back
+with no delay. `=N:T>` spaces those `N` repeats out by duration `T`, relative
+to the triggering completion time. `=*:T>` means unbounded repeats spaced by
+`T` — `*` always requires a `:T`, since an unbounded loop with no delay is
+just a runaway cycle, not a schedule. Every run, including the first, is a
+full `T` after the previous one (or after the trigger, for the first) — run
+`k` fires at `k*T` after the trigger.
+
+There is no wall-clock anchor (e.g. "run at 14:00 daily") — a schedule is
+always a relative offset from the trigger, never pinned to a time of day.
+An anchor attribute was drafted for this ADR but deliberately dropped before
+implementation: it would need to exist consistently on both `=N:T>` and
+`<N:T>`, and there was no use case compelling enough to justify designing and
+maintaining that consistently across both operators.
+
+The count/wait sit on the edge, but they only govern *reaching the target*
+repeatedly — the origin side of that edge already ran once (whatever
+triggered the edge in the first place) and is not itself re-run or delayed.
+So for `@c=5:1d>@a`, `@c` runs immediately, once; `@a` is what fires five
+times, one day apart.
 
 Unbounded graph cycles are invalid. A cyclic Squid Flow must include an
 explicit bound or schedule, such as `@c=5:1d>@a`. Delayed edges create future
@@ -395,6 +515,9 @@ Chained route steps use different semantics:
 | `>@review!` chained step | Start a fresh native session for that step |
 | `<>@review!` request/response step | Send output to fresh `@review!`, then send the review output back to the originating route step |
 | `>@review!2` chained step | Unsupported: `!` does not take `N` |
+| `>#other@review` chained step | Switch to `#other`'s existing resumable `(other, review)` session; later bare `@agent` steps inherit `#other` |
+| `>#other@review!` chained step | Switch to `#other`, start a fresh native session for that step |
+| `>#other` chained step (no agent) | Inherits the root's agent, switched to `#other` — equivalent to `>#other@<root-agent>`, not `#other`'s sticky agent |
 
 A chain carries explicit step-to-step input. Each downstream step receives the
 previous step's output as explicit chain input and does not consult global
@@ -546,7 +669,7 @@ does not synthesize the target handoff.
 Scheduled flow edges use the same fail-stop default. If the source step fails,
 no scheduled handoff is created. If a scheduled target run fails, Squid marks
 that scheduled edge failed and does not enqueue remaining repetitions. For
-example, if `@c=5:1d/1400>@a` fails on the third `@a` run, the fourth and fifth
+example, if `@c=5:1d>@a` fails on the third `@a` run, the fourth and fifth
 runs are not scheduled unless the user explicitly retries or resumes the flow.
 
 ## Relationship to Parallel Execution

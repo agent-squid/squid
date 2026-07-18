@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Squid Flow Playground</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono&display=swap" />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Rubik:wght@700&display=swap" />
+<style>
+  /* Palette mirrors ui/style.css :root — kept standalone so this page has no
+     dependency on the live app. Not wired into Squid yet; see ADR-0032. */
+  :root {
+    --bg:           #0f0f13;
+    --surface:      #13131c;
+    --surface-2:    #1e1e28;
+    --surface-3:    #1a1a24;
+    --raised:       #2a2a35;
+    --code-bg:      #111;
+    --border:       #2e2e3e;
+    --border-faint: #141420;
+    --text:         #e8e4dc;
+    --text-muted:   #aaa;
+    --text-mid:     #888;
+    --text-lo:      #666;
+    --text-dim:     #555;
+    --accent:       #f07040;
+    --accent-dim:   #d07840;
+    --accent-light: #f5a060;
+    --danger:       #e05030;
+    --ok:           #4a8a4a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, sans-serif;
+    margin: 0;
+    padding: 2rem 1.5rem 4rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .wrap { width: 100%; max-width: 780px; }
+  h1 {
+    font-family: 'Rubik', ui-sans-serif, system-ui, sans-serif;
+    font-size: 1.3rem;
+    color: var(--accent);
+    margin: 0 0 0.25rem;
+  }
+  .sub { color: var(--text-mid); font-size: 0.85em; margin: 0 0 1.5rem; }
+  .sub code { color: var(--accent-light); }
+
+  textarea {
+    width: 100%;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 0.95rem;
+    padding: 0.75rem 0.9rem;
+    resize: vertical;
+    min-height: 3em;
+  }
+  textarea:focus { outline: none; border-color: var(--accent-dim); }
+
+  .examples { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.6rem 0 1.5rem; }
+  .example-btn {
+    background: var(--surface-3);
+    border: 1px solid var(--border);
+    color: var(--text-mid);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 0.72em;
+    border-radius: 5px;
+    padding: 0.25rem 0.55rem;
+    cursor: pointer;
+  }
+  .example-btn:hover { color: var(--accent-light); border-color: var(--accent-dim); }
+
+  .status {
+    border-radius: 6px;
+    padding: 0.5rem 0.8rem;
+    font-size: 0.85em;
+    margin-bottom: 1.25rem;
+    border: 1px solid var(--border);
+  }
+  .status.ok { color: var(--ok); border-color: var(--ok); background: rgba(74,138,74,0.08); }
+  .status.err { color: var(--danger); border-color: var(--danger); background: rgba(224,80,48,0.08); }
+  .status.idle { color: var(--text-dim); }
+
+  section.out { margin-bottom: 1.75rem; }
+  section.out h2 {
+    font-size: 0.7em;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-lo);
+    margin: 0 0 0.5rem;
+    font-weight: 600;
+  }
+  .branch-count { color: var(--text-dim); font-size: 0.75em; margin-left: 0.4em; text-transform: none; letter-spacing: 0; }
+
+  .route-line {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.15rem;
+    font-family: ui-monospace, monospace;
+    font-size: 0.8rem;
+    background: var(--surface-2);
+    border: 1px solid var(--border-faint);
+    border-radius: 6px;
+    padding: 0.4rem 0.6rem;
+    margin-bottom: 0.35rem;
+  }
+  .tag-topic { color: var(--accent-dim); }
+  .tag-agent { color: var(--agent-color, #848899); margin-left: 0.05em; }
+  .tag-fresh { color: var(--agent-color, #848899); }
+  .route-arrow { color: var(--text-dim); font-weight: 700; padding: 0 0.15rem; }
+  .route-join { color: var(--text-mid); font-weight: 700; padding: 0 0.1rem; }
+
+  footer { color: var(--text-dim); font-size: 0.72em; margin-top: 2rem; }
+  footer a { color: var(--text-mid); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Squid Flow Playground</h1>
+  <p class="sub">
+    Type a Squid Flow route expression. See <code>docs/decisions/0032-route-chains-with-cwd-profile-agents.md</code>
+    for the language spec. This page is standalone — not wired into the live composer or backend yet.
+  </p>
+
+  <textarea id="input" spellcheck="false" placeholder="#squid@codex&lt;2&gt;@review!"></textarea>
+
+  <div class="examples" id="examples"></div>
+
+  <div id="status" class="status idle">Type an expression above.</div>
+
+  <section class="out">
+    <h2>Canonical (reduced) form <span class="branch-count" id="canonical-count"></span></h2>
+    <div id="canonical-list"></div>
+  </section>
+
+  <section class="out">
+    <h2>Fully expanded form <span class="branch-count" id="expanded-count"></span></h2>
+    <div id="expanded-list"></div>
+  </section>
+
+  <footer>Not integrated into Squid yet — a standalone artifact for testing the Squid Flow grammar (ui/flow-lang.js).</footer>
+</div>
+
+<script src="flow-lang.js"></script>
+<script>
+  const EXAMPLES = [
+    '#squid@codex<2>@review!',
+    '#squid@codex>@review!',
+    '#t1@a1,#t2@a1>#t3',
+    '#t1@a,#t2@b<>#c,#d@x',
+    '#t1@a+#t2@a>#t3',
+    '#squid@codex>#hive@review!',
+    '#squid@codex>#hive',
+    '#a@x=5:1d>@y',
+  ];
+
+  const input = document.getElementById('input');
+  const statusEl = document.getElementById('status');
+  const canonicalList = document.getElementById('canonical-list');
+  const expandedList = document.getElementById('expanded-list');
+  const canonicalCount = document.getElementById('canonical-count');
+  const expandedCount = document.getElementById('expanded-count');
+  const examplesEl = document.getElementById('examples');
+
+  for (const ex of EXAMPLES) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'example-btn';
+    btn.textContent = ex;
+    btn.addEventListener('click', () => {
+      input.value = ex;
+      render();
+    });
+    examplesEl.appendChild(btn);
+  }
+
+  // Deterministic hash-based color so agent chips look distinct without
+  // depending on the live agents API (this page has no server dependency).
+  function agentColor(name) {
+    let h = 0;
+    for (let i = 0; i < name.length; i += 1) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+    const hue = h % 360;
+    return `hsl(${hue}, 55%, 62%)`;
+  }
+
+  function routeLineEl(text) {
+    // text is a canonical/expanded string like "#t1@a1>#t3" or "#a+#b>#c".
+    const div = document.createElement('div');
+    div.className = 'route-line';
+    const tokenRe = /(#[A-Za-z0-9_.-]+)|(@[A-Za-z0-9_.-]+!?)|(<[^>]*>)|(=[^>]*>)|(>)|(\+)/g;
+    let m;
+    while ((m = tokenRe.exec(text))) {
+      const span = document.createElement('span');
+      if (m[1]) { span.className = 'tag-topic'; span.textContent = m[1]; }
+      else if (m[2]) {
+        span.className = 'tag-agent';
+        const agentName = m[2].replace(/^@/, '').replace(/!$/, '');
+        span.style.setProperty('--agent-color', agentColor(agentName));
+        span.textContent = m[2];
+      } else if (m[3] || m[4]) { span.className = 'route-arrow'; span.textContent = m[0]; }
+      else if (m[5]) { span.className = 'route-arrow'; span.textContent = '>'; }
+      else if (m[6]) { span.className = 'route-join'; span.textContent = '+'; }
+      div.appendChild(span);
+    }
+    return div;
+  }
+
+  function render() {
+    const text = input.value.trim();
+    canonicalList.innerHTML = '';
+    expandedList.innerHTML = '';
+    canonicalCount.textContent = '';
+    expandedCount.textContent = '';
+
+    if (!text) {
+      statusEl.className = 'status idle';
+      statusEl.textContent = 'Type an expression above.';
+      return;
+    }
+
+    const result = SquidFlow.parse(text);
+    if (!result.ok) {
+      statusEl.className = 'status err';
+      statusEl.textContent = result.error;
+      return;
+    }
+
+    statusEl.className = 'status ok';
+    statusEl.textContent = `Valid — ${result.canonical.length} independent branch${result.canonical.length === 1 ? '' : 'es'}.`;
+
+    canonicalCount.textContent = `(${result.canonical.length})`;
+    expandedCount.textContent = `(${result.expanded.length})`;
+    for (const c of result.canonical) canonicalList.appendChild(routeLineEl(c));
+    for (const e of result.expanded) expandedList.appendChild(routeLineEl(e));
+  }
+
+  input.addEventListener('input', render);
+  input.value = EXAMPLES[0];
+  render();
+</script>
+</body>
+</html>

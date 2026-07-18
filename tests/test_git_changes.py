@@ -1,6 +1,11 @@
 import subprocess
 
-from agent.git_changes import apply_reverse_patch, prepare_tracker, prepare_trackers
+from agent.git_changes import (
+    apply_reverse_patch,
+    extract_file_diff,
+    prepare_tracker,
+    prepare_trackers,
+)
 
 
 def git(cwd, *args):
@@ -151,3 +156,27 @@ def test_worktree_tracker_emits_durable_repo_for_revert(tmp_path):
 
     assert ok, err
     assert (repo / "app.txt").read_text() == "base\n"
+
+
+def test_extract_file_diff_mid_diff_chunk_reverse_applies(tmp_path):
+    # A file whose chunk is followed by another `diff --git` used to be
+    # extracted without a trailing newline, which git apply rejects as a
+    # corrupt patch.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "a.txt").write_text("one\n")
+    (repo / "b.txt").write_text("two\n")
+    git(repo, "add", "a.txt", "b.txt")
+    git(repo, "commit", "-m", "two files")
+
+    (repo / "a.txt").write_text("one changed\n")
+    (repo / "b.txt").write_text("two changed\n")
+    full_diff = git(repo, "diff").stdout
+
+    for fname, restored in [("a.txt", "one\n"), ("b.txt", "two\n")]:
+        chunk = extract_file_diff(full_diff, fname)
+        assert chunk.endswith("\n")
+        ok, err = apply_reverse_patch(repo, chunk)
+        assert ok, err
+        assert (repo / fname).read_text() == restored

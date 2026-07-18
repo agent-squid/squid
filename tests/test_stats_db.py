@@ -794,6 +794,53 @@ def test_history_items_include_stats_event_completed_at(tmp_path, monkeypatch):
     assert status["completed_at"] == "2026-07-15T11:06:43Z"
 
 
+def test_get_messages_flat_uses_per_turn_stats_not_latest_session_row(tmp_path, monkeypatch):
+    """Regression test: history view previously showed the session's latest stats
+    (session_stats, overwritten on every resumed turn) on every historical message
+    instead of each message's own turn stats. Per-turn numbers must come from each
+    message's own run_events "stats" snapshot instead."""
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user1 = stats_db.insert_user_message("squid", "codex", "first")
+    asst1 = stats_db.insert_assistant_message("squid", "codex", user1, adhoc=False)
+    stats_db.update_assistant_message(asst1, "first response", "session-1", "done")
+    stats_db.insert_run_event(asst1, 0, "stats", json.dumps(
+        {"input_tokens": 100, "output_tokens": 10, "cost_usd": 0.1, "duration_ms": 5000}
+    ))
+    stats_db.save_stats(
+        "session-1",
+        {"input_tokens": 100, "output_tokens": 10, "cost_usd": 0.1, "duration_ms": 5000},
+        topic="squid", agent="codex",
+    )
+
+    user2 = stats_db.insert_user_message("squid", "codex", "second")
+    asst2 = stats_db.insert_assistant_message("squid", "codex", user2, adhoc=False)
+    stats_db.update_assistant_message(asst2, "second response", "session-1", "done")
+    stats_db.insert_run_event(asst2, 0, "stats", json.dumps(
+        {"input_tokens": 200, "output_tokens": 20, "cost_usd": 0.2, "duration_ms": 8000}
+    ))
+    # Same session resumed for turn 2 -- session_stats gets overwritten with turn 2's numbers,
+    # so it no longer reflects turn 1 at all.
+    stats_db.save_stats(
+        "session-1",
+        {"input_tokens": 200, "output_tokens": 20, "cost_usd": 0.2, "duration_ms": 8000},
+        topic="squid", agent="codex",
+    )
+
+    items = stats_db.get_messages_flat(topic="squid", agent="codex", limit=10)["items"]
+    by_id = {i["id"]: i for i in items}
+
+    assert by_id[asst1]["stats"]["duration_ms"] == 5000
+    assert by_id[asst1]["stats"]["cost_usd"] == 0.1
+    assert by_id[asst2]["stats"]["duration_ms"] == 8000
+    assert by_id[asst2]["stats"]["cost_usd"] == 0.2
+
+    # get_message (single-message lookup) must agree per-message too.
+    assert stats_db.get_message(asst1)["stats"]["duration_ms"] == 5000
+    assert stats_db.get_message(asst2)["stats"]["duration_ms"] == 8000
+
+
 def test_history_orders_by_completed_at_not_message_id(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

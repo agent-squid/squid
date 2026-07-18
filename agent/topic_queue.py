@@ -289,9 +289,10 @@ class TopicWorker:
                         enriched["adhoc"] = item.adhoc
                         enriched["lookback"] = item.lookback
                         if session_id:
+                            turn_model = enriched.get("model") or item.model
                             save_stats(session_id, enriched, topic=item.topic, agent=item.agent,
                                        harness=resolved.harness, provider=resolved.provider.id,
-                                       model=enriched.pop("model", None) or item.model,
+                                       model=turn_model,
                                        cwd=display_cwd,
                                        lookback=item.lookback)
                             if item.agent and not item.adhoc:
@@ -302,6 +303,9 @@ class TopicWorker:
                                 )
                             enriched["session_id"] = session_id
                             enriched["cwd"] = display_cwd
+                            enriched["model"] = turn_model
+                            enriched["harness"] = resolved.harness
+                            enriched["provider"] = resolved.provider.id
                         completed_at = _utc_now_iso()
                         enriched["completed_at"] = completed_at
                         insert_run_event(item.msg_id, run_seq, "stats", json.dumps(enriched), created_at=completed_at)
