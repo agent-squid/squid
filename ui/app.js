@@ -913,7 +913,7 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0, opts = {}) {
   topicChipEl.innerHTML = '';
   topicChipEl.classList.toggle('route-chain', !!route && !broadcastAgents);
   topicChipEl.classList.toggle('origin-broadcast', !!broadcastAgents);
-  if (!broadcastAgents) {
+  if (!broadcastAgents && !(route && parsedRoute?.complex)) {
     const tSpan = document.createElement('span');
     tSpan.className = 'chip-topic';
     tSpan.textContent = '#' + topic;
@@ -1437,6 +1437,17 @@ function makeBroadcastRouteTag(broadcastAgents) {
       setAgentSlugColor(freshSpan, a.agent);
       wrap.appendChild(freshSpan);
     }
+  });
+  return wrap;
+}
+
+function makeFlowRouteTag(route) {
+  const wrap = document.createElement('span');
+  wrap.className = 'topic-tag';
+  appendColoredRouteTokens(wrap, route, {
+    topicClass: 'tag-topic',
+    agentClass: 'tag-agent',
+    freshClass: 'tag-adhoc',
   });
   return wrap;
 }
@@ -3380,6 +3391,10 @@ async function sendMessage(text, opts = {}) {
   const agent = opts.broadcastTarget ? opts.broadcastTarget.agent : parsed.agent;
   const adhoc = opts.broadcastTarget ? !!opts.broadcastTarget.fresh : parsed.adhoc;
   const flowRoute = route ? canonicalFlowRoute(route) : canonicalFlowRoute(opts.flowRoute);
+  const chipDisplayFlowRoute = source === 'human' && topicChipEl?.classList.contains('route-chain')
+    ? topicChipEl.textContent.trim()
+    : null;
+  const displayFlowRoute = opts.displayFlowRoute || flowRoute || route || opts.flowRoute || stickyChip?.route || chipDisplayFlowRoute || null;
   let flowRunId = flowRoute ? (opts.flowRunId || null) : null;
   let flowRunIdEmitted = false;
   if (updateComposerRoute) {
@@ -3408,7 +3423,7 @@ async function sendMessage(text, opts = {}) {
   // Origin Broadcast: the same literal prompt goes to every target, so only
   // the first target's call renders the shared user bubble — the rest reuse
   // it via opts.suppressUserBubble instead of duplicating it per agent.
-  const userBubble = opts.suppressUserBubble ? null : makeUserBubble(message, topic, agent, null, adhoc, lookback, source, broadcastAgents);
+  const userBubble = opts.suppressUserBubble ? null : makeUserBubble(message, topic, agent, null, adhoc, lookback, source, broadcastAgents, displayFlowRoute);
   const userTopicTag = userBubble ? userBubble.querySelector('.topic-tag') : null;
   if (chainMarker) messages.appendChild(chainMarker);
   if (userBubble) {
@@ -3977,11 +3992,9 @@ async function sendMessage(text, opts = {}) {
               const newThinkingTag = makeTopicTag(topic, resolvedAgent, { adhoc: resolvedAdhoc, clickable: true, lookback, backend: metaRuntime || null });
               thinkingHeaderTag.replaceWith(newThinkingTag);
               thinkingHeaderTag = newThinkingTag;
-              // Broadcast's shared user bubble shows the full route (all
-              // targets), not any single target's resolved agent — leave it
-              // alone here, or the first target to resolve would stomp it
-              // down to just its own #topic@agent.
-              if (userBubble && !broadcastAgents) {
+              // Flow/broadcast user bubbles show the full live route, not
+              // whichever single agent reported meta first.
+              if (userBubble && !broadcastAgents && !displayFlowRoute) {
                 const newUserTag = makeTopicTag(topic, resolvedAgent, { adhoc: resolvedAdhoc, clickable: true, lookback, backend: metaRuntime || null });
                 if (userTopicTag) {
                   userTopicTag.replaceWith(newUserTag);
@@ -4243,6 +4256,7 @@ async function sendOriginBroadcast(text, opts = {}) {
   const parsed = parseInput(text);
   const originTargets = parsed.broadcastAgents || parsed.flowOrigins || null;
   if (!originTargets) return;
+  const displayFlowRoute = parsed.route || (topicChipEl?.classList.contains('route-chain') ? topicChipEl.textContent.trim() : null);
   if (opts.source !== 'system') {
     if (parsed.broadcastAgents) {
       setTopicChip(parsed.topic, null, false, 0, { route: parsed.route, broadcastAgents: parsed.broadcastAgents });
@@ -4266,6 +4280,7 @@ async function sendOriginBroadcast(text, opts = {}) {
         ...opts,
         broadcastTarget: target,
         flowRoute: parsed.route,
+        displayFlowRoute,
         updateComposerRoute: false,
         onFlowRunId: resolveSharedFlowRunId,
       });
@@ -4274,6 +4289,7 @@ async function sendOriginBroadcast(text, opts = {}) {
       ...opts,
       broadcastTarget: target,
       flowRoute: parsed.route,
+      displayFlowRoute,
       flowRunId,
       updateComposerRoute: false,
       suppressUserBubble: true,
@@ -5289,7 +5305,7 @@ async function pollMessageStatus(msgId, contentEl, bubbleEl, stopBtn = null) {
   }, 2000);
 }
 
-function makeUserBubble(text, topic, agent, backendFallback = null, adhoc = false, lookback = 0, source = 'human', broadcastAgents = null) {
+function makeUserBubble(text, topic, agent, backendFallback = null, adhoc = false, lookback = 0, source = 'human', broadcastAgents = null, flowRoute = null) {
   const div = document.createElement('div');
   div.className = 'msg user';
   if (source === 'system') {
@@ -5301,9 +5317,11 @@ function makeUserBubble(text, topic, agent, backendFallback = null, adhoc = fals
     div.appendChild(label);
   }
   const content = document.createElement('div');
-  const showTag = broadcastAgents || (topic && (topic !== 'default' || agent || adhoc));
+  const showTag = flowRoute || broadcastAgents || (topic && (topic !== 'default' || agent || adhoc));
   if (showTag) {
-    const tag = broadcastAgents
+    const tag = flowRoute
+      ? makeFlowRouteTag(flowRoute)
+      : broadcastAgents
       ? makeBroadcastRouteTag(broadcastAgents)
       : makeTopicTag(topic, agent || backendFallback, { clickable: true, adhoc, lookback });
     content.appendChild(tag);
@@ -8343,7 +8361,7 @@ async function loadStats() {
 
   const chartWrap = document.getElementById('stats-chart-wrap');
   if (!rows.length) {
-    statsContent.innerHTML = '<div class="empty">No data yet.</div>';
+    statsContent.innerHTML = '<div class="empty">No results for the current filters. Try widening the time range or clearing agent/topic/route filters if you have usage history.</div>';
     _destroyChart();
     if (chartWrap) chartWrap.hidden = true;
     return;

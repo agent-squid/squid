@@ -700,6 +700,7 @@ test('composer starts join origins under one reduced flow route', async ({ page 
   await page.locator('#input').press('Enter');
 
   await expect.poll(() => chatBodies.length).toBe(2);
+  await expect(page.locator('.msg.user .topic-tag')).toHaveText('#squid@a+@b>@c');
   await expect(page.locator('.route-chain-marker')).toHaveText(['#squid@a>@c', '#squid@b>@c']);
   expect(chatBodies.map(b => b.agent)).toEqual(['a', 'b']);
   expect(chatBodies.every(b => b.topic === 'squid')).toBe(true);
