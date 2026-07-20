@@ -775,7 +775,7 @@ function parseRouteChain(route) {
     join: originStep.kind === 'join',
     fanout: uniqueTargetCount > 1,
     multiOrigin: uniqueOriginCount > 1,
-    complex: originStep.kind === 'join' || uniqueTargetCount > 1 || uniqueOriginCount > 1 || operator === '=>' || operator.startsWith('=') || rounds > 1 || operator.includes(':'),
+    complex: originStep.kind === 'join' || uniqueTargetCount > 1 || uniqueOriginCount > 1 || /^=\d/.test(operator) || rounds > 1 || operator.includes(':'),
     route: routeText,
   };
 }
@@ -955,7 +955,7 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0, opts = {}) {
       }
     });
   } else if (route && parsedRoute?.complex) {
-    topicChipEl.textContent = route;
+    appendColoredRouteTokens(topicChipEl, route);
   } else {
     if (agent) {
       const aSpan = document.createElement('span');
@@ -2313,6 +2313,7 @@ function parseHistoryRouteTarget(route) {
       chainOperator: chain.operator,
       chainRounds: chain.rounds,
       chainTargetTopic: chain.targetTopic,
+      flowOrigins: chain.origins,
     };
   }
   const broadcast = parseOriginBroadcast(route);
@@ -2346,6 +2347,7 @@ function applyRouteTarget(routeTarget) {
     chainRounds: routeTarget.chainRounds,
     chainTargetTopic: routeTarget.chainTargetTopic,
     broadcastAgents: routeTarget.broadcastAgents,
+    flowOrigins: routeTarget.flowOrigins,
   });
   input.value = '';
   input.setSelectionRange(0, 0);
@@ -2364,7 +2366,9 @@ function routeHistoryAutocompleteItems(currentRoute = '') {
     if (!routeKey || !routeTarget || seen.has(dedupeKey)) return;
     seen.add(dedupeKey);
     items.push({
-      label: _acRouteHtml(routeKey),
+      routeHtml: _acRouteHtml(routeKey),
+      routeSwitchIcon: false,
+      label: '',
       insert: '',
       trail: false,
       routeTarget,
@@ -2383,6 +2387,37 @@ function routeHistoryAutocompleteItems(currentRoute = '') {
   return items;
 }
 
+function appendMatchingRouteHistoryItems(items, prefix, seenRoutes = null) {
+  const lowerPrefix = String(prefix || '').toLowerCase();
+  if (!lowerPrefix.startsWith('#')) return items;
+  const seen = seenRoutes || new Set(items.map(item => {
+    const route = item.routeTarget?.route || item.insert || '';
+    return normalizePromptHistoryRoute(route).toLowerCase();
+  }).filter(Boolean));
+
+  for (const entry of promptHistory) {
+    if (hiddenPromptKeys.has(promptHistoryDedupKey(entry))) continue;
+    const { route, prompt } = splitPromptHistoryEntry(entry);
+    const routeKey = normalizePromptHistoryRoute(route);
+    if (!routeKey || !routeKey.toLowerCase().startsWith(lowerPrefix)) continue;
+    const dedupeKey = routeKey.toLowerCase();
+    if (seen.has(dedupeKey)) continue;
+    const routeTarget = parseHistoryRouteTarget(routeKey);
+    if (!routeTarget) continue;
+    seen.add(dedupeKey);
+    items.push({
+      routeHtml: _acRouteHtml(routeKey),
+      routeSwitchIcon: false,
+      label: '',
+      insert: '',
+      trail: false,
+      routeTarget,
+      sub: prompt ? _acLastPrompt(prompt) : '',
+    });
+  }
+  return items;
+}
+
 function composerHasOnlyRoute() {
   const value = input.value.trim();
   if (!value) return true;
@@ -2391,13 +2426,19 @@ function composerHasOnlyRoute() {
 
 function composerRouteForRouteHistory() {
   const value = input.value.trim();
-  if (value) return routeFromParsedInput(parseInput(value));
+  if (value) {
+    const chain = parseRouteChain(value);
+    if (chain) return chain.route;
+    const broadcast = parseOriginBroadcast(value);
+    if (broadcast) return broadcast.route;
+    return routeFromParsedInput(parseInput(value));
+  }
   return currentPromptHistoryRoute();
 }
 
 function openRouteHistoryAutocomplete(direction) {
   const items = routeHistoryAutocompleteItems(composerRouteForRouteHistory());
-  if (items.length <= 1) return false;
+  if (!items.length) return false;
   const currentIndex = Math.max(0, items.findIndex(item => item.currentRoute));
   _acRender(items, 'Routes');
   if (direction === 'previous') {
@@ -3173,7 +3214,7 @@ function semanticRouteBackspace() {
     const before = route.slice(0, caret);
     const after = route.slice(caret);
     const agentMatch = before.match(/^(#\w+@)\w+$/);
-    const chainTargetMatch = before.match(/^(#\w+@\w+!?(?:(?:<>)|>)@)\w+$/);
+    const chainTargetMatch = before.match(/^(#\w+@\w+!?(?:(?:<>)|=>|>)@)\w+$/);
     const chainOriginMatch = before.match(/^(#\w+@)\w+$/);
     // Origin Broadcast (ADR-0032): drop the trailing `,#topic`, `,@agent`, or
     // `,#topic@agent` segment as one unit, same as a chain target —
@@ -3189,7 +3230,7 @@ function semanticRouteBackspace() {
     } else if (chainTargetMatch && (caret === routeEnd || after.startsWith('!'))) {
       nextRoute = chainTargetMatch[1] + after;
       nextCaret = chainTargetMatch[1].length;
-    } else if (before.endsWith('@') && /^#\w+@\w+!?(?:(?:<>)|>)@$/.test(before) && (caret === routeEnd || after.startsWith('!'))) {
+    } else if (before.endsWith('@') && /^#\w+@\w+!?(?:(?:<>)|=>|>)@$/.test(before) && (caret === routeEnd || after.startsWith('!'))) {
       nextRoute = before.slice(0, -2) + after;
       nextCaret = before.length - 2;
     } else if (chainOriginMatch && (after.startsWith('>@') || after.startsWith('<>@') || after.startsWith('!>@') || after.startsWith('!<>@'))) {
@@ -3352,8 +3393,10 @@ async function sendMessage(text, opts = {}) {
     (hasHistoryFilterScope() && !itemMatchesFilter({ topic, agent, adhoc, flow_route: flowRoute }, historyFilter));
 
   let chainMarker = null;
-  if (source === 'human' && route && chainTarget && !opts.suppressUserBubble) {
-    chainMarker = makeRouteChainMarker(route, {
+  const renderSuppressedHeadMarker = opts.suppressUserBubble && flowOrigins && flowOrigins.length > 1;
+  if (source === 'human' && route && chainTarget && (!opts.suppressUserBubble || renderSuppressedHeadMarker)) {
+    const markerRoute = routeChainMarkerRouteForHead(route, topic, agent, adhoc);
+    chainMarker = makeRouteChainMarker(markerRoute, {
       turnCounts: _routeChainTurnCounts(topic, agent, adhoc, chainTarget, chainTargetFresh, chainTargetTopic),
     });
     chainMarker.dataset.topic = topic;
@@ -3545,6 +3588,56 @@ async function sendMessage(text, opts = {}) {
   let liveSessionTurnCount = 0;
   const liveToolEvents = [];
   const controller = new AbortController();
+  let quotaFinalized = false;
+
+  async function finalizeQuotaTracking() {
+    if (quotaFinalized) return;
+    quotaFinalized = true;
+    // Quota is a backend-wide meter, so this before/after difference is only an
+    // observational signal. Parallel prompts have overlapping windows and can
+    // double-count each other's usage; provider reporting lag can shift usage to
+    // a later turn. Do not treat or aggregate it as exact per-prompt attribution.
+    // See ADR-0023.
+    await new Promise(r => setTimeout(r, 1000));
+    const quotaAfterSnapshot = await fetchQuotaForBackend(quotaBackend);
+    // Balance-based gauges (DeepSeek/Kimi) with a max budget: use the computed
+    // percentage so the delta represents budget-% change, not raw dollars.
+    const usePct = isBalanceGauge(quotaBackend)
+      && quotaBeforeSnapshot?.pct != null && quotaAfterSnapshot?.pct != null;
+    const quotaBefore = usePct ? quotaBeforeSnapshot.pct : (quotaBeforeSnapshot?.raw ?? null);
+    const quotaAfter = usePct ? quotaAfterSnapshot.pct : (quotaAfterSnapshot?.raw ?? null);
+    if (quotaBefore !== null && quotaAfter !== null && quotaAfter !== quotaBefore) {
+      // Balance-based gauges report a decreasing balance; flip sign so usage
+      // always shows as positive (consistent with utilization % gauges).
+      const isBalanceMeter = isBalanceGauge(quotaBackend) && !usePct;
+      const rawDiff = quotaAfter - quotaBefore;
+      const d = Math.round((isBalanceMeter ? -rawDiff : rawDiff) * 10) / 10;
+      if (statsEl && d > 0) {
+        const deltaEl = statsEl.querySelector('.stats-quota-delta');
+        deltaEl.textContent = `  ·  +${d} pp`;
+        deltaEl.title = 'Observed account quota-meter change; not exact message usage';
+      }
+      // Persist the sign exactly as intended. The DB layer has no backend/gauge
+      // context, so balance snapshots are normalized here instead.
+      const recordQuotaBefore = isBalanceMeter && quotaBefore > quotaAfter ? quotaAfter : quotaBefore;
+      const recordQuotaAfter = isBalanceMeter && quotaBefore > quotaAfter ? quotaBefore : quotaAfter;
+      if (msgId) {
+        fetch(`/chat/${msgId}/quota-delta`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ before: recordQuotaBefore, after: recordQuotaAfter }),
+        }).catch(() => {});
+      }
+      if (lastSessionId) {
+        fetch('/stats/quota-delta', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: lastSessionId, before: recordQuotaBefore, after: recordQuotaAfter }),
+        }).catch(() => {});
+      }
+    }
+    quotaTrackEnd(quotaBackend);
+  }
 
   function attachMsgId(id) {
     const parsed = parseInt(id, 10);
@@ -3660,10 +3753,27 @@ async function sendMessage(text, opts = {}) {
 
   function startStatusFallback(id) {
     if (statusTimer || !id) return;
+    const MAX_POLLS = 960;  // 32 min at 2s intervals — covers 30 min default timeout
+    let count = 0;
+    const timeoutFallback = () => {
+      completedFromStatus = true;
+      stopStatusFallback();
+      if (raw || firstDataReceived) {
+        parkInterruptedPartial(raw, 'Recovery timed out.');
+      } else {
+        freezeThinking();
+        showError('Response timed out.');
+      }
+      finalizeQuotaTracking();
+    };
     const doPoll = async () => {
+      count++;
       try {
         const statusRes = await fetch(`/chat/${id}/status`);
-        if (!statusRes.ok) return;
+        if (!statusRes.ok) {
+          if (count >= MAX_POLLS) timeoutFallback();
+          return;
+        }
         const data = await statusRes.json();
         if (data.status === 'done') {
           if (completionRendered || completedFromStatus) return;
@@ -3703,7 +3813,9 @@ async function sendMessage(text, opts = {}) {
           renderCompletionTools(storedTools.length ? storedTools : liveToolEvents);
           addCompletionTimestamp();
           scrollToBottom();
+          if (flowRunId && msgId) watchFlowRun(flowRunId, msgId);
           controller.abort();
+          finalizeQuotaTracking();
         } else if (data.status === 'error') {
           if (!String(data.content || '').trim()) return;
           completedFromStatus = true;
@@ -3715,6 +3827,7 @@ async function sendMessage(text, opts = {}) {
             showError(data.content);
           }
           controller.abort();
+          finalizeQuotaTracking();
         } else if (data.status === 'pending') {
           if (data.content && !thinkingFrozen) raw = data.content;
           // Recover status from DB once. Use length comparison so the richer source
@@ -3738,7 +3851,10 @@ async function sendMessage(text, opts = {}) {
           }
           if (!thinkingFrozen) updateThinkingPreview();
         }
-      } catch {}
+        if (count >= MAX_POLLS && !completedFromStatus && !completionRendered) timeoutFallback();
+      } catch {
+        if (count >= MAX_POLLS) timeoutFallback();
+      }
     };
     _activePollImmediate = doPoll;
     doPoll();
@@ -4107,50 +4223,7 @@ async function sendMessage(text, opts = {}) {
     addCompletionTimestamp();
   }
 
-  // Quota is a backend-wide meter, so this before/after difference is only an
-  // observational signal. Parallel prompts have overlapping windows and can
-  // double-count each other's usage; provider reporting lag can shift usage to
-  // a later turn. Do not treat or aggregate it as exact per-prompt attribution.
-  // See ADR-0023.
-  await new Promise(r => setTimeout(r, 1000));
-  const quotaAfterSnapshot = await fetchQuotaForBackend(quotaBackend);
-  // Balance-based gauges (DeepSeek/Kimi) with a max budget: use the computed
-  // percentage so the delta represents budget-% change, not raw dollars.
-  const usePct = isBalanceGauge(quotaBackend)
-    && quotaBeforeSnapshot?.pct != null && quotaAfterSnapshot?.pct != null;
-  const quotaBefore = usePct ? quotaBeforeSnapshot.pct : (quotaBeforeSnapshot?.raw ?? null);
-  const quotaAfter = usePct ? quotaAfterSnapshot.pct : (quotaAfterSnapshot?.raw ?? null);
-  if (quotaBefore !== null && quotaAfter !== null && quotaAfter !== quotaBefore) {
-    // Balance-based gauges report a decreasing balance; flip sign so usage
-    // always shows as positive (consistent with utilization % gauges).
-    const isBalanceMeter = isBalanceGauge(quotaBackend) && !usePct;
-    const rawDiff = quotaAfter - quotaBefore;
-    const d = Math.round((isBalanceMeter ? -rawDiff : rawDiff) * 10) / 10;
-    if (statsEl && d > 0) {
-      const deltaEl = statsEl.querySelector('.stats-quota-delta');
-      deltaEl.textContent = `  ·  +${d} pp`;
-      deltaEl.title = 'Observed account quota-meter change; not exact message usage';
-    }
-    // Persist the sign exactly as intended. The DB layer has no backend/gauge
-    // context, so balance snapshots are normalized here instead.
-    const recordQuotaBefore = isBalanceMeter && quotaBefore > quotaAfter ? quotaAfter : quotaBefore;
-    const recordQuotaAfter = isBalanceMeter && quotaBefore > quotaAfter ? quotaBefore : quotaAfter;
-    if (msgId) {
-      fetch(`/chat/${msgId}/quota-delta`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ before: recordQuotaBefore, after: recordQuotaAfter }),
-      }).catch(() => {});
-    }
-    if (lastSessionId) {
-      fetch('/stats/quota-delta', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: lastSessionId, before: recordQuotaBefore, after: recordQuotaAfter }),
-      }).catch(() => {});
-    }
-  }
-  quotaTrackEnd(quotaBackend);
+  if (!detachedPolling) await finalizeQuotaTracking();
   return { flowRunId, msgId };
 }
 
@@ -4757,7 +4830,7 @@ function makeHistoryPromptToggle(prompt) {
 }
 
 function historyRouteChainFromPrompt(prompt) {
-  const match = String(prompt || '').match(/(?:^|\n)Route:\s*(#\w+@\w+!?(?:(?:<>)|>)(?:#\w+)?@\w+!?)(?:\s|$)/);
+  const match = String(prompt || '').match(/(?:^|\n)Route:\s*(#\w+@\w+!?(?:(?:<>)|=>|>)(?:#\w+)?@\w+!?)(?:\s|$)/);
   return match ? normalizePromptHistoryRoute(match[1]) : '';
 }
 
@@ -4935,6 +5008,7 @@ function makeWipBubble(item) {
   bubble.dataset.msgId = String(item.id);
   bubble.dataset.topic = item.topic || 'default';
   if (item.agent) bubble.dataset.agent = item.agent;
+  if (item.adhoc != null) bubble.dataset.adhoc = item.adhoc ? 'true' : 'false';
 
   // Recovered pending rows have no preceding user bubble after a refresh, so
   // give them the same prompt-bearing header as completed history responses.
@@ -5132,13 +5206,13 @@ async function pollPendingItem(item, wipBubble) {
     count++;
     try {
       const res = await fetch(`/chat/${item.id}/status`);
-      if (!res.ok) { clearInterval(timer); return; }
+      if (!res.ok) return;
       const data = await res.json();
       if (data.status === 'done' || (data.status === 'error' && String(data.content || '').trim())) {
-        clearInterval(timer);
+        cancelPendingPoll(wipBubble);
         await replacePendingWithStoredItem(item, wipBubble);
       } else if (count >= MAX_POLLS) {
-        clearInterval(timer);
+        cancelPendingPoll(wipBubble);
         const content = wipBubble.querySelector('.thinking-live');
         if (content) content.innerHTML += '<br><span class="msg-error">Timed out.</span>';
         updateThinkingHeightButton(wipBubble);
@@ -5162,9 +5236,23 @@ async function pollPendingItem(item, wipBubble) {
           updateThinkingHeightButton(wipBubble);
         }
       }
-    } catch { clearInterval(timer); }
+    } catch {}
   }, 2000);
   pendingPollTimers.set(wipBubble, timer);
+}
+
+function recoverPendingBubbles() {
+  document.querySelectorAll('#messages > .msg-thinking.history-item:not(.msg-thinking-done)[data-msg-id]').forEach(bubble => {
+    const id = parseInt(bubble.dataset.msgId || '', 10);
+    if (!Number.isFinite(id) || id <= 0) return;
+    cancelPendingPoll(bubble);
+    reconnectPendingItem({
+      id,
+      topic: bubble.dataset.topic || 'default',
+      agent: bubble.dataset.agent || null,
+      adhoc: bubble.dataset.adhoc === 'true',
+    }, bubble);
+  });
 }
 
 async function pollMessageStatus(msgId, contentEl, bubbleEl, stopBtn = null) {
@@ -5245,7 +5333,11 @@ function makeRouteChainMarker(route, opts = {}) {
     return div;
   }
   if (chain.complex) {
-    div.textContent = chain.route || route || '';
+    appendColoredRouteTokens(div, chain.route || route || '', {
+      topicClass: 'tag-topic',
+      agentClass: 'tag-agent',
+      freshClass: 'tag-adhoc',
+    });
     return div;
   }
   const { topic, origin: originAgent, originFresh, operator, target: targetAgent, targetFresh, targetTopic } = chain;
@@ -5296,6 +5388,17 @@ function makeRouteChainMarker(route, opts = {}) {
   }
   appendRouteChainTurnCount(div, opts.turnCounts?.target || 0);
   return div;
+}
+
+function routeChainMarkerRouteForHead(route, topic, agent, adhoc) {
+  const chain = parseRouteChain(route);
+  if (!chain?.multiOrigin || chain.targets.length !== 1) return route;
+  const origin = chain.origins.find(o =>
+    o.topic === topic && o.agent === agent && !!o.fresh === !!adhoc
+  );
+  if (!origin) return route;
+  const target = chain.targets[0];
+  return _chainRouteText(origin.topic, origin.agent, target.agent, !!target.fresh, !!origin.fresh, chain.operator, target.topic);
 }
 
 // ---- Squid Flow playground view (ui/flow-lang.js) ------------------------
@@ -6448,7 +6551,8 @@ function initCursorQuota() {
 let statsPeriod = 'turn';
 let statsBreakdown = '';
 // anchor: null means "now"; otherwise an ISO timestamp the days/hours window ends at.
-let statsFilters = { days: -3, agents: [], topics: [], adhoc: 'all', anchor: null };
+let statsFilters = { days: -3, agents: [], topics: [], adhoc: 'all', status: [], anchor: null };
+const STATS_STATUS_LABELS = { done: 'Complete', error: 'Error', cancelled: 'Cancelled' };
 // statsFilters.days doubles as an hours flag: negative values mean
 // "-days" hours (e.g. -3 = 3h). Only the 'turn' grain offers sub-day ranges,
 // since coarser grains bucket by hour/day/week and hours would be meaningless there.
@@ -7406,9 +7510,16 @@ function _statsMultiLabel(values, allLabel, singular, prefix) {
   return `${values.length} ${singular}s`;
 }
 
+function _statsStatusLabel(values) {
+  if (!values.length) return 'All Status';
+  if (values.length === 1) return STATS_STATUS_LABELS[values[0]] || values[0];
+  return `${values.length} Statuses`;
+}
+
 function _updateStatsFilterLabels() {
   const topicToggle = document.getElementById('sf-topic-toggle');
   const agentToggle = document.getElementById('sf-agent-toggle');
+  const statusToggle = document.getElementById('sf-status-toggle');
   const adhocSelect = document.getElementById('sf-adhoc');
   if (topicToggle) {
     topicToggle.textContent = _statsMultiLabel(statsFilters.topics, 'All Topics', 'Topic', '#');
@@ -7417,6 +7528,10 @@ function _updateStatsFilterLabels() {
   if (agentToggle) {
     agentToggle.textContent = _statsMultiLabel(statsFilters.agents, 'All Agents', 'Agent', '@');
     agentToggle.classList.toggle('active', statsFilters.agents.length > 0);
+  }
+  if (statusToggle) {
+    statusToggle.textContent = _statsStatusLabel(statsFilters.status);
+    statusToggle.classList.toggle('active', statsFilters.status.length > 0);
   }
   if (adhocSelect) adhocSelect.classList.toggle('active', statsFilters.adhoc !== 'all');
 }
@@ -7435,13 +7550,22 @@ function _syncStatsTopicMenuSelection() {
   _updateStatsFilterLabels();
 }
 
+function _syncStatsStatusMenuSelection() {
+  document.querySelectorAll('#sf-status-menu input[type="checkbox"]').forEach(input => {
+    input.checked = statsFilters.status.includes(input.value);
+  });
+  _updateStatsFilterLabels();
+}
+
 function _resetStatsDimensionFilters() {
   statsFilters.topics = [];
   statsFilters.agents = [];
   statsFilters.adhoc = 'all';
+  statsFilters.status = [];
   document.getElementById('sf-adhoc').value = 'all';
   _syncStatsTopicMenuSelection();
   _syncStatsAgentMenuSelection();
+  _syncStatsStatusMenuSelection();
 }
 
 function _updateStatsBreakdownUi() {
@@ -7536,6 +7660,7 @@ function _statsQueryParams({ includeTz = false } = {}) {
   if (statsFilters.agents.length) params.set('agent', statsFilters.agents.join(','));
   if (statsFilters.topics.length) params.set('topic', statsFilters.topics.join(','));
   if (statsFilters.adhoc !== 'all') params.set('adhoc', statsFilters.adhoc);
+  if (statsFilters.status.length) params.set('status', statsFilters.status.join(','));
   const series = _statsChartSeries();
   params.set('chart_metrics', series.map(s => s.metric).join(','));
   params.set('chart_aggs', series.map(s => s.agg).join(','));
@@ -7550,6 +7675,7 @@ function _statsState() {
       topic: { mode: statsFilters.topics.length ? 'selected' : 'auto_top', values: [...statsFilters.topics] },
       agent: { mode: statsFilters.agents.length ? 'selected' : 'auto_top', values: [...statsFilters.agents] },
       session_type: { mode: statsFilters.adhoc === 'all' ? 'all' : 'selected', values: statsFilters.adhoc === 'all' ? [] : [statsFilters.adhoc] },
+      status: { mode: statsFilters.status.length ? 'selected' : 'all', values: [...statsFilters.status] },
     },
     breakdown: { key: statsBreakdown, sort: { ..._statsBreakdownColumnSort } },
     measure: {
@@ -7568,6 +7694,7 @@ function _overallStatsState() {
       topic: { mode: 'auto_top', values: [] },
       agent: { mode: 'auto_top', values: [] },
       session_type: { mode: 'all', values: [] },
+      status: { mode: 'all', values: [] },
     },
     breakdown: { key: '', sort: { mode: 'name', dir: 'asc' } },
     measure: { primary: { metric: 'turns', agg: 'sum' }, series: [], visible: [...DEFAULT_STATS_MEASURES] },
@@ -7582,6 +7709,7 @@ function _deepDiveStatsState() {
       topic: { mode: 'auto_top', values: [] },
       agent: { mode: 'auto_top', values: [] },
       session_type: { mode: 'all', values: [] },
+      status: { mode: 'all', values: [] },
     },
     breakdown: { key: '', sort: { mode: 'name', dir: 'asc' } },
     measure: {
@@ -7608,6 +7736,7 @@ function _applyStatsState(state) {
   statsFilters.agents = dims.agent?.mode === 'selected' ? [...(dims.agent.values || [])] : [];
   const sessionValues = dims.session_type?.values || [];
   statsFilters.adhoc = dims.session_type?.mode === 'all' ? 'all' : (sessionValues[0] || 'all');
+  statsFilters.status = dims.status?.mode === 'selected' ? [...(dims.status.values || [])] : [];
   const primaryMeasure = _parseStatsMeasureState(state?.measure?.primary, 'turns');
   statsChartY1 = primaryMeasure.metric || 'turns';
   statsChartAggY1 = primaryMeasure.agg;
@@ -7643,6 +7772,7 @@ function _applyStatsState(state) {
   });
   _syncStatsTopicMenuSelection();
   _syncStatsAgentMenuSelection();
+  _syncStatsStatusMenuSelection();
   _updateStatsMeasureLabel();
   _updateStatsBreakdownUi();
 }
@@ -8532,6 +8662,7 @@ function initStats() {
   const filterMenus = [
     { wrap: document.getElementById('sf-topic-filter'), toggle: document.getElementById('sf-topic-toggle'), menu: document.getElementById('sf-topic-menu'), key: 'topics' },
     { wrap: document.getElementById('sf-agent-filter'), toggle: document.getElementById('sf-agent-toggle'), menu: document.getElementById('sf-agent-menu'), key: 'agents' },
+    { wrap: document.getElementById('sf-status-filter'), toggle: document.getElementById('sf-status-toggle'), menu: document.getElementById('sf-status-menu'), key: 'status' },
   ];
   filterMenus.forEach(({ toggle, menu, key }) => {
     toggle.addEventListener('click', e => {
@@ -9802,11 +9933,14 @@ function _acRender(items, title = 'Suggestions') {
       if (routeBtn) {
         e.preventDefault();
         const idx = Number(routeBtn.dataset.i);
-        const fullEntry = idx >= 0 && idx < acItems.length ? acItems[idx].fullEntry : null;
+        const item = idx >= 0 && idx < acItems.length ? acItems[idx] : null;
+        const fullEntry = item?.fullEntry || null;
         if (fullEntry) {
           hideAutocomplete();
           applyPromptHistoryEntry(fullEntry);
           input.focus();
+        } else if (item) {
+          _acSelect(idx);
         }
         return;
       }
@@ -9912,6 +10046,62 @@ function _agentStyleAttr(agentName, backendFallback = null) {
   return ` style="--agent-color:${agentSlugColor(agentName, backendFallback)}" data-agent-name="${escapeHtml(agentName || '')}"${backendFallback ? ` data-backend-fallback="${escapeHtml(backendFallback)}"` : ''}`;
 }
 
+function _coloredRouteHtml(route) {
+  const src = String(route || '');
+  let out = '';
+  let last = 0;
+  const tokenRe = /#\w+|@\w+!?/g;
+  for (const match of src.matchAll(tokenRe)) {
+    const token = match[0];
+    out += escapeHtml(src.slice(last, match.index));
+    if (token.startsWith('#')) {
+      out += `<span class="ac-topic">${escapeHtml(token)}</span>`;
+    } else {
+      const agent = token.slice(1).replace(/!$/, '');
+      out += `<span class="ac-agent"${_agentStyleAttr(agent)}>${escapeHtml(token)}</span>`;
+    }
+    last = match.index + token.length;
+  }
+  out += escapeHtml(src.slice(last));
+  return out;
+}
+
+function appendColoredRouteTokens(parent, route, opts = {}) {
+  const topicClass = opts.topicClass || 'chip-topic';
+  const agentClass = opts.agentClass || 'chip-agent';
+  const freshClass = opts.freshClass || 'chip-adhoc';
+  const src = String(route || '');
+  let last = 0;
+  const tokenRe = /#\w+|@\w+!?/g;
+  for (const match of src.matchAll(tokenRe)) {
+    const token = match[0];
+    if (match.index > last) parent.appendChild(document.createTextNode(src.slice(last, match.index)));
+    if (token.startsWith('#')) {
+      const span = document.createElement('span');
+      span.className = topicClass;
+      span.textContent = token;
+      parent.appendChild(span);
+    } else {
+      const fresh = token.endsWith('!');
+      const agent = token.slice(1).replace(/!$/, '');
+      const agentSpan = document.createElement('span');
+      agentSpan.className = agentClass;
+      agentSpan.textContent = '@' + agent;
+      setAgentSlugColor(agentSpan, agent);
+      parent.appendChild(agentSpan);
+      if (fresh) {
+        const freshSpan = document.createElement('span');
+        freshSpan.className = freshClass;
+        freshSpan.textContent = '!';
+        setAgentSlugColor(freshSpan, agent);
+        parent.appendChild(freshSpan);
+      }
+    }
+    last = match.index + token.length;
+  }
+  if (last < src.length) parent.appendChild(document.createTextNode(src.slice(last)));
+}
+
 function _acRouteLabel(topic, agent = '', backendFallback = null) {
   const cleanAgent = agent.replace(/[!]\d*$/, '');
   return `<span class="ac-topic">#${escapeHtml(topic)}</span>` +
@@ -9921,7 +10111,7 @@ function _acRouteLabel(topic, agent = '', backendFallback = null) {
 function _acRouteHtml(route) {
   const cm = parseRouteChain(route);
   if (cm) {
-    if (cm.complex) return escapeHtml(cm.route || route);
+    if (cm.complex) return _coloredRouteHtml(cm.route || route);
     return _acRouteLabel(cm.topic, cm.origin + (cm.originFresh ? '!' : '')) +
       `<span class="ac-route-chain-arrow">${escapeHtml(cm.operator)}</span>` +
       `<span class="ac-agent"${_agentStyleAttr(cm.target)}>@${escapeHtml(cm.target)}${cm.targetFresh ? '!' : ''}</span>`;
@@ -9988,21 +10178,24 @@ async function updateAutocomplete() {
   // insert literal text, not set a route — so skip it and fall through to
   // the same handling any other message text gets (prompt history, below).
   const routeSyntaxActive = !stickyChip || editingExpandedSlug;
-  const chainSyntaxActive = routeSyntaxActive || /^#\w+@\w+!?(?:<>?|>|=>)/.test(slugVal);
+  const chainSyntaxActive = routeSyntaxActive || /^#\w+@\w+!?(?:[+,](?:#\w+)?(?:@\w+)?!?)*(?:<>?|>|=>)/.test(slugVal);
+  const broadcastSyntaxActive = routeSyntaxActive || /^#\w+@\w+!?(?:,(?:#\w+@?\w*|@\w*|#\w+|\w*)!?)*,$/.test(slugVal);
+  const aliasSyntaxActive = routeSyntaxActive || /^#\w+@\w*$/.test(slugVal);
   const mTopic = routeSyntaxActive && slugVal.match(/^#(\w*)[!]?$/);
-  const mChainAlias = chainSyntaxActive && slugVal.match(/^#(\w+)@(\w+)(!)?(<>?|>)(?:@?)(\w*)(!)?$/);
-  const mChainTopicTarget = chainSyntaxActive && slugVal.match(/^#(\w+)@(\w+)(!)?(<>?|>)#(\w*)$/);
-  const mAlias = routeSyntaxActive && slugVal.match(/^#(\w+)@(\w*)(!\d*)?$/);
+  const mMultiOriginChainAlias = chainSyntaxActive && slugVal.match(/^(#\w+@\w+!?(?:[+,](?:#\w+)?(?:@\w+)?!?)+)(<>?|>|=>)(?:@?)(\w*)(!)?$/);
+  const mChainAlias = chainSyntaxActive && slugVal.match(/^#(\w+)@(\w+)(!)?(<>?|=>|>)(?:@?)(\w*)(!)?$/);
+  const mChainTopicTarget = chainSyntaxActive && slugVal.match(/^#(\w+)@(\w+)(!)?(<>?|=>|>)#(\w*)$/);
+  const mAlias = aliasSyntaxActive && slugVal.match(/^#(\w+)@(\w*)(!\d*)?$/);
   // Origin Broadcast (ADR-0032): autocomplete for whichever trailing atom is
   // currently being typed after the last comma — everything before it (the
-  // already-typed atoms) is preserved verbatim, never rewritten. `,#topic`
-  // suggests topics; `,@agent` or `,#topic@agent` suggest agents, scoped to
-  // the explicit topic if one was typed, else to the rolling-anchor topic
-  // that atom would currently inherit.
+  // already-typed atoms) is preserved verbatim, never rewritten. `,` and
+  // `,@agent` suggest agents; `,#topic` suggests topics; `,#topic@agent`
+  // suggests agents scoped to the explicit topic if one was typed, else to
+  // the rolling-anchor topic that atom would currently inherit.
   const _BROADCAST_PREFIX_SRC = '#\\w+@\\w+!?(?:,(?:#\\w+@\\w+|#\\w+|@\\w+)!?)*';
-  const mBroadcastFull = routeSyntaxActive && slugVal.match(new RegExp(`^(${_BROADCAST_PREFIX_SRC}),#(\\w+)@(\\w*)$`));
-  const mBroadcastAgent = routeSyntaxActive && slugVal.match(new RegExp(`^(${_BROADCAST_PREFIX_SRC}),@(\\w*)$`));
-  const mBroadcastTopic = routeSyntaxActive && slugVal.match(new RegExp(`^(${_BROADCAST_PREFIX_SRC}),#(\\w*)$`));
+  const mBroadcastFull = broadcastSyntaxActive && slugVal.match(new RegExp(`^(${_BROADCAST_PREFIX_SRC}),#(\\w+)@(\\w*)$`));
+  const mBroadcastAgent = broadcastSyntaxActive && slugVal.match(new RegExp(`^(${_BROADCAST_PREFIX_SRC}),@?(\\w*)$`));
+  const mBroadcastTopic = broadcastSyntaxActive && slugVal.match(new RegExp(`^(${_BROADCAST_PREFIX_SRC}),#(\\w*)$`));
   if (mBroadcastFull || mBroadcastAgent) {
     const prefix = mBroadcastFull ? mBroadcastFull[1] : mBroadcastAgent[1];
     const explicitTopic = mBroadcastFull ? mBroadcastFull[2].toLowerCase() : null;
@@ -10020,7 +10213,7 @@ async function updateAutocomplete() {
     if (input.value !== val) return;
     const usedNames = new Set(history.map(h => h.agent));
     const backendByAgent = new Map(agents.map(a => [a.name, a.backend]));
-    const items = [];
+    let items = [];
     const topicPrefix = explicitTopic ? `#${topic}` : ''; // omit if the topic was inherited, not typed
     const addItem = (name, fresh, sub, meta) => {
       items.push({
@@ -10044,6 +10237,7 @@ async function updateAutocomplete() {
       addItem(a.name, true, '', a.backend);
       addItem(a.name, false, '', a.backend);
     }
+    appendMatchingRouteHistoryItems(items, slugVal);
     _acRender(items.slice(0, 10), 'Routes');
   } else if (mBroadcastTopic) {
     const prefix = mBroadcastTopic[1];
@@ -10077,6 +10271,59 @@ async function updateAutocomplete() {
         })),
       'Routes'
     );
+  } else if (mMultiOriginChainAlias) {
+    const originGroup = mMultiOriginChainAlias[1];
+    const operator = mMultiOriginChainAlias[2].startsWith('<') ? '<>' : mMultiOriginChainAlias[2];
+    const prefix = mMultiOriginChainAlias[3].toLowerCase();
+    const targetFreshTyped = mMultiOriginChainAlias[4] !== undefined;
+    const resolvedOrigins = _resolveBroadcastAtoms(originGroup.split(/[+,]/));
+    const topic = resolvedOrigins && new Set(resolvedOrigins.map(a => a.topic)).size === 1 ? resolvedOrigins[0].topic : null;
+    const [agents, history] = await Promise.all([
+      _acAgents(),
+      topic ? fetch(`/topics/${encodeURIComponent(topic)}/agents/history`).then(r => r.ok ? r.json() : []).catch(() => []) : Promise.resolve([]),
+    ]);
+    if (input.value !== val) return;
+
+    const usedNames = new Set(history.map(h => h.agent));
+    const backendByAgent = new Map(agents.map(a => [a.name, a.backend]));
+    let items = [];
+    const routePrefix = `${originGroup}${operator}@`;
+    const addChainItem = (agentName, fresh, meta) => {
+      const route = `${routePrefix}${agentName}${fresh ? '!' : ''}`;
+      items.push({
+        label: _acRouteHtml(route),
+        insert: route,
+        replaceSlug: replacingSlug,
+        promoteRoute: true,
+        sub: _acLastPrompt(lastPromptForFlowRoute(route)),
+        meta,
+      });
+    };
+
+    for (const h of history) {
+      if (!h.agent.toLowerCase().startsWith(prefix)) continue;
+      if (targetFreshTyped) {
+        addChainItem(h.agent, true, 'fresh');
+        continue;
+      }
+      addChainItem(h.agent, false, backendByAgent.get(h.agent) || null);
+      addChainItem(h.agent, true, 'fresh');
+    }
+
+    for (const a of agents) {
+      if (usedNames.has(a.name)) continue;
+      if (!a.name.toLowerCase().startsWith(prefix)) continue;
+      addChainItem(a.name, targetFreshTyped, targetFreshTyped ? 'fresh' : a.backend);
+    }
+
+    appendMatchingRouteHistoryItems(items, slugVal);
+    if (!routeSyntaxActive) {
+      items = items.map(item => {
+        const routeTarget = parseHistoryRouteTarget(normalizePromptHistoryRoute(item.insert));
+        return routeTarget ? { ...item, insert: '', trail: false, routeTarget } : item;
+      });
+    }
+    _acRender(items.slice(0, 10), 'Routes');
   } else if (mChainTopicTarget) {
     const originTopic = mChainTopicTarget[1];
     const originAgent = mChainTopicTarget[2];
@@ -10085,11 +10332,10 @@ async function updateAutocomplete() {
     const topicPrefix = mChainTopicTarget[5].toLowerCase();
     const topics = await _acTopics();
     if (input.value !== val) return;
-    _acRender(
-      topics.filter(t => t.name.toLowerCase().startsWith(topicPrefix)).slice(0, 8)
-        .map(t => {
-          const route = `#${originTopic}@${originAgent}${originFresh}${operator}#${t.name}`;
-          return {
+    const items = topics.filter(t => t.name.toLowerCase().startsWith(topicPrefix)).slice(0, 8)
+      .map(t => {
+        const route = `#${originTopic}@${originAgent}${originFresh}${operator}#${t.name}`;
+        return {
         label: escapeHtml(route),
         insert: route,
         replaceSlug: replacingSlug,
@@ -10097,9 +10343,9 @@ async function updateAutocomplete() {
         meta: t.active ? '● live' : t.queue_depth > 0 ? `queue ${t.queue_depth}` : '',
         sub: _acLastPrompt(lastPromptForFlowRoute(route)),
       };
-        }),
-      'Routes'
-    );
+      });
+    appendMatchingRouteHistoryItems(items, slugVal);
+    _acRender(items.slice(0, 10), 'Routes');
   } else if (mChainAlias) {
     const topic = mChainAlias[1];
     const originAgent = mChainAlias[2];
@@ -10148,6 +10394,7 @@ async function updateAutocomplete() {
       addChainItem(a.name, targetFreshTyped, targetFreshTyped ? 'fresh' : a.backend);
     }
 
+    appendMatchingRouteHistoryItems(items, slugVal);
     _acRender(items.slice(0, 10), 'Routes');
   } else if (mAlias) {
     const topic  = mAlias[1];
@@ -10218,6 +10465,7 @@ async function updateAutocomplete() {
       });
     }
 
+    appendMatchingRouteHistoryItems(items, slugVal);
     _acRender(items.slice(0, 10), 'Routes');
   } else if (editingExpandedSlug) {
     hideAutocomplete();
@@ -13297,6 +13545,14 @@ document.querySelectorAll('.creds-bookmarklet').forEach(a => {
 // When the user switches away and back, keep following the current streaming
 // state only if the user was already reading at the bottom.
 let _messagesAtBottomBeforeHide = true;
+function recoverForegroundState() {
+  updateActiveQuotaGauge().then(() => {
+    if (activeQuotaBackend) fetchQuotaForBackend(activeQuotaBackend);
+  }).catch(() => {});
+  if (_activePollImmediate) _activePollImmediate();
+  recoverPendingBubbles();
+  startProcPoll();
+}
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     _messagesAtBottomBeforeHide = isAtBottom();
@@ -13304,10 +13560,10 @@ document.addEventListener('visibilitychange', () => {
     if (_messagesAtBottomBeforeHide) {
       messages.scrollTop = messages.scrollHeight;
     }
-    if (_activePollImmediate) _activePollImmediate();
-    startProcPoll();
+    recoverForegroundState();
   }
 });
+window.addEventListener('pageshow', recoverForegroundState);
 
 // ── bookmarklet credential import ─────────────────────────────────────────────
 (function () {

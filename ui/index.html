@@ -20,7 +20,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Rubik:wght@700&display=swap" />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,100..700,0..1,0" />
   <link rel="stylesheet" href="/vendor/atom-one-dark.min.css" />
-  <link rel="stylesheet" href="style.css?v=20260719-001" />
+  <link rel="stylesheet" href="style.css?v=20260720-003" />
   <script src="/vendor/highlight.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/vendor/qrcode.min.js"></script>
@@ -594,6 +594,16 @@
               <option value="adhoc">Adhoc</option>
             </select>
           </label>
+          <div class="sf-field sf-menu-field">
+            <div class="sf-multi" id="sf-status-filter">
+              <button id="sf-status-toggle" class="sf-chip sf-multi-toggle" type="button" aria-haspopup="true" aria-expanded="false">All Status</button>
+              <div id="sf-status-menu" class="sf-multi-menu" hidden>
+                <label><input type="checkbox" value="done"> Complete</label>
+                <label><input type="checkbox" value="error"> Error</label>
+                <label><input type="checkbox" value="cancelled"> Cancelled</label>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
       <div id="stats-chart-wrap">
@@ -728,7 +738,7 @@
   </div>
   <div id="app-tooltip"></div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="flow-lang.js?v=20260719-001"></script>
-  <script src="app.js?v=20260719-001"></script>
+  <script src="flow-lang.js?v=20260720-003"></script>
+  <script src="app.js?v=20260720-003"></script>
 </body>
 </html>

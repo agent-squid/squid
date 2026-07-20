@@ -80,7 +80,7 @@ from .stats_db import (
     update_message_quota_snapshot,
     get_context_history, get_messages_by_ids, mark_orphaned_pending, get_message,
     get_message_previews, get_flow_run_messages,
-    get_completed_run_text, get_completed_run_status_raw, get_run_events,
+    get_completed_run_text, get_completed_run_status_raw, get_run_events, get_run_event_snapshot,
     ensure_session_turn_index,
     get_session_injected_context,
     get_topic_session, clear_topic_session,
@@ -1194,23 +1194,37 @@ async def message_status(msg_id: int):
     row = get_message(msg_id)
     if not row:
         return JSONResponse({"error": "not found"}, status_code=404)
+    pending_assistant = row.get("status") == "pending" and row.get("role") == "assistant"
+    event_snapshot = get_run_event_snapshot(msg_id) if pending_assistant else {}
     recovered_content = get_completed_run_text(msg_id)
     if (
-        row.get("status") == "pending"
-        and row.get("role") == "assistant"
+        pending_assistant
         and recovered_content
     ):
-        recovered_status_raw = row.get("status_raw") or get_completed_run_status_raw(msg_id)
+        recovered_status_raw = row.get("status_raw") or event_snapshot.get("status_raw") or get_completed_run_status_raw(msg_id)
         update_assistant_message(
             msg_id,
             recovered_content,
-            row.get("session_id"),
+            row.get("session_id") or event_snapshot.get("session_id"),
             "done",
-            context=row.get("context"),
+            context=row.get("context") or event_snapshot.get("context"),
             status_raw=recovered_status_raw,
             only_if_pending=True,
         )
         row = get_message(msg_id)
+    elif pending_assistant and event_snapshot:
+        content = event_snapshot.get("text")
+        status_raw = event_snapshot.get("status_raw")
+        context = event_snapshot.get("context")
+        session_id = event_snapshot.get("session_id")
+        if content and len(content) > len(row.get("content") or ""):
+            row["content"] = content
+        if status_raw and len(status_raw) > len(row.get("status_raw") or ""):
+            row["status_raw"] = status_raw
+        if context and not row.get("context"):
+            row["context"] = context
+        if session_id and not row.get("session_id"):
+            row["session_id"] = session_id
     return JSONResponse(row)
 
 
@@ -1579,6 +1593,7 @@ async def usage_stats(
     agent: str = "",
     topic: str = "",
     adhoc: str = "all",
+    status: str = "",
     tz_offset_minutes: int = 0,
     chart_metrics: str = "",
     chart_aggs: str = "",
@@ -1586,7 +1601,7 @@ async def usage_stats(
 ):
     chart_series = _parse_chart_series(chart_metrics, chart_aggs)
     if period == "turn":
-        return JSONResponse(get_stats_by_turn(days=days, hours=hours, agent=agent, topic=topic, adhoc=adhoc, anchor=anchor or None))
+        return JSONResponse(get_stats_by_turn(days=days, hours=hours, agent=agent, topic=topic, adhoc=adhoc, status=status, anchor=anchor or None))
     if group == "time" and breakdown in {"agent", "agent_session", "topic_agent", "topic_agent_session"}:
         return JSONResponse(get_stats_by_breakdown(
             period=period,
@@ -1594,6 +1609,7 @@ async def usage_stats(
             agent=agent,
             topic=topic,
             adhoc=adhoc,
+            status=status,
             tz_offset_minutes=tz_offset_minutes,
             breakdown=breakdown,
             # Breakdown series are dimension values (topic/agent), not metrics —
@@ -1611,6 +1627,7 @@ async def usage_stats(
         agent=agent,
         topic=topic,
         adhoc=adhoc,
+        status=status,
         tz_offset_minutes=tz_offset_minutes,
         chart_series=chart_series,
         anchor=anchor or None,

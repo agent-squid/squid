@@ -125,6 +125,29 @@ def test_status_recovers_status_raw_from_run_events(tmp_path, monkeypatch):
     assert done.json()["status_raw"] == "Working...\nDone"
 
 
+def test_status_hydrates_pending_response_from_run_events(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    user_id = stats_db.insert_user_message("squid", "codex", "prompt")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    stats_db.update_assistant_message(msg_id, "", None, "pending")
+    stats_db.insert_run_event(msg_id, 0, "status", "Reading from DB\n")
+    stats_db.insert_run_event(msg_id, 1, "tool", json.dumps({"name": "Read", "path": "agent/server.py"}))
+    stats_db.insert_run_event(msg_id, 2, "text", "partial answer")
+    stats_db.insert_run_event(msg_id, 3, "stats", json.dumps({"session_id": "session-1"}))
+
+    client = TestClient(server.app)
+    pending = client.get(f"/chat/{msg_id}/status")
+
+    assert pending.status_code == 200
+    body = pending.json()
+    assert body["status"] == "pending"
+    assert body["content"] == "partial answer"
+    assert body["status_raw"] == "Reading from DB\n"
+    assert json.loads(body["context"]) == [{"name": "Read", "path": "agent/server.py"}]
+    assert body["session_id"] == "session-1"
+
+
 def test_status_keeps_pending_partial_content_without_text_events(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

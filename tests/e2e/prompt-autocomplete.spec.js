@@ -136,6 +136,7 @@ test('left and right browse recent routes from an empty composer', async ({ page
   await expect(page.locator('#autocomplete')).toHaveClass(/open/);
   await expect(page.locator('#autocomplete .ac-title')).toHaveText('Routes');
   await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#other@codex');
+  await expect(page.locator('#autocomplete .ac-route-switch-icon')).toHaveCount(0);
   await expect(page.locator('#topic-chip')).toContainText('#other@codex');
   await expect(composer).toHaveValue('');
 
@@ -169,6 +170,166 @@ test('left opens route autocomplete when the composer contains only a route', as
   await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#other@codex');
   await expect(page.locator('#topic-chip')).toContainText('#other@codex');
   await expect(composer).toHaveValue('');
+});
+
+test('route autocomplete includes multi-head flow routes from prompt history', async ({ page }) => {
+  await mockBackend(page);
+  await page.unroute('**/prompts/recent**');
+  await page.route('**/prompts/recent**', route => route.fulfill({ json: { items: [
+    '#squid@a+@b>@revuopen compare heads',
+    '#other@codex older prompt',
+  ] } }));
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  await composer.focus();
+  await composer.press('ArrowLeft');
+
+  await expect(page.locator('#autocomplete')).toHaveClass(/open/);
+  await expect(page.locator('#autocomplete .ac-title')).toHaveText('Routes');
+  const multiHeadItem = page.locator('#autocomplete .ac-item', { hasText: '#squid@a+@b>@revuopen' });
+  await expect(multiHeadItem).toBeVisible();
+  await expect(multiHeadItem.locator('.ac-route-btn')).toBeVisible();
+});
+
+test('route autocomplete opens for a single duplicate-head broadcast route', async ({ page }) => {
+  await mockBackend(page);
+  await page.unroute('**/prompts/recent**');
+  await page.route('**/prompts/recent**', route => route.fulfill({ json: { items: [
+    '#squid@qwen!,@qwen! compare twice',
+  ] } }));
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
+  })));
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  await composer.fill('#squid@qwen!,@qwen!');
+  await composer.press('ArrowLeft');
+
+  await expect(page.locator('#autocomplete')).toHaveClass(/open/);
+  await expect(page.locator('#autocomplete .ac-title')).toHaveText('Routes');
+  await expect(page.locator('#autocomplete .ac-item.selected', { hasText: '#squid@qwen!,@qwen!' })).toBeVisible();
+});
+
+test('complex repeated-agent flow routes keep agent colors in chip and autocomplete', async ({ page }) => {
+  await mockBackend(page);
+  await page.unroute('**/config/agents');
+  await page.route('**/config/agents', route => route.fulfill({ json: [
+    { name: 'qwen', backend: 'claudecode:qwen', provider: 'qwen', provider_color: '#4D9DE0' },
+  ] }));
+  await page.unroute('**/prompts/recent**');
+  await page.route('**/prompts/recent**', route => route.fulfill({ json: { items: [
+    '#debug@qwen,@qwen!>#squid investigate colors',
+  ] } }));
+  await page.goto('/');
+  await page.evaluate(() => _acAgents());
+  await page.evaluate(() => clearTopicChip());
+
+  const composer = page.locator('#input');
+  await composer.fill('#debug@qwen,@qwen!>#squid');
+  await composer.press(' ');
+
+  await expect(page.locator('#topic-chip')).toHaveClass(/route-chain/);
+  await expect(page.locator('#topic-chip .chip-agent').first()).toHaveCSS('color', 'rgb(77, 157, 224)');
+  await expect(page.locator('#topic-chip')).toContainText('#debug');
+  await expect(page.locator('#topic-chip')).toContainText('#squid');
+
+  await composer.focus();
+  await composer.press('ArrowLeft');
+
+  const routeItem = page.locator('#autocomplete .ac-item', { hasText: '#debug@qwen,@qwen!>#squid' });
+  await expect(routeItem).toBeVisible();
+  await expect(routeItem.locator('.ac-route-btn .ac-agent').first()).toHaveCSS('color', 'rgb(77, 157, 224)');
+  await expect(routeItem.locator('.ac-route-btn')).toContainText('#debug');
+  await expect(routeItem.locator('.ac-route-btn')).toContainText('#squid');
+});
+
+test('route autocomplete opens for a non-fresh duplicate-head broadcast route', async ({ page }) => {
+  await mockBackend(page);
+  await page.unroute('**/prompts/recent**');
+  await page.route('**/prompts/recent**', route => route.fulfill({ json: { items: [
+    '#squid@qwen,@qwen say hi',
+  ] } }));
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
+  })));
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  await composer.focus();
+  await composer.press('ArrowLeft');
+
+  await expect(page.locator('#autocomplete')).toHaveClass(/open/);
+  await expect(page.locator('#autocomplete .ac-title')).toHaveText('Routes');
+  await expect(page.locator('#autocomplete .ac-item.selected', { hasText: '#squid@qwen,@qwen' })).toBeVisible();
+
+  await composer.fill('#squid@qwen,@qwen');
+  await composer.press('ArrowLeft');
+  await expect(page.locator('#autocomplete .ac-item.selected', { hasText: '#squid@qwen,@qwen' })).toBeVisible();
+});
+
+test('broadcast route autocomplete opens immediately after comma', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/config/agents', route => route.fulfill({ json: [
+    { name: 'qwen', backend: 'codex' },
+    { name: 'claude', backend: 'claudecode:anthropic' },
+  ] }));
+  await page.route('**/topics/squid/agents/history', route => route.fulfill({ json: [
+    { agent: 'claude', last_prompt: 'compare prompt', last_adhoc_prompt: 'fresh compare prompt' },
+  ] }));
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  await composer.fill('#squid@qwen,');
+
+  await expect(page.locator('#autocomplete')).toHaveClass(/open/);
+  await expect(page.locator('#autocomplete .ac-title')).toHaveText('Routes');
+  await expect(page.locator('#autocomplete .ac-item', { hasText: '#squid@claude!' })).toBeVisible();
+
+  await page.locator('#autocomplete .ac-item', { hasText: '#squid@claude!' }).click();
+
+  await expect(composer).toHaveValue('#squid@qwen,@claude! ');
+});
+
+test('route autocomplete includes saved flows matching an agent route prefix', async ({ page }) => {
+  await mockBackend(page);
+  await page.unroute('**/prompts/recent**');
+  await page.route('**/prompts/recent**', route => route.fulfill({ json: { items: [
+    '#squid@qwen,@qwen! compare twice',
+  ] } }));
+  await page.route('**/config/agents', route => route.fulfill({ json: [
+    { name: 'qwen', backend: 'codex' },
+  ] }));
+  await page.route('**/topics/squid/agents/history', route => route.fulfill({ json: [] }));
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  await composer.fill('#squid@qwen');
+
+  await expect(page.locator('#autocomplete')).toHaveClass(/open/);
+  await expect(page.locator('#autocomplete .ac-title')).toHaveText('Routes');
+  await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#squid@qwen');
+  await expect(page.locator('#autocomplete .ac-item.selected')).not.toContainText(',');
+  await expect(page.locator('#autocomplete .ac-item', { hasText: '#squid@qwen,@qwen!' })).toBeVisible();
+});
+
+test('route autocomplete keeps saved flows visible after a matching chain operator', async ({ page }) => {
+  await mockBackend(page);
+  await page.unroute('**/prompts/recent**');
+  await page.route('**/prompts/recent**', route => route.fulfill({ json: { items: [
+    '#squid@qwen>@revucla! review this',
+  ] } }));
+  await page.route('**/config/agents', route => route.fulfill({ json: [] }));
+  await page.route('**/topics/squid/agents/history', route => route.fulfill({ json: [] }));
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  await composer.fill('#squid@qwen>');
+
+  await expect(page.locator('#autocomplete')).toHaveClass(/open/);
+  await expect(page.locator('#autocomplete .ac-title')).toHaveText('Routes');
+  await expect(page.locator('#autocomplete .ac-item', { hasText: '#squid@qwen>@revucla!' })).toBeVisible();
 });
 
 test('help menu documents route history arrow shortcuts', async ({ page }) => {
@@ -808,6 +969,32 @@ test('route chain target autocomplete opens immediately after chain separator', 
   await expect(composer).toHaveValue('');
   await expect(page.locator('#topic-chip')).toHaveClass(/route-chain/);
   await expect(page.locator('#topic-chip')).toContainText('#squid@codex>@revuopen!');
+});
+
+test('multi-head route chain target autocomplete opens after join separator', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/config/agents', route => route.fulfill({ json: [
+    { name: 'a', backend: 'codex' },
+    { name: 'b', backend: 'codex' },
+    { name: 'revuopen', backend: 'opencode' },
+  ] }));
+  await page.route('**/topics/squid/agents/history', route => route.fulfill({ json: [
+    { agent: 'revuopen', last_prompt: 'review lane prompt', last_adhoc_prompt: 'fresh review prompt' },
+  ] }));
+  await page.goto('/');
+
+  const composer = page.locator('#input');
+  await composer.fill('#squid@a+@b>@rev');
+
+  await expect(page.locator('#autocomplete')).toHaveClass(/open/);
+  await expect(page.locator('#autocomplete .ac-title')).toHaveText('Routes');
+  await expect(page.locator('#autocomplete .ac-item', { hasText: '#squid@a+@b>@revuopen' })).toHaveCount(2);
+
+  await page.locator('#autocomplete .ac-item', { hasText: '#squid@a+@b>@revuopen!' }).click();
+
+  await expect(composer).toHaveValue('');
+  await expect(page.locator('#topic-chip')).toHaveClass(/route-chain/);
+  await expect(page.locator('#topic-chip')).toContainText('#squid@a+@b>@revuopen!');
 });
 
 test('route chain target autocomplete opens right after a bare "<", before ">" is typed', async ({ page }) => {

@@ -179,6 +179,72 @@ test('quota transient errors retry before showing failure', async ({ page }) => 
   expect(result.finalIsError).toBe(true);
 });
 
+test('detached status fallback timeout finalizes active quota tracking', async ({ page }) => {
+  await mockShell(page);
+  await page.route('**/quota/provider/*', route => route.fulfill({
+    json: { status: 'ok', raw: 42, used_percent: 42 },
+  }));
+  await page.route('**/chat', route => route.fulfill({
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream', 'X-Squid-Msg-Id': '10' },
+    body: 'event: meta\ndata: {"agent":"codex","msg_id":10,"adhoc":true}\n\ndata:partial\n\n',
+  }));
+  await page.route('**/chat/10/status', route => route.fulfill({ json: {
+    id: 10,
+    role: 'assistant',
+    topic: 'default',
+    agent: 'codex',
+    adhoc: true,
+    status: 'pending',
+    content: '',
+  } }));
+
+  await page.goto('/');
+  await page.evaluate(() => {
+    window.__squidStatusIntervals = [];
+    const realSetInterval = window.setInterval.bind(window);
+    const realClearInterval = window.clearInterval.bind(window);
+    window.__restoreSquidIntervals = () => {
+      window.setInterval = realSetInterval;
+      window.clearInterval = realClearInterval;
+    };
+    window.setInterval = (callback, delay, ...args) => {
+      if (delay === 2000) {
+        const handle = { callback, args, delay, cleared: false };
+        window.__squidStatusIntervals.push(handle);
+        return handle;
+      }
+      return realSetInterval(callback, delay, ...args);
+    };
+    window.clearInterval = handle => {
+      if (handle && typeof handle === 'object' && 'cleared' in handle) {
+        handle.cleared = true;
+        return;
+      }
+      return realClearInterval(handle);
+    };
+  });
+
+  try {
+    await page.fill('#input', 'hello');
+    await page.locator('#input').press('Enter');
+    await expect.poll(() => page.evaluate(() => quotaState.anthropic?.activeCount || 0)).toBe(1);
+
+    await page.waitForFunction(() => window.__squidStatusIntervals.length > 0);
+    await page.evaluate(async () => {
+      const handle = window.__squidStatusIntervals[0];
+      for (let i = 0; i < 960 && !handle.cleared; i++) {
+        await handle.callback(...handle.args);
+      }
+    });
+
+    await expect.poll(() => page.evaluate(() => quotaState.anthropic?.activeCount || 0)).toBe(0);
+    await expect(page.locator('.msg-thinking-done')).toContainText('Recovery timed out.');
+  } finally {
+    await page.evaluate(() => window.__restoreSquidIntervals?.());
+  }
+});
+
 test('percentage quota gauges retain their reset countdown', async ({ page }) => {
   await mockShell(page);
   await page.route('**/quota/provider/*', route => {

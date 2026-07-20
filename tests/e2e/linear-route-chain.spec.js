@@ -80,6 +80,57 @@ test('composer sends only the origin turn for a one-way route chain; server-disp
   await expect(page.locator('#topic-chip')).toContainText('#squid@codex!>@revucla!');
 });
 
+test('route-chain handoff live bubble appears after origin completes through status fallback', async ({ page }) => {
+  await page.route('**/health', r => r.fulfill({ json: { status: 'ok', backends: {} } }));
+  await page.route('**/quota**', r => r.fulfill({ json: {} }));
+  await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/topics', r => r.fulfill({ json: [] }));
+  await page.route('**/topics/**', r => r.fulfill({ json: [] }));
+  await page.route('**/config/agents', r => r.fulfill({ json: [] }));
+  await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [] } }));
+  await page.route('**/topics/*/memory', r => r.fulfill({ json: {
+    topic: 'squid',
+    content: '',
+    revision: 'r1',
+    exists: false,
+  } }));
+
+  await page.route('**/chat', r => r.fulfill({
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream', 'X-Squid-Msg-Id': '10', 'X-Squid-Flow-Run-Id': 'fallback-flow' },
+    body: 'event: meta\ndata: {"agent":"codex","msg_id":10,"adhoc":true}\n\ndata:partial origin\n\n',
+  }));
+  await page.route('**/chat/10/status', r => r.fulfill({ json: {
+    id: 10, role: 'assistant', topic: 'squid', agent: 'codex', adhoc: true, status: 'done',
+    content: 'origin recovered',
+    prompt: 'review this',
+    prompt_source: 'human', session_id: null,
+  } }));
+  await page.route('**/chat/flow/fallback-flow/steps**', r => r.fulfill({ json: {
+    messages: [{ id: 11, role: 'assistant', topic: 'squid', agent: 'revucla', status: 'pending' }],
+    complete: false,
+  } }));
+  await page.route('**/chat/11/status', r => r.fulfill({ json: {
+    id: 11, role: 'assistant', topic: 'squid', agent: 'revucla', adhoc: true, status: 'pending',
+    content: '',
+    prompt: 'Squid route chain handoff.\nRoute: #squid@codex!>@revucla!\nPrevious step: @codex\nCurrent step: @revucla!\nOriginal prompt: review this',
+    prompt_source: 'system', session_id: null,
+  } }));
+  await page.route('**/chat/11/events', r => r.fulfill({
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' },
+    body: '',
+  }));
+
+  await page.goto('/');
+  await page.fill('#input', '#squid@codex!>@revucla! review this');
+  await page.locator('#input').press('Enter');
+
+  const handoffBubble = page.locator('.msg-thinking[data-msg-id="11"]');
+  await expect(handoffBubble).toBeVisible();
+  await expect(handoffBubble.locator('.tag-agent')).toHaveText('@revucla');
+});
+
 test('composer sends request-response route chain back to origin', async ({ page }) => {
   await page.route('**/health', r => r.fulfill({ json: { status: 'ok', backends: {} } }));
   await page.route('**/quota**', r => r.fulfill({ json: {} }));
@@ -466,6 +517,34 @@ test('bare route chain with trailing whitespace parses from root, not the adhoc 
   await expect(page.locator('#input')).toHaveValue('');
 });
 
+test('alias route chain highlights topic chip segments', async ({ page }) => {
+  await page.route('**/health', r => r.fulfill({ json: { status: 'ok', backends: {} } }));
+  await page.route('**/quota**', r => r.fulfill({ json: {} }));
+  await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/topics', r => r.fulfill({ json: [] }));
+  await page.route('**/topics/**', r => r.fulfill({ json: [] }));
+  await page.route('**/config/agents', r => r.fulfill({ json: [] }));
+  await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [] } }));
+  await page.route('**/topics/*/memory', r => r.fulfill({ json: {
+    topic: 'squid',
+    content: '',
+    revision: 'r1',
+    exists: false,
+  } }));
+
+  await page.goto('/');
+
+  await page.fill('#input', '#squid@deepseek=>@revuqwen! review this');
+
+  await expect(page.locator('#topic-chip')).toHaveClass(/route-chain/);
+  await expect(page.locator('#topic-chip')).toContainText('#squid@deepseek=>@revuqwen!');
+  await expect(page.locator('#topic-chip .chip-topic')).toHaveText('#squid');
+  await expect(page.locator('#topic-chip .chip-agent')).toHaveText(['@deepseek', '@revuqwen']);
+  await expect(page.locator('#topic-chip .chip-route-arrow')).toHaveText('=>');
+  await expect(page.locator('#topic-chip .chip-chain-fresh')).toHaveText('!');
+  await expect(page.locator('#input')).toHaveValue('review this');
+});
+
 test('composer sends one-way route chain that hands off to a different topic', async ({ page }) => {
   // ADR-0032 "also targeted for v0.1": a chain target may be a full
   // #topic@agent, not just a bare @agent on the origin's own topic.
@@ -621,12 +700,58 @@ test('composer starts join origins under one reduced flow route', async ({ page 
   await page.locator('#input').press('Enter');
 
   await expect.poll(() => chatBodies.length).toBe(2);
+  await expect(page.locator('.route-chain-marker')).toHaveText(['#squid@a>@c', '#squid@b>@c']);
   expect(chatBodies.map(b => b.agent)).toEqual(['a', 'b']);
   expect(chatBodies.every(b => b.topic === 'squid')).toBe(true);
   expect(chatBodies.every(b => b.message === 'compare')).toBe(true);
   expect(chatBodies.every(b => b.flow_route === '#squid@a+@b>@c')).toBe(true);
   expect(chatBodies[0].flow_run_id).toBeUndefined();
   expect(chatBodies[1].flow_run_id).toBe('join1');
+});
+
+test('complex comma-head route chain markers keep agent colors', async ({ page }) => {
+  await page.route('**/health', r => r.fulfill({ json: { status: 'ok', backends: {} } }));
+  await page.route('**/quota**', r => r.fulfill({ json: {} }));
+  await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/topics', r => r.fulfill({ json: [] }));
+  await page.route('**/topics/**', r => r.fulfill({ json: [] }));
+  await page.route('**/config/agents', r => r.fulfill({ json: [] }));
+  await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [] } }));
+  await page.route('**/topics/*/memory', r => r.fulfill({ json: {
+    topic: 'debug',
+    content: '',
+    revision: 'r1',
+    exists: false,
+  } }));
+
+  const chatBodies = [];
+  await page.route('**/chat', r => {
+    const body = JSON.parse(r.request().postData() || '{}');
+    chatBodies.push(body);
+    return r.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream', 'X-Squid-Msg-Id': String(50 + chatBodies.length), 'X-Squid-Flow-Run-Id': 'comma-heads' },
+      body: `event: meta\ndata: {"agent":"${body.agent}","msg_id":${50 + chatBodies.length},"adhoc":${body.adhoc ? 'true' : 'false'}}\n\ndata:${body.agent} response\n\nevent: done\ndata: \n\n`,
+    });
+  });
+  await page.route('**/chat/flow/comma-heads/steps**', r => r.fulfill({ json: {
+    messages: [],
+    complete: true,
+  } }));
+
+  await page.goto('/');
+  await page.evaluate(() => {
+    _agentsCache = [{ name: 'qwen', backend: 'claudecode:qwen', color: '#4D9DE0' }];
+  });
+  await page.fill('#input', '#debug@qwen,@qwen!>#squid compare');
+  await page.locator('#input').press('Enter');
+
+  await expect.poll(() => chatBodies.length).toBe(2);
+  const marker = page.locator('.route-chain-marker').first();
+  await expect(marker).toContainText('#debug@qwen,@qwen!>#squid');
+  await expect(marker.locator('.tag-agent').first()).toHaveCSS('color', 'rgb(77, 157, 224)');
+  await expect(marker).toContainText('#debug');
+  await expect(marker).toContainText('#squid');
 });
 
 test('composer accepts repeated and delayed single-operator flow routes', async ({ page }) => {

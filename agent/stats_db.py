@@ -951,6 +951,10 @@ def update_assistant_message(
 
 
 def _run_event_cancel_snapshot(conn: sqlite3.Connection, msg_id: int) -> dict:
+    return _run_event_snapshot(conn, msg_id)
+
+
+def _run_event_snapshot(conn: sqlite3.Connection, msg_id: int) -> dict:
     rows = conn.execute(
         "SELECT event_type, payload FROM run_events WHERE msg_id=? ORDER BY seq",
         (msg_id,),
@@ -978,6 +982,11 @@ def _run_event_cancel_snapshot(conn: sqlite3.Connection, msg_id: int) -> dict:
         "context": json.dumps(tools) if tools else None,
         "session_id": session_id,
     }
+
+
+def get_run_event_snapshot(msg_id: int) -> dict:
+    with _connect() as conn:
+        return _run_event_snapshot(conn, msg_id)
 
 
 def mark_assistant_cancelled(msg_id: int, reason: str = "Cancelled") -> bool:
@@ -1783,6 +1792,13 @@ def _append_stats_in_filter(clauses: list[str], params: list, expr: str, values:
     params.extend(values)
 
 
+_STATS_STATUS_VALUES = {"done", "error", "cancelled"}
+
+
+def _stats_status_values(status: str) -> list[str]:
+    return [s for s in _stats_filter_values(status) if s in _STATS_STATUS_VALUES]
+
+
 _STATS_CHART_AGGS = {"sum", "avg", "min", "max", "p50", "p75", "p95"}
 _STATS_TOKENS_IN_EXPR = """CASE
         WHEN COALESCE(cache_read_tokens, 0) + COALESCE(cache_write_tokens, 0) > 0
@@ -2264,6 +2280,7 @@ def get_aggregated_stats(
     agent: str = "",
     topic: str = "",
     adhoc: str = "all",
+    status: str = "",
     tz_offset_minutes: int = 0,
     chart_series: Optional[list[dict]] = None,
     anchor: Optional[str] = None,
@@ -2288,6 +2305,7 @@ def get_aggregated_stats(
     cutoff = _stats_cutoff(days, anchor=anchor)
     agents = _stats_filter_values(agent)
     topics = _stats_filter_values(topic)
+    statuses = _stats_status_values(status)
 
     cm_clauses: list[str] = ["cm.role = 'assistant'", "cm.status IN ('done', 'error', 'cancelled')"]
     cm_params: list = []
@@ -2297,6 +2315,7 @@ def get_aggregated_stats(
     _append_stats_anchor_upper(cm_clauses, cm_params, "re.created_at", anchor)
     _append_stats_in_filter(cm_clauses, cm_params, "cm.agent", agents)
     _append_stats_in_filter(cm_clauses, cm_params, "cm.topic", topics)
+    _append_stats_in_filter(cm_clauses, cm_params, "cm.status", statuses)
 
     if adhoc == "session":
         cm_clauses.append("COALESCE(cm.adhoc, 0) = 0")
@@ -2312,6 +2331,7 @@ def get_aggregated_stats(
     _append_stats_anchor_upper(count_clauses, count_params, "COALESCE(cm.completed_at, cm.created_at)", anchor)
     _append_stats_in_filter(count_clauses, count_params, "cm.agent", agents)
     _append_stats_in_filter(count_clauses, count_params, "cm.topic", topics)
+    _append_stats_in_filter(count_clauses, count_params, "cm.status", statuses)
     if adhoc == "session":
         count_clauses.append("COALESCE(cm.adhoc, 0) = 0")
     elif adhoc == "adhoc":
@@ -2320,6 +2340,8 @@ def get_aggregated_stats(
 
     ss_clauses: list[str] = ["ss.created_at IS NOT NULL"]
     ss_params: list = []
+    if statuses and "done" not in statuses:
+        ss_clauses.append("1 = 0")
     if cutoff:
         ss_clauses.append("datetime(ss.created_at) >= datetime(?)")
         ss_params.append(cutoff)
@@ -2418,7 +2440,7 @@ def get_aggregated_stats(
 
 def get_stats_by_turn(
     days: int = 30, hours: int = 0, agent: str = "", topic: str = "", adhoc: str = "all",
-    limit: int = 2000, anchor: Optional[str] = None,
+    status: str = "", limit: int = 2000, anchor: Optional[str] = None,
 ) -> list:
     # One row per completed turn, sourced from run_events rather than session_stats:
     # session_stats is keyed by session_id and gets overwritten on every resumed
@@ -2428,6 +2450,7 @@ def get_stats_by_turn(
     cutoff = _stats_cutoff(days, hours, anchor=anchor)
     agents = _stats_filter_values(agent)
     topics = _stats_filter_values(topic)
+    statuses = _stats_status_values(status)
 
     turn_time_expr = "COALESCE(re.created_at, cm.completed_at, cm.created_at)"
     clauses: list[str] = ["cm.role = 'assistant'", "cm.status IN ('done', 'error', 'cancelled')"]
@@ -2438,6 +2461,7 @@ def get_stats_by_turn(
     _append_stats_anchor_upper(clauses, params, turn_time_expr, anchor)
     _append_stats_in_filter(clauses, params, "cm.agent", agents)
     _append_stats_in_filter(clauses, params, "cm.topic", topics)
+    _append_stats_in_filter(clauses, params, "cm.status", statuses)
     if adhoc == "session":
         clauses.append("COALESCE(cm.adhoc, 0) = 0")
     elif adhoc == "adhoc":
@@ -2619,12 +2643,15 @@ def get_stats_by_agent_breakdown(
     agent: str = "",
     topic: str = "",
     adhoc: str = "all",
+    status: str = "",
     tz_offset_minutes: int = 0,
     include_session: bool = False,
     chart_series: Optional[list[dict]] = None,
 ) -> list:
     breakdown = "agent_session" if include_session else "agent"
-    return get_stats_by_breakdown(period, days, agent, topic, adhoc, tz_offset_minutes, breakdown, chart_series)
+    return get_stats_by_breakdown(
+        period, days, agent, topic, adhoc, status, tz_offset_minutes, breakdown, chart_series,
+    )
 
 
 def get_stats_by_breakdown(
@@ -2633,6 +2660,7 @@ def get_stats_by_breakdown(
     agent: str = "",
     topic: str = "",
     adhoc: str = "all",
+    status: str = "",
     tz_offset_minutes: int = 0,
     breakdown: str = "agent",
     chart_series: Optional[list[dict]] = None,
@@ -2657,6 +2685,7 @@ def get_stats_by_breakdown(
     cutoff = _stats_cutoff(days, anchor=anchor)
     agents = _stats_filter_values(agent)
     topics = _stats_filter_values(topic)
+    statuses = _stats_status_values(status)
 
     cm_clauses: list[str] = ["cm.role = 'assistant'", "cm.status IN ('done', 'error', 'cancelled')", "cm.created_at IS NOT NULL"]
     cm_params: list = []
@@ -2666,6 +2695,7 @@ def get_stats_by_breakdown(
     _append_stats_anchor_upper(cm_clauses, cm_params, "re.created_at", anchor)
     _append_stats_in_filter(cm_clauses, cm_params, "cm.agent", agents)
     _append_stats_in_filter(cm_clauses, cm_params, "cm.topic", topics)
+    _append_stats_in_filter(cm_clauses, cm_params, "cm.status", statuses)
 
     if adhoc == "session":
         cm_clauses.append("COALESCE(adhoc, 0) = 0")
@@ -2674,6 +2704,8 @@ def get_stats_by_breakdown(
 
     ss_clauses: list[str] = ["ss.created_at IS NOT NULL"]
     ss_params: list = []
+    if statuses and "done" not in statuses:
+        ss_clauses.append("1 = 0")
     if cutoff:
         ss_clauses.append("datetime(ss.created_at) >= datetime(?)")
         ss_params.append(cutoff)
@@ -2695,6 +2727,7 @@ def get_stats_by_breakdown(
     _append_stats_anchor_upper(count_clauses, count_params, "COALESCE(cm.completed_at, cm.created_at)", anchor)
     _append_stats_in_filter(count_clauses, count_params, "cm.agent", agents)
     _append_stats_in_filter(count_clauses, count_params, "cm.topic", topics)
+    _append_stats_in_filter(count_clauses, count_params, "cm.status", statuses)
     if adhoc == "session":
         count_clauses.append("COALESCE(cm.adhoc, 0) = 0")
     elif adhoc == "adhoc":

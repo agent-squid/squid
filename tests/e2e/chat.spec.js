@@ -1154,6 +1154,102 @@ test.describe('parallel responses', () => {
 });
 
 test.describe('recovered pending responses', () => {
+  test('poll fallback keeps retrying after transient status failure', async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(window, 'EventSource', { configurable: true, value: undefined });
+      const realSetInterval = window.setInterval.bind(window);
+      window.setInterval = (callback, delay, ...args) => realSetInterval(callback, delay === 2000 ? 20 : delay, ...args);
+    });
+    await mockBackend(page);
+
+    await page.route('**/history**', r => r.fulfill({ json: {
+      items: [{
+        id: 79,
+        topic: 'squid',
+        agent: 'claude',
+        backend: 'claude',
+        status: 'pending',
+        prompt: 'long-running task',
+        content: 'History partial',
+        adhoc: false,
+      }],
+      has_more: false,
+    }}));
+    let statusCalls = 0;
+    await page.route('**/chat/79/status', r => {
+      statusCalls++;
+      if (statusCalls === 1) return r.fulfill({ status: 500, body: '' });
+      if (statusCalls === 2) return r.fulfill({ json: { id: 79, status: 'pending', content: 'Still working' } });
+      return r.fulfill({ json: {
+        id: 79,
+        topic: 'squid',
+        agent: 'claude',
+        backend: 'claude',
+        status: 'done',
+        prompt: 'long-running task',
+        content: 'Recovered after transient failure',
+        adhoc: false,
+        timestamp: new Date().toISOString(),
+      }});
+    });
+
+    await page.goto('/');
+
+    await expect(page.locator(RESPONSE).filter({ hasText: 'Recovered after transient failure' })).toBeVisible({ timeout: 5_000 });
+    expect(statusCalls).toBeGreaterThanOrEqual(3);
+    await expect(page.locator(THINKING)).not.toBeAttached();
+  });
+
+  test('pageshow reconnects stale pending event watcher', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__eventSources = [];
+      window.EventSource = class {
+        constructor(url) {
+          this.url = url;
+          this.closed = false;
+          this.listeners = {};
+          window.__eventSources.push(this);
+        }
+        addEventListener(type, callback) {
+          this.listeners[type] = callback;
+        }
+        close() {
+          this.closed = true;
+        }
+      };
+    });
+    await mockBackend(page);
+
+    await page.route('**/history**', r => r.fulfill({ json: {
+      items: [{
+        id: 80,
+        topic: 'squid',
+        agent: 'claude',
+        backend: 'claude',
+        status: 'pending',
+        prompt: 'long-running task',
+        content: 'History partial',
+        adhoc: false,
+      }],
+      has_more: false,
+    }}));
+
+    await page.goto('/');
+    await expect(page.locator(`${THINKING}[data-msg-id="80"]`)).toBeVisible();
+    await page.waitForFunction(() => window.__eventSources.length === 1);
+
+    await page.evaluate(() => window.dispatchEvent(new Event('pageshow')));
+
+    await page.waitForFunction(() => window.__eventSources.length === 2);
+    expect(await page.evaluate(() => ({
+      firstClosed: window.__eventSources[0].closed,
+      secondUrl: window.__eventSources[1].url,
+    }))).toEqual({
+      firstClosed: true,
+      secondUrl: '/chat/80/events',
+    });
+  });
+
   test('refresh recovery streams pending status from event replay', async ({ page }) => {
     await mockBackend(page);
 

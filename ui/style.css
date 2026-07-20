@@ -3281,7 +3281,9 @@ body {
   border-radius: 4px;
   box-shadow: 0 8px 24px rgba(0,0,0,0.35);
 }
-#sf-topic-menu {
+#sf-topic-menu,
+#sf-agent-menu,
+#sf-status-menu {
   left: 0;
   right: auto;
 }
@@ -4549,7 +4551,7 @@ button {
 .ac-route-btn {
   flex: 0 0 auto;
   width: max-content;
-  max-width: min(70vw, 32rem);
+  max-width: min(42vw, 20rem);
   margin-right: 0.4rem;
   display: inline-flex;
   align-items: center;

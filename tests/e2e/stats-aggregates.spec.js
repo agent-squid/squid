@@ -1,5 +1,11 @@
 const { test, expect } = require('@playwright/test');
 
+// The app registers a service worker (ui/sw.js). Playwright's page.route()
+// can't intercept requests a service worker proxies, so without this the
+// insights.json mock below is silently bypassed and tests hit the real
+// https://agentsquid.ai over the network.
+test.use({ serviceWorkers: 'block' });
+
 async function mockApp(page) {
   await page.route('**/health', r => r.fulfill({ json: { status: 'ok', backends: {} } }));
   await page.route('**/config/agents', r => r.fulfill({ json: [] }));
@@ -10,6 +16,16 @@ async function mockApp(page) {
   await page.route('**/topics/**', r => r.fulfill({ json: {} }));
   await page.route('**/stats/filters', r => r.fulfill({ json: { agents: ['codex'], topics: ['squid'] } }));
   await page.route('**/stats/filter-presets', r => r.fulfill({ json: [] }));
+  // The boot-message "insights" widget independently fires its own
+  // /stats?period=weekly requests (with a week-over-week comparison anchor)
+  // on every page load, regardless of the Stats tab. An empty measures list
+  // makes resolveInsightMeasures() short-circuit before it ever calls /stats,
+  // so those unrelated requests don't pollute statsRequests assertions here.
+  // The trailing "*" is required: fetchInsights() cache-busts with a
+  // "?_=<timestamp>" query string, which a bare "**/insights.json" pattern
+  // (no wildcard after it) fails to match, silently falling through to a
+  // real network request.
+  await page.route('**/insights.json*', r => r.fulfill({ json: {} }));
 }
 
 test('stats days filter includes 1d and 3d windows and requests them', async ({ page }) => {
@@ -775,4 +791,52 @@ test('stats chart aggregate controls keep legacy preset chart metrics even when 
   await expect(page.locator('.sc-series-pill').first()).toContainText('SUM Tokens In · L');
   await expect(page.locator('.sc-series-pill').nth(1)).toContainText('SUM Cost ($) · R');
   await expect(page.locator('.sc-extra-row')).toHaveCount(0);
+});
+
+test('response status filter is a multiselect that scopes the stats request', async ({ page }) => {
+  await mockApp(page);
+  const statsRequests = [];
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    statsRequests.push(Object.fromEntries(url.searchParams.entries()));
+    route.fulfill({ json: [] });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+
+  await expect(page.locator('#sf-status-toggle')).toHaveText('All Status');
+  await expect(page.locator('#sf-status-toggle')).not.toHaveClass(/active/);
+  await expect(page.locator('#sf-status-menu')).toBeHidden();
+
+  await page.locator('#sf-status-toggle').click();
+  await expect(page.locator('#sf-status-menu')).toBeVisible();
+  await page.locator('#sf-status-menu input[value="done"]').check();
+  await expect(page.locator('#sf-status-toggle')).toHaveText('Complete');
+  await expect(page.locator('#sf-status-toggle')).toHaveClass(/active/);
+  await expect.poll(() => statsRequests.at(-1)?.status).toBe('done');
+
+  await page.locator('#sf-status-menu input[value="cancelled"]').check();
+  await expect(page.locator('#sf-status-toggle')).toHaveText('2 Statuses');
+  // Value order follows menu (DOM) order — done, error, cancelled — not click order.
+  await expect.poll(() => statsRequests.at(-1)?.status).toBe('done,cancelled');
+
+  // Selecting all three is equivalent to no filter, but the UI still reports
+  // it as an explicit selection rather than silently reverting to "All".
+  await page.locator('#sf-status-menu input[value="error"]').check();
+  await expect(page.locator('#sf-status-toggle')).toHaveText('3 Statuses');
+  await expect.poll(() => statsRequests.at(-1)?.status).toBe('done,error,cancelled');
+
+  await page.locator('#sf-status-menu input[value="done"]').uncheck();
+  await page.locator('#sf-status-menu input[value="cancelled"]').uncheck();
+  await page.locator('#sf-status-menu input[value="error"]').uncheck();
+  await expect(page.locator('#sf-status-toggle')).toHaveText('All Status');
+  await expect(page.locator('#sf-status-toggle')).not.toHaveClass(/active/);
+  await expect.poll(() => statsRequests.at(-1)?.status).toBeUndefined();
+
+  // Menu is still open from checking/unchecking above — clicking outside
+  // closes it, matching the topic/agent multiselects.
+  await expect(page.locator('#sf-status-menu')).toBeVisible();
+  await page.locator('#stats-content').click();
+  await expect(page.locator('#sf-status-menu')).toBeHidden();
 });
