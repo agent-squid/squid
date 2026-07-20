@@ -20,11 +20,9 @@
   const ATOM_RE = new RegExp(`^(?:#(${NAME}))?(?:@(${NAME}))?(!)?`);
   const ROUNDTRIP_RE = /^<(\d+)?(?::([0-9]+[A-Za-z]+))?>/;
   const ONEWAY_ALIAS_RE = /^=>/;
-  // Count comes first, same as roundtrip's bare `<N>` — either a literal
-  // repeat count or `*` for unbounded. `:wait` is an optional add-on that
-  // spaces the repeats out; `*` requires it (an unbounded, undelayed loop
-  // is just a runaway cycle, not a schedule).
-  const SCHEDULED_RE = /^=(\*|\d+)(?::([0-9]+[A-Za-z]+))?>/;
+  // Count comes first, same as roundtrip's bare `<N>`. `:wait` is an
+  // optional add-on that spaces the bounded repeats out.
+  const SCHEDULED_RE = /^=(\d+)(?::([0-9]+[A-Za-z]+))?>/;
   const ONEWAY_RE = /^>/;
 
   function stripLeadingWs(s) {
@@ -97,15 +95,10 @@
 
     m = SCHEDULED_RE.exec(s);
     if (m) {
-      const unbounded = m[1] === '*';
-      if (unbounded && !m[2]) {
-        throw new FlowError(`'=*>' (unbounded loop) requires an explicit ':wait' duration — an unbounded loop with no delay is invalid (position ${offset})`, offset);
-      }
       return {
         op: {
           type: 'scheduled',
-          count: unbounded ? null : parseInt(m[1], 10),
-          unbounded,
+          count: parseInt(m[1], 10),
           wait: m[2] || null,
         },
         consumed: m[0].length,
@@ -158,6 +151,10 @@
       s = rest2;
       offset += c2;
       hops.push({ op: parsedOp.op, target });
+      s = stripLeadingWs(s);
+      if (s) {
+        throw new FlowError(`Multi-hop Squid Flow clauses are not supported in v0.1 (position ${text.length - s.length})`, text.length - s.length);
+      }
     }
 
     return { origin, hops };
@@ -314,7 +311,7 @@
   function opToText(op) {
     if (op.type === 'oneway') return op.alias ? '=>' : '>';
     if (op.type === 'scheduled') {
-      let s = `=${op.unbounded ? '*' : op.count}`;
+      let s = `=${op.count}`;
       if (op.wait) s += `:${op.wait}`;
       return `${s}>`;
     }
@@ -608,10 +605,10 @@
         }
       } else if (step.via && step.via.type === 'scheduled') {
         const text = fullAtomText(step.atom);
-        const repeats = step.via.unbounded ? SCHEDULED_PREVIEW_CAP : step.via.count;
-        if (step.via.unbounded || repeats > SCHEDULED_PREVIEW_CAP) truncated = true;
+        const repeats = step.via.count;
+        if (repeats > SCHEDULED_PREVIEW_CAP) truncated = true;
         const shown = Math.min(repeats, SCHEDULED_PREVIEW_CAP);
-        const totalLabel = step.via.unbounded ? '∞' : String(step.via.count);
+        const totalLabel = String(step.via.count);
         const arrow = step.via.wait ? `=1:${step.via.wait}>` : '>';
         const next = [];
         for (const inst of instances) {

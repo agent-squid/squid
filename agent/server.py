@@ -32,7 +32,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
-from importlib.metadata import version as _pkg_version
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 from typing import AsyncGenerator, Literal, Optional, Union
 
@@ -99,7 +99,10 @@ from .journal import _generate_journal, _current_week, list_topic_journals, read
 from . import creds
 
 BOOT_TIME = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-SQUID_VERSION = _pkg_version("squid")
+try:
+    SQUID_VERSION = _pkg_version("squid")
+except PackageNotFoundError:
+    SQUID_VERSION = "0+local"
 
 init_db()
 
@@ -519,13 +522,16 @@ def _normalize_topic_response(topic: str) -> Union[str, JSONResponse]:
 
 
 def canonical_flow_route(route: Optional[str]) -> Optional[str]:
-    # Comma-separated parts are never reordered: an Origin Broadcast atom can
-    # omit a half and inherit it by rolling anchor from its nearest
-    # fully-explicit predecessor (ADR-0032), so swapping two parts can change
-    # what they resolve to — order is semantic here, not just cosmetic.
     text = re.sub(r"\s+", "", (route or "").strip())
     if not text:
         return None
+    try:
+        from .flow import parse_route_chain
+        parsed = parse_route_chain(text)
+        if parsed:
+            return parsed["route"]
+    except Exception:
+        pass
     parts = [part for part in text.split(",") if part]
     return ",".join(parts)
 
@@ -1266,17 +1272,16 @@ async def flow_run_steps(flow_run_id: str, after_id: int = 0):
     server-side (agent/flow.py) without any client request, so a client
     watching an in-progress chain polls this to discover new steps and
     attach to them via /chat/{msg_id}/events, same as a step it sent itself."""
-    from .flow import parse_route_chain
+    from .flow import expected_row_count
     rows = get_flow_run_messages(flow_run_id)
     new_rows = [r for r in rows if r["id"] > after_id]
 
-    chain = parse_route_chain(rows[0]["flow_route"]) if rows else None
-    expected_rows = (6 if chain["operator"] == "<>" else 4) if chain else 0
+    expected_rows = expected_row_count(rows[0]["flow_route"]) if rows else 0
     last_status = rows[-1]["status"] if rows else None
     complete = (
         not rows
         or last_status in ("error", "cancelled")
-        or (not chain)
+        or (not expected_rows)
         or len(rows) >= expected_rows
     )
 

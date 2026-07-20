@@ -166,15 +166,13 @@ test('Squid Flow scheduled operator puts the loop count first, like <N>', async 
   await expect(statusEl).toHaveClass(/ok/);
   await expect(keyLine).toHaveText('#t@c=1:1d>@a');
 
-  // Unbounded loop requires an explicit delay.
+  // Unbounded loop syntax is not part of v0.1.
   await page.fill('#flow-input', '#t@c=*:1d>@a');
-  await expect(statusEl).toHaveClass(/ok/);
-  await expect(keyLine).toHaveText('#t@c=*:1d>@a');
+  await expect(statusEl).toHaveClass(/err/);
 
-  // Unbounded with no delay is a runaway cycle, not a schedule — rejected.
+  // Unbounded with no delay is rejected by the same v0.1 syntax boundary.
   await page.fill('#flow-input', '#t@c=*>@a');
   await expect(statusEl).toHaveClass(/err/);
-  await expect(statusEl).toContainText("requires an explicit ':wait'");
 
   // The old bare-delay-no-count form is no longer valid syntax.
   await page.fill('#flow-input', '#t@c=1d>@a');
@@ -196,9 +194,11 @@ test('Squid Flow fully-expanded form gives each scheduled repeat its own row', a
   await expect(expandedLines.nth(1)).toHaveText('>#squid@review! · run 1 of 2');
   await expect(expandedLines.nth(2)).toHaveText('>#squid@review! · run 2 of 2');
 
-  // Unbounded repeats are capped in the preview, with a trailing ellipsis row.
-  await page.fill('#flow-input', '#squid@codex=*:1d>@review!');
+  // Large bounded repeats are capped in the preview, with a trailing ellipsis row.
+  await page.fill('#flow-input', '#squid@codex=9:1d>@review!');
   await expect(expandedLines).toHaveCount(7);
+  await expect(expandedLines.nth(1)).toHaveText('=1:1d>#squid@review! · run 1 of 9 · +1d');
+  await expect(expandedLines.nth(5)).toHaveText('=1:1d>#squid@review! · run 5 of 9 · +5d');
   await expect(expandedLines.last()).toHaveText('…');
 });
 

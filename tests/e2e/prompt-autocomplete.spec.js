@@ -103,6 +103,25 @@ test('route agent tags use provider color from recent prompt metadata', async ({
   await expect(page.locator('#autocomplete .ac-route-btn .ac-agent')).toHaveCSS('color', 'rgb(77, 157, 224)');
 });
 
+test('flow-backed prompt history displays the submitted origin route', async ({ page }) => {
+  await mockBackend(page);
+  await page.unroute('**/prompts/recent**');
+  await page.route('**/prompts/recent**', r => r.fulfill({ json: {
+    items: ['#squid@opencode!>@review summarize'],
+  } }));
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
+  })));
+  await page.goto('/');
+
+  await page.fill('#input', 'sum');
+
+  const item = page.locator('#autocomplete .ac-item', { hasText: '#squid@opencode! summarize' });
+  await expect(item).toBeVisible();
+  await expect(item).not.toContainText('>@review');
+  await expect(item.locator('.ac-route-switch-icon')).toHaveCount(1);
+});
+
 test('left and right browse recent routes from an empty composer', async ({ page }) => {
   await mockBackend(page);
   await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
@@ -740,6 +759,10 @@ test('route chain target autocomplete opens while typing squid flow route', asyn
   await page.route('**/topics/squid/agents/history', route => route.fulfill({ json: [
     { agent: 'revuopen', last_prompt: 'review lane prompt', last_adhoc_prompt: 'fresh review prompt' },
   ] }));
+  await page.unroute('**/prompts/recent**');
+  await page.route('**/prompts/recent**', route => route.fulfill({ json: { items: [
+    '#squid@codex>@revuopen full flow prompt',
+  ] } }));
   await page.goto('/');
 
   const composer = page.locator('#input');
@@ -750,10 +773,10 @@ test('route chain target autocomplete opens while typing squid flow route', asyn
   await expect.poll(async () => page.locator('#autocomplete .ac-item').evaluateAll(items => {
     const text = items.map(item => item.innerText.replace(/\s+/g, ''));
     return {
-      persistent: text.some(row => row.startsWith('#squid@codex>@revuopenlast')),
-      fresh: text.some(row => row.startsWith('#squid@codex>@revuopen!last')),
+      persistent: text.some(row => row.startsWith('#squid@codex>@revuopenlastfullflowprompt')),
+      targetLane: text.some(row => row.includes('reviewlaneprompt') || row.includes('freshreviewprompt')),
     };
-  })).toEqual({ persistent: true, fresh: true });
+  })).toEqual({ persistent: true, targetLane: false });
 
   await page.locator('#autocomplete .ac-item', { hasText: '#squid@codex>@revuopen!' }).click();
 
@@ -811,6 +834,27 @@ test('route chain target autocomplete opens right after a bare "<", before ">" i
   await expect(composer).toHaveValue('');
   await expect(page.locator('#topic-chip')).toHaveClass(/route-chain/);
   await expect(page.locator('#topic-chip')).toContainText('#squid@codex<>@revuopen!');
+});
+
+test('long autocomplete routes scroll horizontally on mobile', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 760 });
+  await mockBackend(page);
+  await page.unroute('**/prompts/recent**');
+  await page.route('**/prompts/recent**', route => route.fulfill({ json: { items: [
+    '#squid@codex+#architecture@reviewer>#handoff@verylongreviewagent! long flow prompt',
+  ] } }));
+  await page.goto('/');
+
+  await page.fill('#input', 'long');
+
+  const routeBtn = page.locator('#autocomplete .ac-route-btn').first();
+  await expect(routeBtn).toBeVisible();
+  await expect(routeBtn).toContainText('#architecture');
+  await expect(routeBtn).toContainText('@verylongreviewagent!');
+  await expect.poll(() => routeBtn.evaluate(el => ({
+    scrollable: el.scrollWidth > el.clientWidth,
+    overflowX: getComputedStyle(el).overflowX,
+  }))).toEqual({ scrollable: true, overflowX: 'auto' });
 });
 
 test('an invalid edited slug remains expanded on blur', async ({ page }) => {

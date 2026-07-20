@@ -695,6 +695,27 @@ def test_recent_prompts_normalize_adhoc_lookback(tmp_path, monkeypatch):
     assert stats_db.get_recent_prompts(limit=5) == ["#squid@codex! reuse context"]
 
 
+def test_recent_prompts_use_flow_route_prefix_when_present(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user_id = stats_db.insert_user_message(
+        "squid",
+        "codex",
+        "review this",
+        flow_route="#squid@codex>@review",
+    )
+    stats_db.insert_assistant_message(
+        "squid",
+        "codex",
+        user_id,
+        flow_run_id="flow1",
+        flow_route="#squid@codex>@review",
+    )
+
+    assert stats_db.get_recent_prompts(limit=5) == ["#squid@codex>@review review this"]
+
+
 def test_session_injected_context_recovers_pins_and_memory_revision(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

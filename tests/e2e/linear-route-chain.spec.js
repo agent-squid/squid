@@ -533,6 +533,133 @@ test('composer sends one-way route chain that hands off to a different topic', a
   await expect(page.locator('.msg[data-msg-id="11"]')).toContainText('revucla response');
 });
 
+test('composer accepts bare-topic route chain target and saves reduced route', async ({ page }) => {
+  await page.route('**/health', r => r.fulfill({ json: { status: 'ok', backends: {} } }));
+  await page.route('**/quota**', r => r.fulfill({ json: {} }));
+  await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/topics', r => r.fulfill({ json: [] }));
+  await page.route('**/topics/**', r => r.fulfill({ json: [] }));
+  await page.route('**/config/agents', r => r.fulfill({ json: [] }));
+  await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [] } }));
+  await page.route('**/topics/*/memory', r => r.fulfill({ json: {
+    topic: 'squid',
+    content: '',
+    revision: 'r1',
+    exists: false,
+  } }));
+
+  const chatBodies = [];
+  await page.route('**/chat', r => {
+    const body = JSON.parse(r.request().postData() || '{}');
+    chatBodies.push(body);
+    return r.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream', 'X-Squid-Msg-Id': '30', 'X-Squid-Flow-Run-Id': 'bare-topic' },
+      body: `event: meta\ndata: {"agent":"${body.agent}","msg_id":30,"adhoc":false}\n\ndata:${body.agent} response\n\nevent: done\ndata: \n\n`,
+    });
+  });
+  await page.route('**/chat/flow/bare-topic/steps**', r => r.fulfill({ json: {
+    messages: [{ id: 31, role: 'assistant', topic: 'hive', agent: 'codex', status: 'done' }],
+    complete: true,
+  } }));
+  await page.route('**/chat/31/status', r => r.fulfill({ json: {
+    id: 31, role: 'assistant', topic: 'hive', agent: 'codex', adhoc: false, status: 'done',
+    content: 'hive codex response',
+    prompt: 'Squid route chain handoff.\nRoute: #squid@codex>#hive\nPrevious step: @codex\nCurrent step: @codex\nOriginal prompt: continue there',
+    prompt_source: 'system', session_id: null,
+  } }));
+
+  await page.goto('/');
+  await page.fill('#input', '#squid@codex>#hive continue there');
+  await expect(page.locator('#topic-chip')).toHaveClass(/route-chain/);
+  await expect(page.locator('#topic-chip')).toContainText('#squid@codex>#hive');
+  await page.locator('#input').press('Enter');
+
+  await expect.poll(() => chatBodies.length).toBe(1);
+  expect(chatBodies[0]).toMatchObject({
+    topic: 'squid',
+    agent: 'codex',
+    flow_route: '#squid@codex>#hive',
+    message: 'continue there',
+  });
+});
+
+test('composer starts join origins under one reduced flow route', async ({ page }) => {
+  await page.route('**/health', r => r.fulfill({ json: { status: 'ok', backends: {} } }));
+  await page.route('**/quota**', r => r.fulfill({ json: {} }));
+  await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/topics', r => r.fulfill({ json: [] }));
+  await page.route('**/topics/**', r => r.fulfill({ json: [] }));
+  await page.route('**/config/agents', r => r.fulfill({ json: [] }));
+  await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [] } }));
+  await page.route('**/topics/*/memory', r => r.fulfill({ json: {
+    topic: 'squid',
+    content: '',
+    revision: 'r1',
+    exists: false,
+  } }));
+
+  const chatBodies = [];
+  await page.route('**/chat', r => {
+    const body = JSON.parse(r.request().postData() || '{}');
+    chatBodies.push(body);
+    return r.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream', 'X-Squid-Msg-Id': String(40 + chatBodies.length), 'X-Squid-Flow-Run-Id': 'join1' },
+      body: `event: meta\ndata: {"agent":"${body.agent}","msg_id":${40 + chatBodies.length},"adhoc":false}\n\ndata:${body.agent} response\n\nevent: done\ndata: \n\n`,
+    });
+  });
+  await page.route('**/chat/flow/join1/steps**', r => r.fulfill({ json: {
+    messages: [],
+    complete: true,
+  } }));
+
+  await page.goto('/');
+  await page.fill('#input', '#squid@a+@b>@c compare');
+  await expect(page.locator('#topic-chip')).toHaveClass(/route-chain/);
+  await expect(page.locator('#topic-chip')).toHaveText('#squid@a+@b>@c');
+  await page.locator('#input').press('Enter');
+
+  await expect.poll(() => chatBodies.length).toBe(2);
+  expect(chatBodies.map(b => b.agent)).toEqual(['a', 'b']);
+  expect(chatBodies.every(b => b.topic === 'squid')).toBe(true);
+  expect(chatBodies.every(b => b.message === 'compare')).toBe(true);
+  expect(chatBodies.every(b => b.flow_route === '#squid@a+@b>@c')).toBe(true);
+  expect(chatBodies[0].flow_run_id).toBeUndefined();
+  expect(chatBodies[1].flow_run_id).toBe('join1');
+});
+
+test('composer accepts repeated and delayed single-operator flow routes', async ({ page }) => {
+  await page.route('**/health', r => r.fulfill({ json: { status: 'ok', backends: {} } }));
+  await page.route('**/quota**', r => r.fulfill({ json: {} }));
+  await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/topics', r => r.fulfill({ json: [] }));
+  await page.route('**/topics/**', r => r.fulfill({ json: [] }));
+  await page.route('**/config/agents', r => r.fulfill({ json: [] }));
+  await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [] } }));
+
+  await page.goto('/');
+
+  const repeated = await page.evaluate(() => parseInput('#squid@codex<2>@review repeat me'));
+  expect(repeated).toMatchObject({
+    topic: 'squid',
+    agent: 'codex',
+    route: '#squid@codex<2>@review',
+    chainTarget: 'review',
+    chainRounds: 2,
+    message: 'repeat me',
+  });
+
+  const delayed = await page.evaluate(() => parseInput('#squid@codex=2:1s>@review delay me'));
+  expect(delayed).toMatchObject({
+    topic: 'squid',
+    agent: 'codex',
+    route: '#squid@codex=2:1s>@review',
+    chainTarget: 'review',
+    message: 'delay me',
+  });
+});
+
 test('history shows route chain start marker on origin row with inferred flow route', async ({ page }) => {
   await page.route('**/health', r => r.fulfill({ json: { status: 'ok', backends: {} } }));
   await page.route('**/quota**', r => r.fulfill({ json: {} }));

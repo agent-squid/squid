@@ -709,23 +709,74 @@ function _chainRouteText(topic, originAgent, targetAgent, targetFresh = false, o
   return `#${topic}@${originAgent}${originFresh ? '!' : ''}${operator}${targetPrefix}@${targetAgent}${targetFresh ? '!' : ''}`;
 }
 
+function _parseSquidFlow(route) {
+  const text = String(route || '').trim().replace(/\s+/g, '');
+  if (!text || !window.SquidFlow || typeof window.SquidFlow.parse !== 'function') return null;
+  const result = window.SquidFlow.parse(text);
+  return result && result.ok ? result : null;
+}
+
+function _isLiveFlowChain(result) {
+  if (!result || !Array.isArray(result.branches) || !result.branches.length) return false;
+  return result.branches.every(branch => {
+    const steps = branch.steps || [];
+    if (steps.length !== 2) return false;
+    const origin = steps[0];
+    const next = steps[1];
+    if (origin.kind !== 'atom' && origin.kind !== 'join') return false;
+    if (next.kind === 'roundtrip') return next.rounds >= 1;
+    return next.kind === 'atom' && next.via && (
+      next.via.type === 'oneway' ||
+      (next.via.type === 'scheduled' && !next.via.unbounded && next.via.count >= 1)
+    );
+  });
+}
+
 function parseRouteChain(route) {
-  const match = String(route || '').match(/^#(\w+)@(\w+)(!?)((?:<>)|>)(?:#(\w+))?@(\w+)(!?)$/);
-  if (!match) return null;
-  const operator = match[4] === '>' ? '>' : '<>';
-  const rounds = operator === '>' ? 0 : 1;
-  const topic = match[1].toLowerCase();
-  const targetTopic = match[5] ? match[5].toLowerCase() : topic;
+  const result = _parseSquidFlow(route);
+  if (!result || !_isLiveFlowChain(result)) return null;
+  const firstBranch = result.branches[0];
+  const originStep = firstBranch.steps[0];
+  const nextStep = firstBranch.steps[1];
+  const origins = originStep.kind === 'join'
+    ? originStep.atoms
+    : result.branches.map(b => b.steps[0].atom);
+  const targets = result.branches.map(b => {
+    const step = b.steps[1];
+    return step.kind === 'roundtrip' ? step.target : step.atom;
+  });
+  const origin = origins[0];
+  const target = targets[0];
+  let operator = '>';
+  let rounds = 0;
+  if (nextStep.kind === 'roundtrip') {
+    rounds = nextStep.rounds || 1;
+    operator = rounds === 1 && !nextStep.wait ? '<>' : `<${rounds}${nextStep.wait ? ':' + nextStep.wait : ''}>`;
+  } else if (nextStep.via?.type === 'scheduled') {
+    operator = `=${nextStep.via.count}${nextStep.via.wait ? ':' + nextStep.via.wait : ''}>`;
+  } else if (nextStep.via?.alias) {
+    operator = '=>';
+  }
+  const routeText = result.key || String(route || '').trim().replace(/\s+/g, '');
+  const originKey = a => `${a.topic}\u0000${a.agent}\u0000${a.fresh ? 1 : 0}`;
+  const uniqueOriginCount = new Set(origins.map(originKey)).size;
+  const uniqueTargetCount = new Set(targets.map(originKey)).size;
   return {
-    topic,
-    origin: match[2],
-    originFresh: !!match[3],
+    topic: origin.topic,
+    origin: origin.agent,
+    originFresh: !!origin.fresh,
     operator,
     rounds,
-    targetTopic,
-    target: match[6],
-    targetFresh: !!match[7],
-    route: _chainRouteText(topic, match[2], match[6], !!match[7], !!match[3], operator, targetTopic),
+    targetTopic: target.topic,
+    target: target.agent,
+    targetFresh: !!target.fresh,
+    origins,
+    targets,
+    join: originStep.kind === 'join',
+    fanout: uniqueTargetCount > 1,
+    multiOrigin: uniqueOriginCount > 1,
+    complex: originStep.kind === 'join' || uniqueTargetCount > 1 || uniqueOriginCount > 1 || operator === '=>' || operator.startsWith('=') || rounds > 1 || operator.includes(':'),
+    route: routeText,
   };
 }
 
@@ -821,6 +872,7 @@ function _resolveBroadcastAtoms(rawAtoms) {
 function parseOriginBroadcast(route) {
   const text = String(route || '').trim();
   if (!text.startsWith('#')) return null;
+  if (_parseSquidFlow(text)?.branches?.some(b => (b.steps || []).length > 1)) return null;
   const rawAtoms = text.split(',');
   if (rawAtoms.length < 2) return null;
   const agents = _resolveBroadcastAtoms(rawAtoms);
@@ -837,16 +889,18 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0, opts = {}) {
   const chainRounds = opts.chainRounds || (chainOperator === '<>' ? 1 : 0);
   const chainTargetTopic = opts.chainTargetTopic || null;
   const broadcastAgents = opts.broadcastAgents || null;
+  const flowOrigins = opts.flowOrigins || null;
   const suppressTurnCount = !!opts.suppressTurnCount;
   const route = broadcastAgents
     ? (opts.route || _broadcastRouteText(broadcastAgents))
     : (chainTarget && agent
       ? (opts.route || _chainRouteText(topic, agent, chainTarget, chainTargetFresh, adhoc, chainOperator, chainTargetTopic))
       : null);
+  const parsedRoute = route ? parseRouteChain(route) : null;
   stickyChip = {
     topic, agent, adhoc, lookback, suppressTurnCount,
     ...(route
-      ? (broadcastAgents ? { route, broadcastAgents } : { route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic })
+      ? (broadcastAgents ? { route, broadcastAgents } : { route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, flowOrigins })
       : {}),
   };
   _advisoryTurnCount = 0;
@@ -900,6 +954,8 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0, opts = {}) {
         topicChipEl.appendChild(freshSpan);
       }
     });
+  } else if (route && parsedRoute?.complex) {
+    topicChipEl.textContent = route;
   } else {
     if (agent) {
       const aSpan = document.createElement('span');
@@ -1059,12 +1115,11 @@ function routeScopeText(route) {
 }
 
 function canonicalFlowRoute(route) {
-  // Comma-separated parts are never reordered: an Origin Broadcast atom can
-  // omit a half and inherit it by rolling anchor from its nearest
-  // fully-explicit predecessor (ADR-0032), so swapping two parts can change
-  // what they resolve to — order is semantic here, not just cosmetic.
   const text = String(route || '').trim().replace(/\s+/g, '');
   if (!text) return '';
+  const parsed = _parseSquidFlow(text);
+  if (parsed?.key) return parsed.key;
+  // Fallback for legacy/non-flow strings.
   return text.split(',').filter(Boolean).join(',');
 }
 
@@ -1211,6 +1266,7 @@ function parseInput(text) {
         chainRounds: stickyChip.chainRounds || 0,
         chainTargetTopic: stickyChip.chainTargetTopic || null,
         broadcastAgents: stickyChip.broadcastAgents || null,
+        flowOrigins: stickyChip.flowOrigins || null,
       } : {}),
       message: text.trim() || text,
     };
@@ -1228,9 +1284,9 @@ function parseInput(text) {
       message: broadcastWithMessage[2].trim(),
     };
   }
-  const chainWithMessage = text.match(/^(#\w+@\w+!?((?:<>)|>)(?:#\w+)?@\w+!?)\s+([\s\S]*)$/);
-  const parsedChainWithMessage = chainWithMessage ? parseRouteChain(chainWithMessage[1]) : null;
-  if (parsedChainWithMessage && chainWithMessage[3].trim()) {
+  const routeTokenWithMessage = text.match(/^(\S+)\s+([\s\S]*)$/);
+  const parsedChainWithMessage = routeTokenWithMessage ? parseRouteChain(routeTokenWithMessage[1]) : null;
+  if (parsedChainWithMessage && routeTokenWithMessage[2].trim()) {
     return {
       topic: parsedChainWithMessage.topic,
       agent: parsedChainWithMessage.origin,
@@ -1242,7 +1298,8 @@ function parseInput(text) {
       chainOperator: parsedChainWithMessage.operator,
       chainRounds: parsedChainWithMessage.rounds,
       chainTargetTopic: parsedChainWithMessage.targetTopic,
-      message: chainWithMessage[3].trim(),
+      flowOrigins: parsedChainWithMessage.origins,
+      message: routeTokenWithMessage[2].trim(),
     };
   }
   // adhoc: #topic!N or #topic@agent!N (N optional, defaults to 0 = no lookback)
@@ -1270,6 +1327,7 @@ function parseInput(text) {
       chainOperator: parsedChainBare.operator,
       chainRounds: parsedChainBare.rounds,
       chainTargetTopic: parsedChainBare.targetTopic,
+      flowOrigins: parsedChainBare.origins,
       message: '',
     };
   }
@@ -2100,11 +2158,11 @@ function formatPromptHistoryEntry(topic, agent, adhoc, _lookback, message) {
 
 function splitPromptHistoryEntry(entry) {
   const text = String(entry || '').trim();
-  const match = text.match(new RegExp(
-    `^(${_BROADCAST_ROUTE_DETECT_SRC}|#\\w+@\\w+!?(?:(?:<>)|>)(?:#\\w+)?@\\w+!?|#\\w+(?:@\\w+)?(?:!\\d*)?)\\s+([\\s\\S]+)$`
-  ));
-  if (!match) return { route: '', prompt: text };
-  return { route: match[1], prompt: match[2].trim() };
+  const tokenMatch = text.match(/^(\S+)\s+([\s\S]+)$/);
+  if (tokenMatch && normalizePromptHistoryRoute(tokenMatch[1])) {
+    return { route: tokenMatch[1], prompt: tokenMatch[2].trim() };
+  }
+  return { route: '', prompt: text };
 }
 
 function promptHistoryDedupKey(entry) {
@@ -2128,6 +2186,24 @@ function normalizePromptHistoryRoute(route) {
   const match = String(route || '').match(/^#(\w+)(?:@(\w+))?(!)?\d*$/);
   if (!match) return '';
   return promptHistoryRoute(match[1].toLowerCase(), match[2] || null, !!match[3]);
+}
+
+function promptHistoryDisplayRoute(route) {
+  const chain = parseRouteChain(route);
+  if (chain && !chain.complex) return promptHistoryRoute(chain.topic, chain.origin, chain.originFresh);
+  if (chain) return chain.route;
+  return normalizePromptHistoryRoute(route);
+}
+
+function lastPromptForFlowRoute(route) {
+  const targetRoute = normalizePromptHistoryRoute(route).toLowerCase();
+  if (!targetRoute) return '';
+  for (const entry of promptHistory) {
+    if (hiddenPromptKeys.has(promptHistoryDedupKey(entry))) continue;
+    const { route: entryRoute, prompt } = splitPromptHistoryEntry(entry);
+    if (normalizePromptHistoryRoute(entryRoute).toLowerCase() === targetRoute) return prompt;
+  }
+  return '';
 }
 
 function applyPromptHistoryEntry(entry) {
@@ -2207,14 +2283,18 @@ function promptHistoryAutocompleteItems(entries) {
     const { route, prompt } = splitPromptHistoryEntry(ph);
     const promptText = prompt || ph;
     const routeKey = normalizePromptHistoryRoute(route);
+    const displayRouteKey = promptHistoryDisplayRoute(routeKey);
     const isDifferentRoute = !!(routeKey && routeKey.toLowerCase() !== currentRoute);
-    const routeHtml = isDifferentRoute ? _acRouteHtml(routeKey) : '';
+    const routeHtml = isDifferentRoute ? _acRouteHtml(displayRouteKey) : '';
     return {
       label: `<span class="ac-history-prompt">${escapeHtml(truncate(promptText, 55))}</span>`,
       insert: promptText,
       trail: false,
       deletePromptEntry: ph,
-      ...(routeHtml ? { routeHtml, fullEntry: `${routeKey} ${promptText}` } : {}),
+      ...(routeHtml ? {
+        routeHtml,
+        fullEntry: `${displayRouteKey} ${promptText}`,
+      } : {}),
     };
   });
 }
@@ -2730,12 +2810,12 @@ form.addEventListener('submit', async (e) => {
   const text = input.value.trim();
   if (!text) return;
   commandEditRestore = null;
-  const { topic, agent, adhoc, lookback, route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, message } = parseInput(text);
+  const { topic, agent, adhoc, lookback, route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, flowOrigins, message } = parseInput(text);
   if (!message) {
     input.value = '';
     resizeComposer();
     hideAutocomplete();
-    setTopicChip(topic, agent, adhoc, lookback, { route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents });
+    setTopicChip(topic, agent, adhoc, lookback, { route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, flowOrigins });
     return;
   }
   const cmd = parseCommand(message);
@@ -2753,7 +2833,7 @@ form.addEventListener('submit', async (e) => {
     await handleCommand(cmd, topic, agent, adhoc, lookback);
     // Re-set chip after topic-scoped commands so next message stays in context
     if (['clear', 'stop', 'stopall', 'deq'].includes(cmd.command) && (topic !== 'default' || agent)) {
-      setTopicChip(topic, agent, adhoc, lookback, { route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents });
+      setTopicChip(topic, agent, adhoc, lookback, { route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, flowOrigins });
     }
     return;
   }
@@ -2765,7 +2845,7 @@ form.addEventListener('submit', async (e) => {
   invalidateTopicsManageCache();
   recordPrompt(route ? `${route} ${message}` : formatPromptHistoryEntry(topic, agent, adhoc, lookback, message));
   localStorage.removeItem('squid_draft');
-  if (broadcastAgents) {
+  if (broadcastAgents || (flowOrigins && flowOrigins.length > 1)) {
     sendOriginBroadcast(text);
   } else {
     sendMessage(text);
@@ -2915,6 +2995,7 @@ async function _maybePromoteSlug(val) {
       chainOperator: chain.operator,
       chainRounds: chain.rounds,
       chainTargetTopic: chain.targetTopic,
+      flowOrigins: chain.origins,
     });
     hideAutocomplete();
     resizeComposer();
@@ -2967,7 +3048,7 @@ async function _maybeCollapseExpandedSlug(force = false, allowCompletedPrompt = 
   if (!editingExpandedSlug && (!allowCompletedPrompt || stickyChip)) return;
 
   const val = input.value;
-  const chainMatch = val.match(/^(#\w+@\w+!?(?:(?:<>)|>)(?:#\w+)?@\w+!?)\s+([\s\S]+)$/);
+  const chainMatch = val.match(/^(\S+)\s+([\s\S]+)$/);
   const chain = chainMatch ? parseRouteChain(chainMatch[1]) : null;
   if (chain) {
     const prompt = chainMatch[2];
@@ -2982,6 +3063,7 @@ async function _maybeCollapseExpandedSlug(force = false, allowCompletedPrompt = 
       chainOperator: chain.operator,
       chainRounds: chain.rounds,
       chainTargetTopic: chain.targetTopic,
+      flowOrigins: chain.origins,
     });
     input.value = prompt;
     input.setSelectionRange(selectionStart, selectionEnd);
@@ -3246,7 +3328,7 @@ async function sendMessage(text, opts = {}) {
   const updateComposerRoute = source !== 'system' && opts.updateComposerRoute !== false;
   const suppressChipTurnCount = !!opts.suppressChipTurnCount;
   const parsed = parseInput(text);
-  const { lookback, route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, message } = parsed;
+  const { lookback, route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, flowOrigins, message } = parsed;
   // Origin Broadcast (ADR-0032): N independent origins, one per sendMessage
   // call — the orchestrator (sendOriginBroadcast) tells each call which of
   // the parsed broadcastAgents it's responsible for via opts.broadcastTarget.
@@ -3260,7 +3342,7 @@ async function sendMessage(text, opts = {}) {
   let flowRunId = flowRoute ? (opts.flowRunId || null) : null;
   let flowRunIdEmitted = false;
   if (updateComposerRoute) {
-    setTopicChip(topic, agent, adhoc, lookback, { route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, suppressTurnCount: suppressChipTurnCount });
+    setTopicChip(topic, agent, adhoc, lookback, { route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, flowOrigins, suppressTurnCount: suppressChipTurnCount });
   }
   const sendTime = new Date().toISOString();
   // A search scope can't be evaluated against a message that isn't in the DB yet, so keep
@@ -3270,7 +3352,7 @@ async function sendMessage(text, opts = {}) {
     (hasHistoryFilterScope() && !itemMatchesFilter({ topic, agent, adhoc, flow_route: flowRoute }, historyFilter));
 
   let chainMarker = null;
-  if (source === 'human' && route && chainTarget) {
+  if (source === 'human' && route && chainTarget && !opts.suppressUserBubble) {
     chainMarker = makeRouteChainMarker(route, {
       turnCounts: _routeChainTurnCounts(topic, agent, adhoc, chainTarget, chainTargetFresh, chainTargetTopic),
     });
@@ -4086,13 +4168,26 @@ async function sendMessage(text, opts = {}) {
 // literal prompt and repeating it per agent would just be visual noise.
 async function sendOriginBroadcast(text, opts = {}) {
   const parsed = parseInput(text);
-  if (!parsed.broadcastAgents) return;
+  const originTargets = parsed.broadcastAgents || parsed.flowOrigins || null;
+  if (!originTargets) return;
   if (opts.source !== 'system') {
-    setTopicChip(parsed.topic, null, false, 0, { route: parsed.route, broadcastAgents: parsed.broadcastAgents });
+    if (parsed.broadcastAgents) {
+      setTopicChip(parsed.topic, null, false, 0, { route: parsed.route, broadcastAgents: parsed.broadcastAgents });
+    } else {
+      setTopicChip(parsed.topic, parsed.agent, parsed.adhoc, 0, {
+        route: parsed.route,
+        chainTarget: parsed.chainTarget,
+        chainTargetFresh: parsed.chainTargetFresh,
+        chainOperator: parsed.chainOperator,
+        chainRounds: parsed.chainRounds,
+        chainTargetTopic: parsed.chainTargetTopic,
+        flowOrigins: parsed.flowOrigins,
+      });
+    }
   }
   let resolveSharedFlowRunId;
   const sharedFlowRunId = new Promise(resolve => { resolveSharedFlowRunId = resolve; });
-  const sends = parsed.broadcastAgents.map((target, i) => {
+  const sends = originTargets.map((target, i) => {
     if (i === 0) {
       return sendMessage(text, {
         ...opts,
@@ -5147,6 +5242,10 @@ function makeRouteChainMarker(route, opts = {}) {
   const chain = parseRouteChain(route);
   if (!chain) {
     div.textContent = route || '';
+    return div;
+  }
+  if (chain.complex) {
+    div.textContent = chain.route || route || '';
     return div;
   }
   const { topic, origin: originAgent, originFresh, operator, target: targetAgent, targetFresh, targetTopic } = chain;
@@ -9656,6 +9755,7 @@ function _acRestoreDraft() {
         chainRounds: promptDraftChip.chainRounds,
         chainTargetTopic: promptDraftChip.chainTargetTopic,
         broadcastAgents: promptDraftChip.broadcastAgents,
+        flowOrigins: promptDraftChip.flowOrigins,
       });
     }
     else clearTopicChip();
@@ -9678,7 +9778,7 @@ function _acRender(items, title = 'Suggestions') {
   const rows = items.map((item, i) =>
     `<div class="ac-item" data-i="${i}"${item.execute != null ? ' data-cmd' : ''}>` +
     `<div class="ac-row">` +
-    (item.routeHtml ? `<button class="ac-route-btn" type="button" data-i="${i}" title="Switch to this route">${item.routeHtml}<span class="ac-route-switch-icon" aria-hidden="true"></span></button> ` : '') +
+    (item.routeHtml ? `<button class="ac-route-btn" type="button" data-i="${i}" title="Switch to this route">${item.routeHtml}${item.routeSwitchIcon === false ? '' : '<span class="ac-route-switch-icon" aria-hidden="true"></span>'}</button> ` : '') +
     `<span class="ac-label">${item.label}</span>` +
     (item.sub ? `<span class="ac-sub">${item.sub}</span>` : '') +
     (item.meta ? `<span class="ac-meta">${item.meta}</span>` : '') +
@@ -9781,6 +9881,25 @@ function _acSelect(idx) {
     input.focus();
     return;
   }
+  if (item.promoteRoute) {
+    const chain = parseRouteChain(item.insert);
+    if (chain) {
+      setTopicChip(chain.topic, chain.origin, chain.originFresh, 0, {
+        route: chain.route,
+        chainTarget: chain.target,
+        chainTargetFresh: chain.targetFresh,
+        chainOperator: chain.operator,
+        chainRounds: chain.rounds,
+        chainTargetTopic: chain.targetTopic,
+        flowOrigins: chain.origins,
+      });
+      input.value = '';
+      resizeComposer();
+      input.focus();
+      input.dispatchEvent(new Event('input'));
+      return;
+    }
+  }
   if (item.clearChip && stickyChip) clearTopicChip();
   input.value = item.trail === false ? item.insert : item.insert + ' ';
   resizeComposer();
@@ -9802,6 +9921,7 @@ function _acRouteLabel(topic, agent = '', backendFallback = null) {
 function _acRouteHtml(route) {
   const cm = parseRouteChain(route);
   if (cm) {
+    if (cm.complex) return escapeHtml(cm.route || route);
     return _acRouteLabel(cm.topic, cm.origin + (cm.originFresh ? '!' : '')) +
       `<span class="ac-route-chain-arrow">${escapeHtml(cm.operator)}</span>` +
       `<span class="ac-agent"${_agentStyleAttr(cm.target)}>@${escapeHtml(cm.target)}${cm.targetFresh ? '!' : ''}</span>`;
@@ -9868,8 +9988,10 @@ async function updateAutocomplete() {
   // insert literal text, not set a route — so skip it and fall through to
   // the same handling any other message text gets (prompt history, below).
   const routeSyntaxActive = !stickyChip || editingExpandedSlug;
+  const chainSyntaxActive = routeSyntaxActive || /^#\w+@\w+!?(?:<>?|>|=>)/.test(slugVal);
   const mTopic = routeSyntaxActive && slugVal.match(/^#(\w*)[!]?$/);
-  const mChainAlias = routeSyntaxActive && slugVal.match(/^#(\w+)@(\w+)(!)?(<>?|>)(?:@?)(\w*)(!)?$/);
+  const mChainAlias = chainSyntaxActive && slugVal.match(/^#(\w+)@(\w+)(!)?(<>?|>)(?:@?)(\w*)(!)?$/);
+  const mChainTopicTarget = chainSyntaxActive && slugVal.match(/^#(\w+)@(\w+)(!)?(<>?|>)#(\w*)$/);
   const mAlias = routeSyntaxActive && slugVal.match(/^#(\w+)@(\w*)(!\d*)?$/);
   // Origin Broadcast (ADR-0032): autocomplete for whichever trailing atom is
   // currently being typed after the last comma — everything before it (the
@@ -9955,6 +10077,29 @@ async function updateAutocomplete() {
         })),
       'Routes'
     );
+  } else if (mChainTopicTarget) {
+    const originTopic = mChainTopicTarget[1];
+    const originAgent = mChainTopicTarget[2];
+    const originFresh = mChainTopicTarget[3] || '';
+    const operator = mChainTopicTarget[4].startsWith('<') ? '<>' : mChainTopicTarget[4];
+    const topicPrefix = mChainTopicTarget[5].toLowerCase();
+    const topics = await _acTopics();
+    if (input.value !== val) return;
+    _acRender(
+      topics.filter(t => t.name.toLowerCase().startsWith(topicPrefix)).slice(0, 8)
+        .map(t => {
+          const route = `#${originTopic}@${originAgent}${originFresh}${operator}#${t.name}`;
+          return {
+        label: escapeHtml(route),
+        insert: route,
+        replaceSlug: replacingSlug,
+        promoteRoute: true,
+        meta: t.active ? '● live' : t.queue_depth > 0 ? `queue ${t.queue_depth}` : '',
+        sub: _acLastPrompt(lastPromptForFlowRoute(route)),
+      };
+        }),
+      'Routes'
+    );
   } else if (mChainAlias) {
     const topic = mChainAlias[1];
     const originAgent = mChainAlias[2];
@@ -9975,13 +10120,14 @@ async function updateAutocomplete() {
     const backendByAgent = new Map(agents.map(a => [a.name, a.backend]));
     const items = [];
     const routePrefix = `#${topic}@${originAgent}${originFresh}${operator}@`;
-    const addChainItem = (agentName, fresh, sub, meta) => {
+    const addChainItem = (agentName, fresh, meta) => {
       const route = `${routePrefix}${agentName}${fresh ? '!' : ''}`;
       items.push({
         label: _acRouteHtml(route),
         insert: route,
         replaceSlug: replacingSlug,
-        sub,
+        promoteRoute: true,
+        sub: _acLastPrompt(lastPromptForFlowRoute(route)),
         meta,
       });
     };
@@ -9989,17 +10135,17 @@ async function updateAutocomplete() {
     for (const h of history) {
       if (!h.agent.toLowerCase().startsWith(prefix)) continue;
       if (targetFreshTyped) {
-        addChainItem(h.agent, true, h.last_adhoc_prompt ? _acLastPrompt(h.last_adhoc_prompt) : '', 'fresh');
+        addChainItem(h.agent, true, 'fresh');
         continue;
       }
-      addChainItem(h.agent, false, h.last_prompt ? _acLastPrompt(h.last_prompt) : '', backendByAgent.get(h.agent) || null);
-      addChainItem(h.agent, true, h.last_adhoc_prompt ? _acLastPrompt(h.last_adhoc_prompt) : '', 'fresh');
+      addChainItem(h.agent, false, backendByAgent.get(h.agent) || null);
+      addChainItem(h.agent, true, 'fresh');
     }
 
     for (const a of agents) {
       if (usedNames.has(a.name)) continue;
       if (!a.name.toLowerCase().startsWith(prefix)) continue;
-      addChainItem(a.name, targetFreshTyped, '', targetFreshTyped ? 'fresh' : a.backend);
+      addChainItem(a.name, targetFreshTyped, targetFreshTyped ? 'fresh' : a.backend);
     }
 
     _acRender(items.slice(0, 10), 'Routes');

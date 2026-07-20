@@ -4547,8 +4547,13 @@ button {
 .ac-item:hover .ac-del-btn, .ac-item.selected .ac-del-btn { color: var(--remove-mark); }
 .ac-del-btn:hover { color: var(--danger) !important; }
 .ac-route-btn {
-  flex-shrink: 0;
+  flex: 0 0 auto;
+  width: max-content;
+  max-width: min(70vw, 32rem);
   margin-right: 0.4rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
   background: none;
   border: 1px solid var(--border);
   color: inherit;
@@ -4556,10 +4561,17 @@ button {
   font-family: ui-monospace, monospace;
   font-size: var(--text-body);
   font-weight: 600;
-  padding: 0.05em 0.35em;
-  line-height: 1;
+  padding: 0.14em 0.42em;
+  line-height: 1.3;
   border-radius: 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
 }
+.ac-route-btn::-webkit-scrollbar { height: 4px; }
+.ac-route-btn::-webkit-scrollbar-thumb { background: var(--border); border-radius: 999px; }
 .ac-route-btn:hover { border-color: var(--accent-dim); background: var(--surface-2); }
 .ac-route-btn .ac-topic { color: var(--accent-dim); }
 .ac-route-btn .ac-agent { color: var(--agent-color, #848899); }
@@ -4567,10 +4579,18 @@ button {
 .ac-broadcast-sep { color: var(--text-dim); font-weight: 700; padding: 0 0.05rem; }
 .ac-route-switch-icon {
   color: var(--accent);
-  font-size: 1.25em;
-  line-height: 0.8;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.35em;
+  margin-left: 0.2rem;
+  padding-left: 0.34rem;
+  border-left: 1px solid var(--border);
+  font-size: 1.15em;
+  line-height: 1;
 }
-.ac-route-switch-icon::before { content: ' ⇄'; }
+.ac-route-switch-icon::before { content: '⇄'; }
 
 @media (max-width: 768px) {
   .ac-item { padding: 0.5rem 0.75rem; font-size: var(--text-body); }

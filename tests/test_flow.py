@@ -78,6 +78,20 @@ def test_parse_route_chain_cross_topic_target():
     }
 
 
+def test_parse_route_chain_bare_topic_target_inherits_origin_agent():
+    assert flow.parse_route_chain("#squid@codex>#hive") == {
+        "topic": "squid",
+        "origin": "codex",
+        "origin_fresh": False,
+        "operator": ">",
+        "rounds": 0,
+        "target_topic": "hive",
+        "target": "codex",
+        "target_fresh": False,
+        "route": "#squid@codex>#hive",
+    }
+
+
 def test_parse_route_chain_same_topic_target_prefix_is_dropped_on_render():
     # A redundant same-topic `#topic` prefix on the target still parses, but
     # the canonical route text collapses it back to the compact bare form.
@@ -90,9 +104,99 @@ def test_parse_route_chain_rejects_unsupported_or_malformed():
     assert flow.parse_route_chain(None) is None
     assert flow.parse_route_chain("") is None
     assert flow.parse_route_chain("#squid@codex") is None
-    # <N> numbered rounds are not implemented yet (ADR-0032) — must not be
-    # misread as a plain chain.
-    assert flow.parse_route_chain("#squid@codex<2>@revucla") is None
+    assert flow.parse_route_chain("#squid@codex@bad>@revucla") is None
+
+
+def test_parse_route_chain_repeated_rounds():
+    chain = flow.parse_route_chain("#squid@codex<2>@revucla")
+    assert chain["operator"] == "<>"
+    assert chain["rounds"] == 2
+    assert chain["route"] == "#squid@codex<2>@revucla"
+
+
+def test_next_chain_steps_target_fanout_after_origin(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    route = "#squid@codex>@review,@test"
+    flow_run_id, asst_id = _seed_chain(route, [
+        ("user", "codex", "review this", None),
+        ("assistant", "codex", "codex output", "done"),
+    ])
+
+    steps = flow.next_chain_steps(flow_run_id)
+    assert [
+        (s["topic"], s["agent"], s["previous_msg_ids"], s["route"])
+        for s in steps
+    ] == [
+        ("squid", "review", [asst_id], route),
+        ("squid", "test", [asst_id], route),
+    ]
+
+
+def test_next_chain_steps_join_waits_for_all_origins_and_pins_both(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    route = "#squid@a+@b>@c"
+    flow_run_id, a_asst_id = _seed_chain(route, [
+        ("user", "a", "compare", None),
+        ("assistant", "a", "a output", "done"),
+    ])
+    assert flow.next_chain_steps(flow_run_id) == []
+
+    b_user = stats_db.insert_user_message("squid", "b", "compare", flow_run_id=flow_run_id, flow_route=route)
+    b_asst_id = stats_db.insert_assistant_message("squid", "b", b_user, flow_run_id=flow_run_id, flow_route=route)
+    stats_db.update_assistant_message(b_asst_id, "b output", None, "done")
+
+    steps = flow.next_chain_steps(flow_run_id)
+    assert len(steps) == 1
+    assert steps[0]["topic"] == "squid"
+    assert steps[0]["agent"] == "c"
+    assert steps[0]["previous_agent"] == "@a+@b"
+    assert steps[0]["previous_msg_ids"] == [a_asst_id, b_asst_id]
+    assert steps[0]["route"] == route
+
+
+def test_next_chain_steps_scheduled_repeat_records_delays(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    route = "#squid@codex=2:1s>@review"
+    flow_run_id, asst_id = _seed_chain(route, [
+        ("user", "codex", "review this", None),
+        ("assistant", "codex", "codex output", "done"),
+    ])
+
+    steps = flow.next_chain_steps(flow_run_id)
+    assert [(s["agent"], s["previous_msg_ids"], s["delay_seconds"]) for s in steps] == [
+        ("review", [asst_id], 1),
+        ("review", [asst_id], 2),
+    ]
+
+
+def test_next_chain_steps_repeated_roundtrip_advances_one_leg_at_a_time(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    route = "#squid@codex<2>@review"
+    flow_run_id, origin_asst_id = _seed_chain(route, [
+        ("user", "codex", "review this", None),
+        ("assistant", "codex", "codex output", "done"),
+    ])
+
+    first = flow.next_chain_steps(flow_run_id)
+    assert [(s["agent"], s["previous_msg_ids"]) for s in first] == [("review", [origin_asst_id])]
+
+    review_user = stats_db.insert_user_message(
+        "squid",
+        "review",
+        flow.chain_handoff_prompt(route, "codex", "review", False, "review this"),
+        source="system",
+        flow_run_id=flow_run_id,
+        flow_route=route,
+    )
+    review_asst_id = stats_db.insert_assistant_message("squid", "review", review_user, flow_run_id=flow_run_id, flow_route=route)
+    stats_db.update_assistant_message(review_asst_id, "review output", None, "done")
+
+    second = flow.next_chain_steps(flow_run_id)
+    assert [(s["agent"], s["previous_msg_ids"]) for s in second] == [("codex", [review_asst_id])]
 
 
 def test_chain_handoff_prompt_matches_ui_template():
@@ -233,7 +337,7 @@ def test_next_chain_step_fail_stops_on_empty_output(tmp_path, monkeypatch):
 def test_next_chain_step_ignores_unrecognized_route(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
-    flow_run_id, _ = _seed_chain("#squid@codex<2>@revucla!", [
+    flow_run_id, _ = _seed_chain("#squid@codex<bad>@revucla!", [
         ("user", "codex", "review this", None),
         ("assistant", "codex", "codex output", "done"),
     ])

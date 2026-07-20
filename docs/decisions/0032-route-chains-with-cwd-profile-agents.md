@@ -29,27 +29,25 @@ native profile files from its process cwd.
 
 ## Current Implementation
 
-As of 2026-07-16, Squid implements the one-way handoff and the single-round
-request/response form:
+As of 2026-07-19, Squid implements the v0.1 single-operator live subset:
 
 ```text
 #topic@origin[!]>@target[!]
+#topic@origin[!]=>@target[!]
 #topic@origin[!]<>@target[!]
+#topic@origin[!]<N[:T]>@target[!]
+#topic@origin[!]=N[:T]>@target[!]
 ```
 
 The broader Squid Flow syntax in this ADR remains the accepted direction, but
-joins, scheduled edges, cycles, the `=>` one-way alias, and `<N>` for any round
-count other than one (including `<N:T>` scheduled rounds) are not implemented
-yet. `<N>` route text is not recognized as a chain and falls back to ordinary
-route parsing.
+multi-hop chains, `;` DAG clauses, cycles, and unbounded `=*` loops are outside
+v0.1. Delayed `:T` forms use an in-memory async delay in the current
+implementation; if the server restarts while a delayed handoff is sleeping,
+that pending delayed handoff is lost.
 
-A chain target may be a full `#topic@agent` route, not only a bare `@agent` —
-`#topic@origin>#other@target` is implemented and hands off to a different
-topic mid-chain (`_ROUTE_CHAIN_RE` in `agent/flow.py`, `parseRouteChain` in
-`ui/app.js`). What's still missing is the bare-topic-only target form,
-`#topic@origin>#other` (topic switches, agent inherited from the origin) —
-`_ROUTE_CHAIN_RE` currently requires an explicit `@agent` on the target, so
-this v0.1-scope form (see "v0.1 Scope" below) isn't accepted yet.
+A chain target may be a full `#topic@agent` route, a bare `@agent`, or a
+bare `#topic` that inherits the source agent. Target fan-out and origin-side
+joins are implemented for the same single operator.
 
 The client only ever sends the origin turn. Every step after that is
 dispatched by the server (`agent/flow.py`), not the browser: `TopicWorker`
@@ -69,11 +67,11 @@ server-dispatched steps and render them live while a tab is open, purely for
 UX — the chain's correctness never depends on a client being connected.
 
 For `>`, the origin prompt is sent first, then Squid synthesizes and sends the
-target prompt after the origin response completes. For `<>`, Squid
-additionally synthesizes and sends one return prompt back to the origin route
-step after the target response completes, then the chain ends — repeated
-rounds (`<N>` for N > 1) are not implemented, so a second round is never
-started. Both the forward and return handoff prompts reuse the same generic
+target prompt after the origin response completes. For `<>` and `<N>`, Squid
+sends alternating target/origin handoffs until the requested round count is
+complete. For `=N>`, Squid sends the same one-way target handoff `N` times
+from the same previous output. `:T` adds an in-memory delay before each
+scheduled hop. Both the forward and return handoff prompts reuse the same generic
 template described under "Downstream Prompt Synthesis" below (Route / Previous
 step / Current step / Original prompt); the differentiated reconciliation-style
 return prompt shown later in this ADR is the target direction, not yet
@@ -91,12 +89,11 @@ describing the broader Squid Flow direction, not v0.1.
 
 **In scope:**
 
-- An origin, always fully explicit: `#topic@origin[!]`. The origin never
-  omits either half — there is nothing for it to inherit from yet, since
-  it's what *establishes* the root that later inheritance rolls from. This
-  holds whether the origin is a single atom, an Origin Broadcast list
-  (`#topic@a,@b`, no operator), or a join (`@a+@b`, feeding the one
-  following hop).
+- An origin group that contains at least one fully explicit anchor:
+  `#topic@origin[!]`. A single origin atom must therefore be fully explicit,
+  but an Origin Broadcast or join may use omitted-half atoms once some atom
+  in that origin group establishes the root that later inheritance rolls
+  from: `#topic@a,@b` and `#topic@a+@b>@c` are valid.
 - At most one hop operator after the origin: `>`, `=>`, `<>`, `<N>`, `<N:T>`,
   `=N>`, `=N:T>`. A clause has either zero operators (a bare origin or
   broadcast, nothing downstream) or exactly one — never two or more chained
@@ -123,20 +120,17 @@ describing the broader Squid Flow direction, not v0.1.
   origin either — inheritance only flows origin → target, never the reverse
   — so `@target`'s agent is never a candidate source for the origin's missing
   agent, even in principle.
-- A join (`+`) as the origin, feeding the one hop: `@a+@b>@c`. See "Squid
-  Flow" below for how the joined branches' context reaches the target step
-  (pins, not a synthesized envelope) and what happens when they disagree on
-  a field the target needs to inherit.
+- A join (`+`) as the origin, feeding the one hop:
+  `#topic@a+@b>@c` and `#t1@a+#t2@b>#t3@c` are both valid. See "Squid Flow"
+  below for how the joined branches' context reaches the target step (pins,
+  not a synthesized envelope) and what happens when they disagree on a field
+  the target needs to inherit.
 
 **Out of scope:**
 
 - Multi-hop chains — more than one operator in a clause (`@a>@b>@c`). Once a
   hop's target (or targets) is reached, that clause is done.
 - Multiple `;`-separated clauses (a full Squid Flow DAG). v0.1 is one clause.
-- Scheduled edges (`=N:T>`, `<N:T>`) and repeated rounds (`<N>` for N > 1) —
-  accepted direction, not yet implemented: no repeat-dispatch or delayed-
-  dispatch mechanism exists server-side yet (`agent/topic_queue.py` only
-  dispatches immediately, once).
 - `;` multi-clause DAGs, cycles — not part of v0.1 or its near-term
   extension; `ui/flow-lang.js`'s reference grammar rejects `;` outright.
 
@@ -539,7 +533,6 @@ one-way handoffs:
 @a<5:1d>@b
 @c=2>@a
 @c=2:1d>@a
-@c=*:1d>@a
 @c=5:1d>@a
 ```
 
@@ -555,20 +548,19 @@ therefore not degenerate: its one round still has two hops, at `T` and `2T`.
 If the two directions need different delays, that isn't expressed on
 `<N:T>` — write the round out explicitly as chained one-way edges instead,
 e.g. `@a=1:1h>@b=>@a` (an hour out, no delay back) or `@a=1:1h>@b=1:2h>@a` (a
-different delay each way). Unlike `=*:T>` below, there is no unbounded
-`<*:T>` form: a round trip's natural stopping point is semantic (e.g. "until
-the reviewer approves"), which Squid Flow has no conditional edges to
-express, so an unbounded agent-to-agent loop has no way to terminate and is
-intentionally not supported — use a large bounded `N` instead.
+different delay each way). There is no unbounded `<*:T>` form: a round trip's
+natural stopping point is semantic (e.g. "until the reviewer approves"), which
+Squid Flow has no conditional edges to express, so an unbounded agent-to-agent
+loop has no way to terminate and is intentionally not supported — use an
+explicit bounded `N` instead.
 
 `=>` is equivalent to `>`. The count always comes first, same as `<N>` —
 `=N>` repeats the one-way handoff `N` times back to back
 with no delay. `=N:T>` spaces those `N` repeats out by duration `T`, relative
-to the triggering completion time. `=*:T>` means unbounded repeats spaced by
-`T` — `*` always requires a `:T`, since an unbounded loop with no delay is
-just a runaway cycle, not a schedule. Every run, including the first, is a
-full `T` after the previous one (or after the trigger, for the first) — run
-`k` fires at `k*T` after the trigger.
+to the triggering completion time. Every delayed run, including the first, is
+a full `T` after the previous one (or after the trigger, for the first) — run
+`k` fires at `k*T` after the trigger. Unbounded scheduled repeats (`=*`) are
+not part of v0.1; use an explicit bounded `N`.
 
 There is no wall-clock anchor (e.g. "run at 14:00 daily") — a schedule is
 always a relative offset from the trigger, never pinned to a time of day.
@@ -584,12 +576,12 @@ So for `@c=5:1d>@a`, `@c` runs immediately, once; `@a` is what fires five
 times, one day apart.
 
 Unbounded graph cycles are invalid. A cyclic Squid Flow must include an
-explicit bound or schedule, such as `@c=5:1d>@a`. Delayed edges create future
-Squid Flow runs with lineage metadata; Squid must persist the pending handoff
-rather than keep an in-memory chain suspended for the delay.
+explicit bound or schedule, such as `@c=5:1d>@a`. The v0.1 implementation uses
+in-memory delayed dispatch for `:T`; persisted pending handoffs are a later
+durability improvement, not part of v0.1.
 
-The first implementation can support only linear chains while using the same
-Squid Flow representation internally. Joins, scheduled edges, and cyclic flows
+The v0.1 implementation supports the single-operator subset while using the
+same Squid Flow representation internally. Cyclic and multi-clause graph flows
 can land incrementally without redefining the route syntax.
 
 Complex graph expressions should also have a named alias form so the composer

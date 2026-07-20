@@ -1292,7 +1292,7 @@ def get_flow_run_messages(flow_run_id: str) -> list[dict]:
     full step sequence used to derive what (if anything) runs next."""
     with _connect() as conn:
         rows = conn.execute(
-            """SELECT id, role, topic, agent, content, status, flow_route, created_at
+            """SELECT id, role, topic, agent, source, reply_to, adhoc, content, status, context, flow_route, created_at
                FROM chat_messages
                WHERE flow_run_id = ?
                ORDER BY id""",
@@ -1603,6 +1603,7 @@ def get_recent_prompts(limit: int = 50) -> list:
                           TRIM(u.content) AS content,
                           u.topic,
                           u.agent,
+                          u.flow_route,
                           COALESCE((
                               SELECT a.adhoc
                               FROM chat_messages a
@@ -1619,9 +1620,9 @@ def get_recent_prompts(limit: int = 50) -> list:
                ), latest_unique AS (
                    SELECT MAX(id) AS id
                    FROM routed_prompts
-                   GROUP BY content, topic, agent, adhoc
+                   GROUP BY content, COALESCE(flow_route, ''), topic, agent, adhoc
                )
-               SELECT p.content, p.topic, p.agent, p.adhoc, p.lookback
+               SELECT p.content, p.topic, p.agent, p.adhoc, p.lookback, p.flow_route
                FROM routed_prompts p
                JOIN latest_unique latest ON latest.id = p.id
                ORDER BY p.id DESC
@@ -1639,8 +1640,11 @@ def get_recent_prompts(limit: int = 50) -> list:
         topic = row.get('topic') or ''
         agent = row.get('agent') or ''
         adhoc = bool(row.get('adhoc'))
+        flow_route = (row.get('flow_route') or '').strip()
         prefix = ''
-        if topic and (topic != 'default' or agent):
+        if flow_route:
+            prefix = flow_route + ' '
+        elif topic and (topic != 'default' or agent):
             prefix = f'#{topic}'
             if agent:
                 prefix += f'@{agent}'
