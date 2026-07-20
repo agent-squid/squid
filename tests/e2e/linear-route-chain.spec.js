@@ -305,6 +305,12 @@ test('route chain marker follows live group filter visibility', async ({ page })
   await expect(page.locator('.route-chain-marker')).toBeVisible();
   await expect(page.locator('.msg-thinking:not(.msg-thinking-done)')).toBeVisible();
 
+  // Switching to a different route while a chip is active now requires an
+  // explicit clear/edit (click-to-edit, backspace) rather than just typing a
+  // new "#topic@agent" — the implicit override-by-typing that used to do
+  // this was removed (it made ordinary messages starting with "#" silently
+  // swap the active route). Clearing here stands in for that explicit action.
+  await page.evaluate(() => clearTopicChip());
   await page.fill('#input', '#other@codex /filter');
   await page.locator('#input').press('Enter');
   await expect(page.locator('.route-chain-marker')).toHaveClass(/live-hidden/);
@@ -458,6 +464,73 @@ test('bare route chain with trailing whitespace parses from root, not the adhoc 
   await expect(page.locator('#topic-chip')).toContainText('#squid@deepseek>@revuqwen!');
   await expect(page.locator('#topic-chip .chip-chain-origin-fresh')).toHaveCount(0);
   await expect(page.locator('#input')).toHaveValue('');
+});
+
+test('composer sends one-way route chain that hands off to a different topic', async ({ page }) => {
+  // ADR-0032 "also targeted for v0.1": a chain target may be a full
+  // #topic@agent, not just a bare @agent on the origin's own topic.
+  await page.route('**/health', r => r.fulfill({ json: { status: 'ok', backends: {} } }));
+  await page.route('**/quota**', r => r.fulfill({ json: {} }));
+  await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/topics', r => r.fulfill({ json: [] }));
+  await page.route('**/topics/**', r => r.fulfill({ json: [] }));
+  await page.route('**/config/agents', r => r.fulfill({ json: [] }));
+  await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [] } }));
+  await page.route('**/topics/*/memory', r => r.fulfill({ json: {
+    topic: 'squid',
+    content: '',
+    revision: 'r1',
+    exists: false,
+  } }));
+
+  const chatBodies = [];
+  await page.route('**/chat', r => {
+    const body = JSON.parse(r.request().postData() || '{}');
+    chatBodies.push(body);
+    return r.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream', 'X-Squid-Msg-Id': '10', 'X-Squid-Flow-Run-Id': '3' },
+      body: `event: meta\ndata: {"agent":"${body.agent}","msg_id":10,"adhoc":${body.adhoc ? 'true' : 'false'}}\n\ndata:${body.agent} response\n\nevent: done\ndata: \n\n`,
+    });
+  });
+  await page.route('**/chat/flow/3/steps**', r => r.fulfill({ json: {
+    messages: [{ id: 11, role: 'assistant', topic: 'hive', agent: 'revucla', status: 'done' }],
+    complete: true,
+  } }));
+  await page.route('**/chat/11/status', r => r.fulfill({ json: {
+    id: 11, role: 'assistant', topic: 'hive', agent: 'revucla', adhoc: true, status: 'done',
+    content: 'revucla response',
+    prompt: 'Squid route chain handoff.\nRoute: #squid@codex!>#hive@revucla!\nPrevious step: @codex\nCurrent step: @revucla!\nOriginal prompt: review this\n\n<previous_step_output>',
+    prompt_source: 'system', session_id: null,
+  } }));
+
+  await page.goto('/');
+  await page.fill('#input', '#squid@codex!>#hive@revucla! review this');
+  await expect(page.locator('#topic-chip')).toHaveClass(/route-chain/);
+  await expect(page.locator('#topic-chip')).toContainText('#squid@codex!>#hive@revucla!');
+  await expect(page.locator('#input')).toHaveValue('review this');
+  await page.locator('#input').press('Enter');
+
+  await expect(page.locator('.route-chain-marker')).toHaveText('#squid@codex!>#hive@revucla!');
+  await expect(page.locator('.route-chain-marker .tag-topic')).toHaveText(['#squid', '#hive']);
+  await expect(page.locator('.route-chain-marker .tag-agent')).toHaveText(['@codex', '@revucla']);
+
+  // Only the origin is ever POSTed, on its own topic — the cross-topic target
+  // handoff is dispatched server-side (agent/flow.py).
+  await expect.poll(() => chatBodies.length).toBe(1);
+  expect(chatBodies[0]).toMatchObject({
+    topic: 'squid',
+    agent: 'codex',
+    message: 'review this',
+    adhoc: true,
+    source: 'human',
+    flow_route: '#squid@codex!>#hive@revucla!',
+  });
+
+  // The server-dispatched target step is discovered via polling and rendered.
+  await expect(page.locator('.msg[data-msg-id="11"]')).toBeVisible();
+  await expect(page.locator('.msg[data-msg-id="11"] .tag-agent')).toHaveText('@revucla');
+  await expect(page.locator('.msg[data-msg-id="11"]')).toContainText('revucla response');
 });
 
 test('history shows route chain start marker on origin row with inferred flow route', async ({ page }) => {

@@ -43,6 +43,7 @@ def test_parse_route_chain_one_way():
         "origin_fresh": False,
         "operator": ">",
         "rounds": 0,
+        "target_topic": "squid",
         "target": "revucla",
         "target_fresh": False,
         "route": "#squid@codex>@revucla",
@@ -56,10 +57,33 @@ def test_parse_route_chain_fresh_flags_and_round_trip():
         "origin_fresh": True,
         "operator": "<>",
         "rounds": 1,
+        "target_topic": "squid",
         "target": "revucla",
         "target_fresh": True,
         "route": "#squid@codex!<>@revucla!",
     }
+
+
+def test_parse_route_chain_cross_topic_target():
+    assert flow.parse_route_chain("#squid@codex>#hive@revucla!") == {
+        "topic": "squid",
+        "origin": "codex",
+        "origin_fresh": False,
+        "operator": ">",
+        "rounds": 0,
+        "target_topic": "hive",
+        "target": "revucla",
+        "target_fresh": True,
+        "route": "#squid@codex>#hive@revucla!",
+    }
+
+
+def test_parse_route_chain_same_topic_target_prefix_is_dropped_on_render():
+    # A redundant same-topic `#topic` prefix on the target still parses, but
+    # the canonical route text collapses it back to the compact bare form.
+    chain = flow.parse_route_chain("#squid@codex>#squid@revucla")
+    assert chain["target_topic"] == "squid"
+    assert chain["route"] == "#squid@codex>@revucla"
 
 
 def test_parse_route_chain_rejects_unsupported_or_malformed():
@@ -99,6 +123,27 @@ def test_next_chain_step_one_way_sends_target_after_origin(tmp_path, monkeypatch
     step = flow.next_chain_step(flow_run_id)
     assert step == {
         "topic": "squid",
+        "agent": "revucla",
+        "fresh": True,
+        "previous_agent": "codex",
+        "previous_msg_id": asst_id,
+        "original_prompt": "review this",
+        "route": route,
+    }
+
+
+def test_next_chain_step_one_way_dispatches_target_on_its_own_topic(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    route = "#squid@codex>#hive@revucla!"
+    flow_run_id, asst_id = _seed_chain(route, [
+        ("user", "codex", "review this", None),
+        ("assistant", "codex", "codex output", "done"),
+    ])
+
+    step = flow.next_chain_step(flow_run_id)
+    assert step == {
+        "topic": "hive",
         "agent": "revucla",
         "fresh": True,
         "previous_agent": "codex",
@@ -234,6 +279,37 @@ def test_continue_chain_dispatches_target_after_origin_completes(tmp_path, monke
 
     # Chain is now complete (one-way, 4 rows) — no further steps.
     assert flow.next_chain_step(flow_run_id) is None
+
+
+def test_continue_chain_dispatches_target_onto_its_own_topic(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    _seed_agent("codex")
+    _seed_agent("revucla")
+    route = "#squid@codex>#hive@revucla!"
+    flow_run_id, origin_asst_id = _seed_chain(route, [
+        ("user", "codex", "review this", None),
+        ("assistant", "codex", "codex output", "done"),
+    ])
+
+    async def fake_runner(*args, **kwargs):
+        yield "revucla output"
+
+    async def run():
+        with patch("agent.runners.run_codex", fake_runner):
+            await flow.continue_chain(origin_asst_id)
+
+    asyncio.run(run())
+
+    rows = stats_db.get_flow_run_messages(flow_run_id)
+    assert len(rows) == 4
+    handoff, target = rows[2], rows[3]
+    assert handoff["topic"] == "hive"
+    assert handoff["agent"] == "revucla"
+    assert target["topic"] == "hive"
+    assert target["agent"] == "revucla"
+    assert target["status"] == "done"
+    assert target["content"] == "revucla output"
 
 
 def test_continue_chain_completes_a_round_trip_end_to_end(tmp_path, monkeypatch):

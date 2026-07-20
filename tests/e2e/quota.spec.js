@@ -286,3 +286,47 @@ test('dual quota gauges keep 5h and 7d data separate', async ({ page }) => {
   await expect(page.locator('#quota-7d-label')).toHaveText('—');
   await expect(page.locator('#quota-7d-suffix')).toHaveText('7D');
 });
+
+test('kimi balance gauge shows balance, budget pct, and saves max budget', async ({ page }) => {
+  await mockShell(page);
+  await page.route('**/quota/provider/kimi', route => route.fulfill({
+    json: {
+      status: 'ok', text: '$24.93', raw: 24.93, used_percent: null, reset_at: null,
+      title: 'Kimi · $5.07 spent of $30.00', max_budget: 30, max_budget_pct: 17, spent: 5.07,
+    },
+  }));
+  const budgetCalls = [];
+  await page.route('**/config/kimi/max-budget', route => {
+    budgetCalls.push({ method: route.request().method(), body: route.request().postData() });
+    return route.fulfill({ json: { status: 'ok' } });
+  });
+
+  await page.goto('/');
+
+  // Selecting a kimi-backed topic activates the kimi balance gauge.
+  await page.evaluate(async () => {
+    _providerMetadata.kimi = { label: 'Kimi', gauge: { type: 'kimi' } };
+    _topicsCache = [{ name: 'work', agent: 'kimi-agent' }];
+    _agentsCache = [{ name: 'kimi-agent', harness: 'claudecode', provider: 'kimi' }];
+    input.value = '#work';
+    await updateActiveQuotaGauge();
+  });
+
+  const display = page.locator('#kimi-quota-display');
+  await expect(display).toBeVisible();
+  await expect(page.locator('#quota-display')).toBeHidden();
+  await expect(page.locator('#kimi-quota-label')).toHaveText('$24.93');
+  await expect(page.locator('#kimi-pct')).toHaveText('17');
+
+  // The shared balance popup saves against the kimi-scoped endpoint.
+  await display.click();
+  await expect(page.locator('#balance-max-popup')).toHaveClass(/open/);
+  await page.locator('#balance-max-input').fill('30');
+  await page.locator('#balance-max-save').click();
+  await expect(page.locator('#balance-max-status')).toHaveText('saved ✓');
+  expect(budgetCalls).toEqual([{ method: 'POST', body: '{"amount":30}' }]);
+
+  await page.locator('#balance-max-clear').click();
+  await expect.poll(() => budgetCalls.length).toBe(2);
+  expect(budgetCalls[1]).toEqual({ method: 'DELETE', body: null });
+});

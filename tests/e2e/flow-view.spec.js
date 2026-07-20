@@ -50,6 +50,25 @@ test('Squid Flow canonical key is order-independent for the same workflow', asyn
   await expect(keyLine).toHaveText('#t1@a1,#t2');
 });
 
+test('Squid Flow canonical key drops a target field only against the parent state, idempotently', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Menu' }).click();
+  await page.getByRole('button', { name: 'Squid Flow' }).click();
+
+  const keyLine = page.locator('#flow-key-line .flow-route-line');
+
+  // Redundantly repeating the origin's topic on the target reduces away —
+  // the target's only legal source of a dropped field is the fixed parent
+  // state (the edge's source), never a sibling.
+  await page.fill('#flow-input', '#squid@codex<2>#squid@review!');
+  await expect(keyLine).toHaveText('#squid@codex<2>@review!');
+
+  // Already-bare input is a fixed point: re-deriving the key from the
+  // resolved value must not re-add the redundant topic.
+  await page.fill('#flow-input', '#squid@codex<2>@review!');
+  await expect(keyLine).toHaveText('#squid@codex<2>@review!');
+});
+
 test('Squid Flow canonical key stays condensed for a comma-origins x comma-targets clause', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Menu' }).click();
@@ -65,9 +84,14 @@ test('Squid Flow canonical key stays condensed for a comma-origins x comma-targe
   await expect(statusEl).toContainText('4 independent branches');
   await expect(keyLine).toHaveText('#topic1@agent1,#topic2@agent2<>#topic3,#topic4@agentx');
 
-  // Reordering both groups still normalizes to the identical condensed key.
+  // Reordering the origins still normalizes to the identical sorted origin
+  // list. The target group does NOT: the two origins disagree on both topic
+  // and agent, so the target's incoming state is fully ambiguous and the
+  // target group can't be resolved at all — it falls back to keeping the
+  // target atoms exactly as written (order-preserving), not sorted, since
+  // there's nothing to safely group without a resolved value to group by.
   await page.fill('#flow-input', '#topic2@agent2,#topic1@agent1<>#topic4@agentx,#topic3');
-  await expect(keyLine).toHaveText('#topic1@agent1,#topic2@agent2<>#topic3,#topic4@agentx');
+  await expect(keyLine).toHaveText('#topic1@agent1,#topic2@agent2<>#topic4@agentx,#topic3');
 });
 
 test('Squid Flow origin list lets a partial atom borrow from any fully-explicit sibling', async ({ page }) => {
@@ -108,15 +132,15 @@ test('Squid Flow canonical key never collides two different graphs that share th
 
   const keyLine = page.locator('#flow-key-line .flow-route-line');
 
-  // #t3 (bare agent) borrows from whichever atom is first-fully-explicit —
-  // which one that is depends on input order, so these two inputs resolve
-  // to genuinely different graphs (t3 ends up on a1 vs a2) and must not
-  // collapse to the same key.
-  await page.fill('#flow-input', '#t1@a1,#t3,#t2@a2');
+  // #t3 (bare topic, missing agent) borrows agent from whichever atom is the
+  // *nearest preceding* fully-explicit root — which one that is depends on
+  // input order, so these two inputs resolve to genuinely different graphs
+  // (t3 ends up on a2 vs a1) and must not collapse to the same key.
+  await page.fill('#flow-input', '#t1@a1,#t2@a2,#t3');
   await expect(keyLine).toHaveText('#t1@a1,#t2@a2,#t3');
 
   await page.fill('#flow-input', '#t2@a2,#t1@a1,#t3');
-  await expect(keyLine).toHaveText('#t2@a2,#t1@a1,#t3');
+  await expect(keyLine).toHaveText('#t1@a1,#t3,#t2@a2');
 });
 
 test('Squid Flow scheduled operator puts the loop count first, like <N>', async ({ page }) => {
@@ -127,7 +151,12 @@ test('Squid Flow scheduled operator puts the loop count first, like <N>', async 
   const statusEl = page.locator('#flow-status');
   const keyLine = page.locator('#flow-key-line .flow-route-line');
 
-  // Bare count, no delay — repeats immediately, same shape as `<N>`.
+  // Bare count, no delay — repeats immediately, same shape as `<N>`. Target
+  // atoms never borrow from each other (no rolling anchor for targets — each
+  // resolves independently against the fixed parent state), so the only
+  // thing a target atom can drop is a field matching that parent state
+  // directly — here `@a` already omits topic 't', matching the origin's
+  // topic, so it stays bare (see ADR-0032, "Canonical Key").
   await page.fill('#flow-input', '#t@c=2>@a');
   await expect(statusEl).toHaveClass(/ok/);
   await expect(keyLine).toHaveText('#t@c=2>@a');

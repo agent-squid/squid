@@ -95,17 +95,33 @@ def read_codex_creds() -> str:
     return token
 
 
-def save_deepseek_max_budget(amount: float) -> None:
-    _save({"deepseek_max_budget": amount})
-
-
-def get_deepseek_max_budget() -> Optional[float]:
-    return load().get("deepseek_max_budget")
-
-
-def clear_deepseek_max_budget() -> None:
+def save_max_budget(gauge: str, amount: float) -> None:
     data = load()
-    data.pop("deepseek_max_budget", None)
+    budgets = data.get("max_budgets") or {}
+    budgets[gauge] = amount
+    data["max_budgets"] = budgets
+    if gauge == "deepseek":
+        data.pop("deepseek_max_budget", None)  # superseded legacy flat key
+    _CREDS_PATH.write_text(json.dumps(data, indent=2))
+
+
+def get_max_budget(gauge: str) -> Optional[float]:
+    data = load()
+    budgets = data.get("max_budgets") or {}
+    if gauge in budgets:
+        return budgets[gauge]
+    if gauge == "deepseek":
+        return data.get("deepseek_max_budget")  # legacy flat key
+    return None
+
+
+def clear_max_budget(gauge: str) -> None:
+    data = load()
+    budgets = data.get("max_budgets") or {}
+    budgets.pop(gauge, None)
+    data["max_budgets"] = budgets
+    if gauge == "deepseek":
+        data.pop("deepseek_max_budget", None)
     _CREDS_PATH.write_text(json.dumps(data, indent=2))
 
 

@@ -332,7 +332,7 @@ test('autocomplete can be dismissed with its touch-accessible close button', asy
   await page.getByRole('button', { name: 'Close suggestions' }).click();
 
   await expect(page.locator('#autocomplete')).not.toHaveClass(/open/);
-  await expect(page.locator('#input')).toBeFocused();
+  await expect(page.locator('#messages')).toBeFocused();
   await expect(page.locator('#input')).toHaveValue('push');
 });
 

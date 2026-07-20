@@ -435,8 +435,9 @@ body {
 #cursor-quota-display.loaded { color: var(--text-lo); }
 #cursor-quota-display.error { color: var(--quota-accent); }
 #cursor-quota-display.error #cursor-pie-arc { stroke: var(--quota-accent); }
-/* deepseek cost gauge */
-#deepseek-quota-display {
+/* prepaid-balance cost gauges (deepseek, kimi) */
+#deepseek-quota-display,
+#kimi-quota-display {
   --quota-accent: #4d9de0;
   display: flex;
   align-items: center;
@@ -450,7 +451,9 @@ body {
   min-height: 24px;
   padding: 0;
 }
-#deepseek-quota-display.loaded { color: var(--text-lo); }
+#kimi-quota-display { --quota-accent: #4d6bfe; }
+#deepseek-quota-display.loaded,
+#kimi-quota-display.loaded { color: var(--text-lo); }
 
 /* static text gauge (free tier, local model) */
 #static-quota-display {
@@ -472,6 +475,7 @@ body {
 #right-rail.quota-chat-hidden #codex-quota-display,
 #right-rail.quota-chat-hidden #cursor-quota-display,
 #right-rail.quota-chat-hidden #deepseek-quota-display,
+#right-rail.quota-chat-hidden #kimi-quota-display,
 #right-rail.quota-chat-hidden #static-quota-display {
   display: none !important;
 }
@@ -505,7 +509,7 @@ body {
 }
 #cursor-creds-popup.open { display: flex; }
 
-#deepseek-max-popup {
+#balance-max-popup {
   display: none;
   position: absolute;
   top: calc(100% + 6px);
@@ -521,8 +525,8 @@ body {
   gap: 0.45rem;
   min-width: 260px;
 }
-#deepseek-max-popup.open { display: flex; }
-#deepseek-max-input {
+#balance-max-popup.open { display: flex; }
+#balance-max-input {
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -531,10 +535,10 @@ body {
   padding: 0.2rem 0.5rem;
   width: 80px;
 }
-#deepseek-max-save, #deepseek-max-clear { background: var(--raised); font-size: var(--text-sm); }
-#deepseek-max-save:hover { color: #4d9de0; border-color: #4d9de0; }
-#deepseek-max-clear:hover { color: var(--text-mid); border-color: var(--text-dim); }
-#deepseek-max-status { font-size: var(--text-xs); color: var(--text-dim); }
+#balance-max-save, #balance-max-clear { background: var(--raised); font-size: var(--text-sm); }
+#balance-max-save:hover { color: #4d9de0; border-color: #4d9de0; }
+#balance-max-clear:hover { color: var(--text-mid); border-color: var(--text-dim); }
+#balance-max-status { font-size: var(--text-xs); color: var(--text-dim); }
 
 #codex-creds-popup {
   display: none;
@@ -864,6 +868,7 @@ body {
   scrollbar-color: #2a2a40 transparent;
   scrollbar-width: thin;
 }
+#messages:focus { outline: none; }
 #messages::-webkit-scrollbar { width: 5px; }
 #messages::-webkit-scrollbar-track { background: transparent; }
 #messages::-webkit-scrollbar-thumb { background: #2a2a40; border-radius: 3px; }
@@ -3793,6 +3798,7 @@ body {
   min-width: 11em;
 }
 .help-row span { color: #777; }
+.help-row .material-symbols-outlined { color: inherit; font-variation-settings: 'FILL' 1, 'wght' 500, 'GRAD' 0, 'opsz' 20; }
 .help-row kbd {
   display: inline-block;
   font-family: ui-monospace, monospace;
@@ -3845,14 +3851,18 @@ body {
   font-family: ui-monospace, monospace;
   font-weight: 600;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* A long lineage (broadcast/chain route) scrolls horizontally rather than
+     being clipped with an ellipsis — the tail end (often the most recently
+     added target) matters as much as the head. */
+  overflow-x: auto;
+  overflow-y: hidden;
   min-width: 0;
   cursor: pointer;
   user-select: none;
 }
 #topic-chip.visible { display: block; }
-#topic-chip.route-chain {
+#topic-chip.route-chain,
+#topic-chip.origin-broadcast {
   display: flex;
   align-items: center;
   gap: 0.12rem;
@@ -3862,6 +3872,10 @@ body {
   color: var(--text-dim);
   font-weight: 700;
   padding: 0 0.1rem;
+}
+.chip-broadcast-sep {
+  color: var(--text-dim);
+  font-weight: 700;
 }
 .chip-chain-target,
 .chip-chain-fresh {
@@ -4008,7 +4022,7 @@ button {
   }
 
   #quota-creds-popup,
-  #deepseek-max-popup,
+  #balance-max-popup,
   #codex-creds-popup,
   #cursor-creds-popup {
     position: fixed;
@@ -4550,6 +4564,7 @@ button {
 .ac-route-btn .ac-topic { color: var(--accent-dim); }
 .ac-route-btn .ac-agent { color: var(--agent-color, #848899); }
 .ac-route-chain-arrow { color: var(--text-dim); padding: 0 0.12rem; }
+.ac-broadcast-sep { color: var(--text-dim); font-weight: 700; padding: 0 0.05rem; }
 .ac-route-switch-icon {
   color: var(--accent);
   font-size: 1.25em;
@@ -4573,14 +4588,26 @@ button {
   font-size: var(--text-body);
   font-family: ui-monospace, monospace;
   font-weight: 600;
+  /* A long lineage (e.g. a broadcast route with many origins — see
+     makeBroadcastRouteTag) scrolls horizontally within its own box rather
+     than cramping/overflowing the surrounding bubble; short tags are
+     unaffected since there's nothing to scroll. */
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* The horizontal scrollbar (when a long lineage triggers one) is drawn
+     inside the box's own bottom edge — without extra height reserved for
+     it, it overlaps/clips the tag's own text instead of sitting below it. */
+  padding-bottom: 0.15em;
 }
+.topic-tag > * { flex-shrink: 0; }
 .tag-topic { color: var(--accent-dim); }
 .tag-agent { color: var(--agent-color, #848899); margin-left: 0.05em; }
 .tag-adhoc { color: var(--agent-color, #848899); }
+.tag-broadcast-sep { color: var(--text-dim); font-weight: 700; }
 .topic-tag.clickable { cursor: pointer; }
 .topic-tag.clickable:hover .tag-topic { color: #e8a060; }
 .topic-tag.clickable:hover .tag-agent { color: var(--agent-color, #a8aabb); filter: brightness(1.18); }
-
 /* Chip sub-spans */
 .chip-topic { color: var(--accent-dim); }
 .chip-agent { color: var(--agent-color, #848899); margin-left: 0.05em; }

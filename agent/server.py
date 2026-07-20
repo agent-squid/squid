@@ -31,6 +31,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.parse
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import AsyncGenerator, Literal, Optional, Union
@@ -518,12 +519,14 @@ def _normalize_topic_response(topic: str) -> Union[str, JSONResponse]:
 
 
 def canonical_flow_route(route: Optional[str]) -> Optional[str]:
+    # Comma-separated parts are never reordered: an Origin Broadcast atom can
+    # omit a half and inherit it by rolling anchor from its nearest
+    # fully-explicit predecessor (ADR-0032), so swapping two parts can change
+    # what they resolve to — order is semantic here, not just cosmetic.
     text = re.sub(r"\s+", "", (route or "").strip())
     if not text:
         return None
     parts = [part for part in text.split(",") if part]
-    if len(parts) > 1:
-        parts.sort()
     return ",".join(parts)
 
 
@@ -1090,7 +1093,7 @@ def _gauge_authed(gauge_type: str, provider: Provider) -> Optional[bool]:
         return bool(creds.get_codex_token())
     if gauge_type == "cursor":
         return bool(creds.get_cursor_token())
-    if gauge_type == "deepseek":
+    if gauge_type in _BALANCE_GAUGES:
         try:
             return bool(provider.resolved_api_key())
         except ValueError:
@@ -1860,19 +1863,102 @@ async def quota_deepseek():
         return JSONResponse({"error": str(exc)}, status_code=502)
 
 
-@app.post("/config/deepseek/max-budget")
-async def set_deepseek_max_budget(body: dict):
+@app.post("/config/{gauge}/max-budget")
+async def set_max_budget(gauge: str, body: dict):
+    if gauge not in _BALANCE_GAUGES:
+        return JSONResponse({"error": f"unknown balance gauge {gauge!r}"}, status_code=404)
     amount = body.get("amount")
     if not amount or amount <= 0:
         return JSONResponse({"error": "invalid amount"}, status_code=400)
-    creds.save_deepseek_max_budget(amount)
+    creds.save_max_budget(gauge, amount)
     return JSONResponse({"status": "ok"})
 
 
-@app.delete("/config/deepseek/max-budget")
-async def clear_deepseek_max_budget():
-    creds.clear_deepseek_max_budget()
+@app.delete("/config/{gauge}/max-budget")
+async def clear_max_budget(gauge: str):
+    if gauge not in _BALANCE_GAUGES:
+        return JSONResponse({"error": f"unknown balance gauge {gauge!r}"}, status_code=404)
+    creds.clear_max_budget(gauge)
     return JSONResponse({"status": "ok"})
+
+
+def _parse_deepseek_balance(data: dict, host: str) -> tuple[float, str]:
+    balances = data.get("balance_infos") or []
+    info = next((item for item in balances if item.get("currency") == "USD"), None)
+    info = info or next((item for item in balances if item.get("currency") == "CNY"), None)
+    if not info:
+        raise ValueError("balance unavailable")
+    return float(info.get("total_balance") or 0), ("$" if info.get("currency") == "USD" else "¥")
+
+
+def _parse_kimi_balance(data: dict, host: str) -> tuple[float, str]:
+    if data.get("status") is not True and data.get("code") != 0:
+        raise ValueError("balance unavailable")
+    balance = (data.get("data") or {}).get("available_balance")
+    if balance is None:
+        raise ValueError("balance unavailable")
+    # moonshot.cn bills in CNY, moonshot.ai in USD — the payload has no currency field
+    return float(balance), ("¥" if host.endswith(".cn") else "$")
+
+
+# Prepaid-balance gauges: one entry per provider family. The balance URL is the
+# provider's configured base_url origin (default_base as fallback) plus `path`;
+# `parse` normalizes the upstream payload to (balance, currency_symbol).
+_BALANCE_GAUGES = {
+    "deepseek": {
+        "label": "DeepSeek", "default_base": "https://api.deepseek.com",
+        "path": "/user/balance", "parse": _parse_deepseek_balance,
+    },
+    "kimi": {
+        "label": "Kimi", "default_base": "https://api.moonshot.ai",
+        "path": "/v1/users/me/balance", "parse": _parse_kimi_balance,
+    },
+}
+
+
+def _balance_url(provider: Provider, spec: dict) -> str:
+    raw = (provider.base_url or "").strip()
+    parsed = urllib.parse.urlparse(raw if "://" in raw else f"https://{raw}") if raw else None
+    origin = f"{parsed.scheme}://{parsed.netloc}" if parsed and parsed.netloc else spec["default_base"]
+    return f"{origin}{spec['path']}"
+
+
+async def _balance_snapshot(provider: Provider, ref: str, spec: dict) -> JSONResponse:
+    try:
+        api_key = provider.resolved_api_key()
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if not api_key:
+        return JSONResponse({"error": "api_key not configured"}, status_code=400)
+    url = _balance_url(provider, spec)
+    try:
+        import httpx
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                url, headers={"Authorization": f"Bearer {api_key}"}, timeout=10,
+            )
+        if response.status_code != 200:
+            return JSONResponse({"error": f"{spec['label']} returned {response.status_code}"}, status_code=502)
+        balance, symbol = spec["parse"](response.json(), urllib.parse.urlparse(url).netloc)
+    except Exception as exc:
+        log.error("%s balance fetch failed for %s: %s", provider.gauge.type, ref, exc)
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    label = spec["label"]
+    max_budget = creds.get_max_budget(provider.gauge.type)
+    if max_budget and max_budget > 0:
+        spent = max(0, max_budget - balance)
+        pct = max(0, min(100, round(spent / max_budget * 100)))
+        return JSONResponse({
+            "status": "ok", "text": f"{symbol}{balance:.2f}",
+            "raw": balance, "used_percent": None, "reset_at": None,
+            "title": f"{label} · {symbol}{spent:.2f} spent of {symbol}{max_budget:.2f}",
+            "max_budget": max_budget, "max_budget_pct": pct, "spent": spent,
+        })
+    return JSONResponse({
+        "status": "ok", "text": f"{symbol}{balance:.2f}",
+        "raw": balance, "used_percent": None, "reset_at": None,
+        "title": f"{label} balance · {symbol}{balance:.2f}",
+    })
 
 
 def _json_response_data(response: JSONResponse) -> dict:
@@ -1894,48 +1980,8 @@ async def _quota_snapshot_for_provider(provider: Provider, ref: str) -> JSONResp
             "used_percent": None, "reset_at": None,
         })
 
-    if gauge.type == "deepseek":
-        try:
-            api_key = provider.resolved_api_key()
-        except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
-        if not api_key:
-            return JSONResponse({"error": "api_key not configured"}, status_code=400)
-        try:
-            import httpx
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    "https://api.deepseek.com/user/balance",
-                    headers={"Authorization": f"Bearer {api_key}"}, timeout=10,
-                )
-            if response.status_code != 200:
-                return JSONResponse({"error": f"DeepSeek returned {response.status_code}"}, status_code=502)
-            data = response.json()
-        except Exception as exc:
-            log.error("deepseek balance fetch failed for %s: %s", ref, exc)
-            return JSONResponse({"error": str(exc)}, status_code=502)
-        balances = data.get("balance_infos") or []
-        info = next((item for item in balances if item.get("currency") == "USD"), None)
-        info = info or next((item for item in balances if item.get("currency") == "CNY"), None)
-        if not info:
-            return JSONResponse({"error": "balance unavailable"}, status_code=502)
-        symbol = "$" if info.get("currency") == "USD" else "¥"
-        balance = float(info.get("total_balance") or 0)
-        max_budget = creds.get_deepseek_max_budget()
-        if max_budget and max_budget > 0:
-            spent = max(0, max_budget - balance)
-            pct = max(0, min(100, round(spent / max_budget * 100)))
-            return JSONResponse({
-                "status": "ok", "text": f"{symbol}{balance:.2f}",
-                "raw": balance, "used_percent": None, "reset_at": None,
-                "title": f"DeepSeek · {symbol}{spent:.2f} spent of {symbol}{max_budget:.2f}",
-                "max_budget": max_budget, "max_budget_pct": pct, "spent": spent,
-            })
-        return JSONResponse({
-            "status": "ok", "text": f"{symbol}{balance:.2f}",
-            "raw": balance, "used_percent": None, "reset_at": None,
-            "title": f"DeepSeek balance · {symbol}{balance:.2f}",
-        })
+    if gauge.type in _BALANCE_GAUGES:
+        return await _balance_snapshot(provider, ref, _BALANCE_GAUGES[gauge.type])
 
     raw_response = await {
         "claude": quota_claude,

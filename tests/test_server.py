@@ -1,11 +1,15 @@
 import asyncio
+import json
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
 from fastapi.testclient import TestClient
 
+from agent import creds
 from agent import server
 from agent import stats_db
+from agent.providers import Gauge, Provider
 
 
 def _config_yaml(root: Path) -> str:
@@ -297,10 +301,14 @@ def test_chat_rejects_server_side_hidden_route_chain():
     assert res.json()["error"] == "route chains are executed as explicit UI turns"
 
 
-def test_canonical_flow_route_sorts_comma_clauses():
-    route = " #squid@codex>@test , @review>@codex "
+def test_canonical_flow_route_strips_whitespace_without_reordering_clauses():
+    # Comma-separated parts must keep their original order: an Origin
+    # Broadcast atom can inherit an omitted half from its nearest
+    # fully-explicit predecessor by rolling anchor (ADR-0032), so reordering
+    # parts can change what they resolve to — it is not a safe normalization.
+    route = " @review>@codex , #squid@codex>@test "
 
-    assert server.canonical_flow_route(route) == "#squid@codex>@test,@review>@codex"
+    assert server.canonical_flow_route(route) == "@review>@codex,#squid@codex>@test"
 
 
 def test_backend_native_chat_commands_bypass_context_augmentation_for_any_agent():
@@ -481,6 +489,118 @@ def test_provider_quota_404s_for_unknown_provider():
     response = client.get("/quota/provider/does-not-exist")
 
     assert response.status_code == 404
+
+
+class _FakeHttpResponse:
+    def __init__(self, payload, status_code=200):
+        self._payload = payload
+        self.status_code = status_code
+
+    def json(self):
+        return self._payload
+
+
+def _patch_balance_fetch(monkeypatch, payload, status_code=200, captured=None):
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, headers=None, timeout=None):
+            if captured is not None:
+                captured["url"] = url
+                captured["headers"] = headers or {}
+            return _FakeHttpResponse(payload, status_code)
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda: FakeAsyncClient())
+
+
+def _balance_provider(provider_id: str, gauge: str, base_url: str) -> Provider:
+    return Provider(
+        id=provider_id, label=provider_id.title(), color="#4D6BFE",
+        base_url=base_url, auth_type="api_key", api_key="sk-test",
+        gauge=Gauge(type=gauge),
+    )
+
+
+def test_kimi_balance_quota_is_normalized(monkeypatch):
+    captured = {}
+    _patch_balance_fetch(monkeypatch, {
+        "code": 0, "status": True,
+        "data": {"available_balance": 24.92686, "voucher_balance": 4.92686, "cash_balance": 20},
+    }, captured=captured)
+    monkeypatch.setattr(creds, "get_max_budget", lambda gauge: None)
+    provider = _balance_provider("kimi", "kimi", "https://api.moonshot.ai/anthropic")
+
+    response = asyncio.run(server._quota_snapshot_for_provider(provider, "kimi"))
+
+    assert response.status_code == 200
+    assert json.loads(response.body) == {
+        "status": "ok", "text": "$24.93", "raw": 24.92686,
+        "used_percent": None, "reset_at": None,
+        "title": "Kimi balance · $24.93",
+    }
+    assert captured["url"] == "https://api.moonshot.ai/v1/users/me/balance"
+    assert captured["headers"]["Authorization"] == "Bearer sk-test"
+
+
+def test_kimi_balance_quota_reports_spend_against_max_budget(monkeypatch):
+    _patch_balance_fetch(monkeypatch, {
+        "code": 0, "status": True, "data": {"available_balance": 20.0},
+    })
+    monkeypatch.setattr(creds, "get_max_budget", lambda gauge: 50.0)
+    provider = _balance_provider("kimi", "kimi", "https://api.moonshot.ai/anthropic")
+
+    response = asyncio.run(server._quota_snapshot_for_provider(provider, "kimi"))
+
+    body = json.loads(response.body)
+    assert body["max_budget"] == 50.0
+    assert body["spent"] == 30.0
+    assert body["max_budget_pct"] == 60
+    assert body["title"] == "Kimi · $30.00 spent of $50.00"
+
+
+def test_kimi_balance_quota_502s_when_upstream_rejects(monkeypatch):
+    _patch_balance_fetch(monkeypatch, {}, status_code=401)
+    monkeypatch.setattr(creds, "get_max_budget", lambda gauge: None)
+    provider = _balance_provider("kimi", "kimi", "https://api.moonshot.ai/anthropic")
+
+    response = asyncio.run(server._quota_snapshot_for_provider(provider, "kimi"))
+
+    assert response.status_code == 502
+
+
+def test_deepseek_balance_quota_still_normalized(monkeypatch):
+    captured = {}
+    _patch_balance_fetch(monkeypatch, {
+        "balance_infos": [{"currency": "USD", "total_balance": "12.34"}],
+    }, captured=captured)
+    monkeypatch.setattr(creds, "get_max_budget", lambda gauge: None)
+    provider = _balance_provider("deepseek", "deepseek", "https://api.deepseek.com/anthropic")
+
+    response = asyncio.run(server._quota_snapshot_for_provider(provider, "deepseek"))
+
+    assert response.status_code == 200
+    body = json.loads(response.body)
+    assert body["text"] == "$12.34"
+    assert body["title"] == "DeepSeek balance · $12.34"
+    assert captured["url"] == "https://api.deepseek.com/user/balance"
+
+
+def test_max_budget_endpoints_are_gauge_scoped(monkeypatch):
+    saved = {}
+    monkeypatch.setattr(creds, "save_max_budget", lambda gauge, amount: saved.update({gauge: amount}))
+    monkeypatch.setattr(creds, "clear_max_budget", lambda gauge: saved.pop(gauge, None))
+    client = TestClient(server.app)
+
+    assert client.post("/config/kimi/max-budget", json={"amount": 25}).status_code == 200
+    assert saved == {"kimi": 25}
+    assert client.post("/config/kimi/max-budget", json={"amount": -1}).status_code == 400
+    assert client.post("/config/claude/max-budget", json={"amount": 25}).status_code == 404
+    assert client.delete("/config/kimi/max-budget").status_code == 200
+    assert saved == {}
 
 
 def test_agent_rejects_unconfigured_harness():

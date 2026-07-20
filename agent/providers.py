@@ -18,7 +18,7 @@ from typing import Any, Optional
 from .config import _cfg
 
 SUPPORTED_AUTH_TYPES = frozenset({"api_key", "subscription"})
-SUPPORTED_GAUGES = frozenset({"claude", "codex", "cursor", "deepseek", "static", "none"})
+SUPPORTED_GAUGES = frozenset({"claude", "codex", "cursor", "deepseek", "kimi", "static", "none"})
 _ID_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 _COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 _ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")

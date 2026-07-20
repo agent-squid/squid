@@ -166,32 +166,50 @@
   // ---- Resolution: root inheritance, agreement rules, branch expansion ----
 
   function resolveGroupAgainstState(group, state, isOrigin) {
-    // Origins have nothing external to inherit from, so any atom missing a
-    // field borrows it from another atom in the SAME group — specifically,
-    // the first one (scanning left to right) that's fully explicit. That
-    // anchor doesn't have to be positionally first; an earlier partial atom
-    // can still borrow from an anchor that appears later in the list.
-    let effectiveState = state;
-    if (isOrigin) {
-      const anchor = group.atoms.find(a => a.topic != null && a.agent != null);
-      if (!anchor) {
-        throw new FlowError('At least one origin in this list must be a full #topic@agent — nothing to inherit yet', 0);
-      }
-      effectiveState = { topic: anchor.topic, agent: anchor.agent };
+    // Rolling anchor (ADR-0032) applies *within* an origin list only — an
+    // origin atom has no parent to inherit from, so a bare one borrows from
+    // a sibling instead, and any sibling that's itself fully explicit
+    // supersedes the root for whichever siblings come after it (see the
+    // pre-seed below for a bare atom positioned before that sibling).
+    //
+    // A hop-target group is different: every atom in it *does* have a
+    // parent — the edge's source, passed in as `state` — so each one
+    // resolves independently against that single incoming state. Siblings
+    // never inherit from each other here, no matter how they're written;
+    // that's what "a comma-list source decomposes into independent
+    // branches" (ADR-0032) means for the target side of an edge too. A
+    // target atom that happens to be fully explicit is just explicit for
+    // itself — it does not become a new root for the atoms next to it.
+    if (!isOrigin) {
+      const resolved = group.atoms.map(atom => {
+        const topic = atom.topic != null ? atom.topic : state.topic;
+        const agent = atom.agent != null ? atom.agent : state.agent;
+        if (topic == null || agent == null) {
+          throw new FlowError(`Cannot resolve "${renderAtom(atom)}" — missing ${topic == null ? 'topic' : 'agent'} and no root value available`, 0);
+        }
+        return { topic, agent, fresh: atom.fresh, written: atom };
+      });
+      return finishGroupResolution(group, resolved);
     }
-    // Every item resolves independently against that same state — comma-list
-    // peers never inherit from each other directly, only via the shared
-    // state above (the origin anchor, or the incoming branch state for a
-    // hop target).
+
+    const firstAnchor = group.atoms.find(a => a.topic != null && a.agent != null);
+    if (!firstAnchor) {
+      throw new FlowError('At least one origin in this list must be a full #topic@agent — nothing to inherit yet', 0);
+    }
+    let root = { topic: firstAnchor.topic, agent: firstAnchor.agent };
     const resolved = group.atoms.map(atom => {
-      const topic = atom.topic != null ? atom.topic : effectiveState.topic;
-      const agent = atom.agent != null ? atom.agent : effectiveState.agent;
+      if (atom.topic != null && atom.agent != null) root = { topic: atom.topic, agent: atom.agent };
+      const topic = atom.topic != null ? atom.topic : root.topic;
+      const agent = atom.agent != null ? atom.agent : root.agent;
       if (topic == null || agent == null) {
         throw new FlowError(`Cannot resolve "${renderAtom(atom)}" — missing ${topic == null ? 'topic' : 'agent'} and no root value available`, 0);
       }
       return { topic, agent, fresh: atom.fresh, written: atom };
     });
+    return finishGroupResolution(group, resolved);
+  }
 
+  function finishGroupResolution(group, resolved) {
     if (group.kind === 'plus') {
       // Topic and agent agreement are independent: a later step may only need
       // the one the joined origins actually agree on (e.g. an explicit target
@@ -335,90 +353,139 @@
     return text;
   }
 
-  // ---- Canonical KEY: condensed, tree-shaped, sorted ------------------------
-  // `canonical` (above) flattens every independent branch into its own
-  // string — good for an interim, human-readable breakdown, but a clause
-  // with N comma origins and M comma targets flattens into N*M branches, and
-  // naively sorting-and-joining all of them balloons into a huge string for
-  // what's really just "N origins, M targets, one shared edge shape." The
-  // key instead walks the *parsed clause* directly (not the expanded
-  // branches), emitting one sorted group per origin/hop-target rather than
-  // one string per branch — so it stays exactly as condensed as the input,
-  // however many branches it expands to.
-  function keyGroupText(group, uniformState) {
-    const rendered = group.atoms.map(atom => {
-      // Reduction (dropping a redundant #topic/@agent) is only safe when
-      // every branch reaching this atom shares the same incoming state —
-      // once origins/targets have forked into disagreeing branches, an
-      // omitted field means a genuinely different value per branch, so we
-      // keep the atom exactly as written instead of guessing which value it
-      // would resolve to.
-      if (!uniformState) return renderAtom(atom);
-      const resolved = {
-        topic: atom.topic != null ? atom.topic : uniformState.topic,
-        agent: atom.agent != null ? atom.agent : uniformState.agent,
-        fresh: atom.fresh,
-        written: atom,
-      };
-      return renderStepAtomCanonical(resolved, uniformState);
-    });
-    return rendered.slice().sort().join(group.kind === 'plus' ? '+' : ',');
-  }
-
-  // Picks which resolved origin atom should be the anchor. An anchor can
-  // donate its agent to atoms sharing its topic AND its topic to atoms
-  // sharing its agent, independently and simultaneously — so the best
-  // anchor is whichever atom the most OTHER atoms share at least one field
-  // with, not just whichever agent (or topic) value happens to repeat most.
-  // Ties broken deterministically (lowest topic, then lowest agent) so the
-  // choice never depends on input order.
-  function bestOriginAnchor(resolvedAtoms) {
-    let best = null;
-    for (const candidate of resolvedAtoms) {
-      let count = 0;
-      for (const other of resolvedAtoms) {
-        if (other === candidate) continue;
-        if (other.agent === candidate.agent || other.topic === candidate.topic) count += 1;
+  // ---- Canonical KEY: condensed, order-independent, write-only --------------
+  // `canonical` (above) is meant to be read (and, in principle, re-entered) —
+  // it flattens every independent branch into its own human-readable string.
+  // `key` serves a different purpose entirely: it's a DB/dedup identity token
+  // for "same workflow," never re-parsed as flow syntax by anything (nothing
+  // in this codebase currently reads it back — see the top-level `parse()`
+  // doc below). Because it's write-only, it's safe to do what `canonical`
+  // can't: resolve every atom first (respecting the order-sensitive rolling
+  // anchor — see resolveGroupAgainstState — so this step alone must still
+  // happen in original order), and only THEN group the resulting
+  // *already-resolved* (topic, agent) pairs. Once an atom is fully resolved
+  // it's just a plain fact with no remaining positional ambiguity, so
+  // reordering facts is fine — it's reordering the ambiguous, not-yet-resolved
+  // written atoms that silently changes meaning (that was the actual bug in
+  // an earlier version of this function, which sorted before resolving).
+  // The result: two differently-ordered or differently-phrased inputs that
+  // resolve to the same set of turns get the same key, which is exactly what
+  // an identity key for "same workflow" should do.
+  //
+  // Grouping strategy: greedy max-coverage dominating set, not a single fixed
+  // sort axis. A fixed axis (e.g. "always sort/group by topic") leaves real
+  // savings on the table whenever agents repeat more than topics do, and the
+  // reverse (group by agent) does the same when topics repeat more — neither
+  // axis dominates the other in general, and an atom can drop at most one
+  // field either way. So: repeatedly pick whichever remaining atom would
+  // "cover" the most other remaining atoms (an atom covers another if they
+  // share a topic OR an agent — the atom could drop that shared field once
+  // written against this one as root); that atom becomes a run's anchor,
+  // written in full, and every atom it covers joins the run, dropping
+  // whichever field it shares with the anchor. Remove the run, repeat on
+  // what's left. This also lets a single anchor's run mix which atoms drop
+  // topic and which drop agent (some members may match on topic, others on
+  // agent), which a single-axis sort can never do. Ties (equal coverage) are
+  // broken by ascending (topic, agent) so the result stays deterministic —
+  // same atom set always yields the same key, which is the only actual
+  // requirement (ADR-0032: "canonicalization must produce exactly one shape
+  // per meaning"); nothing about that requirement demands a single sort axis,
+  // only that the function be pure. This is a greedy approximation of
+  // minimum dominating set (NP-hard in general) — not guaranteed globally
+  // optimal, but exact for the small atom counts a broadcast/join list
+  // actually has, and it always matches or beats either single-axis sort.
+  function minimalGroupedText(resolvedAtoms, sep) {
+    let remaining = resolvedAtoms.slice();
+    const runs = [];
+    while (remaining.length) {
+      let anchor = null;
+      let anchorCover = null;
+      for (const cand of remaining) {
+        const cover = remaining.filter(a => a.topic === cand.topic || a.agent === cand.agent);
+        const better = !anchor || cover.length > anchorCover.length ||
+          (cover.length === anchorCover.length &&
+            (cand.topic < anchor.topic ||
+              (cand.topic === anchor.topic && cand.agent < anchor.agent)));
+        if (better) { anchor = cand; anchorCover = cover; }
       }
-      const better = !best || count > best.count
-        || (count === best.count && (candidate.topic < best.anchor.topic
-          || (candidate.topic === best.anchor.topic && candidate.agent < best.anchor.agent)));
-      if (better) best = { anchor: candidate, count };
+      runs.push({ anchor, members: anchorCover });
+      const covered = new Set(anchorCover);
+      remaining = remaining.filter(a => !covered.has(a));
     }
-    return best.anchor;
+    runs.sort((r1, r2) =>
+      r1.anchor.topic < r2.anchor.topic ? -1 : r1.anchor.topic > r2.anchor.topic ? 1
+        : r1.anchor.agent < r2.anchor.agent ? -1 : r1.anchor.agent > r2.anchor.agent ? 1 : 0);
+    const parts = [];
+    for (const run of runs) {
+      const a0 = run.anchor;
+      parts.push(`#${a0.topic}@${a0.agent}${a0.fresh ? '!' : ''}`);
+      for (const a of run.members) {
+        if (a === a0) continue;
+        const fresh = a.fresh ? '!' : '';
+        parts.push(a.topic === a0.topic ? `@${a.agent}${fresh}` : `#${a.topic}${fresh}`);
+      }
+    }
+    return parts.join(sep);
   }
 
-  // Renders a fully-resolved origin/join group as compactly as possible.
-  // Compression MUST work from the resolved (topic, agent) values, never by
-  // echoing back whatever bare/explicit choice was originally written and
-  // then sorting: since a bare origin atom's value depends on which atom
-  // ends up first-fully-explicit in the FINAL text, naively reordering
-  // written atoms can silently change what a bare one resolves to (two
-  // inputs with the same atoms in different orders can be genuinely
-  // different graphs). So: pick the single best anchor, let every OTHER
-  // atom drop whichever one field it shares with that anchor (an atom
-  // matching on both — an exact duplicate — can only drop one, since it
-  // can't omit both # and @), and put the anchor textually FIRST —
-  // guaranteeing a re-parse finds it as the anchor, rather than some other
-  // atom that happens to sort earlier. Everything else is sorted after it.
-  function keyOriginGroupText(resolvedAtoms, kind) {
-    const sep = kind === 'plus' ? '+' : ',';
-    if (resolvedAtoms.length === 1) {
-      const a = resolvedAtoms[0];
-      return `#${a.topic}@${a.agent}${a.fresh ? '!' : ''}`;
+  // Same "resolve each atom independently against the parent state" rule as
+  // resolveGroupAgainstState's hop-target path (no sibling-to-sibling
+  // inheritance — only an origin list rolls, since only an origin has no
+  // parent to inherit from instead), but returns null rather than throwing
+  // when a field can't be resolved — used only here, where the key needs to
+  // degrade gracefully (order-preserving, no sort/group) rather than fail
+  // outright when upstream branches disagree on a field this group needs.
+  function resolveGroupSoft(atoms, state) {
+    const out = [];
+    for (const atom of atoms) {
+      const topic = atom.topic != null ? atom.topic : (state ? state.topic : null);
+      const agent = atom.agent != null ? atom.agent : (state ? state.agent : null);
+      if (topic == null || agent == null) return null;
+      out.push({ topic, agent, fresh: atom.fresh });
     }
-    const anchor = bestOriginAnchor(resolvedAtoms);
-    const rest = resolvedAtoms.filter(a => a !== anchor).map(a => {
-      const fresh = a.fresh ? '!' : '';
-      const sameAgent = a.agent === anchor.agent;
-      const sameTopic = a.topic === anchor.topic;
-      if (sameAgent && !sameTopic) return `#${a.topic}${fresh}`; // drop the shared agent
-      if (sameTopic && !sameAgent) return `@${a.agent}${fresh}`; // drop the shared topic
-      if (sameAgent && sameTopic) return `#${a.topic}${fresh}`; // exact duplicate — drop agent
-      return `#${a.topic}@${a.agent}${fresh}`; // shares neither — stays explicit
+    return out;
+  }
+
+  // Order-preserving fallback for when a hop-target group can't be fully
+  // resolved (branches upstream disagree on a field it needs) — keeps atoms
+  // exactly as written rather than guessing at a grouping for an unknown value.
+  function verbatimGroupText(atoms, sep) {
+    return atoms.map(renderAtom).join(sep);
+  }
+
+  // Target atoms never borrow from each other (resolveGroupAgainstState's
+  // isOrigin=false path is a stateless per-atom map against one fixed parent
+  // state — there is no rolling root for targets), so minimalGroupedText's
+  // sibling-coverage grouping would be structurally wrong here: it could
+  // drop a field because it happens to match a *sibling's* value, but
+  // re-parsing a bare target atom only ever looks up the parent state, never
+  // a sibling — silently corrupting the value on round-trip whenever a
+  // sibling's field coincides with something other than the parent's. Each
+  // target atom can only safely drop a field that matches the parent state
+  // directly.
+  function dropAgainstParentText(resolved, uniformState) {
+    return resolved.map(a => {
+      const dropTopic = !!uniformState && uniformState.topic != null && uniformState.topic === a.topic;
+      const dropAgent = !!uniformState && uniformState.agent != null && uniformState.agent === a.agent;
+      let s = '';
+      if (!dropTopic) s += `#${a.topic}`;
+      if (!dropAgent) s += `@${a.agent}`;
+      if (!s) s = `@${a.agent}`; // both matched parent; keep agent visible
+      if (a.fresh) s += '!';
+      return s;
     });
-    const anchorText = `#${anchor.topic}@${anchor.agent}${anchor.fresh ? '!' : ''}`;
-    return [anchorText, ...rest.sort()].join(sep);
+  }
+
+  function keyGroupText(group, uniformState) {
+    const sep = group.kind === 'plus' ? '+' : ',';
+    const resolved = resolveGroupSoft(group.atoms, uniformState);
+    return resolved ? dropAgainstParentText(resolved, uniformState).join(sep) : verbatimGroupText(group.atoms, sep);
+  }
+
+  function keyOriginGroupText(resolvedAtoms, kind) {
+    // Origins are already fully resolved by the caller (resolveGroupAgainstState),
+    // in original order — grouping is safe here for the reasons above.
+    return minimalGroupedText(resolvedAtoms, kind === 'plus' ? '+' : ',');
   }
 
   function canonicalKeyForClause(clause) {
@@ -586,7 +653,9 @@
         // Cartesian fan-out doesn't balloon into one string per branch. This
         // is what gets saved to the DB and used as the identity key for
         // "same workflow" — the per-branch `canonical` breakdown above is
-        // only an interim display aid.
+        // only an interim display aid. Write-only: nothing re-parses `key`
+        // as flow syntax, which is what makes order-independence safe here
+        // even under rolling anchor (ADR-0032) — see sortedGroupedKeyText.
         key: canonicalKeyForClause(clause),
         branches,
       };

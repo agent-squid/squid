@@ -766,6 +766,19 @@ test('desktop burger only shows settings while mobile burger shows primary nav',
   await expect(page.locator('#hamburger-menu').getByRole('button', { name: 'Settings' })).toBeVisible();
 });
 
+test('mobile burger closes an open help panel', async ({ page }) => {
+  await mockApp(page);
+  await page.setViewportSize({ width: 390, height: 720 });
+  await page.goto('/');
+
+  await page.locator('#help-btn').click();
+  await expect(page.locator('#help-panel')).toHaveClass(/open/);
+
+  await page.locator('#hamburger-btn').click();
+  await expect(page.locator('#help-panel')).not.toHaveClass(/open/);
+  await expect(page.locator('#hamburger-menu')).toBeVisible();
+});
+
 test('mobile right-swipe goes back to the previous view via history', async ({ page }) => {
   await mockApp(page);
   await page.setViewportSize({ width: 390, height: 720 });

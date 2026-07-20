@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-15
-updated: 2026-07-18
+updated: 2026-07-19
 ---
 # ADR-0032: Route Chains and Squid Flow with CWD-Profile Agents
 
@@ -43,12 +43,13 @@ count other than one (including `<N:T>` scheduled rounds) are not implemented
 yet. `<N>` route text is not recognized as a chain and falls back to ordinary
 route parsing.
 
-Also targeted for v0.1: a chain target may be a full `#topic@agent` route, not
-only a bare `@agent`. Today every target is implicitly on the origin's topic
-(`#topic@origin>@target` — `@target` is always `#topic`'s own agent); there is
-no way to hand off to a different topic mid-chain. `#topic@origin>#other@target`
-should be accepted so a chain step can cross into a different topic. See
-"Accepted Route Syntax" and "Squid Flow" below.
+A chain target may be a full `#topic@agent` route, not only a bare `@agent` —
+`#topic@origin>#other@target` is implemented and hands off to a different
+topic mid-chain (`_ROUTE_CHAIN_RE` in `agent/flow.py`, `parseRouteChain` in
+`ui/app.js`). What's still missing is the bare-topic-only target form,
+`#topic@origin>#other` (topic switches, agent inherited from the origin) —
+`_ROUTE_CHAIN_RE` currently requires an explicit `@agent` on the target, so
+this v0.1-scope form (see "v0.1 Scope" below) isn't accepted yet.
 
 The client only ever sends the origin turn. Every step after that is
 dispatched by the server (`agent/flow.py`), not the browser: `TopicWorker`
@@ -79,6 +80,65 @@ return prompt shown later in this ADR is the target direction, not yet
 implemented. The backend still rejects route-chain expressions sent directly
 to `/chat` via the legacy `route` field; this keeps the chain visible as normal
 message rows rather than a hidden backend-only transaction.
+
+### v0.1 Scope
+
+v0.1 covers a single clause with **at most one hop operator** — no chained
+multi-hop sequences (chaining more operators together). This subsection is
+the authoritative boundary; every other section in this ADR should be read
+against it, and any example elsewhere that implies something outside it is
+describing the broader Squid Flow direction, not v0.1.
+
+**In scope:**
+
+- An origin, always fully explicit: `#topic@origin[!]`. The origin never
+  omits either half — there is nothing for it to inherit from yet, since
+  it's what *establishes* the root that later inheritance rolls from. This
+  holds whether the origin is a single atom, an Origin Broadcast list
+  (`#topic@a,@b`, no operator), or a join (`@a+@b`, feeding the one
+  following hop).
+- At most one hop operator after the origin: `>`, `=>`, `<>`, `<N>`, `<N:T>`,
+  `=N>`, `=N:T>`. A clause has either zero operators (a bare origin or
+  broadcast, nothing downstream) or exactly one — never two or more chained
+  together.
+- One or more target atoms for that one hop, each independently
+  `[#topic]@target[!]`, `#topic[!]` (bare topic — inherits the origin's
+  agent), or `@target[!]` (bare agent — inherits the origin's topic).
+  Multiple targets after one operator (`#topic@origin>@a,@b`, target
+  fan-out) is in scope — it's still one hop, one operator, just multiple
+  independent targets fed by it, structurally the same decomposition Origin
+  Broadcast already does (each target atom resolves independently against
+  the one shared parent state, then dispatches as an independent handoff
+  carrying the same previous-step output). For example,
+  `#topic@origin>#other` is valid: the origin is fully explicit, and the
+  target switches topic while inheriting `origin`'s agent. `#topic>#other@target`
+  is **not** valid syntax at any point in Squid Flow: the origin atom here is
+  only `#topic` — no `@origin` — so nothing establishes a root at all.
+  Concretely, origin resolution (`resolveGroupAgainstState`, `isOrigin=true`)
+  requires *some* atom in the origin group to already be fully explicit
+  before anything can act as a root (`firstAnchor = atoms.find(a => a.topic
+  != null && a.agent != null)`); with a single bare-topic origin atom and no
+  sibling to borrow from, there is no candidate and resolution fails outright
+  ("nothing to inherit yet"). Target atoms never donate backward into the
+  origin either — inheritance only flows origin → target, never the reverse
+  — so `@target`'s agent is never a candidate source for the origin's missing
+  agent, even in principle.
+- A join (`+`) as the origin, feeding the one hop: `@a+@b>@c`. See "Squid
+  Flow" below for how the joined branches' context reaches the target step
+  (pins, not a synthesized envelope) and what happens when they disagree on
+  a field the target needs to inherit.
+
+**Out of scope:**
+
+- Multi-hop chains — more than one operator in a clause (`@a>@b>@c`). Once a
+  hop's target (or targets) is reached, that clause is done.
+- Multiple `;`-separated clauses (a full Squid Flow DAG). v0.1 is one clause.
+- Scheduled edges (`=N:T>`, `<N:T>`) and repeated rounds (`<N>` for N > 1) —
+  accepted direction, not yet implemented: no repeat-dispatch or delayed-
+  dispatch mechanism exists server-side yet (`agent/topic_queue.py` only
+  dispatches immediately, once).
+- `;` multi-clause DAGs, cycles — not part of v0.1 or its near-term
+  extension; `ui/flow-lang.js`'s reference grammar rejects `;` outright.
 
 ## Decision Drivers
 
@@ -166,8 +226,9 @@ inherit the new topic):
 ```
 
 This hands off from `#squid@codex` to a fresh `@review!` session on `#hive`,
-not `#squid`. `#topic@agent` targets are v0.1, not yet implemented — today
-every target is implicitly on the origin's topic.
+not `#squid`. This explicit form (`#topic@agent`, both halves shown) is
+implemented. The bare-topic form below it (`#hive` alone, agent inherited) is
+not yet implemented — see "Current Implementation" and "v0.1 Scope" above.
 
 A graph clause step is its own parse context, separate from an ordinary
 standalone message, so ADR-0005's sticky-agent rule for a bare `#topic` does
@@ -189,22 +250,54 @@ list of bare topics) — that would be a second way to spell the same meaning
 via a new grammar shape, and canonicalization must produce exactly one shape
 per meaning, using rules that already exist.
 
-Within an origin list, at least one atom must be a full `#topic@agent` — that
-one becomes the root every other atom in the list borrows its missing half
-from, independently per atom and per field. It does not have to be
-positionally first: `#t3,#t2@a1` is valid (`#t2@a1` is the only complete
-atom, so `#t3` borrows `a1` from it), and a single root can donate its topic
-to one atom and its agent to a different atom in the same list at once
-(`#t3,@a2,#t1@a1` → `#t1` donates both halves: `#t3` becomes `#t3@a1`, `@a2`
-becomes `#t1@a2`). What it cannot do is let two atoms disagree on which is
-the root by position — `#t1@a1,#t3,#t2@a2` and `#t2@a2,#t1@a1,#t3` are
-different graphs, not the same one written two ways: in the first, `#t3`
-borrows from `#t1@a1` (the first complete atom in *that* text) and ends up
-`@a1`; in the second, `#t3` borrows from `#t2@a2` and ends up `@a2`. The
-anchor is always "whichever atom is first fully-explicit in the text as
-written," so reordering a list that contains more than one fully-explicit
-atom can change which one wins and therefore change the meaning — this is
-the one place order isn't free to change without changing the graph.
+Within an origin list, at least one atom must be a full `#topic@agent`.
+Inheritance rolls left to right by *nearest fully-explicit ancestor*, not by
+a single anchor fixed for the whole list: the first fully-explicit atom seeds
+the initial root (so a bare atom with nothing yet resolved to its left still
+borrows from the first complete atom in the text), but every atom that is
+itself fully explicit supersedes the prior root for everything after it. A
+root can donate its topic to one atom and its agent to a different atom at
+once: `#t3,#t2@a1` is valid (`#t2@a1` is the only complete atom, so `#t3`
+borrows `a1` from it), and `#t3,@a2,#t1@a1` resolves to `#t3@a1,#t1@a2,#t1@a1`
+(`#t1@a1` is the only complete atom, so it donates both halves: `#t3` becomes
+`#t3@a1`, `@a2` becomes `#t1@a2`).
+
+Once a later atom is itself fully explicit, it becomes the new root for
+everything after it — this is a rolling handoff, not a single global anchor:
+
+```text
+#t1@a1,#t2,@a2,#t4@a4,#a1
+```
+
+resolves left to right: `#t1@a1` seeds the root; `#t2` borrows `@a1` (root's
+agent); `@a2` borrows `#t1` (root's topic); `#t4@a4` is itself fully explicit
+and becomes the new root; `#a1` — a *topic* that happens to be spelled the
+same as the first agent's name, a different namespace — borrows `@a4` from
+that newer root, not `@a1` from the first one:
+
+```text
+#t1@a1,#t2@a1,#t1@a2,#t4@a4,#a1@a4
+```
+
+This is why order matters: `#t1@a1,#t3,#t2@a2` and `#t1@a1,#t2@a2,#t3` are
+different graphs even though they contain the same three atoms — in the
+first, `#t3` sits before any second fully-explicit atom appears, so its
+nearest ancestor is still the root `#t1@a1` and it resolves to `#t3@a1`; in
+the second, `#t3` sits after `#t2@a2`, which has already superseded the root,
+so it resolves to `#t3@a2` instead. Reordering only changes the meaning when
+it changes which fully-explicit atom is nearest to a given bare atom.
+
+Rolling anchor is specific to origins, and only origins: an origin atom has
+no parent to inherit from, which is the entire reason it borrows from a
+sibling instead. A hop-target list is different — every target atom already
+has a parent, the edge's source — so each target atom resolves independently
+against that parent and never against another atom in the same target list,
+no matter how that sibling happens to be written. `#squid@codex>@b,#t2@c,@d`:
+`@d` inherits topic `squid` from the edge's source (`#squid@codex`), not `t2`
+from its sibling `#t2@c`, even though `#t2@c` is fully explicit and sits
+immediately to `@d`'s left. A target atom that happens to be fully explicit
+is explicit only for itself; it does not become a root for the atoms next to
+it the way a fully-explicit origin atom does for later origins.
 
 A comma-list source always decomposes into independent branches before any
 inheritance is resolved (unchanged from Origin Broadcast) — so each branch
@@ -280,9 +373,22 @@ inherit from yet. A bare `@agent` or bare `#topic` as the first origin is
 invalid.
 
 `;` separates lineage clauses. `>` and `=>` remain directed handoffs. `+` is
-an explicit join operator: the downstream step runs after every listed upstream
-step has completed, and Squid synthesizes one combined chain envelope from the
-joined outputs.
+an explicit join operator: the downstream step runs after every listed
+upstream step has completed. Context reaches the downstream step by **pinning
+each joined branch's final message** into that turn — the same
+pin-injection mechanism Squid already uses elsewhere (`pinned_ids`,
+`lookback_via_pins` in `agent/server.py`; `_injectablePinnedIds` in
+`ui/app.js`) — not a synthesized envelope specific to joins. A two-way join
+(`@a+@b>@c`) pins exactly two messages into `@c`'s turn, one per branch;
+an N-way join pins N. This is deliberately not the one-way/round-trip
+envelope described under "Downstream Prompt Synthesis" below: that envelope
+exists to hand a *single* previous step's output to the next step as an
+explicit prompt, because there is no other channel carrying it there. A join
+has no single previous step to describe that way, and the branches' actual
+outputs are already available to the downstream turn via the pins — so
+Squid still sends a handoff prompt (route, original user prompt), but does
+not also try to textually concatenate multiple outputs into one synthesized
+`<previous_step_output>` block.
 
 Implicit joins are not part of Squid Flow syntax. For example:
 
@@ -321,7 +427,9 @@ Within a single `;`-delimited clause: if the clause has no operator, `,` lists
 parallel origins (see Origin Broadcast below). If the clause has an operator,
 `,` after `>` lists parallel targets fed by the same source, e.g. `@a>@b,@c`
 means `@a`'s output goes to both `@b` and `@c` independently, with no join
-between them.
+between them. Target fan-out is in v0.1 scope (see "v0.1 Scope" above) — it
+doesn't add hop depth, just parallel targets at the one hop v0.1 already
+allows.
 
 An earlier draft of this ADR used `,` for both roles. That was ambiguous: a
 comma-separated clause opening with a bare `@agent` could be read either as a
@@ -356,6 +464,52 @@ Autocomplete should prefer `!` on broadcast origins (`@a!,@b!`), for the same
 reason it prefers `!` on chained request/response targets: comparing agents
 usually wants independent fresh takes rather than each mutating its persistent
 lane.
+
+### Canonical Key (Storage/Dedup Identity)
+
+Distinct from the human-readable `canonical` form above (which is
+order-preserving and meant to be read back), a comma/plus-separated group also
+has a condensed **key** form: a write-only identity token used for storage and
+dedup ("is this the same broadcast/join as one we've already recorded"),
+never re-parsed as flow syntax by anything. Because it's write-only, it's free
+to do what the readable form can't — resolve every atom first (respecting the
+order-sensitive rolling anchor, so that step alone still happens in original
+order), then reorder and group the resulting *already-resolved* (topic,
+agent) facts, since a fully-resolved atom has no positional ambiguity left to
+preserve.
+
+The grouping rule is not a single fixed sort axis. Sorting and grouping by
+topic alone (drop a topic that repeats the previous entry's) leaves savings on
+the table whenever agents repeat more than topics do in a given list, and
+grouping by agent alone has the same blind spot in reverse — neither axis
+dominates the other in general, and a single-axis rule also cannot mix which
+field it drops within one list. Instead: repeatedly pick whichever remaining
+atom would "cover" the most other remaining atoms, where one atom covers
+another if they share a topic *or* an agent. That atom becomes a run's
+anchor, written in full (`#topic@agent`); every atom it covers joins the run,
+each dropping whichever one field it shares with the anchor. Remove the run
+and repeat on what's left. Ties (equal coverage) break on ascending
+`(topic, agent)` so the result stays a pure function of the atom set —
+same set in, same key out, which is the actual requirement ("canonicalization
+must produce exactly one shape per meaning," above); nothing about that
+requirement demands a single sort axis, only that the function be
+deterministic. This is a greedy approximation of minimum dominating set
+(NP-hard in general) — not guaranteed globally optimal, but cheap and exact
+in practice for the small atom counts a broadcast or join list actually has,
+and it always matches or beats either single-axis sort.
+
+Worked example: `#t2@a2,#t1,@a1` resolves (rolling anchor) to
+`#t2@a2, #t1@a2, #t2@a1`. `#t2@a2` covers both other atoms (shares agent `a2`
+with the second, shares topic `t2` with the third) and wins the coverage tie,
+so it anchors the only run: the key is `#t2@a2,#t1,@a1` — the second atom
+drops its agent (matches the anchor's), the third drops its topic (also
+matches the anchor's). Reference implementation: `ui/flow-lang.js`
+(`minimalGroupedText`, used by both `keyOriginGroupText` for origin/join
+lists and `keyGroupText` for hop-target lists — the same rule applies
+wherever a comma/plus list appears, not just at the root; see "Rolling anchor
+is specific to origins, and only origins" above for why *resolution* still
+differs between an origin list and a hop-target list, even though this
+grouping step doesn't).
 
 ### Related Prior Art
 

@@ -9,7 +9,8 @@ This module hooks into that same completion point so the *next* chain step
 is dispatched the same way, entirely server-side.
 
 Only the currently-implemented subset of ADR-0032 is handled here: a linear
-`#topic@origin[!]>@target[!]` one-way handoff, or a single-round
+`#topic@origin[!]>@target[!]` one-way handoff (optionally crossing into a
+different topic, `#topic@origin[!]>#other@target[!]`), or a single-round
 `#topic@origin[!]<>@target[!]` request/response chain. Anything else (joins,
 `<N>` for N != 1, scheduled edges, broadcasts) is not a chain this module
 recognizes, and is left alone.
@@ -26,14 +27,19 @@ from .stats_db import (
 
 log = logging.getLogger(__name__)
 
-_ROUTE_CHAIN_RE = re.compile(r"^#(\w+)@(\w+)(!?)((?:<>)|>)@(\w+)(!?)$")
+_ROUTE_CHAIN_RE = re.compile(r"^#(\w+)@(\w+)(!?)((?:<>)|>)(?:#(\w+))?@(\w+)(!?)$")
 
 
 def chain_route_text(
     topic: str, origin_agent: str, target_agent: str,
     target_fresh: bool = False, origin_fresh: bool = False, operator: str = ">",
+    target_topic: Optional[str] = None,
 ) -> str:
-    return f"#{topic}@{origin_agent}{'!' if origin_fresh else ''}{operator}@{target_agent}{'!' if target_fresh else ''}"
+    target_prefix = f"#{target_topic}" if target_topic and target_topic != topic else ""
+    return (
+        f"#{topic}@{origin_agent}{'!' if origin_fresh else ''}{operator}"
+        f"{target_prefix}@{target_agent}{'!' if target_fresh else ''}"
+    )
 
 
 def parse_route_chain(route: Optional[str]) -> Optional[dict]:
@@ -41,18 +47,22 @@ def parse_route_chain(route: Optional[str]) -> Optional[dict]:
     match = _ROUTE_CHAIN_RE.match(str(route or ""))
     if not match:
         return None
-    topic, origin, origin_fresh, operator_raw, target, target_fresh = match.groups()
+    topic, origin, origin_fresh, operator_raw, target_topic, target, target_fresh = match.groups()
     operator = ">" if operator_raw == ">" else "<>"
     topic = topic.lower()
+    target_topic = target_topic.lower() if target_topic else topic
     return {
         "topic": topic,
         "origin": origin,
         "origin_fresh": bool(origin_fresh),
         "operator": operator,
         "rounds": 0 if operator == ">" else 1,
+        "target_topic": target_topic,
         "target": target,
         "target_fresh": bool(target_fresh),
-        "route": chain_route_text(topic, origin, target, bool(target_fresh), bool(origin_fresh), operator),
+        "route": chain_route_text(
+            topic, origin, target, bool(target_fresh), bool(origin_fresh), operator, target_topic,
+        ),
     }
 
 
@@ -91,7 +101,7 @@ def next_chain_step(flow_run_id: str) -> Optional[dict]:
 
     if n == 2:
         return {
-            "topic": chain["topic"],
+            "topic": chain["target_topic"],
             "agent": chain["target"],
             "fresh": chain["target_fresh"],
             "previous_agent": chain["origin"],

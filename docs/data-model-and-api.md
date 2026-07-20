@@ -990,19 +990,21 @@ Fetch current DeepSeek account balance.
 
 ---
 
-### POST /config/deepseek/max-budget
+### POST /config/{gauge}/max-budget
 
-Set a soft spend cap used by the DeepSeek quota gauge.
+Set a soft spend cap used by a prepaid-balance quota gauge (`deepseek`,
+`kimi`). Stored per gauge type.
 
 **Request body**: `{ "amount": 0.0 }`
 
-**Response**: `{ "status": "ok" }` or 400.
+**Response**: `{ "status": "ok" }`, 400 for an invalid amount, or 404 for an
+unknown balance gauge.
 
-### DELETE /config/deepseek/max-budget
+### DELETE /config/{gauge}/max-budget
 
-Clear the DeepSeek spend cap.
+Clear the spend cap for a prepaid-balance gauge.
 
-**Response**: `{ "status": "ok" }`
+**Response**: `{ "status": "ok" }` or 404.
 
 ---
 
@@ -1011,8 +1013,11 @@ Clear the DeepSeek spend cap.
 Returns a normalized dynamic or static gauge snapshot for one configured
 provider. Gauge routing and credentials come from provider config and are
 independent of which harness is using that provider. Internally delegates to
-the claude/codex/cursor/deepseek/static logic above based on the provider's
-gauge type.
+the claude/codex/cursor/balance/static logic above based on the provider's
+gauge type. Prepaid-balance gauges (`deepseek`, `kimi`) fetch the provider's
+balance endpoint — derived from its configured `base_url` origin — and
+normalize to `(text, raw)` plus optional `max_budget`/`max_budget_pct`/`spent`
+when a spend cap is set.
 
 ```json
 { "status": "ok", "text": "$12.34", "raw": 12.34, "used_percent": null, "reset_at": null, "title": "DeepSeek balance", "seven_day": null, "max_budget": null }

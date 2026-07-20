@@ -135,6 +135,7 @@ const AGENT_THEME_COLORS = Object.freeze({
   cursor: '#FFFFFF',
   opencode: '#CFCECD',
   deepseek: '#4d9de0',
+  kimi: '#4d6bfe',
   antigravity: '#4ea1ff',
   copilot: '#ff5db1',
   default: '#888888',
@@ -404,7 +405,7 @@ function switchView(name) {
   currentView = name;
   document.getElementById('right-rail')?.classList.toggle('quota-chat-hidden', name !== 'chat');
   if (name !== 'chat') {
-    document.querySelectorAll('#quota-creds-popup, #codex-creds-popup, #cursor-creds-popup, #deepseek-max-popup')
+    document.querySelectorAll('#quota-creds-popup, #codex-creds-popup, #cursor-creds-popup, #balance-max-popup')
       .forEach(popup => popup.classList.remove('open'));
   }
   if (name === 'files') openFilesTabView();
@@ -528,6 +529,7 @@ function initSettings() {
   const hamburgerMenu = document.getElementById('hamburger-menu');
   hamburgerBtn.addEventListener('click', e => {
     e.stopPropagation();
+    if (helpPanel.classList.contains('open')) closeHelp();
     const open = hamburgerMenu.classList.toggle('open');
     hamburgerBtn.classList.toggle('active', open);
   });
@@ -702,25 +704,128 @@ let editingExpandedSlug = false;
 let expandedSlugEditToken = 0;
 let composerActionTitleSeq = 0;
 
-function _chainRouteText(topic, originAgent, targetAgent, targetFresh = false, originFresh = false, operator = '>') {
-  return `#${topic}@${originAgent}${originFresh ? '!' : ''}${operator}@${targetAgent}${targetFresh ? '!' : ''}`;
+function _chainRouteText(topic, originAgent, targetAgent, targetFresh = false, originFresh = false, operator = '>', targetTopic = null) {
+  const targetPrefix = targetTopic && targetTopic !== topic ? `#${targetTopic}` : '';
+  return `#${topic}@${originAgent}${originFresh ? '!' : ''}${operator}${targetPrefix}@${targetAgent}${targetFresh ? '!' : ''}`;
 }
 
 function parseRouteChain(route) {
-  const match = String(route || '').match(/^#(\w+)@(\w+)(!?)((?:<>)|>)@(\w+)(!?)$/);
+  const match = String(route || '').match(/^#(\w+)@(\w+)(!?)((?:<>)|>)(?:#(\w+))?@(\w+)(!?)$/);
   if (!match) return null;
   const operator = match[4] === '>' ? '>' : '<>';
   const rounds = operator === '>' ? 0 : 1;
+  const topic = match[1].toLowerCase();
+  const targetTopic = match[5] ? match[5].toLowerCase() : topic;
   return {
-    topic: match[1].toLowerCase(),
+    topic,
     origin: match[2],
     originFresh: !!match[3],
     operator,
     rounds,
-    target: match[5],
-    targetFresh: !!match[6],
-    route: _chainRouteText(match[1].toLowerCase(), match[2], match[5], !!match[6], !!match[3], operator),
+    targetTopic,
+    target: match[6],
+    targetFresh: !!match[7],
+    route: _chainRouteText(topic, match[2], match[6], !!match[7], !!match[3], operator, targetTopic),
   };
+}
+
+// Origin Broadcast (ADR-0032): a bare, comma-separated origin list with no
+// operator. Each listed origin receives the literal prompt independently —
+// no chain envelope, no downstream step. `#topic@a,@b` == sending `#topic@a`
+// and `#topic@b` separately, grouped under one flow_run_id for display only.
+//
+// Atoms may each be a full `#topic@agent`, a bare `@agent`, or a bare
+// `#topic` — whichever half an atom omits is inherited from its nearest
+// fully-explicit ancestor, not a single anchor fixed for the whole list: the
+// first fully-explicit atom seeds the root, but every later atom that is
+// itself fully explicit supersedes it for everything after (see ADR-0032,
+// "Within an origin list...").
+//
+// Stored/displayed in *reduced* form, not fully-explicit: greedy max-coverage
+// dominating-set grouping, ported from ui/flow-lang.js's minimalGroupedText
+// (see ADR-0032, "Canonical Key (Storage/Dedup Identity)"). Repeatedly pick
+// whichever remaining agent would "cover" the most other remaining ones (two
+// atoms cover each other if they share a topic or an agent); that atom
+// anchors a run, written in full, and every atom it covers joins the run,
+// each dropping whichever one field it shares with the anchor. This beats a
+// single fixed sort axis (e.g. topic-only) whenever agents repeat more than
+// topics do, or vice versa, and can mix which field drops within one run —
+// something a single-axis sort can never do. Ties break on ascending
+// (topic, agent) so the result is a pure function of the resolved agent set,
+// same set in, same text out — this doesn't reorder the *dispatch*, only the
+// stored/displayed route text (each independent /chat send still goes out in
+// `agents`' original order).
+function _broadcastRouteText(agents) {
+  let remaining = agents.slice();
+  const runs = [];
+  while (remaining.length) {
+    let anchor = null;
+    let anchorCover = null;
+    for (const cand of remaining) {
+      const cover = remaining.filter(a => a.topic === cand.topic || a.agent === cand.agent);
+      const better = !anchor || cover.length > anchorCover.length ||
+        (cover.length === anchorCover.length &&
+          (cand.topic < anchor.topic ||
+            (cand.topic === anchor.topic && cand.agent < anchor.agent)));
+      if (better) { anchor = cand; anchorCover = cover; }
+    }
+    runs.push({ anchor, members: anchorCover });
+    const covered = new Set(anchorCover);
+    remaining = remaining.filter(a => !covered.has(a));
+  }
+  runs.sort((r1, r2) =>
+    r1.anchor.topic < r2.anchor.topic ? -1 : r1.anchor.topic > r2.anchor.topic ? 1
+      : r1.anchor.agent < r2.anchor.agent ? -1 : r1.anchor.agent > r2.anchor.agent ? 1 : 0);
+  const parts = [];
+  for (const run of runs) {
+    const a0 = run.anchor;
+    parts.push(`#${a0.topic}@${a0.agent}${a0.fresh ? '!' : ''}`);
+    for (const a of run.members) {
+      if (a === a0) continue;
+      const fresh = a.fresh ? '!' : '';
+      parts.push(a.topic === a0.topic ? `@${a.agent}${fresh}` : `#${a.topic}${fresh}`);
+    }
+  }
+  return parts.join(',');
+}
+
+const _BROADCAST_ATOM_RE = /^(?:#(\w+))?(?:@(\w+))?(!?)$/;
+// Loose detector for "does this text look like a broadcast route" — the
+// first atom must be a full #topic@agent, later atoms may each drop either
+// half (or both stay, or a bare topic switch, etc.); parseOriginBroadcast
+// does the real validation. Shared so every call site that needs to peel a
+// broadcast route off the front of raw composer text stays in sync.
+const _BROADCAST_ROUTE_DETECT_SRC = '#\\w+@\\w+!?(?:,(?:#\\w+)?(?:@\\w+)?!?)+';
+
+// Core rolling-anchor resolver, shared by parseOriginBroadcast (full-route
+// validation) and the composer autocomplete (which wants the same walk over
+// however many atoms are typed so far, even just one, to know what an
+// about-to-be-typed trailing atom would currently inherit).
+function _resolveBroadcastAtoms(rawAtoms) {
+  const parsedAtoms = [];
+  for (const raw of rawAtoms) {
+    const m = raw.match(_BROADCAST_ATOM_RE);
+    if (!m || (!m[1] && !m[2])) return null; // each atom needs at least a topic or an agent
+    parsedAtoms.push({ topic: m[1] ? m[1].toLowerCase() : null, agent: m[2] || null, fresh: !!m[3] });
+  }
+  const firstExplicit = parsedAtoms.find(a => a.topic && a.agent);
+  if (!firstExplicit) return null; // at least one atom must be a full #topic@agent
+
+  let root = { topic: firstExplicit.topic, agent: firstExplicit.agent };
+  return parsedAtoms.map(a => {
+    if (a.topic && a.agent) root = { topic: a.topic, agent: a.agent }; // supersedes root from here on
+    return { topic: a.topic || root.topic, agent: a.agent || root.agent, fresh: a.fresh };
+  });
+}
+
+function parseOriginBroadcast(route) {
+  const text = String(route || '').trim();
+  if (!text.startsWith('#')) return null;
+  const rawAtoms = text.split(',');
+  if (rawAtoms.length < 2) return null;
+  const agents = _resolveBroadcastAtoms(rawAtoms);
+  if (!agents) return null;
+  return { topic: agents[0].topic, agents, route: _broadcastRouteText(agents) };
 }
 
 function setTopicChip(topic, agent, adhoc = false, lookback = 0, opts = {}) {
@@ -730,9 +835,20 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0, opts = {}) {
   const chainTargetFresh = !!opts.chainTargetFresh;
   const chainOperator = opts.chainOperator || '>';
   const chainRounds = opts.chainRounds || (chainOperator === '<>' ? 1 : 0);
+  const chainTargetTopic = opts.chainTargetTopic || null;
+  const broadcastAgents = opts.broadcastAgents || null;
   const suppressTurnCount = !!opts.suppressTurnCount;
-  const route = chainTarget && agent ? _chainRouteText(topic, agent, chainTarget, chainTargetFresh, adhoc, chainOperator) : null;
-  stickyChip = { topic, agent, adhoc, lookback, suppressTurnCount, ...(route ? { route, chainTarget, chainTargetFresh, chainOperator, chainRounds } : {}) };
+  const route = broadcastAgents
+    ? (opts.route || _broadcastRouteText(broadcastAgents))
+    : (chainTarget && agent
+      ? (opts.route || _chainRouteText(topic, agent, chainTarget, chainTargetFresh, adhoc, chainOperator, chainTargetTopic))
+      : null);
+  stickyChip = {
+    topic, agent, adhoc, lookback, suppressTurnCount,
+    ...(route
+      ? (broadcastAgents ? { route, broadcastAgents } : { route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic })
+      : {}),
+  };
   _advisoryTurnCount = 0;
   // Don't persist a sessioned default chip — #default is adhoc-first; session there is ephemeral
   if (topic !== 'default' || adhoc) {
@@ -741,62 +857,108 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0, opts = {}) {
   }
 
   topicChipEl.innerHTML = '';
-  topicChipEl.classList.toggle('route-chain', !!route);
-  const tSpan = document.createElement('span');
-  tSpan.className = 'chip-topic';
-  tSpan.textContent = '#' + topic;
-  topicChipEl.appendChild(tSpan);
-  if (agent) {
-    const aSpan = document.createElement('span');
-    aSpan.className = 'chip-agent';
-    aSpan.textContent = '@' + agent;
-    setAgentSlugColor(aSpan, agent);
-    topicChipEl.appendChild(aSpan);
+  topicChipEl.classList.toggle('route-chain', !!route && !broadcastAgents);
+  topicChipEl.classList.toggle('origin-broadcast', !!broadcastAgents);
+  if (!broadcastAgents) {
+    const tSpan = document.createElement('span');
+    tSpan.className = 'chip-topic';
+    tSpan.textContent = '#' + topic;
+    topicChipEl.appendChild(tSpan);
   }
-  if (route) {
-    if (adhoc) {
-      const originFreshSpan = document.createElement('span');
-      originFreshSpan.className = 'chip-adhoc chip-chain-origin-fresh';
-      originFreshSpan.textContent = '!';
-      if (agent) setAgentSlugColor(originFreshSpan, agent);
-      topicChipEl.appendChild(originFreshSpan);
-    }
-    const arrowSpan = document.createElement('span');
-    arrowSpan.className = 'chip-route-arrow';
-    arrowSpan.textContent = chainOperator;
-    topicChipEl.appendChild(arrowSpan);
-    const targetSpan = document.createElement('span');
-    targetSpan.className = 'chip-agent chip-chain-target';
-    targetSpan.textContent = '@' + chainTarget;
-    setAgentSlugColor(targetSpan, chainTarget);
-    topicChipEl.appendChild(targetSpan);
-    if (chainTargetFresh) {
-      const freshSpan = document.createElement('span');
-      freshSpan.className = 'chip-adhoc chip-chain-fresh';
-      freshSpan.textContent = '!';
-      setAgentSlugColor(freshSpan, chainTarget);
-      topicChipEl.appendChild(freshSpan);
-    }
-  } else if (adhoc) {
-    const adSpan = document.createElement('span');
-    adSpan.className = 'chip-adhoc';
-    adSpan.textContent = lookback > 0 ? `!${lookback}` : '!';
-    if (agent) setAgentSlugColor(adSpan, agent);
-    topicChipEl.appendChild(adSpan);
-  } else if (!suppressTurnCount) {
-    clearTimeout(_chipTurnCountTimer);
-    _chipTurnCountTimer = null;
-    const sid = _sessionIds[`${topic}@${agent || '_'}`];
-    const count = sid ? (_sessionTurnCounts[sid] || 0) : 0;
-    if (count > 0) {
-      _renderChipTurnCount(count);
-    } else {
-      _scheduleChipTurnCountUpdate(topic, agent);
-    }
+  if (broadcastAgents) {
+    // Origin Broadcast (ADR-0032): N independent origins, no chain envelope —
+    // just a comma-joined origin list, no arrow, no single "agent" identity,
+    // and (unlike a single-topic broadcast) no single "topic" identity
+    // either — each origin shows its own #topic when it differs from the
+    // one before it (rolling-anchor resolution already filled in every
+    // origin's topic/agent, this just avoids repeating an unchanged topic).
+    let lastTopic = null;
+    broadcastAgents.forEach((a, i) => {
+      if (i > 0) {
+        const sepSpan = document.createElement('span');
+        sepSpan.className = 'chip-broadcast-sep';
+        sepSpan.textContent = ',';
+        topicChipEl.appendChild(sepSpan);
+      }
+      if (a.topic !== lastTopic) {
+        const tSpan2 = document.createElement('span');
+        tSpan2.className = 'chip-topic';
+        tSpan2.textContent = '#' + a.topic;
+        topicChipEl.appendChild(tSpan2);
+        lastTopic = a.topic;
+      }
+      const aSpan = document.createElement('span');
+      aSpan.className = 'chip-agent chip-broadcast-agent';
+      aSpan.textContent = '@' + a.agent;
+      setAgentSlugColor(aSpan, a.agent);
+      topicChipEl.appendChild(aSpan);
+      if (a.fresh) {
+        const freshSpan = document.createElement('span');
+        freshSpan.className = 'chip-adhoc';
+        freshSpan.textContent = '!';
+        setAgentSlugColor(freshSpan, a.agent);
+        topicChipEl.appendChild(freshSpan);
+      }
+    });
   } else {
-    clearTimeout(_chipTurnCountTimer);
-    _chipTurnCountTimer = null;
-    _renderChipTurnCount(0);
+    if (agent) {
+      const aSpan = document.createElement('span');
+      aSpan.className = 'chip-agent';
+      aSpan.textContent = '@' + agent;
+      setAgentSlugColor(aSpan, agent);
+      topicChipEl.appendChild(aSpan);
+    }
+    if (route) {
+      if (adhoc) {
+        const originFreshSpan = document.createElement('span');
+        originFreshSpan.className = 'chip-adhoc chip-chain-origin-fresh';
+        originFreshSpan.textContent = '!';
+        if (agent) setAgentSlugColor(originFreshSpan, agent);
+        topicChipEl.appendChild(originFreshSpan);
+      }
+      const arrowSpan = document.createElement('span');
+      arrowSpan.className = 'chip-route-arrow';
+      arrowSpan.textContent = chainOperator;
+      topicChipEl.appendChild(arrowSpan);
+      if (chainTargetTopic && chainTargetTopic !== topic) {
+        const targetTopicSpan = document.createElement('span');
+        targetTopicSpan.className = 'chip-topic chip-chain-target-topic';
+        targetTopicSpan.textContent = '#' + chainTargetTopic;
+        topicChipEl.appendChild(targetTopicSpan);
+      }
+      const targetSpan = document.createElement('span');
+      targetSpan.className = 'chip-agent chip-chain-target';
+      targetSpan.textContent = '@' + chainTarget;
+      setAgentSlugColor(targetSpan, chainTarget);
+      topicChipEl.appendChild(targetSpan);
+      if (chainTargetFresh) {
+        const freshSpan = document.createElement('span');
+        freshSpan.className = 'chip-adhoc chip-chain-fresh';
+        freshSpan.textContent = '!';
+        setAgentSlugColor(freshSpan, chainTarget);
+        topicChipEl.appendChild(freshSpan);
+      }
+    } else if (adhoc) {
+      const adSpan = document.createElement('span');
+      adSpan.className = 'chip-adhoc';
+      adSpan.textContent = lookback > 0 ? `!${lookback}` : '!';
+      if (agent) setAgentSlugColor(adSpan, agent);
+      topicChipEl.appendChild(adSpan);
+    } else if (!suppressTurnCount) {
+      clearTimeout(_chipTurnCountTimer);
+      _chipTurnCountTimer = null;
+      const sid = _sessionIds[`${topic}@${agent || '_'}`];
+      const count = sid ? (_sessionTurnCounts[sid] || 0) : 0;
+      if (count > 0) {
+        _renderChipTurnCount(count);
+      } else {
+        _scheduleChipTurnCountUpdate(topic, agent);
+      }
+    } else {
+      clearTimeout(_chipTurnCountTimer);
+      _chipTurnCountTimer = null;
+      _renderChipTurnCount(0);
+    }
   }
   topicChipEl.classList.add('visible');
   topicChipEl.classList.remove('needs-agent');
@@ -813,7 +975,7 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0, opts = {}) {
 function clearTopicChip() {
   stickyChip = null;
   localStorage.removeItem('squid_sticky_chip');
-  topicChipEl.classList.remove('visible', 'needs-agent', 'route-chain');
+  topicChipEl.classList.remove('visible', 'needs-agent', 'route-chain', 'origin-broadcast');
   input.placeholder = '#topic or #topic@agent message…';
   updateComposerActionTitles();
   updateActiveQuotaGauge();
@@ -861,10 +1023,10 @@ function _sessionTurnCountForRouteStep(topic, agent, fresh = false) {
   return sid ? (_sessionTurnCounts[sid] || 0) : 0;
 }
 
-function _routeChainTurnCounts(topic, originAgent, originFresh, targetAgent, targetFresh) {
+function _routeChainTurnCounts(topic, originAgent, originFresh, targetAgent, targetFresh, targetTopic) {
   return {
     origin: _sessionTurnCountForRouteStep(topic, originAgent, originFresh),
-    target: _sessionTurnCountForRouteStep(topic, targetAgent, targetFresh),
+    target: _sessionTurnCountForRouteStep(targetTopic || topic, targetAgent, targetFresh),
   };
 }
 
@@ -897,11 +1059,13 @@ function routeScopeText(route) {
 }
 
 function canonicalFlowRoute(route) {
+  // Comma-separated parts are never reordered: an Origin Broadcast atom can
+  // omit a half and inherit it by rolling anchor from its nearest
+  // fully-explicit predecessor (ADR-0032), so swapping two parts can change
+  // what they resolve to — order is semantic here, not just cosmetic.
   const text = String(route || '').trim().replace(/\s+/g, '');
   if (!text) return '';
-  const parts = text.split(',').filter(Boolean);
-  if (parts.length > 1) parts.sort();
-  return parts.join(',');
+  return text.split(',').filter(Boolean).join(',');
 }
 
 function searchScopeText(state) {
@@ -936,6 +1100,7 @@ async function resolveEffectiveComposerRoute() {
         chainTargetFresh: parsed.chainTargetFresh,
         chainOperator: parsed.chainOperator || '>',
         chainRounds: parsed.chainRounds || 0,
+        chainTargetTopic: parsed.chainTargetTopic,
       } : {}),
     };
   }
@@ -1031,7 +1196,7 @@ chipStashBtn.addEventListener('click', async e => {
 });
 
 function parseInput(text) {
-  if (stickyChip && !text.startsWith('#')) {
+  if (stickyChip) {
     const adhoc = !!stickyChip.adhoc;
     return {
       topic: stickyChip.topic,
@@ -1044,11 +1209,26 @@ function parseInput(text) {
         chainTargetFresh: stickyChip.chainTargetFresh,
         chainOperator: stickyChip.chainOperator || '>',
         chainRounds: stickyChip.chainRounds || 0,
+        chainTargetTopic: stickyChip.chainTargetTopic || null,
+        broadcastAgents: stickyChip.broadcastAgents || null,
       } : {}),
       message: text.trim() || text,
     };
   }
-  const chainWithMessage = text.match(/^(#\w+@\w+!?((?:<>)|>)@\w+!?)\s+([\s\S]*)$/);
+  const broadcastWithMessage = text.match(new RegExp(`^(${_BROADCAST_ROUTE_DETECT_SRC})(?:\\s+([\\s\\S]*))?$`));
+  const parsedBroadcastWithMessage = broadcastWithMessage ? parseOriginBroadcast(broadcastWithMessage[1]) : null;
+  if (parsedBroadcastWithMessage && broadcastWithMessage[2] && broadcastWithMessage[2].trim()) {
+    return {
+      topic: parsedBroadcastWithMessage.topic,
+      agent: null,
+      adhoc: false,
+      lookback: 0,
+      route: parsedBroadcastWithMessage.route,
+      broadcastAgents: parsedBroadcastWithMessage.agents,
+      message: broadcastWithMessage[2].trim(),
+    };
+  }
+  const chainWithMessage = text.match(/^(#\w+@\w+!?((?:<>)|>)(?:#\w+)?@\w+!?)\s+([\s\S]*)$/);
   const parsedChainWithMessage = chainWithMessage ? parseRouteChain(chainWithMessage[1]) : null;
   if (parsedChainWithMessage && chainWithMessage[3].trim()) {
     return {
@@ -1061,6 +1241,7 @@ function parseInput(text) {
       chainTargetFresh: parsedChainWithMessage.targetFresh,
       chainOperator: parsedChainWithMessage.operator,
       chainRounds: parsedChainWithMessage.rounds,
+      chainTargetTopic: parsedChainWithMessage.targetTopic,
       message: chainWithMessage[3].trim(),
     };
   }
@@ -1088,6 +1269,19 @@ function parseInput(text) {
       chainTargetFresh: parsedChainBare.targetFresh,
       chainOperator: parsedChainBare.operator,
       chainRounds: parsedChainBare.rounds,
+      chainTargetTopic: parsedChainBare.targetTopic,
+      message: '',
+    };
+  }
+  const parsedBroadcastBare = parseOriginBroadcast(text.trim());
+  if (parsedBroadcastBare) {
+    return {
+      topic: parsedBroadcastBare.topic,
+      agent: null,
+      adhoc: false,
+      lookback: 0,
+      route: parsedBroadcastBare.route,
+      broadcastAgents: parsedBroadcastBare.agents,
       message: '',
     };
   }
@@ -1146,6 +1340,46 @@ function makeTopicTag(topic, agent, { clickable = false, adhoc = false, lookback
     });
   }
 
+  return wrap;
+}
+
+// Origin Broadcast (ADR-0032), live display only: the shared user bubble has
+// no single agent identity (it's the one literal prompt sent to N targets),
+// so instead of makeTopicTag's single #topic@agent it shows the full comma
+// route — #topic@a,@b — matching what the composer chip already renders for
+// the same broadcast. This is never persisted; after a refresh each target's
+// own history row shows only its own #topic@agent, same as any other turn.
+function makeBroadcastRouteTag(broadcastAgents) {
+  const wrap = document.createElement('span');
+  wrap.className = 'topic-tag';
+  let lastTopic = null;
+  broadcastAgents.forEach((a, i) => {
+    if (i > 0) {
+      const sepSpan = document.createElement('span');
+      sepSpan.className = 'tag-broadcast-sep';
+      sepSpan.textContent = ',';
+      wrap.appendChild(sepSpan);
+    }
+    if (a.topic !== lastTopic) {
+      const tSpan = document.createElement('span');
+      tSpan.className = 'tag-topic';
+      tSpan.textContent = '#' + a.topic;
+      wrap.appendChild(tSpan);
+      lastTopic = a.topic;
+    }
+    const aSpan = document.createElement('span');
+    aSpan.className = 'tag-agent';
+    aSpan.textContent = '@' + a.agent;
+    setAgentSlugColor(aSpan, a.agent);
+    wrap.appendChild(aSpan);
+    if (a.fresh) {
+      const freshSpan = document.createElement('span');
+      freshSpan.className = 'tag-adhoc';
+      freshSpan.textContent = '!';
+      setAgentSlugColor(freshSpan, a.agent);
+      wrap.appendChild(freshSpan);
+    }
+  });
   return wrap;
 }
 
@@ -1217,10 +1451,12 @@ function filterByFlowRoute(route, routeParts = null) {
   const flowRoute = canonicalFlowRoute(route);
   const parsed = routeParts?.route ? routeParts : parseInput(flowRoute);
   setTopicChip(parsed.topic, parsed.agent, parsed.adhoc, parsed.lookback || 0, {
+    route: parsed.route,
     chainTarget: parsed.chainTarget,
     chainTargetFresh: parsed.chainTargetFresh,
     chainOperator: parsed.chainOperator || '>',
     chainRounds: parsed.chainRounds || 0,
+    chainTargetTopic: parsed.chainTargetTopic,
   });
   applyHistoryFilter({ flow_route: flowRoute, topic: null, agent: null, adhoc: null });
 }
@@ -1864,7 +2100,9 @@ function formatPromptHistoryEntry(topic, agent, adhoc, _lookback, message) {
 
 function splitPromptHistoryEntry(entry) {
   const text = String(entry || '').trim();
-  const match = text.match(/^(#\w+@\w+!?(?:(?:<>)|>)@\w+!?|#\w+(?:@\w+)?(?:!\d*)?)\s+([\s\S]+)$/);
+  const match = text.match(new RegExp(
+    `^(${_BROADCAST_ROUTE_DETECT_SRC}|#\\w+@\\w+!?(?:(?:<>)|>)(?:#\\w+)?@\\w+!?|#\\w+(?:@\\w+)?(?:!\\d*)?)\\s+([\\s\\S]+)$`
+  ));
   if (!match) return { route: '', prompt: text };
   return { route: match[1], prompt: match[2].trim() };
 }
@@ -1885,6 +2123,8 @@ function promptHistoryRoute(topic, agent, adhoc) {
 function normalizePromptHistoryRoute(route) {
   const chain = parseRouteChain(route);
   if (chain) return chain.route;
+  const broadcast = parseOriginBroadcast(route);
+  if (broadcast) return broadcast.route;
   const match = String(route || '').match(/^#(\w+)(?:@(\w+))?(!)?\d*$/);
   if (!match) return '';
   return promptHistoryRoute(match[1].toLowerCase(), match[2] || null, !!match[3]);
@@ -1896,14 +2136,23 @@ function applyPromptHistoryEntry(entry) {
     const chain = parseRouteChain(route);
     if (chain) {
       setTopicChip(chain.topic, chain.origin, chain.originFresh, 0, {
+        route: chain.route,
         chainTarget: chain.target,
         chainTargetFresh: chain.targetFresh,
         chainOperator: chain.operator,
         chainRounds: chain.rounds,
+        chainTargetTopic: chain.targetTopic,
+      });
+    }
+    const broadcast = !chain ? parseOriginBroadcast(route) : null;
+    if (broadcast) {
+      setTopicChip(broadcast.topic, null, false, 0, {
+        route: broadcast.route,
+        broadcastAgents: broadcast.agents,
       });
     }
     const match = route.match(/^#(\w+)(?:@(\w+))?(!(?:(\d+))?)?$/);
-    if (!chain && match) {
+    if (!chain && !broadcast && match) {
       setTopicChip(
         match[1].toLowerCase(),
         match[2] || null,
@@ -1983,6 +2232,18 @@ function parseHistoryRouteTarget(route) {
       chainTargetFresh: chain.targetFresh,
       chainOperator: chain.operator,
       chainRounds: chain.rounds,
+      chainTargetTopic: chain.targetTopic,
+    };
+  }
+  const broadcast = parseOriginBroadcast(route);
+  if (broadcast) {
+    return {
+      topic: broadcast.topic,
+      agent: null,
+      adhoc: false,
+      lookback: 0,
+      route: broadcast.route,
+      broadcastAgents: broadcast.agents,
     };
   }
   const match = String(route || '').match(/^#(\w+)(?:@(\w+))?(!)?$/);
@@ -1998,10 +2259,13 @@ function parseHistoryRouteTarget(route) {
 function applyRouteTarget(routeTarget) {
   if (!routeTarget) return;
   setTopicChip(routeTarget.topic, routeTarget.agent, routeTarget.adhoc, routeTarget.lookback || 0, {
+    route: routeTarget.route,
     chainTarget: routeTarget.chainTarget,
     chainTargetFresh: routeTarget.chainTargetFresh,
     chainOperator: routeTarget.chainOperator,
     chainRounds: routeTarget.chainRounds,
+    chainTargetTopic: routeTarget.chainTargetTopic,
+    broadcastAgents: routeTarget.broadcastAgents,
   });
   input.value = '';
   input.setSelectionRange(0, 0);
@@ -2042,7 +2306,7 @@ function routeHistoryAutocompleteItems(currentRoute = '') {
 function composerHasOnlyRoute() {
   const value = input.value.trim();
   if (!value) return true;
-  return /^#\w+(?:@\w+)?(?:!\d*)?$/.test(value) || !!parseRouteChain(value);
+  return /^#\w+(?:@\w+)?(?:!\d*)?$/.test(value) || !!parseRouteChain(value) || !!parseOriginBroadcast(value);
 }
 
 function composerRouteForRouteHistory() {
@@ -2466,12 +2730,12 @@ form.addEventListener('submit', async (e) => {
   const text = input.value.trim();
   if (!text) return;
   commandEditRestore = null;
-  const { topic, agent, adhoc, lookback, route, chainTarget, chainTargetFresh, chainOperator, chainRounds, message } = parseInput(text);
+  const { topic, agent, adhoc, lookback, route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, message } = parseInput(text);
   if (!message) {
     input.value = '';
     resizeComposer();
     hideAutocomplete();
-    setTopicChip(topic, agent, adhoc, lookback, { chainTarget, chainTargetFresh, chainOperator, chainRounds });
+    setTopicChip(topic, agent, adhoc, lookback, { route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents });
     return;
   }
   const cmd = parseCommand(message);
@@ -2489,7 +2753,7 @@ form.addEventListener('submit', async (e) => {
     await handleCommand(cmd, topic, agent, adhoc, lookback);
     // Re-set chip after topic-scoped commands so next message stays in context
     if (['clear', 'stop', 'stopall', 'deq'].includes(cmd.command) && (topic !== 'default' || agent)) {
-      setTopicChip(topic, agent, adhoc, lookback, { chainTarget, chainTargetFresh, chainOperator, chainRounds });
+      setTopicChip(topic, agent, adhoc, lookback, { route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents });
     }
     return;
   }
@@ -2501,7 +2765,11 @@ form.addEventListener('submit', async (e) => {
   invalidateTopicsManageCache();
   recordPrompt(route ? `${route} ${message}` : formatPromptHistoryEntry(topic, agent, adhoc, lookback, message));
   localStorage.removeItem('squid_draft');
-  sendMessage(text);
+  if (broadcastAgents) {
+    sendOriginBroadcast(text);
+  } else {
+    sendMessage(text);
+  }
 });
 
 function fmtCtxLabel(adhoc, pinCount = 0, mem = false, sessionTurnCount = 0) {
@@ -2556,27 +2824,40 @@ function _activeLookbackItems(adhoc, lookback) {
 }
 
 function updateInContextMarkers() {
-  const { topic, agent, adhoc, lookback } = _currentContextTarget();
+  const broadcastAgents = stickyChip?.broadcastAgents || null;
+  const singleTarget = broadcastAgents ? null : _currentContextTarget();
+  const targets = broadcastAgents
+    ? broadcastAgents.map(a => ({ topic: a.topic, agent: a.agent, adhoc: !!a.fresh }))
+    : [singleTarget];
 
-  const taKey   = `${topic}@${agent || '_'}`;
-  const sid     = (!adhoc && agent) ? (_sessionIds[taKey] || null) : null;
-  const injected = sid ? (getInjectedInto()[sid] || []) : [];
+  // Each target's own session id + injected-into set — a bubble lights up if
+  // it's in context for *any* currently active head, not just one derived
+  // target (same "any head" rule as the pin-count badge — see updatePinCount).
+  const perTargetCtx = targets.map(({ topic, agent, adhoc }) => {
+    const taKey = `${topic}@${agent || '_'}`;
+    const sid = (!adhoc && agent) ? (_sessionIds[taKey] || null) : null;
+    const injected = sid ? (getInjectedInto()[sid] || []) : [];
+    return { adhoc, sid, injected };
+  });
 
-  const activeItems = adhoc && lookback > 0 ? _activeLookbackItems(adhoc, lookback) : [];
+  // Lookback selection is a single-target-only concept — broadcast heads
+  // don't carry a numeric lookback.
+  const activeItems = singleTarget?.adhoc && singleTarget.lookback > 0
+    ? _activeLookbackItems(singleTarget.adhoc, singleTarget.lookback) : [];
   const activeIdSet = new Set(activeItems.map(i => i.id));
 
   document.querySelectorAll('#messages .history-item.assistant:not(.msg-thinking)').forEach(el => {
     const ctxSpan = el.querySelector('.user-ctx');
     const msgId = el.dataset.msgId ? parseInt(el.dataset.msgId) : null;
-    const wasInjected = msgId && injected.includes(msgId);
 
-    // Orange dot = already in context (session continuity or prior injection), not "will inject"
-    let inCtx = false;
-    if (!adhoc) {
-      inCtx = !!(sid && el.dataset.sessionId === sid);
-    }
-    inCtx = inCtx || !!wasInjected;
-    const selectedForLookback = !!(adhoc && activeIdSet.has(msgId));
+    // Orange dot = already in context (session continuity or prior
+    // injection) for at least one active head, not "will inject."
+    const inCtx = perTargetCtx.some(({ adhoc, sid, injected }) => {
+      const wasInjected = !!(msgId && injected.includes(msgId));
+      const sessionMatch = !adhoc && !!(sid && el.dataset.sessionId === sid);
+      return sessionMatch || wasInjected;
+    });
+    const selectedForLookback = !!(singleTarget?.adhoc && activeIdSet.has(msgId));
 
     if (ctxSpan) {
       ctxSpan.classList.toggle('ctx-live', inCtx);
@@ -2615,15 +2896,36 @@ function refreshContextIndicators({ force = false } = {}) {
 }
 
 async function _maybePromoteSlug(val) {
+  // An active chip already owns routing — same guard as parseInput's own
+  // stickyChip branch. Without this, typing an ordinary message that
+  // happens to start with "#word " (e.g. "#other hello") would silently
+  // swap the active chip out from under the user on every keystroke, since
+  // this listener fires on the raw input event, not just at submit time.
+  // Intentional editing (clicking the chip, or backspacing into it) already
+  // clears stickyChip first via clearTopicChip(), so this doesn't block that.
+  if (stickyChip) return;
   const chainText = val.endsWith(' ') ? val.trim() : '';
   const chain = parseRouteChain(chainText);
   if (chain) {
     input.value = '';
     setTopicChip(chain.topic, chain.origin, chain.originFresh, 0, {
+      route: chain.route,
       chainTarget: chain.target,
       chainTargetFresh: chain.targetFresh,
       chainOperator: chain.operator,
       chainRounds: chain.rounds,
+      chainTargetTopic: chain.targetTopic,
+    });
+    hideAutocomplete();
+    resizeComposer();
+    return;
+  }
+  const broadcast = parseOriginBroadcast(chainText);
+  if (broadcast) {
+    input.value = '';
+    setTopicChip(broadcast.topic, null, false, 0, {
+      route: broadcast.route,
+      broadcastAgents: broadcast.agents,
     });
     hideAutocomplete();
     resizeComposer();
@@ -2654,10 +2956,18 @@ async function _maybePromoteSlug(val) {
 }
 
 async function _maybeCollapseExpandedSlug(force = false, allowCompletedPrompt = false) {
-  if (!editingExpandedSlug && !allowCompletedPrompt) return;
+  // editingExpandedSlug means the user explicitly opened the route for
+  // editing (click-to-edit, or backspacing into it) — clearTopicChip()
+  // already cleared stickyChip for that flow, so this proceeds regardless.
+  // Outside of that, only auto-promote a completed "#route message" when
+  // there's no chip already active: an active chip already owns routing
+  // (same rule as _maybePromoteSlug and parseInput's own stickyChip
+  // branch), so ordinary message text that happens to start with "#" must
+  // not silently swap it out from under the user.
+  if (!editingExpandedSlug && (!allowCompletedPrompt || stickyChip)) return;
 
   const val = input.value;
-  const chainMatch = val.match(/^(#\w+@\w+!?(?:(?:<>)|>)@\w+!?)\s+([\s\S]+)$/);
+  const chainMatch = val.match(/^(#\w+@\w+!?(?:(?:<>)|>)(?:#\w+)?@\w+!?)\s+([\s\S]+)$/);
   const chain = chainMatch ? parseRouteChain(chainMatch[1]) : null;
   if (chain) {
     const prompt = chainMatch[2];
@@ -2666,10 +2976,29 @@ async function _maybeCollapseExpandedSlug(force = false, allowCompletedPrompt = 
     const selectionStart = Math.max(0, input.selectionStart - promptStart);
     const selectionEnd = Math.max(0, input.selectionEnd - promptStart);
     setTopicChip(chain.topic, chain.origin, chain.originFresh, 0, {
+      route: chain.route,
       chainTarget: chain.target,
       chainTargetFresh: chain.targetFresh,
       chainOperator: chain.operator,
       chainRounds: chain.rounds,
+      chainTargetTopic: chain.targetTopic,
+    });
+    input.value = prompt;
+    input.setSelectionRange(selectionStart, selectionEnd);
+    input.dispatchEvent(new Event('input'));
+    return;
+  }
+  const broadcastMatch = val.match(new RegExp(`^(${_BROADCAST_ROUTE_DETECT_SRC})\\s+([\\s\\S]+)$`));
+  const broadcast = broadcastMatch ? parseOriginBroadcast(broadcastMatch[1]) : null;
+  if (broadcast) {
+    const prompt = broadcastMatch[2];
+    const promptStart = val.length - prompt.length;
+    if (!force && (input.selectionStart < promptStart || input.selectionEnd < promptStart)) return;
+    const selectionStart = Math.max(0, input.selectionStart - promptStart);
+    const selectionEnd = Math.max(0, input.selectionEnd - promptStart);
+    setTopicChip(broadcast.topic, null, false, 0, {
+      route: broadcast.route,
+      broadcastAgents: broadcast.agents,
     });
     input.value = prompt;
     input.setSelectionRange(selectionStart, selectionEnd);
@@ -2734,6 +3063,12 @@ input.addEventListener('blur', () => {
 
 function semanticRouteBackspace() {
   if (input.selectionStart !== input.selectionEnd) return false;
+  // An active chip already owns routing (see updateAutocomplete/
+  // _maybeCollapseExpandedSlug), so "#topic@agent" typed as ordinary message
+  // text no longer functions as a route unless the chip is explicitly
+  // opened for editing first. Deleting a whole "@agent" in one backspace
+  // would be misleading in that state — treat it as regular text instead.
+  if (stickyChip && !editingExpandedSlug) return false;
   const val = input.value;
   if (!val.startsWith('#')) return false;
 
@@ -2758,8 +3093,18 @@ function semanticRouteBackspace() {
     const agentMatch = before.match(/^(#\w+@)\w+$/);
     const chainTargetMatch = before.match(/^(#\w+@\w+!?(?:(?:<>)|>)@)\w+$/);
     const chainOriginMatch = before.match(/^(#\w+@)\w+$/);
+    // Origin Broadcast (ADR-0032): drop the trailing `,#topic`, `,@agent`, or
+    // `,#topic@agent` segment as one unit, same as a chain target —
+    // otherwise a comma-list route can only be trimmed one character at a
+    // time. (Trailing `!` on that segment is stripped by the top-of-function
+    // check on an earlier backspace press, same as everywhere else here.)
+    const _atom = '(?:#\\w+@\\w+|#\\w+|@\\w+)';
+    const broadcastTailMatch = before.match(new RegExp(`^(#\\w+@\\w+!?(?:,${_atom}!?)*),(${_atom})$`));
 
-    if (chainTargetMatch && (caret === routeEnd || after.startsWith('!'))) {
+    if (broadcastTailMatch && (caret === routeEnd || after.startsWith('!'))) {
+      nextRoute = broadcastTailMatch[1] + after;
+      nextCaret = broadcastTailMatch[1].length;
+    } else if (chainTargetMatch && (caret === routeEnd || after.startsWith('!'))) {
       nextRoute = chainTargetMatch[1] + after;
       nextCaret = chainTargetMatch[1].length;
     } else if (before.endsWith('@') && /^#\w+@\w+!?(?:(?:<>)|>)@$/.test(before) && (caret === routeEnd || after.startsWith('!'))) {
@@ -2898,13 +3243,24 @@ input.addEventListener('keydown', (e) => {
 
 async function sendMessage(text, opts = {}) {
   const source = opts.source === 'system' ? 'system' : 'human';
-  const updateComposerRoute = source !== 'system';
+  const updateComposerRoute = source !== 'system' && opts.updateComposerRoute !== false;
   const suppressChipTurnCount = !!opts.suppressChipTurnCount;
-  const { topic, agent, adhoc, lookback, route, chainTarget, chainTargetFresh, chainOperator, chainRounds, message } = parseInput(text);
+  const parsed = parseInput(text);
+  const { lookback, route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, message } = parsed;
+  // Origin Broadcast (ADR-0032): N independent origins, one per sendMessage
+  // call — the orchestrator (sendOriginBroadcast) tells each call which of
+  // the parsed broadcastAgents it's responsible for via opts.broadcastTarget.
+  // Each target carries its own topic too (rolling-anchor resolution — see
+  // parseOriginBroadcast — can send different targets to different topics),
+  // not just parsed.topic, which is only the group's first/anchor topic.
+  const topic = opts.broadcastTarget ? opts.broadcastTarget.topic : parsed.topic;
+  const agent = opts.broadcastTarget ? opts.broadcastTarget.agent : parsed.agent;
+  const adhoc = opts.broadcastTarget ? !!opts.broadcastTarget.fresh : parsed.adhoc;
   const flowRoute = route ? canonicalFlowRoute(route) : canonicalFlowRoute(opts.flowRoute);
   let flowRunId = flowRoute ? (opts.flowRunId || null) : null;
+  let flowRunIdEmitted = false;
   if (updateComposerRoute) {
-    setTopicChip(topic, agent, adhoc, lookback, { chainTarget, chainTargetFresh, chainOperator, chainRounds, suppressTurnCount: suppressChipTurnCount });
+    setTopicChip(topic, agent, adhoc, lookback, { route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, suppressTurnCount: suppressChipTurnCount });
   }
   const sendTime = new Date().toISOString();
   // A search scope can't be evaluated against a message that isn't in the DB yet, so keep
@@ -2916,7 +3272,7 @@ async function sendMessage(text, opts = {}) {
   let chainMarker = null;
   if (source === 'human' && route && chainTarget) {
     chainMarker = makeRouteChainMarker(route, {
-      turnCounts: _routeChainTurnCounts(topic, agent, adhoc, chainTarget, chainTargetFresh),
+      turnCounts: _routeChainTurnCounts(topic, agent, adhoc, chainTarget, chainTargetFresh, chainTargetTopic),
     });
     chainMarker.dataset.topic = topic;
     chainMarker.dataset.flowRoute = flowRoute;
@@ -2924,21 +3280,30 @@ async function sendMessage(text, opts = {}) {
     if (adhoc) chainMarker.dataset.adhoc = '1';
     if (liveHiddenByScope) chainMarker.classList.add('live-hidden');
   }
-  const userBubble = makeUserBubble(message, topic, agent, null, adhoc, lookback, source);
-  const userTopicTag = userBubble.querySelector('.topic-tag');
+  // Origin Broadcast: the same literal prompt goes to every target, so only
+  // the first target's call renders the shared user bubble — the rest reuse
+  // it via opts.suppressUserBubble instead of duplicating it per agent.
+  const userBubble = opts.suppressUserBubble ? null : makeUserBubble(message, topic, agent, null, adhoc, lookback, source, broadcastAgents);
+  const userTopicTag = userBubble ? userBubble.querySelector('.topic-tag') : null;
   if (chainMarker) messages.appendChild(chainMarker);
-  messages.appendChild(userBubble);
-  const userTimeEl = addTimestamp(userBubble, sendTime, true);
-  if (liveHiddenByScope) {
-    userBubble.classList.add('live-hidden');
-    userTimeEl?.classList.add('live-hidden');
-  }
-  requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
+  if (userBubble) {
+    messages.appendChild(userBubble);
+    const userTimeEl = addTimestamp(userBubble, sendTime, true);
+    if (liveHiddenByScope) {
+      userBubble.classList.add('live-hidden');
+      userTimeEl?.classList.add('live-hidden');
+    }
+    requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
 
-  // Non-blocking nudge — fires async after the message is already in flight
-  maybeShowCodeRootsNudge(topic, userBubble);
+    // Non-blocking nudge — fires async after the message is already in flight
+    maybeShowCodeRootsNudge(topic, userBubble);
+  }
 
   // ── Thinking bubble (visible immediately, shows status/queue/loader) ──────────
+  // Same route+prompt header shape as the history/WIP bubble (makeWipBubble,
+  // appendHistoryItem) — so a live-in-flight turn already reads the way it
+  // will after a refresh, instead of a bare loader with no context until the
+  // first content chunk reveals a separate response bubble below.
   const thinkingBubble = document.createElement('div');
   thinkingBubble.className = 'msg assistant msg-thinking';
   thinkingBubble.dataset.topic = topic;
@@ -2946,6 +3311,18 @@ async function sendMessage(text, opts = {}) {
   if (agent) thinkingBubble.dataset.agent = agent;
   if (adhoc) thinkingBubble.dataset.adhoc = '1';
   if (liveHiddenByScope) thinkingBubble.classList.add('live-hidden');
+  const thinkingHeader = document.createElement('div');
+  thinkingHeader.className = 'response-header';
+  const thinkingHeaderText = document.createElement('span');
+  thinkingHeaderText.className = 'response-header-text';
+  let thinkingHeaderTag = makeTopicTag(topic, agent, { adhoc, lookback });
+  thinkingHeaderText.appendChild(thinkingHeaderTag);
+  thinkingHeaderText.appendChild(document.createTextNode('  '));
+  const { promptToggle: thinkingPromptToggle, promptFullDiv: thinkingPromptFullDiv } = makeHistoryPromptToggle(message);
+  thinkingHeaderText.appendChild(thinkingPromptToggle);
+  thinkingHeader.appendChild(thinkingHeaderText);
+  thinkingBubble.appendChild(thinkingHeader);
+  thinkingBubble.appendChild(thinkingPromptFullDiv);
   const thinkingContent = document.createElement('div');
   thinkingContent.className = 'thinking-live';
   thinkingBubble.appendChild(thinkingContent);
@@ -3046,11 +3423,13 @@ async function sendMessage(text, opts = {}) {
   if (agent) bubble.dataset.agent = agent;
   const responseHeader = document.createElement('div');
   responseHeader.className = 'response-header';
-  const responseHeaderTag = makeTopicTag(topic, agent, { adhoc, lookback });
+  let responseHeaderTag = makeTopicTag(topic, agent, { adhoc, lookback });
   const headerText = document.createElement('span');
   headerText.className = 'response-header-text';
   headerText.appendChild(responseHeaderTag);
-  headerText.appendChild(document.createTextNode('  ' + truncate(message, 55)));
+  headerText.appendChild(document.createTextNode('  '));
+  const { promptToggle: responsePromptToggle, promptFullDiv: responsePromptFullDiv } = makeHistoryPromptToggle(message);
+  headerText.appendChild(responsePromptToggle);
   responseHeader.appendChild(headerText);
   const liveCtxSpan = document.createElement('span');
   liveCtxSpan.className = 'user-ctx';
@@ -3060,6 +3439,7 @@ async function sendMessage(text, opts = {}) {
   liveCtxSpan.addEventListener('click', e => { e.stopPropagation(); showCtxPopup(liveCtxSpan); });
   responseHeader.appendChild(liveCtxSpan);
   bubble.appendChild(responseHeader);
+  bubble.appendChild(responsePromptFullDiv);
   const contentDiv = document.createElement('div');
   bubble.appendChild(contentDiv);
 
@@ -3332,6 +3712,10 @@ async function sendMessage(text, opts = {}) {
       thinkingBubble.dataset.flowRunId = flowRunId;
       bubble.dataset.flowRunId = flowRunId;
     }
+    // Origin Broadcast: hand the flow_run_id back to the orchestrator as soon
+    // as headers arrive — not after this whole turn finishes streaming — so
+    // sibling targets can fire without waiting on this one to complete.
+    if (opts.onFlowRunId) { opts.onFlowRunId(flowRunId); flowRunIdEmitted = true; }
     if (!msgId) attachMsgId(res.headers.get('X-Squid-Msg-Id'));
     _lookbackUnselected.clear();
     _lastLookbackSelectionKey = '';
@@ -3391,22 +3775,34 @@ async function sendMessage(text, opts = {}) {
               const resolvedAdhoc = adhoc; // server echoes back what we sent; use closure as reliable source
               const newTag = makeTopicTag(topic, resolvedAgent, { adhoc: resolvedAdhoc, clickable: true, lookback, backend: metaRuntime || null });
               responseHeaderTag.replaceWith(newTag);
-              const newUserTag = makeTopicTag(topic, resolvedAgent, { adhoc: resolvedAdhoc, clickable: true, lookback, backend: metaRuntime || null });
-              if (userTopicTag) {
-                userTopicTag.replaceWith(newUserTag);
-              } else if (resolvedAgent || topic !== 'default') {
-                const content = userBubble.firstElementChild;
-                if (content) {
-                  content.insertBefore(document.createTextNode(' '), content.firstChild);
-                  content.insertBefore(newUserTag, content.firstChild);
+              responseHeaderTag = newTag;
+              const newThinkingTag = makeTopicTag(topic, resolvedAgent, { adhoc: resolvedAdhoc, clickable: true, lookback, backend: metaRuntime || null });
+              thinkingHeaderTag.replaceWith(newThinkingTag);
+              thinkingHeaderTag = newThinkingTag;
+              // Broadcast's shared user bubble shows the full route (all
+              // targets), not any single target's resolved agent — leave it
+              // alone here, or the first target to resolve would stomp it
+              // down to just its own #topic@agent.
+              if (userBubble && !broadcastAgents) {
+                const newUserTag = makeTopicTag(topic, resolvedAgent, { adhoc: resolvedAdhoc, clickable: true, lookback, backend: metaRuntime || null });
+                if (userTopicTag) {
+                  userTopicTag.replaceWith(newUserTag);
+                } else if (resolvedAgent || topic !== 'default') {
+                  const content = userBubble.firstElementChild;
+                  if (content) {
+                    content.insertBefore(document.createTextNode(' '), content.firstChild);
+                    content.insertBefore(newUserTag, content.firstChild);
+                  }
                 }
               }
               if (updateComposerRoute) {
                 setTopicChip(topic, resolvedAgent, resolvedAdhoc, lookback, {
+                  route,
                   chainTarget,
                   chainTargetFresh,
                   chainOperator,
                   chainRounds,
+                  chainTargetTopic,
                   suppressTurnCount: suppressChipTurnCount,
                 });
               }
@@ -3578,6 +3974,9 @@ async function sendMessage(text, opts = {}) {
       }
     }
   } catch (err) {
+    // Safety net: if this target's request failed before headers ever
+    // arrived, don't leave sibling broadcast targets awaiting an id forever.
+    if (opts.onFlowRunId && !flowRunIdEmitted) { opts.onFlowRunId(null); flowRunIdEmitted = true; }
     if (!completedFromStatus && err.name !== 'AbortError') {
       if (msgId || await recoverMsgIdFromProcesses()) {
         detachedPolling = true;
@@ -3633,27 +4032,27 @@ async function sendMessage(text, opts = {}) {
   // See ADR-0023.
   await new Promise(r => setTimeout(r, 1000));
   const quotaAfterSnapshot = await fetchQuotaForBackend(quotaBackend);
-  // Balance-based gauges (DeepSeek) with a max budget: use the computed
+  // Balance-based gauges (DeepSeek/Kimi) with a max budget: use the computed
   // percentage so the delta represents budget-% change, not raw dollars.
-  const usePct = gaugeTypeFor(quotaBackend) === 'deepseek'
+  const usePct = isBalanceGauge(quotaBackend)
     && quotaBeforeSnapshot?.pct != null && quotaAfterSnapshot?.pct != null;
   const quotaBefore = usePct ? quotaBeforeSnapshot.pct : (quotaBeforeSnapshot?.raw ?? null);
   const quotaAfter = usePct ? quotaAfterSnapshot.pct : (quotaAfterSnapshot?.raw ?? null);
   if (quotaBefore !== null && quotaAfter !== null && quotaAfter !== quotaBefore) {
     // Balance-based gauges report a decreasing balance; flip sign so usage
     // always shows as positive (consistent with utilization % gauges).
-    const isDeepSeekBalance = gaugeTypeFor(quotaBackend) === 'deepseek' && !usePct;
+    const isBalanceMeter = isBalanceGauge(quotaBackend) && !usePct;
     const rawDiff = quotaAfter - quotaBefore;
-    const d = Math.round((isDeepSeekBalance ? -rawDiff : rawDiff) * 10) / 10;
+    const d = Math.round((isBalanceMeter ? -rawDiff : rawDiff) * 10) / 10;
     if (statsEl && d > 0) {
       const deltaEl = statsEl.querySelector('.stats-quota-delta');
       deltaEl.textContent = `  ·  +${d} pp`;
       deltaEl.title = 'Observed account quota-meter change; not exact message usage';
     }
     // Persist the sign exactly as intended. The DB layer has no backend/gauge
-    // context, so DeepSeek balance snapshots are normalized here instead.
-    const recordQuotaBefore = isDeepSeekBalance && quotaBefore > quotaAfter ? quotaAfter : quotaBefore;
-    const recordQuotaAfter = isDeepSeekBalance && quotaBefore > quotaAfter ? quotaBefore : quotaAfter;
+    // context, so balance snapshots are normalized here instead.
+    const recordQuotaBefore = isBalanceMeter && quotaBefore > quotaAfter ? quotaAfter : quotaBefore;
+    const recordQuotaAfter = isBalanceMeter && quotaBefore > quotaAfter ? quotaBefore : quotaAfter;
     if (msgId) {
       fetch(`/chat/${msgId}/quota-delta`, {
         method: 'POST',
@@ -3670,6 +4069,49 @@ async function sendMessage(text, opts = {}) {
     }
   }
   quotaTrackEnd(quotaBackend);
+  return { flowRunId, msgId };
+}
+
+// Origin Broadcast (ADR-0032): sends the same prompt to each listed agent as
+// an independent origin turn — no chain envelope, no dispatch coupling
+// between them. This is sugar over N normal sendMessage calls, fired in
+// parallel: the first call's request goes out immediately and, as soon as
+// its response headers arrive (not once its whole turn finishes), hands its
+// server-allocated flow_run_id to the rest via onFlowRunId — so siblings
+// start within one header round-trip of each other instead of waiting for
+// each prior turn to fully complete. agent/flow.py never sees or dispatches
+// any of this, since a bare comma-separated route has no operator to
+// recognize. Only the first target renders the (shared) user prompt bubble —
+// see suppressUserBubble in sendMessage — since every target got the same
+// literal prompt and repeating it per agent would just be visual noise.
+async function sendOriginBroadcast(text, opts = {}) {
+  const parsed = parseInput(text);
+  if (!parsed.broadcastAgents) return;
+  if (opts.source !== 'system') {
+    setTopicChip(parsed.topic, null, false, 0, { route: parsed.route, broadcastAgents: parsed.broadcastAgents });
+  }
+  let resolveSharedFlowRunId;
+  const sharedFlowRunId = new Promise(resolve => { resolveSharedFlowRunId = resolve; });
+  const sends = parsed.broadcastAgents.map((target, i) => {
+    if (i === 0) {
+      return sendMessage(text, {
+        ...opts,
+        broadcastTarget: target,
+        flowRoute: parsed.route,
+        updateComposerRoute: false,
+        onFlowRunId: resolveSharedFlowRunId,
+      });
+    }
+    return sharedFlowRunId.then(flowRunId => sendMessage(text, {
+      ...opts,
+      broadcastTarget: target,
+      flowRoute: parsed.route,
+      flowRunId,
+      updateComposerRoute: false,
+      suppressUserBubble: true,
+    }));
+  });
+  await Promise.all(sends);
 }
 
 // ── tooltip ───────────────────────────────────────────────────────────────────
@@ -4220,7 +4662,7 @@ function makeHistoryPromptToggle(prompt) {
 }
 
 function historyRouteChainFromPrompt(prompt) {
-  const match = String(prompt || '').match(/(?:^|\n)Route:\s*(#\w+@\w+!?(?:(?:<>)|>)@\w+!?)(?:\s|$)/);
+  const match = String(prompt || '').match(/(?:^|\n)Route:\s*(#\w+@\w+!?(?:(?:<>)|>)(?:#\w+)?@\w+!?)(?:\s|$)/);
   return match ? normalizePromptHistoryRoute(match[1]) : '';
 }
 
@@ -4664,7 +5106,7 @@ async function pollMessageStatus(msgId, contentEl, bubbleEl, stopBtn = null) {
   }, 2000);
 }
 
-function makeUserBubble(text, topic, agent, backendFallback = null, adhoc = false, lookback = 0, source = 'human') {
+function makeUserBubble(text, topic, agent, backendFallback = null, adhoc = false, lookback = 0, source = 'human', broadcastAgents = null) {
   const div = document.createElement('div');
   div.className = 'msg user';
   if (source === 'system') {
@@ -4676,10 +5118,11 @@ function makeUserBubble(text, topic, agent, backendFallback = null, adhoc = fals
     div.appendChild(label);
   }
   const content = document.createElement('div');
-  const showTag = topic && (topic !== 'default' || agent || adhoc);
+  const showTag = broadcastAgents || (topic && (topic !== 'default' || agent || adhoc));
   if (showTag) {
-    const label = agent || backendFallback;
-    const tag = makeTopicTag(topic, label, { clickable: true, adhoc, lookback });
+    const tag = broadcastAgents
+      ? makeBroadcastRouteTag(broadcastAgents)
+      : makeTopicTag(topic, agent || backendFallback, { clickable: true, adhoc, lookback });
     content.appendChild(tag);
     content.appendChild(document.createTextNode(' '));
   }
@@ -4706,7 +5149,7 @@ function makeRouteChainMarker(route, opts = {}) {
     div.textContent = route || '';
     return div;
   }
-  const { topic, origin: originAgent, originFresh, operator, target: targetAgent, targetFresh } = chain;
+  const { topic, origin: originAgent, originFresh, operator, target: targetAgent, targetFresh, targetTopic } = chain;
   const topicSpan = document.createElement('span');
   topicSpan.className = 'tag-topic';
   topicSpan.textContent = `#${topic}`;
@@ -4731,6 +5174,13 @@ function makeRouteChainMarker(route, opts = {}) {
   arrowSpan.className = 'route-chain-arrow';
   arrowSpan.textContent = operator;
   div.appendChild(arrowSpan);
+
+  if (targetTopic && targetTopic !== topic) {
+    const targetTopicSpan = document.createElement('span');
+    targetTopicSpan.className = 'tag-topic';
+    targetTopicSpan.textContent = `#${targetTopic}`;
+    div.appendChild(targetTopicSpan);
+  }
 
   const targetSpan = document.createElement('span');
   targetSpan.className = 'tag-agent';
@@ -4763,6 +5213,10 @@ const FLOW_EXAMPLES = [
   '#squid@codex>#hive@review!',
   '#squid@codex>#hive',
   '#topic1@agent1=5:1d>@agent2',
+  '#topic1@agent1,@agent2',
+  '#topic1@agent2,#topic3@agent1,#topic4@agent2',
+  '#topic1@agent1!,@agent2!',
+  '#topic1@agent1<3:1h>@agent2!',
 ];
 
 let _flowViewInitialized = false;
@@ -5194,8 +5648,18 @@ const QUOTA_CONFIG = {
     fiveHourPctId:   'deepseek-pct',
     labelId:      'deepseek-quota-label',
     pieC:         2 * Math.PI * 6,
-    credsPopupId: 'deepseek-max-popup',
+    credsPopupId: 'balance-max-popup',
     errorTitle:   'DeepSeek balance unavailable',
+    formatLabel:  (state) => state.displayText || '—',
+  },
+  kimi: {
+    displayId:    'kimi-quota-display',
+    pieArcId:     'kimi-pie-arc',
+    fiveHourPctId:   'kimi-pct',
+    labelId:      'kimi-quota-label',
+    pieC:         2 * Math.PI * 6,
+    credsPopupId: 'balance-max-popup',
+    errorTitle:   'Kimi balance unavailable',
     formatLabel:  (state) => state.displayText || '—',
   },
   static: {
@@ -5221,6 +5685,14 @@ function quotaStateFor(backend) {
 
 function gaugeTypeFor(backend) {
   return _backendMetadata[backend]?.gauge?.type || providerMetadataForBackend(backend)?.gauge?.type || 'none';
+}
+
+// Prepaid-balance gauges (DeepSeek/Kimi) share one rendering path: balance
+// text instead of a percentage, and the max-budget popup on click.
+const BALANCE_GAUGES = new Set(['deepseek', 'kimi']);
+
+function isBalanceGauge(ref) {
+  return BALANCE_GAUGES.has(gaugeTypeFor(ref));
 }
 
 function quotaConfigFor(backend) {
@@ -5542,12 +6014,12 @@ async function fetchQuotaForBackend(backend) {
       raw: data.raw ?? null,
       pct: data.used_percent != null
         ? Math.max(0, Math.min(100, Math.round(data.used_percent)))
-        : (gaugeTypeFor(provider) === 'deepseek' && data.max_budget_pct != null
+        : (isBalanceGauge(provider) && data.max_budget_pct != null
           ? Math.max(0, Math.min(100, Math.round(data.max_budget_pct)))
           : null),
       resetAt,
       title: data.title || '',
-      displayText: gaugeTypeFor(provider) === 'deepseek'
+      displayText: isBalanceGauge(provider)
         ? (data.text ?? null)
         : (data.used_percent == null ? (data.text ?? null) : null),
       sevenDay: data.seven_day ? {
@@ -5665,16 +6137,16 @@ function initCodexQuota() {
   fetchCodexQuota();
 }
 
-function initDeepSeekQuota() {
-  const cfg = QUOTA_CONFIG.deepseek;
+function initBalanceQuota(gaugeType) {
+  const cfg = QUOTA_CONFIG[gaugeType];
   const displayEl = document.getElementById(cfg.displayId);
   if (!displayEl) return;
-  displayEl.style.setProperty('--quota-accent', agentThemeColor('deepseek'));
+  displayEl.style.setProperty('--quota-accent', agentThemeColor(gaugeType));
   displayEl.innerHTML = `
     <span style="display:inline-flex;align-items:center">
-      <svg id="deepseek-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
+      <svg id="${gaugeType}-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
         <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
-        <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('deepseek')}"
+        <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor(gaugeType)}"
                 stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
                 transform="rotate(-90 9 9)"/>
         <text id="${cfg.fiveHourPctId}" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff"></text>
@@ -5683,24 +6155,32 @@ function initDeepSeekQuota() {
     </span>`;
 
   const popup = document.getElementById(cfg.credsPopupId);
-  displayEl.addEventListener('click', () => popup.classList.toggle('open'));
-  document.addEventListener('click', (e) => {
-    if (!displayEl.contains(e.target) && !popup.contains(e.target))
-      popup.classList.remove('open');
+  displayEl.addEventListener('click', () => {
+    popup.dataset.gauge = gaugeType;
+    popup.classList.toggle('open');
   });
 }
 
-function initDeepSeekMaxPopup() {
-  const maxInput = document.getElementById('deepseek-max-input');
-  const saveBtn  = document.getElementById('deepseek-max-save');
-  const clearBtn = document.getElementById('deepseek-max-clear');
-  const status   = document.getElementById('deepseek-max-status');
-  if (!maxInput || !saveBtn) return;
+function initBalanceMaxPopup() {
+  const popup    = document.getElementById('balance-max-popup');
+  const maxInput = document.getElementById('balance-max-input');
+  const saveBtn  = document.getElementById('balance-max-save');
+  const clearBtn = document.getElementById('balance-max-clear');
+  const status   = document.getElementById('balance-max-status');
+  if (!popup || !maxInput || !saveBtn) return;
+
+  // One outside-click closer for the shared popup — any balance display counts
+  // as inside, otherwise gauge A's closer would kill the popup opened by B.
+  document.addEventListener('click', (e) => {
+    const inTrigger = [...BALANCE_GAUGES].some(g =>
+      document.getElementById(QUOTA_CONFIG[g].displayId)?.contains(e.target));
+    if (!inTrigger && !popup.contains(e.target)) popup.classList.remove('open');
+  });
 
   saveBtn.addEventListener('click', async () => {
     const val = parseFloat(maxInput.value);
     if (!val || val <= 0) { status.textContent = 'enter a positive amount'; return; }
-    const res = await fetch(`/config/deepseek/max-budget`, {
+    const res = await fetch(`/config/${popup.dataset.gauge}/max-budget`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ amount: val }),
@@ -5715,7 +6195,7 @@ function initDeepSeekMaxPopup() {
   });
 
   clearBtn?.addEventListener('click', async () => {
-    const res = await fetch(`/config/deepseek/max-budget`, { method: 'DELETE' });
+    const res = await fetch(`/config/${popup.dataset.gauge}/max-budget`, { method: 'DELETE' });
     maxInput.value = '';
     if (res.ok) {
       status.textContent = 'cleared';
@@ -7444,7 +7924,7 @@ function renderQuotaStatus() {
     if (q.status === 'loaded') {
       value = q.displayText || (q.pct == null ? '—' : `${q.pct}%`);
       const reset = quotaTimeText(q.resetAt);
-      detail = reset ? `resets in ${reset}` : (gaugeTypeFor(q.backend) === 'deepseek' ? 'no reset' : (q.title || 'no reset'));
+      detail = reset ? `resets in ${reset}` : (isBalanceGauge(q.backend) ? 'no reset' : (q.title || 'no reset'));
     } else if (q.status === 'error') {
       value = 'error';
       detail = q.text || 'unavailable';
@@ -8541,6 +9021,7 @@ const GAUGE_CATALOG = Object.freeze({
   codex: 'click gauge in header -> Detect',
   cursor: 'automatic via cursor-agent',
   deepseek: 'uses this provider API key',
+  kimi: 'uses this provider API key',
   none: 'no gauge configured',
 });
 
@@ -9168,10 +9649,13 @@ function _acRestoreDraft() {
     input.value = promptDraft;
     if (promptDraftChip) {
       setTopicChip(promptDraftChip.topic, promptDraftChip.agent, promptDraftChip.adhoc, promptDraftChip.lookback || 0, {
+        route: promptDraftChip.route,
         chainTarget: promptDraftChip.chainTarget,
         chainTargetFresh: promptDraftChip.chainTargetFresh,
         chainOperator: promptDraftChip.chainOperator,
         chainRounds: promptDraftChip.chainRounds,
+        chainTargetTopic: promptDraftChip.chainTargetTopic,
+        broadcastAgents: promptDraftChip.broadcastAgents,
       });
     }
     else clearTopicChip();
@@ -9260,7 +9744,7 @@ function _acRender(items, title = 'Suggestions') {
     e.preventDefault();
     e.stopPropagation();
     hideAutocomplete();
-    input.focus();
+    messages.focus();
   });
   acEl.classList.add('open');
   acOpen = true;
@@ -9322,6 +9806,20 @@ function _acRouteHtml(route) {
       `<span class="ac-route-chain-arrow">${escapeHtml(cm.operator)}</span>` +
       `<span class="ac-agent"${_agentStyleAttr(cm.target)}>@${escapeHtml(cm.target)}${cm.targetFresh ? '!' : ''}</span>`;
   }
+  const broadcast = parseOriginBroadcast(route);
+  if (broadcast) {
+    let lastTopic = null;
+    return broadcast.agents.map((a, i) => {
+      const sep = i > 0 ? '<span class="ac-broadcast-sep">,</span>' : '';
+      let topicHtml = '';
+      if (a.topic !== lastTopic) {
+        topicHtml = `<span class="ac-topic">#${escapeHtml(a.topic)}</span>`;
+        lastTopic = a.topic;
+      }
+      const agentHtml = `<span class="ac-agent"${_agentStyleAttr(a.agent)}>@${escapeHtml(a.agent)}${a.fresh ? '!' : ''}</span>`;
+      return sep + topicHtml + agentHtml;
+    }).join('');
+  }
   const rm = String(route || '').match(/^#(\w+)(?:@(\w+))?(!\d*)?$/);
   if (!rm) return '';
   return _acRouteLabel(rm[1], (rm[2] || '') + (rm[3] || ''));
@@ -9362,10 +9860,86 @@ async function updateAutocomplete() {
     return;
   }
 
-  const mTopic = slugVal.match(/^#(\w*)[!]?$/);
-  const mChainAlias = slugVal.match(/^#(\w+)@(\w+)(!)?(<>?|>)(?:@?)(\w*)(!)?$/);
-  const mAlias = slugVal.match(/^#(\w+)@(\w*)(!\d*)?$/);
-  if (mTopic) {
+  // An active chip already owns routing (parseInput reuses it unconditionally
+  // now — see _maybeCollapseExpandedSlug/_maybePromoteSlug), so "#topic@agent"
+  // typed as ordinary message text no longer functions as a route unless the
+  // chip is explicitly opened for editing first. Route-shaped autocomplete
+  // would be misleading in that state — picking a suggestion would just
+  // insert literal text, not set a route — so skip it and fall through to
+  // the same handling any other message text gets (prompt history, below).
+  const routeSyntaxActive = !stickyChip || editingExpandedSlug;
+  const mTopic = routeSyntaxActive && slugVal.match(/^#(\w*)[!]?$/);
+  const mChainAlias = routeSyntaxActive && slugVal.match(/^#(\w+)@(\w+)(!)?(<>?|>)(?:@?)(\w*)(!)?$/);
+  const mAlias = routeSyntaxActive && slugVal.match(/^#(\w+)@(\w*)(!\d*)?$/);
+  // Origin Broadcast (ADR-0032): autocomplete for whichever trailing atom is
+  // currently being typed after the last comma — everything before it (the
+  // already-typed atoms) is preserved verbatim, never rewritten. `,#topic`
+  // suggests topics; `,@agent` or `,#topic@agent` suggest agents, scoped to
+  // the explicit topic if one was typed, else to the rolling-anchor topic
+  // that atom would currently inherit.
+  const _BROADCAST_PREFIX_SRC = '#\\w+@\\w+!?(?:,(?:#\\w+@\\w+|#\\w+|@\\w+)!?)*';
+  const mBroadcastFull = routeSyntaxActive && slugVal.match(new RegExp(`^(${_BROADCAST_PREFIX_SRC}),#(\\w+)@(\\w*)$`));
+  const mBroadcastAgent = routeSyntaxActive && slugVal.match(new RegExp(`^(${_BROADCAST_PREFIX_SRC}),@(\\w*)$`));
+  const mBroadcastTopic = routeSyntaxActive && slugVal.match(new RegExp(`^(${_BROADCAST_PREFIX_SRC}),#(\\w*)$`));
+  if (mBroadcastFull || mBroadcastAgent) {
+    const prefix = mBroadcastFull ? mBroadcastFull[1] : mBroadcastAgent[1];
+    const explicitTopic = mBroadcastFull ? mBroadcastFull[2].toLowerCase() : null;
+    const agentPrefix = (mBroadcastFull ? mBroadcastFull[3] : mBroadcastAgent[2]).toLowerCase();
+    let topic = explicitTopic;
+    if (!topic) {
+      const resolved = _resolveBroadcastAtoms(prefix.split(','));
+      topic = resolved ? resolved[resolved.length - 1].topic : null;
+    }
+    if (!topic) { hideAutocomplete(); return; }
+    const [agents, history] = await Promise.all([
+      _acAgents(),
+      fetch(`/topics/${encodeURIComponent(topic)}/agents/history`).then(r => r.ok ? r.json() : []).catch(() => []),
+    ]);
+    if (input.value !== val) return;
+    const usedNames = new Set(history.map(h => h.agent));
+    const backendByAgent = new Map(agents.map(a => [a.name, a.backend]));
+    const items = [];
+    const topicPrefix = explicitTopic ? `#${topic}` : ''; // omit if the topic was inherited, not typed
+    const addItem = (name, fresh, sub, meta) => {
+      items.push({
+        label: _acRouteLabel(topic, name + (fresh ? '!' : ''), backendByAgent.get(name) || null),
+        insert: `${prefix},${topicPrefix}@${name}${fresh ? '!' : ''}`,
+        replaceSlug: replacingSlug,
+        sub,
+        meta: fresh ? 'fresh' : meta,
+      });
+    };
+    for (const h of history) {
+      if (!h.agent.toLowerCase().startsWith(agentPrefix)) continue;
+      // ADR-0032: autocomplete should prefer `!` on broadcast origins —
+      // comparing agents usually wants independent fresh takes.
+      addItem(h.agent, true, _acLastPrompt(h.last_adhoc_prompt));
+      addItem(h.agent, false, _acLastPrompt(h.last_prompt));
+    }
+    for (const a of agents) {
+      if (usedNames.has(a.name)) continue;
+      if (!a.name.toLowerCase().startsWith(agentPrefix)) continue;
+      addItem(a.name, true, '', a.backend);
+      addItem(a.name, false, '', a.backend);
+    }
+    _acRender(items.slice(0, 10), 'Routes');
+  } else if (mBroadcastTopic) {
+    const prefix = mBroadcastTopic[1];
+    const topicPrefix = mBroadcastTopic[2].toLowerCase();
+    const topics = await _acTopics();
+    if (input.value !== val) return;
+    _acRender(
+      topics.filter(t => t.name.toLowerCase().startsWith(topicPrefix)).slice(0, 8)
+        .map(t => ({
+          label: _acRouteLabel(t.name, t.agent || '', t.last_backend || null),
+          insert: `${prefix},#${t.name}`,
+          replaceSlug: replacingSlug,
+          meta: t.active ? '● live' : t.queue_depth > 0 ? `queue ${t.queue_depth}` : '',
+          sub: _acLastPrompt(t.last_prompt),
+        })),
+      'Routes'
+    );
+  } else if (mTopic) {
     const prefix = mTopic[1].toLowerCase();
     const topics = await _acTopics();
     if (input.value !== val) return;
@@ -10369,8 +10943,8 @@ function _getSessionMeta(topic, agent) {
   return _sessionLookupCache[key];
 }
 
-function _topicMemoryState() {
-  const { topic, agent, adhoc } = _currentContextTarget();
+function _topicMemoryState(target = null) {
+  const { topic, agent, adhoc } = target || _currentContextTarget();
   const meta = _getMemoryMeta(topic);
   const session = _getSessionMeta(topic, agent);
   const exists = !!(meta.exists && (meta.content || '').trim());
@@ -10429,16 +11003,36 @@ function _injectablePinnedIds(topic, agent, adhoc, lookback, items = getPinnedIt
 }
 
 function updatePinCount() {
-  const { topic, agent, adhoc, lookback } = _currentContextTarget();
-  const taKey = `${topic}@${agent || '_'}`;
-  const selectedIds = [
-    ..._activeLookbackItems(adhoc, lookback).map(item => item.id),
-    ..._injectablePinnedIds(topic, agent, adhoc, lookback),
-  ];
-  const pendingIds = !adhoc ? (_pendingSessionInjectedIds[taKey] || []) : [];
-  const memoryState = _topicMemoryState();
-  const selectedCount = new Set(selectedIds).size + (memoryState.selected ? 1 : 0);
-  const pendingCount = new Set(pendingIds).size + (memoryState.pending ? 1 : 0);
+  const broadcastAgents = stickyChip?.broadcastAgents || null;
+  let selectedCount, pendingCount;
+  if (broadcastAgents) {
+    // Origin Broadcast (multi-head): heads are independent turns, each with
+    // its own topic/agent, so a true union-count across heads would mix
+    // unrelated pins into one number that looks precise but isn't (see
+    // discussion — a summed count can't say *which* head needs what without
+    // a per-head breakdown UI we don't have). Simpler and honest: this is a
+    // presence flag, not a count — at most +1 for "some head has a pin
+    // selected," at most +1 for "some head has memory selected," same as
+    // the single-target formula below but clamped to boolean per category.
+    const asTarget = a => ({ topic: a.topic, agent: a.agent, adhoc: !!a.fresh });
+    const anyPinSelected = broadcastAgents.some(a => _injectablePinnedIds(a.topic, a.agent, !!a.fresh, 0).length > 0);
+    const anyMemSelected = broadcastAgents.some(a => _topicMemoryState(asTarget(a)).selected);
+    selectedCount = (anyPinSelected ? 1 : 0) + (anyMemSelected ? 1 : 0);
+    const anyPinPending = broadcastAgents.some(a => !a.fresh && (_pendingSessionInjectedIds[`${a.topic}@${a.agent || '_'}`] || []).length > 0);
+    const anyMemPending = broadcastAgents.some(a => _topicMemoryState(asTarget(a)).pending);
+    pendingCount = (anyPinPending ? 1 : 0) + (anyMemPending ? 1 : 0);
+  } else {
+    const { topic, agent, adhoc, lookback } = _currentContextTarget();
+    const taKey = `${topic}@${agent || '_'}`;
+    const selectedIds = [
+      ..._activeLookbackItems(adhoc, lookback).map(item => item.id),
+      ..._injectablePinnedIds(topic, agent, adhoc, lookback),
+    ];
+    const pendingIds = !adhoc ? (_pendingSessionInjectedIds[taKey] || []) : [];
+    const memoryState = _topicMemoryState();
+    selectedCount = new Set(selectedIds).size + (memoryState.selected ? 1 : 0);
+    pendingCount = new Set(pendingIds).size + (memoryState.pending ? 1 : 0);
+  }
   const savedPins = getPinnedItems().length;
   const badgeCount = selectedCount || pendingCount || savedPins;
   pinCountEl.textContent = badgeCount || '';
@@ -12513,8 +13107,9 @@ initStats();
 initTopicsView();
 initAliases();
 initQuota();
-initDeepSeekQuota();
-initDeepSeekMaxPopup();
+initBalanceQuota('deepseek');
+initBalanceQuota('kimi');
+initBalanceMaxPopup();
 initCreds();
 initCodexQuota();
 initCodexCreds();
@@ -12530,10 +13125,13 @@ try {
   const saved = JSON.parse(localStorage.getItem('squid_sticky_chip') || 'null');
   if (saved?.topic) {
     setTopicChip(saved.topic, saved.agent || null, saved.adhoc || false, saved.lookback || 0, {
+      route: saved.route,
       chainTarget: saved.chainTarget,
       chainTargetFresh: saved.chainTargetFresh,
       chainOperator: saved.chainOperator,
       chainRounds: saved.chainRounds,
+      chainTargetTopic: saved.chainTargetTopic,
+      broadcastAgents: saved.broadcastAgents || null,
     });
   } else {
     _acAgents().then(agents => {

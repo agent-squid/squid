@@ -117,6 +117,7 @@
   .tag-fresh { color: var(--agent-color, #848899); }
   .route-arrow { color: var(--text-dim); font-weight: 700; padding: 0 0.15rem; }
   .route-join { color: var(--text-mid); font-weight: 700; padding: 0 0.1rem; }
+  .route-comma { color: var(--text-dim); font-weight: 700; padding: 0 0.05rem; }
 
   footer { color: var(--text-dim); font-size: 0.72em; margin-top: 2rem; }
   footer a { color: var(--text-mid); }
@@ -137,7 +138,12 @@
   <div id="status" class="status idle">Type an expression above.</div>
 
   <section class="out">
-    <h2>Canonical (reduced) form <span class="branch-count" id="canonical-count"></span></h2>
+    <h2>Canonical key <span class="branch-count">(saved to DB, identifies this workflow — minimized/grouped, not order-preserving)</span></h2>
+    <div id="key-line"></div>
+  </section>
+
+  <section class="out">
+    <h2>Branch breakdown <span class="branch-count" id="canonical-count"></span></h2>
     <div id="canonical-list"></div>
   </section>
 
@@ -160,10 +166,15 @@
     '#squid@codex>#hive@review!',
     '#squid@codex>#hive',
     '#a@x=5:1d>@y',
+    '#squid@codex,@review',
+    '#t1@a2,#t3@a1,#t4@a2',
+    '#squid@codex!,@review!',
+    '#squid@codex<3:1h>@review!',
   ];
 
   const input = document.getElementById('input');
   const statusEl = document.getElementById('status');
+  const keyLine = document.getElementById('key-line');
   const canonicalList = document.getElementById('canonical-list');
   const expandedList = document.getElementById('expanded-list');
   const canonicalCount = document.getElementById('canonical-count');
@@ -192,10 +203,11 @@
   }
 
   function routeLineEl(text) {
-    // text is a canonical/expanded string like "#t1@a1>#t3" or "#a+#b>#c".
+    // text is a canonical/expanded/key string like "#t1@a1>#t3", "#a+#b>#c",
+    // or "#t1@a2,#t4,#t3@a1" (a reduced comma-list key — see ADR-0032).
     const div = document.createElement('div');
     div.className = 'route-line';
-    const tokenRe = /(#[A-Za-z0-9_.-]+)|(@[A-Za-z0-9_.-]+!?)|(<[^>]*>)|(=[^>]*>)|(>)|(\+)/g;
+    const tokenRe = /(#[A-Za-z0-9_.-]+)|(@[A-Za-z0-9_.-]+!?)|(<[^>]*>)|(=[^>]*>)|(>)|(\+)|(,)/g;
     let m;
     while ((m = tokenRe.exec(text))) {
       const span = document.createElement('span');
@@ -208,6 +220,7 @@
       } else if (m[3] || m[4]) { span.className = 'route-arrow'; span.textContent = m[0]; }
       else if (m[5]) { span.className = 'route-arrow'; span.textContent = '>'; }
       else if (m[6]) { span.className = 'route-join'; span.textContent = '+'; }
+      else if (m[7]) { span.className = 'route-comma'; span.textContent = ','; }
       div.appendChild(span);
     }
     return div;
@@ -215,6 +228,7 @@
 
   function render() {
     const text = input.value.trim();
+    keyLine.innerHTML = '';
     canonicalList.innerHTML = '';
     expandedList.innerHTML = '';
     canonicalCount.textContent = '';
@@ -234,6 +248,7 @@
     }
 
     statusEl.className = 'status ok';
+    keyLine.appendChild(routeLineEl(result.key));
     statusEl.textContent = `Valid — ${result.canonical.length} independent branch${result.canonical.length === 1 ? '' : 'es'}.`;
 
     canonicalCount.textContent = `(${result.canonical.length})`;

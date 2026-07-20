@@ -141,6 +141,20 @@ providers:
   #   gauge: deepseek
   #   models: [deepseek-v4-pro]
 
+  # Kimi (Moonshot AI) through Claude Code's Anthropic-compatible transport.
+  # Get an API key at https://platform.moonshot.ai/console/api-keys, then set
+  # MOONSHOT_API_KEY in the environment.
+  # kimi:
+  #   label: Kimi
+  #   color: "#4D6BFE"
+  #   base_url: "https://api.moonshot.ai/anthropic"
+  #   supported_apis: [/v1/chat/completions, /v1/messages]
+  #   auth:
+  #     type: api_key
+  #     api_key: {env: MOONSHOT_API_KEY}
+  #   gauge: kimi
+  #   models: [kimi-k3]
+
   # Canonical base_url/auth.api_key fields are translated into harness-native
   # environment and settings. Raw env/settings/args remain available as
   # escapes.
