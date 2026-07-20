@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-15
-updated: 2026-07-19
+updated: 2026-07-20
 ---
 # ADR-0032: Route Chains and Squid Flow with CWD-Profile Agents
 
@@ -35,15 +35,25 @@ native profile files from its process cwd.
 
 ## Current Implementation
 
-As of 2026-07-19, Squid implements the v0.1 single-operator live subset:
+As of 2026-07-20, Squid implements the v0.1 single-operator live subset. The
+grammar is symmetric between the two edge types (see "Edge types" below) —
+the only structural difference is the leading character:
 
 ```text
 #topic@origin[!]>@target[!]
-#topic@origin[!]=>@target[!]
-#topic@origin[!]<>@target[!]
-#topic@origin[!]<N[:T]>@target[!]
-#topic@origin[!]=N[:T]>@target[!]
+#topic@origin[!]<[N][:T]>@target[!]
+#topic@origin[!]=[N][:T]>@target[!]
 ```
+
+`>` is shorthand for `=>`, itself shorthand for `=1>` — parsed and rendered
+identically to `=[N][:T]>` with `N` and `:T` both omitted, not a separate
+form (`ui/flow-lang.js`'s `SCHEDULED_RE`/`_parse_operator_token` in
+`agent/flow.py` both make `N` optional with an `N ? int(N) : 1` default, the
+same way `<[N][:T]>` already did). Canonical rendering always emits the
+shortest spelling for a given `(count, wait)` — `>` for `count=1, wait=None`,
+`=:T>` for `count=1, wait=T`, `<>` for `rounds=1, wait=None` — regardless of
+which equivalent spelling was typed, so `#a>@b`, `#a=>@b`, and `#a=1>@b` all
+resolve to the identical stored `flow_route`.
 
 The broader Squid Flow syntax in this ADR remains the accepted direction, but
 multi-hop chains, `;` DAG clauses, cycles, and unbounded `=*` loops are outside

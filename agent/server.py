@@ -1598,6 +1598,7 @@ async def usage_stats(
     agent: str = "",
     topic: str = "",
     adhoc: str = "all",
+    flow: str = "all",
     status: str = "",
     tz_offset_minutes: int = 0,
     chart_metrics: str = "",
@@ -1606,7 +1607,7 @@ async def usage_stats(
 ):
     chart_series = _parse_chart_series(chart_metrics, chart_aggs)
     if period == "turn":
-        return JSONResponse(get_stats_by_turn(days=days, hours=hours, agent=agent, topic=topic, adhoc=adhoc, status=status, anchor=anchor or None))
+        return JSONResponse(get_stats_by_turn(days=days, hours=hours, agent=agent, topic=topic, adhoc=adhoc, flow=flow, status=status, anchor=anchor or None))
     if group == "time" and breakdown in {"agent", "agent_session", "topic_agent", "topic_agent_session"}:
         return JSONResponse(get_stats_by_breakdown(
             period=period,
@@ -1614,6 +1615,7 @@ async def usage_stats(
             agent=agent,
             topic=topic,
             adhoc=adhoc,
+            flow=flow,
             status=status,
             tz_offset_minutes=tz_offset_minutes,
             breakdown=breakdown,
@@ -1623,15 +1625,16 @@ async def usage_stats(
             anchor=anchor or None,
         ))
     if group == "topic":
-        return JSONResponse(get_stats_by_topic(days=days, agent=agent, topic=topic, adhoc=adhoc, anchor=anchor or None))
+        return JSONResponse(get_stats_by_topic(days=days, agent=agent, topic=topic, adhoc=adhoc, flow=flow, anchor=anchor or None))
     if group == "agent":
-        return JSONResponse(get_stats_by_agent(days=days, agent=agent, topic=topic, adhoc=adhoc, anchor=anchor or None))
+        return JSONResponse(get_stats_by_agent(days=days, agent=agent, topic=topic, adhoc=adhoc, flow=flow, anchor=anchor or None))
     return JSONResponse(get_aggregated_stats(
         period=period,
         days=days,
         agent=agent,
         topic=topic,
         adhoc=adhoc,
+        flow=flow,
         status=status,
         tz_offset_minutes=tz_offset_minutes,
         chart_series=chart_series,

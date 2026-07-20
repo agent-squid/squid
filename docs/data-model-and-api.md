@@ -820,7 +820,8 @@ restriction; see ADR-0016.
 
 **Query params**: `period` (`daily` | `hourly`, default `daily`), `group` (`time` | `topic` | `agent`, default `time`),
 `breakdown` (default `""`), `days` (default 30), `hours` (default 0), `agent` (default `""`),
-`topic` (default `""`), `adhoc` (`all` | `true` | `false`, default `all`), `tz_offset_minutes` (default 0),
+`topic` (default `""`), `adhoc` (`all` | `session` | `adhoc`, default `all`),
+`flow` (`all` | `single` | `multi`, default `all`), `tz_offset_minutes` (default 0),
 `chart_metrics`, `chart_aggs` (comma-separated), `anchor`.
 
 The response shape varies by `group`/`breakdown` combination — turn-level

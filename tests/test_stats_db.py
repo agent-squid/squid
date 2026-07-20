@@ -1047,6 +1047,28 @@ def test_get_stats_by_turn_filters_by_agent_topic_and_adhoc(tmp_path, monkeypatc
     assert [r["msg_id"] for r in stats_db.get_stats_by_turn(days=0, adhoc="session")] == [codex_asst]
 
 
+def test_stats_filters_by_single_or_multi_flow(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    single_user = stats_db.insert_user_message("squid", "codex", "single")
+    single_asst = stats_db.insert_assistant_message("squid", "codex", single_user, adhoc=False)
+    stats_db.update_assistant_message(single_asst, "ok", "session-single", "done")
+    stats_db.insert_run_event(single_asst, 0, "stats", json.dumps({"input_tokens": 10}))
+
+    multi_user = stats_db.insert_user_message("squid", "codex", "multi", flow_run_id="flow-1", flow_route="#squid@codex>#squid@revu")
+    multi_asst = stats_db.insert_assistant_message(
+        "squid", "codex", multi_user, adhoc=False, flow_run_id="flow-1", flow_route="#squid@codex>#squid@revu",
+    )
+    stats_db.update_assistant_message(multi_asst, "ok", "session-multi", "done")
+    stats_db.insert_run_event(multi_asst, 0, "stats", json.dumps({"input_tokens": 20}))
+
+    assert [r["msg_id"] for r in stats_db.get_stats_by_turn(days=0, flow="single")] == [single_asst]
+    assert [r["msg_id"] for r in stats_db.get_stats_by_turn(days=0, flow="multi")] == [multi_asst]
+    assert stats_db.get_aggregated_stats(period="daily", days=0, flow="single")[0]["input_tokens"] == 10
+    assert stats_db.get_aggregated_stats(period="daily", days=0, flow="multi")[0]["input_tokens"] == 20
+
+
 def test_terminal_non_success_turns_are_stats_rows_without_usage(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

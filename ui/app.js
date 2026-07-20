@@ -735,10 +735,9 @@ function _isLiveFlowChain(result) {
     const next = steps[1];
     if (origin.kind !== 'atom' && origin.kind !== 'join') return false;
     if (next.kind === 'roundtrip') return next.rounds >= 1;
-    return next.kind === 'atom' && next.via && (
-      next.via.type === 'oneway' ||
-      (next.via.type === 'scheduled' && !next.via.unbounded && next.via.count >= 1)
-    );
+    // 'oneway' isn't a separate op.type — '>'/'=>' are the count=1/wait=null
+    // case of 'scheduled' (see ADR-0032, "Edge types").
+    return next.kind === 'atom' && next.via && next.via.type === 'scheduled' && !next.via.unbounded && next.via.count >= 1;
   });
 }
 
@@ -766,9 +765,10 @@ function parseRouteChain(route) {
     rounds = nextStep.rounds || 1;
     operator = rounds === 1 && !nextStep.wait ? '<>' : `<${rounds}${nextStep.wait ? ':' + nextStep.wait : ''}>`;
   } else if (nextStep.via?.type === 'scheduled') {
-    operator = `=${nextStep.via.count}${nextStep.via.wait ? ':' + nextStep.via.wait : ''}>`;
-  } else if (nextStep.via?.alias) {
-    operator = '=>';
+    // Shortest spelling for the (count, wait) pair — '>' when both are
+    // default, mirroring roundtrip's '<>' preference over '<1>' above.
+    const { count, wait } = nextStep.via;
+    operator = count === 1 && !wait ? '>' : `=${count === 1 ? '' : count}${wait ? ':' + wait : ''}>`;
   }
   const routeText = result.key || String(route || '').trim().replace(/\s+/g, '');
   const originKey = a => `${a.topic}\u0000${a.agent}\u0000${a.fresh ? 1 : 0}`;
@@ -5508,6 +5508,7 @@ const FLOW_EXAMPLES = [
   '#squid@codex>#hive@review!',
   '#squid@codex>#hive',
   '#topic1@agent1=5:1d>@agent2',
+  '#topic1@agent1=:5m>@agent2',
   '#topic1@agent1,@agent2',
   '#topic1@agent2,#topic3@agent1,#topic4@agent2',
   '#topic1@agent1!,@agent2!',
@@ -6647,7 +6648,7 @@ function initCursorQuota() {
 let statsPeriod = 'turn';
 let statsBreakdown = '';
 // anchor: null means "now"; otherwise an ISO timestamp the days/hours window ends at.
-let statsFilters = { days: -3, agents: [], topics: [], adhoc: 'all', status: [], anchor: null };
+let statsFilters = { days: -3, agents: [], topics: [], adhoc: 'all', status: [], flow: 'all', anchor: null };
 const STATS_STATUS_LABELS = { done: 'Complete', error: 'Error', cancelled: 'Cancelled' };
 // statsFilters.days doubles as an hours flag: negative values mean
 // "-days" hours (e.g. -3 = 3h). Only the 'turn' grain offers sub-day ranges,
@@ -7617,6 +7618,7 @@ function _updateStatsFilterLabels() {
   const agentToggle = document.getElementById('sf-agent-toggle');
   const statusToggle = document.getElementById('sf-status-toggle');
   const adhocSelect = document.getElementById('sf-adhoc');
+  const flowSelect = document.getElementById('sf-flow');
   if (topicToggle) {
     topicToggle.textContent = _statsMultiLabel(statsFilters.topics, 'All Topics', 'Topic', '#');
     topicToggle.classList.toggle('active', statsFilters.topics.length > 0);
@@ -7630,6 +7632,7 @@ function _updateStatsFilterLabels() {
     statusToggle.classList.toggle('active', statsFilters.status.length > 0);
   }
   if (adhocSelect) adhocSelect.classList.toggle('active', statsFilters.adhoc !== 'all');
+  if (flowSelect) flowSelect.classList.toggle('active', statsFilters.flow !== 'all');
 }
 
 function _syncStatsAgentMenuSelection() {
@@ -7658,7 +7661,9 @@ function _resetStatsDimensionFilters() {
   statsFilters.agents = [];
   statsFilters.adhoc = 'all';
   statsFilters.status = [];
+  statsFilters.flow = 'all';
   document.getElementById('sf-adhoc').value = 'all';
+  document.getElementById('sf-flow').value = 'all';
   _syncStatsTopicMenuSelection();
   _syncStatsAgentMenuSelection();
   _syncStatsStatusMenuSelection();
@@ -7757,6 +7762,7 @@ function _statsQueryParams({ includeTz = false } = {}) {
   if (statsFilters.topics.length) params.set('topic', statsFilters.topics.join(','));
   if (statsFilters.adhoc !== 'all') params.set('adhoc', statsFilters.adhoc);
   if (statsFilters.status.length) params.set('status', statsFilters.status.join(','));
+  if (statsFilters.flow !== 'all') params.set('flow', statsFilters.flow);
   const series = _statsChartSeries();
   params.set('chart_metrics', series.map(s => s.metric).join(','));
   params.set('chart_aggs', series.map(s => s.agg).join(','));
@@ -7772,6 +7778,7 @@ function _statsState() {
       agent: { mode: statsFilters.agents.length ? 'selected' : 'auto_top', values: [...statsFilters.agents] },
       session_type: { mode: statsFilters.adhoc === 'all' ? 'all' : 'selected', values: statsFilters.adhoc === 'all' ? [] : [statsFilters.adhoc] },
       status: { mode: statsFilters.status.length ? 'selected' : 'all', values: [...statsFilters.status] },
+      flow: { mode: statsFilters.flow === 'all' ? 'all' : 'selected', values: statsFilters.flow === 'all' ? [] : [statsFilters.flow] },
     },
     breakdown: { key: statsBreakdown, sort: { ..._statsBreakdownColumnSort } },
     measure: {
@@ -7791,6 +7798,7 @@ function _overallStatsState() {
       agent: { mode: 'auto_top', values: [] },
       session_type: { mode: 'all', values: [] },
       status: { mode: 'all', values: [] },
+      flow: { mode: 'all', values: [] },
     },
     breakdown: { key: '', sort: { mode: 'name', dir: 'asc' } },
     measure: { primary: { metric: 'turns', agg: 'sum' }, series: [], visible: [...DEFAULT_STATS_MEASURES] },
@@ -7806,6 +7814,7 @@ function _deepDiveStatsState() {
       agent: { mode: 'auto_top', values: [] },
       session_type: { mode: 'all', values: [] },
       status: { mode: 'all', values: [] },
+      flow: { mode: 'all', values: [] },
     },
     breakdown: { key: '', sort: { mode: 'name', dir: 'asc' } },
     measure: {
@@ -7833,6 +7842,8 @@ function _applyStatsState(state) {
   const sessionValues = dims.session_type?.values || [];
   statsFilters.adhoc = dims.session_type?.mode === 'all' ? 'all' : (sessionValues[0] || 'all');
   statsFilters.status = dims.status?.mode === 'selected' ? [...(dims.status.values || [])] : [];
+  const flowValues = dims.flow?.values || [];
+  statsFilters.flow = dims.flow?.mode === 'selected' ? (flowValues[0] || 'all') : 'all';
   const primaryMeasure = _parseStatsMeasureState(state?.measure?.primary, 'turns');
   statsChartY1 = primaryMeasure.metric || 'turns';
   statsChartAggY1 = primaryMeasure.agg;
@@ -7858,6 +7869,7 @@ function _applyStatsState(state) {
   _syncStatsDayOptions(statsPeriod);
   document.getElementById('sf-breakdown').value = statsBreakdown;
   document.getElementById('sf-adhoc').value = statsFilters.adhoc;
+  document.getElementById('sf-flow').value = statsFilters.flow;
   _updateStatsAnchorLabel();
   // A saved preset's chart metric might not be in its saved visible measures
   // (older presets could chart something the table didn't show) — reconcile
@@ -8717,6 +8729,13 @@ function initStats() {
 
   document.getElementById('sf-adhoc').addEventListener('change', e => {
     statsFilters.adhoc = e.target.value;
+    _updateStatsFilterLabels();
+    _markStatsPresetDirty();
+    loadStats();
+  });
+
+  document.getElementById('sf-flow').addEventListener('change', e => {
+    statsFilters.flow = e.target.value;
     _updateStatsFilterLabels();
     _markStatsPresetDirty();
     loadStats();

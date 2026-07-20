@@ -161,10 +161,16 @@ test('Squid Flow scheduled operator puts the loop count first, like <N>', async 
   await expect(statusEl).toHaveClass(/ok/);
   await expect(keyLine).toHaveText('#t@c=2>@a');
 
-  // Count + delay.
+  // Count + delay. `=1:1d>` and `=:1d>` (count omitted) are the same edge —
+  // count=1/wait=T is scheduled's analogue of roundtrip's `<1:T>`/`<:T>`, and
+  // canonicalizes the same way roundtrip drops a redundant explicit `1`.
   await page.fill('#flow-input', '#t@c=1:1d>@a');
   await expect(statusEl).toHaveClass(/ok/);
-  await expect(keyLine).toHaveText('#t@c=1:1d>@a');
+  await expect(keyLine).toHaveText('#t@c=:1d>@a');
+
+  await page.fill('#flow-input', '#t@c=:1d>@a');
+  await expect(statusEl).toHaveClass(/ok/);
+  await expect(keyLine).toHaveText('#t@c=:1d>@a');
 
   // Unbounded loop syntax is not part of v0.1.
   await page.fill('#flow-input', '#t@c=*:1d>@a');

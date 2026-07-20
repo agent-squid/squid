@@ -1804,10 +1804,28 @@ def _append_stats_in_filter(clauses: list[str], params: list, expr: str, values:
 
 
 _STATS_STATUS_VALUES = {"done", "error", "cancelled"}
+_STATS_FLOW_VALUES = {"all", "single", "multi"}
 
 
 def _stats_status_values(status: str) -> list[str]:
     return [s for s in _stats_filter_values(status) if s in _STATS_STATUS_VALUES]
+
+
+def _stats_flow_value(flow: str) -> str:
+    return flow if flow in _STATS_FLOW_VALUES else "all"
+
+
+def _append_stats_flow_filter(clauses: list[str], flow: str, expr: str = "cm.flow_run_id") -> None:
+    flow = _stats_flow_value(flow)
+    if flow == "single":
+        clauses.append(f"{expr} IS NULL")
+    elif flow == "multi":
+        clauses.append(f"{expr} IS NOT NULL")
+
+
+def _append_legacy_stats_flow_filter(clauses: list[str], flow: str) -> None:
+    if _stats_flow_value(flow) == "multi":
+        clauses.append("1 = 0")
 
 
 _STATS_CHART_AGGS = {"sum", "avg", "min", "max", "p50", "p75", "p95"}
@@ -2295,6 +2313,7 @@ def get_aggregated_stats(
     tz_offset_minutes: int = 0,
     chart_series: Optional[list[dict]] = None,
     anchor: Optional[str] = None,
+    flow: str = "all",
 ) -> list:
     # Shift UTC timestamps to local time before bucketing so day boundaries
     # reflect the user's clock, not UTC midnight.
@@ -2332,6 +2351,7 @@ def get_aggregated_stats(
         cm_clauses.append("COALESCE(cm.adhoc, 0) = 0")
     elif adhoc == "adhoc":
         cm_clauses.append("COALESCE(cm.adhoc, 0) = 1")
+    _append_stats_flow_filter(cm_clauses, flow)
     cm_where = " AND ".join(cm_clauses)
 
     count_clauses: list[str] = ["cm.role = 'assistant'", "cm.status IN ('done', 'error', 'cancelled')"]
@@ -2347,6 +2367,7 @@ def get_aggregated_stats(
         count_clauses.append("COALESCE(cm.adhoc, 0) = 0")
     elif adhoc == "adhoc":
         count_clauses.append("COALESCE(cm.adhoc, 0) = 1")
+    _append_stats_flow_filter(count_clauses, flow)
     count_where = " AND ".join(count_clauses)
 
     ss_clauses: list[str] = ["ss.created_at IS NOT NULL"]
@@ -2363,6 +2384,7 @@ def get_aggregated_stats(
         ss_clauses.append("COALESCE(ss.adhoc, 0) = 0")
     elif adhoc == "adhoc":
         ss_clauses.append("COALESCE(ss.adhoc, 0) = 1")
+    _append_legacy_stats_flow_filter(ss_clauses, flow)
     ss_where = " AND ".join(ss_clauses)
 
     try:
@@ -2451,7 +2473,7 @@ def get_aggregated_stats(
 
 def get_stats_by_turn(
     days: int = 30, hours: int = 0, agent: str = "", topic: str = "", adhoc: str = "all",
-    status: str = "", limit: int = 2000, anchor: Optional[str] = None,
+    status: str = "", limit: int = 2000, anchor: Optional[str] = None, flow: str = "all",
 ) -> list:
     # One row per completed turn, sourced from run_events rather than session_stats:
     # session_stats is keyed by session_id and gets overwritten on every resumed
@@ -2477,6 +2499,7 @@ def get_stats_by_turn(
         clauses.append("COALESCE(cm.adhoc, 0) = 0")
     elif adhoc == "adhoc":
         clauses.append("COALESCE(cm.adhoc, 0) = 1")
+    _append_stats_flow_filter(clauses, flow)
     where = " AND ".join(clauses)
 
     try:
@@ -2541,6 +2564,7 @@ def _merge_breakdown_chart_aggregates(
     agent: str,
     topic: str,
     adhoc: str,
+    flow: str,
     tz_offset_minutes: int,
     chart_series: Optional[list[dict]],
     breakdown: str,
@@ -2588,6 +2612,7 @@ def _merge_breakdown_chart_aggregates(
         clauses.append("COALESCE(adhoc, 0) = 0")
     elif adhoc == "adhoc":
         clauses.append("COALESCE(adhoc, 0) = 1")
+    _append_legacy_stats_flow_filter(clauses, flow)
     where = " AND ".join(clauses)
 
     for series in chart_series:
@@ -2658,10 +2683,11 @@ def get_stats_by_agent_breakdown(
     tz_offset_minutes: int = 0,
     include_session: bool = False,
     chart_series: Optional[list[dict]] = None,
+    flow: str = "all",
 ) -> list:
     breakdown = "agent_session" if include_session else "agent"
     return get_stats_by_breakdown(
-        period, days, agent, topic, adhoc, status, tz_offset_minutes, breakdown, chart_series,
+        period, days, agent, topic, adhoc, status, tz_offset_minutes, breakdown, chart_series, flow=flow,
     )
 
 
@@ -2676,6 +2702,7 @@ def get_stats_by_breakdown(
     breakdown: str = "agent",
     chart_series: Optional[list[dict]] = None,
     anchor: Optional[str] = None,
+    flow: str = "all",
 ) -> list:
     tz_shift = f"{-tz_offset_minutes} minutes"
     re_bucket = _stats_bucket_expr("re.created_at", period, tz_shift)
@@ -2712,6 +2739,7 @@ def get_stats_by_breakdown(
         cm_clauses.append("COALESCE(adhoc, 0) = 0")
     elif adhoc == "adhoc":
         cm_clauses.append("COALESCE(adhoc, 0) = 1")
+    _append_stats_flow_filter(cm_clauses, flow)
 
     ss_clauses: list[str] = ["ss.created_at IS NOT NULL"]
     ss_params: list = []
@@ -2727,6 +2755,7 @@ def get_stats_by_breakdown(
         ss_clauses.append("COALESCE(ss.adhoc, 0) = 0")
     elif adhoc == "adhoc":
         ss_clauses.append("COALESCE(ss.adhoc, 0) = 1")
+    _append_legacy_stats_flow_filter(ss_clauses, flow)
 
     cm_where = " AND ".join(cm_clauses)
 
@@ -2743,6 +2772,7 @@ def get_stats_by_breakdown(
         count_clauses.append("COALESCE(cm.adhoc, 0) = 0")
     elif adhoc == "adhoc":
         count_clauses.append("COALESCE(cm.adhoc, 0) = 1")
+    _append_stats_flow_filter(count_clauses, flow)
     count_where = " AND ".join(count_clauses)
     ss_where = " AND ".join(ss_clauses)
 
@@ -2936,7 +2966,8 @@ def delete_stats_filter_preset(preset_id: int) -> bool:
 
 
 def get_stats_by_agent(
-    days: int = 30, agent: str = "", topic: str = "", adhoc: str = "all", anchor: Optional[str] = None
+    days: int = 30, agent: str = "", topic: str = "", adhoc: str = "all",
+    anchor: Optional[str] = None, flow: str = "all",
 ) -> list:
     cutoff = _stats_cutoff(days, anchor=anchor)
     agents = _stats_filter_values(agent)
@@ -2955,6 +2986,7 @@ def get_stats_by_agent(
         cm_clauses.append("COALESCE(cm.adhoc, 0) = 0")
     elif adhoc == "adhoc":
         cm_clauses.append("COALESCE(cm.adhoc, 0) = 1")
+    _append_stats_flow_filter(cm_clauses, flow)
 
     ss_clauses: list[str] = ["ss.created_at IS NOT NULL"]
     ss_params: list = []
@@ -2968,6 +3000,7 @@ def get_stats_by_agent(
         ss_clauses.append("COALESCE(ss.adhoc, 0) = 0")
     elif adhoc == "adhoc":
         ss_clauses.append("COALESCE(ss.adhoc, 0) = 1")
+    _append_legacy_stats_flow_filter(ss_clauses, flow)
     cm_where = " AND ".join(cm_clauses)
     ss_where = " AND ".join(ss_clauses)
 
@@ -3048,7 +3081,8 @@ def get_stats_by_agent(
 
 
 def get_stats_by_topic(
-    days: int = 30, agent: str = "", topic: str = "", adhoc: str = "all", anchor: Optional[str] = None
+    days: int = 30, agent: str = "", topic: str = "", adhoc: str = "all",
+    anchor: Optional[str] = None, flow: str = "all",
 ) -> list:
     cutoff = _stats_cutoff(days, anchor=anchor)
     agents = _stats_filter_values(agent)
@@ -3067,6 +3101,7 @@ def get_stats_by_topic(
         cm_clauses.append("COALESCE(cm.adhoc, 0) = 0")
     elif adhoc == "adhoc":
         cm_clauses.append("COALESCE(cm.adhoc, 0) = 1")
+    _append_stats_flow_filter(cm_clauses, flow)
 
     ss_clauses: list[str] = ["ss.topic IS NOT NULL"]
     ss_params: list = []
@@ -3080,6 +3115,7 @@ def get_stats_by_topic(
         ss_clauses.append("COALESCE(ss.adhoc, 0) = 0")
     elif adhoc == "adhoc":
         ss_clauses.append("COALESCE(ss.adhoc, 0) = 1")
+    _append_legacy_stats_flow_filter(ss_clauses, flow)
     cm_where = " AND ".join(cm_clauses)
     ss_where = " AND ".join(ss_clauses)
 

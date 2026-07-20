@@ -162,10 +162,11 @@ def _drop_against_parent_text(atoms: list[dict], state: Optional[dict], sep: str
 
 
 def _parse_operator_token(op: str) -> Optional[dict]:
+    # '>' and '=>' are both just the count=1/wait=None case of the scheduled
+    # production below, spelled with the '=' omitted or the count+wait
+    # omitted respectively — one type, not three (see ADR-0032, "Edge types").
     if op == ">":
-        return {"type": "oneway", "raw": op}
-    if op == "=>":
-        return {"type": "oneway", "raw": op, "alias": True}
+        return {"type": "scheduled", "raw": op, "count": 1, "wait": None}
     match = re.fullmatch(r"<(\d+)?(?::(\d+[smhd]))?>", op)
     if match:
         return {
@@ -174,19 +175,40 @@ def _parse_operator_token(op: str) -> Optional[dict]:
             "rounds": int(match.group(1) or "1"),
             "wait": match.group(2),
         }
-    match = re.fullmatch(r"=(\d+)(?::(\d+[smhd]))?>", op)
+    match = re.fullmatch(r"=(\d+)?(?::(\d+[smhd]))?>", op)
     if match:
         return {
             "type": "scheduled",
             "raw": op,
-            "count": int(match.group(1)),
+            "count": int(match.group(1) or "1"),
             "wait": match.group(2),
         }
     return None
 
 
+def _op_to_text(op: dict) -> str:
+    """Canonical (shortest) spelling for a parsed operator — port of the UI's
+    opToText/canonicalKeyForClause roundtrip branch (ui/flow-lang.js); must
+    stay in sync with it. Never echoes `op["raw"]` (whatever the route was
+    literally typed as) — two spellings of the same edge (e.g. '=1>' and
+    '=>') must canonicalize identically so they dedup to the same key."""
+    if op["type"] == "roundtrip":
+        rounds = op.get("rounds", 1)
+        wait = op.get("wait")
+        if rounds == 1 and not wait:
+            return "<>"
+        return f"<{rounds}{':' + wait if wait else ''}>"
+    count = op.get("count", 1)
+    wait = op.get("wait")
+    if count == 1 and not wait:
+        return ">"
+    n = "" if count == 1 else str(count)
+    t = f":{wait}" if wait else ""
+    return f"={n}{t}>"
+
+
 def _split_operator(route: str) -> Optional[tuple[str, dict, str]]:
-    match = re.search(r"(?:<\d*(?::\d+[smhd])?>|=>|=\d+(?::\d+[smhd])?>|>)", route)
+    match = re.search(r"(?:<\d*(?::\d+[smhd])?>|=\d*(?::\d+[smhd])?>|>)", route)
     if not match:
         return None
     op = _parse_operator_token(match.group(0))
@@ -196,7 +218,7 @@ def _split_operator(route: str) -> Optional[tuple[str, dict, str]]:
     rhs = route[match.end():]
     if not lhs or not rhs:
         return None
-    if re.search(r"(?:<\d*(?::\d+[smhd])?>|=>|=\d+(?::\d+[smhd])?>|>)", rhs):
+    if re.search(r"(?:<\d*(?::\d+[smhd])?>|=\d*(?::\d+[smhd])?>|>)", rhs):
         return None
     return lhs, op, rhs
 
@@ -262,10 +284,11 @@ def parse_flow_route(route: Optional[str]) -> Optional[dict]:
         }
     key_targets = _resolve_target_group(target_group, uniform_state)
     target_sep = "+" if target_group["kind"] == "plus" else ","
+    op_text = _op_to_text(operator)
     if key_targets:
-        key += operator["raw"] + _drop_against_parent_text(key_targets, uniform_state, target_sep)
+        key += op_text + _drop_against_parent_text(key_targets, uniform_state, target_sep)
     else:
-        key += operator["raw"] + target_text
+        key += op_text + target_text
 
     first_origin = origins[0]
     first_target = branches[0]["targets"][0]
@@ -414,9 +437,9 @@ def next_chain_steps(flow_run_id: str) -> list[dict]:
             continue
         previous_ids = [row["id"] for row in origin_assistants]
         previous_label = branch["origins"][0]["agent"] if len(branch["origins"]) == 1 else "+".join(f"@{origin['agent']}" for origin in branch["origins"])
-        # oneway/scheduled branches always carry exactly one target (target
-        # fan-out decomposes into one branch per target at parse time); only
-        # a round-trip branch can have more than one, via target_join.
+        # scheduled branches always carry exactly one target (target fan-out
+        # decomposes into one branch per target at parse time); only a
+        # round-trip branch can have more than one, via target_join.
         target = branch["targets"][0]
         op = branch["op"]
         after_origin = max(previous_ids)
@@ -435,18 +458,10 @@ def next_chain_steps(flow_run_id: str) -> list[dict]:
                     previous_ids=previous_ids,
                     original_prompt=original_prompt,
                     delay_seconds=delay_unit * (i + 1) if delay_unit else 0,
-                    schedule_key=schedule_key,
-                ))
-            continue
-
-        if op["type"] == "oneway":
-            if not _system_user_exists(rows, after_id=after_origin, topic=target["topic"], agent=target["agent"], route=chain["route"]):
-                ready.append(_step(
-                    chain=chain,
-                    target=target,
-                    previous_label=previous_label,
-                    previous_ids=previous_ids,
-                    original_prompt=original_prompt,
+                    # Only meaningful (and only ever added to
+                    # _SCHEDULED_DISPATCHES) once there's an actual delay to
+                    # dedup around — mirrors the round-trip loop below.
+                    schedule_key=schedule_key if delay_unit else None,
                 ))
             continue
 
@@ -530,15 +545,15 @@ def expected_row_count(route: Optional[str]) -> int:
     for branch in chain["branches"]:
         op = branch["op"]
         if op["type"] == "scheduled":
+            # count=1/wait=None ('>'/'=>') falls out of this the same as any
+            # other repeat count — no separate case needed.
             count += 2 * op["count"]
-        elif op["type"] == "roundtrip":
+        else:  # roundtrip
             # Each round is every target (2 rows apiece — usually one, but a
             # target_join branch dispatches all of them in parallel) plus one
             # return leg (2 rows); reduces to the old `4 * rounds` when there's
             # only one target.
             count += op.get("rounds", 1) * (len(branch["targets"]) * 2 + 2)
-        else:
-            count += 2
     return count
 
 

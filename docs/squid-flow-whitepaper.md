@@ -31,7 +31,8 @@ A Squid Flow v0.1 clause is: one **origin group**, optionally followed by
 clause   := group (operator group)?
 group    := atom ((',' atom)* | ('+' atom)*)      -- ',' and '+' never mix in one group
 atom     := ('#' topic)? ('@' agent)? '!'?          -- at least one of topic/agent required
-operator := '>' | '=>' | '<' N? (':' duration)? '>' | '=' N (':' duration)? '>'
+operator := '>' | edge N? (':' duration)? '>'
+edge     := '<' | '='                             -- bidirectional vs one-way; the only structural difference
 duration := digits [smhd]
 ```
 
@@ -40,6 +41,12 @@ duration := digits [smhd]
   the persistent one).
 - `;` (multi-clause DAG) is recognized only to reject it with a clear error —
   out of v0.1 scope. See ADR-0032, "Out of scope."
+- `>` is shorthand for `=>`, itself shorthand for `=1>` — the `N=1, T=none`
+  case of the general `edge N? (':' duration)? '>'` production with `edge='='`
+  and everything after it omitted. It's a separate top-level alternative
+  (rather than reachable by omitting `edge` from the general production)
+  because `edge` itself isn't optional — but semantically it's exactly the
+  same edge as `=>`/`=1>`, not a third thing.
 
 Reference implementation: `ui/flow-lang.js` `parseAtom`/`parseGroup`/`parseClause`
 (`:35-177`); `agent/flow.py` `_parse_atom`/`_parse_group`/`_split_operator`
@@ -47,41 +54,58 @@ Reference implementation: `ui/flow-lang.js` `parseAtom`/`parseGroup`/`parseClaus
 
 ### Edge types
 
-There are exactly **two** edge *types* — what the hop fundamentally does.
-`>`/`=>` and `=N>`/`=N:T>` are not two different types: both implementations
-route them through the same code. `expand()`'s oneway/scheduled branch is one
-shared branch producing a plain `atom` step for either
-(`ui/flow-lang.js:325-337`, the comment literally reads `// oneway /
-scheduled —` above it; only `roundtrip` gets its own branch). At dispatch
-time, `agent/flow.py`'s `_dispatch_or_schedule` checks `delay <= 0` first and
-dispatches immediately in that case — a scheduled edge with `N=1, T=none`
-(`=1>`) resolves `delay_seconds=0` and takes the *exact same* immediate path
-as a plain `>`; `schedule_key`/`_SCHEDULED_DISPATCHES` are only ever
-consulted once `delay > 0`. So `>` isn't a distinct type — it's the
-`N=1, T=none` case of the same type `=N>` spells out in general, given its
-own shorthand spelling because writing `=1>` for the common single handoff
-would be needless ceremony. `=>` is that same shorthand's alias.
+There are exactly **two** edge *types*, and the grammar is now fully
+symmetric between them — the only structural difference is the leading
+character (`<` = bidirectional, `=` = one-way):
 
 | Type | Canonical form | Meaning |
 |---|---|---|
-| **forward** | `=N:T>` (shorthand for `N=1, T=none`: `>`, alias `=>`) | One-way, from the same origin output, repeated `N` times (default 1), each optionally delayed. Terminal — nothing can follow it in a v0.1 clause. |
+| **forward** | `=N:T>` (shorthand `>` for `N=1, T=none`) | One-way, from the same origin output, repeated `N` times (default 1), each optionally delayed. Terminal — nothing can follow it in a v0.1 clause. |
 | **roundtrip** | `<N:T>` | Forward to the target, then send the target's response back to the origin, for `N` rounds (default 1). |
+
+Both are parsed by the *same shape* of regex — `SCHEDULED_RE` and
+`ROUNDTRIP_RE` (`ui/flow-lang.js:21,27`) differ only in their leading
+character, both making count optional (`(\d+)?`) with an `N ? parseInt(N) :
+1` default; `_parse_operator_token` (`agent/flow.py:164-186`) mirrors this
+exactly for both types. `expand()`'s "scheduled" branch (`ui/flow-lang.js`,
+comment: `// scheduled (op.type is always 'scheduled' here — '>'/'=>' are
+just its count=1/wait=null case)`) is the one shared code path for every
+forward edge regardless of how it was spelled; only `roundtrip` gets its own
+branch, structurally the same split as the type table above. At dispatch
+time, `agent/flow.py`'s `_dispatch_or_schedule` checks `delay <= 0` first and
+dispatches immediately in that case, so `>`, `=>`, and `=1>` all take the
+identical immediate-dispatch path — `schedule_key`/`_SCHEDULED_DISPATCHES`
+are only ever populated once `delay > 0` (`next_chain_steps`'s scheduled
+branch passes `schedule_key=schedule_key if delay_unit else None`, mirroring
+the round-trip loop's own `schedule_key if wait_seconds else None`).
+
+**Canonical rendering always prefers the shortest spelling** for a given
+`(count, wait)`, on both types symmetrically: `opToText`/`_op_to_text`
+(`ui/flow-lang.js:350-358`; `agent/flow.py:189-206`, kept in sync the same
+way `chain_handoff_prompt` is) render `count=1, wait=None` as `>` (never
+`=1>` or `=>`), `count=1, wait=T` as `=:T>` (never `=1:T>`), and `rounds=1,
+wait=None` as `<>` (never `<1>`) — every non-canonical spelling still parses
+(`=1>`, `=>`, `=1:5m>`, `<1>` are all valid *input*), it just never comes back
+*out*. This is a real identity guarantee, not cosmetic: `agent/flow.py`'s
+`route`/`key` (the DB dedup token, §4) is built from this canonical text, so
+`#a>@b`, `#a=>@b`, and `#a=1>@b` all resolve to the identical stored
+`flow_route` — they're the same workflow, not three different ones.
 
 ### Edge attributes
 
-`N` (count) and `T` (wait) are **attributes** of both types, not new types
-themselves:
+`N` (count) and `T` (wait) are **attributes** of both types, symmetrically —
+both optional, both defaulting the same way:
 
 | Attribute | Syntax | Forward (`=N:T>` / `>`) | Roundtrip (`<N:T>`) |
 |---|---|---|---|
-| count | `N` | conceptually defaults to `1` — but that default is only reachable via the dedicated `>`/`=>` shorthand; `=N>` itself requires `N` written explicitly (`_parse_operator_token`, `agent/flow.py:169` vs `:177` — roundtrip's `(\d+)?` is optional, scheduled's `(\d+)` is not) | optional, default `1` — `<>` is exactly `<1>` |
+| count | `N` | optional, default `1` — `=>` is exactly `=1>` | optional, default `1` — `<>` is exactly `<1>` |
 | wait | `:T` | optional; spaces the `N` repeats out from the trigger, `T`, `2T`, `3T`, … | optional; applied symmetrically to *every* leg, out and back alike (`<N:T>` waits `T` before each of the `2N` legs — one hop, `2N` legs; see §3's hop/leg distinction) |
 
 So the full accepted surface is both types × their attributes:
-`>`, `=>`, `=N>`, `=N:T>`, `<>`, `<N>`, `<N:T>` — matching ADR-0032's "at
-most one hop operator" list verbatim. `<N:T>` is exactly as first-class as
-`<N>` or `=N:T>`; it's the same `T` attribute applied to roundtrip that
-`=N:T>` applies to forward.
+`>`, `=>`, `=N>`, `=N:T>`, `=:T>`, `<>`, `<N>`, `<N:T>` — matching
+ADR-0032's "at most one hop operator" list, plus `=:T>` (count-omitted,
+wait-present), which is new: previously only reachable by writing `=1:T>`
+explicitly.
 
 ---
 

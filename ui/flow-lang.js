@@ -19,10 +19,12 @@
   const NAME = '[A-Za-z0-9_.-]+';
   const ATOM_RE = new RegExp(`^(?:#(${NAME}))?(?:@(${NAME}))?(!)?`);
   const ROUNDTRIP_RE = /^<(\d+)?(?::([0-9]+[A-Za-z]+))?>/;
-  const ONEWAY_ALIAS_RE = /^=>/;
-  // Count comes first, same as roundtrip's bare `<N>`. `:wait` is an
-  // optional add-on that spaces the bounded repeats out.
-  const SCHEDULED_RE = /^=(\d+)(?::([0-9]+[A-Za-z]+))?>/;
+  // One-way is the same shape as roundtrip, just '=' instead of '<': count
+  // optional (default 1, same as roundtrip's bare `<N>`), `:wait` an
+  // optional add-on that spaces the (possibly single) repeat out. '=>' is
+  // exactly this production with both omitted — not a separate token (see
+  // ADR-0032, "Edge types").
+  const SCHEDULED_RE = /^=(\d+)?(?::([0-9]+[A-Za-z]+))?>/;
   const ONEWAY_RE = /^>/;
 
   function stripLeadingWs(s) {
@@ -94,22 +96,22 @@
         consumed: m[0].length,
       };
     }
-    m = ONEWAY_ALIAS_RE.exec(s);
-    if (m) return { op: { type: 'oneway', alias: true }, consumed: m[0].length };
-
+    // '>' and '=>' are both just the count=1/wait=null case of this same
+    // production, spelled with the '=' omitted or the count+wait omitted
+    // respectively — one type, not three (see ADR-0032, "Edge types").
     m = SCHEDULED_RE.exec(s);
     if (m) {
       return {
         op: {
           type: 'scheduled',
-          count: parseInt(m[1], 10),
+          count: m[1] ? parseInt(m[1], 10) : 1,
           wait: m[2] || null,
         },
         consumed: m[0].length,
       };
     }
     m = ONEWAY_RE.exec(s);
-    if (m) return { op: { type: 'oneway', alias: false }, consumed: m[0].length };
+    if (m) return { op: { type: 'scheduled', count: 1, wait: null }, consumed: m[0].length };
 
     return null;
   }
@@ -322,8 +324,9 @@
           continue;
         }
 
-        // oneway / scheduled — resolveGroupAgainstState throws if the target
-        // actually needs a field that's ambiguous (null) in state.
+        // scheduled (op.type is always 'scheduled' here — '>'/'=>' are just
+        // its count=1/wait=null case) — resolveGroupAgainstState throws if
+        // the target actually needs a field that's ambiguous (null) in state.
         const { resolved } = resolveGroupAgainstState(hop.target, state, false);
         for (const t of resolved) {
           nextBranches.push({
@@ -345,13 +348,14 @@
   // ---- Rendering: canonical (reduced) and fully-expanded forms ------------
 
   function opToText(op) {
-    if (op.type === 'oneway') return op.alias ? '=>' : '>';
-    if (op.type === 'scheduled') {
-      let s = `=${op.count}`;
-      if (op.wait) s += `:${op.wait}`;
-      return `${s}>`;
-    }
-    return '';
+    if (op.type !== 'scheduled') return '';
+    // Canonical form is always the shortest spelling for this (count, wait):
+    // '>' when both are default, '=' with whichever of count/wait isn't —
+    // mirrors why roundtrip always canonicalizes to '<>' over '<1>'.
+    if (op.count === 1 && !op.wait) return '>';
+    const n = op.count === 1 ? '' : String(op.count);
+    const t = op.wait ? `:${op.wait}` : '';
+    return `=${n}${t}>`;
   }
 
   function renderStepAtomCanonical(resolved, priorState) {
@@ -380,7 +384,7 @@
         // is never read again — first target is an arbitrary but harmless pick.
         priorState = { topic: step.target[0].topic, agent: step.target[0].agent };
       } else {
-        if (text) text += opToText(step.via || { type: 'oneway', alias: false });
+        if (text) text += opToText(step.via || { type: 'scheduled', count: 1, wait: null });
         text += renderStepAtomCanonical(step.atom, priorState);
         priorState = { topic: step.atom.topic, agent: step.atom.agent };
       }
@@ -610,7 +614,11 @@
     let forkedAt = -1;
     for (let idx = 0; idx < branch.steps.length; idx += 1) {
       const step = branch.steps[idx];
-      if (step.via && step.via.type === 'scheduled') { forkedAt = idx; break; }
+      // Only fork when there's actually more than one repeat, or a repeat
+      // needs its own delay note — the count=1/wait=null case ('>'/'=>')
+      // is just a plain hop and stays in the single continuous trunk row,
+      // same as roundtrip only forking on `wait`, never on `rounds` alone.
+      if (step.via && step.via.type === 'scheduled' && (step.via.count > 1 || step.via.wait)) { forkedAt = idx; break; }
       if (step.kind === 'roundtrip' && step.wait) { forkedAt = idx; break; }
       if (step.kind === 'join') trunk.push(step.atoms.map(fullAtomText).join('+'));
       else if (step.kind === 'roundtrip') for (const leg of step.appendedSeq) trunk.push(legGroupText(leg));

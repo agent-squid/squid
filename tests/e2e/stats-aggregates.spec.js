@@ -840,3 +840,31 @@ test('response status filter is a multiselect that scopes the stats request', as
   await page.locator('#stats-content').click();
   await expect(page.locator('#sf-status-menu')).toBeHidden();
 });
+
+test('flow filter scopes the stats request', async ({ page }) => {
+  await mockApp(page);
+  const statsRequests = [];
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    statsRequests.push(Object.fromEntries(url.searchParams.entries()));
+    route.fulfill({ json: [] });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+
+  await expect(page.locator('#sf-flow')).toHaveValue('all');
+  await expect(page.locator('#sf-flow')).not.toHaveClass(/active/);
+  await expect.poll(() => statsRequests.at(-1)?.flow).toBeUndefined();
+
+  await page.locator('#sf-flow').selectOption('single');
+  await expect(page.locator('#sf-flow')).toHaveClass(/active/);
+  await expect.poll(() => statsRequests.at(-1)?.flow).toBe('single');
+
+  await page.locator('#sf-flow').selectOption('multi');
+  await expect.poll(() => statsRequests.at(-1)?.flow).toBe('multi');
+
+  await page.locator('#sf-flow').selectOption('all');
+  await expect(page.locator('#sf-flow')).not.toHaveClass(/active/);
+  await expect.poll(() => statsRequests.at(-1)?.flow).toBeUndefined();
+});

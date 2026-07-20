@@ -114,6 +114,56 @@ def test_parse_route_chain_repeated_rounds():
     assert chain["route"] == "#squid@codex<2>@revucla"
 
 
+def test_parse_flow_route_forward_is_one_type_not_two():
+    # '>', '=>', and '=1>' are the same edge (count=1, wait=None) — not two
+    # types (oneway vs scheduled) that happen to look similar. See ADR-0032,
+    # "Edge types": the only real types are forward ('=N:T>', shorthand '>')
+    # and roundtrip ('<N:T>').
+    variants = ["#squid@codex>@revucla", "#squid@codex=>@revucla", "#squid@codex=1>@revucla"]
+    parsed = [flow.parse_flow_route(v) for v in variants]
+    for chain in parsed:
+        assert chain["operator"] == ">"
+        assert chain["rounds"] == 0
+        assert chain["route"] == "#squid@codex>@revucla"
+        op = chain["branches"][0]["op"]
+        assert op == {"type": "scheduled", "raw": op["raw"], "count": 1, "wait": None}
+
+
+def test_parse_flow_route_forward_count_omitted_with_wait():
+    # New: count can be omitted even when a wait is present, same as
+    # roundtrip's '<:T>' — '=:5m>' means count=1, wait='5m'.
+    chain = flow.parse_flow_route("#squid@codex=:5m>@revucla")
+    op = chain["branches"][0]["op"]
+    assert op["count"] == 1
+    assert op["wait"] == "5m"
+    # Canonicalizes the same way regardless of whether count=1 was written
+    # explicitly or omitted — shortest spelling wins.
+    assert chain["route"] == "#squid@codex=:5m>@revucla"
+    assert flow.parse_flow_route("#squid@codex=1:5m>@revucla")["route"] == "#squid@codex=:5m>@revucla"
+
+
+def test_next_chain_steps_forward_variants_dispatch_identically(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    # _seed_chain hardcodes flow_run_id="f1" — insert directly with a
+    # distinct id per variant so each iteration starts from a clean chain.
+    for i, route in enumerate(["#squid@codex>@revucla", "#squid@codex=>@revucla", "#squid@codex=1>@revucla"]):
+        flow_run_id = f"f{i}"
+        user_id = stats_db.insert_user_message("squid", "codex", "review this", flow_run_id=flow_run_id, flow_route=route)
+        asst_id = stats_db.insert_assistant_message("squid", "codex", user_id, flow_run_id=flow_run_id, flow_route=route)
+        stats_db.update_assistant_message(asst_id, "codex output", None, "done")
+        steps = flow.next_chain_steps(flow_run_id)
+        assert len(steps) == 1
+        step = steps[0]
+        assert step["topic"] == "squid"
+        assert step["agent"] == "revucla"
+        assert step["previous_msg_ids"] == [asst_id]
+        # No delay for any of these — schedule_key should never surface for
+        # an immediate dispatch (see next_chain_steps' scheduled branch).
+        assert not step.get("delay_seconds")
+        assert step.get("schedule_key") is None
+
+
 def test_parse_flow_route_rejects_target_join_without_roundtrip():
     # '+' on a hop's target is only a consumer when the round-trip return
     # leg is there to feed — plain '>' has no consumer for it (ADR-0032,

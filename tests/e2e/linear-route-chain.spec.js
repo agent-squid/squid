@@ -586,7 +586,7 @@ test('bare route chain with trailing whitespace parses from root, not the adhoc 
   await expect(page.locator('#input')).toHaveValue('');
 });
 
-test('alias route chain highlights topic chip segments', async ({ page }) => {
+test('=> alias still parses but chip renders the canonical > form', async ({ page }) => {
   await page.route('**/health', r => r.fulfill({ json: { status: 'ok', backends: {} } }));
   await page.route('**/quota**', r => r.fulfill({ json: {} }));
   await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
@@ -603,13 +603,17 @@ test('alias route chain highlights topic chip segments', async ({ page }) => {
 
   await page.goto('/');
 
+  // '=>' is not a separate operator from '>' — it's the same count=1/wait=null
+  // edge, just spelled with the count+wait omitted differently (see ADR-0032,
+  // "Edge types"). Still valid input for back-compat, but the chip always
+  // renders the shortest canonical spelling, same as '<1>' always renders '<>'.
   await page.fill('#input', '#squid@deepseek=>@revuqwen! review this');
 
   await expect(page.locator('#topic-chip')).toHaveClass(/route-chain/);
-  await expect(page.locator('#topic-chip')).toContainText('#squid@deepseek=>@revuqwen!');
+  await expect(page.locator('#topic-chip')).toContainText('#squid@deepseek>@revuqwen!');
   await expect(page.locator('#topic-chip .chip-topic')).toHaveText('#squid');
   await expect(page.locator('#topic-chip .chip-agent')).toHaveText(['@deepseek', '@revuqwen']);
-  await expect(page.locator('#topic-chip .chip-route-arrow')).toHaveText('=>');
+  await expect(page.locator('#topic-chip .chip-route-arrow')).toHaveText('>');
   await expect(page.locator('#topic-chip .chip-chain-fresh')).toHaveText('!');
   await expect(page.locator('#input')).toHaveValue('review this');
 });
