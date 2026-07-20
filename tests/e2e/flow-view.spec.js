@@ -248,6 +248,31 @@ test('Squid Flow round-trip wait applies symmetrically to every hop, out and bac
   await expect(expandedLines.nth(4)).toHaveText('=1:1d>#squid@codex · round 2 of 2 (return) · +4d');
 });
 
+test('Squid Flow round-trip target can be a join, since the return leg is a consumer for it', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Menu' }).click();
+  await page.getByRole('button', { name: 'Squid Flow' }).click();
+
+  const statusEl = page.locator('#flow-status');
+  const keyLine = page.locator('#flow-key-line .flow-route-line');
+  const expandedLines = page.locator('#flow-expanded-list .flow-route-line');
+
+  // '+' has no consumer on a plain one-way target — no hop can follow it in
+  // v0.1, so it's rejected regardless of what's around it.
+  await page.fill('#flow-input', '#t1@a1>#t2+#t3');
+  await expect(statusEl).toHaveClass(/err/);
+  await expect(statusEl).toContainText('join');
+
+  // Under '<>'/'<N>', the return leg back to the origin IS a consumer for
+  // the joined target — dispatch #t2 and #t3 in parallel, then pin both
+  // into the single return turn to #t1@a1.
+  await page.fill('#flow-input', '#t1@a1<>#t2+#t3');
+  await expect(statusEl).toHaveClass(/ok/);
+  await expect(keyLine).toHaveText('#t1@a1<>#t2+#t3');
+  await expect(expandedLines).toHaveCount(1);
+  await expect(expandedLines.nth(0)).toHaveText('#t1@a1>#t2@a1+#t3@a1>#t1@a1');
+});
+
 test('Squid Flow view lists the syntax legend inline instead of only linking the ADR', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Menu' }).click();

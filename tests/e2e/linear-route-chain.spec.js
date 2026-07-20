@@ -323,6 +323,75 @@ test('route chain composer suppresses single-session clear advisory', async ({ p
   await expect(page.locator('#session-advisory')).toBeHidden();
 });
 
+test('route chain marker shows known zero turn counts', async ({ page }) => {
+  await page.route('**/health', r => r.fulfill({ json: { status: 'ok', backends: {} } }));
+  await page.route('**/quota**', r => r.fulfill({ json: {} }));
+  await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/topics', r => r.fulfill({ json: [] }));
+  await page.route('**/topics/**', r => r.fulfill({ json: [] }));
+  await page.route('**/config/agents', r => r.fulfill({ json: [] }));
+  await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [] } }));
+  await page.route('**/topics/*/memory', r => r.fulfill({ json: {
+    topic: 'squid',
+    content: '',
+    revision: 'r1',
+    exists: false,
+  } }));
+  await page.route('**/chat', r => {
+    const body = JSON.parse(r.request().postData() || '{}');
+    return r.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream', 'X-Squid-Msg-Id': '10', 'X-Squid-Flow-Run-Id': '2' },
+      body: `event: meta\ndata: {"agent":"${body.agent}","msg_id":10,"adhoc":false}\n\ndata:${body.agent} response\n\nevent: done\ndata: \n\n`,
+    });
+  });
+  await page.route('**/chat/flow/2/steps**', r => r.fulfill({ json: { messages: [], complete: true } }));
+
+  await page.goto('/');
+  await page.evaluate(() => {
+    _sessionIds['squid@codex'] = 'origin-sid';
+    _sessionTurnCounts['origin-sid'] = 0;
+    _sessionIds['squid@revucla'] = 'target-sid';
+    _sessionTurnCounts['target-sid'] = 0;
+  });
+  await page.fill('#input', '#squid@codex>@revucla review this');
+  await page.locator('#input').press('Enter');
+
+  await expect(page.locator('.route-chain-marker .route-chain-turn-count')).toHaveText(['·0t', '·0t']);
+});
+
+test('/clear on a route chain clears each persistent route node', async ({ page }) => {
+  await page.route('**/health', r => r.fulfill({ json: { status: 'ok', backends: {} } }));
+  await page.route('**/quota**', r => r.fulfill({ json: {} }));
+  await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/topics', r => r.fulfill({ json: [] }));
+  await page.route('**/topics/**', r => r.fulfill({ json: [] }));
+  await page.route('**/config/agents', r => r.fulfill({ json: [] }));
+  await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [] } }));
+  await page.route('**/processes', r => r.fulfill({ json: [] }));
+  const cmdBodies = [];
+  await page.route('**/cmd', r => {
+    const body = JSON.parse(r.request().postData() || '{}');
+    cmdBodies.push(body);
+    return r.fulfill({ json: { ok: true, agent: body.agent } });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '#squid@codex>#hive@review');
+  await page.locator('#input').press('Enter');
+  await expect(page.locator('#topic-chip')).toHaveClass(/route-chain/);
+  await page.fill('#input', '/clear');
+  await page.locator('#input').press('Enter');
+
+  await expect.poll(() => cmdBodies).toEqual([
+    { command: 'clear', topic: 'squid', agent: 'codex' },
+    { command: 'clear', topic: 'hive', agent: 'review' },
+  ]);
+  await expect.poll(() => page.evaluate(() =>
+    _routeChainTurnCounts('squid', 'codex', false, 'review', false, 'hive')
+  )).toEqual({ origin: 0, target: 0 });
+});
+
 test('route chain marker follows live group filter visibility', async ({ page }) => {
   await page.route('**/health', r => r.fulfill({ json: { status: 'ok', backends: {} } }));
   await page.route('**/quota**', r => r.fulfill({ json: {} }));

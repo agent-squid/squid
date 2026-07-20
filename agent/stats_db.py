@@ -1062,6 +1062,17 @@ def get_topic_session(topic: str, agent: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def get_session_turn_count(session_id: str) -> int:
+    with _connect() as conn:
+        row = conn.execute(
+            """SELECT COALESCE(MAX(session_turn_index), 0) AS count
+               FROM chat_messages
+               WHERE session_id=? AND role='assistant' AND adhoc=0""",
+            (session_id,),
+        ).fetchone()
+    return int(row["count"] or 0) if row else 0
+
+
 _invalidated_session_ids: set[str] = set()
 
 

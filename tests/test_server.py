@@ -1,5 +1,7 @@
 import asyncio
 import json
+import sys
+import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -455,6 +457,7 @@ def test_clear_command_kills_only_session_lane():
     client = TestClient(server.app)
 
     with patch("agent.server.get_active_agent_for_topic", return_value="codex"), \
+         patch("agent.server.get_agent", return_value={"name": "codex"}), \
          patch("agent.server.kill_procs_by_topic", return_value=1) as kill_procs, \
          patch("agent.server.clear_topic_session") as clear_session:
         res = client.post("/cmd", json={"command": "clear", "topic": "squid"})
@@ -463,6 +466,45 @@ def test_clear_command_kills_only_session_lane():
     assert res.json() == {"ok": True, "agent": "codex"}
     kill_procs.assert_called_once_with("squid", agent="codex", adhoc=False)
     clear_session.assert_called_once_with("squid", "codex")
+
+
+def test_topic_session_includes_session_turn_count():
+    client = TestClient(server.app)
+
+    with patch("agent.server.get_agent", return_value={"name": "codex"}), \
+         patch("agent.server.get_topic_session", return_value={"session_id": "sid-1", "cwd": "/tmp"}), \
+         patch("agent.server.get_session_injected_context", return_value={}), \
+         patch("agent.server.get_session_turn_count", return_value=0):
+        res = client.get("/topics/squid/session?agent=codex")
+
+    assert res.status_code == 200
+    assert res.json()["session_turn_count"] == 0
+
+    with patch("agent.server.get_agent", return_value={"name": "codex"}), \
+         patch("agent.server.get_topic_session", return_value=None):
+        res = client.get("/topics/squid/session?agent=codex")
+
+    assert res.status_code == 200
+    assert res.json()["session_turn_count"] == 0
+
+    with patch("agent.server.get_agent", return_value=None):
+        res = client.get("/topics/squid/session?agent=missing")
+
+    assert res.status_code == 404
+
+
+def test_clear_command_rejects_unknown_agent():
+    client = TestClient(server.app)
+
+    with patch("agent.server.get_agent", return_value=None), \
+         patch("agent.server.kill_procs_by_topic") as kill_procs, \
+         patch("agent.server.clear_topic_session") as clear_session:
+        res = client.post("/cmd", json={"command": "clear", "topic": "squid", "agent": "missing"})
+
+    assert res.status_code == 400
+    assert res.json()["error"] == "agent not found: missing"
+    kill_procs.assert_not_called()
+    clear_session.assert_not_called()
 
 
 def test_health_returns_harnesses_and_providers_without_backend_aliases():
@@ -512,6 +554,74 @@ def test_provider_quota_404s_for_unknown_provider():
     response = client.get("/quota/provider/does-not-exist")
 
     assert response.status_code == 404
+
+
+def test_codex_quota_normalizes_weekly_primary_window(monkeypatch):
+    async def fake_quota_codex():
+        return server.JSONResponse({
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 50,
+                    "limit_window_seconds": 604800,
+                    "reset_after_seconds": 600,
+                },
+                "secondary_window": None,
+            },
+        })
+
+    monkeypatch.setattr(server, "quota_codex", fake_quota_codex)
+    provider = Provider(id="openai", label="GPT", gauge=Gauge(type="codex"))
+
+    response = asyncio.run(server._quota_snapshot_for_provider(provider, "openai"))
+
+    assert response.status_code == 200
+    body = json.loads(response.body)
+    assert body["used_percent"] == 50
+    assert body["seven_day"]["used_percent"] == 50
+    assert body["reset_at"] == body["seven_day"]["reset_at"]
+
+
+def test_codex_quota_prefers_cli_auth_and_account_header(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"rate_limit": {"primary_window": {"used_percent": 12}}}
+
+    class FakeAsyncSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, headers=None, impersonate=None):
+            captured["url"] = url
+            captured["headers"] = headers or {}
+            captured["impersonate"] = impersonate
+            return FakeResponse()
+
+    fake_requests = types.SimpleNamespace(AsyncSession=FakeAsyncSession)
+    fake_curl = types.SimpleNamespace(requests=fake_requests)
+    monkeypatch.setitem(sys.modules, "curl_cffi", fake_curl)
+    monkeypatch.setitem(sys.modules, "curl_cffi.requests", fake_requests)
+    monkeypatch.setattr(creds, "get_codex_cli_auth", lambda: {
+        "access_token": "header.payload.signature",
+        "account_id": "acct_123",
+    })
+    monkeypatch.setattr(creds, "get_codex_token", lambda: "stale.saved.token")
+    monkeypatch.setattr(server, "_codex_bearer_header", lambda token: f"Bearer {token}")
+
+    response = asyncio.run(server.quota_codex())
+
+    assert response.status_code == 200
+    assert captured["url"] == "https://chatgpt.com/backend-api/wham/usage"
+    assert captured["headers"]["Authorization"] == "Bearer header.payload.signature"
+    assert captured["headers"]["ChatGPT-Account-ID"] == "acct_123"
+    assert captured["headers"]["OpenAI-Beta"] == "codex-1"
+    assert captured["headers"]["originator"] == "Codex Desktop"
 
 
 class _FakeHttpResponse:

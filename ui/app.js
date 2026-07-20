@@ -662,6 +662,8 @@ document.getElementById('help-close').addEventListener('click', closeHelp);
 // ── per-topic session tracking ────────────────────────────────────────────────
 const _sessionIds = {}; // `${topic}@${agent|_}` → most recent session_id
 const _sessionTurnCounts = {}; // session_id → turn count
+const _sessionTurnCountsByRoute = {}; // `${topic}@${agent}` → known turn count, including cleared 0
+const _routeTurnCountRefreshAt = {}; // `${topic}@${agent}` → last refresh timestamp
 const sessionAdvisoryEl    = document.getElementById('session-advisory');
 const sessionAdvisoryMsgEl = document.getElementById('session-advisory-msg');
 let _advisoryTurnCount = 0;
@@ -688,7 +690,15 @@ function clearCachedSessionId(topic, agent) {
   delete _pendingSessionInjectedIds[taKey];
   delete _sessionLookupCache[taKey];
   if (agent) delete _sessionLookupCache[`${topic}@${agent}`];
+  if (agent) delete _sessionTurnCountsByRoute[`${topic}@${agent}`];
   delete _memorySelectionOverrides[_memoryOverrideKey(topic, agent, false)];
+}
+
+function _setKnownSessionTurnCount(topic, agent, count, sessionId = null) {
+  if (!agent || count == null) return;
+  const n = parseInt(count, 10) || 0;
+  _sessionTurnCountsByRoute[`${topic}@${agent}`] = n;
+  if (sessionId) _sessionTurnCounts[sessionId] = n;
 }
 
 // ── topic chip ────────────────────────────────────────────────────────────────
@@ -741,9 +751,12 @@ function parseRouteChain(route) {
   const origins = originStep.kind === 'join'
     ? originStep.atoms
     : result.branches.map(b => b.steps[0].atom);
-  const targets = result.branches.map(b => {
+  // A round-trip step's target is always an array (its own joined group for
+  // a target-side join, or a single-atom array otherwise) — flatten same as
+  // origin-side join already does via originStep.atoms above.
+  const targets = result.branches.flatMap(b => {
     const step = b.steps[1];
-    return step.kind === 'roundtrip' ? step.target : step.atom;
+    return step.kind === 'roundtrip' ? step.target : [step.atom];
   });
   const origin = origins[0];
   const target = targets[0];
@@ -773,6 +786,7 @@ function parseRouteChain(route) {
     origins,
     targets,
     join: originStep.kind === 'join',
+    targetJoin: nextStep.kind === 'roundtrip' && !!nextStep.join,
     fanout: uniqueTargetCount > 1,
     multiOrigin: uniqueOriginCount > 1,
     complex: originStep.kind === 'join' || uniqueTargetCount > 1 || uniqueOriginCount > 1 || /^=\d/.test(operator) || rounds > 1 || operator.includes(':'),
@@ -1003,10 +1017,9 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0, opts = {}) {
     } else if (!suppressTurnCount) {
       clearTimeout(_chipTurnCountTimer);
       _chipTurnCountTimer = null;
-      const sid = _sessionIds[`${topic}@${agent || '_'}`];
-      const count = sid ? (_sessionTurnCounts[sid] || 0) : 0;
-      if (count > 0) {
-        _renderChipTurnCount(count);
+      const count = _knownSessionTurnCount(topic, agent);
+      if (count != null) {
+        _renderChipTurnCount(count, { allowZero: true });
       } else {
         _scheduleChipTurnCountUpdate(topic, agent);
       }
@@ -1019,6 +1032,9 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0, opts = {}) {
   topicChipEl.classList.add('visible');
   topicChipEl.classList.remove('needs-agent');
   chipRow.hidden = false;
+  if (route && !broadcastAgents) {
+    refreshRouteTurnCounts(route, { force: true });
+  }
   input.placeholder = 'message…';
   updateComposerActionTitles();
   updateActiveQuotaGauge();
@@ -1039,10 +1055,10 @@ function clearTopicChip() {
   hideAdvisory();
 }
 
-function _renderChipTurnCount(count) {
+function _renderChipTurnCount(count, opts = {}) {
   let tcSpan = topicChipEl.querySelector('.chip-turn-count');
   if (stickyChip?.suppressTurnCount || stickyChip?.route) count = 0;
-  if (count <= 0) { tcSpan?.remove(); return; }
+  if (count < 0 || (count === 0 && !opts.allowZero)) { tcSpan?.remove(); return; }
   if (!tcSpan) {
     tcSpan = document.createElement('span');
     tcSpan.className = 'chip-turn-count';
@@ -1054,9 +1070,9 @@ function _renderChipTurnCount(count) {
 }
 
 function _updateChipTurnCount(topic, agent, sessionId, count) {
-  if (sessionId && count > 0) _sessionTurnCounts[sessionId] = count;
+  _setKnownSessionTurnCount(topic, agent, count, sessionId);
   if (!stickyChip || stickyChip.adhoc || stickyChip.suppressTurnCount || stickyChip.route || stickyChip.topic !== topic || (stickyChip.agent || null) !== (agent || null)) return;
-  _renderChipTurnCount(count);
+  _renderChipTurnCount(count, { allowZero: true });
 }
 
 let _chipTurnCountTimer = null;
@@ -1066,17 +1082,23 @@ function _scheduleChipTurnCountUpdate(topic, agent) {
   _chipTurnCountTimer = setTimeout(() => {
     _chipTurnCountTimer = null;
     if (!stickyChip || stickyChip.adhoc || stickyChip.suppressTurnCount || stickyChip.route || stickyChip.topic !== topic || (stickyChip.agent || null) !== (agent || null)) return;
-    const sid = _sessionIds[`${topic}@${agent || '_'}`];
-    if (!sid) return;
-    const count = _sessionTurnCounts[sid] || 0;
-    if (count > 0) _renderChipTurnCount(count);
+    const count = _knownSessionTurnCount(topic, agent);
+    if (count != null) _renderChipTurnCount(count, { allowZero: true });
   }, 700);
 }
 
+function _knownSessionTurnCount(topic, agent) {
+  if (!agent) return null;
+  const routeKey = `${topic}@${agent}`;
+  if (Object.prototype.hasOwnProperty.call(_sessionTurnCountsByRoute, routeKey)) return _sessionTurnCountsByRoute[routeKey] || 0;
+  const sid = _sessionIds[routeKey];
+  if (!sid || !Object.prototype.hasOwnProperty.call(_sessionTurnCounts, sid)) return null;
+  return _sessionTurnCounts[sid] || 0;
+}
+
 function _sessionTurnCountForRouteStep(topic, agent, fresh = false) {
-  if (!agent || fresh) return 0;
-  const sid = _sessionIds[`${topic}@${agent}`];
-  return sid ? (_sessionTurnCounts[sid] || 0) : 0;
+  if (!agent || fresh) return null;
+  return _knownSessionTurnCount(topic, agent);
 }
 
 function _routeChainTurnCounts(topic, originAgent, originFresh, targetAgent, targetFresh, targetTopic) {
@@ -1084,6 +1106,21 @@ function _routeChainTurnCounts(topic, originAgent, originFresh, targetAgent, tar
     origin: _sessionTurnCountForRouteStep(topic, originAgent, originFresh),
     target: _sessionTurnCountForRouteStep(targetTopic || topic, targetAgent, targetFresh),
   };
+}
+
+function _routePersistentSessionTargets(route) {
+  const chain = parseRouteChain(route);
+  if (!chain) return [];
+  const seen = new Set();
+  const targets = [];
+  [...(chain.origins || []), ...(chain.targets || [])].forEach(step => {
+    if (!step?.topic || !step?.agent || step.fresh) return;
+    const key = `${step.topic}@${step.agent}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    targets.push({ topic: step.topic, agent: step.agent });
+  });
+  return targets;
 }
 
 topicChipEl.addEventListener('click', () => {
@@ -1722,6 +1759,12 @@ function itemMatchesFilter(item, filter) {
   if (filter.topic && (item.topic || 'default') !== filter.topic) return false;
   if (filter.agent && (item.agent || null) !== filter.agent) return false;
   if (filter.adhoc !== null && filter.adhoc !== undefined && !!item.adhoc !== filter.adhoc) return false;
+  return true;
+}
+
+function shouldShowNewResponse(item) {
+  if (searchActive) return false;
+  if (hasHistoryFilterScope()) return itemMatchesFilter(item, historyFilter);
   return true;
 }
 
@@ -2589,7 +2632,7 @@ function parseCommand(message) {
   return null;
 }
 
-async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
+async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0, opts = {}) {
   if (cmd.command === 'status') {
     toggleProcPopup();
     return;
@@ -2645,13 +2688,19 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
   }
 
   if (cmd.command === 'clear') {
-    const stoppingRows = await commandWouldStopRunningPrompt(cmd.command, topic, agent);
+    const routeTargets = opts.route ? _routePersistentSessionTargets(opts.route) : [];
+    const clearTargets = opts.route ? routeTargets : [{ topic, agent }];
+    if (!clearTargets.length) {
+      showCmdFeedback(`${opts.route} — no persistent sessions to clear`);
+      return;
+    }
+    const stoppingRows = await commandWouldStopRunningPrompt(cmd.command, topic, agent, opts.route ? clearTargets : null);
     if (stoppingRows.length) {
-      const route = agent ? `#${topic}@${agent}` : `#${topic}`;
+      const route = opts.route || (agent ? `#${topic}@${agent}` : `#${topic}`);
       const ok = await confirmRestartWithRunningPrompts(stoppingRows, {
         header: 'Clear Session',
-        title: 'Running prompt will be stopped',
-        copy: `Clearing ${route} will stop the prompt currently running before clearing the session.`,
+        title: stoppingRows.length === 1 ? 'Running prompt will be stopped' : 'Running prompts will be stopped',
+        copy: `Clearing ${route} will stop running session prompts in that scope before clearing.`,
         confirmLabel: 'Clear',
       });
       if (!ok) {
@@ -2661,15 +2710,23 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
     }
     const feedbackEl = showCmdFeedback(`${cmd.command}…`);
     try {
-      const body = { command: cmd.command, topic };
-      if (agent) body.agent = agent;
-      const res = await fetch('/cmd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      const data = await res.json();
-      if (!data.ok) { feedbackEl.textContent = `${cmd.command} failed: ${data.error || ''}`; return; }
-      clearCachedSessionId(topic, data.agent || agent || null);
+      const cleared = [];
+      let lastError = '';
+      for (const target of clearTargets) {
+        const body = { command: cmd.command, topic: target.topic };
+        if (target.agent) body.agent = target.agent;
+        const res = await fetch('/cmd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const data = await res.json();
+        if (!data.ok) { lastError = data.error || ''; continue; }
+        const clearedAgent = data.agent || target.agent || null;
+        clearCachedSessionId(target.topic, clearedAgent);
+        _setKnownSessionTurnCount(target.topic, clearedAgent, 0);
+        cleared.push(clearedAgent ? `#${target.topic}@${clearedAgent}` : `#${target.topic}`);
+      }
+      if (!cleared.length) { feedbackEl.textContent = `${cmd.command} failed: ${lastError}`; return; }
+      if (opts.route) refreshRouteTurnCounts(opts.route, { force: true });
       if (pinPanel.classList.contains('open')) renderPinPanel();
-      const tag = agent ? `#${topic}@${agent}` : `#${topic}`;
-      feedbackEl.textContent = `${tag} — session cleared`;
+      feedbackEl.textContent = `${cleared.join(', ')} — session${cleared.length === 1 ? '' : 's'} cleared`;
     } catch {
       feedbackEl.textContent = `${cmd.command} — request failed`;
     }
@@ -2703,8 +2760,11 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0) {
   }
 }
 
-async function commandWouldStopRunningPrompt(command, topic, agent) {
+async function commandWouldStopRunningPrompt(command, topic, agent, targets = null) {
   if (command !== 'clear') return [];
+  const targetSet = Array.isArray(targets) && targets.length
+    ? new Set(targets.map(t => `${t.topic}@${t.agent || '_'}`))
+    : null;
   try {
     const res = await fetch('/processes');
     if (!res.ok) return [];
@@ -2712,9 +2772,11 @@ async function commandWouldStopRunningPrompt(command, topic, agent) {
     if (!Array.isArray(rows)) return [];
     return rows.filter(row => {
       if (!row || isIdleProc(row)) return false;
-      if (row.topic !== topic) return false;
+      if (targetSet) {
+        if (!targetSet.has(`${row.topic}@${row.agent || '_'}`)) return false;
+      } else if (row.topic !== topic) return false;
       if (Boolean(row.adhoc)) return false;
-      if (agent && row.agent !== agent) return false;
+      if (!targetSet && agent && row.agent !== agent) return false;
       return true;
     });
   } catch {
@@ -2882,7 +2944,7 @@ form.addEventListener('submit', async (e) => {
       clearTimeout(_draftSaveTimer);
       localStorage.removeItem('squid_draft');
     }
-    await handleCommand(cmd, topic, agent, adhoc, lookback);
+    await handleCommand(cmd, topic, agent, adhoc, lookback, { route });
     // Re-set chip after topic-scoped commands so next message stays in context
     if (['clear', 'stop', 'stopall', 'deq'].includes(cmd.command) && (topic !== 'default' || agent)) {
       setTopicChip(topic, agent, adhoc, lookback, { route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, flowOrigins });
@@ -3706,10 +3768,11 @@ async function sendMessage(text, opts = {}) {
 
   function showError(text) {
     revealResponseBubble();  // sets firstDataReceived, suppresses finally fallback
-    if (!bubble.parentNode) messages.appendChild(bubble);
     const errDisplay = normalizedErrorDisplay(text);
     // Don't wipe streamed content with a generic fallback message
     if (!errDisplay && raw) return;
+    if (!shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) return;
+    if (!bubble.parentNode) messages.appendChild(bubble);
     contentDiv.innerHTML = `<span class="msg-error">${errDisplay || 'Response interrupted.'}</span>`;
     scrollToBottom();
   }
@@ -3730,10 +3793,12 @@ async function sendMessage(text, opts = {}) {
   }
 
   function showStoredResponse(content) {
+    if (!shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) return false;
     if (!bubble.parentNode) messages.appendChild(bubble);
     raw = content || '';
     contentDiv.innerHTML = renderAssistantMarkdown(raw);
     scrollToBottom();
+    return true;
   }
 
   function addCompletionTimestamp() {
@@ -3802,7 +3867,11 @@ async function sendMessage(text, opts = {}) {
             statusBuf = data.status_raw;
           }
           removeThinking();
-          showStoredResponse(data.content || '');
+          if (!showStoredResponse(data.content || '')) {
+            controller.abort();
+            finalizeQuotaTracking();
+            return;
+          }
           bubble.classList.add('history-item');
           resolvedAgent = data.agent || resolvedAgent;
           addPinButton(bubble, msgId, topic, resolvedAgent, data.session_id || null);
@@ -3828,7 +3897,8 @@ async function sendMessage(text, opts = {}) {
           renderCompletionTools(storedTools.length ? storedTools : liveToolEvents);
           addCompletionTimestamp();
           scrollToBottom();
-          if (flowRunId && msgId) watchFlowRun(flowRunId, msgId);
+          if (flowRunId && msgId) watchFlowRun(flowRunId, msgId, flowRoute || route);
+          if (flowRoute || route) refreshRouteTurnCounts(flowRoute || route, { force: true });
           controller.abort();
           finalizeQuotaTracking();
         } else if (data.status === 'error') {
@@ -4106,20 +4176,19 @@ async function sendMessage(text, opts = {}) {
             if (firstDataReceived) {
               contentDiv.innerHTML = renderAssistantMarkdown(raw);
               bubble.classList.add('history-item');
-              messages.appendChild(bubble);
-              if (searchActive && searchState) {
-                const kws = searchState.keywords.trim().split(/\s+/).filter(Boolean);
-                if (kws.length) highlightTextNodes(bubble, kws);
+              if (shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) {
+                messages.appendChild(bubble);
+                if (statsEl) messages.appendChild(statsEl); // stats goes between bubble and diffs, not after
+                renderCompletionTools(liveToolEvents);
+                scrollToBottom();
               }
-              if (statsEl) messages.appendChild(statsEl); // stats goes between bubble and diffs, not after
-              renderCompletionTools(liveToolEvents);
-              scrollToBottom();
             }
             // Later chain steps (target handoff, "<>" return) are dispatched
             // server-side (agent/flow.py) — not sent from here anymore, so a
             // refresh mid-chain can't strand it. Just watch for them to keep
             // rendering live while this tab stays open.
-            if (flowRunId && msgId) watchFlowRun(flowRunId, msgId);
+            if (flowRunId && msgId) watchFlowRun(flowRunId, msgId, flowRoute || route);
+            if (flowRoute || route) refreshRouteTurnCounts(flowRoute || route, { force: true });
             // Update ctx label with pin count and store IDs for popup
             setCtxLabel(liveCtxSpan, adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
             liveCtxSpan.dataset.pinnedIds = JSON.stringify(_contextIds);
@@ -4230,8 +4299,10 @@ async function sendMessage(text, opts = {}) {
       if (pinPanel.classList.contains('open')) renderPinPanel();
     }
     if (!detachedPolling && !userAborted && !firstDataReceived && !completedFromStatus) {
-      if (!bubble.parentNode) messages.appendChild(bubble);
-      contentDiv.innerHTML = '<span class="msg-error">No response — backend may be rate-limited or unavailable.</span>';
+      if (shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) {
+        if (!bubble.parentNode) messages.appendChild(bubble);
+        contentDiv.innerHTML = '<span class="msg-error">No response — backend may be rate-limited or unavailable.</span>';
+      }
     }
     addCompletionTimestamp();
   }
@@ -4949,6 +5020,9 @@ function appendHistoryItem(item, container) {
   ctxSpan.className = 'user-ctx';
   if (item.id != null) ctxSpan.dataset.msgId = String(item.id);
   const sessionTurnCount = parseInt(item.session_turn_count || '0', 10) || 0;
+  if (item.session_turn_count != null && item.agent && !item.adhoc) {
+    _setKnownSessionTurnCount(item.topic || 'default', item.agent, sessionTurnCount, item.session_id || null);
+  }
   if (sessionTurnCount > 0 && item.session_id && !item.adhoc) {
     const prev = _sessionTurnCounts[item.session_id] || 0;
     if (sessionTurnCount > prev) {
@@ -5072,11 +5146,8 @@ async function replacePendingWithStoredItem(item, wipBubble) {
     if (data.status !== 'done' && data.status !== 'error') return;
     if (data.status === 'error' && !String(data.content || '').trim()) return;
     wipBubble.remove();
-    const wipEl = appendHistoryItem(data, messages);
-    if (wipEl && searchActive && searchState) {
-      const kws = searchState.keywords.trim().split(/\s+/).filter(Boolean);
-      if (kws.length) highlightTextNodes(wipEl, kws);
-    }
+    if (!shouldShowNewResponse(data)) return;
+    appendHistoryItem(data, messages);
     updateInContextMarkers();
     updatePinCount();
     if (pinPanel.classList.contains('open')) renderPinPanel();
@@ -5095,10 +5166,12 @@ async function attachFlowStep(msgId) {
     const data = await res.json();
     if (messages.querySelector(`[data-msg-id="${msgId}"]`)) return;
     if (data.status === 'pending') {
+      if (!searchActive && hasHistoryFilterScope() && !itemMatchesFilter(data, historyFilter)) return;
       const wipBubble = makeWipBubble(data);
       messages.appendChild(wipBubble);
       reconnectPendingItem(data, wipBubble);
     } else {
+      if (!shouldShowNewResponse(data)) return;
       appendHistoryItem(data, messages);
     }
     scrollToBottom();
@@ -5110,7 +5183,7 @@ async function attachFlowStep(msgId) {
 // poll for them while this tab is open so they render live, same as a step
 // this tab sent itself. Purely cosmetic: the chain completes server-side
 // with or without a watcher.
-function watchFlowRun(flowRunId, afterId) {
+function watchFlowRun(flowRunId, afterId, route = null) {
   if (!flowRunId || _flowRunWatchers.has(flowRunId)) return;
   _flowRunWatchers.add(flowRunId);
   let cursor = afterId;
@@ -5131,6 +5204,7 @@ function watchFlowRun(flowRunId, afterId) {
         if (data.complete) {
           clearInterval(timer);
           _flowRunWatchers.delete(flowRunId);
+          if (route) refreshRouteTurnCounts(route, { force: true });
           return;
         }
       }
@@ -5333,7 +5407,7 @@ function makeUserBubble(text, topic, agent, backendFallback = null, adhoc = fals
 }
 
 function appendRouteChainTurnCount(parent, count) {
-  if (!count || count <= 0) return;
+  if (count == null || count < 0) return;
   const countSpan = document.createElement('span');
   countSpan.className = 'chip-turn-count route-chain-turn-count';
   countSpan.textContent = `·${count}t`;
@@ -5377,7 +5451,7 @@ function makeRouteChainMarker(route, opts = {}) {
     setAgentSlugColor(freshSpan, originAgent);
     div.appendChild(freshSpan);
   }
-  appendRouteChainTurnCount(div, opts.turnCounts?.origin || 0);
+  appendRouteChainTurnCount(div, opts.turnCounts?.origin);
 
   const arrowSpan = document.createElement('span');
   arrowSpan.className = 'route-chain-arrow';
@@ -5404,7 +5478,7 @@ function makeRouteChainMarker(route, opts = {}) {
     setAgentSlugColor(freshSpan, targetAgent);
     div.appendChild(freshSpan);
   }
-  appendRouteChainTurnCount(div, opts.turnCounts?.target || 0);
+  appendRouteChainTurnCount(div, opts.turnCounts?.target);
   return div;
 }
 
@@ -5430,6 +5504,7 @@ const FLOW_EXAMPLES = [
   '#topic1@agent1,#topic2@agent1>#topic3',
   '#topic1@agent1,#topic2@agent2<>#topic3,#topic4@agentx',
   '#topic1@agent1+#topic2@agent1>#topic3',
+  '#topic1@agent1<>#topic2+#topic3',
   '#squid@codex>#hive@review!',
   '#squid@codex>#hive',
   '#topic1@agent1=5:1d>@agent2',
@@ -5892,6 +5967,7 @@ const QUOTA_CONFIG = {
 
 const quotaSnapshots = {};
 const QUOTA_ERROR_RETRY_DELAYS = [3000, 10000, 30000];
+const QUOTA_ERROR_BACKGROUND_RETRY_DELAY = 60000;
 // Per-backend runtime state. timer is the label-refresh interval handle.
 // activeCount tracks in-flight messages; drives the 30s quota poll interval.
 const quotaState = {};
@@ -5917,6 +5993,18 @@ function isBalanceGauge(ref) {
 
 function quotaConfigFor(backend) {
   return QUOTA_CONFIG[gaugeTypeFor(backend)] || null;
+}
+
+async function ensureQuotaMetadata() {
+  if (Object.keys(_providerMetadata).length) return;
+  try {
+    const res = await fetch('/health');
+    if (!res.ok) return;
+    const health = await res.json();
+    _providerMetadata = health.providers || {};
+    _harnessMetadata = {};
+    for (const h of (health.harnesses || [])) _harnessMetadata[h.id] = h;
+  } catch { /* quota remains hidden until health is reachable */ }
 }
 
 let activeQuotaBackend = null;
@@ -6006,15 +6094,7 @@ async function resolveActiveQuotaBackend() {
 
 async function resolveQuotaProvider(topicName, agentName) {
   if (!Object.keys(_providerMetadata).length) {
-    try {
-      const res = await fetch('/health');
-      if (res.ok) {
-        const health = await res.json();
-        _providerMetadata = health.providers || {};
-        _harnessMetadata = {};
-        for (const h of (health.harnesses || [])) _harnessMetadata[h.id] = h;
-      }
-    } catch { /* gauge remains hidden until health is reachable */ }
+    await ensureQuotaMetadata();
   }
   if (!agentName && topicName) {
     const topics = await _acTopics();
@@ -6156,11 +6236,11 @@ function renderQuotaLoaded(backend, snapshot) {
   });
 }
 
-function showQuotaError(backend, text) {
+function showQuotaError(backend, text, options = {}) {
   const cfg = quotaConfigFor(backend);
   if (!cfg) return;
   const state = quotaStateFor(backend);
-  clearQuotaRetry(state);
+  if (options.clearRetry !== false) clearQuotaRetry(state);
   state.resetAt = null;
   if (state.timer) { clearTimeout(state.timer); state.timer = null; }
 
@@ -6193,7 +6273,11 @@ function showTransientQuotaError(backend, text) {
   if (state.retryTimer) return;
   const delay = QUOTA_ERROR_RETRY_DELAYS[state.retryAttempt++];
   if (delay == null) {
-    showQuotaError(backend, text);
+    showQuotaError(backend, text, { clearRetry: false });
+    state.retryTimer = setTimeout(async () => {
+      state.retryTimer = null;
+      await fetchQuotaForBackend(backend);
+    }, QUOTA_ERROR_BACKGROUND_RETRY_DELAY);
     return;
   }
   state.retryTimer = setTimeout(async () => {
@@ -6202,9 +6286,23 @@ function showTransientQuotaError(backend, text) {
   }, delay);
 }
 
+function showRecoverableQuotaError(backend, text) {
+  const state = quotaStateFor(backend);
+  showQuotaError(backend, text, { clearRetry: false });
+  if (state.retryTimer) return;
+  state.retryTimer = setTimeout(async () => {
+    state.retryTimer = null;
+    await fetchQuotaForBackend(backend);
+  }, QUOTA_ERROR_BACKGROUND_RETRY_DELAY);
+}
+
 async function fetchQuotaForBackend(backend) {
   const provider = quotaStatusProviderKey(backend);
-  const cfg = quotaConfigFor(provider);
+  let cfg = quotaConfigFor(provider);
+  if (!cfg && !Object.keys(_providerMetadata).length) {
+    await ensureQuotaMetadata();
+    cfg = quotaConfigFor(provider);
+  }
   if (!cfg) return null;
   const state = quotaStateFor(provider);
   if (state.inFlight) return state.raw == null ? null : { backend: provider, ...state };
@@ -6214,7 +6312,10 @@ async function fetchQuotaForBackend(backend) {
     const url = `/quota/provider/${encodeURIComponent(provider)}`;
     const res = await fetch(url);
     if (!res.ok) {
-      if (res.status === 400) showQuotaError(provider, `${label} auth`);
+      const isAuthFailure = [400, 401, 403].includes(res.status);
+      if (isAuthFailure && gaugeTypeFor(provider) === 'codex') {
+        showRecoverableQuotaError(provider, `${label} auth`);
+      } else if (isAuthFailure) showQuotaError(provider, `${label} auth`);
       else showTransientQuotaError(provider, `${label} error`);
       return null;
     }
@@ -6307,7 +6408,10 @@ function initQuota() {
 const codexQuotaDisplay = document.getElementById('codex-quota-display');
 
 async function fetchCodexQuota() {
-  return fetchQuotaForBackend('openai');
+  if (!Object.keys(_providerMetadata).length) await ensureQuotaMetadata();
+  const provider = Object.keys(_providerMetadata)
+    .find(id => _providerMetadata[id]?.gauge?.type === 'codex') || 'openai';
+  return fetchQuotaForBackend(provider);
 }
 
 function parseCursorQuota(data) {
@@ -6346,8 +6450,6 @@ function initCodexQuota() {
       </svg>
       <span id="${cfg.labelId}"></span>
     </span>`;
-  showQuotaError('codex', 'Codex auth');
-
   const credsPopup = document.getElementById(cfg.credsPopupId);
   codexQuotaDisplay.addEventListener('click', () => credsPopup.classList.toggle('open'));
   document.addEventListener('click', (e) => {
@@ -6431,30 +6533,6 @@ function initCodexCreds() {
   const tokenInput = document.getElementById('codex-creds-token');
   const saveBtn    = document.getElementById('codex-creds-save');
   const status     = document.getElementById('codex-creds-status');
-  const autoBtn    = document.getElementById('codex-creds-auto');
-  const autoStatus = document.getElementById('codex-creds-auto-status');
-
-  if (location.hostname !== '127.0.0.1' && location.hostname !== 'localhost') {
-    autoBtn.style.display = 'none';
-    autoStatus.style.display = 'none';
-  }
-
-  autoBtn.addEventListener('click', async () => {
-    autoBtn.disabled = true;
-    autoStatus.textContent = 'detecting…';
-    try {
-      const res = await fetch('/config/creds/codex/auto', { method: 'POST' });
-      const data = await res.json();
-      if (res.ok) {
-        autoStatus.textContent = 'saved ✓';
-        fetchCodexQuota();
-      } else {
-        autoStatus.textContent = data.error || 'failed';
-      }
-    } catch { autoStatus.textContent = 'error'; }
-    autoBtn.disabled = false;
-    setTimeout(() => { autoStatus.textContent = ''; }, 5000);
-  });
 
   saveBtn.addEventListener('click', async () => {
     const token = tokenInput.value.trim();
@@ -9248,7 +9326,7 @@ const DRIVER_CATALOG = Object.freeze({
     label: 'Codex',
     installCmd: 'curl -fsSL https://chatgpt.com/codex/install.sh | sh',
     authHint: 'run codex to authenticate',
-    gaugeHint: 'click gauge in header -> Detect',
+    gaugeHint: 'uses codex CLI auth',
   },
   cursor: {
     label: 'Cursor Agent',
@@ -9266,7 +9344,7 @@ const DRIVER_CATALOG = Object.freeze({
 
 const GAUGE_CATALOG = Object.freeze({
   claude: 'click gauge in header -> Detect',
-  codex: 'click gauge in header -> Detect',
+  codex: 'uses codex CLI auth',
   cursor: 'automatic via cursor-agent',
   deepseek: 'uses this provider API key',
   kimi: 'uses this provider API key',
@@ -11323,15 +11401,20 @@ async function saveCodeRootsDecision(topic, payload) {
 function _getSessionMeta(topic, agent) {
   if (!agent) return { session_id: null, cwd: null, loading: false };
   const key = `${topic}@${agent}`;
-  if (_sessionIds[`${topic}@${agent}`]) {
-    return { session_id: _sessionIds[`${topic}@${agent}`], cwd: null, loading: false };
+  const cachedSid = _sessionIds[`${topic}@${agent}`];
+  if (cachedSid && Object.prototype.hasOwnProperty.call(_sessionTurnCounts, cachedSid)) {
+    return { session_id: cachedSid, cwd: null, session_turn_count: _sessionTurnCounts[cachedSid], loading: false };
   }
   if (_sessionLookupCache[key]) return _sessionLookupCache[key];
   _sessionLookupCache[key] = { session_id: null, cwd: null, loading: true };
   fetch(`/topics/${encodeURIComponent(topic)}/session?agent=${encodeURIComponent(agent)}`)
     .then(r => r.ok ? r.json() : null)
     .then(data => {
+      if (!data || typeof data !== 'object' || Array.isArray(data)) return;
       _sessionLookupCache[key] = { ...(data || { session_id: null, cwd: null }), loading: false };
+      if (data.session_turn_count != null) {
+        _setKnownSessionTurnCount(topic, agent, data.session_turn_count, data.session_id || null);
+      }
       if (data?.session_id) {
         _sessionIds[`${topic}@${agent}`] = data.session_id;
         _rememberSessionMemoryRevision(topic, agent, data);
@@ -11341,10 +11424,10 @@ function _getSessionMeta(topic, agent) {
           setInjectedInto(inj);
         }
       }
-      if (!_acStashedForNav && data?.session_id && stickyChip && !stickyChip.adhoc && !stickyChip.route &&
+      if (!_acStashedForNav && stickyChip && !stickyChip.adhoc && !stickyChip.route &&
           stickyChip.topic === topic && stickyChip.agent === agent) {
-        const count = _sessionTurnCounts[data.session_id] || 0;
-        if (count > 0) _renderChipTurnCount(count);
+        const count = _knownSessionTurnCount(topic, agent);
+        if (count != null) _renderChipTurnCount(count, { allowZero: true });
       }
       updatePinCount();
       if (pinPanel.classList.contains('open')) renderPinPanel();
@@ -11353,6 +11436,36 @@ function _getSessionMeta(topic, agent) {
     })
     .catch(() => { _sessionLookupCache[key].loading = false; });
   return _sessionLookupCache[key];
+}
+
+async function refreshRouteTurnCounts(route, opts = {}) {
+  const targets = _routePersistentSessionTargets(route);
+  if (!targets.length) return;
+  const force = !!opts.force;
+  const minAgeMs = opts.minAgeMs ?? 5000;
+  await Promise.all(targets.map(async target => {
+    const key = `${target.topic}@${target.agent}`;
+    if (!force && Object.prototype.hasOwnProperty.call(_sessionTurnCountsByRoute, key)) return;
+    const now = Date.now();
+    if (force && now - (_routeTurnCountRefreshAt[key] || 0) < minAgeMs) return;
+    _routeTurnCountRefreshAt[key] = now;
+    try {
+      const res = await fetch(`/topics/${encodeURIComponent(target.topic)}/session?agent=${encodeURIComponent(target.agent)}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+      _sessionLookupCache[key] = { ...(data || { session_id: null, cwd: null }), loading: false };
+      if (data?.session_id) {
+        _sessionIds[key] = data.session_id;
+        _rememberSessionMemoryRevision(target.topic, target.agent, data);
+      } else {
+        delete _sessionIds[key];
+      }
+      if (data && data.session_turn_count != null) {
+        _setKnownSessionTurnCount(target.topic, target.agent, data.session_turn_count, data.session_id || null);
+      }
+    } catch {}
+  }));
 }
 
 function _topicMemoryState(target = null) {
@@ -13570,6 +13683,9 @@ function recoverForegroundState() {
   if (_activePollImmediate) _activePollImmediate();
   recoverPendingBubbles();
   startProcPoll();
+  if (stickyChip?.route && !stickyChip.broadcastAgents) {
+    refreshRouteTurnCounts(stickyChip.route, { force: true });
+  }
 }
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {

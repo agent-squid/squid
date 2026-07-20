@@ -228,7 +228,7 @@ test('agents provider catalog treats keyed DeepSeek as ready without Claude auth
   await expect(row).not.toContainText('installed');
 });
 
-test('agents provider catalog points Claude and Codex gauges to auto-detect', async ({ page }) => {
+test('agents provider catalog points gauges to their auth source', async ({ page }) => {
   await mockApp(page);
   await page.route('**/health', r => r.fulfill({ json: {
     status: 'ok',
@@ -247,7 +247,7 @@ test('agents provider catalog points Claude and Codex gauges to auto-detect', as
   await page.locator('.nav-tab[data-view="agents"]').click();
 
   await expect(page.locator('#providers-catalog .bcat-row').filter({ hasText: 'Claude' })).toContainText('click gauge in header -> Detect');
-  await expect(page.locator('#providers-catalog .bcat-row').filter({ hasText: 'GPT' })).toContainText('click gauge in header -> Detect');
+  await expect(page.locator('#providers-catalog .bcat-row').filter({ hasText: 'GPT' })).toContainText('uses codex CLI auth');
   await expect(page.locator('#providers-catalog')).not.toContainText('paste org ID');
   await expect(page.locator('#providers-catalog')).not.toContainText('bookmarklet');
 });

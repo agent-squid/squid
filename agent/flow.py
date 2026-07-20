@@ -209,7 +209,10 @@ def parse_flow_route(route: Optional[str]) -> Optional[dict]:
         return None
     origin_text, operator, target_text = split
     origin_group = _parse_group(origin_text, allow_plus=True)
-    target_group = _parse_group(target_text, allow_plus=False)
+    # A round-trip's return leg is a real consumer of a joined target (see
+    # ADR-0032, "Principle of join") — every other operator is terminal, so
+    # '+' stays illegal on their target side.
+    target_group = _parse_group(target_text, allow_plus=(operator["type"] == "roundtrip"))
     if not origin_group or not target_group:
         return None
     origins = _resolve_origin_group(origin_group)
@@ -217,26 +220,34 @@ def parse_flow_route(route: Optional[str]) -> Optional[dict]:
         return None
     if operator["type"] == "roundtrip" and origin_group["kind"] == "plus":
         return None
+    target_join = operator["type"] == "roundtrip" and target_group["kind"] == "plus"
 
     branches = []
     if origin_group["kind"] == "plus":
         targets = _resolve_target_group(target_group, _join_forward_state(origins))
         if not targets:
             return None
-        for target in targets:
-            branches.append({"origins": origins, "target": target, "operator": operator["type"], "op": operator})
+        if target_join:
+            branches.append({"origins": origins, "targets": targets, "target_join": True, "operator": operator["type"], "op": operator})
+        else:
+            for target in targets:
+                branches.append({"origins": origins, "targets": [target], "target_join": False, "operator": operator["type"], "op": operator})
     else:
         for origin_atom in origins:
             targets = _resolve_target_group(target_group, origin_atom)
             if not targets:
                 return None
-            for target in targets:
-                branches.append({
-                    "origins": [origin_atom],
-                    "target": target,
-                    "operator": operator["type"],
-                    "op": operator,
-                })
+            if target_join:
+                branches.append({"origins": [origin_atom], "targets": targets, "target_join": True, "operator": operator["type"], "op": operator})
+            else:
+                for target in targets:
+                    branches.append({
+                        "origins": [origin_atom],
+                        "targets": [target],
+                        "target_join": False,
+                        "operator": operator["type"],
+                        "op": operator,
+                    })
 
     origin_sep = "+" if origin_group["kind"] == "plus" else ","
     key = _minimal_grouped_text(origins, origin_sep)
@@ -250,13 +261,14 @@ def parse_flow_route(route: Optional[str]) -> Optional[dict]:
             "agent": origins[0]["agent"] if len(agents) == 1 else None,
         }
     key_targets = _resolve_target_group(target_group, uniform_state)
+    target_sep = "+" if target_group["kind"] == "plus" else ","
     if key_targets:
-        key += operator["raw"] + _drop_against_parent_text(key_targets, uniform_state, ",")
+        key += operator["raw"] + _drop_against_parent_text(key_targets, uniform_state, target_sep)
     else:
         key += operator["raw"] + target_text
 
     first_origin = origins[0]
-    first_target = branches[0]["target"]
+    first_target = branches[0]["targets"][0]
     return {
         "topic": first_origin["topic"],
         "origin": first_origin["agent"],
@@ -270,6 +282,7 @@ def parse_flow_route(route: Optional[str]) -> Optional[dict]:
         "origins": origins,
         "branches": branches,
         "join": origin_group["kind"] == "plus",
+        "target_join": target_join,
         "route": key,
     }
 
@@ -401,7 +414,10 @@ def next_chain_steps(flow_run_id: str) -> list[dict]:
             continue
         previous_ids = [row["id"] for row in origin_assistants]
         previous_label = branch["origins"][0]["agent"] if len(branch["origins"]) == 1 else "+".join(f"@{origin['agent']}" for origin in branch["origins"])
-        target = branch["target"]
+        # oneway/scheduled branches always carry exactly one target (target
+        # fan-out decomposes into one branch per target at parse time); only
+        # a round-trip branch can have more than one, via target_join.
+        target = branch["targets"][0]
         op = branch["op"]
         after_origin = max(previous_ids)
 
@@ -443,27 +459,43 @@ def next_chain_steps(flow_run_id: str) -> list[dict]:
         current_previous_label = previous_label
         wait_seconds = _duration_seconds(op.get("wait"))
         for leg in range(op.get("rounds", 1) * 2):
-            leg_target = target if leg % 2 == 0 else origin
-            assistant = _system_assistant(rows, after_id=current_after, topic=leg_target["topic"], agent=leg_target["agent"], route=chain["route"])
-            if assistant:
-                current_previous_ids = [assistant["id"]]
-                current_after = assistant["id"]
-                current_previous_label = leg_target["agent"]
+            # The "out" leg is every joined target at once for a target_join
+            # branch (dispatched in parallel), or the single target
+            # otherwise; the "return" leg is always the single origin.
+            leg_targets = branch["targets"] if leg % 2 == 0 else [origin]
+            done = []
+            pending = []
+            for leg_target in leg_targets:
+                assistant = _system_assistant(rows, after_id=current_after, topic=leg_target["topic"], agent=leg_target["agent"], route=chain["route"])
+                (done if assistant else pending).append((leg_target, assistant))
+            if not pending:
+                # Every member of this leg completed — advance past it,
+                # pinning all of them (mirrors the origin-side join gate above).
+                current_previous_ids = [assistant["id"] for _, assistant in done]
+                current_after = max(current_previous_ids)
+                current_previous_label = (
+                    leg_targets[0]["agent"] if len(leg_targets) == 1
+                    else "+".join(f"@{t['agent']}" for t in leg_targets)
+                )
                 continue
-            if _system_user_exists(rows, after_id=current_after, topic=leg_target["topic"], agent=leg_target["agent"], route=chain["route"]):
-                break
-            schedule_key = (flow_run_id, chain["route"], "roundtrip", leg_target["topic"], leg_target["agent"], tuple(current_previous_ids), leg + 1)
-            if schedule_key in _SCHEDULED_DISPATCHES:
-                break
-            ready.append(_step(
-                chain=chain,
-                target=leg_target,
-                previous_label=current_previous_label,
-                previous_ids=current_previous_ids,
-                original_prompt=original_prompt,
-                delay_seconds=wait_seconds,
-                schedule_key=schedule_key if wait_seconds else None,
-            ))
+            # Not every member is done yet — dispatch whichever haven't been
+            # sent, in parallel, and leave the rest for a later call (each
+            # completion re-triggers next_chain_steps via the completion hook).
+            for leg_target, _ in pending:
+                if _system_user_exists(rows, after_id=current_after, topic=leg_target["topic"], agent=leg_target["agent"], route=chain["route"]):
+                    continue
+                schedule_key = (flow_run_id, chain["route"], "roundtrip", leg_target["topic"], leg_target["agent"], tuple(current_previous_ids), leg + 1)
+                if schedule_key in _SCHEDULED_DISPATCHES:
+                    continue
+                ready.append(_step(
+                    chain=chain,
+                    target=leg_target,
+                    previous_label=current_previous_label,
+                    previous_ids=current_previous_ids,
+                    original_prompt=original_prompt,
+                    delay_seconds=wait_seconds,
+                    schedule_key=schedule_key if wait_seconds else None,
+                ))
             break
     return ready
 
@@ -500,7 +532,11 @@ def expected_row_count(route: Optional[str]) -> int:
         if op["type"] == "scheduled":
             count += 2 * op["count"]
         elif op["type"] == "roundtrip":
-            count += 2 * op.get("rounds", 1) * 2
+            # Each round is every target (2 rows apiece — usually one, but a
+            # target_join branch dispatches all of them in parallel) plus one
+            # return leg (2 rows); reduces to the old `4 * rounds` when there's
+            # only one target.
+            count += op.get("rounds", 1) * (len(branch["targets"]) * 2 + 2)
         else:
             count += 2
     return count

@@ -479,3 +479,34 @@ test('a live in-flight message stays hidden while searching, then reappears on c
   await expect(thinking).toBeVisible();
   await expect(userBubble).toBeVisible();
 });
+
+test('a completed live response is not added to the visible list while searching', async ({ page }) => {
+  await mockBackend(page);
+
+  let fulfillChat;
+  const chatIntercepted = new Promise(resolve => {
+    page.route('**/chat', route => {
+      fulfillChat = body => route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' },
+        body,
+      });
+      resolve();
+    });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', 'hello');
+  await page.keyboard.press('Enter');
+  await chatIntercepted;
+
+  await page.fill('#input', '/s needle');
+  await page.keyboard.press('Enter');
+  await fulfillChat(
+    `event: meta\ndata: ${JSON.stringify({ agent: 'claude', backend: 'claude', msg_id: 1, adhoc: false })}\n\n` +
+    `data:New response\n\n` +
+    `event: done\ndata: \n\n`
+  );
+
+  await expect(page.locator('.msg.assistant:not(.msg-thinking)').filter({ hasText: 'New response' })).toHaveCount(0);
+});

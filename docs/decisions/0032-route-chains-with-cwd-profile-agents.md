@@ -5,6 +5,12 @@ updated: 2026-07-19
 ---
 # ADR-0032: Route Chains and Squid Flow with CWD-Profile Agents
 
+> For the technical implementation reference (grammar, resolution semantics,
+> branch expansion, canonical forms, and the server-side execution model) see
+> the [Squid Flow v0.1 Whitepaper](../squid-flow-whitepaper.md). This ADR is
+> the decision record — scope boundary and rationale; the whitepaper is the
+> implementation reference.
+
 ## Context and Problem Statement
 
 Squid should support workflows where an agent's behavior comes from the CLI's
@@ -46,8 +52,10 @@ implementation; if the server restarts while a delayed handoff is sleeping,
 that pending delayed handoff is lost.
 
 A chain target may be a full `#topic@agent` route, a bare `@agent`, or a
-bare `#topic` that inherits the source agent. Target fan-out and origin-side
-joins are implemented for the same single operator.
+bare `#topic` that inherits the source agent. Target fan-out, origin-side
+joins, and — under `<>`/`<N>` only, where the round-trip return leg is a real
+consumer for it (see the join-principle bullet under "v0.1 Scope") —
+target-side joins are all implemented for the same single operator.
 
 The client only ever sends the origin turn. Every step after that is
 dispatched by the server (`agent/flow.py`), not the browser: `TopicWorker`
@@ -71,7 +79,7 @@ target prompt after the origin response completes. For `<>` and `<N>`, Squid
 sends alternating target/origin handoffs until the requested round count is
 complete. For `=N>`, Squid sends the same one-way target handoff `N` times
 from the same previous output. `:T` adds an in-memory delay before each
-scheduled hop. Both the forward and return handoff prompts reuse the same generic
+scheduled repeat. Both the forward and return handoff prompts reuse the same generic
 template described under "Downstream Prompt Synthesis" below (Route / Previous
 step / Current step / Original prompt); the differentiated reconciliation-style
 return prompt shown later in this ADR is the target direction, not yet
@@ -120,11 +128,36 @@ describing the broader Squid Flow direction, not v0.1.
   origin either — inheritance only flows origin → target, never the reverse
   — so `@target`'s agent is never a candidate source for the origin's missing
   agent, even in principle.
-- A join (`+`) as the origin, feeding the one hop:
-  `#topic@a+@b>@c` and `#t1@a+#t2@b>#t3@c` are both valid. See "Squid Flow"
-  below for how the joined branches' context reaches the target step (pins,
-  not a synthesized envelope) and what happens when they disagree on a field
-  the target needs to inherit.
+- **Principle of join: a join always requires a downstream consumer.** `+`
+  pins every joined branch's final message into one later step's turn (see
+  "Squid Flow" below) — that pinning is the join's entire reason to exist.
+  A join with nothing to pin *into* is meaningless, full stop; this is the
+  one rule that decides whether any given `+` is legal, in any position.
+  Unlike `,` (Origin Broadcast), which is a complete, meaningful clause on
+  its own (each listed origin just runs independently — see "zero operators"
+  above), a bare `#topic@a+@b` with nothing after it has no consumer and is
+  **not** valid syntax. `ui/flow-lang.js`'s `parseClause` rejects this case
+  explicitly.
+- The **origin** always satisfies the join principle, feeding the clause's
+  one hop: `#topic@a+@b>@c` and `#t1@a+#t2@b>#t3@c` are both valid. See
+  "Squid Flow" below for what happens when the joined origins disagree on a
+  field the target needs to inherit.
+- A hop's **target** can also satisfy it, but only under `<>`/`<N>`:
+  `#t1@a1<>#t2+#t3` dispatches `#t2` and `#t3` in parallel from `t1`'s
+  forwarded output, waits for *both* to complete, then fires one return turn
+  to `t1` pinning both — the round-trip's return leg is what makes this a
+  real consumer, already built into one operator token, unlike a plain `>`
+  target (nothing can follow it in a single-operator clause, so `+` there
+  is never valid — `#t1@a1>#t2+#t3` still rejects). The join-gate this
+  needs — dispatch every joined target, wait for all of them, pin all of
+  them into the one return step — lives in
+  `agent/flow.py`'s `next_chain_steps` round-trip loop (`leg_targets =
+  branch["targets"] if leg % 2 == 0 else [origin]`, gated by a `pending`
+  list mirroring the origin-side join gate in the same function's `ready`
+  loop) and in `ui/flow-lang.js`'s `expand()` (`hop.target.kind === 'plus'`
+  branch of the roundtrip case). Every other operator (`>`, `=>`, `=N>`) is
+  terminal — no hop can follow it in v0.1 — so target-side `+` stays illegal
+  there regardless of anything else in the clause.
 
 **Out of scope:**
 
@@ -301,7 +334,8 @@ edges first, `#t1@a1>#t3` and `#t2@a2>#t3`, and only then does each `#t3`
 inherit its own branch's agent: `#t1@a1>#t3@a1, #t2@a2>#t3@a2`.
 
 `+` is different: a join does not decompose — that is the entire point of an
-explicit join, one envelope feeding one downstream step. So an omitted-half
+explicit join, every joined branch's output reaching one downstream step as
+pins (see "Squid Flow" below — never a synthesized envelope). So an omitted-half
 step downstream of a join has no single root to inherit from unless the
 joined origins agree. `#t1@a+#t2@a>#t3` is unambiguous (both agree the agent
 is `a`, so `#t3` resolves to `#t3@a`). `#t1@a1+#t2@a2>#t3` is **not** valid:
@@ -537,14 +571,20 @@ one-way handoffs:
 ```
 
 `<N:T>` means run `N` request/response rounds with the next route step, waiting
-duration `T` between every hop — the out-hop and the return-hop of each round
+duration `T` between every leg — the out-leg and the return-leg of each round
 alike, symmetrically in both directions, not just between successive rounds.
-A round is two hops (out, back), so `N` rounds are `2N` hops. Matching the
-scheduled edge's rule below (every repeat, including the first, is a full `T`
-after the trigger — never immediate), hop `k` fires at `k*T` after the
-origin: hop 1 (round 1's out-hop) is `T` after the trigger, hop 2 (round 1's
-return) is `2T` after the trigger, and so on through hop `2N`. `<1:T>` is
-therefore not degenerate: its one round still has two hops, at `T` and `2T`.
+(This is the one place in this ADR where "hop" and "leg" need to be kept
+apart: `<N:T>` is one hop — the clause's single operator, same as any other
+— but that one hop dispatches `2N` legs, alternating target/origin. "At most
+one hop operator" elsewhere in this document is a grammar-depth rule, not a
+cap on how many messages that hop sends; see the Squid Flow v0.1 Whitepaper,
+"Hop vs. leg," for the full distinction.) A round is two legs (out, back), so
+`N` rounds are `2N` legs. Matching the scheduled edge's rule below (every
+repeat, including the first, is a full `T` after the trigger — never
+immediate), leg `k` fires at `k*T` after the origin: leg 1 (round 1's
+out-leg) is `T` after the trigger, leg 2 (round 1's return) is `2T` after
+the trigger, and so on through leg `2N`. `<1:T>` is therefore not
+degenerate: its one round still has two legs, at `T` and `2T`.
 If the two directions need different delays, that isn't expressed on
 `<N:T>` — write the round out explicitly as chained one-way edges instead,
 e.g. `@a=1:1h>@b=>@a` (an hour out, no delay back) or `@a=1:1h>@b=1:2h>@a` (a

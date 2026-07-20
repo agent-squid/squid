@@ -46,7 +46,11 @@
     };
   }
 
-  // allowPlus: whether '+' is a legal separator in this position (origin only).
+  // allowPlus: whether '+' is a legal separator in this position — the
+  // clause origin always allows it, and so does a round-trip's target
+  // (its return leg is a real consumer of the join; see ADR-0032,
+  // "Principle of join"). Every other target position has no consumer for
+  // a join to feed, so allowPlus is false there.
   function parseGroup(s, offset, allowPlus) {
     const atoms = [];
     let kind = 'single';
@@ -60,7 +64,7 @@
       const sep = rest[0];
       if (sep === ',' || sep === '+') {
         if (sep === '+' && !allowPlus) {
-          throw new FlowError(`'+' (join) is not valid here (position ${pos}) — join is only valid on the origin side of an edge`, pos);
+          throw new FlowError(`'+' (join) is not valid here (position ${pos}) — a join needs something to consume its output (an origin feeding a hop, or a round-trip's target feeding its return leg)`, pos);
         }
         const thisKind = sep === ',' ? 'comma' : 'plus';
         if (kind !== 'single' && kind !== thisKind) {
@@ -136,7 +140,12 @@
       offset += parsedOp.consumed;
 
       if (parsedOp.op.type === 'roundtrip') {
-        const { group: target, consumed: c2, rest: rest2 } = parseGroup(s, offset, false);
+        // Unlike every other operator, '<>'/'<N>' has a built-in second
+        // dispatch (the return leg back to origin) inside one operator
+        // token — that return leg is a real consumer, so a joined target
+        // satisfies the join principle here even though it can't anywhere
+        // else (see ADR-0032, "Principle of join").
+        const { group: target, consumed: c2, rest: rest2 } = parseGroup(s, offset, true);
         s = rest2;
         offset += c2;
         hops.push({ op: parsedOp.op, target });
@@ -155,6 +164,10 @@
       if (s) {
         throw new FlowError(`Multi-hop Squid Flow clauses are not supported in v0.1 (position ${text.length - s.length})`, text.length - s.length);
       }
+    }
+
+    if (origin.kind === 'plus' && hops.length === 0) {
+      throw new FlowError(`'+' (join) needs a hop after it to consume the join, e.g. '${text.trim()}>@target' — a join by itself has nothing to feed`, text.length);
     }
 
     return { origin, hops };
@@ -264,19 +277,42 @@
             throw new FlowError('A join cannot have a return step (no single root to return to) — write the join as one-way only', 0);
           }
           const { resolved } = resolveGroupAgainstState(hop.target, state, false);
-          for (const t of resolved) {
-            // Segments appended *after* the origin, which is already its own
-            // step — do not re-include it at the front here.
+          // appendedSeq entries are always leg *groups* (arrays), even for a
+          // single plain target — a joined target's leg is the whole
+          // resolved array; the return leg is always just [origin].
+          if (hop.target.kind === 'plus') {
             const appended = [];
             for (let i = 0; i < hop.op.rounds; i += 1) {
-              appended.push(t);
-              appended.push(last.atom);
+              appended.push(resolved.slice());
+              appended.push([last.atom]);
             }
             nextBranches.push({
               steps: branch.steps.concat([{
                 kind: 'roundtrip',
                 origin: last.atom,
-                target: t,
+                target: resolved,
+                join: true,
+                rounds: hop.op.rounds,
+                wait: hop.op.wait,
+                appendedSeq: appended,
+              }]),
+            });
+            continue;
+          }
+          for (const t of resolved) {
+            // Segments appended *after* the origin, which is already its own
+            // step — do not re-include it at the front here.
+            const appended = [];
+            for (let i = 0; i < hop.op.rounds; i += 1) {
+              appended.push([t]);
+              appended.push([last.atom]);
+            }
+            nextBranches.push({
+              steps: branch.steps.concat([{
+                kind: 'roundtrip',
+                origin: last.atom,
+                target: [t],
+                join: false,
                 rounds: hop.op.rounds,
                 wait: hop.op.wait,
                 appendedSeq: appended,
@@ -339,8 +375,10 @@
         priorState = step.forwardState;
       } else if (step.kind === 'roundtrip') {
         const opText = step.rounds === 1 && !step.wait ? '<>' : `<${step.rounds}${step.wait ? ':' + step.wait : ''}>`;
-        text += opText + renderStepAtomCanonical(step.target, priorState);
-        priorState = { topic: step.target.topic, agent: step.target.agent };
+        text += opText + step.target.map(t => renderStepAtomCanonical(t, priorState)).join('+');
+        // Chaining after a round-trip is rejected at parse time, so priorState
+        // is never read again — first target is an arbitrary but harmless pick.
+        priorState = { topic: step.target[0].topic, agent: step.target[0].agent };
       } else {
         if (text) text += opToText(step.via || { type: 'oneway', alias: false });
         text += renderStepAtomCanonical(step.atom, priorState);
@@ -560,6 +598,13 @@
   // only ran once — so everything up to (and including) the origin of the
   // first scheduled edge renders as a single "trunk" row, and only the
   // repeated target hops fork into their own rows below it.
+  // A roundtrip leg group is always an array (the return leg is [origin];
+  // a joined target leg is every resolved target) — this renders whichever
+  // it is, joining with '+' only when there's more than one atom to join.
+  function legGroupText(legAtoms) {
+    return legAtoms.map(fullAtomText).join('+');
+  }
+
   function expandedForBranch(branch) {
     const trunk = [];
     let forkedAt = -1;
@@ -568,7 +613,7 @@
       if (step.via && step.via.type === 'scheduled') { forkedAt = idx; break; }
       if (step.kind === 'roundtrip' && step.wait) { forkedAt = idx; break; }
       if (step.kind === 'join') trunk.push(step.atoms.map(fullAtomText).join('+'));
-      else if (step.kind === 'roundtrip') for (const atom of step.appendedSeq) trunk.push(fullAtomText(atom));
+      else if (step.kind === 'roundtrip') for (const leg of step.appendedSeq) trunk.push(legGroupText(leg));
       else trunk.push(fullAtomText(step.atom));
     }
     if (forkedAt === -1) return [{ text: trunk.join('>'), note: null, continuation: false }];
@@ -592,15 +637,15 @@
         const arrow = `=1:${step.wait}>`;
         for (const inst of instances) {
           for (let i = 0; i < step.appendedSeq.length; i += 1) {
-            const text = fullAtomText(step.appendedSeq[i]);
+            const text = legGroupText(step.appendedSeq[i]);
             const note = roundtripHopNote(step, i);
             next.push({ segs: inst.segs.concat([{ arrow, text }]), note: inst.note ? `${inst.note}; ${note}` : note });
           }
         }
         instances = next;
       } else if (step.kind === 'roundtrip') {
-        for (const atom of step.appendedSeq) {
-          const text = fullAtomText(atom);
+        for (const leg of step.appendedSeq) {
+          const text = legGroupText(leg);
           for (const inst of instances) inst.segs.push({ arrow: '>', text });
         }
       } else if (step.via && step.via.type === 'scheduled') {

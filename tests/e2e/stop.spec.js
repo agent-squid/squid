@@ -158,6 +158,41 @@ test('#topic@agent! /clear preserves adhoc chip without sending adhoc to clear',
   expect(cmdBodies[1].adhoc).toBe(true);
 });
 
+test('#topic@agent /clear shows known zero turn count on the chip', async ({ page }) => {
+  await mockBackend(page, { topic: 'debug', agent: 'squid' });
+
+  await page.route('**/cmd', async route => {
+    const body = route.request().postDataJSON();
+    await route.fulfill({ json: { ok: true, agent: body.agent } });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '#debug@squid /clear');
+  await page.keyboard.press('Enter');
+
+  await expect(page.locator('#topic-chip')).toContainText('#debug@squid');
+  await expect(page.locator('#topic-chip .chip-turn-count')).toHaveText('·0t');
+});
+
+test('#topic@missing-agent /clear leaves turn count unknown', async ({ page }) => {
+  await mockBackend(page, { topic: 'debug', agent: 'codex' });
+
+  await page.route('**/cmd', async route => {
+    await route.fulfill({ status: 400, json: { ok: false, error: 'agent not found: squid' } });
+  });
+  await page.route('**/topics/debug/session?agent=squid', async route => {
+    await route.fulfill({ status: 404, json: { error: 'agent not found: squid' } });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '#debug@squid /clear');
+  await page.keyboard.press('Enter');
+
+  await expect(page.locator('#topic-chip')).toContainText('#debug@squid');
+  await expect(page.locator('#topic-chip .chip-turn-count')).toHaveCount(0);
+  await expect(page.locator('.cmd-feedback')).toContainText('clear failed: agent not found: squid');
+});
+
 test('/clear warns before stopping a running prompt and cancels cleanly', async ({ page }) => {
   await mockBackend(page);
   await page.route('**/processes', r => r.fulfill({ json: [

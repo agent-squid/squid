@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 _CREDS_PATH = Path.home() / ".squid" / "squid-creds.json"
+_CODEX_AUTH_PATH = Path.home() / ".codex" / "auth.json"
 
 
 def load() -> dict:
@@ -46,6 +47,15 @@ def get_codex_token() -> Optional[str]:
     return load().get("codex_token")
 
 
+def get_codex_cli_auth() -> dict:
+    try:
+        data = json.loads(_CODEX_AUTH_PATH.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    tokens = data.get("tokens")
+    return tokens if isinstance(tokens, dict) else {}
+
+
 def _extract_cookies(domain: str) -> dict:
     """Read all cookies for a domain from Chrome then Safari."""
     import browser_cookie3
@@ -74,25 +84,6 @@ def read_chrome_claude_creds() -> dict:
     if not result.get("sessionKey"):
         raise RuntimeError("sessionKey not found in claude.ai cookies. Make sure you are logged in.")
     return result
-
-
-def read_codex_creds() -> str:
-    """Fetch Codex access token from chatgpt.com session API using local browser cookies."""
-    import json
-    from curl_cffi.requests import Session
-    cookies = _extract_cookies("chatgpt.com")
-    with Session(impersonate="chrome") as s:
-        r = s.get(
-            "https://chatgpt.com/api/auth/session",
-            cookies=cookies,
-            timeout=10,
-        )
-    if r.status_code != 200:
-        raise RuntimeError(f"chatgpt.com returned {r.status_code}")
-    token = r.json().get("accessToken")
-    if not token:
-        raise RuntimeError("accessToken not found. Make sure you are logged into ChatGPT.")
-    return token
 
 
 def save_max_budget(gauge: str, amount: float) -> None:

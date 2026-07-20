@@ -34,7 +34,7 @@ test('topbar quota gauge keeps its neutral original treatment', async ({ page })
   await expect(page.locator('#quota-creds-popup')).toHaveClass(/open/);
 });
 
-test('credential auto-detect notes that remote browser cookies are unavailable', async ({ page }) => {
+test('credential popups describe their auth source', async ({ page }) => {
   await mockShell(page);
   await page.route('**/quota/provider/*', route => route.fulfill({
     json: { status: 'ok', raw: 42, used_percent: 42 },
@@ -46,8 +46,10 @@ test('credential auto-detect notes that remote browser cookies are unavailable',
   await expect(page.locator('#quota-creds-popup')).toContainText('remote phone/tablet browsers cannot share their cookies');
 
   await page.evaluate(() => document.getElementById('codex-creds-popup').classList.add('open'));
-  await expect(page.locator('#codex-creds-popup')).toContainText('Runs on this Squid server machine only');
-  await expect(page.locator('#codex-creds-popup')).toContainText('remote phone/tablet browsers cannot share their cookies');
+  await expect(page.locator('#codex-creds-popup')).toContainText('Run codex in the terminal to authenticate');
+  await expect(page.locator('#codex-creds-popup')).toContainText('~/.codex/auth.json');
+  await expect(page.locator('#codex-creds-popup')).not.toContainText('browser detect');
+  await expect(page.locator('#codex-creds-auto')).toHaveCount(0);
 });
 
 test('topbar quota gauge is chat-only while status keeps quota available', async ({ page }) => {
@@ -172,11 +174,278 @@ test('quota transient errors retry before showing failure', async ({ page }) => 
     }
   });
 
-  expect(result.delays).toEqual([3000, 10000, 30000]);
+  expect(result.delays).toEqual([3000, 10000, 30000, 60000]);
   expect(result.quotaCalls).toBe(4);
   expect(result.afterFirst).toEqual({ text: '', isError: false });
   expect(result.finalText).toBe('Claude error');
   expect(result.finalIsError).toBe(true);
+});
+
+test('codex quota transient error recovers without page refresh', async ({ page }) => {
+  await page.route('**/health', route => route.fulfill({
+    json: {
+      status: 'ok',
+      harnesses: [{ id: 'codex', installed: true, default_provider: 'openai', compatible_providers: ['openai'] }],
+      providers: { openai: { label: 'GPT', gauge: { type: 'codex' }, gauge_authed: true } },
+    },
+  }));
+  await page.route('**/config/agents', route => route.fulfill({ json: [
+    { name: 'gpt', harness: 'codex', provider: 'openai' },
+  ] }));
+  await page.route('**/topics', route => route.fulfill({ json: [
+    { name: 'default', agent: 'gpt', sticky_adhoc: true },
+  ] }));
+  await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/queue', route => route.fulfill({ json: [] }));
+  await page.route('**/processes', route => route.fulfill({ json: [] }));
+  await page.route('**/topics/**', route => route.fulfill({ json: {} }));
+
+  let quotaCalls = 0;
+  await page.route('**/quota/provider/openai', route => {
+    quotaCalls++;
+    if (quotaCalls <= 4) return route.fulfill({ status: 502 });
+    return route.fulfill({ json: { status: 'ok', raw: 21, used_percent: 21 } });
+  });
+
+  await page.addInitScript(() => {
+    const realSetTimeout = window.setTimeout.bind(window);
+    const realClearTimeout = window.clearTimeout.bind(window);
+    window.__quotaTimerCallbacks = [];
+    window.setTimeout = (callback, delay, ...args) => {
+      if ([3000, 10000, 30000, 60000].includes(delay)) {
+        const handle = { callback, args, delay, cleared: false };
+        window.__quotaTimerCallbacks.push(handle);
+        return handle;
+      }
+      return realSetTimeout(callback, delay, ...args);
+    };
+    window.clearTimeout = handle => {
+      if (handle && typeof handle === 'object' && 'cleared' in handle) {
+        handle.cleared = true;
+        return;
+      }
+      return realClearTimeout(handle);
+    };
+  });
+  await page.goto('/');
+  quotaCalls = 0;
+  const result = await page.evaluate(async () => {
+    setVisibleQuotaBackend('openai');
+    await fetchQuotaForBackend('openai');
+    const callbacks = window.__quotaTimerCallbacks;
+    for (let i = 0; i < 10 && !callbacks.some(item => item.delay === 60000); i++) {
+      const next = callbacks.find(item => !item.cleared);
+      if (!next) break;
+      next.cleared = true;
+      await next.callback(...next.args);
+    }
+    const bgIndex = callbacks.findIndex(item => !item.cleared && item.delay === 60000);
+    if (bgIndex < 0) return {
+      errored: document.getElementById('codex-quota-display').classList.contains('error'),
+      recovered: false,
+      text: callbacks.map(item => item.delay).join(','),
+    };
+    const errored = document.getElementById('codex-quota-display').classList.contains('error');
+    callbacks[bgIndex].cleared = true;
+    await callbacks[bgIndex].callback(...callbacks[bgIndex].args);
+    return {
+      errored,
+      recovered: document.getElementById('codex-quota-display').classList.contains('loaded'),
+      text: document.getElementById('codex-5h-pct').textContent,
+    };
+  });
+
+  expect(result).toEqual({ errored: true, recovered: true, text: '21' });
+  expect(quotaCalls).toBeGreaterThanOrEqual(5);
+});
+
+test('codex quota keeps background retrying after repeated visible errors', async ({ page }) => {
+  await page.route('**/health', route => route.fulfill({
+    json: {
+      status: 'ok',
+      harnesses: [{ id: 'codex', installed: true, default_provider: 'openai', compatible_providers: ['openai'] }],
+      providers: { openai: { label: 'GPT', gauge: { type: 'codex' }, gauge_authed: true } },
+    },
+  }));
+  await page.route('**/config/agents', route => route.fulfill({ json: [
+    { name: 'gpt', harness: 'codex', provider: 'openai' },
+  ] }));
+  await page.route('**/topics', route => route.fulfill({ json: [
+    { name: 'default', agent: 'gpt', sticky_adhoc: true },
+  ] }));
+  await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/queue', route => route.fulfill({ json: [] }));
+  await page.route('**/processes', route => route.fulfill({ json: [] }));
+  await page.route('**/topics/**', route => route.fulfill({ json: {} }));
+
+  let quotaCalls = 0;
+  await page.route('**/quota/provider/openai', route => {
+    quotaCalls++;
+    if (quotaCalls <= 5) return route.fulfill({ status: 502 });
+    return route.fulfill({ json: { status: 'ok', raw: 34, used_percent: 34 } });
+  });
+
+  await page.addInitScript(() => {
+    const realSetTimeout = window.setTimeout.bind(window);
+    const realClearTimeout = window.clearTimeout.bind(window);
+    window.__quotaTimerCallbacks = [];
+    window.setTimeout = (callback, delay, ...args) => {
+      if ([3000, 10000, 30000, 60000].includes(delay)) {
+        const handle = { callback, args, delay, cleared: false };
+        window.__quotaTimerCallbacks.push(handle);
+        return handle;
+      }
+      return realSetTimeout(callback, delay, ...args);
+    };
+    window.clearTimeout = handle => {
+      if (handle && typeof handle === 'object' && 'cleared' in handle) {
+        handle.cleared = true;
+        return;
+      }
+      return realClearTimeout(handle);
+    };
+  });
+  await page.goto('/');
+  quotaCalls = 0;
+
+  const result = await page.evaluate(async () => {
+    setVisibleQuotaBackend('openai');
+    await fetchQuotaForBackend('openai');
+    const callbacks = window.__quotaTimerCallbacks;
+    for (let i = 0; i < 5; i++) {
+      const next = callbacks.find(item => !item.cleared);
+      if (!next) break;
+      next.cleared = true;
+      await next.callback(...next.args);
+    }
+    return {
+      delays: callbacks.map(item => item.delay),
+      isError: document.getElementById('codex-quota-display').classList.contains('error'),
+      isLoaded: document.getElementById('codex-quota-display').classList.contains('loaded'),
+      text: document.getElementById('codex-5h-pct').textContent,
+    };
+  });
+
+  expect(result).toEqual({
+    delays: [3000, 10000, 30000, 60000, 60000],
+    isError: false,
+    isLoaded: true,
+    text: '34',
+  });
+  expect(quotaCalls).toBeGreaterThanOrEqual(6);
+});
+
+test('codex quota auth error keeps retrying without page refresh', async ({ page }) => {
+  await page.route('**/health', route => route.fulfill({
+    json: {
+      status: 'ok',
+      harnesses: [{ id: 'codex', installed: true, default_provider: 'openai', compatible_providers: ['openai'] }],
+      providers: { openai: { label: 'GPT', gauge: { type: 'codex' }, gauge_authed: true } },
+    },
+  }));
+  await page.route('**/config/agents', route => route.fulfill({ json: [
+    { name: 'gpt', harness: 'codex', provider: 'openai' },
+  ] }));
+  await page.route('**/topics', route => route.fulfill({ json: [
+    { name: 'default', agent: 'gpt', sticky_adhoc: true },
+  ] }));
+  await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/queue', route => route.fulfill({ json: [] }));
+  await page.route('**/processes', route => route.fulfill({ json: [] }));
+  await page.route('**/topics/**', route => route.fulfill({ json: {} }));
+
+  let quotaCalls = 0;
+  await page.route('**/quota/provider/openai', route => {
+    quotaCalls++;
+    if (quotaCalls === 1) return route.fulfill({ status: 401, json: { error: 'token expired' } });
+    return route.fulfill({ json: { status: 'ok', raw: 18, used_percent: 18 } });
+  });
+
+  await page.addInitScript(() => {
+    const realSetTimeout = window.setTimeout.bind(window);
+    const realClearTimeout = window.clearTimeout.bind(window);
+    window.__quotaTimerCallbacks = [];
+    window.setTimeout = (callback, delay, ...args) => {
+      if (delay === 60000) {
+        const handle = { callback, args, delay, cleared: false };
+        window.__quotaTimerCallbacks.push(handle);
+        return handle;
+      }
+      return realSetTimeout(callback, delay, ...args);
+    };
+    window.clearTimeout = handle => {
+      if (handle && typeof handle === 'object' && 'cleared' in handle) {
+        handle.cleared = true;
+        return;
+      }
+      return realClearTimeout(handle);
+    };
+  });
+  await page.goto('/');
+  quotaCalls = 0;
+
+  const result = await page.evaluate(async () => {
+    setVisibleQuotaBackend('openai');
+    clearQuotaRetry(quotaStateFor('openai'));
+    window.__quotaTimerCallbacks.length = 0;
+    await fetchQuotaForBackend('openai');
+    const timer = window.__quotaTimerCallbacks.find(item => !item.cleared && item.delay === 60000);
+    const afterError = {
+      errored: document.getElementById('codex-quota-display').classList.contains('error'),
+      text: document.getElementById('codex-quota-label').textContent,
+      hasRetry: !!timer,
+    };
+    timer.cleared = true;
+    await timer.callback(...timer.args);
+    return {
+      afterError,
+      recovered: document.getElementById('codex-quota-display').classList.contains('loaded'),
+      text: document.getElementById('codex-5h-pct').textContent,
+    };
+  });
+
+  expect(result).toEqual({
+    afterError: { errored: true, text: 'GPT auth', hasRetry: true },
+    recovered: true,
+    text: '18',
+  });
+  expect(quotaCalls).toBe(2);
+});
+
+test('codex quota initialization uses configured provider id', async ({ page }) => {
+  await page.route('**/health', route => route.fulfill({
+    json: {
+      status: 'ok',
+      harnesses: [{ id: 'codex', installed: true, default_provider: 'gpt', compatible_providers: ['gpt'] }],
+      providers: { gpt: { label: 'GPT', gauge: { type: 'codex' }, gauge_authed: true } },
+    },
+  }));
+  await page.route('**/config/agents', route => route.fulfill({ json: [
+    { name: 'gpt', harness: 'codex', provider: 'gpt' },
+  ] }));
+  await page.route('**/topics', route => route.fulfill({ json: [
+    { name: 'default', agent: 'gpt', sticky_adhoc: true },
+  ] }));
+  await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/queue', route => route.fulfill({ json: [] }));
+  await page.route('**/processes', route => route.fulfill({ json: [] }));
+  await page.route('**/topics/**', route => route.fulfill({ json: {} }));
+
+  const quotaPaths = [];
+  await page.route('**/quota/provider/*', route => {
+    quotaPaths.push(new URL(route.request().url()).pathname);
+    return route.fulfill({ json: { status: 'ok', raw: 27, used_percent: 27 } });
+  });
+
+  await page.goto('/');
+  await page.evaluate(async () => {
+    await setVisibleQuotaBackend('gpt');
+    await fetchCodexQuota();
+  });
+
+  await expect(page.locator('#codex-5h-pct')).toHaveText('27');
+  expect(quotaPaths).toContain('/quota/provider/gpt');
+  expect(quotaPaths).not.toContain('/quota/provider/openai');
 });
 
 test('detached status fallback timeout finalizes active quota tracking', async ({ page }) => {

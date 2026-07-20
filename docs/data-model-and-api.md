@@ -944,12 +944,6 @@ Auto-detect Claude web credentials from local Chrome cookies. No request body.
 
 **Response**: `{ "ok": true, "claude_org_id": "string" }` or `{ "error": "..." }`
 
-### POST /config/creds/codex/auto
-
-Auto-detect a Codex bearer token from the local Codex CLI install. No request body.
-
-**Response**: `{ "ok": true }`
-
 ### POST /config/creds/codex
 
 Save a Codex bearer token directly.

@@ -121,14 +121,29 @@
 
   footer { color: var(--text-dim); font-size: 0.72em; margin-top: 2rem; }
   footer a { color: var(--text-mid); }
+
+  .syntax-table { width: 100%; border-collapse: collapse; font-size: 0.8em; }
+  .syntax-table th, .syntax-table td {
+    text-align: left;
+    padding: 0.4rem 0.6rem;
+    border-bottom: 1px solid var(--border-faint);
+    vertical-align: top;
+  }
+  .syntax-table th { color: var(--text-lo); text-transform: uppercase; font-size: 0.85em; letter-spacing: 0.04em; }
+  .syntax-table td:first-child { font-family: 'JetBrains Mono', ui-monospace, monospace; color: var(--accent-light); white-space: nowrap; }
+  .syntax-table td:last-child { color: var(--text-muted); }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Squid Flow Playground</h1>
   <p class="sub">
-    Type a Squid Flow route expression. See <code>docs/decisions/0032-route-chains-with-cwd-profile-agents.md</code>
-    for the language spec. This page is standalone — not wired into the live composer or backend yet.
+    Type a Squid Flow route expression. See
+    <a href="https://github.com/agent-squid/squid/blob/main/docs/decisions/0032-route-chains-with-cwd-profile-agents.md" target="_blank" rel="noopener">ADR-0032</a>
+    for the language spec and decision record, or the
+    <a href="https://github.com/agent-squid/squid/blob/main/docs/squid-flow-whitepaper.md" target="_blank" rel="noopener">Squid Flow v0.1 Whitepaper</a>
+    for implementation details (grammar, resolution rules, canonical forms, execution model).
+    This page is standalone — not wired into the live composer or backend yet.
   </p>
 
   <textarea id="input" spellcheck="false" placeholder="#squid@codex&lt;2&gt;@review!"></textarea>
@@ -152,7 +167,31 @@
     <div id="expanded-list"></div>
   </section>
 
-  <footer>Not integrated into Squid yet — a standalone artifact for testing the Squid Flow grammar (ui/flow-lang.js).</footer>
+  <section class="out">
+    <h2>Syntax</h2>
+    <table class="syntax-table">
+      <thead><tr><th>Syntax</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td>#topic1</td><td>which topic (conversation) this step runs in</td></tr>
+        <tr><td>@agent1</td><td>which agent handles this step</td></tr>
+        <tr><td>!</td><td>fresh — start a new session instead of continuing the agent's existing one</td></tr>
+        <tr><td>&gt;</td><td>one-way handoff to the next step</td></tr>
+        <tr><td>=&gt;</td><td>alias for <code>&gt;</code> — same meaning, alternate spelling</td></tr>
+        <tr><td>,</td><td>independent branches — each side runs on its own, not chained together</td></tr>
+        <tr><td>#t2@a1,#t3</td><td>the first atom has to be a full route so it can anchor later partial atoms borrowing the missing half from it (here, <code>#t3</code> becomes <code>#t3@a1</code>)</td></tr>
+        <tr><td>+</td><td>join — merges multiple steps into one downstream consumer. Valid as the origin (feeding the one hop: <code>#a+#b&gt;#c</code>) or, only under <code>&lt;&gt;</code>/<code>&lt;N&gt;</code>, as the target (the return leg is the consumer: <code>#a&lt;&gt;#b+#c</code> dispatches <code>#b</code> and <code>#c</code> in parallel, then pins both into the return to <code>#a</code>). A join with no consumer (e.g. a bare <code>#a+#b</code>, or <code>+</code> on a plain <code>&gt;</code> target) is rejected.</td></tr>
+        <tr><td>&lt;&gt; / &lt;N&gt;</td><td>request/response round trip; <code>&lt;N&gt;</code> repeats it N times</td></tr>
+        <tr><td>&lt;N:1d&gt;</td><td>round trip, waiting the given duration between every hop (out and back), both directions equally</td></tr>
+        <tr><td>=N&gt;</td><td>repeat this one-way handoff N times back to back, no delay</td></tr>
+        <tr><td>=N:1d&gt;</td><td>repeat N times, spaced by the given duration</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <footer>
+    Not integrated into Squid yet — a standalone artifact for testing the Squid Flow grammar (ui/flow-lang.js).
+    Full implementation reference: <a href="https://github.com/agent-squid/squid/blob/main/docs/squid-flow-whitepaper.md" target="_blank" rel="noopener">Squid Flow v0.1 Whitepaper</a>.
+  </footer>
 </div>
 
 <script src="flow-lang.js"></script>
@@ -163,6 +202,7 @@
     '#t1@a1,#t2@a1>#t3',
     '#t1@a,#t2@b<>#c,#d@x',
     '#t1@a+#t2@a>#t3',
+    '#t1@a1<>#t2+#t3',
     '#squid@codex>#hive@review!',
     '#squid@codex>#hive',
     '#a@x=5:1d>@y',

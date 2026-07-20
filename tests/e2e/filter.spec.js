@@ -540,6 +540,38 @@ test('a live in-flight message matching the filter stays visible', async ({ page
   await expect(thinking).not.toBeVisible();
 });
 
+test('a completed live response not matching the filter is not added to the visible list', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
+
+  let fulfillChat;
+  const chatIntercepted = new Promise(resolve => {
+    page.route('**/chat', route => {
+      fulfillChat = body => route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' },
+        body,
+      });
+      resolve();
+    });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', 'hello');
+  await page.keyboard.press('Enter');
+  await chatIntercepted;
+
+  await page.fill('#input', '/f #squid');
+  await page.keyboard.press('Enter');
+  await fulfillChat(
+    `event: meta\ndata: ${JSON.stringify({ agent: 'claude', backend: 'claude', msg_id: 1, adhoc: false })}\n\n` +
+    `data:Filtered out response\n\n` +
+    `event: done\ndata: \n\n`
+  );
+
+  await expect(page.locator('.msg.assistant:not(.msg-thinking)').filter({ hasText: 'Filtered out response' })).toHaveCount(0);
+});
+
 test('a recovered pending item is shown only while it matches the active filter', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
   await page.route('**/chat/*/status', r => r.fulfill({ json: { status: 'pending', content: '' } }));

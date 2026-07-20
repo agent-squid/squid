@@ -82,7 +82,7 @@ from .stats_db import (
     get_message_previews, get_flow_run_messages,
     get_completed_run_text, get_completed_run_status_raw, get_run_events, get_run_event_snapshot,
     ensure_session_turn_index,
-    get_session_injected_context,
+    get_session_injected_context, get_session_turn_count,
     get_topic_session, clear_topic_session,
     delete_topic, delete_topic_agent, set_topic_hidden, get_topic_agents, get_topic_agent_history,
     clear_agent_sessions, get_agent_sessions,
@@ -1060,6 +1060,8 @@ async def run_cmd(req: CmdRequest):
             agent = topic_row.get("agent") if topic_row else None
         if not agent:
             return JSONResponse({"ok": False, "error": "no active session"}, status_code=400)
+        if not get_agent(agent):
+            return JSONResponse({"ok": False, "error": f"agent not found: {agent}"}, status_code=400)
         killed = kill_procs_by_topic(topic, agent=agent, adhoc=False)
         from .worktree import cleanup_worktrees
         conflicts = await cleanup_worktrees(topic)
@@ -1412,11 +1414,14 @@ async def get_session(topic: str, agent: str):
     topic = _normalize_topic_response(topic)
     if isinstance(topic, JSONResponse):
         return topic
+    if not get_agent(agent):
+        return JSONResponse({"error": f"agent not found: {agent}"}, status_code=404)
     stored = get_topic_session(topic, agent)
     if not stored:
-        return JSONResponse({"session_id": None, "cwd": None})
+        return JSONResponse({"session_id": None, "cwd": None, "session_turn_count": 0})
     injected_context = get_session_injected_context(stored["session_id"])
     return JSONResponse({"session_id": stored["session_id"], "cwd": stored["cwd"],
+                         "session_turn_count": get_session_turn_count(stored["session_id"]),
                          **injected_context})
 
 
@@ -1770,16 +1775,6 @@ async def auto_detect_creds():
     return JSONResponse({"ok": True, "claude_org_id": org_id})
 
 
-@app.post("/config/creds/codex/auto")
-async def auto_detect_codex_creds():
-    try:
-        token = await asyncio.to_thread(creds.read_codex_creds)
-    except RuntimeError as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-    creds.save_codex(token)
-    return JSONResponse({"ok": True})
-
-
 @app.post("/config/creds/codex")
 async def save_codex_creds(req: CodexCredsRequest):
     creds.save_codex(req.token.strip())
@@ -1812,7 +1807,8 @@ async def quota_claude():
 
 @app.get("/quota/codex")
 async def quota_codex():
-    token = creds.get_codex_token()
+    codex_auth = creds.get_codex_cli_auth()
+    token = codex_auth.get("access_token") or creds.get_codex_token()
     if not token:
         return JSONResponse({"error": "credentials not configured"}, status_code=400)
     authorization = _codex_bearer_header(token)
@@ -1822,10 +1818,15 @@ async def quota_codex():
         from curl_cffi.requests import AsyncSession
         common_headers = {
             "Accept": "application/json",
+            "OpenAI-Beta": "codex-1",
             "Origin": "https://chatgpt.com",
             "Referer": "https://chatgpt.com/",
+            "originator": "Codex Desktop",
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         }
+        account_id = codex_auth.get("account_id")
+        if account_id:
+            common_headers["ChatGPT-Account-ID"] = account_id
         async with AsyncSession() as session:
             r = await session.get(
                 "https://chatgpt.com/backend-api/wham/usage",
@@ -1833,6 +1834,8 @@ async def quota_codex():
                 impersonate="chrome",
             )
         if r.status_code != 200:
+            if r.status_code == 401:
+                return JSONResponse({"error": "Codex token expired"}, status_code=401)
             return JSONResponse({"error": f"wham/usage returned {r.status_code}"}, status_code=502)
         return JSONResponse(r.json())
     except Exception as exc:
@@ -1990,6 +1993,53 @@ def _json_response_data(response: JSONResponse) -> dict:
         return {}
 
 
+def _quota_number(value) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _codex_limit_window(value: object) -> Optional[dict]:
+    if not isinstance(value, dict):
+        return None
+    used = _quota_number(value.get("used_percent", value.get("usedPercent")))
+    reset_at = value.get("reset_at", value.get("resets_at", value.get("resetsAt")))
+    if reset_at is None and value.get("reset_after_seconds") is not None:
+        reset_after = _quota_number(value.get("reset_after_seconds"))
+        if reset_after is not None:
+            reset_at = time.time() + reset_after
+    window_seconds = _quota_number(
+        value.get("limit_window_seconds", value.get("window_seconds"))
+    )
+    if used is None and reset_at is None and window_seconds is None:
+        return None
+    return {"used_percent": used, "reset_at": reset_at, "window_seconds": window_seconds}
+
+
+def _codex_usage_windows(data: dict) -> tuple[Optional[dict], Optional[dict]]:
+    rate_limit = data.get("rate_limit") or data.get("rateLimits") or {}
+    primary = _codex_limit_window(rate_limit.get("primary_window") or rate_limit.get("primary"))
+    secondary = _codex_limit_window(rate_limit.get("secondary_window") or rate_limit.get("secondary"))
+    five_hour = None
+    seven_day = None
+    for window in (primary, secondary):
+        if not window:
+            continue
+        seconds = window.get("window_seconds")
+        if seconds == 18_000:
+            five_hour = window
+        elif seconds == 604_800:
+            seven_day = window
+        elif five_hour is None:
+            five_hour = window
+        elif seven_day is None:
+            seven_day = window
+    return five_hour, seven_day
+
+
 async def _quota_snapshot_for_provider(provider: Provider, ref: str) -> JSONResponse:
     """Return a normalized gauge snapshot for one provider. Quota is a provider
     attribute (ADR-0028) — this never needs to know which harness is using it."""
@@ -2027,21 +2077,18 @@ async def _quota_snapshot_for_provider(provider: Provider, ref: str) -> JSONResp
             } if sd else None,
         })
     if gauge.type == "codex":
-        rate_limit = data.get("rate_limit") or {}
-        window = rate_limit.get("primary_window") or {}
-        used = window.get("used_percent")
-        reset_at = window.get("reset_at")
-        if reset_at is None and window.get("reset_after_seconds") is not None:
-            reset_at = time.time() + window["reset_after_seconds"]
-        secondary = rate_limit.get("secondary_window") or {}
+        five_hour, seven_day = _codex_usage_windows(data)
+        display_window = five_hour or seven_day or {}
+        used = display_window.get("used_percent")
+        reset_at = display_window.get("reset_at")
         return JSONResponse({
             "status": "ok", "text": f"{round(used)}%" if used is not None else None,
             "raw": used, "used_percent": used, "reset_at": reset_at,
             "title": "Codex usage",
             "seven_day": {
-                "used_percent": secondary.get("used_percent"),
-                "reset_at": secondary.get("reset_at"),
-            } if secondary else None,
+                "used_percent": seven_day.get("used_percent"),
+                "reset_at": seven_day.get("reset_at"),
+            } if seven_day else None,
         })
     if data.get("isUnlimited"):
         return JSONResponse({

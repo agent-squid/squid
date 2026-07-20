@@ -114,6 +114,26 @@ def test_parse_route_chain_repeated_rounds():
     assert chain["route"] == "#squid@codex<2>@revucla"
 
 
+def test_parse_flow_route_rejects_target_join_without_roundtrip():
+    # '+' on a hop's target is only a consumer when the round-trip return
+    # leg is there to feed — plain '>' has no consumer for it (ADR-0032,
+    # "Principle of join").
+    assert flow.parse_flow_route("#t1@a1>#t2+#t3") is None
+    assert flow.parse_flow_route("#t1@a1=>#t2+#t3") is None
+    assert flow.parse_flow_route("#t1@a1=2>#t2+#t3") is None
+
+
+def test_parse_flow_route_target_join_under_roundtrip():
+    chain = flow.parse_flow_route("#t1@a1<>#t2+#t3")
+    assert chain["target_join"] is True
+    assert chain["join"] is False
+    assert chain["route"] == "#t1@a1<>#t2+#t3"
+    assert len(chain["branches"]) == 1
+    branch = chain["branches"][0]
+    assert branch["target_join"] is True
+    assert [(t["topic"], t["agent"]) for t in branch["targets"]] == [("t2", "a1"), ("t3", "a1")]
+
+
 def test_next_chain_steps_target_fanout_after_origin(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
@@ -153,6 +173,43 @@ def test_next_chain_steps_join_waits_for_all_origins_and_pins_both(tmp_path, mon
     assert steps[0]["agent"] == "c"
     assert steps[0]["previous_agent"] == "@a+@b"
     assert steps[0]["previous_msg_ids"] == [a_asst_id, b_asst_id]
+    assert steps[0]["route"] == route
+
+
+def test_next_chain_steps_target_join_roundtrip_dispatches_both_targets_in_parallel(tmp_path, monkeypatch):
+    # The mirror image of the origin-side join test above: a round-trip's
+    # target can be a join (only position besides the origin where '+' has
+    # a consumer — the return leg). Topics differ here, unlike the origin
+    # join test, so this doesn't use _seed_chain (hardcoded to topic "squid").
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    route = "#t1@a1<>#t2+#t3"
+    flow_run_id = "f1"
+    u1 = stats_db.insert_user_message("t1", "a1", "go", flow_run_id=flow_run_id, flow_route=route)
+    origin_asst_id = stats_db.insert_assistant_message("t1", "a1", u1, flow_run_id=flow_run_id, flow_route=route)
+    stats_db.update_assistant_message(origin_asst_id, "origin output", None, "done")
+
+    steps = flow.next_chain_steps(flow_run_id)
+    assert {(s["topic"], s["agent"]) for s in steps} == {("t2", "a1"), ("t3", "a1")}
+    assert all(s["previous_msg_ids"] == [origin_asst_id] for s in steps)
+
+    u_t2 = stats_db.insert_user_message("t2", "a1", "handoff", flow_run_id=flow_run_id, flow_route=route)
+    a_t2 = stats_db.insert_assistant_message("t2", "a1", u_t2, flow_run_id=flow_run_id, flow_route=route)
+    u_t3 = stats_db.insert_user_message("t3", "a1", "handoff", flow_run_id=flow_run_id, flow_route=route)
+    a_t3 = stats_db.insert_assistant_message("t3", "a1", u_t3, flow_run_id=flow_run_id, flow_route=route)
+
+    # Only one of the two joined targets has finished — no return step yet,
+    # and no re-dispatch of the one already sent.
+    stats_db.update_assistant_message(a_t2, "t2 output", None, "done")
+    assert flow.next_chain_steps(flow_run_id) == []
+
+    # Both finished — exactly one return step to the origin, pinning both.
+    stats_db.update_assistant_message(a_t3, "t3 output", None, "done")
+    steps = flow.next_chain_steps(flow_run_id)
+    assert len(steps) == 1
+    assert steps[0]["topic"] == "t1"
+    assert steps[0]["agent"] == "a1"
+    assert set(steps[0]["previous_msg_ids"]) == {a_t2, a_t3}
     assert steps[0]["route"] == route
 
 

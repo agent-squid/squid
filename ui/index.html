@@ -185,14 +185,9 @@
       </div>
 
       <div id="codex-creds-popup">
-        <div class="creds-auto-row">
-          <div class="creds-auto-text">
-            <span class="creds-auto-label">Auto-detect from browser</span>
-            <span class="creds-auto-desc">Runs on this Squid server machine only; remote phone/tablet browsers cannot share their cookies.</span>
-          </div>
-          <button id="codex-creds-auto" type="button" class="creds-auto-btn">Detect</button>
+        <div class="creds-help">
+          <span class="creds-help-hint">Run <code>codex</code> in the terminal to authenticate; Squid reads <code>~/.codex/auth.json</code>.</span>
         </div>
-        <span id="codex-creds-auto-status" class="creds-auto-status"></span>
         <div class="creds-divider"></div>
         <div class="creds-inputs">
           <input id="codex-creds-token" type="password" placeholder="Bearer eyJ…" />
@@ -722,7 +717,7 @@
         <div class="flow-legend-item"><code>=&gt;</code><span>alias for <code>&gt;</code> — same meaning, alternate spelling</span></div>
         <div class="flow-legend-item"><code>,</code><span>independent branches — each side runs on its own, not chained together</span></div>
         <div class="flow-legend-item"><code>#t2@a1,#t3</code><span>The first atom has to be a full route so it can act as an anchor following partial atoms borrowing its missing parts from the first in the list (here, <code>#t3</code> becomes <code>#t3@a1</code>)</span></div>
-        <div class="flow-legend-item"><code>+</code><span>join — multiple origins merge into a single step</span></div>
+        <div class="flow-legend-item"><code>+</code><span>join — merges multiple steps into one downstream consumer; valid as the origin (feeding the one hop) or, under <code>&lt;&gt;</code>/<code>&lt;N&gt;</code>, as the target (its return leg is the consumer)</span></div>
         <div class="flow-legend-item"><code>&lt;&gt; / &lt;N&gt;</code><span>request/response round trip; <code>&lt;N&gt;</code> repeats it N times</span></div>
         <div class="flow-legend-item"><code>&lt;N:1d&gt;</code><span>round trip, waiting the given duration between every hop (out and back), both directions equally</span></div>
         <div class="flow-legend-item"><code>=N&gt;</code><span>repeat this one-way handoff N times back to back, no delay</span></div>
@@ -738,7 +733,7 @@
   </div>
   <div id="app-tooltip"></div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="flow-lang.js?v=20260720-003"></script>
-  <script src="app.js?v=20260720-003"></script>
+  <script src="flow-lang.js?v=20260720-005"></script>
+  <script src="app.js?v=20260720-005"></script>
 </body>
 </html>
