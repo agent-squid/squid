@@ -20,7 +20,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Rubik:wght@700&display=swap" />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,100..700,0..1,0" />
   <link rel="stylesheet" href="/vendor/atom-one-dark.min.css" />
-  <link rel="stylesheet" href="style.css?v=20260720-003" />
+  <link rel="stylesheet" href="style.css?v=20260720-008" />
   <script src="/vendor/highlight.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/vendor/qrcode.min.js"></script>
@@ -699,7 +699,7 @@
 
     <!-- ── SQUID FLOW VIEW ──────────────────────────────────────────────────── -->
     <div id="view-flow" class="view">
-      <h4>Squid Flow =></h4>
+      <h4><a href="https://github.com/agent-squid/squid/blob/main/docs/squid-flow-whitepaper.md" target="_blank" rel="noopener">Squid Flow =></a></h4>
       <textarea id="flow-input" spellcheck="false" placeholder="#squid@codex&lt;2&gt;@review!"></textarea>
       <div id="flow-examples"></div>
       <div id="flow-status" class="flow-status idle">Type an expression above.</div>
@@ -723,24 +723,21 @@
         <div class="flow-legend-item"><code>&gt;</code><span>one-way handoff to the next step</span></div>
         <div class="flow-legend-item"><code>=&gt;</code><span>alias for <code>&gt;</code> — same meaning, alternate spelling</span></div>
         <div class="flow-legend-item"><code>,</code><span>independent branches — each side runs on its own, not chained together</span></div>
-        <div class="flow-legend-item"><code>#t2@a1,#t3</code><span>The first atom has to be a full route so it can act as an anchor following partial atoms borrowing its missing parts from the first in the list (here, <code>#t3</code> becomes <code>#t3@a1</code>)</span></div>
+        <div class="flow-legend-item"><code>#t3,#t1@a1</code><span>a bare atom borrows its missing half from the nearest fully-explicit atom before it — or, if none precedes it yet, from the first fully-explicit atom anywhere in the list (here, <code>#t3</code> becomes <code>#t3@a1</code> even though it's written first)</span></div>
         <div class="flow-legend-item"><code>+</code><span>join — merges multiple steps into one downstream consumer; valid as the origin (feeding the one hop) or, under <code>&lt;&gt;</code>/<code>&lt;N&gt;</code>, as the target (its return leg is the consumer)</span></div>
         <div class="flow-legend-item"><code>&lt;&gt; / &lt;N&gt;</code><span>request/response round trip; <code>&lt;N&gt;</code> repeats it N times</span></div>
         <div class="flow-legend-item"><code>&lt;N:1d&gt;</code><span>round trip, waiting the given duration between every hop (out and back), both directions equally</span></div>
         <div class="flow-legend-item"><code>=N&gt;</code><span>repeat this one-way handoff N times back to back, no delay</span></div>
         <div class="flow-legend-item"><code>=N:1d&gt;</code><span>repeat N times, spaced by the given duration</span></div>
+        <div class="flow-legend-item"><code>=:1d&gt;</code><span>count omitted (defaults to 1), waiting the given duration before sending</span></div>
       </div>
-      <p class="settings-hint">
-        Squid Flow route syntax playground. Full spec:
-        <code>docs/decisions/0032-route-chains-with-cwd-profile-agents.md</code>.
-      </p>
     </div>
 
     <!-- Inline agent creation prompt (appended to #messages dynamically) -->
   </div>
   <div id="app-tooltip"></div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="flow-lang.js?v=20260720-005"></script>
-  <script src="app.js?v=20260720-005"></script>
+  <script src="flow-lang.js?v=20260720-008"></script>
+  <script src="app.js?v=20260720-008"></script>
 </body>
 </html>

@@ -4,7 +4,7 @@ Replaces the static `backends.py` Backend lookup. There is no `backends:`
 config section anymore — a named agent selects harness + provider directly,
 and this module combines the two into the same shape callers (runners.py,
 topic_queue.py, journal.py, server.py) used to get from a `Backend`: a
-resolved object exposing `execution_env()`, `driver_settings()`, `args`,
+resolved object exposing `execution_env()`, `harness_settings()`, `args`,
 `protocol`, `interactive`, `fingerprint`, `available`, etc.
 """
 
@@ -144,7 +144,7 @@ class ResolvedAgent:
             result.setdefault("NVIDIA_API_KEY", api_key)
         return result
 
-    def driver_settings(self) -> dict[str, Any]:
+    def harness_settings(self) -> dict[str, Any]:
         """Merge canonical provider fields into harness-native structured settings."""
         result = dict(self.provider.settings)
         if self.harness in ("pi", "opencode"):

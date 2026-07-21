@@ -19,6 +19,14 @@ agent:
   first_byte_timeout: 600
   response_timeout: 3600
 
+# Squid Echo: an extra "echo" harness that dispatches through the real
+# HTTP/queue/flow-continuation path but never runs a real CLI — it just
+# echoes the prompt back instantly. For previewing how a Squid Flow route
+# actually executes (joins, round-trips, broadcasts, ...) at zero cost/time
+# before pointing it at a real agent. Off by default; register a normal
+# agent with harness `echo` once this is on.
+# test_harness_enabled: true
+
 # A harness is one of Squid's coded coding-agent CLI integrations. The
 # supported harness set is fixed in code; these YAML entries configure each
 # harness's defaults. A named agent picks harness + provider + model + cwd

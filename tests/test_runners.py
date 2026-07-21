@@ -6,7 +6,7 @@ import json
 import signal
 import time
 from types import SimpleNamespace
-from unittest.mock import patch, call
+from unittest.mock import patch, call, AsyncMock
 import pytest
 
 from agent.runners import (
@@ -19,11 +19,12 @@ from agent.runners import (
     kill_proc_by_msg_id,
     list_active_procs,
     runner_for_backend,
-    runner_for_driver,
+    runner_for_harness,
     run_claude,
     run_claude_interactive_cli,
     run_codex,
     run_cursor,
+    run_echo,
     run_opencode,
     run_pi,
 )
@@ -83,12 +84,12 @@ class _FakeProcess:
         return self.returncode
 
 
-def test_runner_for_driver_uses_shared_supported_driver_map():
-    assert runner_for_driver("claude") is run_claude
-    assert runner_for_driver("codex") is run_codex
-    assert runner_for_driver("opencode") is run_opencode
-    assert runner_for_driver("pi") is run_pi
-    assert runner_for_driver("missing") is None
+def test_runner_for_harness_uses_shared_supported_harness_map():
+    assert runner_for_harness("claudecode") is run_claude
+    assert runner_for_harness("codex") is run_codex
+    assert runner_for_harness("opencode") is run_opencode
+    assert runner_for_harness("pi") is run_pi
+    assert runner_for_harness("missing") is None
 
 
 def test_runner_for_backend_selects_protocol_and_forces_adhoc_oneshot():
@@ -101,20 +102,19 @@ def test_runner_for_backend_selects_protocol_and_forces_adhoc_oneshot():
     assert runner_for_backend(live) is run_claude_interactive_cli
     assert runner_for_backend(live, adhoc=True) is run_claude
     assert runner_for_backend(codex) is run_codex
-    assert runner_for_backend(cursor) is runner_for_driver("cursor")
+    assert runner_for_backend(cursor) is runner_for_harness("cursor")
     assert runner_for_backend(opencode) is run_opencode
     assert runner_for_backend(pi) is run_pi
 
 
-@pytest.mark.parametrize("driver,oneshot_runner", [
-    ("claude", run_claude),
+@pytest.mark.parametrize("harness,oneshot_runner", [
+    ("claudecode", run_claude),
     ("codex", run_codex),
     ("cursor", run_cursor),
     ("opencode", run_opencode),
     ("pi", run_pi),
 ])
-def test_runner_for_backend_selects_oneshot_cli(driver, oneshot_runner):
-    harness = "claudecode" if driver == "claude" else driver
+def test_runner_for_backend_selects_oneshot_cli(harness, oneshot_runner):
     oneshot = SimpleNamespace(harness=harness, protocol="oneshot-cli")
 
     assert runner_for_backend(oneshot) is oneshot_runner
@@ -126,11 +126,39 @@ def test_runner_for_backend_selects_claude_interactive_cli():
     assert runner_for_backend(interactive) is run_claude_interactive_cli
 
 
-@pytest.mark.parametrize("driver", ["codex", "cursor", "opencode", "pi"])
-def test_runner_for_backend_does_not_route_non_persistent_interactive_cli(driver):
-    backend = SimpleNamespace(harness=driver, protocol="interactive-cli")
+@pytest.mark.parametrize("harness", ["codex", "cursor", "opencode", "pi"])
+def test_runner_for_backend_does_not_route_non_persistent_interactive_cli(harness):
+    backend = SimpleNamespace(harness=harness, protocol="interactive-cli")
 
     assert runner_for_backend(backend) is None
+
+
+def test_run_echo_echoes_prompt_and_yields_stats():
+    # run_echo itself is always importable/callable regardless of
+    # SQUID_TEST_HARNESS — only its *registration* (SUPPORTED_HARNESSES,
+    # PROVIDERS) is gated behind that flag (see agent/config.py). No
+    # subprocess, no network call, but it does wait a real random 5-10s
+    # before replying (deliberately — see run_echo's docstring), so tests
+    # patch that sleep away to stay fast.
+    async def collect():
+        with patch("agent.runners.asyncio.sleep", new=AsyncMock()):
+            return [chunk async for chunk in run_echo("hello world", msg_id=42, topic="t", agent="a")]
+
+    chunks = asyncio.run(collect())
+    assert chunks[0] == "echo: hello world"
+    assert len(chunks) == 2
+    stats = chunks[1]["_stats"]
+    assert stats["session_id"] == "echo-42"
+    assert stats["output_tokens"] > 0
+
+
+def test_run_echo_resumes_the_given_session_id():
+    async def collect():
+        with patch("agent.runners.asyncio.sleep", new=AsyncMock()):
+            return [chunk async for chunk in run_echo("hi", resume_session_id="prior-session", msg_id=99)]
+
+    chunks = asyncio.run(collect())
+    assert chunks[1]["_stats"]["session_id"] == "prior-session"
 
 
 def test_claude_oneshot_cli_passes_prompt_as_process_argument():

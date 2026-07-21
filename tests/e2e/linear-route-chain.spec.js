@@ -774,7 +774,11 @@ test('composer starts join origins under one reduced flow route', async ({ page 
 
   await expect.poll(() => chatBodies.length).toBe(2);
   await expect(page.locator('.msg.user .topic-tag')).toHaveText('#squid@a+@b>@c');
-  await expect(page.locator('.route-chain-marker')).toHaveText(['#squid@a>@c', '#squid@b>@c']);
+  // The join gates @c on *both* @a and @b completing (agent/flow.py
+  // next_chain_steps skips the branch until every joined origin resolves) —
+  // each origin's own marker must show the full join, not a collapsed
+  // "thisOrigin > @c" edge that doesn't exist yet and isn't from it alone.
+  await expect(page.locator('.route-chain-marker')).toHaveText(['#squid@a+@b>@c', '#squid@a+@b>@c']);
   expect(chatBodies.map(b => b.agent)).toEqual(['a', 'b']);
   expect(chatBodies.every(b => b.topic === 'squid')).toBe(true);
   expect(chatBodies.every(b => b.message === 'compare')).toBe(true);

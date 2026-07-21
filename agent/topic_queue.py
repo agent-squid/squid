@@ -236,7 +236,7 @@ class TopicWorker:
             adhoc=item.adhoc, msg_id=item.msg_id,
             prompt_preview=item.display_prompt,
             backend_id=resolved.harness, backend_env=backend_env,
-            backend_settings=resolved.driver_settings(), backend_args=resolved.args,
+            backend_settings=resolved.harness_settings(), backend_args=resolved.args,
         )
         if resolved.protocol.startswith("interactive-") and not item.adhoc:
             kwargs["interactive_idle_timeout_s"] = resolved.interactive.idle_timeout_seconds

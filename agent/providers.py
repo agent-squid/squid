@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from .config import _cfg
+from .config import TEST_HARNESS_ENABLED, _cfg
 
 SUPPORTED_AUTH_TYPES = frozenset({"api_key", "subscription"})
 SUPPORTED_GAUGES = frozenset({"claude", "codex", "cursor", "deepseek", "kimi", "static", "none"})
@@ -246,6 +246,18 @@ PROVIDERS: dict[str, Provider] = {
     provider_id: _validate_provider(provider_id, raw)
     for provider_id, raw in _configured_providers().items()
 }
+
+if TEST_HARNESS_ENABLED:
+    # Added after the config-driven dict, not folded into _DEFAULT_PROVIDERS,
+    # because a user's own `providers:` section *replaces* the defaults
+    # wholesale (see _configured_providers) rather than merging — Squid Echo
+    # must exist regardless of what's configured there. Its supported_apis
+    # is a private, made-up value no real provider declares, so it never
+    # shows up as "compatible" with any other harness and vice versa.
+    PROVIDERS["echo"] = Provider(
+        id="echo", label="Squid Echo", color="#888888",
+        auth_type="subscription", supported_apis=frozenset({"/native/echo"}),
+    )
 
 
 def get_provider(provider_id: str) -> Optional[Provider]:

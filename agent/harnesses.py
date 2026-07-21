@@ -15,9 +15,17 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .config import CLAUDE_PATH, CODEX_PATH, CURSOR_PATH, OPENCODE_PATH, PI_PATH, _cfg
+from .config import CLAUDE_PATH, CODEX_PATH, CURSOR_PATH, OPENCODE_PATH, PI_PATH, TEST_HARNESS_ENABLED, _cfg
 
-SUPPORTED_HARNESSES = frozenset({"claudecode", "codex", "cursor", "opencode", "pi"})
+# "echo" (Squid Echo, agent/runners.py's run_echo) is only ever a member of
+# this set when SQUID_TEST_HARNESS is set — see config.py's
+# TEST_HARNESS_ENABLED. Every *_BY_HARNESS dict below still carries an
+# "echo" entry unconditionally; that's harmless (nothing looks one up
+# unless the id is first found in SUPPORTED_HARNESSES) and keeps the
+# opt-in check in exactly one place.
+SUPPORTED_HARNESSES = frozenset(
+    {"claudecode", "codex", "cursor", "opencode", "pi"} | ({"echo"} if TEST_HARNESS_ENABLED else set())
+)
 SUPPORTED_PROTOCOLS = frozenset({"oneshot-cli", "interactive-cli", "interactive-pty"})
 _ID_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
@@ -28,6 +36,7 @@ SUPPORTED_PROTOCOLS_BY_HARNESS: dict[str, frozenset[str]] = {
     "cursor": frozenset({"oneshot-cli"}),
     "opencode": frozenset({"oneshot-cli"}),
     "pi": frozenset({"oneshot-cli"}),
+    "echo": frozenset({"oneshot-cli"}),
 }
 _DEFAULT_PROTOCOL_BY_HARNESS: dict[str, str] = {
     "claudecode": "oneshot-cli",
@@ -35,6 +44,7 @@ _DEFAULT_PROTOCOL_BY_HARNESS: dict[str, str] = {
     "cursor": "oneshot-cli",
     "opencode": "oneshot-cli",
     "pi": "oneshot-cli",
+    "echo": "oneshot-cli",
 }
 
 DEFAULT_INTERACTIVE_IDLE_TIMEOUT_SECONDS = 3600
@@ -45,6 +55,10 @@ _HARNESS_PATHS: dict[str, "str | None"] = {
     "cursor": CURSOR_PATH,
     "opencode": OPENCODE_PATH,
     "pi": PI_PATH,
+    # No real binary — run_echo never shells out — but is_installed() only
+    # ever reports true/false from truthiness, so a fixed sentinel makes
+    # Squid Echo always "installed" whenever it's enabled at all.
+    "echo": "squid-echo",
 }
 
 _DEFAULT_HARNESS_LABELS: dict[str, str] = {
@@ -53,6 +67,7 @@ _DEFAULT_HARNESS_LABELS: dict[str, str] = {
     "cursor": "Cursor",
     "opencode": "OpenCode",
     "pi": "Pi",
+    "echo": "Squid Echo",
 }
 
 # Install commands, matching README.md's table — the single source of truth
@@ -63,6 +78,7 @@ _HARNESS_INSTALL: dict[str, str] = {
     "cursor": "curl -fsS https://cursor.com/install | bash",
     "opencode": "curl -fsSL https://opencode.ai/install | bash",
     "pi": "curl -fsSL https://pi.dev/install.sh | sh",
+    "echo": "built in — nothing to install; set SQUID_TEST_HARNESS=1 to enable",
 }
 
 _DEFAULT_PROVIDER_BY_HARNESS: dict[str, str] = {
@@ -71,6 +87,7 @@ _DEFAULT_PROVIDER_BY_HARNESS: dict[str, str] = {
     "cursor": "cursor",
     "opencode": "nvidia",
     "pi": "nvidia",
+    "echo": "echo",
 }
 
 _DEFAULT_SUPPORTED_APIS_BY_HARNESS: dict[str, frozenset[str]] = {
@@ -79,6 +96,7 @@ _DEFAULT_SUPPORTED_APIS_BY_HARNESS: dict[str, frozenset[str]] = {
     "cursor": frozenset({"/native/cursor"}),
     "opencode": frozenset({"/v1/chat/completions", "/native/opencode"}),
     "pi": frozenset({"/v1/chat/completions"}),
+    "echo": frozenset({"/native/echo"}),
 }
 
 

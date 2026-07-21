@@ -51,9 +51,20 @@ CURSOR_CLI    = "cursor-agent"
 OPENCODE_CLI  = "opencode"
 PI_CLI        = "pi"
 
-# Experimental runners exist for these CLIs but they are not configurable drivers.
+# Experimental runners exist for these CLIs but they are not configurable harnesses.
 COPILOT_CLI  = "copilot"
 AGY_CLI      = "agy"
+
+# Squid Echo: a no-op harness (agent/runners.py's run_echo) that echoes the
+# prompt straight back with no subprocess and no network call — for fast,
+# free previews of how a Squid Flow route actually dispatches/executes
+# (joins, round-trips, broadcasts, ...) without a real coding-agent CLI in
+# the loop. Opt-in only (absent/false by default), so it never shows up for
+# a user who hasn't asked for it; harnesses.py and providers.py both gate on
+# this flag. Settable either way — `test_harness_enabled: true` in
+# squid.yaml (picked up on every restart, since /restart re-execs and
+# re-reads the file) or the SQUID_TEST_HARNESS env var (for CI/one-offs).
+TEST_HARNESS_ENABLED: bool = bool(_cfg.get("test_harness_enabled")) or bool(os.environ.get("SQUID_TEST_HARNESS"))
 
 # How long to wait for a CLI to produce its first byte before giving up
 FIRST_BYTE_TIMEOUT: int = _cfg["agent"]["first_byte_timeout"]

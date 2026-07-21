@@ -122,11 +122,11 @@ function renderAssistantMarkdown(content) {
   return marked.parse(escapeMarkdownTildes(content));
 }
 
-const DRIVER_MODEL_HINTS = Object.freeze({
-  claude:   'e.g. claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7',
-  codex:    'e.g. o4-mini, o3',
-  cursor:   'model (optional)',
-  opencode: 'e.g. opencode/deepseek-v4-flash-free, anthropic/claude-sonnet-4-6',
+const HARNESS_MODEL_HINTS = Object.freeze({
+  claudecode: 'e.g. claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7',
+  codex:      'e.g. o4-mini, o3',
+  cursor:     'model (optional)',
+  opencode:   'e.g. opencode/deepseek-v4-flash-free, anthropic/claude-sonnet-4-6',
 });
 
 const AGENT_THEME_COLORS = Object.freeze({
@@ -285,8 +285,8 @@ function backendDisplayName(backend) {
 }
 
 function backendModelHint(backend) {
-  const driver = _backendMetadata[backend]?.driver || backend;
-  return DRIVER_MODEL_HINTS[driver] || 'model (optional)';
+  const harness = _backendMetadata[backend]?.harness || backend;
+  return HARNESS_MODEL_HINTS[harness] || 'model (optional)';
 }
 
 // Suggestions only — provider.models is a UI convenience list, never
@@ -771,9 +771,12 @@ function parseRouteChain(route) {
     operator = count === 1 && !wait ? '>' : `=${count === 1 ? '' : count}${wait ? ':' + wait : ''}>`;
   }
   const routeText = result.key || String(route || '').trim().replace(/\s+/g, '');
-  const originKey = a => `${a.topic}\u0000${a.agent}\u0000${a.fresh ? 1 : 0}`;
-  const uniqueOriginCount = new Set(origins.map(originKey)).size;
-  const uniqueTargetCount = new Set(targets.map(originKey)).size;
+  // Deliberately raw counts, not deduped by resolved value: a rolling-anchor
+  // bare atom (e.g. `#t@a!,@a!`) can resolve to the exact same
+  // (topic, agent, fresh) as its sibling while still being two independent
+  // dispatches (two separate turns/sessions) — the send path fans out on
+  // origins.length/targets.length (see the flowOrigins.length > 1 check),
+  // so the chip must call it "multi" on the same basis or the two disagree.
   return {
     topic: origin.topic,
     origin: origin.agent,
@@ -787,9 +790,9 @@ function parseRouteChain(route) {
     targets,
     join: originStep.kind === 'join',
     targetJoin: nextStep.kind === 'roundtrip' && !!nextStep.join,
-    fanout: uniqueTargetCount > 1,
-    multiOrigin: uniqueOriginCount > 1,
-    complex: originStep.kind === 'join' || uniqueTargetCount > 1 || uniqueOriginCount > 1 || /^=\d/.test(operator) || rounds > 1 || operator.includes(':'),
+    fanout: targets.length > 1,
+    multiOrigin: origins.length > 1,
+    complex: originStep.kind === 'join' || targets.length > 1 || origins.length > 1 || /^=\d/.test(operator) || rounds > 1 || operator.includes(':'),
     route: routeText,
   };
 }
@@ -1316,7 +1319,7 @@ function parseInput(text) {
       agent: null,
       adhoc: false,
       lookback: 0,
-      route: parsedBroadcastWithMessage.route,
+      route: broadcastWithMessage[1],
       broadcastAgents: parsedBroadcastWithMessage.agents,
       message: broadcastWithMessage[2].trim(),
     };
@@ -1329,7 +1332,11 @@ function parseInput(text) {
       agent: parsedChainWithMessage.origin,
       adhoc: parsedChainWithMessage.originFresh,
       lookback: 0,
-      route: parsedChainWithMessage.route,
+      // Preserve the literal typed token here, not parsedChainWithMessage.route
+      // (the canonicalized/reduced spelling) — canonicalization is for
+      // backend storage/dedup (flow_route), not for what the composer/chip
+      // and prompt-history recall should echo back to the user.
+      route: routeTokenWithMessage[1],
       chainTarget: parsedChainWithMessage.target,
       chainTargetFresh: parsedChainWithMessage.targetFresh,
       chainOperator: parsedChainWithMessage.operator,
@@ -1358,7 +1365,7 @@ function parseInput(text) {
       agent: parsedChainBare.origin,
       adhoc: parsedChainBare.originFresh,
       lookback: 0,
-      route: parsedChainBare.route,
+      route: text.trim(),
       chainTarget: parsedChainBare.target,
       chainTargetFresh: parsedChainBare.targetFresh,
       chainOperator: parsedChainBare.operator,
@@ -1375,7 +1382,7 @@ function parseInput(text) {
       agent: null,
       adhoc: false,
       lookback: 0,
-      route: parsedBroadcastBare.route,
+      route: text.trim(),
       broadcastAgents: parsedBroadcastBare.agents,
       message: '',
     };
@@ -2957,7 +2964,13 @@ form.addEventListener('submit', async (e) => {
   if (searchActive) clearSearch();
   invalidateTopicsCache();
   invalidateTopicsManageCache();
-  recordPrompt(route ? `${route} ${message}` : formatPromptHistoryEntry(topic, agent, adhoc, lookback, message));
+  // Record what was literally typed, not the canonical/reduced route —
+  // canonicalization is for backend storage/dedup (flow_route) and chain
+  // matching, not for what autocomplete/arrow-up recall should show back.
+  // A sticky chip has no route text in `text` at all (the composer holds
+  // only the free-text message then), so that case still has to
+  // reconstruct from the chip's own (already-canonical) route.
+  recordPrompt(!stickyChip ? text : (route ? `${route} ${message}` : formatPromptHistoryEntry(topic, agent, adhoc, lookback, message)));
   localStorage.removeItem('squid_draft');
   if (broadcastAgents || (flowOrigins && flowOrigins.length > 1)) {
     sendOriginBroadcast(text);
@@ -3102,8 +3115,13 @@ async function _maybePromoteSlug(val) {
   const chain = parseRouteChain(chainText);
   if (chain) {
     input.value = '';
+    // route: the literal typed text, not chain.route (the canonicalized/
+    // reduced spelling) — otherwise a redundant-but-explicit field (e.g.
+    // `@echo` matching what a join would already infer) silently vanishes
+    // from the chip the instant the route is promoted, before the user
+    // even finishes the message.
     setTopicChip(chain.topic, chain.origin, chain.originFresh, 0, {
-      route: chain.route,
+      route: chainText,
       chainTarget: chain.target,
       chainTargetFresh: chain.targetFresh,
       chainOperator: chain.operator,
@@ -3119,7 +3137,7 @@ async function _maybePromoteSlug(val) {
   if (broadcast) {
     input.value = '';
     setTopicChip(broadcast.topic, null, false, 0, {
-      route: broadcast.route,
+      route: chainText,
       broadcastAgents: broadcast.agents,
     });
     hideAutocomplete();
@@ -3171,7 +3189,9 @@ async function _maybeCollapseExpandedSlug(force = false, allowCompletedPrompt = 
     const selectionStart = Math.max(0, input.selectionStart - promptStart);
     const selectionEnd = Math.max(0, input.selectionEnd - promptStart);
     setTopicChip(chain.topic, chain.origin, chain.originFresh, 0, {
-      route: chain.route,
+      // Literal typed token, not chain.route (canonical) — see
+      // _maybePromoteSlug for why.
+      route: chainMatch[1],
       chainTarget: chain.target,
       chainTargetFresh: chain.targetFresh,
       chainOperator: chain.operator,
@@ -3193,7 +3213,7 @@ async function _maybeCollapseExpandedSlug(force = false, allowCompletedPrompt = 
     const selectionStart = Math.max(0, input.selectionStart - promptStart);
     const selectionEnd = Math.max(0, input.selectionEnd - promptStart);
     setTopicChip(broadcast.topic, null, false, 0, {
-      route: broadcast.route,
+      route: broadcastMatch[1],
       broadcastAgents: broadcast.agents,
     });
     input.value = prompt;
@@ -3487,7 +3507,12 @@ async function sendMessage(text, opts = {}) {
   // it via opts.suppressUserBubble instead of duplicating it per agent.
   const userBubble = opts.suppressUserBubble ? null : makeUserBubble(message, topic, agent, null, adhoc, lookback, source, broadcastAgents, displayFlowRoute);
   const userTopicTag = userBubble ? userBubble.querySelector('.topic-tag') : null;
-  if (chainMarker) messages.appendChild(chainMarker);
+  // The live user bubble now renders the route flow itself (displayFlowRoute),
+  // so it already reads as the one prompt driving every masked head — the
+  // start marker is a graph annotation on top of it, not a header above it.
+  // It goes after the bubble it belongs to (and, for a broadcast, above the
+  // bubble-less per-head markers appended by the sibling sendMessage calls
+  // that follow this one) regardless of single- vs multi-head.
   if (userBubble) {
     messages.appendChild(userBubble);
     const userTimeEl = addTimestamp(userBubble, sendTime, true);
@@ -3500,6 +3525,7 @@ async function sendMessage(text, opts = {}) {
     // Non-blocking nudge — fires async after the message is already in flight
     maybeShowCodeRootsNudge(topic, userBubble);
   }
+  if (chainMarker) messages.appendChild(chainMarker);
 
   // ── Thinking bubble (visible immediately, shows status/queue/loader) ──────────
   // Same route+prompt header shape as the history/WIP bubble (makeWipBubble,
@@ -3645,6 +3671,21 @@ async function sendMessage(text, opts = {}) {
   const contentDiv = document.createElement('div');
   bubble.appendChild(contentDiv);
 
+  // The response bubble lands wherever `messages` happens to end at the
+  // moment its first content arrives — not necessarily right after
+  // thinkingBubble's old slot, since concurrent heads (Origin Broadcast) or
+  // other topics can append in between while this one is still streaming.
+  // chainMarker was placed right before thinkingBubble, which gets removed
+  // once this bubble is ready (removeThinking/freezeThinking) — so without
+  // relocating it here too, the marker is orphaned above whatever now sits
+  // in that old slot instead of above its own response. insertBefore moves
+  // an already-attached node rather than duplicating it, so this is safe to
+  // call every time the bubble is (re)placed.
+  function placeResponseBubble() {
+    if (!bubble.parentNode) messages.appendChild(bubble);
+    if (chainMarker) messages.insertBefore(chainMarker, bubble);
+  }
+
   let firstDataReceived = false;
 
   let quotaBackend = await resolveQuotaProvider(topic, agent);
@@ -3772,7 +3813,7 @@ async function sendMessage(text, opts = {}) {
     // Don't wipe streamed content with a generic fallback message
     if (!errDisplay && raw) return;
     if (!shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) return;
-    if (!bubble.parentNode) messages.appendChild(bubble);
+    placeResponseBubble();
     contentDiv.innerHTML = `<span class="msg-error">${errDisplay || 'Response interrupted.'}</span>`;
     scrollToBottom();
   }
@@ -3794,7 +3835,7 @@ async function sendMessage(text, opts = {}) {
 
   function showStoredResponse(content) {
     if (!shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) return false;
-    if (!bubble.parentNode) messages.appendChild(bubble);
+    placeResponseBubble();
     raw = content || '';
     contentDiv.innerHTML = renderAssistantMarkdown(raw);
     scrollToBottom();
@@ -4177,7 +4218,7 @@ async function sendMessage(text, opts = {}) {
               contentDiv.innerHTML = renderAssistantMarkdown(raw);
               bubble.classList.add('history-item');
               if (shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) {
-                messages.appendChild(bubble);
+                placeResponseBubble();
                 if (statsEl) messages.appendChild(statsEl); // stats goes between bubble and diffs, not after
                 renderCompletionTools(liveToolEvents);
                 scrollToBottom();
@@ -4300,7 +4341,7 @@ async function sendMessage(text, opts = {}) {
     }
     if (!detachedPolling && !userAborted && !firstDataReceived && !completedFromStatus) {
       if (shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) {
-        if (!bubble.parentNode) messages.appendChild(bubble);
+        placeResponseBubble();
         contentDiv.innerHTML = '<span class="msg-error">No response — backend may be rate-limited or unavailable.</span>';
       }
     }
@@ -5484,7 +5525,14 @@ function makeRouteChainMarker(route, opts = {}) {
 
 function routeChainMarkerRouteForHead(route, topic, agent, adhoc) {
   const chain = parseRouteChain(route);
-  if (!chain?.multiOrigin || chain.targets.length !== 1) return route;
+  // A '+' join gates the target on *every* joined origin completing (see
+  // agent/flow.py next_chain_steps: a branch is skipped until none of its
+  // origins resolve to None) — collapsing to "thisOrigin > target" would
+  // draw an edge that doesn't exist yet (or isn't from this origin alone).
+  // Comma-separated multi-origin fanout has no such gate — each origin
+  // independently and immediately dispatches to the target — so collapsing
+  // stays correct there.
+  if (!chain?.multiOrigin || chain.join || chain.targets.length !== 1) return route;
   const origin = chain.origins.find(o =>
     o.topic === topic && o.agent === agent && !!o.fresh === !!adhoc
   );
@@ -9334,33 +9382,6 @@ async function confirmTopicDelete() {
 
 // ── runtime catalogs ──────────────────────────────────────────────────────────
 
-const DRIVER_CATALOG = Object.freeze({
-  claude: {
-    label: 'Claude Code',
-    installCmd: 'curl -fsSL https://claude.ai/install.sh | bash',
-    authHint: 'run claude to authenticate',
-    gaugeHint: 'click gauge in header -> Detect',
-  },
-  codex: {
-    label: 'Codex',
-    installCmd: 'curl -fsSL https://chatgpt.com/codex/install.sh | sh',
-    authHint: 'run codex to authenticate',
-    gaugeHint: 'uses codex CLI auth',
-  },
-  cursor: {
-    label: 'Cursor Agent',
-    installCmd: 'curl -fsS https://cursor.com/install | bash',
-    authHint: 'run cursor-agent to authenticate',
-    gaugeHint: 'automatic via cursor-agent',
-  },
-  opencode: {
-    label: 'OpenCode',
-    installCmd: 'curl -fsSL https://opencode.ai/install | bash',
-    authHint: 'free tier requires no auth — run opencode to configure providers',
-    gaugeHint: 'free tier available (opencode/deepseek-v4-flash-free)',
-  },
-});
-
 const GAUGE_CATALOG = Object.freeze({
   claude: 'click gauge in header -> Detect',
   codex: 'uses codex CLI auth',
@@ -9379,7 +9400,6 @@ function ensureRuntimeMetadata(harness, provider = null) {
   _backendMetadata[ref] = {
     label: provider ? `${hInfo.label || harness} / ${pInfo?.label || provider}` : (hInfo.label || harness),
     color: pInfo?.color,
-    driver: harness === 'claudecode' ? 'claude' : harness,
     harness,
     provider,
     protocol: hInfo.protocol || 'oneshot-cli',
@@ -9467,7 +9487,7 @@ function renderHarnessesCatalog(health) {
     const info = _harnessMetadata[id] || {};
     const available = !!info.installed;
     const label = info.label || id;
-    const installCmd = info.install_cmd || DRIVER_CATALOG[id]?.installCmd || '';
+    const installCmd = info.install_cmd || '';
     const providers = (info.compatible_providers || [])
       .map(providerId => _providerMetadata[providerId]?.label || providerId)
       .sort((a, b) => a.localeCompare(b));
@@ -10246,8 +10266,14 @@ function _acRouteHtml(route) {
     }).join('');
   }
   const rm = String(route || '').match(/^#(\w+)(?:@(\w+))?(!\d*)?$/);
-  if (!rm) return '';
-  return _acRouteLabel(rm[1], (rm[2] || '') + (rm[3] || ''));
+  if (rm) return _acRouteLabel(rm[1], (rm[2] || '') + (rm[3] || ''));
+  // Neither parser resolved this route — e.g. a join whose origins span
+  // different topics leaves a bare `@target` topic-ambiguous, so
+  // parseRouteChain returns null while the composer is still mid-type.
+  // Render the raw tokens instead of going blank; it becomes a normal
+  // colored/parsed label again once the missing piece (usually the target's
+  // #topic) is typed.
+  return _coloredRouteHtml(route);
 }
 
 function _acLastPrompt(prompt) {

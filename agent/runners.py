@@ -8,6 +8,7 @@ as the last item when usage data is available (claude only).
 import asyncio
 import json
 import os
+import random
 import re
 import signal
 import subprocess
@@ -1748,6 +1749,50 @@ async def run_pi(
             raise CLIError(event.get("message", "pi error"))
 
 
+async def run_echo(
+    prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
+    model: Optional[str] = None, topic: str = "", agent: str = "",
+    response_timeout: Optional[int] = None,
+    resume_session_id: Optional[str] = None,
+    adhoc: bool = False, msg_id: Optional[int] = None,
+    backend_id: str = "echo", backend_env: Optional[dict] = None,
+    backend_settings: Optional[dict] = None, backend_args: tuple[str, ...] = (),
+    prompt_preview: Optional[str] = None,
+) -> AsyncGenerator[Union[str, dict], None]:
+    """Squid Echo — no subprocess, no network call, echoes the prompt straight
+    back. Exists purely so Squid Flow chains and other dispatch-graph behavior
+    (attribution, races, fan-out/fan-in) can be exercised through the real
+    HTTP/queue/completion-hook path without a real coding-agent CLI. Opt-in
+    only — see config.py's TEST_HARNESS_ENABLED / SQUID_TEST_HARNESS.
+
+    Waits a random 5-10s before responding — a real CLI never answers
+    instantly, and an always-zero-latency echo makes it too easy to miss
+    timing-dependent bugs (dispatch races, thinking-bubble/marker placement,
+    ...) that only show up when turns actually overlap in time."""
+    start = time.monotonic()
+    await asyncio.sleep(random.uniform(5, 10))
+    # Reuse the caller's session if this is a resumed persistent turn, else
+    # mint one from msg_id — deterministic and unique per turn, and (like a
+    # real CLI) becomes "the" session for this topic+agent once
+    # topic_queue.py persists it, so the *next* persistent turn naturally
+    # resumes it instead of getting a fresh one each time.
+    session_id = resume_session_id or f"echo-{msg_id if msg_id is not None else 'adhoc'}"
+    yield f"echo: {prompt}"
+    yield {
+        "_stats": {
+            "session_id": session_id,
+            "model": model,
+            "input_tokens": len(prompt.split()),
+            "output_tokens": len(prompt.split()) + 1,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "history_input_tokens": _estimate_history_tokens(history),
+            "cost_usd": 0,
+            "duration_ms": int((time.monotonic() - start) * 1000),
+        }
+    }
+
+
 RUNNER_NAMES_BY_HARNESS = {
     "claudecode": "run_claude",
     "codex": "run_codex",
@@ -1756,6 +1801,7 @@ RUNNER_NAMES_BY_HARNESS = {
     "antigravity": "run_antigravity",
     "opencode": "run_opencode",
     "pi": "run_pi",
+    "echo": "run_echo",
 }
 
 RUNNER_NAMES_BY_HARNESS_PROTOCOL = {
@@ -1765,6 +1811,7 @@ RUNNER_NAMES_BY_HARNESS_PROTOCOL = {
     ("cursor", "oneshot-cli"): "run_cursor",
     ("opencode", "oneshot-cli"): "run_opencode",
     ("pi", "oneshot-cli"): "run_pi",
+    ("echo", "oneshot-cli"): "run_echo",
 }
 
 
@@ -1778,16 +1825,8 @@ def runner_for_agent(resolved, *, adhoc: bool = False):
     if adhoc and protocol != "oneshot-cli":
         protocol = "oneshot-cli"
     harness = getattr(resolved, "harness", None)
-    if harness is None:
-        driver = getattr(resolved, "driver", None)
-        harness = "claudecode" if driver == "claude" else driver
     name = RUNNER_NAMES_BY_HARNESS_PROTOCOL.get((harness, protocol))
     return globals().get(name) if name else None
-
-
-def runner_for_driver(driver: str):
-    harness = "claudecode" if driver == "claude" else driver
-    return runner_for_harness(harness)
 
 
 def runner_for_backend(backend, *, adhoc: bool = False):

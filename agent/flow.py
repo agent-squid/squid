@@ -13,6 +13,7 @@ handoff operator, with origin broadcasts, target fan-out, bare-topic targets,
 origin-side joins, and single-round `<>`. Scheduled/repeated edges remain
 playground/spec-only until a delayed/repeat dispatcher exists.
 """
+import json
 import logging
 import re
 import asyncio
@@ -333,19 +334,86 @@ def _done_assistant_for_user(rows: list[dict], user_id: int) -> Optional[dict]:
     return None
 
 
-def _origin_assistant(rows: list[dict], origin: dict) -> Optional[dict]:
+def _origin_assistant(rows: list[dict], origin: dict, claimed: set[int], resolved: dict[int, Optional[int]]) -> Optional[dict]:
+    # Two *different* origin atoms (distinct dict objects — one per comma/plus
+    # entry in the origin group) can resolve to the identical (topic, agent),
+    # e.g. `#t@a!,@a!` under the rolling anchor (ADR-0032). Matching by value
+    # alone would point both at the same (first) row. But the same single
+    # origin atom is also legitimately *shared* across multiple branches for
+    # target fan-out (`#a>@b,@c` — one origin atom, two branches) and must
+    # keep resolving to that one row every time it's looked up, not grab a
+    # second distinct row.
+    #
+    # `resolved` memoizes by origin-atom identity (id(origin)) so a shared
+    # atom always maps to the same row; `claimed` tracks which rows are
+    # already spoken for by some *other* atom, so distinct-but-equal atoms
+    # each claim their own row in turn. (Can't also match on origin["fresh"]
+    # here — insert_user_message never writes the `adhoc` column, so every
+    # user row reads back adhoc=0 regardless of whether it was a fresh send.)
+    key = id(origin)
+    if key in resolved:
+        row_id = resolved[key]
+        return _done_assistant_for_user(rows, row_id) if row_id is not None else None
     for row in rows:
         if row["role"] != "user" or row.get("source") != "human":
             continue
+        if row["id"] in claimed:
+            continue
         if row["topic"] == origin["topic"] and row["agent"] == origin["agent"]:
+            claimed.add(row["id"])
+            resolved[key] = row["id"]
             return _done_assistant_for_user(rows, row["id"])
+    resolved[key] = None
     return None
 
 
-def _system_user_exists(rows: list[dict], *, after_id: int, topic: str, agent: str, route: str) -> bool:
+def _row_pins(row: dict) -> Optional[frozenset[int]]:
+    """The message ids this row was dispatched with as pinned context
+    (server.py stores step["previous_msg_ids"] into insert_user_message's
+    context_ids, so every flow-dispatched target/return row carries exactly
+    its own branch's previous_ids here). None means "no pin info" — either a
+    human-authored row, or one from before this field existed — which callers
+    should treat as inconclusive rather than a non-match."""
+    raw = row.get("context")
+    if not raw:
+        return None
+    try:
+        pins = json.loads(raw).get("pins")
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if not isinstance(pins, list) or not pins:
+        return None
+    return frozenset(pins)
+
+
+def _row_belongs_to_branch(row: dict, previous_ids: Optional[list[int]]) -> bool:
+    """Whether `row` is plausibly *this* branch's own dispatched turn, not a
+    sibling branch's — needed because two branches can share the identical
+    (topic, agent) target (rolling-anchor duplicate origins resolve their
+    targets identically too), which makes the topic/agent/after_id filters in
+    _system_users/_system_assistant/_system_user_exists alone ambiguous.
+    Falls back to "yes" when either side has no pin info to compare, so the
+    ordinary single-branch case (or a manually-typed human message) is
+    unaffected."""
+    if not previous_ids:
+        return True
+    pins = _row_pins(row)
+    if pins is None:
+        return True
+    return pins == frozenset(previous_ids)
+
+
+def _system_user_exists(rows: list[dict], *, after_id: int, topic: str, agent: str, route: str, exclude_ids: frozenset[int] = frozenset(), previous_ids: Optional[list[int]] = None) -> bool:
+    # exclude_ids: this chain's own origin rows (see next_chain_steps) — a
+    # degenerate route can give a target the identical (topic, agent) as
+    # another branch's origin (e.g. rolling-anchor duplicates), and that
+    # origin's human-authored user row must never be mistaken for a
+    # already-dispatched target leg just because it shares topic/agent.
     route_line = f"Route: {route}"
     for row in rows:
-        if row["id"] <= after_id or row["role"] != "user":
+        if row["id"] <= after_id or row["role"] != "user" or row["id"] in exclude_ids:
+            continue
+        if not _row_belongs_to_branch(row, previous_ids):
             continue
         content = row.get("content") or ""
         if row["topic"] == topic and row["agent"] == agent and (route_line in content or row.get("source") != "system"):
@@ -353,10 +421,12 @@ def _system_user_exists(rows: list[dict], *, after_id: int, topic: str, agent: s
     return False
 
 
-def _system_assistant(rows: list[dict], *, after_id: int, topic: str, agent: str, route: str) -> Optional[dict]:
+def _system_assistant(rows: list[dict], *, after_id: int, topic: str, agent: str, route: str, exclude_ids: frozenset[int] = frozenset(), previous_ids: Optional[list[int]] = None) -> Optional[dict]:
     route_line = f"Route: {route}"
     for user in rows:
-        if user["id"] <= after_id or user["role"] != "user":
+        if user["id"] <= after_id or user["role"] != "user" or user["id"] in exclude_ids:
+            continue
+        if not _row_belongs_to_branch(user, previous_ids):
             continue
         content = user.get("content") or ""
         if user["topic"] != topic or user["agent"] != agent:
@@ -367,11 +437,13 @@ def _system_assistant(rows: list[dict], *, after_id: int, topic: str, agent: str
     return None
 
 
-def _system_users(rows: list[dict], *, after_id: int, topic: str, agent: str, route: str) -> list[dict]:
+def _system_users(rows: list[dict], *, after_id: int, topic: str, agent: str, route: str, exclude_ids: frozenset[int] = frozenset(), previous_ids: Optional[list[int]] = None) -> list[dict]:
     route_line = f"Route: {route}"
     out = []
     for row in rows:
-        if row["id"] <= after_id or row["role"] != "user":
+        if row["id"] <= after_id or row["role"] != "user" or row["id"] in exclude_ids:
+            continue
+        if not _row_belongs_to_branch(row, previous_ids):
             continue
         content = row.get("content") or ""
         if row["topic"] != topic or row["agent"] != agent:
@@ -431,8 +503,23 @@ def next_chain_steps(flow_run_id: str) -> list[dict]:
 
     original_prompt = rows[0]["content"]
     ready = []
+    # Both shared across every branch below (not reset per-branch) — see
+    # _origin_assistant for why a memoized identity map and a claimed-rows
+    # set are both needed.
+    claimed_origins: set[int] = set()
+    resolved_origins: dict[int, Optional[int]] = {}
+    # Resolve every branch's origin(s) up front so claimed_origins is
+    # complete (the full set of rows that are *this chain's own origins*)
+    # before any branch below checks whether one of its target legs was
+    # already dispatched — otherwise a branch processed early wouldn't yet
+    # know about a later branch's origin row and could mistake it for a
+    # dispatched target (see _system_users/_system_assistant exclude_ids).
     for branch in chain["branches"]:
-        origin_assistants = [_origin_assistant(rows, origin) for origin in branch["origins"]]
+        for origin in branch["origins"]:
+            _origin_assistant(rows, origin, claimed_origins, resolved_origins)
+
+    for branch in chain["branches"]:
+        origin_assistants = [_origin_assistant(rows, origin, claimed_origins, resolved_origins) for origin in branch["origins"]]
         if any(row is None for row in origin_assistants):
             continue
         previous_ids = [row["id"] for row in origin_assistants]
@@ -445,7 +532,7 @@ def next_chain_steps(flow_run_id: str) -> list[dict]:
         after_origin = max(previous_ids)
 
         if op["type"] == "scheduled":
-            sent = len(_system_users(rows, after_id=after_origin, topic=target["topic"], agent=target["agent"], route=chain["route"]))
+            sent = len(_system_users(rows, after_id=after_origin, topic=target["topic"], agent=target["agent"], route=chain["route"], exclude_ids=claimed_origins, previous_ids=previous_ids))
             delay_unit = _duration_seconds(op.get("wait"))
             for i in range(sent, op["count"]):
                 schedule_key = (flow_run_id, chain["route"], "scheduled", target["topic"], target["agent"], tuple(previous_ids), i + 1)
@@ -458,10 +545,17 @@ def next_chain_steps(flow_run_id: str) -> list[dict]:
                     previous_ids=previous_ids,
                     original_prompt=original_prompt,
                     delay_seconds=delay_unit * (i + 1) if delay_unit else 0,
-                    # Only meaningful (and only ever added to
-                    # _SCHEDULED_DISPATCHES) once there's an actual delay to
-                    # dedup around — mirrors the round-trip loop below.
-                    schedule_key=schedule_key if delay_unit else None,
+                    # Always set — including for an immediate (zero-delay)
+                    # dispatch. Several messages in a multi-origin chain can
+                    # each complete and call continue_chain() within the same
+                    # narrow window, and each independently calls
+                    # next_chain_steps() and can conclude the same branch is
+                    # still undispatched before any of them has committed a
+                    # row proving otherwise. schedule_key is how
+                    # _dispatch_or_schedule claims a step atomically (no
+                    # `await` between the check and the claim) so only the
+                    # first of those racing calls actually dispatches.
+                    schedule_key=schedule_key,
                 ))
             continue
 
@@ -481,7 +575,7 @@ def next_chain_steps(flow_run_id: str) -> list[dict]:
             done = []
             pending = []
             for leg_target in leg_targets:
-                assistant = _system_assistant(rows, after_id=current_after, topic=leg_target["topic"], agent=leg_target["agent"], route=chain["route"])
+                assistant = _system_assistant(rows, after_id=current_after, topic=leg_target["topic"], agent=leg_target["agent"], route=chain["route"], exclude_ids=claimed_origins, previous_ids=current_previous_ids)
                 (done if assistant else pending).append((leg_target, assistant))
             if not pending:
                 # Every member of this leg completed — advance past it,
@@ -497,7 +591,7 @@ def next_chain_steps(flow_run_id: str) -> list[dict]:
             # sent, in parallel, and leave the rest for a later call (each
             # completion re-triggers next_chain_steps via the completion hook).
             for leg_target, _ in pending:
-                if _system_user_exists(rows, after_id=current_after, topic=leg_target["topic"], agent=leg_target["agent"], route=chain["route"]):
+                if _system_user_exists(rows, after_id=current_after, topic=leg_target["topic"], agent=leg_target["agent"], route=chain["route"], exclude_ids=claimed_origins, previous_ids=current_previous_ids):
                     continue
                 schedule_key = (flow_run_id, chain["route"], "roundtrip", leg_target["topic"], leg_target["agent"], tuple(current_previous_ids), leg + 1)
                 if schedule_key in _SCHEDULED_DISPATCHES:
@@ -509,7 +603,8 @@ def next_chain_steps(flow_run_id: str) -> list[dict]:
                     previous_ids=current_previous_ids,
                     original_prompt=original_prompt,
                     delay_seconds=wait_seconds,
-                    schedule_key=schedule_key if wait_seconds else None,
+                    # Always set — see the scheduled branch above for why.
+                    schedule_key=schedule_key,
                 ))
             break
     return ready
@@ -527,8 +622,11 @@ def next_chain_step(flow_run_id: str) -> Optional[dict]:
         step["previous_msg_ids"] = previous_ids
     if not step.get("delay_seconds"):
         step.pop("delay_seconds", None)
-    if step.get("schedule_key") is None:
-        step.pop("schedule_key", None)
+    # schedule_key is next_chain_steps/_dispatch_or_schedule's internal
+    # dedup claim (always set now, even for an immediate dispatch — see
+    # next_chain_steps) — not part of this legacy-compatible single-step
+    # summary shape.
+    step.pop("schedule_key", None)
     return step
 
 
@@ -536,12 +634,12 @@ def expected_row_count(route: Optional[str]) -> int:
     chain = parse_flow_route(route)
     if not chain:
         return 0
-    origins = {
-        (origin["topic"], origin["agent"], bool(origin.get("fresh")))
+    origin_ids = {
+        id(origin)
         for branch in chain["branches"]
         for origin in branch["origins"]
     }
-    count = len(origins) * 2
+    count = len(origin_ids) * 2
     for branch in chain["branches"]:
         op = branch["op"]
         if op["type"] == "scheduled":
@@ -624,12 +722,22 @@ async def _dispatch_next_step(flow_run_id: str, step: dict) -> None:
 async def _dispatch_or_schedule(flow_run_id: str, step: dict) -> bool:
     delay = int(step.get("delay_seconds") or 0)
     schedule_key = step.get("schedule_key")
-    if delay <= 0:
-        await _dispatch_next_step(flow_run_id, step)
-        return True
+    # Claim synchronously — check-then-add with no `await` between them, so
+    # this can't interleave with another coroutine doing the same check for
+    # the identical step (see next_chain_steps' scheduled branch for why
+    # that race is real: several messages in one multi-origin chain can each
+    # complete and independently decide the same branch still needs
+    # dispatching before any of them has committed proof otherwise). Only
+    # the first caller to reach this line for a given schedule_key wins.
     if schedule_key in _SCHEDULED_DISPATCHES:
         return False
     _SCHEDULED_DISPATCHES.add(schedule_key)
+    if delay <= 0:
+        try:
+            await _dispatch_next_step(flow_run_id, step)
+        finally:
+            _SCHEDULED_DISPATCHES.discard(schedule_key)
+        return True
 
     async def later() -> None:
         try:
@@ -655,11 +763,16 @@ async def continue_chain(msg_id: int) -> None:
         steps = next_chain_steps(flow_run_id)
         if not steps:
             return
-        # Re-check right before dispatch: guards against a boot-time sweep and
-        # this same live hook racing each other for the same flow_run_id.
-        rows_now = get_flow_run_messages(flow_run_id)
-        if rows_now and rows_now[-1]["id"] != msg_id:
-            return
+        # No "is msg_id still the last row" re-check here (there used to be
+        # one) — that was only ever valid for a single linear branch, where
+        # nothing else could complete concurrently. A join's origins run in
+        # parallel and are dispatched (and therefore id-ordered) up front,
+        # so they can *finish* in any order: whichever origin finishes last
+        # chronologically is not guaranteed to hold the highest id, and that
+        # stale check silently dropped the dispatch whenever it didn't (the
+        # join would then never fire its target). The real
+        # boot-sweep-vs-live-hook race is already handled per-step by
+        # _dispatch_or_schedule's atomic schedule_key claim below.
         for step in steps:
             await _dispatch_or_schedule(flow_run_id, step)
     except Exception:

@@ -981,12 +981,14 @@ Fresh chain sessions are ephemeral workflow sessions. They should not update or
 replace the persistent `(topic, agent)` session row used by normal direct
 messages.
 
-`/clear` remains scoped to the origin lane in a route expression. For example,
-`#squid@codex>@review /clear` clears `#squid@codex`, not both lanes. Clearing
-the target lane requires an explicit target route such as `#squid@review /clear`.
-The generic single-session `/clear` advisory is suppressed on Squid Flow route
-chips because one turn count or one clear target is misleading when the composer
-route contains multiple agents.
+`/clear` on a route expression clears every unique persistent `(topic, agent)`
+lane the chain touches, not just the origin. For example, `#squid@codex>@review
+/clear` clears both `#squid@codex` and `#squid@review`. Lanes are collected
+from the chain's origins and targets, deduped by `(topic, agent)`, and any leg
+marked fresh (`!`) is skipped — fresh legs are ephemeral and never had a
+persistent session to clear. The generic single-session `/clear` advisory is
+suppressed on Squid Flow route chips because one turn count or one clear target
+is misleading when the composer route contains multiple agents.
 
 ## Consequences
 

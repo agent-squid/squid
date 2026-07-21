@@ -139,7 +139,7 @@ async def _run_generation(prompt: str) -> str:
         runner_kwargs = {
             "backend_id": resolved.harness,
             "backend_env": resolved.execution_env(),
-            "backend_settings": resolved.driver_settings(),
+            "backend_settings": resolved.harness_settings(),
             "backend_args": resolved.args,
         }
 
