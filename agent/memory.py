@@ -211,7 +211,7 @@ def topic_memory_squid_config(topic: str) -> dict:
     return topic_memory_squid_config_from_content(read_topic_memory(topic)["content"])
 
 
-def code_roots_prompt_block(code_roots: list[str], isolated: bool = False) -> Optional[str]:
+def code_roots_prompt_block(code_roots: list[str], isolated: bool = False, topic: Optional[str] = None) -> Optional[str]:
     roots = _normalize_code_roots(code_roots)
     if not roots:
         return None
@@ -223,10 +223,20 @@ def code_roots_prompt_block(code_roots: list[str], isolated: bool = False) -> Op
         "Treat these paths as the primary codebase roots for this topic. Prefer working in them over the process working directory.",
     ]
     if isolated:
+        publish_topic = normalize_topic_slug(topic) if topic else "<topic>"
         lines.append(
-            "You are the sole writer in this worktree for this turn. Trust your writes — never re-read a file to confirm an edit, never re-verify state you just set. Do not delete dependency/cache directories such as .venv, node_modules, or vendor; they may be symlinks to the source repo."
+            "You are the sole writer in this isolated turn directory for this turn. Trust your writes — never re-read a file to confirm an edit, never re-verify state you just set. Do not delete dependency/cache directories such as .venv, node_modules, or vendor; they may be symlinks to the source repo."
         )
         lines.append(
-            "This worktree is a temporary staging copy: edits made here are synced into the real repository automatically once the turn ends, with no action needed from you. Do not run git commit, push, or other branch/history-changing commands against these paths — if asked to commit or push, run that against the process's working directory (the real repository) instead."
+            "This is a temporary Squid staging copy, intentionally not a Git repository. Edit files here only; Squid will diff and sync the changes automatically after the turn."
+        )
+        lines.append(
+            "Do not run git init, commit, push, branch, tag, or pull-request commands here. Do not search for, switch to, or suggest working in another checkout or source repository to make those commands work. Do not provide manual Git commands as a workaround."
+        )
+        lines.append(
+            f"If asked to commit, push, publish, branch, tag, release, or open a PR, do not perform the Git operation yourself. Run `squid-publish --topic {publish_topic}`."
+        )
+        lines.append(
+            f"For requests such as updating a version tag to the latest commit, run `squid-publish --topic {publish_topic} --tag <tag>` instead of running or suggesting git tag commands."
         )
     return "\n".join(lines)

@@ -4,6 +4,7 @@ import pytest
 
 from agent import memory
 from agent.memory import (
+    code_roots_prompt_block,
     read_topic_memory,
     topic_memory_prompt_block,
     topic_memory_squid_config,
@@ -88,6 +89,30 @@ Notes.
     assert config["code_roots"] == ["/work/squid"]
     assert config["code_roots_skipped"] is False
     assert config["code_roots_missing"] is False
+
+
+def test_isolated_code_roots_prompt_mentions_squid_publish_command():
+    prompt = memory.code_roots_prompt_block(["/repo"], isolated=True, topic="squid")
+
+    assert "Run `squid-publish --topic squid`." in prompt
+    assert "MCP" not in prompt
+    assert "mcp__squid__publish" not in prompt
+    assert "ToolSearch" not in prompt
+    assert "Do not run git init, commit, push, branch, tag" in prompt
+
+
+def test_isolated_code_roots_prompt_forbids_git_recovery():
+    block = code_roots_prompt_block(["/work/squid"], isolated=True)
+
+    assert "intentionally not a Git repository" in block
+    assert "Do not search for, switch to, or suggest working in another checkout or source repository" in block
+    assert "If asked to commit, push, publish, branch, tag, release, or open a PR" in block
+    assert "squid-publish --topic <topic> --tag <tag>" in block
+    assert "squid-publish --topic <topic>" in block
+    assert "Do not provide manual Git commands as a workaround" in block
+    assert "working in the real repo" not in block
+    assert "git tag -f" not in block
+    assert "run that against the process's working directory" not in block
 
 
 def test_frontmatter_closing_delimiter_must_be_standalone(tmp_path, monkeypatch):

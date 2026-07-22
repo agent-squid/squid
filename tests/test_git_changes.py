@@ -124,7 +124,8 @@ def test_worktree_tracker_emits_durable_repo_for_revert(tmp_path):
     repo.mkdir()
     init_repo(repo)
     wt = tmp_path / "wt"
-    git(repo, "worktree", "add", "-b", "sqd-test", str(wt), "HEAD")
+    wt.mkdir()
+    (wt / "app.txt").write_text("base\n")
 
     trackers = prepare_trackers(
         [str(wt)],
@@ -137,7 +138,8 @@ def test_worktree_tracker_emits_durable_repo_for_revert(tmp_path):
 
     assert len(trackers) == 1
     tracker = trackers[0]
-    assert tracker.repo_root == wt
+    assert tracker.repo_root == repo
+    assert tracker.work_tree == wt
     assert tracker.event_repo_root == repo
 
     (wt / "app.txt").write_text("changed in worktree\n")
@@ -152,9 +154,7 @@ def test_worktree_tracker_emits_durable_repo_for_revert(tmp_path):
     assert "-base" in event["diff"]
     assert "+changed in worktree" in event["diff"]
 
-    git(wt, "add", "app.txt")
-    git(wt, "commit", "-m", "worktree change")
-    git(repo, "merge", "--no-ff", "sqd-test")
+    (repo / "app.txt").write_text("changed in worktree\n")
     ok, err = apply_reverse_patch(repo, event["diff"])
 
     assert ok, err

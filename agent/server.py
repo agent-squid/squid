@@ -147,7 +147,7 @@ dispatcher = TopicDispatcher()
 os.environ.pop("SQUID_NATIVE_CLAUDE_TOKEN", None)
 
 _SQUID_CHAT_COMMANDS = frozenset({
-    "clear", "deq", "f", "filter", "help", "remote", "restart",
+    "clear", "deq", "f", "filter", "help", "publish", "remote", "restart",
     "s", "search", "status", "stop", "stopall",
 })
 
@@ -401,12 +401,27 @@ def _codex_bearer_header(token: str) -> Optional[str]:
 
 
 class CmdRequest(BaseModel):
-    command: Literal["stop", "stopall", "deq", "list", "restart", "clear", "stop_msg", "journal"]
+    command: Literal["stop", "stopall", "deq", "list", "restart", "clear", "stop_msg", "journal", "publish"]
     topic: str = "default"
     agent: Optional[str] = None
     adhoc: Optional[bool] = None
     pos: Optional[int] = None
     msg_id: Optional[int] = None
+    message: Optional[str] = None
+    tag: Optional[str] = None
+
+
+async def publish_topic(topic: str, message: Optional[str] = None, tag: Optional[str] = None) -> dict:
+    from .publish import publish_code_roots
+
+    roots = topic_memory_squid_config(topic).get("code_roots") or []
+    published = await asyncio.to_thread(
+        publish_code_roots, topic, roots, message=message, tag=tag
+    )
+    return {
+        "ok": True,
+        "published": [repo.__dict__ for repo in published],
+    }
 
 
 def _validate_config_content(content: str) -> dict:
@@ -672,15 +687,18 @@ async def _prepare_chat_turn(
     effective_code_roots = code_roots
     effective_cwd = cwd
     worktree_isolated = False
+    worktree_setup_elapsed_ms: Optional[float] = None
     if WORKTREE_ISOLATION_ENABLED and resolved_agent and code_roots:
+        worktree_setup_started_at = time.perf_counter()
         effective_code_roots, effective_cwd, worktree_isolated = await _setup_worktrees(
             code_roots, cwd, topic, str(asst_msg_id)
         )
+        worktree_setup_elapsed_ms = (time.perf_counter() - worktree_setup_started_at) * 1000
 
     effective_message = message
     prefix_blocks: list[str] = []
     if not native_backend_command and effective_code_roots:
-        code_roots_block = code_roots_prompt_block(effective_code_roots, isolated=worktree_isolated)
+        code_roots_block = code_roots_prompt_block(effective_code_roots, isolated=worktree_isolated, topic=topic)
         if code_roots_block:
             prefix_blocks.append(code_roots_block)
     tracking_roots: list[str] = [] if native_backend_command else effective_code_roots
@@ -738,6 +756,8 @@ async def _prepare_chat_turn(
         "source_cwd": source_cwd,
         "harness": harness,
         "provider": provider,
+        "worktree_setup_elapsed_ms": worktree_setup_elapsed_ms,
+        "worktree_isolated": worktree_isolated,
     }
 
 # ---------------------------------------------------------------------------
@@ -885,6 +905,8 @@ async def stream_response(
     source_cwd: Optional[str] = None,
     harness: Optional[str] = None,
     provider: Optional[str] = None,
+    worktree_setup_elapsed_ms: Optional[float] = None,
+    worktree_isolated: bool = False,
 ) -> AsyncGenerator[str, None]:
     yield sse_event("meta", json.dumps({
         "agent": agent,
@@ -907,6 +929,8 @@ async def stream_response(
         adhoc=adhoc, lookback=lookback, msg_id=asst_msg_id,
         code_roots=code_roots,
         display_prompt=display_prompt,
+        worktree_setup_elapsed_ms=worktree_setup_elapsed_ms,
+        worktree_isolated=worktree_isolated,
     )
 
     raw = ""
@@ -1055,6 +1079,8 @@ async def chat(req: ChatRequest):
             source_cwd=prepared["source_cwd"],
             harness=prepared["harness"],
             provider=prepared["provider"],
+            worktree_setup_elapsed_ms=prepared["worktree_setup_elapsed_ms"],
+            worktree_isolated=prepared["worktree_isolated"],
         ),
         media_type="text/event-stream",
         headers={
@@ -1137,6 +1163,14 @@ async def run_cmd(req: CmdRequest):
         if path:
             return JSONResponse({"ok": True, "file": str(path)})
         return JSONResponse({"ok": False, "error": "generation failed or no turns"}, status_code=500)
+
+    if req.command == "publish":
+        from .publish import PublishError
+        try:
+            result = await publish_topic(topic, req.message, req.tag)
+        except PublishError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status_code)
+        return JSONResponse(result)
 
     return JSONResponse({"ok": False, "error": "unknown command"}, status_code=400)
 
@@ -2354,6 +2388,59 @@ async def serve_local_file(path: str, request: Request, render: bool = False):
     if (not mime or mime == "application/octet-stream") and _looks_like_text_file(p):
         return PlainTextResponse(p.read_text(errors="replace"), media_type="text/plain", headers=_nocache)
     return FileResponse(str(p), media_type=mime or "application/octet-stream", headers=_nocache)
+
+
+def _encode_cwd_dashes(cwd: str) -> str:
+    return cwd.replace("/", "-")
+
+
+def _find_session_log(harness: str, session_id: str, cwd: str) -> Optional[Path]:
+    """Locate a coding agent's raw on-disk session transcript (.jsonl), if any.
+
+    Each CLI encodes cwd into its session directory name differently; these are the
+    conventions observed for each harness's own local session storage (not something
+    Squid controls). Falls back to a recursive search under the harness's base dir if
+    the direct guess misses, so a slightly-off encoding assumption still resolves.
+    """
+    if not session_id:
+        return None
+    home = Path.home()
+    try:
+        if harness == "claudecode":
+            base = home / ".claude" / "projects"
+            direct = base / _encode_cwd_dashes(cwd) / f"{session_id}.jsonl"
+            if direct.is_file():
+                return direct
+            return next(base.rglob(f"{session_id}.jsonl"), None) if base.is_dir() else None
+        if harness == "codex":
+            base = home / ".codex" / "sessions"
+            return next(base.rglob(f"*{session_id}.jsonl"), None) if base.is_dir() else None
+        if harness == "pi":
+            base = home / ".pi" / "agent" / "sessions"
+            direct_dir = base / f"--{_encode_cwd_dashes(cwd)}--"
+            if direct_dir.is_dir():
+                match = next(direct_dir.glob(f"*_{session_id}.jsonl"), None)
+                if match:
+                    return match
+            return next(base.rglob(f"*_{session_id}.jsonl"), None) if base.is_dir() else None
+        if harness == "cursor":
+            base = home / ".cursor" / "projects"
+            direct = base / cwd.strip("/").replace("/", "-") / "agent-transcripts" / session_id / f"{session_id}.jsonl"
+            if direct.is_file():
+                return direct
+            return next(base.rglob(f"{session_id}.jsonl"), None) if base.is_dir() else None
+    except OSError:
+        return None
+    return None
+
+
+@app.get("/session-log")
+async def session_log(agent: str, session_id: str, cwd: str = ""):
+    """Resolve the local raw transcript path for a session, if the harness stores one on disk."""
+    agent_cfg = get_agent(agent)
+    harness = agent_cfg.get("harness") if agent_cfg else None
+    path = _find_session_log(harness, session_id, cwd) if harness else None
+    return JSONResponse({"path": str(path) if path else None})
 
 
 @app.post("/localfile")

@@ -12,6 +12,7 @@ Strategy (Option 4):
 """
 
 import asyncio
+import json
 import logging
 import os
 import subprocess
@@ -23,6 +24,67 @@ log = logging.getLogger(__name__)
 
 CONTEXT_DIR = str(Path.home() / ".squid" / "context")
 _last_sync_mtime: float = 0.0
+_CODEX_MANAGED_BEGIN = "# BEGIN SQUID MANAGED MCP"
+_CODEX_MANAGED_END = "# END SQUID MANAGED MCP"
+
+
+def _rmdir_empty_parents(path: Path, stop: Path) -> None:
+    parent = path.parent
+    while parent != stop and parent.is_relative_to(stop):
+        try:
+            parent.rmdir()
+        except OSError:
+            return
+        parent = parent.parent
+
+
+def _remove_json_server(path: Path, section: str, empty_shape: dict, context_dir: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return
+    if not isinstance(config, dict):
+        return
+    servers = config.get(section)
+    if not isinstance(servers, dict) or "squid" not in servers:
+        return
+    servers.pop("squid", None)
+    if config == empty_shape:
+        path.unlink()
+        _rmdir_empty_parents(path, context_dir)
+        return
+    path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+
+
+def _remove_codex_managed_block(path: Path, context_dir: Path) -> None:
+    if not path.exists():
+        return
+    text = path.read_text(encoding="utf-8")
+    start = text.find(_CODEX_MANAGED_BEGIN)
+    end = text.find(_CODEX_MANAGED_END)
+    if start < 0 or end < start:
+        return
+    end += len(_CODEX_MANAGED_END)
+    updated = (text[:start].rstrip() + "\n" + text[end:].lstrip()).strip()
+    if not updated:
+        path.unlink()
+        _rmdir_empty_parents(path, context_dir)
+        return
+    path.write_text(updated + "\n", encoding="utf-8")
+
+
+def _remove_legacy_mcp_context_files(context_dir: Path) -> None:
+    _remove_json_server(context_dir / ".mcp.json", "mcpServers", {"mcpServers": {}}, context_dir)
+    _remove_json_server(context_dir / ".cursor" / "mcp.json", "mcpServers", {"mcpServers": {}}, context_dir)
+    _remove_json_server(
+        context_dir / "opencode.json",
+        "mcp",
+        {"$schema": "https://opencode.ai/config.json", "mcp": {}},
+        context_dir,
+    )
+    _remove_codex_managed_block(context_dir / ".codex" / "config.toml", context_dir)
 
 
 def _tree_mtime(path: str) -> float:
@@ -52,6 +114,7 @@ def sync_now() -> None:
     """Full blocking sync at daemon startup. Creates SQUID_HOME if needed."""
     global _last_sync_mtime
     os.makedirs(SQUID_HOME, exist_ok=True)
+    _remove_legacy_mcp_context_files(Path(CONTEXT_DIR))
     if _rsync():
         _last_sync_mtime = _tree_mtime(CONTEXT_DIR)
         log.info("context synced → %s", SQUID_HOME)

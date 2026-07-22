@@ -52,9 +52,11 @@ so user-curated context persists across tarball installs/updates.
 `start.sh` creates `/tmp/<user>/squid` with `mkdir -p` as a lightweight guard
 in case the server is restarted without running `start.sh`.
 
-On first run, `start.sh` seeds `~/.squid/context/` from the install dir's
-`context/` so users have a starting point. Subsequent edits to
-`~/.squid/context/` are user-owned and survive tarball updates.
+On install, `install.sh` seeds `~/.squid/context/` from the install dir's
+`context/` when the user context directory is empty. `start.sh` keeps the same
+first-run guard for users who start without explicitly installing first.
+Subsequent edits to `~/.squid/context/` are user-owned and survive tarball
+updates.
 
 ## Consequences
 

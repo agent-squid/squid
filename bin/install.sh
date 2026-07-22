@@ -52,6 +52,7 @@ run_quiet() {
 }
 
 SQUID_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SQUID_HOME="$HOME/.squid"
 
 # ── banner ──────────────────────────────────────────────────────────────────
 echo -e "\n${BOLD}squid — install${RESET}\n"
@@ -114,9 +115,21 @@ if [[ -z "$PYTHON" ]]; then
   mark_error
 else
   VENV_DIR="$SQUID_DIR/.venv"
-  [[ -d "$VENV_DIR" ]] || run_quiet "create Python virtualenv" "$PYTHON" -m venv "$VENV_DIR"
-  run_quiet "upgrade pip" "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-  run_quiet "install squid package" "$VENV_DIR/bin/pip" install --quiet "$SQUID_DIR"
+  [[ -x "$VENV_DIR/bin/python" ]] || run_quiet "create Python virtualenv" "$PYTHON" -m venv "$VENV_DIR"
+  if ! "$VENV_DIR/bin/python" -m pip --version >/dev/null 2>&1; then
+    run_quiet "bootstrap pip" "$VENV_DIR/bin/python" -m ensurepip --upgrade
+  fi
+  run_quiet "upgrade pip" "$VENV_DIR/bin/python" -m pip install --quiet --upgrade pip
+  run_quiet "install squid package" "$VENV_DIR/bin/python" -m pip install --quiet "$SQUID_DIR"
+  mkdir -p "$SQUID_HOME/logs" "$SQUID_HOME/context"
+  if [[ ! -f "$SQUID_HOME/squid.yaml" && -f "$SQUID_DIR/config/squid.yaml.example" ]]; then
+    sed "s|/tmp/squid|/tmp/$(whoami)/squid|g" "$SQUID_DIR/config/squid.yaml.example" > "$SQUID_HOME/squid.yaml"
+    ok "created ~/.squid/squid.yaml"
+  fi
+  if [[ -d "$SQUID_DIR/context" && -z "$(ls -A "$SQUID_HOME/context" 2>/dev/null)" ]]; then
+    cp -r "$SQUID_DIR/context/." "$SQUID_HOME/context/"
+    ok "seeded ~/.squid/context"
+  fi
   ok "squid installed"
 fi
 

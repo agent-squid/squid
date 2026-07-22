@@ -42,15 +42,35 @@ def _repo_root(cwd: Path) -> Optional[Path]:
     return Path(out).resolve() if out else None
 
 
-def _snapshot_tree(repo_root: Path) -> str:
+def _snapshot_tree(repo_root: Path, work_tree: Optional[Path] = None) -> str:
+    """
+    Build a tree object for work_tree's current file content, using
+    repo_root's object database. Defaults to snapshotting repo_root itself
+    (its own dirty state relative to HEAD).
+
+    When work_tree is a separate, branchless per-turn directory (no .git of
+    its own — see ADR-0025), it is captured via GIT_WORK_TREE instead, with
+    no `read-tree HEAD` seeding: the turn directory may have started from an
+    older base than repo_root's current HEAD, and seeding from HEAD would
+    make repo_root drift since the turn started look like part of the turn's
+    own diff.
+    """
     fd, index_path = tempfile.mkstemp(prefix="agent-squid-index-")
     os.close(fd)
     os.unlink(index_path)
     try:
         env = os.environ.copy()
         env["GIT_INDEX_FILE"] = index_path
-        _run_git(repo_root, "read-tree", "HEAD", env=env)
+        if work_tree is not None and work_tree != repo_root:
+            env["GIT_WORK_TREE"] = str(work_tree)
+        else:
+            _run_git(repo_root, "read-tree", "HEAD", env=env)
         _run_git(repo_root, "add", "-A", "--", ".", env=env)
+        if work_tree is not None and work_tree != repo_root:
+            from .worktree import _external_dir_symlink_rel_paths, _linked_dir_rel_paths
+
+            for rel in set(_linked_dir_rel_paths(repo_root)) | set(_external_dir_symlink_rel_paths(work_tree)):
+                _run_git(repo_root, "rm", "-r", "--cached", "--ignore-unmatch", "--", str(rel), env=env, check=False)
         return _run_git(repo_root, "write-tree", env=env).stdout.strip()
     finally:
         try:
@@ -126,11 +146,13 @@ class GitChangeTracker:
     source_root: Path
     run_cwd: Path
     repo_root: Path
+    work_tree: Path
     event_cwd: Path
     event_repo_root: Path
     base_tree: str
     persistent: bool
     msg_id: Optional[int] = None
+    head_tree: Optional[str] = None
 
     @classmethod
     def prepare(
@@ -146,22 +168,26 @@ class GitChangeTracker:
     ) -> Optional["GitChangeTracker"]:
         del topic, agent, adhoc
         run_cwd = Path(cwd).expanduser().resolve()
-        run_root = _repo_root(run_cwd)
-        if not run_root:
-            return None
 
         event_cwd = Path(source_cwd).expanduser().resolve() if source_cwd else run_cwd
-        if source_root:
-            event_root = Path(source_root).expanduser().resolve()
-        else:
-            event_root = _repo_root(event_cwd) or run_root
+        event_root = Path(source_root).expanduser().resolve() if source_root else _repo_root(event_cwd)
 
-        base_tree = _snapshot_tree(run_root)
+        # run_cwd is a branchless per-turn directory (no .git of its own — see
+        # ADR-0025) whenever source_root points elsewhere: git commands must
+        # run against the real repo, snapshotting run_cwd's content via
+        # GIT_WORK_TREE rather than requiring run_cwd itself to be a git repo.
+        git_root = _repo_root(run_cwd) or event_root
+        if not git_root:
+            return None
+        event_root = event_root or git_root
+
+        base_tree = _snapshot_tree(git_root, run_cwd)
         return cls(
             source_cwd=event_cwd,
             source_root=event_root,
             run_cwd=run_cwd,
-            repo_root=run_root,
+            repo_root=git_root,
+            work_tree=run_cwd,
             event_cwd=event_cwd,
             event_repo_root=event_root,
             base_tree=base_tree,
@@ -170,7 +196,8 @@ class GitChangeTracker:
         )
 
     def build_event(self) -> Optional[dict]:
-        head_tree = _snapshot_tree(self.repo_root)
+        head_tree = _snapshot_tree(self.repo_root, self.work_tree)
+        self.head_tree = head_tree
         name_status = _run_git(self.repo_root, "diff", "--name-status", self.base_tree, head_tree).stdout
         files = _parse_name_status(name_status)
         if not files:
@@ -204,9 +231,9 @@ class GitChangeTracker:
             "omitted_paths": omitted_paths,
             **({
                 "worktree_cwd": str(self.run_cwd),
-                "worktree_repo": str(self.repo_root),
+                "worktree_repo": str(self.work_tree),
                 "worktree_status": "pending",
-            } if self.repo_root != self.event_repo_root else {}),
+            } if self.work_tree != self.event_repo_root else {}),
         }
 
     def build_no_change_event(self) -> dict:
@@ -219,6 +246,7 @@ class GitChangeTracker:
             "stat": "",
             "diff": "",
             "base": self.base_tree,
+            "head": self.head_tree or self.base_tree,
             "cwd": str(self.event_cwd),
             "source": str(self.source_cwd),
             "repo": str(self.event_repo_root),
@@ -228,9 +256,9 @@ class GitChangeTracker:
             "no_changes": True,
             **({
                 "worktree_cwd": str(self.run_cwd),
-                "worktree_repo": str(self.repo_root),
+                "worktree_repo": str(self.work_tree),
                 "worktree_status": "pending",
-            } if self.repo_root != self.event_repo_root else {}),
+            } if self.work_tree != self.event_repo_root else {}),
         }
 
     def cleanup(self) -> None:

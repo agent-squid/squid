@@ -49,6 +49,7 @@ compatibility.
 | `/stop`              | SIGTERM running process for topic                 | uniform                |
 | `/stopall`           | SIGTERM + drain queue                             | uniform                |
 | `/deq [N]`           | drain queue or remove Nth item                    | uniform                |
+| `/publish [message]` | commit and push synced code-root changes          | uniform                |
 | `/restart`           | kill all procs + restart server                   | uniform                |
 | `/refresh`           | hard-refresh the browser tab; server untouched     | client-only            |
 | `/f`, `/filter`      | filter history by topic/agent; `/f reset` clears   | client-only            |
@@ -59,7 +60,7 @@ compatibility.
 | `/help`              | open help panel                                     | client-only            |
 | `/remote`            | show QR code for mobile/tablet access               | client-only            |
 
-`/deq`, `/stop`, `/stopall`, `/restart`, and `/clear` are also exposed
+`/deq`, `/stop`, `/stopall`, `/restart`, `/clear`, and `/publish` are also exposed
 server-side via `POST /cmd`; the rest are handled entirely client-side.
 
 ### `/clear` implementation

@@ -11,6 +11,7 @@ import pytest
 
 from agent.runners import (
     _claude_interactive_sessions,
+    _child_env,
     _proc_registry,
     _register_proc,
     _deregister_proc,
@@ -161,6 +162,21 @@ def test_run_echo_resumes_the_given_session_id():
     assert chunks[1]["_stats"]["session_id"] == "prior-session"
 
 
+def test_child_env_prepends_squid_tool_path_and_applies_backend_env(monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    def fake_prepend(env):
+        env["PATH"] = "/tmp/squid/bin:" + env["PATH"]
+        return env
+
+    with patch("agent.runners.prepend_tool_path", fake_prepend):
+        env = _child_env({"PATH": "/custom/bin", "TOKEN": "kept", "REMOVE_ME": None})
+
+    assert env["PATH"] == "/tmp/squid/bin:/custom/bin"
+    assert env["TOKEN"] == "kept"
+    assert "REMOVE_ME" not in env
+
+
 def test_claude_oneshot_cli_passes_prompt_as_process_argument():
     captured = {}
 
@@ -170,7 +186,7 @@ def test_claude_oneshot_cli_passes_prompt_as_process_argument():
         yield json.dumps({"type": "result", "result": "answer", "usage": {}})
 
     async def collect():
-        return [chunk async for chunk in run_claude("fresh prompt", cwd="/tmp/project")]
+        return [chunk async for chunk in run_claude("fresh prompt", cwd="/tmp/project", msg_id=123)]
 
     with patch("agent.runners.CLAUDE_PATH", "claude"), patch(
         "agent.runners._stream_lines", fake_stream_lines
@@ -178,9 +194,34 @@ def test_claude_oneshot_cli_passes_prompt_as_process_argument():
         chunks = asyncio.run(collect())
 
     assert captured["cmd"][:2] == ["claude", "--print"]
+    assert "--mcp-config" not in captured["cmd"]
+    assert "--append-system-prompt" not in captured["cmd"]
+    assert captured["cmd"][-2] == "--"
     assert captured["cmd"][-1] == "fresh prompt"
     assert captured["kwargs"]["prompt"] == "fresh prompt"
     assert chunks[0] == "answer"
+
+
+def test_claude_init_event_does_not_yield_mcp_diagnostics():
+    async def fake_stream_lines(_cmd, **_kwargs):
+        yield json.dumps({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-1",
+            "tools": ["Read", "Edit"],
+        })
+        yield json.dumps({"type": "result", "result": "answer", "usage": {}})
+
+    async def collect():
+        return [chunk async for chunk in run_claude("fresh prompt", cwd="/tmp/project", msg_id=123)]
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        chunks = asyncio.run(collect())
+
+    assert chunks[0] == "answer"
+    assert chunks[1]["_stats"]["session_id"] == "sess-1"
 
 
 def test_claude_interactive_reuses_live_process_for_same_session_key():
@@ -1157,6 +1198,7 @@ def test_codex_oneshot_fresh_vs_resume_command_shape():
 
     assert captured[0][:3] == ["codex", "exec", "--json"]
     assert "resume" not in captured[0]
+    assert not any("mcp_servers.squid" in arg for arg in captured[0])
     assert captured[0][-1] == "fresh"
     assert captured[1][:4] == ["codex", "exec", "resume", "--json"]
     assert captured[1][-2:] == ["thread-1", "next"]
@@ -1756,7 +1798,7 @@ def test_codex_backend_configuration_reaches_command_and_process_metadata():
     with patch("agent.runners.CODEX_PATH", "codex"), patch("agent.runners._stream_lines", fake_stream_lines):
         asyncio.run(collect())
 
-    assert ["-c", 'model_provider="vllm_mlx"'] == captured["cmd"][5:7]
+    assert 'model_provider="vllm_mlx"' in captured["cmd"]
     assert captured["kwargs"]["backend"] == "local-codex"
     assert captured["kwargs"]["extra_env"] == {"LOCAL_TOKEN": "token"}
 

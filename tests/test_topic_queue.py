@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import subprocess
 from unittest.mock import patch
 
@@ -358,7 +359,7 @@ def test_worker_emits_git_diff_tool_event(tmp_path):
     assert "+changed by agent" in tools[0]["diff"]
 
 
-def test_worker_marks_worktree_conflict_and_emits_sync_tool():
+def test_worker_marks_worktree_conflict_and_emits_sync_tool(caplog):
     class FakeTracker:
         def build_event(self):
             return {
@@ -393,13 +394,16 @@ def test_worker_marks_worktree_conflict_and_emits_sync_tool():
             code_roots=["/tmp/wt"],
             adhoc=True,
             msg_id=458,
+            worktree_setup_elapsed_ms=12.3,
+            worktree_isolated=True,
         )
         rec = {
             "repo_root": "/tmp/repo",
             "worktree_path": "/tmp/wt",
             "integration_worktree_path": "/tmp/wt-integration",
         }
-        with patch("agent.runners.run_codex", fake_runner), \
+        with caplog.at_level(logging.INFO), \
+             patch("agent.runners.run_codex", fake_runner), \
              patch("agent.stats_db.get_worktrees", return_value=[rec]), \
              patch("agent.git_changes.prepare_trackers", return_value=[FakeTracker()]), \
              patch("agent.worktree.sync_after_turn", return_value=["app.txt"]), \
@@ -424,6 +428,8 @@ def test_worker_marks_worktree_conflict_and_emits_sync_tool():
     assert tools[1]["status"] == "conflict"
     assert tools[1]["conflicts"] == ["app.txt"]
     assert mark_status_call.args == ("work", "458", "/tmp/repo", "conflict")
+    assert "worktree turn timing topic=work agent=codex msg_id=458 isolated=True repos=1 setup_ms=12.3" in caplog.text
+    assert "statuses=conflict" in caplog.text
 
 
 def test_worker_emits_no_change_git_diff_when_tracked_tree_is_clean(tmp_path):

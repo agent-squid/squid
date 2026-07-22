@@ -2607,6 +2607,7 @@ const SQUID_COMMANDS = [
   { name: 'stop',         desc: 'kill running process for current topic',             args: false },
   { name: 'stopall',      desc: 'kill + drain queue for current topic',               args: false },
   { name: 'deq',          desc: 'drain queue (deq N removes Nth item)',               args: true  },
+  { name: 'publish',      desc: 'commit and push synced code-root changes',            args: true  },
   { name: 'restart',      desc: 'restart the squid server — kills any in-flight prompts (confirms first)', args: false },
   { name: 'refresh',      desc: 'hard refresh this browser tab — clears cache, server untouched', args: false },
   { name: 'f', alias: 'filter', desc: 'filter — e.g. /f #topic  ·  /f @agent!  ·  /f reset', args: true },
@@ -2627,6 +2628,8 @@ function parseCommand(message) {
   if (/^stop$/i.test(t))         return { command: 'stop' };
   if (/^stopall$/i.test(t))      return { command: 'stopall' };
   if (/^clear$/i.test(t))        return { command: 'clear' };
+  const mp = t.match(/^publish(?:\s+([\s\S]*))?$/i);
+  if (mp) return { command: 'publish', message: (mp[1] || '').trim() };
   if (/^(?:bookmarks|bm)$/i.test(t)) return { command: 'bookmarks' };
   if (/^prompts$/i.test(t))      return { command: 'prompts' };
   if (/^status$/i.test(t))       return { command: 'status' };
@@ -2743,6 +2746,29 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0, opt
       feedbackEl.textContent = `${cleared.join(', ')} — session${cleared.length === 1 ? '' : 's'} cleared`;
     } catch {
       feedbackEl.textContent = `${cmd.command} — request failed`;
+    }
+    return;
+  }
+
+  if (cmd.command === 'publish') {
+    const feedbackEl = showCmdFeedback('publish…');
+    try {
+      const body = { command: 'publish', topic };
+      if (cmd.message) body.message = cmd.message;
+      const res = await fetch('/cmd', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        feedbackEl.textContent = `publish failed: ${data.error || 'unknown error'}`;
+        return;
+      }
+      const count = Array.isArray(data.published) ? data.published.length : 0;
+      feedbackEl.textContent = `publish #${topic} — committed and pushed ${count} repo${count === 1 ? '' : 's'}`;
+    } catch {
+      feedbackEl.textContent = 'publish — request failed';
     }
     return;
   }
@@ -4184,6 +4210,7 @@ async function sendMessage(text, opts = {}) {
               if (stats.session_id) liveCtxSpan.dataset.sessionId = stats.session_id;
               if (!adhoc && !suppressChipTurnCount) _updateChipTurnCount(topic, resolvedAgent || null, stats.session_id || null, liveSessionTurnCount);
               if (stats.cwd) liveCtxSpan.dataset.cwd = stats.cwd;
+              if (resolvedAgent) liveCtxSpan.dataset.agent = resolvedAgent;
               if (stats.session_id && !adhoc && stickyChip && !stickyChip.adhoc) {
                 localStorage.setItem(`squid_adv_lta_${stickyChip.topic}_${stickyChip.agent||'_'}_${stats.session_id}`, String(Date.now()));
               }
@@ -5148,6 +5175,7 @@ function appendHistoryItem(item, container) {
   ctxSpan.dataset.sessionId = item.session_id || '';
   ctxSpan.dataset.flowRunId = item.flow_run_id || '';
   ctxSpan.dataset.cwd = item.stats?.cwd || '';
+  ctxSpan.dataset.agent = item.agent || '';
   ctxSpan.dataset.topic = item.topic || '';
   ctxSpan.dataset.sessionTurnCount = String(sessionTurnCount);
   ctxSpan.dataset.pinnedIds = JSON.stringify(_pc.pins);
@@ -6505,7 +6533,7 @@ function initQuota() {
       </svg>
       <span id="${cfg.sevenDaySuffixId}" class="quota-7d-suffix">7D</span>
     </span>
-    <span style="display:inline-flex;align-items:center">
+    <span style="display:inline-flex;align-items:center;gap:0.1rem">
       <svg id="quota-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
         <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
         <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('anthropic')}"
@@ -6564,7 +6592,7 @@ function initCodexQuota() {
       </svg>
       <span id="${cfg.sevenDaySuffixId}" class="quota-7d-suffix">7D</span>
     </span>
-    <span style="display:inline-flex;align-items:center">
+    <span style="display:inline-flex;align-items:center;gap:0.1rem">
       <svg id="codex-pie" width="18" height="18" viewBox="0 0 18 18" style="flex-shrink:0">
         <circle cx="9" cy="9" r="6" fill="none" stroke="#2a2a3c" stroke-width="4"/>
         <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('codex')}"
@@ -11101,6 +11129,7 @@ function showCtxPopup(spanEl) {
   const flowRunId = spanEl.dataset.flowRunId || '';
   const msgId  = spanEl.dataset.msgId || '';
   const cwd    = spanEl.dataset.cwd || '';
+  const agent  = spanEl.dataset.agent || '';
   const mem    = spanEl.dataset.mem === 'true';
   const topic  = spanEl.dataset.topic || '';
   const sessionTurnCount = parseInt(spanEl.dataset.sessionTurnCount || '0', 10) || 0;
@@ -11115,11 +11144,15 @@ function showCtxPopup(spanEl) {
     html += `<div class="ctx-popup-row"><span class="ctx-popup-key">flow run</span><span class="ctx-popup-val">${escapeHtml(flowRunId)}</span></div>`;
   }
   if (sid || cwd) {
-    html += `<div class="ctx-popup-row"><span class="ctx-popup-key">session</span><span class="ctx-popup-val">${sid}</span></div>`;
+    if (sid && agent) {
+      html += `<div class="ctx-popup-row ctx-popup-session-row" data-session-id="${escapeHtml(sid)}" data-agent="${escapeHtml(agent)}" data-cwd="${escapeHtml(cwd)}"><span class="ctx-popup-key">session</span><span class="ctx-popup-val ctx-popup-link" title="Open raw session log">${sid}</span></div>`;
+    } else {
+      html += `<div class="ctx-popup-row"><span class="ctx-popup-key">session</span><span class="ctx-popup-val">${sid}</span></div>`;
+    }
     if (sessionTurnCount > 0) {
       html += `<div class="ctx-popup-row"><span class="ctx-popup-key">session context</span><span class="ctx-popup-val">${sessionTurnCount} turn${sessionTurnCount !== 1 ? 's' : ''}</span></div>`;
     }
-    if (cwd) html += `<div class="ctx-popup-row"><span class="ctx-popup-key">cwd</span><span class="ctx-popup-val">${cwd}</span></div>`;
+    if (cwd) html += `<div class="ctx-popup-row ctx-popup-cwd-row" data-cwd="${escapeHtml(cwd)}"><span class="ctx-popup-key">cwd</span><span class="ctx-popup-val ctx-popup-link" title="Open in file viewer">${cwd}</span></div>`;
   } else if (sessionTurnCount > 0) {
     html += `<div class="ctx-popup-row"><span class="ctx-popup-key">session context</span><span class="ctx-popup-val">${sessionTurnCount} turn${sessionTurnCount !== 1 ? 's' : ''}</span></div>`;
   }
@@ -11158,6 +11191,37 @@ function showCtxPopup(spanEl) {
     memRow.addEventListener('click', () => {
       _closeCtxPopup(popup);
       openMemoryEditor(memRow.dataset.topic);
+    });
+  }
+
+  const cwdRow = popup.querySelector('.ctx-popup-cwd-row');
+  if (cwdRow) {
+    cwdRow.addEventListener('click', () => {
+      _closeCtxPopup(popup);
+      openFileViewer(cwdRow.dataset.cwd);
+    });
+  }
+
+  const sessionRow = popup.querySelector('.ctx-popup-session-row');
+  if (sessionRow) {
+    sessionRow.addEventListener('click', async () => {
+      const valEl = sessionRow.querySelector('.ctx-popup-val');
+      const original = valEl.textContent;
+      const { sessionId, agent: rowAgent, cwd: rowCwd } = sessionRow.dataset;
+      try {
+        const q = new URLSearchParams({ agent: rowAgent, session_id: sessionId, cwd: rowCwd || '' });
+        const { path } = await fetch(`/session-log?${q}`).then(r => r.json());
+        if (path) {
+          _closeCtxPopup(popup);
+          openFileViewer(path);
+        } else {
+          valEl.textContent = 'no local transcript found';
+          setTimeout(() => { valEl.textContent = original; }, 1500);
+        }
+      } catch {
+        valEl.textContent = 'lookup failed';
+        setTimeout(() => { valEl.textContent = original; }, 1500);
+      }
     });
   }
 
@@ -11201,8 +11265,13 @@ function showCtxPopup(spanEl) {
       frag.appendChild(divider);
       roots.forEach((root, i) => {
         const row = document.createElement('div');
-        row.className = 'ctx-popup-row';
-        row.innerHTML = `<span class="ctx-popup-key">${i === 0 ? 'roots' : ''}</span><span class="ctx-popup-val">${escapeHtml(root)}</span>`;
+        row.className = 'ctx-popup-row ctx-popup-root-row';
+        row.dataset.root = root;
+        row.innerHTML = `<span class="ctx-popup-key">${i === 0 ? 'roots' : ''}</span><span class="ctx-popup-val ctx-popup-link" title="Open in file viewer">${escapeHtml(root)}</span>`;
+        row.addEventListener('click', () => {
+          _closeCtxPopup(popup);
+          openFileViewer(root);
+        });
         frag.appendChild(row);
       });
       placeholder.replaceWith(frag);
@@ -11788,7 +11857,7 @@ function renderPinPanel() {
       const control = item.isLookback
         ? `<button class="pin-item-toggle active" data-lookback-id="${item.id}" type="button">On</button>`
         : `<button class="pin-item-remove" data-id="${item.id}" type="button">✕</button>`;
-      html += `<div class="${itemCls}">
+      html += `<div class="${itemCls}" data-open-id="${item.id}">
         <span class="pin-item-tag">${escapeHtml(tag)}</span>
         <span class="pin-item-preview">${escapeHtml(preview)}</span>
         <span class="pin-item-status ${st.cls}">${st.text}</span>
@@ -11816,6 +11885,11 @@ function renderPinPanel() {
       _memorySelectionOverrides[memoryState.key] = !memoryState.selected;
       updatePinCount();
       renderPinPanel();
+    });
+  });
+  listEl.querySelectorAll('.pin-item[data-open-id]').forEach(row => {
+    row.querySelectorAll('.pin-item-tag, .pin-item-preview').forEach(el => {
+      el.addEventListener('click', () => openMsgModal(parseInt(row.dataset.openId, 10)));
     });
   });
   listEl.querySelectorAll('[data-lookback-id]').forEach(btn => {
@@ -12573,7 +12647,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   findInput.className = 'fv-edit-find';
   findInput.type = 'search';
   findInput.placeholder = 'Find';
-  findInput.setAttribute('aria-label', 'Find in editor');
+  findInput.setAttribute('aria-label', 'Find in file');
   const findPrevBtn = document.createElement('button');
   findPrevBtn.className = 'fv-edit-tool-btn';
   findPrevBtn.type = 'button';
@@ -12793,9 +12867,11 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     if (_isMarkdownPath(path || '')) {
       markdownPreview = !markdownPreview;
       if (markdownPreview) {
+        editToolbar.hidden = true;
         _renderMarkdownFilePreview(body, fileText);
       } else {
         _renderFileViewer(body, fileText, line, endLine, path, changedLines);
+        showFileViewToolbar();
       }
       updatePreviewButtonLabel();
       return;
@@ -12810,6 +12886,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     historyIdx = navHistory.length - 1;
     webPreview = true;
     updateNav();
+    editToolbar.hidden = true;
     _renderWebFilePreview(body, path);
     if (isMobileViewport() && history.pushState) {
       const state = (history.state && typeof history.state === 'object') ? history.state : {};
@@ -13063,9 +13140,28 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     dockFindTools();
   }
 
+  function _fvHighlightViewLine(lineNo) {
+    const rows = body.querySelectorAll('.fv-line');
+    rows.forEach(r => r.classList.remove('fv-target'));
+    const row = rows[lineNo - 1];
+    if (row) {
+      row.classList.add('fv-target');
+      row.scrollIntoView({ block: 'center' });
+    }
+    return row;
+  }
+
   function moveEditorToLine(lineNo, floatTools = false) {
     const view = body._cmView;
-    if (!view) return;
+    if (!view) {
+      const rows = body.querySelectorAll('.fv-line');
+      if (!rows.length) return;
+      const target = Math.min(Math.max(parseInt(lineNo, 10) || 1, 1), rows.length);
+      _fvHighlightViewLine(target);
+      lineInput.value = String(target);
+      editStatus.textContent = `Line ${target}`;
+      return;
+    }
     const doc = view.state.doc;
     const total = doc.lines || String(doc).split('\n').length;
     const target = Math.min(Math.max(parseInt(lineNo, 10) || 1, 1), total);
@@ -13080,7 +13176,27 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   function findInEditor(dir = 1) {
     const view = body._cmView;
     const query = findInput.value;
-    if (!view || !query) return;
+    if (!query) return;
+    if (!view) {
+      const rows = Array.from(body.querySelectorAll('.fv-line'));
+      const total = rows.length;
+      if (!total) return;
+      const needle = query.toLowerCase();
+      const start = _editFindPos >= 0 && _editFindPos < total ? _editFindPos : (dir < 0 ? 0 : total - 1);
+      for (let step = 1; step <= total; step++) {
+        const idx = ((start + dir * step) % total + total) % total;
+        const text = rows[idx].querySelector('.fv-code')?.textContent || '';
+        if (text.toLowerCase().includes(needle)) {
+          _editFindPos = idx;
+          _fvHighlightViewLine(idx + 1);
+          lineInput.value = String(idx + 1);
+          editStatus.textContent = `Match on line ${idx + 1}`;
+          return;
+        }
+      }
+      editStatus.textContent = 'No matches';
+      return;
+    }
     const text = view.state.doc.toString();
     const haystack = text.toLowerCase();
     const needle = query.toLowerCase();
@@ -13100,6 +13216,14 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     editStatus.textContent = `Match on line ${foundLine}`;
     showFindPopoverAtPos(pos);
     view.focus();
+  }
+
+  function showFileViewToolbar() {
+    findInput.value = '';
+    _editFindPos = -1;
+    lineInput.value = line ? String(line) : '';
+    editStatus.textContent = '';
+    editToolbar.hidden = false;
   }
 
   async function enterEditMode(text) {
@@ -13473,8 +13597,13 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
       fileText = text;
       markdownPreview = false;
       updateNav();
-      if (webPreview) _renderWebFilePreview(body, path);
-      else _renderFileViewer(body, text, line, endLine, path, changedLines);
+      if (webPreview) {
+        editToolbar.hidden = true;
+        _renderWebFilePreview(body, path);
+      } else {
+        _renderFileViewer(body, text, line, endLine, path, changedLines);
+        showFileViewToolbar();
+      }
     } catch (err) {
       body.textContent = err?.message || 'Failed to load file.';
     }

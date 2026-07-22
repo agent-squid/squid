@@ -4,6 +4,7 @@ topic_queue.py — Per-topic FIFO queues with parallel execution across topics.
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -81,6 +82,8 @@ class QueueItem:
     lookback: int = 0
     msg_id: Optional[int] = None
     display_prompt: Optional[str] = None
+    worktree_setup_elapsed_ms: Optional[float] = None
+    worktree_isolated: bool = False
     out_q: asyncio.Queue = field(default_factory=asyncio.Queue)
 
 
@@ -287,6 +290,7 @@ class TopicWorker:
         tool_events: list[dict] = []
         session_id: Optional[str] = None
         response_remapper = _StreamingWorktreePathRemapper(worktree_sources)
+        worktree_turn_trees: dict[tuple[str, str], str] = {}
 
         async def _emit_tool(tool: dict):
             nonlocal run_seq
@@ -313,6 +317,13 @@ class TopicWorker:
                 try:
                     try:
                         tool = await asyncio.to_thread(tracker.build_event)
+                        work_tree = getattr(tracker, "work_tree", None)
+                        event_repo_root = getattr(tracker, "event_repo_root", None)
+                        head_tree = getattr(tracker, "head_tree", None)
+                        if work_tree and event_repo_root and work_tree != event_repo_root and head_tree:
+                            worktree_turn_trees[
+                                (str(event_repo_root.resolve()), str(work_tree.resolve()))
+                            ] = head_tree
                         if not tool and no_change_tool is None:
                             no_change_tool = tracker.build_no_change_event()
                     finally:
@@ -368,6 +379,8 @@ class TopicWorker:
                     elif "_error" in chunk:
                         insert_run_event(item.msg_id, run_seq, "error", chunk["_error"])
                         await item.out_q.put(chunk)
+                    elif "_diag" in chunk:
+                        insert_run_event(item.msg_id, run_seq, "diag", json.dumps(chunk["_diag"]))
                 else:
                     await _emit_text(response_remapper.feed(chunk))
                     continue
@@ -415,24 +428,33 @@ class TopicWorker:
 
             await _emit_git_diff()
 
-            if item.agent and item.msg_id:
+            worktree_sync_elapsed_ms: Optional[float] = None
+            worktree_sync_statuses: list[str] = []
+            worktree_sync_repo_count = 0
+            if item.agent and item.msg_id and item.worktree_isolated:
                 wt_key = str(item.msg_id)
                 from .stats_db import mark_worktree_synced, mark_worktree_status
                 from .worktree import sync_after_turn
+                sync_started_at = time.perf_counter() if item.worktree_setup_elapsed_ms is not None else None
                 try:
                     wt_records = await asyncio.to_thread(get_worktrees, item.topic, wt_key)
                 except Exception:
                     wt_records = []
                     log.debug("worktree sync lookup skipped topic=%s msg_id=%s", item.topic, item.msg_id, exc_info=True)
+                worktree_sync_repo_count = len(wt_records)
                 for rec in wt_records:
                     repo_root = rec["repo_root"]
                     worktree_repo = rec["worktree_path"]
                     sync_status = "pending"
                     try:
+                        turn_tree = worktree_turn_trees.get(
+                            (str(Path(repo_root).resolve()), str(Path(worktree_repo).resolve()))
+                        )
                         conflicts = await asyncio.to_thread(
                             sync_after_turn, Path(repo_root), item.topic, wt_key, item.msg_id,
                             request_text=(item.display_prompt or item.prompt),
                             response_text=raw,
+                            turn_tree=turn_tree,
                         )
                         if conflicts:
                             log.warning("worktree merge conflicts after turn msg_id=%s: %s", item.msg_id, conflicts)
@@ -471,11 +493,23 @@ class TopicWorker:
                         })
                         log.exception("worktree sync failed after turn msg_id=%s", item.msg_id)
                     finally:
+                        worktree_sync_statuses.append(sync_status)
                         for tool in tool_events:
                             if tool.get("name") == "GitDiff" and tool.get("worktree_repo") == worktree_repo:
                                 tool["worktree_status"] = sync_status
                                 if rec.get("integration_worktree_path"):
                                     tool["integration_worktree_path"] = rec.get("integration_worktree_path")
+                if sync_started_at is not None:
+                    worktree_sync_elapsed_ms = (time.perf_counter() - sync_started_at) * 1000
+
+            if item.worktree_setup_elapsed_ms is not None:
+                log.info(
+                    "worktree turn timing topic=%s agent=%s msg_id=%s isolated=%s repos=%d setup_ms=%.1f sync_ms=%.1f statuses=%s",
+                    item.topic, item.agent, item.msg_id, item.worktree_isolated,
+                    worktree_sync_repo_count, item.worktree_setup_elapsed_ms,
+                    worktree_sync_elapsed_ms or 0.0,
+                    ",".join(worktree_sync_statuses) if worktree_sync_statuses else "-",
+                )
 
             content = raw
             context_json = json.dumps(tool_events) if tool_events else None
@@ -557,6 +591,8 @@ class TopicDispatcher:
         msg_id: Optional[int] = None,
         code_roots: Optional[list[str]] = None,
         display_prompt: Optional[str] = None,
+        worktree_setup_elapsed_ms: Optional[float] = None,
+        worktree_isolated: bool = False,
     ) -> tuple[asyncio.Queue, int, TopicWorker]:
         if adhoc:
             # Each adhoc message gets its own ephemeral worker — never queued, always parallel.
@@ -576,6 +612,8 @@ class TopicDispatcher:
             code_roots=code_roots, timeout=response_timeout,
             resume_session_id=resume_session_id,
             adhoc=adhoc, lookback=lookback, msg_id=msg_id,
+            worktree_setup_elapsed_ms=worktree_setup_elapsed_ms,
+            worktree_isolated=worktree_isolated,
         )
         seq = await worker.enqueue(item)
         return item.out_q, seq, worker

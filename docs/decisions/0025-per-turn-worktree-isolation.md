@@ -1,17 +1,36 @@
 ---
-status: shipped; enabled by default
+status: accepted (branchless isolation implemented; prior worktree/branch mechanism superseded)
 date: 2026-07-09
-updated: 2026-07-21
+updated: 2026-07-22
 ---
 # ADR-0025: Per-Turn Git Worktree Isolation for Agent Changes
 
 ## Status
 
-**Enabled by default.** `WORKTREE_ISOLATION_ENABLED` (`agent/config.py`, driven
-by `worktree.enabled` in `squid.yaml`, default `true`) gates the whole
-feature. With it off, every turn runs in **Fallback** (below): agents write
-directly to the real working tree, diffs are unscoped, and the model is not
-told it's a sole writer.
+**Current design.** The worktree/branch isolation mechanism originally
+described by this ADR
+(hidden base commit + `sqd-*` branch + `git worktree add`) shipped and worked
+for isolation and diffing, but on 2026-07-22 it leaked: an agent (opencode
+running a free-tier model) ran `git push` from inside its per-turn worktree
+and pushed the internal `sqd-hive-6746-2a8899` branch — including the hidden
+`squid: hidden base for hive/6746` commit — to the real GitHub remote,
+unprotected. A follow-up turn on the same backend, after being told not to
+push from the worktree, instead created a *new*, normally-named branch and
+attempted a pull request — showing that neither prompt instructions nor a
+naming-pattern-based guard (e.g. a pre-push hook rejecting `refs/heads/sqd-*`)
+close this off, since the model can simply not use the blocked name. See
+"Revised design" for the shipped replacement: per-turn isolation without ever
+creating a branch, ref, or `.git` the agent can push from at all.
+
+The rest of this document (Context, Considered Options, the original
+Decision, and the "Reference: current implementation details" section) is retained
+as the historical record of the worktree/branch approach and why it was
+chosen over Options 1–3.
+
+`WORKTREE_ISOLATION_ENABLED` (`agent/config.py`, driven by `worktree.enabled`
+in `squid.yaml`, default `true`) gates the whole feature. With it off, every
+turn runs in **Fallback** (below): agents write directly to the real working
+tree, diffs are unscoped, and the model is not told it's a sole writer.
 
 This ADR previously proposed "commit each turn on a per-turn branch, then
 `merge --no-ff` into the source repo" as the sync mechanism, and left it
@@ -19,13 +38,14 @@ disabled because the resulting per-turn commit trail (`"squid: turn N"`)
 had no story for turning back into normal-looking history short of a whole
 new squash-on-push subsystem. A later draft tried to avoid that trail with
 raw `git stash create` / `stash apply`, but that is not a reliable merge
-primitive for dirty worktrees. The shipped design is now **hidden snapshot
-commits + off-repo merge + patch promotion**: Squid may create internal commit
-objects/refs for preprocessing and merge mechanics, but it never advances the
-user's branch or creates user-visible per-turn commits. Remaining work is rich
-conflict-resolution UX around the integration worktree; unresolved conflict or
-promotion-failure rows block new turns against the affected repo instead of
-silently starting a fresh isolated turn.
+primitive for dirty worktrees. The shipped design is now **branchless turn
+directories + hidden snapshot commits + off-repo merge + patch promotion**:
+Squid may create internal commit objects/refs for preprocessing and merge
+mechanics, but it never advances the user's branch or creates user-visible
+per-turn commits. Remaining work is rich conflict-resolution UX around the
+integration worktree; unresolved conflict or promotion-failure rows block new
+turns against the affected repo instead of silently starting a fresh isolated
+turn.
 
 ### Configuring the shipped implementation
 
@@ -40,6 +60,10 @@ worktree:
   # as ignored. Leave unset; add only dependency/cache names Squid misses.
   # dependency_dirs:
   #   - custom-cache-dir
+  # Whether a new turn should start from source checkout dirty/untracked files.
+  # false seeds from HEAD only; promotion still snapshots the source checkout
+  # at turn end so dirty source files are not blindly overwritten.
+  track_dirty_changes: false
 ```
 
 `auto_link_ignored_dirs` makes `ensure_worktree` discover ignored directories
@@ -51,6 +75,170 @@ extension point for project-specific dependency/cache names, including
 unignored ones in tests or nonstandard repos. Existing user configs may still
 contain an older expanded `dependency_dirs` list; that list is not needed in
 YAML unless the user is adding project-specific names.
+
+## Revised design: branchless per-turn checkout + patch promotion
+
+Replaces the worktree/branch mechanism (`git worktree add -b sqd-*`) with a
+per-turn directory that is never a git repo in its own right, so there is
+nothing in it for an agent to `git branch`/`push`/`gh pr create` against,
+regardless of what name it picks. This isn't a narrower guard than the
+pre-push hook idea — it's not naming-pattern-based at all, since the failure
+mode observed was a model routing around a naming-pattern guard by inventing
+its own branch name.
+
+### Why git-based diffing stays, why locking stays coarse
+
+- **Diffing must stay git-based, not agent-reported.** Codex does not
+  reliably emit a changed-file list with edited regions, so per-tool-event
+  diff attribution (what MultiEdit/Write tool events already carry for
+  Claude) can't be the universal source of truth. A plain filesystem/tree
+  diff of the turn's directory, backend-agnostic, remains required.
+- **Bleed prevention requires isolating the whole diffable window, not
+  fine-grained locking.** A directory-level diff is contaminated by *any*
+  other write landing in it between the pre- and post-turn snapshot, even to
+  a file no lock would have covered. Per-file or per-tool-call locking (via a
+  hypothetical tool-call hook, or a wrapped binary) only helps with
+  corruption, not bleed, and — since real coding turns interleave edits with
+  reads/thinking throughout, not just at the end — any scheme that toggles a
+  lock on and off around individual writes reopens the same bleed gap between
+  bursts *within one turn*. The fix is a private directory for the entire
+  turn, not a smarter lock schedule.
+- **The lock must not span the whole turn.** Squid can only intercept
+  subprocess start/end, not individual tool calls inside a running backend
+  CLI, so a lock that has to cover "no other writer during this window" would
+  otherwise have to be held for the turn's full duration (seconds to many
+  minutes) — serializing all same-repo_root turns, defeating ADR-0010's
+  adhoc parallelism for no correctness reason. Materializing an isolated copy
+  removes the need for any lock during the turn at all; the only lock left is
+  the brief promotion-time critical section, same duration as today's
+  `_lock_for`.
+
+### Mechanics
+
+```
+turn starts
+  → choose BASE_COMMIT:
+    - with `worktree.track_dirty_changes: false`, BASE_COMMIT is HEAD.
+    - with `worktree.track_dirty_changes: true`, Squid snapshots repo_root's
+      current dirty/untracked tree and creates a hidden BASE_COMMIT parented
+      to HEAD.
+  → materialize BASE_COMMIT into a fresh directory with NO .git present via
+    `git archive <base_commit> | tar -x`, not `git worktree add`.
+    Dependency/cache dirs are symlinked in exactly as today
+    (`_link_dependency_dirs`).
+  → agent runs against that directory for however long it takes; no lock is
+    held, no other turn is blocked, regardless of how many small edits it
+    makes or how they're spaced out.
+
+turn ends
+  → snapshot the turn directory into a tree object and diff it against the
+    seed tree; this is the turn's GitDiff, computed the same way regardless
+    of backend. The post-turn tree cached for GitDiff is passed into
+    `sync_after_turn` so promotion does not rescan the turn directory just to
+    discover a no-op.
+  → if TURN_TREE equals BASE_TREE, promotion returns without snapshotting
+    repo_root or creating an integration worktree.
+  → otherwise acquire the brief per-repo_root lock, snapshot repo_root's
+    current dirty/untracked content as CURRENT_TREE, merge TURN_TREE with
+    CURRENT_TREE in a disposable Squid-internal integration worktree, and
+    apply `CURRENT_TREE..MERGED_TREE` back to repo_root with drift/rollback
+    checks.
+  → repo_root receives ordinary working-tree edits. Squid does not create a
+    user-visible per-turn commit and does not install a squash-on-push hook.
+  → release the lock.
+```
+
+No branch, ref, or `.git` is ever created in the agent-visible turn
+directory, so there is no separate namespace for a push/PR to leak into. The
+only real `git worktree` used by the shipped implementation is the disposable
+integration worktree created after the turn, under Squid control, for merge
+and conflict handling.
+
+### Resolved: dirty-tree tracking is opt-in, off by default
+
+Capturing repo_root's live dirty state (`SEED_TREE`/`CURRENT_TREE` via the
+scratch-index overlay in "Capturing content trees") is not free on repos with
+large tracked-file counts: it requires `stat`-ing every tracked file to
+determine what changed, unconditionally, whether or not anything is actually
+dirty — see "Capturing content trees" cost analysis. Doing this up to 3x per
+turn (seed, turn-end, promotion-time drift recheck) is a standing per-turn
+cost proportional to tracked file count, not repo byte size, and not
+something Squid can safely assume is cheap without knowing the target repo's
+scale in advance.
+
+Decision: gate it behind a new config flag,
+`worktree.track_dirty_changes`, **default `false`**.
+
+- **`false` (default):** turns seed from `HEAD` only. Uncommitted changes in
+  repo_root — from a user's IDE, or anything else outside Squid — are
+  invisible to the next turn until committed. This is the cheaper turn-start
+  path: no scratch-index overlay is needed to seed the isolated directory.
+  Promotion still snapshots repo_root at turn end and still uses the
+  CURRENT/TURN hidden-commit merge path, so disabling dirty tracking does not
+  let Squid blindly overwrite dirty source files. Docs/UI must tell users
+  plainly that edits made outside Squid need to be committed to become visible
+  to a turn — this is a real behavior change from "the agent sees your unsaved
+  edits," not just an internal simplification.
+- **`true`:** restores today's documented behavior — dirty-tree capture,
+  synthetic BASE/CURRENT/TURN commits, and the real 3-way merge, so
+  non-overlapping concurrent edits (IDE vs. agent) auto-merge instead of
+  requiring a commit first. The config comment should say plainly that this
+  can be expensive on large-file-count repos and that enabling Git's
+  `core.fsmonitor` is the recommended mitigation, since fsmonitor is what
+  turns the unconditional stat sweep into a cheap "what changed since last
+  check" lookup.
+
+This is additive to `worktree.enabled`: dirty tracking only has meaning when
+worktree isolation itself is on.
+
+#### Trade-offs behind defaulting `false`
+
+- **The cost is unconditional, not just a "dirty" tax.** `stat()`-ing every
+  tracked file is how Git *finds out* whether anything changed — there's no
+  cheaper pre-check, since the index only caches what was true as of the last
+  refresh and nothing updates it automatically when a file changes on disk.
+  So a perfectly clean repo pays the same sweep cost as a dirty one; only the
+  content-hashing step (cheap, proportional to what changed) is skipped.
+- **The seed cost is paid every isolated turn, not just code-editing turns**,
+  because Squid must create the turn directory before it knows whether the
+  backend will edit files. Promotion-time repo_root snapshotting is skipped
+  when the cached GitDiff tree proves the turn made no file changes.
+- **Reverting to real `git worktree add` instead of a bare directory does
+  not reduce this cost.** The expensive step is capturing *repo_root's* dirty
+  state, which is identical either way; only the turn side's materialization
+  mechanism changes. Real worktrees also reopen the exact `git push`/`branch`
+  leak this ADR's redesign exists to close (naming-pattern pre-push guards
+  were already shown insufficient — a model just picks an unblocked name), so
+  it's a worse trade on both axes, not a cost fix.
+- **An agent's own `git status`/`git diff` habits don't substitute for this
+  either.** Under the branchless design the turn directory has no `.git`, so
+  those calls are simply inert there. In fallback mode (isolation off),
+  where code roots do resolve to a real repo, an agent's own git commands can
+  incur a similar cost independently — which is a reason the *aggregate*
+  system cost is muddier than "Squid adds this from zero," but not a reason
+  to make it Squid's default.
+- **A cheap, unrelated check:** counting tracked files (`git ls-files | wc
+  -l` or reading the index/HEAD tree directly) is not the same operation —
+  it's a single sequential read of an already-existing structure, no
+  filesystem `stat()` calls at all, and stays fast (low tens of ms) even at
+  million-file scale. It's suitable for something like a startup-time repo
+  size check, but counting files doesn't tell you dirtiness — that's the
+  part that's actually expensive.
+
+### Resolved: no auto-commit or squash-on-push in the shipped implementation
+
+- **Per-turn auto-commit onto the real branch is not part of the shipped
+  design.** Squid promotes the merged tree back to repo_root as ordinary
+  working-tree edits. The user's branch does not advance until the user or an
+  explicit future Squid action commits in repo_root.
+- **Squash-on-push is not installed.** It was considered as a way to make
+  automatic per-turn commits look like normal history before push, but the
+  shipped design avoids creating those user-visible commits in the first
+  place. There is therefore no Squid-owned `pre-push` hook in the current
+  implementation.
+- Per-backend tool-call hook support (for a future finer-grained corruption
+  guard, separate from bleed prevention) hasn't been surveyed beyond
+  confirming none exists in this codebase today.
 
 ## Context
 
@@ -65,7 +253,7 @@ changes land directly in the working tree. This creates two problems:
    editing for one topic can interfere with another topic's diff tracking or
    working state.
 3. **Observed data loss under concurrent writes (not just bleed).** With
-   isolation off — today's default — two parallel prompts (e.g. two adhoc
+   isolation off, two parallel prompts (e.g. two adhoc
    turns, or an adhoc turn racing a regular one, per ADR-0010) writing
    directly to the same real working tree is a plain filesystem overwrite,
    not a Git operation. There is no line-based 3-way merge and no conflict
@@ -86,19 +274,20 @@ that turn's changes.
    tree state. Concurrent or cross-session changes may be included.
 2. **Per-turn isolation via Git worktrees, synced by commit + merge.** Create
    a worktree per turn, auto-commit whatever's left uncommitted at turn end,
-   merge that commit into the source repo. This was previously shipped
-   (disabled by default), but left noisy per-turn commits on the user's
-   branch.
+   merge that commit into the source repo. This was an earlier implementation,
+   but left noisy per-turn commits on the user's branch and exposed an
+   agent-visible Git repository that could be pushed.
 3. **Per-turn isolation via Git worktrees, synced by stash relay.** Create a
    worktree per turn; instead of committing, seed it from the source repo's
    current dirty tree and, at turn end, drain its changes back into the
    source repo's dirty tree — via `git stash create`/`apply`, never `commit`
    or `merge`. Rejected; see Rejected alternatives.
 4. **Per-turn isolation via hidden snapshot commits and patch promotion.**
-   Capture repo_root's dirty tree into internal tree/commit objects, run the
-   agent in a worktree seeded from that hidden snapshot, merge concurrent
-   updates in a disposable integration worktree, then promote the resolved
-   delta back to repo_root as ordinary unstaged local file changes.
+   Capture repo_root's dirty tree into internal tree/commit objects when
+   configured, run the agent in a plain branchless directory seeded from
+   HEAD or that hidden snapshot, merge concurrent updates in a disposable
+   integration worktree, then promote the resolved delta back to repo_root as
+   ordinary unstaged local file changes.
 
 ## Decision
 
@@ -127,10 +316,11 @@ never become the commit history the user sees.
 
 ```
 turn starts
-  → capture repo_root's dirty working-tree content as SEED_TREE
-  → create hidden BASE_COMMIT from SEED_TREE
-  → create per-turn worktree from BASE_COMMIT
-  → run the agent against that worktree
+  → with `track_dirty_changes: false`, use HEAD as BASE_COMMIT
+  → with `track_dirty_changes: true`, capture repo_root's dirty working-tree
+    content as SEED_TREE and create hidden BASE_COMMIT from SEED_TREE
+  → create a plain branchless turn directory from BASE_COMMIT
+  → run the agent against that directory
 
 turn ends
   → capture the turn worktree as TURN_TREE
@@ -146,11 +336,11 @@ and `git commit` behave as if the edits had been made directly in repo_root.
 
 ### Naming and stored state
 
-Per-turn worktree paths can keep the current shape:
+Per-turn directory paths keep the current shape:
 
 ```
 turn worktree path:  ~/.squid/worktrees/<repo_hash>/sqd-<slug>-<md5>/
-turn branch/ref:      sqd-<slug>-<md5> or detached hidden commit
+base ref:            refs/squid/worktrees/<slug>-<md5>/base
 ```
 
 The key remains `(topic, str(asst_msg_id))`; see Reference for the current
@@ -159,14 +349,15 @@ needed across process boundaries:
 
 - `base_commit`: repo_root's content when the turn started, recorded under
   `refs/squid/worktrees/<turn-key>/base`.
-- `worktree_path`: the isolated turn worktree.
+- `worktree_path`: the isolated branchless turn directory.
 - `integration_worktree_path`: the disposable worktree path used for merge
   conflicts.
 - `status`: `pending`, `synced`, `conflict`, or `promotion_failed`.
 
 The merge algorithm also creates short-lived tree/commit objects:
 
-- `seed_tree` / `base_commit`: repo_root's content when the turn started.
+- `seed_tree` / `base_commit`: repo_root's content when the turn started, or
+  HEAD when dirty tracking is disabled.
 - `turn_tree` / `turn_commit`: the agent worktree content when the turn ended.
 - `current_tree` / `current_commit`: repo_root's content at the last merge
   attempt.
@@ -327,9 +518,10 @@ those changes is a separate normal repo_root operation.
 
 ### Rejected alternatives
 
-- **Commit + merge into the source branch.** This is the shipped implementation
-  behind the disabled flag. It gives good merge semantics, but creates a
-  permanent per-turn commit trail on the user's branch.
+- **Commit + merge into the source branch.** This was the earlier
+  worktree/branch implementation. It gives good merge semantics, but creates
+  a permanent per-turn commit trail on the user's branch and exposes a Git
+  repo to the agent.
 - **Raw stash relay.** `git stash create` is useful as a read-only snapshot of
   tracked dirty state, but it is not the target merge primitive:
   `stash create` does not capture untracked files, `stash apply` onto a dirty
@@ -359,7 +551,7 @@ those changes is a separate normal repo_root operation.
 
 ## Fallback
 
-Whenever `WORKTREE_ISOLATION_ENABLED` is `false` — the default — or
+Whenever `WORKTREE_ISOLATION_ENABLED` is `false`, or
 `ensure_worktree` raises for a root (not a git repo, no initial commit,
 detached HEAD, disk exhaustion, corrupt path), that root is excluded from
 the worktree map. If no root produces a working worktree, the turn runs
@@ -425,9 +617,9 @@ directly against the real working tree, same as Option 1:
   action.
 - Bad (all worktree designs): dependency directories are symlinks — deleting one
   from inside a worktree deletes the real directory in repo_root.
-- Bad (all worktree designs): if Squid crashes mid-turn, stale worktree
-  directories and branches can accumulate until the sweep or a startup pass
-  prunes them.
+- Bad (all worktree designs): if Squid crashes mid-turn, stale turn
+  directories, hidden base refs, and integration worktrees can accumulate
+  until the sweep or a startup pass prunes them.
 - Bad (all worktree designs): non-git directories and repos without an initial
   commit fall back to direct working-tree mode; bleed is possible until
   fixed.
@@ -455,27 +647,31 @@ directly against the real working tree, same as Option 1:
 
 ---
 
-## Reference: current implementation (hidden snapshots + patch promotion)
+## Reference: current implementation details
 
-This is what's actually shipped, gated off by default (see Status).
+*(This section tracks the branchless shipped implementation and the remaining
+details around dependency-dir symlinking, drift detection, and conflict
+handling.)*
 
 ### Naming and paths
 
 ```
-worktree path:  ~/.squid/worktrees/<repo_hash>/sqd-<slug>-<md5>/
-branch name:    sqd-<slug>-<md5>
-base ref:       refs/squid/worktrees/<branch>/base
+turn dir path:  ~/.squid/worktrees/<repo_hash>/sqd-<slug>-<md5>/
+dir name:       sqd-<slug>-<md5>
+base ref:       refs/squid/worktrees/<slug>-<md5>/base
 ```
 
 The key passed to the naming functions is `str(asst_msg_id)` — unique per
 turn. It's stored in the `worktrees.agent` column because that table
 predates per-turn keys; for worktree rows the column holds a worktree key,
 not a configured agent name. `<slug>`/`<md5>` derive from `(topic, key)`;
-`<repo_hash>` is 8 hex chars of `MD5(repo_root)`. Worktrees live outside the
-project directory so they never appear in the user's repo; the `sqd-`
-prefix identifies Squid-managed branches. `ensure_worktree` snapshots
-repo_root's dirty working tree into a hidden base commit, records it under the
-base ref, and creates the turn branch/worktree from that internal commit.
+`<repo_hash>` is 8 hex chars of `MD5(repo_root)`. Turn directories live
+outside the project directory so they never appear in the user's repo; the
+`sqd-` prefix identifies Squid-managed turn directories. `ensure_worktree`
+records a base commit under the base ref and materializes that commit into a
+plain turn directory. With `track_dirty_changes: false`, the base commit is
+HEAD. With `track_dirty_changes: true`, Squid first snapshots repo_root's
+dirty working tree into a hidden base commit.
 
 Using the assistant message ID as the key means every turn — adhoc or
 regular — gets a fresh, isolated worktree with no state carried over. The
@@ -485,8 +681,8 @@ available as the key.
 ### How the worktree becomes the agent's working directory
 
 `_setup_worktrees` calls `ensure_worktree(repo_root, topic, str(asst_msg_id))`
-for each git repo under `code_roots`, which snapshots the current dirty
-repo_root state and runs `git worktree add -b sqd-<key> <path> <base_commit>`.
+for each git repo under `code_roots`, which records the configured base commit
+and extracts it into the branchless turn directory.
 `effective_code_roots` is remapped to the worktree paths; **CWD is not
 remapped** (`proc_cwd` stays the source repo path across all turns —
 ADR-0003). The model reaches the worktree only through the absolute paths in
@@ -494,15 +690,16 @@ ADR-0003). The model reaches the worktree only through the absolute paths in
 `topic_queue._process` routes `proc_cwd` (source repo path) to the
 subprocess `cwd` and `display_cwd` to stats/session-tracking/SSE.
 
-**Sole-writer guarantee:** because each turn has its own worktree and CWD is
-never shared with a running turn, the agent is the only writer to
-`effective_code_roots` during that turn — surfaced to the model via
-`<squid_code_roots>` so it can skip redundant re-reads.
+**Sole-writer guarantee:** each turn has its own directory for the paths
+surfaced in `<squid_code_roots>`, so the agent is the only writer to those
+effective code roots during that turn. Process CWD still follows ADR-0003 and
+is not remapped; relative writes against CWD can bypass isolation until CWD
+enforcement is changed.
 
 ### Dependency directories
 
 `ensure_worktree` calls `_link_dependency_dirs(repo_root, wt)` right after
-`git worktree add` succeeds. It symlinks allowlisted ignored directories
+materializing the branchless turn directory. It symlinks allowlisted ignored directories
 discovered by Git when `auto_link_ignored_dirs` is enabled, plus optional
 `worktree.dependency_dirs` entries, into the equivalent path under `wt`.
 It only ever matches directories, never individual files, so it can't touch
@@ -570,7 +767,7 @@ turn N+1 dispatch  [topic_queue.py: TopicDispatcher.dispatch]
 Removing a worktree synchronously right after the CLI process exits is
 unsafe — a backgrounded process (e.g. a `bash` tool call backgrounding
 `pytest`) could still have it as `cwd`. So sync (merge into repo_root) and
-remove (delete worktree dir, branch, DB row) are split:
+remove (delete worktree dir, hidden base ref, DB row) are split:
 
 - **Sync — synchronous, at turn end.** `sync_after_turn` runs for every
   registry row keyed by `str(asst_msg_id)`. On success, `mark_worktree_synced`

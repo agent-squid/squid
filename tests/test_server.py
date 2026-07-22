@@ -2,6 +2,7 @@ import asyncio
 import json
 import sys
 import types
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -529,6 +530,28 @@ def test_clear_command_rejects_unknown_agent():
     assert res.json()["error"] == "agent not found: missing"
     kill_procs.assert_not_called()
     clear_session.assert_not_called()
+
+
+def test_publish_command_uses_topic_code_roots():
+    client = TestClient(server.app)
+    with patch("agent.server.topic_memory_squid_config", return_value={"code_roots": ["/repo"]}), \
+         patch("agent.publish.publish_code_roots", return_value=[SimpleNamespace(
+             repo_root="/repo",
+             branch="main",
+             commit="abc123",
+             files=["app.py"],
+             pushed=True,
+         )]) as publish:
+        res = client.post("/cmd", json={
+            "command": "publish",
+            "topic": "squid",
+            "message": "ship it",
+            "tag": "v0.1",
+        })
+
+    assert res.status_code == 200
+    assert res.json()["published"][0]["repo_root"] == "/repo"
+    publish.assert_called_once_with("squid", ["/repo"], message="ship it", tag="v0.1")
 
 
 def test_health_returns_harnesses_and_providers_without_backend_aliases():

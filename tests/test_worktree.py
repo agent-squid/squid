@@ -16,9 +16,7 @@ from agent.worktree import (
     _link_dependency_dirs,
     branch_name,
     cleanup_worktrees,
-    commit_worktree,
     ensure_worktree,
-    merge_worktree,
     remove_worktree,
     repo_root_for,
     sync_after_turn,
@@ -94,15 +92,19 @@ def test_ensure_worktree_creates_directory(tmp_path):
     assert (wt / "file.txt").exists()
 
 
-def test_ensure_worktree_creates_branch(tmp_path):
+def test_ensure_worktree_has_no_git(tmp_path):
+    """Turn directory must not be a git repo — nothing for an agent to
+    `git branch`/`push`/`gh pr create` against, regardless of what name it
+    tries (ADR-0025, "Revised design")."""
     repo = init_repo(tmp_path / "repo")
-    ensure_worktree(repo, "t", "102")
+    wt = ensure_worktree(repo, "t", "102")
+    assert not (wt / ".git").exists()
     br = branch_name("t", "102")
     result = subprocess.run(
         ["git", "branch", "--list", br], cwd=str(repo),
         text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
-    assert br in result.stdout
+    assert br not in result.stdout
 
 
 def test_ensure_worktree_reuses_existing(tmp_path):
@@ -121,6 +123,30 @@ def test_ensure_worktree_per_msg_id_are_independent(tmp_path):
     assert wt_b.exists()
 
 
+def test_ensure_worktree_defaults_to_clean_head_seed(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree_mod.config, "WORKTREE_TRACK_DIRTY_CHANGES", False)
+    repo = init_repo(tmp_path / "repo")
+    (repo / "file.txt").write_text("dirty source\n")
+    (repo / "seed.txt").write_text("untracked seed\n")
+
+    wt = ensure_worktree(repo, "t", "204")
+
+    assert (wt / "file.txt").read_text() == "base\n"
+    assert not (wt / "seed.txt").exists()
+
+
+def test_ensure_worktree_tracks_dirty_code_root_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree_mod.config, "WORKTREE_TRACK_DIRTY_CHANGES", True)
+    repo = init_repo(tmp_path / "repo")
+    (repo / "file.txt").write_text("dirty source\n")
+    (repo / "seed.txt").write_text("untracked seed\n")
+
+    wt = ensure_worktree(repo, "t", "205")
+
+    assert (wt / "file.txt").read_text() == "dirty source\n"
+    assert (wt / "seed.txt").read_text() == "untracked seed\n"
+
+
 def test_ensure_worktree_symlinks_dependency_dirs(tmp_path):
     repo = init_repo(tmp_path / "repo")
     node_modules = repo / "node_modules" / "some-pkg"
@@ -136,7 +162,6 @@ def test_ensure_worktree_symlinks_dependency_dirs(tmp_path):
     assert (wt / "node_modules" / "some-pkg" / "index.js").exists()
     assert (wt / ".venv").is_symlink()
     assert (wt / ".venv" / "bin" / "python").exists()
-    assert git(wt, "status", "--short").stdout == ""
 
 
 def test_ensure_worktree_auto_symlinks_only_allowlisted_ignored_dirs_not_files(tmp_path, monkeypatch):
@@ -159,7 +184,6 @@ def test_ensure_worktree_auto_symlinks_only_allowlisted_ignored_dirs_not_files(t
     assert (wt / "tool-cache" / "bin" / "tool").exists()
     assert not (wt / "dist").exists()
     assert not (wt / ".env").exists()
-    assert git(wt, "status", "--short").stdout == ""
 
 
 def test_ensure_worktree_playwright_cli_runs_through_nested_symlink(tmp_path):
@@ -216,29 +240,6 @@ def test_ensure_worktree_does_not_recurse_into_matched_dependency_dirs(tmp_path)
 
 
 # ---------------------------------------------------------------------------
-# commit_worktree
-# ---------------------------------------------------------------------------
-
-def test_commit_worktree_commits_changes(tmp_path):
-    repo = init_repo(tmp_path / "repo")
-    wt = ensure_worktree(repo, "t", "301")
-    (wt / "new.txt").write_text("hello\n")
-    committed = commit_worktree(wt, "squid: turn 301")
-    assert committed
-    log = subprocess.run(
-        ["git", "log", "--oneline"], cwd=str(wt),
-        text=True, stdout=subprocess.PIPE,
-    ).stdout
-    assert "squid: turn 301" in log
-
-
-def test_commit_worktree_returns_false_when_nothing_to_commit(tmp_path):
-    repo = init_repo(tmp_path / "repo")
-    wt = ensure_worktree(repo, "t", "302")
-    assert not commit_worktree(wt, "squid: turn 302")
-
-
-# ---------------------------------------------------------------------------
 # sync_after_turn
 # ---------------------------------------------------------------------------
 
@@ -261,6 +262,22 @@ def test_sync_after_turn_is_noop_when_no_worktree(tmp_path):
     assert conflicts == []
 
 
+def test_sync_after_turn_reuses_supplied_turn_tree_for_noop(tmp_path, monkeypatch):
+    repo = init_repo(tmp_path / "repo")
+    ensure_worktree(repo, "t", "408")
+    base_commit = worktree_mod.base_commit_for(repo, "t", "408")
+    base_tree = git(repo, "show", "--format=%T", "--no-patch", base_commit).stdout.strip()
+
+    def fail_snapshot_dir(*args, **kwargs):
+        raise AssertionError("turn directory was snapshotted again")
+
+    monkeypatch.setattr(worktree_mod, "_snapshot_dir", fail_snapshot_dir)
+
+    conflicts = sync_after_turn(repo, "t", "408", msg_id=408, turn_tree=base_tree)
+
+    assert conflicts == []
+
+
 def test_sync_after_turn_promotes_without_source_commit(tmp_path):
     repo = init_repo(tmp_path / "repo")
     head_before = git(repo, "rev-parse", "HEAD").stdout.strip()
@@ -279,7 +296,8 @@ def test_sync_after_turn_promotes_without_source_commit(tmp_path):
     assert git(repo, "rev-parse", "HEAD").stdout.strip() == head_before
 
 
-def test_sync_after_turn_seeds_from_dirty_code_root(tmp_path):
+def test_sync_after_turn_seeds_from_dirty_code_root_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree_mod.config, "WORKTREE_TRACK_DIRTY_CHANGES", True)
     repo = init_repo(tmp_path / "repo")
     head_before = git(repo, "rev-parse", "HEAD").stdout.strip()
     (repo / "file.txt").write_text("dirty source\n")
@@ -300,17 +318,25 @@ def test_sync_after_turn_seeds_from_dirty_code_root(tmp_path):
     assert git(repo, "rev-parse", "HEAD").stdout.strip() == head_before
 
 
-def test_sync_after_turn_uses_seed_ref_when_turn_commits(tmp_path):
+def test_sync_after_turn_preserves_dirty_source_when_tracking_disabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree_mod.config, "WORKTREE_TRACK_DIRTY_CHANGES", False)
     repo = init_repo(tmp_path / "repo")
     head_before = git(repo, "rev-parse", "HEAD").stdout.strip()
-    wt = ensure_worktree(repo, "t", "412")
-    (wt / "committed.txt").write_text("turn commit\n")
-    assert commit_worktree(wt, "agent commit")
+    (repo / "file.txt").write_text("dirty source\n")
+    (repo / "seed.txt").write_text("untracked seed\n")
 
+    wt = ensure_worktree(repo, "t", "412")
+
+    assert (wt / "file.txt").read_text() == "base\n"
+    assert not (wt / "seed.txt").exists()
+
+    (wt / "turn.txt").write_text("turn output\n")
     conflicts = sync_after_turn(repo, "t", "412", msg_id=412)
 
     assert conflicts == []
-    assert (repo / "committed.txt").read_text() == "turn commit\n"
+    assert (repo / "file.txt").read_text() == "dirty source\n"
+    assert (repo / "seed.txt").read_text() == "untracked seed\n"
+    assert (repo / "turn.txt").read_text() == "turn output\n"
     assert git(repo, "rev-parse", "HEAD").stdout.strip() == head_before
 
 
@@ -358,24 +384,6 @@ def test_sync_after_turn_excludes_stale_external_dependency_symlinks(tmp_path):
     assert git(repo, "ls-files", "--", "agent/__pycache__").stdout == ""
 
 
-def test_merge_worktree_raises_on_failure_without_conflict_markers(tmp_path):
-    """A merge that fails to even run (e.g. lock contention) must not be
-    mistaken for a clean merge — that would silently drop the turn's work."""
-    repo = init_repo(tmp_path / "repo")
-    ensure_worktree(repo, "t", "420")
-    wt = worktree_path(repo, "t", "420")
-    (wt / "new.txt").write_text("turn output\n")
-    commit_worktree(wt, "squid: turn 420")
-
-    lock_file = repo / ".git" / "index.lock"
-    lock_file.write_text("")
-    try:
-        with pytest.raises(RuntimeError):
-            merge_worktree(repo, "t", "420")
-    finally:
-        lock_file.unlink()
-
-
 def test_sync_after_turn_returns_conflicts_on_same_line_edit(tmp_path):
     repo = init_repo(tmp_path / "repo")
 
@@ -406,12 +414,6 @@ def test_remove_worktree_cleans_up(tmp_path):
     remove_worktree(repo, "t", "601")
 
     assert not wt.exists()
-    br = branch_name("t", "601")
-    result = subprocess.run(
-        ["git", "branch", "--list", br], cwd=str(repo),
-        text=True, stdout=subprocess.PIPE,
-    )
-    assert br not in result.stdout
 
 
 # ---------------------------------------------------------------------------

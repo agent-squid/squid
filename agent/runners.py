@@ -16,6 +16,7 @@ import time
 from typing import AsyncGenerator, List, Optional, Union
 
 from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, OPENCODE_PATH, PI_PATH, FIRST_BYTE_TIMEOUT, RESPONSE_TIMEOUT, PROXY_ENV
+from .tool_scripts import prepend_tool_path
 
 # ---------------------------------------------------------------------------
 # Process registry
@@ -181,6 +182,19 @@ def _claude_child_env(backend_id: str, backend_env: Optional[dict]) -> dict:
     return env_for_claude
 
 
+def _child_env(extra_env: Optional[dict] = None) -> dict:
+    env = os.environ.copy()
+    if PROXY_ENV:
+        env.update(PROXY_ENV)
+    if extra_env:
+        for name, value in extra_env.items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = value
+    return prepend_tool_path(env)
+
+
 def _claude_replayed_user_content(event: dict) -> Optional[str]:
     if event.get("type") != "user" or not event.get("isReplay"):
         return None
@@ -231,8 +245,9 @@ def _claude_event_task_notification_tool_use_id(event: dict) -> Optional[str]:
 
 
 class _ClaudeStreamParser:
-    def __init__(self, history: Optional[List[dict]]):
+    def __init__(self, history: Optional[List[dict]], emit_init_diag: bool = False):
         self.history = history
+        self.emit_init_diag = emit_init_diag
         self.session_id: Optional[str] = None
         self.tool_blocks: dict[int, dict] = {}
         self.done = False
@@ -381,15 +396,7 @@ async def _stream_lines(
     Drains stderr concurrently to prevent the 64KB pipe buffer from filling
     and blocking the subprocess before it can write to stdout.
     """
-    env = os.environ.copy()
-    if PROXY_ENV:
-        env.update(PROXY_ENV)
-    if extra_env:
-        for name, value in extra_env.items():
-            if value is None:
-                env.pop(name, None)
-            else:
-                env[name] = value
+    env = _child_env(extra_env)
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -617,11 +624,11 @@ async def run_claude(
 
     if resume_session_id:
         cmd += ["--resume", resume_session_id]
-        cmd.append(prompt)
+        cmd += ["--", prompt]
     else:
-        cmd.append(_build_prompt(prompt, history))
+        cmd += ["--", _build_prompt(prompt, history)]
 
-    parser = _ClaudeStreamParser(history)
+    parser = _ClaudeStreamParser(history, emit_init_diag=msg_id is not None)
     env_for_claude = _claude_child_env(backend_id, backend_env)
 
     async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, prompt_preview=prompt_preview, extra_env=env_for_claude):
@@ -701,14 +708,7 @@ class _ClaudeInteractiveCLI:
         if resume_session_id:
             cmd += ["--resume", resume_session_id]
 
-        env = os.environ.copy()
-        if PROXY_ENV:
-            env.update(PROXY_ENV)
-        for name, value in _claude_child_env(self.backend_id, self.backend_env).items():
-            if value is None:
-                env.pop(name, None)
-            else:
-                env[name] = value
+        env = _child_env(_claude_child_env(self.backend_id, self.backend_env))
 
         self.proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -832,7 +832,7 @@ class _ClaudeInteractiveCLI:
                 await self.close()
                 raise CLIError(f"Claude interactive stdin failed: {exc}") from exc
 
-            parser = _ClaudeStreamParser(history)
+            parser = _ClaudeStreamParser(history, emit_init_diag=msg_id is not None)
             WAIT_PROMPT_REPLAY = "wait_prompt_replay"
             READ_PROMPT_TURN = "read_prompt_turn"
             WAIT_AGENT_NOTIFICATION = "wait_agent_notification"
@@ -859,7 +859,7 @@ class _ClaudeInteractiveCLI:
                 nonlocal parser, phase, turn_live_chunks, turn_result_chunks
                 nonlocal turn_agent_tool_use_id, turn_agent_label
                 nonlocal ask_followup_tool_use_id, ask_followup_question_text
-                parser = _ClaudeStreamParser(history)
+                parser = _ClaudeStreamParser(history, emit_init_diag=msg_id is not None)
                 phase = next_phase
                 turn_live_chunks = []
                 turn_result_chunks = []
@@ -934,6 +934,9 @@ class _ClaudeInteractiveCLI:
 
                     chunks = parser.feed_line(line_text)
                     for chunk in chunks:
+                        if isinstance(chunk, dict) and "_diag" in chunk:
+                            yield chunk
+                            continue
                         if isinstance(chunk, dict) and ("_status" in chunk or "_tool" in chunk):
                             tool = chunk.get("_tool")
                             if isinstance(tool, dict) and tool.get("name") == "Agent":

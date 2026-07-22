@@ -1,8 +1,15 @@
 """
-worktree.py — Git worktree isolation per (topic, agent) session.
+worktree.py — per-turn code-root isolation for (topic, agent) sessions.
 
-Worktrees live at ~/.squid/worktrees/<repo_hash>/sqd-<session_key>/
-so they never appear in the user's project directory.
+Turn directories live at ~/.squid/worktrees/<repo_hash>/sqd-<session_key>/ so
+they never appear in the user's project directory. Despite the module name,
+a turn directory is a plain directory with no .git of its own — not a real
+`git worktree` — so there is nothing in it for an agent to `git branch`/
+`push`/`gh pr create` against (see ADR-0025, "Revised design", after a
+2026-07-22 incident where an agent pushed a real per-turn worktree branch to
+the real remote). The disposable integration worktree used for conflict
+resolution in sync_after_turn is still a real `git worktree` — it is
+Squid-internal only and never exposed to an agent.
 """
 from __future__ import annotations
 
@@ -11,6 +18,7 @@ import hashlib
 import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -87,34 +95,6 @@ def _link_dependency_dirs(repo_root: Path, wt: Path) -> None:
             dst.symlink_to(src, target_is_directory=True)
         if dst.is_symlink():
             linked_rels.append(rel)
-    _exclude_worktree_symlinks(wt, linked_rels)
-
-
-def _exclude_worktree_symlinks(wt: Path, rels: list[Path]) -> None:
-    if not rels:
-        return
-    exclude_raw = _run_git(wt, "rev-parse", "--git-path", "info/exclude", check=False).stdout.strip()
-    if not exclude_raw:
-        return
-    exclude_path = Path(exclude_raw)
-    if not exclude_path.is_absolute():
-        exclude_path = wt / exclude_path
-    exclude_path.parent.mkdir(parents=True, exist_ok=True)
-    existing = set()
-    if exclude_path.exists():
-        existing = {line.strip() for line in exclude_path.read_text().splitlines()}
-    lines = []
-    for rel in rels:
-        pattern = rel.as_posix().rstrip("/")
-        if pattern and pattern not in existing:
-            lines.append(pattern)
-            existing.add(pattern)
-    if lines:
-        with exclude_path.open("a") as f:
-            if exclude_path.exists() and exclude_path.stat().st_size > 0:
-                f.write("\n")
-            f.write("\n".join(lines))
-            f.write("\n")
 
 
 def _run_git(
@@ -155,6 +135,54 @@ def _snapshot_tree(repo_root: Path) -> str:
         _run_git(repo_root, "read-tree", "HEAD", env=env)
         _run_git(repo_root, "add", "-A", "--", ".", env=env)
         for rel in set(_linked_dir_rel_paths(repo_root)) | set(_external_dir_symlink_rel_paths(repo_root)):
+            _run_git(repo_root, "rm", "-r", "--cached", "--ignore-unmatch", "--", rel, env=env, check=False)
+        return _run_git(repo_root, "write-tree", env=env).stdout.strip()
+    finally:
+        try:
+            os.unlink(index_path)
+        except FileNotFoundError:
+            pass
+
+
+def _materialize_tree(repo_root: Path, commit: str, dest: Path) -> None:
+    """
+    Extract commit's tree content into dest as plain files. dest is never a
+    git repo — no .git, no branch, nothing for a turn to `git branch`/`push`/
+    `gh pr create` against, regardless of what name it tries (ADR-0025).
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    archive = subprocess.Popen(
+        ["git", "archive", commit], cwd=str(repo_root), stdout=subprocess.PIPE,
+    )
+    extract = subprocess.run(["tar", "-x", "-C", str(dest)], stdin=archive.stdout)
+    archive.stdout.close()
+    archive.wait()
+    if archive.returncode != 0 or extract.returncode != 0:
+        raise RuntimeError(
+            f"materializing {commit} into {dest} failed "
+            f"(archive exit {archive.returncode}, tar exit {extract.returncode})"
+        )
+
+
+def _snapshot_dir(repo_root: Path, work_tree: Path) -> str:
+    """
+    Build a git tree object for work_tree's current file content, using
+    repo_root's object database. work_tree need not be a git repo itself —
+    this is how a branchless turn directory (see _materialize_tree) gets
+    captured. Unlike _snapshot_tree, this does not seed from `read-tree
+    HEAD`: work_tree's content may have started from an older base than
+    repo_root's current HEAD, and seeding from HEAD would make repo_root
+    drift since the turn started look like a change the turn itself made.
+    """
+    fd, index_path = tempfile.mkstemp(prefix="squid-worktree-index-")
+    os.close(fd)
+    os.unlink(index_path)
+    try:
+        env = os.environ.copy()
+        env["GIT_INDEX_FILE"] = index_path
+        env["GIT_WORK_TREE"] = str(work_tree)
+        _run_git(repo_root, "add", "-A", "--", ".", env=env)
+        for rel in set(_linked_dir_rel_paths(repo_root)) | set(_external_dir_symlink_rel_paths(work_tree)):
             _run_git(repo_root, "rm", "-r", "--cached", "--ignore-unmatch", "--", rel, env=env, check=False)
         return _run_git(repo_root, "write-tree", env=env).stdout.strip()
     finally:
@@ -303,34 +331,32 @@ def worktree_path(repo_root: Path, topic: str, agent: str) -> Path:
 
 
 def ensure_worktree(repo_root: Path, topic: str, agent: str) -> Path:
-    """Get or create the worktree for (topic, agent). Returns the worktree path."""
+    """
+    Get or create the isolated turn directory for (topic, agent). Returns its
+    path. This is a plain directory with no .git of its own — nothing in it
+    for an agent to `git branch`/`push`/`gh pr create` against, regardless of
+    what name it tries (see ADR-0025, "Revised design").
+    """
     wt = worktree_path(repo_root, topic, agent)
-    br = branch_name(topic, agent)
-
     if wt.exists():
         return wt
 
     wt.parent.mkdir(parents=True, exist_ok=True)
-    seed_tree = _snapshot_tree(repo_root)
     head = _run_git(repo_root, "rev-parse", "HEAD").stdout.strip()
-    base_commit = _commit_tree(repo_root, seed_tree, f"squid: hidden base for {topic}/{agent}", [head])
-    _run_git(repo_root, "update-ref", base_ref_name(topic, agent), base_commit)
-    existing_branch = _run_git(repo_root, "branch", "--list", br, check=False).stdout.strip()
-    if existing_branch:
-        _run_git(repo_root, "worktree", "add", str(wt), br)
+    if config.WORKTREE_TRACK_DIRTY_CHANGES:
+        seed_tree = _snapshot_tree(repo_root)
+        base_commit = _commit_tree(repo_root, seed_tree, f"squid: hidden base for {topic}/{agent}", [head])
     else:
-        _run_git(repo_root, "worktree", "add", "-b", br, str(wt), base_commit)
+        base_commit = head
+    _run_git(repo_root, "update-ref", base_ref_name(topic, agent), base_commit)
+    _materialize_tree(repo_root, base_commit, wt)
     _link_dependency_dirs(repo_root, wt)
-    log.info("worktree created: %s branch=%s", wt, br)
+    log.info("worktree created: %s (branchless, base=%s)", wt, base_commit[:12])
     return wt
 
 
 def base_commit_for(repo_root: Path, topic: str, agent: str) -> Optional[str]:
     out = _run_git(repo_root, "rev-parse", "--verify", base_ref_name(topic, agent), check=False).stdout.strip()
-    if out:
-        return out
-    br = branch_name(topic, agent)
-    out = _run_git(repo_root, "rev-parse", "--verify", br, check=False).stdout.strip()
     return out or None
 
 
@@ -339,74 +365,18 @@ def integration_worktree_path(repo_root: Path, topic: str, agent: str) -> Path:
 
 
 def remove_worktree(repo_root: Path, topic: str, agent: str) -> None:
-    """Remove the worktree directory and delete its branch."""
+    """
+    Remove the turn directory and its hidden base ref. The turn directory is
+    a plain directory (no .git), so this is a filesystem remove, not
+    `git worktree remove`. The integration worktree used for conflict
+    resolution is still a real, disposable, Squid-internal git worktree.
+    """
     wt = worktree_path(repo_root, topic, agent)
     integration_wt = integration_worktree_path(repo_root, topic, agent)
-    br = branch_name(topic, agent)
     _run_git(repo_root, "worktree", "remove", "--force", str(integration_wt), check=False)
-    _run_git(repo_root, "worktree", "remove", "--force", str(wt), check=False)
-    _run_git(repo_root, "branch", "-D", br, check=False)
+    shutil.rmtree(wt, ignore_errors=True)
     _run_git(repo_root, "update-ref", "-d", base_ref_name(topic, agent), check=False)
     log.info("worktree removed: %s", wt)
-
-
-def merge_worktree(repo_root: Path, topic: str, agent: str) -> list[str]:
-    """
-    Merge the session branch into the current HEAD of repo_root.
-    Returns a list of conflicted file paths (empty = clean merge or nothing to merge).
-    Caller must call abort_merge() if conflicts are returned.
-
-    Raises RuntimeError if the merge command itself fails without producing
-    conflict markers (e.g. it couldn't even start — lock contention from a
-    concurrent git operation on repo_root). That case must never be treated
-    as a clean merge: doing so silently drops the turn's changes.
-    """
-    br = branch_name(topic, agent)
-    if not _run_git(repo_root, "branch", "--list", br, check=False).stdout.strip():
-        return []
-
-    ahead = _run_git(
-        repo_root, "rev-list", f"HEAD..{br}", "--count", check=False
-    ).stdout.strip()
-    if ahead == "0":
-        return []
-
-    result = _run_git(repo_root, "merge", "--no-ff", br, check=False)
-    if result.returncode == 0:
-        return []
-
-    conflicts = [
-        f for f in (
-            _run_git(repo_root, "diff", "--name-only", "--diff-filter=U", check=False)
-            .stdout.strip()
-            .splitlines()
-        )
-        if f
-    ]
-    if not conflicts:
-        raise RuntimeError(
-            f"git merge --no-ff {br} failed in {repo_root} without producing "
-            f"conflict markers (exit {result.returncode}, stderr: {result.stderr.strip()!r})"
-        )
-    log.warning("merge conflicts in %s: %s file(s)", repo_root, len(conflicts))
-    return conflicts
-
-
-def abort_merge(repo_root: Path) -> None:
-    _run_git(repo_root, "merge", "--abort", check=False)
-
-
-def _has_changes(wt_path: Path) -> bool:
-    return bool(_run_git(wt_path, "status", "--porcelain", check=False).stdout.strip())
-
-
-def commit_worktree(wt_path: Path, msg: str) -> bool:
-    """Stage all changes and commit. Returns True if a commit was made."""
-    if not _has_changes(wt_path):
-        return False
-    _run_git(wt_path, "add", "-A", check=False)
-    _run_git(wt_path, "commit", "-m", msg, check=False)
-    return True
 
 
 def _build_commit_message(
@@ -426,6 +396,7 @@ def _build_commit_message(
 def sync_after_turn(
     repo_root: Path, topic: str, agent: str, msg_id: Optional[int] = None,
     request_text: Optional[str] = None, response_text: Optional[str] = None,
+    turn_tree: Optional[str] = None,
 ) -> list[str]:
     """
     Called at end of each turn: merge the turn's file tree with the current
@@ -441,7 +412,7 @@ def sync_after_turn(
         base_commit = _base_commit_from_registry(repo_root, topic, agent) or base_commit_for(repo_root, topic, agent)
         if not base_commit:
             raise RuntimeError(f"missing base commit for worktree {wt}")
-        turn_tree = _snapshot_tree(wt)
+        turn_tree = turn_tree or _snapshot_dir(repo_root, wt)
         base_tree = _run_git(repo_root, "show", "--format=%T", "--no-patch", base_commit).stdout.strip()
         if turn_tree == base_tree:
             return []
