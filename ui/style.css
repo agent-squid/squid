@@ -1427,6 +1427,9 @@ body {
   cursor: default;
 }
 
+.stats-token-warn { color: #7a6030; }
+.stats-token-danger { color: #8a3535; }
+
 .stats-deep-dive-btn {
   display: inline-flex;
   align-items: center;
@@ -4536,6 +4539,7 @@ button {
 .ac-close:hover { color: var(--accent-light); background: var(--surface-2); }
 .ac-close-mobile { display: none; }
 .close-mobile { display: none; }
+.help-mobile-only { display: none; }
 .ac-item[data-cmd] .ac-meta { color: #2a5a40; font-size: var(--text-md); background: #0e2218; padding: 0.05em 0.35em; border-radius: 3px; }
 .ac-del-btn {
   flex-shrink: 0;
@@ -4605,6 +4609,7 @@ button {
   .ac-close-mobile { display: inline; }
   .close-desktop { display: none; }
   .close-mobile { display: inline; }
+  .help-mobile-only { display: block; }
 }
 
 /* inline topic tag — used in user bubbles and response context header */

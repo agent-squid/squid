@@ -1329,6 +1329,31 @@ def test_reverting_later_gitdiff_unblocks_older_same_file(tmp_path, monkeypatch)
     assert stats_db.get_diff_revert_eligibility(first_id, repo) == {"app.txt": "revertable"}
 
 
+def test_omitted_path_is_ineligible_for_revert(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    repo = "/tmp/project"
+    user_id = stats_db.insert_user_message("squid", "codex", "prompt")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
+    context = json.dumps([{
+        "name": "GitDiff",
+        "repo": repo,
+        "files": [
+            {"status": "M", "path": "small.txt"},
+            {"status": "M", "path": "huge.txt"},
+        ],
+        "diff": "diff --git a/small.txt b/small.txt\n",
+        "omitted_paths": ["huge.txt"],
+    }])
+    stats_db.update_assistant_message(msg_id, "resp", "session-1", "done", context=context)
+
+    assert stats_db.get_diff_revert_eligibility(msg_id, repo) == {
+        "small.txt": "revertable",
+        "huge.txt": "diff_too_large",
+    }
+
+
 def test_get_messages_by_ids_includes_compact_gitdiff_context(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
@@ -1386,12 +1411,13 @@ def test_get_message_previews_fetches_lightweight_batch(tmp_path, monkeypatch):
     pending_user_id = stats_db.insert_user_message("squid", "codex", "pending prompt preview")
     pending_id = stats_db.insert_assistant_message("squid", "codex", pending_user_id, adhoc=False)
 
-    assert stats_db.get_message_previews([assistant_id, pending_id], max_chars=10) == [
+    previews = stats_db.get_message_previews([assistant_id, pending_id], max_chars=10)
+    assert previews == [
         {"id": assistant_id, "preview": "assistant "},
         {"id": pending_id, "preview": "pending pr"},
     ]
-    assert "full diff should not be injected" not in messages[1]["content"]
-    assert "sqd-squid-1234-deadbe" not in messages[1]["content"]
+    assert "full diff should not be injected" not in previews[1]["preview"]
+    assert "sqd-squid-1234-deadbe" not in previews[1]["preview"]
 
 
 def test_get_messages_by_ids_sanitizes_transient_worktree_paths(tmp_path, monkeypatch):
@@ -1737,7 +1763,7 @@ def test_mark_worktree_synced_updates_status_and_last_used(tmp_path, monkeypatch
 
     stats_db.save_worktree("t", "901", "/repo", "/repo-wt", "sqd-t-901")
     before = stats_db.get_worktrees("t", "901")[0]
-    assert before["status"] == "active"
+    assert before["status"] == "pending"
 
     stats_db.mark_worktree_synced("t", "901", "/repo")
 

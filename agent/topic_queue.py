@@ -23,6 +23,44 @@ def remap_worktree_paths(text: str, worktree_sources: dict[str, str]) -> str:
     return remapped
 
 
+def _longest_worktree_path_prefix_suffix(text: str, worktree_paths: list[str]) -> int:
+    """Length of the longest text suffix that could become a worktree path."""
+    max_len = 0
+    for path in worktree_paths:
+        limit = min(len(text), len(path) - 1)
+        for size in range(limit, 0, -1):
+            if size <= max_len:
+                break
+            if text.endswith(path[:size]):
+                max_len = size
+                break
+    return max_len
+
+
+class _StreamingWorktreePathRemapper:
+    def __init__(self, worktree_sources: dict[str, str]):
+        self._sources = worktree_sources
+        self._paths = sorted(worktree_sources, key=len, reverse=True)
+        self._pending = ""
+
+    def feed(self, text: str) -> str:
+        if not text or not self._sources:
+            return text
+        combined = self._pending + text
+        keep = _longest_worktree_path_prefix_suffix(combined, self._paths)
+        if keep:
+            self._pending = combined[-keep:]
+            combined = combined[:-keep]
+        else:
+            self._pending = ""
+        return remap_worktree_paths(combined, self._sources)
+
+    def flush(self) -> str:
+        pending = self._pending
+        self._pending = ""
+        return remap_worktree_paths(pending, self._sources)
+
+
 @dataclass
 class QueueItem:
     seq: int
@@ -248,12 +286,22 @@ class TopicWorker:
         status_raw = ""
         tool_events: list[dict] = []
         session_id: Optional[str] = None
+        response_remapper = _StreamingWorktreePathRemapper(worktree_sources)
 
         async def _emit_tool(tool: dict):
             nonlocal run_seq
             tool_events.append(tool)
             insert_run_event(item.msg_id, run_seq, "tool", json.dumps(tool))
             await item.out_q.put({"_tool": tool})
+            run_seq += 1
+
+        async def _emit_text(text: str):
+            nonlocal run_seq, raw
+            if not text:
+                return
+            raw += text
+            insert_run_event(item.msg_id, run_seq, "text", text)
+            await item.out_q.put(text)
             run_seq += 1
 
         async def _emit_git_diff():
@@ -321,11 +369,10 @@ class TopicWorker:
                         insert_run_event(item.msg_id, run_seq, "error", chunk["_error"])
                         await item.out_q.put(chunk)
                 else:
-                    chunk = remap_worktree_paths(chunk, worktree_sources)
-                    raw += chunk
-                    insert_run_event(item.msg_id, run_seq, "text", chunk)
-                    await item.out_q.put(chunk)
+                    await _emit_text(response_remapper.feed(chunk))
+                    continue
                 run_seq += 1
+            await _emit_text(response_remapper.flush())
 
         try:
             try:
@@ -370,7 +417,7 @@ class TopicWorker:
 
             if item.agent and item.msg_id:
                 wt_key = str(item.msg_id)
-                from .stats_db import mark_worktree_synced
+                from .stats_db import mark_worktree_synced, mark_worktree_status
                 from .worktree import sync_after_turn
                 try:
                     wt_records = await asyncio.to_thread(get_worktrees, item.topic, wt_key)
@@ -378,22 +425,57 @@ class TopicWorker:
                     wt_records = []
                     log.debug("worktree sync lookup skipped topic=%s msg_id=%s", item.topic, item.msg_id, exc_info=True)
                 for rec in wt_records:
+                    repo_root = rec["repo_root"]
+                    worktree_repo = rec["worktree_path"]
+                    sync_status = "pending"
                     try:
                         conflicts = await asyncio.to_thread(
-                            sync_after_turn, Path(rec["repo_root"]), item.topic, wt_key, item.msg_id,
+                            sync_after_turn, Path(repo_root), item.topic, wt_key, item.msg_id,
                             request_text=(item.display_prompt or item.prompt),
                             response_text=raw,
                         )
                         if conflicts:
                             log.warning("worktree merge conflicts after turn msg_id=%s: %s", item.msg_id, conflicts)
+                            sync_status = "conflict"
+                            await asyncio.to_thread(mark_worktree_status, item.topic, wt_key, repo_root, sync_status)
+                            await _emit_tool({
+                                "name": "WorktreeSync",
+                                "status": sync_status,
+                                "repo": repo_root,
+                                "worktree_repo": worktree_repo,
+                                "integration_worktree_path": rec.get("integration_worktree_path"),
+                                "conflicts": conflicts,
+                            })
                         else:
                             # Merge is done, so the source repo is current — but the worktree
                             # dir itself is left in place. A tool the turn ran may have spawned
                             # a background process still using it as cwd; removal happens later
                             # via worktree.cleanup_worktrees (see TopicDispatcher.dispatch).
-                            await asyncio.to_thread(mark_worktree_synced, item.topic, wt_key, rec["repo_root"])
+                            sync_status = "synced"
+                            await asyncio.to_thread(mark_worktree_synced, item.topic, wt_key, repo_root)
+                            await _emit_tool({
+                                "name": "WorktreeSync",
+                                "status": sync_status,
+                                "repo": repo_root,
+                                "worktree_repo": worktree_repo,
+                            })
                     except Exception:
+                        sync_status = "promotion_failed"
+                        await asyncio.to_thread(mark_worktree_status, item.topic, wt_key, repo_root, sync_status)
+                        await _emit_tool({
+                            "name": "WorktreeSync",
+                            "status": sync_status,
+                            "repo": repo_root,
+                            "worktree_repo": worktree_repo,
+                            "integration_worktree_path": rec.get("integration_worktree_path"),
+                        })
                         log.exception("worktree sync failed after turn msg_id=%s", item.msg_id)
+                    finally:
+                        for tool in tool_events:
+                            if tool.get("name") == "GitDiff" and tool.get("worktree_repo") == worktree_repo:
+                                tool["worktree_status"] = sync_status
+                                if rec.get("integration_worktree_path"):
+                                    tool["integration_worktree_path"] = rec.get("integration_worktree_path")
 
             content = raw
             context_json = json.dumps(tool_events) if tool_events else None
@@ -444,6 +526,10 @@ class TopicDispatcher:
     def _sweep_worktrees(self, topic: str) -> None:
         """Best-effort, non-blocking sweep of worktrees left over from prior
         turns of this topic. Never delays admitting the new turn."""
+        from .config import WORKTREE_ISOLATION_ENABLED
+        if not WORKTREE_ISOLATION_ENABLED:
+            return
+
         async def _run():
             from .worktree import cleanup_worktrees
             try:

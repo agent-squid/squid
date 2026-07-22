@@ -20,7 +20,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Rubik:wght@700&display=swap" />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,100..700,0..1,0" />
   <link rel="stylesheet" href="/vendor/atom-one-dark.min.css" />
-  <link rel="stylesheet" href="style.css?v=20260720-008" />
+  <link rel="stylesheet" href="style.css?v=20260721-003" />
   <script src="/vendor/highlight.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/vendor/qrcode.min.js"></script>
@@ -231,6 +231,9 @@
         <button id="help-close" type="button"><span class="close-desktop">Esc</span><span class="close-mobile">✕</span></button>
       </div>
       <div id="help-content">
+        <div class="help-section help-mobile-only">
+          <div class="help-row"><span>On mobile: at the bottom of the chat, swipe up to refresh</span></div>
+        </div>
         <div class="help-section">
           <div class="help-title">Input syntax</div>
           <div class="help-row"><code>#topic@agent message</code><span>session — FIFO queued per agent</span></div>
@@ -302,6 +305,26 @@
       </div>
     </div>
 
+    <!-- Restart confirmation modal (floating overlay, always available — a restart can be
+         triggered from the hamburger menu on any tab, not just chat) -->
+    <div id="restart-modal">
+      <div id="restart-modal-box">
+        <div id="restart-modal-header">
+          <span class="settings-label">Restart Squid</span>
+          <button id="restart-modal-close" type="button">✕</button>
+        </div>
+        <div id="restart-modal-body">
+          <div id="restart-modal-title">Running prompts will be stopped</div>
+          <div id="restart-modal-copy">Restarting now will stop these active prompts before the server restarts.</div>
+          <div id="restart-modal-processes"></div>
+        </div>
+        <div id="restart-modal-footer">
+          <button id="restart-modal-cancel" type="button">Cancel</button>
+          <button id="restart-modal-confirm" type="button">Restart</button>
+        </div>
+      </div>
+    </div>
+
     <!-- ── CHAT VIEW ─────────────────────────────────────────────────────── -->
     <div id="view-chat" class="view active">
       <div id="messages" tabindex="-1"></div>
@@ -317,24 +340,6 @@
           </div>
         </div>
         <div id="pin-panel-list"></div>
-      </div>
-
-      <div id="restart-modal">
-        <div id="restart-modal-box">
-          <div id="restart-modal-header">
-            <span class="settings-label">Restart Squid</span>
-            <button id="restart-modal-close" type="button">✕</button>
-          </div>
-          <div id="restart-modal-body">
-            <div id="restart-modal-title">Running prompts will be stopped</div>
-            <div id="restart-modal-copy">Restarting now will stop these active prompts before the server restarts.</div>
-            <div id="restart-modal-processes"></div>
-          </div>
-          <div id="restart-modal-footer">
-            <button id="restart-modal-cancel" type="button">Cancel</button>
-            <button id="restart-modal-confirm" type="button">Restart</button>
-          </div>
-        </div>
       </div>
 
       <div id="autocomplete"></div>
@@ -737,7 +742,7 @@
   </div>
   <div id="app-tooltip"></div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-  <script src="flow-lang.js?v=20260720-008"></script>
-  <script src="app.js?v=20260720-008"></script>
+  <script src="flow-lang.js?v=20260721-003"></script>
+  <script src="app.js?v=20260721-003"></script>
 </body>
 </html>

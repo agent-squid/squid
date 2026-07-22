@@ -235,6 +235,52 @@ def test_worker_remaps_worktree_paths_before_stream_and_persist():
     assert update_call.args[1] == expected
 
 
+def test_worker_remaps_worktree_paths_split_across_chunks():
+    worktree = "/Users/alice/.squid/worktrees/abcd1234/sqd-squid-2067-921e61"
+    source = "/Users/alice/Work/squid"
+
+    async def fake_runner(*args, **kwargs):
+        yield "See [app.py](/Users/alice/.squid/worktrees/abcd1234/sqd"
+        yield "-squid-2067-921e61/app.py:12)"
+
+    async def run():
+        worker = TopicWorker("work")
+        item = QueueItem(
+            seq=0,
+            topic="work",
+            agent="codex",
+            prompt="hello",
+            context_history=[],
+            backend="codex",
+            model=None,
+            msg_id=2067,
+        )
+        with patch("agent.runners.run_codex", fake_runner), \
+             patch("agent.stats_db.get_worktrees", return_value=[{
+                 "worktree_path": worktree,
+                 "repo_root": source,
+             }]), \
+             patch("agent.stats_db.insert_run_event"), \
+             patch("agent.stats_db.update_assistant_message") as update_message, \
+             patch("agent.stats_db.set_topic_session"), \
+             patch("agent.stats_db.save_stats"):
+            await worker._process(item)
+
+        chunks = []
+        while True:
+            chunk = await item.out_q.get()
+            chunks.append(chunk)
+            if chunk is None:
+                break
+        return update_message.call_args, chunks
+
+    update_call, chunks = asyncio.run(run())
+    content = "".join(chunk for chunk in chunks if isinstance(chunk, str))
+    expected = "See [app.py](/Users/alice/Work/squid/app.py:12)"
+    assert content == expected
+    assert update_call.args[1] == expected
+
+
 def test_worker_does_not_persist_status_as_response_when_no_final_text():
     async def fake_runner(*args, **kwargs):
         yield {"_status": "Checking the code..."}
@@ -310,6 +356,74 @@ def test_worker_emits_git_diff_tool_event(tmp_path):
     assert [tool["name"] for tool in tools] == ["GitDiff"]
     assert tools[0]["files"] == [{"status": "M", "path": "app.txt"}]
     assert "+changed by agent" in tools[0]["diff"]
+
+
+def test_worker_marks_worktree_conflict_and_emits_sync_tool():
+    class FakeTracker:
+        def build_event(self):
+            return {
+                "name": "GitDiff",
+                "repo": "/tmp/repo",
+                "worktree_repo": "/tmp/wt",
+                "worktree_status": "pending",
+                "files": [{"status": "M", "path": "app.txt"}],
+                "diff": "diff --git a/app.txt b/app.txt\n",
+            }
+
+        def build_no_change_event(self):
+            return {"name": "GitDiff", "files": [], "no_changes": True}
+
+        def cleanup(self):
+            return None
+
+    async def fake_runner(*args, **kwargs):
+        yield "done"
+
+    async def run():
+        worker = TopicWorker("work")
+        item = QueueItem(
+            seq=0,
+            topic="work",
+            agent="codex",
+            prompt="hello",
+            context_history=[],
+            backend="codex",
+            model=None,
+            cwd="/tmp/wt",
+            code_roots=["/tmp/wt"],
+            adhoc=True,
+            msg_id=458,
+        )
+        rec = {
+            "repo_root": "/tmp/repo",
+            "worktree_path": "/tmp/wt",
+            "integration_worktree_path": "/tmp/wt-integration",
+        }
+        with patch("agent.runners.run_codex", fake_runner), \
+             patch("agent.stats_db.get_worktrees", return_value=[rec]), \
+             patch("agent.git_changes.prepare_trackers", return_value=[FakeTracker()]), \
+             patch("agent.worktree.sync_after_turn", return_value=["app.txt"]), \
+             patch("agent.stats_db.mark_worktree_status") as mark_status, \
+             patch("agent.stats_db.insert_run_event"), \
+             patch("agent.stats_db.update_assistant_message"), \
+             patch("agent.stats_db.set_topic_session"), \
+             patch("agent.stats_db.save_stats"):
+            await worker._process(item)
+
+        chunks = []
+        while True:
+            chunk = await item.out_q.get()
+            chunks.append(chunk)
+            if chunk is None:
+                break
+        return chunks, mark_status.call_args
+
+    chunks, mark_status_call = asyncio.run(run())
+    tools = [chunk["_tool"] for chunk in chunks if isinstance(chunk, dict) and "_tool" in chunk]
+    assert [tool["name"] for tool in tools] == ["GitDiff", "WorktreeSync"]
+    assert tools[1]["status"] == "conflict"
+    assert tools[1]["conflicts"] == ["app.txt"]
+    assert mark_status_call.args == ("work", "458", "/tmp/repo", "conflict")
 
 
 def test_worker_emits_no_change_git_diff_when_tracked_tree_is_clean(tmp_path):
@@ -580,6 +694,7 @@ def test_worker_clears_session_on_prompt_too_long_text_response():
             msg_id=526,
         )
         with patch("agent.runners.run_claude_interactive_cli", fake_runner), \
+             patch("agent.runners.runner_for_agent", return_value=fake_runner), \
              patch("agent.stats_db.insert_run_event"), \
              patch("agent.stats_db.update_assistant_message"), \
              patch("agent.stats_db.set_topic_session"), \
@@ -628,6 +743,7 @@ def test_worker_retries_fresh_on_prompt_too_long():
             msg_id=500,
         )
         with patch("agent.runners.run_claude_interactive_cli", fake_runner), \
+             patch("agent.runners.runner_for_agent", return_value=fake_runner), \
              patch("agent.stats_db.insert_run_event"), \
              patch("agent.stats_db.update_assistant_message"), \
              patch("agent.stats_db.set_topic_session"), \

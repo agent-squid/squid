@@ -61,6 +61,7 @@ from .topics import normalize_topic_slug
 from .memory import (
     _split_frontmatter,
     code_roots_prompt_block,
+    ensure_topic_memory_placeholder,
     read_topic_memory,
     topic_memory_path,
     topic_memory_squid_config,
@@ -91,7 +92,7 @@ from .stats_db import (
     get_recent_prompts,
     save_file_edit, get_file_edit_history, get_file_edit_by_id,
     get_bookmarks, add_bookmark, remove_bookmark,
-    save_worktree, get_worktrees, delete_all_worktrees,
+    save_worktree, get_worktrees, get_all_worktrees_for_topic, delete_all_worktrees,
     delete_all_topic_worktrees,
     allocate_id,
 )
@@ -198,6 +199,31 @@ def _backend_native_chat_command_name(message: str) -> str:
 def _is_backend_native_chat_command(message: str) -> bool:
     command_name = _backend_native_chat_command_name(message)
     return bool(command_name and command_name not in _SQUID_CHAT_COMMANDS)
+
+
+async def _active_worktree_blockers(topic: str, code_roots: list[str]) -> list[dict]:
+    from .worktree import repo_root_for
+
+    repo_roots: set[str] = set()
+    for root in code_roots:
+        repo_root = await asyncio.to_thread(repo_root_for, root)
+        if repo_root:
+            repo_roots.add(str(repo_root))
+    if not repo_roots:
+        return []
+
+    blockers = []
+    for rec in await asyncio.to_thread(get_all_worktrees_for_topic, topic):
+        if rec.get("repo_root") not in repo_roots:
+            continue
+        if rec.get("status") in {"conflict", "promotion_failed"}:
+            blockers.append({
+                "repo_root": rec.get("repo_root"),
+                "worktree_path": rec.get("worktree_path"),
+                "integration_worktree_path": rec.get("integration_worktree_path"),
+                "status": rec.get("status"),
+            })
+    return blockers
 
 
 def _resolve_agent_runtime(agent_config: dict) -> tuple[str, Optional[str], str, object]:
@@ -612,7 +638,17 @@ async def _prepare_chat_turn(
 
     memory_config = topic_memory_squid_config(topic)
     code_roots = memory_config.get("code_roots") or []
+    if harness == "echo":
+        code_roots = []
     source_cwd = cwd
+
+    if WORKTREE_ISOLATION_ENABLED and code_roots:
+        blockers = await _active_worktree_blockers(topic, code_roots)
+        if blockers:
+            return JSONResponse({
+                "error": "worktree sync requires attention before starting another turn",
+                "worktrees": blockers,
+            }, status_code=409)
 
     memory_revision: Optional[str] = None
     memory_data_for_prompt: Optional[dict] = None
@@ -783,23 +819,44 @@ async def _setup_worktrees(
     model uses effective_code_roots (worktree-remapped absolute paths) for all
     file access. Falls back to original paths on any error, with isolated=False.
     """
-    from .worktree import repo_root_for, ensure_worktree, map_to_worktree, branch_name
+    from .worktree import (
+        repo_root_for,
+        ensure_worktree,
+        map_to_worktree,
+        branch_name,
+        base_commit_for,
+        integration_worktree_path,
+    )
 
     worktree_map: dict[Path, Path] = {}
+    repo_roots: list[Path] = []
     for root in code_roots:
         try:
             repo_root = await asyncio.to_thread(repo_root_for, root)
-            if repo_root and repo_root not in worktree_map:
-                wt_path = await asyncio.to_thread(ensure_worktree, repo_root, topic, agent)
-                worktree_map[repo_root] = wt_path
-                await asyncio.to_thread(
-                    save_worktree, topic, agent,
-                    str(repo_root), str(wt_path), branch_name(topic, agent),
-                )
+            if not repo_root:
+                log.warning("worktree setup skipped non-git root=%s topic=%s agent=%s", root, topic, agent)
+                return code_roots, cwd, False
+            if repo_root not in repo_roots:
+                repo_roots.append(repo_root)
         except Exception:
             log.exception("worktree setup failed for root=%s topic=%s agent=%s", root, topic, agent)
+            return code_roots, cwd, False
 
-    if not worktree_map:
+    for repo_root in repo_roots:
+        try:
+            wt_path = await asyncio.to_thread(ensure_worktree, repo_root, topic, agent)
+            worktree_map[repo_root] = wt_path
+            await asyncio.to_thread(
+                save_worktree, topic, agent,
+                str(repo_root), str(wt_path), branch_name(topic, agent),
+                await asyncio.to_thread(base_commit_for, repo_root, topic, agent),
+                str(integration_worktree_path(repo_root, topic, agent)),
+            )
+        except Exception:
+            log.exception("worktree setup failed for repo=%s topic=%s agent=%s", repo_root, topic, agent)
+            return code_roots, cwd, False
+
+    if not worktree_map or len(worktree_map) != len(repo_roots):
         return code_roots, cwd, False
 
     effective_roots = [map_to_worktree(r, worktree_map) or r for r in code_roots]
@@ -1063,8 +1120,10 @@ async def run_cmd(req: CmdRequest):
         if not get_agent(agent):
             return JSONResponse({"ok": False, "error": f"agent not found: {agent}"}, status_code=400)
         killed = kill_procs_by_topic(topic, agent=agent, adhoc=False)
-        from .worktree import cleanup_worktrees
-        conflicts = await cleanup_worktrees(topic)
+        conflicts = {}
+        if WORKTREE_ISOLATION_ENABLED:
+            from .worktree import cleanup_worktrees
+            conflicts = await cleanup_worktrees(topic)
         clear_topic_session(topic, agent)
         log.info("cmd %s topic=%s agent=%s killed=%s", req.command, topic, agent, killed)
         result: dict = {"ok": True, "agent": agent}
@@ -1371,6 +1430,14 @@ async def put_topic_memory_route(topic: str, req: TopicMemoryRequest):
     return JSONResponse(write_topic_memory(topic, req.content))
 
 
+@app.post("/topics/{topic}/memory/squid/seed")
+async def seed_topic_memory_route(topic: str):
+    topic = _normalize_topic_response(topic)
+    if isinstance(topic, JSONResponse):
+        return topic
+    return JSONResponse(ensure_topic_memory_placeholder(topic))
+
+
 @app.put("/topics/{topic}/memory/squid/code-roots")
 async def put_topic_memory_code_roots_route(topic: str, req: TopicMemoryCodeRootsRequest):
     topic = _normalize_topic_response(topic)
@@ -1439,8 +1506,10 @@ async def clear_session(topic: str, agent: str):
     topic = _normalize_topic_response(topic)
     if isinstance(topic, JSONResponse):
         return topic
-    from .worktree import cleanup_worktrees
-    conflicts = await cleanup_worktrees(topic)
+    conflicts = {}
+    if WORKTREE_ISOLATION_ENABLED:
+        from .worktree import cleanup_worktrees
+        conflicts = await cleanup_worktrees(topic)
     clear_topic_session(topic, agent)
     result: dict = {"ok": True}
     if conflicts:
@@ -1668,10 +1737,38 @@ async def record_msg_quota_delta(msg_id: int, req: MsgQuotaSnapshotRequest):
 async def diff_revert_status(msg_id: int, repo: str):
     if _validate_repo_path(repo) is None:
         return JSONResponse({"error": "invalid repo path"}, status_code=400)
+    gitdiff = await asyncio.to_thread(get_message_gitdiff, msg_id, repo)
+    blocked = _worktree_diff_blocked(gitdiff)
+    if blocked:
+        return JSONResponse(blocked)
     eligibility = await asyncio.to_thread(get_diff_revert_eligibility, msg_id, repo)
     if not eligibility:
         return JSONResponse({"error": "diff not found"}, status_code=404)
     return JSONResponse(eligibility)
+
+
+@app.get("/chat/{msg_id}/diff-file")
+async def diff_file(msg_id: int, repo: str, path: str):
+    """On-demand diff for one file this turn's stored diff omitted (too large
+    to include in full — see GitChangeTracker._truncate_diff_by_file). Recomputed
+    live from the (base, head) trees anchored at turn end for this purpose."""
+    from .git_changes import diff_for_path
+
+    repo_root = _validate_repo_path(repo)
+    if repo_root is None:
+        return JSONResponse({"error": "invalid repo path"}, status_code=400)
+
+    gitdiff = await asyncio.to_thread(get_message_gitdiff, msg_id, repo)
+    if not gitdiff:
+        return JSONResponse({"error": "diff not found"}, status_code=404)
+    base, head = gitdiff.get("base"), gitdiff.get("head")
+    if not base or not head:
+        return JSONResponse({"error": "diff too old to recompute (no anchored trees)"}, status_code=404)
+
+    diff = await asyncio.to_thread(diff_for_path, repo_root, base, head, path)
+    if not diff:
+        return JSONResponse({"error": "diff unavailable — anchor may have been pruned"}, status_code=404)
+    return JSONResponse({"diff": diff})
 
 
 def _validate_repo_path(repo: str) -> Optional[Path]:
@@ -1685,6 +1782,19 @@ def _validate_repo_path(repo: str) -> Optional[Path]:
     return p
 
 
+def _worktree_diff_blocked(gitdiff: Optional[dict]) -> Optional[dict[str, str]]:
+    if not gitdiff or not gitdiff.get("worktree_repo"):
+        return None
+    status = gitdiff.get("worktree_status")
+    if not status or status == "synced":
+        return None
+    return {
+        f.get("path"): status
+        for f in gitdiff.get("files", [])
+        if f.get("path")
+    }
+
+
 @app.post("/chat/{msg_id}/revert")
 async def revert_diff(msg_id: int, req: RevertRequest):
     from .git_changes import extract_file_diff, apply_reverse_patch
@@ -1692,6 +1802,11 @@ async def revert_diff(msg_id: int, req: RevertRequest):
     repo_root = _validate_repo_path(req.repo)
     if repo_root is None:
         return JSONResponse({"error": "invalid repo path"}, status_code=400)
+
+    this_diff = await asyncio.to_thread(get_message_gitdiff, msg_id, req.repo)
+    blocked = _worktree_diff_blocked(this_diff)
+    if blocked:
+        return JSONResponse({"error": "worktree diff is not synced", "status": next(iter(blocked.values()), "pending")}, status_code=400)
 
     eligibility = await asyncio.to_thread(get_diff_revert_eligibility, msg_id, req.repo)
     if not eligibility:
@@ -1711,7 +1826,6 @@ async def revert_diff(msg_id: int, req: RevertRequest):
     if not files_to_revert:
         return JSONResponse({"error": "no revertable files"}, status_code=400)
 
-    this_diff = await asyncio.to_thread(get_message_gitdiff, msg_id, req.repo)
     if not this_diff:
         return JSONResponse({"error": "GitDiff not found"}, status_code=404)
 

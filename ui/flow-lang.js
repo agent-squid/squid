@@ -1,7 +1,7 @@
 // Squid Flow language: parse / validate / canonicalize / expand.
-// Standalone, dependency-free. Not wired into the live app yet — see
-// flow-playground.html for an interactive surface, and ADR-0032 for the
-// language spec this implements.
+// Standalone, dependency-free. Used by the composer, the in-app Flow view,
+// and the standalone flow-playground.html. See ADR-0032 for the language
+// spec this implements.
 //
 // Scope: single linear clause only. `;` (multi-clause DAG / cycles) is
 // explicitly out of scope and rejected with a clear message.

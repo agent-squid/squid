@@ -85,6 +85,41 @@ def _parse_numstat(output: str) -> tuple[int, int]:
     return additions, deletions
 
 
+def _diff_anchor_ref(msg_id: int) -> str:
+    return f"refs/squid/diffs/{msg_id}"
+
+
+def _anchor_diff_trees(repo_root: Path, msg_id: Optional[int], base_tree: str, head_tree: str) -> None:
+    """Keep base_tree/head_tree reachable indefinitely so a later on-demand
+    per-file diff (e.g. a file this turn's diff omitted for size) can still be
+    recomputed from them, even after `git gc` would otherwise prune a bare,
+    ref-less tree. Best-effort: this must never fail the turn itself — chat
+    history/diffs are already retained indefinitely (ADR-0029), so once
+    created this ref is never deleted either.
+    """
+    if msg_id is None:
+        return
+    try:
+        from .worktree import _commit_tree, _internal_commit_env  # local: avoid any import-time cycle
+
+        base_commit = _commit_tree(repo_root, base_tree, f"squid: diff base for turn {msg_id}")
+        head_commit = _commit_tree(repo_root, head_tree, f"squid: diff head for turn {msg_id}", [base_commit])
+        _run_git(repo_root, "update-ref", _diff_anchor_ref(msg_id), head_commit, check=False)
+    except Exception:
+        log.debug("diff anchor ref failed for msg_id=%s", msg_id, exc_info=True)
+
+
+def diff_for_path(repo_root: Path, base: str, head: str, path: str) -> str:
+    """Recompute a single file's diff live from stored (base, head) tree hashes.
+    Used for files a turn's stored diff omitted for size — those still have
+    their trees anchored via _anchor_diff_trees, so this works long after the
+    turn ended. Returns '' if either tree is gone (e.g. pre-anchor history, or
+    the anchor ref was somehow removed) rather than raising.
+    """
+    result = _run_git(repo_root, "diff", "--binary", "--unified=3", base, head, "--", path, check=False)
+    return result.stdout if result.returncode == 0 else ''
+
+
 @dataclass
 class GitChangeTracker:
     source_cwd: Path
@@ -95,6 +130,7 @@ class GitChangeTracker:
     event_repo_root: Path
     base_tree: str
     persistent: bool
+    msg_id: Optional[int] = None
 
     @classmethod
     def prepare(
@@ -108,7 +144,7 @@ class GitChangeTracker:
         source_cwd: Optional[str] = None,
         source_root: Optional[str] = None,
     ) -> Optional["GitChangeTracker"]:
-        del topic, agent, adhoc, msg_id
+        del topic, agent, adhoc
         run_cwd = Path(cwd).expanduser().resolve()
         run_root = _repo_root(run_cwd)
         if not run_root:
@@ -130,6 +166,7 @@ class GitChangeTracker:
             event_repo_root=event_root,
             base_tree=base_tree,
             persistent=True,
+            msg_id=msg_id,
         )
 
     def build_event(self) -> Optional[dict]:
@@ -142,11 +179,11 @@ class GitChangeTracker:
         numstat = _run_git(self.repo_root, "diff", "--numstat", self.base_tree, head_tree).stdout
         additions, deletions = _parse_numstat(numstat)
         stat = _run_git(self.repo_root, "diff", "--stat", self.base_tree, head_tree).stdout
-        diff = _run_git(self.repo_root, "diff", "--binary", "--unified=3", self.base_tree, head_tree).stdout
-        truncated = False
-        if len(diff) > _MAX_DIFF_CHARS:
-            diff = diff[:_MAX_DIFF_CHARS] + "\n\n[diff truncated]\n"
-            truncated = True
+        full_diff = _run_git(self.repo_root, "diff", "--binary", "--unified=3", self.base_tree, head_tree).stdout
+        diff, omitted_paths = _truncate_diff_by_file(full_diff, _MAX_DIFF_CHARS)
+        truncated = bool(omitted_paths)
+        if omitted_paths:
+            _anchor_diff_trees(self.repo_root, self.msg_id, self.base_tree, head_tree)
 
         return {
             "name": "GitDiff",
@@ -157,15 +194,18 @@ class GitChangeTracker:
             "stat": stat,
             "diff": diff,
             "base": self.base_tree,
+            "head": head_tree,
             "cwd": str(self.event_cwd),
             "source": str(self.source_cwd),
             "repo": str(self.event_repo_root),
             "mode": "direct-watch",
             "persistent": self.persistent,
             "truncated": truncated,
+            "omitted_paths": omitted_paths,
             **({
                 "worktree_cwd": str(self.run_cwd),
                 "worktree_repo": str(self.repo_root),
+                "worktree_status": "pending",
             } if self.repo_root != self.event_repo_root else {}),
         }
 
@@ -189,6 +229,7 @@ class GitChangeTracker:
             **({
                 "worktree_cwd": str(self.run_cwd),
                 "worktree_repo": str(self.repo_root),
+                "worktree_status": "pending",
             } if self.repo_root != self.event_repo_root else {}),
         }
 
@@ -196,31 +237,65 @@ class GitChangeTracker:
         return None
 
 
-def extract_file_diff(full_diff: str, file_path: str) -> str:
-    """Extract the unified diff chunk for a single file from a full diff."""
+def _iter_diff_chunks(full_diff: str):
+    """Yield (path, chunk_text) for each file section of a unified diff, in order.
+
+    chunk_text always ends with a trailing newline — git apply rejects a patch
+    whose last line has none ("corrupt patch"), which a naive line-boundary
+    split can otherwise produce at the last chunk or a truncation cut point.
+    """
     current_path: Optional[str] = None
     current_lines: list[str] = []
 
     def _chunk() -> str:
-        # git apply rejects a patch whose last line has no trailing newline
-        # ("corrupt patch"), which happens when the chunk is cut at the next
-        # `diff --git` boundary.
         text = '\n'.join(current_lines)
         return text if text.endswith('\n') else text + '\n'
 
     for line in full_diff.split('\n'):
         if line.startswith('diff --git '):
-            if current_path == file_path:
-                return _chunk()
+            if current_lines:
+                yield current_path, _chunk()
             m = re.match(r'^diff --git a/.+ b/(.+)$', line)
             current_path = m.group(1) if m else None
             current_lines = [line]
         elif current_path is not None:
             current_lines.append(line)
 
-    if current_path == file_path:
-        return _chunk()
+    if current_lines:
+        yield current_path, _chunk()
+
+
+def extract_file_diff(full_diff: str, file_path: str) -> str:
+    """Extract the unified diff chunk for a single file from a full diff."""
+    for path, chunk in _iter_diff_chunks(full_diff):
+        if path == file_path:
+            return chunk
     return ''
+
+
+def _truncate_diff_by_file(full_diff: str, max_chars: int) -> tuple[str, list[str]]:
+    """Keep whole file chunks up to max_chars total — never cut mid-file/mid-hunk.
+
+    Returns (kept_diff_text, omitted_paths). Once a chunk doesn't fit, it and
+    every chunk after it (in original order) are omitted, so kept_diff_text is
+    always a clean prefix of full_diff and every included file's diff is
+    complete and independently appliable (e.g. for single-file revert).
+    """
+    if len(full_diff) <= max_chars:
+        return full_diff, []
+    kept: list[str] = []
+    omitted: list[str] = []
+    budget = max_chars
+    cutoff = False
+    for path, chunk in _iter_diff_chunks(full_diff):
+        if not cutoff and len(chunk) <= budget:
+            kept.append(chunk)
+            budget -= len(chunk)
+        else:
+            cutoff = True
+            if path:
+                omitted.append(path)
+    return ''.join(kept), omitted
 
 
 def apply_reverse_patch(repo_root: Path, patch_text: str) -> tuple[bool, str]:

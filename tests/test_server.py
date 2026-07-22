@@ -33,6 +33,30 @@ providers:
 '''
 
 
+def test_worktree_diff_blocked_until_synced():
+    gitdiff = {
+        "name": "GitDiff",
+        "worktree_repo": "/tmp/wt",
+        "worktree_status": "conflict",
+        "files": [{"path": "app.py"}],
+    }
+
+    assert server._worktree_diff_blocked(gitdiff) == {"app.py": "conflict"}
+
+    gitdiff["worktree_status"] = "synced"
+    assert server._worktree_diff_blocked(gitdiff) is None
+
+
+def test_worktree_diff_missing_status_is_legacy_unblocked():
+    gitdiff = {
+        "name": "GitDiff",
+        "worktree_repo": "/tmp/wt",
+        "files": [{"path": "app.py"}],
+    }
+
+    assert server._worktree_diff_blocked(gitdiff) is None
+
+
 class FinishedWorker:
     def position_of(self, seq):
         return 0

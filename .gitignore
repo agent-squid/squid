@@ -1,4 +1,4 @@
-__pycache__/
+__pycache__
 *.py[cod]
 *.egg-info/
 .venv
@@ -8,6 +8,7 @@ dist/
 squid.db
 .squid.pid
 tests/e2e/node_modules
+ui/vendor
 tests/e2e/playwright-report/
 tests/e2e/test-results/
 context/journals/
@@ -17,5 +18,5 @@ context/topics/default/*
 !context/topics/default/memory.md
 logs/
 .claude/
-benchmarks/claude_session_continuity/results/
+benchmarks/claude_session_continuity/results
 config/squid.yaml

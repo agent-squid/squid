@@ -5,6 +5,7 @@ from unittest.mock import patch, AsyncMock
 import pytest
 
 from agent import flow
+from agent import server
 from agent import stats_db
 from agent.config import TEST_HARNESS_ENABLED
 
@@ -148,6 +149,8 @@ def test_parse_flow_route_forward_count_omitted_with_wait():
 
 def test_next_chain_steps_forward_variants_dispatch_identically(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    monkeypatch.setattr("agent.server.WORKTREE_ISOLATION_ENABLED", False)
+    monkeypatch.setattr("agent.config.WORKTREE_ISOLATION_ENABLED", False)
     stats_db.init_db()
     # _seed_chain hardcodes flow_run_id="f1" — insert directly with a
     # distinct id per variant so each iteration starts from a clean chain.
@@ -299,6 +302,8 @@ def test_continue_chain_multi_origin_via_real_echo_harness(tmp_path, monkeypatch
         SQUID_TEST_HARNESS=1 python -m pytest tests/test_flow.py -k echo
     """
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    monkeypatch.setattr("agent.server.WORKTREE_ISOLATION_ENABLED", False)
+    monkeypatch.setattr("agent.config.WORKTREE_ISOLATION_ENABLED", False)
     stats_db.init_db()
     stats_db.upsert_agent("echobot", "echo", "echo", None, cwd=str(tmp_path))
 
@@ -322,14 +327,17 @@ def test_continue_chain_multi_origin_via_real_echo_harness(tmp_path, monkeypatch
         # run_echo deliberately waits a real random 5-10s before replying
         # (see its docstring) — patched away here so this test stays fast;
         # that latency itself isn't what this test is checking.
+        real_sleep = asyncio.sleep
         with patch("agent.runners.asyncio.sleep", new=AsyncMock()):
             for asst_id in asst_ids:
                 await flow.continue_chain(asst_id)
-            for _ in range(100):  # up to ~2s
+            for _ in range(250):  # up to ~5s
+                for worker in list(server.dispatcher._workers.values()):
+                    await worker.q.join()
                 rows = stats_db.get_flow_run_messages(flow_run_id)
                 if len(rows) == 8 and all(r["status"] == "done" for r in rows if r["role"] == "assistant"):
                     break
-                await asyncio.sleep(0.02)
+                await real_sleep(0.02)
 
     asyncio.run(run())
 

@@ -45,8 +45,33 @@ def _load_frontmatter(content: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+_CODE_ROOTS_HINT_LINES = ["  # code_roots:", "  #   - /absolute/path/to/repo"]
+
+_PLACEHOLDER_MEMORY = (
+    "---\n"
+    "squid:\n"
+    "  # code_roots:\n"
+    "  #   - /absolute/path/to/repo\n"
+    "  # code_roots_skipped: true\n"
+    "---\n"
+)
+
+
+def _insert_code_roots_hint(yaml_text: str) -> str:
+    lines = yaml_text.split("\n")
+    out = []
+    for line in lines:
+        out.append(line)
+        if line.strip() == "squid:":
+            out.extend(_CODE_ROOTS_HINT_LINES)
+    return "\n".join(out)
+
+
 def _dump_memory(frontmatter: dict, body: str) -> str:
     yaml_text = yaml.safe_dump(frontmatter, sort_keys=False, default_flow_style=False).strip()
+    squid = frontmatter.get("squid")
+    if isinstance(squid, dict) and not squid.get("code_roots"):
+        yaml_text = _insert_code_roots_hint(yaml_text)
     if body:
         return f"---\n{yaml_text}\n---\n{body}"
     return f"---\n{yaml_text}\n---\n"
@@ -102,6 +127,15 @@ def read_topic_memory(topic: str) -> dict:
         "path": _display_path(path),
         "squid": topic_memory_squid_config_from_content(content),
     }
+
+
+def ensure_topic_memory_placeholder(topic: str) -> dict:
+    slug = normalize_topic_slug(topic)
+    path = topic_memory_path(slug)
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_PLACEHOLDER_MEMORY, encoding="utf-8")
+    return read_topic_memory(slug)
 
 
 def write_topic_memory(topic: str, content: str) -> dict:
@@ -190,6 +224,9 @@ def code_roots_prompt_block(code_roots: list[str], isolated: bool = False) -> Op
     ]
     if isolated:
         lines.append(
-            "You are the sole writer in this worktree for this turn. Trust your writes — never re-read a file to confirm an edit, never re-verify state you just set."
+            "You are the sole writer in this worktree for this turn. Trust your writes — never re-read a file to confirm an edit, never re-verify state you just set. Do not delete dependency/cache directories such as .venv, node_modules, or vendor; they may be symlinks to the source repo."
+        )
+        lines.append(
+            "This worktree is a temporary staging copy: edits made here are synced into the real repository automatically once the turn ends, with no action needed from you. Do not run git commit, push, or other branch/history-changing commands against these paths — if asked to commit or push, run that against the process's working directory (the real repository) instead."
         )
     return "\n".join(lines)

@@ -154,7 +154,9 @@ _TABLES = [
         repo_root       TEXT NOT NULL,
         worktree_path   TEXT NOT NULL,
         branch_name     TEXT NOT NULL,
-        status          TEXT NOT NULL DEFAULT 'active',
+        base_commit     TEXT,
+        integration_worktree_path TEXT,
+        status          TEXT NOT NULL DEFAULT 'pending',
         created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         last_used_at    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         PRIMARY KEY (topic, agent, repo_root)
@@ -288,6 +290,11 @@ def init_db() -> None:
             conn.execute("ALTER TABLE chat_messages ADD COLUMN flow_run_id TEXT")
         if "flow_route" not in message_columns:
             conn.execute("ALTER TABLE chat_messages ADD COLUMN flow_route TEXT")
+        worktree_columns = _table_columns(conn, "worktrees")
+        if "base_commit" not in worktree_columns:
+            conn.execute("ALTER TABLE worktrees ADD COLUMN base_commit TEXT")
+        if "integration_worktree_path" not in worktree_columns:
+            conn.execute("ALTER TABLE worktrees ADD COLUMN integration_worktree_path TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_flow_route ON chat_messages(flow_route, completed_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_flow_run ON chat_messages(flow_run_id, id)")
         agent_columns = _table_columns(conn, "agents")
@@ -3312,10 +3319,12 @@ def get_diff_revert_eligibility(msg_id: int, repo: str) -> dict[str, str]:
                     if fpath not in lr:
                         later_touched.add(fpath)
 
+    omitted = set(this_diff.get('omitted_paths') or [])
     return {
         fpath: (
             'reverted' if fpath in already_reverted
             else 'conflicting' if fpath in later_touched
+            else 'diff_too_large' if fpath in omitted
             else 'revertable'
         )
         for fpath in this_files
@@ -3458,27 +3467,48 @@ def remove_bookmark(msg_id: int) -> None:
 # Worktrees
 # ---------------------------------------------------------------------------
 
-def save_worktree(topic: str, agent: str, repo_root: str, wt_path: str, br: str) -> None:
+def save_worktree(
+    topic: str,
+    agent: str,
+    repo_root: str,
+    wt_path: str,
+    br: str,
+    base_commit: Optional[str] = None,
+    integration_worktree_path: Optional[str] = None,
+) -> None:
     with _connect() as conn:
         conn.execute(
-            """INSERT INTO worktrees (topic, agent, repo_root, worktree_path, branch_name)
-               VALUES (?, ?, ?, ?, ?)
+            """INSERT INTO worktrees
+                 (topic, agent, repo_root, worktree_path, branch_name, base_commit, integration_worktree_path)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(topic, agent, repo_root) DO UPDATE SET
-                 last_used_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), status='active'""",
-            (topic, agent, repo_root, wt_path, br),
+                 base_commit=COALESCE(excluded.base_commit, worktrees.base_commit),
+                 integration_worktree_path=COALESCE(excluded.integration_worktree_path, worktrees.integration_worktree_path),
+                 last_used_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), status='pending'""",
+            (topic, agent, repo_root, wt_path, br, base_commit, integration_worktree_path),
         )
 
 
 def mark_worktree_synced(topic: str, agent: str, repo_root: str) -> None:
-    """Record that a turn's changes were merged, without deleting the worktree
+    """Record that a turn's changes were promoted, without deleting the worktree
     yet — actual removal is a later best-effort sweep (see worktree.cleanup_worktrees),
-    so a background process the turn spawned isn't left with its cwd yanked out."""
+    so a background process the turn spawned isn't left without its working directory."""
     with _connect() as conn:
         conn.execute(
             """UPDATE worktrees SET status='synced',
                  last_used_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
                WHERE topic=? AND agent=? AND repo_root=?""",
             (topic, agent, repo_root),
+        )
+
+
+def mark_worktree_status(topic: str, agent: str, repo_root: str, status: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            """UPDATE worktrees SET status=?,
+                 last_used_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+               WHERE topic=? AND agent=? AND repo_root=?""",
+            (status, topic, agent, repo_root),
         )
 
 

@@ -89,13 +89,15 @@ OPENCODE_DEFAULT_MODEL = "opencode/deepseek-v4-flash-free"
 # Per-user tmp dir for context sync — avoids cross-user permission conflicts
 SQUID_HOME = f"/tmp/{os.getlogin()}/squid"
 
-# Per-turn Git worktree isolation (see ADR-0025). Off by default; enable via
-# `worktree.enabled: true` in squid.yaml once the sync/cleanup lifecycle is
-# trusted for your setup.
+# Per-turn Git worktree isolation (see ADR-0025). On by default; set
+# `worktree.enabled: false` in squid.yaml to use direct working-tree writes.
 _worktree_cfg = _cfg.get("worktree", {})
-WORKTREE_ISOLATION_ENABLED: bool = bool(_worktree_cfg.get("enabled", False))
+WORKTREE_ISOLATION_ENABLED: bool = bool(_worktree_cfg.get("enabled", True))
 
-# Directory names to symlink from a code root into each fresh per-turn worktree.
+# Dependency/cache directory names to symlink from a code root into each fresh
+# per-turn worktree. auto_link_ignored_dirs only links ignored dirs whose
+# basename appears in this allowlist.
+WORKTREE_AUTO_LINK_IGNORED_DIRS: bool = bool(_worktree_cfg.get("auto_link_ignored_dirs", True))
 DEPENDENCY_DIRS: list[str] = _worktree_cfg.get("dependency_dirs", [
     "node_modules", ".venv", "venv", "env", ".tox", "__pypackages__",
     "vendor", "target", ".bundle", "Pods", ".cargo", ".stack-work", "elm-stuff",

@@ -687,6 +687,43 @@ test.describe('response bubble', () => {
     await expect(page.locator('#file-modal-body .fv-changed')).toContainText('const opened = true;');
   });
 
+  test('GitDiff uses streamed worktree sync status before showing actions', async ({ page }) => {
+    await page.route('**/chat/1/diff-revert-status**', route => route.fulfill({
+      json: { 'ui/app.js': 'revertable' },
+    }));
+    await page.route('**/chat', route => route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        META,
+        { event: 'tool', data: {
+          name: 'GitDiff',
+          repo: '/tmp/repo',
+          worktree_repo: '/tmp/.squid/worktrees/topic/repo',
+          worktree_status: 'pending',
+          file_count: 1,
+          additions: 1,
+          deletions: 0,
+          files: [{ status: 'M', path: 'ui/app.js' }],
+          diff: 'diff --git a/ui/app.js b/ui/app.js\n@@ -1 +1 @@\n+const opened = true;',
+        } },
+        { event: 'tool', data: {
+          name: 'WorktreeSync',
+          status: 'synced',
+          repo: '/tmp/repo',
+          worktree_repo: '/tmp/.squid/worktrees/topic/repo',
+        } },
+        { data: 'Done' },
+        DONE,
+      ),
+    }));
+
+    await sendMsg(page);
+    await expect(page.locator('.tool-toggle')).toContainText('Changed files: 1 file, +1 -0');
+    await expect(page.locator('.tool-toggle')).not.toContainText('pending');
+    await expect(page.getByRole('button', { name: 'Open ui/app.js in file viewer' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'revert' })).toBeVisible();
+  });
+
   test('mobile browser back closes GitDiff file viewer back to diff list', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 800 });
     await page.route('**/chat/1/diff-revert-status**', route => route.fulfill({

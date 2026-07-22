@@ -1,7 +1,9 @@
 import subprocess
 
+import agent.git_changes as git_changes
 from agent.git_changes import (
     apply_reverse_patch,
+    diff_for_path,
     extract_file_diff,
     prepare_tracker,
     prepare_trackers,
@@ -146,6 +148,7 @@ def test_worktree_tracker_emits_durable_repo_for_revert(tmp_path):
     assert event["cwd"] == str(repo)
     assert event["worktree_repo"] == str(wt)
     assert event["worktree_cwd"] == str(wt)
+    assert event["worktree_status"] == "pending"
     assert "-base" in event["diff"]
     assert "+changed in worktree" in event["diff"]
 
@@ -180,3 +183,70 @@ def test_extract_file_diff_mid_diff_chunk_reverse_applies(tmp_path):
         ok, err = apply_reverse_patch(repo, chunk)
         assert ok, err
         assert (repo / fname).read_text() == restored
+
+
+def test_truncate_diff_by_file_never_cuts_mid_file(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "a.txt").write_text("one\n")
+    (repo / "b.txt").write_text("two\n")
+    (repo / "c.txt").write_text("three\n")
+    git(repo, "add", "a.txt", "b.txt", "c.txt")
+    git(repo, "commit", "-m", "three files")
+
+    (repo / "a.txt").write_text("one changed\n")
+    (repo / "b.txt").write_text("two changed\n")
+    (repo / "c.txt").write_text("three changed\n")
+    full_diff = git(repo, "diff").stdout
+
+    # Budget only large enough for the first file's chunk.
+    a_chunk = extract_file_diff(full_diff, "a.txt")
+    kept, omitted = git_changes._truncate_diff_by_file(full_diff, len(a_chunk))
+
+    assert kept == a_chunk
+    assert omitted == ["b.txt", "c.txt"]
+    # What's kept must still be a complete, appliable patch for a.txt alone.
+    ok, err = apply_reverse_patch(repo, kept)
+    assert ok, err
+    assert (repo / "a.txt").read_text() == "one\n"
+    # Untouched by the (correctly omitted) chunks for b.txt/c.txt.
+    assert (repo / "b.txt").read_text() == "two changed\n"
+
+
+def test_truncate_diff_by_file_under_budget_is_unchanged():
+    full_diff = "diff --git a/x b/x\n@@ -1 +1 @@\n-old\n+new\n"
+    kept, omitted = git_changes._truncate_diff_by_file(full_diff, 10_000)
+    assert kept == full_diff
+    assert omitted == []
+
+
+def test_omitted_file_diff_recoverable_via_anchored_trees(tmp_path, monkeypatch):
+    # A file too large to include in the stored diff should still be fetchable
+    # on demand, long after the turn ends, via the (base, head) trees the
+    # tracker anchors under a Squid-owned ref when it omits anything.
+    init_repo(tmp_path)
+    (tmp_path / "small.txt").write_text("s\n")
+    (tmp_path / "huge.txt").write_text("h\n")
+    git(tmp_path, "add", "small.txt", "huge.txt")
+    git(tmp_path, "commit", "-m", "two files")
+
+    monkeypatch.setattr(git_changes, "_MAX_DIFF_CHARS", 1)  # force everything to omit
+
+    tracker = prepare_tracker(
+        str(tmp_path), topic="t", agent="codex", adhoc=False, msg_id=777,
+    )
+    assert tracker is not None
+    (tmp_path / "small.txt").write_text("s changed\n")
+    (tmp_path / "huge.txt").write_text("h changed\n")
+
+    event = tracker.build_event()
+    assert set(event["omitted_paths"]) == {"small.txt", "huge.txt"}
+    assert event["diff"] == ""
+    assert event["base"] and event["head"]
+
+    # Simulate looking it up long after the turn, in a fresh call, using only
+    # what would have been persisted in the message row.
+    recovered = diff_for_path(tmp_path, event["base"], event["head"], "huge.txt")
+    assert "+h changed" in recovered
+    assert "small.txt" not in recovered

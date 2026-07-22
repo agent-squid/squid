@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from agent import worktree as worktree_mod
 from agent import stats_db
 from agent.worktree import (
     _link_dependency_dirs,
@@ -135,6 +136,30 @@ def test_ensure_worktree_symlinks_dependency_dirs(tmp_path):
     assert (wt / "node_modules" / "some-pkg" / "index.js").exists()
     assert (wt / ".venv").is_symlink()
     assert (wt / ".venv" / "bin" / "python").exists()
+    assert git(wt, "status", "--short").stdout == ""
+
+
+def test_ensure_worktree_auto_symlinks_only_allowlisted_ignored_dirs_not_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree_mod.config, "DEPENDENCY_DIRS", ["tool-cache"])
+    repo = init_repo(tmp_path / "repo")
+    (repo / ".gitignore").write_text("tool-cache/\ndist/\n.env\n")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-m", "ignore local tool state")
+    tool_cache = repo / "tool-cache" / "bin"
+    tool_cache.mkdir(parents=True)
+    (tool_cache / "tool").write_text("#!/bin/sh\n")
+    dist = repo / "dist"
+    dist.mkdir()
+    (dist / "app.js").write_text("built output\n")
+    (repo / ".env").write_text("SECRET=1\n")
+
+    wt = ensure_worktree(repo, "t", "212")
+
+    assert (wt / "tool-cache").is_symlink()
+    assert (wt / "tool-cache" / "bin" / "tool").exists()
+    assert not (wt / "dist").exists()
+    assert not (wt / ".env").exists()
+    assert git(wt, "status", "--short").stdout == ""
 
 
 def test_ensure_worktree_playwright_cli_runs_through_nested_symlink(tmp_path):
@@ -236,8 +261,9 @@ def test_sync_after_turn_is_noop_when_no_worktree(tmp_path):
     assert conflicts == []
 
 
-def test_sync_after_turn_commit_includes_request_and_response(tmp_path):
+def test_sync_after_turn_promotes_without_source_commit(tmp_path):
     repo = init_repo(tmp_path / "repo")
+    head_before = git(repo, "rev-parse", "HEAD").stdout.strip()
     ensure_worktree(repo, "t", "410")
     wt = worktree_path(repo, "t", "410")
     (wt / "new.txt").write_text("turn output\n")
@@ -249,14 +275,87 @@ def test_sync_after_turn_commit_includes_request_and_response(tmp_path):
     )
 
     assert conflicts == []
-    # HEAD is the --no-ff merge commit; the turn's own commit (with our
-    # generated message) is its second parent.
-    log = subprocess.run(
-        ["git", "log", "-1", "--format=%B", "HEAD^2"], cwd=str(repo),
-        text=True, stdout=subprocess.PIPE,
-    ).stdout
-    assert "please add new.txt" in log
-    assert "Added new.txt with the requested content." in log
+    assert (repo / "new.txt").read_text() == "turn output\n"
+    assert git(repo, "rev-parse", "HEAD").stdout.strip() == head_before
+
+
+def test_sync_after_turn_seeds_from_dirty_code_root(tmp_path):
+    repo = init_repo(tmp_path / "repo")
+    head_before = git(repo, "rev-parse", "HEAD").stdout.strip()
+    (repo / "file.txt").write_text("dirty source\n")
+    (repo / "seed.txt").write_text("untracked seed\n")
+
+    wt = ensure_worktree(repo, "t", "411")
+
+    assert (wt / "file.txt").read_text() == "dirty source\n"
+    assert (wt / "seed.txt").read_text() == "untracked seed\n"
+
+    (wt / "turn.txt").write_text("turn output\n")
+    conflicts = sync_after_turn(repo, "t", "411", msg_id=411)
+
+    assert conflicts == []
+    assert (repo / "file.txt").read_text() == "dirty source\n"
+    assert (repo / "seed.txt").read_text() == "untracked seed\n"
+    assert (repo / "turn.txt").read_text() == "turn output\n"
+    assert git(repo, "rev-parse", "HEAD").stdout.strip() == head_before
+
+
+def test_sync_after_turn_uses_seed_ref_when_turn_commits(tmp_path):
+    repo = init_repo(tmp_path / "repo")
+    head_before = git(repo, "rev-parse", "HEAD").stdout.strip()
+    wt = ensure_worktree(repo, "t", "412")
+    (wt / "committed.txt").write_text("turn commit\n")
+    assert commit_worktree(wt, "agent commit")
+
+    conflicts = sync_after_turn(repo, "t", "412", msg_id=412)
+
+    assert conflicts == []
+    assert (repo / "committed.txt").read_text() == "turn commit\n"
+    assert git(repo, "rev-parse", "HEAD").stdout.strip() == head_before
+
+
+def test_sync_after_turn_rolls_back_partial_git_apply_failure(tmp_path, monkeypatch):
+    repo = init_repo(tmp_path / "repo")
+    wt = ensure_worktree(repo, "t", "413")
+    (wt / "file.txt").write_text("turn output\n")
+
+    original_run_git = worktree_mod._run_git
+    failed_once = False
+
+    def fake_run_git(cwd: Path, *args: str, **kwargs) -> subprocess.CompletedProcess:
+        nonlocal failed_once
+        if cwd == repo and args == ("apply",) and not failed_once:
+            failed_once = True
+            (repo / "file.txt").write_text("partially applied\n")
+            return subprocess.CompletedProcess(["git", "apply"], 128, "", "fatal: simulated apply failure")
+        return original_run_git(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(worktree_mod, "_run_git", fake_run_git)
+
+    with pytest.raises(RuntimeError, match="rolled back partial changes"):
+        sync_after_turn(repo, "t", "413", msg_id=413)
+
+    assert failed_once
+    assert (repo / "file.txt").read_text() == "base\n"
+
+
+def test_sync_after_turn_excludes_stale_external_dependency_symlinks(tmp_path):
+    repo = init_repo(tmp_path / "repo")
+    wt = ensure_worktree(repo, "t", "414")
+    dep_cache = repo / "agent" / "__pycache__"
+    dep_cache.mkdir(parents=True)
+    (dep_cache / "cache.pyc").write_text("cache\n")
+
+    stale_link = wt / "agent" / "__pycache__"
+    stale_link.parent.mkdir(parents=True, exist_ok=True)
+    stale_link.symlink_to(dep_cache, target_is_directory=True)
+    (wt / "new.txt").write_text("turn output\n")
+
+    conflicts = sync_after_turn(repo, "t", "414", msg_id=414)
+
+    assert conflicts == []
+    assert (repo / "new.txt").read_text() == "turn output\n"
+    assert git(repo, "ls-files", "--", "agent/__pycache__").stdout == ""
 
 
 def test_merge_worktree_raises_on_failure_without_conflict_markers(tmp_path):
@@ -280,26 +379,17 @@ def test_merge_worktree_raises_on_failure_without_conflict_markers(tmp_path):
 def test_sync_after_turn_returns_conflicts_on_same_line_edit(tmp_path):
     repo = init_repo(tmp_path / "repo")
 
-    # session A edits line 1
+    # Two turns start from the same seed, then both edit line 1.
     ensure_worktree(repo, "topic", "501")
     wt_a = worktree_path(repo, "topic", "501")
-    (wt_a / "file.txt").write_text("edit-A\n")
-    sync_after_turn(repo, "topic", "501", msg_id=501)
-
-    # session B also edits the same line, based on the original HEAD (before A merged)
-    # Simulate by checking out a fresh worktree from original HEAD isn't possible here;
-    # instead we manufacture a conflicting state by creating a new branch that
-    # diverges from the pre-A HEAD.
-    br_b = branch_name("topic", "502")
-    git(repo, "checkout", "-b", br_b, "HEAD~1")  # branch from before A's merge
-    git(repo, "checkout", "main")  # back to main
-
     ensure_worktree(repo, "topic", "502")
     wt_b = worktree_path(repo, "topic", "502")
-    (wt_b / "file.txt").write_text("edit-B\n")
-    commit_worktree(wt_b, "squid: turn 502")
 
-    conflicts = merge_worktree(repo, "topic", "502")
+    (wt_a / "file.txt").write_text("edit-A\n")
+    sync_after_turn(repo, "topic", "501", msg_id=501)
+    (wt_b / "file.txt").write_text("edit-B\n")
+
+    conflicts = sync_after_turn(repo, "topic", "502", msg_id=502)
     assert "file.txt" in conflicts
 
 
@@ -377,6 +467,54 @@ def test_cleanup_worktrees_skips_worktree_with_active_msg_id(tmp_path, monkeypat
     assert conflicts == {}
     assert wt.exists()
     assert stats_db.get_worktrees("sweeptopic", "803")
+
+
+def test_cleanup_worktrees_marks_conflicts_and_skips_later(tmp_path, monkeypatch):
+    monkeypatch.setattr("agent.runners.get_active_msg_ids", lambda: set())
+    monkeypatch.setattr("agent.worktree._CLEANUP_GRACE_SECONDS", 0)
+    stats_db.init_db()
+    repo = init_repo(tmp_path / "repo")
+    wt = ensure_worktree(repo, "sweeptopic", "804")
+    stats_db.save_worktree("sweeptopic", "804", str(repo), str(wt), branch_name("sweeptopic", "804"))
+    (repo / "file.txt").write_text("source edit\n")
+    (wt / "file.txt").write_text("turn edit\n")
+
+    conflicts = asyncio.run(cleanup_worktrees("sweeptopic"))
+
+    assert conflicts == {str(repo): ["file.txt"]}
+    rec = stats_db.get_worktrees("sweeptopic", "804")[0]
+    assert rec["status"] == "conflict"
+
+    def fail_sync(*args, **kwargs):
+        raise AssertionError("conflicted worktree should be skipped")
+
+    monkeypatch.setattr(worktree_mod, "sync_after_turn", fail_sync)
+    assert asyncio.run(cleanup_worktrees("sweeptopic")) == {}
+
+
+def test_cleanup_worktrees_marks_promotion_failures_and_skips_later(tmp_path, monkeypatch):
+    monkeypatch.setattr("agent.runners.get_active_msg_ids", lambda: set())
+    monkeypatch.setattr("agent.worktree._CLEANUP_GRACE_SECONDS", 0)
+    stats_db.init_db()
+    repo = init_repo(tmp_path / "repo")
+    wt = ensure_worktree(repo, "sweeptopic", "805")
+    stats_db.save_worktree("sweeptopic", "805", str(repo), str(wt), branch_name("sweeptopic", "805"))
+
+    calls = 0
+
+    def fail_sync(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("simulated promotion failure")
+
+    monkeypatch.setattr(worktree_mod, "sync_after_turn", fail_sync)
+
+    assert asyncio.run(cleanup_worktrees("sweeptopic")) == {}
+    rec = stats_db.get_worktrees("sweeptopic", "805")[0]
+    assert rec["status"] == "promotion_failed"
+
+    assert asyncio.run(cleanup_worktrees("sweeptopic")) == {}
+    assert calls == 1
 
 
 # ---------------------------------------------------------------------------

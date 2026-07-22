@@ -19,6 +19,18 @@ agent:
   first_byte_timeout: 600
   response_timeout: 3600
 
+worktree:
+  # Per-turn code-root isolation. Set enabled: false to use direct writes.
+  enabled: true
+  # Symlink allowlisted Git-ignored dependency/cache directories such as
+  # .venv/node_modules into turn worktrees so local tools do not need
+  # reinstalling there.
+  auto_link_ignored_dirs: true
+  # Optional fallback for dependency/cache directory names Git does not report
+  # as ignored. Leave unset; add only dependency/cache names Squid misses.
+  # dependency_dirs:
+  #   - custom-cache-dir
+
 # Squid Echo: an extra "echo" harness that dispatches through the real
 # HTTP/queue/flow-continuation path but never runs a real CLI — it just
 # echoes the prompt back instantly. For previewing how a Squid Flow route

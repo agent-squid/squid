@@ -941,9 +941,13 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0, opts = {}) {
     // just a comma-joined origin list, no arrow, no single "agent" identity,
     // and (unlike a single-topic broadcast) no single "topic" identity
     // either — each origin shows its own #topic when it differs from the
-    // one before it (rolling-anchor resolution already filled in every
-    // origin's topic/agent, this just avoids repeating an unchanged topic).
+    // one before it, and its own @agent when it differs from the one before
+    // it (rolling-anchor resolution already filled in every origin's
+    // topic/agent, this just avoids repeating an unchanged field — matching
+    // the literal typed shorthand, e.g. `#t1@echo,#t2` stays that way
+    // instead of spelling out as `#t1@echo,#t2@echo`).
     let lastTopic = null;
+    let lastAgent = null;
     broadcastAgents.forEach((a, i) => {
       if (i > 0) {
         const sepSpan = document.createElement('span');
@@ -958,11 +962,14 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0, opts = {}) {
         topicChipEl.appendChild(tSpan2);
         lastTopic = a.topic;
       }
-      const aSpan = document.createElement('span');
-      aSpan.className = 'chip-agent chip-broadcast-agent';
-      aSpan.textContent = '@' + a.agent;
-      setAgentSlugColor(aSpan, a.agent);
-      topicChipEl.appendChild(aSpan);
+      if (a.agent !== lastAgent) {
+        const aSpan = document.createElement('span');
+        aSpan.className = 'chip-agent chip-broadcast-agent';
+        aSpan.textContent = '@' + a.agent;
+        setAgentSlugColor(aSpan, a.agent);
+        topicChipEl.appendChild(aSpan);
+        lastAgent = a.agent;
+      }
       if (a.fresh) {
         const freshSpan = document.createElement('span');
         freshSpan.className = 'chip-adhoc';
@@ -4463,6 +4470,7 @@ function toolLabel(tool) {
     const n = tool.file_count ?? (tool.files || []).length;
     return `Changed files: ${n} file${n !== 1 ? 's' : ''}`;
   }
+  if (name === 'WorktreeSync') return `Worktree sync: ${tool.status || 'unknown'}`;
   if (name === 'Read' || name === 'Edit' || name === 'Write' || name === 'MultiEdit' || name === 'Diff')
     return `${name}: ${tool.file || ''}`;
   if (name === 'Bash') return `Bash: ${truncate(tool.command || '', 70)}`;
@@ -4473,8 +4481,23 @@ function toolLabel(tool) {
 }
 
 function changeTools(tools) {
+  const syncStatusByWorktree = new Map();
+  for (const tool of tools || []) {
+    if (tool.name === 'WorktreeSync' && tool.worktree_repo && tool.status) {
+      syncStatusByWorktree.set(tool.worktree_repo, tool.status);
+    }
+  }
   const gitTools = tools.filter(t => t.name === 'GitDiff');
-  if (gitTools.length) return gitTools.filter(t => (t.file_count ?? (t.files || []).length) > 0);
+  if (gitTools.length) {
+    return gitTools
+      .filter(t => (t.file_count ?? (t.files || []).length) > 0)
+      .map(t => {
+        const syncStatus = t.worktree_repo ? syncStatusByWorktree.get(t.worktree_repo) : null;
+        return syncStatus && t.worktree_status !== syncStatus
+          ? { ...t, worktree_status: syncStatus }
+          : t;
+      });
+  }
   return tools.filter(t => t.name === 'Edit' || t.name === 'Write' || t.name === 'MultiEdit' || t.name === 'Diff');
 }
 
@@ -4739,10 +4762,13 @@ function makeToolBlock(tool, msgId, timestamp) {
     const count = tool.file_count ?? (tool.files || []).length;
     const additions = tool.additions ?? 0;
     const deletions = tool.deletions ?? 0;
-    toggle.textContent = `Changed files: ${count} file${count !== 1 ? 's' : ''}, +${additions} -${deletions}`;
+    const worktreeStatus = tool.worktree_repo ? tool.worktree_status : null;
+    const worktreeBlocked = !!worktreeStatus && worktreeStatus !== 'synced';
+    const statusSuffix = worktreeBlocked ? ` · ${worktreeStatus}` : '';
+    toggle.textContent = `Changed files: ${count} file${count !== 1 ? 's' : ''}, +${additions} -${deletions}${statusSuffix}`;
 
     const sourceRepo = _gitDiffSourceRepo(tool);
-    const revertEligible = msgId && sourceRepo && _withinRevertWindow(timestamp);
+    const revertEligible = msgId && sourceRepo && _withinRevertWindow(timestamp) && !worktreeBlocked;
     if (revertEligible) {
       block.dataset.msgId = String(msgId);
       block.dataset.repo = sourceRepo;
@@ -4752,6 +4778,7 @@ function makeToolBlock(tool, msgId, timestamp) {
     }
 
     const fileDiffs = splitUnifiedDiff(tool.diff || '');
+    const omittedPaths = new Set(tool.omitted_paths || []);
     const files = tool.files || [];
     const displayPaths = _gitDiffDisplayPaths(files);
     const fullDisplayPaths = files.map(_gitDiffFullDisplayPath);
@@ -4760,6 +4787,7 @@ function makeToolBlock(tool, msgId, timestamp) {
       const displayPath = displayPaths[i];
       const fullDisplayPath = fullDisplayPaths[i];
       const chunk = fileDiffs.get(file.path) || fileDiffs.get(file.old_path) || '';
+      const isOmitted = omittedPaths.has(file.path) || (file.old_path && omittedPaths.has(file.old_path));
       const firstChangedRange = _firstChangedNewRange(chunk);
       const allChangedLines = _allChangedNewLines(chunk);
 
@@ -4775,7 +4803,53 @@ function makeToolBlock(tool, msgId, timestamp) {
       // check; only fall back to the extension guess when there's no chunk to look at
       const isBinary = chunk ? chunk.includes('Binary files') : !_isTextPath(file.path || '');
       let fileBody = null;
-      if (isBinary) {
+      if (isOmitted) {
+        fileToggle.textContent = `${status} ${displayPath}`;
+        fileToggle.classList.add('gitdiff-file-toggle--no-diff');
+        const badge = document.createElement('span');
+        badge.className = 'gitdiff-binary-badge';
+        badge.title = 'This turn’s diff was too large — earlier files were shown in full and this one was left out entirely, not cut mid-file.';
+        badge.textContent = 'too large to show';
+        fileToggle.appendChild(badge);
+        row.appendChild(fileToggle);
+
+        if (msgId && sourceRepo) {
+          const loadBtn = document.createElement('button');
+          loadBtn.type = 'button';
+          loadBtn.className = 'gitdiff-file-open';
+          loadBtn.textContent = 'load diff';
+          loadBtn.addEventListener('click', async e => {
+            e.stopPropagation();
+            loadBtn.disabled = true; loadBtn.textContent = '…';
+            try {
+              const res = await fetch(`/chat/${msgId}/diff-file?repo=${encodeURIComponent(sourceRepo)}&path=${encodeURIComponent(file.path)}`);
+              const data = await res.json();
+              if (!res.ok || !data.diff) {
+                loadBtn.textContent = 'load diff';
+                loadBtn.disabled = false;
+                loadBtn.title = data.error || 'failed to load';
+                return;
+              }
+              const loadedBody = document.createElement('div');
+              loadedBody.className = 'gitdiff-file-body';
+              const loadedScroll = document.createElement('div');
+              loadedScroll.className = 'diff-scroll';
+              renderUnifiedDiffLines(loadedScroll, data.diff);
+              loadedBody.appendChild(loadedScroll);
+              row.appendChild(loadedBody);
+              loadBtn.remove();
+              fileToggle.classList.remove('gitdiff-file-toggle--no-diff');
+              fileToggle.addEventListener('click', () => row.classList.toggle('gitdiff-file-expanded'));
+              row.classList.add('gitdiff-file-expanded');
+            } catch {
+              loadBtn.textContent = 'load diff';
+              loadBtn.disabled = false;
+              loadBtn.title = 'failed to load';
+            }
+          });
+          row.appendChild(loadBtn);
+        }
+      } else if (isBinary) {
         fileToggle.textContent = `${status} ${displayPath}`;
         fileToggle.classList.add('gitdiff-file-toggle--no-diff');
         const badge = document.createElement('span');
@@ -4803,7 +4877,7 @@ function makeToolBlock(tool, msgId, timestamp) {
       const _absPath = file.path
         ? (file.path.startsWith('/') ? file.path : sourceRepo ? sourceRepo + '/' + file.path : null)
         : null;
-      if (status !== 'D' && _absPath && _isTextPath(_absPath)) {
+      if (status !== 'D' && _absPath && _isTextPath(_absPath) && !worktreeBlocked) {
         const openBtn = document.createElement('button');
         openBtn.type = 'button';
         openBtn.className = 'gitdiff-file-open';
@@ -4822,13 +4896,6 @@ function makeToolBlock(tool, msgId, timestamp) {
       body.appendChild(row);
     }
 
-    if (tool.truncated) {
-      const el = document.createElement('span');
-      el.className = 'diff-line diff-hunk';
-      el.style.display = 'block';
-      el.textContent = '[diff truncated]';
-      body.appendChild(el);
-    }
 
     block.classList.add('tool-expanded');
   }
@@ -5774,7 +5841,15 @@ function addStats(bubble, stats, timestamp) {
   const dur        = stats.duration_ms ? ` · ${(stats.duration_ms / 1000).toFixed(1)}s` : '';
   const timePrefix = timestamp ? fmtTime(timestamp) + '  ·  ' : '';
 
-  el.appendChild(document.createTextNode(`${timePrefix}↑ ${fmtNum(inp)}`));
+  const inputTokenClass = inp > 1_000_000 ? 'stats-token-danger'
+                         : inp >= 500_000 ? 'stats-token-warn'
+                         : '';
+
+  el.appendChild(document.createTextNode(timePrefix));
+  const inpSpan = document.createElement('span');
+  inpSpan.className = inputTokenClass;
+  inpSpan.textContent = `↑ ${fmtNum(inp)}`;
+  el.appendChild(inpSpan);
   if (detailLabel) {
     const detailSpan = document.createElement('span');
     detailSpan.className = 'stats-token-detail';
@@ -9830,7 +9905,15 @@ async function maybeShowCodeRootsNudge(topic, anchor) {
   try { meta = await fetchMemoryMeta(topic); } catch { return; }
   if (hasCodeRootsDecision(meta)) return;
   if (document.getElementById('code-roots-prompt')) return;
+  if (!meta.exists) seedTopicMemoryPlaceholder(topic);
   showCodeRootsNudge(topic, anchor);
+}
+
+// Seeds memory.md with a commented squid-config example on first contact with a
+// topic that has no memory file yet, so dismissing/skipping the nudge still
+// leaves users a file that shows what's available to configure later.
+function seedTopicMemoryPlaceholder(topic) {
+  fetch(`/topics/${encodeURIComponent(topic)}/memory/squid/seed`, { method: 'POST' }).catch(() => {});
 }
 
 function showCodeRootsNudge(topic, anchor) {

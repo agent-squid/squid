@@ -10,15 +10,22 @@ documents are complementary: the ADR is the authoritative scope boundary and
 rationale; this paper is the implementation reference for engineers building
 against or extending the language.
 
-There are two independent implementations of everything in this paper:
-`ui/flow-lang.js` (parse/resolve/expand/render — used by the composer, the
-in-app Flow view, and the standalone `ui/flow-playground.html`) and
-`agent/flow.py` (parse/resolve/dispatch — the only one that actually executes
-a chain). They are not shared code; each is a from-scratch port of the same
-grammar and resolution rules, and comments in both files call out the sync
-obligation (e.g. `chain_handoff_prompt`'s docstring: "Port of the UI's
-chainHandoffPrompt (ui/app.js) — must stay in sync with it"). Anywhere this
-paper cites one file's line numbers, assume the other has an equivalent.
+There are two independent implementations of the *language* (grammar/resolve/
+expand/render) in this paper: `ui/flow-lang.js` (used by the composer, the
+in-app Flow view, and the standalone `ui/flow-playground.html`) and the
+parse/resolve layer of `agent/flow.py`. They are not shared code; each is a
+from-scratch port of the same grammar and resolution rules, and comments in
+both files call out the sync obligation (e.g. `_op_to_text`'s docstring:
+"Port of the UI's opToText/canonicalKeyForClause roundtrip branch
+(ui/flow-lang.js); must stay in sync with it"). Anywhere this paper cites one
+file's line numbers for this shared language logic, assume the other has an
+equivalent.
+
+Dispatch itself — `chain_handoff_prompt`, `next_chain_steps`, and everything
+in §5 — has no client-side counterpart: the client only ever sends the origin
+turn (§5) and never builds a handoff prompt itself, so there is nothing in
+`ui/app.js` for `chain_handoff_prompt` to stay in sync with. Execution-model
+citations (§5) are `agent/flow.py`-only.
 
 ---
 
@@ -49,8 +56,8 @@ duration := digits [smhd]
   same edge as `=>`/`=1>`, not a third thing.
 
 Reference implementation: `ui/flow-lang.js` `parseAtom`/`parseGroup`/`parseClause`
-(`:35-177`); `agent/flow.py` `_parse_atom`/`_parse_group`/`_split_operator`
-(`:47-201`).
+(`:35-176`); `agent/flow.py` `_parse_atom` (`:48-58`), `_parse_group`
+(`:61-71`), `_split_operator` (`:211-224`).
 
 ### Edge types
 
@@ -63,10 +70,10 @@ character (`<` = bidirectional, `=` = one-way):
 | **forward** | `=N:T>` (shorthand `>` for `N=1, T=none`) | One-way, from the same origin output, repeated `N` times (default 1), each optionally delayed. Terminal — nothing can follow it in a v0.1 clause. |
 | **roundtrip** | `<N:T>` | Forward to the target, then send the target's response back to the origin, for `N` rounds (default 1). |
 
-Both are parsed by the *same shape* of regex — `SCHEDULED_RE` and
-`ROUNDTRIP_RE` (`ui/flow-lang.js:21,27`) differ only in their leading
+Both are parsed by the *same shape* of regex — `ROUNDTRIP_RE` and
+`SCHEDULED_RE` (`ui/flow-lang.js:21,27`) differ only in their leading
 character, both making count optional (`(\d+)?`) with an `N ? parseInt(N) :
-1` default; `_parse_operator_token` (`agent/flow.py:164-186`) mirrors this
+1` default; `_parse_operator_token` (`agent/flow.py:165-187`) mirrors this
 exactly for both types. `expand()`'s "scheduled" branch (`ui/flow-lang.js`,
 comment: `// scheduled (op.type is always 'scheduled' here — '>'/'=>' are
 just its count=1/wait=null case)`) is the one shared code path for every
@@ -74,15 +81,22 @@ forward edge regardless of how it was spelled; only `roundtrip` gets its own
 branch, structurally the same split as the type table above. At dispatch
 time, `agent/flow.py`'s `_dispatch_or_schedule` checks `delay <= 0` first and
 dispatches immediately in that case, so `>`, `=>`, and `=1>` all take the
-identical immediate-dispatch path — `schedule_key`/`_SCHEDULED_DISPATCHES`
-are only ever populated once `delay > 0` (`next_chain_steps`'s scheduled
-branch passes `schedule_key=schedule_key if delay_unit else None`, mirroring
-the round-trip loop's own `schedule_key if wait_seconds else None`).
+identical immediate-dispatch path — but `schedule_key` is always populated,
+for every step, regardless of delay (`next_chain_steps`'s scheduled branch
+always passes `schedule_key=schedule_key`, never conditioned on
+`delay_unit`; the round-trip loop does the same). That's not about delay:
+`schedule_key` is `_dispatch_or_schedule`'s atomic claim token, added to
+`_SCHEDULED_DISPATCHES` synchronously before any `await` — so when several
+origins in a join complete within the same narrow window and each
+independently calls `next_chain_steps`, only the first caller to reach the
+claim for a given step actually dispatches it. For an immediate (`delay <=
+0`) step the key is released again in a `finally` right after dispatch; for
+a delayed step it's held until the scheduled task fires.
 
 **Canonical rendering always prefers the shortest spelling** for a given
 `(count, wait)`, on both types symmetrically: `opToText`/`_op_to_text`
-(`ui/flow-lang.js:350-358`; `agent/flow.py:189-206`, kept in sync the same
-way `chain_handoff_prompt` is) render `count=1, wait=None` as `>` (never
+(`ui/flow-lang.js:350-359`; `agent/flow.py:190-208`, kept in sync per
+`_op_to_text`'s own docstring) render `count=1, wait=None` as `>` (never
 `=1>` or `=>`), `count=1, wait=T` as `=:T>` (never `=1:T>`), and `rounds=1,
 wait=None` as `<>` (never `<1>`) — every non-canonical spelling still parses
 (`=1>`, `=>`, `=1:5m>`, `<1>` are all valid *input*), it just never comes back
@@ -140,7 +154,7 @@ anything: `#t3,#t1@a1` and `#t1@a1,#t3` both resolve to the identical pair
 side of it a bare atom sits on doesn't matter.
 
 Implementation: `resolveGroupAgainstState(group, state, isOrigin=true)`
-(`ui/flow-lang.js:178-221`); `_resolve_origin_group` (`agent/flow.py:73-88`).
+(`ui/flow-lang.js:180-222`); `_resolve_origin_group` (`agent/flow.py:74-89`).
 
 ### 2.2 Target independence
 
@@ -150,8 +164,9 @@ sibling in the same target list, no matter how that sibling is written. A
 comma target list decomposes into fully independent branches before any
 inheritance happens.
 
-Implementation: `resolveGroupAgainstState(group, state, isOrigin=false)`
-(`ui/flow-lang.js:184-192`); `_resolve_target_group` (`agent/flow.py:100-108`).
+Implementation: `resolveGroupAgainstState(group, state, isOrigin=false)`'s
+`isOrigin=false` branch (`ui/flow-lang.js:195-205`); `_resolve_target_group`
+(`agent/flow.py:101-109`).
 
 ### 2.3 Principle of join
 
@@ -174,8 +189,8 @@ legal, in any position:
   anything else in the clause.
 
 A bare `#topic@a+@b` with no hop after it is rejected the same way, for the
-same reason: `ui/flow-lang.js` `parseClause` (`:169-171`, the origin case;
-`:65-67` inside `parseGroup`, the "no consumer at all" position check for
+same reason: `ui/flow-lang.js` `parseClause` (`:171-173`, the origin case;
+`:68-69` inside `parseGroup`, the "no consumer at all" position check for
 every other target).
 
 ### 2.4 Agreement when a join's output must be inherited
@@ -192,8 +207,8 @@ known before the join is even considered, and chaining after a round-trip is
 rejected at parse time — so nothing downstream ever needs to infer a field
 from the joined targets.
 
-Implementation: `finishGroupResolution` (`ui/flow-lang.js:222-239`);
-`_join_forward_state` (`agent/flow.py:91-97`).
+Implementation: `finishGroupResolution` (`ui/flow-lang.js:224-240`);
+`_join_forward_state` (`agent/flow.py:92-98`).
 
 ---
 
@@ -225,7 +240,7 @@ actual dispatch at execution time, and a single hop can produce more than
 one: a forward hop with count `N` produces `N` legs (`>` is the `N=1` case:
 one leg); a roundtrip hop with `N` rounds produces `2N` legs, alternating
 target/origin (`agent/flow.py`'s `next_chain_steps` names this loop variable
-`leg` directly: `for leg in range(op.get("rounds", 1) * 2)`, `:461`; `ui/flow-lang.js`
+`leg` directly: `for leg in range(op.get("rounds", 1) * 2)`, `:570`; `ui/flow-lang.js`
 uses the same word, `legGroupText`/`appendedSeq`). So `#a<>#b` is **one hop,
 two legs** — the hop-count restriction ("at most one") is about grammar
 depth (can you chain a second operator after this one — no, in v0.1), not
@@ -241,18 +256,18 @@ different, execution-level concept; read "leg" there.
 Two distinct rendered forms come out of a parsed clause — they serve
 different purposes and must not be confused:
 
-- **`canonical`** (`canonicalForBranch`, `ui/flow-lang.js:368-388`) — one
+- **`canonical`** (`canonicalForBranch`, `ui/flow-lang.js:372-393`) — one
   string per branch, human-readable and re-enterable, order-preserving. This
   is what the "branch breakdown" section of the playground shows.
-- **`key`** (`canonicalKeyForClause`, `ui/flow-lang.js:526-569`) — a single
+- **`key`** (`canonicalKeyForClause`, `ui/flow-lang.js:530-564`) — a single
   condensed, **order-independent** string built from the clause itself (not
   the expanded branches), used as the DB identity/dedup token for "same
   workflow." It is write-only: nothing in the codebase re-parses `key` as
   flow syntax.
 
 `key` grouping is a greedy max-coverage dominating-set algorithm
-(`minimalGroupedText`, `ui/flow-lang.js:432-472`; ported in
-`_minimal_grouped_text`, `agent/flow.py:111-143`): repeatedly pick whichever
+(`minimalGroupedText`, `ui/flow-lang.js:436-468`; ported in
+`_minimal_grouped_text`, `agent/flow.py:112-144`): repeatedly pick whichever
 remaining atom "covers" the most others (two atoms cover each other if they
 share a topic or an agent), write it in full as a run's anchor, and let every
 atom it covers join the run dropping whichever field matches the anchor.
@@ -296,7 +311,7 @@ chain's correctness never depends on that poll.
 
 ### 5.2 `next_chain_steps` — the per-branch state machine
 
-For each branch in the parsed chain (`agent/flow.py:396-500`):
+For each branch in the parsed chain (`agent/flow.py:491-610`):
 
 - **Origin gate**: every origin in the branch's `origins` list must already
   have a completed assistant row (`_origin_assistant`) before anything in
@@ -342,7 +357,7 @@ have theirs available via the pins.
 
 ### 5.4 Completion detection
 
-`expected_row_count(route)` (`agent/flow.py:520-541`) is a heuristic upper
+`expected_row_count(route)` (`agent/flow.py:633-655`) is a heuristic upper
 bound on total message rows, used only for client-side "is this chain
 probably done" polling (`GET /chat/flow/{flow_run_id}/steps`) — it does not
 gate dispatch. Per round-trip branch: every target in `branch["targets"]`
