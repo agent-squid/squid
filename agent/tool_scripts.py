@@ -88,9 +88,8 @@ def _script_text() -> str:
                 print(f"squid-publish: {{data.get('error') or data}}", file=sys.stderr)
                 return 1
             if data.get("deferred"):
-                print("publish queued; Squid will run it after this turn syncs")
+                print("publish queued; Squid will run it after this turn syncs if no files changed")
                 return 0
-
             for repo in data.get("published") or []:
                 pushed = " pushed" if repo.get("pushed") else ""
                 print(f"published {{repo.get('repo_root')}} {{repo.get('branch')}} {{repo.get('commit')}}{{pushed}}")

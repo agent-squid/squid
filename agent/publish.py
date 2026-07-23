@@ -21,17 +21,6 @@ class PublishBlocked(PublishError):
 
 
 @dataclass
-class PublishedRepo:
-    repo_root: str
-    branch: str
-    commit: str
-    files: list[str]
-    pushed: bool
-    tag: Optional[str] = None
-    tag_pushed: bool = False
-
-
-@dataclass
 class PendingPublish:
     message: Optional[str] = None
     tag: Optional[str] = None
@@ -49,6 +38,17 @@ def defer_publish(topic: str, msg_id: int, *, message: Optional[str] = None, tag
 def pop_deferred_publish(topic: str, msg_id: int) -> Optional[PendingPublish]:
     with _pending_publish_lock:
         return _pending_publish.pop((topic, msg_id), None)
+
+
+@dataclass
+class PublishedRepo:
+    repo_root: str
+    branch: str
+    commit: str
+    files: list[str]
+    pushed: bool
+    tag: Optional[str] = None
+    tag_pushed: bool = False
 
 
 def _run_git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:

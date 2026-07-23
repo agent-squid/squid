@@ -698,7 +698,12 @@ async def _prepare_chat_turn(
     effective_message = message
     prefix_blocks: list[str] = []
     if not native_backend_command and effective_code_roots:
-        code_roots_block = code_roots_prompt_block(effective_code_roots, isolated=worktree_isolated, topic=topic)
+        code_roots_block = code_roots_prompt_block(
+            effective_code_roots,
+            isolated=worktree_isolated,
+            topic=topic,
+            backing_roots=code_roots if worktree_isolated else None,
+        )
         if code_roots_block:
             prefix_blocks.append(code_roots_block)
     tracking_roots: list[str] = [] if native_backend_command else effective_code_roots

@@ -211,7 +211,12 @@ def topic_memory_squid_config(topic: str) -> dict:
     return topic_memory_squid_config_from_content(read_topic_memory(topic)["content"])
 
 
-def code_roots_prompt_block(code_roots: list[str], isolated: bool = False, topic: Optional[str] = None) -> Optional[str]:
+def code_roots_prompt_block(
+    code_roots: list[str],
+    isolated: bool = False,
+    topic: Optional[str] = None,
+    backing_roots: Optional[list[str]] = None,
+) -> Optional[str]:
     roots = _normalize_code_roots(code_roots)
     if not roots:
         return None
@@ -223,10 +228,20 @@ def code_roots_prompt_block(code_roots: list[str], isolated: bool = False, topic
         "Use these paths, not process cwd, as the codebase roots.",
     ]
     if isolated:
+        backing = _normalize_code_roots(backing_roots or [])
+        if backing:
+            lines.extend([
+                "Backing git repos:",
+                "<squid_backing_repos>",
+                *backing,
+                "</squid_backing_repos>",
+            ])
         lines.append(
             "Isolated Squid turn dir: edit here only; no `.git`; deps/cache dirs may be symlinks. "
-            "Trust writes; do not re-read just to confirm edits. "
-            "Do not run/suggest git init, commit, push, branch, tag, PR, or checkout switching. "
-            "Do not publish/tag in the same turn as code changes; Squid syncs edits back after the response completes."
+            "Trust writes; do not re-read just to confirm edits. Do not edit backing repo files directly. "
+            "Squid syncs isolated edits back to the backing repos after the response completes. "
+            "For turns with file edits, do not run/suggest git commit, push, pull, branch, tag, PR, publish, or checkout switching. "
+            "For git-only turns with no file edits, run requested git status, commit, push, pull, branch, tag, or PR commands only in the backing repos. "
+            "If asked to push changes, commit existing backing-repo changes first when needed, then push."
         )
     return "\n".join(lines)

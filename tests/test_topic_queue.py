@@ -433,17 +433,10 @@ def test_worker_marks_worktree_conflict_and_emits_sync_tool(caplog):
     assert "statuses=conflict" in caplog.text
 
 
-def test_worker_runs_deferred_publish_after_worktree_sync():
+def test_worker_runs_deferred_publish_after_no_change_worktree_sync():
     class FakeTracker:
         def build_event(self):
-            return {
-                "name": "GitDiff",
-                "repo": "/tmp/repo",
-                "worktree_repo": "/tmp/wt",
-                "worktree_status": "pending",
-                "files": [{"status": "M", "path": "app.txt"}],
-                "diff": "diff --git a/app.txt b/app.txt\n",
-            }
+            return {"name": "GitDiff", "repo": "/tmp/repo", "files": [], "no_changes": True}
 
         def build_no_change_event(self):
             return {"name": "GitDiff", "files": [], "no_changes": True}
@@ -460,7 +453,7 @@ def test_worker_runs_deferred_publish_after_worktree_sync():
             seq=0,
             topic="work",
             agent="codex",
-            prompt="hello",
+            prompt="publish",
             context_history=[],
             backend="codex",
             model=None,
@@ -513,6 +506,77 @@ def test_worker_runs_deferred_publish_after_worktree_sync():
     assert tools[2]["published"][0]["commit"] == "abc123"
     assert publish_call.args == ("work", ["/repo"])
     assert publish_call.kwargs == {"message": "ship it", "tag": "v0.1"}
+
+
+def test_worker_blocks_deferred_publish_when_turn_changed_files():
+    class FakeTracker:
+        def build_event(self):
+            return {
+                "name": "GitDiff",
+                "repo": "/tmp/repo",
+                "worktree_repo": "/tmp/wt",
+                "worktree_status": "pending",
+                "files": [{"status": "M", "path": "app.txt"}],
+                "diff": "diff --git a/app.txt b/app.txt\n",
+            }
+
+        def build_no_change_event(self):
+            return {"name": "GitDiff", "files": [], "no_changes": True}
+
+        def cleanup(self):
+            return None
+
+    async def fake_runner(*args, **kwargs):
+        yield "publish queued"
+
+    async def run():
+        worker = TopicWorker("work")
+        item = QueueItem(
+            seq=0,
+            topic="work",
+            agent="codex",
+            prompt="edit and publish",
+            context_history=[],
+            backend="codex",
+            model=None,
+            cwd="/tmp/wt",
+            code_roots=["/tmp/wt"],
+            adhoc=True,
+            msg_id=460,
+            worktree_setup_elapsed_ms=12.3,
+            worktree_isolated=True,
+        )
+        rec = {
+            "repo_root": "/tmp/repo",
+            "worktree_path": "/tmp/wt",
+            "integration_worktree_path": "/tmp/wt-integration",
+        }
+        with patch("agent.runners.run_codex", fake_runner), \
+             patch("agent.stats_db.get_worktrees", return_value=[rec]), \
+             patch("agent.git_changes.prepare_trackers", return_value=[FakeTracker()]), \
+             patch("agent.worktree.sync_after_turn", return_value=[]), \
+             patch("agent.stats_db.mark_worktree_synced"), \
+             patch("agent.publish.pop_deferred_publish", return_value=SimpleNamespace(message="ship it", tag="v0.1")), \
+             patch("agent.publish.publish_code_roots") as publish, \
+             patch("agent.stats_db.insert_run_event"), \
+             patch("agent.stats_db.update_assistant_message"), \
+             patch("agent.stats_db.set_topic_session"), \
+             patch("agent.stats_db.save_stats"):
+            await worker._process(item)
+        chunks = []
+        while True:
+            chunk = await item.out_q.get()
+            chunks.append(chunk)
+            if chunk is None:
+                break
+        return chunks, publish
+
+    chunks, publish = asyncio.run(run())
+    tools = [chunk["_tool"] for chunk in chunks if isinstance(chunk, dict) and "_tool" in chunk]
+    assert [tool["name"] for tool in tools] == ["GitDiff", "WorktreeSync", "SquidPublish"]
+    assert tools[2]["status"] == "blocked"
+    assert "same turn as code changes" in tools[2]["error"]
+    publish.assert_not_called()
 
 
 def test_worker_emits_no_change_git_diff_when_tracked_tree_is_clean(tmp_path):

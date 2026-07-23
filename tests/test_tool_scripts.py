@@ -22,4 +22,4 @@ def test_ensure_squid_tool_scripts_creates_executable_publish_helper(tmp_path, m
     assert "--tag" in result.stdout
     text = script.read_text(encoding="utf-8")
     assert '"msg_id": os.environ.get("SQUID_MSG_ID")' in text
-    assert "publish queued; Squid will run it after this turn syncs" in text
+    assert "publish queued; Squid will run it after this turn syncs if no files changed" in text

@@ -92,16 +92,27 @@ Notes.
 
 
 def test_isolated_code_roots_prompt_blocks_publish_with_code_changes():
-    prompt = memory.code_roots_prompt_block(["/repo"], isolated=True, topic="squid")
+    prompt = memory.code_roots_prompt_block(
+        ["/tmp/squid-worktree"],
+        isolated=True,
+        topic="squid",
+        backing_roots=["/repo"],
+    )
 
     assert "squid-publish" not in prompt
+    assert "<squid_backing_repos>" in prompt
+    assert "/repo" in prompt
     assert "MCP" not in prompt
     assert "mcp__squid__publish" not in prompt
     assert "ToolSearch" not in prompt
-    assert "Do not run/suggest git init, commit, push, branch, tag" in prompt
-    assert "Do not publish/tag in the same turn as code changes" in prompt
-    assert "Squid syncs edits back after the response completes" in prompt
-    assert len(prompt.split()) <= 85
+    assert "Do not edit backing repo files directly" in prompt
+    assert "For turns with file edits" in prompt
+    assert "do not run/suggest git commit, push, pull, branch, tag, PR, publish" in prompt
+    assert "For git-only turns with no file edits" in prompt
+    assert "run requested git status, commit, push, pull, branch, tag, or PR commands only in the backing repos" in prompt
+    assert "If asked to push changes, commit existing backing-repo changes first when needed, then push" in prompt
+    assert "Squid syncs isolated edits back to the backing repos after the response completes" in prompt
+    assert len(prompt.split()) <= 125
 
 
 def test_isolated_code_roots_prompt_forbids_git_recovery():
@@ -109,9 +120,9 @@ def test_isolated_code_roots_prompt_forbids_git_recovery():
 
     assert "no `.git`" in block
     assert "checkout switching" in block
-    assert "Do not run/suggest git init, commit, push, branch, tag" in block
+    assert "For turns with file edits" in block
     assert "squid-publish" not in block
-    assert "Do not publish/tag in the same turn as code changes" in block
+    assert "For git-only turns with no file edits" in block
     assert "commit, push" in block
     assert "working in the real repo" not in block
     assert "git tag -f" not in block
