@@ -11734,7 +11734,8 @@ function addAttachedFile(path) {
   if (pinPanel.classList.contains('open')) renderPinPanel();
 }
 function openFileUploadPicker() {
-  openFileViewer(null, null, null, null, null, { onPick: addAttachedFile });
+  const savedPath = localStorage.getItem('squid_fv_last_path_picker') || null;
+  openFileViewer(savedPath, null, null, null, null, { onPick: addAttachedFile }, { persistKey: 'picker' });
 }
 function clearPinnedItems() {
   setPinnedItems([]);
@@ -12662,8 +12663,13 @@ function stashComposerAndEdit(command) {
   if (prev && prev !== command && !prev.startsWith('/')) {
     recordPrompt(prev);
     const hint = document.createElement('span');
-    hint.className = 'restore-hint';
-    hint.textContent = '↑ restore';
+    if (isMobileViewport()) {
+      hint.className = 'restore-hint restore-hint-icon material-symbols-outlined';
+      hint.textContent = 'archive';
+    } else {
+      hint.className = 'restore-hint';
+      hint.textContent = '↑ restore';
+    }
     document.getElementById('tag-bar').appendChild(hint);
     setTimeout(() => {
       hint.classList.add('fade');
@@ -12798,7 +12804,8 @@ function openFileRootBrowser() {
 }
 
 function openFilesTabView() {
-  openFileViewer(null, null, null, document.getElementById('view-files'));
+  const savedPath = localStorage.getItem('squid_fv_last_path_browser') || null;
+  openFileViewer(savedPath, null, null, document.getElementById('view-files'), null, null, { persistKey: 'browser' });
 }
 
 function openFileViewer(initialPath, initialLine, initialEndLine, inlineContainer = null, initialChangedLines = null, pickOpts = null, viewerOpts = null) {
@@ -12820,6 +12827,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   let markdownPreview = false;
   let webPreview = false;
   let pushedFileViewerHistory = false;
+  let setDirUploadStatus = null;
   const initialSearch = viewerOpts?.search || '';
 
   // ── DOM ──────────────────────────────────────────────────────────────────────
@@ -12928,6 +12936,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   uploadBtn.setAttribute('aria-label', 'Upload file');
   uploadBtn.innerHTML = FV_ICON_UPLOAD;
   uploadBtn.hidden = true;
+  if (pickOpts) uploadBtn.classList.add('fv-action-btn-attention');
   const uploadInput = document.createElement('input');
   uploadInput.type = 'file';
   uploadInput.multiple = true;
@@ -13005,7 +13014,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   header.append(navBtns, breadcrumb, actions);
 
   const pickHint = document.createElement('p');
-  pickHint.className = 'fv-roots-hint';
+  pickHint.className = pickOpts ? 'fv-roots-hint fv-roots-hint-pick' : 'fv-roots-hint';
   pickHint.textContent = 'Select a file to attach it as context, or upload a new one.';
   pickHint.hidden = !pickOpts;
 
@@ -13073,6 +13082,10 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     fileText = '';
     markdownPreview = false;
     webPreview = false;
+    if (viewerOpts?.persistKey) {
+      const key = 'squid_fv_last_path_' + viewerOpts.persistKey;
+      if (path) localStorage.setItem(key, path); else localStorage.removeItem(key);
+    }
     updateNav();
     loadFile();
   }
@@ -13238,16 +13251,20 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     if (resolve) resolve(value);
   }
 
-  function openPathModal({ title, value, confirmLabel, hint }) {
+  function openPathModal({ title, value, confirmLabel, hint, mode = 'input', danger = false }) {
+    const isInput = mode === 'input';
     pathModalTitle.textContent = title;
-    pathModalInput.value = value || '';
-    pathModalConfirm.textContent = confirmLabel || 'Save';
-    pathModalHint.textContent = hint || 'Edit the filename or destination path.';
+    pathModalInput.hidden = !isInput;
+    pathModalInput.value = isInput ? (value || '') : '';
+    pathModalCancel.hidden = mode === 'alert';
+    pathModalConfirm.textContent = confirmLabel || (mode === 'alert' ? 'OK' : mode === 'confirm' ? 'Confirm' : 'Save');
+    pathModalConfirm.classList.toggle('fv-path-modal-confirm-danger', !!danger);
+    pathModalHint.textContent = hint || (isInput ? 'Edit the filename or destination path.' : '');
     pathModalError.textContent = '';
     pathModal.hidden = false;
     requestAnimationFrame(() => {
-      pathModalInput.focus();
-      pathModalInput.select();
+      if (isInput) { pathModalInput.focus(); pathModalInput.select(); }
+      else pathModalConfirm.focus();
     });
     return new Promise(resolve => { _pathModalResolve = resolve; });
   }
@@ -13260,6 +13277,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   pathModalCancel.addEventListener('click', () => closePathModal(null));
   pathModalBox.addEventListener('submit', e => {
     e.preventDefault();
+    if (pathModalInput.hidden) { closePathModal(true); return; }
     const value = pathModalInput.value.trim();
     if (!value) {
       pathModalError.textContent = 'Destination is required.';
@@ -13298,7 +13316,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
       if (!res.ok) throw new Error(data.error || 'Create failed');
       navigate(data.path);
     } catch (err) {
-      window.alert(err.message || 'Create failed');
+      await openPathModal({ title: 'Create failed', mode: 'alert', hint: err.message || 'Create failed' });
     } finally {
       btn.disabled = false;
     }
@@ -13326,11 +13344,18 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
       if (afterRename) afterRename(data.path);
       else navigate(data.path);
     } catch (err) {
-      window.alert(err.message || 'Rename failed');
+      await openPathModal({ title: 'Rename failed', mode: 'alert', hint: err.message || 'Rename failed' });
     }
   }
   async function deleteLocalFile(targetPath, name, afterDelete = null) {
-    if (!window.confirm(`Delete ${name}?`)) return;
+    const confirmed = await openPathModal({
+      title: 'Delete',
+      mode: 'confirm',
+      confirmLabel: 'Delete',
+      hint: `Delete ${name}? This can't be undone.`,
+      danger: true,
+    });
+    if (!confirmed) return;
     try {
       const res = await fetch('/localfile/delete', {
         method: 'POST',
@@ -13342,7 +13367,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
       if (afterDelete) afterDelete();
       else navigate(targetPath.split('/').slice(0, -1).join('/') || null);
     } catch (err) {
-      window.alert(err.message || 'Delete failed');
+      await openPathModal({ title: 'Delete failed', mode: 'alert', hint: err.message || 'Delete failed' });
     }
   }
   async function uploadLocalFiles(parentPath, files, setStatus) {
@@ -13368,7 +13393,10 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     const uploadedPaths = await uploadLocalFiles(parentPath, files, setStatus);
     if (pickOpts && uploadedPaths.length) {
       uploadedPaths.forEach(p => pickOpts.onPick(p));
-      closeModal();
+      // uploadLocalFiles() reloads the listing above, which replaces the status
+      // node — read setDirUploadStatus fresh instead of the (now stale) setStatus.
+      setDirUploadStatus?.(`Added ${uploadedPaths.length} file${uploadedPaths.length === 1 ? '' : 's'} to context`);
+      setTimeout(closeModal, 900);
     }
   }
   newFolderBtn.addEventListener('click', () => createLocalChild('folder'));
@@ -13378,9 +13406,9 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     if (pathKind !== 'directory' || !uploadInput.files?.length) return;
     uploadBtn.disabled = true;
     try {
-      await uploadAndMaybePick(path, uploadInput.files);
+      await uploadAndMaybePick(path, uploadInput.files, setDirUploadStatus);
     } catch (err) {
-      window.alert(err.message || 'Upload failed');
+      await openPathModal({ title: 'Upload failed', mode: 'alert', hint: err.message || 'Upload failed' });
     } finally {
       uploadInput.value = '';
       uploadBtn.disabled = false;
@@ -13920,7 +13948,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
             webPreview = false;
             if (data.path !== path) path = data.path;
             updateNav();
-            _renderDirListing(body, data, {
+            setDirUploadStatus = _renderDirListing(body, data, {
               renameIcon: FV_ICON_RENAME,
               deleteIcon: FV_ICON_DELETE,
               onRename: entry => renameLocalPath(entry.path, entry.name, () => loadFile()),
@@ -14131,6 +14159,7 @@ function _renderDirListing(container, data, opts = {}) {
 
   renderEntries(data.entries);
   requestAnimationFrame(() => filterInput.focus());
+  return setUploadStatus;
 }
 
 function _renderFileViewer(container, text, targetLine, endLine, path, changedLines = null) {

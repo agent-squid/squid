@@ -2277,6 +2277,8 @@ body {
   font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 20;
 }
 .fv-action-btn:hover { background: rgba(255,255,255,0.07); color: #ccc; }
+.fv-action-btn-attention { color: var(--accent); }
+.fv-action-btn-attention:hover { color: var(--accent-light); }
 .fv-danger-btn { color: var(--remove-mark); }
 .fv-danger-btn:hover { color: #e06060; }
 #file-modal-close {
@@ -2379,6 +2381,7 @@ body {
 .fv-roots-hint { margin: 0; padding: 0.55rem 1.4rem 0.3rem; font-size: 0.82em; color: var(--text-dim); }
 .fv-roots-hint a { color: var(--text-mid); text-decoration: none; }
 .fv-roots-hint a:hover { color: var(--accent-light); }
+.fv-roots-hint-pick { color: var(--accent-light); }
 .fv-dir-entry {
   display: flex;
   align-items: baseline;
@@ -2513,6 +2516,11 @@ body {
 .fv-path-modal-footer button[type="submit"] {
   background: var(--accent);
   border-color: var(--accent);
+  color: #fff;
+}
+.fv-path-modal-footer button.fv-path-modal-confirm-danger {
+  background: var(--danger);
+  border-color: var(--danger);
   color: #fff;
 }
 .fv-lines { display: table; min-width: 100%; }
@@ -3907,6 +3915,7 @@ body {
   white-space: nowrap;
 }
 .restore-hint.fade { opacity: 0; }
+.restore-hint-icon { font-size: 1rem; }
 #topic-chip {
   display: none;
   background: #1c1a18;
