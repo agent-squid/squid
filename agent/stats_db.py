@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
+from .config import SQUID_HOME
 from .harnesses import SUPPORTED_HARNESSES, is_installed
 from .resolve import agent_ref_for_storage, split_agent_ref
 
@@ -21,6 +22,17 @@ _SEED_DEFAULT_MODEL_BY_HARNESS: dict[str, str] = {
 }
 _SEED_DEFAULT_PROVIDER_BY_HARNESS: dict[str, str] = {
     "pi": "nvidia",
+}
+
+# Reviewer-persona agents, one per harness — cwd points at the shared
+# roles/review/AGENTS.md persona (roles/review/claude/ for claudecode, since
+# Claude Code reads CLAUDE.md rather than AGENTS.md).
+_REVIEW_AGENT_HARNESS: dict[str, str] = {
+    "clarev": "claudecode",
+    "codrev": "codex",
+    "operev": "opencode",
+    "pirev": "pi",
+    "currev": "cursor",
 }
 
 # Store database in ~/.squid/ so it persists across installs/updates.
@@ -326,6 +338,25 @@ def init_db() -> None:
                 conn.execute(
                     "INSERT OR IGNORE INTO agents (name, harness, provider, model) VALUES (?, ?, ?, ?)",
                     ("claude", "claudecode", "anthropic", None),
+                )
+        # Seed one reviewer-persona agent per installed harness (same
+        # INSERT OR IGNORE contract as the default agents above).
+        for agent_name, harness in sorted(_REVIEW_AGENT_HARNESS.items()):
+            if not is_installed(harness):
+                continue
+            provider = "anthropic" if harness == "claudecode" else _SEED_DEFAULT_PROVIDER_BY_HARNESS.get(harness)
+            model = None if harness == "claudecode" else _SEED_DEFAULT_MODEL_BY_HARNESS.get(harness)
+            cwd = f"{SQUID_HOME}/roles/review/claude" if harness == "claudecode" else f"{SQUID_HOME}/roles/review"
+            if has_legacy_backend:
+                conn.execute(
+                    """INSERT OR IGNORE INTO agents
+                       (name, backend, harness, provider, model, cwd) VALUES (?, ?, ?, ?, ?, ?)""",
+                    (agent_name, agent_ref_for_storage(harness, provider), harness, provider, model, cwd),
+                )
+            else:
+                conn.execute(
+                    "INSERT OR IGNORE INTO agents (name, harness, provider, model, cwd) VALUES (?, ?, ?, ?, ?)",
+                    (agent_name, harness, provider, model, cwd),
                 )
         # FTS repair: remove entries whose content was indexed mid-stream
         # (partial saves) and now differs from the final stored content.
