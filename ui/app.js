@@ -682,12 +682,16 @@ function clearCachedSessionId(topic, agent) {
     const inj = getInjectedInto();
     delete inj[sid];
     setInjectedInto(inj);
+    const attached = getAttachedFilesInSession();
+    delete attached[sid];
+    setAttachedFilesInSession(attached);
     delete _sessionTurnCounts[sid];
   }
   delete _sessionIds[taKey];
   delete _memoryInjectedInto[taKey];
   delete _pendingSessionMemoryRevisions[taKey];
   delete _pendingSessionInjectedIds[taKey];
+  delete _pendingSessionAttachedFiles[taKey];
   delete _sessionLookupCache[taKey];
   if (agent) delete _sessionLookupCache[`${topic}@${agent}`];
   if (agent) delete _sessionTurnCountsByRoute[`${topic}@${agent}`];
@@ -3878,11 +3882,40 @@ async function sendMessage(text, opts = {}) {
   function renderCompletionTools(tools) {
     const diffTools = changeTools(tools || []);
     for (const tool of diffTools) {
-      const block = makeToolBlock(tool, msgId);
+      const block = makeToolBlock(tool, msgId, null, topic);
       block.classList.add('tool-block-history');
       messages.appendChild(block);
     }
     refreshAllRevertButtons();
+  }
+
+  function renderWorktreeBlockers(worktrees) {
+    for (const wt of worktrees || []) {
+      const ownerMsgId = Number.parseInt(wt.msg_id, 10);
+      const conflicts = Array.isArray(wt.conflicts) ? wt.conflicts : [];
+      const files = conflicts.length
+        ? conflicts.map(path => ({ status: 'U', path }))
+        : [{ status: 'M', path: 'worktree changes' }];
+      const block = makeToolBlock({
+        name: 'GitDiff',
+        repo: wt.repo_root,
+        source: wt.repo_root,
+        worktree_repo: wt.worktree_path,
+        worktree_status: wt.status || 'pending',
+        worktree_conflicts: conflicts,
+        integration_worktree_path: wt.integration_worktree_path || '',
+        worktree_blocker: true,
+        files,
+        file_count: files.length,
+        additions: 0,
+        deletions: 0,
+        diff: '',
+      }, Number.isFinite(ownerMsgId) ? ownerMsgId : null, null, topic);
+      block.classList.add('tool-block-history');
+      messages.appendChild(block);
+    }
+    refreshAllRevertButtons();
+    scrollToBottom();
   }
 
   function startStatusFallback(id) {
@@ -4015,7 +4048,7 @@ async function sendMessage(text, opts = {}) {
   const _pinnedIds = _injectablePinnedIds(topic, _effectiveAgent, adhoc, lookback);
   const _extraPinnedIds = Array.isArray(opts.extraPinnedIds) ? opts.extraPinnedIds : [];
   const _contextIds = [...new Set([..._lookbackIds, ..._pinnedIds, ..._extraPinnedIds])];
-  const _attachedFiles = getAttachedFiles();
+  const _attachedFiles = _attachedFilesState({ topic, agent: _effectiveAgent, adhoc }).selected;
   const _messageForServer = _attachedFiles.length
     ? `${message}\n\nFiles:\n${_attachedFiles.map(f => `- ${f.path}`).join('\n')}`
     : message;
@@ -4035,16 +4068,23 @@ async function sendMessage(text, opts = {}) {
       // For UI sends, !N is resolved into explicit pinned_ids from the current list.
       signal: controller.signal,
     });
-    if (res.status === 400) {
+    if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      if (err.error && err.error.includes('not found')) {
+      if (res.status === 400 && err.error && err.error.includes('not found')) {
         freezeThinking();
         showAgentCreatePrompt(agent, () => sendMessage(text));
         return;
       }
-      throw new Error(err.error || `HTTP 400`);
+      if (res.status === 409 && Array.isArray(err.worktrees) && err.worktrees.length) {
+        freezeThinking();
+        showError(err.error || 'Worktree sync requires attention before starting another turn.');
+        renderWorktreeBlockers(err.worktrees);
+        completionRendered = true;
+        return;
+      }
+      throw new Error(err.error || `HTTP ${res.status}`);
     }
-    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+    if (!res.body) throw new Error(`HTTP ${res.status}`);
     const responseFlowRunId = res.headers.get('X-Squid-Flow-Run-Id');
     if (flowRoute && responseFlowRunId) {
       flowRunId = responseFlowRunId;
@@ -4073,6 +4113,15 @@ async function sendMessage(text, opts = {}) {
       const memoryKey = _memoryInjectedKey(topic, _effectiveAgent);
       _pendingSessionMemoryRevisions[memoryKey] = _topicMemoryForSend.revision;
       delete _memorySelectionOverrides[_memoryOverrideKey(topic, _effectiveAgent, false)];
+      updatePinCount();
+      if (pinPanel.classList.contains('open')) renderPinPanel();
+    }
+    if (_attachedFiles.length && !adhoc) {
+      const pendingKey = `${topic}@${_effectiveAgent || '_'}`;
+      _pendingSessionAttachedFiles[pendingKey] = [...new Set([
+        ...(_pendingSessionAttachedFiles[pendingKey] || []),
+        ..._attachedFiles.map(f => f.path),
+      ])];
       updatePinCount();
       if (pinPanel.classList.contains('open')) renderPinPanel();
     }
@@ -4276,6 +4325,20 @@ async function sendMessage(text, opts = {}) {
               updatePinCount();
               if (pinPanel.classList.contains('open')) renderPinPanel();
             }
+            if (_attachedFiles.length && !adhoc) {
+              if (lastSessionId) {
+                const inSession = getAttachedFilesInSession();
+                inSession[lastSessionId] = [...new Set([
+                  ...(inSession[lastSessionId] || []),
+                  ..._attachedFiles.map(f => f.path),
+                ])];
+                setAttachedFilesInSession(inSession);
+              }
+              delete _pendingSessionAttachedFiles[`${topic}@${_effectiveAgent || '_'}`];
+              delete _pendingSessionAttachedFiles[`${topic}@${resolvedAgent || '_'}`];
+              updatePinCount();
+              if (pinPanel.classList.contains('open')) renderPinPanel();
+            }
             updateInContextMarkers();
             eventName = null;
 
@@ -4323,7 +4386,7 @@ async function sendMessage(text, opts = {}) {
         updateThinkingPreview();
         startStatusFallback(msgId);
       } else {
-        showError('Unable to start response stream.');
+        showError(err?.message || 'Unable to start response stream.');
       }
     }
   } finally {
@@ -4354,6 +4417,8 @@ async function sendMessage(text, opts = {}) {
       delete _pendingSessionInjectedIds[`${topic}@${resolvedAgent || '_'}`];
       delete _pendingSessionMemoryRevisions[_memoryInjectedKey(topic, _effectiveAgent)];
       delete _pendingSessionMemoryRevisions[_memoryInjectedKey(topic, resolvedAgent)];
+      delete _pendingSessionAttachedFiles[`${topic}@${_effectiveAgent || '_'}`];
+      delete _pendingSessionAttachedFiles[`${topic}@${resolvedAgent || '_'}`];
       updatePinCount();
       if (pinPanel.classList.contains('open')) renderPinPanel();
     }
@@ -4492,10 +4557,10 @@ function toolLabel(tool) {
 }
 
 function changeTools(tools) {
-  const syncStatusByWorktree = new Map();
+  const syncByWorktree = new Map();
   for (const tool of tools || []) {
     if (tool.name === 'WorktreeSync' && tool.worktree_repo && tool.status) {
-      syncStatusByWorktree.set(tool.worktree_repo, tool.status);
+      syncByWorktree.set(tool.worktree_repo, tool);
     }
   }
   const gitTools = tools.filter(t => t.name === 'GitDiff');
@@ -4503,9 +4568,14 @@ function changeTools(tools) {
     return gitTools
       .filter(t => (t.file_count ?? (t.files || []).length) > 0)
       .map(t => {
-        const syncStatus = t.worktree_repo ? syncStatusByWorktree.get(t.worktree_repo) : null;
-        return syncStatus && t.worktree_status !== syncStatus
-          ? { ...t, worktree_status: syncStatus }
+        const syncTool = t.worktree_repo ? syncByWorktree.get(t.worktree_repo) : null;
+        return syncTool
+          ? {
+              ...t,
+              worktree_status: syncTool.status,
+              worktree_conflicts: syncTool.conflicts || t.worktree_conflicts || [],
+              integration_worktree_path: syncTool.integration_worktree_path || t.integration_worktree_path || '',
+            }
           : t;
       });
   }
@@ -4708,6 +4778,26 @@ function _gitDiffSourceRepo(tool) {
   return '';
 }
 
+function markVisibleWorktreeResolved(msgId, sourceRepo, message) {
+  if (!msgId) return;
+  const selector = `.tool-block[data-worktree-msg-id="${CSS.escape(String(msgId))}"]`;
+  document.querySelectorAll(selector).forEach(block => {
+    if (sourceRepo && block.dataset.worktreeRepo !== sourceRepo) return;
+    const notice = block.querySelector('.gitdiff-sync-notice');
+    if (notice) notice.textContent = message;
+    block.querySelectorAll('.gitdiff-sync-actions button').forEach(btn => {
+      btn.disabled = true;
+      if (btn.textContent === 'Re-sync' || btn.textContent === 'Retrying...' || btn.textContent === 'Synced') {
+        btn.textContent = 'Resolved';
+      }
+    });
+    const toggle = block.querySelector('.tool-toggle');
+    if (toggle) {
+      toggle.textContent = toggle.textContent.replace(/ · (conflict|promotion_failed|pending)\b/, ' · resolved');
+    }
+  });
+}
+
 // Revert is "undo what I just saw," not time travel — past this window other
 // work has almost certainly built on top of the file, so the eligibility
 // check (which scans every later message in the topic) is skipped entirely.
@@ -4719,7 +4809,7 @@ function _withinRevertWindow(timestamp) {
   return Number.isFinite(t) && Date.now() - t < REVERT_WINDOW_MS;
 }
 
-function makeToolBlock(tool, msgId, timestamp) {
+function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
   const name = tool.name || '';
   const block = document.createElement('div');
   block.className = 'tool-block';
@@ -4786,6 +4876,177 @@ function makeToolBlock(tool, msgId, timestamp) {
       const revertBar = document.createElement('div');
       revertBar.className = 'gitdiff-revert-bar';
       body.appendChild(revertBar);
+    }
+
+    if (worktreeBlocked) {
+      if (msgId) block.dataset.worktreeMsgId = String(msgId);
+      if (sourceRepo) block.dataset.worktreeRepo = sourceRepo;
+      const notice = document.createElement('div');
+      notice.className = 'gitdiff-sync-notice';
+      const conflicts = Array.isArray(tool.worktree_conflicts) ? tool.worktree_conflicts : [];
+      const conflictText = conflicts.length ? conflicts.join(', ') : 'changed files';
+      notice.textContent = worktreeStatus === 'conflict'
+        ? `Worktree sync conflict: ${conflictText}. New turns for this topic are blocked until the integration worktree is resolved or discarded.`
+        : worktreeStatus === 'promotion_failed'
+          ? `Worktree sync failed. New turns for this topic are blocked until this worktree is resolved or discarded.`
+          : `Worktree sync ${worktreeStatus}. Squid is still promoting this turn; retry or refresh if it does not clear.`;
+      body.appendChild(notice);
+
+      if (msgId && sourceRepo && messageTopic && (worktreeStatus === 'conflict' || worktreeStatus === 'promotion_failed')) {
+        const actions = document.createElement('div');
+        actions.className = 'gitdiff-sync-actions';
+        const firstConflictPath = conflicts[0] || (tool.files || [])[0]?.path || '';
+        const targetTurn = msgId ? `turn #${msgId}` : 'this turn';
+        const blockerPrefix = tool.worktree_blocker
+          ? `This later blocked message points at ${targetTurn}. `
+          : `Targets ${targetTurn}. `;
+        if (tool.integration_worktree_path && firstConflictPath) {
+          const openConflictBtn = document.createElement('button');
+          openConflictBtn.type = 'button';
+          openConflictBtn.className = 'gitdiff-resolve-worktree-btn';
+          openConflictBtn.textContent = 'Conflicts';
+          openConflictBtn.title = `${blockerPrefix}Open the conflicted file in the integration worktree.`;
+          openConflictBtn.addEventListener('click', async e => {
+            e.stopPropagation();
+            const conflictFile = `${tool.integration_worktree_path}/${firstConflictPath}`;
+            let markerLine = null;
+            try {
+              const res = await fetch('/localfile?' + new URLSearchParams({ path: conflictFile, _t: Date.now() }));
+              if (res.ok) {
+                const text = await res.text();
+                const idx = text.split('\n').findIndex(line => line.startsWith('<<<<<<<'));
+                if (idx >= 0) markerLine = idx + 1;
+              }
+            } catch {}
+            openFileViewer(conflictFile, markerLine, null, null, null, null, { search: '<<<<<<<' });
+          });
+          actions.appendChild(openConflictBtn);
+        }
+
+        async function chooseWorktreeSide(side, btn) {
+          if (btn.disabled) return;
+          btn.disabled = true;
+          const originalText = btn.textContent;
+          btn.textContent = side === 'new' ? 'Taking new...' : 'Taking old...';
+          try {
+            const res = await fetch(`/chat/${msgId}/worktree/choose`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ topic: messageTopic, repo: sourceRepo, side }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || !data.ok) throw new Error(data.error || `${originalText} failed`);
+            const resolvedMessage = data.already_resolved
+              ? 'Worktree was already resolved. Future turns for this topic can start normally.'
+              : side === 'new'
+                ? 'Resolved by taking the newer main checkout side. Future turns for this topic can start normally.'
+                : 'Resolved by taking the older isolated turn side. Future turns for this topic can start normally.';
+            markVisibleWorktreeResolved(msgId, sourceRepo, resolvedMessage);
+          } catch (err) {
+            const msg = err?.message || `${originalText} failed`;
+            btn.disabled = false;
+            btn.textContent = originalText;
+            btn.title = msg;
+            notice.textContent = `${originalText} failed: ${msg}`;
+          }
+        }
+
+        const retryBtn = document.createElement('button');
+        retryBtn.type = 'button';
+        retryBtn.className = 'gitdiff-resolve-worktree-btn';
+        retryBtn.textContent = 'Re-sync';
+        retryBtn.title = `${blockerPrefix}Apply the saved integration worktree resolution back to the main checkout.`;
+        retryBtn.addEventListener('click', async e => {
+          e.stopPropagation();
+          if (retryBtn.disabled) return;
+          retryBtn.disabled = true;
+          retryBtn.textContent = 'Retrying...';
+          try {
+            const res = await fetch(`/chat/${msgId}/worktree/retry`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ topic: messageTopic, repo: sourceRepo }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || !data.ok) throw new Error(data.error || 'Retry failed');
+            const resolvedMessage = data.already_resolved
+              ? 'Worktree was already resolved. Future turns for this topic can start normally.'
+              : 'Worktree resolved and synced. Future turns for this topic can start normally.';
+            markVisibleWorktreeResolved(msgId, sourceRepo, resolvedMessage);
+          } catch (err) {
+            const msg = err?.message || 'Retry failed';
+            retryBtn.disabled = false;
+            retryBtn.textContent = 'Re-sync';
+            retryBtn.title = msg;
+            notice.textContent = `Re-sync failed: ${msg}`;
+          }
+        });
+        actions.appendChild(retryBtn);
+
+        if (worktreeStatus === 'conflict') {
+          const newBtn = document.createElement('button');
+          newBtn.type = 'button';
+          newBtn.className = 'gitdiff-resolve-worktree-btn';
+          newBtn.textContent = 'Keep New';
+          newBtn.title = `${blockerPrefix}Resolve all conflict markers by taking the newer main checkout side.`;
+          newBtn.addEventListener('click', e => {
+            e.stopPropagation();
+            chooseWorktreeSide('new', newBtn);
+          });
+          actions.appendChild(newBtn);
+
+          const oldBtn = document.createElement('button');
+          oldBtn.type = 'button';
+          oldBtn.className = 'gitdiff-resolve-worktree-btn';
+          oldBtn.textContent = 'Keep Old';
+          oldBtn.title = `${blockerPrefix}Resolve all conflict markers by taking the older isolated turn side.`;
+          oldBtn.addEventListener('click', e => {
+            e.stopPropagation();
+            chooseWorktreeSide('old', oldBtn);
+          });
+          actions.appendChild(oldBtn);
+        }
+
+        const discardBtn = document.createElement('button');
+        discardBtn.type = 'button';
+        discardBtn.className = 'gitdiff-discard-worktree-btn';
+        discardBtn.textContent = 'Discard Old';
+        discardBtn.title = `${blockerPrefix}Discard only this isolated turn's pending worktree changes; already-applied main checkout changes are not reverted.`;
+        discardBtn.addEventListener('click', async e => {
+          e.stopPropagation();
+          if (discardBtn.disabled) return;
+          discardBtn.disabled = true;
+          discardBtn.textContent = 'Discarding...';
+          try {
+            const res = await fetch(`/chat/${msgId}/worktree/discard`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ topic: messageTopic, repo: sourceRepo }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || !data.ok) throw new Error(data.error || 'Discard failed');
+            const resolvedMessage = data.already_resolved
+              ? 'Worktree was already resolved. Future turns for this topic can start normally.'
+              : 'Worktree discarded. Future turns for this topic can start normally.';
+            markVisibleWorktreeResolved(msgId, sourceRepo, resolvedMessage);
+          } catch (err) {
+            const msg = err?.message || 'Discard failed';
+            discardBtn.disabled = false;
+            discardBtn.textContent = 'Discard Old';
+            discardBtn.title = msg;
+            notice.textContent = `Discard failed: ${msg}`;
+          }
+        });
+        actions.appendChild(discardBtn);
+        body.appendChild(actions);
+      }
+
+      if (tool.integration_worktree_path) {
+        const pathLine = document.createElement('div');
+        pathLine.className = 'gitdiff-sync-path';
+        pathLine.textContent = tool.integration_worktree_path;
+        body.appendChild(pathLine);
+      }
     }
 
     const fileDiffs = splitUnifiedDiff(tool.diff || '');
@@ -5201,7 +5462,7 @@ function appendHistoryItem(item, container) {
       const diffTools = changeTools(tools);
       let lastEl = asstBubble;
       for (const tool of diffTools) {
-        const block = makeToolBlock(tool, item.id, item.timestamp);
+        const block = makeToolBlock(tool, item.id, item.timestamp, item.topic || 'default');
         block.classList.add('history-item', 'tool-block-history');
         if (container) container.appendChild(block);
         else { lastEl.after(block); lastEl = block; }
@@ -11437,6 +11698,7 @@ const _sessionLookupCache = {};
 const _memorySelectionOverrides = {};
 const _pendingSessionInjectedIds = {}; // `${topic}@${agent|_}` -> pinned IDs submitted to an in-flight session turn
 const _pendingSessionMemoryRevisions = {}; // `${topic}@${agent|_}` -> topic memory revision submitted to an in-flight session turn
+const _pendingSessionAttachedFiles = {}; // `${topic}@${agent|_}` -> attached file paths submitted to an in-flight session turn
 let _editingMemoryTopic = null;
 
 function updateMemoryTokenCount() {
@@ -11460,6 +11722,10 @@ function getAttachedFiles() {
   try { return JSON.parse(localStorage.getItem('attachedFiles') || '[]'); } catch { return []; }
 }
 function setAttachedFiles(items) { localStorage.setItem('attachedFiles', JSON.stringify(items)); }
+function getAttachedFilesInSession() {
+  try { return JSON.parse(localStorage.getItem('attachedFilesInSession') || '{}'); } catch { return {}; }
+}
+function setAttachedFilesInSession(map) { localStorage.setItem('attachedFilesInSession', JSON.stringify(map)); }
 function addAttachedFile(path) {
   const items = getAttachedFiles();
   if (items.some(f => f.path === path)) return;
@@ -11725,6 +11991,22 @@ function _injectablePinnedIds(topic, agent, adhoc, lookback, items = getPinnedIt
     .map(item => item.id);
 }
 
+function _attachedFilesState(target = null) {
+  const { topic, agent, adhoc } = target || _currentContextTarget();
+  const files = getAttachedFiles();
+  if (adhoc) return { selected: files, pending: [], saved: [] };
+  const taKey = `${topic}@${agent || '_'}`;
+  const currentSid = _sessionIds[taKey] || null;
+  const inSession = getAttachedFilesInSession();
+  const sent = new Set(currentSid ? (inSession[currentSid] || []) : []);
+  const pending = new Set(_pendingSessionAttachedFiles[taKey] || []);
+  return {
+    selected: files.filter(f => !sent.has(f.path) && !pending.has(f.path)),
+    pending: files.filter(f => pending.has(f.path)),
+    saved: files.filter(f => sent.has(f.path)),
+  };
+}
+
 function updatePinCount() {
   const broadcastAgents = stickyChip?.broadcastAgents || null;
   let selectedCount, pendingCount;
@@ -11756,7 +12038,11 @@ function updatePinCount() {
     selectedCount = new Set(selectedIds).size + (memoryState.selected ? 1 : 0);
     pendingCount = new Set(pendingIds).size + (memoryState.pending ? 1 : 0);
   }
-  const savedPins = getPinnedItems().length + getAttachedFiles().length;
+  const attachedState = _attachedFilesState();
+  const pinnedCount = getPinnedItems().length;
+  selectedCount += attachedState.selected.length;
+  pendingCount += attachedState.pending.length;
+  const savedPins = pinnedCount + attachedState.saved.length;
   const badgeCount = selectedCount || pendingCount || savedPins;
   pinCountEl.textContent = badgeCount || '';
   pinCountEl.classList.toggle('visible', badgeCount > 0);
@@ -11819,6 +12105,13 @@ function _memoryStatus(state) {
   return { text: 'skipped', cls: 'pin-status-done' };
 }
 
+function _attachedFileStatus(file) {
+  const state = _attachedFilesState();
+  if (state.pending.some(f => f.path === file.path)) return { text: 'sending', cls: 'pin-status-session' };
+  if (state.saved.some(f => f.path === file.path)) return { text: 'in session · skip', cls: 'pin-status-session' };
+  return { text: 'will inject', cls: 'pin-status-inject' };
+}
+
 function renderPinPanel() {
   const items = getPinnedItems();
   const listEl = document.getElementById('pin-panel-list');
@@ -11873,9 +12166,11 @@ function renderPinPanel() {
   if (attachedFiles.length) {
     html += `<div class="pin-section-label">Files</div>`;
     attachedFiles.forEach(file => {
+      const st = _attachedFileStatus(file);
       html += `<div class="pin-item" data-file-path="${escapeHtml(file.path)}">
         <span class="pin-item-tag"><span class="material-symbols-outlined" aria-hidden="true">description</span></span>
         <span class="pin-item-preview">${escapeHtml(file.path)}</span>
+        <span class="pin-item-status ${st.cls}">${st.text}</span>
         <button class="pin-item-remove" data-file-remove="${escapeHtml(file.path)}" type="button">✕</button>
       </div>`;
     });
@@ -12506,7 +12801,7 @@ function openFilesTabView() {
   openFileViewer(null, null, null, document.getElementById('view-files'));
 }
 
-function openFileViewer(initialPath, initialLine, initialEndLine, inlineContainer = null, initialChangedLines = null, pickOpts = null) {
+function openFileViewer(initialPath, initialLine, initialEndLine, inlineContainer = null, initialChangedLines = null, pickOpts = null, viewerOpts = null) {
   document.getElementById('file-modal')?.remove();
   _fvNavigate = null;
   _fvHandlePopState = null;
@@ -12525,6 +12820,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   let markdownPreview = false;
   let webPreview = false;
   let pushedFileViewerHistory = false;
+  const initialSearch = viewerOpts?.search || '';
 
   // ── DOM ──────────────────────────────────────────────────────────────────────
   let modal, box;
@@ -12675,6 +12971,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   findInput.type = 'search';
   findInput.placeholder = 'Find';
   findInput.setAttribute('aria-label', 'Find in file');
+  findInput.value = initialSearch;
   const findPrevBtn = document.createElement('button');
   findPrevBtn.className = 'fv-edit-tool-btn';
   findPrevBtn.type = 'button';
@@ -13261,10 +13558,10 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   }
 
   function showFileViewToolbar() {
-    findInput.value = '';
-    _editFindPos = -1;
+    findInput.value = initialSearch;
+    _editFindPos = initialSearch && line ? Math.max(0, (parseInt(line, 10) || 1) - 1) : -1;
     lineInput.value = line ? String(line) : '';
-    editStatus.textContent = '';
+    editStatus.textContent = initialSearch ? `Find: ${initialSearch}` : '';
     editToolbar.hidden = false;
   }
 
@@ -13309,7 +13606,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     cancelBtn.hidden = false;
     saveBtn.hidden = false;
     editStatus.textContent = 'No changes';
-    findInput.value = '';
+    findInput.value = initialSearch;
     _editFindPos = -1;
     lineInput.value = line ? String(line) : '';
     saveBtn.disabled = true;

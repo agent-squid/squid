@@ -487,6 +487,85 @@ def sync_after_turn(
     return []
 
 
+def promote_resolved_integration_worktree(repo_root: Path, topic: str, agent: str) -> None:
+    """
+    Promote a manually resolved integration worktree after a conflict. The
+    integration worktree's HEAD is the source tree at conflict time; its working
+    tree/index is the user's resolution. Apply only that resolved delta onto
+    the current source checkout, so newer source changes are preserved unless
+    Git cannot apply the patch cleanly.
+    """
+    integration_wt = integration_worktree_path(repo_root, topic, agent)
+    if not integration_wt.exists():
+        raise RuntimeError(f"integration worktree not found: {integration_wt}")
+
+    with _lock_for(repo_root):
+        _run_git(integration_wt, "add", "-A")
+        conflicts = [
+            f for f in (
+                _run_git(integration_wt, "diff", "--name-only", "--diff-filter=U", check=False)
+                .stdout.strip()
+                .splitlines()
+            )
+            if f
+        ]
+        if conflicts:
+            raise RuntimeError("unresolved conflicts remain: " + ", ".join(conflicts))
+
+        integration_base = _run_git(integration_wt, "rev-parse", "HEAD").stdout.strip()
+        resolved_tree = _run_git(integration_wt, "write-tree").stdout.strip()
+        current_tree = _snapshot_tree(repo_root)
+        patch = _run_git(repo_root, "diff", "--binary", integration_base, resolved_tree).stdout
+        if patch:
+            check = _run_git(repo_root, "apply", "--check", check=False, input=patch)
+            if check.returncode != 0:
+                raise RuntimeError(
+                    "resolved patch did not apply cleanly to current source "
+                    f"(exit {check.returncode}, stderr: {check.stderr.strip()!r})"
+                )
+            applied = _run_git(repo_root, "apply", check=False, input=patch)
+            if applied.returncode != 0:
+                after_failed_apply_tree = _snapshot_tree(repo_root)
+                rollback_error = _restore_tree(repo_root, after_failed_apply_tree, current_tree)
+                raise RuntimeError(
+                    "resolved patch apply failed after clean check "
+                    f"(exit {applied.returncode}, stderr: {applied.stderr.strip()!r}"
+                    + (f", {rollback_error}" if rollback_error else ", rolled back partial changes")
+                    + ")"
+                )
+
+        remove_worktree(repo_root, topic, agent)
+
+
+def choose_integration_conflict_side(repo_root: Path, topic: str, agent: str, side: str) -> list[str]:
+    """
+    Resolve every currently conflicted file in the integration worktree by
+    choosing one side. "new" is the current main checkout side (ours);
+    "old" is the isolated turn side (theirs).
+    """
+    if side not in {"new", "old"}:
+        raise RuntimeError(f"invalid conflict side: {side}")
+    integration_wt = integration_worktree_path(repo_root, topic, agent)
+    if not integration_wt.exists():
+        raise RuntimeError(f"integration worktree not found: {integration_wt}")
+
+    checkout_side = "--ours" if side == "new" else "--theirs"
+    with _lock_for(repo_root):
+        conflicts = [
+            f for f in (
+                _run_git(integration_wt, "diff", "--name-only", "--diff-filter=U", check=False)
+                .stdout.strip()
+                .splitlines()
+            )
+            if f
+        ]
+        if not conflicts:
+            return []
+        _run_git(integration_wt, "checkout", checkout_side, "--", *conflicts)
+        _run_git(integration_wt, "add", "--", *conflicts)
+        return conflicts
+
+
 def _base_commit_from_registry(repo_root: Path, topic: str, agent: str) -> Optional[str]:
     try:
         from .stats_db import get_worktrees
@@ -554,6 +633,76 @@ async def cleanup_worktrees(topic: str) -> dict[str, list[str]]:
             log.exception("worktree cleanup failed for %s topic=%s key=%s", repo_root, topic, wt_key)
 
     return conflicts
+
+
+async def settle_worktrees_before_turn(topic: str, repo_roots: list[Path]) -> list[dict]:
+    """
+    Admission-time settlement for worktrees that can affect the next turn's
+    base. Unlike cleanup_worktrees(), this is strict and has no grace period:
+    a new same-topic/same-repo turn must not be materialized from source while
+    an older isolated turn is still pending promotion.
+
+    Returns blockers that require user-visible attention. Cleanly synced
+    pending worktrees are removed from the registry before this returns.
+    """
+    from .runners import get_active_msg_ids
+    from .stats_db import get_all_worktrees_for_topic, delete_worktree, mark_worktree_status
+
+    wanted = {str(p.resolve()) for p in repo_roots}
+    if not wanted:
+        return []
+
+    active = get_active_msg_ids()
+    blockers: list[dict] = []
+    records = await asyncio.to_thread(get_all_worktrees_for_topic, topic)
+    for rec in records:
+        repo_root = Path(rec["repo_root"])
+        repo_key = str(repo_root.resolve())
+        if repo_key not in wanted:
+            continue
+
+        wt_key = rec["agent"]
+        status = rec.get("status") or "pending"
+        blocker = {
+            "repo_root": rec.get("repo_root"),
+            "worktree_path": rec.get("worktree_path"),
+            "integration_worktree_path": rec.get("integration_worktree_path"),
+            "status": status,
+            "msg_id": wt_key,
+        }
+
+        try:
+            if int(wt_key) in active:
+                continue
+        except (ValueError, TypeError):
+            pass
+
+        if status in {"conflict", "promotion_failed"}:
+            blockers.append(blocker)
+            continue
+
+        if status == "synced":
+            continue
+
+        try:
+            conflict_files = await asyncio.to_thread(
+                sync_after_turn, repo_root, topic, wt_key, None
+            )
+            if conflict_files:
+                await asyncio.to_thread(mark_worktree_status, topic, wt_key, rec["repo_root"], "conflict")
+                blocker["status"] = "conflict"
+                blocker["conflicts"] = conflict_files
+                blockers.append(blocker)
+            else:
+                await asyncio.to_thread(remove_worktree, repo_root, topic, wt_key)
+                await asyncio.to_thread(delete_worktree, topic, wt_key, rec["repo_root"])
+        except Exception:
+            await asyncio.to_thread(mark_worktree_status, topic, wt_key, rec["repo_root"], "promotion_failed")
+            blocker["status"] = "promotion_failed"
+            blockers.append(blocker)
+            log.exception("worktree admission settlement failed for %s topic=%s key=%s", repo_root, topic, wt_key)
+
+    return blockers
 
 
 def map_to_worktree(path: str, worktree_map: dict[Path, Path]) -> Optional[str]:

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import subprocess
 import sys
 import types
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from fastapi.testclient import TestClient
 from agent import creds
 from agent import server
 from agent import stats_db
+from agent import worktree as worktree_mod
 from agent.providers import Gauge, Provider
 
 
@@ -32,6 +34,30 @@ providers:
     auth: {{type: subscription}}
     gauge: codex
 '''
+
+
+def _init_repo(repo: Path) -> None:
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    (repo / "app.py").write_text("base\n")
+    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def _make_conflicted_worktree(repo: Path, topic: str, first_id: str, conflict_id: str) -> Path:
+    worktree_mod.ensure_worktree(repo, topic, first_id)
+    wt_a = worktree_mod.worktree_path(repo, topic, first_id)
+    worktree_mod.ensure_worktree(repo, topic, conflict_id)
+    wt_b = worktree_mod.worktree_path(repo, topic, conflict_id)
+    stats_db.save_worktree(topic, conflict_id, str(repo), str(wt_b), worktree_mod.branch_name(topic, conflict_id))
+    (wt_a / "app.py").write_text("newer main\n")
+    worktree_mod.sync_after_turn(repo, topic, first_id, msg_id=int(first_id))
+    (wt_b / "app.py").write_text("older isolated\n")
+    assert worktree_mod.sync_after_turn(repo, topic, conflict_id, msg_id=int(conflict_id)) == ["app.py"]
+    stats_db.mark_worktree_status(topic, conflict_id, str(repo), "conflict")
+    return worktree_mod.integration_worktree_path(repo, topic, conflict_id)
 
 
 def test_worktree_diff_blocked_until_synced():
@@ -56,6 +82,278 @@ def test_worktree_diff_missing_status_is_legacy_unblocked():
     }
 
     assert server._worktree_diff_blocked(gitdiff) is None
+
+
+def test_discard_worktree_blocker_removes_conflict_row(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    (repo / "app.py").write_text("base\n")
+    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    wt = worktree_mod.ensure_worktree(repo, "squid", "42")
+    stats_db.save_worktree("squid", "42", str(repo), str(wt), worktree_mod.branch_name("squid", "42"))
+    stats_db.mark_worktree_status("squid", "42", str(repo), "conflict")
+
+    with patch("agent.runners.get_active_msg_ids", return_value=set()):
+        res = TestClient(server.app).post("/chat/42/worktree/discard", json={
+            "topic": "squid",
+            "repo": str(repo),
+        })
+
+    assert res.status_code == 200
+    assert res.json() == {"ok": True}
+    assert stats_db.get_worktrees("squid", "42") == []
+    assert not wt.exists()
+
+
+def test_discard_worktree_blocker_handles_missing_registry_row(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    (repo / "app.py").write_text("base\n")
+    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    wt = worktree_mod.ensure_worktree(repo, "squid", "43")
+
+    with patch("agent.runners.get_active_msg_ids", return_value=set()):
+        res = TestClient(server.app).post("/chat/43/worktree/discard", json={
+            "topic": "squid",
+            "repo": str(repo),
+        })
+
+    assert res.status_code == 200
+    assert res.json() == {"ok": True}
+    assert not wt.exists()
+
+
+def test_discard_worktree_blocker_is_idempotent_when_already_gone(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    with patch("agent.runners.get_active_msg_ids", return_value=set()):
+        res = TestClient(server.app).post("/chat/44/worktree/discard", json={
+            "topic": "squid",
+            "repo": str(repo),
+        })
+
+    assert res.status_code == 200
+    assert res.json() == {"ok": True, "already_resolved": True}
+
+
+def test_retry_worktree_resolution_promotes_manual_resolution(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    (repo / "app.py").write_text("base\n")
+    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    worktree_mod.ensure_worktree(repo, "squid", "50")
+    wt_a = worktree_mod.worktree_path(repo, "squid", "50")
+    worktree_mod.ensure_worktree(repo, "squid", "51")
+    wt_b = worktree_mod.worktree_path(repo, "squid", "51")
+    stats_db.save_worktree("squid", "51", str(repo), str(wt_b), worktree_mod.branch_name("squid", "51"))
+    (wt_a / "app.py").write_text("first\n")
+    worktree_mod.sync_after_turn(repo, "squid", "50", msg_id=50)
+    (wt_b / "app.py").write_text("second\n")
+    assert worktree_mod.sync_after_turn(repo, "squid", "51", msg_id=51) == ["app.py"]
+    stats_db.mark_worktree_status("squid", "51", str(repo), "conflict")
+
+    integration = worktree_mod.integration_worktree_path(repo, "squid", "51")
+    (integration / "app.py").write_text("resolved\n")
+
+    with patch("agent.runners.get_active_msg_ids", return_value=set()):
+        res = TestClient(server.app).post("/chat/51/worktree/retry", json={
+            "topic": "squid",
+            "repo": str(repo),
+        })
+
+    assert res.status_code == 200
+    assert res.json() == {"ok": True}
+    assert (repo / "app.py").read_text() == "resolved\n"
+    assert stats_db.get_worktrees("squid", "51") == []
+
+
+def test_retry_worktree_resolution_handles_missing_registry_row(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    (repo / "app.py").write_text("base\n")
+    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    worktree_mod.ensure_worktree(repo, "squid", "60")
+    wt_a = worktree_mod.worktree_path(repo, "squid", "60")
+    worktree_mod.ensure_worktree(repo, "squid", "61")
+    wt_b = worktree_mod.worktree_path(repo, "squid", "61")
+    (wt_a / "app.py").write_text("first\n")
+    worktree_mod.sync_after_turn(repo, "squid", "60", msg_id=60)
+    (wt_b / "app.py").write_text("second\n")
+    assert worktree_mod.sync_after_turn(repo, "squid", "61", msg_id=61) == ["app.py"]
+
+    integration = worktree_mod.integration_worktree_path(repo, "squid", "61")
+    (integration / "app.py").write_text("resolved without registry\n")
+
+    with patch("agent.runners.get_active_msg_ids", return_value=set()):
+        res = TestClient(server.app).post("/chat/61/worktree/retry", json={
+            "topic": "squid",
+            "repo": str(repo),
+        })
+
+    assert res.status_code == 200
+    assert res.json() == {"ok": True}
+    assert (repo / "app.py").read_text() == "resolved without registry\n"
+    assert not integration.exists()
+
+
+def test_retry_worktree_resolution_is_idempotent_when_already_gone(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    with patch("agent.runners.get_active_msg_ids", return_value=set()):
+        res = TestClient(server.app).post("/chat/62/worktree/retry", json={
+            "topic": "squid",
+            "repo": str(repo),
+        })
+
+    assert res.status_code == 200
+    assert res.json() == {"ok": True, "already_resolved": True}
+
+
+def test_choose_worktree_resolution_new_takes_current_checkout(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _make_conflicted_worktree(repo, "squid", "70", "71")
+
+    with patch("agent.runners.get_active_msg_ids", return_value=set()):
+        res = TestClient(server.app).post("/chat/71/worktree/choose", json={
+            "topic": "squid",
+            "repo": str(repo),
+            "side": "new",
+        })
+
+    assert res.status_code == 200
+    assert res.json()["ok"] is True
+    assert (repo / "app.py").read_text() == "newer main\n"
+    assert stats_db.get_worktrees("squid", "71") == []
+
+
+def test_choose_worktree_resolution_old_takes_isolated_turn(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _make_conflicted_worktree(repo, "squid", "72", "73")
+
+    with patch("agent.runners.get_active_msg_ids", return_value=set()):
+        res = TestClient(server.app).post("/chat/73/worktree/choose", json={
+            "topic": "squid",
+            "repo": str(repo),
+            "side": "old",
+        })
+
+    assert res.status_code == 200
+    assert res.json()["ok"] is True
+    assert (repo / "app.py").read_text() == "older isolated\n"
+    assert stats_db.get_worktrees("squid", "73") == []
+
+
+def test_history_marks_missing_worktree_conflict_as_synced(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    user_id = stats_db.insert_user_message("squid", "codex", "prompt")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    tools = [{
+        "name": "GitDiff",
+        "repo": str(repo),
+        "worktree_repo": str(worktree_mod.worktree_path(repo, "squid", str(msg_id))),
+        "worktree_status": "conflict",
+        "files": [{"status": "M", "path": "app.py"}],
+    }]
+    stats_db.update_assistant_message(msg_id, "done", "session-1", "done", context=json.dumps(tools))
+
+    res = TestClient(server.app).get(f"/history/by-ids?ids={msg_id}")
+
+    assert res.status_code == 200
+    item = res.json()["items"][0]
+    hydrated_tools = json.loads(item["context"])
+    assert hydrated_tools[0]["worktree_status"] == "synced"
+    assert hydrated_tools[0]["already_resolved"] is True
+
+
+def test_history_backfills_unresolved_worktree_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    (repo / "app.py").write_text("base\n")
+    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    user_id = stats_db.insert_user_message("squid", "codex", "prompt")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    wt = worktree_mod.ensure_worktree(repo, "squid", str(msg_id))
+    integration = worktree_mod.integration_worktree_path(repo, "squid", str(msg_id))
+    integration.mkdir(parents=True)
+    stats_db.save_worktree(
+        "squid",
+        str(msg_id),
+        str(repo),
+        str(wt),
+        worktree_mod.branch_name("squid", str(msg_id)),
+        integration_worktree_path=str(integration),
+    )
+    stats_db.mark_worktree_status("squid", str(msg_id), str(repo), "conflict")
+    tools = [{
+        "name": "GitDiff",
+        "repo": str(repo),
+        "worktree_repo": str(wt),
+        "worktree_status": "conflict",
+        "files": [{"status": "U", "path": "app.py"}],
+    }]
+    stats_db.update_assistant_message(msg_id, "done", "session-1", "done", context=json.dumps(tools))
+
+    res = TestClient(server.app).get(f"/history/by-ids?ids={msg_id}")
+
+    assert res.status_code == 200
+    item = res.json()["items"][0]
+    hydrated_tools = json.loads(item["context"])
+    assert hydrated_tools[0]["worktree_status"] == "conflict"
+    assert hydrated_tools[0]["integration_worktree_path"] == str(integration)
 
 
 class FinishedWorker:

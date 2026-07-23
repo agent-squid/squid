@@ -92,7 +92,8 @@ from .stats_db import (
     get_recent_prompts,
     save_file_edit, get_file_edit_history, get_file_edit_by_id,
     get_bookmarks, add_bookmark, remove_bookmark,
-    save_worktree, get_worktrees, get_all_worktrees_for_topic, delete_all_worktrees,
+    save_worktree, get_worktrees, get_all_worktrees_for_topic, delete_worktree,
+    mark_worktree_synced, delete_all_worktrees,
     delete_all_topic_worktrees,
     allocate_id,
 )
@@ -202,13 +203,7 @@ def _is_backend_native_chat_command(message: str) -> bool:
 
 
 async def _active_worktree_blockers(topic: str, code_roots: list[str]) -> list[dict]:
-    from .worktree import repo_root_for
-
-    repo_roots: set[str] = set()
-    for root in code_roots:
-        repo_root = await asyncio.to_thread(repo_root_for, root)
-        if repo_root:
-            repo_roots.add(str(repo_root))
+    repo_roots = {str(root) for root in await _repo_roots_for_code_roots(code_roots)}
     if not repo_roots:
         return []
 
@@ -222,8 +217,26 @@ async def _active_worktree_blockers(topic: str, code_roots: list[str]) -> list[d
                 "worktree_path": rec.get("worktree_path"),
                 "integration_worktree_path": rec.get("integration_worktree_path"),
                 "status": rec.get("status"),
+                "msg_id": rec.get("agent"),
             })
     return blockers
+
+
+async def _repo_roots_for_code_roots(code_roots: list[str]) -> list[Path]:
+    from .worktree import repo_root_for
+
+    repo_roots: list[Path] = []
+    seen: set[str] = set()
+    for root in code_roots:
+        repo_root = await asyncio.to_thread(repo_root_for, root)
+        if not repo_root:
+            continue
+        key = str(repo_root)
+        if key in seen:
+            continue
+        seen.add(key)
+        repo_roots.append(repo_root)
+    return repo_roots
 
 
 def _resolve_agent_runtime(agent_config: dict) -> tuple[str, Optional[str], str, object]:
@@ -638,12 +651,19 @@ async def _prepare_chat_turn(
 
     memory_config = topic_memory_squid_config(topic)
     code_roots = memory_config.get("code_roots") or []
-    if harness == "echo":
+    if native_backend_command or harness == "echo":
         code_roots = []
     source_cwd = cwd
 
     if WORKTREE_ISOLATION_ENABLED and code_roots:
-        blockers = await _active_worktree_blockers(topic, code_roots)
+        repo_roots = await _repo_roots_for_code_roots(code_roots)
+        if repo_roots:
+            from .worktree import settle_worktrees_before_turn
+            blockers = await settle_worktrees_before_turn(topic, repo_roots)
+        else:
+            blockers = []
+        if not blockers:
+            blockers = await _active_worktree_blockers(topic, code_roots)
         if blockers:
             return JSONResponse({
                 "error": "worktree sync requires attention before starting another turn",
@@ -1211,7 +1231,17 @@ async def history(offset: int = 0, limit: int = 5, topic: Optional[str] = None,
         if isinstance(normalized, JSONResponse):
             return normalized
         topic = normalized
-    return JSONResponse(list_history(topic=topic, agent=agent, adhoc=adhoc, offset=offset, limit=limit, flow_route=canonical_flow_route(flow_route)))
+    payload = await asyncio.to_thread(
+        list_history,
+        topic=topic,
+        agent=agent,
+        adhoc=adhoc,
+        offset=offset,
+        limit=limit,
+        flow_route=canonical_flow_route(flow_route),
+    )
+    await asyncio.to_thread(_annotate_history_worktree_state, payload)
+    return JSONResponse(payload)
 
 
 @app.get("/history/by-ids")
@@ -1223,7 +1253,93 @@ async def history_by_ids(ids: str = ""):
     except ValueError:
         return JSONResponse({"error": "invalid ids"}, status_code=400)
     parsed = parsed[:200]  # cap to prevent abuse
-    return JSONResponse(list_history_by_ids(parsed))
+    payload = await asyncio.to_thread(list_history_by_ids, parsed)
+    await asyncio.to_thread(_annotate_history_worktree_state, payload)
+    return JSONResponse(payload)
+
+
+def _is_squid_worktree_path(value: object) -> bool:
+    return isinstance(value, str) and bool(re.search(r"(^|/)\.squid/worktrees/", value))
+
+
+def _tool_source_repo(tool: dict) -> str:
+    for key in ("source", "repo", "cwd"):
+        value = tool.get(key)
+        if isinstance(value, str) and value and not _is_squid_worktree_path(value):
+            return value
+    return ""
+
+
+def _annotate_history_worktree_state(payload: dict) -> None:
+    for item in payload.get("items") or []:
+        context = item.get("context")
+        if not context:
+            continue
+        try:
+            tools = json.loads(context) if isinstance(context, str) else context
+        except Exception:
+            continue
+        if not isinstance(tools, list):
+            continue
+
+        topic = item.get("topic") or "default"
+        wt_key = str(item.get("id") or "")
+        if not wt_key:
+            continue
+        records = get_worktrees(topic, wt_key)
+        changed = False
+
+        for tool in tools:
+            if not isinstance(tool, dict) or tool.get("name") not in {"GitDiff", "WorktreeSync"}:
+                continue
+            status = tool.get("worktree_status") if tool.get("name") == "GitDiff" else tool.get("status")
+            if not status or status == "synced":
+                continue
+
+            source_repo = _tool_source_repo(tool)
+            worktree_repo = tool.get("worktree_repo")
+            rec = next((
+                row for row in records
+                if (source_repo and str(Path(row["repo_root"]).resolve()) == str(Path(source_repo).resolve()))
+                or (worktree_repo and row.get("worktree_path") == worktree_repo)
+            ), None)
+
+            if rec:
+                live_status = rec.get("status") or status
+                if tool.get("name") == "GitDiff":
+                    tool["worktree_status"] = live_status
+                else:
+                    tool["status"] = live_status
+                tool.setdefault("worktree_repo", rec.get("worktree_path"))
+                if rec.get("integration_worktree_path"):
+                    tool["integration_worktree_path"] = rec["integration_worktree_path"]
+                changed = True
+                continue
+
+            if source_repo:
+                try:
+                    from .worktree import integration_worktree_path, worktree_path
+                    repo_root = Path(source_repo).resolve()
+                    wt_path = worktree_path(repo_root, topic, wt_key)
+                    integration_path = integration_worktree_path(repo_root, topic, wt_key)
+                    if wt_path.exists() or integration_path.exists():
+                        tool.setdefault("worktree_repo", str(wt_path))
+                        if integration_path.exists():
+                            tool["integration_worktree_path"] = str(integration_path)
+                        changed = True
+                        continue
+                except Exception:
+                    pass
+
+            if tool.get("name") == "GitDiff":
+                tool["worktree_status"] = "synced"
+            else:
+                tool["status"] = "synced"
+            tool["already_resolved"] = True
+            changed = True
+
+        if changed:
+            item["context"] = json.dumps(tools)
 
 
 @app.get("/search")
@@ -1743,6 +1859,15 @@ class RevertRequest(BaseModel):
     file_path: Optional[str] = None
 
 
+class WorktreeDiscardRequest(BaseModel):
+    topic: str = Field(..., min_length=1)
+    repo: str = Field(..., min_length=1)
+
+
+class WorktreeChooseRequest(WorktreeDiscardRequest):
+    side: Literal["new", "old"]
+
+
 @app.post("/chat/{msg_id}/quota-delta")
 async def record_msg_quota_delta(msg_id: int, req: MsgQuotaSnapshotRequest):
     update_message_quota_snapshot(msg_id, req.before, req.after)
@@ -1761,6 +1886,110 @@ async def diff_revert_status(msg_id: int, repo: str):
     if not eligibility:
         return JSONResponse({"error": "diff not found"}, status_code=404)
     return JSONResponse(eligibility)
+
+
+async def _worktree_record_or_existing_paths(topic: str, wt_key: str, repo_root: Path) -> tuple[Optional[dict], bool]:
+    rows = await asyncio.to_thread(get_worktrees, topic, wt_key)
+    rec = next((row for row in rows if Path(row["repo_root"]).resolve() == repo_root), None)
+    if rec:
+        return rec, True
+
+    from .worktree import integration_worktree_path, worktree_path
+    if worktree_path(repo_root, topic, wt_key).exists() or integration_worktree_path(repo_root, topic, wt_key).exists():
+        return {"status": "missing_registry"}, True
+    return None, False
+
+
+@app.post("/chat/{msg_id}/worktree/discard")
+async def discard_worktree_blocker(msg_id: int, req: WorktreeDiscardRequest):
+    topic = _normalize_topic_response(req.topic)
+    if isinstance(topic, JSONResponse):
+        return topic
+    repo_root = _validate_repo_path(req.repo)
+    if repo_root is None:
+        return JSONResponse({"error": "invalid repo path"}, status_code=400)
+
+    wt_key = str(msg_id)
+    rec, found = await _worktree_record_or_existing_paths(topic, wt_key, repo_root)
+    if not found:
+        log.info("worktree discard skipped; already gone topic=%s msg_id=%s repo=%s", topic, msg_id, repo_root)
+        return JSONResponse({"ok": True, "already_resolved": True})
+
+    from .runners import get_active_msg_ids
+    if msg_id in get_active_msg_ids():
+        return JSONResponse({"error": "worktree is still running"}, status_code=409)
+
+    from .worktree import remove_worktree
+    await asyncio.to_thread(remove_worktree, repo_root, topic, wt_key)
+    await asyncio.to_thread(delete_worktree, topic, wt_key, str(repo_root))
+    log.info("worktree discarded topic=%s msg_id=%s repo=%s status=%s", topic, msg_id, repo_root, rec.get("status"))
+    return JSONResponse({"ok": True})
+
+
+@app.post("/chat/{msg_id}/worktree/retry")
+async def retry_worktree_resolution(msg_id: int, req: WorktreeDiscardRequest):
+    topic = _normalize_topic_response(req.topic)
+    if isinstance(topic, JSONResponse):
+        return topic
+    repo_root = _validate_repo_path(req.repo)
+    if repo_root is None:
+        return JSONResponse({"error": "invalid repo path"}, status_code=400)
+
+    wt_key = str(msg_id)
+    rec, found = await _worktree_record_or_existing_paths(topic, wt_key, repo_root)
+    if not found:
+        log.info("worktree retry skipped; already gone topic=%s msg_id=%s repo=%s", topic, msg_id, repo_root)
+        return JSONResponse({"ok": True, "already_resolved": True})
+
+    from .runners import get_active_msg_ids
+    if msg_id in get_active_msg_ids():
+        return JSONResponse({"error": "worktree is still running"}, status_code=409)
+
+    from .worktree import promote_resolved_integration_worktree
+    try:
+        await asyncio.to_thread(promote_resolved_integration_worktree, repo_root, topic, wt_key)
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+
+    await asyncio.to_thread(mark_worktree_synced, topic, wt_key, str(repo_root))
+    await asyncio.to_thread(delete_worktree, topic, wt_key, str(repo_root))
+    log.info("worktree resolved topic=%s msg_id=%s repo=%s status=%s", topic, msg_id, repo_root, rec.get("status"))
+    return JSONResponse({"ok": True})
+
+
+@app.post("/chat/{msg_id}/worktree/choose")
+async def choose_worktree_resolution(msg_id: int, req: WorktreeChooseRequest):
+    topic = _normalize_topic_response(req.topic)
+    if isinstance(topic, JSONResponse):
+        return topic
+    repo_root = _validate_repo_path(req.repo)
+    if repo_root is None:
+        return JSONResponse({"error": "invalid repo path"}, status_code=400)
+
+    wt_key = str(msg_id)
+    rec, found = await _worktree_record_or_existing_paths(topic, wt_key, repo_root)
+    if not found:
+        log.info("worktree choose skipped; already gone topic=%s msg_id=%s repo=%s side=%s", topic, msg_id, repo_root, req.side)
+        return JSONResponse({"ok": True, "already_resolved": True})
+
+    from .runners import get_active_msg_ids
+    if msg_id in get_active_msg_ids():
+        return JSONResponse({"error": "worktree is still running"}, status_code=409)
+
+    from .worktree import choose_integration_conflict_side, promote_resolved_integration_worktree
+    try:
+        chosen = await asyncio.to_thread(choose_integration_conflict_side, repo_root, topic, wt_key, req.side)
+        await asyncio.to_thread(promote_resolved_integration_worktree, repo_root, topic, wt_key)
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+
+    await asyncio.to_thread(mark_worktree_synced, topic, wt_key, str(repo_root))
+    await asyncio.to_thread(delete_worktree, topic, wt_key, str(repo_root))
+    log.info(
+        "worktree resolved by side topic=%s msg_id=%s repo=%s side=%s files=%d status=%s",
+        topic, msg_id, repo_root, req.side, len(chosen), rec.get("status"),
+    )
+    return JSONResponse({"ok": True, "side": req.side, "files": chosen})
 
 
 @app.get("/chat/{msg_id}/diff-file")

@@ -724,6 +724,128 @@ test.describe('response bubble', () => {
     await expect(page.getByRole('button', { name: 'revert' })).toBeVisible();
   });
 
+  test('GitDiff surfaces streamed worktree sync conflicts', async ({ page }) => {
+    await page.route('**/chat/1/diff-revert-status**', route => route.fulfill({
+      json: { 'ui/app.js': 'revertable' },
+    }));
+    let discardBody = null;
+    await page.route('**/chat/1/worktree/retry', route => route.fulfill({
+      status: 404,
+      json: { error: 'worktree not found' },
+    }));
+    await page.route('**/chat/1/worktree/discard', route => {
+      discardBody = route.request().postDataJSON();
+      route.fulfill({ json: { ok: true } });
+    });
+    await page.route('**/localfile**', route => route.fulfill({
+      status: 200,
+      contentType: 'text/plain',
+      body: 'line 1\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> turn\nline 7\n<<<<<<< HEAD\nours 2\n=======\ntheirs 2\n>>>>>>> turn\n',
+    }));
+    await page.route('**/chat', route => route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        META,
+        { event: 'tool', data: {
+          name: 'GitDiff',
+          repo: '/tmp/repo',
+          worktree_repo: '/tmp/.squid/worktrees/topic/repo',
+          worktree_status: 'pending',
+          file_count: 1,
+          additions: 1,
+          deletions: 0,
+          files: [{ status: 'M', path: 'ui/app.js' }],
+          diff: 'diff --git a/ui/app.js b/ui/app.js\n@@ -1 +1 @@\n+const opened = true;',
+        } },
+        { event: 'tool', data: {
+          name: 'WorktreeSync',
+          status: 'conflict',
+          repo: '/tmp/repo',
+          worktree_repo: '/tmp/.squid/worktrees/topic/repo',
+          integration_worktree_path: '/tmp/.squid/worktrees/topic/repo-integration',
+          conflicts: ['ui/app.js'],
+        } },
+        { data: 'Done' },
+        DONE,
+      ),
+    }));
+
+    await sendMsg(page);
+    const block = page.locator('.tool-block-history').first();
+    await expect(block.locator('.tool-toggle')).toContainText('Changed files: 1 file, +1 -0 · conflict');
+    await expect(block.locator('.gitdiff-sync-notice')).toContainText('Worktree sync conflict: ui/app.js');
+    await expect(block.locator('.gitdiff-sync-path')).toContainText('/tmp/.squid/worktrees/topic/repo-integration');
+    await expect(page.getByRole('button', { name: 'Open ui/app.js in file viewer' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'revert' })).toHaveCount(0);
+    await block.getByRole('button', { name: 'Conflicts' }).click();
+    await expect(page.locator('#file-modal-breadcrumb')).toContainText('/tmp/.squid/worktrees/topic/repo-integration/ui/app.js');
+    await expect(page.locator('.fv-edit-find')).toHaveValue('<<<<<<<');
+    await expect(page.locator('#file-modal-body .fv-target')).toContainText('<<<<<<< HEAD');
+    await expect(page.locator('.fv-edit-line')).toHaveValue('2');
+    await page.locator('.fv-edit-tool-btn[aria-label="Next match"]').click();
+    await expect(page.locator('#file-modal-body .fv-target')).toContainText('<<<<<<< HEAD');
+    await expect(page.locator('.fv-edit-line')).toHaveValue('8');
+    await page.locator('#file-modal-close').click();
+    await expect(block.getByRole('button', { name: 'Keep New' })).toHaveAttribute('title', /newer main checkout side/);
+    await expect(block.getByRole('button', { name: 'Keep Old' })).toHaveAttribute('title', /older isolated turn side/);
+    await block.getByRole('button', { name: 'Re-sync' }).click();
+    await expect(block.locator('.gitdiff-sync-notice')).toContainText('Re-sync failed: worktree not found');
+    await block.getByRole('button', { name: 'Discard Old' }).click();
+    await expect(block.locator('.gitdiff-sync-notice')).toContainText('Worktree discarded');
+    expect(discardBody).toEqual({ topic: 'default', repo: '/tmp/repo' });
+  });
+
+  test('blocked worktree response renders controls for original turn', async ({ page }) => {
+    let retryUrl = null;
+    let retryBody = null;
+    await page.route('**/chat/*/worktree/retry', route => {
+      retryUrl = route.request().url();
+      retryBody = route.request().postDataJSON();
+      route.fulfill({ json: { ok: true } });
+    });
+    await page.route('**/localfile**', route => route.fulfill({
+      status: 200,
+      contentType: 'text/plain',
+      body: 'line 1\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> turn\n',
+    }));
+    await page.route('**/chat', route => route.fulfill({
+      status: 409,
+      json: {
+        error: 'worktree sync requires attention before starting another turn',
+        worktrees: [{
+          repo_root: '/tmp/repo',
+          worktree_path: '/tmp/.squid/worktrees/topic/repo',
+          integration_worktree_path: '/tmp/.squid/worktrees/topic/repo-integration',
+          status: 'conflict',
+          msg_id: '7282',
+          conflicts: ['ui/app.js'],
+        }],
+      },
+    }));
+
+    await sendMsg(page);
+    await expect(page.locator(MSG_ERROR)).toContainText('worktree sync requires attention');
+    const block = page.locator('.tool-block-history').first();
+    await expect(block.locator('.gitdiff-sync-notice')).toContainText('Worktree sync conflict: ui/app.js');
+    await expect(block.getByRole('button', { name: 'Keep New' })).toBeVisible();
+    await expect(block.getByRole('button', { name: 'Keep Old' })).toBeVisible();
+    await expect(block.getByRole('button', { name: 'Discard Old' })).toHaveAttribute(
+      'title',
+      /later blocked message points at turn #7282.*Discard only this isolated turn's pending worktree changes/,
+    );
+    await block.evaluate(el => el.after(el.cloneNode(true)));
+    await expect(page.locator('.tool-block-history .gitdiff-sync-notice')).toHaveCount(2);
+    await block.getByRole('button', { name: 'Re-sync' }).click();
+    await expect(page.locator('.tool-block-history .gitdiff-sync-notice')).toHaveText([
+      /Worktree resolved and synced/,
+      /Worktree resolved and synced/,
+    ]);
+    await expect(page.locator('.tool-block-history').nth(0).locator('.gitdiff-resolve-worktree-btn', { hasText: 'Resolved' })).toBeDisabled();
+    await expect(page.locator('.tool-block-history').nth(1).locator('.gitdiff-resolve-worktree-btn', { hasText: 'Resolved' })).toBeDisabled();
+    expect(retryUrl).toContain('/chat/7282/worktree/retry');
+    expect(retryBody).toEqual({ topic: 'default', repo: '/tmp/repo' });
+  });
+
   test('mobile browser back closes GitDiff file viewer back to diff list', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 800 });
     await page.route('**/chat/1/diff-revert-status**', route => route.fulfill({

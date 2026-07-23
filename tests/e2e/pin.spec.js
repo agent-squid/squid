@@ -46,6 +46,16 @@ async function seedPin(page, item) {
   }, item);
 }
 
+async function seedAttachedFile(page, path) {
+  await page.evaluate(path => {
+    localStorage.setItem('attachedFiles', JSON.stringify([{
+      path,
+      name: path.split('/').filter(Boolean).pop() || path,
+    }]));
+    updatePinCount();
+  }, path);
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 test('pin button on bubble adds item to pin panel', async ({ page }) => {
@@ -244,6 +254,54 @@ test('session send clears the will-inject pin badge once context is delivered', 
   await expect(page.locator('#pin-btn')).toHaveClass(/has-saved-pins/);
   await page.click('#pin-btn');
   await expect(page.locator('.pin-item-status')).toContainText('in session');
+});
+
+test('session send turns attached file badge gray once delivered', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/topics/squid/memory', r => r.fulfill({
+    json: {
+      topic: 'squid', exists: false, content: '', path: '~/.squid/context/topics/squid/memory.md',
+      squid: { code_roots: [], code_roots_skipped: true, code_roots_missing: false },
+    },
+  }));
+  await page.route('**/topics/squid/session?agent=claude', r => r.fulfill({
+    json: { session_id: null, cwd: null },
+  }));
+
+  const sentMessages = [];
+  await page.route('**/chat', async route => {
+    sentMessages.push(route.request().postDataJSON().message);
+    await route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(META, { data: 'session response' }, STATS, DONE),
+    });
+  });
+
+  await page.goto('/');
+  await seedAttachedFile(page, '/Users/haebin/Work/squid/pyproject.toml');
+
+  await page.fill('#input', '#squid@claude hello');
+  await page.click('#pin-btn');
+  await expect(page.locator('#pin-count')).toHaveText('1');
+  await expect(page.locator('#pin-btn')).toHaveClass(/(^|\s)has-context(\s|$)/);
+  await expect(page.locator('.pin-item-status')).toContainText('will inject');
+  await page.click('#pin-btn');
+
+  await page.focus('#input');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toBeVisible();
+  expect(sentMessages[0]).toContain('Files:\n- /Users/haebin/Work/squid/pyproject.toml');
+
+  await expect(page.locator('#pin-count')).toHaveText('1');
+  await expect(page.locator('#pin-btn')).toHaveClass(/has-saved-pins/);
+  await expect(page.locator('#pin-btn')).not.toHaveClass(/(^|\s)has-context(\s|$)/);
+  await page.click('#pin-btn');
+  await expect(page.locator('.pin-item-status')).toContainText('in session');
+  await page.click('#pin-btn');
+
+  await page.fill('#input', '#squid@claude again');
+  await page.keyboard.press('Enter');
+  await expect(sentMessages[1]).not.toContain('Files:');
 });
 
 test('session send marks memory and pinned context as sending while request is pending', async ({ page }) => {

@@ -17,8 +17,10 @@ from agent.worktree import (
     branch_name,
     cleanup_worktrees,
     ensure_worktree,
+    promote_resolved_integration_worktree,
     remove_worktree,
     repo_root_for,
+    settle_worktrees_before_turn,
     sync_after_turn,
     worktree_path,
 )
@@ -411,6 +413,31 @@ def test_sync_after_turn_returns_conflicts_on_same_line_edit(tmp_path):
     assert "file.txt" in conflicts
 
 
+def test_promote_resolved_integration_worktree_applies_manual_resolution(tmp_path):
+    repo = init_repo(tmp_path / "repo")
+
+    ensure_worktree(repo, "topic", "511")
+    wt_a = worktree_path(repo, "topic", "511")
+    ensure_worktree(repo, "topic", "512")
+    wt_b = worktree_path(repo, "topic", "512")
+
+    (wt_a / "file.txt").write_text("edit-A\n")
+    sync_after_turn(repo, "topic", "511", msg_id=511)
+    (wt_b / "file.txt").write_text("edit-B\n")
+
+    conflicts = sync_after_turn(repo, "topic", "512", msg_id=512)
+    assert conflicts == ["file.txt"]
+
+    integration = worktree_mod.integration_worktree_path(repo, "topic", "512")
+    (integration / "file.txt").write_text("resolved\n")
+
+    promote_resolved_integration_worktree(repo, "topic", "512")
+
+    assert (repo / "file.txt").read_text() == "resolved\n"
+    assert not integration.exists()
+    assert not wt_b.exists()
+
+
 # ---------------------------------------------------------------------------
 # remove_worktree
 # ---------------------------------------------------------------------------
@@ -527,6 +554,60 @@ def test_cleanup_worktrees_marks_promotion_failures_and_skips_later(tmp_path, mo
 
     assert asyncio.run(cleanup_worktrees("sweeptopic")) == {}
     assert calls == 1
+
+
+# ---------------------------------------------------------------------------
+# admission settlement
+# ---------------------------------------------------------------------------
+
+def test_settle_worktrees_before_turn_promotes_pending_without_grace(tmp_path, monkeypatch):
+    monkeypatch.setattr("agent.runners.get_active_msg_ids", lambda: set())
+    monkeypatch.setattr("agent.worktree._CLEANUP_GRACE_SECONDS", 3600)
+    stats_db.init_db()
+    repo = init_repo(tmp_path / "repo")
+    wt = ensure_worktree(repo, "admit", "901")
+    stats_db.save_worktree("admit", "901", str(repo), str(wt), branch_name("admit", "901"))
+    (wt / "turn.txt").write_text("ready\n")
+
+    blockers = asyncio.run(settle_worktrees_before_turn("admit", [repo]))
+
+    assert blockers == []
+    assert (repo / "turn.txt").read_text() == "ready\n"
+    assert not wt.exists()
+    assert stats_db.get_worktrees("admit", "901") == []
+
+
+def test_settle_worktrees_before_turn_skips_active_prior_turn(tmp_path, monkeypatch):
+    monkeypatch.setattr("agent.runners.get_active_msg_ids", lambda: {902})
+    stats_db.init_db()
+    repo = init_repo(tmp_path / "repo")
+    wt = ensure_worktree(repo, "admit", "902")
+    stats_db.save_worktree("admit", "902", str(repo), str(wt), branch_name("admit", "902"))
+    (wt / "turn.txt").write_text("still running\n")
+
+    blockers = asyncio.run(settle_worktrees_before_turn("admit", [repo]))
+
+    assert blockers == []
+    assert not (repo / "turn.txt").exists()
+    assert wt.exists()
+    assert stats_db.get_worktrees("admit", "902")
+
+
+def test_settle_worktrees_before_turn_surfaces_conflict(tmp_path, monkeypatch):
+    monkeypatch.setattr("agent.runners.get_active_msg_ids", lambda: set())
+    stats_db.init_db()
+    repo = init_repo(tmp_path / "repo")
+    wt = ensure_worktree(repo, "admit", "903")
+    stats_db.save_worktree("admit", "903", str(repo), str(wt), branch_name("admit", "903"))
+    (repo / "file.txt").write_text("source edit\n")
+    (wt / "file.txt").write_text("turn edit\n")
+
+    blockers = asyncio.run(settle_worktrees_before_turn("admit", [repo]))
+
+    assert blockers
+    assert blockers[0]["status"] == "conflict"
+    assert blockers[0]["conflicts"] == ["file.txt"]
+    assert stats_db.get_worktrees("admit", "903")[0]["status"] == "conflict"
 
 
 # ---------------------------------------------------------------------------
