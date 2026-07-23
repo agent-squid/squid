@@ -2607,7 +2607,6 @@ const SQUID_COMMANDS = [
   { name: 'stop',         desc: 'kill running process for current topic',             args: false },
   { name: 'stopall',      desc: 'kill + drain queue for current topic',               args: false },
   { name: 'deq',          desc: 'drain queue (deq N removes Nth item)',               args: true  },
-  { name: 'publish',      desc: 'commit and push synced code-root changes',            args: true  },
   { name: 'restart',      desc: 'restart the squid server — kills any in-flight prompts (confirms first)', args: false },
   { name: 'refresh',      desc: 'hard refresh this browser tab — clears cache, server untouched', args: false },
   { name: 'f', alias: 'filter', desc: 'filter — e.g. /f #topic  ·  /f @agent!  ·  /f reset', args: true },
@@ -2628,8 +2627,6 @@ function parseCommand(message) {
   if (/^stop$/i.test(t))         return { command: 'stop' };
   if (/^stopall$/i.test(t))      return { command: 'stopall' };
   if (/^clear$/i.test(t))        return { command: 'clear' };
-  const mp = t.match(/^publish(?:\s+([\s\S]*))?$/i);
-  if (mp) return { command: 'publish', message: (mp[1] || '').trim() };
   if (/^(?:bookmarks|bm)$/i.test(t)) return { command: 'bookmarks' };
   if (/^prompts$/i.test(t))      return { command: 'prompts' };
   if (/^status$/i.test(t))       return { command: 'status' };
@@ -2746,29 +2743,6 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0, opt
       feedbackEl.textContent = `${cleared.join(', ')} — session${cleared.length === 1 ? '' : 's'} cleared`;
     } catch {
       feedbackEl.textContent = `${cmd.command} — request failed`;
-    }
-    return;
-  }
-
-  if (cmd.command === 'publish') {
-    const feedbackEl = showCmdFeedback('publish…');
-    try {
-      const body = { command: 'publish', topic };
-      if (cmd.message) body.message = cmd.message;
-      const res = await fetch('/cmd', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json();
-      if (!data.ok) {
-        feedbackEl.textContent = `publish failed: ${data.error || 'unknown error'}`;
-        return;
-      }
-      const count = Array.isArray(data.published) ? data.published.length : 0;
-      feedbackEl.textContent = `publish #${topic} — committed and pushed ${count} repo${count === 1 ? '' : 's'}`;
-    } catch {
-      feedbackEl.textContent = 'publish — request failed';
     }
     return;
   }

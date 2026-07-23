@@ -163,17 +163,13 @@ def test_run_echo_resumes_the_given_session_id():
     assert chunks[1]["_stats"]["session_id"] == "prior-session"
 
 
-def test_child_env_prepends_squid_tool_path_and_applies_backend_env(monkeypatch):
+def test_child_env_applies_backend_env(monkeypatch):
     monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("REMOVE_ME", "1")
 
-    def fake_prepend(env):
-        env["PATH"] = "/tmp/squid/bin:" + env["PATH"]
-        return env
+    env = _child_env({"PATH": "/custom/bin", "TOKEN": "kept", "REMOVE_ME": None})
 
-    with patch("agent.runners.prepend_tool_path", fake_prepend):
-        env = _child_env({"PATH": "/custom/bin", "TOKEN": "kept", "REMOVE_ME": None})
-
-    assert env["PATH"] == "/tmp/squid/bin:/custom/bin"
+    assert env["PATH"] == "/custom/bin"
     assert env["TOKEN"] == "kept"
     assert "REMOVE_ME" not in env
 

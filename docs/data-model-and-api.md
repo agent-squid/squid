@@ -364,14 +364,12 @@ Run a topic-scoped control command.
 **Request body**
 ```json
 {
-  "command": "stop | stopall | deq | list | restart | clear | stop_msg | journal | publish",
+  "command": "stop | stopall | deq | list | restart | clear | stop_msg | journal",
   "topic":   "string (default: \"default\")",
   "agent":   "string | null  — scopes stop/stopall to one agent lane; required for clear if no sticky",
   "adhoc":   "boolean | null — scopes stop/stopall to adhoc-only turns",
   "pos":     "integer | null  — deq only: null=all, 1=first, -1=last",
-  "msg_id":  "integer | null  — stop_msg only: kill the process running this message",
-  "message": "string | null — publish only: commit message",
-  "tag":     "string | null — publish only: tag to move to the published commit"
+  "msg_id":  "integer | null  — stop_msg only: kill the process running this message"
 }
 ```
 
@@ -385,7 +383,6 @@ Run a topic-scoped control command.
 { "ok": true, "topics": [...] }                // list
 { "ok": true, "killed": int }                  // stop_msg
 { "ok": true, "file": "path" }                 // journal
-{ "ok": true, "published": [...] }             // publish
 { "ok": false, "error": "..." }                // 400
 ```
 

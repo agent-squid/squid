@@ -24,13 +24,6 @@ def remap_worktree_paths(text: str, worktree_sources: dict[str, str]) -> str:
     return remapped
 
 
-def _turn_has_code_changes(tool_events: list[dict]) -> bool:
-    return any(
-        event.get("name") == "GitDiff" and bool(event.get("files"))
-        for event in tool_events
-    )
-
-
 def _longest_worktree_path_prefix_suffix(text: str, worktree_paths: list[str]) -> int:
     """Length of the longest text suffix that could become a worktree path."""
     max_len = 0
@@ -517,47 +510,6 @@ class TopicWorker:
                     worktree_sync_elapsed_ms or 0.0,
                     ",".join(worktree_sync_statuses) if worktree_sync_statuses else "-",
                 )
-
-            if item.msg_id is not None:
-                from .publish import PublishError, pop_deferred_publish, publish_code_roots
-                pending_publish = pop_deferred_publish(item.topic, item.msg_id)
-                if pending_publish:
-                    if _turn_has_code_changes(tool_events):
-                        await _emit_tool({
-                            "name": "SquidPublish",
-                            "status": "blocked",
-                            "error": "publish/tag cannot run in the same turn as code changes; wait for sync, then publish in a separate turn",
-                        })
-                    else:
-                        try:
-                            from .memory import topic_memory_squid_config
-
-                            roots = topic_memory_squid_config(item.topic).get("code_roots") or []
-                            published = await asyncio.to_thread(
-                                publish_code_roots,
-                                item.topic,
-                                roots,
-                                message=pending_publish.message,
-                                tag=pending_publish.tag,
-                            )
-                            await _emit_tool({
-                                "name": "SquidPublish",
-                                "status": "published",
-                                "published": [repo.__dict__ for repo in published],
-                            })
-                        except PublishError as exc:
-                            await _emit_tool({
-                                "name": "SquidPublish",
-                                "status": "blocked",
-                                "error": str(exc),
-                            })
-                        except Exception as exc:
-                            log.exception("deferred publish failed after turn msg_id=%s", item.msg_id)
-                            await _emit_tool({
-                                "name": "SquidPublish",
-                                "status": "error",
-                                "error": str(exc),
-                            })
 
             content = raw
             context_json = json.dumps(tool_events) if tool_events else None

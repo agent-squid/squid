@@ -532,46 +532,6 @@ def test_clear_command_rejects_unknown_agent():
     clear_session.assert_not_called()
 
 
-def test_publish_command_uses_topic_code_roots():
-    client = TestClient(server.app)
-    with patch("agent.server.topic_memory_squid_config", return_value={"code_roots": ["/repo"]}), \
-         patch("agent.publish.publish_code_roots", return_value=[SimpleNamespace(
-             repo_root="/repo",
-             branch="main",
-             commit="abc123",
-             files=["app.py"],
-             pushed=True,
-         )]) as publish:
-        res = client.post("/cmd", json={
-            "command": "publish",
-            "topic": "squid",
-            "message": "ship it",
-            "tag": "v0.1",
-        })
-
-    assert res.status_code == 200
-    assert res.json()["published"][0]["repo_root"] == "/repo"
-    publish.assert_called_once_with("squid", ["/repo"], message="ship it", tag="v0.1")
-
-
-def test_publish_command_defers_when_called_from_turn_helper():
-    client = TestClient(server.app)
-    with patch("agent.publish.defer_publish") as defer_publish, \
-         patch("agent.publish.publish_code_roots") as publish:
-        res = client.post("/cmd", json={
-            "command": "publish",
-            "topic": "squid",
-            "msg_id": 7120,
-            "message": "ship it",
-            "tag": "v0.1",
-        })
-
-    assert res.status_code == 200
-    assert res.json() == {"ok": True, "deferred": True, "msg_id": 7120}
-    defer_publish.assert_called_once_with("squid", 7120, message="ship it", tag="v0.1")
-    publish.assert_not_called()
-
-
 def test_health_returns_harnesses_and_providers_without_backend_aliases():
     client = TestClient(server.app)
     response = client.get("/health")

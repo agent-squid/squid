@@ -16,7 +16,6 @@ import time
 from typing import AsyncGenerator, List, Optional, Union
 
 from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, OPENCODE_PATH, PI_PATH, FIRST_BYTE_TIMEOUT, RESPONSE_TIMEOUT, PROXY_ENV
-from .tool_scripts import prepend_tool_path
 
 # ---------------------------------------------------------------------------
 # Process registry
@@ -192,7 +191,7 @@ def _child_env(extra_env: Optional[dict] = None) -> dict:
                 env.pop(name, None)
             else:
                 env[name] = value
-    return prepend_tool_path(env)
+    return env
 
 
 def _claude_replayed_user_content(event: dict) -> Optional[str]:

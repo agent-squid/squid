@@ -147,7 +147,7 @@ dispatcher = TopicDispatcher()
 os.environ.pop("SQUID_NATIVE_CLAUDE_TOKEN", None)
 
 _SQUID_CHAT_COMMANDS = frozenset({
-    "clear", "deq", "f", "filter", "help", "publish", "remote", "restart",
+    "clear", "deq", "f", "filter", "help", "remote", "restart",
     "s", "search", "status", "stop", "stopall",
 })
 
@@ -401,27 +401,12 @@ def _codex_bearer_header(token: str) -> Optional[str]:
 
 
 class CmdRequest(BaseModel):
-    command: Literal["stop", "stopall", "deq", "list", "restart", "clear", "stop_msg", "journal", "publish"]
+    command: Literal["stop", "stopall", "deq", "list", "restart", "clear", "stop_msg", "journal"]
     topic: str = "default"
     agent: Optional[str] = None
     adhoc: Optional[bool] = None
     pos: Optional[int] = None
     msg_id: Optional[int] = None
-    message: Optional[str] = None
-    tag: Optional[str] = None
-
-
-async def publish_topic(topic: str, message: Optional[str] = None, tag: Optional[str] = None) -> dict:
-    from .publish import publish_code_roots
-
-    roots = topic_memory_squid_config(topic).get("code_roots") or []
-    published = await asyncio.to_thread(
-        publish_code_roots, topic, roots, message=message, tag=tag
-    )
-    return {
-        "ok": True,
-        "published": [repo.__dict__ for repo in published],
-    }
 
 
 def _validate_config_content(content: str) -> dict:
@@ -1168,17 +1153,6 @@ async def run_cmd(req: CmdRequest):
         if path:
             return JSONResponse({"ok": True, "file": str(path)})
         return JSONResponse({"ok": False, "error": "generation failed or no turns"}, status_code=500)
-
-    if req.command == "publish":
-        from .publish import PublishError, defer_publish
-        if req.msg_id is not None:
-            defer_publish(topic, req.msg_id, message=req.message, tag=req.tag)
-            return JSONResponse({"ok": True, "deferred": True, "msg_id": req.msg_id})
-        try:
-            result = await publish_topic(topic, req.message, req.tag)
-        except PublishError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status_code)
-        return JSONResponse(result)
 
     return JSONResponse({"ok": False, "error": "unknown command"}, status_code=400)
 
