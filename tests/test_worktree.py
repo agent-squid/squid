@@ -107,6 +107,16 @@ def test_ensure_worktree_has_no_git(tmp_path):
     assert br not in result.stdout
 
 
+def test_ensure_worktree_prunes_temporary_git_worktree_registration(tmp_path):
+    repo = init_repo(tmp_path / "repo")
+    wt = ensure_worktree(repo, "t", "102b")
+
+    result = git(repo, "worktree", "list", "--porcelain")
+
+    assert str(wt) not in result.stdout
+    assert not (wt / ".git").exists()
+
+
 def test_ensure_worktree_reuses_existing(tmp_path):
     repo = init_repo(tmp_path / "repo")
     wt1 = ensure_worktree(repo, "t", "103")

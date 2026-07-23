@@ -1,7 +1,7 @@
 ---
 status: accepted (branchless isolation implemented; prior worktree/branch mechanism superseded)
 date: 2026-07-09
-updated: 2026-07-22
+updated: 2026-07-23
 ---
 # ADR-0025: Per-Turn Git Worktree Isolation for Agent Changes
 
@@ -130,8 +130,11 @@ turn starts
     - with `worktree.track_dirty_changes: true`, Squid snapshots repo_root's
       current dirty/untracked tree and creates a hidden BASE_COMMIT parented
       to HEAD.
-  → materialize BASE_COMMIT into a fresh directory with NO .git present via
-    `git archive <base_commit> | tar -x`, not `git worktree add`.
+  → materialize BASE_COMMIT into a fresh directory by using
+    `git worktree add --detach` as a fast checkout primitive, then immediately
+    remove the `.git` link from the turn directory and run `git worktree
+    prune` in repo_root before returning the path to the agent. The
+    agent-visible result is still a plain directory with NO `.git` present.
     Dependency/cache dirs are symlinked in exactly as today
     (`_link_dependency_dirs`).
   → agent runs against that directory for however long it takes; no lock is
@@ -156,11 +159,13 @@ turn ends
   → release the lock.
 ```
 
-No branch, ref, or `.git` is ever created in the agent-visible turn
-directory, so there is no separate namespace for a push/PR to leak into. The
-only real `git worktree` used by the shipped implementation is the disposable
-integration worktree created after the turn, under Squid control, for merge
-and conflict handling.
+No branch, ref, or `.git` is ever present in the agent-visible turn
+directory, so there is no separate namespace for a push/PR to leak into. Git
+may briefly register the turn directory as a detached worktree while Squid is
+materializing files, but that linkage is severed and pruned before any agent
+process can see the path. The other real `git worktree` used by the shipped
+implementation is the disposable integration worktree created after the turn,
+under Squid control, for merge and conflict handling.
 
 ### Resolved: dirty-tree tracking is opt-in, off by default
 
@@ -211,13 +216,15 @@ worktree isolation itself is on.
   because Squid must create the turn directory before it knows whether the
   backend will edit files. Promotion-time repo_root snapshotting is skipped
   when the cached GitDiff tree proves the turn made no file changes.
-- **Reverting to real `git worktree add` instead of a bare directory does
-  not reduce this cost.** The expensive step is capturing *repo_root's* dirty
-  state, which is identical either way; only the turn side's materialization
-  mechanism changes. Real worktrees also reopen the exact `git push`/`branch`
-  leak this ADR's redesign exists to close (naming-pattern pre-push guards
-  were already shown insufficient — a model just picks an unblocked name), so
-  it's a worse trade on both axes, not a cost fix.
+- **Using `git worktree add` only as a checkout primitive does not reduce this
+  cost.** The expensive step is capturing *repo_root's* dirty state, which is
+  identical either way; only the turn side's materialization mechanism
+  changes. Agent-visible real worktrees would reopen the exact
+  `git push`/`branch` leak this ADR's redesign exists to close
+  (naming-pattern pre-push guards were already shown insufficient — a model
+  just picks an unblocked name). The accepted compromise is to use detached
+  worktree checkout for speed, then remove `.git` and prune the registration
+  before exposing the directory.
 - **An agent's own `git status`/`git diff` habits don't substitute for this
   either.** Under the branchless design the turn directory has no `.git`, so
   those calls are simply inert there. In fallback mode (isolation off),
@@ -334,7 +341,9 @@ turn starts
   → with `track_dirty_changes: false`, use HEAD as BASE_COMMIT
   → with `track_dirty_changes: true`, capture repo_root's dirty working-tree
     content as SEED_TREE and create hidden BASE_COMMIT from SEED_TREE
-  → create a plain branchless turn directory from BASE_COMMIT
+  → create a detached Git worktree from BASE_COMMIT as a checkout primitive
+  → remove `.git` and prune Git's worktree registration, leaving a plain
+    branchless turn directory
   → run the agent against that directory
 
 turn ends

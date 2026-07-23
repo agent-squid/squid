@@ -146,22 +146,28 @@ def _snapshot_tree(repo_root: Path) -> str:
 
 def _materialize_tree(repo_root: Path, commit: str, dest: Path) -> None:
     """
-    Extract commit's tree content into dest as plain files. dest is never a
-    git repo — no .git, no branch, nothing for a turn to `git branch`/`push`/
-    `gh pr create` against, regardless of what name it tries (ADR-0025).
+    Materialize commit's tree content into dest as plain files. Git's
+    detached worktree checkout is used as the fast file population primitive,
+    then the .git linkage is removed and the source repo's worktree registry
+    is pruned before the path is returned to an agent.
     """
-    dest.mkdir(parents=True, exist_ok=True)
-    archive = subprocess.Popen(
-        ["git", "archive", commit], cwd=str(repo_root), stdout=subprocess.PIPE,
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    result = _run_git(
+        repo_root, "worktree", "add", "--detach", str(dest), commit, check=False,
     )
-    extract = subprocess.run(["tar", "-x", "-C", str(dest)], stdin=archive.stdout)
-    archive.stdout.close()
-    archive.wait()
-    if archive.returncode != 0 or extract.returncode != 0:
-        raise RuntimeError(
-            f"materializing {commit} into {dest} failed "
-            f"(archive exit {archive.returncode}, tar exit {extract.returncode})"
-        )
+    if result.returncode != 0:
+        raise RuntimeError(f"failed to create temporary worktree {dest}: {result.stderr.strip()}")
+
+    git_link = dest / ".git"
+    try:
+        git_link.unlink()
+        prune = _run_git(repo_root, "worktree", "prune", check=False)
+        if prune.returncode != 0:
+            raise RuntimeError(f"failed to prune temporary worktree registry: {prune.stderr.strip()}")
+    except Exception:
+        _run_git(repo_root, "worktree", "remove", "--force", str(dest), check=False)
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
 
 
 def _snapshot_dir(repo_root: Path, work_tree: Path) -> str:
