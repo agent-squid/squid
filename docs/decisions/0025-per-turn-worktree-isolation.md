@@ -47,6 +47,14 @@ integration worktree; unresolved conflict or promotion-failure rows block new
 turns against the affected repo instead of silently starting a fresh isolated
 turn.
 
+User-visible commit/push is now an explicit Squid-owned publish action after
+promotion, not an agent-owned Git operation inside the isolated directory.
+Squid exposes a model-facing `squid-publish --topic <topic>` helper in the
+PATH of Squid-launched CLI subprocesses. The helper reads `~/.squid/squid.yaml`
+for the local server address and calls the existing `POST /cmd` publish path,
+which delegates to `publish_code_roots(...)`. This keeps the commit/push/tag
+operation in repo_root, after all per-turn worktrees for the topic are synced.
+
 ### Configuring the shipped implementation
 
 Shipped enabled in `config/squid.yaml.example`. To opt out, set
@@ -230,12 +238,19 @@ worktree isolation itself is on.
 - **Per-turn auto-commit onto the real branch is not part of the shipped
   design.** Squid promotes the merged tree back to repo_root as ordinary
   working-tree edits. The user's branch does not advance until the user or an
-  explicit future Squid action commits in repo_root.
+  explicit Squid publish action commits in repo_root.
 - **Squash-on-push is not installed.** It was considered as a way to make
   automatic per-turn commits look like normal history before push, but the
   shipped design avoids creating those user-visible commits in the first
   place. There is therefore no Squid-owned `pre-push` hook in the current
   implementation.
+- **Publish is explicit and Squid-owned.** `squid-publish --topic <topic>`
+  is the model-facing command; `/publish [message]` remains the UI/composer
+  shortcut. Both hit `POST /cmd {command: "publish", ...}` and run
+  `publish_code_roots(...)` in the source repo, never in the branchless turn
+  directory. Publish refuses if any topic worktree row is not `synced`, if the
+  repo has unresolved merge conflicts, or if the user already has staged
+  changes that would be mixed with Squid's commit.
 - Per-backend tool-call hook support (for a future finer-grained corruption
   guard, separate from bleed prevention) hasn't been surveyed beyond
   confirming none exists in this codebase today.
@@ -506,15 +521,18 @@ drift collides again.
 
 ### Commit requests
 
-An agent may still run `git commit` inside its isolated turn or integration
-worktree if the user asks it to "commit it." That commit is not user history by
-default, because it lands outside the source branch. Sync should promote the
-resulting file tree to repo_root the same way as any other turn output.
+An agent must not run `git commit`, `git push`, `git tag`, or PR commands
+inside its isolated turn directory. The branchless turn directory has no
+`.git`, so normal Git commands there are inert; more importantly, the
+user-visible history boundary belongs to Squid after promotion, not to the
+agent while it is editing a temporary copy.
 
-A user-visible commit, if Squid supports one, must happen only after successful
-promotion and must run in repo_root against the promoted local changes. That
-keeps the mental model simple: Squid sync creates local changes; committing
-those changes is a separate normal repo_root operation.
+A user-visible commit/push happens through Squid's explicit publish path:
+`squid-publish --topic <topic> [-m <message>] [--tag <tag>]` for agent
+subprocesses, or `/publish [message]` in the UI. Publish happens only after
+successful promotion and runs in repo_root against the promoted local changes.
+That keeps the mental model simple: Squid sync creates local changes; publish
+turns the synced topic code-root changes into normal Git history.
 
 ### Rejected alternatives
 
@@ -610,11 +628,11 @@ directly against the real working tree, same as Option 1:
 - Bad (shipped design): because promoted changes are ordinary working-tree
   edits, the user's branch accumulates changes without user-visible commit
   logs. Squid's audit trail lives in stored turn metadata/diffs, not Git
-  history, unless a future explicit commit action is added.
+  history, until the user or model runs the explicit Squid publish action.
 - Bad (shipped design): a user-visible commit cannot be a raw `git commit`
   performed inside the isolated worktree. Squid must promote the file state to
-  repo_root first, then commit in repo_root if it supports an explicit commit
-  action.
+  repo_root first, then commit/push in repo_root through the Squid-owned
+  publish path.
 - Bad (all worktree designs): dependency directories are symlinks — deleting one
   from inside a worktree deletes the real directory in repo_root.
 - Bad (all worktree designs): if Squid crashes mid-turn, stale turn
@@ -760,6 +778,14 @@ turn N ends  [topic_queue.py: _process]
 turn N+1 dispatch  [topic_queue.py: TopicDispatcher.dispatch]
   → fires worktree.cleanup_worktrees(topic) as a background task
   → sweep removes turn N's worktree once inactive and past grace period
+
+explicit publish  [agent/tool_scripts.py → server.py → publish.py]
+  → model or user runs `squid-publish --topic <topic> [-m <message>] [--tag <tag>]`
+    or the UI `/publish [message]` command
+  → Squid verifies all worktree rows for the topic are `synced`
+  → for each configured topic code root, group by repo_root and commit only
+    changed paths under those code roots
+  → push the current branch and, when requested, move/push the tag
 ```
 
 ### Sync now, remove later
