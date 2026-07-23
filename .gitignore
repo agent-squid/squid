@@ -8,7 +8,6 @@ dist/
 squid.db
 .squid.pid
 tests/e2e/node_modules
-ui/vendor
 tests/e2e/playwright-report/
 tests/e2e/test-results/
 context/journals/
