@@ -4009,6 +4009,10 @@ async function sendMessage(text, opts = {}) {
   const _pinnedIds = _injectablePinnedIds(topic, _effectiveAgent, adhoc, lookback);
   const _extraPinnedIds = Array.isArray(opts.extraPinnedIds) ? opts.extraPinnedIds : [];
   const _contextIds = [...new Set([..._lookbackIds, ..._pinnedIds, ..._extraPinnedIds])];
+  const _attachedFiles = getAttachedFiles();
+  const _messageForServer = _attachedFiles.length
+    ? `${message}\n\nFiles:\n${_attachedFiles.map(f => `- ${f.path}`).join('\n')}`
+    : message;
 
   try {
     startProcPoll({ hold: true });
@@ -4016,7 +4020,7 @@ async function sendMessage(text, opts = {}) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        message, topic, agent, lookback, adhoc, source,
+        message: _messageForServer, topic, agent, lookback, adhoc, source,
         ...(flowRoute ? { flow_route: flowRoute, ...(flowRunId ? { flow_run_id: flowRunId } : {}) } : {}),
         ...(adhoc && lookback > 0 ? { lookback_via_pins: true } : {}),
         ...(_includeTopicMemory ? { include_topic_memory: true } : {}),
@@ -11443,6 +11447,21 @@ function getPinnedItems() {
   try { return (JSON.parse(localStorage.getItem('pinnedItems') || '[]')).sort((a, b) => a.id - b.id); } catch { return []; }
 }
 function setPinnedItems(items) { localStorage.setItem('pinnedItems', JSON.stringify(items)); }
+
+function getAttachedFiles() {
+  try { return JSON.parse(localStorage.getItem('attachedFiles') || '[]'); } catch { return []; }
+}
+function setAttachedFiles(items) { localStorage.setItem('attachedFiles', JSON.stringify(items)); }
+function addAttachedFile(path) {
+  const items = getAttachedFiles();
+  if (items.some(f => f.path === path)) return;
+  setAttachedFiles([...items, { path, name: path.split('/').filter(Boolean).pop() || path }]);
+  updatePinCount();
+  if (pinPanel.classList.contains('open')) renderPinPanel();
+}
+function openFileUploadPicker() {
+  openFileViewer(null, null, null, null, null, { onPick: addAttachedFile });
+}
 function clearPinnedItems() {
   setPinnedItems([]);
   document.querySelectorAll('.msg-pin-btn.pinned').forEach(b => b.classList.remove('pinned'));
@@ -11729,7 +11748,7 @@ function updatePinCount() {
     selectedCount = new Set(selectedIds).size + (memoryState.selected ? 1 : 0);
     pendingCount = new Set(pendingIds).size + (memoryState.pending ? 1 : 0);
   }
-  const savedPins = getPinnedItems().length;
+  const savedPins = getPinnedItems().length + getAttachedFiles().length;
   const badgeCount = selectedCount || pendingCount || savedPins;
   pinCountEl.textContent = badgeCount || '';
   pinCountEl.classList.toggle('visible', badgeCount > 0);
@@ -11842,6 +11861,18 @@ function renderPinPanel() {
     html += '<div style="padding:0.5rem 0.8rem;color:#484858;font-size:0.78em">No pins yet.<br>Click <svg width="10" height="11" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true" style="vertical-align:-0.1em"><path d="M25 21v1H8v-1l2-2L11 4L9 2V1h15v1l-2 2l1 15l2 2zM16 31h1l1-8h-3l1 8z"/></svg> on any response to add it.</div>';
   }
 
+  const attachedFiles = getAttachedFiles();
+  if (attachedFiles.length) {
+    html += `<div class="pin-section-label">Files</div>`;
+    attachedFiles.forEach(file => {
+      html += `<div class="pin-item" data-file-path="${escapeHtml(file.path)}">
+        <span class="pin-item-tag"><span class="material-symbols-outlined" aria-hidden="true">description</span></span>
+        <span class="pin-item-preview">${escapeHtml(file.path)}</span>
+        <button class="pin-item-remove" data-file-remove="${escapeHtml(file.path)}" type="button">✕</button>
+      </div>`;
+    });
+  }
+
   listEl.innerHTML = html;
   listEl.querySelectorAll('[data-memory-edit]').forEach(el => {
     el.addEventListener('mousedown', e => {
@@ -11876,7 +11907,20 @@ function renderPinPanel() {
       renderPinPanel();
     });
   });
-  listEl.querySelectorAll('.pin-item-remove').forEach(btn => {
+  listEl.querySelectorAll('.pin-item[data-file-path]').forEach(row => {
+    row.querySelectorAll('.pin-item-preview').forEach(el => {
+      el.addEventListener('click', () => openFileViewer(row.dataset.filePath));
+    });
+  });
+  listEl.querySelectorAll('[data-file-remove]').forEach(btn => {
+    btn.addEventListener('mousedown', e => {
+      e.preventDefault();
+      setAttachedFiles(getAttachedFiles().filter(f => f.path !== btn.dataset.fileRemove));
+      updatePinCount();
+      renderPinPanel();
+    });
+  });
+  listEl.querySelectorAll('.pin-item-remove[data-id]').forEach(btn => {
     btn.addEventListener('mousedown', e => {
       e.preventDefault();
       const id = parseInt(btn.dataset.id);
@@ -12183,6 +12227,7 @@ function initPin() {
   });
   document.getElementById('pin-panel-close').addEventListener('click', closePinPanel);
   document.getElementById('pin-panel-clear').addEventListener('click', clearPinnedItems);
+  document.getElementById('pin-panel-upload').addEventListener('click', openFileUploadPicker);
   memoryCloseBtn.addEventListener('click', closeMemoryEditor);
   memorySaveBtn.addEventListener('click', saveMemoryEditor);
   memoryModal.addEventListener('mousedown', e => {
@@ -12453,7 +12498,7 @@ function openFilesTabView() {
   openFileViewer(null, null, null, document.getElementById('view-files'));
 }
 
-function openFileViewer(initialPath, initialLine, initialEndLine, inlineContainer = null, initialChangedLines = null) {
+function openFileViewer(initialPath, initialLine, initialEndLine, inlineContainer = null, initialChangedLines = null, pickOpts = null) {
   document.getElementById('file-modal')?.remove();
   _fvNavigate = null;
   _fvHandlePopState = null;
@@ -12654,6 +12699,11 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
 
   header.append(navBtns, breadcrumb, actions);
 
+  const pickHint = document.createElement('p');
+  pickHint.className = 'fv-roots-hint';
+  pickHint.textContent = 'Select a file to attach it as context, or upload a new one.';
+  pickHint.hidden = !pickOpts;
+
   const body = document.createElement('div');
   body.id = 'file-modal-body';
   body.textContent = 'Loading…';
@@ -12697,7 +12747,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   pathModalBox.append(pathModalHeader, pathModalBody, pathModalFooter);
   pathModal.appendChild(pathModalBox);
 
-  box.append(header, editToolbar, body, uploadInput, pathModal);
+  box.append(header, pickHint, editToolbar, body, uploadInput, pathModal);
   if (!isInline) {
     modal.appendChild(box);
     document.body.appendChild(modal);
@@ -12992,7 +13042,8 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   }
   async function uploadLocalFiles(parentPath, files, setStatus) {
     const uploadFiles = Array.from(files || []).filter(file => file?.name);
-    if (!uploadFiles.length) return;
+    if (!uploadFiles.length) return [];
+    const uploadedPaths = [];
     for (let i = 0; i < uploadFiles.length; i++) {
       const file = uploadFiles[i];
       setStatus?.(`Uploading ${i + 1}/${uploadFiles.length}: ${file.name}`);
@@ -13002,9 +13053,18 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `Upload failed: ${file.name}`);
+      uploadedPaths.push(data.path);
     }
     setStatus?.('Upload complete');
     loadFile();
+    return uploadedPaths;
+  }
+  async function uploadAndMaybePick(parentPath, files, setStatus) {
+    const uploadedPaths = await uploadLocalFiles(parentPath, files, setStatus);
+    if (pickOpts && uploadedPaths.length) {
+      uploadedPaths.forEach(p => pickOpts.onPick(p));
+      closeModal();
+    }
   }
   newFolderBtn.addEventListener('click', () => createLocalChild('folder'));
   newFileBtn.addEventListener('click', () => createLocalChild('file'));
@@ -13013,7 +13073,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
     if (pathKind !== 'directory' || !uploadInput.files?.length) return;
     uploadBtn.disabled = true;
     try {
-      await uploadLocalFiles(path, uploadInput.files);
+      await uploadAndMaybePick(path, uploadInput.files);
     } catch (err) {
       window.alert(err.message || 'Upload failed');
     } finally {
@@ -13560,7 +13620,8 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
               deleteIcon: FV_ICON_DELETE,
               onRename: entry => renameLocalPath(entry.path, entry.name, () => loadFile()),
               onDelete: entry => deleteLocalFile(entry.path, entry.name, () => loadFile()),
-              onUploadFiles: (files, setStatus) => uploadLocalFiles(data.path, files, setStatus),
+              onUploadFiles: (files, setStatus) => uploadAndMaybePick(data.path, files, setStatus),
+              onPick: pickOpts ? entry => { pickOpts.onPick(entry.path); closeModal(); } : undefined,
             });
             return;
           }
@@ -13701,6 +13762,7 @@ function _renderDirListing(container, data, opts = {}) {
       a.addEventListener('click', e => {
         e.preventDefault();
         e.stopPropagation();
+        if (!entry.is_dir && opts.onPick) { opts.onPick(entry); return; }
         if (_fvNavigate) _fvNavigate(entry.path);
         else openFileViewer(entry.path);
       });

@@ -1631,10 +1631,25 @@ body {
 #pin-panel-actions {
   display: flex;
   align-items: center;
-  gap: 0.35rem;
+  gap: 0.6rem;
 }
-#pin-panel-clear { font-size: var(--text-sm); padding: 0.12rem 0.45rem; }
+#pin-panel-clear {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: var(--text-sm);
+  padding: 0.12rem 0.45rem;
+}
 #pin-panel-clear:disabled { color: #3f3f4a; border-color: #25252f; }
+#pin-panel-upload {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: var(--text-sm);
+  padding: 0.12rem 0.45rem;
+}
+.upload-icon-mobile { display: none; }
+.clear-icon-mobile { display: none; }
 #pin-panel-close {
   background: transparent;
   border: none;
@@ -3899,7 +3914,7 @@ body {
   width: 100%;
 }
 #chip-row[hidden] { display: none; }
-#chip-actions { display: flex; align-items: center; gap: 0; margin-left: auto; flex: 0 0 auto; }
+#chip-actions { display: flex; align-items: center; gap: 0.3rem; margin-left: auto; flex: 0 0 auto; }
 .composer-tool-btn {
   display: inline-flex;
   align-items: center;
@@ -4611,6 +4626,18 @@ button {
   .close-desktop { display: none; }
   .close-mobile { display: inline; }
   .help-mobile-only { display: block; }
+  .upload-label-desktop { display: none; }
+  .upload-icon-mobile { display: inline; }
+  .clear-label-desktop { display: none; }
+  .clear-icon-mobile { display: inline; }
+  #pin-panel-upload, #pin-panel-clear {
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    gap: 0;
+    justify-content: center;
+    border-color: transparent;
+  }
 }
 
 /* inline topic tag — used in user bubbles and response context header */
