@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import subprocess
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from agent.memory import code_roots_prompt_block
@@ -430,6 +431,88 @@ def test_worker_marks_worktree_conflict_and_emits_sync_tool(caplog):
     assert mark_status_call.args == ("work", "458", "/tmp/repo", "conflict")
     assert "worktree turn timing topic=work agent=codex msg_id=458 isolated=True repos=1 setup_ms=12.3" in caplog.text
     assert "statuses=conflict" in caplog.text
+
+
+def test_worker_runs_deferred_publish_after_worktree_sync():
+    class FakeTracker:
+        def build_event(self):
+            return {
+                "name": "GitDiff",
+                "repo": "/tmp/repo",
+                "worktree_repo": "/tmp/wt",
+                "worktree_status": "pending",
+                "files": [{"status": "M", "path": "app.txt"}],
+                "diff": "diff --git a/app.txt b/app.txt\n",
+            }
+
+        def build_no_change_event(self):
+            return {"name": "GitDiff", "files": [], "no_changes": True}
+
+        def cleanup(self):
+            return None
+
+    async def fake_runner(*args, **kwargs):
+        yield "publish queued"
+
+    async def run():
+        worker = TopicWorker("work")
+        item = QueueItem(
+            seq=0,
+            topic="work",
+            agent="codex",
+            prompt="hello",
+            context_history=[],
+            backend="codex",
+            model=None,
+            cwd="/tmp/wt",
+            code_roots=["/tmp/wt"],
+            adhoc=True,
+            msg_id=459,
+            worktree_setup_elapsed_ms=12.3,
+            worktree_isolated=True,
+        )
+        rec = {
+            "repo_root": "/tmp/repo",
+            "worktree_path": "/tmp/wt",
+            "integration_worktree_path": "/tmp/wt-integration",
+        }
+        published_repo = SimpleNamespace(
+            repo_root="/tmp/repo",
+            branch="main",
+            commit="abc123",
+            files=["app.txt"],
+            pushed=True,
+            tag="v0.1",
+            tag_pushed=True,
+        )
+        with patch("agent.runners.run_codex", fake_runner), \
+             patch("agent.stats_db.get_worktrees", return_value=[rec]), \
+             patch("agent.git_changes.prepare_trackers", return_value=[FakeTracker()]), \
+             patch("agent.worktree.sync_after_turn", return_value=[]), \
+             patch("agent.stats_db.mark_worktree_synced"), \
+             patch("agent.publish.pop_deferred_publish", return_value=SimpleNamespace(message="ship it", tag="v0.1")), \
+             patch("agent.memory.topic_memory_squid_config", return_value={"code_roots": ["/repo"]}), \
+             patch("agent.publish.publish_code_roots", return_value=[published_repo]) as publish, \
+             patch("agent.stats_db.insert_run_event"), \
+             patch("agent.stats_db.update_assistant_message"), \
+             patch("agent.stats_db.set_topic_session"), \
+             patch("agent.stats_db.save_stats"):
+            await worker._process(item)
+        chunks = []
+        while True:
+            chunk = await item.out_q.get()
+            chunks.append(chunk)
+            if chunk is None:
+                break
+        return chunks, publish.call_args
+
+    chunks, publish_call = asyncio.run(run())
+    tools = [chunk["_tool"] for chunk in chunks if isinstance(chunk, dict) and "_tool" in chunk]
+    assert [tool["name"] for tool in tools] == ["GitDiff", "WorktreeSync", "SquidPublish"]
+    assert tools[2]["status"] == "published"
+    assert tools[2]["published"][0]["commit"] == "abc123"
+    assert publish_call.args == ("work", ["/repo"])
+    assert publish_call.kwargs == {"message": "ship it", "tag": "v0.1"}
 
 
 def test_worker_emits_no_change_git_diff_when_tracked_tree_is_clean(tmp_path):

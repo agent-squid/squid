@@ -4,6 +4,7 @@ publish.py - Squid-owned commit/push for promoted code-root changes.
 from __future__ import annotations
 
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -28,6 +29,26 @@ class PublishedRepo:
     pushed: bool
     tag: Optional[str] = None
     tag_pushed: bool = False
+
+
+@dataclass
+class PendingPublish:
+    message: Optional[str] = None
+    tag: Optional[str] = None
+
+
+_pending_publish_lock = threading.Lock()
+_pending_publish: dict[tuple[str, int], PendingPublish] = {}
+
+
+def defer_publish(topic: str, msg_id: int, *, message: Optional[str] = None, tag: Optional[str] = None) -> None:
+    with _pending_publish_lock:
+        _pending_publish[(topic, msg_id)] = PendingPublish(message=message, tag=tag)
+
+
+def pop_deferred_publish(topic: str, msg_id: int) -> Optional[PendingPublish]:
+    with _pending_publish_lock:
+        return _pending_publish.pop((topic, msg_id), None)
 
 
 def _run_git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:

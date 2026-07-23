@@ -220,23 +220,13 @@ def code_roots_prompt_block(code_roots: list[str], isolated: bool = False, topic
         "<squid_code_roots>",
         *roots,
         "</squid_code_roots>",
-        "Treat these paths as the primary codebase roots for this topic. Prefer working in them over the process working directory.",
+        "Use these paths, not process cwd, as the codebase roots.",
     ]
     if isolated:
-        publish_topic = normalize_topic_slug(topic) if topic else "<topic>"
         lines.append(
-            "You are the sole writer in this isolated turn directory for this turn. Trust your writes — never re-read a file to confirm an edit, never re-verify state you just set. Do not delete dependency/cache directories such as .venv, node_modules, or vendor; they may be symlinks to the source repo."
-        )
-        lines.append(
-            "This is a temporary Squid staging copy, intentionally not a Git repository. Edit files here only; Squid will diff and sync the changes automatically after the turn."
-        )
-        lines.append(
-            "Do not run git init, commit, push, branch, tag, or pull-request commands here. Do not search for, switch to, or suggest working in another checkout or source repository to make those commands work. Do not provide manual Git commands as a workaround."
-        )
-        lines.append(
-            f"If asked to commit, push, publish, branch, tag, release, or open a PR, do not perform the Git operation yourself. Run `squid-publish --topic {publish_topic}`."
-        )
-        lines.append(
-            f"For requests such as updating a version tag to the latest commit, run `squid-publish --topic {publish_topic} --tag <tag>` instead of running or suggesting git tag commands."
+            "Isolated Squid turn dir: edit here only; no `.git`; deps/cache dirs may be symlinks. "
+            "Trust writes; do not re-read just to confirm edits. "
+            "Do not run/suggest git init, commit, push, branch, tag, PR, or checkout switching. "
+            "Do not publish/tag in the same turn as code changes; Squid syncs edits back after the response completes."
         )
     return "\n".join(lines)

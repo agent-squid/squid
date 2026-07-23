@@ -397,6 +397,12 @@ async def _stream_lines(
     and blocking the subprocess before it can write to stdout.
     """
     env = _child_env(extra_env)
+    if topic:
+        env["SQUID_TOPIC"] = topic
+    if agent:
+        env["SQUID_AGENT"] = agent
+    if msg_id is not None:
+        env["SQUID_MSG_ID"] = str(msg_id)
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,

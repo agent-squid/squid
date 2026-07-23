@@ -20,6 +20,7 @@ def _script_text() -> str:
         #!{sys.executable}
         import argparse
         import json
+        import os
         import sys
         import urllib.error
         import urllib.request
@@ -59,6 +60,7 @@ def _script_text() -> str:
                 "topic": args.topic,
                 "message": args.message,
                 "tag": args.tag,
+                "msg_id": os.environ.get("SQUID_MSG_ID"),
             }}
             body = json.dumps(payload).encode("utf-8")
             request = urllib.request.Request(
@@ -85,6 +87,9 @@ def _script_text() -> str:
             if not data.get("ok"):
                 print(f"squid-publish: {{data.get('error') or data}}", file=sys.stderr)
                 return 1
+            if data.get("deferred"):
+                print("publish queued; Squid will run it after this turn syncs")
+                return 0
 
             for repo in data.get("published") or []:
                 pushed = " pushed" if repo.get("pushed") else ""

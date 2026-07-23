@@ -511,6 +511,40 @@ class TopicWorker:
                     ",".join(worktree_sync_statuses) if worktree_sync_statuses else "-",
                 )
 
+            if item.msg_id is not None:
+                from .publish import PublishError, pop_deferred_publish, publish_code_roots
+                pending_publish = pop_deferred_publish(item.topic, item.msg_id)
+                if pending_publish:
+                    try:
+                        from .memory import topic_memory_squid_config
+
+                        roots = topic_memory_squid_config(item.topic).get("code_roots") or []
+                        published = await asyncio.to_thread(
+                            publish_code_roots,
+                            item.topic,
+                            roots,
+                            message=pending_publish.message,
+                            tag=pending_publish.tag,
+                        )
+                        await _emit_tool({
+                            "name": "SquidPublish",
+                            "status": "published",
+                            "published": [repo.__dict__ for repo in published],
+                        })
+                    except PublishError as exc:
+                        await _emit_tool({
+                            "name": "SquidPublish",
+                            "status": "blocked",
+                            "error": str(exc),
+                        })
+                    except Exception as exc:
+                        log.exception("deferred publish failed after turn msg_id=%s", item.msg_id)
+                        await _emit_tool({
+                            "name": "SquidPublish",
+                            "status": "error",
+                            "error": str(exc),
+                        })
+
             content = raw
             context_json = json.dumps(tool_events) if tool_events else None
             update_assistant_message(item.msg_id, content, session_id,

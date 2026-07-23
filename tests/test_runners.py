@@ -14,6 +14,7 @@ from agent.runners import (
     _child_env,
     _proc_registry,
     _register_proc,
+    _stream_lines,
     _deregister_proc,
     kill_all_procs,
     kill_procs_by_topic,
@@ -175,6 +176,30 @@ def test_child_env_prepends_squid_tool_path_and_applies_backend_env(monkeypatch)
     assert env["PATH"] == "/tmp/squid/bin:/custom/bin"
     assert env["TOKEN"] == "kept"
     assert "REMOVE_ME" not in env
+
+
+def test_stream_lines_sets_squid_turn_env(monkeypatch):
+    captured = {}
+    fake_proc = _FakeProcess(9100, ["ok\n"])
+
+    async def fake_create_subprocess_exec(*cmd, **kwargs):
+        captured["env"] = kwargs["env"]
+        return fake_proc
+
+    async def collect():
+        return [line async for line in _stream_lines(
+            ["agent"],
+            topic="squid",
+            agent="codex",
+            msg_id=7120,
+        )]
+
+    with patch("agent.runners.asyncio.create_subprocess_exec", fake_create_subprocess_exec):
+        assert asyncio.run(collect()) == ["ok"]
+
+    assert captured["env"]["SQUID_TOPIC"] == "squid"
+    assert captured["env"]["SQUID_AGENT"] == "codex"
+    assert captured["env"]["SQUID_MSG_ID"] == "7120"
 
 
 def test_claude_oneshot_cli_passes_prompt_as_process_argument():

@@ -91,25 +91,28 @@ Notes.
     assert config["code_roots_missing"] is False
 
 
-def test_isolated_code_roots_prompt_mentions_squid_publish_command():
+def test_isolated_code_roots_prompt_blocks_publish_with_code_changes():
     prompt = memory.code_roots_prompt_block(["/repo"], isolated=True, topic="squid")
 
-    assert "Run `squid-publish --topic squid`." in prompt
+    assert "squid-publish" not in prompt
     assert "MCP" not in prompt
     assert "mcp__squid__publish" not in prompt
     assert "ToolSearch" not in prompt
-    assert "Do not run git init, commit, push, branch, tag" in prompt
+    assert "Do not run/suggest git init, commit, push, branch, tag" in prompt
+    assert "Do not publish/tag in the same turn as code changes" in prompt
+    assert "Squid syncs edits back after the response completes" in prompt
+    assert len(prompt.split()) <= 85
 
 
 def test_isolated_code_roots_prompt_forbids_git_recovery():
     block = code_roots_prompt_block(["/work/squid"], isolated=True)
 
-    assert "intentionally not a Git repository" in block
-    assert "Do not search for, switch to, or suggest working in another checkout or source repository" in block
-    assert "If asked to commit, push, publish, branch, tag, release, or open a PR" in block
-    assert "squid-publish --topic <topic> --tag <tag>" in block
-    assert "squid-publish --topic <topic>" in block
-    assert "Do not provide manual Git commands as a workaround" in block
+    assert "no `.git`" in block
+    assert "checkout switching" in block
+    assert "Do not run/suggest git init, commit, push, branch, tag" in block
+    assert "squid-publish" not in block
+    assert "Do not publish/tag in the same turn as code changes" in block
+    assert "commit, push" in block
     assert "working in the real repo" not in block
     assert "git tag -f" not in block
     assert "run that against the process's working directory" not in block

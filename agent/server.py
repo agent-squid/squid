@@ -1165,7 +1165,10 @@ async def run_cmd(req: CmdRequest):
         return JSONResponse({"ok": False, "error": "generation failed or no turns"}, status_code=500)
 
     if req.command == "publish":
-        from .publish import PublishError
+        from .publish import PublishError, defer_publish
+        if req.msg_id is not None:
+            defer_publish(topic, req.msg_id, message=req.message, tag=req.tag)
+            return JSONResponse({"ok": True, "deferred": True, "msg_id": req.msg_id})
         try:
             result = await publish_topic(topic, req.message, req.tag)
         except PublishError as exc:

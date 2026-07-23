@@ -49,11 +49,11 @@ turn.
 
 User-visible commit/push is now an explicit Squid-owned publish action after
 promotion, not an agent-owned Git operation inside the isolated directory.
-Squid exposes a model-facing `squid-publish --topic <topic>` helper in the
-PATH of Squid-launched CLI subprocesses. The helper reads `~/.squid/squid.yaml`
-for the local server address and calls the existing `POST /cmd` publish path,
-which delegates to `publish_code_roots(...)`. This keeps the commit/push/tag
-operation in repo_root, after all per-turn worktrees for the topic are synced.
+The isolated-turn prompt tells agents not to publish/tag in the same turn as
+code changes. After promotion, the UI `/publish` command or compatibility
+helper calls the existing `POST /cmd` publish path, which delegates to
+`publish_code_roots(...)`. This keeps the commit/push/tag operation in
+repo_root, after all per-turn worktrees for the topic are synced.
 
 ### Configuring the shipped implementation
 
@@ -251,9 +251,10 @@ worktree isolation itself is on.
   shipped design avoids creating those user-visible commits in the first
   place. There is therefore no Squid-owned `pre-push` hook in the current
   implementation.
-- **Publish is explicit and Squid-owned.** `squid-publish --topic <topic>`
-  is the model-facing command; `/publish [message]` remains the UI/composer
-  shortcut. Both hit `POST /cmd {command: "publish", ...}` and run
+- **Publish is explicit and Squid-owned.** Agents are instructed not to
+  publish/tag in the same turn as code changes. `/publish [message]` remains
+  the UI/composer shortcut, and compatibility helpers may also hit
+  `POST /cmd {command: "publish", ...}`. Both paths run
   `publish_code_roots(...)` in the source repo, never in the branchless turn
   directory. Publish refuses if any topic worktree row is not `synced`, if the
   repo has unresolved merge conflicts, or if the user already has staged
@@ -537,11 +538,11 @@ user-visible history boundary belongs to Squid after promotion, not to the
 agent while it is editing a temporary copy.
 
 A user-visible commit/push happens through Squid's explicit publish path:
-`squid-publish --topic <topic> [-m <message>] [--tag <tag>]` for agent
-subprocesses, or `/publish [message]` in the UI. Publish happens only after
-successful promotion and runs in repo_root against the promoted local changes.
-That keeps the mental model simple: Squid sync creates local changes; publish
-turns the synced topic code-root changes into normal Git history.
+`/publish [message]` in the UI, or a compatibility helper after the turn has
+completed. Publish happens only after successful promotion and runs in
+repo_root against the promoted local changes. That keeps the mental model
+simple: Squid sync creates local changes; publish turns the synced topic
+code-root changes into normal Git history.
 
 ### Rejected alternatives
 
@@ -789,8 +790,8 @@ turn N+1 dispatch  [topic_queue.py: TopicDispatcher.dispatch]
   → sweep removes turn N's worktree once inactive and past grace period
 
 explicit publish  [agent/tool_scripts.py → server.py → publish.py]
-  → model or user runs `squid-publish --topic <topic> [-m <message>] [--tag <tag>]`
-    or the UI `/publish [message]` command
+  → user runs the UI `/publish [message]` command, or a compatibility helper
+    after the turn has completed
   → Squid verifies all worktree rows for the topic are `synced`
   → for each configured topic code root, group by repo_root and commit only
     changed paths under those code roots
