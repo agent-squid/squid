@@ -3314,6 +3314,7 @@ function semanticRouteBackspace() {
     const before = route.slice(0, caret);
     const after = route.slice(caret);
     const agentMatch = before.match(/^(#\w+@)\w+$/);
+    const topicMatch = before.match(/^(#)\w+$/);
     const chainTargetMatch = before.match(/^(#\w+@\w+!?(?:(?:<>)|=>|>)@)\w+$/);
     const chainOriginMatch = before.match(/^(#\w+@)\w+$/);
     // Origin Broadcast (ADR-0032): drop the trailing `,#topic`, `,@agent`, or
@@ -3339,6 +3340,11 @@ function semanticRouteBackspace() {
     } else if (agentMatch && (caret === routeEnd || after.startsWith('!'))) {
       nextRoute = agentMatch[1] + after;
       nextCaret = agentMatch[1].length;
+    } else if (topicMatch && (caret === routeEnd || after.startsWith('@') || after.startsWith('!'))) {
+      // Deletes a bare "#topic" (no agent yet) back to "#" in one press, same
+      // as agentMatch does for "@agent" — lets you retype a new topic fast.
+      nextRoute = topicMatch[1] + after;
+      nextCaret = topicMatch[1].length;
     } else if (before.endsWith('@') && /^#\w+@$/.test(before) && (caret === routeEnd || after.startsWith('!'))) {
       nextRoute = before.slice(0, -1) + after;
       nextCaret = before.length - 1;
@@ -7942,7 +7948,9 @@ function _deepDiveStatsState() {
       topic: { mode: 'auto_top', values: [] },
       agent: { mode: 'auto_top', values: [] },
       session_type: { mode: 'all', values: [] },
-      status: { mode: 'all', values: [] },
+      // Error/cancelled turns don't have a stats link and break the
+      // per-turn chart, so default this view to completed turns only.
+      status: { mode: 'selected', values: ['done'] },
       flow: { mode: 'all', values: [] },
     },
     breakdown: { key: '', sort: { mode: 'name', dir: 'asc' } },
