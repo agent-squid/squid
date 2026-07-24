@@ -220,15 +220,23 @@ def code_roots_prompt_block(
     roots = _normalize_code_roots(code_roots)
     if not roots:
         return None
+    backing = _normalize_code_roots(backing_roots or []) if isolated else []
+    # Worktree folder names encode the topic slug, not the repo name, so two
+    # worktrees for different repos under the same topic can look identical
+    # at a glance (e.g. both named "sqd-squid-...") — annotate each path with
+    # its source repo so that ambiguity isn't left for the model to guess at.
+    if isolated and len(backing) == len(roots):
+        root_lines = [f"{root}  (repo: {repo})" for root, repo in zip(roots, backing)]
+    else:
+        root_lines = roots
     lines = [
         "Topic code roots:",
         "<squid_code_roots>",
-        *roots,
+        *root_lines,
         "</squid_code_roots>",
         "Use these paths, not process cwd, as the codebase roots.",
     ]
     if isolated:
-        backing = _normalize_code_roots(backing_roots or [])
         if backing:
             lines.extend([
                 "Backing git repos:",
