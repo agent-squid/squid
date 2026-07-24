@@ -70,12 +70,14 @@ script checkout.
   untouched — only the Settings notice's copy-paste command
   (`ui/app.js`'s `renderSettingsUpdateNotice`) changed, from the tarball
   re-pull + `start.sh --restart` sequence to `pipx upgrade agentsquid`.
-- **Release process**: bump `pyproject.toml`'s `version`, then
-  `uv build && uv publish`. PyPI permanently rejects re-uploading an
-  existing version, so the bump is mandatory before every publish, not
-  optional. A `git tag` is no longer required for the update mechanism to
-  function (the notify check reads `main` directly, per ADR-0030), though
-  nothing stops still tagging releases for human changelog purposes.
+- **Release process**: publish through GitHub Actions and PyPI Trusted
+  Publishing. Bump `pyproject.toml`'s `version` only when the next release
+  is ready, tag the same version as `vX.Y.Z`, then push the tag. The
+  `.github/workflows/publish.yml` workflow builds the sdist/wheel, runs
+  `twine check`, and publishes to PyPI using GitHub OIDC (`id-token:
+  write`), so no long-lived PyPI API token is stored in GitHub. PyPI
+  permanently rejects re-uploading an existing version, so the version bump
+  is mandatory before every publish, not optional.
 - **Existing GitHub tag tarball (`v0.1`) is left as-is**, not retagged or
   rebuilt — tags are treated as immutable once published. It's the last
   tarball-era release; no further tarball releases are planned. The
@@ -83,6 +85,36 @@ script checkout.
   `ui/app.js`, and the `agentsquid.ai` site (`index.html`, `index1.html`,
   `docs/quick-start.html`) are all updated to the `pipx` path in the same
   change as this ADR.
+
+## Publish Process
+
+PyPI Trusted Publishing is configured against the exact GitHub workflow,
+repository, and environment:
+
+- PyPI project: `agentsquid`
+- GitHub owner: `agent-squid`
+- GitHub repository: `squid`
+- Workflow filename: `publish.yml`
+- Environment: `pypi`
+
+Release checklist:
+
+1. Accumulate changes while `pyproject.toml` remains at the current
+   published version.
+2. When ready to release, bump `[project].version` in `pyproject.toml` to a
+   new PyPI version, e.g. `0.1.1`.
+3. Run `python3 -m build` and `python3 -m twine check dist/*` locally if
+   changing packaging metadata or included files.
+4. Commit the version bump and release changes.
+5. Create and push the matching tag, e.g. `v0.1.1`.
+6. Let GitHub Actions run `Publish to PyPI`; the job publishes only after
+   the `pypi` environment's protection rules, if any, are satisfied.
+
+The tag and package version must match. A tag `v0.1.1` with
+`version = "0.1.0"` would try to publish `0.1.0`, and PyPI would reject it
+if that version already exists. A tag `v0.1.1` with `version = "0.1.2"`
+would publish `0.1.2`, which is misleading even though PyPI would accept it
+if unused.
 
 ## Verified before publishing
 
@@ -138,9 +170,9 @@ decision itself, but found because of it.
 - Bad: PyPI publish is a one-way door per version (no re-upload, no
   delete-and-reuse) — mistakes need a new version bump, not a fix-in-place.
 - Bad: two release surfaces now exist in principle (PyPI for
-  installed/`pipx` users, GitHub for source browsing) — mitigated by
-  treating GitHub tags as historical/frozen rather than a second thing to
-  keep in lockstep.
+  installed/`pipx` users, GitHub for source browsing) — mitigated by making
+  GitHub version tags the trigger for PyPI publication, with the tag name
+  matching `pyproject.toml`'s version.
 - Bad: `pipx upgrade` only replaces installed files; it does not restart a
   currently-running `agentsquid` process. The Settings notice's copy-paste
   command reflects only the upgrade step, not the restart — acceptable for
