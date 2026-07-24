@@ -17,8 +17,8 @@ jobs:
           GH_TOKEN: ${{ secrets.AGENTSQUID_SITE_DISPATCH_TOKEN }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "Missing AGENTSQUID_SITE_DISPATCH_TOKEN secret"
-            exit 1
+            echo "::warning::Missing AGENTSQUID_SITE_DISPATCH_TOKEN secret; skipping agentsquid.ai deploy trigger"
+            exit 0
           fi
           curl --fail --silent --show-error --location \
             --request POST \
