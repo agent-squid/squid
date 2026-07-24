@@ -1,8 +1,19 @@
 ---
-status: accepted
+status: superseded
 date: 2026-07-13
+superseded: 2026-07-24
 ---
 # ADR-0030: Update Mechanism — Tag-Based Tarball Releases, Notify-Only
+
+> Superseded by [ADR-0034](0034-pypi-pipx-distribution.md). Squid is
+> published to PyPI as `agentsquid`; install/update moves from a GitHub tag
+> tarball + `bin/update.sh` to `pipx install`/`pipx upgrade agentsquid`. The
+> version-source-of-truth, `/health` field, and static-file
+> (`raw.githubusercontent.com/.../pyproject.toml`) notify-only check below are
+> all unchanged and still exactly how ADR-0034 works — only the install/update
+> *execution* mechanism changes. Kept here for the notify-only reasoning
+> (Option 2 vs. 3), which ADR-0034 builds on directly, and because the
+> deferred migration-system section still applies unchanged.
 
 ## Context and Problem Statement
 
@@ -170,3 +181,11 @@ version gate.
 - Bad: until the deferred migration system exists, any DB/config shape
   change must remain additive-only or an old running instance could
   misbehave silently.
+
+## Superseded Outcome
+
+ADR-0034 replaces the tarball/`bin/update.sh` install-and-update path with
+PyPI + `pipx`. `bin/update.sh` is never written — `pipx upgrade agentsquid`
+does what it would have, without the PID_FILE move or sibling-directory
+layout this ADR planned for. The version-source, `/health` field, and the
+notify-only static-file check are untouched.

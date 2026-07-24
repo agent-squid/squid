@@ -30,7 +30,10 @@ def test_init_db_seeds_claude_agent_without_claudecode_or_haiku_names(tmp_path, 
             "SELECT name, harness, provider, model FROM agents ORDER BY name"
         ).fetchall()
 
-    assert rows == [("claude", "claudecode", "anthropic", None)]
+    assert rows == [
+        ("clarev", "claudecode", "anthropic", None),
+        ("claude", "claudecode", "anthropic", None),
+    ]
 
 
 def test_chat_messages_source_defaults_and_can_mark_system(tmp_path, monkeypatch):
@@ -112,7 +115,29 @@ def test_init_db_seeds_five_default_agents_when_all_harnesses_are_installed(tmp_
     with sqlite3.connect(tmp_path / "squid.db") as conn:
         rows = conn.execute("SELECT name FROM agents ORDER BY name").fetchall()
 
-    assert [row[0] for row in rows] == ["claude", "codex", "cursor", "opencode", "pi"]
+    assert [row[0] for row in rows] == [
+        "clarev", "claude", "codex", "codrev", "currev",
+        "cursor", "opencode", "operev", "pi", "pirev",
+    ]
+
+
+def test_init_db_seeds_review_agents_gated_per_harness_with_role_cwd(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    monkeypatch.setattr(stats_db, "SUPPORTED_HARNESSES", frozenset({"claudecode", "codex"}))
+    monkeypatch.setattr(stats_db, "is_installed", lambda harness: harness in {"claudecode", "codex"})
+
+    stats_db.init_db()
+
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        rows = dict(conn.execute("SELECT name, cwd FROM agents").fetchall())
+
+    # Only harnesses reported installed get a review agent seeded.
+    assert set(rows) == {"claude", "codex", "clarev", "codrev"}
+    # claudecode gets the claude-specific CLAUDE.md shim; every other
+    # harness reads the shared AGENTS.md directly (see context/roles/review/).
+    assert rows["clarev"].endswith("/roles/review/claude")
+    assert rows["codrev"].endswith("/roles/review")
+    assert not rows["codrev"].endswith("/roles/review/claude")
 
 
 def test_aggregated_stats_includes_requested_chart_percentile(tmp_path, monkeypatch):

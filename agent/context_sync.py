@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -23,7 +24,28 @@ from .config import SQUID_HOME
 log = logging.getLogger(__name__)
 
 CONTEXT_DIR = str(Path.home() / ".squid" / "context")
+# Bundled default context (topics/roles seed content), shipped alongside
+# ui/ and config/ in the wheel (see pyproject.toml's force-include). Sibling
+# to this package the same way UI_DIR is in agent/server.py.
+_BUNDLED_CONTEXT = Path(__file__).parent.parent / "context"
 _last_sync_mtime: float = 0.0
+
+
+def _seed_context_if_empty() -> None:
+    """Copy the bundled default context/ into ~/.squid/context on first run.
+
+    bin/install.sh and bin/start.sh do this same "only if empty" copy for a
+    source checkout, but a pip/pipx install never runs either script, so
+    this has to also happen here — otherwise a fresh pipx install has no
+    default topics/roles content and nothing seeds it.
+    """
+    context_dir = Path(CONTEXT_DIR)
+    if context_dir.exists() and any(context_dir.iterdir()):
+        return
+    if not _BUNDLED_CONTEXT.exists():
+        return
+    context_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(_BUNDLED_CONTEXT, context_dir, dirs_exist_ok=True)
 _CODEX_MANAGED_BEGIN = "# BEGIN SQUID MANAGED MCP"
 _CODEX_MANAGED_END = "# END SQUID MANAGED MCP"
 
@@ -114,6 +136,7 @@ def sync_now() -> None:
     """Full blocking sync at daemon startup. Creates SQUID_HOME if needed."""
     global _last_sync_mtime
     os.makedirs(SQUID_HOME, exist_ok=True)
+    _seed_context_if_empty()
     _remove_legacy_mcp_context_files(Path(CONTEXT_DIR))
     if _rsync():
         _last_sync_mtime = _tree_mtime(CONTEXT_DIR)

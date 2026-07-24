@@ -102,7 +102,7 @@ from . import creds
 
 BOOT_TIME = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 try:
-    SQUID_VERSION = _pkg_version("squid")
+    SQUID_VERSION = _pkg_version("agentsquid")
 except PackageNotFoundError:
     SQUID_VERSION = "0+local"
 
@@ -2780,8 +2780,49 @@ if UI_DIR.exists():
     app.mount("/", StaticFiles(directory=UI_DIR, html=True), name="ui")
 
 
+def _configure_tailscale_serve(port: int) -> None:
+    """Best-effort, never fatal — mirrors bin/start.sh's tailscale section so
+    a pipx-installed `agentsquid` gets the same one-time persistent
+    `tailscale serve` config a source checkout's bin/start.sh already set up.
+    Tailscale remembers this across reboots; safe to check/re-run every start.
+    """
+    import shutil
+    if not shutil.which("tailscale"):
+        return
+    try:
+        status = subprocess.run(
+            ["tailscale", "serve", "status"], capture_output=True, text=True, timeout=5,
+        )
+        already = status.returncode == 0 and f"127.0.0.1:{port}" in status.stdout
+        if not already:
+            configured = subprocess.run(
+                ["tailscale", "serve", "--bg", f"127.0.0.1:{port}"],
+                capture_output=True, timeout=5,
+            ).returncode == 0
+            if not configured:
+                log.warning(
+                    "tailscale serve failed — squid will run locally only (127.0.0.1:%s). "
+                    "To enable remote access later, run: tailscale serve --bg 127.0.0.1:%s",
+                    port, port,
+                )
+                return
+        dns = ""
+        info = subprocess.run(
+            ["tailscale", "status", "--json"], capture_output=True, text=True, timeout=5,
+        )
+        if info.returncode == 0:
+            dns = json.loads(info.stdout).get("Self", {}).get("DNSName", "").rstrip(".")
+        log.info(
+            "tailscale serve: %s → https://%s/",
+            "already configured" if already else "configured", dns or "<machine-name>",
+        )
+    except Exception as e:
+        log.warning("tailscale serve check failed: %s", e)
+
+
 def main():
     import ipaddress
+    import socket
     import uvicorn
 
     host = _cfg["server"]["host"]
@@ -2800,6 +2841,26 @@ def main():
             "For remote access via Tailscale, use:\n"
             f"  tailscale serve --bg --http={port} 127.0.0.1:{port}"
         )
+
+    # Probe the port before handing off to uvicorn. uvicorn's ASGI lifespan
+    # (this app's @app.on_event("startup") hooks — orphaned-pending recovery,
+    # stalled-flow resume) runs *before* uvicorn attempts its own socket bind,
+    # so a second process racing an already-running squid on this port would
+    # otherwise mutate shared DB state before ever learning it can't take
+    # over the port. Failing fast here, ahead of the ASGI lifespan, closes
+    # that window.
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.bind((host, port))
+        probe.close()
+    except OSError as e:
+        sys.exit(
+            f"ERROR: port {port} on {host} is already in use ({e}).\n"
+            "Another squid instance is likely already running — stop it before\n"
+            "starting a new one, rather than launching a second process."
+        )
+
+    _configure_tailscale_serve(port)
 
     log.info("Starting squid on http://%s:%s", host, port)
     uvicorn.run(

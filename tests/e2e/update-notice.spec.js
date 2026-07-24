@@ -41,7 +41,7 @@ test('hamburger and Settings row get a dot, and Settings shows the update comman
   const notice = page.locator('#settings-update-notice');
   await expect(notice).toBeVisible();
   await expect(notice).toContainText('v0.1.0 → v0.2.0');
-  await expect(page.locator('#settings-update-cmd')).toContainText('v0.2.0.tar.gz');
+  await expect(page.locator('#settings-update-cmd')).toContainText('pipx upgrade agentsquid');
 });
 
 test('no dot when already on the latest version', async ({ page }) => {

@@ -1,3 +1,4 @@
+import getpass
 import hashlib
 import os
 import shutil
@@ -7,8 +8,27 @@ from typing import Optional
 import yaml
 
 _USER_CONFIG = Path.home() / ".squid" / "squid.yaml"
+_EXAMPLE_CONFIG = Path(__file__).parent.parent / "config" / "squid.yaml.example"
+
+
+def _bootstrap_config() -> None:
+    """Create ~/.squid/squid.yaml from the bundled example on first run.
+
+    bin/install.sh and bin/start.sh do this same substitution for a source
+    checkout, but a pip/pipx install never runs either script, so this has
+    to also happen here — otherwise a fresh pipx install has no config file
+    and _load_config() below crashes on the very first launch.
+    """
+    if _USER_CONFIG.exists() or not _EXAMPLE_CONFIG.exists():
+        return
+    _USER_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    text = _EXAMPLE_CONFIG.read_text(encoding="utf-8")
+    text = text.replace("/tmp/squid", f"/tmp/{getpass.getuser()}/squid")
+    _USER_CONFIG.write_text(text, encoding="utf-8")
+
 
 def _load_config() -> dict:
+    _bootstrap_config()
     return yaml.safe_load(_USER_CONFIG.read_text())
 
 

@@ -23,8 +23,8 @@
 2. Install and run AgentSquid!
 
 ```bash
-curl -L https://github.com/agent-squid/squid/archive/refs/tags/v0.1.tar.gz | tar xz
-./squid-0.1/bin/start.sh 
+curl -fsSL https://agentsquid.ai/install.sh | sh
+agentsquid
 ```
 
 3. Open in your browser:
@@ -124,10 +124,10 @@ Squid is most useful when your local machine can keep working while you are away
 
 Tailscale is a good fit for this. Its Personal plan is free for non-commercial personal use, and it creates a private WireGuard-based network across your own devices. Your phone, tablet, laptop, Mac mini, and workstation can talk inside the tailnet without opening a public port.
 
-Squid always binds to `127.0.0.1`, it never exposes itself directly on the network. `bin/start.sh` automatically configures Tailscale’s HTTPS proxy if Tailscale is installed:
+Squid always binds to `127.0.0.1`, it never exposes itself directly on the network. Starting squid automatically configures Tailscale's HTTPS proxy if Tailscale is installed:
 
 ```bash
-bin/start.sh   # configures tailscale serve automatically
+agentsquid   # configures tailscale serve automatically
 ```
 
 Type `/remote` in the chat to get a QR code with the full HTTPS URL and your

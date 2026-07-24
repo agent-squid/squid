@@ -45,7 +45,8 @@ public DNS.
 **Host setup:**
 1. In Tailscale admin, rename the machine (e.g. `agent-squid`).
 2. Keep `server.host: "127.0.0.1"` — squid always binds to loopback.
-3. Run `bin/start.sh` — it auto-configures `tailscale serve` as the HTTPS proxy.
+3. Start squid (`agentsquid`, or `bin/start.sh` from a source checkout) — it
+   auto-configures `tailscale serve` as the HTTPS proxy.
 
 **Phone/tablet access:**
 - Connect the device to the same Tailscale network.

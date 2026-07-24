@@ -197,9 +197,8 @@ function renderSettingsUpdateNotice() {
   if (!_updateInfo) { el.hidden = true; return; }
   el.hidden = false;
   document.getElementById('settings-update-text').textContent =
-    `Squid v${_updateInfo.current} → v${_updateInfo.latest} available`;
-  document.getElementById('settings-update-cmd').textContent =
-    `curl -L https://github.com/agent-squid/squid/archive/refs/tags/v${_updateInfo.latest}.tar.gz | tar xz && ./squid-${_updateInfo.latest}/bin/start.sh --restart`;
+    `Squid v${_updateInfo.current} → v${_updateInfo.latest} available — restart required after upgrading`;
+  document.getElementById('settings-update-cmd').textContent = 'pipx upgrade agentsquid';
 }
 
 async function checkForSquidUpdate(currentVersion) {
@@ -625,8 +624,8 @@ async function openRemoteQR() {
   } else {
     const reason = remoteReason;
     const msgs = {
-      not_installed: 'Tailscale is not installed.\nInstall from tailscale.com, then restart squid — bin/start.sh will configure remote access automatically.',
-      not_running:   'Tailscale is installed but not running.\nStart the Tailscale app, then run bin/start.sh again.',
+      not_installed: 'Tailscale is not installed.\nInstall from tailscale.com, then restart squid to configure remote access automatically.',
+      not_running:   'Tailscale is installed but not running.\nStart the Tailscale app, then restart squid.',
       no_dns:        'Tailscale is running but has no DNS name.\nEnable MagicDNS in your Tailscale admin console (tailscale.com/kb/1081).',
       error:         'Could not reach Tailscale. Check that the Tailscale app is running.',
     };
@@ -3859,6 +3858,10 @@ async function sendMessage(text, opts = {}) {
     return true;
   }
 
+  function shouldShowLiveResponse() {
+    return shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute });
+  }
+
   function addCompletionTimestamp() {
     if (!completionTimestampEl && !statsEl && doneTime && firstDataReceived) {
       completionTimestampEl = addTimestamp(bubble, doneTime, false);
@@ -3880,6 +3883,7 @@ async function sendMessage(text, opts = {}) {
   }
 
   function renderCompletionTools(tools) {
+    if (!shouldShowLiveResponse()) return;
     const diffTools = changeTools(tools || []);
     for (const tool of diffTools) {
       const block = makeToolBlock(tool, msgId, null, topic);
@@ -5149,7 +5153,7 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
       const _absPath = file.path
         ? (file.path.startsWith('/') ? file.path : sourceRepo ? sourceRepo + '/' + file.path : null)
         : null;
-      if (status !== 'D' && _absPath && _isTextPath(_absPath) && !worktreeBlocked) {
+      if (status !== 'D' && _absPath && !isBinary && !worktreeBlocked) {
         const openBtn = document.createElement('button');
         openBtn.type = 'button';
         openBtn.className = 'gitdiff-file-open';
@@ -5546,13 +5550,12 @@ async function attachFlowStep(msgId) {
     if (!res.ok) return;
     const data = await res.json();
     if (messages.querySelector(`[data-msg-id="${msgId}"]`)) return;
+    if (!shouldShowNewResponse(data)) return;
     if (data.status === 'pending') {
-      if (!searchActive && hasHistoryFilterScope() && !itemMatchesFilter(data, historyFilter)) return;
       const wipBubble = makeWipBubble(data);
       messages.appendChild(wipBubble);
       reconnectPendingItem(data, wipBubble);
     } else {
-      if (!shouldShowNewResponse(data)) return;
       appendHistoryItem(data, messages);
     }
     scrollToBottom();
@@ -11325,7 +11328,7 @@ async function showBootBanner() {
               <button class="no-agent-copy" data-cmd="${a.cmd}">copy</button>
             </div>`).join('')}
         </div>
-        <div class="no-agent-restart">Then restart: <code>bin/start.sh --restart</code></div>`;
+        <div class="no-agent-restart">Then restart squid.</div>`;
       setup.querySelectorAll('.no-agent-copy').forEach(btn => {
         btn.addEventListener('click', () => {
           navigator.clipboard.writeText(btn.dataset.cmd).then(() => {
@@ -12744,7 +12747,7 @@ document.addEventListener('click', e => {
 });
 // ── file viewer ───────────────────────────────────────────────────────────────
 
-const _TEXT_EXTS = new Set(['txt','md','py','js','ts','jsx','tsx','json','yaml','yml',
+const _TEXT_EXTS = new Set(['txt','md','py','js','mjs','cjs','ts','jsx','tsx','json','yaml','yml',
   'toml','ini','cfg','conf','sh','bash','zsh','fish','rb','go','rs','java','c','cpp',
   'h','hpp','cs','php','swift','kt','kts','lua','r','sql','html','css','xml','svg',
   'log','env','gitignore','dockerfile','makefile','lock','csv','tsv']);

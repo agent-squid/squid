@@ -1,0 +1,148 @@
+---
+status: accepted
+date: 2026-07-24
+---
+# ADR-0034: Distribution via PyPI, Install/Update via pipx
+
+## Context and Problem Statement
+
+ADR-0030 formalized a notify-only update mechanism on top of the install
+path that existed at the time: `curl <tag>.tar.gz | tar xz` into a
+version-named sibling directory (`squid-X.Y/`), run its `bin/install.sh`,
+then `bin/start.sh`. That ADR planned `bin/update.sh` (never written) to
+automate re-running that sequence against a new tag, and flagged a
+dependency it hadn't landed yet: moving `PID_FILE` out of the per-checkout
+directory into `~/.squid/` so a new version's `start.sh --restart` could
+find and kill the old version's process across directories.
+
+Two problems with that path surfaced while actually preparing a release:
+
+- The package's own `pyproject.toml` had never been exercised as a real
+  install target: `[project.scripts]` pointed `squid` at
+  `agent.server:app` — a FastAPI ASGI instance, not a callable — which
+  would have crashed on invocation. It went unnoticed because
+  `bin/start.sh` always ran `python -m agent.server` directly, never the
+  installed console script.
+- The project name `squid` collides with the long-established Squid proxy
+  cache server (owns `brew install squid`, dominates search results), an
+  SEO/discovery problem independent of the packaging bug.
+
+Separately, a `pip install`-based path is the standard expectation for a
+Python CLI tool, and `pipx` (isolated per-app venvs, one command to
+upgrade) is the standard tool for installing Python CLI applications
+system-wide without polluting a project or system environment — closer to
+what `brew install`/`npm install -g` users expect than a tarball-and-shell-
+script checkout.
+
+## Decision
+
+**Publish to PyPI as `agentsquid`; install and update via `pipx`.**
+
+- **Package renamed** `squid` → `agentsquid` in `pyproject.toml`, alongside
+  the `agent.server:main` entry-point fix and added PyPI metadata
+  (`readme`, `license`, `authors`, `classifiers`, `project.urls`).
+  `agent/server.py`'s `_pkg_version()` lookup key updated to match — this
+  had to change in the same commit as the rename, since a stale lookup key
+  silently returns the `PackageNotFoundError` fallback (`"0+local"`) for
+  every real install, which the version-compare logic below then reads as
+  always-behind (see Consequences).
+- **Install**: `curl -fsSL https://agentsquid.ai/install.sh | sh` —
+  hosted on the marketing site (`agentsquid.ai/install.sh`, built from
+  `~/Work/agentsquid.ai`'s `install.sh`, registered in
+  `scripts/build-site.mjs`'s `STATIC_FILES`). The script bootstraps `pipx`
+  if missing (`brew install pipx`, or `pip install --user pipx` +
+  `pipx ensurepath` as fallback), then installs/upgrades `agentsquid`.
+  Someone who already has `pipx` can skip the script and run
+  `pipx install agentsquid` directly.
+- **Update**: `pipx upgrade agentsquid`. No `bin/update.sh` — this
+  replaces that planned script entirely, and the `PID_FILE`-to-`~/.squid/`
+  move ADR-0030 flagged as a dependency is no longer needed: `pipx` keeps
+  one venv location per app, upgraded in place, so there's no
+  sibling-directory-per-version layout and no cross-directory old-process
+  lookup to perform. The user still has to restart the running server
+  process themselves for an upgrade to take effect — `pipx upgrade` only
+  replaces the installed files, it doesn't touch an already-running
+  process — but that's a single restart of the same command, not a
+  directory hunt.
+- **In-app notice unchanged.** ADR-0030's version-source-of-truth
+  (`pyproject.toml`), `/health` field, and static-file check
+  (`raw.githubusercontent.com/.../pyproject.toml`, not the GitHub API) are
+  untouched — only the Settings notice's copy-paste command
+  (`ui/app.js`'s `renderSettingsUpdateNotice`) changed, from the tarball
+  re-pull + `start.sh --restart` sequence to `pipx upgrade agentsquid`.
+- **Release process**: bump `pyproject.toml`'s `version`, then
+  `uv build && uv publish`. PyPI permanently rejects re-uploading an
+  existing version, so the bump is mandatory before every publish, not
+  optional. A `git tag` is no longer required for the update mechanism to
+  function (the notify check reads `main` directly, per ADR-0030), though
+  nothing stops still tagging releases for human changelog purposes.
+- **Existing GitHub tag tarball (`v0.1`) is left as-is**, not retagged or
+  rebuilt — tags are treated as immutable once published. It's the last
+  tarball-era release; no further tarball releases are planned. The
+  `curl .../v0.1.tar.gz | tar xz` references in `README.md`,
+  `ui/app.js`, and the `agentsquid.ai` site (`index.html`, `index1.html`,
+  `docs/quick-start.html`) are all updated to the `pipx` path in the same
+  change as this ADR.
+
+## Verified before publishing
+
+The core risk in cutting over to `pipx upgrade` as the update mechanism is
+whether it actually resolves and applies a newer version by package name
+the way the in-app notice assumes. Verified locally, offline, before the
+first real PyPI publish:
+
+1. Built two wheels of the same package at different versions (`0.1.0`,
+   `0.1.1`) from independent source copies.
+2. Served them from a local directory via `pip`'s `--find-links` (no
+   `--no-index`, so normal dependency resolution against the real index
+   still applies to everything except the pinned local package) —
+   resolving `agentsquid` **by name**, not by a fixed local path, matching
+   how a real index lookup behaves.
+3. `pipx install agentsquid --pip-args="--find-links <dir>"` with only
+   `0.1.0` present in the directory installed `0.1.0`.
+4. Added `0.1.1` to the directory. `pipx upgrade agentsquid` (the exact
+   command shown in the Settings notice, no extra flags in production)
+   correctly reported `upgraded package agentsquid from 0.1.0 to 0.1.1`.
+5. Confirmed the installed app's own `importlib.metadata.version("agentsquid")`
+   read back `0.1.1` post-upgrade — i.e. `/health`'s version field would
+   correctly reflect the upgrade too, not just `pipx`'s own bookkeeping.
+
+This confirms name-based version resolution and in-place upgrade work as
+the notify-only mechanism assumes, without needing two real releases
+published to PyPI/TestPyPI just to find that out.
+
+One related, separately-fixed bug surfaced during this same testing pass:
+running a second `agentsquid`/`python -m agent.server` process against the
+shared `~/.squid` database (as happens when testing an installed package
+locally) raced `agent/server.py`'s FastAPI startup-lifespan hooks — in
+particular the orphaned-`pending`-message recovery — against a real,
+still-running instance's in-flight write, incorrectly marking a live
+message as errored before the second process ever discovered the port was
+taken. Fixed by probing the port before calling `uvicorn.run()` in
+`main()`, so a losing second process exits before the ASGI lifespan (and
+its DB-mutating startup hooks) ever runs. Unrelated to the PyPI/pipx
+decision itself, but found because of it.
+
+## Consequences
+
+- Good: `pip install`/`pipx install agentsquid` matches the standard
+  expectation for a Python CLI tool, closer to `brew install`/`npm install
+  -g` than a tarball-and-shell-script checkout.
+- Good: no `bin/update.sh` to write or maintain, no `PID_FILE` relocation
+  needed — `pipx` already solves both problems `bin/update.sh` existed to
+  solve.
+- Good: `agentsquid` avoids the name collision with the Squid proxy server
+  that `squid` had (Homebrew formula name, search-result competition).
+- Good: upgrade behavior verified against real name/version resolution
+  before the first publish, not assumed.
+- Bad: PyPI publish is a one-way door per version (no re-upload, no
+  delete-and-reuse) — mistakes need a new version bump, not a fix-in-place.
+- Bad: two release surfaces now exist in principle (PyPI for
+  installed/`pipx` users, GitHub for source browsing) — mitigated by
+  treating GitHub tags as historical/frozen rather than a second thing to
+  keep in lockstep.
+- Bad: `pipx upgrade` only replaces installed files; it does not restart a
+  currently-running `agentsquid` process. The Settings notice's copy-paste
+  command reflects only the upgrade step, not the restart — acceptable for
+  now under the same notify-only, user-confirms-the-restart reasoning
+  ADR-0030 already established for killing in-flight CLI sessions.
