@@ -243,7 +243,7 @@
     return `hsl(${hue}, 55%, 62%)`;
   }
 
-  function routeLineEl(text) {
+  function routeLineEl(text, note) {
     // text is a canonical/expanded/key string like "#t1@a1>#t3", "#a+#b>#c",
     // or "#t1@a2,#t4,#t3@a1" (a reduced comma-list key — see ADR-0032).
     const div = document.createElement('div');
@@ -263,6 +263,12 @@
       else if (m[6]) { span.className = 'route-join'; span.textContent = '+'; }
       else if (m[7]) { span.className = 'route-comma'; span.textContent = ','; }
       div.appendChild(span);
+    }
+    if (note) {
+      const noteSpan = document.createElement('span');
+      noteSpan.className = 'branch-count';
+      noteSpan.textContent = ` · ${note}`;
+      div.appendChild(noteSpan);
     }
     return div;
   }
@@ -295,7 +301,7 @@
     canonicalCount.textContent = `(${result.canonical.length})`;
     expandedCount.textContent = `(${result.expanded.length})`;
     for (const c of result.canonical) canonicalList.appendChild(routeLineEl(c));
-    for (const e of result.expanded) expandedList.appendChild(routeLineEl(e));
+    for (const e of result.expanded) expandedList.appendChild(routeLineEl(e.text, e.note));
   }
 
   input.addEventListener('input', render);
