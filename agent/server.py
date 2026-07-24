@@ -2863,6 +2863,14 @@ def main():
     _configure_tailscale_serve(port)
 
     log.info("Starting squid on http://%s:%s", host, port)
+    # All logging (including uvicorn's own) goes to the rotating file handler
+    # above, not the console — so without a direct print here, running
+    # `agentsquid` in a terminal produces zero visible output while it blocks
+    # in the foreground, indistinguishable from a hang. bin/start.sh avoids
+    # this by backgrounding the process and polling /health itself before
+    # printing this same confirmation; a bare `agentsquid` invocation has no
+    # equivalent, so it has to speak for itself here instead.
+    print(f"squid is up → http://{host}:{port}  (running in the foreground — Ctrl+C to stop)", flush=True)
     uvicorn.run(
         "agent.server:app",
         host=host,

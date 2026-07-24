@@ -131,6 +131,52 @@ test('route-chain handoff live bubble appears after origin completes through sta
   await expect(handoffBubble.locator('.tag-agent')).toHaveText('@revucla');
 });
 
+test('route-chain target in another topic stays hidden while a topic filter is active', async ({ page }) => {
+  await page.route('**/health', r => r.fulfill({ json: { status: 'ok', backends: {} } }));
+  await page.route('**/quota**', r => r.fulfill({ json: {} }));
+  await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/topics', r => r.fulfill({ json: [
+    { name: 'current', agent: 'codex', queue_depth: 0, active: false, last_prompt: '' },
+    { name: 'other', agent: 'revucla', queue_depth: 0, active: false, last_prompt: '' },
+  ] }));
+  await page.route('**/topics/**', r => r.fulfill({ json: [] }));
+  await page.route('**/config/agents', r => r.fulfill({ json: [] }));
+  await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [] } }));
+  await page.route('**/topics/*/memory', r => r.fulfill({ json: {
+    topic: 'current',
+    content: '',
+    revision: 'r1',
+    exists: false,
+  } }));
+
+  await page.route('**/chat', r => r.fulfill({
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream', 'X-Squid-Msg-Id': '10', 'X-Squid-Flow-Run-Id': 'filtered-flow' },
+    body: 'event: meta\ndata: {"agent":"codex","msg_id":10,"adhoc":false}\n\ndata:current response\n\nevent: done\ndata: \n\n',
+  }));
+  await page.route('**/chat/flow/filtered-flow/steps**', r => r.fulfill({ json: {
+    messages: [{ id: 11, role: 'assistant', topic: 'other', agent: 'revucla', status: 'done' }],
+    complete: true,
+  } }));
+  await page.route('**/chat/11/status', r => r.fulfill({ json: {
+    id: 11, role: 'assistant', topic: 'other', agent: 'revucla', adhoc: false, status: 'done',
+    content: 'other topic response',
+    prompt: 'Squid route chain handoff.\nRoute: #current@codex>#other@revucla\nPrevious step: @codex\nCurrent step: #other@revucla\nOriginal prompt: review this',
+    prompt_source: 'system', session_id: 'other-sid',
+  } }));
+
+  await page.goto('/');
+  await page.fill('#input', '/f #current');
+  await page.keyboard.press('Enter');
+  await page.fill('#input', '#current@codex>#other@revucla review this');
+  await page.locator('#input').press('Enter');
+
+  await expect(page.locator('.msg[data-msg-id="10"]')).toContainText('current response');
+  await page.waitForTimeout(500);
+  await expect(page.locator('.msg[data-msg-id="11"]')).toHaveCount(0);
+  await expect(page.locator('#messages')).not.toContainText('other topic response');
+});
+
 test('composer sends request-response route chain back to origin', async ({ page }) => {
   await page.route('**/health', r => r.fulfill({ json: { status: 'ok', backends: {} } }));
   await page.route('**/quota**', r => r.fulfill({ json: {} }));

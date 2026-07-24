@@ -687,6 +687,31 @@ test.describe('response bubble', () => {
     await expect(page.locator('#file-modal-body .fv-changed')).toContainText('const opened = true;');
   });
 
+  test('GitDiff file-open control is visible for mjs text diffs', async ({ page }) => {
+    await page.route('**/chat', route => route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        META,
+        { event: 'tool', data: {
+          name: 'GitDiff',
+          repo: '/tmp/repo',
+          file_count: 1,
+          additions: 1,
+          deletions: 0,
+          files: [{ status: 'M', path: 'scripts/build.mjs' }],
+          diff: 'diff --git a/scripts/build.mjs b/scripts/build.mjs\n@@ -1 +1 @@\n+export const opened = true;',
+        } },
+        { data: 'Done' },
+        DONE,
+      ),
+    }));
+
+    await sendMsg(page);
+    const row = page.locator('.gitdiff-file-row');
+    await expect(row.locator('.gitdiff-binary-badge')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Open scripts/build.mjs in file viewer' })).toBeVisible();
+  });
+
   test('GitDiff uses streamed worktree sync status before showing actions', async ({ page }) => {
     await page.route('**/chat/1/diff-revert-status**', route => route.fulfill({
       json: { 'ui/app.js': 'revertable' },
