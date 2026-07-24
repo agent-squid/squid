@@ -24,7 +24,6 @@
 
 ```bash
 curl -fsSL https://agentsquid.ai/install.sh | sh
-agentsquid
 ```
 
 3. Open in your browser:
