@@ -40,9 +40,9 @@ agent name (@agent) = harness (Claude Code) + provider (Claude) + model (claude-
 
 * COUNT every token, every prompt!
 * UNIFY your subscriptions, free tiers, and local models into one workplace.
-* SHARE context explicitly across models, topics, sessions; no waste!
-* CLEAR old context without fear; AgentSquid alerts you to clear and let you choose exactly what stays!
+* SHARE context explicitly across models, topics, sessions; clear sessions without fear!
 * PARALLELIZE your prompts, no more waiting!
+* INVOKE other agents only when you need it; #code@agent>@review!
 
 ## Your Local Coding Agents, Unified
 
