@@ -4344,9 +4344,6 @@ button {
     width: 100%;
   }
 
-  #agents-list .col-cwd {
-    display: none;
-  }
   .runtime-full { display: none; }
   .runtime-short { display: inline; }
   #agents-list table {
@@ -4356,6 +4353,15 @@ button {
   #agents-list td {
     padding-inline: 0.45rem;
   }
+  #agents-list th:first-child,
+  #agents-list td:first-child {
+    width: 6rem;
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    background: var(--surface);
+  }
+  #agents-list tbody tr:hover td:first-child { background: var(--surface-3); }
   #agents-list .col-runtime {
     width: 4.4rem;
   }
@@ -4365,6 +4371,7 @@ button {
     text-overflow: ellipsis;
   }
   #agents-list .col-model {
+    width: 6rem;
     overflow: hidden;
     text-overflow: ellipsis;
   }
@@ -4372,6 +4379,9 @@ button {
     display: block;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  #agents-list .col-cwd {
+    width: 12rem;
   }
   #agents-list th:last-child,
   #agents-list td:last-child {
@@ -4431,6 +4441,8 @@ button {
 
 #agents-list {
   overflow-y: auto;
+  overflow-x: auto;
+  scrollbar-gutter: stable;
   flex: 1;
   font-size: 13px;
 }
@@ -4442,6 +4454,22 @@ button {
   padding: 0.3rem 0.75rem;
   text-align: left;
   white-space: nowrap;
+}
+/* Every column except cwd shrinks to fit its own content (the width: 1%
+   hint overrides auto layout's tendency to stretch all columns to fit the
+   widest cell); cwd then absorbs whatever's left and truncates into it
+   instead of forcing the table wider than the viewport. */
+#agents-list th:not(.col-cwd),
+#agents-list td:not(.col-cwd) {
+  width: 1%;
+}
+#agents-list .col-cwd {
+  max-width: 24rem;
+}
+#agents-list .agent-cwd {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 #agents-list thead th {
   color: var(--text-dim);
@@ -4468,6 +4496,15 @@ button {
   color: var(--text-ghost);
 }
 #agents-list tbody tr:hover td { background: var(--surface-3); }
+/* Actions column stays pinned to the visible right edge so it's never lost
+   to horizontal overflow when the row (esp. the cwd cell) runs wide. */
+#agents-list th:last-child,
+#agents-list td:last-child {
+  position: sticky;
+  right: 0;
+  background: var(--surface);
+}
+#agents-list tbody tr:hover td:last-child { background: var(--surface-3); }
 #agents-list .edit-btn, #agents-list .del-btn {
   background: transparent;
   border: 1px solid #333;
@@ -4996,7 +5033,12 @@ mark.search-kw-highlight {
 @media (max-width: 768px) {
   #agents-list {
     max-height: none;
-    overflow: visible;
+    overflow-x: auto;
+    overflow-y: visible;
+  }
+
+  #agents-list table {
+    width: max-content;
   }
 
   #agent-form {

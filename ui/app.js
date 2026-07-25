@@ -10060,7 +10060,9 @@ async function loadAgents() {
         return `<span class="runtime-full">${full}</span><span class="runtime-short">${abbr}</span>`;
       })()}</td>
       <td class="col-model">${modelHtml}</td>
-      <td class="col-cwd">${a.cwd ? escapeHtml(a.cwd) : `<span class="col-default">${escapeHtml(_squidHome)}</span>`}</td>
+      <td class="col-cwd">${a.cwd
+        ? `<span class="agent-cwd" title="${escapeHtml(a.cwd)}">${escapeHtml(a.cwd)}</span>`
+        : `<span class="agent-cwd col-default" title="${escapeHtml(_squidHome)}">${escapeHtml(_squidHome)}</span>`}</td>
       <td>
         <button class="edit-btn" data-name="${escapeHtml(a.name)}" data-harness="${escapeHtml(runtime.harness)}" data-provider="${escapeHtml(runtime.provider || '')}" data-backend="${escapeHtml(ref || '')}" data-model="${escapeHtml(a.model || '')}" data-cwd="${escapeHtml(a.cwd || '')}" title="Edit agent">✎</button>
         <button class="del-btn" data-name="${escapeHtml(a.name)}" title="Delete agent (does not affect existing messages)">✕</button>
