@@ -1142,6 +1142,26 @@ async def run_cmd(req: CmdRequest):
             if "--reload" in sys.argv:
                 Path(__file__).touch()
             else:
+                # uvicorn marks its listening socket inheritable
+                # (Config.bind_socket calls sock.set_inheritable(True)), so
+                # it survives this in-place re-exec instead of closing. The
+                # re-exec'd process's startup port probe in main() then
+                # finds that leaked, still-listening fd bound to the same
+                # port and exits thinking a second instance already owns
+                # it. Close every inheritable fd (past stdio) first so the
+                # new process starts with a clean fd table.
+                for entry in os.listdir("/dev/fd"):
+                    try:
+                        fd = int(entry)
+                    except ValueError:
+                        continue
+                    if fd <= 2:
+                        continue
+                    try:
+                        if os.get_inheritable(fd):
+                            os.close(fd)
+                    except OSError:
+                        pass
                 os.execv(sys.executable, [sys.executable, "-m", "agent.server"])
         asyncio.create_task(_restart())
         return JSONResponse({"ok": True})
@@ -2851,6 +2871,12 @@ def main():
     # that window.
     try:
         probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Match uvicorn's own bind_socket(), which always sets this before
+        # binding. Without it, connections this restart just tore down
+        # (open UI tabs, SSE streams) sitting in TIME_WAIT on this port make
+        # the probe fail for up to a minute even though uvicorn's real bind
+        # — which does set SO_REUSEADDR — would have succeeded immediately.
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         probe.bind((host, port))
         probe.close()
     except OSError as e:
