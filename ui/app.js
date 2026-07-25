@@ -294,9 +294,6 @@ function backendModelSuggestions(backend) {
   return providerMetadataForBackend(backend)?.models || [];
 }
 
-function abbrev3(s) {
-  return (s || '').slice(0, 3);
-}
 
 // Populates the compact "pick a known model" <select> next to a freeform
 // model <input>. Choosing an option fills the input; the picker itself
@@ -10054,11 +10051,7 @@ async function loadAgents() {
     return `
     <tr>
       <td><span class="agent-name">${escapeHtml(a.name)}</span></td>
-      <td class="col-runtime">${(() => {
-        const full = escapeHtml(runtimeText);
-        const abbr = runtime.provider ? `${escapeHtml(abbrev3(runtime.harness))}:${escapeHtml(abbrev3(runtime.provider))}` : escapeHtml(abbrev3(runtime.harness));
-        return `<span class="runtime-full">${full}</span><span class="runtime-short">${abbr}</span>`;
-      })()}</td>
+      <td class="col-runtime">${escapeHtml(runtimeText)}</td>
       <td class="col-model">${modelHtml}</td>
       <td class="col-cwd">${a.cwd
         ? `<span class="agent-cwd" title="${escapeHtml(a.cwd)}">${escapeHtml(a.cwd)}</span>`
@@ -10074,7 +10067,7 @@ async function loadAgents() {
   listEl.innerHTML = `<table>
     <thead><tr>
       <th aria-sort="${ariaSort('name')}"><button class="agent-sort-btn" data-sort="name" type="button">Name <span class="sort-indicator">${sortIndicator('name')}</span></button></th>
-      <th class="col-runtime" aria-sort="${ariaSort('runtime')}"><button class="agent-sort-btn" data-sort="runtime" type="button"><span class="runtime-full">Runtime</span><span class="runtime-short">Run</span> <span class="sort-indicator">${sortIndicator('runtime')}</span></button></th>
+      <th class="col-runtime" aria-sort="${ariaSort('runtime')}"><button class="agent-sort-btn" data-sort="runtime" type="button">Runtime <span class="sort-indicator">${sortIndicator('runtime')}</span></button></th>
       <th class="col-model">Model</th><th class="col-cwd">CWD</th><th></th>
     </tr></thead>
     <tbody>${rows}</tbody>

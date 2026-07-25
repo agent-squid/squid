@@ -4045,8 +4045,6 @@ button {
 
 .send-icon { display: none; }
 
-.runtime-short { display: none; }
-
 @media (max-width: 768px) {
   body {
     font-size: 16px;
@@ -4344,8 +4342,6 @@ button {
     width: 100%;
   }
 
-  .runtime-full { display: none; }
-  .runtime-short { display: inline; }
   #agents-list table {
     table-layout: fixed;
   }
@@ -4362,9 +4358,6 @@ button {
     background: var(--surface);
   }
   #agents-list tbody tr:hover td:first-child { background: var(--surface-3); }
-  #agents-list .col-runtime {
-    width: 4.4rem;
-  }
   #agents-list .agent-name {
     display: block;
     overflow: hidden;

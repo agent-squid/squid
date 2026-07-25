@@ -1,4 +1,4 @@
-const CACHE_NAME = 'squid-pwa-v20260725-004';
+const CACHE_NAME = 'squid-pwa-v20260725-005';
 const APP_SHELL = [
   '/',
   '/index.html',
