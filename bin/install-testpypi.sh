@@ -17,10 +17,30 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if ! command -v pipx >/dev/null 2>&1; then
-  echo "pipx is required. Install it first, then re-run this script." >&2
-  exit 1
-fi
+ensure_pipx() {
+  if command -v python3 >/dev/null 2>&1; then
+    export PATH="$(python3 -m site --user-base)/bin:$HOME/.local/bin:$PATH"
+  fi
+
+  if command -v pipx >/dev/null 2>&1; then
+    return
+  fi
+
+  if command -v brew >/dev/null 2>&1; then
+    brew install pipx
+  else
+    python3 -m pip install --user --quiet pipx
+    python3 -m pipx ensurepath
+    export PATH="$(python3 -m site --user-base)/bin:$HOME/.local/bin:$PATH"
+  fi
+
+  if ! command -v pipx >/dev/null 2>&1; then
+    echo "pipx install completed but pipx is still not on PATH; restart your shell and re-run this script." >&2
+    exit 1
+  fi
+}
+
+ensure_pipx
 
 python3 -m pip download \
   --no-deps \

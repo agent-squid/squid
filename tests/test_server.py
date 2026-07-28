@@ -344,6 +344,17 @@ def test_sse_event_preserves_multiline_data_fields():
     )
 
 
+def test_sse_chunk_preserves_leading_spaces_after_sse_parsing():
+    encoded = server.sse_chunk(" hello\n  world")
+    assert encoded == "data:  hello\ndata:   world\n\n"
+    parsed = []
+    for line in encoded.splitlines():
+        if line.startswith("data:"):
+            field = line[5:]
+            parsed.append(field[1:] if field.startswith(" ") else field)
+    assert "\n".join(parsed) == " hello\n  world"
+
+
 def test_status_recovers_final_content_from_text_events(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

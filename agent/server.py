@@ -32,6 +32,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
+from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 from typing import AsyncGenerator, Literal, Optional, Union
@@ -269,23 +270,28 @@ def _public_agent_map() -> dict:
 _check_deps()
 sync_now()
 
-app = FastAPI(title="Squid", version=SQUID_VERSION)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-
-
-@app.on_event("startup")
 async def _recover_orphaned_pending_on_startup():
     orphaned = mark_orphaned_pending(before_created_at=BOOT_TIME)
     if orphaned:
         log.warning("Marked %d orphaned pending messages as error", orphaned)
 
 
-@app.on_event("startup")
 async def _resume_stalled_flows_on_startup():
     from .flow import sweep_incomplete_flows
     resumed = await sweep_incomplete_flows()
     if resumed:
         log.warning("Resumed %d stalled Squid Flow chain(s) on startup", resumed)
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    await _recover_orphaned_pending_on_startup()
+    await _resume_stalled_flows_on_startup()
+    yield
+
+
+app = FastAPI(title="Squid", version=SQUID_VERSION, lifespan=_lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
 UI_DIR = Path(__file__).parent.parent / "ui"
@@ -544,7 +550,10 @@ _HEARTBEAT_TICKS = 10      # emit a heartbeat after this many idle poll timeouts
 
 
 def sse_chunk(data: str) -> str:
-    return "data:" + data.replace("\n", "\ndata:") + "\n\n"
+    normalized = data.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    encoded = "\n".join("data:" + (" " if line.startswith(" ") else "") + line for line in lines)
+    return encoded + "\n\n"
 
 def sse_event(event: str, data: str = "") -> str:
     # SSE represents multiline payloads as repeated data fields. Preserve the
