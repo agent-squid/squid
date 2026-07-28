@@ -46,7 +46,7 @@ script checkout.
   silently returns the `PackageNotFoundError` fallback (`"0+local"`) for
   every real install, which the version-compare logic below then reads as
   always-behind (see Consequences).
-- **Install**: `curl -fsSL https://agentsquid.ai/install.sh | sh` —
+- **Install**: `curl -fsSL https://agentsquid.ai/install.sh | bash` —
   hosted on the marketing site (`agentsquid.ai/install.sh`, built from
   `~/Work/agentsquid.ai`'s `install.sh`, registered in
   `scripts/build-site.mjs`'s `STATIC_FILES`). The script bootstraps `pipx`

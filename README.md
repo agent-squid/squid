@@ -23,7 +23,7 @@
 2. Install and run AgentSquid!
 
 ```bash
-curl -fsSL https://agentsquid.ai/install.sh | sh
+curl -fsSL https://agentsquid.ai/install.sh | bash
 ```
 
 3. Open in your browser:
