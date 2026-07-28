@@ -4609,6 +4609,7 @@ function toolLabel(tool) {
 }
 
 function changeTools(tools) {
+  tools = dedupeToolRecords(tools);
   const syncByWorktree = new Map();
   for (const tool of tools || []) {
     if (tool.name === 'WorktreeSync' && tool.worktree_repo && tool.status) {
@@ -4656,6 +4657,22 @@ function _hasTraceContent(statusRaw, contextVal, finalContent = '') {
     const arr = typeof contextVal === 'string' ? JSON.parse(contextVal) : contextVal;
     return Array.isArray(arr) && arr.length > 0;
   } catch { return false; }
+}
+
+function dedupeToolRecords(tools) {
+  const seen = new Set();
+  const deduped = [];
+  for (const tool of tools || []) {
+    if (!tool || typeof tool !== 'object') continue;
+    const id = tool.tool_use_id;
+    if (id) {
+      const key = `${tool.name || ''}\0${id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+    }
+    deduped.push(tool);
+  }
+  return deduped;
 }
 
 

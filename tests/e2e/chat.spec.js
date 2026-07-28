@@ -579,6 +579,61 @@ test.describe('response bubble', () => {
     await expect(page.locator('.tool-block-history')).toHaveCount(0);
   });
 
+  test('dedupes repeated legacy edit tool records', async ({ page }) => {
+    const writeTool = {
+      name: 'Write',
+      tool_use_id: 'toolu_duplicate',
+      file: '/tmp/repo/line.txt',
+      content: 'new line\n',
+    };
+    await page.route('**/chat', r => r.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        META,
+        { event: 'tool', data: writeTool },
+        { event: 'tool', data: writeTool },
+        { data: 'Done' },
+        DONE,
+      ),
+    }));
+
+    await sendMsg(page);
+    const blocks = page.locator('.tool-block-history');
+    await expect(blocks).toHaveCount(1);
+    await expect(blocks.first().locator('.tool-toggle')).toContainText('Write: /tmp/repo/line.txt');
+  });
+
+  test('dedupes repeated legacy edit tool records from history', async ({ page }) => {
+    const writeTool = {
+      name: 'Write',
+      tool_use_id: 'toolu_duplicate_history',
+      file: '/tmp/repo/line.txt',
+      content: 'new line\n',
+    };
+    await page.unroute('**/history**');
+    await page.route('**/history**', r => r.fulfill({ json: {
+      items: [{
+        id: 8484,
+        topic: 'squid',
+        agent: 'claude',
+        backend: 'claude',
+        status: 'done',
+        prompt: 'fix conflict',
+        content: 'Done',
+        context: JSON.stringify([writeTool, writeTool]),
+        timestamp: new Date().toISOString(),
+        adhoc: false,
+      }],
+      has_more: false,
+    }}));
+
+    await page.reload();
+    await expect(page.locator(RESPONSE)).toContainText('Done');
+    const blocks = page.locator('.tool-block-history');
+    await expect(blocks).toHaveCount(1);
+    await expect(blocks.first().locator('.tool-toggle')).toContainText('Write: /tmp/repo/line.txt');
+  });
+
   test('GitDiff renders text diffs for files with generic trailing suffixes', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200, headers: SSE_HEADERS,
