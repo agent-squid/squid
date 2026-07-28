@@ -106,8 +106,10 @@ Release checklist:
 3. Run `python3 -m build` and `python3 -m twine check dist/*` locally if
    changing packaging metadata or included files.
 4. Commit the version bump and release changes.
-5. Create and push the matching tag, e.g. `v0.1.1`.
-6. Let GitHub Actions run `Publish to PyPI`; the job publishes only after
+5. Create and push the matching TestPyPI tag, e.g. `test-v0.1.1`, then run
+   `bin/install-testpypi.sh 0.1.1` after the TestPyPI workflow completes.
+6. Create and push the matching production tag, e.g. `v0.1.1`.
+7. Let GitHub Actions run `Publish to PyPI`; the job publishes only after
    the `pypi` environment's protection rules, if any, are satisfied.
 
 The tag and package version must match. A tag `v0.1.1` with
@@ -115,6 +117,11 @@ The tag and package version must match. A tag `v0.1.1` with
 if that version already exists. A tag `v0.1.1` with `version = "0.1.2"`
 would publish `0.1.2`, which is misleading even though PyPI would accept it
 if unused.
+
+TestPyPI uses the same rule with a `test-` tag prefix: `test-v0.1.1` must
+point to a commit where `pyproject.toml` has `version = "0.1.1"`. The
+TestPyPI workflow publishes to `https://test.pypi.org/legacy/`; production
+PyPI remains tied to `vX.Y.Z` tags only.
 
 ## Verified before publishing
 
