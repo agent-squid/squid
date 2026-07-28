@@ -955,14 +955,20 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0, opts = {}) {
         sepSpan.textContent = ',';
         topicChipEl.appendChild(sepSpan);
       }
-      if (a.topic !== lastTopic) {
+      const topicChanged = a.topic !== lastTopic;
+      if (topicChanged) {
         const tSpan2 = document.createElement('span');
         tSpan2.className = 'chip-topic';
         tSpan2.textContent = '#' + a.topic;
         topicChipEl.appendChild(tSpan2);
         lastTopic = a.topic;
       }
-      if (a.agent !== lastAgent) {
+      // Drop @agent only when the #topic just rendered already identifies
+      // this atom — if neither field changed (e.g. a repeated `!` for
+      // freshness), the agent must still render or the atom is left with no
+      // identifying token at all (see _broadcastRouteText/minimalGroupedText,
+      // which never drop both fields for the same reason).
+      if (a.agent !== lastAgent || !topicChanged) {
         const aSpan = document.createElement('span');
         aSpan.className = 'chip-agent chip-broadcast-agent';
         aSpan.textContent = '@' + a.agent;
@@ -1120,10 +1126,15 @@ function _routeChainTurnCounts(topic, originAgent, originFresh, targetAgent, tar
 
 function _routePersistentSessionTargets(route) {
   const chain = parseRouteChain(route);
-  if (!chain) return [];
+  // Broadcast routes (`@a,@b`) have no chain operator, so parseRouteChain
+  // always returns null for them — fall back to the broadcast parser instead
+  // of reporting zero persistent targets for every broadcast /clear.
+  const steps = chain
+    ? [...(chain.origins || []), ...(chain.targets || [])]
+    : (parseOriginBroadcast(route)?.agents || []);
   const seen = new Set();
   const targets = [];
-  [...(chain.origins || []), ...(chain.targets || [])].forEach(step => {
+  steps.forEach(step => {
     if (!step?.topic || !step?.agent || step.fresh) return;
     const key = `${step.topic}@${step.agent}`;
     if (seen.has(key)) return;
@@ -1912,7 +1923,7 @@ async function loadHistory() {
       continue;
     }
 
-    if (!item.content && item.status !== 'pending') continue;
+    if (!item.content && !item.context && item.status !== 'pending') continue;
 
     if (item.status === 'pending') {
       // Queued/in-flight items already carry topic/agent/adhoc from the DB row, so a
@@ -2440,6 +2451,15 @@ function routeHistoryAutocompleteItems(currentRoute = '') {
       insert: '',
       trail: false,
       routeTarget,
+      // Dedicated route-history browsing (ArrowLeft/ArrowRight over a
+      // composer that's only a route) — every item here is a full route to
+      // switch to, so previewing-by-highlight applying it live is the point.
+      // appendMatchingRouteHistoryItems below shares this same item shape
+      // but gets mixed into an otherwise plain-text "Routes" suggestion
+      // list, where auto-applying on mere highlight would leave the real
+      // chip stuck on a route the user only scrolled past — so it must NOT
+      // set this flag.
+      previewApply: true,
       currentRoute: current,
       sub: prompt ? _acLastPrompt(prompt) : '',
     });
@@ -2466,8 +2486,11 @@ function appendMatchingRouteHistoryItems(items, prefix, seenRoutes = null) {
   for (const entry of promptHistory) {
     if (hiddenPromptKeys.has(promptHistoryDedupKey(entry))) continue;
     const { route, prompt } = splitPromptHistoryEntry(entry);
-    const routeKey = normalizePromptHistoryRoute(route);
-    if (!routeKey || !routeKey.toLowerCase().startsWith(lowerPrefix)) continue;
+    const normalizedRouteKey = normalizePromptHistoryRoute(route);
+    const rawRouteKey = String(route || '').trim().replace(/\s+/g, '');
+    const routeKey = [normalizedRouteKey, rawRouteKey]
+      .find(candidate => candidate && candidate.toLowerCase().startsWith(lowerPrefix));
+    if (!routeKey) continue;
     const dedupeKey = routeKey.toLowerCase();
     if (seen.has(dedupeKey)) continue;
     const routeTarget = parseHistoryRouteTarget(routeKey);
@@ -2477,7 +2500,12 @@ function appendMatchingRouteHistoryItems(items, prefix, seenRoutes = null) {
       routeHtml: _acRouteHtml(routeKey),
       routeSwitchIcon: false,
       label: '',
-      insert: '',
+      // Plain route text, not '' — these items sit alongside live-typed
+      // insert-only suggestions in the same arrow-navigable list, so
+      // previewing one must behave the same way theirs does (fill the
+      // composer as text) rather than instantly switching the real chip;
+      // see previewApply on routeHistoryAutocompleteItems above for why.
+      insert: routeKey,
       trail: false,
       routeTarget,
       sub: prompt ? _acLastPrompt(prompt) : '',
@@ -3383,10 +3411,7 @@ input.addEventListener('keydown', (e) => {
   }
   if (e.key === 'ArrowUp' && commandEditRestore !== null) {
     e.preventDefault();
-    input.value = commandEditRestore;
-    commandEditRestore = null;
-    input.setSelectionRange(input.value.length, input.value.length);
-    resizeComposer();
+    restoreStashedInput();
     return;
   }
   if (e.key === 'Tab' && !sessionAdvisoryEl.hidden) { e.preventDefault(); stashComposerAndEdit('/clear'); return; }
@@ -3471,8 +3496,8 @@ input.addEventListener('keydown', (e) => {
 });
 
 async function sendMessage(text, opts = {}) {
-  const source = opts.source === 'system' ? 'system' : 'human';
-  const updateComposerRoute = source !== 'system' && opts.updateComposerRoute !== false;
+  const source = opts.source === 'workflow' || opts.source === 'diff_viewer' ? opts.source : 'human';
+  const updateComposerRoute = source === 'human' && opts.updateComposerRoute !== false;
   const suppressChipTurnCount = !!opts.suppressChipTurnCount;
   const parsed = parseInput(text);
   const { lookback, route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, flowOrigins, message } = parsed;
@@ -3887,7 +3912,13 @@ async function sendMessage(text, opts = {}) {
       block.classList.add('tool-block-history');
       messages.appendChild(block);
     }
-    refreshAllRevertButtons();
+    // force: this message's own GitDiff block is new (would get checked
+    // regardless), but it can also retroactively flip earlier same-session
+    // blocks from revertable to conflicting (see get_diff_revert_eligibility)
+    // — those are already dataset.revertChecked='1' from their own render
+    // and would otherwise sit stale until a full history reload re-creates
+    // their DOM from scratch.
+    refreshAllRevertButtons({ force: true });
   }
 
   function renderWorktreeBlockers(worktrees) {
@@ -4453,7 +4484,7 @@ async function sendOriginBroadcast(text, opts = {}) {
   const originTargets = parsed.broadcastAgents || parsed.flowOrigins || null;
   if (!originTargets) return;
   const displayFlowRoute = parsed.route || (topicChipEl?.classList.contains('route-chain') ? topicChipEl.textContent.trim() : null);
-  if (opts.source !== 'system') {
+  if ((opts.source || 'human') === 'human') {
     if (parsed.broadcastAgents) {
       setTopicChip(parsed.topic, null, false, 0, { route: parsed.route, broadcastAgents: parsed.broadcastAgents });
     } else {
@@ -4786,15 +4817,16 @@ function markVisibleWorktreeResolved(msgId, sourceRepo, message) {
     if (sourceRepo && block.dataset.worktreeRepo !== sourceRepo) return;
     const notice = block.querySelector('.gitdiff-sync-notice');
     if (notice) notice.textContent = message;
-    block.querySelectorAll('.gitdiff-sync-actions button').forEach(btn => {
-      btn.disabled = true;
-      if (btn.textContent === 'Re-sync' || btn.textContent === 'Retrying...' || btn.textContent === 'Synced') {
-        btn.textContent = 'Resolved';
-      }
-    });
+    const actions = block.querySelector('.gitdiff-sync-actions');
+    if (actions) {
+      const label = document.createElement('span');
+      label.className = 'gitdiff-resolved-label';
+      label.textContent = 'Resolved';
+      actions.replaceWith(label);
+    }
     const toggle = block.querySelector('.tool-toggle');
     if (toggle) {
-      toggle.textContent = toggle.textContent.replace(/ · (conflict|promotion_failed|pending)\b/, ' · resolved');
+      toggle.textContent = toggle.textContent.replace(/ · (conflict|promotion_failed|pending)\b/, ' · Conflict Resolved');
     }
   });
 }
@@ -4866,11 +4898,16 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
     const deletions = tool.deletions ?? 0;
     const worktreeStatus = tool.worktree_repo ? tool.worktree_status : null;
     const worktreeBlocked = !!worktreeStatus && worktreeStatus !== 'synced';
-    const statusSuffix = worktreeBlocked ? ` · ${worktreeStatus}` : '';
+    const statusLabel = worktreeStatus === 'resolved' ? 'Conflict Resolved' : worktreeStatus;
+    const statusSuffix = worktreeBlocked ? ` · ${statusLabel}` : '';
     toggle.textContent = `Changed files: ${count} file${count !== 1 ? 's' : ''}, +${additions} -${deletions}${statusSuffix}`;
 
     const sourceRepo = _gitDiffSourceRepo(tool);
-    const revertEligible = msgId && sourceRepo && _withinRevertWindow(timestamp) && !worktreeBlocked;
+    // Only conflict/promotion_failed/discarded turns have nothing (or an
+    // ambiguous result) to revert — a resolved turn's changes did land, same
+    // as a plain synced one, so revert stays available for it.
+    const revertBlocked = worktreeStatus === 'conflict' || worktreeStatus === 'promotion_failed' || worktreeStatus === 'discarded';
+    const revertEligible = msgId && sourceRepo && _withinRevertWindow(timestamp) && !revertBlocked;
     if (revertEligible) {
       block.dataset.msgId = String(msgId);
       block.dataset.repo = sourceRepo;
@@ -4890,7 +4927,13 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
         ? `Worktree sync conflict: ${conflictText}. New turns for this topic are blocked until the integration worktree is resolved or discarded.`
         : worktreeStatus === 'promotion_failed'
           ? `Worktree sync failed. New turns for this topic are blocked until this worktree is resolved or discarded.`
-          : `Worktree sync ${worktreeStatus}. Squid is still promoting this turn; retry or refresh if it does not clear.`;
+          : worktreeStatus === 'discarded'
+            ? `Discarded — this turn's changes were never applied to the main checkout.`
+            : worktreeStatus === 'resolved'
+              ? `Conflict resolved — final state applied to the main checkout.`
+              : `Worktree sync ${worktreeStatus}. Squid is still promoting this turn; retry or refresh if it does not clear.`;
+      if (worktreeStatus === 'discarded') notice.classList.add('gitdiff-sync-notice-discarded');
+      if (worktreeStatus === 'resolved') notice.classList.add('gitdiff-sync-notice-resolved');
       body.appendChild(notice);
 
       if (msgId && sourceRepo && messageTopic && (worktreeStatus === 'conflict' || worktreeStatus === 'promotion_failed')) {
@@ -4924,94 +4967,190 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
           actions.appendChild(openConflictBtn);
         }
 
-        async function chooseWorktreeSide(side, btn) {
-          if (btn.disabled) return;
-          btn.disabled = true;
-          const originalText = btn.textContent;
-          btn.textContent = side === 'new' ? 'Taking new...' : 'Taking old...';
-          try {
-            const res = await fetch(`/chat/${msgId}/worktree/choose`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ topic: messageTopic, repo: sourceRepo, side }),
-            });
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok || !data.ok) throw new Error(data.error || `${originalText} failed`);
-            const resolvedMessage = data.already_resolved
-              ? 'Worktree was already resolved. Future turns for this topic can start normally.'
-              : side === 'new'
-                ? 'Resolved by taking the newer main checkout side. Future turns for this topic can start normally.'
-                : 'Resolved by taking the older isolated turn side. Future turns for this topic can start normally.';
-            markVisibleWorktreeResolved(msgId, sourceRepo, resolvedMessage);
-          } catch (err) {
-            const msg = err?.message || `${originalText} failed`;
-            btn.disabled = false;
-            btn.textContent = originalText;
-            btn.title = msg;
-            notice.textContent = `${originalText} failed: ${msg}`;
-          }
-        }
-
         const retryBtn = document.createElement('button');
         retryBtn.type = 'button';
         retryBtn.className = 'gitdiff-resolve-worktree-btn';
-        retryBtn.textContent = 'Re-sync';
+        retryBtn.textContent = 'Resolve';
         retryBtn.title = `${blockerPrefix}Apply the saved integration worktree resolution back to the main checkout.`;
         retryBtn.addEventListener('click', async e => {
           e.stopPropagation();
           if (retryBtn.disabled) return;
           retryBtn.disabled = true;
-          retryBtn.textContent = 'Retrying...';
+          retryBtn.textContent = 'Resolving...';
+          const postRetry = force => fetch(`/chat/${msgId}/worktree/retry`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ topic: messageTopic, repo: sourceRepo, force }),
+          }).then(async res => ({ res, data: await res.json().catch(() => ({})) }));
           try {
-            const res = await fetch(`/chat/${msgId}/worktree/retry`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ topic: messageTopic, repo: sourceRepo }),
-            });
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok || !data.ok) throw new Error(data.error || 'Retry failed');
+            let { res, data } = await postRetry(false);
+            if (!res.ok && data.conflict_markers_remain) {
+              const files = (data.files || []).join(', ') || 'the conflicted file(s)';
+              const proceed = await confirmRestartWithRunningPrompts([], {
+                header: 'Resolve Conflict',
+                title: 'Conflict markers still present',
+                copy: `${files} still look${data.files?.length === 1 ? 's' : ''} like they contain conflict-marker ` +
+                  `text (<<<<<<< / ======= / >>>>>>>). Promote anyway?`,
+                confirmLabel: 'Promote Anyway',
+              });
+              if (!proceed) {
+                retryBtn.disabled = false;
+                retryBtn.textContent = 'Resolve';
+                return;
+              }
+              ({ res, data } = await postRetry(true));
+            }
+            if (!res.ok || !data.ok) throw new Error(data.error || 'Resolve failed');
             const resolvedMessage = data.already_resolved
               ? 'Worktree was already resolved. Future turns for this topic can start normally.'
               : 'Worktree resolved and synced. Future turns for this topic can start normally.';
             markVisibleWorktreeResolved(msgId, sourceRepo, resolvedMessage);
           } catch (err) {
-            const msg = err?.message || 'Retry failed';
+            const msg = err?.message || 'Resolve failed';
             retryBtn.disabled = false;
-            retryBtn.textContent = 'Re-sync';
+            retryBtn.textContent = 'Resolve';
             retryBtn.title = msg;
-            notice.textContent = `Re-sync failed: ${msg}`;
+            notice.textContent = `Resolve failed: ${msg}`;
           }
         });
         actions.appendChild(retryBtn);
 
         if (worktreeStatus === 'conflict') {
-          const newBtn = document.createElement('button');
-          newBtn.type = 'button';
-          newBtn.className = 'gitdiff-resolve-worktree-btn';
-          newBtn.textContent = 'Keep New';
-          newBtn.title = `${blockerPrefix}Resolve all conflict markers by taking the newer main checkout side.`;
-          newBtn.addEventListener('click', e => {
-            e.stopPropagation();
-            chooseWorktreeSide('new', newBtn);
-          });
-          actions.appendChild(newBtn);
+          const sep = document.createElement('span');
+          sep.className = 'gitdiff-sync-actions-sep';
+          actions.appendChild(sep);
 
-          const oldBtn = document.createElement('button');
-          oldBtn.type = 'button';
-          oldBtn.className = 'gitdiff-resolve-worktree-btn';
-          oldBtn.textContent = 'Keep Old';
-          oldBtn.title = `${blockerPrefix}Resolve all conflict markers by taking the older isolated turn side.`;
-          oldBtn.addEventListener('click', e => {
+          const autoResolveBtn = document.createElement('button');
+          autoResolveBtn.type = 'button';
+          autoResolveBtn.className = 'gitdiff-resolve-worktree-btn';
+          autoResolveBtn.textContent = 'Auto-Resolve';
+          autoResolveBtn.title = `${blockerPrefix}Ask the model to merge both sides directly in the integration worktree, using the original turn as context.`;
+          autoResolveBtn.addEventListener('click', async e => {
             e.stopPropagation();
-            chooseWorktreeSide('old', oldBtn);
+            if (autoResolveBtn.disabled) return;
+            autoResolveBtn.disabled = true;
+            autoResolveBtn.textContent = 'Resolving...';
+            let thinkingBubble = null, thinkingContent = null, loader = null;
+            const fail = msg => {
+              autoResolveBtn.disabled = false;
+              autoResolveBtn.textContent = 'Auto-Resolve';
+              autoResolveBtn.title = msg;
+              notice.textContent = `Auto-resolve failed: ${msg}`;
+              if (thinkingBubble) {
+                thinkingBubble.classList.remove('msg-thinking');
+                if (loader?.parentNode) loader.remove();
+                const errEl = document.createElement('div');
+                errEl.className = 'msg-error';
+                errEl.textContent = msg;
+                thinkingBubble.appendChild(errEl);
+              }
+            };
+            try {
+              const res = await fetch(`/chat/${msgId}/worktree/auto-resolve`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ topic: messageTopic, repo: sourceRepo }),
+              });
+              const isStream = res.ok && (res.headers.get('content-type') || '').includes('text/event-stream');
+              if (!isStream) {
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok || !data.ok) throw new Error(data.error || 'Auto-resolve failed');
+                const resolvedMessage = data.already_resolved
+                  ? 'Worktree was already resolved. Future turns for this topic can start normally.'
+                  : 'Auto-resolved by the model. Future turns for this topic can start normally.';
+                markVisibleWorktreeResolved(msgId, sourceRepo, resolvedMessage);
+                return;
+              }
+
+              // Real model work is happening now — render it as a normal chat
+              // turn (prompt + live thinking + streamed response) instead of
+              // hiding it behind a bare button spinner.
+              const userBubble = makeUserBubble('Auto-resolve merge conflict', messageTopic, null, null, true, 0, 'diff_viewer');
+              messages.appendChild(userBubble);
+              addTimestamp(userBubble, new Date().toISOString(), true);
+
+              thinkingBubble = document.createElement('div');
+              thinkingBubble.className = 'msg assistant msg-thinking';
+              thinkingBubble.dataset.topic = messageTopic;
+              const thinkingHeader = document.createElement('div');
+              thinkingHeader.className = 'response-header';
+              const thinkingHeaderText = document.createElement('span');
+              thinkingHeaderText.className = 'response-header-text';
+              thinkingHeaderText.appendChild(makeTopicTag(messageTopic, null, { adhoc: true }));
+              thinkingHeader.appendChild(thinkingHeaderText);
+              thinkingBubble.appendChild(thinkingHeader);
+              thinkingContent = document.createElement('div');
+              thinkingContent.className = 'thinking-live';
+              thinkingBubble.appendChild(thinkingContent);
+              loader = addLoader(thinkingContent);
+              messages.appendChild(thinkingBubble);
+              scrollToBottom();
+
+              let raw = '';
+              let statusBuf = '';
+              const updatePreview = () => {
+                if (loader?.parentNode) loader.remove();
+                thinkingContent.textContent = (statusBuf ? statusBuf.trim() + (raw ? '\n\n' : '') : '') + raw;
+                scrollToBottom();
+              };
+
+              const reader = res.body.getReader();
+              const decoder = new TextDecoder();
+              let buf = '';
+              let eventName = null;
+              let resolveResult = null;
+
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buf += decoder.decode(value, { stream: true });
+                const lines = buf.split('\n');
+                buf = lines.pop();
+                for (const line of lines) {
+                  if (line.startsWith('event:')) {
+                    eventName = line.slice(6).trim();
+                  } else if (line.startsWith('data:')) {
+                    const field = line.slice(5);
+                    const data = field.startsWith(' ') ? field.slice(1) : field;
+                    if (eventName === 'resolve_result') {
+                      try { resolveResult = JSON.parse(data); } catch {}
+                    } else if (eventName === 'status' || eventName === 'tool') {
+                      statusBuf += (statusBuf ? '\n' : '') + data;
+                      updatePreview();
+                    } else if (eventName === 'error') {
+                      throw new Error(data.trim() || 'Auto-resolve failed');
+                    } else if (eventName === 'done' || eventName === 'meta' || eventName === 'stats') {
+                      // internal turn — no per-event UI beyond the live text below
+                    } else {
+                      raw += data;
+                      updatePreview();
+                    }
+                  } else if (line === '') {
+                    eventName = null;
+                  }
+                }
+              }
+
+              if (!resolveResult || !resolveResult.ok) {
+                throw new Error(resolveResult?.error || 'Auto-resolve failed');
+              }
+
+              thinkingBubble.classList.remove('msg-thinking');
+              if (loader?.parentNode) loader.remove();
+              thinkingContent.innerHTML = raw ? renderAssistantMarkdown(raw) : '';
+              thinkingBubble.classList.add('history-item');
+              markVisibleWorktreeResolved(msgId, sourceRepo, 'Auto-resolved by the model. Future turns for this topic can start normally.');
+            } catch (err) {
+              fail(err?.message || 'Auto-resolve failed');
+            }
           });
-          actions.appendChild(oldBtn);
+          actions.appendChild(autoResolveBtn);
         }
 
         const discardBtn = document.createElement('button');
         discardBtn.type = 'button';
         discardBtn.className = 'gitdiff-discard-worktree-btn';
-        discardBtn.textContent = 'Discard Old';
+        discardBtn.textContent = 'Discard Turn';
         discardBtn.title = `${blockerPrefix}Discard only this isolated turn's pending worktree changes; already-applied main checkout changes are not reverted.`;
         discardBtn.addEventListener('click', async e => {
           e.stopPropagation();
@@ -5033,7 +5172,7 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
           } catch (err) {
             const msg = err?.message || 'Discard failed';
             discardBtn.disabled = false;
-            discardBtn.textContent = 'Discard Old';
+            discardBtn.textContent = 'Discard Turn';
             discardBtn.title = msg;
             notice.textContent = `Discard failed: ${msg}`;
           }
@@ -5318,7 +5457,7 @@ function historyRouteChainMarkerForItem(item, nextItem, prevItem) {
   if (historyItemMatchesRouteOrigin(item, routeChainParts(ownRoute))) {
     return ownRoute;
   }
-  const nextRoute = nextItem?.prompt_source === 'system'
+  const nextRoute = nextItem?.prompt_source === 'workflow'
     ? historyRouteChainFromPrompt(nextItem.prompt)
     : '';
   const nextParts = routeChainParts(nextRoute);
@@ -5763,12 +5902,12 @@ async function pollMessageStatus(msgId, contentEl, bubbleEl, stopBtn = null) {
 function makeUserBubble(text, topic, agent, backendFallback = null, adhoc = false, lookback = 0, source = 'human', broadcastAgents = null, flowRoute = null) {
   const div = document.createElement('div');
   div.className = 'msg user';
-  if (source === 'system') {
+  if (source === 'workflow' || source === 'diff_viewer') {
     div.classList.add('user-system-generated');
-    div.dataset.source = 'system';
+    div.dataset.source = source;
     const label = document.createElement('div');
     label.className = 'user-source-label';
-    label.textContent = 'SYSTEM';
+    label.textContent = source === 'diff_viewer' ? 'DIFF VIEWER' : 'WORKFLOW';
     div.appendChild(label);
   }
   const content = document.createElement('div');
@@ -10048,14 +10187,21 @@ async function loadAgents() {
     const modelHtml = model
       ? `<span class="agent-model" title="${escapeHtml(model)}">${escapeHtml(model)}</span>`
       : '<span class="col-default">—</span>';
+    const cwdHtml = a.cwd
+      ? `<span class="agent-cwd agent-cwd-link" data-cwd="${escapeHtml(a.cwd)}" title="Open ${escapeHtml(a.cwd)} in file viewer">${escapeHtml(a.cwd)}</span>`
+      : `<span class="agent-cwd agent-cwd-link col-default" data-cwd="${escapeHtml(_squidHome)}" title="Open ${escapeHtml(_squidHome)} in file viewer">${escapeHtml(_squidHome)}</span>`;
+    // A custom cwd hides the default squid home from the row entirely — give
+    // it a small, grey secondary link back to squid home so it's still one
+    // click away instead of only reachable from rows that have no custom cwd.
+    const homeLinkHtml = (a.cwd && a.cwd !== _squidHome)
+      ? `<span class="agent-cwd-home agent-cwd-link col-default" data-cwd="${escapeHtml(_squidHome)}" title="Open default (${escapeHtml(_squidHome)}) in file viewer">⌂</span>`
+      : '';
     return `
     <tr>
       <td><span class="agent-name">${escapeHtml(a.name)}</span></td>
       <td class="col-runtime">${escapeHtml(runtimeText)}</td>
       <td class="col-model">${modelHtml}</td>
-      <td class="col-cwd">${a.cwd
-        ? `<span class="agent-cwd" title="${escapeHtml(a.cwd)}">${escapeHtml(a.cwd)}</span>`
-        : `<span class="agent-cwd col-default" title="${escapeHtml(_squidHome)}">${escapeHtml(_squidHome)}</span>`}</td>
+      <td class="col-cwd"><span class="agent-cwd-cell">${cwdHtml}${homeLinkHtml}</span></td>
       <td>
         <button class="edit-btn" data-name="${escapeHtml(a.name)}" data-harness="${escapeHtml(runtime.harness)}" data-provider="${escapeHtml(runtime.provider || '')}" data-backend="${escapeHtml(ref || '')}" data-model="${escapeHtml(a.model || '')}" data-cwd="${escapeHtml(a.cwd || '')}" title="Edit agent">✎</button>
         <button class="del-btn" data-name="${escapeHtml(a.name)}" title="Delete agent (does not affect existing messages)">✕</button>
@@ -10083,6 +10229,10 @@ async function loadAgents() {
       }
       loadAgents();
     });
+  });
+
+  listEl.querySelectorAll('.agent-cwd-link').forEach(el => {
+    el.addEventListener('click', () => openFileViewer(el.dataset.cwd));
   });
 
   listEl.querySelectorAll('.edit-btn').forEach(btn => {
@@ -10354,7 +10504,7 @@ function _acPreview() {
   }
   if (item.fullEntry) {
     applyPromptHistoryEntry(item.fullEntry);
-  } else if (item.routeTarget) {
+  } else if (item.routeTarget && item.previewApply) {
     applyRouteTarget(item.routeTarget);
   } else {
     input.value = item.insert;
@@ -10703,6 +10853,8 @@ async function updateAutocomplete() {
       topic = resolved ? resolved[resolved.length - 1].topic : null;
     }
     if (!topic) { hideAutocomplete(); return; }
+    const prefixAgentKeys = new Set((_resolveBroadcastAtoms(prefix.split(',')) || [])
+      .map(a => `${a.topic}\0${String(a.agent || '').toLowerCase()}`));
     const [agents, history] = await Promise.all([
       _acAgents(),
       fetch(`/topics/${encodeURIComponent(topic)}/agents/history`).then(r => r.ok ? r.json() : []).catch(() => []),
@@ -10713,9 +10865,11 @@ async function updateAutocomplete() {
     let items = [];
     const topicPrefix = explicitTopic ? `#${topic}` : ''; // omit if the topic was inherited, not typed
     const addItem = (name, fresh, sub, meta) => {
+      if (prefixAgentKeys.has(`${topic}\0${String(name || '').toLowerCase()}`)) return;
+      const route = `${prefix},${topicPrefix}@${name}${fresh ? '!' : ''}`;
       items.push({
-        label: _acRouteLabel(topic, name + (fresh ? '!' : ''), backendByAgent.get(name) || null),
-        insert: `${prefix},${topicPrefix}@${name}${fresh ? '!' : ''}`,
+        label: _acRouteHtml(route),
+        insert: route,
         replaceSlug: replacingSlug,
         sub,
         meta: fresh ? 'fresh' : meta,
@@ -10728,13 +10882,15 @@ async function updateAutocomplete() {
       addItem(h.agent, true, _acLastPrompt(h.last_adhoc_prompt));
       addItem(h.agent, false, _acLastPrompt(h.last_prompt));
     }
-    for (const a of agents) {
-      if (usedNames.has(a.name)) continue;
-      if (!a.name.toLowerCase().startsWith(agentPrefix)) continue;
-      addItem(a.name, true, '', a.backend);
-      addItem(a.name, false, '', a.backend);
-    }
     appendMatchingRouteHistoryItems(items, slugVal);
+    if (agentPrefix) {
+      for (const a of agents) {
+        if (usedNames.has(a.name)) continue;
+        if (!a.name.toLowerCase().startsWith(agentPrefix)) continue;
+        addItem(a.name, true, '', a.backend);
+        addItem(a.name, false, '', a.backend);
+      }
+    }
     _acRender(items.slice(0, 10), 'Routes');
   } else if (mBroadcastTopic) {
     const prefix = mBroadcastTopic[1];
@@ -10814,12 +10970,6 @@ async function updateAutocomplete() {
     }
 
     appendMatchingRouteHistoryItems(items, slugVal);
-    if (!routeSyntaxActive) {
-      items = items.map(item => {
-        const routeTarget = parseHistoryRouteTarget(normalizePromptHistoryRoute(item.insert));
-        return routeTarget ? { ...item, insert: '', trail: false, routeTarget } : item;
-      });
-    }
     _acRender(items.slice(0, 10), 'Routes');
   } else if (mChainTopicTarget) {
     const originTopic = mChainTopicTarget[1];
@@ -12246,7 +12396,7 @@ async function openMemoryEditor(topic) {
   memoryTokenCount.textContent = '';
   memoryModal.classList.add('open');
   try {
-    const data = await fetch(`/topics/${encodeURIComponent(topic)}/memory`).then(r => r.json());
+    const data = await fetch(`/topics/${encodeURIComponent(topic)}/memory/squid/seed`, { method: 'POST' }).then(r => r.json());
     _memoryCache[topic] = { ...data, loading: false };
     memoryEditor.value = data.content || '';
     memoryPath.textContent = data.path || `~/.squid/context/topics/${topic}/memory.md`;
@@ -12655,18 +12805,30 @@ document.getElementById('session-advisory-dismiss').addEventListener('click', ()
   hideAdvisory();
 });
 
+function restoreStashedInput() {
+  if (commandEditRestore === null) return;
+  input.value = commandEditRestore;
+  commandEditRestore = null;
+  input.setSelectionRange(input.value.length, input.value.length);
+  resizeComposer();
+}
+
 function stashComposerAndEdit(command) {
   const prev = input.value.trim();
   commandEditRestore = prev && prev !== command ? prev : null;
   if (prev && prev !== command && !prev.startsWith('/')) {
     recordPrompt(prev);
     const hint = document.createElement('span');
+    hint.className = 'restore-hint';
     if (isMobileViewport()) {
-      hint.className = 'restore-hint restore-hint-icon material-symbols-outlined';
-      hint.textContent = 'archive';
+      hint.classList.add('restore-hint-tappable');
+      const icon = document.createElement('span');
+      icon.className = 'restore-hint-icon material-symbols-outlined';
+      icon.textContent = 'archive';
+      hint.append(icon, ' tap to restore');
+      hint.addEventListener('click', () => { restoreStashedInput(); input.focus(); });
     } else {
-      hint.className = 'restore-hint';
-      hint.textContent = '↑ restore';
+      hint.textContent = '↑ to restore';
     }
     document.getElementById('tag-bar').appendChild(hint);
     setTimeout(() => {
@@ -13013,8 +13175,22 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
 
   const pickHint = document.createElement('p');
   pickHint.className = pickOpts ? 'fv-roots-hint fv-roots-hint-pick' : 'fv-roots-hint';
-  pickHint.textContent = 'Select a file to attach it as context, or upload a new one.';
+  pickHint.appendChild(document.createTextNode('Select a file to attach it as context, or upload a new one. '));
+  const pickHintTmpLink = document.createElement('a');
+  pickHintTmpLink.href = '#';
+  pickHintTmpLink.textContent = 'Go to /tmp for temporary uploads →';
+  pickHintTmpLink.hidden = true;
+  pickHintTmpLink.addEventListener('click', e => {
+    e.preventDefault();
+    navigate('/tmp');
+  });
+  pickHint.appendChild(pickHintTmpLink);
   pickHint.hidden = !pickOpts;
+  if (pickOpts) {
+    fetch('/localfile?' + new URLSearchParams({ path: '/tmp' }))
+      .then(res => { if (res.ok) pickHintTmpLink.hidden = false; })
+      .catch(() => {});
+  }
 
   const body = document.createElement('div');
   body.id = 'file-modal-body';

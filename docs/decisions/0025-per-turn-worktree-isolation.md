@@ -531,6 +531,34 @@ Both paths end with `status = 'synced'` on success or
 `status = 'conflict'` with a refreshed conflict artifact if repo_root
 drift collides again.
 
+**Shipped, with one deliberate deviation from the above.** "Ask AI to
+resolve" is the Auto-Resolve button (`POST /chat/{msg_id}/worktree/auto-resolve`,
+`agent/server.py`), and it does route the follow-up turn to the existing
+`integration_worktree_path` via `override_cwd`, as specified. It does **not**
+store a `MergeConflict` tool event at conflict-detection time — no such event
+type exists. Instead `conflict_context_summary()` (`agent/worktree.py`, a
+sibling to `_gitdiff_context_summary()` per the plan above) reads the
+integration worktree's live merge stages (`git show :1/:2/:3:path`) at
+auto-resolve time and formats them into the same `<merge_conflict>` block this
+section calls for. This is simpler than persisting the conflict as a tool
+event, at the cost of only being reconstructable while the integration
+worktree still exists (true for the whole `status = 'conflict'` window, which
+is the only time this endpoint is reachable).
+
+The original turn's request/response is not retyped into the prompt either —
+the auto-resolve endpoint passes `pinned_ids=[msg_id]` through the normal
+adhoc pinned-context path (`_prepare_chat_turn`, `agent/server.py`), which
+already prepends pinned messages into `context_history` for adhoc turns and
+appends their `_gitdiff_context_summary()` via `get_messages_by_ids`. The
+model sees the original turn as a real preceding conversation turn, not prose
+describing it.
+
+An earlier version of the auto-resolve prompt also told the model "the
+repository at {repo_root}" without clarifying that its actual cwd is a
+*different* directory (the integration worktree) — the model would `cd`
+there, find no conflict, and report a false negative. The prompt now says so
+explicitly.
+
 ### Commit requests
 
 An agent must not run `git commit`, `git push`, `git pull`, `git tag`, branch,

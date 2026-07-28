@@ -416,7 +416,7 @@ def _system_user_exists(rows: list[dict], *, after_id: int, topic: str, agent: s
         if not _row_belongs_to_branch(row, previous_ids):
             continue
         content = row.get("content") or ""
-        if row["topic"] == topic and row["agent"] == agent and (route_line in content or row.get("source") != "system"):
+        if row["topic"] == topic and row["agent"] == agent and (route_line in content or row.get("source") != "workflow"):
             return True
     return False
 
@@ -431,7 +431,7 @@ def _system_assistant(rows: list[dict], *, after_id: int, topic: str, agent: str
         content = user.get("content") or ""
         if user["topic"] != topic or user["agent"] != agent:
             continue
-        if user.get("source") == "system" and route_line not in content:
+        if user.get("source") == "workflow" and route_line not in content:
             continue
         return _done_assistant_for_user(rows, user["id"])
     return None
@@ -448,7 +448,7 @@ def _system_users(rows: list[dict], *, after_id: int, topic: str, agent: str, ro
         content = row.get("content") or ""
         if row["topic"] != topic or row["agent"] != agent:
             continue
-        if row.get("source") == "system" and route_line not in content:
+        if row.get("source") == "workflow" and route_line not in content:
             continue
         out.append(row)
     return out
@@ -691,7 +691,7 @@ async def _dispatch_next_step(flow_run_id: str, step: dict) -> None:
         adhoc=step["fresh"],
         lookback=0,
         pinned_ids=step["previous_msg_ids"],
-        source="system",
+        source="workflow",
         flow_run_id=flow_run_id,
         flow_route=step["route"],
     )

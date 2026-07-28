@@ -41,7 +41,7 @@ def test_chat_messages_source_defaults_and_can_mark_system(tmp_path, monkeypatch
     stats_db.init_db()
 
     human_user = stats_db.insert_user_message("squid", "codex", "human prompt")
-    system_user = stats_db.insert_user_message("squid", "codex", "handoff prompt", source="system")
+    system_user = stats_db.insert_user_message("squid", "codex", "handoff prompt", source="workflow")
     system_asst = stats_db.insert_assistant_message("squid", "codex", system_user)
 
     with sqlite3.connect(tmp_path / "squid.db") as conn:
@@ -49,8 +49,8 @@ def test_chat_messages_source_defaults_and_can_mark_system(tmp_path, monkeypatch
             "SELECT id, source FROM chat_messages WHERE role='user' ORDER BY id"
         ).fetchall()
 
-    assert rows == [(human_user, "human"), (system_user, "system")]
-    assert stats_db.get_message(system_asst)["prompt_source"] == "system"
+    assert rows == [(human_user, "human"), (system_user, "workflow")]
+    assert stats_db.get_message(system_asst)["prompt_source"] == "workflow"
 
 
 def test_allocate_id_returns_incrementing_values_per_namespace(tmp_path, monkeypatch):
@@ -99,6 +99,25 @@ def test_init_db_backfills_source_for_existing_chat_messages(tmp_path, monkeypat
         row = conn.execute("SELECT source FROM chat_messages WHERE content='old prompt'").fetchone()
 
     assert row == ("human",)
+
+
+def test_init_db_migrates_legacy_system_source_to_workflow(tmp_path, monkeypatch):
+    db_path = tmp_path / "squid.db"
+    monkeypatch.setattr(stats_db, "_DB_PATH", db_path)
+    stats_db.init_db()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO chat_messages (topic, role, content, status, source) "
+            "VALUES ('squid', 'user', 'handoff prompt', 'done', 'system')"
+        )
+
+    stats_db.init_db()
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute("SELECT source FROM chat_messages WHERE content='handoff prompt'").fetchone()
+
+    assert row == ("workflow",)
 
 
 def test_init_db_seeds_five_default_agents_when_all_harnesses_are_installed(tmp_path, monkeypatch):
@@ -1581,7 +1600,7 @@ def test_flow_route_filter_matches_legacy_handoff_prompt_variants(tmp_path, monk
         "Current step: @revuqwen!",
         "Original prompt: needle origin prompt",
     ])
-    target_user = stats_db.insert_user_message("squid", "revuqwen", handoff, source="system")
+    target_user = stats_db.insert_user_message("squid", "revuqwen", handoff, source="workflow")
     target_asst = stats_db.insert_assistant_message("squid", "revuqwen", target_user, adhoc=True)
     stats_db.update_assistant_message(target_asst, "needle target response", "target-session", "done")
 

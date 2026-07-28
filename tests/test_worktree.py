@@ -438,6 +438,34 @@ def test_promote_resolved_integration_worktree_applies_manual_resolution(tmp_pat
     assert not wt_b.exists()
 
 
+def test_promote_resolved_integration_worktree_rejects_leftover_conflict_markers(tmp_path):
+    repo = init_repo(tmp_path / "repo")
+
+    ensure_worktree(repo, "topic", "521")
+    wt_a = worktree_path(repo, "topic", "521")
+    ensure_worktree(repo, "topic", "522")
+    wt_b = worktree_path(repo, "topic", "522")
+
+    (wt_a / "file.txt").write_text("edit-A\n")
+    sync_after_turn(repo, "topic", "521", msg_id=521)
+    (wt_b / "file.txt").write_text("edit-B\n")
+
+    conflicts = sync_after_turn(repo, "topic", "522", msg_id=522)
+    assert conflicts == ["file.txt"]
+
+    integration = worktree_mod.integration_worktree_path(repo, "topic", "522")
+    # Nothing edited — the file still has the merge's literal conflict markers.
+    with pytest.raises(worktree_mod.ConflictMarkersRemainError) as exc_info:
+        promote_resolved_integration_worktree(repo, "topic", "522")
+    assert exc_info.value.files == ["file.txt"]
+    assert integration.exists()
+
+    # force=True bypasses the check for an explicit "promote anyway".
+    promote_resolved_integration_worktree(repo, "topic", "522", force=True)
+    assert "<<<<<<<" in (repo / "file.txt").read_text()
+    assert not integration.exists()
+
+
 # ---------------------------------------------------------------------------
 # remove_worktree
 # ---------------------------------------------------------------------------

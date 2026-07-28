@@ -1098,6 +1098,16 @@ body {
   white-space: normal;
   word-break: break-word;
 }
+.gitdiff-sync-notice-discarded {
+  background: var(--surface-3);
+  color: var(--danger);
+  border-top: 1px solid var(--surface-3);
+}
+.gitdiff-sync-notice-resolved {
+  background: rgba(74, 138, 74, 0.14);
+  color: var(--ok);
+  border-top: 1px solid rgba(74, 138, 74, 0.24);
+}
 .gitdiff-sync-path {
   padding: 0.35rem 0.7rem;
   color: var(--text-dim);
@@ -1108,9 +1118,16 @@ body {
 }
 .gitdiff-sync-actions {
   display: flex;
+  align-items: center;
   gap: 0.45rem;
   flex-wrap: wrap;
   margin: 0.45rem 0.7rem;
+}
+.gitdiff-sync-actions-sep {
+  width: 1px;
+  align-self: stretch;
+  min-height: 1.2rem;
+  background: var(--surface-3);
 }
 .gitdiff-resolve-worktree-btn,
 .gitdiff-discard-worktree-btn {
@@ -1131,6 +1148,11 @@ body {
 .gitdiff-discard-worktree-btn:disabled {
   opacity: 0.7;
   cursor: default;
+}
+.gitdiff-resolved-label {
+  display: inline-block;
+  margin: 0.45rem 0.7rem;
+  color: var(--text-dim);
 }
 .gitdiff-file-row {
   border-top: 1px solid var(--surface-3); display: flex; flex-wrap: wrap; align-items: center;
@@ -2537,6 +2559,7 @@ body {
   display: table-cell;
   text-align: right;
   padding: 0 1.2em 0 1em;
+  width: 1%;
   color: #333345;
   user-select: none;
   white-space: pre;
@@ -3915,6 +3938,7 @@ body {
   white-space: nowrap;
 }
 .restore-hint.fade { opacity: 0; }
+.restore-hint-tappable { pointer-events: auto; cursor: pointer; display: inline-flex; align-items: center; gap: 0.15rem; }
 .restore-hint-icon { font-size: 1rem; }
 #topic-chip {
   display: none;
@@ -4459,10 +4483,28 @@ button {
 #agents-list .col-cwd {
   max-width: 24rem;
 }
+#agents-list .agent-cwd-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
 #agents-list .agent-cwd {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+#agents-list .agent-cwd-home {
+  flex-shrink: 0;
+}
+#agents-list .agent-cwd-link {
+  cursor: pointer;
+  color: var(--accent-light);
+}
+#agents-list .agent-cwd-link:hover {
+  color: #ffb87a;
 }
 #agents-list thead th {
   color: var(--text-dim);

@@ -735,12 +735,12 @@ def test_chat_response_exposes_message_id_header():
             "message": "hello",
             "topic": "squid",
             "agent": "codex",
-            "source": "system",
+            "source": "workflow",
         })
 
     assert res.status_code == 200
     assert res.headers["X-Squid-Msg-Id"] == "202"
-    assert insert_user_message.call_args.kwargs["source"] == "system"
+    assert insert_user_message.call_args.kwargs["source"] == "workflow"
 
 
 def test_chat_allocates_short_flow_run_id_for_routed_turn():

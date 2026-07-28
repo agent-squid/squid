@@ -1828,10 +1828,15 @@ def runner_for_harness(harness: str):
     return globals().get(name) if name else None
 
 
-def runner_for_agent(resolved, *, adhoc: bool = False):
+def effective_protocol(resolved, *, adhoc: bool = False) -> str:
     protocol = getattr(resolved, "protocol", "oneshot-cli") or "oneshot-cli"
     if adhoc and protocol != "oneshot-cli":
         protocol = "oneshot-cli"
+    return protocol
+
+
+def runner_for_agent(resolved, *, adhoc: bool = False):
+    protocol = effective_protocol(resolved, adhoc=adhoc)
     harness = getattr(resolved, "harness", None)
     name = RUNNER_NAMES_BY_HARNESS_PROTOCOL.get((harness, protocol))
     return globals().get(name) if name else None

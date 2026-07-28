@@ -156,8 +156,12 @@ def test_write_topic_memory_squid_code_roots_preserves_markdown_body(tmp_path, m
 
     assert data["squid"]["code_roots_skipped"] is True
     assert data["content"].startswith(
-        "---\nsquid:\n  # code_roots:\n  #   - /absolute/path/to/repo\n  code_roots_skipped: true\n---\n"
+        "---\nsquid:\n"
+        "  # code_roots: absolute path(s) to this topic's repo(s) — enables code context\n"
+        "  #   - /absolute/path/to/repo\n"
+        "  code_roots_skipped: true\n---\n"
     )
+
     assert "## Notes\n\nKeep this." in data["content"]
 
 

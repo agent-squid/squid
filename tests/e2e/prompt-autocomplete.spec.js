@@ -285,9 +285,9 @@ test('broadcast route autocomplete opens immediately after comma', async ({ page
 
   await expect(page.locator('#autocomplete')).toHaveClass(/open/);
   await expect(page.locator('#autocomplete .ac-title')).toHaveText('Routes');
-  await expect(page.locator('#autocomplete .ac-item', { hasText: '#squid@claude!' })).toBeVisible();
+  await expect(page.locator('#autocomplete .ac-item', { hasText: '#squid@qwen,@claude!' })).toBeVisible();
 
-  await page.locator('#autocomplete .ac-item', { hasText: '#squid@claude!' }).click();
+  await page.locator('#autocomplete .ac-item', { hasText: '#squid@qwen,@claude!' }).click();
 
   await expect(composer).toHaveValue('#squid@qwen,@claude! ');
 });
@@ -312,6 +312,48 @@ test('route autocomplete includes saved flows matching an agent route prefix', a
   await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#squid@qwen');
   await expect(page.locator('#autocomplete .ac-item.selected')).not.toContainText(',');
   await expect(page.locator('#autocomplete .ac-item', { hasText: '#squid@qwen,@qwen!' })).toBeVisible();
+});
+
+test('broadcast route autocomplete keeps saved repeated-agent flows visible after comma', async ({ page }) => {
+  await mockBackend(page);
+  await page.unroute('**/prompts/recent**');
+  await page.route('**/prompts/recent**', route => route.fulfill({ json: { items: [
+    '#conflict@claude,@claude! compare twice',
+    '#conflict@claude,@codex compare other',
+  ] } }));
+  await page.unroute('**/config/agents');
+  await page.route('**/config/agents', route => route.fulfill({ json: [
+    'alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf', 'hotel'
+  ].map(name => ({ name, backend: 'codex' })) }));
+  await page.route('**/topics/conflict/agents/history', route => route.fulfill({ json: [
+    { agent: 'claude', last_prompt: 'Changed FOOT to random number string', last_adhoc_prompt: 'Changed FOOT to random number string' },
+  ] }));
+  await page.goto('/');
+  await page.evaluate(() => clearTopicChip());
+
+  const composer = page.locator('#input');
+  await composer.fill('#conflict@claude,');
+
+  await expect(page.locator('#autocomplete')).toHaveClass(/open/);
+  await expect(page.locator('#autocomplete .ac-title')).toHaveText('Routes');
+  const savedFlow = page.locator('#autocomplete .ac-item', { hasText: '#conflict@claude,@claude!' });
+  await expect(savedFlow).toBeVisible();
+  await expect(page.locator('#autocomplete .ac-item', { hasText: /#conflict@claude,@claude(?![!])/ })).toHaveCount(0);
+  await expect(page.locator('#autocomplete .ac-item', { hasText: '#conflict@alpha!' })).toHaveCount(0);
+  await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#conflict@claude,@claude!');
+
+  await composer.press('ArrowUp');
+  await expect(page.locator('#autocomplete .ac-item.selected')).not.toContainText('#conflict@claude,@claude!');
+  await expect(page.locator('#topic-chip')).not.toHaveClass(/visible/);
+
+  await composer.press('ArrowDown');
+  await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#conflict@claude,@claude!');
+  await expect(composer).toHaveValue('#conflict@claude,@claude!');
+  await expect(page.locator('#topic-chip')).not.toHaveClass(/visible/);
+
+  await composer.press('ArrowUp');
+  await expect(page.locator('#autocomplete .ac-item.selected')).not.toContainText('#conflict@claude,@claude!');
+  await expect(page.locator('#topic-chip')).not.toHaveClass(/visible/);
 });
 
 test('route autocomplete keeps saved flows visible after a matching chain operator', async ({ page }) => {

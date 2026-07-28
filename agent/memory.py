@@ -45,14 +45,17 @@ def _load_frontmatter(content: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-_CODE_ROOTS_HINT_LINES = ["  # code_roots:", "  #   - /absolute/path/to/repo"]
+_CODE_ROOTS_HINT_LINES = [
+    "  # code_roots: absolute path(s) to this topic's repo(s) — enables code context",
+    "  #   - /absolute/path/to/repo",
+]
 
 _PLACEHOLDER_MEMORY = (
     "---\n"
     "squid:\n"
-    "  # code_roots:\n"
+    "  # code_roots: absolute path(s) to this topic's repo(s) — enables code context\n"
     "  #   - /absolute/path/to/repo\n"
-    "  # code_roots_skipped: true\n"
+    "  # code_roots_skipped: true  # set if this topic has no local codebase\n"
     "---\n"
 )
 
@@ -191,6 +194,17 @@ def topic_memory_prompt_block(topic: str) -> Optional[str]:
         content,
         "</topic_memory>",
     ])
+
+
+def oneshot_protocol_prompt_block() -> str:
+    return (
+        "This turn is a one-shot, non-interactive CLI process: it exits as soon as you emit your "
+        "response, and nothing resumes it afterward. Do not background a task and tell the user "
+        "you'll \"check back\", \"report back\", or \"follow up\" once it finishes — no later turn "
+        "fires when that job completes, so that promise can't be kept. If a command may take a while, "
+        "wait for it synchronously in this turn and report the real outcome, or tell the user up front "
+        "that they'll need to ask again to check on it."
+    )
 
 
 def topic_memory_squid_config_from_content(content: str) -> dict:

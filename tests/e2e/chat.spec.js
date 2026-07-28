@@ -811,11 +811,11 @@ test.describe('response bubble', () => {
     await expect(page.locator('#file-modal-body .fv-target')).toContainText('<<<<<<< HEAD');
     await expect(page.locator('.fv-edit-line')).toHaveValue('8');
     await page.locator('#file-modal-close').click();
-    await expect(block.getByRole('button', { name: 'Keep New' })).toHaveAttribute('title', /newer main checkout side/);
-    await expect(block.getByRole('button', { name: 'Keep Old' })).toHaveAttribute('title', /older isolated turn side/);
-    await block.getByRole('button', { name: 'Re-sync' }).click();
-    await expect(block.locator('.gitdiff-sync-notice')).toContainText('Re-sync failed: worktree not found');
-    await block.getByRole('button', { name: 'Discard Old' }).click();
+    await expect(block.getByRole('button', { name: 'Auto-Resolve' })).toHaveAttribute('title', /Ask the model to merge both sides directly in the integration worktree/);
+    await block.getByRole('button', { name: 'Resolve', exact: true }).click();
+    await expect(block.locator('.gitdiff-sync-notice')).toContainText('Resolve failed: worktree not found');
+    await expect(block.getByRole('button', { name: 'Discard Turn' })).toHaveAttribute('title', /already-applied main checkout changes are not reverted/);
+    await block.getByRole('button', { name: 'Discard Turn' }).click();
     await expect(block.locator('.gitdiff-sync-notice')).toContainText('Worktree discarded');
     expect(discardBody).toEqual({ topic: 'default', repo: '/tmp/repo' });
   });
@@ -852,23 +852,23 @@ test.describe('response bubble', () => {
     await expect(page.locator(MSG_ERROR)).toContainText('worktree sync requires attention');
     const block = page.locator('.tool-block-history').first();
     await expect(block.locator('.gitdiff-sync-notice')).toContainText('Worktree sync conflict: ui/app.js');
-    await expect(block.getByRole('button', { name: 'Keep New' })).toBeVisible();
-    await expect(block.getByRole('button', { name: 'Keep Old' })).toBeVisible();
-    await expect(block.getByRole('button', { name: 'Discard Old' })).toHaveAttribute(
+    await expect(block.getByRole('button', { name: 'Conflicts' })).toBeVisible();
+    await expect(block.getByRole('button', { name: 'Auto-Resolve' })).toBeVisible();
+    await expect(block.getByRole('button', { name: 'Discard Turn' })).toHaveAttribute(
       'title',
       /later blocked message points at turn #7282.*Discard only this isolated turn's pending worktree changes/,
     );
     await block.evaluate(el => el.after(el.cloneNode(true)));
     await expect(page.locator('.tool-block-history .gitdiff-sync-notice')).toHaveCount(2);
-    await block.getByRole('button', { name: 'Re-sync' }).click();
+    await block.getByRole('button', { name: 'Resolve', exact: true }).click();
     await expect(page.locator('.tool-block-history .gitdiff-sync-notice')).toHaveText([
       /Worktree resolved and synced/,
       /Worktree resolved and synced/,
     ]);
-    await expect(page.locator('.tool-block-history').nth(0).locator('.gitdiff-resolve-worktree-btn', { hasText: 'Resolved' })).toBeDisabled();
-    await expect(page.locator('.tool-block-history').nth(1).locator('.gitdiff-resolve-worktree-btn', { hasText: 'Resolved' })).toBeDisabled();
+    await expect(page.locator('.tool-block-history').nth(0).locator('.gitdiff-resolved-label')).toHaveText('Resolved');
+    await expect(page.locator('.tool-block-history').nth(1).locator('.gitdiff-resolved-label')).toHaveText('Resolved');
     expect(retryUrl).toContain('/chat/7282/worktree/retry');
-    expect(retryBody).toEqual({ topic: 'default', repo: '/tmp/repo' });
+    expect(retryBody).toEqual({ topic: 'default', repo: '/tmp/repo', force: false });
   });
 
   test('mobile browser back closes GitDiff file viewer back to diff list', async ({ page }) => {

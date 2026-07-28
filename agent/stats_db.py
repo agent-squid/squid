@@ -296,6 +296,9 @@ def init_db() -> None:
         if "source" not in message_columns:
             conn.execute("ALTER TABLE chat_messages ADD COLUMN source TEXT NOT NULL DEFAULT 'human'")
             conn.execute("UPDATE chat_messages SET source = 'human' WHERE source IS NULL OR source = ''")
+        # 'system' was renamed to 'workflow' (flow-route handoffs were its only
+        # use); backfill existing rows written under the old name.
+        conn.execute("UPDATE chat_messages SET source = 'workflow' WHERE source = 'system'")
         if "completed_at" not in message_columns:
             conn.execute("ALTER TABLE chat_messages ADD COLUMN completed_at TEXT")
         if "flow_run_id" not in message_columns:
@@ -801,7 +804,7 @@ def _flow_route_filter_clause(flow_route: str, msg_alias: str = "m") -> tuple[st
             f"""EXISTS (
                 SELECT 1 FROM chat_messages pu
                 WHERE pu.id = {msg_alias}.reply_to
-                  AND pu.source = 'system'
+                  AND pu.source = 'workflow'
                   AND pu.content LIKE ? ESCAPE '\\'
             )"""
         )
@@ -815,7 +818,7 @@ def _flow_route_filter_clause(flow_route: str, msg_alias: str = "m") -> tuple[st
                     AND EXISTS (
                         SELECT 1 FROM chat_messages su
                         WHERE su.role = 'user'
-                          AND su.source = 'system'
+                          AND su.source = 'workflow'
                           AND su.topic = {msg_alias}.topic
                           AND su.content LIKE ? ESCAPE '\\'
                           AND su.id > {msg_alias}.id
@@ -836,7 +839,7 @@ def _route_from_handoff_prompt(prompt: Optional[str]) -> Optional[str]:
 
 
 def _infer_origin_flow_route(conn: sqlite3.Connection, row: dict) -> Optional[str]:
-    if row.get("flow_route") or row.get("prompt_source") == "system":
+    if row.get("flow_route") or row.get("prompt_source") == "workflow":
         return row.get("flow_route")
     if row.get("id") is None or not row.get("topic") or not row.get("agent"):
         return row.get("flow_route")
@@ -844,7 +847,7 @@ def _infer_origin_flow_route(conn: sqlite3.Connection, row: dict) -> Optional[st
         """SELECT content
            FROM chat_messages
            WHERE role = 'user'
-             AND source = 'system'
+             AND source = 'workflow'
              AND topic = ?
              AND id > ?
              AND content LIKE '%Route: %'
@@ -874,7 +877,7 @@ def insert_user_message(
     flow_run_id: Optional[str] = None,
     flow_route: Optional[str] = None,
 ) -> int:
-    if source not in {"human", "system"}:
+    if source not in {"human", "workflow", "diff_viewer"}:
         source = "human"
     if context_ids or mem or mem_revision:
         context = {"pins": context_ids or [], "mem": mem}
@@ -3284,18 +3287,24 @@ def record_git_diff_revert(msg_id: int, repo: str, file_paths: list[str]) -> Non
 def get_diff_revert_eligibility(msg_id: int, repo: str) -> dict[str, str]:
     """Return {file_path: 'revertable'|'conflicting'|'reverted'} for a GitDiff event.
 
-    A file is revertable when no non-reverted GitDiff with a higher msg_id
-    in the same topic and repo has also touched that file.
+    A file is revertable when no non-reverted GitDiff that landed later (by
+    completed_at, falling back to msg_id when either side's completion time
+    is unknown) in the same topic and repo has also touched that file.
+    completed_at is the tiebreaker rather than msg_id alone because two turns
+    on the same topic can run concurrently and finish out of msg_id order —
+    using raw id would call the earlier-finishing (but higher-id) turn
+    "later" than a turn that actually landed after it.
     """
     with _connect() as conn:
         row = conn.execute(
-            "SELECT topic, context FROM chat_messages WHERE id = ? AND role = 'assistant'",
+            "SELECT topic, context, completed_at FROM chat_messages WHERE id = ? AND role = 'assistant'",
             (msg_id,),
         ).fetchone()
         if not row or not row['context']:
             return {}
 
         topic = row['topic']
+        this_completed_at = row['completed_at']
         try:
             tools = json.loads(row['context'])
         except Exception:
@@ -3319,11 +3328,19 @@ def get_diff_revert_eligibility(msg_id: int, repo: str) -> dict[str, str]:
             ).fetchall()
         }
 
-        later_rows = conn.execute(
-            """SELECT id, context FROM chat_messages
-               WHERE topic = ? AND role = 'assistant' AND id > ? AND context IS NOT NULL""",
+        candidate_rows = conn.execute(
+            """SELECT id, context, completed_at FROM chat_messages
+               WHERE topic = ? AND role = 'assistant' AND id != ? AND context IS NOT NULL""",
             (topic, msg_id),
         ).fetchall()
+
+        def _is_later(cand) -> bool:
+            cand_completed_at = cand['completed_at']
+            if this_completed_at and cand_completed_at and cand_completed_at != this_completed_at:
+                return cand_completed_at > this_completed_at
+            return cand['id'] > msg_id
+
+        later_rows = [r for r in candidate_rows if _is_later(r)]
 
         later_ids = [r['id'] for r in later_rows]
         later_reverted_map: dict[int, set[str]] = {}

@@ -487,19 +487,66 @@ def sync_after_turn(
     return []
 
 
-def promote_resolved_integration_worktree(repo_root: Path, topic: str, agent: str) -> None:
+class ConflictMarkersRemainError(RuntimeError):
+    """Raised when previously-conflicted files still contain literal conflict-marker
+    text at promotion time. `git add` clears git's own unmerged/stage tracking
+    regardless of file content, so that check alone can't catch a no-op resolve —
+    this scans the file text for the marker triplet before staging destroys the signal."""
+
+    def __init__(self, files: list[str]):
+        super().__init__("conflict markers still present: " + ", ".join(files))
+        self.files = files
+
+
+def _files_with_conflict_markers(integration_wt: Path, files: list[str]) -> list[str]:
+    hits = []
+    for rel in files:
+        try:
+            lines = (integration_wt / rel).read_text(errors="replace").split("\n")
+        except OSError:
+            continue
+        start = sep = False
+        for line in lines:
+            if not start and line.startswith("<<<<<<< "):
+                start = True
+            elif start and not sep and line == "=======":
+                sep = True
+            elif start and sep and line.startswith(">>>>>>> "):
+                hits.append(rel)
+                break
+    return hits
+
+
+def promote_resolved_integration_worktree(repo_root: Path, topic: str, agent: str, force: bool = False) -> None:
     """
     Promote a manually resolved integration worktree after a conflict. The
     integration worktree's HEAD is the source tree at conflict time; its working
     tree/index is the user's resolution. Apply only that resolved delta onto
     the current source checkout, so newer source changes are preserved unless
     Git cannot apply the patch cleanly.
+
+    Raises ConflictMarkersRemainError (rather than proceeding) if any file git
+    still considers unmerged also still contains literal conflict-marker text,
+    unless `force` is set.
     """
     integration_wt = integration_worktree_path(repo_root, topic, agent)
     if not integration_wt.exists():
         raise RuntimeError(f"integration worktree not found: {integration_wt}")
 
     with _lock_for(repo_root):
+        pre_add_conflicts = [
+            f for f in (
+                _run_git(integration_wt, "diff", "--name-only", "--diff-filter=U", check=False)
+                .stdout.strip()
+                .splitlines()
+            )
+            if f
+        ]
+        if pre_add_conflicts and not force:
+            still_marked = _files_with_conflict_markers(integration_wt, pre_add_conflicts)
+            if still_marked:
+                raise ConflictMarkersRemainError(still_marked)
+
         _run_git(integration_wt, "add", "-A")
         conflicts = [
             f for f in (
@@ -566,6 +613,50 @@ def choose_integration_conflict_side(repo_root: Path, topic: str, agent: str, si
         return conflicts
 
 
+def integration_conflicts(repo_root: Path, topic: str, agent: str) -> list[str]:
+    """Currently conflicted file paths in the integration worktree, if any."""
+    integration_wt = integration_worktree_path(repo_root, topic, agent)
+    if not integration_wt.exists():
+        return []
+    return [
+        f for f in (
+            _run_git(integration_wt, "diff", "--name-only", "--diff-filter=U", check=False)
+            .stdout.strip()
+            .splitlines()
+        )
+        if f
+    ]
+
+
+def conflict_context_summary(repo_root: Path, topic: str, agent: str, conflicts: list[str]) -> str:
+    """`<merge_conflict>` block with each conflicted file's base/current/turn blob,
+    read live from the integration worktree's merge stages (1/2/3) — the same
+    three-way content the conflict markers in the working tree represent, given
+    to a follow-up LLM turn as structured context instead of prose (ADR-0025,
+    "Conflict resolution across turns")."""
+    integration_wt = integration_worktree_path(repo_root, topic, agent)
+    if not integration_wt.exists() or not conflicts:
+        return ""
+
+    def _stage(stage: int, path: str) -> Optional[str]:
+        result = _run_git(integration_wt, "show", f":{stage}:{path}", check=False)
+        return result.stdout if result.returncode == 0 else None
+
+    sections = []
+    for path in conflicts:
+        base = _stage(1, path)
+        current = _stage(2, path)
+        turn = _stage(3, path)
+        parts = [f'<file path="{path}">']
+        parts.append("  <base>\n" + (base if base is not None else "(no common ancestor)") + "\n  </base>")
+        parts.append("  <current_repository_state>\n" + (current if current is not None else "(deleted on this side)") + "\n  </current_repository_state>")
+        parts.append("  <this_turns_changes>\n" + (turn if turn is not None else "(deleted on this side)") + "\n  </this_turns_changes>")
+        parts.append("</file>")
+        sections.append("\n".join(parts))
+
+    return "<merge_conflict>\n" + "\n".join(sections) + "\n</merge_conflict>"
+
+
 def _base_commit_from_registry(repo_root: Path, topic: str, agent: str) -> Optional[str]:
     try:
         from .stats_db import get_worktrees
@@ -604,7 +695,7 @@ async def cleanup_worktrees(topic: str) -> dict[str, list[str]]:
     for rec in records:
         repo_root = Path(rec["repo_root"])
         wt_key = rec["agent"]
-        if rec.get("status") in {"conflict", "promotion_failed"}:
+        if rec.get("status") in {"conflict", "promotion_failed", "discarded", "resolved"}:
             log.debug(
                 "worktree skip — requires manual attention: topic=%s key=%s status=%s",
                 topic, wt_key, rec.get("status"),
@@ -681,7 +772,7 @@ async def settle_worktrees_before_turn(topic: str, repo_roots: list[Path]) -> li
             blockers.append(blocker)
             continue
 
-        if status == "synced":
+        if status in {"synced", "discarded", "resolved"}:
             continue
 
         try:

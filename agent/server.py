@@ -52,7 +52,7 @@ from .config import (
 from .harnesses import SUPPORTED_HARNESSES, _validate_harness_config, list_harnesses
 from .providers import Provider, _validate_provider, get_provider, public_providers, require_provider
 from .resolve import agent_ref_for_storage, resolve_agent, split_agent_ref
-from .runners import list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic
+from .runners import list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic, effective_protocol
 from .history import list_history, list_history_by_ids
 from .stats_db import get_usage_stats
 from .topic_queue import TopicDispatcher
@@ -62,6 +62,7 @@ from .memory import (
     _split_frontmatter,
     code_roots_prompt_block,
     ensure_topic_memory_placeholder,
+    oneshot_protocol_prompt_block,
     read_topic_memory,
     topic_memory_path,
     topic_memory_squid_config,
@@ -92,8 +93,8 @@ from .stats_db import (
     get_recent_prompts,
     save_file_edit, get_file_edit_history, get_file_edit_by_id,
     get_bookmarks, add_bookmark, remove_bookmark,
-    save_worktree, get_worktrees, get_all_worktrees_for_topic, delete_worktree,
-    mark_worktree_synced, delete_all_worktrees,
+    save_worktree, get_worktrees, get_all_worktrees_for_topic,
+    mark_worktree_status, delete_all_worktrees,
     delete_all_topic_worktrees,
     allocate_id,
 )
@@ -588,6 +589,7 @@ async def _prepare_chat_turn(
     source: str = "human",
     flow_run_id: Optional[str] = None,
     flow_route: Optional[str] = None,
+    override_cwd: Optional[str] = None,
 ) -> Union[dict, JSONResponse]:
     # 1. Resolve agent — explicit wins, else use topic sticky
     resolved_agent: Optional[str] = agent
@@ -653,6 +655,12 @@ async def _prepare_chat_turn(
     code_roots = memory_config.get("code_roots") or []
     if native_backend_command or harness == "echo":
         code_roots = []
+    if override_cwd:
+        # Runs against a specific pre-existing directory (e.g. an integration
+        # worktree mid-conflict) instead of the topic's normal isolated
+        # worktree, so skip isolation/blocker checks entirely.
+        code_roots = []
+        cwd = override_cwd
     source_cwd = cwd
 
     if WORKTREE_ISOLATION_ENABLED and code_roots:
@@ -665,9 +673,26 @@ async def _prepare_chat_turn(
         if not blockers:
             blockers = await _active_worktree_blockers(topic, code_roots)
         if blockers:
+            # Persist a trace even though this turn never runs — otherwise a
+            # blocked turn (e.g. a broadcast sibling that loses a worktree-sync
+            # race) leaves no record anywhere but the server log.
+            blocker_desc = "; ".join(
+                f"{b.get('worktree_path') or b.get('repo_root')} ({b.get('status')})" for b in blockers
+            )
+            blocked_user_id = insert_user_message(topic, resolved_agent, message,
+                                                    lookback=lookback, source=source,
+                                                    flow_run_id=flow_run_id, flow_route=flow_route)
+            blocked_asst_id = insert_assistant_message(topic, resolved_agent, blocked_user_id,
+                                                         adhoc=adhoc, flow_run_id=flow_run_id, flow_route=flow_route)
+            update_assistant_message(
+                blocked_asst_id,
+                f"Blocked: worktree sync requires attention before starting another turn — {blocker_desc}",
+                None, status="error",
+            )
             return JSONResponse({
                 "error": "worktree sync requires attention before starting another turn",
                 "worktrees": blockers,
+                "msg_id": blocked_asst_id,
             }, status_code=409)
 
     memory_revision: Optional[str] = None
@@ -702,6 +727,8 @@ async def _prepare_chat_turn(
 
     effective_message = message
     prefix_blocks: list[str] = []
+    if not native_backend_command and effective_protocol(resolved_runtime, adhoc=adhoc) == "oneshot-cli":
+        prefix_blocks.append(oneshot_protocol_prompt_block())
     if not native_backend_command and effective_code_roots:
         code_roots_block = code_roots_prompt_block(
             effective_code_roots,
@@ -1313,7 +1340,7 @@ def _annotate_history_worktree_state(payload: dict) -> None:
             if not isinstance(tool, dict) or tool.get("name") not in {"GitDiff", "WorktreeSync"}:
                 continue
             status = tool.get("worktree_status") if tool.get("name") == "GitDiff" else tool.get("status")
-            if not status or status == "synced":
+            if not status:
                 continue
 
             source_repo = _tool_source_repo(tool)
@@ -1882,6 +1909,7 @@ class RevertRequest(BaseModel):
 class WorktreeDiscardRequest(BaseModel):
     topic: str = Field(..., min_length=1)
     repo: str = Field(..., min_length=1)
+    force: bool = False
 
 
 class WorktreeChooseRequest(WorktreeDiscardRequest):
@@ -1941,7 +1969,11 @@ async def discard_worktree_blocker(msg_id: int, req: WorktreeDiscardRequest):
 
     from .worktree import remove_worktree
     await asyncio.to_thread(remove_worktree, repo_root, topic, wt_key)
-    await asyncio.to_thread(delete_worktree, topic, wt_key, str(repo_root))
+    # Keep the row (status="discarded") instead of deleting it — a fully
+    # deleted row is indistinguishable from "never had a problem" once
+    # _annotate_history_worktree_state falls back to reporting "synced" for
+    # it, which would misrepresent a discarded turn as having landed cleanly.
+    await asyncio.to_thread(mark_worktree_status, topic, wt_key, str(repo_root), "discarded")
     log.info("worktree discarded topic=%s msg_id=%s repo=%s status=%s", topic, msg_id, repo_root, rec.get("status"))
     return JSONResponse({"ok": True})
 
@@ -1965,14 +1997,18 @@ async def retry_worktree_resolution(msg_id: int, req: WorktreeDiscardRequest):
     if msg_id in get_active_msg_ids():
         return JSONResponse({"error": "worktree is still running"}, status_code=409)
 
-    from .worktree import promote_resolved_integration_worktree
+    from .worktree import ConflictMarkersRemainError, promote_resolved_integration_worktree
     try:
-        await asyncio.to_thread(promote_resolved_integration_worktree, repo_root, topic, wt_key)
+        await asyncio.to_thread(promote_resolved_integration_worktree, repo_root, topic, wt_key, req.force)
+    except ConflictMarkersRemainError as exc:
+        return JSONResponse({"error": str(exc), "conflict_markers_remain": True, "files": exc.files}, status_code=409)
     except RuntimeError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
 
-    await asyncio.to_thread(mark_worktree_synced, topic, wt_key, str(repo_root))
-    await asyncio.to_thread(delete_worktree, topic, wt_key, str(repo_root))
+    # Keep the row (status="resolved") rather than deleting it — otherwise
+    # this collapses back to indistinguishable-from-never-conflicted "synced"
+    # the same way a deleted "discarded" row did (see that fix's comment).
+    await asyncio.to_thread(mark_worktree_status, topic, wt_key, str(repo_root), "resolved")
     log.info("worktree resolved topic=%s msg_id=%s repo=%s status=%s", topic, msg_id, repo_root, rec.get("status"))
     return JSONResponse({"ok": True})
 
@@ -2003,13 +2039,134 @@ async def choose_worktree_resolution(msg_id: int, req: WorktreeChooseRequest):
     except RuntimeError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
 
-    await asyncio.to_thread(mark_worktree_synced, topic, wt_key, str(repo_root))
-    await asyncio.to_thread(delete_worktree, topic, wt_key, str(repo_root))
+    await asyncio.to_thread(mark_worktree_status, topic, wt_key, str(repo_root), "resolved")
     log.info(
         "worktree resolved by side topic=%s msg_id=%s repo=%s side=%s files=%d status=%s",
         topic, msg_id, repo_root, req.side, len(chosen), rec.get("status"),
     )
     return JSONResponse({"ok": True, "side": req.side, "files": chosen})
+
+
+_AUTO_RESOLVE_PROMPT_TEMPLATE = """\
+A merge conflict occurred integrating the original turn above (pinned \
+context) with the current state of the repository ({repo_root}). Your \
+current working directory is already an isolated worktree containing the \
+conflicted files below — resolve them in place. Do not `cd` to {repo_root} \
+or any other checkout of this repo; that is a different, unrelated copy.
+
+Conflicted files: {file_list}
+
+{conflict_block}
+
+For each file, merge the intent of both sides — don't just pick one side \
+wholesale unless the other side is genuinely superseded. Remove all conflict \
+markers and leave the file in a syntactically valid state, then `git add` it. \
+Do not commit.
+
+If any file's two sides make incompatible changes to the same logic and you \
+can't safely reconcile them, leave that file's markers in place and say so \
+plainly in your response instead of guessing."""
+
+
+@app.post("/chat/{msg_id}/worktree/auto-resolve")
+async def auto_resolve_worktree_conflict(msg_id: int, req: WorktreeDiscardRequest):
+    topic = _normalize_topic_response(req.topic)
+    if isinstance(topic, JSONResponse):
+        return topic
+    repo_root = _validate_repo_path(req.repo)
+    if repo_root is None:
+        return JSONResponse({"error": "invalid repo path"}, status_code=400)
+
+    wt_key = str(msg_id)
+    rec, found = await _worktree_record_or_existing_paths(topic, wt_key, repo_root)
+    if not found:
+        log.info("worktree auto-resolve skipped; already gone topic=%s msg_id=%s repo=%s", topic, msg_id, repo_root)
+        return JSONResponse({"ok": True, "already_resolved": True})
+    if rec.get("status") != "conflict":
+        return JSONResponse({"error": "auto-resolve is only available while conflicted"}, status_code=409)
+
+    from .runners import get_active_msg_ids
+    if msg_id in get_active_msg_ids():
+        return JSONResponse({"error": "worktree is still running"}, status_code=409)
+
+    from .worktree import (
+        integration_worktree_path, integration_conflicts, promote_resolved_integration_worktree,
+        conflict_context_summary,
+    )
+    conflicts = await asyncio.to_thread(integration_conflicts, repo_root, topic, wt_key)
+    if not conflicts:
+        return JSONResponse({"error": "no conflicted files found"}, status_code=409)
+
+    turn = await asyncio.to_thread(get_message, msg_id)
+    conflict_block = await asyncio.to_thread(conflict_context_summary, repo_root, topic, wt_key, conflicts)
+    prompt = _AUTO_RESOLVE_PROMPT_TEMPLATE.format(
+        repo_root=repo_root,
+        file_list=", ".join(conflicts),
+        conflict_block=conflict_block,
+    )
+    integration_wt = integration_worktree_path(repo_root, topic, wt_key)
+
+    # Pin the original turn (its request/response, plus its own gitdiff summary
+    # via get_messages_by_ids) as real context_history instead of retyping it
+    # into the prompt — same mechanism as any other adhoc pinned-context turn.
+    prepared = await _prepare_chat_turn(
+        message=prompt,
+        topic=topic,
+        agent=(turn or {}).get("agent"),
+        adhoc=True,
+        source="diff_viewer",
+        override_cwd=str(integration_wt),
+        pinned_ids=[msg_id],
+    )
+    if isinstance(prepared, JSONResponse):
+        return prepared
+
+    async def _stream() -> AsyncGenerator[str, None]:
+        # Forward every event live — the UI renders this exactly like a normal
+        # chat turn (user bubble + thinking bubble + streamed response) instead
+        # of hiding the model call behind a bare button spinner.
+        async for event in stream_response(
+            prepared["effective_message"], prepared["topic"], prepared["agent"], prepared["backend"], prepared["model"], prepared["cwd"],
+            prepared["context_history"], prepared["asst_msg_id"], prepared["response_timeout"],
+            resume_session_id=prepared["resume_session_id"],
+            adhoc=prepared["adhoc"],
+            lookback=prepared["lookback"],
+            code_roots=prepared["code_roots"],
+            display_prompt=prepared["display_prompt"],
+            source_cwd=prepared["source_cwd"],
+            harness=prepared["harness"],
+            provider=prepared["provider"],
+        ):
+            yield event
+
+        remaining = await asyncio.to_thread(integration_conflicts, repo_root, topic, wt_key)
+        if remaining:
+            log.warning("auto-resolve left conflicts topic=%s msg_id=%s remaining=%s", topic, msg_id, remaining)
+            yield sse_event("resolve_result", json.dumps({
+                "error": "unresolved conflicts remain",
+                "conflicts": remaining,
+            }))
+            return
+
+        try:
+            await asyncio.to_thread(promote_resolved_integration_worktree, repo_root, topic, wt_key)
+        except RuntimeError as exc:
+            yield sse_event("resolve_result", json.dumps({"error": str(exc)}))
+            return
+
+        await asyncio.to_thread(mark_worktree_status, topic, wt_key, str(repo_root), "resolved")
+        log.info("worktree auto-resolved topic=%s msg_id=%s repo=%s files=%d", topic, msg_id, repo_root, len(conflicts))
+        yield sse_event("resolve_result", json.dumps({"ok": True, "files": conflicts}))
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={
+            "X-Accel-Buffering": "no",
+            "Cache-Control": "no-cache",
+            "X-Squid-Msg-Id": str(prepared["asst_msg_id"]),
+        },
+    )
 
 
 @app.get("/chat/{msg_id}/diff-file")

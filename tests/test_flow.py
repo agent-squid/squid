@@ -277,7 +277,7 @@ def test_next_chain_steps_duplicate_target_identity_does_not_block_sibling_branc
     # pinned_ids (== previous_msg_ids) end up in the row's context.pins.
     target_user_id = stats_db.insert_user_message(
         "squid", "qwen", f"Route: {route}\nhandoff", context_ids=[asst1_id],
-        source="system", flow_run_id=flow_run_id, flow_route=route,
+        source="workflow", flow_run_id=flow_run_id, flow_route=route,
     )
     target_asst_id = stats_db.insert_assistant_message("squid", "qwen", target_user_id, flow_run_id=flow_run_id, flow_route=route)
     stats_db.update_assistant_message(target_asst_id, "handoff output", None, "done")
@@ -343,7 +343,7 @@ def test_continue_chain_multi_origin_via_real_echo_harness(tmp_path, monkeypatch
 
     rows = stats_db.get_flow_run_messages(flow_run_id)
     assert len(rows) == 8  # 2 origins + 2 dispatched targets, 2 rows each
-    dispatched_targets = [r for r in rows if r["role"] == "user" and r["source"] == "system"]
+    dispatched_targets = [r for r in rows if r["role"] == "user" and r["source"] == "workflow"]
     assert len(dispatched_targets) == 2
     pinned = sorted(json.loads(r["context"])["pins"][0] for r in dispatched_targets)
     assert pinned == asst_ids  # one dispatch per origin, not both off the same one
@@ -445,7 +445,7 @@ def test_next_chain_steps_repeated_roundtrip_advances_one_leg_at_a_time(tmp_path
         "squid",
         "review",
         flow.chain_handoff_prompt(route, "codex", "review", False, "review this"),
-        source="system",
+        source="workflow",
         flow_run_id=flow_run_id,
         flow_route=route,
     )
