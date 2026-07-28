@@ -1801,6 +1801,58 @@ def test_claude_routes_partial_text_to_status_and_result_to_response():
     assert "_stats" in chunks[2]
 
 
+def test_claude_does_not_duplicate_tool_use_between_stream_event_and_assistant():
+    # With --include-partial-messages, Claude Code emits a tool_use both via
+    # the granular stream_event content_block_stop *and* again inside the
+    # consolidated "assistant" event for the same turn. Both share the same
+    # tool_use id, so the second occurrence must be suppressed.
+    tool_use_id = "toolu_dup123"
+
+    async def fake_stream_lines(*args, **kwargs):
+        yield json.dumps({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "tool_use", "id": tool_use_id, "name": "Edit"},
+            },
+        })
+        yield json.dumps({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": '{"file":"a.py"}'},
+            },
+        })
+        yield json.dumps({
+            "type": "stream_event",
+            "event": {"type": "content_block_stop", "index": 0},
+        })
+        yield json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "id": tool_use_id, "name": "Edit", "input": {"file": "a.py"}},
+                ],
+                "stop_reason": "tool_use",
+            },
+        })
+        yield json.dumps({"type": "result", "result": "", "usage": {}})
+
+    async def collect():
+        return [chunk async for chunk in run_claude("hello", cwd="/tmp")]
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        chunks = asyncio.run(collect())
+
+    tool_chunks = [c for c in chunks if isinstance(c, dict) and "_tool" in c]
+    assert len(tool_chunks) == 1
+    assert tool_chunks[0]["_tool"]["tool_use_id"] == tool_use_id
+
+
 def test_codex_backend_configuration_reaches_command_and_process_metadata():
     captured = {}
 

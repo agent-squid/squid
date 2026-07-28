@@ -249,6 +249,7 @@ class _ClaudeStreamParser:
         self.emit_init_diag = emit_init_diag
         self.session_id: Optional[str] = None
         self.tool_blocks: dict[int, dict] = {}
+        self.emitted_tool_ids: set[str] = set()
         self.done = False
         self.done_from_assistant_text = False
 
@@ -300,10 +301,16 @@ class _ClaudeStreamParser:
                         if text:
                             text_parts.append(text)
                     elif block_type == "tool_use":
+                        tool_id = block.get("id")
+                        if tool_id and tool_id in self.emitted_tool_ids:
+                            # Already emitted via the granular stream_event path below;
+                            # this consolidated "assistant" event repeats the same
+                            # tool_use blocks and would otherwise duplicate the entry.
+                            continue
                         name = block.get("name", "")
                         tool_input = block.get("input", {})
                         input_json = json.dumps(tool_input) if isinstance(tool_input, dict) else str(tool_input or "")
-                        chunks.append({"_tool": _tool_data(name, input_json, block.get("id"))})
+                        chunks.append({"_tool": _tool_data(name, input_json, tool_id)})
 
             text = "".join(text_parts)
             if text:
@@ -346,7 +353,10 @@ class _ClaudeStreamParser:
 
             elif inner_type == "content_block_stop" and idx in self.tool_blocks:
                 block = self.tool_blocks.pop(idx)
-                chunks.append({"_tool": _tool_data(block["name"], block["input_json"], block.get("id"))})
+                tool_id = block.get("id")
+                if tool_id:
+                    self.emitted_tool_ids.add(tool_id)
+                chunks.append({"_tool": _tool_data(block["name"], block["input_json"], tool_id)})
 
         elif t == "result":
             subtype = event.get("subtype")
