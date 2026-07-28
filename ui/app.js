@@ -146,22 +146,38 @@ let _harnessMetadata = {};
 let _providerMetadata = {};
 
 // ── update notice (ADR-0030) ─────────────────────────────────────────────────
-const UPDATE_CHECK_URL = 'https://raw.githubusercontent.com/agent-squid/squid/main/pyproject.toml';
+const UPDATE_CHECK_URL = 'https://pypi.org/pypi/agentsquid/json';
 const UPDATE_CACHE_KEY = 'squid_update_check_cache';
 const UPDATE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const UPDATE_DISMISS_KEY = 'squid_update_dismissed_version';
 let _updateInfo = null; // { current, latest } once a newer version is confirmed available
 
-function _versionParts(v) {
-  return String(v).split('.').map(n => parseInt(n, 10) || 0);
+function _parseVersion(v) {
+  const match = String(v).trim().match(/^(\d+(?:\.\d+)*)(?:(a|b|rc)(\d+))?(?:\.post(\d+))?/i);
+  if (!match) return null;
+  return {
+    release: match[1].split('.').map(n => parseInt(n, 10) || 0),
+    preType: match[2]?.toLowerCase() || null,
+    preNum: match[3] ? parseInt(match[3], 10) || 0 : null,
+    postNum: match[4] ? parseInt(match[4], 10) || 0 : null,
+  };
 }
 
 function _isNewerVersion(latest, current) {
-  const a = _versionParts(latest), b = _versionParts(current);
-  for (let i = 0; i < Math.max(a.length, b.length); i++) {
-    const x = a[i] || 0, y = b[i] || 0;
+  const a = _parseVersion(latest), b = _parseVersion(current);
+  if (!a || !b) return false;
+  for (let i = 0; i < Math.max(a.release.length, b.release.length); i++) {
+    const x = a.release[i] || 0, y = b.release[i] || 0;
     if (x !== y) return x > y;
   }
+  const preRank = { a: 0, b: 1, rc: 2 };
+  if (a.preType || b.preType) {
+    if (!a.preType) return true;
+    if (!b.preType) return false;
+    if (preRank[a.preType] !== preRank[b.preType]) return preRank[a.preType] > preRank[b.preType];
+    if (a.preNum !== b.preNum) return a.preNum > b.preNum;
+  }
+  if (a.postNum !== b.postNum) return (a.postNum ?? -1) > (b.postNum ?? -1);
   return false;
 }
 
@@ -173,11 +189,11 @@ async function _fetchLatestSquidVersion() {
   try {
     const res = await fetch(UPDATE_CHECK_URL);
     if (!res.ok) return null;
-    const text = await res.text();
-    const match = text.match(/^version\s*=\s*"([^"]+)"/m);
-    if (!match) return null;
-    localStorage.setItem(UPDATE_CACHE_KEY, JSON.stringify({ version: match[1], checkedAt: Date.now() }));
-    return match[1];
+    const data = await res.json();
+    const version = data?.info?.version;
+    if (!version) return null;
+    localStorage.setItem(UPDATE_CACHE_KEY, JSON.stringify({ version, checkedAt: Date.now() }));
+    return version;
   } catch {
     return null;
   }

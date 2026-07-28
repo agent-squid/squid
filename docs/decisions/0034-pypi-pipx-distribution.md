@@ -64,12 +64,18 @@ script checkout.
   replaces the installed files, it doesn't touch an already-running
   process — but that's a single restart of the same command, not a
   directory hunt.
-- **In-app notice unchanged.** ADR-0030's version-source-of-truth
-  (`pyproject.toml`), `/health` field, and static-file check
-  (`raw.githubusercontent.com/.../pyproject.toml`, not the GitHub API) are
-  untouched — only the Settings notice's copy-paste command
-  (`ui/app.js`'s `renderSettingsUpdateNotice`) changed, from the tarball
-  re-pull + `start.sh --restart` sequence to `pipx upgrade agentsquid`.
+- **In-app notice follows the install channel.** The installed version still
+  comes from `/health`, which reports `importlib.metadata.version("agentsquid")`.
+  The latest available version is read from PyPI's project JSON endpoint
+  (`https://pypi.org/pypi/agentsquid/json`), not from GitHub `main`, so the
+  Settings notice only tracks versions that `pipx upgrade agentsquid` can
+  actually install from production PyPI. The frontend's version comparison
+  (`ui/app.js`) parses PEP 440 pre-release/post-release suffixes rather than
+  comparing dotted numbers alone, so a `0.1.2rc1` production `pyproject.toml`
+  bump during the TestPyPI candidate window (see Release checklist below)
+  doesn't rank as newer than an already-installed `0.1.2` final — needed
+  because this ADR's own release process routes rc versions through
+  `pyproject.toml` before the final version is cut.
 - **Release process**: publish through GitHub Actions and PyPI Trusted
   Publishing. Bump `pyproject.toml`'s `version` only when the next release
   is ready, tag the same version as `vX.Y.Z`, then push the tag. The
@@ -97,19 +103,36 @@ repository, and environment:
 - Workflow filename: `publish.yml`
 - Environment: `pypi`
 
+TestPyPI has a separate Trusted Publishing entry for the test workflow:
+
+- TestPyPI project: `agentsquid`
+- GitHub owner: `agent-squid`
+- GitHub repository: `squid`
+- Workflow filename: `publish-testpypi.yml`
+- Environment: `testpypi`
+
 Release checklist:
 
 1. Accumulate changes while `pyproject.toml` remains at the current
    published version.
-2. When ready to release, bump `[project].version` in `pyproject.toml` to a
-   new PyPI version, e.g. `0.1.1`.
+2. When ready to test the next release, bump `[project].version` in
+   `pyproject.toml` to a new pre-release version for TestPyPI, e.g.
+   `0.1.2rc1`.
 3. Run `python3 -m build` and `python3 -m twine check dist/*` locally if
    changing packaging metadata or included files.
 4. Commit the version bump and release changes.
-5. Create and push the matching TestPyPI tag, e.g. `test-v0.1.1`, then run
-   `bin/install-testpypi.sh 0.1.1` after the TestPyPI workflow completes.
-6. Create and push the matching production tag, e.g. `v0.1.1`.
-7. Let GitHub Actions run `Publish to PyPI`; the job publishes only after
+5. Create and push the matching TestPyPI tag, e.g. `test-v0.1.2rc1`, then
+   run `bin/install-testpypi.sh 0.1.2rc1` after the TestPyPI workflow
+   completes.
+6. If TestPyPI exposes a packaging or install problem, fix it with another
+   unused pre-release version, e.g. `0.1.2rc2` with tag `test-v0.1.2rc2`.
+   Do not reuse `0.1.2rc1`; TestPyPI rejects replacing an existing
+   distribution file for the same version, just like production PyPI.
+7. Once the TestPyPI candidate is verified, bump `[project].version` to the
+   final production version, e.g. `0.1.2`.
+8. Commit the final version bump.
+9. Create and push the matching production tag, e.g. `v0.1.2`.
+10. Let GitHub Actions run `Publish to PyPI`; the job publishes only after
    the `pypi` environment's protection rules, if any, are satisfied.
 
 The tag and package version must match. A tag `v0.1.1` with
@@ -122,6 +145,13 @@ TestPyPI uses the same rule with a `test-` tag prefix: `test-v0.1.1` must
 point to a commit where `pyproject.toml` has `version = "0.1.1"`. The
 TestPyPI workflow publishes to `https://test.pypi.org/legacy/`; production
 PyPI remains tied to `vX.Y.Z` tags only.
+
+For repeated TestPyPI testing, use PEP 440 pre-release versions instead of
+burning final versions: `0.1.2rc1`, `0.1.2rc2`, and so on. The corresponding
+tags are `test-v0.1.2rc1`, `test-v0.1.2rc2`, etc., and each candidate is
+installed with the exact same version string:
+`bin/install-testpypi.sh 0.1.2rc1`. When the candidate is good, the real PyPI
+release should be the final version (`0.1.2`), not the `rcN` version.
 
 ## Verified before publishing
 

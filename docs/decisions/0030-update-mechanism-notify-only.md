@@ -8,12 +8,11 @@ superseded: 2026-07-24
 > Superseded by [ADR-0034](0034-pypi-pipx-distribution.md). Squid is
 > published to PyPI as `agentsquid`; install/update moves from a GitHub tag
 > tarball + `bin/update.sh` to `pipx install`/`pipx upgrade agentsquid`. The
-> version-source-of-truth, `/health` field, and static-file
-> (`raw.githubusercontent.com/.../pyproject.toml`) notify-only check below are
-> all unchanged and still exactly how ADR-0034 works — only the install/update
-> *execution* mechanism changes. Kept here for the notify-only reasoning
-> (Option 2 vs. 3), which ADR-0034 builds on directly, and because the
-> deferred migration-system section still applies unchanged.
+> `/health` version field remains unchanged, but ADR-0034 now reads the latest
+> installable version from PyPI's project JSON endpoint so the notice follows
+> the `pipx upgrade agentsquid` channel. Kept here for the notify-only
+> reasoning (Option 2 vs. 3), which ADR-0034 builds on directly, and because
+> the deferred migration-system section still applies unchanged.
 
 ## Context and Problem Statement
 

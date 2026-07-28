@@ -1,6 +1,6 @@
 const { test, expect } = require('@playwright/test');
 
-const PYPROJECT_URL = 'https://raw.githubusercontent.com/agent-squid/squid/main/pyproject.toml';
+const PYPI_PROJECT_URL = 'https://pypi.org/pypi/agentsquid/json';
 
 async function mockApp(page, { version = '0.1.0' } = {}) {
   await page.route('**/health', r => r.fulfill({ json: { status: 'ok', version, harnesses: [], providers: {} } }));
@@ -16,9 +16,8 @@ async function mockApp(page, { version = '0.1.0' } = {}) {
 }
 
 function mockLatestVersion(page, version) {
-  return page.route(PYPROJECT_URL, r => r.fulfill({
-    contentType: 'text/plain',
-    body: `[project]\nname = "squid"\nversion = "${version}"\n`,
+  return page.route(PYPI_PROJECT_URL, r => r.fulfill({
+    json: { info: { version } },
   }));
 }
 
@@ -77,7 +76,7 @@ test('a further version bump re-shows the dot even after a prior dismissal', asy
   await page.locator('#settings-update-dismiss').click();
   await expect(page.locator('#hamburger-btn')).not.toHaveClass(/has-update/);
 
-  await page.unroute(PYPROJECT_URL);
+  await page.unroute(PYPI_PROJECT_URL);
   await mockLatestVersion(page, '0.3.0');
   // simulate the 24h cache TTL elapsing so the next boot re-fetches instead of reusing 0.2.0
   await page.evaluate(() => localStorage.removeItem('squid_update_check_cache'));
@@ -86,4 +85,20 @@ test('a further version bump re-shows the dot even after a prior dismissal', asy
   await expect(page.locator('#hamburger-btn')).toHaveClass(/has-update/);
   await openSettings(page);
   await expect(page.locator('#settings-update-notice')).toContainText('v0.1.0 → v0.3.0');
+});
+
+test('release candidates do not outrank the matching final release', async ({ page }) => {
+  await mockApp(page, { version: '0.1.2' });
+  await mockLatestVersion(page, '0.1.2rc1');
+
+  await page.goto('/');
+  await expect(page.locator('#hamburger-btn')).not.toHaveClass(/has-update/);
+});
+
+test('the matching final release outranks an installed release candidate', async ({ page }) => {
+  await mockApp(page, { version: '0.1.2rc1' });
+  await mockLatestVersion(page, '0.1.2');
+
+  await page.goto('/');
+  await expect(page.locator('#hamburger-btn')).toHaveClass(/has-update/);
 });
