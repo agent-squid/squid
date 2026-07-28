@@ -11946,6 +11946,11 @@ function openFileUploadPicker() {
   const savedPath = localStorage.getItem('squid_fv_last_path_picker') || null;
   openFileViewer(savedPath, null, null, null, null, { onPick: addAttachedFile }, { persistKey: 'picker' });
 }
+function clearAttachedFiles() {
+  setAttachedFiles([]);
+  updatePinCount();
+  if (pinPanel.classList.contains('open')) renderPinPanel();
+}
 function clearPinnedItems() {
   setPinnedItems([]);
   document.querySelectorAll('.msg-pin-btn.pinned').forEach(b => b.classList.remove('pinned'));
@@ -12326,6 +12331,7 @@ function renderPinPanel() {
   const items = getPinnedItems();
   const listEl = document.getElementById('pin-panel-list');
   const clearBtn = document.getElementById('pin-panel-clear');
+  const clearFilesBtn = document.getElementById('pin-panel-clear-files');
   const { topic: ctxTopic, agent: ctxAgent, adhoc, lookback } = _currentContextTarget();
   const activeLbItems = _activeLookbackItems(adhoc, lookback);
   const activeLbIds = new Set(activeLbItems.map(i => i.id));
@@ -12373,6 +12379,7 @@ function renderPinPanel() {
   }
 
   const attachedFiles = getAttachedFiles();
+  if (clearFilesBtn) clearFilesBtn.disabled = attachedFiles.length === 0;
   if (attachedFiles.length) {
     html += `<div class="pin-section-label">Files</div>`;
     attachedFiles.forEach(file => {
@@ -12740,6 +12747,7 @@ function initPin() {
   });
   document.getElementById('pin-panel-close').addEventListener('click', closePinPanel);
   document.getElementById('pin-panel-clear').addEventListener('click', clearPinnedItems);
+  document.getElementById('pin-panel-clear-files').addEventListener('click', clearAttachedFiles);
   document.getElementById('pin-panel-upload').addEventListener('click', openFileUploadPicker);
   memoryCloseBtn.addEventListener('click', closeMemoryEditor);
   memorySaveBtn.addEventListener('click', saveMemoryEditor);

@@ -1706,6 +1706,14 @@ body {
   padding: 0.12rem 0.45rem;
 }
 #pin-panel-clear:disabled { color: #3f3f4a; border-color: #25252f; }
+#pin-panel-clear-files {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: var(--text-sm);
+  padding: 0.12rem 0.45rem;
+}
+#pin-panel-clear-files:disabled { color: #3f3f4a; border-color: #25252f; }
 #pin-panel-upload {
   display: inline-flex;
   align-items: center;
@@ -1715,6 +1723,7 @@ body {
 }
 .upload-icon-mobile { display: none; }
 .clear-icon-mobile { display: none; }
+.clear-files-icon-mobile { display: none; }
 #pin-panel-close {
   background: transparent;
   border: none;
@@ -4320,7 +4329,10 @@ button {
     height: 28px;
   }
 
-  #chip-bookmark-btn,
+  #chip-actions {
+    gap: 0.15rem;
+  }
+
   #chip-prompts-btn {
     display: none;
   }
@@ -4754,7 +4766,9 @@ button {
   .upload-icon-mobile { display: inline; }
   .clear-label-desktop { display: none; }
   .clear-icon-mobile { display: inline; }
-  #pin-panel-upload, #pin-panel-clear {
+  .clear-files-label-desktop { display: none; }
+  .clear-files-icon-mobile { display: inline; }
+  #pin-panel-upload, #pin-panel-clear, #pin-panel-clear-files {
     width: 24px;
     height: 24px;
     padding: 0;
