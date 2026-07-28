@@ -1081,6 +1081,7 @@ body {
 }
 .diff-remove { background: rgba(180, 40, 40, 0.18); color: #d07070; }
 .diff-add    { background: rgba(40, 150, 70, 0.13); color: #70b870; }
+.diff-same   { color: var(--text-dim); }
 .diff-hunk   { background: rgba(80, 80, 150, 0.16); color: #8080c8; }
 .diff-file   { background: rgba(255, 255, 255, 0.035); color: #aaaabb; }
 .diff-header { margin: 0; }

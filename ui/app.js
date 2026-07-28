@@ -4659,17 +4659,52 @@ function _hasTraceContent(statusRaw, contextVal, finalContent = '') {
 }
 
 
-function renderDiffLines(container, oldStr, newStr) {
-  for (const line of (oldStr || '').split('\n')) {
-    const el = document.createElement('span');
-    el.className = 'diff-line diff-remove';
-    el.textContent = '- ' + line;
-    container.appendChild(el);
+const DIFF_LCS_MAX_CELLS = 4_000_000;
+
+function diffLineOps(oldLines, newLines) {
+  const n = oldLines.length, m = newLines.length;
+  if (n * m > DIFF_LCS_MAX_CELLS) return null;
+  const dp = new Array(n + 1);
+  for (let i = 0; i <= n; i++) dp[i] = new Uint32Array(m + 1);
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = oldLines[i] === newLines[j]
+        ? dp[i + 1][j + 1] + 1
+        : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
   }
-  for (const line of (newStr || '').split('\n')) {
+  const ops = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (oldLines[i] === newLines[j]) {
+      ops.push({ type: 'same', line: oldLines[i] });
+      i++; j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      ops.push({ type: 'remove', line: oldLines[i] });
+      i++;
+    } else {
+      ops.push({ type: 'add', line: newLines[j] });
+      j++;
+    }
+  }
+  for (; i < n; i++) ops.push({ type: 'remove', line: oldLines[i] });
+  for (; j < m; j++) ops.push({ type: 'add', line: newLines[j] });
+  return ops;
+}
+
+function renderDiffLines(container, oldStr, newStr) {
+  const oldLines = (oldStr || '').split('\n');
+  const newLines = (newStr || '').split('\n');
+  const ops = diffLineOps(oldLines, newLines) || [
+    ...oldLines.map(line => ({ type: 'remove', line })),
+    ...newLines.map(line => ({ type: 'add', line })),
+  ];
+  const prefix = { same: '  ', remove: '- ', add: '+ ' };
+  const cls = { same: 'diff-line diff-same', remove: 'diff-line diff-remove', add: 'diff-line diff-add' };
+  for (const op of ops) {
     const el = document.createElement('span');
-    el.className = 'diff-line diff-add';
-    el.textContent = '+ ' + line;
+    el.className = cls[op.type];
+    el.textContent = prefix[op.type] + op.line;
     container.appendChild(el);
   }
 }
