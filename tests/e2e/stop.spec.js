@@ -338,3 +338,44 @@ test('kill button appears on thinking bubble and sends stop_msg with msg_id', as
   // Close the held stream so the page can clean up
   await page.evaluate(() => window._testSseWriter?.close().catch(() => {}));
 });
+
+test('queued prompt kill leaves dequeued label', async ({ page }) => {
+  await mockBackend(page);
+
+  let cmdBody = null;
+  await page.route('**/cmd', async route => {
+    cmdBody = route.request().postDataJSON();
+    await route.fulfill({ json: { ok: true, drained: 1 } });
+  });
+
+  await page.goto('/');
+  await page.evaluate(() => {
+    const orig = window.fetch;
+    window.fetch = async (url, opts) => {
+      if (!url.includes('/chat')) return orig(url, opts);
+      const { readable, writable } = new TransformStream();
+      const writer = writable.getWriter();
+      const enc = new TextEncoder();
+      writer.write(enc.encode(
+        'event: queued\ndata: {"topic":"squid","position":1}\n\n'
+      ));
+      window._testSseWriter = writer;
+      return new Response(readable, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+      });
+    };
+  });
+
+  await page.fill('#input', '#squid@claude wait behind current work');
+  await page.keyboard.press('Enter');
+
+  const killBtn = page.locator('.thinking-kill-btn');
+  await expect(killBtn).toBeVisible({ timeout: 5000 });
+  await killBtn.click();
+
+  expect(cmdBody).toMatchObject({ command: 'deq', topic: 'squid', pos: 1 });
+  await expect(page.locator('.msg-thinking')).toContainText('Dequeued.');
+
+  await page.evaluate(() => window._testSseWriter?.close().catch(() => {}));
+});

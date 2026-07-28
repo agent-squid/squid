@@ -36,30 +36,6 @@ providers:
 '''
 
 
-def _init_repo(repo: Path) -> None:
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
-    (repo / "app.py").write_text("base\n")
-    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-
-def _make_conflicted_worktree(repo: Path, topic: str, first_id: str, conflict_id: str) -> Path:
-    worktree_mod.ensure_worktree(repo, topic, first_id)
-    wt_a = worktree_mod.worktree_path(repo, topic, first_id)
-    worktree_mod.ensure_worktree(repo, topic, conflict_id)
-    wt_b = worktree_mod.worktree_path(repo, topic, conflict_id)
-    stats_db.save_worktree(topic, conflict_id, str(repo), str(wt_b), worktree_mod.branch_name(topic, conflict_id))
-    (wt_a / "app.py").write_text("newer main\n")
-    worktree_mod.sync_after_turn(repo, topic, first_id, msg_id=int(first_id))
-    (wt_b / "app.py").write_text("older isolated\n")
-    assert worktree_mod.sync_after_turn(repo, topic, conflict_id, msg_id=int(conflict_id)) == ["app.py"]
-    stats_db.mark_worktree_status(topic, conflict_id, str(repo), "conflict")
-    return worktree_mod.integration_worktree_path(repo, topic, conflict_id)
-
-
 def test_worktree_diff_blocked_until_synced():
     gitdiff = {
         "name": "GitDiff",
@@ -243,46 +219,6 @@ def test_retry_worktree_resolution_is_idempotent_when_already_gone(tmp_path, mon
 
     assert res.status_code == 200
     assert res.json() == {"ok": True, "already_resolved": True}
-
-
-def test_choose_worktree_resolution_new_takes_current_checkout(tmp_path, monkeypatch):
-    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
-    stats_db.init_db()
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    _make_conflicted_worktree(repo, "squid", "70", "71")
-
-    with patch("agent.runners.get_active_msg_ids", return_value=set()):
-        res = TestClient(server.app).post("/chat/71/worktree/choose", json={
-            "topic": "squid",
-            "repo": str(repo),
-            "side": "new",
-        })
-
-    assert res.status_code == 200
-    assert res.json()["ok"] is True
-    assert (repo / "app.py").read_text() == "newer main\n"
-    assert stats_db.get_worktrees("squid", "71") == []
-
-
-def test_choose_worktree_resolution_old_takes_isolated_turn(tmp_path, monkeypatch):
-    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
-    stats_db.init_db()
-    repo = tmp_path / "repo"
-    _init_repo(repo)
-    _make_conflicted_worktree(repo, "squid", "72", "73")
-
-    with patch("agent.runners.get_active_msg_ids", return_value=set()):
-        res = TestClient(server.app).post("/chat/73/worktree/choose", json={
-            "topic": "squid",
-            "repo": str(repo),
-            "side": "old",
-        })
-
-    assert res.status_code == 200
-    assert res.json()["ok"] is True
-    assert (repo / "app.py").read_text() == "older isolated\n"
-    assert stats_db.get_worktrees("squid", "73") == []
 
 
 def test_history_marks_missing_worktree_conflict_as_synced(tmp_path, monkeypatch):

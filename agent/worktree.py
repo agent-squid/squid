@@ -584,35 +584,6 @@ def promote_resolved_integration_worktree(repo_root: Path, topic: str, agent: st
         remove_worktree(repo_root, topic, agent)
 
 
-def choose_integration_conflict_side(repo_root: Path, topic: str, agent: str, side: str) -> list[str]:
-    """
-    Resolve every currently conflicted file in the integration worktree by
-    choosing one side. "new" is the current main checkout side (ours);
-    "old" is the isolated turn side (theirs).
-    """
-    if side not in {"new", "old"}:
-        raise RuntimeError(f"invalid conflict side: {side}")
-    integration_wt = integration_worktree_path(repo_root, topic, agent)
-    if not integration_wt.exists():
-        raise RuntimeError(f"integration worktree not found: {integration_wt}")
-
-    checkout_side = "--ours" if side == "new" else "--theirs"
-    with _lock_for(repo_root):
-        conflicts = [
-            f for f in (
-                _run_git(integration_wt, "diff", "--name-only", "--diff-filter=U", check=False)
-                .stdout.strip()
-                .splitlines()
-            )
-            if f
-        ]
-        if not conflicts:
-            return []
-        _run_git(integration_wt, "checkout", checkout_side, "--", *conflicts)
-        _run_git(integration_wt, "add", "--", *conflicts)
-        return conflicts
-
-
 def integration_conflicts(repo_root: Path, topic: str, agent: str) -> list[str]:
     """Currently conflicted file paths in the integration worktree, if any."""
     integration_wt = integration_worktree_path(repo_root, topic, agent)

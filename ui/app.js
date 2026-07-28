@@ -3616,6 +3616,7 @@ async function sendMessage(text, opts = {}) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ command: 'deq', topic, pos: queuePosition }),
       }).catch(() => {});
+      renderCancelledThinking('Dequeued.');
       pollProcs();
     } else if (msgId) {
       await fetch('/cmd', {
@@ -3904,6 +3905,18 @@ async function sendMessage(text, opts = {}) {
     scrollToBottom();
   }
 
+  function renderCancelledThinking(label) {
+    thinkingFrozen = true;
+    killBtn.style.display = 'none';
+    if (thinkingLoader.parentNode) thinkingLoader.remove();
+    thinkingContent.className = '';
+    thinkingContent.innerHTML = `<span class="msg-error">${label}</span>`;
+    thinkingBubble.style.display = '';
+    thinkingBubble.classList.add('msg-thinking-done');
+    updateThinkingHeightButton(thinkingBubble);
+    scrollToBottom();
+  }
+
   function renderCompletionTools(tools) {
     if (!shouldShowLiveResponse()) return;
     const diffTools = changeTools(tools || []);
@@ -4030,6 +4043,12 @@ async function sendMessage(text, opts = {}) {
             discardInterruptedStatusBubble(data.content) || freezeThinking();
             showError(data.content);
           }
+          controller.abort();
+          finalizeQuotaTracking();
+        } else if (data.status === 'cancelled') {
+          completedFromStatus = true;
+          stopStatusFallback();
+          renderCancelledThinking(cancelledTurnLabel(data.content));
           controller.abort();
           finalizeQuotaTracking();
         } else if (data.status === 'pending') {
@@ -4248,6 +4267,7 @@ async function sendMessage(text, opts = {}) {
             try {
               const info = JSON.parse(data);
               queuePosition = info.position;
+              killBtn.style.display = '';
               setThinkingText(`#${info.topic} · queued — position ${info.position}`);
             } catch {}
             pollProcs();
@@ -5506,6 +5526,10 @@ function updateThinkingHeightButton(bubble) {
   btn.classList.toggle('hidden', !canGrow);
 }
 
+function cancelledTurnLabel(content) {
+  return /before start/i.test(String(content || '')) ? 'Dequeued.' : 'Cancelled.';
+}
+
 
 function appendHistoryItem(item, container) {
   const lb = item.stats?.lookback ?? 0;
@@ -5576,6 +5600,8 @@ function appendHistoryItem(item, container) {
   if (item.status === 'error') {
     const raw = (item.content || '').split('\n')[0].replace(/^CLI exited \d+:\s*/, '').trim();
     asstContent.innerHTML = `<span class="msg-error">${raw || 'Response interrupted.'}</span>`;
+  } else if (item.status === 'cancelled') {
+    asstContent.innerHTML = `<span class="msg-error">${cancelledTurnLabel(item.content)}</span>`;
   } else {
     asstContent.innerHTML = renderAssistantMarkdown(item.content || '');
   }
@@ -5664,7 +5690,7 @@ async function replacePendingWithStoredItem(item, wipBubble) {
     const res = await fetch(`/chat/${item.id}/status`);
     if (!res.ok || !wipBubble.parentNode) return;
     const data = await res.json();
-    if (data.status !== 'done' && data.status !== 'error') return;
+    if (data.status !== 'done' && data.status !== 'error' && data.status !== 'cancelled') return;
     if (data.status === 'error' && !String(data.content || '').trim()) return;
     wipBubble.remove();
     if (!shouldShowNewResponse(data)) return;
@@ -5818,7 +5844,7 @@ async function pollPendingItem(item, wipBubble) {
       const res = await fetch(`/chat/${item.id}/status`);
       if (!res.ok) return;
       const data = await res.json();
-      if (data.status === 'done' || (data.status === 'error' && String(data.content || '').trim())) {
+      if (data.status === 'done' || data.status === 'cancelled' || (data.status === 'error' && String(data.content || '').trim())) {
         cancelPendingPoll(wipBubble);
         await replacePendingWithStoredItem(item, wipBubble);
       } else if (count >= MAX_POLLS) {

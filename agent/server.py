@@ -1912,10 +1912,6 @@ class WorktreeDiscardRequest(BaseModel):
     force: bool = False
 
 
-class WorktreeChooseRequest(WorktreeDiscardRequest):
-    side: Literal["new", "old"]
-
-
 @app.post("/chat/{msg_id}/quota-delta")
 async def record_msg_quota_delta(msg_id: int, req: MsgQuotaSnapshotRequest):
     update_message_quota_snapshot(msg_id, req.before, req.after)
@@ -2011,40 +2007,6 @@ async def retry_worktree_resolution(msg_id: int, req: WorktreeDiscardRequest):
     await asyncio.to_thread(mark_worktree_status, topic, wt_key, str(repo_root), "resolved")
     log.info("worktree resolved topic=%s msg_id=%s repo=%s status=%s", topic, msg_id, repo_root, rec.get("status"))
     return JSONResponse({"ok": True})
-
-
-@app.post("/chat/{msg_id}/worktree/choose")
-async def choose_worktree_resolution(msg_id: int, req: WorktreeChooseRequest):
-    topic = _normalize_topic_response(req.topic)
-    if isinstance(topic, JSONResponse):
-        return topic
-    repo_root = _validate_repo_path(req.repo)
-    if repo_root is None:
-        return JSONResponse({"error": "invalid repo path"}, status_code=400)
-
-    wt_key = str(msg_id)
-    rec, found = await _worktree_record_or_existing_paths(topic, wt_key, repo_root)
-    if not found:
-        log.info("worktree choose skipped; already gone topic=%s msg_id=%s repo=%s side=%s", topic, msg_id, repo_root, req.side)
-        return JSONResponse({"ok": True, "already_resolved": True})
-
-    from .runners import get_active_msg_ids
-    if msg_id in get_active_msg_ids():
-        return JSONResponse({"error": "worktree is still running"}, status_code=409)
-
-    from .worktree import choose_integration_conflict_side, promote_resolved_integration_worktree
-    try:
-        chosen = await asyncio.to_thread(choose_integration_conflict_side, repo_root, topic, wt_key, req.side)
-        await asyncio.to_thread(promote_resolved_integration_worktree, repo_root, topic, wt_key)
-    except RuntimeError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=409)
-
-    await asyncio.to_thread(mark_worktree_status, topic, wt_key, str(repo_root), "resolved")
-    log.info(
-        "worktree resolved by side topic=%s msg_id=%s repo=%s side=%s files=%d status=%s",
-        topic, msg_id, repo_root, req.side, len(chosen), rec.get("status"),
-    )
-    return JSONResponse({"ok": True, "side": req.side, "files": chosen})
 
 
 _AUTO_RESOLVE_PROMPT_TEMPLATE = """\
