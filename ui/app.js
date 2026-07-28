@@ -11190,6 +11190,7 @@ function initPullToRefresh() {
   let startY = 0;
   let startedAtBottom = false;
   const GESTURE_ZONE = 64; // px from bottom edge reserved for Android nav gesture
+  const REFRESH_DRAG_THRESHOLD = 480;
 
   messages.addEventListener('touchstart', (e) => {
     const y = e.touches[0].clientY;
@@ -11202,7 +11203,7 @@ function initPullToRefresh() {
   messages.addEventListener('touchend', (e) => {
     if (!startedAtBottom || !startY) return;
     const dy = startY - e.changedTouches[0].clientY; // positive = finger moved up
-    if (dy > 240) setTimeout(() => location.reload(), 150);
+    if (dy > REFRESH_DRAG_THRESHOLD) setTimeout(() => location.reload(), 150);
     startY = 0;
   }, { passive: true });
 }
