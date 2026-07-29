@@ -5416,6 +5416,10 @@ async function _doRevert(msgId, repo, filePath) {
   return res.json();
 }
 
+function _revertFailureText(data, fallback = 'failed') {
+  return data?.failed?.[0]?.error || data?.error || fallback;
+}
+
 async function fetchRevertEligibility(block) {
   const msgId = block.dataset.msgId;
   const repo = block.dataset.repo;
@@ -5452,7 +5456,7 @@ async function fetchRevertEligibility(block) {
             refreshAllRevertButtons({ force: true });
           } else {
             btn.disabled = false; btn.textContent = 'revert';
-            btn.title = data.failed?.[0]?.error || data.error || 'failed';
+            btn.title = _revertFailureText(data);
           }
         } catch { btn.disabled = false; btn.textContent = 'revert'; }
       });
@@ -5479,9 +5483,13 @@ async function fetchRevertEligibility(block) {
       btn.disabled = true; btn.textContent = '…';
       try {
         const data = await _doRevert(msgId, repo, null);
-        if (data.ok) { refreshAllRevertButtons({ force: true }); }
-        else { btn.disabled = false; btn.textContent = `Revert all`; btn.title = data.error || 'failed'; }
-      } catch { btn.disabled = false; }
+        if (data.ok && data.reverted?.length) { refreshAllRevertButtons({ force: true }); }
+        else {
+          btn.disabled = false;
+          btn.textContent = `Revert all ${revertableFiles.length} files`;
+          btn.title = _revertFailureText(data);
+        }
+      } catch { btn.disabled = false; btn.textContent = `Revert all ${revertableFiles.length} files`; }
     });
     bar.appendChild(btn);
   }

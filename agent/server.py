@@ -2239,6 +2239,11 @@ async def revert_diff(msg_id: int, req: RevertRequest):
 
     if reverted:
         await asyncio.to_thread(record_git_diff_revert, msg_id, req.repo, reverted)
+    elif failed:
+        return JSONResponse(
+            {"ok": False, "reverted": reverted, "failed": failed, "error": "revert failed"},
+            status_code=409,
+        )
 
     return JSONResponse({"ok": True, "reverted": reverted, "failed": failed})
 

@@ -60,6 +60,88 @@ def test_worktree_diff_missing_status_is_legacy_unblocked():
     assert server._worktree_diff_blocked(gitdiff) is None
 
 
+def test_revert_diff_reports_failure_when_patch_does_not_apply(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    (repo / "app.py").write_text("base\n")
+    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    (repo / "app.py").write_text("changed\n")
+    diff = subprocess.run(["git", "diff", "--binary"], cwd=repo, text=True, check=True, stdout=subprocess.PIPE).stdout
+    (repo / "app.py").write_text("base\n")
+
+    user_id = stats_db.insert_user_message("squid", "codex", "change app")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    stats_db.update_assistant_message(msg_id, "done", None, context=json.dumps([{
+        "name": "GitDiff",
+        "repo": str(repo),
+        "cwd": str(repo),
+        "source": str(repo),
+        "file_count": 1,
+        "files": [{"status": "M", "path": "app.py"}],
+        "diff": diff,
+    }]))
+
+    res = TestClient(server.app).post(f"/chat/{msg_id}/revert", json={"repo": str(repo)})
+
+    assert res.status_code == 409
+    body = res.json()
+    assert body["ok"] is False
+    assert body["reverted"] == []
+    assert body["failed"][0]["file"] == "app.py"
+    assert stats_db.get_diff_revert_eligibility(msg_id, str(repo)) == {"app.py": "revertable"}
+
+
+def test_revert_diff_restores_target_repo_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    (repo / "app.py").write_text("base\n")
+    (repo / "style.css").write_text("body {}\n")
+    subprocess.run(["git", "add", "app.py", "style.css"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    (repo / "app.py").write_text("changed\n")
+    (repo / "style.css").write_text("body { color: red; }\n")
+    diff = subprocess.run(["git", "diff", "--binary"], cwd=repo, text=True, check=True, stdout=subprocess.PIPE).stdout
+
+    user_id = stats_db.insert_user_message("squid", "codex", "change files")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    stats_db.update_assistant_message(msg_id, "done", None, context=json.dumps([{
+        "name": "GitDiff",
+        "repo": str(repo),
+        "cwd": str(repo),
+        "source": str(repo),
+        "file_count": 2,
+        "files": [
+            {"status": "M", "path": "app.py"},
+            {"status": "M", "path": "style.css"},
+        ],
+        "diff": diff,
+    }]))
+
+    res = TestClient(server.app).post(f"/chat/{msg_id}/revert", json={"repo": str(repo)})
+
+    assert res.status_code == 200
+    assert res.json() == {"ok": True, "reverted": ["app.py", "style.css"], "failed": []}
+    assert (repo / "app.py").read_text() == "base\n"
+    assert (repo / "style.css").read_text() == "body {}\n"
+    assert stats_db.get_diff_revert_eligibility(msg_id, str(repo)) == {
+        "app.py": "reverted",
+        "style.css": "reverted",
+    }
+
+
 def test_discard_worktree_blocker_removes_conflict_row(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

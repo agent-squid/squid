@@ -1047,6 +1047,54 @@ test.describe('response bubble', () => {
     await expect.poll(() => statusRequests).toEqual(['1', '2', '1', '2']);
   });
 
+  test('revert all does not show success when no files reverted', async ({ page }) => {
+    await page.route('**/chat/1/diff-revert-status**', route => route.fulfill({
+      json: { 'ui/app.js': 'revertable', 'ui/style.css': 'revertable' },
+    }));
+    await page.route('**/chat/1/revert', route => route.fulfill({
+      json: {
+        ok: true,
+        reverted: [],
+        failed: [{ file: 'ui/app.js', error: 'patch does not apply' }],
+      },
+    }));
+    await page.route('**/chat', route => route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        META,
+        { event: 'tool', data: {
+          name: 'GitDiff',
+          repo: '/tmp/repo',
+          file_count: 2,
+          additions: 2,
+          deletions: 0,
+          files: [
+            { status: 'M', path: 'ui/app.js' },
+            { status: 'M', path: 'ui/style.css' },
+          ],
+          diff: [
+            'diff --git a/ui/app.js b/ui/app.js',
+            '@@ -1 +1 @@',
+            '+const opened = true;',
+            'diff --git a/ui/style.css b/ui/style.css',
+            '@@ -1 +1 @@',
+            '+body { color: red; }',
+          ].join('\n'),
+        } },
+        { data: 'Done' },
+        DONE,
+      ),
+    }));
+
+    await sendMsg(page);
+    const revertAll = page.getByRole('button', { name: 'Revert all 2 files' });
+    await revertAll.click();
+
+    await expect(revertAll).toBeEnabled();
+    await expect(revertAll).toHaveText('Revert all 2 files');
+    await expect(revertAll).toHaveAttribute('title', 'patch does not apply');
+  });
+
   test('recovered completion restores GitDiff and renders one end timestamp', async ({ page }) => {
     const gitDiff = {
       name: 'GitDiff',
