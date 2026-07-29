@@ -31,14 +31,14 @@ worktree:
   # dependency_dirs:
   #   - custom-cache-dir
   # Whether a new turn should start from the source checkout's uncommitted
-  # state. false means the turn directory is seeded from HEAD only; dirty and
-  # untracked files in the source checkout are not visible to the agent until
-  # committed. true snapshots those dirty/untracked files into the turn seed,
-  # which is useful for side-by-side IDE editing but costs an extra Git index
-  # scan/stat pass over the source checkout at turn start. Promotion still
-  # snapshots the current source checkout at turn end in both modes, so false
-  # does not allow Squid to blindly overwrite dirty source files.
-  track_dirty_changes: false
+  # state. true snapshots dirty/untracked files into the turn seed, so files
+  # you just edited or added are visible to the agent without committing first.
+  # This is clearer for side-by-side IDE editing, but costs an extra Git index
+  # scan/stat pass over the source checkout at turn start. Set false to seed
+  # turn directories from HEAD only; promotion still snapshots the current
+  # source checkout at turn end in both modes, so false does not allow Squid to
+  # blindly overwrite dirty source files.
+  track_dirty_changes: true
 
 # Squid Echo: an extra "echo" harness that dispatches through the real
 # HTTP/queue/flow-continuation path but never runs a real CLI — it just

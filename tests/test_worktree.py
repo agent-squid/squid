@@ -30,6 +30,11 @@ from agent.worktree import (
 # helpers
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def isolated_worktrees_home(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree_mod, "_WORKTREES_HOME", tmp_path / ".squid" / "worktrees")
+
+
 def git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", *args],
@@ -135,16 +140,16 @@ def test_ensure_worktree_per_msg_id_are_independent(tmp_path):
     assert wt_b.exists()
 
 
-def test_ensure_worktree_defaults_to_clean_head_seed(tmp_path, monkeypatch):
-    monkeypatch.setattr(worktree_mod.config, "WORKTREE_TRACK_DIRTY_CHANGES", False)
+def test_ensure_worktree_defaults_to_dirty_code_root_seed(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree_mod.config, "WORKTREE_TRACK_DIRTY_CHANGES", True)
     repo = init_repo(tmp_path / "repo")
     (repo / "file.txt").write_text("dirty source\n")
     (repo / "seed.txt").write_text("untracked seed\n")
 
     wt = ensure_worktree(repo, "t", "204")
 
-    assert (wt / "file.txt").read_text() == "base\n"
-    assert not (wt / "seed.txt").exists()
+    assert (wt / "file.txt").read_text() == "dirty source\n"
+    assert (wt / "seed.txt").read_text() == "untracked seed\n"
 
 
 def test_ensure_worktree_tracks_dirty_code_root_when_enabled(tmp_path, monkeypatch):

@@ -71,9 +71,11 @@ worktree:
   # dependency_dirs:
   #   - custom-cache-dir
   # Whether a new turn should start from source checkout dirty/untracked files.
+  # true makes uncommitted edits visible without committing first, at the cost
+  # of an extra Git index scan/stat pass over the source checkout at turn start.
   # false seeds from HEAD only; promotion still snapshots the source checkout
   # at turn end so dirty source files are not blindly overwritten.
-  track_dirty_changes: false
+  track_dirty_changes: true
 ```
 
 `auto_link_ignored_dirs` makes `ensure_worktree` discover ignored directories
@@ -169,7 +171,7 @@ process can see the path. The other real `git worktree` used by the shipped
 implementation is the disposable integration worktree created after the turn,
 under Squid control, for merge and conflict handling.
 
-### Resolved: dirty-tree tracking is opt-in, off by default
+### Resolved: dirty-tree tracking is enabled by default
 
 Capturing repo_root's live dirty state (`SEED_TREE`/`CURRENT_TREE` via the
 scratch-index overlay in "Capturing content trees") is not free on repos with
@@ -181,10 +183,17 @@ cost proportional to tracked file count, not repo byte size, and not
 something Squid can safely assume is cheap without knowing the target repo's
 scale in advance.
 
-Decision: gate it behind a new config flag,
-`worktree.track_dirty_changes`, **default `false`**.
+Decision: gate it behind a config flag,
+`worktree.track_dirty_changes`, **default `true`**.
 
-- **`false` (default):** turns seed from `HEAD` only. Uncommitted changes in
+- **`true` (default):** captures dirty-tree state — dirty/untracked source
+  files, synthetic BASE/CURRENT/TURN commits, and the real 3-way merge — so
+  non-overlapping concurrent edits (IDE vs. agent) auto-merge instead of
+  requiring a commit first. The config comment says plainly that this can be
+  expensive on large-file-count repos and that enabling Git's `core.fsmonitor`
+  is the recommended mitigation, since fsmonitor is what turns the
+  unconditional stat sweep into a cheap "what changed since last check" lookup.
+- **`false`:** turns seed from `HEAD` only. Uncommitted changes in
   repo_root — from a user's IDE, or anything else outside Squid — are
   invisible to the next turn until committed. This is the cheaper turn-start
   path: no scratch-index overlay is needed to seed the isolated directory.
@@ -192,16 +201,7 @@ Decision: gate it behind a new config flag,
   CURRENT/TURN hidden-commit merge path, so disabling dirty tracking does not
   let Squid blindly overwrite dirty source files. Docs/UI must tell users
   plainly that edits made outside Squid need to be committed to become visible
-  to a turn — this is a real behavior change from "the agent sees your unsaved
-  edits," not just an internal simplification.
-- **`true`:** restores today's documented behavior — dirty-tree capture,
-  synthetic BASE/CURRENT/TURN commits, and the real 3-way merge, so
-  non-overlapping concurrent edits (IDE vs. agent) auto-merge instead of
-  requiring a commit first. The config comment should say plainly that this
-  can be expensive on large-file-count repos and that enabling Git's
-  `core.fsmonitor` is the recommended mitigation, since fsmonitor is what
-  turns the unconditional stat sweep into a cheap "what changed since last
-  check" lookup.
+  to a turn.
 
 This is additive to `worktree.enabled`: dirty tracking only has meaning when
 worktree isolation itself is on.
@@ -734,9 +734,9 @@ not a configured agent name. `<slug>`/`<md5>` derive from `(topic, key)`;
 outside the project directory so they never appear in the user's repo; the
 `sqd-` prefix identifies Squid-managed turn directories. `ensure_worktree`
 records a base commit under the base ref and materializes that commit into a
-plain turn directory. With `track_dirty_changes: false`, the base commit is
-HEAD. With `track_dirty_changes: true`, Squid first snapshots repo_root's
-dirty working tree into a hidden base commit.
+plain turn directory. With `track_dirty_changes: true`, Squid first snapshots
+repo_root's dirty working tree into a hidden base commit. With
+`track_dirty_changes: false`, the base commit is HEAD.
 
 Using the assistant message ID as the key means every turn — adhoc or
 regular — gets a fresh, isolated worktree with no state carried over. The

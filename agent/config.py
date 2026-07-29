@@ -113,7 +113,7 @@ SQUID_HOME = f"/tmp/{os.getlogin()}/squid"
 # `worktree.enabled: false` in squid.yaml to use direct working-tree writes.
 _worktree_cfg = _cfg.get("worktree", {})
 WORKTREE_ISOLATION_ENABLED: bool = bool(_worktree_cfg.get("enabled", True))
-WORKTREE_TRACK_DIRTY_CHANGES: bool = bool(_worktree_cfg.get("track_dirty_changes", False))
+WORKTREE_TRACK_DIRTY_CHANGES: bool = bool(_worktree_cfg.get("track_dirty_changes", True))
 
 # Dependency/cache directory names to symlink from a code root into each fresh
 # per-turn worktree. auto_link_ignored_dirs only links ignored dirs whose
