@@ -48,6 +48,10 @@ def test_worktree_diff_blocked_until_synced():
 
     gitdiff["worktree_status"] = "synced"
     assert server._worktree_diff_blocked(gitdiff) is None
+    gitdiff["worktree_status"] = "resolved"
+    assert server._worktree_diff_blocked(gitdiff) is None
+    gitdiff["worktree_status"] = "discarded"
+    assert server._worktree_diff_blocked(gitdiff) is None
 
 
 def test_worktree_diff_missing_status_is_legacy_unblocked():
@@ -133,7 +137,10 @@ def test_revert_diff_restores_target_repo_file(tmp_path, monkeypatch):
     res = TestClient(server.app).post(f"/chat/{msg_id}/revert", json={"repo": str(repo)})
 
     assert res.status_code == 200
-    assert res.json() == {"ok": True, "reverted": ["app.py", "style.css"], "failed": []}
+    data = res.json()
+    assert data["ok"] is True
+    assert sorted(data["reverted"]) == ["app.py", "style.css"]
+    assert data["failed"] == []
     assert (repo / "app.py").read_text() == "base\n"
     assert (repo / "style.css").read_text() == "body {}\n"
     assert stats_db.get_diff_revert_eligibility(msg_id, str(repo)) == {
@@ -142,7 +149,7 @@ def test_revert_diff_restores_target_repo_file(tmp_path, monkeypatch):
     }
 
 
-def test_discard_worktree_blocker_removes_conflict_row(tmp_path, monkeypatch):
+def test_discard_worktree_blocker_marks_conflict_row_discarded(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
     repo = tmp_path / "repo"
@@ -166,7 +173,9 @@ def test_discard_worktree_blocker_removes_conflict_row(tmp_path, monkeypatch):
 
     assert res.status_code == 200
     assert res.json() == {"ok": True}
-    assert stats_db.get_worktrees("squid", "42") == []
+    rows = stats_db.get_worktrees("squid", "42")
+    assert len(rows) == 1
+    assert rows[0]["status"] == "discarded"
     assert not wt.exists()
 
 
@@ -247,7 +256,38 @@ def test_retry_worktree_resolution_promotes_manual_resolution(tmp_path, monkeypa
     assert res.status_code == 200
     assert res.json() == {"ok": True}
     assert (repo / "app.py").read_text() == "resolved\n"
-    assert stats_db.get_worktrees("squid", "51") == []
+    rows = stats_db.get_worktrees("squid", "51")
+    assert len(rows) == 1
+    assert rows[0]["status"] == "resolved"
+
+
+def test_retry_worktree_resolution_promotes_stale_pending_worktree(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    (repo / "app.py").write_text("base\n")
+    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    wt = worktree_mod.ensure_worktree(repo, "squid", "52")
+    stats_db.save_worktree("squid", "52", str(repo), str(wt), worktree_mod.branch_name("squid", "52"))
+    (wt / "app.py").write_text("stale pending\n")
+
+    with patch("agent.runners.get_active_msg_ids", return_value=set()):
+        res = TestClient(server.app).post("/chat/52/worktree/retry", json={
+            "topic": "squid",
+            "repo": str(repo),
+        })
+
+    assert res.status_code == 200
+    assert res.json() == {"ok": True}
+    assert (repo / "app.py").read_text() == "stale pending\n"
+    assert stats_db.get_worktrees("squid", "52") == []
+    assert not wt.exists()
 
 
 def test_retry_worktree_resolution_handles_missing_registry_row(tmp_path, monkeypatch):
@@ -770,6 +810,49 @@ def test_chat_response_exposes_message_id_header():
     assert res.status_code == 200
     assert res.headers["X-Squid-Msg-Id"] == "202"
     assert insert_user_message.call_args.kwargs["source"] == "workflow"
+
+
+def test_blocked_worktree_turn_persists_recovery_context(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    blocker = {
+        "repo_root": str(repo),
+        "worktree_path": str(tmp_path / "turn"),
+        "integration_worktree_path": str(tmp_path / "integration"),
+        "status": "conflict",
+        "msg_id": "7282",
+        "conflicts": ["ui/app.js"],
+    }
+
+    async def fake_repo_roots(_code_roots):
+        return [repo]
+
+    async def fake_settle(_topic, _repo_roots):
+        return [blocker]
+
+    with patch("agent.server.get_agent", return_value={"cwd": str(repo)}), \
+         patch("agent.server._resolve_agent_runtime", return_value=("codex", None, "codex", SimpleNamespace(fingerprint="f"))), \
+         patch("agent.server.get_topic_session", return_value=None), \
+         patch("agent.server.topic_memory_squid_config", return_value={"code_roots": [str(repo)]}), \
+         patch("agent.server._repo_roots_for_code_roots", fake_repo_roots), \
+         patch("agent.worktree.settle_worktrees_before_turn", fake_settle):
+        res = asyncio.run(server._prepare_chat_turn(
+            message="next",
+            topic="squid",
+            agent="codex",
+        ))
+
+    assert res.status_code == 409
+    body = json.loads(res.body)
+    assert body["worktrees"] == [blocker]
+    saved = stats_db.get_message(body["msg_id"])
+    tools = json.loads(saved["context"])
+    assert tools[0]["name"] == "GitDiff"
+    assert tools[0]["worktree_blocker"] is True
+    assert tools[0]["worktree_status"] == "conflict"
+    assert tools[0]["worktree_conflicts"] == ["ui/app.js"]
 
 
 def test_chat_allocates_short_flow_run_id_for_routed_turn():

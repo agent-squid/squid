@@ -95,7 +95,7 @@ from .stats_db import (
     save_file_edit, get_file_edit_history, get_file_edit_by_id,
     get_bookmarks, add_bookmark, remove_bookmark,
     save_worktree, get_worktrees, get_all_worktrees_for_topic,
-    mark_worktree_status, delete_all_worktrees,
+    mark_worktree_status, delete_worktree, delete_all_worktrees,
     delete_all_topic_worktrees,
     allocate_id,
 )
@@ -239,6 +239,32 @@ async def _repo_roots_for_code_roots(code_roots: list[str]) -> list[Path]:
         seen.add(key)
         repo_roots.append(repo_root)
     return repo_roots
+
+
+def _worktree_blocker_tools(blockers: list[dict]) -> list[dict]:
+    tools: list[dict] = []
+    for blocker in blockers:
+        conflicts = blocker.get("conflicts") if isinstance(blocker.get("conflicts"), list) else []
+        files = (
+            [{"status": "U", "path": path} for path in conflicts if isinstance(path, str) and path]
+            or [{"status": "M", "path": "worktree changes"}]
+        )
+        tools.append({
+            "name": "GitDiff",
+            "repo": blocker.get("repo_root"),
+            "source": blocker.get("repo_root"),
+            "worktree_repo": blocker.get("worktree_path"),
+            "worktree_status": blocker.get("status") or "pending",
+            "worktree_conflicts": conflicts,
+            "integration_worktree_path": blocker.get("integration_worktree_path") or "",
+            "worktree_blocker": True,
+            "files": files,
+            "file_count": len(files),
+            "additions": 0,
+            "deletions": 0,
+            "diff": "",
+        })
+    return tools
 
 
 def _resolve_agent_runtime(agent_config: dict) -> tuple[str, Optional[str], str, object]:
@@ -696,7 +722,7 @@ async def _prepare_chat_turn(
             update_assistant_message(
                 blocked_asst_id,
                 f"Blocked: worktree sync requires attention before starting another turn — {blocker_desc}",
-                None, status="error",
+                None, status="error", context=json.dumps(_worktree_blocker_tools(blockers)),
             )
             return JSONResponse({
                 "error": "worktree sync requires attention before starting another turn",
@@ -2002,7 +2028,25 @@ async def retry_worktree_resolution(msg_id: int, req: WorktreeDiscardRequest):
     if msg_id in get_active_msg_ids():
         return JSONResponse({"error": "worktree is still running"}, status_code=409)
 
-    from .worktree import ConflictMarkersRemainError, promote_resolved_integration_worktree
+    from .worktree import ConflictMarkersRemainError, promote_resolved_integration_worktree, remove_worktree, sync_after_turn
+    if rec.get("status") in {"pending", "active"}:
+        try:
+            conflict_files = await asyncio.to_thread(sync_after_turn, repo_root, topic, wt_key, msg_id)
+        except RuntimeError as exc:
+            await asyncio.to_thread(mark_worktree_status, topic, wt_key, str(repo_root), "promotion_failed")
+            return JSONResponse({"error": str(exc), "status": "promotion_failed"}, status_code=409)
+        if conflict_files:
+            await asyncio.to_thread(mark_worktree_status, topic, wt_key, str(repo_root), "conflict")
+            return JSONResponse({
+                "error": "worktree sync conflict",
+                "status": "conflict",
+                "conflicts": conflict_files,
+            }, status_code=409)
+        await asyncio.to_thread(remove_worktree, repo_root, topic, wt_key)
+        await asyncio.to_thread(delete_worktree, topic, wt_key, str(repo_root))
+        log.info("worktree retry synced topic=%s msg_id=%s repo=%s status=%s", topic, msg_id, repo_root, rec.get("status"))
+        return JSONResponse({"ok": True})
+
     try:
         await asyncio.to_thread(promote_resolved_integration_worktree, repo_root, topic, wt_key, req.force)
     except ConflictMarkersRemainError as exc:
@@ -2179,7 +2223,7 @@ def _worktree_diff_blocked(gitdiff: Optional[dict]) -> Optional[dict[str, str]]:
     if not gitdiff or not gitdiff.get("worktree_repo"):
         return None
     status = gitdiff.get("worktree_status")
-    if not status or status == "synced":
+    if not status or status in {"synced", "resolved", "discarded"}:
         return None
     return {
         f.get("path"): status

@@ -926,6 +926,40 @@ test.describe('response bubble', () => {
     expect(retryBody).toEqual({ topic: 'default', repo: '/tmp/repo', force: false });
   });
 
+  test('active worktree blocker offers retry sync and discard controls', async ({ page }) => {
+    let retryBody = null;
+    await page.route('**/chat/*/worktree/retry', route => {
+      retryBody = route.request().postDataJSON();
+      route.fulfill({ json: { ok: true } });
+    });
+    await page.route('**/chat', route => route.fulfill({
+      status: 409,
+      json: {
+        error: 'worktree sync requires attention before starting another turn',
+        worktrees: [{
+          repo_root: '/tmp/repo',
+          worktree_path: '/tmp/.squid/worktrees/topic/repo',
+          status: 'active',
+          msg_id: '7283',
+        }],
+      },
+    }));
+
+    await sendMsg(page);
+    const block = page.locator('.tool-block-history').first();
+    await expect(block.locator('.gitdiff-sync-notice')).toContainText('Worktree sync active');
+    await expect(block.getByRole('button', { name: 'Retry Sync' })).toBeVisible();
+    await expect(block.getByRole('button', { name: 'Discard Turn' })).toBeVisible();
+    await expect(block.getByRole('button', { name: 'Resolve', exact: true })).toHaveCount(0);
+    await expect(block.getByRole('button', { name: 'Conflicts' })).toHaveCount(0);
+    await expect(block.getByRole('button', { name: 'Open worktree changes in file viewer' })).toHaveCount(0);
+    await expect(block.getByRole('button', { name: 'revert' })).toHaveCount(0);
+
+    await block.getByRole('button', { name: 'Retry Sync' }).click();
+    await expect(block.locator('.gitdiff-sync-notice')).toContainText('Worktree synced');
+    expect(retryBody).toEqual({ topic: 'default', repo: '/tmp/repo', force: false });
+  });
+
   test('mobile browser back closes GitDiff file viewer back to diff list', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 800 });
     await page.route('**/chat/1/diff-revert-status**', route => route.fulfill({
@@ -1001,7 +1035,7 @@ test.describe('response bubble', () => {
     expect(openedPaths[0]).not.toContain('/.squid/worktrees/');
   });
 
-  test('revert eligibility is not re-fetched for already-checked blocks, but is after a revert', async ({ page }) => {
+  test('revert eligibility is refreshed for new GitDiff blocks and after a revert', async ({ page }) => {
     const statusRequests = [];
     await page.route('**/chat/*/diff-revert-status**', route => {
       const msgId = route.request().url().match(/\/chat\/(\d+)\//)[1];
@@ -1026,8 +1060,8 @@ test.describe('response bubble', () => {
     await expect.poll(() => statusRequests).toEqual(['1']);
 
     // Second message completes with its own GitDiff tool block (msg_id 2).
-    // Rendering it re-triggers refreshAllRevertButtons() over the whole DOM,
-    // but block 1 was already checked, so only block 2 should fire a request.
+    // Rendering it can retroactively change older blocks' eligibility, so the
+    // existing block is rechecked along with the new one.
     await page.route('**/chat', route => route.fulfill({
       status: 200, headers: SSE_HEADERS,
       body: sse(
@@ -1039,12 +1073,50 @@ test.describe('response bubble', () => {
     }));
     await sendMsg(page, 'second');
     await expect(page.locator('.tool-block-history')).toHaveCount(2);
-    await expect.poll(() => statusRequests).toEqual(['1', '2']);
+    await expect.poll(() => statusRequests).toEqual(['1', '1', '2']);
 
     // Reverting changes the working tree, so eligibility for every block -
     // including the already-checked one - needs a fresh check.
     await page.locator('.tool-block-history').first().getByRole('button', { name: 'revert' }).click();
-    await expect.poll(() => statusRequests).toEqual(['1', '2', '1', '2']);
+    await expect(page.locator('#restart-modal')).toHaveClass(/open/);
+    await expect(page.locator('#restart-modal-title')).toHaveText('Revert ui/app.js?');
+    await page.locator('#restart-modal-confirm').click();
+    await expect.poll(() => statusRequests).toEqual(['1', '1', '2', '1', '2']);
+  });
+
+  test('single-file revert can be cancelled before request', async ({ page }) => {
+    let revertRequests = 0;
+    await page.route('**/chat/1/diff-revert-status**', route => route.fulfill({
+      json: { 'ui/app.js': 'revertable' },
+    }));
+    await page.route('**/chat/1/revert', route => {
+      revertRequests++;
+      route.fulfill({ json: { ok: true, reverted: ['ui/app.js'] } });
+    });
+    await page.route('**/chat', route => route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        META,
+        { event: 'tool', data: {
+          name: 'GitDiff',
+          repo: '/tmp/repo',
+          file_count: 1,
+          additions: 1,
+          deletions: 0,
+          files: [{ status: 'M', path: 'ui/app.js' }],
+          diff: 'diff --git a/ui/app.js b/ui/app.js\n@@ -1 +1 @@\n+const opened = true;',
+        } },
+        { data: 'Done' },
+        DONE,
+      ),
+    }));
+
+    await sendMsg(page);
+    await page.getByRole('button', { name: 'revert' }).click();
+    await expect(page.locator('#restart-modal-title')).toHaveText('Revert ui/app.js?');
+    await page.locator('#restart-modal-cancel').click();
+    await expect(page.locator('#restart-modal')).not.toHaveClass(/open/);
+    expect(revertRequests).toBe(0);
   });
 
   test('revert all does not show success when no files reverted', async ({ page }) => {
@@ -1089,6 +1161,8 @@ test.describe('response bubble', () => {
     await sendMsg(page);
     const revertAll = page.getByRole('button', { name: 'Revert all 2 files' });
     await revertAll.click();
+    await expect(page.locator('#restart-modal-title')).toHaveText('Revert 2 files?');
+    await page.locator('#restart-modal-confirm').click();
 
     await expect(revertAll).toBeEnabled();
     await expect(revertAll).toHaveText('Revert all 2 files');

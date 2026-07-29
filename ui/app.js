@@ -4900,6 +4900,12 @@ function _gitDiffSourceRepo(tool) {
 
 function markVisibleWorktreeResolved(msgId, sourceRepo, message) {
   if (!msgId) return;
+  const terminalLabel = /discarded/i.test(message)
+    ? 'Discarded'
+    : /synced/i.test(message) && !/resolved/i.test(message)
+      ? 'Synced'
+      : 'Resolved';
+  const toggleLabel = terminalLabel === 'Resolved' ? 'Conflict Resolved' : terminalLabel;
   const selector = `.tool-block[data-worktree-msg-id="${CSS.escape(String(msgId))}"]`;
   document.querySelectorAll(selector).forEach(block => {
     if (sourceRepo && block.dataset.worktreeRepo !== sourceRepo) return;
@@ -4909,12 +4915,12 @@ function markVisibleWorktreeResolved(msgId, sourceRepo, message) {
     if (actions) {
       const label = document.createElement('span');
       label.className = 'gitdiff-resolved-label';
-      label.textContent = 'Resolved';
+      label.textContent = terminalLabel;
       actions.replaceWith(label);
     }
     const toggle = block.querySelector('.tool-toggle');
     if (toggle) {
-      toggle.textContent = toggle.textContent.replace(/ · (conflict|promotion_failed|pending)\b/, ' · Conflict Resolved');
+      toggle.textContent = toggle.textContent.replace(/ · (conflict|promotion_failed|pending|active)\b/, ` · ${toggleLabel}`);
     }
   });
 }
@@ -4994,7 +5000,7 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
     // Only conflict/promotion_failed/discarded turns have nothing (or an
     // ambiguous result) to revert — a resolved turn's changes did land, same
     // as a plain synced one, so revert stays available for it.
-    const revertBlocked = worktreeStatus === 'conflict' || worktreeStatus === 'promotion_failed' || worktreeStatus === 'discarded';
+    const revertBlocked = !!worktreeStatus && worktreeStatus !== 'synced' && worktreeStatus !== 'resolved';
     const revertEligible = msgId && sourceRepo && _withinRevertWindow(timestamp) && !revertBlocked;
     if (revertEligible) {
       block.dataset.msgId = String(msgId);
@@ -5024,7 +5030,8 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
       if (worktreeStatus === 'resolved') notice.classList.add('gitdiff-sync-notice-resolved');
       body.appendChild(notice);
 
-      if (msgId && sourceRepo && messageTopic && (worktreeStatus === 'conflict' || worktreeStatus === 'promotion_failed')) {
+      const worktreeActionable = worktreeStatus !== 'discarded' && worktreeStatus !== 'resolved';
+      if (msgId && sourceRepo && messageTopic && worktreeActionable) {
         const actions = document.createElement('div');
         actions.className = 'gitdiff-sync-actions';
         const firstConflictPath = conflicts[0] || (tool.files || [])[0]?.path || '';
@@ -5032,7 +5039,7 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
         const blockerPrefix = tool.worktree_blocker
           ? `This later blocked message points at ${targetTurn}. `
           : `Targets ${targetTurn}. `;
-        if (tool.integration_worktree_path && firstConflictPath) {
+        if (worktreeStatus === 'conflict' && tool.integration_worktree_path && firstConflictPath) {
           const openConflictBtn = document.createElement('button');
           openConflictBtn.type = 'button';
           openConflictBtn.className = 'gitdiff-resolve-worktree-btn';
@@ -5058,8 +5065,11 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
         const retryBtn = document.createElement('button');
         retryBtn.type = 'button';
         retryBtn.className = 'gitdiff-resolve-worktree-btn';
-        retryBtn.textContent = 'Resolve';
-        retryBtn.title = `${blockerPrefix}Apply the saved integration worktree resolution back to the main checkout.`;
+        const retryLabel = worktreeStatus === 'conflict' || worktreeStatus === 'promotion_failed' ? 'Resolve' : 'Retry Sync';
+        retryBtn.textContent = retryLabel;
+        retryBtn.title = worktreeStatus === 'conflict' || worktreeStatus === 'promotion_failed'
+          ? `${blockerPrefix}Apply the saved integration worktree resolution back to the main checkout.`
+          : `${blockerPrefix}Retry promoting this isolated turn's changes to the main checkout.`;
         retryBtn.addEventListener('click', async e => {
           e.stopPropagation();
           if (retryBtn.disabled) return;
@@ -5083,7 +5093,7 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
               });
               if (!proceed) {
                 retryBtn.disabled = false;
-                retryBtn.textContent = 'Resolve';
+                retryBtn.textContent = retryLabel;
                 return;
               }
               ({ res, data } = await postRetry(true));
@@ -5091,14 +5101,16 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
             if (!res.ok || !data.ok) throw new Error(data.error || 'Resolve failed');
             const resolvedMessage = data.already_resolved
               ? 'Worktree was already resolved. Future turns for this topic can start normally.'
-              : 'Worktree resolved and synced. Future turns for this topic can start normally.';
+              : worktreeStatus === 'conflict' || worktreeStatus === 'promotion_failed'
+                ? 'Worktree resolved and synced. Future turns for this topic can start normally.'
+                : 'Worktree synced. Future turns for this topic can start normally.';
             markVisibleWorktreeResolved(msgId, sourceRepo, resolvedMessage);
           } catch (err) {
             const msg = err?.message || 'Resolve failed';
             retryBtn.disabled = false;
-            retryBtn.textContent = 'Resolve';
+            retryBtn.textContent = retryLabel;
             retryBtn.title = msg;
-            notice.textContent = `Resolve failed: ${msg}`;
+            notice.textContent = `${retryLabel} failed: ${msg}`;
           }
         });
         actions.appendChild(retryBtn);
@@ -5420,6 +5432,19 @@ function _revertFailureText(data, fallback = 'failed') {
   return data?.failed?.[0]?.error || data?.error || fallback;
 }
 
+function confirmDiffRevert({ filePath = null, count = 1 } = {}) {
+  const title = filePath ? `Revert ${filePath}?` : `Revert ${count} files?`;
+  const copy = filePath
+    ? 'This applies a reverse patch directly to the main checkout.'
+    : `This applies reverse patches for ${count} files directly to the main checkout.`;
+  return confirmRestartWithRunningPrompts([], {
+    header: 'Revert Changes',
+    title,
+    copy,
+    confirmLabel: 'Revert',
+  });
+}
+
 async function fetchRevertEligibility(block) {
   const msgId = block.dataset.msgId;
   const repo = block.dataset.repo;
@@ -5449,6 +5474,8 @@ async function fetchRevertEligibility(block) {
       btn.textContent = 'revert';
       btn.addEventListener('click', async e => {
         e.stopPropagation();
+        const confirmed = await confirmDiffRevert({ filePath: fpath });
+        if (!confirmed) return;
         btn.disabled = true; btn.textContent = '…';
         try {
           const data = await _doRevert(msgId, repo, fpath);
@@ -5480,6 +5507,8 @@ async function fetchRevertEligibility(block) {
     btn.textContent = `Revert all ${revertableFiles.length} files`;
     btn.addEventListener('click', async e => {
       e.stopPropagation();
+      const confirmed = await confirmDiffRevert({ count: revertableFiles.length });
+      if (!confirmed) return;
       btn.disabled = true; btn.textContent = '…';
       try {
         const data = await _doRevert(msgId, repo, null);
