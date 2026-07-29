@@ -38,8 +38,14 @@ test('hamburger and Settings row get a dot, and Settings shows the update comman
   await page.locator('.hmenu-item[data-view="settings"]').click();
 
   const notice = page.locator('#settings-update-notice');
+  await expect(page.locator('#settings-version-info')).toHaveText('AgentSquid v0.1.0');
+  const headerBox = await page.locator('#config-editor-header').boundingBox();
+  const versionBox = await page.locator('#settings-version-info').boundingBox();
+  const actionsBox = await page.locator('#config-editor-actions').boundingBox();
+  expect(Math.abs(versionBox.x - headerBox.x)).toBeLessThan(2);
+  expect(Math.abs((actionsBox.x + actionsBox.width) - (headerBox.x + headerBox.width))).toBeLessThan(2);
   await expect(notice).toBeVisible();
-  await expect(notice).toContainText('v0.1.0 → v0.2.0');
+  await expect(notice).toContainText('AgentSquid v0.1.0 → v0.2.0');
   await expect(page.locator('#settings-update-cmd')).toContainText('pipx upgrade agentsquid');
 });
 
@@ -84,7 +90,7 @@ test('a further version bump re-shows the dot even after a prior dismissal', asy
 
   await expect(page.locator('#hamburger-btn')).toHaveClass(/has-update/);
   await openSettings(page);
-  await expect(page.locator('#settings-update-notice')).toContainText('v0.1.0 → v0.3.0');
+  await expect(page.locator('#settings-update-notice')).toContainText('AgentSquid v0.1.0 → v0.3.0');
 });
 
 test('release candidates do not outrank the matching final release', async ({ page }) => {

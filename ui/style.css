@@ -1581,14 +1581,22 @@ body {
 }
 #config-editor-path { color: var(--text-dim); }
 #config-editor-header {
-  display: flex;
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: flex-end;
   gap: 1rem;
   margin-top: 0;
   flex-shrink: 0;
+  width: 100%;
 }
-#config-editor-actions { flex-shrink: 0; display: flex; align-items: center; gap: 0.5rem; }
+#settings-version-info {
+  color: var(--text);
+  font-size: 1rem;
+  min-width: 0;
+  text-align: left;
+}
+#config-editor-actions { display: flex; align-items: center; gap: 0.5rem; justify-self: end; }
 #config-editor-status-line { min-height: 1.2em; flex-shrink: 0; }
 #config-editor-status {
   color: var(--text-mid);
@@ -4462,10 +4470,6 @@ button {
   .topic-meta { justify-content: flex-end; flex-wrap: wrap; }
   .topic-agent-row .topic-agent-main { padding-left: 0.8rem; }
   .msg-pin-btn { flex-shrink: 0; }
-
-  .settings-hint {
-    display: none;
-  }
 
 }
 

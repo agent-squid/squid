@@ -213,8 +213,14 @@ function renderSettingsUpdateNotice() {
   if (!_updateInfo) { el.hidden = true; return; }
   el.hidden = false;
   document.getElementById('settings-update-text').textContent =
-    `Squid v${_updateInfo.current} → v${_updateInfo.latest} available — restart required after upgrading`;
+    `AgentSquid v${_updateInfo.current} → v${_updateInfo.latest} available — restart required after upgrading`;
   document.getElementById('settings-update-cmd').textContent = 'pipx upgrade agentsquid';
+}
+
+function renderSettingsVersion(version) {
+  const el = document.getElementById('settings-version-info');
+  if (!el) return;
+  el.textContent = version ? `AgentSquid v${version}` : '';
 }
 
 async function checkForSquidUpdate(currentVersion) {
@@ -10193,6 +10199,7 @@ function renderProvidersCatalog() {
 }
 
 function renderRuntimeCatalogs(health) {
+  renderSettingsVersion(health?.version);
   refreshRuntimeMetadata(health);
   renderHarnessesCatalog(health);
   renderProvidersCatalog();
@@ -11570,6 +11577,7 @@ async function showBootBanner() {
     _providerMetadata = data.providers || {};
     _harnessMetadata = {};
     for (const h of (data.harnesses || [])) _harnessMetadata[h.id] = h;
+    renderSettingsVersion(data.version);
     checkForSquidUpdate(data.version);
     await updateActiveQuotaGauge();
     if (activeQuotaBackend) fetchQuotaForBackend(activeQuotaBackend);
