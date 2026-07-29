@@ -3523,17 +3523,18 @@ def save_worktree(
     br: str,
     base_commit: Optional[str] = None,
     integration_worktree_path: Optional[str] = None,
+    status: str = "pending",
 ) -> None:
     with _connect() as conn:
         conn.execute(
             """INSERT INTO worktrees
-                 (topic, agent, repo_root, worktree_path, branch_name, base_commit, integration_worktree_path)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
+                 (topic, agent, repo_root, worktree_path, branch_name, base_commit, integration_worktree_path, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(topic, agent, repo_root) DO UPDATE SET
                  base_commit=COALESCE(excluded.base_commit, worktrees.base_commit),
                  integration_worktree_path=COALESCE(excluded.integration_worktree_path, worktrees.integration_worktree_path),
-                 last_used_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), status='pending'""",
-            (topic, agent, repo_root, wt_path, br, base_commit, integration_worktree_path),
+                 last_used_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), status=excluded.status""",
+            (topic, agent, repo_root, wt_path, br, base_commit, integration_worktree_path, status),
         )
 
 

@@ -613,7 +613,7 @@ def test_cleanup_worktrees_marks_promotion_failures_and_skips_later(tmp_path, mo
 
 def test_settle_worktrees_before_turn_promotes_pending_without_grace(tmp_path, monkeypatch):
     monkeypatch.setattr("agent.runners.get_active_msg_ids", lambda: set())
-    monkeypatch.setattr("agent.worktree._CLEANUP_GRACE_SECONDS", 3600)
+    monkeypatch.setattr("agent.worktree._CLEANUP_GRACE_SECONDS", 0)
     stats_db.init_db()
     repo = init_repo(tmp_path / "repo")
     wt = ensure_worktree(repo, "admit", "901")
@@ -626,6 +626,23 @@ def test_settle_worktrees_before_turn_promotes_pending_without_grace(tmp_path, m
     assert (repo / "turn.txt").read_text() == "ready\n"
     assert not wt.exists()
     assert stats_db.get_worktrees("admit", "901") == []
+
+
+def test_settle_worktrees_before_turn_skips_recent_active_race(tmp_path, monkeypatch):
+    monkeypatch.setattr("agent.runners.get_active_msg_ids", lambda: set())
+    monkeypatch.setattr("agent.worktree._CLEANUP_GRACE_SECONDS", 3600)
+    stats_db.init_db()
+    repo = init_repo(tmp_path / "repo")
+    wt = ensure_worktree(repo, "admit", "901b")
+    stats_db.save_worktree("admit", "901b", str(repo), str(wt), branch_name("admit", "901b"), status="active")
+    (wt / "turn.txt").write_text("still starting\n")
+
+    blockers = asyncio.run(settle_worktrees_before_turn("admit", [repo]))
+
+    assert blockers == []
+    assert not (repo / "turn.txt").exists()
+    assert wt.exists()
+    assert stats_db.get_worktrees("admit", "901b")
 
 
 def test_settle_worktrees_before_turn_skips_active_prior_turn(tmp_path, monkeypatch):
@@ -646,6 +663,7 @@ def test_settle_worktrees_before_turn_skips_active_prior_turn(tmp_path, monkeypa
 
 def test_settle_worktrees_before_turn_surfaces_conflict(tmp_path, monkeypatch):
     monkeypatch.setattr("agent.runners.get_active_msg_ids", lambda: set())
+    monkeypatch.setattr("agent.worktree._CLEANUP_GRACE_SECONDS", 0)
     stats_db.init_db()
     repo = init_repo(tmp_path / "repo")
     wt = ensure_worktree(repo, "admit", "903")

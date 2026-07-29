@@ -943,6 +943,7 @@ async def _setup_worktrees(
                 str(repo_root), str(wt_path), branch_name(topic, agent),
                 await asyncio.to_thread(base_commit_for, repo_root, topic, agent),
                 str(integration_worktree_path(repo_root, topic, agent)),
+                "active",
             )
         except Exception:
             log.exception("worktree setup failed for repo=%s topic=%s agent=%s", repo_root, topic, agent)

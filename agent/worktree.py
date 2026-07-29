@@ -744,6 +744,13 @@ async def settle_worktrees_before_turn(topic: str, repo_roots: list[Path]) -> li
         except (ValueError, TypeError):
             pass
 
+        if status == "active" and _seconds_since(rec["last_used_at"]) < _CLEANUP_GRACE_SECONDS:
+            log.debug(
+                "worktree admission skip — recently touched unfinished turn: topic=%s key=%s status=%s",
+                topic, wt_key, status,
+            )
+            continue
+
         if status in {"conflict", "promotion_failed"}:
             blockers.append(blocker)
             continue
