@@ -8,6 +8,9 @@
    ██████╔╝╚██████╔╝╚██████╔╝██║██████╔╝
    ╚═════╝  ╚══▀▀═╝  ╚═════╝ ╚═╝╚═════╝
 ```
+
+![AgentSquid](https://raw.githubusercontent.com/agent-squid/agentsquid.ai/main/images/agentsquid-carousel.gif)
+
 ## Quick Start
 
 1. Install at least one supported CLI and check whether you can use it (/login):
