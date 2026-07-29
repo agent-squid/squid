@@ -518,6 +518,29 @@ def test_cleanup_worktrees_removes_once_grace_period_elapses(tmp_path, monkeypat
     assert stats_db.get_worktrees("sweeptopic", "802") == []
 
 
+def test_cleanup_worktrees_removes_synced_without_resyncing(tmp_path, monkeypatch):
+    monkeypatch.setattr("agent.runners.get_active_msg_ids", lambda: set())
+    monkeypatch.setattr("agent.worktree._CLEANUP_GRACE_SECONDS", 0)
+    stats_db.init_db()
+    repo = init_repo(tmp_path / "repo")
+    wt = ensure_worktree(repo, "sweeptopic", "802b")
+    stats_db.save_worktree("sweeptopic", "802b", str(repo), str(wt), branch_name("sweeptopic", "802b"))
+    (wt / "file.txt").write_text("turn output\n")
+    assert sync_after_turn(repo, "sweeptopic", "802b", msg_id=802) == []
+    stats_db.mark_worktree_synced("sweeptopic", "802b", str(repo))
+
+    # Simulate a user reverting the synced turn before deferred cleanup runs.
+    # Cleanup must not promote the stale worktree contents a second time.
+    (repo / "file.txt").write_text("base\n")
+
+    conflicts = asyncio.run(cleanup_worktrees("sweeptopic"))
+
+    assert conflicts == {}
+    assert (repo / "file.txt").read_text() == "base\n"
+    assert not wt.exists()
+    assert stats_db.get_worktrees("sweeptopic", "802b") == []
+
+
 def test_cleanup_worktrees_skips_worktree_with_active_msg_id(tmp_path, monkeypatch):
     """Even past the grace period, a worktree whose turn is still running must
     never be removed out from under it."""

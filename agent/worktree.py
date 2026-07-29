@@ -681,6 +681,11 @@ async def cleanup_worktrees(topic: str) -> dict[str, list[str]]:
         if _seconds_since(rec["last_used_at"]) < _CLEANUP_GRACE_SECONDS:
             continue
         try:
+            if rec.get("status") == "synced":
+                await asyncio.to_thread(remove_worktree, repo_root, topic, wt_key)
+                await asyncio.to_thread(delete_worktree, topic, wt_key, rec["repo_root"])
+                continue
+
             conflict_files = await asyncio.to_thread(
                 sync_after_turn, repo_root, topic, wt_key, None
             )
