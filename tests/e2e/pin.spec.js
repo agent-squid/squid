@@ -342,6 +342,48 @@ test('session send marks memory and pinned context as sending while request is p
   await expect(page.locator('.pin-item-status')).toContainText('sending');
 });
 
+test('status polling completion clears sending context badge', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/topics/squid/memory', r => r.fulfill({
+    json: {
+      topic: 'squid', exists: true, content: MEMORY_WITH_SKIP, revision: 'rev-1', path: '~/.squid/context/topics/squid/memory.md',
+      squid: { code_roots: [], code_roots_skipped: true, code_roots_missing: false },
+    },
+  }));
+  await page.route('**/topics/squid/session?agent=claude', r => r.fulfill({
+    json: { session_id: null, cwd: null },
+  }));
+  await page.route('**/chat/42/status', r => r.fulfill({
+    json: {
+      status: 'done',
+      content: 'recovered response',
+      agent: 'claude',
+      session_id: 'test-sess-abc',
+      session_turn_count: 1,
+      stats: { session_id: 'test-sess-abc', input_tokens: 10, output_tokens: 5 },
+    },
+  }));
+  await page.route('**/chat', r => r.fulfill({
+    status: 200, headers: SSE_HEADERS,
+    body: sse({ event: 'meta', data: { agent: 'claude', backend: 'claude', msg_id: 42, adhoc: false } }),
+  }));
+
+  await page.goto('/');
+  await seedPin(page, { id: 77, topic: 'other', agent: 'codex', content: 'cross-topic context' });
+
+  await page.fill('#input', '#squid@claude hello');
+  await page.focus('#input');
+  await page.keyboard.press('Enter');
+
+  await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toContainText('recovered response');
+  await expect(page.locator('#pin-count')).toHaveText('1');
+  await expect(page.locator('#pin-btn')).toHaveClass(/has-saved-pins/);
+  await expect(page.locator('#pin-btn')).not.toHaveClass(/has-context-pending/);
+  await page.click('#pin-btn');
+  await expect(page.locator('.memory-item-status')).toContainText('in session');
+  await expect(page.locator('.pin-item-status')).toContainText('in session');
+});
+
 test('cancelled session send restores pending memory and pins to will-inject', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
   await page.route('**/topics/squid/memory', r => r.fulfill({

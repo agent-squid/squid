@@ -3979,6 +3979,50 @@ async function sendMessage(text, opts = {}) {
     scrollToBottom();
   }
 
+  function markSessionContextDelivered(sessionId) {
+    const pendingAgentKeys = [
+      `${topic}@${_effectiveAgent || '_'}`,
+      `${topic}@${resolvedAgent || '_'}`,
+    ];
+    const memoryKeys = [
+      _memoryInjectedKey(topic, _effectiveAgent),
+      _memoryInjectedKey(topic, resolvedAgent),
+    ];
+    const changed = _contextIds.length || _includeTopicMemory || _attachedFiles.length;
+
+    if (_contextIds.length) {
+      if (!(adhoc && lookback === 0) && sessionId) {
+        const injected = getInjectedInto();
+        injected[sessionId] = [...new Set([...(injected[sessionId] || []), ..._contextIds])];
+        setInjectedInto(injected);
+      }
+      if (!adhoc) pendingAgentKeys.forEach(key => { delete _pendingSessionInjectedIds[key]; });
+    }
+    if (_includeTopicMemory && !adhoc) {
+      memoryKeys.forEach(key => {
+        if (key) {
+          _memoryInjectedInto[key] = _topicMemoryForSend.revision;
+          delete _pendingSessionMemoryRevisions[key];
+        }
+      });
+    }
+    if (_attachedFiles.length && !adhoc) {
+      if (sessionId) {
+        const inSession = getAttachedFilesInSession();
+        inSession[sessionId] = [...new Set([
+          ...(inSession[sessionId] || []),
+          ..._attachedFiles.map(f => f.path),
+        ])];
+        setAttachedFilesInSession(inSession);
+      }
+      pendingAgentKeys.forEach(key => { delete _pendingSessionAttachedFiles[key]; });
+    }
+    if (changed) {
+      updatePinCount();
+      if (pinPanel.classList.contains('open')) renderPinPanel();
+    }
+  }
+
   function startStatusFallback(id) {
     if (statusTimer || !id) return;
     const MAX_POLLS = 960;  // 32 min at 2s intervals — covers 30 min default timeout
@@ -4029,10 +4073,13 @@ async function sendMessage(text, opts = {}) {
           if (statsEl) { messages.appendChild(statsEl); addDeepDiveButton(bubble, topic, resolvedAgent, !!adhoc, statsEl, msgId, completedAt); }
           liveSessionTurnCount = parseInt(data.session_turn_count || '0', 10) || liveSessionTurnCount;
           _advisoryTurnCount = liveSessionTurnCount;
-          if (data.session_id && !adhoc) _sessionIds[`${topic}@${resolvedAgent || '_'}`] = data.session_id;
+          const completedSessionId = data.session_id || data.stats?.session_id || lastSessionId;
+          if (completedSessionId && !adhoc) _sessionIds[`${topic}@${resolvedAgent || '_'}`] = completedSessionId;
           liveCtxSpan.dataset.sessionTurnCount = String(liveSessionTurnCount);
+          if (completedSessionId) liveCtxSpan.dataset.sessionId = completedSessionId;
           setCtxLabel(liveCtxSpan, !!data.adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
-          if (!adhoc && !suppressChipTurnCount) _updateChipTurnCount(topic, resolvedAgent || null, data.session_id || null, liveSessionTurnCount);
+          if (!adhoc && !suppressChipTurnCount) _updateChipTurnCount(topic, resolvedAgent || null, completedSessionId || null, liveSessionTurnCount);
+          markSessionContextDelivered(completedSessionId);
           evaluateAdvisory();
           let storedTools = [];
           if (data.context) {
@@ -4369,44 +4416,7 @@ async function sendMessage(text, opts = {}) {
             setCtxLabel(liveCtxSpan, adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
             liveCtxSpan.dataset.pinnedIds = JSON.stringify(_contextIds);
             liveCtxSpan.dataset.mem = _includeTopicMemory ? 'true' : 'false';
-            // Record injected pinned IDs keyed by session_id for cross-device correctness
-            // Skip recording for lookback=0 adhoc turns — each is a fresh context, pins always re-inject
-            if (_contextIds.length) {
-              if (!(adhoc && lookback === 0) && lastSessionId) {
-                const _inj = getInjectedInto();
-                _inj[lastSessionId] = [...new Set([...(_inj[lastSessionId] || []), ..._contextIds])];
-                setInjectedInto(_inj);
-              }
-              if (!adhoc) {
-                delete _pendingSessionInjectedIds[`${topic}@${_effectiveAgent || '_'}`];
-                delete _pendingSessionInjectedIds[`${topic}@${resolvedAgent || '_'}`];
-              }
-              // Session sends are done with this context now — clear the "will inject" badge.
-              // Adhoc turns keep it: each adhoc turn re-injects, so it's not "already sent" in the same sense.
-              if (!adhoc) updatePinCount();
-              if (pinPanel.classList.contains('open')) renderPinPanel();
-            }
-            if (_includeTopicMemory && !adhoc) {
-              const memoryKey = _memoryInjectedKey(topic, _effectiveAgent);
-              _memoryInjectedInto[memoryKey] = _topicMemoryForSend.revision;
-              delete _pendingSessionMemoryRevisions[memoryKey];
-              updatePinCount();
-              if (pinPanel.classList.contains('open')) renderPinPanel();
-            }
-            if (_attachedFiles.length && !adhoc) {
-              if (lastSessionId) {
-                const inSession = getAttachedFilesInSession();
-                inSession[lastSessionId] = [...new Set([
-                  ...(inSession[lastSessionId] || []),
-                  ..._attachedFiles.map(f => f.path),
-                ])];
-                setAttachedFilesInSession(inSession);
-              }
-              delete _pendingSessionAttachedFiles[`${topic}@${_effectiveAgent || '_'}`];
-              delete _pendingSessionAttachedFiles[`${topic}@${resolvedAgent || '_'}`];
-              updatePinCount();
-              if (pinPanel.classList.contains('open')) renderPinPanel();
-            }
+            markSessionContextDelivered(lastSessionId);
             updateInContextMarkers();
             eventName = null;
 
