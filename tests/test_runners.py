@@ -1140,6 +1140,47 @@ def test_codex_routes_jsonl_commentary_to_status_and_dedupes_response_items():
     assert chunks[2]["_stats"]["session_id"] == "thread-jsonl"
 
 
+def test_codex_persists_jsonl_image_generation_results(tmp_path):
+    png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR42mP8z8BQDwAFgwJ/lxb8WQAAAABJRU5ErkJggg=="
+
+    async def fake_stream_lines(*args, **kwargs):
+        yield '{"type":"session_meta","payload":{"id":"thread-images"}}'
+        yield json.dumps({
+            "type": "event_msg",
+            "payload": {
+                "type": "image_generation_end",
+                "call_id": "ig_123",
+                "status": "generating",
+                "result": png_b64,
+            },
+        })
+        yield json.dumps({
+            "type": "response_item",
+            "payload": {
+                "type": "image_generation_call",
+                "id": "ig_123",
+                "status": "generating",
+                "result": png_b64,
+            },
+        })
+        yield '{"type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"Done."}}'
+        yield '{"type":"turn.completed","usage":{}}'
+
+    async def collect():
+        return [chunk async for chunk in run_codex("draw", cwd="/tmp")]
+
+    with patch("agent.runners.CODEX_PATH", "codex"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ), patch("agent.runners.Path.home", return_value=tmp_path):
+        chunks = asyncio.run(collect())
+
+    assert chunks[0].startswith("![Generated image 1](")
+    assert chunks[0].endswith("01-ig_123.png)\n\n")
+    assert chunks[1] == "Done."
+    image_path = tmp_path / ".squid" / "artifacts" / "codex-images" / "thread-images" / "01-ig_123.png"
+    assert image_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+
 def test_codex_routes_phase_less_progress_before_tool_to_status():
     async def fake_stream_lines(*args, **kwargs):
         yield '{"type":"thread.started","thread_id":"thread-legacy"}'

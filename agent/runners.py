@@ -6,8 +6,10 @@ as the last item when usage data is available (claude only).
 """
 
 import asyncio
+import base64
 import json
 import os
+from pathlib import Path
 import random
 import re
 import signal
@@ -610,6 +612,30 @@ def _codex_message_chunk(text: str, phase: Optional[str]) -> Union[str, dict]:
     return text
 
 
+def _codex_image_markdown(payload: dict, *, thread_id: Optional[str], index: int) -> Optional[str]:
+    """Persist a Codex image-generation result and return markdown to render it."""
+    if payload.get("type") not in ("image_generation_call", "image_generation_end"):
+        return None
+    result = payload.get("result")
+    if not isinstance(result, str) or not result:
+        return None
+    try:
+        data = base64.b64decode(result, validate=True)
+    except Exception:
+        return None
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return None
+
+    image_id = str(payload.get("id") or payload.get("call_id") or f"image-{index}")
+    safe_thread = re.sub(r"[^A-Za-z0-9_.-]+", "-", thread_id or "unknown").strip(".-") or "unknown"
+    safe_image = re.sub(r"[^A-Za-z0-9_.-]+", "-", image_id).strip(".-") or f"image-{index}"
+    out_dir = Path.home() / ".squid" / "artifacts" / "codex-images" / safe_thread
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{index:02d}-{safe_image}.png"
+    out_path.write_bytes(data)
+    return f"![Generated image {index}]({out_path})\n\n"
+
+
 async def run_claude(
     prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
     model: Optional[str] = None, topic: str = "", agent: str = "",
@@ -1117,6 +1143,8 @@ async def run_codex(
     thread_id: Optional[str] = None
     last_agent_message: Optional[tuple[str, str]] = None
     pending_unphased_message: Optional[str] = None
+    emitted_image_ids: set[str] = set()
+    image_count = 0
 
     def flush_pending_unphased_as_status() -> Optional[dict]:
         nonlocal pending_unphased_message
@@ -1143,6 +1171,18 @@ async def run_codex(
             thread_id = payload.get("id") or thread_id
         elif t in ("event_msg", "response_item"):
             payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            if payload.get("type") in ("image_generation_call", "image_generation_end"):
+                image_id = str(payload.get("id") or payload.get("call_id") or "")
+                if image_id and image_id not in emitted_image_ids:
+                    pending = flush_pending_unphased_as_status()
+                    if pending:
+                        yield pending
+                    image_count += 1
+                    markdown = _codex_image_markdown(payload, thread_id=thread_id, index=image_count)
+                    if markdown:
+                        emitted_image_ids.add(image_id)
+                        yield markdown
+                continue
             text, phase = _codex_agent_message(payload)
             if text:
                 key = (phase or "", text)
