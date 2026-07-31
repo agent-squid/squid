@@ -755,7 +755,6 @@ def test_backend_native_chat_commands_bypass_context_augmentation_for_any_agent(
              patch("agent.server.topic_memory_squid_config", return_value={
                  "code_roots": ["/Users/haebin/Work/squid"],
              }), \
-             patch("agent.server.code_roots_prompt_block") as code_roots_prompt_block, \
              patch("agent.server.read_topic_memory") as read_topic_memory, \
              patch("agent.server.get_messages_by_ids") as get_messages_by_ids, \
              patch("agent.server.insert_user_message", return_value=201), \
@@ -777,7 +776,6 @@ def test_backend_native_chat_commands_bypass_context_augmentation_for_any_agent(
         assert captured["context_history"] == []
         assert captured["code_roots"] == []
         get_context_history.assert_not_called()
-        code_roots_prompt_block.assert_not_called()
         read_topic_memory.assert_not_called()
         get_messages_by_ids.assert_not_called()
 

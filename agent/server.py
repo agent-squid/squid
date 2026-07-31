@@ -56,7 +56,7 @@ from .config import (
 from .harnesses import SUPPORTED_HARNESSES, _validate_harness_config, list_harnesses
 from .providers import Provider, _validate_provider, get_provider, public_providers, require_provider
 from .resolve import agent_ref_for_storage, resolve_agent, split_agent_ref
-from .runners import list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic, effective_protocol
+from .runners import list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic
 from .history import list_history, list_history_by_ids
 from .stats_db import get_usage_stats
 from .topic_queue import TopicDispatcher
@@ -64,9 +64,7 @@ from .context_sync import sync_now, maybe_sync
 from .topics import normalize_topic_slug
 from .memory import (
     _split_frontmatter,
-    code_roots_prompt_block,
     ensure_topic_memory_placeholder,
-    oneshot_protocol_prompt_block,
     read_topic_memory,
     topic_memory_path,
     topic_memory_squid_config,
@@ -97,7 +95,7 @@ from .stats_db import (
     get_recent_prompts,
     save_file_edit, get_file_edit_history, get_file_edit_by_id,
     get_bookmarks, add_bookmark, remove_bookmark,
-    save_worktree, get_worktrees, get_all_worktrees_for_topic,
+    get_worktrees, get_all_worktrees_for_topic,
     mark_worktree_status, delete_worktree, delete_all_worktrees,
     delete_all_topic_worktrees,
     allocate_id,
@@ -798,31 +796,9 @@ async def _prepare_chat_turn(
     asst_msg_id = insert_assistant_message(topic, resolved_agent, user_msg_id, adhoc=adhoc, flow_run_id=flow_run_id, flow_route=flow_route)
     attach_assistant_session(asst_msg_id, resume_session_id)
 
-    effective_code_roots = code_roots
-    effective_cwd = cwd
-    worktree_isolated = False
-    worktree_setup_elapsed_ms: Optional[float] = None
-    if WORKTREE_ISOLATION_ENABLED and resolved_agent and code_roots:
-        worktree_setup_started_at = time.perf_counter()
-        effective_code_roots, effective_cwd, worktree_isolated = await _setup_worktrees(
-            code_roots, cwd, topic, str(asst_msg_id)
-        )
-        worktree_setup_elapsed_ms = (time.perf_counter() - worktree_setup_started_at) * 1000
-
     effective_message = message
     prefix_blocks: list[str] = []
-    if not native_backend_command and effective_protocol(resolved_runtime, adhoc=adhoc) == "oneshot-cli":
-        prefix_blocks.append(oneshot_protocol_prompt_block())
-    if not native_backend_command and effective_code_roots:
-        code_roots_block = code_roots_prompt_block(
-            effective_code_roots,
-            isolated=worktree_isolated,
-            topic=topic,
-            backing_roots=code_roots if worktree_isolated else None,
-        )
-        if code_roots_block:
-            prefix_blocks.append(code_roots_block)
-    tracking_roots: list[str] = [] if native_backend_command else effective_code_roots
+    tracking_roots: list[str] = [] if native_backend_command else code_roots
 
     if memory_data_for_prompt:
         memory_content = memory_data_for_prompt["content"].strip()
@@ -865,7 +841,7 @@ async def _prepare_chat_turn(
         "agent": resolved_agent,
         "backend": backend,
         "model": model,
-        "cwd": effective_cwd,
+        "cwd": cwd,
         "context_history": context_history,
         "asst_msg_id": asst_msg_id,
         "response_timeout": response_timeout,
@@ -877,8 +853,8 @@ async def _prepare_chat_turn(
         "source_cwd": source_cwd,
         "harness": harness,
         "provider": provider,
-        "worktree_setup_elapsed_ms": worktree_setup_elapsed_ms,
-        "worktree_isolated": worktree_isolated,
+        "worktree_setup_elapsed_ms": None,
+        "worktree_isolated": False,
     }
 
 # ---------------------------------------------------------------------------
@@ -942,68 +918,6 @@ async def _drain_to_completion(
         log.info("drain complete msg_id=%s len=%d tools=%d sid=%s", msg_id, len(content), len(tool_events), session_id)
     except Exception:
         log.exception("drain save failed msg_id=%s", msg_id)
-
-# ---------------------------------------------------------------------------
-# Worktree helpers
-# ---------------------------------------------------------------------------
-
-async def _setup_worktrees(
-    code_roots: list[str],
-    cwd: Optional[str],
-    topic: str,
-    agent: str,
-) -> tuple[list[str], Optional[str], bool]:
-    """
-    Create worktrees for each unique git repo in code_roots and remap paths.
-    Returns (effective_code_roots, cwd, isolated). CWD is never remapped — it
-    stays as the source repo path for session continuity (see ADR-0003). The
-    model uses effective_code_roots (worktree-remapped absolute paths) for all
-    file access. Falls back to original paths on any error, with isolated=False.
-    """
-    from .worktree import (
-        repo_root_for,
-        ensure_worktree,
-        map_to_worktree,
-        branch_name,
-        base_commit_for,
-        integration_worktree_path,
-    )
-
-    worktree_map: dict[Path, Path] = {}
-    repo_roots: list[Path] = []
-    for root in code_roots:
-        try:
-            repo_root = await asyncio.to_thread(repo_root_for, root)
-            if not repo_root:
-                log.warning("worktree setup skipped non-git root=%s topic=%s agent=%s", root, topic, agent)
-                return code_roots, cwd, False
-            if repo_root not in repo_roots:
-                repo_roots.append(repo_root)
-        except Exception:
-            log.exception("worktree setup failed for root=%s topic=%s agent=%s", root, topic, agent)
-            return code_roots, cwd, False
-
-    for repo_root in repo_roots:
-        try:
-            wt_path = await asyncio.to_thread(ensure_worktree, repo_root, topic, agent)
-            worktree_map[repo_root] = wt_path
-            await asyncio.to_thread(
-                save_worktree, topic, agent,
-                str(repo_root), str(wt_path), branch_name(topic, agent),
-                await asyncio.to_thread(base_commit_for, repo_root, topic, agent),
-                str(integration_worktree_path(repo_root, topic, agent)),
-                "active",
-            )
-        except Exception:
-            log.exception("worktree setup failed for repo=%s topic=%s agent=%s", repo_root, topic, agent)
-            return code_roots, cwd, False
-
-    if not worktree_map or len(worktree_map) != len(repo_roots):
-        return code_roots, cwd, False
-
-    effective_roots = [map_to_worktree(r, worktree_map) or r for r in code_roots]
-    return effective_roots, cwd, True
-
 
 # ---------------------------------------------------------------------------
 # Streaming response generator

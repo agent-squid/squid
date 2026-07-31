@@ -62,6 +62,105 @@ class _StreamingWorktreePathRemapper:
         return remap_worktree_paths(pending, self._sources)
 
 
+def _worktree_blocker_tools(blockers: list[dict]) -> list[dict]:
+    tools: list[dict] = []
+    for blocker in blockers:
+        conflicts = blocker.get("conflicts") if isinstance(blocker.get("conflicts"), list) else []
+        files = (
+            [{"status": "U", "path": path} for path in conflicts if isinstance(path, str) and path]
+            or [{"status": "M", "path": "worktree changes"}]
+        )
+        tools.append({
+            "name": "GitDiff",
+            "repo": blocker.get("repo_root"),
+            "source": blocker.get("repo_root"),
+            "worktree_repo": blocker.get("worktree_path"),
+            "worktree_status": blocker.get("status") or "pending",
+            "worktree_conflicts": conflicts,
+            "integration_worktree_path": blocker.get("integration_worktree_path") or "",
+            "worktree_blocker": True,
+            "files": files,
+            "file_count": len(files),
+            "additions": 0,
+            "deletions": 0,
+            "diff": "",
+        })
+    return tools
+
+
+async def _repo_roots_for_code_roots(code_roots: list[str]) -> list[Path]:
+    from .worktree import repo_root_for
+
+    repo_roots: list[Path] = []
+    seen: set[str] = set()
+    for root in code_roots:
+        repo_root = await asyncio.to_thread(repo_root_for, root)
+        if not repo_root:
+            continue
+        key = str(repo_root.resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        repo_roots.append(repo_root)
+    return repo_roots
+
+
+async def _setup_worktrees(
+    code_roots: list[str],
+    cwd: Optional[str],
+    topic: str,
+    agent: str,
+) -> tuple[list[str], Optional[str], bool]:
+    """
+    Create worktrees for each unique git repo in code_roots and remap paths.
+    CWD is kept as the source repo path for session continuity.
+    """
+    from .stats_db import save_worktree
+    from .worktree import (
+        repo_root_for,
+        ensure_worktree,
+        map_to_worktree,
+        branch_name,
+        base_commit_for,
+        integration_worktree_path,
+    )
+
+    worktree_map: dict[Path, Path] = {}
+    repo_roots: list[Path] = []
+    for root in code_roots:
+        try:
+            repo_root = await asyncio.to_thread(repo_root_for, root)
+            if not repo_root:
+                log.warning("worktree setup skipped non-git root=%s topic=%s agent=%s", root, topic, agent)
+                return code_roots, cwd, False
+            if repo_root not in repo_roots:
+                repo_roots.append(repo_root)
+        except Exception:
+            log.exception("worktree setup failed for root=%s topic=%s agent=%s", root, topic, agent)
+            return code_roots, cwd, False
+
+    for repo_root in repo_roots:
+        try:
+            wt_path = await asyncio.to_thread(ensure_worktree, repo_root, topic, agent)
+            worktree_map[repo_root] = wt_path
+            await asyncio.to_thread(
+                save_worktree, topic, agent,
+                str(repo_root), str(wt_path), branch_name(topic, agent),
+                await asyncio.to_thread(base_commit_for, repo_root, topic, agent),
+                str(integration_worktree_path(repo_root, topic, agent)),
+                "active",
+            )
+        except Exception:
+            log.exception("worktree setup failed for repo=%s topic=%s agent=%s", repo_root, topic, agent)
+            return code_roots, cwd, False
+
+    if not worktree_map or len(worktree_map) != len(repo_roots):
+        return code_roots, cwd, False
+
+    effective_roots = [map_to_worktree(r, worktree_map) or r for r in code_roots]
+    return effective_roots, cwd, True
+
+
 @dataclass
 class QueueItem:
     seq: int
@@ -210,8 +309,9 @@ class TopicWorker:
         asyncio.create_task(_run(), name=f"squid-chain-{msg_id}")
 
     async def _process(self, item: QueueItem):
-        from .runners import CLIError, runner_for_agent
-        from .config import SQUID_HOME
+        from .runners import CLIError, effective_protocol, runner_for_agent
+        from .config import SQUID_HOME, WORKTREE_ISOLATION_ENABLED
+        from .memory import code_roots_prompt_block, oneshot_protocol_prompt_block
         from .resolve import resolve_agent, split_agent_ref
         from .stats_db import (
             get_completed_run_status_raw,
@@ -245,52 +345,11 @@ class TopicWorker:
             await item.out_q.put(None)
             return
 
-        proc_cwd = item.cwd or SQUID_HOME  # subprocess working dir (may be a worktree path)
-        display_cwd = item.source_cwd or proc_cwd  # source repo path for stats/UI
-        tracking_roots = item.code_roots or []
-        worktree_sources: dict[str, str] = {}
-        if item.msg_id:
-            try:
-                wt_records = await asyncio.to_thread(get_worktrees, item.topic, str(item.msg_id))
-                worktree_sources = {
-                    rec["worktree_path"]: rec["repo_root"]
-                    for rec in wt_records
-                }
-            except Exception:
-                log.debug("worktree lookup skipped topic=%s msg_id=%s", item.topic, item.msg_id, exc_info=True)
-        git_trackers = await asyncio.to_thread(
-            prepare_trackers,
-            tracking_roots,
-            topic=item.topic,
-            agent=item.agent,
-            adhoc=item.adhoc,
-            msg_id=item.msg_id,
-            worktree_sources=worktree_sources,
-        )
-        effective_cwd = proc_cwd
-        effective_prompt = item.prompt
-        kwargs: dict = dict(
-            history=item.context_history, model=item.model,
-            cwd=effective_cwd,
-            topic=item.topic, agent=item.agent or "",
-            response_timeout=item.timeout,
-            adhoc=item.adhoc, msg_id=item.msg_id,
-            prompt_preview=item.display_prompt,
-            backend_id=resolved.harness, backend_env=backend_env,
-            backend_settings=resolved.harness_settings(), backend_args=resolved.args,
-        )
-        if resolved.protocol.startswith("interactive-") and not item.adhoc:
-            kwargs["interactive_idle_timeout_s"] = resolved.interactive.idle_timeout_seconds
-        if item.resume_session_id:
-            kwargs["resume_session_id"] = item.resume_session_id
-
         run_seq = 0
         raw = ""
         status_raw = ""
         tool_events: list[dict] = []
         session_id: Optional[str] = None
-        response_remapper = _StreamingWorktreePathRemapper(worktree_sources)
-        worktree_turn_trees: dict[tuple[str, str], str] = {}
 
         async def _emit_tool(tool: dict):
             nonlocal run_seq
@@ -307,6 +366,94 @@ class TopicWorker:
             insert_run_event(item.msg_id, run_seq, "text", text)
             await item.out_q.put(text)
             run_seq += 1
+
+        proc_cwd = item.cwd or SQUID_HOME  # subprocess working dir (may be a worktree path)
+        display_cwd = item.source_cwd or proc_cwd  # source repo path for stats/UI
+        tracking_roots = item.code_roots or []
+        if WORKTREE_ISOLATION_ENABLED and item.agent and item.msg_id and item.code_roots and not item.worktree_isolated:
+            repo_roots = await _repo_roots_for_code_roots(item.code_roots)
+            if repo_roots:
+                from .worktree import settle_worktrees_before_turn
+
+                blockers = await settle_worktrees_before_turn(item.topic, repo_roots)
+                if blockers:
+                    for tool in _worktree_blocker_tools(blockers):
+                        await _emit_tool(tool)
+                    blocker_desc = "; ".join(
+                        f"{b.get('worktree_path') or b.get('repo_root')} ({b.get('status')})" for b in blockers
+                    )
+                    err_text = f"Blocked: worktree sync requires attention before starting another turn — {blocker_desc}"
+                    update_assistant_message(
+                        item.msg_id, err_text, None, "error",
+                        context=json.dumps(tool_events) if tool_events else None,
+                        status_raw=status_raw,
+                        only_if_pending=True,
+                    )
+                    await item.out_q.put({"_error": err_text})
+                    await item.out_q.put(None)
+                    return
+
+            setup_started_at = time.perf_counter()
+            tracking_roots, proc_cwd, item.worktree_isolated = await _setup_worktrees(
+                item.code_roots, item.cwd, item.topic, str(item.msg_id)
+            )
+            item.worktree_setup_elapsed_ms = (time.perf_counter() - setup_started_at) * 1000
+            display_cwd = item.source_cwd or (item.cwd or SQUID_HOME)
+
+        worktree_sources: dict[str, str] = {}
+        if item.msg_id:
+            try:
+                wt_records = await asyncio.to_thread(get_worktrees, item.topic, str(item.msg_id))
+                worktree_sources = {
+                    rec["worktree_path"]: rec["repo_root"]
+                    for rec in wt_records
+                }
+            except Exception:
+                log.debug("worktree lookup skipped topic=%s msg_id=%s", item.topic, item.msg_id, exc_info=True)
+        prefix_blocks: list[str] = []
+        if effective_protocol(resolved, adhoc=item.adhoc) == "oneshot-cli":
+            prefix_blocks.append(oneshot_protocol_prompt_block())
+        if tracking_roots:
+            code_roots_block = code_roots_prompt_block(
+                tracking_roots,
+                isolated=item.worktree_isolated,
+                topic=item.topic,
+                backing_roots=item.code_roots if item.worktree_isolated else None,
+            )
+            if code_roots_block:
+                prefix_blocks.append(code_roots_block)
+
+        effective_prompt = item.prompt
+        if prefix_blocks:
+            effective_prompt = "\n\n".join(prefix_blocks + [item.prompt])
+
+        git_trackers = await asyncio.to_thread(
+            prepare_trackers,
+            tracking_roots,
+            topic=item.topic,
+            agent=item.agent,
+            adhoc=item.adhoc,
+            msg_id=item.msg_id,
+            worktree_sources=worktree_sources,
+        )
+        effective_cwd = proc_cwd
+        kwargs: dict = dict(
+            history=item.context_history, model=item.model,
+            cwd=effective_cwd,
+            topic=item.topic, agent=item.agent or "",
+            response_timeout=item.timeout,
+            adhoc=item.adhoc, msg_id=item.msg_id,
+            prompt_preview=item.display_prompt,
+            backend_id=resolved.harness, backend_env=backend_env,
+            backend_settings=resolved.harness_settings(), backend_args=resolved.args,
+        )
+        if resolved.protocol.startswith("interactive-") and not item.adhoc:
+            kwargs["interactive_idle_timeout_s"] = resolved.interactive.idle_timeout_seconds
+        if item.resume_session_id:
+            kwargs["resume_session_id"] = item.resume_session_id
+
+        response_remapper = _StreamingWorktreePathRemapper(worktree_sources)
+        worktree_turn_trees: dict[tuple[str, str], str] = {}
 
         async def _emit_git_diff():
             if not git_trackers:

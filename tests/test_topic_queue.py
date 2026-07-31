@@ -1,8 +1,12 @@
 import asyncio
 import logging
+import re
 import subprocess
+from pathlib import Path
 from unittest.mock import patch
 
+from agent import stats_db
+from agent import worktree as worktree_mod
 from agent.memory import code_roots_prompt_block
 from agent.topic_queue import QueueItem, TopicDispatcher, TopicWorker, remap_worktree_paths
 
@@ -100,9 +104,76 @@ def test_position_of_reflects_live_queue_after_earlier_item_cancelled():
         after = worker.position_of(2)
         return before, after
 
-    (pos_first, pos_second), pos_second_after_cancel = asyncio.run(run())
+    with patch("agent.stats_db.mark_assistant_cancelled"):
+        (pos_first, pos_second), pos_second_after_cancel = asyncio.run(run())
     assert (pos_first, pos_second) == (1, 2)
     assert pos_second_after_cancel == 1
+
+
+def test_worker_defers_worktree_setup_until_queued_item_runs(tmp_path, monkeypatch):
+    stats_db.init_db()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    monkeypatch.setattr(worktree_mod, "_WORKTREES_HOME", tmp_path / ".squid" / "worktrees")
+    monkeypatch.setattr(worktree_mod.config, "WORKTREE_TRACK_DIRTY_CHANGES", True)
+
+    seen = {}
+
+    def prompt_worktree_root(prompt: str) -> str:
+        match = re.search(r"<squid_code_roots>\n(.+?)  \(repo:", prompt)
+        assert match, prompt
+        return match.group(1)
+
+    async def fake_runner(prompt, **kwargs):
+        wt_root = prompt_worktree_root(prompt)
+        if "first turn" in prompt:
+            (Path(wt_root) / "app.txt").write_text("first\n")
+        elif "second turn" in prompt:
+            seen["second_base"] = (Path(wt_root) / "app.txt").read_text()
+            (Path(wt_root) / "app.txt").write_text("second\n")
+        yield "done"
+
+    async def run():
+        topic = "queued-defer"
+        worker = TopicWorker(topic)
+        first = QueueItem(
+            seq=0, topic=topic, agent="codex", prompt="first turn",
+            context_history=[], backend="codex", model=None,
+            cwd=str(repo), code_roots=[str(repo)], msg_id=901,
+        )
+        second = QueueItem(
+            seq=0, topic=topic, agent="codex", prompt="second turn",
+            context_history=[], backend="codex", model=None,
+            cwd=str(repo), code_roots=[str(repo)], msg_id=902,
+        )
+        await worker.enqueue(first)
+        await worker.enqueue(second)
+        await worker.q.put(None)
+        with patch("agent.config.WORKTREE_ISOLATION_ENABLED", True), \
+             patch("agent.runners.run_codex", fake_runner), \
+             patch("agent.runners.get_active_msg_ids", return_value=set()), \
+             patch("agent.stats_db.insert_run_event"), \
+             patch("agent.stats_db.update_assistant_message"), \
+             patch("agent.stats_db.set_topic_session"), \
+             patch("agent.stats_db.save_stats"), \
+             patch.object(worker, "_trigger_chain_continuation", lambda msg_id: None):
+            await asyncio.wait_for(worker._run(), timeout=5)
+
+        chunks = []
+        for item in (first, second):
+            while True:
+                chunk = await item.out_q.get()
+                chunks.append(chunk)
+                if chunk is None:
+                    break
+        return chunks
+
+    chunks = asyncio.run(run())
+    sync_tools = [chunk["_tool"] for chunk in chunks if isinstance(chunk, dict) and chunk.get("_tool", {}).get("name") == "WorktreeSync"]
+    assert [tool["status"] for tool in sync_tools] == ["synced", "synced"]
+    assert seen["second_base"] == "first\n"
+    assert (repo / "app.txt").read_text() == "second\n"
 
 
 def test_worker_persists_stats_with_item_lookback():
@@ -336,7 +407,8 @@ def test_worker_emits_git_diff_tool_event(tmp_path):
             adhoc=True,
             msg_id=456,
         )
-        with patch("agent.runners.run_codex", fake_runner), \
+        with patch("agent.config.WORKTREE_ISOLATION_ENABLED", False), \
+             patch("agent.runners.run_codex", fake_runner), \
              patch("agent.stats_db.get_worktrees", return_value=[]), \
              patch("agent.stats_db.insert_run_event"), \
              patch("agent.stats_db.update_assistant_message"), \
@@ -454,7 +526,8 @@ def test_worker_emits_no_change_git_diff_when_tracked_tree_is_clean(tmp_path):
             adhoc=True,
             msg_id=457,
         )
-        with patch("agent.runners.run_codex", fake_runner), \
+        with patch("agent.config.WORKTREE_ISOLATION_ENABLED", False), \
+             patch("agent.runners.run_codex", fake_runner), \
              patch("agent.stats_db.get_worktrees", return_value=[]), \
              patch("agent.stats_db.insert_run_event"), \
              patch("agent.stats_db.update_assistant_message"), \
@@ -562,7 +635,8 @@ def test_worker_keeps_agent_cwd_when_code_roots_are_tracked(tmp_path):
             adhoc=True,
             msg_id=790,
         )
-        with patch("agent.runners.run_codex", fake_runner), \
+        with patch("agent.config.WORKTREE_ISOLATION_ENABLED", False), \
+             patch("agent.runners.run_codex", fake_runner), \
              patch("agent.stats_db.insert_run_event"), \
              patch("agent.stats_db.update_assistant_message"), \
              patch("agent.stats_db.set_topic_session"), \
@@ -597,7 +671,8 @@ def test_worker_keeps_real_code_roots_in_prompt(tmp_path):
             adhoc=True,
             msg_id=791,
         )
-        with patch("agent.runners.run_codex", fake_runner), \
+        with patch("agent.config.WORKTREE_ISOLATION_ENABLED", False), \
+             patch("agent.runners.run_codex", fake_runner), \
              patch("agent.stats_db.insert_run_event"), \
              patch("agent.stats_db.update_assistant_message"), \
              patch("agent.stats_db.set_topic_session"), \
@@ -634,7 +709,8 @@ def test_worker_passes_display_prompt_as_runner_preview(tmp_path):
             adhoc=True,
             msg_id=793,
         )
-        with patch("agent.runners.run_codex", fake_runner), \
+        with patch("agent.config.WORKTREE_ISOLATION_ENABLED", False), \
+             patch("agent.runners.run_codex", fake_runner), \
              patch("agent.stats_db.insert_run_event"), \
              patch("agent.stats_db.update_assistant_message"), \
              patch("agent.stats_db.set_topic_session"), \
@@ -667,7 +743,8 @@ def test_worker_persists_agent_cwd_for_sessions_with_code_roots(tmp_path):
             adhoc=False,
             msg_id=792,
         )
-        with patch("agent.runners.run_codex", fake_runner), \
+        with patch("agent.config.WORKTREE_ISOLATION_ENABLED", False), \
+             patch("agent.runners.run_codex", fake_runner), \
              patch("agent.stats_db.insert_run_event"), \
              patch("agent.stats_db.update_assistant_message"), \
              patch("agent.stats_db.set_topic_session") as set_topic_session, \
