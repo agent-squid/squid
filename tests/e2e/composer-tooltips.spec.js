@@ -22,7 +22,7 @@ test('composer tool buttons have correct initial tooltips with slash-command hin
   await page.waitForSelector('#chip-bookmark-btn');
 
   await expect(page.locator('#chip-bookmark-btn')).toHaveAttribute('title', 'bookmarks only: /bm');
-  await expect(page.locator('#chip-prompts-btn')).toHaveAttribute('title', 'prompts only: /prompts');
+  await expect(page.locator('#chip-prompts-btn')).toHaveCount(0);
   await expect(page.locator('#chip-filter-btn')).toHaveAttribute('title', 'filter topic: /f #default');
   await expect(page.locator('#chip-search-btn')).toHaveAttribute('title', 'search: /s #default kw1 kw2…');
   await expect(page.locator('#chip-clear-btn')).toHaveAttribute('title', 'clear context: /clear');
@@ -40,20 +40,6 @@ test('bookmark button tooltip toggles between on/off states', async ({ page }) =
 
   await page.locator('#chip-bookmark-btn').click();
   await expect(page.locator('#chip-bookmark-btn')).toHaveAttribute('title', 'bookmarks only: /bm');
-});
-
-test('prompts button tooltip toggles between on/off states', async ({ page }) => {
-  await mockBackend(page);
-  await page.goto('/');
-  await page.waitForSelector('#chip-prompts-btn');
-
-  await expect(page.locator('#chip-prompts-btn')).toHaveAttribute('title', 'prompts only: /prompts');
-
-  await page.locator('#chip-prompts-btn').click();
-  await expect(page.locator('#chip-prompts-btn')).toHaveAttribute('title', 'show full thread: /prompts');
-
-  await page.locator('#chip-prompts-btn').click();
-  await expect(page.locator('#chip-prompts-btn')).toHaveAttribute('title', 'prompts only: /prompts');
 });
 
 test('dynamic filter tooltip updates with scope after topic chip set', async ({ page }) => {

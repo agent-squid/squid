@@ -346,7 +346,8 @@ test('user prompts only keeps the active history filter', async ({ page }) => {
   await page.goto('/');
   await page.fill('#input', '/f #squid@claude!');
   await page.keyboard.press('Enter');
-  await page.locator('#chip-prompts-btn').click();
+  await page.fill('#input', '/prompts');
+  await page.keyboard.press('Enter');
 
   const last = urls[urls.length - 1];
   expect(last).toMatch(/topic=squid/);
@@ -354,7 +355,7 @@ test('user prompts only keeps the active history filter', async ({ page }) => {
   expect(last).toMatch(/adhoc=true/);
 });
 
-test('/prompts toggles user prompts only like the composer prompt icon', async ({ page }) => {
+test('/prompts toggles user prompts only', async ({ page }) => {
   await mockBackend(page);
 
   const urls = [];
@@ -369,7 +370,6 @@ test('/prompts toggles user prompts only like the composer prompt icon', async (
   await page.fill('#input', '/prompts');
   await page.keyboard.press('Enter');
 
-  await expect(page.locator('#chip-prompts-btn')).toHaveAttribute('aria-pressed', 'true');
   const last = urls[urls.length - 1];
   expect(last).toMatch(/topic=squid/);
   expect(last).toMatch(/agent=claude/);

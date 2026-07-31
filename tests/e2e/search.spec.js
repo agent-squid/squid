@@ -240,7 +240,8 @@ test('user prompt search includes the active filter scope', async ({ page }) => 
 
   await page.fill('#input', '/f #squid@claude!');
   await page.keyboard.press('Enter');
-  await page.locator('#chip-prompts-btn').click();
+  await page.fill('#input', '/prompts');
+  await page.keyboard.press('Enter');
   await page.fill('#input', '/s needle');
   await page.keyboard.press('Enter');
 
