@@ -2063,10 +2063,12 @@ body {
   white-space: nowrap;
 }
 #restart-modal-cancel,
+#restart-modal-secondary,
 #restart-modal-confirm {
   border-radius: 6px;
   padding: 0.28rem 0.75rem;
 }
+#restart-modal-secondary[hidden] { display: none; }
 #restart-modal-confirm {
   background: var(--accent);
   border-color: var(--accent);

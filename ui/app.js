@@ -151,6 +151,7 @@ const UPDATE_CACHE_KEY = 'squid_update_check_cache';
 const UPDATE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const UPDATE_DISMISS_KEY = 'squid_update_dismissed_version';
 let _updateInfo = null; // { current, latest } once a newer version is confirmed available
+let _updatesInstallOnRestart = 'ask';
 
 function _parseVersion(v) {
   const match = String(v).trim().match(/^(\d+(?:\.\d+)*)(?:(a|b|rc)(\d+))?(?:\.post(\d+))?/i);
@@ -221,6 +222,12 @@ function renderSettingsVersion(version) {
   const el = document.getElementById('settings-version-info');
   if (!el) return;
   el.textContent = version ? `AgentSquid v${version}` : '';
+}
+
+function updateSettingsFromHealth(health) {
+  renderSettingsVersion(health?.version);
+  const mode = health?.updates?.install_on_restart;
+  _updatesInstallOnRestart = ['ask', 'always', 'never'].includes(mode) ? mode : 'ask';
 }
 
 async function checkForSquidUpdate(currentVersion) {
@@ -2865,20 +2872,37 @@ async function runningPromptsForRestart() {
 // polls /health and hard-refreshes this tab once it's back.
 async function restartServer() {
   const runningPrompts = await runningPromptsForRestart();
-  const ok = !runningPrompts.length || await confirmRestartWithRunningPrompts(runningPrompts);
+  let upgrade = _updateInfo && _updatesInstallOnRestart === 'always';
+  let ok = true;
+  if (runningPrompts.length) {
+    ok = await confirmRestartWithRunningPrompts(runningPrompts);
+  }
+  if (ok && _updateInfo && _updatesInstallOnRestart === 'ask') {
+    const choice = await confirmRestartWithRunningPrompts([], {
+      header: 'Update AgentSquid',
+      title: `AgentSquid v${_updateInfo.latest} is available`,
+      copy: `Upgrade from v${_updateInfo.current} before restarting?`,
+      confirmLabel: 'Upgrade and Restart',
+      confirmResult: 'upgrade',
+      secondaryLabel: 'Restart Without Upgrading',
+      secondaryResult: 'restart',
+    });
+    ok = !!choice;
+    upgrade = choice === 'upgrade';
+  }
   if (!ok) {
     showCmdFeedback('restart cancelled');
     return;
   }
-  const feedbackEl = showCmdFeedback('restart…');
+  const feedbackEl = showCmdFeedback(upgrade ? 'upgrading…' : 'restart…');
   try {
     const res = await fetch('/cmd', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: 'restart', topic: 'default' }),
+      body: JSON.stringify({ command: 'restart', topic: 'default', upgrade }),
     });
     const data = await res.json();
-    if (!data.ok) { feedbackEl.textContent = 'restart failed'; return; }
+    if (!data.ok) { feedbackEl.textContent = upgrade ? `upgrade failed — ${data.error || 'restart cancelled'}` : 'restart failed'; return; }
     feedbackEl.textContent = 'restarting…';
     // Poll /health until server is back up, then hard-refresh this tab.
     const poll = async () => {
@@ -2899,15 +2923,27 @@ function confirmRestartWithRunningPrompts(rows, {
   title = 'Running prompts will be stopped',
   copy = 'Restarting now will stop these active prompts before the server restarts.',
   confirmLabel = 'Restart',
+  confirmResult = true,
+  secondaryLabel = null,
+  secondaryResult = false,
 } = {}) {
   return new Promise(resolve => {
     const modal = document.getElementById('restart-modal');
     const list = document.getElementById('restart-modal-processes');
     const confirmBtn = document.getElementById('restart-modal-confirm');
+    const secondaryBtn = document.getElementById('restart-modal-secondary');
     document.querySelector('#restart-modal .settings-label').textContent = header;
     document.getElementById('restart-modal-title').textContent = title;
     document.getElementById('restart-modal-copy').textContent = copy;
     confirmBtn.textContent = confirmLabel;
+    if (secondaryLabel) {
+      secondaryBtn.textContent = secondaryLabel;
+      secondaryBtn.hidden = false;
+      secondaryBtn.disabled = false;
+    } else {
+      secondaryBtn.hidden = true;
+      secondaryBtn.textContent = '';
+    }
     const close = (ok) => {
       modal.classList.remove('open');
       resolve(ok);
@@ -2926,6 +2962,8 @@ function confirmRestartWithRunningPrompts(rows, {
     modal.classList.add('open');
     confirmBtn.focus();
     modal._resolveRestart = close;
+    modal._confirmRestartResult = confirmResult;
+    modal._secondaryRestartResult = secondaryResult;
   });
 }
 
@@ -2934,6 +2972,8 @@ function closeRestartModal(ok = false) {
   if (!modal) return;
   const resolve = modal._resolveRestart;
   modal._resolveRestart = null;
+  modal._confirmRestartResult = true;
+  modal._secondaryRestartResult = false;
   modal.classList.remove('open');
   if (resolve) resolve(ok);
 }
@@ -10199,7 +10239,7 @@ function renderProvidersCatalog() {
 }
 
 function renderRuntimeCatalogs(health) {
-  renderSettingsVersion(health?.version);
+  updateSettingsFromHealth(health);
   refreshRuntimeMetadata(health);
   renderHarnessesCatalog(health);
   renderProvidersCatalog();
@@ -11577,7 +11617,7 @@ async function showBootBanner() {
     _providerMetadata = data.providers || {};
     _harnessMetadata = {};
     for (const h of (data.harnesses || [])) _harnessMetadata[h.id] = h;
-    renderSettingsVersion(data.version);
+    updateSettingsFromHealth(data);
     checkForSquidUpdate(data.version);
     await updateActiveQuotaGauge();
     if (activeQuotaBackend) fetchQuotaForBackend(activeQuotaBackend);
@@ -12851,7 +12891,12 @@ function initPin() {
   });
   document.getElementById('restart-modal-close').addEventListener('click', () => closeRestartModal(false));
   document.getElementById('restart-modal-cancel').addEventListener('click', () => closeRestartModal(false));
-  document.getElementById('restart-modal-confirm').addEventListener('click', () => closeRestartModal(true));
+  document.getElementById('restart-modal-secondary').addEventListener('click', () => {
+    closeRestartModal(document.getElementById('restart-modal')._secondaryRestartResult);
+  });
+  document.getElementById('restart-modal-confirm').addEventListener('click', () => {
+    closeRestartModal(document.getElementById('restart-modal')._confirmRestartResult);
+  });
   document.getElementById('restart-modal').addEventListener('mousedown', e => {
     if (e.target === document.getElementById('restart-modal')) closeRestartModal(false);
   });

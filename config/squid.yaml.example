@@ -19,6 +19,12 @@ agent:
   first_byte_timeout: 600
   response_timeout: 3600
 
+updates:
+  # What to do when a newer AgentSquid release is available and the user restarts.
+  # ask: prompt in the restart modal; always: run `pipx upgrade agentsquid`;
+  # never: restart without attempting an upgrade.
+  install_on_restart: ask
+
 worktree:
   # Per-turn code-root isolation. Set enabled: false to use direct writes.
   enabled: true

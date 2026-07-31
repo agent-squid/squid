@@ -950,10 +950,38 @@ def test_health_returns_harnesses_and_providers_without_backend_aliases():
     body = response.json()
     assert "backends" not in body
     assert body["version"] == server.SQUID_VERSION
+    assert body["updates"]["install_on_restart"] == server.UPDATES_INSTALL_ON_RESTART
     claudecode = next(h for h in body["harnesses"] if h["id"] == "claudecode")
     assert claudecode["default_provider"] == "anthropic"
     assert body["providers"]["anthropic"]["gauge"]["type"] == "claude"
     assert body["providers"]["anthropic"]["color"].startswith("#")
+
+
+def test_pipx_upgrade_rejects_source_checkout_install():
+    with patch("agent.server.SQUID_VERSION", "0+local"), \
+         patch("agent.server.subprocess.run") as run:
+        ok, message = server._pipx_upgrade_agentsquid()
+
+    assert ok is False
+    assert "installed agentsquid packages" in message
+    run.assert_not_called()
+
+
+def test_pipx_upgrade_runs_agentsquid_upgrade():
+    completed = subprocess.CompletedProcess(["pipx", "upgrade", "agentsquid"], 0, "upgraded\n", "")
+    with patch("agent.server.SQUID_VERSION", "0.1.0"), \
+         patch("agent.server.shutil.which", return_value="/usr/local/bin/pipx"), \
+         patch("agent.server.subprocess.run", return_value=completed) as run:
+        ok, message = server._pipx_upgrade_agentsquid()
+
+    assert ok is True
+    assert "upgraded" in message
+    run.assert_called_once_with(
+        ["/usr/local/bin/pipx", "upgrade", "agentsquid"],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
 
 
 def test_public_agent_config_includes_provider_color():

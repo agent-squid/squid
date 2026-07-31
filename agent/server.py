@@ -28,6 +28,7 @@ import logging
 import logging.handlers
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -47,6 +48,7 @@ from pydantic import BaseModel, Field
 from .config import (
     CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH,
     OPENCODE_PATH, SQUID_HOME, RESPONSE_TIMEOUT, WORKTREE_ISOLATION_ENABLED,
+    UPDATES_INSTALL_ON_RESTART,
     _USER_CONFIG, _cfg,
     config_revision, config_text, write_config_text,
 )
@@ -453,6 +455,30 @@ class CmdRequest(BaseModel):
     adhoc: Optional[bool] = None
     pos: Optional[int] = None
     msg_id: Optional[int] = None
+    upgrade: Optional[bool] = None
+
+
+def _pipx_upgrade_agentsquid() -> tuple[bool, str]:
+    if SQUID_VERSION == "0+local":
+        return False, "upgrade is only available for installed agentsquid packages"
+    pipx = shutil.which("pipx")
+    if not pipx:
+        return False, "pipx is not installed or not on PATH"
+    try:
+        result = subprocess.run(
+            [pipx, "upgrade", "agentsquid"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "pipx upgrade agentsquid timed out"
+    except OSError as exc:
+        return False, f"pipx upgrade agentsquid failed to start: {exc}"
+    output = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+    if result.returncode != 0:
+        return False, output or f"pipx upgrade agentsquid exited with status {result.returncode}"
+    return True, output or "pipx upgrade agentsquid completed"
 
 
 def _validate_config_content(content: str) -> dict:
@@ -1199,6 +1225,13 @@ async def run_cmd(req: CmdRequest):
     if req.command == "list":
         return JSONResponse({"ok": True, "topics": get_topics_summary()})
     if req.command == "restart":
+        if req.upgrade:
+            ok, output = await asyncio.to_thread(_pipx_upgrade_agentsquid)
+            if not ok:
+                log.warning("upgrade before restart failed: %s", output)
+                return JSONResponse({"ok": False, "error": output}, status_code=500)
+            log.info("upgrade before restart completed: %s", output)
+
         async def _restart():
             await asyncio.sleep(0.4)
             kill_all_procs()
@@ -1299,6 +1332,7 @@ async def health():
         "boot_time": BOOT_TIME,
         "version": SQUID_VERSION,
         "squid_home": SQUID_HOME,
+        "updates": {"install_on_restart": UPDATES_INSTALL_ON_RESTART},
         "harnesses": list_harnesses(),
         "providers": providers,
         **get_usage_stats(),

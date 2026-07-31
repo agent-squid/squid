@@ -59,11 +59,17 @@ script checkout.
   move ADR-0030 flagged as a dependency is no longer needed: `pipx` keeps
   one venv location per app, upgraded in place, so there's no
   sibling-directory-per-version layout and no cross-directory old-process
-  lookup to perform. The user still has to restart the running server
-  process themselves for an upgrade to take effect — `pipx upgrade` only
-  replaces the installed files, it doesn't touch an already-running
-  process — but that's a single restart of the same command, not a
-  directory hunt.
+  lookup to perform. `pipx upgrade` only replaces the installed files; a
+  running server still needs to restart before the new code is active.
+- **Upgrade-on-restart policy** is controlled by
+  `updates.install_on_restart` in `~/.squid/squid.yaml`: `ask` (default),
+  `always`, or `never`. When the UI has detected a newer PyPI version and
+  the user restarts, `ask` reuses the existing themed restart modal to offer
+  "Upgrade and Restart", "Restart Without Upgrading", or cancel. `always`
+  runs `pipx upgrade agentsquid` before the restart without the extra
+  update-choice prompt; `never` preserves restart-only behavior. Upgrade
+  failures abort the restart and surface the pipx error, so the app does not
+  silently restart while still on the old version.
 - **In-app notice follows the install channel.** The installed version still
   comes from `/health`, which reports `importlib.metadata.version("agentsquid")`.
   The latest available version is read from PyPI's project JSON endpoint
@@ -210,8 +216,7 @@ decision itself, but found because of it.
   installed/`pipx` users, GitHub for source browsing) — mitigated by making
   GitHub version tags the trigger for PyPI publication, with the tag name
   matching `pyproject.toml`'s version.
-- Bad: `pipx upgrade` only replaces installed files; it does not restart a
-  currently-running `agentsquid` process. The Settings notice's copy-paste
-  command reflects only the upgrade step, not the restart — acceptable for
-  now under the same notify-only, user-confirms-the-restart reasoning
-  ADR-0030 already established for killing in-flight CLI sessions.
+- Bad: restart-time upgrades add a network/PyPI dependency to a path that
+  users may expect to be local and quick. Keeping `ask` as the default makes
+  that extra work explicit, while `always` remains available for users who
+  prefer automatic upgrades on restart.

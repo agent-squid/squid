@@ -2,8 +2,10 @@ const { test, expect } = require('@playwright/test');
 
 const PYPI_PROJECT_URL = 'https://pypi.org/pypi/agentsquid/json';
 
-async function mockApp(page, { version = '0.1.0' } = {}) {
-  await page.route('**/health', r => r.fulfill({ json: { status: 'ok', version, harnesses: [], providers: {} } }));
+async function mockApp(page, { version = '0.1.0', installOnRestart = 'ask' } = {}) {
+  await page.route('**/health', r => r.fulfill({
+    json: { status: 'ok', version, updates: { install_on_restart: installOnRestart }, harnesses: [], providers: {} },
+  }));
   await page.route('**/config/agents', r => r.fulfill({ json: [] }));
   await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
   await page.route('**/queue', r => r.fulfill({ json: [] }));
@@ -107,4 +109,60 @@ test('the matching final release outranks an installed release candidate', async
 
   await page.goto('/');
   await expect(page.locator('#hamburger-btn')).toHaveClass(/has-update/);
+});
+
+test('restart asks whether to upgrade when an update is available', async ({ page }) => {
+  const cmdBodies = [];
+  await mockApp(page, { version: '0.1.0', installOnRestart: 'ask' });
+  await mockLatestVersion(page, '0.2.0');
+  await page.route('**/cmd', async route => {
+    cmdBodies.push(route.request().postDataJSON());
+    await route.fulfill({ json: { ok: true } });
+  });
+
+  await page.goto('/');
+  await expect(page.locator('#hamburger-btn')).toHaveClass(/has-update/);
+  await page.locator('#hamburger-btn').click();
+  await page.locator('#hmenu-restart').click();
+  await expect(page.locator('#restart-modal-title')).toHaveText('AgentSquid v0.2.0 is available');
+  await page.locator('#restart-modal-confirm').click();
+
+  expect(cmdBodies[0]).toMatchObject({ command: 'restart', upgrade: true });
+});
+
+test('restart can skip an available update from the prompt', async ({ page }) => {
+  const cmdBodies = [];
+  await mockApp(page, { version: '0.1.0', installOnRestart: 'ask' });
+  await mockLatestVersion(page, '0.2.0');
+  await page.route('**/cmd', async route => {
+    cmdBodies.push(route.request().postDataJSON());
+    await route.fulfill({ json: { ok: true } });
+  });
+
+  await page.goto('/');
+  await expect(page.locator('#hamburger-btn')).toHaveClass(/has-update/);
+  await page.locator('#hamburger-btn').click();
+  await page.locator('#hmenu-restart').click();
+  await page.locator('#restart-modal-secondary').click();
+
+  expect(cmdBodies[0]).toMatchObject({ command: 'restart', upgrade: false });
+});
+
+test('always mode upgrades on restart without asking', async ({ page }) => {
+  const cmdBodies = [];
+  await mockApp(page, { version: '0.1.0', installOnRestart: 'always' });
+  await mockLatestVersion(page, '0.2.0');
+  await page.route('**/cmd', async route => {
+    cmdBodies.push(route.request().postDataJSON());
+    await route.fulfill({ json: { ok: true } });
+  });
+
+  await page.goto('/');
+  await expect(page.locator('#hamburger-btn')).toHaveClass(/has-update/);
+  await page.locator('#hamburger-btn').click();
+  await page.locator('#hmenu-restart').click();
+
+  await expect.poll(() => cmdBodies.length).toBe(1);
+  await expect(page.locator('#restart-modal')).not.toHaveClass(/open/);
+  expect(cmdBodies[0]).toMatchObject({ command: 'restart', upgrade: true });
 });

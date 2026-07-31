@@ -92,6 +92,11 @@ FIRST_BYTE_TIMEOUT: int = _cfg["agent"]["first_byte_timeout"]
 # Hard cap on total response time per request
 RESPONSE_TIMEOUT: int = _cfg["agent"]["response_timeout"]
 
+_updates_cfg = _cfg.get("updates", {})
+UPDATES_INSTALL_ON_RESTART: str = str(_updates_cfg.get("install_on_restart", "ask")).lower()
+if UPDATES_INSTALL_ON_RESTART not in {"ask", "always", "never"}:
+    UPDATES_INSTALL_ON_RESTART = "ask"
+
 def find_cli(name: str) -> Optional[str]:
     return shutil.which(name)
 
