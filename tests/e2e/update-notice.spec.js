@@ -2,9 +2,15 @@ const { test, expect } = require('@playwright/test');
 
 const PYPI_PROJECT_URL = 'https://pypi.org/pypi/agentsquid/json';
 
-async function mockApp(page, { version = '0.1.0', installOnRestart = 'ask' } = {}) {
+async function mockApp(page, { version = '0.1.0', installOnRestart = 'ask', canInstallOnRestart = true } = {}) {
   await page.route('**/health', r => r.fulfill({
-    json: { status: 'ok', version, updates: { install_on_restart: installOnRestart }, harnesses: [], providers: {} },
+    json: {
+      status: 'ok',
+      version,
+      updates: { install_on_restart: installOnRestart, can_install_on_restart: canInstallOnRestart },
+      harnesses: [],
+      providers: {},
+    },
   }));
   await page.route('**/config/agents', r => r.fulfill({ json: [] }));
   await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
@@ -59,6 +65,16 @@ test('no dot when already on the latest version', async ({ page }) => {
 
   await page.goto('/');
   await expect(page.locator('#hamburger-btn')).not.toHaveClass(/has-update/);
+});
+
+test('no dot when restart-time install is unavailable', async ({ page }) => {
+  await mockApp(page, { version: '0.1.0', canInstallOnRestart: false });
+  await mockLatestVersion(page, '0.2.0');
+
+  await page.goto('/');
+  await expect(page.locator('#hamburger-btn')).not.toHaveClass(/has-update/);
+  await openSettings(page);
+  await expect(page.locator('#settings-update-notice')).toBeHidden();
 });
 
 test('dismissing clears the dot and stays cleared on reload for that version', async ({ page }) => {

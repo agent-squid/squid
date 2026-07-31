@@ -152,6 +152,7 @@ const UPDATE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const UPDATE_DISMISS_KEY = 'squid_update_dismissed_version';
 let _updateInfo = null; // { current, latest } once a newer version is confirmed available
 let _updatesInstallOnRestart = 'ask';
+let _canInstallOnRestart = false;
 
 function _parseVersion(v) {
   const match = String(v).trim().match(/^(\d+(?:\.\d+)*)(?:(a|b|rc)(\d+))?(?:\.post(\d+))?/i);
@@ -212,7 +213,7 @@ function setUpdateAvailable(info) {
 function renderSettingsUpdateNotice() {
   const el = document.getElementById('settings-update-notice');
   if (!el) return;
-  if (!_updateInfo) { el.hidden = true; return; }
+  if (!_updateInfo || !_canInstallOnRestart) { el.hidden = true; return; }
   el.hidden = false;
   document.getElementById('settings-update-text').textContent =
     `AgentSquid v${_updateInfo.current} → v${_updateInfo.latest} available — Restart Server can upgrade before restarting`;
@@ -227,12 +228,15 @@ function renderSettingsVersion(version) {
 
 function updateSettingsFromHealth(health) {
   renderSettingsVersion(health?.version);
-  const mode = health?.updates?.install_on_restart;
+  const updates = health?.updates || {};
+  const mode = updates.install_on_restart;
   _updatesInstallOnRestart = ['ask', 'always', 'never'].includes(mode) ? mode : 'ask';
+  _canInstallOnRestart = updates.can_install_on_restart === true;
+  if (!_canInstallOnRestart) setUpdateAvailable(null);
 }
 
 async function checkForSquidUpdate(currentVersion) {
-  if (!currentVersion) return;
+  if (!currentVersion || !_canInstallOnRestart) return;
   const latest = await _fetchLatestSquidVersion();
   if (!latest || !_isNewerVersion(latest, currentVersion)) { setUpdateAvailable(null); return; }
   if (localStorage.getItem(UPDATE_DISMISS_KEY) === latest) { setUpdateAvailable(null); return; }
@@ -2873,12 +2877,13 @@ async function runningPromptsForRestart() {
 // polls /health and hard-refreshes this tab once it's back.
 async function restartServer() {
   const runningPrompts = await runningPromptsForRestart();
-  let upgrade = _updateInfo && _updatesInstallOnRestart === 'always';
+  const canUpgrade = _canInstallOnRestart && _updateInfo;
+  let upgrade = canUpgrade && _updatesInstallOnRestart === 'always';
   let ok = true;
   if (runningPrompts.length) {
     ok = await confirmRestartWithRunningPrompts(runningPrompts);
   }
-  if (ok && _updateInfo && _updatesInstallOnRestart === 'ask') {
+  if (ok && canUpgrade && _updatesInstallOnRestart === 'ask') {
     const choice = await confirmRestartWithRunningPrompts([], {
       header: 'Update AgentSquid',
       title: `AgentSquid v${_updateInfo.latest} is available`,

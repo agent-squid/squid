@@ -63,14 +63,14 @@ script checkout.
   running server still needs to restart before the new code is active.
 - **Upgrade-on-restart policy** is controlled by
   `updates.install_on_restart` in `~/.squid/squid.yaml`: `ask` (default),
-  `always`, or `never`. When the UI has detected a newer PyPI version and
-  the user restarts, `ask` reuses the existing themed restart modal as the
-  primary upgrade path, offering "Upgrade and Restart", "Restart Without
-  Upgrading", or cancel. `always` runs `pipx upgrade agentsquid` before the
-  restart without the extra update-choice prompt; `never` preserves
-  restart-only behavior. Upgrade failures abort the restart and surface the
-  pipx error, so the app does not silently restart while still on the old
-  version.
+  `always`, or `never`. When the UI has detected a newer PyPI version, the
+  running app reports that restart-time install is supported, and the user
+  restarts, `ask` reuses the existing themed restart modal as the primary
+  upgrade path, offering "Upgrade and Restart", "Restart Without Upgrading",
+  or cancel. `always` runs `pipx upgrade agentsquid` before the restart
+  without the extra update-choice prompt; `never` preserves restart-only
+  behavior. Upgrade failures abort the restart and surface the pipx error, so
+  the app does not silently restart while still on the old version.
 - **In-app notice follows the install channel.** The installed version still
   comes from `/health`, which reports `importlib.metadata.version("agentsquid")`.
   The latest available version is read from PyPI's project JSON endpoint

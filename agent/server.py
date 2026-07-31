@@ -458,12 +458,34 @@ class CmdRequest(BaseModel):
     upgrade: Optional[bool] = None
 
 
-def _pipx_upgrade_agentsquid() -> tuple[bool, str]:
+def _is_running_from_pipx_agentsquid() -> bool:
+    try:
+        parts = Path(sys.executable).resolve().parts
+    except OSError:
+        return False
+    return any(
+        part == "venvs"
+        and idx + 1 < len(parts)
+        and parts[idx + 1] == "agentsquid"
+        for idx, part in enumerate(parts)
+    )
+
+
+def _pipx_upgrade_unavailable_reason() -> Optional[str]:
     if SQUID_VERSION == "0+local":
-        return False, "upgrade is only available for installed agentsquid packages"
+        return "upgrade is only available for installed agentsquid packages"
+    if not _is_running_from_pipx_agentsquid():
+        return "upgrade on restart is only available when running the pipx-installed agentsquid app"
+    if not shutil.which("pipx"):
+        return "pipx is not installed or not on PATH"
+    return None
+
+
+def _pipx_upgrade_agentsquid() -> tuple[bool, str]:
+    unavailable = _pipx_upgrade_unavailable_reason()
+    if unavailable:
+        return False, unavailable
     pipx = shutil.which("pipx")
-    if not pipx:
-        return False, "pipx is not installed or not on PATH"
     try:
         result = subprocess.run(
             [pipx, "upgrade", "agentsquid"],
@@ -1332,7 +1354,10 @@ async def health():
         "boot_time": BOOT_TIME,
         "version": SQUID_VERSION,
         "squid_home": SQUID_HOME,
-        "updates": {"install_on_restart": UPDATES_INSTALL_ON_RESTART},
+        "updates": {
+            "install_on_restart": UPDATES_INSTALL_ON_RESTART,
+            "can_install_on_restart": _pipx_upgrade_unavailable_reason() is None,
+        },
         "harnesses": list_harnesses(),
         "providers": providers,
         **get_usage_stats(),
