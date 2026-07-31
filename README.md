@@ -129,7 +129,8 @@ Tailscale is a good fit for this. Its Personal plan is free for non-commercial p
 Squid always binds to `127.0.0.1`, it never exposes itself directly on the network. Starting squid automatically configures Tailscale's HTTPS proxy if Tailscale is installed:
 
 ```bash
-agentsquid   # configures tailscale serve automatically
+agentsquid start   # run in the background and configure tailscale serve
+agentsquid         # run in the foreground for debugging
 ```
 
 Type `/remote` in the chat to get a QR code with the full HTTPS URL and your

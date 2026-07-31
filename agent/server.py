@@ -33,6 +33,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
+import urllib.request
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
@@ -3077,6 +3078,223 @@ def _configure_tailscale_serve(port: int) -> None:
         log.warning("tailscale serve check failed: %s", e)
 
 
+def _lifecycle_paths() -> tuple[Path, Path]:
+    logs_dir = Path(SQUID_HOME) / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    return Path(SQUID_HOME) / "agentsquid.pid", logs_dir / "boot.log"
+
+
+def _read_lifecycle_pid(pid_file: Path) -> Optional[int]:
+    try:
+        raw = pid_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not raw.isdigit():
+        return None
+    return int(raw)
+
+
+def _pid_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _pid_looks_like_agentsquid(pid: int) -> bool:
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    command = result.stdout.strip()
+    return "agentsquid" in command or "agent.server" in command
+
+
+def _health_ok(host: str, port: int) -> bool:
+    return _health_json(host, port) is not None
+
+
+def _health_json(host: str, port: int) -> Optional[dict]:
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/health", timeout=0.5) as response:
+            if not 200 <= response.status < 300:
+                return None
+            data = json.loads(response.read().decode("utf-8"))
+            return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _request_http_restart(host: str, port: int) -> Optional[int]:
+    before = _health_json(host, port)
+    if not before:
+        return None
+    body = json.dumps({"command": "restart", "topic": "default", "upgrade": False}).encode("utf-8")
+    request = urllib.request.Request(
+        f"http://{host}:{port}/cmd",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=3) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            if not (200 <= response.status < 300 and payload.get("ok")):
+                return None
+    except Exception:
+        return None
+
+    print("restarting agentsquid via running server", end="", flush=True)
+    before_boot = before.get("boot_time")
+    saw_down = False
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        time.sleep(0.5)
+        current = _health_json(host, port)
+        if not current:
+            saw_down = True
+            print(".", end="", flush=True)
+            continue
+        if saw_down or current.get("boot_time") != before_boot:
+            print("")
+            print(f"agentsquid restarted -> http://{host}:{port}")
+            return 0
+        print(".", end="", flush=True)
+    print("")
+    print("restart requested; agentsquid stayed reachable")
+    return 0
+
+
+def _print_lifecycle_usage() -> None:
+    print(
+        "usage: agentsquid [--fg|--reload|start|stop|restart|status]\n\n"
+        "commands:\n"
+        "  start     run agentsquid in the background\n"
+        "  stop      stop the background agentsquid process\n"
+        "  restart   stop then start the background process\n"
+        "  status    show whether agentsquid is running\n\n"
+        "bare agentsquid runs in the foreground; Ctrl+C stops it."
+    )
+
+
+def _lifecycle_status(host: str, port: int) -> int:
+    pid_file, _boot_log = _lifecycle_paths()
+    pid = _read_lifecycle_pid(pid_file)
+    if pid and _pid_running(pid):
+        print(f"agentsquid is running (PID {pid}) -> http://{host}:{port}")
+        return 0
+    if pid_file.exists():
+        pid_file.unlink(missing_ok=True)
+    if _health_ok(host, port):
+        print(f"agentsquid is running at http://{host}:{port} (no PID file)")
+        return 0
+    print("agentsquid is not running")
+    return 1
+
+
+def _lifecycle_start(host: str, port: int) -> int:
+    pid_file, boot_log = _lifecycle_paths()
+    pid = _read_lifecycle_pid(pid_file)
+    if pid and _pid_running(pid):
+        print(f"agentsquid is already running (PID {pid}) -> http://{host}:{port}")
+        return 0
+    if pid_file.exists():
+        pid_file.unlink(missing_ok=True)
+    if _health_ok(host, port):
+        print(f"agentsquid is already running at http://{host}:{port} (no PID file)")
+        return 0
+
+    with boot_log.open("w", encoding="utf-8") as log_file:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "agent.server", "--fg"],
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+    pid_file.write_text(f"{proc.pid}\n", encoding="utf-8")
+
+    print("starting agentsquid", end="", flush=True)
+    for _ in range(20):
+        time.sleep(0.5)
+        if _health_ok(host, port):
+            print("")
+            print(f"agentsquid is up -> http://{host}:{port}")
+            return 0
+        if proc.poll() is not None:
+            pid_file.unlink(missing_ok=True)
+            print("")
+            print(f"agentsquid failed to start; check {boot_log}", file=sys.stderr)
+            return 1
+        print(".", end="", flush=True)
+    print("")
+    print(f"warning: agentsquid did not respond within 10s; check {boot_log}", file=sys.stderr)
+    return 1
+
+
+def _lifecycle_stop(_host: str, _port: int) -> int:
+    pid_file, _boot_log = _lifecycle_paths()
+    pid = _read_lifecycle_pid(pid_file)
+    if not pid:
+        if pid_file.exists():
+            pid_file.unlink(missing_ok=True)
+        print("agentsquid is not running")
+        return 0
+    if not _pid_running(pid):
+        pid_file.unlink(missing_ok=True)
+        print("agentsquid is not running; removed stale PID file")
+        return 0
+    if not _pid_looks_like_agentsquid(pid):
+        print(f"refusing to stop PID {pid} because it does not look like agentsquid", file=sys.stderr)
+        return 1
+
+    print(f"stopping agentsquid (PID {pid})")
+    try:
+        os.kill(pid, 15)
+    except OSError as exc:
+        print(f"failed to stop agentsquid: {exc}", file=sys.stderr)
+        return 1
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if not _pid_running(pid):
+            pid_file.unlink(missing_ok=True)
+            print("agentsquid stopped")
+            return 0
+        time.sleep(0.25)
+    print("agentsquid was signaled but is still running", file=sys.stderr)
+    return 1
+
+
+def _lifecycle_restart(host: str, port: int) -> int:
+    restarted = _request_http_restart(host, port)
+    if restarted is not None:
+        return restarted
+    stopped = _lifecycle_stop(host, port)
+    if stopped != 0:
+        return stopped
+    return _lifecycle_start(host, port)
+
+
+def _run_lifecycle_command(command: str, host: str, port: int) -> int:
+    if command == "start":
+        return _lifecycle_start(host, port)
+    if command == "stop":
+        return _lifecycle_stop(host, port)
+    if command == "restart":
+        return _lifecycle_restart(host, port)
+    if command == "status":
+        return _lifecycle_status(host, port)
+    _print_lifecycle_usage()
+    return 2
+
+
 def main():
     import ipaddress
     import socket
@@ -3084,6 +3302,21 @@ def main():
 
     host = _cfg["server"]["host"]
     port = _cfg["server"]["port"]
+    args = [arg for arg in sys.argv[1:] if arg != "--fg"]
+    lifecycle_commands = {"start", "stop", "restart", "status"}
+    if args and args[0] in {"-h", "--help"}:
+        _print_lifecycle_usage()
+        return
+    if args and args[0] in lifecycle_commands:
+        if any(arg in {"-h", "--help"} for arg in args[1:]):
+            _print_lifecycle_usage()
+            return
+        sys.exit(_run_lifecycle_command(args[0], host, port))
+    unknown = [arg for arg in args if arg != "--reload"]
+    if unknown:
+        print(f"unknown agentsquid option: {unknown[0]}", file=sys.stderr)
+        _print_lifecycle_usage()
+        sys.exit(2)
 
     # Only loopback (127.0.0.0/8) is permitted. squid must never bind directly
     # to a network interface — use `tailscale serve` to expose it on your mesh.

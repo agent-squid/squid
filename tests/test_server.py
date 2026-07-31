@@ -997,6 +997,116 @@ def test_pipx_upgrade_runs_agentsquid_upgrade():
     )
 
 
+def test_lifecycle_start_backgrounds_server(tmp_path):
+    pid_file = tmp_path / "agentsquid.pid"
+    boot_log = tmp_path / "boot.log"
+    proc = SimpleNamespace(pid=1234, poll=lambda: None)
+    health_checks = [False, True]
+
+    with patch("agent.server._lifecycle_paths", return_value=(pid_file, boot_log)), \
+         patch("agent.server._read_lifecycle_pid", return_value=None), \
+         patch("agent.server._health_ok", side_effect=lambda host, port: health_checks.pop(0)), \
+         patch("agent.server.subprocess.Popen", return_value=proc) as popen, \
+         patch("agent.server.time.sleep"):
+        assert server._lifecycle_start("127.0.0.1", 8000) == 0
+
+    assert pid_file.read_text() == "1234\n"
+    args, kwargs = popen.call_args
+    assert args[0] == [sys.executable, "-m", "agent.server", "--fg"]
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is subprocess.STDOUT
+    assert kwargs["start_new_session"] is True
+    assert kwargs["close_fds"] is True
+
+
+def test_lifecycle_stop_uses_pid_file(tmp_path):
+    pid_file = tmp_path / "agentsquid.pid"
+    pid_file.write_text("1234\n")
+    boot_log = tmp_path / "boot.log"
+
+    with patch("agent.server._lifecycle_paths", return_value=(pid_file, boot_log)), \
+         patch("agent.server._pid_running", side_effect=[True, False]), \
+         patch("agent.server._pid_looks_like_agentsquid", return_value=True), \
+         patch("agent.server.os.kill") as kill:
+        assert server._lifecycle_stop("127.0.0.1", 8000) == 0
+
+    kill.assert_called_once_with(1234, 15)
+    assert not pid_file.exists()
+
+
+def test_lifecycle_restart_stops_then_starts():
+    with patch("agent.server._request_http_restart", return_value=None) as http_restart, \
+         patch("agent.server._lifecycle_stop", return_value=0) as stop, \
+         patch("agent.server._lifecycle_start", return_value=0) as start:
+        assert server._lifecycle_restart("127.0.0.1", 8000) == 0
+
+    http_restart.assert_called_once_with("127.0.0.1", 8000)
+    stop.assert_called_once_with("127.0.0.1", 8000)
+    start.assert_called_once_with("127.0.0.1", 8000)
+
+
+def test_lifecycle_restart_prefers_running_server_restart():
+    with patch("agent.server._request_http_restart", return_value=0) as http_restart, \
+         patch("agent.server._lifecycle_stop") as stop, \
+         patch("agent.server._lifecycle_start") as start:
+        assert server._lifecycle_restart("127.0.0.1", 8000) == 0
+
+    http_restart.assert_called_once_with("127.0.0.1", 8000)
+    stop.assert_not_called()
+    start.assert_not_called()
+
+
+def test_request_http_restart_posts_cmd_and_waits_for_new_health():
+    class Response:
+        def __init__(self, payload):
+            self.status = 200
+            self.payload = payload
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append(request)
+        if len(calls) == 1:
+            return Response({"boot_time": "old"})
+        if len(calls) == 2:
+            return Response({"ok": True})
+        return Response({"boot_time": "new"})
+
+    with patch("agent.server.urllib.request.urlopen", side_effect=fake_urlopen), \
+         patch("agent.server.time.sleep"):
+        assert server._request_http_restart("127.0.0.1", 8000) == 0
+
+    restart_request = calls[1]
+    assert restart_request.full_url == "http://127.0.0.1:8000/cmd"
+    assert json.loads(restart_request.data.decode("utf-8")) == {
+        "command": "restart",
+        "topic": "default",
+        "upgrade": False,
+    }
+
+
+def test_main_dispatches_start_command():
+    with patch.object(sys, "argv", ["agentsquid", "start"]), \
+         patch("agent.server._lifecycle_start", return_value=0) as start:
+        try:
+            server.main()
+        except SystemExit as exc:
+            assert exc.code == 0
+        else:
+            raise AssertionError("main should exit after lifecycle command")
+
+    start.assert_called_once_with(server._cfg["server"]["host"], server._cfg["server"]["port"])
+
+
 def test_public_agent_config_includes_provider_color():
     item = server._public_agent_config({
         "name": "haiku",
