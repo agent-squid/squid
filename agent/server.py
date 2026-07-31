@@ -450,7 +450,7 @@ def _codex_bearer_header(token: str) -> Optional[str]:
 
 
 class CmdRequest(BaseModel):
-    command: Literal["stop", "stopall", "deq", "list", "restart", "clear", "stop_msg", "journal"]
+    command: Literal["stop", "stopall", "deq", "list", "restart", "shutdown", "clear", "stop_msg", "journal"]
     topic: str = "default"
     agent: Optional[str] = None
     adhoc: Optional[bool] = None
@@ -1283,6 +1283,20 @@ async def run_cmd(req: CmdRequest):
                         pass
                 os.execv(sys.executable, [sys.executable, "-m", "agent.server"])
         asyncio.create_task(_restart())
+        return JSONResponse({"ok": True})
+    if req.command == "shutdown":
+        async def _shutdown():
+            await asyncio.sleep(0.4)
+            kill_all_procs()
+            try:
+                pid_file, _boot_log = _lifecycle_paths()
+                if _read_lifecycle_pid(pid_file) == os.getpid():
+                    pid_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            os._exit(0)
+
+        asyncio.create_task(_shutdown())
         return JSONResponse({"ok": True})
 
     if req.command == "clear":
@@ -3079,9 +3093,10 @@ def _configure_tailscale_serve(port: int) -> None:
 
 
 def _lifecycle_paths() -> tuple[Path, Path]:
-    logs_dir = Path(SQUID_HOME) / "logs"
+    squid_state_dir = Path.home() / ".squid"
+    logs_dir = squid_state_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
-    return Path(SQUID_HOME) / "agentsquid.pid", logs_dir / "boot.log"
+    return squid_state_dir / "agentsquid.pid", logs_dir / "boot.log"
 
 
 def _read_lifecycle_pid(pid_file: Path) -> Optional[int]:
@@ -3171,6 +3186,38 @@ def _request_http_restart(host: str, port: int) -> Optional[int]:
     return 0
 
 
+def _request_http_shutdown(host: str, port: int) -> Optional[int]:
+    if not _health_ok(host, port):
+        return None
+    body = json.dumps({"command": "shutdown", "topic": "default"}).encode("utf-8")
+    request = urllib.request.Request(
+        f"http://{host}:{port}/cmd",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=3) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            if not (200 <= response.status < 300 and payload.get("ok")):
+                return None
+    except Exception:
+        return None
+
+    print("stopping agentsquid via running server", end="", flush=True)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        time.sleep(0.25)
+        if not _health_ok(host, port):
+            print("")
+            print("agentsquid stopped")
+            return 0
+        print(".", end="", flush=True)
+    print("")
+    print("agentsquid stop was requested but the server is still reachable", file=sys.stderr)
+    return 1
+
+
 def _print_lifecycle_usage() -> None:
     print(
         "usage: agentsquid [--fg|--reload|start|stop|restart|status]\n\n"
@@ -3245,10 +3292,30 @@ def _lifecycle_stop(_host: str, _port: int) -> int:
     if not pid:
         if pid_file.exists():
             pid_file.unlink(missing_ok=True)
+        if _health_ok(_host, _port):
+            stopped = _request_http_shutdown(_host, _port)
+            if stopped is not None:
+                return stopped
+            print(
+                f"agentsquid is running at http://{_host}:{_port} but has no PID file "
+                "and does not support HTTP shutdown",
+                file=sys.stderr,
+            )
+            return 1
         print("agentsquid is not running")
         return 0
     if not _pid_running(pid):
         pid_file.unlink(missing_ok=True)
+        if _health_ok(_host, _port):
+            stopped = _request_http_shutdown(_host, _port)
+            if stopped is not None:
+                return stopped
+            print(
+                f"agentsquid is running at http://{_host}:{_port} but its PID file was stale "
+                "and it does not support HTTP shutdown",
+                file=sys.stderr,
+            )
+            return 1
         print("agentsquid is not running; removed stale PID file")
         return 0
     if not _pid_looks_like_agentsquid(pid):

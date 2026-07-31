@@ -1019,6 +1019,15 @@ def test_lifecycle_start_backgrounds_server(tmp_path):
     assert kwargs["close_fds"] is True
 
 
+def test_lifecycle_paths_use_user_squid_home(tmp_path):
+    with patch("agent.server.Path.home", return_value=tmp_path):
+        pid_file, boot_log = server._lifecycle_paths()
+
+    assert pid_file == tmp_path / ".squid" / "agentsquid.pid"
+    assert boot_log == tmp_path / ".squid" / "logs" / "boot.log"
+    assert boot_log.parent.is_dir()
+
+
 def test_lifecycle_stop_uses_pid_file(tmp_path):
     pid_file = tmp_path / "agentsquid.pid"
     pid_file.write_text("1234\n")
@@ -1032,6 +1041,19 @@ def test_lifecycle_stop_uses_pid_file(tmp_path):
 
     kill.assert_called_once_with(1234, 15)
     assert not pid_file.exists()
+
+
+def test_lifecycle_stop_without_pid_uses_http_shutdown(tmp_path):
+    pid_file = tmp_path / "agentsquid.pid"
+    boot_log = tmp_path / "boot.log"
+
+    with patch("agent.server._lifecycle_paths", return_value=(pid_file, boot_log)), \
+         patch("agent.server._health_ok", return_value=True) as health_ok, \
+         patch("agent.server._request_http_shutdown", return_value=0) as shutdown:
+        assert server._lifecycle_stop("127.0.0.1", 8000) == 0
+
+    health_ok.assert_called_once_with("127.0.0.1", 8000)
+    shutdown.assert_called_once_with("127.0.0.1", 8000)
 
 
 def test_lifecycle_restart_stops_then_starts():
@@ -1091,6 +1113,46 @@ def test_request_http_restart_posts_cmd_and_waits_for_new_health():
         "command": "restart",
         "topic": "default",
         "upgrade": False,
+    }
+
+
+def test_request_http_shutdown_posts_cmd_and_waits_for_health_down():
+    class Response:
+        def __init__(self, payload):
+            self.status = 200
+            self.payload = payload
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    calls = []
+    health_checks = 0
+
+    def fake_urlopen(request, timeout):
+        nonlocal health_checks
+        calls.append(request)
+        if isinstance(request, str):
+            health_checks += 1
+            if health_checks == 1:
+                return Response({"status": "ok"})
+            raise OSError("down")
+        return Response({"ok": True})
+
+    with patch("agent.server.urllib.request.urlopen", side_effect=fake_urlopen), \
+         patch("agent.server.time.sleep"):
+        assert server._request_http_shutdown("127.0.0.1", 8000) == 0
+
+    shutdown_request = calls[1]
+    assert shutdown_request.full_url == "http://127.0.0.1:8000/cmd"
+    assert json.loads(shutdown_request.data.decode("utf-8")) == {
+        "command": "shutdown",
+        "topic": "default",
     }
 
 
