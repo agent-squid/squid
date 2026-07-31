@@ -64,12 +64,13 @@ script checkout.
 - **Upgrade-on-restart policy** is controlled by
   `updates.install_on_restart` in `~/.squid/squid.yaml`: `ask` (default),
   `always`, or `never`. When the UI has detected a newer PyPI version and
-  the user restarts, `ask` reuses the existing themed restart modal to offer
-  "Upgrade and Restart", "Restart Without Upgrading", or cancel. `always`
-  runs `pipx upgrade agentsquid` before the restart without the extra
-  update-choice prompt; `never` preserves restart-only behavior. Upgrade
-  failures abort the restart and surface the pipx error, so the app does not
-  silently restart while still on the old version.
+  the user restarts, `ask` reuses the existing themed restart modal as the
+  primary upgrade path, offering "Upgrade and Restart", "Restart Without
+  Upgrading", or cancel. `always` runs `pipx upgrade agentsquid` before the
+  restart without the extra update-choice prompt; `never` preserves
+  restart-only behavior. Upgrade failures abort the restart and surface the
+  pipx error, so the app does not silently restart while still on the old
+  version.
 - **In-app notice follows the install channel.** The installed version still
   comes from `/health`, which reports `importlib.metadata.version("agentsquid")`.
   The latest available version is read from PyPI's project JSON endpoint
@@ -82,6 +83,13 @@ script checkout.
   doesn't rank as newer than an already-installed `0.1.2` final — needed
   because this ADR's own release process routes rc versions through
   `pyproject.toml` before the final version is cut.
+- **Update affordance is centered on restart.** The hamburger button still
+  gets a small update dot, and both Settings and Restart Server are marked in
+  the hamburger menu. Settings remains the passive detail/dismiss surface
+  with the manual `pipx upgrade agentsquid` command for users who want it,
+  but users do not need to visit Settings to act on an update: clicking
+  Restart Server triggers the upgrade decision directly when policy is
+  `ask`.
 - **Release process**: publish through GitHub Actions and PyPI Trusted
   Publishing. Bump `pyproject.toml`'s `version` only when the next release
   is ready, tag the same version as `vX.Y.Z`, then push the tag. The

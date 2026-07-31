@@ -28,7 +28,7 @@ async function openSettings(page) {
   await page.locator('.hmenu-item[data-view="settings"]').click();
 }
 
-test('hamburger and Settings row get a dot, and Settings shows the update command', async ({ page }) => {
+test('hamburger, Settings, and Restart get a dot, and Settings explains restart upgrade', async ({ page }) => {
   await mockApp(page, { version: '0.1.0' });
   await mockLatestVersion(page, '0.2.0');
 
@@ -37,6 +37,7 @@ test('hamburger and Settings row get a dot, and Settings shows the update comman
 
   await page.locator('#hamburger-btn').click();
   await expect(page.locator('.hmenu-item[data-view="settings"]')).toHaveClass(/has-update/);
+  await expect(page.locator('#hmenu-restart')).toHaveClass(/has-update/);
   await page.locator('.hmenu-item[data-view="settings"]').click();
 
   const notice = page.locator('#settings-update-notice');
@@ -48,6 +49,7 @@ test('hamburger and Settings row get a dot, and Settings shows the update comman
   expect(Math.abs((actionsBox.x + actionsBox.width) - (headerBox.x + headerBox.width))).toBeLessThan(2);
   await expect(notice).toBeVisible();
   await expect(notice).toContainText('AgentSquid v0.1.0 → v0.2.0');
+  await expect(notice).toContainText('Restart Server can upgrade before restarting');
   await expect(page.locator('#settings-update-cmd')).toContainText('pipx upgrade agentsquid');
 });
 
@@ -69,6 +71,8 @@ test('dismissing clears the dot and stays cleared on reload for that version', a
   await page.locator('#settings-update-dismiss').click();
 
   await expect(page.locator('#hamburger-btn')).not.toHaveClass(/has-update/);
+  await page.locator('#hamburger-btn').click();
+  await expect(page.locator('#hmenu-restart')).not.toHaveClass(/has-update/);
   await expect(page.locator('#settings-update-notice')).toBeHidden();
 
   await page.reload();

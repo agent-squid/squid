@@ -205,6 +205,7 @@ function setUpdateAvailable(info) {
   const hasUpdate = !!info;
   document.getElementById('hamburger-btn')?.classList.toggle('has-update', hasUpdate);
   document.querySelector('.hmenu-item[data-view="settings"]')?.classList.toggle('has-update', hasUpdate);
+  document.getElementById('hmenu-restart')?.classList.toggle('has-update', hasUpdate);
   renderSettingsUpdateNotice();
 }
 
@@ -214,7 +215,7 @@ function renderSettingsUpdateNotice() {
   if (!_updateInfo) { el.hidden = true; return; }
   el.hidden = false;
   document.getElementById('settings-update-text').textContent =
-    `AgentSquid v${_updateInfo.current} → v${_updateInfo.latest} available — restart required after upgrading`;
+    `AgentSquid v${_updateInfo.current} → v${_updateInfo.latest} available — Restart Server can upgrade before restarting`;
   document.getElementById('settings-update-cmd').textContent = 'pipx upgrade agentsquid';
 }
 
