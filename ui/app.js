@@ -2468,6 +2468,8 @@ function promptHistoryAutocompleteItems(entries) {
     const routeHtml = isDifferentRoute ? _acRouteHtml(displayRouteKey) : '';
     return {
       label: `<span class="ac-history-prompt">${escapeHtml(truncate(promptText, 55))}</span>`,
+      labelClass: 'ac-prompt-label',
+      rowClass: 'ac-prompt-row',
       insert: promptText,
       trail: false,
       deletePromptEntry: ph,
@@ -10848,9 +10850,9 @@ function _acRender(items, title = 'Suggestions') {
   acItems = items; acSel = 0;
   const rows = items.map((item, i) =>
     `<div class="ac-item" data-i="${i}"${item.execute != null ? ' data-cmd' : ''}>` +
-    `<div class="ac-row">` +
+    `<div class="ac-row${item.rowClass ? ` ${item.rowClass}` : ''}">` +
     (item.routeHtml ? `<button class="ac-route-btn" type="button" data-i="${i}" title="Switch to this route">${item.routeHtml}${item.routeSwitchIcon === false ? '' : '<span class="ac-route-switch-icon" aria-hidden="true"></span>'}</button> ` : '') +
-    `<span class="ac-label">${item.label}</span>` +
+    `<span class="ac-label${item.labelClass ? ` ${item.labelClass}` : ''}">${item.label}</span>` +
     (item.sub ? `<span class="ac-sub">${item.sub}</span>` : '') +
     (item.meta ? `<span class="ac-meta">${item.meta}</span>` : '') +
     (item.deleteTopic ? `<button class="ac-del-btn" data-topic="${item.deleteTopic}" type="button" title="Delete #${item.deleteTopic} sessions">✕</button>` : '') +

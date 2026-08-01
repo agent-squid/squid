@@ -728,6 +728,41 @@ test('prompt autocomplete dedupes exact duplicate recent prompts', async ({ page
   await expect(page.locator('#autocomplete .ac-item', { hasText: 'Push the change and update the v0.1 to latest commit.' })).toHaveCount(1);
 });
 
+test('long prompt autocomplete rows keep the remove button visible', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockBackend(page);
+  await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [
+    '#squid@codex maybe i am on v0.1.0',
+    '#squid@codex This is a very long saved prompt that should truncate before it can push the remove button outside the autocomplete row.',
+    '#squid@codex This is another very long saved prompt matching the input so the selected row still keeps its remove button visible.',
+  ] } }));
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
+  })));
+  await page.goto('/');
+
+  await page.fill('#input', 'This');
+
+  const autocomplete = page.locator('#autocomplete');
+  const removeButtons = page.locator('#autocomplete .ac-del-prompt-btn');
+  await expect(removeButtons).toHaveCount(2);
+  const boxes = await page.evaluate(() => {
+    const ac = document.getElementById('autocomplete').getBoundingClientRect();
+    const buttons = [...document.querySelectorAll('#autocomplete .ac-del-prompt-btn')]
+      .map(btn => btn.getBoundingClientRect());
+    return {
+      acLeft: ac.left,
+      acRight: ac.right,
+      buttons: buttons.map(btn => ({ left: btn.left, right: btn.right })),
+    };
+  });
+  for (const btn of boxes.buttons) {
+    expect(btn.left).toBeGreaterThanOrEqual(boxes.acLeft);
+    expect(btn.right).toBeLessThanOrEqual(boxes.acRight);
+  }
+  await expect(autocomplete).toContainText('This is a very long saved prompt');
+});
+
 test('bare default prompts are recorded without a default route chip', async ({ page }) => {
   await mockBackend(page);
   await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [] } }));
