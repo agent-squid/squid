@@ -1622,6 +1622,18 @@ body {
   min-width: 0;
   text-align: left;
 }
+#settings-update-check {
+  align-items: center;
+  box-sizing: border-box;
+  display: inline-flex;
+  gap: 0.35rem;
+  justify-content: center;
+  white-space: nowrap;
+}
+#settings-update-check .material-symbols-outlined {
+  display: none;
+  font-size: 18px;
+}
 #config-editor-actions { display: flex; align-items: center; gap: 0.5rem; justify-self: end; }
 #config-editor-status-line { min-height: 0; flex-shrink: 0; }
 #config-editor-status {
@@ -4837,6 +4849,22 @@ button {
     gap: 0;
     justify-content: center;
     border-color: transparent;
+  }
+  #settings-update-check {
+    flex: 0 0 24px;
+    width: 24px;
+    min-width: 24px;
+    height: auto;
+    min-height: 0;
+    padding: 0;
+    gap: 0;
+  }
+  #settings-update-check .material-symbols-outlined {
+    display: block;
+    font-size: 15px;
+  }
+  .settings-update-check-label {
+    display: none;
   }
 }
 

@@ -255,20 +255,28 @@ async function checkForSquidUpdate(currentVersion, { force = false } = {}) {
   return { checked: true, latest, hasUpdate: true };
 }
 
+function setUpdateCheckButtonText(btn, text) {
+  const label = btn.querySelector('.settings-update-check-label');
+  if (label) label.textContent = text;
+  else btn.textContent = text;
+  btn.title = text;
+  btn.setAttribute('aria-label', text);
+}
+
 async function forceCheckForSquidUpdate() {
   const btn = document.getElementById('settings-update-check');
   if (!btn) return;
-  const original = btn.textContent;
+  const original = btn.querySelector('.settings-update-check-label')?.textContent || btn.textContent || 'Check Updates';
   btn.disabled = true;
-  btn.textContent = 'Checking...';
+  setUpdateCheckButtonText(btn, 'Checking...');
   try {
     const result = await checkForSquidUpdate(_squidVersion, { force: true });
-    btn.textContent = result.hasUpdate ? 'Update Found' : 'Up to Date';
+    setUpdateCheckButtonText(btn, result.hasUpdate ? 'Update Found' : 'Up to Date');
   } catch {
-    btn.textContent = 'Check Failed';
+    setUpdateCheckButtonText(btn, 'Check Failed');
   } finally {
     setTimeout(() => {
-      btn.textContent = original || 'Check Updates';
+      setUpdateCheckButtonText(btn, original || 'Check Updates');
       btn.disabled = false;
     }, 1500);
   }

@@ -61,6 +61,24 @@ test('hamburger, Settings, and Restart get a dot, and Settings explains restart 
   await expect(page.locator('#settings-update-cmd')).toContainText('pipx upgrade agentsquid');
 });
 
+test('manual update check is text-only on desktop and matches action button height', async ({ page }) => {
+  await mockApp(page, { version: '0.1.1' });
+  await mockLatestVersion(page, '0.1.1');
+
+  await page.goto('/');
+  await openSettings(page);
+
+  const button = page.locator('#settings-update-check');
+  await expect(button.locator('.settings-update-check-label')).toBeVisible();
+  await expect(button.locator('.material-symbols-outlined')).toBeHidden();
+
+  const heights = await page.evaluate(() => {
+    const ids = ['settings-update-check', 'config-editor-reload', 'config-editor-save'];
+    return ids.map(id => Math.round(document.getElementById(id).getBoundingClientRect().height));
+  });
+  expect(new Set(heights).size).toBe(1);
+});
+
 test('no dot when already on the latest version', async ({ page }) => {
   await mockApp(page, { version: '0.1.0' });
   await mockLatestVersion(page, '0.1.0');
@@ -100,6 +118,25 @@ test('manual update check bypasses no-update cache', async ({ page }) => {
 
   await expect(page.locator('#hamburger-btn')).toHaveClass(/has-update/);
   await expect(page.locator('#settings-update-notice')).toContainText('AgentSquid v0.1.1 → v0.1.2');
+});
+
+test('manual update check is icon-only on mobile', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockApp(page, { version: '0.1.1' });
+  await mockLatestVersion(page, '0.1.1');
+
+  await page.goto('/');
+  await openSettings(page);
+
+  const button = page.locator('#settings-update-check');
+  await expect(button).toHaveAttribute('aria-label', 'Check Updates');
+  await expect(button.locator('.material-symbols-outlined')).toHaveText('deployed_code_update');
+  await expect(button.locator('.settings-update-check-label')).toBeHidden();
+
+  const box = await button.boundingBox();
+  const reloadBox = await page.locator('#config-editor-reload').boundingBox();
+  expect(Math.round(box.width)).toBe(24);
+  expect(Math.round(box.height)).toBe(Math.round(reloadBox.height));
 });
 
 test('version notice still appears when restart-time install is unavailable', async ({ page }) => {

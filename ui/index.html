@@ -693,7 +693,10 @@
       <div id="config-editor-header">
         <div id="settings-version-row">
           <span id="settings-version-info" aria-live="polite"></span>
-          <button id="settings-update-check" type="button">Check Updates</button>
+          <button id="settings-update-check" type="button" aria-label="Check Updates" title="Check Updates">
+            <span class="material-symbols-outlined" aria-hidden="true">deployed_code_update</span>
+            <span class="settings-update-check-label">Check Updates</span>
+          </button>
         </div>
         <div id="config-editor-actions">
           <button id="config-editor-reload" type="button">Reload</button>
