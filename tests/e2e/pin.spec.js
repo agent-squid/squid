@@ -603,6 +603,30 @@ test('fresh session send includes topic memory when memory exists', async ({ pag
   expect(capturedBody?.include_topic_memory).toBe(true);
 });
 
+test('dotted subtopic route sends as the selected topic', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid.experiment', agent: 'claude' });
+  await page.route('**/topics/squid.experiment/session?agent=claude', r => r.fulfill({
+    json: { session_id: null, cwd: null },
+  }));
+
+  let capturedBody = null;
+  await page.route('**/chat', async route => {
+    capturedBody = route.request().postDataJSON();
+    await route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(META, { data: 'subtopic response' }, DONE),
+    });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '#Squid.Experiment@claude hello');
+  await page.keyboard.press('Enter');
+
+  await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toBeVisible();
+  expect(capturedBody?.topic).toBe('squid.experiment');
+  expect(capturedBody?.agent).toBe('claude');
+});
+
 test('topic memory reinjects when revision changes after prior injection', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
 
@@ -773,6 +797,64 @@ test('topic memory editor saves and refreshes preview', async ({ page }) => {
   await page.click('#memory-modal-close');
   await page.click('#pin-btn');
   await expect(page.locator('.memory-item-preview')).toContainText('Prefer transparent context.');
+});
+
+test('dotted subtopic memory save refreshes root memory cache state', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid.experiment', agent: 'claude' });
+  await page.route('**/topics/squid.experiment/memory', async route => {
+    if (route.request().method() === 'PUT') {
+      await route.fulfill({
+        json: {
+          topic: 'squid',
+          exists: true,
+          content: route.request().postDataJSON().content,
+          revision: 'rev-new',
+          path: '~/.squid/context/topics/squid/memory.md',
+        },
+      });
+      return;
+    }
+    await route.fulfill({
+      json: {
+        topic: 'squid',
+        exists: true,
+        content: 'Old root memory.',
+        revision: 'rev-old',
+        path: '~/.squid/context/topics/squid/memory.md',
+      },
+    });
+  });
+
+  await page.goto('/');
+  const state = await page.evaluate(async () => {
+    _memoryCache.squid = {
+      topic: 'squid',
+      exists: true,
+      content: 'Old root memory.',
+      revision: 'rev-old',
+      loading: false,
+    };
+    _memorySelectionOverrides['squid@claude:session'] = false;
+    _sessionLookupCache['squid@claude'] = { session_id: 'sid-old', memory_revision: 'rev-old', loading: false };
+    _editingMemoryTopic = 'squid.experiment';
+    document.getElementById('memory-editor').value = 'Updated from sub-topic.';
+
+    await saveMemoryEditor();
+
+    return {
+      rootContent: _memoryCache.squid?.content,
+      subtopicContent: _memoryCache['squid.experiment']?.content,
+      rootOverrideExists: Object.prototype.hasOwnProperty.call(_memorySelectionOverrides, 'squid@claude:session'),
+      rootSessionCacheExists: Object.prototype.hasOwnProperty.call(_sessionLookupCache, 'squid@claude'),
+    };
+  });
+
+  expect(state).toEqual({
+    rootContent: 'Updated from sub-topic.',
+    subtopicContent: 'Updated from sub-topic.',
+    rootOverrideExists: false,
+    rootSessionCacheExists: false,
+  });
 });
 
 test('a slow first memory fetch does not clobber a newer save (out-of-order response)', async ({ page }) => {

@@ -149,3 +149,19 @@ test('backspace deletes one character at a time in message text while a chip is 
   await page.keyboard.press('Backspace');
   await expect(page.locator('#input')).toHaveValue('#other@');
 });
+
+test('backspace trims dotted composer topics to the previous dot', async ({ page }) => {
+  await page.route('**/health', r => r.fulfill({ json: { status: 'ok', backends: {} } }));
+  await page.route('**/quota**', r => r.fulfill({ json: {} }));
+  await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/topics', r => r.fulfill({ json: [] }));
+  await page.route('**/topics/**', r => r.fulfill({ json: [] }));
+  await page.route('**/config/agents', r => r.fulfill({ json: [] }));
+  await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [] } }));
+
+  await page.goto('/');
+  await page.fill('#input', '#parent.child');
+  await page.locator('#input').press('Backspace');
+
+  await expect(page.locator('#input')).toHaveValue('#parent.');
+});

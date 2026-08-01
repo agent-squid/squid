@@ -1511,6 +1511,24 @@ body {
 .stats-deep-dive-btn .material-symbols-outlined { font-size: 14px; font-variation-settings: 'FILL' 0, 'wght' 600, 'GRAD' 0, 'opsz' 20; }
 .stats-deep-dive-btn:hover { color: var(--accent); }
 
+.msg-reply-btn {
+  position: absolute;
+  right: 0.5rem;
+  bottom: 0.4rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent-light);
+  cursor: pointer;
+  opacity: 0.65;
+  transition: color 0.15s, opacity 0.15s;
+}
+.msg-reply-btn .material-symbols-outlined { font-size: 15px; font-variation-settings: 'FILL' 0, 'wght' 500, 'GRAD' 0, 'opsz' 20; }
+.msg-reply-btn:hover { color: var(--accent); opacity: 1; }
+
 .stats-tooltip {
   display: none;
   position: absolute;
@@ -3166,6 +3184,24 @@ body {
   background: var(--bg);
   cursor: pointer;
 }
+.topic-row.subtopic {
+  background: #111119;
+}
+.topic-row.subtopic .topic-main {
+  padding-left: 1.45rem;
+  position: relative;
+}
+.topic-row.subtopic .topic-main::before {
+  content: '';
+  position: absolute;
+  left: 0.55rem;
+  top: 50%;
+  width: 0.55rem;
+  border-top: 1px solid #30303d;
+}
+.topic-row.subtopic .topic-name {
+  color: #b36d48;
+}
 .topic-row:hover,
 .topic-agent-row:hover { background: var(--surface-3); }
 .topic-row.hidden { opacity: 0.62; }
@@ -3244,6 +3280,9 @@ body {
 .topic-agent-row {
   background: var(--bg);
   padding-left: 2.1rem;
+}
+.topic-agents.subtopic .topic-agent-row {
+  padding-left: 3.55rem;
 }
 .topic-agent-row .topic-agent-main { padding-left: 0.5rem; }
 .topic-agent-row.adhoc .topic-agent-label { color: #a98562; }
@@ -3980,6 +4019,14 @@ body {
   user-select: none;
 }
 #topic-chip.visible { display: block; }
+#topic-chip.reply-blink { animation: topic-chip-reply-blink 0.55s ease-in-out; }
+@keyframes topic-chip-reply-blink {
+  0%, 100% { box-shadow: none; }
+  25%, 75% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 55%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #topic-chip.reply-blink { animation: none; }
+}
 #topic-chip.route-chain,
 #topic-chip.origin-broadcast {
   display: flex;

@@ -11,7 +11,7 @@ from agent.memory import (
     write_topic_memory,
     write_topic_memory_squid_code_roots,
 )
-from agent.topics import normalize_topic_slug
+from agent.topics import memory_root_slug, normalize_topic_slug
 
 
 def test_normalize_topic_slug_lowercases():
@@ -22,6 +22,38 @@ def test_normalize_topic_slug_lowercases():
 def test_normalize_topic_slug_rejects_invalid_chars():
     with pytest.raises(ValueError):
         normalize_topic_slug("bad-topic")
+
+
+def test_normalize_topic_slug_allows_dotted_subtopics():
+    assert normalize_topic_slug("Squid.Experiment") == "squid.experiment"
+
+
+def test_normalize_topic_slug_rejects_malformed_dots():
+    for bad in (".squid", "squid.", "squid..experiment"):
+        with pytest.raises(ValueError):
+            normalize_topic_slug(bad)
+
+
+def test_memory_root_slug_strips_to_first_segment():
+    assert memory_root_slug("squid.experiment") == "squid"
+    assert memory_root_slug("squid.experiment.nested") == "squid"
+    assert memory_root_slug("squid") == "squid"
+
+
+def test_dotted_subtopic_shares_root_topic_memory(tmp_path, monkeypatch):
+    monkeypatch.setattr(memory, "TOPICS_CONTEXT_DIR", tmp_path / "topics")
+
+    write_topic_memory("squid", "Root memory.")
+    data = read_topic_memory("squid.experiment")
+
+    assert data["topic"] == "squid"
+    assert data["content"] == "Root memory."
+    assert not (tmp_path / "topics" / "squid.experiment").exists()
+
+    updated = write_topic_memory("squid.experiment", "Updated from sub-topic.")
+
+    assert updated["topic"] == "squid"
+    assert read_topic_memory("squid")["content"] == "Updated from sub-topic."
 
 
 def test_missing_topic_memory_does_not_create_dir(tmp_path, monkeypatch):

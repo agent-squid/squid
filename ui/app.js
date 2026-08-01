@@ -747,6 +747,10 @@ let stickyChip = null; // { topic, agent, adhoc, chainTarget?, chainTargetFresh?
 let editingExpandedSlug = false;
 let expandedSlugEditToken = 0;
 let composerActionTitleSeq = 0;
+const TOPIC_SLUG_SRC = '[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)*';
+const TOPIC_SLUG_PARTIAL_SRC = '[A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]*)*';
+const AGENT_SLUG_SRC = '\\w+';
+const AGENT_SLUG_PARTIAL_SRC = '\\w*';
 
 function _chainRouteText(topic, originAgent, targetAgent, targetFresh = false, originFresh = false, operator = '>', targetTopic = null) {
   const targetPrefix = targetTopic && targetTopic !== topic ? `#${targetTopic}` : '';
@@ -891,13 +895,13 @@ function _broadcastRouteText(agents) {
   return parts.join(',');
 }
 
-const _BROADCAST_ATOM_RE = /^(?:#(\w+))?(?:@(\w+))?(!?)$/;
+const _BROADCAST_ATOM_RE = new RegExp(`^(?:#(${TOPIC_SLUG_SRC}))?(?:@(${AGENT_SLUG_SRC}))?(!?)$`);
 // Loose detector for "does this text look like a broadcast route" — the
 // first atom must be a full #topic@agent, later atoms may each drop either
 // half (or both stay, or a bare topic switch, etc.); parseOriginBroadcast
 // does the real validation. Shared so every call site that needs to peel a
 // broadcast route off the front of raw composer text stays in sync.
-const _BROADCAST_ROUTE_DETECT_SRC = '#\\w+@\\w+!?(?:,(?:#\\w+)?(?:@\\w+)?!?)+';
+const _BROADCAST_ROUTE_DETECT_SRC = `#${TOPIC_SLUG_SRC}@${AGENT_SLUG_SRC}!?(?:,(?:#${TOPIC_SLUG_SRC})?(?:@${AGENT_SLUG_SRC})?!?)+`;
 
 // Core rolling-anchor resolver, shared by parseOriginBroadcast (full-route
 // validation) and the composer autocomplete (which wants the same walk over
@@ -1344,6 +1348,17 @@ chipStashBtn.addEventListener('click', async e => {
 
 function parseInput(text) {
   if (stickyChip) {
+    const explicit = String(text || '').trimStart();
+    if (explicit.startsWith('#')) {
+      const activeChip = stickyChip;
+      stickyChip = null;
+      try {
+        const parsed = parseInput(text);
+        if (parseCommand(parsed.message)) return parsed;
+      } finally {
+        stickyChip = activeChip;
+      }
+    }
     const adhoc = !!stickyChip.adhoc;
     return {
       topic: stickyChip.topic,
@@ -1399,12 +1414,12 @@ function parseInput(text) {
     };
   }
   // adhoc: #topic!N or #topic@agent!N (N optional, defaults to 0 = no lookback)
-  const ma = text.match(/^#(\w+)(?:@(\w+))?!(\d*)\s+([\s\S]*)$/);
+  const ma = text.match(new RegExp(`^#(${TOPIC_SLUG_SRC})(?:@(${AGENT_SLUG_SRC}))?!(\\d*)\\s+([\\s\\S]*)$`));
   if (ma && ma[4].trim()) {
     return { topic: ma[1].toLowerCase(), agent: ma[2] || null, adhoc: true, lookback: ma[3] ? Math.min(parseInt(ma[3]), 20) : 0, message: ma[4].trim() };
   }
   // session: #topic or #topic@agent
-  const ms = text.match(/^#(\w+)(?:@(\w+))?\s+([\s\S]*)$/);
+  const ms = text.match(new RegExp(`^#(${TOPIC_SLUG_SRC})(?:@(${AGENT_SLUG_SRC}))?\\s+([\\s\\S]*)$`));
   if (ms && ms[3].trim()) {
     return { topic: ms[1].toLowerCase(), agent: ms[2] || null, adhoc: false, lookback: 0, message: ms[3].trim() };
   }
@@ -1439,7 +1454,7 @@ function parseInput(text) {
       message: '',
     };
   }
-  const mb = text.match(/^#(\w+)(?:@(\w+))?(?:!(\d*))?$/);
+  const mb = text.match(new RegExp(`^#(${TOPIC_SLUG_SRC})(?:@(${AGENT_SLUG_SRC}))?(?:!(\\d*))?$`));
   if (mb) {
     return {
       topic: mb[1].toLowerCase(),
@@ -2030,7 +2045,7 @@ function parseScopeInput(text, { allowAll = false } = {}) {
       : null;
   }
 
-  const topicMatch = scope.match(/^#([\w-]+)(?:@([\w-]+)([!+*])?)?$/);
+  const topicMatch = scope.match(new RegExp(`^#(${TOPIC_SLUG_SRC})(?:@([\\w-]+)([!+*])?)?$`));
   if (topicMatch) {
     const agent = topicMatch[2] || null;
     const mode = topicMatch[3] || '';
@@ -2296,7 +2311,7 @@ function normalizePromptHistoryRoute(route) {
   if (chain) return chain.route;
   const broadcast = parseOriginBroadcast(route);
   if (broadcast) return broadcast.route;
-  const match = String(route || '').match(/^#(\w+)(?:@(\w+))?(!)?\d*$/);
+  const match = String(route || '').match(new RegExp(`^#(${TOPIC_SLUG_SRC})(?:@(${AGENT_SLUG_SRC}))?(!)?\\d*$`));
   if (!match) return '';
   return promptHistoryRoute(match[1].toLowerCase(), match[2] || null, !!match[3]);
 }
@@ -2340,7 +2355,7 @@ function applyPromptHistoryEntry(entry) {
         broadcastAgents: broadcast.agents,
       });
     }
-    const match = route.match(/^#(\w+)(?:@(\w+))?(!(?:(\d+))?)?$/);
+    const match = route.match(new RegExp(`^#(${TOPIC_SLUG_SRC})(?:@(${AGENT_SLUG_SRC}))?(!(?:(\\d+))?)?$`));
     if (!chain && !broadcast && match) {
       setTopicChip(
         match[1].toLowerCase(),
@@ -2440,7 +2455,7 @@ function parseHistoryRouteTarget(route) {
       broadcastAgents: broadcast.agents,
     };
   }
-  const match = String(route || '').match(/^#(\w+)(?:@(\w+))?(!)?$/);
+  const match = String(route || '').match(new RegExp(`^#(${TOPIC_SLUG_SRC})(?:@(${AGENT_SLUG_SRC}))?(!)?$`));
   if (!match) return null;
   return {
     topic: match[1].toLowerCase(),
@@ -2551,7 +2566,7 @@ function appendMatchingRouteHistoryItems(items, prefix, seenRoutes = null) {
 function composerHasOnlyRoute() {
   const value = input.value.trim();
   if (!value) return true;
-  return /^#\w+(?:@\w+)?(?:!\d*)?$/.test(value) || !!parseRouteChain(value) || !!parseOriginBroadcast(value);
+  return new RegExp(`^#${TOPIC_SLUG_SRC}(?:@${AGENT_SLUG_SRC})?(?:!\\d*)?$`).test(value) || !!parseRouteChain(value) || !!parseOriginBroadcast(value);
 }
 
 function composerRouteForRouteHistory() {
@@ -3247,7 +3262,7 @@ async function _maybePromoteSlug(val) {
     resizeComposer();
     return;
   }
-  const m = val.match(/^#(\w+)(?:@(\w+))?(!\d*)? $/);
+  const m = val.match(new RegExp(`^#(${TOPIC_SLUG_SRC})(?:@(${AGENT_SLUG_SRC}))?(!\\d*)? $`));
   if (!m) return;
   const topic = m[1].toLowerCase();
   const explicitAgent = m[2] || null;
@@ -3324,7 +3339,7 @@ async function _maybeCollapseExpandedSlug(force = false, allowCompletedPrompt = 
     input.dispatchEvent(new Event('input'));
     return;
   }
-  const m = val.match(/^#(\w+)(?:@(\w+))?(!(\d*))? ([\s\S]+)$/);
+  const m = val.match(new RegExp(`^#(${TOPIC_SLUG_SRC})(?:@(${AGENT_SLUG_SRC}))?(!(\\d*))? ([\\s\\S]+)$`));
   if (!m) return;
 
   const prompt = m[5];
@@ -3401,7 +3416,7 @@ function semanticRouteBackspace() {
   let nextRoute = null;
   let nextCaret = caret;
 
-  if (caret === routeEnd && /^#\w+@\w+!\d+$/.test(route)) return false;
+  if (caret === routeEnd && new RegExp(`^#${TOPIC_SLUG_SRC}@${AGENT_SLUG_SRC}!\\d+$`).test(route)) return false;
 
   if (caret === routeEnd && route.endsWith('!')) {
     nextRoute = route.slice(0, -1);
@@ -3409,17 +3424,17 @@ function semanticRouteBackspace() {
   } else {
     const before = route.slice(0, caret);
     const after = route.slice(caret);
-    const agentMatch = before.match(/^(#\w+@)\w+$/);
-    const topicMatch = before.match(/^(#)\w+$/);
-    const chainTargetMatch = before.match(/^(#\w+@\w+!?(?:(?:<>)|=>|>)@)\w+$/);
-    const chainOriginMatch = before.match(/^(#\w+@)\w+$/);
+    const agentMatch = before.match(new RegExp(`^(#${TOPIC_SLUG_SRC}@)${AGENT_SLUG_SRC}$`));
+    const topicMatch = before.match(new RegExp(`^(#)${TOPIC_SLUG_SRC}$`));
+    const chainTargetMatch = before.match(new RegExp(`^(#${TOPIC_SLUG_SRC}@${AGENT_SLUG_SRC}!?(?:(?:<>)|=>|>)@)${AGENT_SLUG_SRC}$`));
+    const chainOriginMatch = before.match(new RegExp(`^(#${TOPIC_SLUG_SRC}@)${AGENT_SLUG_SRC}$`));
     // Origin Broadcast (ADR-0032): drop the trailing `,#topic`, `,@agent`, or
     // `,#topic@agent` segment as one unit, same as a chain target —
     // otherwise a comma-list route can only be trimmed one character at a
     // time. (Trailing `!` on that segment is stripped by the top-of-function
     // check on an earlier backspace press, same as everywhere else here.)
-    const _atom = '(?:#\\w+@\\w+|#\\w+|@\\w+)';
-    const broadcastTailMatch = before.match(new RegExp(`^(#\\w+@\\w+!?(?:,${_atom}!?)*),(${_atom})$`));
+    const _atom = `(?:#${TOPIC_SLUG_SRC}@${AGENT_SLUG_SRC}|#${TOPIC_SLUG_SRC}|@${AGENT_SLUG_SRC})`;
+    const broadcastTailMatch = before.match(new RegExp(`^(#${TOPIC_SLUG_SRC}@${AGENT_SLUG_SRC}!?(?:,${_atom}!?)*),(${_atom})$`));
 
     if (broadcastTailMatch && (caret === routeEnd || after.startsWith('!'))) {
       nextRoute = broadcastTailMatch[1] + after;
@@ -3427,7 +3442,7 @@ function semanticRouteBackspace() {
     } else if (chainTargetMatch && (caret === routeEnd || after.startsWith('!'))) {
       nextRoute = chainTargetMatch[1] + after;
       nextCaret = chainTargetMatch[1].length;
-    } else if (before.endsWith('@') && /^#\w+@\w+!?(?:(?:<>)|=>|>)@$/.test(before) && (caret === routeEnd || after.startsWith('!'))) {
+    } else if (before.endsWith('@') && new RegExp(`^#${TOPIC_SLUG_SRC}@${AGENT_SLUG_SRC}!?(?:(?:<>)|=>|>)@$`).test(before) && (caret === routeEnd || after.startsWith('!'))) {
       nextRoute = before.slice(0, -2) + after;
       nextCaret = before.length - 2;
     } else if (chainOriginMatch && (after.startsWith('>@') || after.startsWith('<>@') || after.startsWith('!>@') || after.startsWith('!<>@'))) {
@@ -3437,11 +3452,12 @@ function semanticRouteBackspace() {
       nextRoute = agentMatch[1] + after;
       nextCaret = agentMatch[1].length;
     } else if (topicMatch && (caret === routeEnd || after.startsWith('@') || after.startsWith('!'))) {
-      // Deletes a bare "#topic" (no agent yet) back to "#" in one press, same
-      // as agentMatch does for "@agent" — lets you retype a new topic fast.
-      nextRoute = topicMatch[1] + after;
-      nextCaret = topicMatch[1].length;
-    } else if (before.endsWith('@') && /^#\w+@$/.test(before) && (caret === routeEnd || after.startsWith('!'))) {
+      // Dotted topic names are hierarchical; trim only the last segment so
+      // "#parent.child" backs up to "#parent." instead of clearing the topic.
+      const lastDot = before.lastIndexOf('.');
+      nextCaret = lastDot > 0 ? lastDot + 1 : topicMatch[1].length;
+      nextRoute = before.slice(0, nextCaret) + after;
+    } else if (before.endsWith('@') && new RegExp(`^#${TOPIC_SLUG_SRC}@$`).test(before) && (caret === routeEnd || after.startsWith('!'))) {
       nextRoute = before.slice(0, -1) + after;
       nextCaret = before.length - 1;
     }
@@ -4120,9 +4136,13 @@ async function sendMessage(text, opts = {}) {
           resolvedAgent = data.agent || resolvedAgent;
           addPinButton(bubble, msgId, topic, resolvedAgent, data.session_id || null);
           addBookmarkButton(bubble, msgId, topic, resolvedAgent);
+          addReplyButton(bubble, topic, resolvedAgent, !!adhoc);
           const completedAt = data.completed_at || data.stats?.completed_at || doneTime;
           if (!statsEl && data.stats) statsEl = addStats(bubble, data.stats, completedAt);
-          if (statsEl) { messages.appendChild(statsEl); addDeepDiveButton(bubble, topic, resolvedAgent, !!adhoc, statsEl, msgId, completedAt); }
+          if (statsEl) {
+            messages.appendChild(statsEl);
+            addDeepDiveButton(bubble, topic, resolvedAgent, !!adhoc, statsEl, msgId, completedAt);
+          }
           liveSessionTurnCount = parseInt(data.session_turn_count || '0', 10) || liveSessionTurnCount;
           _advisoryTurnCount = liveSessionTurnCount;
           const completedSessionId = data.session_id || data.stats?.session_id || lastSessionId;
@@ -4374,6 +4394,7 @@ async function sendMessage(text, opts = {}) {
                 }
                 addPinButton(bubble, msgId, topic, resolvedAgent);
                 addBookmarkButton(bubble, msgId, topic, resolvedAgent);
+                addReplyButton(bubble, topic, resolvedAgent, !!adhoc);
               }
             } catch {}
             eventName = null;
@@ -5624,7 +5645,7 @@ function makeHistoryPromptToggle(prompt) {
 }
 
 function historyRouteChainFromPrompt(prompt) {
-  const match = String(prompt || '').match(/(?:^|\n)Route:\s*(#\w+@\w+!?(?:(?:<>)|=>|>)(?:#\w+)?@\w+!?)(?:\s|$)/);
+  const match = String(prompt || '').match(new RegExp(`(?:^|\\n)Route:\\s*(#${TOPIC_SLUG_SRC}@${AGENT_SLUG_SRC}!?(?:(?:<>)|=>|>)(?:#${TOPIC_SLUG_SRC})?@${AGENT_SLUG_SRC}!?)(?:\\s|$)`));
   return match ? normalizePromptHistoryRoute(match[1]) : '';
 }
 
@@ -5776,6 +5797,7 @@ function appendHistoryItem(item, container) {
   if (item.timestamp) asstBubble.dataset.ts = item.timestamp;
   if (item.id) addPinButton(asstBubble, item.id, item.topic || 'default', item.agent || null, item.session_id || null);
   if (item.id) addBookmarkButton(asstBubble, item.id, item.topic || 'default', item.agent || null);
+  if (item.id) addReplyButton(asstBubble, item.topic || 'default', item.agent || null, !!item.adhoc);
 
   if (container) container.appendChild(asstBubble);
 
@@ -9839,13 +9861,59 @@ function _renderTopicAgents(topic) {
   return html;
 }
 
-function _renderTopicRows(topic) {
+function _topicRootName(name) {
+  return String(name || 'default').split('.', 1)[0] || 'default';
+}
+
+function _topicCompare(a, b) {
+  let cmp;
+  if (_topicsSort.col === 'name') {
+    cmp = a.name.localeCompare(b.name);
+  } else if (_topicsSort.col === 'turns') {
+    cmp = (a.total_turns || 0) - (b.total_turns || 0);
+  } else {
+    const ta = a.last_at || '';
+    const tb = b.last_at || '';
+    cmp = ta < tb ? -1 : ta > tb ? 1 : 0;
+  }
+  return _topicsSort.dir === 'asc' ? cmp : -cmp;
+}
+
+function _nestedTopicRows(sortedTopics, allTopics) {
+  const allByName = new Map((allTopics || []).map(topic => [topic.name, topic]));
+  const listed = new Set(sortedTopics.map(topic => topic.name));
+  const roots = [];
+  const childrenByRoot = new Map();
+  for (const topic of sortedTopics) {
+    const root = _topicRootName(topic.name);
+    if (root !== topic.name && allByName.has(root)) {
+      if (!childrenByRoot.has(root)) childrenByRoot.set(root, []);
+      childrenByRoot.get(root).push(topic);
+    } else {
+      roots.push(topic);
+    }
+  }
+  for (const [root, children] of childrenByRoot) {
+    if (!listed.has(root)) roots.push(allByName.get(root));
+  }
+  roots.sort(_topicCompare);
+  const rows = [];
+  for (const root of roots) {
+    rows.push({ topic: root, subtopic: false });
+    const children = (childrenByRoot.get(root.name) || []).sort(_topicCompare);
+    children.forEach(topic => rows.push({ topic, subtopic: true }));
+  }
+  return rows;
+}
+
+function _renderTopicRows(topic, opts = {}) {
+  const subtopic = !!opts.subtopic;
   const expanded = _topicsExpanded.has(topic.name);
   const prompt = topic.last_prompt ? escapeHtml(truncate(topic.last_prompt, 120)) : '<span class="col-default">No prompt yet</span>';
   const memoryLabel = topic.memory?.exists ? 'Memory' : 'Add memory';
   const hideLabel = topic.name !== 'default' ? (topic.hidden ? 'Show' : 'Hide') : '';
   return `
-    <div class="topic-row${topic.hidden ? ' hidden' : ''}${expanded ? ' expanded' : ''}" data-topic="${escapeHtml(topic.name)}">
+    <div class="topic-row${topic.hidden ? ' hidden' : ''}${expanded ? ' expanded' : ''}${subtopic ? ' subtopic' : ''}" data-topic="${escapeHtml(topic.name)}">
       <div class="topic-main">
         <span class="topic-caret">${expanded ? '▾' : '▸'}</span>
         <span class="topic-identity"><span class="topic-name">#${escapeHtml(topic.name)}</span>${topic.total_turns > 0 ? `<span class="topic-turn-count">${topic.total_turns}</span>` : ''}</span>
@@ -9854,12 +9922,12 @@ function _renderTopicRows(topic) {
       <div class="topic-meta">
         ${_topicStatusBadges(topic)}
         <button class="topic-btn" data-topic-open="${escapeHtml(topic.name)}" type="button">Open</button>
-        <button class="topic-btn" data-topic-memory="${escapeHtml(topic.name)}" type="button">${memoryLabel}</button>
+        ${subtopic ? '' : `<button class="topic-btn" data-topic-memory="${escapeHtml(topic.name)}" type="button">${memoryLabel}</button>`}
         ${topic.name !== 'default' ? `<button class="topic-btn" data-topic-hide="${escapeHtml(topic.name)}" data-hidden="${topic.hidden ? '1' : '0'}" type="button">${hideLabel}</button>` : ''}
         <button class="topic-btn danger" data-topic-delete="${escapeHtml(topic.name)}" type="button">${topic.name === 'default' ? 'Clear' : 'Delete'}</button>
       </div>
     </div>
-    <div class="topic-agents"${expanded ? '' : ' hidden'}>${_renderTopicAgents(topic)}</div>`;
+    <div class="topic-agents${subtopic ? ' subtopic' : ''}"${expanded ? '' : ' hidden'}>${_renderTopicAgents(topic)}</div>`;
 }
 
 async function loadTopicsView() {
@@ -9885,21 +9953,10 @@ async function loadTopicsView() {
     return;
   }
 
-  const sorted = [...filtered].sort((a, b) => {
-    let cmp;
-    if (_topicsSort.col === 'name') {
-      cmp = a.name.localeCompare(b.name);
-    } else if (_topicsSort.col === 'turns') {
-      cmp = (a.total_turns || 0) - (b.total_turns || 0);
-    } else {
-      const ta = a.last_at || '';
-      const tb = b.last_at || '';
-      cmp = ta < tb ? -1 : ta > tb ? 1 : 0;
-    }
-    return _topicsSort.dir === 'asc' ? cmp : -cmp;
-  });
+  const sorted = [...filtered].sort(_topicCompare);
+  const rows = _nestedTopicRows(sorted, topics);
 
-  listEl.innerHTML = sorted.map(_renderTopicRows).join('');
+  listEl.innerHTML = rows.map(row => _renderTopicRows(row.topic, { subtopic: row.subtopic })).join('');
   _updateTopicsSortBar();
   bindTopicsView();
 }
@@ -10885,7 +10942,7 @@ function _coloredRouteHtml(route) {
   const src = String(route || '');
   let out = '';
   let last = 0;
-  const tokenRe = /#\w+|@\w+!?/g;
+  const tokenRe = new RegExp(`#${TOPIC_SLUG_SRC}|@${AGENT_SLUG_SRC}!?`, 'g');
   for (const match of src.matchAll(tokenRe)) {
     const token = match[0];
     out += escapeHtml(src.slice(last, match.index));
@@ -10907,7 +10964,7 @@ function appendColoredRouteTokens(parent, route, opts = {}) {
   const freshClass = opts.freshClass || 'chip-adhoc';
   const src = String(route || '');
   let last = 0;
-  const tokenRe = /#\w+|@\w+!?/g;
+  const tokenRe = new RegExp(`#${TOPIC_SLUG_SRC}|@${AGENT_SLUG_SRC}!?`, 'g');
   for (const match of src.matchAll(tokenRe)) {
     const token = match[0];
     if (match.index > last) parent.appendChild(document.createTextNode(src.slice(last, match.index)));
@@ -10965,7 +11022,7 @@ function _acRouteHtml(route) {
       return sep + topicHtml + agentHtml;
     }).join('');
   }
-  const rm = String(route || '').match(/^#(\w+)(?:@(\w+))?(!\d*)?$/);
+  const rm = String(route || '').match(new RegExp(`^#(${TOPIC_SLUG_SRC})(?:@(${AGENT_SLUG_SRC}))?(!\\d*)?$`));
   if (rm) return _acRouteLabel(rm[1], (rm[2] || '') + (rm[3] || ''));
   // Neither parser resolved this route — e.g. a join whose origins span
   // different topics leaves a bare `@target` topic-ambiguous, so
@@ -11019,24 +11076,24 @@ async function updateAutocomplete() {
   // insert literal text, not set a route — so skip it and fall through to
   // the same handling any other message text gets (prompt history, below).
   const routeSyntaxActive = !stickyChip || editingExpandedSlug;
-  const chainSyntaxActive = routeSyntaxActive || /^#\w+@\w+!?(?:[+,](?:#\w+)?(?:@\w+)?!?)*(?:<>?|>|=>)/.test(slugVal);
-  const broadcastSyntaxActive = routeSyntaxActive || /^#\w+@\w+!?(?:,(?:#\w+@?\w*|@\w*|#\w+|\w*)!?)*,$/.test(slugVal);
-  const aliasSyntaxActive = routeSyntaxActive || /^#\w+@\w*$/.test(slugVal);
-  const mTopic = routeSyntaxActive && slugVal.match(/^#(\w*)[!]?$/);
-  const mMultiOriginChainAlias = chainSyntaxActive && slugVal.match(/^(#\w+@\w+!?(?:[+,](?:#\w+)?(?:@\w+)?!?)+)(<>?|>|=>)(?:@?)(\w*)(!)?$/);
-  const mChainAlias = chainSyntaxActive && slugVal.match(/^#(\w+)@(\w+)(!)?(<>?|=>|>)(?:@?)(\w*)(!)?$/);
-  const mChainTopicTarget = chainSyntaxActive && slugVal.match(/^#(\w+)@(\w+)(!)?(<>?|=>|>)#(\w*)$/);
-  const mAlias = aliasSyntaxActive && slugVal.match(/^#(\w+)@(\w*)(!\d*)?$/);
+  const chainSyntaxActive = routeSyntaxActive || new RegExp(`^#${TOPIC_SLUG_SRC}@${AGENT_SLUG_SRC}!?(?:[+,](?:#${TOPIC_SLUG_SRC})?(?:@${AGENT_SLUG_SRC})?!?)*(?:<>?|>|=>)`).test(slugVal);
+  const broadcastSyntaxActive = routeSyntaxActive || new RegExp(`^#${TOPIC_SLUG_SRC}@${AGENT_SLUG_SRC}!?(?:,(?:#${TOPIC_SLUG_SRC}@?${AGENT_SLUG_PARTIAL_SRC}|@${AGENT_SLUG_PARTIAL_SRC}|#${TOPIC_SLUG_SRC}|${AGENT_SLUG_PARTIAL_SRC})!?)*,$`).test(slugVal);
+  const aliasSyntaxActive = routeSyntaxActive || new RegExp(`^#${TOPIC_SLUG_SRC}@${AGENT_SLUG_PARTIAL_SRC}$`).test(slugVal);
+  const mTopic = routeSyntaxActive && slugVal.match(new RegExp(`^#(${TOPIC_SLUG_PARTIAL_SRC})[!]?$`));
+  const mMultiOriginChainAlias = chainSyntaxActive && slugVal.match(new RegExp(`^(#${TOPIC_SLUG_SRC}@${AGENT_SLUG_SRC}!?(?:[+,](?:#${TOPIC_SLUG_SRC})?(?:@${AGENT_SLUG_SRC})?!?)+)(<>?|>|=>)(?:@?)(${AGENT_SLUG_PARTIAL_SRC})(!)?$`));
+  const mChainAlias = chainSyntaxActive && slugVal.match(new RegExp(`^#(${TOPIC_SLUG_SRC})@(${AGENT_SLUG_SRC})(!)?(<>?|=>|>)(?:@?)(${AGENT_SLUG_PARTIAL_SRC})(!)?$`));
+  const mChainTopicTarget = chainSyntaxActive && slugVal.match(new RegExp(`^#(${TOPIC_SLUG_SRC})@(${AGENT_SLUG_SRC})(!)?(<>?|=>|>)#(${TOPIC_SLUG_PARTIAL_SRC})$`));
+  const mAlias = aliasSyntaxActive && slugVal.match(new RegExp(`^#(${TOPIC_SLUG_SRC})@(${AGENT_SLUG_PARTIAL_SRC})(!\\d*)?$`));
   // Origin Broadcast (ADR-0032): autocomplete for whichever trailing atom is
   // currently being typed after the last comma — everything before it (the
   // already-typed atoms) is preserved verbatim, never rewritten. `,` and
   // `,@agent` suggest agents; `,#topic` suggests topics; `,#topic@agent`
   // suggests agents scoped to the explicit topic if one was typed, else to
   // the rolling-anchor topic that atom would currently inherit.
-  const _BROADCAST_PREFIX_SRC = '#\\w+@\\w+!?(?:,(?:#\\w+@\\w+|#\\w+|@\\w+)!?)*';
-  const mBroadcastFull = broadcastSyntaxActive && slugVal.match(new RegExp(`^(${_BROADCAST_PREFIX_SRC}),#(\\w+)@(\\w*)$`));
-  const mBroadcastAgent = broadcastSyntaxActive && slugVal.match(new RegExp(`^(${_BROADCAST_PREFIX_SRC}),@?(\\w*)$`));
-  const mBroadcastTopic = broadcastSyntaxActive && slugVal.match(new RegExp(`^(${_BROADCAST_PREFIX_SRC}),#(\\w*)$`));
+  const _BROADCAST_PREFIX_SRC = `#${TOPIC_SLUG_SRC}@${AGENT_SLUG_SRC}!?(?:,(?:#${TOPIC_SLUG_SRC}@${AGENT_SLUG_SRC}|#${TOPIC_SLUG_SRC}|@${AGENT_SLUG_SRC})!?)*`;
+  const mBroadcastFull = broadcastSyntaxActive && slugVal.match(new RegExp(`^(${_BROADCAST_PREFIX_SRC}),#(${TOPIC_SLUG_SRC})@(${AGENT_SLUG_PARTIAL_SRC})$`));
+  const mBroadcastAgent = broadcastSyntaxActive && slugVal.match(new RegExp(`^(${_BROADCAST_PREFIX_SRC}),@?(${AGENT_SLUG_PARTIAL_SRC})$`));
+  const mBroadcastTopic = broadcastSyntaxActive && slugVal.match(new RegExp(`^(${_BROADCAST_PREFIX_SRC}),#(${TOPIC_SLUG_PARTIAL_SRC})$`));
   if (mBroadcastFull || mBroadcastAgent) {
     const prefix = mBroadcastFull ? mBroadcastFull[1] : mBroadcastAgent[1];
     const explicitTopic = mBroadcastFull ? mBroadcastFull[2].toLowerCase() : null;
@@ -12138,6 +12195,40 @@ function _memoryRevision(meta) {
   return meta?.revision || `content:${meta?.content || ''}`;
 }
 
+function _memoryRootTopic(topic) {
+  return String(topic || 'default').toLowerCase().split('.', 1)[0] || 'default';
+}
+
+function _memoryCacheKeys(topic, data = null) {
+  const keys = [];
+  const add = value => {
+    const key = String(value || '').toLowerCase();
+    if (key && !keys.includes(key)) keys.push(key);
+  };
+  add(topic);
+  add(data?.topic);
+  add(_memoryRootTopic(topic));
+  return keys;
+}
+
+function _knownMemoryMeta(topic) {
+  return _memoryCacheKeys(topic).map(key => _memoryCache[key]).find(Boolean) || null;
+}
+
+function _cacheMemoryMeta(topic, data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
+  const meta = { ...data, loading: false };
+  _memoryCacheKeys(topic, data).forEach(key => { _memoryCache[key] = meta; });
+  return meta;
+}
+
+function _clearMemoryRouteState(topic, data = null) {
+  _memoryCacheKeys(topic, data).forEach(key => {
+    _clearMemorySelectionOverridesForTopic(key);
+    _clearSessionLookupCacheForTopic(key);
+  });
+}
+
 function _clearMemorySelectionOverridesForTopic(topic) {
   for (const key of Object.keys(_memorySelectionOverrides)) {
     if (key.startsWith(`${topic}@`)) delete _memorySelectionOverrides[key];
@@ -12156,7 +12247,8 @@ function _rememberSessionMemoryRevision(topic, agent, session) {
 }
 
 function _getMemoryMeta(topic) {
-  if (_memoryCache[topic]) return _memoryCache[topic];
+  const cached = _knownMemoryMeta(topic);
+  if (cached) return cached;
   const placeholder = { topic, exists: false, content: '', path: `~/.squid/context/topics/${topic}/memory.md`, loading: true };
   _memoryCache[topic] = placeholder;
   fetch(`/topics/${encodeURIComponent(topic)}/memory`)
@@ -12164,7 +12256,7 @@ function _getMemoryMeta(topic) {
     .then(data => {
       // A newer write (save, code-roots decision, or a send's own fresh fetch) may have
       // already replaced the cache entry while this request was in flight — don't clobber it.
-      if (data && _memoryCache[topic] === placeholder) _memoryCache[topic] = { ...data, loading: false };
+      if (data && _memoryCache[topic] === placeholder) _cacheMemoryMeta(topic, data);
       updatePinCount();
       if (pinPanel.classList.contains('open')) renderPinPanel();
     })
@@ -12175,8 +12267,7 @@ function _getMemoryMeta(topic) {
 async function fetchMemoryMeta(topic) {
   const data = await fetch(`/topics/${encodeURIComponent(topic)}/memory`).then(r => r.json());
   if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
-  _memoryCache[topic] = { ...data, loading: false };
-  return _memoryCache[topic];
+  return _cacheMemoryMeta(topic, data);
 }
 
 function hasCodeRootsDecision(meta) {
@@ -12193,7 +12284,7 @@ function parseCodeRootsInput(value) {
 }
 
 async function saveCodeRootsDecision(topic, payload) {
-  const oldRevision = _memoryRevision(_memoryCache[topic]);
+  const oldRevision = _memoryRevision(_knownMemoryMeta(topic));
   const res = await fetch(`/topics/${encodeURIComponent(topic)}/memory/squid/code-roots`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -12202,13 +12293,12 @@ async function saveCodeRootsDecision(topic, payload) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `Save failed (${res.status})`);
   if (_memoryRevision(data) !== oldRevision) {
-    _clearMemorySelectionOverridesForTopic(topic);
-    _clearSessionLookupCacheForTopic(topic);
+    _clearMemoryRouteState(topic, data);
   }
-  _memoryCache[topic] = { ...data, loading: false };
+  const meta = _cacheMemoryMeta(topic, data);
   updatePinCount();
   if (pinPanel.classList.contains('open')) renderPinPanel();
-  return data;
+  return meta;
 }
 
 
@@ -12304,7 +12394,7 @@ async function _topicMemoryStateForSend(topic, agent, adhoc) {
   const meta = await fetch(`/topics/${encodeURIComponent(topic)}/memory`)
     .then(r => r.ok ? r.json() : null)
     .catch(() => null);
-  if (meta) _memoryCache[topic] = { ...meta, loading: false };
+  if (meta) _cacheMemoryMeta(topic, meta);
   const exists = !!(meta?.exists && (meta.content || '').trim());
   if (!exists) return { selected: false };
   const revision = _memoryRevision(meta);
@@ -12600,7 +12690,7 @@ async function openMemoryEditor(topic) {
   memoryModal.classList.add('open');
   try {
     const data = await fetch(`/topics/${encodeURIComponent(topic)}/memory/squid/seed`, { method: 'POST' }).then(r => r.json());
-    _memoryCache[topic] = { ...data, loading: false };
+    _cacheMemoryMeta(topic, data);
     memoryEditor.value = data.content || '';
     memoryPath.textContent = data.path || `~/.squid/context/topics/${topic}/memory.md`;
     updateMemoryTokenCount();
@@ -12619,7 +12709,7 @@ function closeMemoryEditor() {
 async function saveMemoryEditor() {
   if (!_editingMemoryTopic) return;
   const topic = _editingMemoryTopic;
-  const oldRevision = _memoryRevision(_memoryCache[topic]);
+  const oldRevision = _memoryRevision(_knownMemoryMeta(topic));
   const idleLabel = 'Save';
   memorySaveBtn.disabled = true;
   memorySaveBtn.textContent = 'Saving...';
@@ -12633,10 +12723,9 @@ async function saveMemoryEditor() {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || `Save failed (${res.status})`);
     if (_memoryRevision(data) !== oldRevision) {
-      _clearMemorySelectionOverridesForTopic(topic);
-      _clearSessionLookupCacheForTopic(topic);
+      _clearMemoryRouteState(topic, data);
     }
-    _memoryCache[topic] = { ...data, loading: false };
+    _cacheMemoryMeta(topic, data);
     memoryPath.textContent = `${data.path || `~/.squid/context/topics/${topic}/memory.md`} · saved`;
     memorySaveBtn.textContent = 'Saved';
     updatePinCount();
@@ -12825,6 +12914,80 @@ function addDeepDiveButton(bubbleEl, topic, agent, adhoc, statsEl, msgId, timest
     statsEl.appendChild(btn);
   }
   return statsEl.querySelector('.stats-deep-dive-btn');
+}
+
+function addReplyButton(bubbleEl, topic, agent, adhoc) {
+  if (bubbleEl.querySelector('.msg-reply-btn')) return;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'msg-reply-btn';
+  btn.title = 'Reply';
+  btn.innerHTML = `<span class="material-symbols-outlined">reply</span>`;
+  btn.addEventListener('click', e => {
+    e.stopPropagation();
+    replyToMessage(bubbleEl, topic, agent, !!adhoc);
+  });
+  // Anchored via position:absolute (bottom-right corner of the bubble, see
+  // .msg-reply-btn) — not part of the .stats row, so it doesn't inherit that
+  // row's shrink-wrapped width and stays pinned to the bubble's actual edge
+  // regardless of how long the stats text or topic tag are.
+  bubbleEl.appendChild(btn);
+}
+
+function blinkTopicChip() {
+  if (!topicChipEl) return;
+  topicChipEl.classList.remove('reply-blink');
+  void topicChipEl.offsetWidth; // restart the animation if it's already running
+  topicChipEl.classList.add('reply-blink');
+}
+topicChipEl?.addEventListener('animationend', e => {
+  if (e.animationName === 'topic-chip-reply-blink') topicChipEl.classList.remove('reply-blink');
+});
+
+// Reply is one click: land on the message's route if we're elsewhere, or —
+// if already on that route but the message belongs to an earlier session —
+// pull it into context the same way the pin button does. Same route, same
+// session: nothing to do, you're already there.
+async function replyToMessage(bubbleEl, topic, agent, adhoc) {
+  const msgTopic = topic || 'default';
+  const msgAgent = agent || null;
+  const msgAdhoc = !!adhoc;
+
+  const active = await resolveEffectiveComposerRoute();
+  const sameRoute = !active.route
+    && (active.topic || 'default') === msgTopic
+    && (active.agent || null) === msgAgent
+    && !!active.adhoc === msgAdhoc;
+
+  if (!sameRoute) {
+    // Point the composer at this message's route only — reply shouldn't
+    // also filter the visible history, unlike clicking the topic chip does.
+    setTopicChip(msgTopic, msgAgent, msgAdhoc);
+  }
+  // Blink either way: on a route switch it confirms the new target, and on
+  // an already-matching route it's the only feedback the click did anything
+  // — otherwise a same-route reply looks like a no-op.
+  blinkTopicChip();
+  if (!sameRoute) return;
+
+  const msgId = bubbleEl.dataset.msgId ? parseInt(bubbleEl.dataset.msgId, 10) : null;
+  const sid = bubbleEl.dataset.sessionId || null;
+  const currentSid = (!msgAdhoc && msgAgent) ? (_sessionIds[`${msgTopic}@${msgAgent}`] || null) : null;
+  // No id or no session on the message — can't tell it apart from the active
+  // one, so do nothing rather than guess. But a missing currentSid (e.g. the
+  // route's session was just cleared) isn't "unknown" — it means there is no
+  // active session, so a message that does have a sid is necessarily stale
+  // and should be pinned, not skipped.
+  if (msgId == null || !sid || sid === currentSid) return;
+
+  const pinned = getPinnedItems();
+  if (pinned.find(i => i.id === msgId)) return;
+  const text = _messageBodyText(bubbleEl).slice(0, 300);
+  setPinnedItems([...pinned, { id: msgId, topic: msgTopic, agent: msgAgent, session_id: sid, content: text }]);
+  bubbleEl.querySelector(`.msg-pin-btn[data-msg-id="${msgId}"]`)?.classList.add('pinned');
+  bubbleEl.classList.add('pinned-sel');
+  updatePinCount();
+  if (pinPanel.classList.contains('open')) renderPinPanel();
 }
 
 async function _navigateToDeepDive(topic, agent, adhoc) {

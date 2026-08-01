@@ -51,13 +51,15 @@ async function mockBackend(page, topics = TOPICS) {
   await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
   await page.route('**/topics/manage**', r => r.fulfill({ json: currentTopics() }));
   await page.route('**/topics', r => r.fulfill({ json: currentTopics().filter(t => !t.hidden) }));
-  await page.route('**/topics/*/memory', r => r.fulfill({ json: {
+  const topicMemory = {
     topic: 'squid',
     exists: true,
     content: 'Remember topic state.',
     path: '~/.squid/context/topics/squid/memory.md',
     squid: { code_roots: [], code_roots_skipped: false, code_roots_missing: false },
-  }}));
+  };
+  await page.route('**/topics/*/memory/squid/seed', r => r.fulfill({ json: topicMemory }));
+  await page.route('**/topics/*/memory', r => r.fulfill({ json: topicMemory }));
   await page.route('**/config/agents', r => r.fulfill({ json: [] }));
 }
 
@@ -114,6 +116,42 @@ test('topics tab renders searchable expandable topic lanes and actions', async (
   await expect(page.locator('#topic-delete-modal-title')).toHaveText('#squid');
   await page.locator('#topic-delete-confirm').click();
   expect(deletedRequests[0]).toContain('/topics/squid');
+});
+
+test('dotted topics render nested under root topic without memory action', async ({ page }) => {
+  const topics = JSON.parse(JSON.stringify(TOPICS));
+  topics.splice(1, 0, {
+    name: 'squid.experiment',
+    agent: 'codex',
+    sticky_adhoc: false,
+    last_model: 'gpt-5',
+    last_backend: 'codex',
+    last_prompt: 'subtopic prompt',
+    last_at: '2026-06-13T12:00:00Z',
+    hidden: false,
+    queue_depth: 0,
+    active: false,
+    total_turns: 3,
+    memory: { exists: true, path: '~/.squid/context/topics/squid/memory.md' },
+    agents: [],
+  });
+  await mockBackend(page, topics);
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Topics' }).click();
+
+  const rowTopics = await page.locator('.topic-row').evaluateAll(rows => rows.map(row => row.dataset.topic));
+  expect(rowTopics.slice(0, 2)).toEqual(['squid', 'squid.experiment']);
+
+  const rootRow = page.locator('.topic-row[data-topic="squid"]');
+  const childRow = page.locator('.topic-row[data-topic="squid.experiment"]');
+  await expect(childRow).toHaveClass(/subtopic/);
+  await expect(rootRow.locator('[data-topic-memory="squid"]')).toHaveCount(1);
+  await expect(childRow.locator('[data-topic-memory]')).toHaveCount(0);
+
+  await page.fill('#topics-search', 'experiment');
+  await expect(page.locator('.topic-row[data-topic="squid"]')).toHaveCount(1);
+  await expect(page.locator('.topic-row[data-topic="squid.experiment"]')).toHaveClass(/subtopic/);
 });
 
 test('topic open records topics page so browser back returns there', async ({ page }) => {

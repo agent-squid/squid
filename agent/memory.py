@@ -4,7 +4,7 @@ from typing import Optional
 
 import yaml
 
-from .topics import normalize_topic_slug
+from .topics import memory_root_slug
 
 
 _SQUID_HOME = Path.home() / ".squid"
@@ -105,12 +105,12 @@ def _display_path(path: Path) -> str:
 
 
 def topic_memory_path(topic: str) -> Path:
-    slug = normalize_topic_slug(topic)
+    slug = memory_root_slug(topic)
     return TOPICS_CONTEXT_DIR / slug / "memory.md"
 
 
 def read_topic_memory(topic: str) -> dict:
-    slug = normalize_topic_slug(topic)
+    slug = memory_root_slug(topic)
     path = topic_memory_path(slug)
     if not path.exists():
         return {
@@ -133,7 +133,7 @@ def read_topic_memory(topic: str) -> dict:
 
 
 def ensure_topic_memory_placeholder(topic: str) -> dict:
-    slug = normalize_topic_slug(topic)
+    slug = memory_root_slug(topic)
     path = topic_memory_path(slug)
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -142,7 +142,7 @@ def ensure_topic_memory_placeholder(topic: str) -> dict:
 
 
 def write_topic_memory(topic: str, content: str) -> dict:
-    slug = normalize_topic_slug(topic)
+    slug = memory_root_slug(topic)
     path = topic_memory_path(slug)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -155,7 +155,7 @@ def write_topic_memory_squid_code_roots(
     code_roots: Optional[list[str]] = None,
     code_roots_skipped: bool = False,
 ) -> dict:
-    slug = normalize_topic_slug(topic)
+    slug = memory_root_slug(topic)
     path = topic_memory_path(slug)
     content = path.read_text(encoding="utf-8") if path.exists() else ""
     yaml_text, body = _split_frontmatter(content)
