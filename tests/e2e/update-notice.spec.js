@@ -51,8 +51,10 @@ test('hamburger, Settings, and Restart get a dot, and Settings explains restart 
   const headerBox = await page.locator('#config-editor-header').boundingBox();
   const versionBox = await page.locator('#settings-version-info').boundingBox();
   const actionsBox = await page.locator('#config-editor-actions').boundingBox();
+  const noticeBox = await notice.boundingBox();
   expect(Math.abs(versionBox.x - headerBox.x)).toBeLessThan(2);
   expect(Math.abs((actionsBox.x + actionsBox.width) - (headerBox.x + headerBox.width))).toBeLessThan(2);
+  expect(noticeBox.y).toBeGreaterThan(headerBox.y + headerBox.height - 1);
   await expect(notice).toBeVisible();
   await expect(notice).toContainText('AgentSquid v0.1.0 → v0.2.0');
   await expect(notice).toContainText('Restart Server can upgrade before restarting');
@@ -67,20 +69,37 @@ test('no dot when already on the latest version', async ({ page }) => {
   await expect(page.locator('#hamburger-btn')).not.toHaveClass(/has-update/);
 });
 
-test('stale no-update cache is rechecked on load', async ({ page }) => {
+test('no-update cache is reused for 24 hours', async ({ page }) => {
+  let pypiHits = 0;
   await mockApp(page, { version: '0.1.1' });
-  await mockLatestVersion(page, '0.1.2');
+  await page.route(PYPI_PROJECT_URL, r => {
+    pypiHits += 1;
+    return r.fulfill({ json: { info: { version: '0.1.1' } } });
+  });
 
   await page.goto('/');
-  await page.evaluate(() => {
-    localStorage.setItem('squid_update_check_cache', JSON.stringify({
-      version: '0.1.1',
-      checkedAt: Date.now(),
-    }));
-  });
+  await expect(page.locator('#hamburger-btn')).not.toHaveClass(/has-update/);
+  expect(pypiHits).toBe(1);
+
   await page.reload();
+  await expect(page.locator('#hamburger-btn')).not.toHaveClass(/has-update/);
+  expect(pypiHits).toBe(1);
+});
+
+test('manual update check bypasses no-update cache', async ({ page }) => {
+  await mockApp(page, { version: '0.1.1' });
+  await mockLatestVersion(page, '0.1.1');
+
+  await page.goto('/');
+  await expect(page.locator('#hamburger-btn')).not.toHaveClass(/has-update/);
+
+  await page.unroute(PYPI_PROJECT_URL);
+  await mockLatestVersion(page, '0.1.2');
+  await openSettings(page);
+  await page.locator('#settings-update-check').click();
 
   await expect(page.locator('#hamburger-btn')).toHaveClass(/has-update/);
+  await expect(page.locator('#settings-update-notice')).toContainText('AgentSquid v0.1.1 → v0.1.2');
 });
 
 test('version notice still appears when restart-time install is unavailable', async ({ page }) => {

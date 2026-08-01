@@ -690,18 +690,21 @@
 
     <!-- ── SETTINGS VIEW ────────────────────────────────────────────────────── -->
     <div id="view-settings" class="view">
+      <div id="config-editor-header">
+        <div id="settings-version-row">
+          <span id="settings-version-info" aria-live="polite"></span>
+          <button id="settings-update-check" type="button">Check Updates</button>
+        </div>
+        <div id="config-editor-actions">
+          <button id="config-editor-reload" type="button">Reload</button>
+          <button id="config-editor-save" type="button">Save YAML</button>
+        </div>
+      </div>
       <div id="settings-update-notice" class="settings-update-notice" hidden>
         <span id="settings-update-text"></span>
         <code id="settings-update-cmd" class="no-agent-cmd"></code>
         <button id="settings-update-copy" class="no-agent-copy" type="button">copy</button>
         <button id="settings-update-dismiss" type="button" aria-label="Dismiss update notice" title="Dismiss">×</button>
-      </div>
-      <div id="config-editor-header">
-        <span id="settings-version-info" aria-live="polite"></span>
-        <div id="config-editor-actions">
-          <button id="config-editor-reload" type="button">Reload</button>
-          <button id="config-editor-save" type="button">Save YAML</button>
-        </div>
       </div>
       <div id="config-editor-status-line"><span id="config-editor-status"></span></div>
       <div class="settings-hint">Validated and backed up before saving. Most changes require a restart; file roots apply immediately. <span id="config-editor-path"></span></div>

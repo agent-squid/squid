@@ -1195,6 +1195,96 @@ def test_provider_static_quota_is_normalized_with_no_harness_involved():
     }
 
 
+def test_provider_claude_quota_skips_fetch_without_credentials(monkeypatch):
+    async def fail_quota_claude():
+        raise AssertionError("quota_claude should not be called")
+
+    monkeypatch.setattr(creds, "get_org_id", lambda: None)
+    monkeypatch.setattr(creds, "get_session_key", lambda: None)
+    monkeypatch.setattr(server, "quota_claude", fail_quota_claude)
+
+    response = asyncio.run(
+        server._quota_snapshot_for_provider(
+            Provider(id="anthropic", label="Claude", gauge=Gauge(type="claude")),
+            "anthropic",
+        )
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.body) == {
+        "status": "unauthenticated",
+        "text": "auth",
+        "title": "Claude credentials not configured",
+        "used_percent": None,
+        "reset_at": None,
+    }
+
+
+def test_provider_subscription_quota_skips_fetch_without_credentials(monkeypatch):
+    async def fail_quota_codex():
+        raise AssertionError("quota_codex should not be called")
+
+    async def fail_quota_cursor():
+        raise AssertionError("quota_cursor should not be called")
+
+    monkeypatch.setattr(creds, "get_codex_cli_auth", lambda: {})
+    monkeypatch.setattr(creds, "get_codex_token", lambda: None)
+    monkeypatch.setattr(creds, "get_cursor_token", lambda: None)
+    monkeypatch.setattr(server, "quota_codex", fail_quota_codex)
+    monkeypatch.setattr(server, "quota_cursor", fail_quota_cursor)
+
+    codex = asyncio.run(
+        server._quota_snapshot_for_provider(
+            Provider(id="openai", label="GPT", gauge=Gauge(type="codex")),
+            "openai",
+        )
+    )
+    cursor = asyncio.run(
+        server._quota_snapshot_for_provider(
+            Provider(id="cursor", label="Cursor", gauge=Gauge(type="cursor")),
+            "cursor",
+        )
+    )
+
+    assert codex.status_code == 200
+    assert json.loads(codex.body)["status"] == "unauthenticated"
+    assert json.loads(codex.body)["title"] == "GPT credentials not configured"
+    assert cursor.status_code == 200
+    assert json.loads(cursor.body)["status"] == "unauthenticated"
+    assert json.loads(cursor.body)["title"] == "Cursor credentials not configured"
+
+
+def test_provider_balance_quota_skips_fetch_without_api_key():
+    response = asyncio.run(
+        server._quota_snapshot_for_provider(
+            Provider(
+                id="deepseek",
+                label="DeepSeek",
+                auth_type="api_key",
+                api_key={"env": "SQUID_TEST_MISSING_DEEPSEEK_KEY"},
+                gauge=Gauge(type="deepseek"),
+            ),
+            "deepseek",
+        )
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.body) == {
+        "status": "unauthenticated",
+        "text": "auth",
+        "title": "DeepSeek credentials not configured",
+        "used_percent": None,
+        "reset_at": None,
+    }
+
+
+def test_codex_gauge_auth_detects_cli_auth(monkeypatch):
+    monkeypatch.setattr(creds, "get_codex_cli_auth", lambda: {"access_token": "token"})
+    monkeypatch.setattr(creds, "get_codex_token", lambda: None)
+
+    assert server._gauge_authed("codex", Provider(id="openai")) is True
+
+
 def test_provider_quota_404s_for_unknown_provider():
     client = TestClient(server.app)
     response = client.get("/quota/provider/does-not-exist")

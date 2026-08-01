@@ -153,6 +153,7 @@ const UPDATE_DISMISS_KEY = 'squid_update_dismissed_version';
 let _updateInfo = null; // { current, latest } once a newer version is confirmed available
 let _updatesInstallOnRestart = 'ask';
 let _canInstallOnRestart = false;
+let _squidVersion = null;
 
 function _parseVersion(v) {
   const match = String(v).trim().match(/^(\d+(?:\.\d+)*)(?:(a|b|rc)(\d+))?(?:\.post(\d+))?/i);
@@ -183,12 +184,10 @@ function _isNewerVersion(latest, current) {
   return false;
 }
 
-async function _fetchLatestSquidVersion(currentVersion = null) {
+async function _fetchLatestSquidVersion({ force = false } = {}) {
   try {
     const cached = JSON.parse(localStorage.getItem(UPDATE_CACHE_KEY) || 'null');
-    if (cached && Date.now() - cached.checkedAt < UPDATE_CACHE_TTL_MS) {
-      if (!currentVersion || _isNewerVersion(cached.version, currentVersion)) return cached.version;
-    }
+    if (!force && cached && Date.now() - cached.checkedAt < UPDATE_CACHE_TTL_MS) return cached.version;
   } catch {}
   try {
     const res = await fetch(UPDATE_CHECK_URL);
@@ -231,7 +230,8 @@ function renderSettingsVersion(version) {
 }
 
 function updateSettingsFromHealth(health) {
-  renderSettingsVersion(health?.version);
+  _squidVersion = health?.version || null;
+  renderSettingsVersion(_squidVersion);
   const updates = health?.updates || {};
   const mode = updates.install_on_restart;
   _updatesInstallOnRestart = ['ask', 'always', 'never'].includes(mode) ? mode : 'ask';
@@ -240,12 +240,38 @@ function updateSettingsFromHealth(health) {
   renderSettingsUpdateNotice();
 }
 
-async function checkForSquidUpdate(currentVersion) {
-  if (!currentVersion) return;
-  const latest = await _fetchLatestSquidVersion(currentVersion);
-  if (!latest || !_isNewerVersion(latest, currentVersion)) { setUpdateAvailable(null); return; }
-  if (localStorage.getItem(UPDATE_DISMISS_KEY) === latest) { setUpdateAvailable(null); return; }
+async function checkForSquidUpdate(currentVersion, { force = false } = {}) {
+  if (!currentVersion) return { checked: false };
+  const latest = await _fetchLatestSquidVersion({ force });
+  if (!latest || !_isNewerVersion(latest, currentVersion)) {
+    setUpdateAvailable(null);
+    return { checked: true, latest, hasUpdate: false };
+  }
+  if (!force && localStorage.getItem(UPDATE_DISMISS_KEY) === latest) {
+    setUpdateAvailable(null);
+    return { checked: true, latest, hasUpdate: false, dismissed: true };
+  }
   setUpdateAvailable({ current: currentVersion, latest });
+  return { checked: true, latest, hasUpdate: true };
+}
+
+async function forceCheckForSquidUpdate() {
+  const btn = document.getElementById('settings-update-check');
+  if (!btn) return;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Checking...';
+  try {
+    const result = await checkForSquidUpdate(_squidVersion, { force: true });
+    btn.textContent = result.hasUpdate ? 'Update Found' : 'Up to Date';
+  } catch {
+    btn.textContent = 'Check Failed';
+  } finally {
+    setTimeout(() => {
+      btn.textContent = original || 'Check Updates';
+      btn.disabled = false;
+    }, 1500);
+  }
 }
 
 function splitAgentRef(ref, provider = null) {
@@ -596,6 +622,7 @@ function initSettings() {
       setTimeout(() => { btn.textContent = 'copy'; }, 1500);
     });
   });
+  document.getElementById('settings-update-check')?.addEventListener('click', forceCheckForSquidUpdate);
   document.getElementById('settings-update-dismiss')?.addEventListener('click', () => {
     if (_updateInfo) localStorage.setItem(UPDATE_DISMISS_KEY, _updateInfo.latest);
     setUpdateAvailable(null);

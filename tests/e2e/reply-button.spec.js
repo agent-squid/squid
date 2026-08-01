@@ -49,7 +49,7 @@ test('reply button sits in the bottom-right corner of the response bubble', asyn
   expect(bubbleBox.x + bubbleBox.width - (btnBox.x + btnBox.width)).toBeLessThan(12);
   expect(bubbleBox.y + bubbleBox.height - (btnBox.y + btnBox.height)).toBeLessThan(12);
 
-  const gap = await bubble.evaluate(el => {
+  const overlapsText = await bubble.evaluate(el => {
     const btn = el.querySelector('.msg-reply-btn').getBoundingClientRect();
     const content = Array.from(el.children).find(child =>
       !child.classList.contains('response-header') &&
@@ -61,10 +61,14 @@ test('reply button sits in the bottom-right corner of the response bubble', asyn
     const range = document.createRange();
     range.selectNodeContents(content);
     const textRects = Array.from(range.getClientRects()).filter(rect => rect.width && rect.height);
-    const bottomLine = textRects.reduce((last, rect) => rect.bottom > last.bottom ? rect : last, textRects[0]);
-    return btn.left - bottomLine.right;
+    return textRects.some(rect =>
+      rect.left < btn.right &&
+      rect.right > btn.left &&
+      rect.top < btn.bottom &&
+      rect.bottom > btn.top
+    );
   });
-  expect(gap).toBeGreaterThanOrEqual(4);
+  expect(overlapsText).toBe(false);
 });
 
 test('reply on a message from a different route sets the composer route without filtering history', async ({ page }) => {

@@ -1260,7 +1260,8 @@ def _gauge_authed(gauge_type: str, provider: Provider) -> Optional[bool]:
     if gauge_type == "claude":
         return bool(creds.get_org_id() and creds.get_session_key())
     if gauge_type == "codex":
-        return bool(creds.get_codex_token())
+        codex_auth = creds.get_codex_cli_auth()
+        return bool(codex_auth.get("access_token") or creds.get_codex_token())
     if gauge_type == "cursor":
         return bool(creds.get_cursor_token())
     if gauge_type in _BALANCE_GAUGES:
@@ -2598,6 +2599,16 @@ async def _quota_snapshot_for_provider(provider: Provider, ref: str) -> JSONResp
         return JSONResponse({
             "status": "static", "text": gauge.text, "title": gauge.title,
             "used_percent": None, "reset_at": None,
+        })
+
+    if _gauge_authed(gauge.type, provider) is False:
+        label = provider.label or ref
+        return JSONResponse({
+            "status": "unauthenticated",
+            "text": "auth",
+            "title": f"{label} credentials not configured",
+            "used_percent": None,
+            "reset_at": None,
         })
 
     if gauge.type in _BALANCE_GAUGES:

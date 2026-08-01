@@ -978,7 +978,7 @@ body {
 .ctx-popup-link { color: var(--accent-light); }
 .ctx-popup-mem-row:hover .ctx-popup-link, .ctx-popup-trace-row:hover .ctx-popup-link, .ctx-popup-cwd-row:hover .ctx-popup-link, .ctx-popup-session-row:hover .ctx-popup-link, .ctx-popup-root-row:hover .ctx-popup-link { color: #ffb87a; }
 .msg.assistant { background: var(--surface-2); align-self: flex-start; line-height: 1.6; }
-.msg.assistant.has-reply-btn { padding: 0.6rem 3rem 1.15rem 0.9rem; }
+.msg.assistant.has-reply-btn { display: flow-root; }
 
 /* markdown */
 .msg.assistant p { margin: 0.4em 0; }
@@ -1366,7 +1366,7 @@ body {
   border: 1px solid #2a2a40;
   border-radius: 6px;
   padding: 0.5rem 0.75rem;
-  margin-bottom: 0.6rem;
+  margin: 0.6rem 0;
 }
 .settings-update-notice[hidden] { display: none; }
 #settings-update-text {
@@ -1513,12 +1513,13 @@ body {
 .stats-deep-dive-btn:hover { color: var(--accent); }
 
 .msg-reply-btn {
-  position: absolute;
-  right: 0.5rem;
-  bottom: 0.4rem;
+  float: right;
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  line-height: 1;
+  margin: 0.1rem -0.35rem -0.15rem 0.55rem;
   padding: 0;
   border: none;
   background: none;
@@ -1609,6 +1610,12 @@ body {
   flex-shrink: 0;
   width: 100%;
 }
+#settings-version-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+}
 #settings-version-info {
   color: var(--text);
   font-size: 1rem;
@@ -1616,7 +1623,7 @@ body {
   text-align: left;
 }
 #config-editor-actions { display: flex; align-items: center; gap: 0.5rem; justify-self: end; }
-#config-editor-status-line { min-height: 1.2em; flex-shrink: 0; }
+#config-editor-status-line { min-height: 0; flex-shrink: 0; }
 #config-editor-status {
   color: var(--text-mid);
   display: inline-block;
@@ -1624,6 +1631,7 @@ body {
   line-height: 1.5;
   max-width: 100%;
 }
+#config-editor-status:empty { display: none; }
 #config-editor-status.ok { color: #6fa66f; }
 #config-editor-status.error {
   background: rgba(120, 24, 24, 0.42);
