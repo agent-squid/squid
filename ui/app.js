@@ -183,10 +183,12 @@ function _isNewerVersion(latest, current) {
   return false;
 }
 
-async function _fetchLatestSquidVersion() {
+async function _fetchLatestSquidVersion(currentVersion = null) {
   try {
     const cached = JSON.parse(localStorage.getItem(UPDATE_CACHE_KEY) || 'null');
-    if (cached && Date.now() - cached.checkedAt < UPDATE_CACHE_TTL_MS) return cached.version;
+    if (cached && Date.now() - cached.checkedAt < UPDATE_CACHE_TTL_MS) {
+      if (!currentVersion || _isNewerVersion(cached.version, currentVersion)) return cached.version;
+    }
   } catch {}
   try {
     const res = await fetch(UPDATE_CHECK_URL);
@@ -206,17 +208,19 @@ function setUpdateAvailable(info) {
   const hasUpdate = !!info;
   document.getElementById('hamburger-btn')?.classList.toggle('has-update', hasUpdate);
   document.querySelector('.hmenu-item[data-view="settings"]')?.classList.toggle('has-update', hasUpdate);
-  document.getElementById('hmenu-restart')?.classList.toggle('has-update', hasUpdate);
+  document.getElementById('hmenu-restart')?.classList.toggle('has-update', hasUpdate && _canInstallOnRestart);
   renderSettingsUpdateNotice();
 }
 
 function renderSettingsUpdateNotice() {
   const el = document.getElementById('settings-update-notice');
   if (!el) return;
-  if (!_updateInfo || !_canInstallOnRestart) { el.hidden = true; return; }
+  if (!_updateInfo) { el.hidden = true; return; }
   el.hidden = false;
   document.getElementById('settings-update-text').textContent =
-    `AgentSquid v${_updateInfo.current} → v${_updateInfo.latest} available — Restart Server can upgrade before restarting`;
+    _canInstallOnRestart
+      ? `AgentSquid v${_updateInfo.current} → v${_updateInfo.latest} available — Restart Server can upgrade before restarting`
+      : `AgentSquid v${_updateInfo.current} → v${_updateInfo.latest} available`;
   document.getElementById('settings-update-cmd').textContent = 'pipx upgrade agentsquid';
 }
 
@@ -232,12 +236,13 @@ function updateSettingsFromHealth(health) {
   const mode = updates.install_on_restart;
   _updatesInstallOnRestart = ['ask', 'always', 'never'].includes(mode) ? mode : 'ask';
   _canInstallOnRestart = updates.can_install_on_restart === true;
-  if (!_canInstallOnRestart) setUpdateAvailable(null);
+  document.getElementById('hmenu-restart')?.classList.toggle('has-update', !!_updateInfo && _canInstallOnRestart);
+  renderSettingsUpdateNotice();
 }
 
 async function checkForSquidUpdate(currentVersion) {
-  if (!currentVersion || !_canInstallOnRestart) return;
-  const latest = await _fetchLatestSquidVersion();
+  if (!currentVersion) return;
+  const latest = await _fetchLatestSquidVersion(currentVersion);
   if (!latest || !_isNewerVersion(latest, currentVersion)) { setUpdateAvailable(null); return; }
   if (localStorage.getItem(UPDATE_DISMISS_KEY) === latest) { setUpdateAvailable(null); return; }
   setUpdateAvailable({ current: currentVersion, latest });

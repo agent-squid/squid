@@ -67,14 +67,55 @@ test('no dot when already on the latest version', async ({ page }) => {
   await expect(page.locator('#hamburger-btn')).not.toHaveClass(/has-update/);
 });
 
-test('no dot when restart-time install is unavailable', async ({ page }) => {
+test('stale no-update cache is rechecked on load', async ({ page }) => {
+  await mockApp(page, { version: '0.1.1' });
+  await mockLatestVersion(page, '0.1.2');
+
+  await page.goto('/');
+  await page.evaluate(() => {
+    localStorage.setItem('squid_update_check_cache', JSON.stringify({
+      version: '0.1.1',
+      checkedAt: Date.now(),
+    }));
+  });
+  await page.reload();
+
+  await expect(page.locator('#hamburger-btn')).toHaveClass(/has-update/);
+});
+
+test('version notice still appears when restart-time install is unavailable', async ({ page }) => {
   await mockApp(page, { version: '0.1.0', canInstallOnRestart: false });
   await mockLatestVersion(page, '0.2.0');
 
   await page.goto('/');
-  await expect(page.locator('#hamburger-btn')).not.toHaveClass(/has-update/);
+  await expect(page.locator('#hamburger-btn')).toHaveClass(/has-update/);
+  await page.locator('#hamburger-btn').click();
+  await expect(page.locator('.hmenu-item[data-view="settings"]')).toHaveClass(/has-update/);
+  await expect(page.locator('#hmenu-restart')).not.toHaveClass(/has-update/);
+  await page.locator('.hmenu-item[data-view="settings"]').click();
+  await expect(page.locator('#settings-update-notice')).toBeVisible();
+  await expect(page.locator('#settings-update-notice')).toContainText('AgentSquid v0.1.0 → v0.2.0');
+  await expect(page.locator('#settings-update-notice')).not.toContainText('Restart Server can upgrade before restarting');
+});
+
+test('restart does not prompt for upgrade when restart-time install is unavailable', async ({ page }) => {
+  const cmdBodies = [];
+  await mockApp(page, { version: '0.1.0', canInstallOnRestart: false });
+  await mockLatestVersion(page, '0.2.0');
+  await page.route('**/cmd', async route => {
+    cmdBodies.push(route.request().postDataJSON());
+    await route.fulfill({ json: { ok: true } });
+  });
+
+  await page.goto('/');
   await openSettings(page);
-  await expect(page.locator('#settings-update-notice')).toBeHidden();
+  await expect(page.locator('#settings-update-notice')).toBeVisible();
+  await page.locator('#hamburger-btn').click();
+  await page.locator('#hmenu-restart').click();
+
+  await expect.poll(() => cmdBodies.length).toBe(1);
+  expect(cmdBodies[0]).toMatchObject({ command: 'restart' });
+  expect(cmdBodies[0]).not.toHaveProperty('upgrade', true);
 });
 
 test('dismissing clears the dot and stays cleared on reload for that version', async ({ page }) => {
