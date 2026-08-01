@@ -79,6 +79,21 @@ test('manual update check is text-only on desktop and matches action button heig
   expect(new Set(heights).size).toBe(1);
 });
 
+test('successful manual update check temporarily shows check icon', async ({ page }) => {
+  await mockApp(page, { version: '0.1.1' });
+  await mockLatestVersion(page, '0.1.1');
+
+  await page.goto('/');
+  await openSettings(page);
+
+  const button = page.locator('#settings-update-check');
+  await expect(button.locator('.material-symbols-outlined')).toBeHidden();
+  await button.click();
+  await expect(button.locator('.material-symbols-outlined')).toHaveText('check_circle');
+  await expect(button.locator('.material-symbols-outlined')).toBeVisible();
+  await expect(button.locator('.settings-update-check-label')).toHaveText('Up to Date');
+});
+
 test('no dot when already on the latest version', async ({ page }) => {
   await mockApp(page, { version: '0.1.0' });
   await mockLatestVersion(page, '0.1.0');

@@ -1519,7 +1519,7 @@ body {
   align-items: center;
   justify-content: center;
   line-height: 1;
-  margin: 0.1rem -0.35rem -0.15rem 0.55rem;
+  margin: 0.1rem -0.35rem 0.1rem 0.55rem;
   padding: 0;
   border: none;
   background: none;
@@ -1633,6 +1633,9 @@ body {
 #settings-update-check .material-symbols-outlined {
   display: none;
   font-size: 18px;
+}
+#settings-update-check.is-success .material-symbols-outlined {
+  display: inline-block;
 }
 #config-editor-actions { display: flex; align-items: center; gap: 0.5rem; justify-self: end; }
 #config-editor-status-line { min-height: 0; flex-shrink: 0; }

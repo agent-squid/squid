@@ -263,20 +263,32 @@ function setUpdateCheckButtonText(btn, text) {
   btn.setAttribute('aria-label', text);
 }
 
+function setUpdateCheckButtonIcon(btn, icon) {
+  const el = btn.querySelector('.material-symbols-outlined');
+  if (el) el.textContent = icon;
+}
+
 async function forceCheckForSquidUpdate() {
   const btn = document.getElementById('settings-update-check');
   if (!btn) return;
   const original = btn.querySelector('.settings-update-check-label')?.textContent || btn.textContent || 'Check Updates';
+  const originalIcon = btn.querySelector('.material-symbols-outlined')?.textContent || 'deployed_code_update';
   btn.disabled = true;
+  btn.classList.remove('is-success');
   setUpdateCheckButtonText(btn, 'Checking...');
+  setUpdateCheckButtonIcon(btn, originalIcon);
   try {
     const result = await checkForSquidUpdate(_squidVersion, { force: true });
     setUpdateCheckButtonText(btn, result.hasUpdate ? 'Update Found' : 'Up to Date');
+    btn.classList.add('is-success');
+    setUpdateCheckButtonIcon(btn, 'check_circle');
   } catch {
     setUpdateCheckButtonText(btn, 'Check Failed');
   } finally {
     setTimeout(() => {
       setUpdateCheckButtonText(btn, original || 'Check Updates');
+      setUpdateCheckButtonIcon(btn, originalIcon);
+      btn.classList.remove('is-success');
       btn.disabled = false;
     }, 1500);
   }
