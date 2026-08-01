@@ -978,6 +978,7 @@ body {
 .ctx-popup-link { color: var(--accent-light); }
 .ctx-popup-mem-row:hover .ctx-popup-link, .ctx-popup-trace-row:hover .ctx-popup-link, .ctx-popup-cwd-row:hover .ctx-popup-link, .ctx-popup-session-row:hover .ctx-popup-link, .ctx-popup-root-row:hover .ctx-popup-link { color: #ffb87a; }
 .msg.assistant { background: var(--surface-2); align-self: flex-start; line-height: 1.6; }
+.msg.assistant.has-reply-btn { padding: 0.6rem 3rem 1.15rem 0.9rem; }
 
 /* markdown */
 .msg.assistant p { margin: 0.4em 0; }

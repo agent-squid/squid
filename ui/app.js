@@ -7454,7 +7454,6 @@ let statsChartExtra = [{ metric: 'cache_hit_rate', agg: 'avg', axis: 'y2' }];
 let statsChartEditIndex = null;
 let statsChartInstance = null;
 let _lastStatsRows = null;
-let _statsFiltersLoaded = false;
 let _statsPage = 0;
 const _STATS_PAGE_SIZE = 10;
 // One-shot: the msg_id to highlight+scroll to on the next render, set when
@@ -9182,14 +9181,11 @@ async function loadStats() {
     await _loadStatsPresets({ applyDefault: true });
   }
 
-  if (!_statsFiltersLoaded) {
-    _statsFiltersLoaded = true;
-    fetch('/stats/filters').then(r => r.json()).then(data => {
-      _renderStatsMultiMenu(document.getElementById('sf-agent-menu'), data.agents, statsFilters.agents, '@');
-      _renderStatsMultiMenu(document.getElementById('sf-topic-menu'), data.topics, statsFilters.topics, '#');
-      _updateStatsFilterLabels();
-    }).catch(() => {});
-  }
+  await fetch('/stats/filters').then(r => r.json()).then(data => {
+    _renderStatsMultiMenu(document.getElementById('sf-agent-menu'), data.agents, statsFilters.agents, '@');
+    _renderStatsMultiMenu(document.getElementById('sf-topic-menu'), data.topics, statsFilters.topics, '#');
+    _updateStatsFilterLabels();
+  }).catch(() => {});
 
   const params = _statsQueryParams({ includeTz: true });
 
@@ -12918,6 +12914,7 @@ function addDeepDiveButton(bubbleEl, topic, agent, adhoc, statsEl, msgId, timest
 
 function addReplyButton(bubbleEl, topic, agent, adhoc) {
   if (bubbleEl.querySelector('.msg-reply-btn')) return;
+  bubbleEl.classList.add('has-reply-btn');
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'msg-reply-btn';

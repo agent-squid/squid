@@ -48,6 +48,23 @@ test('reply button sits in the bottom-right corner of the response bubble', asyn
   const btnBox = await replyBtn.boundingBox();
   expect(bubbleBox.x + bubbleBox.width - (btnBox.x + btnBox.width)).toBeLessThan(12);
   expect(bubbleBox.y + bubbleBox.height - (btnBox.y + btnBox.height)).toBeLessThan(12);
+
+  const gap = await bubble.evaluate(el => {
+    const btn = el.querySelector('.msg-reply-btn').getBoundingClientRect();
+    const content = Array.from(el.children).find(child =>
+      !child.classList.contains('response-header') &&
+      !child.classList.contains('history-prompt-full') &&
+      !child.classList.contains('msg-reply-btn') &&
+      !child.classList.contains('msg-pin-btn') &&
+      !child.classList.contains('msg-bookmark-btn')
+    );
+    const range = document.createRange();
+    range.selectNodeContents(content);
+    const textRects = Array.from(range.getClientRects()).filter(rect => rect.width && rect.height);
+    const bottomLine = textRects.reduce((last, rect) => rect.bottom > last.bottom ? rect : last, textRects[0]);
+    return btn.left - bottomLine.right;
+  });
+  expect(gap).toBeGreaterThanOrEqual(4);
 });
 
 test('reply on a message from a different route sets the composer route without filtering history', async ({ page }) => {

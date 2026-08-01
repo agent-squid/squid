@@ -1063,6 +1063,35 @@ test('agent breakdown defaults to top four agents when none are selected', async
   await expect(page.locator('#stats-content th', { hasText: 'Misc' })).toHaveCount(1);
 });
 
+test('stats agent filter refreshes after initially empty clean-install options', async ({ page }) => {
+  await mockApp(page);
+  let filterRequests = 0;
+  await page.route('**/stats/filters', route => {
+    filterRequests += 1;
+    return route.fulfill({
+      json: filterRequests === 1
+        ? { agents: [], topics: [] }
+        : { agents: ['claude', 'codex'], topics: ['squid'] },
+    });
+  });
+  await page.route('**/stats?**', route => route.fulfill({
+    json: [
+      { period: '2026-08-01 00:02', topic: 'squid', agent_key: 'codex', agent: 'codex', sessions: 1, total_turns: 1 },
+      { period: '2026-08-01 00:03', topic: 'squid', agent_key: 'claude', agent: 'claude', sessions: 1, total_turns: 1 },
+    ],
+  }));
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('#sf-agent-toggle').click();
+  await expect(page.locator('#sf-agent-menu')).toContainText('No options.');
+
+  await page.locator('#sf-period').selectOption('daily');
+  await expect.poll(() => filterRequests).toBeGreaterThan(1);
+  await expect(page.locator('#sf-agent-menu input[value="claude"]')).toBeVisible();
+  await expect(page.locator('#sf-agent-menu input[value="codex"]')).toBeVisible();
+});
+
 test('stats breakdown caps visible series and keeps total column sticky while scrolling', async ({ page }) => {
   await mockApp(page);
   await page.setViewportSize({ width: 900, height: 720 });
