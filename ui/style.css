@@ -844,7 +844,6 @@ body {
 .text-logo {
   display: flex;
   align-items: center;
-  gap: 0.2em;
   font-family: 'Rubik', ui-sans-serif, system-ui, sans-serif;
   font-size: var(--text-md);
   font-weight: 700;
@@ -852,7 +851,7 @@ body {
   color: var(--accent);
 }
 .logo-icon {
-  height: 1.4em;
+  height: 2.8em;
   width: auto;
 }
 

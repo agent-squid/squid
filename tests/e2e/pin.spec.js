@@ -36,6 +36,12 @@ async function mockBackend(page, { agent = 'claude', topic = 'squid' } = {}) {
   await page.route('**/topics/**',     r => r.fulfill({ json: [] }));
   await page.route('**/config/agents', r => r.fulfill({ json: [] }));
   await page.route('**/chat/*/status', r => r.fulfill({ json: { status: 'pending', content: '' } }));
+  await page.route('**/localfile/check-paths', async r => {
+    const body = r.request().postDataJSON();
+    await r.fulfill({ json: {
+      paths: (body.paths || []).map(path => ({ path, resolved_path: path, exists: true, is_file: true })),
+    } });
+  });
 }
 
 async function seedPin(page, item) {
@@ -302,6 +308,46 @@ test('session send turns attached file badge gray once delivered', async ({ page
   await page.fill('#input', '#squid@claude again');
   await page.keyboard.press('Enter');
   await expect(sentMessages[1]).not.toContain('Files:');
+});
+
+test('session send prunes missing attached files before submitting', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/topics/squid/memory', r => r.fulfill({
+    json: {
+      topic: 'squid', exists: false, content: '', path: '~/.squid/context/topics/squid/memory.md',
+      squid: { code_roots: [], code_roots_skipped: true, code_roots_missing: false },
+    },
+  }));
+  await page.route('**/topics/squid/session?agent=claude', r => r.fulfill({
+    json: { session_id: null, cwd: null },
+  }));
+  await page.route('**/localfile/check-paths', async r => {
+    const body = r.request().postDataJSON();
+    await r.fulfill({ json: {
+      paths: (body.paths || []).map(path => ({ path, resolved_path: path, exists: false, is_file: false })),
+    } });
+  });
+
+  const sentMessages = [];
+  await page.route('**/chat', async route => {
+    sentMessages.push(route.request().postDataJSON().message);
+    await route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(META, { data: 'session response' }, STATS, DONE),
+    });
+  });
+
+  await page.goto('/');
+  await seedAttachedFile(page, '/tmp/deleted.txt');
+
+  await page.fill('#input', '#squid@claude hello');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toBeVisible();
+
+  expect(sentMessages[0]).not.toContain('Files:');
+  await expect(page.locator('#pin-count')).toHaveText('');
+  const attachedFiles = await page.evaluate(() => JSON.parse(localStorage.getItem('attachedFiles') || '[]'));
+  expect(attachedFiles).toEqual([]);
 });
 
 test('session send marks memory and pinned context as sending while request is pending', async ({ page }) => {

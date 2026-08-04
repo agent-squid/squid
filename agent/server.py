@@ -394,6 +394,10 @@ class LocalfileDeleteRequest(BaseModel):
     path: str = Field(..., min_length=1)
 
 
+class LocalfileCheckPathsRequest(BaseModel):
+    paths: list[str] = Field(default_factory=list)
+
+
 class LocalfileRevertEditRequest(BaseModel):
     edit_id: int
 
@@ -2729,6 +2733,21 @@ def _localfile_child(parent: Path, name: str) -> Union[Path, JSONResponse]:
         return JSONResponse({"error": "invalid name"}, status_code=400)
     return child
 
+def _localfile_available_child(parent: Path, name: str) -> Union[Path, JSONResponse]:
+    child = _localfile_child(parent, name)
+    if isinstance(child, JSONResponse) or not child.exists():
+        return child
+    original = Path(name)
+    stem = original.stem if original.suffix else original.name
+    suffix = original.suffix
+    for i in range(1, 1000):
+        candidate = _localfile_child(parent, f"{stem} {i}{suffix}")
+        if isinstance(candidate, JSONResponse):
+            return candidate
+        if not candidate.exists():
+            return candidate
+    return JSONResponse({"error": "no available filename"}, status_code=409)
+
 def _looks_like_text_file(path: Path, sample_size: int = 65536) -> bool:
     try:
         sample = path.read_bytes()[:sample_size]
@@ -2903,11 +2922,9 @@ async def upload_local_file(parent: str, name: str, request: Request):
     parent_path = Path(parent).expanduser().resolve()
     if not parent_path.is_dir():
         return JSONResponse({"error": "parent is not a directory"}, status_code=400)
-    child = _localfile_child(parent_path, name.strip())
+    child = _localfile_available_child(parent_path, name.strip())
     if isinstance(child, JSONResponse):
         return child
-    if child.exists():
-        return JSONResponse({"error": "path already exists"}, status_code=409)
     child.write_bytes(await request.body())
     return JSONResponse({"ok": True, "path": str(child)})
 
@@ -2948,6 +2965,24 @@ async def delete_local_file(req: LocalfileDeleteRequest, request: Request):
         return JSONResponse({"error": "not a file"}, status_code=400)
     p.unlink()
     return JSONResponse({"ok": True, "path": str(p)})
+
+
+@app.post("/localfile/check-paths")
+async def check_local_paths(req: LocalfileCheckPathsRequest, request: Request):
+    if not _same_origin(request):
+        return JSONResponse({"error": "cross-origin reads are not allowed"}, status_code=403)
+    paths = []
+    for raw_path in req.paths:
+        try:
+            p = Path(raw_path).expanduser().resolve()
+            exists = p.exists()
+            is_file = p.is_file() if exists else False
+        except OSError:
+            p = Path(raw_path)
+            exists = False
+            is_file = False
+        paths.append({"path": raw_path, "resolved_path": str(p), "exists": exists, "is_file": is_file})
+    return JSONResponse({"paths": paths})
 
 
 @app.get("/localfile/history")

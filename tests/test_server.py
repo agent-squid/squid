@@ -1611,6 +1611,49 @@ def test_localfile_serves_unknown_extension_text_inline(tmp_path):
         server._LOCALFILE_ROOTS[:] = original_roots
 
 
+def test_localfile_upload_suffixes_duplicate_names(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "report.txt").write_text("existing")
+    (root / "report 1.txt").write_text("existing 1")
+    original_roots = list(server._LOCALFILE_ROOTS)
+    client = TestClient(server.app)
+
+    try:
+        server._LOCALFILE_ROOTS[:] = [root.resolve()]
+        res = client.post(
+            "/localfile/upload",
+            params={"parent": str(root), "name": "report.txt"},
+            content=b"uploaded",
+        )
+        assert res.status_code == 200
+        assert res.json()["path"] == str((root / "report 2.txt").resolve())
+        assert (root / "report 2.txt").read_bytes() == b"uploaded"
+    finally:
+        server._LOCALFILE_ROOTS[:] = original_roots
+
+
+def test_localfile_check_paths_reports_missing_files(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    existing = root / "notes.txt"
+    missing = root / "missing.txt"
+    existing.write_text("notes")
+    original_roots = list(server._LOCALFILE_ROOTS)
+    client = TestClient(server.app)
+
+    try:
+        server._LOCALFILE_ROOTS[:] = [root.resolve()]
+        res = client.post("/localfile/check-paths", json={"paths": [str(existing), str(missing)]})
+        assert res.status_code == 200
+        assert res.json()["paths"] == [
+            {"path": str(existing), "resolved_path": str(existing.resolve()), "exists": True, "is_file": True},
+            {"path": str(missing), "resolved_path": str(missing.resolve()), "exists": False, "is_file": False},
+        ]
+    finally:
+        server._LOCALFILE_ROOTS[:] = original_roots
+
+
 def test_localfile_rename_can_move_across_directories(tmp_path):
     root = tmp_path / "workspace"
     src = root / "src"

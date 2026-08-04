@@ -1074,7 +1074,8 @@ Create a directory. Fails if the path already exists.
 ### POST /localfile/upload?parent={path}&name={filename}
 
 Upload a file using the raw request body as file bytes.
-Fails if the path already exists.
+If the path already exists, writes to the next available numbered filename
+before the extension, such as `name 1.txt`.
 
 **Response**: `{ "ok": true, "path": "string" }`
 
@@ -1086,6 +1087,14 @@ target path already exists.
 **Request body**: `{ "path": "string", "name": "string" }`
 
 **Response**: `{ "ok": true, "path": "string" }`
+
+### POST /localfile/check-paths
+
+Check local path existence without reading file contents.
+
+**Request body**: `{ "paths": ["string"] }`
+
+**Response**: `{ "paths": [{ "path": "string", "resolved_path": "string", "exists": true, "is_file": true }] }`
 
 ### GET /localfile/history?path={path}
 

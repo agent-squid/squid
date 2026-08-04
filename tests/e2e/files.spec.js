@@ -245,26 +245,29 @@ test('Files menu deletes files from rows and the open file view', async ({ page 
   });
 
   await page.goto('/');
+  await page.evaluate(() => {
+    localStorage.setItem('attachedFiles', JSON.stringify([
+      { path: '/tmp/work/project/notes.txt', name: 'notes.txt' },
+    ]));
+  });
   await page.getByRole('button', { name: 'Files' }).click();
   await page.getByRole('link', { name: '/tmp/work/project' }).click();
 
   await expect(page.getByRole('button', { name: 'Delete src' })).toHaveCount(0);
-  page.once('dialog', async dialog => {
-    expect(dialog.message()).toBe('Delete notes.txt?');
-    await dialog.accept();
-  });
   await page.getByRole('button', { name: 'Delete notes.txt' }).click();
+  await expect(page.locator('.fv-path-modal')).toContainText("Delete notes.txt? This can't be undone.");
+  await page.locator('.fv-path-modal').getByRole('button', { name: 'Delete' }).click();
   await expect(page.getByRole('link', { name: 'notes.txt' })).toHaveCount(0);
+  const attachedAfterDelete = await page.evaluate(() => JSON.parse(localStorage.getItem('attachedFiles') || '[]'));
+  expect(attachedAfterDelete).toEqual([]);
 
   await page.getByRole('link', { name: 'README.md' }).click();
   await expect(page.locator('#file-modal-body')).toContainText('readme body');
   await expect(page.getByRole('button', { name: 'Delete file' })).toBeVisible();
 
-  page.once('dialog', async dialog => {
-    expect(dialog.message()).toBe('Delete README.md?');
-    await dialog.accept();
-  });
   await page.getByRole('button', { name: 'Delete file' }).click();
+  await expect(page.locator('.fv-path-modal')).toContainText("Delete README.md? This can't be undone.");
+  await page.locator('.fv-path-modal').getByRole('button', { name: 'Delete' }).click();
   await expect(page.locator('#file-modal-breadcrumb')).toContainText('tmp/work/project');
   await expect(page.getByRole('link', { name: 'README.md' })).toHaveCount(0);
 

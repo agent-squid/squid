@@ -4288,6 +4288,7 @@ async function sendMessage(text, opts = {}) {
   const _pinnedIds = _injectablePinnedIds(topic, _effectiveAgent, adhoc, lookback);
   const _extraPinnedIds = Array.isArray(opts.extraPinnedIds) ? opts.extraPinnedIds : [];
   const _contextIds = [...new Set([..._lookbackIds, ..._pinnedIds, ..._extraPinnedIds])];
+  await pruneMissingAttachedFiles();
   const _attachedFiles = _attachedFilesState({ topic, agent: _effectiveAgent, adhoc }).selected;
   const _messageForServer = _attachedFiles.length
     ? `${message}\n\nFiles:\n${_attachedFiles.map(f => `- ${f.path}`).join('\n')}`
@@ -12177,6 +12178,65 @@ function getAttachedFilesInSession() {
   try { return JSON.parse(localStorage.getItem('attachedFilesInSession') || '{}'); } catch { return {}; }
 }
 function setAttachedFilesInSession(map) { localStorage.setItem('attachedFilesInSession', JSON.stringify(map)); }
+function _removeAttachedFilePath(path) {
+  if (!path) return false;
+  let changed = false;
+  const items = getAttachedFiles();
+  const nextItems = items.filter(f => f.path !== path);
+  if (nextItems.length !== items.length) {
+    setAttachedFiles(nextItems);
+    changed = true;
+  }
+  const inSession = getAttachedFilesInSession();
+  Object.keys(inSession).forEach(key => {
+    const next = (inSession[key] || []).filter(p => p !== path);
+    if (next.length !== (inSession[key] || []).length) {
+      inSession[key] = next;
+      changed = true;
+    }
+  });
+  if (changed) setAttachedFilesInSession(inSession);
+  Object.keys(_pendingSessionAttachedFiles).forEach(key => {
+    const next = (_pendingSessionAttachedFiles[key] || []).filter(p => p !== path);
+    if (next.length !== (_pendingSessionAttachedFiles[key] || []).length) {
+      _pendingSessionAttachedFiles[key] = next;
+      changed = true;
+    }
+  });
+  return changed;
+}
+function removeAttachedFilePath(path) {
+  const changed = _removeAttachedFilePath(path);
+  if (changed) {
+    updatePinCount();
+    if (pinPanel.classList.contains('open')) renderPinPanel();
+  }
+  return changed;
+}
+async function pruneMissingAttachedFiles() {
+  const files = getAttachedFiles();
+  const paths = [...new Set(files.map(f => f.path).filter(Boolean))];
+  if (!paths.length) return [];
+  try {
+    const res = await fetch('/localfile/check-paths', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths }),
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const missing = (data.paths || [])
+      .filter(item => !item.exists || !item.is_file)
+      .map(item => item.path);
+    if (!missing.length) return [];
+    missing.forEach(path => _removeAttachedFilePath(path));
+    updatePinCount();
+    if (pinPanel.classList.contains('open')) renderPinPanel();
+    return missing;
+  } catch {
+    return [];
+  }
+}
 function addAttachedFile(path) {
   const items = getAttachedFiles();
   if (items.some(f => f.path === path)) return;
@@ -12710,9 +12770,7 @@ function renderPinPanel() {
   listEl.querySelectorAll('[data-file-remove]').forEach(btn => {
     btn.addEventListener('mousedown', e => {
       e.preventDefault();
-      setAttachedFiles(getAttachedFiles().filter(f => f.path !== btn.dataset.fileRemove));
-      updatePinCount();
-      renderPinPanel();
+      removeAttachedFilePath(btn.dataset.fileRemove);
     });
   });
   listEl.querySelectorAll('.pin-item-remove[data-id]').forEach(btn => {
@@ -12797,6 +12855,7 @@ function openPinPanel() {
   updateInContextMarkers();
   renderPinPanel();
   pinPanel.classList.add('open');
+  pruneMissingAttachedFiles();
 }
 function closePinPanel({ restoreFocus = false } = {}) {
   pinPanel.classList.remove('open');
@@ -13961,6 +14020,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Delete failed');
+      removeAttachedFilePath(data.path || targetPath);
       if (afterDelete) afterDelete();
       else navigate(targetPath.split('/').slice(0, -1).join('/') || null);
     } catch (err) {
