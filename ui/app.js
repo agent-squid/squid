@@ -1853,7 +1853,12 @@ function _updateFilterBadge() {
     addSegment('bookmarks', document.createTextNode('bookmarked'), () => removeFilterSegment('bookmarks'), false);
   }
   if (badOnlyHistory) {
-    addSegment('bad', document.createTextNode('marked bad'), () => removeFilterSegment('bad'), false);
+    const icon = document.createElement('span');
+    icon.className = 'filter-scope-icon material-symbols-outlined';
+    icon.textContent = 'thumb_down';
+    icon.title = 'Marked bad responses';
+    icon.setAttribute('aria-label', 'Marked bad responses');
+    addSegment('bad', icon, () => removeFilterSegment('bad'), false);
   }
   badge.classList.add('active');
   updateFilterButton();

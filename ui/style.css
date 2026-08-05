@@ -5008,6 +5008,10 @@ button {
   gap: 0.2rem;
   cursor: pointer;
 }
+.filter-scope-icon.material-symbols-outlined {
+  color: var(--accent);
+  font-variation-settings: 'FILL' 1, 'wght' 500, 'GRAD' 0, 'opsz' 20;
+}
 .filter-scope-remove {
   background: none;
   border: none;

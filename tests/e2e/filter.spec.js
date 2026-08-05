@@ -428,6 +428,27 @@ test('/bookmarks and /bm toggle bookmarked only like the composer bookmark icon'
   await expect(page.locator('#chip-bookmark-btn')).toHaveAttribute('aria-pressed', 'false');
 });
 
+test('/bad renders the filter tag as a filled thumb-down icon', async ({ page }) => {
+  await mockBackend(page);
+  await page.unroute('**/history**');
+  await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
+
+  await page.goto('/');
+  await page.fill('#input', '/bad');
+  await page.keyboard.press('Enter');
+
+  const badTag = page.locator('.filter-scope-bad');
+  const badIcon = badTag.locator('.filter-scope-icon.material-symbols-outlined');
+  await expect(badTag).toBeVisible();
+  await expect(badIcon).toHaveText('thumb_down');
+  await expect(badIcon).toHaveAttribute('aria-label', 'Marked bad responses');
+  await expect(badTag).not.toContainText('marked bad');
+
+  const fill = await badIcon.evaluate(el => getComputedStyle(el).fontVariationSettings);
+  expect(fill).toMatch(/["']FILL["'] 1/);
+  await expect(badIcon).toHaveCSS('color', 'rgb(240, 112, 64)');
+});
+
 test('history renders only assistant bubbles — no user bubbles', async ({ page }) => {
   await mockBackend(page);
 
