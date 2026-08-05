@@ -449,6 +449,39 @@ test('/bad renders the filter tag as a filled thumb-down icon', async ({ page })
   await expect(badIcon).toHaveCSS('color', 'rgb(240, 112, 64)');
 });
 
+test('message bookmark and bad-response buttons post marker-only payloads', async ({ page }) => {
+  await mockBackend(page);
+  let bookmarkBody = null;
+  let annotationBody = null;
+  await page.route('**/bookmarks', route => {
+    if (route.request().method() === 'POST') {
+      bookmarkBody = route.request().postDataJSON();
+      return route.fulfill({ json: { ok: true } });
+    }
+    return route.fulfill({ json: { items: [] } });
+  });
+  await page.route('**/annotations**', route => {
+    if (route.request().method() === 'POST') {
+      annotationBody = route.request().postDataJSON();
+      return route.fulfill({ json: { ok: true } });
+    }
+    return route.fulfill({ json: { items: [] } });
+  });
+  await page.route('**/history**', route => route.fulfill({ json: {
+    items: [
+      { id: 10, role: 'assistant', topic: 'squid', agent: 'claude', content: 'response text that should not be copied', status: 'done', adhoc: false, prompt: 'match', timestamp: new Date().toISOString() },
+    ],
+    has_more: false,
+  }}));
+
+  await page.goto('/');
+  await page.locator('.msg-bookmark-btn[data-msg-id="10"]').click();
+  await page.locator('.msg-bad-response-btn[data-msg-id="10"]').click();
+
+  expect(bookmarkBody).toEqual({ msg_id: 10 });
+  expect(annotationBody).toEqual({ msg_id: 10, kind: 'bad_response', payload: {} });
+});
+
 test('history renders only assistant bubbles — no user bubbles', async ({ page }) => {
   await mockBackend(page);
 

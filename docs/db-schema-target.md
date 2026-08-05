@@ -176,16 +176,22 @@ CREATE TABLE file_edit_history (
 CREATE INDEX idx_file_edit_history_path ON file_edit_history (file_path, id DESC);
 ```
 
-### `bookmarks`
+### `message_annotations`
 ```sql
-CREATE TABLE bookmarks (
-    msg_id      INTEGER PRIMARY KEY,
-    topic       TEXT,
-    agent       TEXT,
-    content     TEXT,
-    saved_at    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+CREATE TABLE message_annotations (
+    msg_id     INTEGER NOT NULL,
+    kind       TEXT NOT NULL,
+    payload    TEXT,
+    created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    PRIMARY KEY (msg_id, kind)
 );
+
+CREATE INDEX idx_message_annotations_kind ON message_annotations (kind, created_at DESC);
 ```
+
+Bookmarks are represented as `kind='bookmark'` annotations. Full content stays
+in `chat_messages`.
 
 ### `worktrees`
 ```sql

@@ -199,15 +199,18 @@ Indexed on `(file_path, id DESC)`.
 
 ---
 
-### `bookmarks` — saved messages
+### `message_annotations` — message markers
 
 ```
-msg_id   INTEGER  PK
-topic    TEXT
-agent    TEXT
-content  TEXT
-saved_at TEXT     ISO8601
+msg_id     INTEGER
+kind       TEXT     e.g. bookmark, bad_response
+payload    TEXT     JSON
+created_at TEXT     ISO8601
+updated_at TEXT     ISO8601
 ```
+
+Bookmarks are stored as `kind="bookmark"` annotations. Full message content is
+read from `chat_messages`, not copied into annotation rows.
 
 ---
 
@@ -921,7 +924,7 @@ file or (if `file_path` omitted) all files in the diff. Recorded in
 
 ### POST /bookmarks
 
-**Request body**: `{ "msg_id": int, "topic": "string | null", "agent": "string | null", "content": "string | null" }`
+**Request body**: `{ "msg_id": int }`
 
 **Response**: `{ "ok": true }`
 

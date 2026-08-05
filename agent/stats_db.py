@@ -153,19 +153,9 @@ _TABLES = [
         edited_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )""",
     "CREATE INDEX IF NOT EXISTS idx_file_edit_history_path ON file_edit_history (file_path, id DESC)",
-    """CREATE TABLE IF NOT EXISTS bookmarks (
-        msg_id      INTEGER PRIMARY KEY,
-        topic       TEXT,
-        agent       TEXT,
-        content     TEXT,
-        saved_at    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-    )""",
     """CREATE TABLE IF NOT EXISTS message_annotations (
         msg_id     INTEGER NOT NULL,
         kind       TEXT NOT NULL,
-        topic      TEXT,
-        agent      TEXT,
-        content    TEXT,
         payload    TEXT,
         created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
@@ -265,6 +255,51 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _migrate_message_annotations_schema(conn: sqlite3.Connection) -> None:
+    columns = _table_columns(conn, "message_annotations")
+    target = {"msg_id", "kind", "payload", "created_at", "updated_at"}
+    if columns <= target:
+        return
+    conn.execute(
+        """CREATE TABLE message_annotations_new (
+            msg_id     INTEGER NOT NULL,
+            kind       TEXT NOT NULL,
+            payload    TEXT,
+            created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            PRIMARY KEY (msg_id, kind)
+        )"""
+    )
+    conn.execute(
+        """INSERT OR REPLACE INTO message_annotations_new
+           (msg_id, kind, payload, created_at, updated_at)
+           SELECT msg_id, kind, COALESCE(payload, '{}'), created_at, updated_at
+           FROM message_annotations"""
+    )
+    conn.execute("DROP TABLE message_annotations")
+    conn.execute("ALTER TABLE message_annotations_new RENAME TO message_annotations")
+
+
+def _migrate_bookmarks_to_annotations(conn: sqlite3.Connection) -> None:
+    if not _table_exists(conn, "bookmarks"):
+        return
+    conn.execute(
+        """INSERT OR IGNORE INTO message_annotations
+           (msg_id, kind, payload, created_at, updated_at)
+           SELECT msg_id, 'bookmark', '{}', saved_at, saved_at
+           FROM bookmarks"""
+    )
+    conn.execute("DROP TABLE bookmarks")
+
+
 def allocate_id(namespace: str) -> str:
     namespace = (namespace or "").strip()
     if not namespace:
@@ -299,6 +334,9 @@ def init_db() -> None:
     try:
         for ddl in _TABLES:
             conn.execute(ddl)
+        _migrate_message_annotations_schema(conn)
+        _migrate_bookmarks_to_annotations(conn)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_message_annotations_kind ON message_annotations (kind, created_at DESC)")
         topic_columns = _table_columns(conn, "topics")
         if "last_session_at" not in topic_columns:
             conn.execute("ALTER TABLE topics ADD COLUMN last_session_at TEXT")
@@ -1475,7 +1513,10 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
                       marked_bad: bool = False) -> dict:
     where = "WHERE m.role = 'assistant'"
     params: list = []
-    bookmark_join = "JOIN bookmarks b ON b.msg_id = m.id" if bookmarked else ""
+    bookmark_join = (
+        "JOIN message_annotations ma_bookmark ON ma_bookmark.msg_id = m.id AND ma_bookmark.kind = 'bookmark'"
+        if bookmarked else ""
+    )
     marked_bad_join = (
         "JOIN message_annotations ma_bad ON ma_bad.msg_id = m.id AND ma_bad.kind = 'bad_response'"
         if marked_bad else ""
@@ -1607,7 +1648,10 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
         params.extend(clause_params)
 
     where = "WHERE " + " AND ".join(where_parts)
-    bookmark_join = "JOIN bookmarks b ON b.msg_id = m.id" if bookmarked else ""
+    bookmark_join = (
+        "JOIN message_annotations ma_bookmark ON ma_bookmark.msg_id = m.id AND ma_bookmark.kind = 'bookmark'"
+        if bookmarked else ""
+    )
     marked_bad_join = (
         "JOIN message_annotations ma_bad ON ma_bad.msg_id = m.id AND ma_bad.kind = 'bad_response'"
         if marked_bad else ""
@@ -1676,7 +1720,10 @@ def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = N
         params.extend(clause_params)
 
     where = "WHERE " + " AND ".join(where_parts)
-    bookmark_join = "JOIN bookmarks b ON b.msg_id = m.id" if bookmarked else ""
+    bookmark_join = (
+        "JOIN message_annotations ma_bookmark ON ma_bookmark.msg_id = m.id AND ma_bookmark.kind = 'bookmark'"
+        if bookmarked else ""
+    )
     marked_bad_join = (
         "JOIN message_annotations ma_bad ON ma_bad.msg_id = m.id AND ma_bad.kind = 'bad_response'"
         if marked_bad else ""
@@ -3597,22 +3644,21 @@ def get_run_events(msg_id: int, after_seq: int = -1) -> list[dict]:
 def get_bookmarks() -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT msg_id AS id, topic, agent, content, saved_at FROM bookmarks ORDER BY saved_at DESC"
+            """SELECT ma.msg_id AS id, m.topic, m.agent, ma.created_at AS saved_at
+               FROM message_annotations ma
+               LEFT JOIN chat_messages m ON m.id = ma.msg_id
+               WHERE ma.kind = 'bookmark'
+               ORDER BY datetime(ma.updated_at) DESC, datetime(ma.created_at) DESC"""
         ).fetchall()
     return [dict(r) for r in rows]
 
 
-def add_bookmark(msg_id: int, topic: Optional[str], agent: Optional[str], content: Optional[str]) -> None:
-    with _connect() as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO bookmarks (msg_id, topic, agent, content) VALUES (?, ?, ?, ?)",
-            (msg_id, topic, agent, content),
-        )
+def add_bookmark(msg_id: int) -> None:
+    set_message_annotation(msg_id, "bookmark")
 
 
 def remove_bookmark(msg_id: int) -> None:
-    with _connect() as conn:
-        conn.execute("DELETE FROM bookmarks WHERE msg_id = ?", (msg_id,))
+    remove_message_annotation(msg_id, "bookmark")
 
 
 # ── message annotations ────────────────────────────────────────────────────────
@@ -3621,7 +3667,7 @@ def get_message_annotations(kind: Optional[str] = None) -> list[dict]:
     with _connect() as conn:
         if kind:
             rows = conn.execute(
-                """SELECT msg_id, kind, topic, agent, content, payload, created_at, updated_at
+                """SELECT msg_id, kind, payload, created_at, updated_at
                    FROM message_annotations
                    WHERE kind=?
                    ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC""",
@@ -3629,7 +3675,7 @@ def get_message_annotations(kind: Optional[str] = None) -> list[dict]:
             ).fetchall()
         else:
             rows = conn.execute(
-                """SELECT msg_id, kind, topic, agent, content, payload, created_at, updated_at
+                """SELECT msg_id, kind, payload, created_at, updated_at
                    FROM message_annotations
                    ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC"""
             ).fetchall()
@@ -3639,7 +3685,7 @@ def get_message_annotations(kind: Optional[str] = None) -> list[dict]:
 def get_message_annotation(msg_id: int, kind: str) -> Optional[dict]:
     with _connect() as conn:
         row = conn.execute(
-            """SELECT msg_id, kind, topic, agent, content, payload, created_at, updated_at
+            """SELECT msg_id, kind, payload, created_at, updated_at
                FROM message_annotations
                WHERE msg_id=? AND kind=?""",
             (msg_id, kind),
@@ -3650,23 +3696,17 @@ def get_message_annotation(msg_id: int, kind: str) -> Optional[dict]:
 def set_message_annotation(
     msg_id: int,
     kind: str,
-    topic: Optional[str],
-    agent: Optional[str],
-    content: Optional[str],
     payload: Optional[dict] = None,
 ) -> None:
     payload_text = json.dumps(payload or {}, sort_keys=True)
     with _connect() as conn:
         conn.execute(
-            """INSERT INTO message_annotations (msg_id, kind, topic, agent, content, payload)
-               VALUES (?, ?, ?, ?, ?, ?)
+            """INSERT INTO message_annotations (msg_id, kind, payload)
+               VALUES (?, ?, ?)
                ON CONFLICT(msg_id, kind) DO UPDATE SET
-                   topic=excluded.topic,
-                   agent=excluded.agent,
-                   content=excluded.content,
                    payload=excluded.payload,
                    updated_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')""",
-            (msg_id, kind, topic, agent, content, payload_text),
+            (msg_id, kind, payload_text),
         )
 
 

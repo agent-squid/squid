@@ -53,7 +53,7 @@ def test_chat_messages_source_defaults_and_can_mark_system(tmp_path, monkeypatch
     assert stats_db.get_message(system_asst)["prompt_source"] == "workflow"
 
 
-def test_message_annotations_store_bad_response_snapshot(tmp_path, monkeypatch):
+def test_message_annotations_store_bad_response_marker(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
 
@@ -64,16 +64,61 @@ def test_message_annotations_store_bad_response_snapshot(tmp_path, monkeypatch):
     stats_db.set_message_annotation(
         msg_id,
         "bad_response",
-        "squid",
-        "codex",
-        "partial fix",
         {"reasons": ["incomplete"]},
     )
 
     annotation = stats_db.get_message_annotation(msg_id, "bad_response")
-    assert annotation["content"] == "partial fix"
     assert json.loads(annotation["payload"]) == {"reasons": ["incomplete"]}
     assert stats_db.get_message(msg_id)["marked_bad"] == 1
+
+
+def test_init_db_migrates_bookmarks_to_annotations_and_drops_annotation_snapshots(tmp_path, monkeypatch):
+    db_path = tmp_path / "squid.db"
+    monkeypatch.setattr(stats_db, "_DB_PATH", db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """CREATE TABLE bookmarks (
+                msg_id INTEGER PRIMARY KEY,
+                topic TEXT,
+                agent TEXT,
+                content TEXT,
+                saved_at TEXT
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE message_annotations (
+                msg_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                topic TEXT,
+                agent TEXT,
+                content TEXT,
+                payload TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                PRIMARY KEY (msg_id, kind)
+            )"""
+        )
+        conn.execute(
+            "INSERT INTO bookmarks (msg_id, topic, agent, content, saved_at) VALUES (7, 'squid', 'codex', 'old preview', '2026-01-01T00:00:00Z')"
+        )
+        conn.execute(
+            "INSERT INTO message_annotations (msg_id, kind, topic, agent, content, payload, created_at, updated_at) VALUES (8, 'bad_response', 'squid', 'codex', 'bad preview', '{}', '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z')"
+        )
+
+    stats_db.init_db()
+
+    bookmark = stats_db.get_message_annotation(7, "bookmark")
+    bad = stats_db.get_message_annotation(8, "bad_response")
+    assert bookmark is not None
+    assert bookmark["created_at"] == "2026-01-01T00:00:00Z"
+    assert bad is not None
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(message_annotations)")}
+        bookmarks_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='bookmarks'"
+        ).fetchone()
+    assert {"topic", "agent", "content"}.isdisjoint(columns)
+    assert bookmarks_table is None
 
 
 def test_stats_include_marked_bad_measure(tmp_path, monkeypatch):
@@ -85,7 +130,7 @@ def test_stats_include_marked_bad_measure(tmp_path, monkeypatch):
     stats_db.update_assistant_message(marked_id, "bad", None)
     other_id = stats_db.insert_assistant_message("squid", "codex", user_id)
     stats_db.update_assistant_message(other_id, "ok", None)
-    stats_db.set_message_annotation(marked_id, "bad_response", "squid", "codex", "bad", {})
+    stats_db.set_message_annotation(marked_id, "bad_response")
 
     turn_rows = stats_db.get_stats_by_turn(days=0)
     by_id = {row["msg_id"]: row for row in turn_rows}
@@ -1563,7 +1608,7 @@ def test_search_messages_can_filter_bookmarks_before_limit(tmp_path, monkeypatch
     bookmarked_user_id = stats_db.insert_user_message("squid", "codex", "bookmarked prompt")
     bookmarked_id = stats_db.insert_assistant_message("squid", "codex", bookmarked_user_id, adhoc=False)
     stats_db.update_assistant_message(bookmarked_id, "needle bookmarked response", "session-1", "done")
-    stats_db.add_bookmark(bookmarked_id, "squid", "codex", "needle bookmarked response")
+    stats_db.add_bookmark(bookmarked_id)
 
     newer_user_id = stats_db.insert_user_message("squid", "codex", "newer prompt")
     newer_id = stats_db.insert_assistant_message("squid", "codex", newer_user_id, adhoc=False)
@@ -1581,7 +1626,7 @@ def test_history_can_filter_bookmarks_before_limit(tmp_path, monkeypatch):
     bookmarked_user_id = stats_db.insert_user_message("squid", "codex", "bookmarked prompt")
     bookmarked_id = stats_db.insert_assistant_message("squid", "codex", bookmarked_user_id, adhoc=False)
     stats_db.update_assistant_message(bookmarked_id, "bookmarked response", "session-1", "done")
-    stats_db.add_bookmark(bookmarked_id, "squid", "codex", "bookmarked response")
+    stats_db.add_bookmark(bookmarked_id)
 
     newer_user_id = stats_db.insert_user_message("squid", "codex", "newer prompt")
     newer_id = stats_db.insert_assistant_message("squid", "codex", newer_user_id, adhoc=False)
@@ -1600,7 +1645,7 @@ def test_history_can_filter_marked_bad_before_limit(tmp_path, monkeypatch):
     marked_user_id = stats_db.insert_user_message("squid", "codex", "marked prompt")
     marked_id = stats_db.insert_assistant_message("squid", "codex", marked_user_id, adhoc=False)
     stats_db.update_assistant_message(marked_id, "marked bad response", "session-1", "done")
-    stats_db.set_message_annotation(marked_id, "bad_response", "squid", "codex", "marked bad response")
+    stats_db.set_message_annotation(marked_id, "bad_response")
 
     newer_user_id = stats_db.insert_user_message("squid", "codex", "newer prompt")
     newer_id = stats_db.insert_assistant_message("squid", "codex", newer_user_id, adhoc=False)
@@ -1620,7 +1665,7 @@ def test_search_messages_can_filter_marked_bad_before_limit(tmp_path, monkeypatc
     marked_user_id = stats_db.insert_user_message("squid", "codex", "marked prompt")
     marked_id = stats_db.insert_assistant_message("squid", "codex", marked_user_id, adhoc=False)
     stats_db.update_assistant_message(marked_id, "needle marked bad response", "session-1", "done")
-    stats_db.set_message_annotation(marked_id, "bad_response", "squid", "codex", "needle marked bad response")
+    stats_db.set_message_annotation(marked_id, "bad_response")
 
     newer_user_id = stats_db.insert_user_message("squid", "codex", "newer prompt")
     newer_id = stats_db.insert_assistant_message("squid", "codex", newer_user_id, adhoc=False)

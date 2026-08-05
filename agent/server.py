@@ -1948,9 +1948,6 @@ class WorktreeDiscardRequest(BaseModel):
 class AnnotationRequest(BaseModel):
     msg_id: int
     kind: str = Field(..., min_length=1)
-    topic: Optional[str] = None
-    agent: Optional[str] = None
-    content: Optional[str] = None
     payload: dict = Field(default_factory=dict)
 
 
@@ -2310,7 +2307,7 @@ async def create_bookmark(request: Request):
     msg_id = body.get("msg_id")
     if not isinstance(msg_id, int):
         return JSONResponse({"error": "msg_id required"}, status_code=400)
-    add_bookmark(msg_id, body.get("topic"), body.get("agent"), body.get("content"))
+    add_bookmark(msg_id)
     return JSONResponse({"ok": True})
 
 
@@ -2327,21 +2324,18 @@ async def list_annotations(kind: str = ""):
 
 @app.post("/annotations")
 async def create_annotation(req: AnnotationRequest):
-    if req.kind != "bad_response":
+    if req.kind not in {"bad_response", "bookmark"}:
         return JSONResponse({"error": "unsupported annotation kind"}, status_code=400)
     msg = get_message(req.msg_id)
     if not msg or msg.get("role") != "assistant":
         return JSONResponse({"error": "assistant message not found"}, status_code=404)
-    topic = req.topic if req.topic is not None else msg.get("topic")
-    agent = req.agent if req.agent is not None else msg.get("agent")
-    content = req.content if req.content is not None else msg.get("content")
-    set_message_annotation(req.msg_id, req.kind, topic, agent, content, req.payload)
+    set_message_annotation(req.msg_id, req.kind, req.payload)
     return JSONResponse({"ok": True})
 
 
 @app.delete("/annotations/{kind}/{msg_id}")
 async def delete_annotation(kind: str, msg_id: int):
-    if kind != "bad_response":
+    if kind not in {"bad_response", "bookmark"}:
         return JSONResponse({"error": "unsupported annotation kind"}, status_code=400)
     remove_message_annotation(msg_id, kind)
     return JSONResponse({"ok": True})

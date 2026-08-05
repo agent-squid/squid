@@ -75,9 +75,6 @@ def test_annotations_api_marks_and_unmarks_bad_response(tmp_path, monkeypatch):
     res = client.post("/annotations", json={
         "msg_id": msg_id,
         "kind": "bad_response",
-        "topic": "squid",
-        "agent": "codex",
-        "content": "bad output",
         "payload": {"reasons": ["incomplete"]},
     })
 

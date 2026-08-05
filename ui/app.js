@@ -12885,7 +12885,7 @@ async function _loadBookmarks() {
     for (const item of legacy) {
       if (!_bookmarkIds.has(item.id)) {
         await fetch('/bookmarks', { method: 'POST', headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ msg_id: item.id, topic: item.topic, agent: item.agent || null, content: item.content || null }) });
+          body: JSON.stringify({ msg_id: item.id }) });
       }
     }
     if (legacy.length) {
@@ -12896,18 +12896,17 @@ async function _loadBookmarks() {
   } catch { /* ignore — falls back to empty */ }
 }
 
-async function _apiToggleBookmark(msgId, topic, agent, text) {
+async function _apiToggleBookmark(msgId, topic, agent) {
   if (_bookmarkIds.has(msgId)) {
     _bookmarkIds.delete(msgId);
     _bookmarkItems = _bookmarkItems.filter(i => i.id !== msgId);
     fetch(`/bookmarks/${msgId}`, { method: 'DELETE' }).catch(() => {});
     return false;
   } else {
-    const content = text ? text.slice(0, 300) : null;
     _bookmarkIds.add(msgId);
-    _bookmarkItems = [{ id: msgId, topic, agent: agent || null, content, saved_at: new Date().toISOString() }, ..._bookmarkItems];
+    _bookmarkItems = [{ id: msgId, topic, agent: agent || null, saved_at: new Date().toISOString() }, ..._bookmarkItems];
     fetch('/bookmarks', { method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ msg_id: msgId, topic, agent: agent || null, content }) }).catch(() => {});
+      body: JSON.stringify({ msg_id: msgId }) }).catch(() => {});
     return true;
   }
 }
@@ -12967,8 +12966,7 @@ function addBookmarkButton(bubbleEl, msgId, topic, agent) {
   }
   btn.addEventListener('click', async e => {
     e.stopPropagation();
-    const text = _messageBodyText(bubbleEl);
-    const nowBookmarked = await _apiToggleBookmark(msgId, topic, agent, text);
+    const nowBookmarked = await _apiToggleBookmark(msgId, topic, agent);
     btn.classList.toggle('bookmarked', nowBookmarked);
     btn.title = nowBookmarked ? 'Remove bookmark' : 'Bookmark';
   });
@@ -12998,13 +12996,12 @@ async function _loadBadResponses() {
   } catch { /* ignore — falls back to unmarked */ }
 }
 
-async function _apiToggleBadResponse(msgId, topic, agent, text) {
+async function _apiToggleBadResponse(msgId, topic, agent) {
   if (_badResponseIds.has(msgId)) {
     _badResponseIds.delete(msgId);
     fetch(`/annotations/bad_response/${msgId}`, { method: 'DELETE' }).catch(() => {});
     return false;
   }
-  const content = text ? text.slice(0, 300) : null;
   _badResponseIds.add(msgId);
   fetch('/annotations', {
     method: 'POST',
@@ -13012,9 +13009,6 @@ async function _apiToggleBadResponse(msgId, topic, agent, text) {
     body: JSON.stringify({
       msg_id: msgId,
       kind: 'bad_response',
-      topic,
-      agent: agent || null,
-      content,
       payload: {},
     }),
   }).catch(() => {});
@@ -13037,8 +13031,7 @@ function addBadResponseButton(bubbleEl, msgId, topic, agent, marked = false) {
   btn.classList.toggle('marked-bad', isMarked);
   btn.addEventListener('click', async e => {
     e.stopPropagation();
-    const text = _messageBodyText(bubbleEl);
-    const nowMarked = await _apiToggleBadResponse(msgId, topic, agent, text);
+    const nowMarked = await _apiToggleBadResponse(msgId, topic, agent);
     btn.classList.toggle('marked-bad', nowMarked);
     btn.title = nowMarked ? 'Unmark bad response' : 'Mark bad response';
     btn.setAttribute('aria-label', btn.title);
