@@ -7710,7 +7710,7 @@ const CHART_METRICS = {
   cancelled_turns:{ label: 'Cancelled',      fn: r => (r.cancelled_turns || 0), color: 'rgba(190,150,90,1)', fill: 'rgba(190,150,90,0.08)' },
   new_input:      { label: 'New Input',      fn: r => _splitInputTokens(r).newInput,   color: 'rgba(80,200,120,1)',   fill: 'rgba(80,200,120,0.08)'  },
   error_turns:    { label: 'Errors',         fn: r => (r.error_turns || 0),     color: 'rgba(255,100,100,1)',  fill: 'rgba(255,100,100,0.08)' },
-  marked_bad:     { label: 'Marked Bad',     fn: r => (r.marked_bad || 0),      color: 'rgba(220,80,110,1)',   fill: 'rgba(220,80,110,0.08)' },
+  marked_bad:     { label: 'Bad Responses',  fn: r => (r.marked_bad || 0),      color: 'rgba(220,80,110,1)',   fill: 'rgba(220,80,110,0.08)' },
   cache_hit_rate: { label: 'Cache Hit %',    fn: r => (_cacheHitRate(r) || 0),   color: 'rgba(230,200,80,1)',   fill: 'rgba(230,200,80,0.08)'  },
   avg_tokens_turn:{ label: 'Avg Tokens/Turn',fn: r => (_avgTokensPerTurn(r) || 0), color: 'rgba(150,150,255,1)', fill: 'rgba(150,150,255,0.08)' },
 };
@@ -7995,7 +7995,7 @@ const STATS_TABLE_MEASURES = [
   { key: 'cost', label: 'Cost', row: r => _formatCost(r.cost_usd), total: t => _formatCost(t.cost || 0) },
   { key: 'duration', label: 'Duration', row: r => r.duration_ms != null ? `${(r.duration_ms / 1000).toFixed(1)}s` : '—', total: t => t.duration != null ? `${(t.duration / 1000).toFixed(1)}s` : '—' },
   { key: 'error_turns', label: 'Errors', row: r => fmtNum(r.error_turns || 0), total: t => fmtNum(t.error_turns || 0) },
-  { key: 'marked_bad', label: 'Marked Bad', row: r => fmtNum(r.marked_bad || 0), total: t => fmtNum(t.marked_bad || 0) },
+  { key: 'marked_bad', label: 'Bad Responses', row: r => fmtNum(r.marked_bad || 0), total: t => fmtNum(t.marked_bad || 0) },
   { key: 'new_input', label: 'New Input', row: r => fmtNum(_splitInputTokens(r).newInput), total: t => fmtNum(t.new_input || 0) },
   { key: 'quota', label: 'Quota Delta', title: 'Observed account meter change; not exact attributed usage', row: r => _formatQuotaDelta(r.quota_delta), total: t => _formatQuotaDelta(t.quota) },
   { key: 'sessions', label: 'Sessions', row: r => r.sessions || 0, total: t => t.sessions || 0 },

@@ -341,12 +341,13 @@ test('stats measures are alphabetical and Turns links open responses', async ({ 
     return { measureLabels, links, popupIds };
   });
 
-  expect(state.measureLabels).toEqual([
-    'Turns',
-    'Avg Tokens/Turn',
-    'Cache Hit %',
-    'Cache Read',
-    'Cache Write',
+	expect(state.measureLabels).toEqual([
+	  'Turns',
+	  'Avg Tokens/Turn',
+	  'Bad Responses',
+	  'Cache Hit %',
+	  'Cache Read',
+	  'Cache Write',
     'Cancelled',
     'Cost',
     'Duration',
@@ -452,6 +453,35 @@ test('cache hit chart requests a non-additive aggregate', async ({ page }) => {
 
   await expect.poll(() => statsRequests.at(-1)?.chart_metrics).toBe('cache_hit_rate');
   expect(statsRequests.at(-1).chart_aggs).toBe('avg');
+});
+
+test('bad responses measure requests marked bad count', async ({ page }) => {
+  await mockApp(page);
+  const statsRequests = [];
+  await page.route('**/stats?**', route => {
+    const url = new URL(route.request().url());
+    statsRequests.push(Object.fromEntries(url.searchParams.entries()));
+    route.fulfill({
+      json: [{
+        period: '2026-07-10 10:00',
+        sessions: 2,
+        total_turns: 2,
+        marked_bad: 1,
+        chart_marked_bad_sum: 1,
+      }],
+    });
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Stats' }).click();
+  await page.locator('#sf-measures-toggle').click();
+  await expect(page.locator('#sf-measures-menu input[value="marked_bad"]')).toBeVisible();
+  await page.locator('#sf-measures-menu input[value="marked_bad"]').check();
+  await page.locator('.sc-series-pill').first().click();
+  await page.locator('.sc-extra-row .sc-extra-metric').selectOption('marked_bad');
+
+  await expect.poll(() => statsRequests.at(-1)?.chart_metrics).toBe('marked_bad,cache_hit_rate');
+  expect(statsRequests.at(-1).chart_aggs).toBe('sum,avg');
 });
 
 test('stats chart aggregate chips apply to Y1 and an added series', async ({ page }) => {
