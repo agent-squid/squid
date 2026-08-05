@@ -260,7 +260,6 @@ test('bookmarked search includes the active filter scope and keeps bookmark-only
     urls.push(route.request().url());
     return route.fulfill({ json: { items: [
       { id: 42, topic: 'squid', agent: 'claude', prompt: 'Find it', content: 'Needle bookmark', status: 'done', adhoc: false, timestamp: new Date().toISOString() },
-      { id: 99, topic: 'squid', agent: 'claude', prompt: 'Find another', content: 'Needle unbookmarked', status: 'done', adhoc: false, timestamp: new Date().toISOString() },
     ] } });
   });
   await page.goto('/');
@@ -290,11 +289,13 @@ test('bookmarked search includes the active filter scope and keeps bookmark-only
 test('clearing search restores the filtered bookmark-only history list', async ({ page }) => {
   await mockBackend(page);
   await page.unroute('**/history**');
-  await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
-  await page.route('**/history/by-ids**', route => route.fulfill({ json: { items: [
-    { id: 42, role: 'assistant', topic: 'squid', agent: 'claude', prompt: 'Find it', content: 'Needle bookmark', status: 'done', adhoc: false, timestamp: new Date().toISOString() },
-    { id: 99, role: 'assistant', topic: 'other', agent: 'claude', prompt: 'Other', content: 'Other bookmark', status: 'done', adhoc: false, timestamp: new Date().toISOString() },
-  ] }}));
+  await page.route('**/history**', route => {
+    const url = new URL(route.request().url());
+    const bookmarked = url.searchParams.get('bookmarked') === 'true';
+    return route.fulfill({ json: { items: bookmarked ? [
+      { id: 42, role: 'assistant', topic: 'squid', agent: 'claude', prompt: 'Find it', content: 'Needle bookmark', status: 'done', adhoc: false, timestamp: new Date().toISOString() },
+    ] : [], has_more: false } });
+  });
   await page.route('**/search**', route => route.fulfill({ json: { items: [
     { id: 42, topic: 'squid', agent: 'claude', prompt: 'Find it', content: 'Needle bookmark', status: 'done', adhoc: false, timestamp: new Date().toISOString() },
   ] } }));
@@ -373,10 +374,13 @@ test('search icon prefill then clear preserves topic-only filter after removing 
 test('bookmark search clear preserves topic-only filter after removing agent scope', async ({ page }) => {
   await mockBackend(page);
   await page.unroute('**/history**');
-  await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
-  await page.route('**/history/by-ids**', route => route.fulfill({ json: { items: [
-    { id: 42, role: 'assistant', topic: 'squid', agent: 'claude', prompt: 'Find it', content: 'Needle bookmark', status: 'done', adhoc: false, timestamp: new Date().toISOString() },
-  ] }}));
+  await page.route('**/history**', route => {
+    const url = new URL(route.request().url());
+    const bookmarked = url.searchParams.get('bookmarked') === 'true';
+    return route.fulfill({ json: { items: bookmarked ? [
+      { id: 42, role: 'assistant', topic: 'squid', agent: 'claude', prompt: 'Find it', content: 'Needle bookmark', status: 'done', adhoc: false, timestamp: new Date().toISOString() },
+    ] : [], has_more: false } });
+  });
   await page.route('**/search**', route => route.fulfill({ json: { items: [
     { id: 42, topic: 'squid', agent: 'claude', prompt: 'Find it', content: 'Needle bookmark', status: 'done', adhoc: false, timestamp: new Date().toISOString() },
   ] } }));
@@ -407,10 +411,13 @@ test('bookmark search clear preserves topic-only filter after removing agent sco
 test('bookmark search clear does not restore filter removed during search', async ({ page }) => {
   await mockBackend(page);
   await page.unroute('**/history**');
-  await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
-  await page.route('**/history/by-ids**', route => route.fulfill({ json: { items: [
-    { id: 42, role: 'assistant', topic: 'squid', agent: 'codex', prompt: 'Find it', content: 'Needle bookmark', status: 'done', adhoc: false, timestamp: new Date().toISOString() },
-  ] }}));
+  await page.route('**/history**', route => {
+    const url = new URL(route.request().url());
+    const bookmarked = url.searchParams.get('bookmarked') === 'true';
+    return route.fulfill({ json: { items: bookmarked ? [
+      { id: 42, role: 'assistant', topic: 'squid', agent: 'codex', prompt: 'Find it', content: 'Needle bookmark', status: 'done', adhoc: false, timestamp: new Date().toISOString() },
+    ] : [], has_more: false } });
+  });
   await page.route('**/search**', route => route.fulfill({ json: { items: [
     { id: 42, topic: 'squid', agent: 'codex', prompt: 'Find it', content: 'Needle bookmark', status: 'done', adhoc: false, timestamp: new Date().toISOString() },
   ] } }));

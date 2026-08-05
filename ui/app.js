@@ -1644,6 +1644,10 @@ function hasHistoryFilterScope() {
   return !!(historyFilter.flow_route || historyFilter.topic || historyFilter.agent || historyFilter.explicitAll);
 }
 
+function hasResponseOnlyFilter() {
+  return bookmarkOnlyHistory || badOnlyHistory;
+}
+
 function persistSearchFilterScope(state) {
   if (!hasHistoryFilterScope()) return;
   historyFilter = {
@@ -1660,6 +1664,9 @@ function togglePromptOnlyHistory() {
   if (promptOnlyHistory && bookmarkOnlyHistory) {
     bookmarkOnlyHistory = false;
     updateBookmarkButton();
+  }
+  if (promptOnlyHistory && badOnlyHistory) {
+    badOnlyHistory = false;
   }
   updatePromptOnlyButton();
   if (searchActive) {
@@ -1770,48 +1777,15 @@ function reloadHistory(filter = {}) {
   historyExhausted = false;
   invalidateHistoryLoad();
   if (topSentinel) { topSentinel.remove(); topSentinel = null; }
-  document.querySelectorAll('.history-item, .boot-banner, .tool-block-history').forEach(el => el.remove());
+  document.querySelectorAll('.history-item, .boot-banner, .tool-block-history, #messages > .cmd-feedback').forEach(el => el.remove());
   // Remove live (non-history) messages too — completed ones are in the DB and will reload
   const preserveForLive = collectLiveGroupElements();
   document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .route-chain-marker').forEach(el => {
     if (!preserveForLive.has(el)) el.remove();
   });
-  setLiveGroupHidden(hasHistoryFilterScope());
+  setLiveGroupHidden(hasHistoryFilterScope() || hasResponseOnlyFilter());
   _updateFilterBadge();
-  if (bookmarkOnlyHistory) {
-    loadBookmarkHistory();
-  } else {
-    initHistoryScroll();
-  }
-}
-
-async function loadBookmarkHistory() {
-  const bookmarked = getBookmarkedItems();
-  if (!bookmarked.length) {
-    refreshDateDividers();
-    return;
-  }
-  const ids = bookmarked.map(i => i.id).join(',');
-  let data;
-  try {
-    const res = await fetch(`/history/by-ids?ids=${ids}`);
-    data = await res.json();
-  } catch {
-    return;
-  }
-  const { items } = data;
-  const fragment = document.createDocumentFragment();
-  for (const item of items) {
-    if (!itemMatchesFilter(item, historyFilter)) continue;
-    if (!item.content) continue;
-    appendHistoryItem(item, fragment);
-  }
-  messages.appendChild(fragment);
-  messages.scrollTop = messages.scrollHeight;
-  updateInContextMarkers();
-  refreshAllRevertButtons();
-  evaluateAdvisory();
-  refreshDateDividers();
+  initHistoryScroll();
 }
 
 function _updateFilterBadge() {
@@ -1821,14 +1795,14 @@ function _updateFilterBadge() {
   const { topic, agent, adhoc, flow_route } = activeState;
   const explicitAll = !!activeState.explicitAll;
 
-  if (!flow_route && !topic && !agent && !explicitAll) {
+  if (!flow_route && !topic && !agent && !explicitAll && !bookmarkOnlyHistory && !badOnlyHistory) {
     badge.classList.remove('active');
     updateFilterButton();
     return;
   }
 
   labelEl.innerHTML = '';
-  const addSegment = (kind, content, remove) => {
+  const addSegment = (kind, content, remove, editable = true) => {
     const segment = document.createElement('span');
     segment.className = `filter-scope-segment filter-scope-${kind}`;
     segment.appendChild(content);
@@ -1838,7 +1812,7 @@ function _updateFilterBadge() {
     x.setAttribute('aria-label', `Remove ${kind} filter`);
     x.addEventListener('click', e => { e.stopPropagation(); remove(); });
     segment.appendChild(x);
-    segment.addEventListener('click', editActiveFilter);
+    if (editable) segment.addEventListener('click', editActiveFilter);
     labelEl.appendChild(segment);
   };
 
@@ -1875,6 +1849,12 @@ function _updateFilterBadge() {
     }
     addSegment('agent', lane, () => removeFilterSegment('agent'));
   }
+  if (bookmarkOnlyHistory) {
+    addSegment('bookmarks', document.createTextNode('bookmarked'), () => removeFilterSegment('bookmarks'), false);
+  }
+  if (badOnlyHistory) {
+    addSegment('bad', document.createTextNode('marked bad'), () => removeFilterSegment('bad'), false);
+  }
   badge.classList.add('active');
   updateFilterButton();
 }
@@ -1890,6 +1870,7 @@ function itemMatchesFilter(item, filter) {
 
 function shouldShowNewResponse(item) {
   if (searchActive) return false;
+  if (hasResponseOnlyFilter()) return false;
   if (hasHistoryFilterScope()) return itemMatchesFilter(item, historyFilter);
   return true;
 }
@@ -1902,6 +1883,11 @@ function removeFilterSegment(kind) {
     next.explicitAll = false;
   } else if (kind === 'flow') {
     next.flow_route = null;
+  } else if (kind === 'bookmarks') {
+    bookmarkOnlyHistory = false;
+    updateBookmarkButton();
+  } else if (kind === 'bad') {
+    badOnlyHistory = false;
   } else {
     next.agent = null;
     next.adhoc = null;
@@ -1976,7 +1962,6 @@ function createTopSentinel() {
 }
 
 async function loadHistory() {
-  if (bookmarkOnlyHistory) return;
   // #view-chat is display:none while another tab is active, which collapses every
   // descendant's getBoundingClientRect() to zero — including the sentinel visibility
   // check below, which would then read as "still in view" no matter what and chain-load
@@ -1991,11 +1976,12 @@ async function loadHistory() {
   let data;
   try {
     let url = `/history?offset=${historyOffset}&limit=5`;
-    const applyRouteFilter = !bookmarkOnlyHistory;
-    if (applyRouteFilter && historyFilter.flow_route) url += `&flow_route=${encodeURIComponent(historyFilter.flow_route)}`;
-    if (applyRouteFilter && historyFilter.topic) url += `&topic=${encodeURIComponent(historyFilter.topic)}`;
-    if (applyRouteFilter && historyFilter.agent) url += `&agent=${encodeURIComponent(historyFilter.agent)}`;
-    if (applyRouteFilter && historyFilter.adhoc != null) url += `&adhoc=${historyFilter.adhoc}`;
+    if (historyFilter.flow_route) url += `&flow_route=${encodeURIComponent(historyFilter.flow_route)}`;
+    if (historyFilter.topic) url += `&topic=${encodeURIComponent(historyFilter.topic)}`;
+    if (historyFilter.agent) url += `&agent=${encodeURIComponent(historyFilter.agent)}`;
+    if (historyFilter.adhoc != null) url += `&adhoc=${historyFilter.adhoc}`;
+    if (bookmarkOnlyHistory) url += '&bookmarked=true';
+    if (badOnlyHistory) url += '&marked_bad=true';
     const res = await fetch(url);
     data = await res.json();
   } catch {
@@ -2260,13 +2246,9 @@ function clearSearch() {
   historyOffset = 0;
   historyExhausted = false;
   invalidateHistoryLoad();
-  setLiveGroupHidden(hasHistoryFilterScope());
+  setLiveGroupHidden(hasHistoryFilterScope() || hasResponseOnlyFilter());
   _updateFilterBadge();
-  if (bookmarkOnlyHistory) {
-    loadBookmarkHistory();
-  } else {
-    initHistoryScroll();
-  }
+  initHistoryScroll();
 }
 
 function recordPrompt(text) {
@@ -2674,6 +2656,7 @@ async function loadSearchResults() {
   const searchRole = promptOnlyHistory ? 'user' : 'assistant';
   let url = `/search?limit=100&q=${encodeURIComponent(searchState.keywords)}&role=${searchRole}`;
   if (bookmarkOnlyHistory) url += '&bookmarked=true';
+  if (badOnlyHistory) url += '&marked_bad=true';
   if (searchState.topic) url += `&topic=${encodeURIComponent(searchState.topic)}`;
   if (searchState.agent) url += `&agent=${encodeURIComponent(searchState.agent)}`;
   if (searchState.adhoc !== null && searchState.adhoc !== undefined) url += `&adhoc=${searchState.adhoc}`;
@@ -2693,12 +2676,10 @@ async function loadSearchResults() {
   if (!Array.isArray(items)) { searchLoading = false; return; }
 
   const kws = searchState.keywords.trim().split(/\s+/).filter(Boolean);
-  const bookmarkedIds = bookmarkOnlyHistory ? _bookmarkIds : null;
   const fragment = document.createDocumentFragment();
   for (const item of [...items].reverse()) {
     if (!item.content && !item.prompt) continue;
     if (item.status === 'pending') continue;
-    if (bookmarkedIds && !bookmarkedIds.has(item.id)) continue;
     let el;
     if (promptOnlyHistory) {
       el = appendPromptOnlyHistoryItem(item, fragment);
@@ -2743,6 +2724,7 @@ const SQUID_COMMANDS = [
   { name: 'f', alias: 'filter', desc: 'filter — e.g. /f #topic  ·  /f @agent!  ·  /f reset', args: true },
   { name: 's', alias: 'search', desc: 'search — e.g. /s #topic kw  ·  /s @agent! kw  ·  /s #all kw', args: true },
   { name: 'bookmarks', alias: 'bm', desc: 'toggle bookmarked responses only',         args: false },
+  { name: 'bad',        desc: 'toggle marked bad responses only',                     args: false },
   { name: 'prompts',     desc: 'toggle user prompts only',                            args: false },
   { name: 'status',       desc: 'show active processes panel',                        args: false },
   { name: 'help',         desc: 'show help panel',                                    args: false },
@@ -2759,6 +2741,7 @@ function parseCommand(message) {
   if (/^stopall$/i.test(t))      return { command: 'stopall' };
   if (/^clear$/i.test(t))        return { command: 'clear' };
   if (/^(?:bookmarks|bm)$/i.test(t)) return { command: 'bookmarks' };
+  if (/^bad$/i.test(t))          return { command: 'bad' };
   if (/^prompts$/i.test(t))      return { command: 'prompts' };
   if (/^status$/i.test(t))       return { command: 'status' };
   if (/^help$/i.test(t))         return { command: 'help' };
@@ -2800,6 +2783,10 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0, opt
   }
   if (cmd.command === 'bookmarks') {
     toggleBookmarkOnlyHistory();
+    return;
+  }
+  if (cmd.command === 'bad') {
+    toggleBadOnlyHistory();
     return;
   }
   if (cmd.command === 'restart') {
@@ -4191,6 +4178,7 @@ async function sendMessage(text, opts = {}) {
           addPinButton(bubble, msgId, topic, resolvedAgent, data.session_id || null);
           addBookmarkButton(bubble, msgId, topic, resolvedAgent);
           addReplyButton(bubble, topic, resolvedAgent, !!adhoc);
+          addBadResponseButton(bubble, msgId, topic, resolvedAgent, !!data.marked_bad);
           const completedAt = data.completed_at || data.stats?.completed_at || doneTime;
           if (!statsEl && data.stats) statsEl = addStats(bubble, data.stats, completedAt);
           if (statsEl) {
@@ -4445,11 +4433,12 @@ async function sendMessage(text, opts = {}) {
                   thinkingBubble.dataset.agent = resolvedAgent;
                   // Agent wasn't known at send time (e.g. default agent) — now that it's
                   // resolved, re-check whether this live group matches the active filter.
-                  if (!searchActive && hasHistoryFilterScope()) setLiveGroupHidden(true);
+                  if (!searchActive && (hasHistoryFilterScope() || hasResponseOnlyFilter())) setLiveGroupHidden(true);
                 }
                 addPinButton(bubble, msgId, topic, resolvedAgent);
                 addBookmarkButton(bubble, msgId, topic, resolvedAgent);
                 addReplyButton(bubble, topic, resolvedAgent, !!adhoc);
+                addBadResponseButton(bubble, msgId, topic, resolvedAgent);
               }
             } catch {}
             eventName = null;
@@ -5853,6 +5842,7 @@ function appendHistoryItem(item, container) {
   if (item.id) addPinButton(asstBubble, item.id, item.topic || 'default', item.agent || null, item.session_id || null);
   if (item.id) addBookmarkButton(asstBubble, item.id, item.topic || 'default', item.agent || null);
   if (item.id) addReplyButton(asstBubble, item.topic || 'default', item.agent || null, !!item.adhoc);
+  if (item.id) addBadResponseButton(asstBubble, item.id, item.topic || 'default', item.agent || null, !!item.marked_bad);
 
   if (container) container.appendChild(asstBubble);
 
@@ -7715,6 +7705,7 @@ const CHART_METRICS = {
   cancelled_turns:{ label: 'Cancelled',      fn: r => (r.cancelled_turns || 0), color: 'rgba(190,150,90,1)', fill: 'rgba(190,150,90,0.08)' },
   new_input:      { label: 'New Input',      fn: r => _splitInputTokens(r).newInput,   color: 'rgba(80,200,120,1)',   fill: 'rgba(80,200,120,0.08)'  },
   error_turns:    { label: 'Errors',         fn: r => (r.error_turns || 0),     color: 'rgba(255,100,100,1)',  fill: 'rgba(255,100,100,0.08)' },
+  marked_bad:     { label: 'Marked Bad',     fn: r => (r.marked_bad || 0),      color: 'rgba(220,80,110,1)',   fill: 'rgba(220,80,110,0.08)' },
   cache_hit_rate: { label: 'Cache Hit %',    fn: r => (_cacheHitRate(r) || 0),   color: 'rgba(230,200,80,1)',   fill: 'rgba(230,200,80,0.08)'  },
   avg_tokens_turn:{ label: 'Avg Tokens/Turn',fn: r => (_avgTokensPerTurn(r) || 0), color: 'rgba(150,150,255,1)', fill: 'rgba(150,150,255,0.08)' },
 };
@@ -7734,6 +7725,7 @@ const STATS_METRIC_AGGS = {
   cancelled_turns: ['sum'],
   new_input: ['sum', 'avg', 'min', 'max', 'p50', 'p75', 'p95'],
   error_turns: ['sum'],
+  marked_bad: ['sum'],
   // Ratios/derived-per-bucket values — there's nothing to vary the aggregation over.
   cache_hit_rate: ['avg'],
   avg_tokens_turn: ['sum'],
@@ -7796,6 +7788,7 @@ function _statsMetricValue(row, metric) {
   if (metric === 'cancelled_turns') return row.cancelled_turns || 0;
   if (metric === 'new_input') return _splitInputTokens(row).newInput;
   if (metric === 'error_turns') return row.error_turns || 0;
+  if (metric === 'marked_bad') return row.marked_bad || 0;
   if (metric === 'cache_hit_rate') return _cacheHitRate(row);
   if (metric === 'avg_tokens_turn') return _avgTokensPerTurn(row);
   return row.total_turns || 0;
@@ -7997,6 +7990,7 @@ const STATS_TABLE_MEASURES = [
   { key: 'cost', label: 'Cost', row: r => _formatCost(r.cost_usd), total: t => _formatCost(t.cost || 0) },
   { key: 'duration', label: 'Duration', row: r => r.duration_ms != null ? `${(r.duration_ms / 1000).toFixed(1)}s` : '—', total: t => t.duration != null ? `${(t.duration / 1000).toFixed(1)}s` : '—' },
   { key: 'error_turns', label: 'Errors', row: r => fmtNum(r.error_turns || 0), total: t => fmtNum(t.error_turns || 0) },
+  { key: 'marked_bad', label: 'Marked Bad', row: r => fmtNum(r.marked_bad || 0), total: t => fmtNum(t.marked_bad || 0) },
   { key: 'new_input', label: 'New Input', row: r => fmtNum(_splitInputTokens(r).newInput), total: t => fmtNum(t.new_input || 0) },
   { key: 'quota', label: 'Quota Delta', title: 'Observed account meter change; not exact attributed usage', row: r => _formatQuotaDelta(r.quota_delta), total: t => _formatQuotaDelta(t.quota) },
   { key: 'sessions', label: 'Sessions', row: r => r.sessions || 0, total: t => t.sessions || 0 },
@@ -8143,6 +8137,7 @@ function _statsMeasureTotals(totals, extra) {
 function _statsTotals(rows) {
   const totals = {
     sessions: 0, turns: 0, done_turns: 0, error_turns: 0, cancelled_turns: 0,
+    marked_bad: 0,
     tokens_in: 0, tokens_out: 0, cost: 0, quota: null, duration: null,
     cache_read: 0, cache_write: 0, new_input: 0,
   };
@@ -8153,6 +8148,7 @@ function _statsTotals(rows) {
     totals.done_turns += r.done_turns || 0;
     totals.error_turns += r.error_turns || 0;
     totals.cancelled_turns += r.cancelled_turns || 0;
+    totals.marked_bad += r.marked_bad || 0;
     totals.tokens_in += split.total;
     totals.tokens_out += r.output_tokens || 0;
     totals.cost += r.cost_usd || 0;
@@ -11513,6 +11509,7 @@ const MEASURE_DEFAULT_AGG = {
   tokens_in: 'sum', tokens_out: 'sum', tokens_total: 'sum',
   cache_read: 'sum', cache_write: 'sum', new_input: 'sum',
   quota: 'sum', duration: 'sum',
+  marked_bad: 'sum',
   cache_hit_rate: 'avg', avg_tokens_turn: 'sum',
 };
 
@@ -11533,6 +11530,7 @@ function _measureRowValue(row, measure) {
     case 'cache_hit_rate': return _cacheHitRate(row) || 0;
     case 'avg_tokens_turn': return _avgTokensPerTurn(row) || 0;
     case 'quota': return row.quota_delta || 0;
+    case 'marked_bad': return row.marked_bad || 0;
     case 'duration': return (row.duration_ms || 0) / 1000;
     default: return 0;
   }
@@ -12866,6 +12864,7 @@ function closePinPanel({ restoreFocus = false } = {}) {
 
 let _bookmarkItems = [];
 let _bookmarkIds = new Set();
+let _badResponseIds = new Set();
 
 function getBookmarkedItems() { return _bookmarkItems; }
 
@@ -12909,6 +12908,7 @@ async function _apiToggleBookmark(msgId, topic, agent, text) {
 }
 
 let bookmarkOnlyHistory = false;
+let badOnlyHistory = false;
 
 function updateBookmarkButton() {
   bookmarkBtn.setAttribute('aria-pressed', bookmarkOnlyHistory ? 'true' : 'false');
@@ -12922,6 +12922,22 @@ function toggleBookmarkOnlyHistory() {
     updatePromptOnlyButton();
   }
   updateBookmarkButton();
+  _updateFilterBadge();
+  if (searchActive) {
+    document.querySelectorAll('.search-result-item, .date-divider').forEach(el => el.remove());
+    loadSearchResults();
+  } else {
+    reloadHistory(historyFilter);
+  }
+}
+
+function toggleBadOnlyHistory() {
+  badOnlyHistory = !badOnlyHistory;
+  if (badOnlyHistory && promptOnlyHistory) {
+    promptOnlyHistory = false;
+    updatePromptOnlyButton();
+  }
+  _updateFilterBadge();
   if (searchActive) {
     document.querySelectorAll('.search-result-item, .date-divider').forEach(el => el.remove());
     loadSearchResults();
@@ -12960,6 +12976,71 @@ function initBookmark() {
   bookmarkBtn.addEventListener('click', toggleBookmarkOnlyHistory);
   updateBookmarkButton();
   _loadBookmarks();
+}
+
+async function _loadBadResponses() {
+  try {
+    const res = await fetch('/annotations?kind=bad_response');
+    if (!res.ok) return;
+    const data = await res.json();
+    _badResponseIds = new Set((data.items || []).map(i => i.msg_id));
+    document.querySelectorAll('.msg-bad-response-btn[data-msg-id]').forEach(btn => {
+      const marked = _badResponseIds.has(parseInt(btn.dataset.msgId, 10));
+      btn.classList.toggle('marked-bad', marked);
+      btn.title = marked ? 'Unmark bad response' : 'Mark bad response';
+      btn.setAttribute('aria-pressed', marked ? 'true' : 'false');
+    });
+  } catch { /* ignore — falls back to unmarked */ }
+}
+
+async function _apiToggleBadResponse(msgId, topic, agent, text) {
+  if (_badResponseIds.has(msgId)) {
+    _badResponseIds.delete(msgId);
+    fetch(`/annotations/bad_response/${msgId}`, { method: 'DELETE' }).catch(() => {});
+    return false;
+  }
+  const content = text ? text.slice(0, 300) : null;
+  _badResponseIds.add(msgId);
+  fetch('/annotations', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      msg_id: msgId,
+      kind: 'bad_response',
+      topic,
+      agent: agent || null,
+      content,
+      payload: {},
+    }),
+  }).catch(() => {});
+  return true;
+}
+
+function addBadResponseButton(bubbleEl, msgId, topic, agent, marked = false) {
+  const existing = bubbleEl.querySelector(`.msg-bad-response-btn[data-msg-id="${msgId}"]`);
+  if (existing) return existing;
+  if (marked) _badResponseIds.add(msgId);
+  const isMarked = marked || _badResponseIds.has(msgId);
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'msg-bad-response-btn';
+  btn.dataset.msgId = String(msgId);
+  btn.title = isMarked ? 'Unmark bad response' : 'Mark bad response';
+  btn.setAttribute('aria-label', btn.title);
+  btn.setAttribute('aria-pressed', isMarked ? 'true' : 'false');
+  btn.innerHTML = `<span class="material-symbols-outlined">thumb_down</span>`;
+  btn.classList.toggle('marked-bad', isMarked);
+  btn.addEventListener('click', async e => {
+    e.stopPropagation();
+    const text = _messageBodyText(bubbleEl);
+    const nowMarked = await _apiToggleBadResponse(msgId, topic, agent, text);
+    btn.classList.toggle('marked-bad', nowMarked);
+    btn.title = nowMarked ? 'Unmark bad response' : 'Mark bad response';
+    btn.setAttribute('aria-label', btn.title);
+    btn.setAttribute('aria-pressed', nowMarked ? 'true' : 'false');
+  });
+  bubbleEl.appendChild(btn);
+  return btn;
 }
 
 function addPinButton(bubbleEl, msgId, topic, agent, sessionId = null) {
@@ -13219,6 +13300,7 @@ function initPin() {
 initSettings();
 initPin();
 initBookmark();
+_loadBadResponses();
 document.getElementById('search-bar-clear').addEventListener('click', clearSearch);
 document.getElementById('chip-prompts-btn')?.addEventListener('click', togglePromptOnlyHistory);
 updatePromptOnlyButton();

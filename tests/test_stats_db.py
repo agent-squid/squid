@@ -53,6 +53,54 @@ def test_chat_messages_source_defaults_and_can_mark_system(tmp_path, monkeypatch
     assert stats_db.get_message(system_asst)["prompt_source"] == "workflow"
 
 
+def test_message_annotations_store_bad_response_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user_id = stats_db.insert_user_message("squid", "codex", "fix it")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    stats_db.update_assistant_message(msg_id, "partial fix", None)
+
+    stats_db.set_message_annotation(
+        msg_id,
+        "bad_response",
+        "squid",
+        "codex",
+        "partial fix",
+        {"reasons": ["incomplete"]},
+    )
+
+    annotation = stats_db.get_message_annotation(msg_id, "bad_response")
+    assert annotation["content"] == "partial fix"
+    assert json.loads(annotation["payload"]) == {"reasons": ["incomplete"]}
+    assert stats_db.get_message(msg_id)["marked_bad"] == 1
+
+
+def test_stats_include_marked_bad_measure(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user_id = stats_db.insert_user_message("squid", "codex", "fix it")
+    marked_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    stats_db.update_assistant_message(marked_id, "bad", None)
+    other_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    stats_db.update_assistant_message(other_id, "ok", None)
+    stats_db.set_message_annotation(marked_id, "bad_response", "squid", "codex", "bad", {})
+
+    turn_rows = stats_db.get_stats_by_turn(days=0)
+    by_id = {row["msg_id"]: row for row in turn_rows}
+    assert by_id[marked_id]["marked_bad"] == 1
+    assert by_id[other_id]["marked_bad"] == 0
+
+    aggregate = stats_db.get_aggregated_stats(
+        period="daily",
+        days=0,
+        chart_series=[{"metric": "marked_bad", "agg": "sum"}],
+    )[0]
+    assert aggregate["marked_bad"] == 1
+    assert aggregate["chart_marked_bad_sum"] == 1
+
+
 def test_allocate_id_returns_incrementing_values_per_namespace(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
@@ -1524,6 +1572,64 @@ def test_search_messages_can_filter_bookmarks_before_limit(tmp_path, monkeypatch
     search = stats_db.search_messages("needle", topic="squid", agent="codex", bookmarked=True, limit=1)
 
     assert [item["id"] for item in search["items"]] == [bookmarked_id]
+
+
+def test_history_can_filter_bookmarks_before_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    bookmarked_user_id = stats_db.insert_user_message("squid", "codex", "bookmarked prompt")
+    bookmarked_id = stats_db.insert_assistant_message("squid", "codex", bookmarked_user_id, adhoc=False)
+    stats_db.update_assistant_message(bookmarked_id, "bookmarked response", "session-1", "done")
+    stats_db.add_bookmark(bookmarked_id, "squid", "codex", "bookmarked response")
+
+    newer_user_id = stats_db.insert_user_message("squid", "codex", "newer prompt")
+    newer_id = stats_db.insert_assistant_message("squid", "codex", newer_user_id, adhoc=False)
+    stats_db.update_assistant_message(newer_id, "unbookmarked response", "session-2", "done")
+
+    history = stats_db.get_messages_flat(topic="squid", agent="codex", bookmarked=True, limit=1)
+
+    assert history["total"] == 1
+    assert [item["id"] for item in history["items"]] == [bookmarked_id]
+
+
+def test_history_can_filter_marked_bad_before_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    marked_user_id = stats_db.insert_user_message("squid", "codex", "marked prompt")
+    marked_id = stats_db.insert_assistant_message("squid", "codex", marked_user_id, adhoc=False)
+    stats_db.update_assistant_message(marked_id, "marked bad response", "session-1", "done")
+    stats_db.set_message_annotation(marked_id, "bad_response", "squid", "codex", "marked bad response")
+
+    newer_user_id = stats_db.insert_user_message("squid", "codex", "newer prompt")
+    newer_id = stats_db.insert_assistant_message("squid", "codex", newer_user_id, adhoc=False)
+    stats_db.update_assistant_message(newer_id, "ordinary response", "session-2", "done")
+
+    history = stats_db.get_messages_flat(topic="squid", agent="codex", marked_bad=True, limit=1)
+
+    assert history["total"] == 1
+    assert [item["id"] for item in history["items"]] == [marked_id]
+    assert history["items"][0]["marked_bad"] == 1
+
+
+def test_search_messages_can_filter_marked_bad_before_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    marked_user_id = stats_db.insert_user_message("squid", "codex", "marked prompt")
+    marked_id = stats_db.insert_assistant_message("squid", "codex", marked_user_id, adhoc=False)
+    stats_db.update_assistant_message(marked_id, "needle marked bad response", "session-1", "done")
+    stats_db.set_message_annotation(marked_id, "bad_response", "squid", "codex", "needle marked bad response")
+
+    newer_user_id = stats_db.insert_user_message("squid", "codex", "newer prompt")
+    newer_id = stats_db.insert_assistant_message("squid", "codex", newer_user_id, adhoc=False)
+    stats_db.update_assistant_message(newer_id, "needle ordinary response", "session-2", "done")
+
+    search = stats_db.search_messages("needle", topic="squid", agent="codex", marked_bad=True, limit=1)
+
+    assert [item["id"] for item in search["items"]] == [marked_id]
+    assert search["items"][0]["marked_bad"] == 1
 
 
 def test_search_prompts_uses_prompt_fts_before_limit(tmp_path, monkeypatch):

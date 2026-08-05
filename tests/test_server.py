@@ -64,6 +64,34 @@ def test_worktree_diff_missing_status_is_legacy_unblocked():
     assert server._worktree_diff_blocked(gitdiff) is None
 
 
+def test_annotations_api_marks_and_unmarks_bad_response(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    user_id = stats_db.insert_user_message("squid", "codex", "fix it")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    stats_db.update_assistant_message(msg_id, "bad output", None)
+
+    client = TestClient(server.app)
+    res = client.post("/annotations", json={
+        "msg_id": msg_id,
+        "kind": "bad_response",
+        "topic": "squid",
+        "agent": "codex",
+        "content": "bad output",
+        "payload": {"reasons": ["incomplete"]},
+    })
+
+    assert res.status_code == 200
+    assert res.json() == {"ok": True}
+    listed = client.get("/annotations?kind=bad_response").json()["items"]
+    assert listed[0]["msg_id"] == msg_id
+    assert json.loads(listed[0]["payload"]) == {"reasons": ["incomplete"]}
+
+    res = client.delete(f"/annotations/bad_response/{msg_id}")
+    assert res.status_code == 200
+    assert client.get("/annotations?kind=bad_response").json()["items"] == []
+
+
 def test_revert_diff_reports_failure_when_patch_does_not_apply(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

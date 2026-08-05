@@ -160,6 +160,18 @@ _TABLES = [
         content     TEXT,
         saved_at    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )""",
+    """CREATE TABLE IF NOT EXISTS message_annotations (
+        msg_id     INTEGER NOT NULL,
+        kind       TEXT NOT NULL,
+        topic      TEXT,
+        agent      TEXT,
+        content    TEXT,
+        payload    TEXT,
+        created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        PRIMARY KEY (msg_id, kind)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_message_annotations_kind ON message_annotations (kind, created_at DESC)",
     """CREATE TABLE IF NOT EXISTS worktrees (
         topic           TEXT NOT NULL,
         agent           TEXT NOT NULL,
@@ -696,6 +708,10 @@ def delete_topic(name: str) -> bool:
             "DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM chat_messages WHERE topic=? AND role='assistant')",
             (name,),
         )
+        conn.execute(
+            "DELETE FROM message_annotations WHERE msg_id IN (SELECT id FROM chat_messages WHERE topic=?)",
+            (name,),
+        )
         conn.execute("DELETE FROM topic_sessions WHERE topic = ?", (name,))
         conn.execute("DELETE FROM chat_messages WHERE topic = ?", (name,))
         cur = conn.execute("DELETE FROM topics WHERE topic = ?", (name,))
@@ -709,12 +725,20 @@ def delete_topic_agent(topic: str, agent: str, adhoc: Optional[bool] = None) -> 
                 "DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM chat_messages WHERE topic=? AND agent=? AND role='assistant')",
                 (topic, agent),
             )
+            conn.execute(
+                "DELETE FROM message_annotations WHERE msg_id IN (SELECT id FROM chat_messages WHERE topic=? AND agent=?)",
+                (topic, agent),
+            )
             conn.execute("DELETE FROM chat_messages WHERE topic=? AND agent=?", (topic, agent))
             conn.execute("DELETE FROM topic_sessions WHERE topic=? AND agent=?", (topic, agent))
             conn.execute("DELETE FROM topics WHERE topic=? AND agent=?", (topic, agent))
         elif adhoc:
             conn.execute(
                 "DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM chat_messages WHERE topic=? AND agent=? AND adhoc=1 AND role='assistant')",
+                (topic, agent),
+            )
+            conn.execute(
+                "DELETE FROM message_annotations WHERE msg_id IN (SELECT id FROM chat_messages WHERE topic=? AND agent=? AND adhoc=1)",
                 (topic, agent),
             )
             conn.execute(
@@ -732,6 +756,10 @@ def delete_topic_agent(topic: str, agent: str, adhoc: Optional[bool] = None) -> 
         else:
             conn.execute(
                 "DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM chat_messages WHERE topic=? AND agent=? AND (adhoc=0 OR adhoc IS NULL) AND role='assistant')",
+                (topic, agent),
+            )
+            conn.execute(
+                "DELETE FROM message_annotations WHERE msg_id IN (SELECT id FROM chat_messages WHERE topic=? AND agent=? AND (adhoc=0 OR adhoc IS NULL))",
                 (topic, agent),
             )
             conn.execute(
@@ -1426,7 +1454,8 @@ def get_message(msg_id: int) -> Optional[dict]:
                       m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
                       u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
                       m.session_turn_index AS session_turn_count,
-                      re.payload AS stats_payload
+                      re.payload AS stats_payload,
+                      {_marked_bad_expr("m")} AS marked_bad
                FROM chat_messages m
                LEFT JOIN chat_messages u ON m.reply_to = u.id
                {_latest_stats_event_join(msg_alias="m", outer=True)}
@@ -1442,9 +1471,15 @@ def get_message(msg_id: int) -> Optional[dict]:
 
 def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
                       adhoc: Optional[bool] = None, offset: int = 0, limit: int = 20,
-                      flow_route: Optional[str] = None) -> dict:
+                      flow_route: Optional[str] = None, bookmarked: bool = False,
+                      marked_bad: bool = False) -> dict:
     where = "WHERE m.role = 'assistant'"
     params: list = []
+    bookmark_join = "JOIN bookmarks b ON b.msg_id = m.id" if bookmarked else ""
+    marked_bad_join = (
+        "JOIN message_annotations ma_bad ON ma_bad.msg_id = m.id AND ma_bad.kind = 'bad_response'"
+        if marked_bad else ""
+    )
     if topic:
         where += " AND m.topic = ?"
         params.append(topic)
@@ -1461,7 +1496,11 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
 
     with _connect() as conn:
         total = conn.execute(
-            f"SELECT COUNT(*) FROM chat_messages m {where}", params
+            f"""SELECT COUNT(*) FROM chat_messages m
+                {bookmark_join}
+                {marked_bad_join}
+                {where}""",
+            params,
         ).fetchone()[0]
         rows = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
@@ -1472,8 +1511,11 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
                        u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
                        m.session_turn_index AS session_turn_count,
-                       re.payload AS stats_payload
+                       re.payload AS stats_payload,
+                       {_marked_bad_expr("m")} AS marked_bad
                 FROM chat_messages m
+                {bookmark_join}
+                {marked_bad_join}
                 LEFT JOIN chat_messages u ON m.reply_to = u.id
                 {_latest_stats_event_join(msg_alias="m", outer=True)}
                 {where}
@@ -1510,7 +1552,8 @@ def get_history_items_by_ids(ids: list[int]) -> list[dict]:
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
                        u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
                        m.session_turn_index AS session_turn_count,
-                       re.payload AS stats_payload
+                       re.payload AS stats_payload,
+                       {_marked_bad_expr("m")} AS marked_bad
                 FROM chat_messages m
                 LEFT JOIN chat_messages u ON m.reply_to = u.id
                 {_latest_stats_event_join(msg_alias="m", outer=True)}
@@ -1536,7 +1579,8 @@ def _build_fts_match(q: str) -> str:
 
 def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = None,
                     adhoc: Optional[bool] = None, limit: int = 100,
-                    bookmarked: bool = False, flow_route: Optional[str] = None) -> dict:
+                    bookmarked: bool = False, flow_route: Optional[str] = None,
+                    marked_bad: bool = False) -> dict:
     terms = _build_fts_match(q)
     if not terms:
         return {"items": []}
@@ -1564,6 +1608,10 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
 
     where = "WHERE " + " AND ".join(where_parts)
     bookmark_join = "JOIN bookmarks b ON b.msg_id = m.id" if bookmarked else ""
+    marked_bad_join = (
+        "JOIN message_annotations ma_bad ON ma_bad.msg_id = m.id AND ma_bad.kind = 'bad_response'"
+        if marked_bad else ""
+    )
 
     with _connect() as conn:
         rows = conn.execute(
@@ -1575,9 +1623,11 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
                        u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
                        m.session_turn_index AS session_turn_count,
-                       re.payload AS stats_payload
+                       re.payload AS stats_payload,
+                       {_marked_bad_expr("m")} AS marked_bad
                 FROM chat_messages m
                 {bookmark_join}
+                {marked_bad_join}
                 LEFT JOIN chat_messages u ON m.reply_to = u.id
                 {_latest_stats_event_join(msg_alias="m", outer=True)}
                 {where}
@@ -1596,7 +1646,8 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
 
 def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = None,
                    adhoc: Optional[bool] = None, limit: int = 100,
-                   bookmarked: bool = False, flow_route: Optional[str] = None) -> dict:
+                   bookmarked: bool = False, flow_route: Optional[str] = None,
+                   marked_bad: bool = False) -> dict:
     """Search user prompts via prompts_fts. Returns assistant reply items (same shape as
     search_messages) so the frontend can render them with appendPromptOnlyHistoryItem."""
     terms = _build_fts_match(q)
@@ -1626,6 +1677,10 @@ def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = N
 
     where = "WHERE " + " AND ".join(where_parts)
     bookmark_join = "JOIN bookmarks b ON b.msg_id = m.id" if bookmarked else ""
+    marked_bad_join = (
+        "JOIN message_annotations ma_bad ON ma_bad.msg_id = m.id AND ma_bad.kind = 'bad_response'"
+        if marked_bad else ""
+    )
 
     with _connect() as conn:
         rows = conn.execute(
@@ -1637,9 +1692,11 @@ def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = N
                        m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
                        u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
                        m.session_turn_index AS session_turn_count,
-                       re.payload AS stats_payload
+                       re.payload AS stats_payload,
+                       {_marked_bad_expr("m")} AS marked_bad
                 FROM chat_messages m
                 {bookmark_join}
+                {marked_bad_join}
                 LEFT JOIN chat_messages u ON m.reply_to = u.id
                 {_latest_stats_event_join(msg_alias="m", outer=True)}
                 {where}
@@ -1983,6 +2040,7 @@ def _stats_empty_aggregate() -> dict:
         "duration_values": [],
         "session_turns": 0,
         "adhoc_turns": 0,
+        "marked_bad": 0,
         "message_ids": [],
         "chart_values": {},
         "chart_cache_hit": {},
@@ -1997,6 +2055,7 @@ def _stats_add_payload_to_aggregate(
     adhoc: bool = False,
     status: str = "done",
     quota_delta: Optional[float] = None,
+    marked_bad: bool = False,
     chart_series: Optional[list[dict]] = None,
 ) -> None:
     def num(key: str) -> float:
@@ -2030,6 +2089,8 @@ def _stats_add_payload_to_aggregate(
         agg["done_turns"] += 1
     if msg_id is not None:
         agg["message_ids"].append(str(msg_id))
+    if marked_bad:
+        agg["marked_bad"] += 1
 
     chart_metrics = []
     seen_chart_metrics = set()
@@ -2052,12 +2113,22 @@ def _stats_add_payload_to_aggregate(
                 bucket["hits"] += hits
                 bucket["total"] += total
             continue
-        value = _stats_payload_metric_value(stats, metric)
+        if metric == "marked_bad":
+            value = 1 if marked_bad else 0
+        else:
+            value = _stats_payload_metric_value(stats, metric)
         if value is not None:
             agg["chart_values"].setdefault(metric, []).append(value)
 
 
-def _stats_add_turn_count_to_aggregate(agg: dict, *, msg_id: Optional[int], adhoc: bool, status: str = "done") -> None:
+def _stats_add_turn_count_to_aggregate(
+    agg: dict,
+    *,
+    msg_id: Optional[int],
+    adhoc: bool,
+    status: str = "done",
+    marked_bad: bool = False,
+) -> None:
     if adhoc:
         agg["adhoc_turns"] += 1
     else:
@@ -2070,6 +2141,8 @@ def _stats_add_turn_count_to_aggregate(agg: dict, *, msg_id: Optional[int], adho
         agg["done_turns"] += 1
     if msg_id is not None:
         agg["message_ids"].append(str(msg_id))
+    if marked_bad:
+        agg["marked_bad"] += 1
 
 
 def _stats_finalize_aggregate(agg: dict, chart_series: Optional[list[dict]] = None) -> dict:
@@ -2092,6 +2165,7 @@ def _stats_finalize_aggregate(agg: dict, chart_series: Optional[list[dict]] = No
         "session_turns": agg["session_turns"],
         "adhoc_turns": agg["adhoc_turns"],
         "total_turns": agg["session_turns"] + agg["adhoc_turns"],
+        "marked_bad": agg["marked_bad"],
         "message_ids": ",".join(agg["message_ids"]) if agg["message_ids"] else None,
     }
     for series in chart_series or []:
@@ -2104,12 +2178,13 @@ def _stats_finalize_aggregate(agg: dict, chart_series: Optional[list[dict]] = No
                 result[_stats_chart_field(metric, agg_name)] = (
                     (hit.get("hits", 0) / total) * 100 if total > 0 else None
                 )
-            elif agg_name == "sum" and metric in {"turns", "sessions", "cancelled_turns", "error_turns"}:
+            elif agg_name == "sum" and metric in {"turns", "sessions", "cancelled_turns", "error_turns", "marked_bad"}:
                 result[_stats_chart_field(metric, agg_name)] = {
                     "turns": result["total_turns"],
                     "sessions": result["sessions"],
                     "cancelled_turns": result["cancelled_turns"],
                     "error_turns": result["error_turns"],
+                    "marked_bad": result["marked_bad"],
                 }[metric]
             else:
                 result[_stats_chart_field(metric, agg_name)] = _aggregate_values(
@@ -2126,6 +2201,15 @@ def _latest_stats_event_join(msg_alias: str = "cm", *, outer: bool = False) -> s
                     SELECT MAX(re2.id) FROM run_events re2
                     WHERE re2.msg_id = {msg_alias}.id AND re2.event_type = 'stats'
                 )"""
+
+
+def _marked_bad_expr(msg_alias: str = "cm") -> str:
+    return (
+        "EXISTS ("
+        "SELECT 1 FROM message_annotations ma "
+        f"WHERE ma.msg_id = {msg_alias}.id AND ma.kind = 'bad_response'"
+        ")"
+    )
 
 
 def _attach_turn_stats(row: dict) -> None:
@@ -2260,7 +2344,8 @@ def _merge_chart_aggregates(
         count_clauses.append("COALESCE(cm.adhoc, 0) = 1")
     count_where = " AND ".join(count_clauses)
     turn_rows = conn.execute(
-        f"""SELECT {bucket.replace('created_at', 're.created_at')} AS period, re.payload
+        f"""SELECT {bucket.replace('created_at', 're.created_at')} AS period, re.payload,
+                   {_marked_bad_expr("cm")} AS marked_bad
             FROM chat_messages cm
             JOIN run_events re
                 ON re.id = (
@@ -2322,7 +2407,10 @@ def _merge_chart_aggregates(
                 stats = json.loads(turn["payload"] or "{}")
             except (json.JSONDecodeError, TypeError):
                 continue
-            value = _stats_payload_metric_value(stats, metric)
+            if metric == "marked_bad":
+                value = 1 if turn["marked_bad"] else 0
+            else:
+                value = _stats_payload_metric_value(stats, metric)
             if value is not None:
                 grouped.setdefault(turn["period"], []).append(value)
         if grouped:
@@ -2432,7 +2520,8 @@ def get_aggregated_stats(
         with _connect() as conn:
             event_rows = conn.execute(
                 f"""SELECT {re_bucket} AS period, cm.id AS msg_id,
-                          COALESCE(cm.adhoc, 0) AS adhoc, cm.status, cm.quota_delta, re.payload
+                          COALESCE(cm.adhoc, 0) AS adhoc, cm.status, cm.quota_delta, re.payload,
+                          {_marked_bad_expr("cm")} AS marked_bad
                     FROM chat_messages cm
                     {_latest_stats_event_join()}
                     WHERE {cm_where}""",
@@ -2456,7 +2545,8 @@ def get_aggregated_stats(
             ).fetchall()
             count_rows = conn.execute(
                 f"""SELECT {cm_bucket} AS period, cm.id AS msg_id,
-                          COALESCE(cm.adhoc, 0) AS adhoc, cm.status
+                          COALESCE(cm.adhoc, 0) AS adhoc, cm.status,
+                          {_marked_bad_expr("cm")} AS marked_bad
                     FROM chat_messages cm
                     WHERE {count_where}
                       AND NOT EXISTS (
@@ -2479,6 +2569,7 @@ def get_aggregated_stats(
                     adhoc=bool(event["adhoc"]),
                     status=event["status"],
                     quota_delta=event["quota_delta"],
+                    marked_bad=bool(event["marked_bad"]),
                     chart_series=chart_series,
                 )
             for count in count_rows:
@@ -2487,6 +2578,7 @@ def get_aggregated_stats(
                     msg_id=count["msg_id"],
                     adhoc=bool(count["adhoc"]),
                     status=count["status"],
+                    marked_bad=bool(count["marked_bad"]),
                 )
             for legacy in legacy_rows:
                 stats = dict(legacy)
@@ -2547,7 +2639,8 @@ def get_stats_by_turn(
         with _connect() as conn:
             rows = conn.execute(
                 f"""SELECT cm.id AS msg_id, {turn_time_expr} AS period, cm.topic,
-                           cm.agent, cm.adhoc, cm.status, cm.quota_delta, re.payload
+                           cm.agent, cm.adhoc, cm.status, cm.quota_delta, re.payload,
+                           {_marked_bad_expr("cm")} AS marked_bad
                     FROM chat_messages cm
                     LEFT JOIN run_events re
                         ON re.id = (
@@ -2575,6 +2668,7 @@ def get_stats_by_turn(
         row["done_turns"] = 1 if row.get("status") == "done" else 0
         row["error_turns"] = 1 if row.get("status") == "error" else 0
         row["cancelled_turns"] = 1 if row.get("status") == "cancelled" else 0
+        row["marked_bad"] = 1 if row.get("marked_bad") else 0
         row["message_ids"] = [row["msg_id"]]
         row["input_tokens"] = stats.get("input_tokens") or 0
         row["output_tokens"] = stats.get("output_tokens") or 0
@@ -2822,7 +2916,8 @@ def get_stats_by_breakdown(
             event_rows = conn.execute(
                 f"""SELECT {re_bucket} AS period, cm.id AS msg_id, cm.topic,
                           COALESCE(cm.agent, 'unknown') AS agent,
-                          COALESCE(cm.adhoc, 0) AS adhoc, cm.status, cm.quota_delta, re.payload
+                          COALESCE(cm.adhoc, 0) AS adhoc, cm.status, cm.quota_delta, re.payload,
+                          {_marked_bad_expr("cm")} AS marked_bad
                     FROM chat_messages cm
                     {_latest_stats_event_join()}
                     WHERE {cm_where}""",
@@ -2848,7 +2943,8 @@ def get_stats_by_breakdown(
             count_rows = conn.execute(
                 f"""SELECT {cm_bucket} AS period, cm.id AS msg_id, cm.topic,
                           COALESCE(cm.agent, 'unknown') AS agent,
-                          COALESCE(cm.adhoc, 0) AS adhoc, cm.status
+                          COALESCE(cm.adhoc, 0) AS adhoc, cm.status,
+                          {_marked_bad_expr("cm")} AS marked_bad
                     FROM chat_messages cm
                     WHERE {count_where}
                       AND NOT EXISTS (
@@ -2891,6 +2987,7 @@ def get_stats_by_breakdown(
                     adhoc=adhoc_value,
                     status=event["status"],
                     quota_delta=event["quota_delta"],
+                    marked_bad=bool(event["marked_bad"]),
                     chart_series=chart_series,
                 )
             for count in count_rows:
@@ -2908,6 +3005,7 @@ def get_stats_by_breakdown(
                     msg_id=count["msg_id"],
                     adhoc=adhoc_value,
                     status=count["status"],
+                    marked_bad=bool(count["marked_bad"]),
                 )
             for legacy in legacy_rows:
                 adhoc_value = bool(legacy["adhoc"])
@@ -3050,7 +3148,7 @@ def get_stats_by_agent(
             event_rows = conn.execute(
                 f"""SELECT COALESCE(cm.agent, 'unknown') AS agent,
                           cm.id AS msg_id, COALESCE(cm.adhoc, 0) AS adhoc, cm.status,
-                          cm.quota_delta, re.payload
+                          cm.quota_delta, re.payload, {_marked_bad_expr("cm")} AS marked_bad
                     FROM chat_messages cm
                     {_latest_stats_event_join()}
                     WHERE {cm_where}""",
@@ -3073,7 +3171,8 @@ def get_stats_by_agent(
             ).fetchall()
             count_rows = conn.execute(
                 f"""SELECT COALESCE(cm.agent, 'unknown') AS agent,
-                          cm.id AS msg_id, COALESCE(cm.adhoc, 0) AS adhoc, cm.status
+                          cm.id AS msg_id, COALESCE(cm.adhoc, 0) AS adhoc, cm.status,
+                          {_marked_bad_expr("cm")} AS marked_bad
                     FROM chat_messages cm
                     WHERE {cm_where}
                       AND NOT EXISTS (
@@ -3095,6 +3194,7 @@ def get_stats_by_agent(
                     adhoc=bool(event["adhoc"]),
                     status=event["status"],
                     quota_delta=event["quota_delta"],
+                    marked_bad=bool(event["marked_bad"]),
                 )
             for count in count_rows:
                 _stats_add_turn_count_to_aggregate(
@@ -3102,6 +3202,7 @@ def get_stats_by_agent(
                     msg_id=count["msg_id"],
                     adhoc=bool(count["adhoc"]),
                     status=count["status"],
+                    marked_bad=bool(count["marked_bad"]),
                 )
             for legacy in legacy_rows:
                 qd = None
@@ -3165,7 +3266,7 @@ def get_stats_by_topic(
             event_rows = conn.execute(
                 f"""SELECT COALESCE(cm.topic, 'unknown') AS topic,
                           cm.id AS msg_id, COALESCE(cm.adhoc, 0) AS adhoc, cm.status,
-                          cm.quota_delta, re.payload
+                          cm.quota_delta, re.payload, {_marked_bad_expr("cm")} AS marked_bad
                     FROM chat_messages cm
                     {_latest_stats_event_join()}
                     WHERE {cm_where}""",
@@ -3188,7 +3289,8 @@ def get_stats_by_topic(
             ).fetchall()
             count_rows = conn.execute(
                 f"""SELECT COALESCE(cm.topic, 'unknown') AS topic,
-                          cm.id AS msg_id, COALESCE(cm.adhoc, 0) AS adhoc, cm.status
+                          cm.id AS msg_id, COALESCE(cm.adhoc, 0) AS adhoc, cm.status,
+                          {_marked_bad_expr("cm")} AS marked_bad
                     FROM chat_messages cm
                     WHERE {cm_where}
                       AND NOT EXISTS (
@@ -3210,6 +3312,7 @@ def get_stats_by_topic(
                     adhoc=bool(event["adhoc"]),
                     status=event["status"],
                     quota_delta=event["quota_delta"],
+                    marked_bad=bool(event["marked_bad"]),
                 )
             for count in count_rows:
                 _stats_add_turn_count_to_aggregate(
@@ -3217,6 +3320,7 @@ def get_stats_by_topic(
                     msg_id=count["msg_id"],
                     adhoc=bool(count["adhoc"]),
                     status=count["status"],
+                    marked_bad=bool(count["marked_bad"]),
                 )
             for legacy in legacy_rows:
                 qd = None
@@ -3509,6 +3613,69 @@ def add_bookmark(msg_id: int, topic: Optional[str], agent: Optional[str], conten
 def remove_bookmark(msg_id: int) -> None:
     with _connect() as conn:
         conn.execute("DELETE FROM bookmarks WHERE msg_id = ?", (msg_id,))
+
+
+# ── message annotations ────────────────────────────────────────────────────────
+
+def get_message_annotations(kind: Optional[str] = None) -> list[dict]:
+    with _connect() as conn:
+        if kind:
+            rows = conn.execute(
+                """SELECT msg_id, kind, topic, agent, content, payload, created_at, updated_at
+                   FROM message_annotations
+                   WHERE kind=?
+                   ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC""",
+                (kind,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT msg_id, kind, topic, agent, content, payload, created_at, updated_at
+                   FROM message_annotations
+                   ORDER BY datetime(updated_at) DESC, datetime(created_at) DESC"""
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_message_annotation(msg_id: int, kind: str) -> Optional[dict]:
+    with _connect() as conn:
+        row = conn.execute(
+            """SELECT msg_id, kind, topic, agent, content, payload, created_at, updated_at
+               FROM message_annotations
+               WHERE msg_id=? AND kind=?""",
+            (msg_id, kind),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def set_message_annotation(
+    msg_id: int,
+    kind: str,
+    topic: Optional[str],
+    agent: Optional[str],
+    content: Optional[str],
+    payload: Optional[dict] = None,
+) -> None:
+    payload_text = json.dumps(payload or {}, sort_keys=True)
+    with _connect() as conn:
+        conn.execute(
+            """INSERT INTO message_annotations (msg_id, kind, topic, agent, content, payload)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(msg_id, kind) DO UPDATE SET
+                   topic=excluded.topic,
+                   agent=excluded.agent,
+                   content=excluded.content,
+                   payload=excluded.payload,
+                   updated_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')""",
+            (msg_id, kind, topic, agent, content, payload_text),
+        )
+
+
+def remove_message_annotation(msg_id: int, kind: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "DELETE FROM message_annotations WHERE msg_id=? AND kind=?",
+            (msg_id, kind),
+        )
 
 
 # ---------------------------------------------------------------------------

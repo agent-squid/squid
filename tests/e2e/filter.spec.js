@@ -376,27 +376,27 @@ test('/prompts toggles user prompts only', async ({ page }) => {
   expect(last).toMatch(/adhoc=true/);
 });
 
-test('bookmarked only applies the active filter to fetched bookmark rows', async ({ page }) => {
+test('bookmarked only sends the active filter to history', async ({ page }) => {
   await mockBackend(page);
   await page.unroute('**/history**');
-  await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
-  await page.route('**/history/by-ids**', route => route.fulfill({ json: { items: [
-    { id: 10, role: 'assistant', topic: 'squid', agent: 'claude', content: 'matching bookmark', status: 'done', adhoc: false, prompt: 'match', timestamp: new Date().toISOString() },
-    { id: 11, role: 'assistant', topic: 'other', agent: 'claude', content: 'other bookmark', status: 'done', adhoc: false, prompt: 'other', timestamp: new Date().toISOString() },
-  ] }}));
+  const urls = [];
+  await page.route('**/history**', route => {
+    urls.push(route.request().url());
+    const url = new URL(route.request().url());
+    const bookmarked = url.searchParams.get('bookmarked') === 'true';
+    return route.fulfill({ json: { items: bookmarked ? [
+      { id: 10, role: 'assistant', topic: 'squid', agent: 'claude', content: 'matching bookmark', status: 'done', adhoc: false, prompt: 'match', timestamp: new Date().toISOString() },
+    ] : [], has_more: false } });
+  });
 
   await page.goto('/');
-  await page.evaluate(() => {
-    _bookmarkItems = [
-      { id: 10, topic: 'squid', agent: 'claude', content: 'matching bookmark' },
-      { id: 11, topic: 'other', agent: 'claude', content: 'other bookmark' },
-    ];
-    _bookmarkIds = new Set(_bookmarkItems.map(i => i.id));
-  });
   await page.fill('#input', '/f #squid');
   await page.keyboard.press('Enter');
   await page.locator('#chip-bookmark-btn').click();
 
+  const last = urls.at(-1);
+  expect(last).toMatch(/bookmarked=true/);
+  expect(last).toMatch(/topic=squid/);
   await expect(page.locator('.msg.assistant.history-item')).toHaveCount(1);
   await expect(page.locator('.msg.assistant.history-item')).toContainText('matching bookmark');
   await expect(page.locator('.msg.assistant.history-item')).not.toContainText('other bookmark');
@@ -405,20 +405,15 @@ test('bookmarked only applies the active filter to fetched bookmark rows', async
 test('/bookmarks and /bm toggle bookmarked only like the composer bookmark icon', async ({ page }) => {
   await mockBackend(page);
   await page.unroute('**/history**');
-  await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
-  await page.route('**/history/by-ids**', route => route.fulfill({ json: { items: [
-    { id: 10, role: 'assistant', topic: 'squid', agent: 'claude', content: 'matching bookmark', status: 'done', adhoc: false, prompt: 'match', timestamp: new Date().toISOString() },
-    { id: 11, role: 'assistant', topic: 'other', agent: 'claude', content: 'other bookmark', status: 'done', adhoc: false, prompt: 'other', timestamp: new Date().toISOString() },
-  ] }}));
+  await page.route('**/history**', route => {
+    const url = new URL(route.request().url());
+    const bookmarked = url.searchParams.get('bookmarked') === 'true';
+    return route.fulfill({ json: { items: bookmarked ? [
+      { id: 10, role: 'assistant', topic: 'squid', agent: 'claude', content: 'matching bookmark', status: 'done', adhoc: false, prompt: 'match', timestamp: new Date().toISOString() },
+    ] : [], has_more: false } });
+  });
 
   await page.goto('/');
-  await page.evaluate(() => {
-    _bookmarkItems = [
-      { id: 10, topic: 'squid', agent: 'claude', content: 'matching bookmark' },
-      { id: 11, topic: 'other', agent: 'claude', content: 'other bookmark' },
-    ];
-    _bookmarkIds = new Set(_bookmarkItems.map(i => i.id));
-  });
   await page.fill('#input', '/f #squid');
   await page.keyboard.press('Enter');
   await page.fill('#input', '/bookmarks');

@@ -95,6 +95,7 @@ from .stats_db import (
     get_recent_prompts,
     save_file_edit, get_file_edit_history, get_file_edit_by_id,
     get_bookmarks, add_bookmark, remove_bookmark,
+    get_message_annotations, set_message_annotation, remove_message_annotation,
     get_worktrees, get_all_worktrees_for_topic,
     mark_worktree_status, delete_worktree, delete_all_worktrees,
     delete_all_topic_worktrees,
@@ -1301,7 +1302,8 @@ async def health():
 @app.get("/history")
 async def history(offset: int = 0, limit: int = 5, topic: Optional[str] = None,
                   agent: Optional[str] = None, adhoc: Optional[bool] = None,
-                  flow_route: Optional[str] = None):
+                  flow_route: Optional[str] = None, bookmarked: bool = False,
+                  marked_bad: bool = False):
     if topic is not None:
         normalized = _normalize_topic_response(topic)
         if isinstance(normalized, JSONResponse):
@@ -1315,6 +1317,8 @@ async def history(offset: int = 0, limit: int = 5, topic: Optional[str] = None,
         offset=offset,
         limit=limit,
         flow_route=canonical_flow_route(flow_route),
+        bookmarked=bookmarked,
+        marked_bad=marked_bad,
     )
     await asyncio.to_thread(_annotate_history_worktree_state, payload)
     return JSONResponse(payload)
@@ -1422,7 +1426,7 @@ def _annotate_history_worktree_state(payload: dict) -> None:
 async def search(q: str, limit: int = 100, topic: Optional[str] = None,
                  agent: Optional[str] = None, adhoc: Optional[bool] = None,
                  role: str = "assistant", bookmarked: bool = False,
-                 flow_route: Optional[str] = None):
+                 flow_route: Optional[str] = None, marked_bad: bool = False):
     if topic is not None:
         normalized = _normalize_topic_response(topic)
         if isinstance(normalized, JSONResponse):
@@ -1431,8 +1435,8 @@ async def search(q: str, limit: int = 100, topic: Optional[str] = None,
     limit = min(limit, 100)
     flow_route = canonical_flow_route(flow_route)
     if role == "user":
-        return JSONResponse(search_prompts(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit, bookmarked=bookmarked, flow_route=flow_route))
-    return JSONResponse(search_messages(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit, bookmarked=bookmarked, flow_route=flow_route))
+        return JSONResponse(search_prompts(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit, bookmarked=bookmarked, flow_route=flow_route, marked_bad=marked_bad))
+    return JSONResponse(search_messages(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit, bookmarked=bookmarked, flow_route=flow_route, marked_bad=marked_bad))
 
 
 @app.get("/prompts/recent")
@@ -1941,6 +1945,15 @@ class WorktreeDiscardRequest(BaseModel):
     force: bool = False
 
 
+class AnnotationRequest(BaseModel):
+    msg_id: int
+    kind: str = Field(..., min_length=1)
+    topic: Optional[str] = None
+    agent: Optional[str] = None
+    content: Optional[str] = None
+    payload: dict = Field(default_factory=dict)
+
+
 @app.post("/chat/{msg_id}/quota-delta")
 async def record_msg_quota_delta(msg_id: int, req: MsgQuotaSnapshotRequest):
     update_message_quota_snapshot(msg_id, req.before, req.after)
@@ -2304,6 +2317,33 @@ async def create_bookmark(request: Request):
 @app.delete("/bookmarks/{msg_id}")
 async def delete_bookmark(msg_id: int):
     remove_bookmark(msg_id)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/annotations")
+async def list_annotations(kind: str = ""):
+    return JSONResponse({"items": get_message_annotations(kind or None)})
+
+
+@app.post("/annotations")
+async def create_annotation(req: AnnotationRequest):
+    if req.kind != "bad_response":
+        return JSONResponse({"error": "unsupported annotation kind"}, status_code=400)
+    msg = get_message(req.msg_id)
+    if not msg or msg.get("role") != "assistant":
+        return JSONResponse({"error": "assistant message not found"}, status_code=404)
+    topic = req.topic if req.topic is not None else msg.get("topic")
+    agent = req.agent if req.agent is not None else msg.get("agent")
+    content = req.content if req.content is not None else msg.get("content")
+    set_message_annotation(req.msg_id, req.kind, topic, agent, content, req.payload)
+    return JSONResponse({"ok": True})
+
+
+@app.delete("/annotations/{kind}/{msg_id}")
+async def delete_annotation(kind: str, msg_id: int):
+    if kind != "bad_response":
+        return JSONResponse({"error": "unsupported annotation kind"}, status_code=400)
+    remove_message_annotation(msg_id, kind)
     return JSONResponse({"ok": True})
 
 

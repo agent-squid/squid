@@ -174,6 +174,28 @@ test('#topic@agent /clear shows known zero turn count on the chip', async ({ pag
   await expect(page.locator('#topic-chip .chip-turn-count')).toHaveText('·0t');
 });
 
+test('/clear feedback is removed when history is filtered and unfiltered', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'codex' });
+  await page.route('**/cmd', r => r.fulfill({ json: { ok: true, agent: 'codex' } }));
+
+  await page.goto('/');
+
+  for (let i = 0; i < 3; i++) {
+    await page.fill('#input', '#squid@codex /clear');
+    await page.keyboard.press('Enter');
+    await expect(page.locator('.cmd-feedback').last()).toHaveText('#squid@codex — session cleared');
+  }
+  await expect(page.locator('.cmd-feedback')).toHaveCount(3);
+
+  await page.fill('#input', '/f #squid@codex');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.cmd-feedback')).toHaveCount(0);
+
+  await page.fill('#input', '/f reset');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.cmd-feedback')).toHaveCount(0);
+});
+
 test('#topic@missing-agent /clear leaves turn count unknown', async ({ page }) => {
   await mockBackend(page, { topic: 'debug', agent: 'codex' });
 
