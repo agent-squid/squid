@@ -54,6 +54,7 @@ compatibility.
 | `/refresh`           | hard-refresh the browser tab; server untouched     | client-only            |
 | `/f`, `/filter`      | filter history by topic/agent; `/f reset` clears   | client-only            |
 | `/s`, `/search`      | keyword search history                            | client-only            |
+| `/j`, `/jump`        | jump to a message id or `flow:<id>` and load nearby history | client-only            |
 | `/bookmarks`, `/bm`  | toggle bookmarked-responses-only view              | client-only            |
 | `/prompts`           | toggle user-prompts-only view                      | client-only            |
 | `/status`            | show active processes panel                        | client-only            |

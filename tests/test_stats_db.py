@@ -1023,6 +1023,72 @@ def test_history_orders_by_completed_at_not_message_id(tmp_path, monkeypatch):
     assert slow_asst_id < fast_asst_id
 
 
+def test_history_around_uses_completed_at_keyset(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    def done_turn(prompt, response, completed_at):
+        user_id = stats_db.insert_user_message("squid", "codex", prompt)
+        asst_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
+        stats_db.update_assistant_message(asst_id, response, "session-1", "done")
+        stats_db.insert_run_event(asst_id, 0, "stats", json.dumps({"input_tokens": 1}), created_at=completed_at)
+        return asst_id
+
+    oldest = done_turn("oldest", "oldest response", "2026-07-15T10:00:00Z")
+    target = done_turn("target", "target response", "2026-07-15T10:20:00Z")
+    newest = done_turn("newest", "newest response", "2026-07-15T10:30:00Z")
+    older_near = done_turn("older near", "older near response", "2026-07-15T10:10:00Z")
+
+    window = stats_db.get_messages_around(target, before=1, after=1, topic="squid", agent="codex")
+
+    assert window["found"] is True
+    assert [item["id"] for item in window["items"]] == [newest, target, older_near]
+    assert window["has_older"] is True
+    assert window["has_newer"] is False
+    assert window["older_cursor"]["id"] == older_near
+    assert window["newer_cursor"]["id"] == newest
+
+    older_page = stats_db.get_messages_from_cursor(
+        "older",
+        window["older_cursor"]["completed_at"],
+        window["older_cursor"]["id"],
+        limit=1,
+        topic="squid",
+        agent="codex",
+    )
+
+    assert [item["id"] for item in older_page["items"]] == [oldest]
+    assert older_page["has_more"] is False
+
+
+def test_history_around_flow_resolves_numeric_flow_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    ordinary_user = stats_db.insert_user_message("squid", "codex", "ordinary")
+    ordinary_asst = stats_db.insert_assistant_message("squid", "codex", ordinary_user, adhoc=False)
+    stats_db.update_assistant_message(ordinary_asst, "ordinary response", "session-1", "done")
+    stats_db.insert_run_event(ordinary_asst, 0, "stats", json.dumps({"input_tokens": 1}), created_at="2026-07-15T10:00:00Z")
+
+    flow_user = stats_db.insert_user_message(
+        "squid", "codex", "flow origin", flow_run_id="71", flow_route="#squid@codex>@revu",
+    )
+    flow_asst = stats_db.insert_assistant_message(
+        "squid", "codex", flow_user, adhoc=False, flow_run_id="71", flow_route="#squid@codex>@revu",
+    )
+    stats_db.update_assistant_message(flow_asst, "flow response", "session-flow", "done")
+    stats_db.insert_run_event(flow_asst, 0, "stats", json.dumps({"input_tokens": 1}), created_at="2026-07-15T10:05:00Z")
+
+    window = stats_db.get_messages_around_flow("71", before=0, after=0)
+
+    assert window["found"] is True
+    assert window["target_id"] == flow_asst
+    assert window["flow_run_id"] == "71"
+    assert window["target_id"] != 71
+    assert window["items"][0]["id"] == flow_asst
+    assert window["items"][0]["flow_run_id"] == "71"
+
+
 def test_mark_orphaned_pending_recovers_only_completed_run_text(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

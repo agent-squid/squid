@@ -50,10 +50,15 @@ if ('serviceWorker' in navigator) {
 }
 
 messages.addEventListener('scroll', () => {
-  scrollBtn.classList.toggle('visible', !isAtBottom());
+  updateScrollButtonVisibility();
 });
 scrollBtn.addEventListener('click', () => {
+  if (historyWindowMode) {
+    resetHistoryToLatest();
+    return;
+  }
   messages.scrollTop = messages.scrollHeight;
+  updateScrollButtonVisibility();
 });
 scrollBtn.addEventListener('mouseenter', () => {
   scrollBtn.style.background = '#3a3a45';
@@ -1775,8 +1780,16 @@ function reloadHistory(filter = {}) {
   historyFilter = filter;
   historyOffset = 0;
   historyExhausted = false;
+  historyWindowMode = false;
+  historyWindowEdgesArmed = false;
+  historyTopPaginationArmed = true;
+  historyOlderCursor = null;
+  historyNewerCursor = null;
+  historyHasOlder = false;
+  historyHasNewer = false;
   invalidateHistoryLoad();
   if (topSentinel) { topSentinel.remove(); topSentinel = null; }
+  if (bottomSentinel) { bottomSentinel.remove(); bottomSentinel = null; }
   document.querySelectorAll('.history-item, .boot-banner, .tool-block-history, #messages > .cmd-feedback').forEach(el => el.remove());
   // Remove live (non-history) messages too — completed ones are in the DB and will reload
   const preserveForLive = collectLiveGroupElements();
@@ -1916,8 +1929,17 @@ let historyOffset = 0;
 let historyExhausted = false;
 let historyLoading = false;
 let topSentinel = null;
+let bottomSentinel = null;
 let historyGeneration = 0;
 let historyObserver = null;
+let historyBottomObserver = null;
+let historyWindowMode = false;
+let historyOlderCursor = null;
+let historyNewerCursor = null;
+let historyHasOlder = false;
+let historyHasNewer = false;
+let historyWindowEdgesArmed = false;
+let historyTopPaginationArmed = true;
 const pendingPollTimers = new WeakMap();
 
 function invalidateHistoryLoad() {
@@ -1926,6 +1948,10 @@ function invalidateHistoryLoad() {
   if (historyObserver) {
     historyObserver.disconnect();
     historyObserver = null;
+  }
+  if (historyBottomObserver) {
+    historyBottomObserver.disconnect();
+    historyBottomObserver = null;
   }
 }
 
@@ -1966,41 +1992,28 @@ function createTopSentinel() {
   return el;
 }
 
-async function loadHistory() {
-  // #view-chat is display:none while another tab is active, which collapses every
-  // descendant's getBoundingClientRect() to zero — including the sentinel visibility
-  // check below, which would then read as "still in view" no matter what and chain-load
-  // the entire history in the background. Bail here so a page in flight when the user
-  // switches tabs doesn't keep pulling more; the IntersectionObserver re-evaluates and
-  // resumes normally once #view-chat becomes visible again.
-  if (currentView !== 'chat') return;
-  if (historyExhausted || historyLoading) return;
-  historyLoading = true;
-  const generation = historyGeneration;
+function createBottomSentinel() {
+  const el = document.createElement('div');
+  el.id = 'history-bottom-sentinel';
+  return el;
+}
 
-  let data;
-  try {
-    let url = `/history?offset=${historyOffset}&limit=5`;
-    if (historyFilter.flow_route) url += `&flow_route=${encodeURIComponent(historyFilter.flow_route)}`;
-    if (historyFilter.topic) url += `&topic=${encodeURIComponent(historyFilter.topic)}`;
-    if (historyFilter.agent) url += `&agent=${encodeURIComponent(historyFilter.agent)}`;
-    if (historyFilter.adhoc != null) url += `&adhoc=${historyFilter.adhoc}`;
-    if (bookmarkOnlyHistory) url += '&bookmarked=true';
-    if (badOnlyHistory) url += '&marked_bad=true';
-    const res = await fetch(url);
-    data = await res.json();
-  } catch {
-    if (generation === historyGeneration) historyLoading = false;
-    return;
-  }
+function updateScrollButtonVisibility() {
+  scrollBtn.classList.toggle('visible', historyWindowMode || !isAtBottom());
+}
 
-  // Search/filter navigation may have superseded this request while it was in flight.
-  if (generation !== historyGeneration) return;
+function historyUrlParams() {
+  const params = new URLSearchParams();
+  if (historyFilter.flow_route) params.set('flow_route', historyFilter.flow_route);
+  if (historyFilter.topic) params.set('topic', historyFilter.topic);
+  if (historyFilter.agent) params.set('agent', historyFilter.agent);
+  if (historyFilter.adhoc != null) params.set('adhoc', historyFilter.adhoc);
+  if (bookmarkOnlyHistory) params.set('bookmarked', 'true');
+  if (badOnlyHistory) params.set('marked_bad', 'true');
+  return params;
+}
 
-  const { items, has_more } = data;
-  const prevHeight = messages.scrollHeight;
-  const fragment = document.createDocumentFragment();
-
+function appendHistoryItems(items, fragment) {
   const chronologicalItems = [...items].reverse();
   for (let i = 0; i < chronologicalItems.length; i += 1) {
     const item = chronologicalItems[i];
@@ -2031,6 +2044,41 @@ async function loadHistory() {
     appendHistoryRouteChainMarker(routeMarker, item, fragment);
     appendHistoryItem(item, fragment);
   }
+}
+
+async function loadHistory() {
+  // #view-chat is display:none while another tab is active, which collapses every
+  // descendant's getBoundingClientRect() to zero — including the sentinel visibility
+  // check below, which would then read as "still in view" no matter what and chain-load
+  // the entire history in the background. Bail here so a page in flight when the user
+  // switches tabs doesn't keep pulling more; the IntersectionObserver re-evaluates and
+  // resumes normally once #view-chat becomes visible again.
+  if (currentView !== 'chat') return;
+  if (historyWindowMode) return;
+  if (historyExhausted || historyLoading) return;
+  historyLoading = true;
+  const generation = historyGeneration;
+
+  let data;
+  try {
+    const params = historyUrlParams();
+    params.set('offset', historyOffset);
+    params.set('limit', 5);
+    const url = `/history?${params.toString()}`;
+    const res = await fetch(url);
+    data = await res.json();
+  } catch {
+    if (generation === historyGeneration) historyLoading = false;
+    return;
+  }
+
+  // Search/filter navigation may have superseded this request while it was in flight.
+  if (generation !== historyGeneration) return;
+
+  const { items, has_more } = data;
+  const prevHeight = messages.scrollHeight;
+  const fragment = document.createDocumentFragment();
+  appendHistoryItems(items, fragment);
 
   const anchor = topSentinel ? topSentinel.nextSibling : messages.firstChild;
   messages.insertBefore(fragment, anchor);
@@ -2056,18 +2104,259 @@ async function loadHistory() {
       loadHistory();
     }
   }
+  updateScrollButtonVisibility();
+}
+
+async function loadHistoryWindow(direction) {
+  if (currentView !== 'chat' || !historyWindowMode) return;
+  if (historyLoading) return;
+  const cursor = direction === 'newer' ? historyNewerCursor : historyOlderCursor;
+  const hasMore = direction === 'newer' ? historyHasNewer : historyHasOlder;
+  if (!cursor || !hasMore) return;
+  historyLoading = true;
+  const generation = historyGeneration;
+
+  let data;
+  try {
+    const params = historyUrlParams();
+    params.set('direction', direction);
+    params.set('cursor_completed_at', cursor.completed_at);
+    params.set('cursor_id', cursor.id);
+    params.set('limit', 20);
+    const res = await fetch(`/history/around?${params.toString()}`);
+    data = await res.json();
+  } catch {
+    if (generation === historyGeneration) historyLoading = false;
+    return;
+  }
+  if (generation !== historyGeneration || !historyWindowMode) return;
+
+  const prevHeight = messages.scrollHeight;
+  const fragment = document.createDocumentFragment();
+  appendHistoryItems(data.items || [], fragment);
+
+  if (direction === 'newer') {
+    const anchor = bottomSentinel || null;
+    messages.insertBefore(fragment, anchor);
+    historyNewerCursor = data.newer_cursor || historyNewerCursor;
+    historyHasNewer = !!data.has_more;
+  } else {
+    const anchor = topSentinel ? topSentinel.nextSibling : messages.firstChild;
+    messages.insertBefore(fragment, anchor);
+    messages.scrollTop += messages.scrollHeight - prevHeight;
+    historyOlderCursor = data.older_cursor || historyOlderCursor;
+    historyHasOlder = !!data.has_more;
+  }
+
+  historyLoading = false;
+  updateInContextMarkers();
+  refreshAllRevertButtons();
+  evaluateAdvisory();
+  refreshDateDividers();
+  updateHistoryWindowSentinels();
+  updateScrollButtonVisibility();
+}
+
+async function resetHistoryToLatest() {
+  const generation = historyGeneration + 1;
+  invalidateHistoryLoad();
+  historyWindowMode = false;
+  historyWindowEdgesArmed = false;
+  historyTopPaginationArmed = false;
+  historyOlderCursor = null;
+  historyNewerCursor = null;
+  historyHasOlder = false;
+  historyHasNewer = false;
+  historyOffset = 0;
+  historyExhausted = false;
+  if (topSentinel) { topSentinel.remove(); topSentinel = null; }
+  if (bottomSentinel) { bottomSentinel.remove(); bottomSentinel = null; }
+
+  let data;
+  try {
+    const params = historyUrlParams();
+    params.set('offset', 0);
+    params.set('limit', 5);
+    const res = await fetch(`/history?${params.toString()}`);
+    data = await res.json();
+  } catch {
+    if (generation === historyGeneration) {
+      historyLoading = false;
+      updateScrollButtonVisibility();
+    }
+    return;
+  }
+  if (generation !== historyGeneration) return;
+
+  document.querySelectorAll('.history-item, .boot-banner, .search-result-item, .tool-block-history, #messages > .cmd-feedback').forEach(el => el.remove());
+  const preserveForLive = collectLiveGroupElements();
+  document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .route-chain-marker').forEach(el => {
+    if (!preserveForLive.has(el)) el.remove();
+  });
+  setLiveGroupHidden(hasHistoryFilterScope() || hasResponseOnlyFilter());
+
+  const fragment = document.createDocumentFragment();
+  appendHistoryItems(data.items || [], fragment);
+  messages.appendChild(fragment);
+  historyOffset = (data.items || []).length;
+  historyExhausted = !data.has_more;
+  historyLoading = false;
+
+  if (!historyExhausted) {
+    topSentinel = createTopSentinel();
+    messages.insertBefore(topSentinel, messages.firstChild);
+    historyObserver = new IntersectionObserver(
+      (entries) => { if (historyTopPaginationArmed && entries[0].isIntersecting) loadHistory(); },
+      { root: messages, threshold: 0 },
+    );
+    historyObserver.observe(topSentinel);
+    setTimeout(() => { historyTopPaginationArmed = true; }, 250);
+  }
+
+  messages.scrollTop = messages.scrollHeight;
+  _updateFilterBadge();
+  updateInContextMarkers();
+  refreshAllRevertButtons();
+  evaluateAdvisory();
+  refreshDateDividers();
+  updateScrollButtonVisibility();
 }
 
 function initHistoryScroll() {
   if (historyObserver) historyObserver.disconnect();
+  if (historyBottomObserver) {
+    historyBottomObserver.disconnect();
+    historyBottomObserver = null;
+  }
+  if (bottomSentinel) {
+    bottomSentinel.remove();
+    bottomSentinel = null;
+  }
+  historyWindowMode = false;
+  historyWindowEdgesArmed = false;
+  historyTopPaginationArmed = true;
   topSentinel = createTopSentinel();
   messages.insertBefore(topSentinel, messages.firstChild);
 
   historyObserver = new IntersectionObserver(
-    (entries) => { if (entries[0].isIntersecting) loadHistory(); },
+    (entries) => { if (historyTopPaginationArmed && entries[0].isIntersecting) loadHistory(); },
     { root: messages, threshold: 0 },
   );
   historyObserver.observe(topSentinel);
+}
+
+function updateHistoryWindowSentinels() {
+  if (topSentinel && !historyHasOlder) {
+    topSentinel.remove();
+    topSentinel = null;
+  }
+  if (bottomSentinel && !historyHasNewer) {
+    bottomSentinel.remove();
+    bottomSentinel = null;
+  }
+}
+
+function initHistoryWindowScroll() {
+  if (historyObserver) historyObserver.disconnect();
+  if (historyBottomObserver) historyBottomObserver.disconnect();
+  historyWindowEdgesArmed = false;
+  setTimeout(() => { historyWindowEdgesArmed = true; }, 250);
+
+  if (historyHasOlder) {
+    topSentinel = createTopSentinel();
+    messages.insertBefore(topSentinel, messages.firstChild);
+    historyObserver = new IntersectionObserver(
+      (entries) => { if (historyWindowEdgesArmed && entries[0].isIntersecting) loadHistoryWindow('older'); },
+      { root: messages, threshold: 0 },
+    );
+    historyObserver.observe(topSentinel);
+  }
+
+  if (historyHasNewer) {
+    bottomSentinel = createBottomSentinel();
+    messages.appendChild(bottomSentinel);
+    historyBottomObserver = new IntersectionObserver(
+      (entries) => { if (historyWindowEdgesArmed && entries[0].isIntersecting) loadHistoryWindow('newer'); },
+      { root: messages, threshold: 0 },
+    );
+    historyBottomObserver.observe(bottomSentinel);
+  }
+}
+
+async function jumpToMessage(msgId, flowRunId = null) {
+  const targetLabel = flowRunId ? `flow:${flowRunId}` : String(msgId);
+  const feedbackEl = showCmdFeedback(`jump ${targetLabel}...`);
+  const generation = historyGeneration;
+
+  try {
+    const params = historyUrlParams();
+    if (flowRunId) params.set('flow_run_id', flowRunId);
+    else params.set('msg_id', msgId);
+    params.set('before', 20);
+    params.set('after', 20);
+    const res = await fetch(`/history/around?${params.toString()}`);
+    const data = await res.json();
+    if (!res.ok || !data.found) {
+      feedbackEl.textContent = `jump ${targetLabel} — not found`;
+      return;
+    }
+    if (generation !== historyGeneration) return;
+
+    invalidateHistoryLoad();
+    historyWindowMode = true;
+    historyLoading = true;
+    document.getElementById('msg-modal')?.classList.remove('open');
+    document.getElementById('ctx-popup')?.classList.remove('open');
+    document.getElementById('stats-turn-popup')?.classList.remove('open');
+    if (currentView !== 'chat') navigateView('chat');
+
+    if (searchActive) {
+      searchActive = false;
+      searchState = null;
+      searchLoading = false;
+      document.getElementById('search-bar').classList.remove('active');
+      updateSearchButton();
+    }
+    if (promptOnlyHistory) {
+      promptOnlyHistory = false;
+      updatePromptOnlyButton();
+    }
+    if (topSentinel) { topSentinel.remove(); topSentinel = null; }
+    if (bottomSentinel) { bottomSentinel.remove(); bottomSentinel = null; }
+    document.querySelectorAll('.history-item, .boot-banner, .search-result-item, .tool-block-history, #messages > .cmd-feedback').forEach(el => el.remove());
+    const preserveForLive = collectLiveGroupElements();
+    document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .route-chain-marker').forEach(el => {
+      if (!preserveForLive.has(el)) el.remove();
+    });
+    setLiveGroupHidden(hasHistoryFilterScope() || hasResponseOnlyFilter());
+
+    const fragment = document.createDocumentFragment();
+    appendHistoryItems(data.items || [], fragment);
+    messages.appendChild(fragment);
+    historyOlderCursor = data.older_cursor || null;
+    historyNewerCursor = data.newer_cursor || null;
+    historyHasOlder = !!data.has_older;
+    historyHasNewer = !!data.has_newer;
+    historyLoading = false;
+    initHistoryWindowScroll();
+    _updateFilterBadge();
+    updateInContextMarkers();
+    refreshAllRevertButtons();
+    evaluateAdvisory();
+    refreshDateDividers();
+
+    const resolvedMsgId = data.target_id || msgId;
+    const target = messages.querySelector(`.msg[data-msg-id="${resolvedMsgId}"]`);
+    if (target) {
+      target.scrollIntoView({ block: 'center' });
+      target.classList.add('msg-jump-highlight');
+      setTimeout(() => target.classList.remove('msg-jump-highlight'), 1800);
+    }
+    updateScrollButtonVisibility();
+  } catch {
+    feedbackEl.textContent = `jump ${targetLabel} — request failed`;
+    historyLoading = false;
+  }
 }
 
 // ── keyword search ────────────────────────────────────────────────────────────
@@ -2224,6 +2513,9 @@ function startSearch(rawArgs) {
 
   // Stop history scroll
   if (topSentinel) { topSentinel.remove(); topSentinel = null; }
+  if (bottomSentinel) { bottomSentinel.remove(); bottomSentinel = null; }
+  historyWindowMode = false;
+  historyWindowEdgesArmed = false;
   invalidateHistoryLoad();
 
   // Clear pane
@@ -2248,8 +2540,15 @@ function clearSearch() {
   document.querySelectorAll('.search-result-item, .date-divider').forEach(el => el.remove());
   document.querySelectorAll('#messages > .cmd-feedback.search-no-results').forEach(el => el.remove());
   if (topSentinel) { topSentinel.remove(); topSentinel = null; }
+  if (bottomSentinel) { bottomSentinel.remove(); bottomSentinel = null; }
   historyOffset = 0;
   historyExhausted = false;
+  historyWindowMode = false;
+  historyWindowEdgesArmed = false;
+  historyOlderCursor = null;
+  historyNewerCursor = null;
+  historyHasOlder = false;
+  historyHasNewer = false;
   invalidateHistoryLoad();
   setLiveGroupHidden(hasHistoryFilterScope() || hasResponseOnlyFilter());
   _updateFilterBadge();
@@ -2728,6 +3027,7 @@ const SQUID_COMMANDS = [
   { name: 'refresh',      desc: 'hard refresh this browser tab — clears cache, server untouched', args: false },
   { name: 'f', alias: 'filter', desc: 'filter — e.g. /f #topic  ·  /f @agent!  ·  /f reset', args: true },
   { name: 's', alias: 'search', desc: 'search — e.g. /s #topic kw  ·  /s @agent! kw  ·  /s #all kw', args: true },
+  { name: 'jump', alias: 'j', desc: 'jump to message or flow id — e.g. /jump 12345 · /jump flow:71', args: true },
   { name: 'bookmarks', alias: 'bm', desc: 'toggle bookmarked responses only',         args: false },
   { name: 'bad',        desc: 'toggle marked bad responses only',                     args: false },
   { name: 'prompts',     desc: 'toggle user prompts only',                            args: false },
@@ -2760,6 +3060,10 @@ function parseCommand(message) {
   }
   const m = t.match(/^deq(?:\s+(-?\d+))?$/i);
   if (m) return { command: 'deq', pos: m[1] != null ? parseInt(m[1]) : null };
+  const mfj = t.match(/^(?:j|jump)\s+flow:\s*(\S+)$/i);
+  if (mfj) return { command: 'jump', flowRunId: mfj[1] };
+  const mj = t.match(/^(?:j|jump)\s+(?:msg:\s*)?(\d+)$/i);
+  if (mj) return { command: 'jump', msgId: parseInt(mj[1], 10) };
   const ms = t.match(/^s(?:earch)?(?:\s+([\s\S]*))?$/i);
   if (ms) return { command: 'search', args: (ms[1] || '').trim() };
   return null;
@@ -2821,6 +3125,11 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0, opt
       return;
     }
     startSearch(cmd.args);
+    return;
+  }
+
+  if (cmd.command === 'jump') {
+    await jumpToMessage(cmd.msgId || null, cmd.flowRunId || null);
     return;
   }
 
@@ -7669,8 +7978,16 @@ function showStatsTurnsPopup(anchorEl, ids) {
     ids.map(id => `<div class="ctx-popup-pin" data-turn-id="${id}">
       <span class="ctx-popup-tag">#${id}</span>
       <span class="ctx-popup-preview" id="stats-turn-preview-${id}">loading…</span>
+      <button type="button" class="ctx-popup-jump-btn" data-jump-msg-id="${id}" title="/jump ${id}">/jump</button>
     </div>`).join('');
   popup.classList.add('open');
+
+  popup.querySelectorAll('.ctx-popup-jump-btn[data-jump-msg-id]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      jumpToMessage(parseInt(btn.dataset.jumpMsgId, 10));
+    });
+  });
 
   popup.querySelectorAll('.ctx-popup-pin[data-turn-id]').forEach(row => {
     row.addEventListener('click', () => {
@@ -11840,10 +12157,10 @@ function showCtxPopup(spanEl) {
 
   let html = '';
   if (msgId) {
-    html += `<div class="ctx-popup-row"><span class="ctx-popup-key">message</span><span class="ctx-popup-val">#${msgId}</span></div>`;
+    html += `<div class="ctx-popup-row ctx-popup-jump-row" data-jump-msg-id="${escapeHtml(msgId)}"><span class="ctx-popup-key">message</span><span class="ctx-popup-val ctx-popup-link" title="/jump ${escapeHtml(msgId)}">#${escapeHtml(msgId)}</span></div>`;
   }
   if (flowRunId) {
-    html += `<div class="ctx-popup-row"><span class="ctx-popup-key">flow run</span><span class="ctx-popup-val">${escapeHtml(flowRunId)}</span></div>`;
+    html += `<div class="ctx-popup-row ctx-popup-jump-row" data-jump-flow-run-id="${escapeHtml(flowRunId)}"><span class="ctx-popup-key">flow run</span><span class="ctx-popup-val ctx-popup-link" title="/jump flow:${escapeHtml(flowRunId)}">${escapeHtml(flowRunId)}</span></div>`;
   }
   if (sid || cwd) {
     if (sid && agent) {
@@ -11887,6 +12204,16 @@ function showCtxPopup(spanEl) {
 
   popup.innerHTML = html;
   popup.classList.add('open');
+
+  popup.querySelectorAll('.ctx-popup-jump-row .ctx-popup-link').forEach(link => {
+    link.addEventListener('click', e => {
+      e.stopPropagation();
+      const row = link.closest('.ctx-popup-jump-row');
+      const jumpMsgId = row.dataset.jumpMsgId ? parseInt(row.dataset.jumpMsgId, 10) : null;
+      const jumpFlowRunId = row.dataset.jumpFlowRunId || null;
+      jumpToMessage(jumpMsgId, jumpFlowRunId);
+    });
+  });
 
   const memRow = popup.querySelector('.ctx-popup-mem-row');
   if (memRow) {

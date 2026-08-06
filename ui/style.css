@@ -917,6 +917,9 @@ body {
 .msg.user.user-system-generated.prompt-only-history-item .user-source-label {
   right: 2.2rem;
 }
+.msg.msg-jump-highlight {
+  box-shadow: 0 0 0 2px #4a4a70;
+}
 .user-source-label {
   color: var(--text-dim);
   font-size: var(--text-2xs);
@@ -975,7 +978,18 @@ body {
 .ctx-popup-preview { color: var(--text-lo); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ctx-popup-mem-row, .ctx-popup-trace-row, .ctx-popup-cwd-row, .ctx-popup-session-row, .ctx-popup-root-row { cursor: pointer; }
 .ctx-popup-link { color: var(--accent-light); }
-.ctx-popup-mem-row:hover .ctx-popup-link, .ctx-popup-trace-row:hover .ctx-popup-link, .ctx-popup-cwd-row:hover .ctx-popup-link, .ctx-popup-session-row:hover .ctx-popup-link, .ctx-popup-root-row:hover .ctx-popup-link { color: #ffb87a; }
+.ctx-popup-mem-row:hover .ctx-popup-link, .ctx-popup-trace-row:hover .ctx-popup-link, .ctx-popup-cwd-row:hover .ctx-popup-link, .ctx-popup-session-row:hover .ctx-popup-link, .ctx-popup-root-row:hover .ctx-popup-link, .ctx-popup-jump-row:hover .ctx-popup-link { color: #ffb87a; }
+.ctx-popup-jump-row .ctx-popup-link { cursor: pointer; }
+.ctx-popup-jump-btn {
+  background: transparent;
+  border: 0;
+  color: var(--accent-light);
+  cursor: pointer;
+  flex-shrink: 0;
+  font: inherit;
+  padding: 0;
+}
+.ctx-popup-jump-btn:hover { color: #ffb87a; text-decoration: underline; }
 .msg.assistant { background: var(--surface-2); align-self: flex-start; line-height: 1.6; }
 .msg.assistant.has-reply-btn { display: flow-root; }
 

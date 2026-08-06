@@ -505,6 +505,17 @@ Fetch specific message rows by id (comma-separated, capped at 200), same row sha
 
 ---
 
+### GET /history/around
+
+Fetch a bounded history window around a message id, or a keyset page from a window edge.
+Uses history order `(completed_at, id)`, where `completed_at` is the turn stats timestamp with row `created_at` fallback.
+
+**Query params**: `msg_id` or `flow_run_id`, `before` (default 20), `after` (default 20), `direction` (`older` | `newer`), `cursor_completed_at`, `cursor_id`, `limit` (default 20), plus the same scope/filter params as `GET /history`.
+
+**Response**: `{ "items": [...], "found": true, "target_id": 123, "has_older": true, "has_newer": true, "older_cursor": {...}, "newer_cursor": {...} }`
+
+---
+
 ### GET /search
 
 Full-text search over messages via `messages_fts`/`prompts_fts`.

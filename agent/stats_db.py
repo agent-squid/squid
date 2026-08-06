@@ -1487,6 +1487,7 @@ def get_message(msg_id: int) -> Optional[dict]:
         row = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
                       m.content, m.status, m.source, m.adhoc, m.session_id,
+                      m.flow_run_id, m.flow_route,
                       m.context, m.status_raw, m.created_at AS timestamp,
                       {_turn_end_expr("m")} AS completed_at, m.reply_to,
                       m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
@@ -1576,6 +1577,211 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
         "items": items,
         "total": total,
         "has_more": (offset + limit) < total,
+    }
+
+
+def _history_filter_sql(topic: Optional[str] = None, agent: Optional[str] = None,
+                        adhoc: Optional[bool] = None, flow_route: Optional[str] = None,
+                        bookmarked: bool = False, marked_bad: bool = False) -> tuple[str, list, str, str]:
+    where = "WHERE m.role = 'assistant'"
+    params: list = []
+    bookmark_join = (
+        "JOIN message_annotations ma_bookmark ON ma_bookmark.msg_id = m.id AND ma_bookmark.kind = 'bookmark'"
+        if bookmarked else ""
+    )
+    marked_bad_join = (
+        "JOIN message_annotations ma_bad ON ma_bad.msg_id = m.id AND ma_bad.kind = 'bad_response'"
+        if marked_bad else ""
+    )
+    if topic:
+        where += " AND m.topic = ?"
+        params.append(topic)
+    if agent:
+        where += " AND m.agent = ?"
+        params.append(agent)
+    if adhoc is not None:
+        where += " AND COALESCE(m.adhoc, 0) = ?"
+        params.append(1 if adhoc else 0)
+    if flow_route:
+        clause, clause_params = _flow_route_filter_clause(flow_route)
+        where += f" AND {clause}"
+        params.extend(clause_params)
+    return where, params, bookmark_join, marked_bad_join
+
+
+def _history_rows(conn: sqlite3.Connection, where: str, params: list,
+                  bookmark_join: str = "", marked_bad_join: str = "",
+                  order_sql: str = "ORDER BY completed_at DESC, m.id DESC",
+                  limit: int = 20) -> list[dict]:
+    rows = conn.execute(
+        f"""SELECT m.id, m.role, m.topic, m.agent,
+                   m.content, m.status, m.source, m.adhoc, m.session_id,
+                   m.flow_run_id, m.flow_route,
+                   m.context, m.status_raw, m.created_at AS timestamp,
+                   {_turn_end_expr("m")} AS completed_at, m.reply_to,
+                   m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
+                   u.content AS prompt, u.context AS prompt_context, u.source AS prompt_source,
+                   m.session_turn_index AS session_turn_count,
+                   re.payload AS stats_payload,
+                   {_marked_bad_expr("m")} AS marked_bad
+            FROM chat_messages m
+            {bookmark_join}
+            {marked_bad_join}
+            LEFT JOIN chat_messages u ON m.reply_to = u.id
+            {_latest_stats_event_join(msg_alias="m", outer=True)}
+            {where}
+            {order_sql}
+            LIMIT ?""",
+        params + [limit],
+    ).fetchall()
+    items = []
+    for r in rows:
+        row = dict(r)
+        row["flow_route"] = _infer_origin_flow_route(conn, row)
+        _attach_turn_stats(row)
+        items.append(row)
+    return items
+
+
+def _history_cursor(item: Optional[dict]) -> Optional[dict]:
+    if not item:
+        return None
+    return {"completed_at": item.get("completed_at"), "id": item.get("id")}
+
+
+def get_messages_around(msg_id: int, before: int = 20, after: int = 20,
+                        topic: Optional[str] = None, agent: Optional[str] = None,
+                        adhoc: Optional[bool] = None, flow_route: Optional[str] = None,
+                        bookmarked: bool = False, marked_bad: bool = False) -> dict:
+    before = max(0, min(int(before), 100))
+    after = max(0, min(int(after), 100))
+    where, params, bookmark_join, marked_bad_join = _history_filter_sql(
+        topic=topic, agent=agent, adhoc=adhoc, flow_route=flow_route,
+        bookmarked=bookmarked, marked_bad=marked_bad,
+    )
+    with _connect() as conn:
+        target_rows = _history_rows(
+            conn,
+            where + " AND m.id = ?",
+            params + [msg_id],
+            bookmark_join,
+            marked_bad_join,
+            limit=1,
+        )
+        if not target_rows:
+            return {"items": [], "target_id": msg_id, "found": False, "has_older": False, "has_newer": False}
+        target = target_rows[0]
+        end_at = target["completed_at"]
+        older_rows = _history_rows(
+            conn,
+            where + f" AND ({_turn_end_expr('m')} < ? OR ({_turn_end_expr('m')} = ? AND m.id < ?))",
+            params + [end_at, end_at, msg_id],
+            bookmark_join,
+            marked_bad_join,
+            limit=before + 1,
+        )
+        newer_ascending = _history_rows(
+            conn,
+            where + f" AND ({_turn_end_expr('m')} > ? OR ({_turn_end_expr('m')} = ? AND m.id > ?))",
+            params + [end_at, end_at, msg_id],
+            bookmark_join,
+            marked_bad_join,
+            order_sql="ORDER BY completed_at ASC, m.id ASC",
+            limit=after + 1,
+        )
+
+    has_older = len(older_rows) > before
+    has_newer = len(newer_ascending) > after
+    older_rows = older_rows[:before]
+    newer_rows = list(reversed(newer_ascending[:after]))
+    items = newer_rows + [target] + older_rows
+    chronological = list(reversed(items))
+    return {
+        "items": items,
+        "target_id": msg_id,
+        "found": True,
+        "has_older": has_older,
+        "has_newer": has_newer,
+        "older_cursor": _history_cursor(chronological[0] if chronological else None),
+        "newer_cursor": _history_cursor(chronological[-1] if chronological else None),
+    }
+
+
+def get_messages_around_flow(flow_run_id: str, before: int = 20, after: int = 20,
+                             topic: Optional[str] = None, agent: Optional[str] = None,
+                             adhoc: Optional[bool] = None, flow_route: Optional[str] = None,
+                             bookmarked: bool = False, marked_bad: bool = False) -> dict:
+    flow_run_id = str(flow_run_id or "").strip()
+    if not flow_run_id:
+        return {"items": [], "flow_run_id": flow_run_id, "found": False, "has_older": False, "has_newer": False}
+    where, params, bookmark_join, marked_bad_join = _history_filter_sql(
+        topic=topic, agent=agent, adhoc=adhoc, flow_route=flow_route,
+        bookmarked=bookmarked, marked_bad=marked_bad,
+    )
+    with _connect() as conn:
+        anchors = _history_rows(
+            conn,
+            where + " AND m.flow_run_id = ?",
+            params + [flow_run_id],
+            bookmark_join,
+            marked_bad_join,
+            order_sql="ORDER BY m.id ASC",
+            limit=1,
+        )
+    if not anchors:
+        return {"items": [], "flow_run_id": flow_run_id, "found": False, "has_older": False, "has_newer": False}
+    payload = get_messages_around(
+        anchors[0]["id"],
+        before=before,
+        after=after,
+        topic=topic,
+        agent=agent,
+        adhoc=adhoc,
+        flow_route=flow_route,
+        bookmarked=bookmarked,
+        marked_bad=marked_bad,
+    )
+    payload["flow_run_id"] = flow_run_id
+    return payload
+
+
+def get_messages_from_cursor(direction: str, cursor_completed_at: str, cursor_id: int,
+                             limit: int = 20, topic: Optional[str] = None,
+                             agent: Optional[str] = None, adhoc: Optional[bool] = None,
+                             flow_route: Optional[str] = None, bookmarked: bool = False,
+                             marked_bad: bool = False) -> dict:
+    limit = max(1, min(int(limit), 100))
+    where, params, bookmark_join, marked_bad_join = _history_filter_sql(
+        topic=topic, agent=agent, adhoc=adhoc, flow_route=flow_route,
+        bookmarked=bookmarked, marked_bad=marked_bad,
+    )
+    if direction == "newer":
+        cursor_where = where + f" AND ({_turn_end_expr('m')} > ? OR ({_turn_end_expr('m')} = ? AND m.id > ?))"
+        order_sql = "ORDER BY completed_at ASC, m.id ASC"
+    else:
+        direction = "older"
+        cursor_where = where + f" AND ({_turn_end_expr('m')} < ? OR ({_turn_end_expr('m')} = ? AND m.id < ?))"
+        order_sql = "ORDER BY completed_at DESC, m.id DESC"
+    with _connect() as conn:
+        rows = _history_rows(
+            conn,
+            cursor_where,
+            params + [cursor_completed_at, cursor_completed_at, cursor_id],
+            bookmark_join,
+            marked_bad_join,
+            order_sql=order_sql,
+            limit=limit + 1,
+        )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    items = list(reversed(rows)) if direction == "newer" else rows
+    chronological = list(reversed(items))
+    return {
+        "items": items,
+        "has_more": has_more,
+        "direction": direction,
+        "older_cursor": _history_cursor(chronological[0] if chronological else None),
+        "newer_cursor": _history_cursor(chronological[-1] if chronological else None),
     }
 
 

@@ -57,7 +57,7 @@ from .harnesses import SUPPORTED_HARNESSES, _validate_harness_config, list_harne
 from .providers import Provider, _validate_provider, get_provider, public_providers, require_provider
 from .resolve import agent_ref_for_storage, resolve_agent, split_agent_ref
 from .runners import list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic
-from .history import list_history, list_history_by_ids
+from .history import list_history, list_history_by_ids, list_history_around
 from .stats_db import get_usage_stats
 from .topic_queue import TopicDispatcher
 from .context_sync import sync_now, maybe_sync
@@ -1334,6 +1334,44 @@ async def history_by_ids(ids: str = ""):
         return JSONResponse({"error": "invalid ids"}, status_code=400)
     parsed = parsed[:200]  # cap to prevent abuse
     payload = await asyncio.to_thread(list_history_by_ids, parsed)
+    await asyncio.to_thread(_annotate_history_worktree_state, payload)
+    return JSONResponse(payload)
+
+
+@app.get("/history/around")
+async def history_around(msg_id: Optional[int] = None, flow_run_id: Optional[str] = None,
+                         before: int = 20, after: int = 20,
+                         direction: Optional[str] = None,
+                         cursor_completed_at: Optional[str] = None,
+                         cursor_id: Optional[int] = None,
+                         limit: int = 20, topic: Optional[str] = None,
+                         agent: Optional[str] = None, adhoc: Optional[bool] = None,
+                         flow_route: Optional[str] = None, bookmarked: bool = False,
+                         marked_bad: bool = False):
+    if topic is not None:
+        normalized = _normalize_topic_response(topic)
+        if isinstance(normalized, JSONResponse):
+            return normalized
+        topic = normalized
+    if direction is not None and direction not in {"older", "newer"}:
+        return JSONResponse({"error": "invalid direction"}, status_code=400)
+    payload = await asyncio.to_thread(
+        list_history_around,
+        msg_id=msg_id,
+        flow_run_id=flow_run_id,
+        before=before,
+        after=after,
+        direction=direction,
+        cursor_completed_at=cursor_completed_at,
+        cursor_id=cursor_id,
+        limit=limit,
+        topic=topic,
+        agent=agent,
+        adhoc=adhoc,
+        flow_route=canonical_flow_route(flow_route),
+        bookmarked=bookmarked,
+        marked_bad=marked_bad,
+    )
     await asyncio.to_thread(_annotate_history_worktree_state, payload)
     return JSONResponse(payload)
 
