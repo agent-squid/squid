@@ -161,7 +161,7 @@ let _canInstallOnRestart = false;
 let _squidVersion = null;
 
 function _parseVersion(v) {
-  const match = String(v).trim().match(/^(\d+(?:\.\d+)*)(?:(a|b|rc)(\d+))?(?:\.post(\d+))?/i);
+  const match = String(v).trim().match(/^v?(\d+(?:\.\d+)*)(?:(a|b|rc)(\d+))?(?:\.post(\d+))?/i);
   if (!match) return null;
   return {
     release: match[1].split('.').map(n => parseInt(n, 10) || 0),
@@ -174,6 +174,7 @@ function _parseVersion(v) {
 function _isNewerVersion(latest, current) {
   const a = _parseVersion(latest), b = _parseVersion(current);
   if (!a || !b) return false;
+  if (a.preType && !b.preType) return false;
   for (let i = 0; i < Math.max(a.release.length, b.release.length); i++) {
     const x = a.release[i] || 0, y = b.release[i] || 0;
     if (x !== y) return x > y;

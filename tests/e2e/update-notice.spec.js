@@ -235,6 +235,38 @@ test('release candidates do not outrank the matching final release', async ({ pa
   await expect(page.locator('#hamburger-btn')).not.toHaveClass(/has-update/);
 });
 
+test('release candidates do not trigger updates for stable installs', async ({ page }) => {
+  await mockApp(page, { version: '0.1.3' });
+  await mockLatestVersion(page, '0.1.4rc1');
+
+  await page.goto('/');
+  await expect(page.locator('#hamburger-btn')).not.toHaveClass(/has-update/);
+});
+
+test('newer release candidates trigger updates for release candidate installs', async ({ page }) => {
+  await mockApp(page, { version: '0.1.3rc4' });
+  await mockLatestVersion(page, '0.1.4rc1');
+
+  await page.goto('/');
+  await expect(page.locator('#hamburger-btn')).toHaveClass(/has-update/);
+});
+
+test('newer release candidates trigger updates for v-prefixed release candidate installs', async ({ page }) => {
+  await mockApp(page, { version: 'v0.1.3rc1' });
+  await mockLatestVersion(page, '0.1.4rc1');
+
+  await page.goto('/');
+  await expect(page.locator('#hamburger-btn')).toHaveClass(/has-update/);
+});
+
+test('older release candidates do not trigger updates for v-prefixed release candidate installs', async ({ page }) => {
+  await mockApp(page, { version: 'v0.1.13rc1' });
+  await mockLatestVersion(page, '0.1.4rc1');
+
+  await page.goto('/');
+  await expect(page.locator('#hamburger-btn')).not.toHaveClass(/has-update/);
+});
+
 test('the matching final release outranks an installed release candidate', async ({ page }) => {
   await mockApp(page, { version: '0.1.2rc1' });
   await mockLatestVersion(page, '0.1.2');
