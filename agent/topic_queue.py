@@ -309,7 +309,7 @@ class TopicWorker:
         asyncio.create_task(_run(), name=f"squid-chain-{msg_id}")
 
     async def _process(self, item: QueueItem):
-        from .runners import CLIError, effective_protocol, runner_for_agent
+        from .runners import CLIError, CLIAuthRequired, effective_protocol, runner_for_agent
         from .config import SQUID_HOME, WORKTREE_ISOLATION_ENABLED
         from .memory import code_roots_prompt_block, oneshot_protocol_prompt_block
         from .resolve import resolve_agent, split_agent_ref
@@ -671,6 +671,15 @@ class TopicWorker:
             err_text = str(exc)
             if not isinstance(exc, CLIError):
                 log.exception("Unexpected error processing msg_id=%s", item.msg_id)
+            if isinstance(exc, CLIAuthRequired):
+                # Session isn't corrupted, only auth is missing — clearing it
+                # would just throw away context for no benefit once the user
+                # logs in and retries.
+                # Stable, greppable prefix (not a DB schema change) so the
+                # error text alone tells a reconnecting/reloading client
+                # which harness needs the in-app auth-session flow, without
+                # a separate out-of-band signal that a page reload would lose.
+                err_text = f"[[cli-auth-required:{exc.harness_id}]] {err_text}"
             recovered_content = get_completed_run_text(item.msg_id) if not raw else None
             content = raw or recovered_content or err_text
             try:

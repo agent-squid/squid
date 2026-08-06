@@ -20,6 +20,7 @@ from agent.runners import (
     kill_procs_by_topic,
     kill_proc_by_msg_id,
     list_active_procs,
+    CLIAuthRequired,
     runner_for_backend,
     runner_for_harness,
     run_claude,
@@ -1840,6 +1841,47 @@ def test_claude_routes_partial_text_to_status_and_result_to_response():
     assert chunks[0] == {"_status": "Working on it..."}
     assert chunks[1] == "Finished response."
     assert "_stats" in chunks[2]
+
+
+def test_claude_auth_banner_raises_auth_required():
+    async def fake_stream_lines(*args, **kwargs):
+        yield json.dumps({
+            "type": "result",
+            "result": "Not logged in. Run /login to authenticate.",
+            "usage": {},
+        })
+
+    async def collect():
+        return [chunk async for chunk in run_claude("hello", cwd="/tmp")]
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        with pytest.raises(CLIAuthRequired):
+            asyncio.run(collect())
+
+
+def test_claude_answer_about_login_text_is_not_auth_failure():
+    async def fake_stream_lines(*args, **kwargs):
+        yield json.dumps({
+            "type": "result",
+            "result": (
+                "Yes, detection worked because the previous message contained "
+                '"Not logged in" and "/login" in the CLI output.'
+            ),
+            "usage": {},
+        })
+
+    async def collect():
+        return [chunk async for chunk in run_claude("hello", cwd="/tmp")]
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        chunks = asyncio.run(collect())
+
+    assert chunks[0].startswith("Yes, detection worked")
+    assert "_stats" in chunks[1]
 
 
 def test_claude_does_not_duplicate_tool_use_between_stream_event_and_assistant():

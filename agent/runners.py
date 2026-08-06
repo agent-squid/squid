@@ -168,6 +168,82 @@ class CLIError(RuntimeError):
     pass
 
 
+class CLIAuthRequired(CLIError):
+    """A CLIError whose root cause is a missing/expired login for `harness_id`.
+
+    Raised per harness (ADR-0035) since each CLI fails differently on missing
+    auth — there is no shared detector. Subclasses CLIError so existing
+    `except CLIError` handling keeps working unchanged; callers that want to
+    offer the in-app auth-session flow can additionally catch this specific
+    type and read `harness_id`.
+    """
+
+    def __init__(self, harness_id: str, message: str):
+        super().__init__(message)
+        self.harness_id = harness_id
+
+
+# Substrings observed in each harness's own failure output when the CLI
+# isn't logged in (or the token expired), gathered by actually running each
+# CLI unauthenticated rather than guessing at error text:
+#   - codex: an {"type":"error"} event whose message is the 401 the CLI got
+#     back from api.openai.com while reconnecting.
+#   - cursor: a plain "Error: Authentication required. ..." line on stderr,
+#     which surfaces through _stream_lines' generic non-zero-exit CLIError.
+# opencode has no equivalent reliable text — its failures come back as an
+# opaque {"name":"UnknownError","message":"Unexpected server error..."}
+# regardless of cause — so it isn't handled by text matching here; see
+# `_opencode_auth_required` below, which checks `opencode auth list` instead.
+_CODEX_AUTH_MARKERS = ("401 Unauthorized", "Missing bearer or basic authentication")
+_CURSOR_AUTH_MARKER = "Authentication required"
+
+
+def _codex_auth_message(message: str) -> bool:
+    return all(marker in message for marker in _CODEX_AUTH_MARKERS)
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+_OPENCODE_CREDENTIAL_COUNT_RE = re.compile(r"(\d+)\s+credentials?")
+
+
+def _claude_auth_result(text: str) -> bool:
+    # Anchored to the start of the (ANSI-stripped) text, not a bare substring
+    # check: the banner is short and always leads, but a normal answer can
+    # legitimately *mention* "Not logged in" and "/login" while discussing
+    # something else entirely, and that must not be misdetected as the CLI's
+    # own auth-failure banner.
+    normalized = _ANSI_RE.sub("", text or "").strip()
+    return normalized.startswith("Not logged in") and "/login" in normalized
+
+
+async def _opencode_auth_required() -> bool:
+    """Heuristic for opencode: its own run failures come back as an opaque
+    {"name":"UnknownError", ...} regardless of cause (verified empirically —
+    even a provider needing a plain env var and one needing `opencode auth
+    login` produce the identical generic error), so there's no reliable
+    substring to match in the failure itself. Instead, proactively ask
+    opencode's own credential store how many providers it has logged in —
+    zero is a reasonable signal that `opencode auth login` is the fix.
+    False on any error from the check itself, since this only gates whether
+    to offer the auth-session flow, not whether the original error surfaces.
+    """
+    if not OPENCODE_PATH:
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            OPENCODE_PATH, "auth", "list",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+    except Exception:
+        return False
+    text = _ANSI_RE.sub("", out.decode(errors="replace"))
+    match = _OPENCODE_CREDENTIAL_COUNT_RE.search(text)
+    return bool(match) and int(match.group(1)) == 0
+
+
 def _claude_child_env(backend_id: str, backend_env: Optional[dict]) -> dict:
     env_for_claude = dict(backend_env) if backend_env else {}
     if backend_id == "claudecode":
@@ -367,8 +443,11 @@ class _ClaudeStreamParser:
                 self.done = True
                 raise CLIError(final_text or f"Claude result: {subtype}")
             if final_text:
-                if "Not logged in" in final_text and "/login" in final_text:
-                    raise CLIError("Claude auth failed (network down or token expired) — run: claude login")
+                if _claude_auth_result(final_text):
+                    raise CLIAuthRequired(
+                        "claudecode",
+                        "Claude auth failed (network down or token expired) — run: claude login",
+                    )
                 chunks.append(final_text)
             # ── Claude token semantics (verified via stream-json output, 2026-06) ──────────
             # The Anthropic API / Claude Code CLI splits input into THREE buckets:
@@ -486,6 +565,13 @@ async def _stream_lines(
 
     if proc.returncode != 0:
         err = b"".join(stderr_buf).decode(errors="replace").strip()
+        if backend == "cursor" and _CURSOR_AUTH_MARKER in err:
+            raise CLIAuthRequired("cursor", err)
+        if backend == "claudecode" and _claude_auth_result(err):
+            raise CLIAuthRequired(
+                "claudecode",
+                "Claude auth failed (network down or token expired) — run: claude login",
+            )
         raise CLIError(f"CLI exited {proc.returncode}: {err}")
 
 
@@ -1268,7 +1354,10 @@ async def run_codex(
                 }
             }
         elif t == "error":
-            raise CLIError(event.get("message", "codex error"))
+            msg = event.get("message", "codex error")
+            if _codex_auth_message(msg):
+                raise CLIAuthRequired("codex", msg)
+            raise CLIError(msg)
 
 
 async def run_copilot(
@@ -1678,6 +1767,8 @@ async def run_opencode(
         elif t == "error":
             err = event.get("error", {})
             msg = (err.get("data", {}) or {}).get("message") or err.get("message") or "opencode error"
+            if await _opencode_auth_required():
+                raise CLIAuthRequired("opencode", msg)
             raise CLIError(msg)
 
     if pending_text:

@@ -1254,6 +1254,89 @@ async def processes():
     return JSONResponse(list_active_procs())
 
 
+class AuthSessionRequest(BaseModel):
+    harness: str
+    cols: int = 100
+    rows: int = 10
+
+
+class AuthSessionInputRequest(BaseModel):
+    data: str
+
+
+class AuthSessionResizeRequest(BaseModel):
+    cols: int
+    rows: int
+
+
+@app.post("/auth/session")
+async def auth_session_create(req: AuthSessionRequest):
+    from .auth_sessions import create_session, AuthSessionError, NoLoginCommand
+
+    if req.harness not in SUPPORTED_HARNESSES:
+        return JSONResponse({"error": f"Unknown harness {req.harness!r}"}, status_code=400)
+    try:
+        session = await create_session(req.harness, req.cols, req.rows)
+    except NoLoginCommand as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except AuthSessionError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse({"id": session.id, "harness": session.harness_id})
+
+
+@app.get("/auth/session/{session_id}/events")
+async def auth_session_events(session_id: str):
+    from .auth_sessions import get_session, stream_events
+
+    session = get_session(session_id)
+    if not session:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    async def event_stream() -> AsyncGenerator[str, None]:
+        async for chunk in stream_events(session):
+            yield sse_event("data", base64.b64encode(chunk).decode("ascii"))
+        yield sse_event("exit", str(session.returncode if session.returncode is not None else -1))
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
+
+
+@app.post("/auth/session/{session_id}/input")
+async def auth_session_input(session_id: str, req: AuthSessionInputRequest):
+    from .auth_sessions import get_session, write_input, AuthSessionError
+
+    session = get_session(session_id)
+    if not session:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        write_input(session, req.data.encode())
+    except AuthSessionError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/auth/session/{session_id}/resize")
+async def auth_session_resize(session_id: str, req: AuthSessionResizeRequest):
+    from .auth_sessions import get_session, resize
+
+    session = get_session(session_id)
+    if not session:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    resize(session, req.cols, req.rows)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/auth/session/{session_id}/cancel")
+async def auth_session_cancel(session_id: str):
+    from .auth_sessions import cancel_session
+
+    ok = await cancel_session(session_id)
+    return JSONResponse({"ok": ok})
+
+
 @app.get("/queue")
 async def queued():
     return JSONResponse(dispatcher.all_queued_items())

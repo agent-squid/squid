@@ -1,0 +1,151 @@
+---
+status: accepted
+date: 2026-08-06
+---
+# ADR-0035: CLI Auth Sessions via Scoped PTY over SSE
+
+## Context and Problem Statement
+
+Every bundled harness (`claudecode`, `codex`, `cursor`, `opencode`, `pi`)
+shells out through `oneshot-cli` (and `claudecode` also through
+`interactive-cli`) with `stdin=DEVNULL` or a structured stdin/stdout
+protocol — never a real terminal. When a harness isn't logged in, Squid can
+only detect and report the failure, not fix it: today that detection exists
+for exactly one harness, a string match on `"Not logged in"` in
+`_ClaudeStreamParser.feed_line` (`agent/runners.py:370`), which raises a
+`CLIError` telling the user to run `claude login` themselves, outside Squid.
+
+An API-key/env-var shortcut does not solve this for most users. Subscription
+tiers (Claude Pro/Max, Cursor, ChatGPT Plus) authenticate via OAuth or
+device-code flows tied to the account, not an API key — API keys are a
+separate pay-per-use billing surface. So for the common case, the CLI's own
+interactive login command is the only path to auth, and that command expects
+a real terminal (it prints a URL/device code and polls, or opens a browser
+and waits, or runs an interactive provider-picker wizard).
+
+Squid needs a way to run that login command and let the user complete it
+without leaving the app.
+
+## Decision Outcome
+
+Add a narrow, allowlisted **auth session** feature, separate from normal
+turn execution and separate from the `interactive-pty` *protocol* defined in
+[ADR-0022](0022-multi-protocol-agent-execution.md). ADR-0022's
+`interactive-pty` is for running full agent turns through a PTY when a
+harness's real interactive behavior only exists in a terminal; this feature
+uses the same PTY primitive but only ever runs one of a fixed, allowlisted
+set of login subcommands, never a turn and never arbitrary input. The two
+should not be conflated even though both spawn PTYs.
+
+### Transport: SSE output + POST input, not WebSocket
+
+Squid has no WebSocket infrastructure today — every streaming surface is
+`StreamingResponse` over `text/event-stream` (`agent/server.py:1111`,
+`:1587`, `:2218`), paired with discrete POSTs for input actions. Chat itself
+stays on SSE; this ADR does not change chat's transport. Login flows
+involve a handful of discrete inputs per session (open a link, copy/paste a
+code, press Enter once) — not continuous keystroke-rate interaction — so
+POST-per-input is sufficient and avoids introducing a second realtime
+transport stack for one feature. WebSocket is deferred until a real
+general-purpose interactive shell is in scope, which this feature
+deliberately is not.
+
+Endpoints:
+
+```
+POST /auth/session                 create + spawn an allowlisted login command
+GET  /auth/session/{id}/events     SSE stream of PTY output bytes
+POST /auth/session/{id}/input      forward input bytes to the process
+POST /auth/session/{id}/resize     terminal resize (cols, rows)
+POST /auth/session/{id}/cancel     kill the process group, close the session
+```
+
+### Allowlisted commands only
+
+The command run by an auth session is chosen server-side from a fixed table
+keyed by harness — never constructed from user input:
+
+```
+claudecode -> claude auth login --claudeai
+codex      -> codex login --device-auth
+cursor     -> cursor-agent login   (NO_OPEN_BROWSER=1 optional)
+opencode   -> opencode auth login
+pi         -> no login command; manual instructions to set
+              ANTHROPIC_API_KEY / ANTHROPIC_OAUTH_TOKEN
+```
+
+Input bytes sent to `/input` are forwarded to this fixed process only — a
+user cannot start a different command through this endpoint. There is no
+general shell.
+
+### Detection
+
+`CLIAuthRequired` is raised per harness, not shared. Only `claudecode` has a
+detector today (`runners.py:370`); `codex`, `cursor`, and `opencode` need
+their own stderr/exit-code detectors added, since each fails differently on
+missing auth. This is in scope for the feature, not follow-up work.
+
+### Credentials and process environment
+
+Login processes run in the same host environment normal turns run in, not
+inside per-turn worktree isolation ([ADR-0025](0025-per-turn-worktree-isolation.md)
+scopes cwd/workspace, not credential storage). Each harness writes its
+credentials to the same fixed, non-isolated locations it reads at normal
+turn time (`~/.claude`, `~/.codex/auth.json`, OS keychain for cursor, etc.),
+so a completed login is immediately visible to the next real turn with no
+extra plumbing.
+
+### UI
+
+Only the composer (`#view-chat > form#form` / `#input-area`) swaps to an
+embedded xterm.js panel; the chat transcript above it is untouched and the
+page never becomes a full-screen terminal. xterm.js is the renderer only —
+it does not require WebSocket and needs just the SSE byte stream plus
+`/input`/`/resize`. Squid's existing in-app panel/modal styling is used, not
+a system modal.
+
+Lifecycle:
+
+- Exit 0: close the panel, restore the composer, retry the original prompt
+  if the session was triggered by a failed turn.
+- Exit nonzero: keep terminal output visible with Retry/Cancel.
+- Cancel or SSE disconnect: kill the process group, restore the composer.
+
+### Process lifecycle
+
+Standard `pty.openpty()` spawn with process-group isolation, consistent with
+[ADR-0018](0018-cli-process-group-isolation.md), registered in the normal
+process registry so existing stop/timeout controls reach it. An idle timeout
+closes orphaned sessions (e.g. a closed browser tab) rather than leaking
+processes indefinitely.
+
+## Consequences
+
+- Good: users can complete OAuth/device-code login for any harness without
+  leaving Squid or opening a separate terminal.
+- Good: no new realtime transport — chat keeps its existing SSE model, and
+  the auth session reuses the same mental model (SSE out, POST in) instead
+  of adding WebSocket infrastructure the rest of the app doesn't have.
+- Good: scoped to a fixed command allowlist, so this is not a general
+  in-app shell and doesn't expand Squid's security surface the way one
+  would.
+- Neutral: xterm.js renders whatever the CLI prints (spinners, ANSI, prompts)
+  correctly with no per-harness output parsing, at the cost of adding a
+  frontend terminal-emulator dependency.
+- Bad: per-harness auth-failure detection has to be built individually for
+  `codex`, `cursor`, and `opencode` — there's no shared detector to reuse
+  beyond `claudecode`'s.
+- Bad: `pi` has no CLI login command at all, so it falls back to manual
+  instructions rather than a driven auth session.
+
+## Deferred / open before implementation
+
+- `codex login --device-auth` and `cursor-agent login` with
+  `NO_OPEN_BROWSER=1` are believed to be non-interactive-friendly
+  (print-and-poll) based on `--help` output, but neither has been run
+  end-to-end to confirm they don't require an additional keypress after the
+  browser/device step completes.
+- Idle timeout value for auth sessions is not yet chosen (may reuse
+  `DEFAULT_INTERACTIVE_IDLE_TIMEOUT_SECONDS` from `agent/harnesses.py` or
+  use a shorter, dedicated value).
+- xterm.js is not yet a UI dependency and needs to be added.

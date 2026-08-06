@@ -1,0 +1,319 @@
+"""agent/auth_sessions.py — CLI auth sessions via scoped PTY (ADR-0035).
+
+A narrow, allowlisted feature for running a harness's own interactive login
+command (device-code flow, OAuth browser flow, or provider-picker wizard)
+inside a real PTY so the user can complete it without leaving Squid. This is
+deliberately not a general in-app shell: the command run is always chosen
+server-side from ALLOWLISTED_LOGIN_COMMANDS, never constructed from user
+input, and input bytes sent to a session are forwarded only to that fixed
+process.
+
+Distinct from the `interactive-pty` *protocol* name declared in
+harnesses.py (ADR-0022) — that protocol has no implementation anywhere in
+the codebase today. This module is the first real PTY spawn/stream code in
+Squid and does not share machinery with it.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import fcntl
+import os
+import pty
+import signal
+import struct
+import termios
+import time
+import uuid
+from typing import AsyncGenerator, Optional
+
+from .config import CLAUDE_PATH, CODEX_PATH, CURSOR_PATH, OPENCODE_PATH
+from .runners import _register_proc, _deregister_proc, _signal_process_group
+
+# Sentinel topic under the existing process registry (agent/runners.py) so
+# /processes, /cmd stopall, and shutdown/restart's kill_all_procs() all reach
+# auth sessions the same way they reach normal turn subprocesses — this is
+# the "registered in the normal process registry" requirement from
+# ADR-0035, not a parallel bookkeeping system.
+_AUTH_SESSION_TOPIC = "__auth_session__"
+
+# Codex's device code expires in 15 minutes (observed in its own login output);
+# cursor's browser-deep-link flow has no printed expiry. 20 minutes covers
+# codex's window with margin while still reaping an abandoned browser tab in
+# a bounded time — a dedicated value rather than reusing the 1h
+# DEFAULT_INTERACTIVE_IDLE_TIMEOUT_SECONDS, which is sized for long-lived
+# agent turns, not a one-shot login prompt.
+AUTH_SESSION_IDLE_TIMEOUT_SECONDS = 1200
+
+# Rolling output buffer per session so a client that opens the SSE stream
+# slightly after spawn still sees the banner/URL/code instead of missing it.
+_REPLAY_BUFFER_CAP = 64 * 1024
+
+
+class AuthSessionError(RuntimeError):
+    pass
+
+
+class NoLoginCommand(AuthSessionError):
+    """Raised for harnesses with no CLI login command (pi)."""
+
+
+def _login_argv(harness_id: str) -> list[str]:
+    """Fixed, allowlisted command per harness. Never built from user input."""
+    if harness_id == "claudecode":
+        if not CLAUDE_PATH:
+            raise AuthSessionError("claude CLI not found in PATH")
+        return [CLAUDE_PATH, "auth", "login", "--claudeai"]
+    if harness_id == "codex":
+        if not CODEX_PATH:
+            raise AuthSessionError("codex CLI not found in PATH")
+        return [CODEX_PATH, "login", "--device-auth"]
+    if harness_id == "cursor":
+        if not CURSOR_PATH:
+            raise AuthSessionError("cursor-agent CLI not found in PATH")
+        return [CURSOR_PATH, "login"]
+    if harness_id == "opencode":
+        if not OPENCODE_PATH:
+            raise AuthSessionError("opencode CLI not found in PATH")
+        return [OPENCODE_PATH, "auth", "login"]
+    if harness_id == "pi":
+        raise NoLoginCommand(
+            "pi has no CLI login command — set ANTHROPIC_API_KEY or "
+            "ANTHROPIC_OAUTH_TOKEN in its environment instead."
+        )
+    raise AuthSessionError(f"Unknown harness {harness_id!r}")
+
+
+def _login_env(harness_id: str) -> dict:
+    env = os.environ.copy()
+    if harness_id == "cursor":
+        # Non-interactive-friendly: print the deep link instead of trying to
+        # exec a browser from inside Squid's PTY (verified empirically —
+        # honored, no browser launch attempted).
+        env["NO_OPEN_BROWSER"] = "1"
+    return env
+
+
+class AuthSession:
+    def __init__(self, session_id: str, harness_id: str, pid: int, master_fd: int):
+        self.id = session_id
+        self.harness_id = harness_id
+        self.pid = pid
+        self.master_fd = master_fd
+        self.state = "running"  # running -> exited
+        self.returncode: Optional[int] = None
+        self.created_at = time.monotonic()
+        self.last_activity = self.created_at
+        self.buffer = bytearray()
+        self.listeners: list[asyncio.Queue] = []
+        self.reader_task: Optional[asyncio.Task] = None
+        self.idle_task: Optional[asyncio.Task] = None
+        self._closed = asyncio.Event()
+
+    def touch(self) -> None:
+        self.last_activity = time.monotonic()
+
+    def broadcast(self, chunk: bytes) -> None:
+        self.buffer.extend(chunk)
+        if len(self.buffer) > _REPLAY_BUFFER_CAP:
+            del self.buffer[: len(self.buffer) - _REPLAY_BUFFER_CAP]
+        for q in list(self.listeners):
+            q.put_nowait(chunk)
+
+    def mark_exited(self, returncode: int) -> None:
+        if self.state == "exited":
+            return
+        self.state = "exited"
+        self.returncode = returncode
+        for q in list(self.listeners):
+            q.put_nowait(None)
+        self._closed.set()
+
+
+_sessions: dict[str, AuthSession] = {}
+# asyncio only keeps a task alive via a strong reference; a bare
+# create_task() result that's dropped can be garbage-collected before it
+# runs. _expire_session is fire-and-forget by design, so it's tracked here
+# instead (discarded via the task's own done-callback) rather than skipped —
+# losing it silently would quietly reintroduce the leak this exists to fix.
+_expiry_tasks: set[asyncio.Task] = set()
+
+
+def get_session(session_id: str) -> Optional[AuthSession]:
+    return _sessions.get(session_id)
+
+
+def _spawn_pty(argv: list[str], env: dict, cols: int, rows: int) -> tuple[int, int]:
+    """Fork+exec argv[0] attached to a fresh PTY. Runs in a worker thread —
+    the child calls execvpe immediately with no other Python code in
+    between, same fork+exec shape asyncio.create_subprocess_exec already
+    uses elsewhere in this codebase, just with a real terminal instead of
+    pipes so CLIs that check isatty() behave as they do in a real shell.
+    pty.fork() makes the child a session leader with the PTY slave as its
+    controlling terminal (setsid + TIOCSCTTY), so os.killpg(pid, ...) works
+    without any extra preexec_fn, consistent with ADR-0018's process-group
+    isolation.
+
+    The winsize is set here, in the parent, immediately after fork and
+    before returning — not via a follow-up ioctl once the client's resize
+    request round-trips back. That earlier request used to arrive after the
+    child had already exec'd and often already rendered its first frame at
+    the PTY's default (unset) size; a provider-picker TUI redrawing itself
+    against a SIGWINCH after its first paint has already computed on-screen
+    row offsets from the old size, which is what produced the up-arrow
+    rendering corruption in the opencode login list.
+    """
+    pid, master_fd = pty.fork()
+    if pid == 0:
+        try:
+            os.execvpe(argv[0], argv, env)
+        except Exception:
+            os._exit(127)
+    else:
+        winsize = struct.pack("HHHH", rows, cols, 0, 0)
+        fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
+    return pid, master_fd
+
+
+async def create_session(harness_id: str, cols: int, rows: int) -> AuthSession:
+    argv = _login_argv(harness_id)  # raises AuthSessionError / NoLoginCommand
+    env = _login_env(harness_id)
+
+    pid, master_fd = await asyncio.to_thread(_spawn_pty, argv, env, cols, rows)
+    os.set_blocking(master_fd, False)
+
+    session_id = uuid.uuid4().hex
+    session = AuthSession(session_id, harness_id, pid, master_fd)
+    _sessions[session_id] = session
+
+    _register_proc(
+        pid, backend=harness_id, topic=_AUTH_SESSION_TOPIC, agent=harness_id,
+        adhoc=True, prompt=f"auth login: {harness_id}",
+    )
+
+    loop = asyncio.get_event_loop()
+
+    def _on_readable() -> None:
+        try:
+            chunk = os.read(master_fd, 4096)
+        except OSError:
+            chunk = b""
+        if not chunk:
+            loop.remove_reader(master_fd)
+            asyncio.create_task(_finalize(session))
+            return
+        session.touch()
+        session.broadcast(chunk)
+
+    loop.add_reader(master_fd, _on_readable)
+    session.idle_task = asyncio.create_task(_idle_reaper(session))
+    return session
+
+
+
+# How long an exited session stays in _sessions before being dropped.
+# cancel_session() (explicit user Cancel/Close) still removes it immediately —
+# this is only for a client that never calls back after the process exits on
+# its own (tab closed, network dropped, login finished and the exit event was
+# missed), so a still-open tab can reconnect and see the final output/exit
+# code instead of a 404 for a session that technically finished a moment ago.
+_POST_EXIT_RETENTION_SECONDS = 120
+
+
+async def _finalize(session: AuthSession) -> None:
+    """Reap the child once its PTY slave closes (process exited)."""
+    try:
+        _, status = await asyncio.to_thread(os.waitpid, session.pid, 0)
+        returncode = os.WEXITSTATUS(status) if os.WIFEXITED(status) else -1
+    except ChildProcessError:
+        returncode = -1
+    session.mark_exited(returncode)
+    _deregister_proc(session.pid)
+    try:
+        os.close(session.master_fd)
+    except OSError:
+        pass
+    if session.idle_task:
+        session.idle_task.cancel()
+    expiry_task = asyncio.create_task(_expire_session(session.id))
+    _expiry_tasks.add(expiry_task)
+    expiry_task.add_done_callback(_expiry_tasks.discard)
+
+
+async def _expire_session(session_id: str) -> None:
+    await asyncio.sleep(_POST_EXIT_RETENTION_SECONDS)
+    _sessions.pop(session_id, None)
+
+
+async def _idle_reaper(session: AuthSession) -> None:
+    try:
+        while session.state == "running":
+            await asyncio.sleep(30)
+            if session.state != "running":
+                return
+            if time.monotonic() - session.last_activity > AUTH_SESSION_IDLE_TIMEOUT_SECONDS:
+                await cancel_session(session.id)
+                return
+    except asyncio.CancelledError:
+        pass
+
+
+async def stream_events(session: AuthSession) -> AsyncGenerator[bytes, None]:
+    """Replay the buffer, then yield live chunks until the session ends.
+
+    The queue is registered before the buffer is snapshotted, and nothing
+    awaits between those two lines — broadcast() runs synchronously on the
+    event loop (it's called from a non-async reader callback), so there is
+    no point where it can interleave between them. That ordering matters:
+    doing it the other way (snapshot, *then* yield, *then* register) leaves
+    a real gap at the `yield` — the generator can stay suspended there for
+    however long the SSE response takes to flush that chunk to the network,
+    during which any PTY output (e.g. the OAuth URL/device code the buffer
+    exists to protect) would be broadcast to no one and lost.
+    """
+    q: asyncio.Queue = asyncio.Queue()
+    session.listeners.append(q)
+    try:
+        snapshot = bytes(session.buffer)
+        if snapshot:
+            yield snapshot
+        if session.state == "exited":
+            return
+        while True:
+            chunk = await q.get()
+            if chunk is None:
+                return
+            yield chunk
+    finally:
+        try:
+            session.listeners.remove(q)
+        except ValueError:
+            pass
+
+
+def write_input(session: AuthSession, data: bytes) -> None:
+    if session.state != "running":
+        raise AuthSessionError("session is not running")
+    session.touch()
+    os.write(session.master_fd, data)
+
+
+def resize(session: AuthSession, cols: int, rows: int) -> None:
+    if session.state != "running":
+        return
+    winsize = struct.pack("HHHH", rows, cols, 0, 0)
+    fcntl.ioctl(session.master_fd, termios.TIOCSWINSZ, winsize)
+
+
+async def cancel_session(session_id: str) -> bool:
+    session = _sessions.get(session_id)
+    if not session:
+        return False
+    if session.state == "running":
+        _signal_process_group(session.pid, signal.SIGTERM)
+        try:
+            await asyncio.wait_for(session._closed.wait(), timeout=3)
+        except asyncio.TimeoutError:
+            _signal_process_group(session.pid, signal.SIGKILL)
+    _sessions.pop(session_id, None)
+    return True

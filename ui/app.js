@@ -3067,6 +3067,8 @@ function parseCommand(message) {
   if (mj) return { command: 'jump', msgId: parseInt(mj[1], 10) };
   const ms = t.match(/^s(?:earch)?(?:\s+([\s\S]*))?$/i);
   if (ms) return { command: 'search', args: (ms[1] || '').trim() };
+  const ml = t.match(/^login(?:\s+(\S+))?$/i);
+  if (ml) return { command: 'login', harness: (ml[1] || '').toLowerCase() };
   return null;
 }
 
@@ -3081,6 +3083,15 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0, opt
   }
   if (cmd.command === 'remote') {
     openRemoteQR();
+    return;
+  }
+  if (cmd.command === 'login') {
+    const harness = cmd.harness || _agentToHarness(stickyChip?.agent);
+    if (!harness || !HARNESS_LABELS[harness]) {
+      showToast('Usage: /login [claude|codex|cursor|opencode]');
+      return;
+    }
+    openAuthPanel(harness, null);
     return;
   }
   if (cmd.command === 'refresh') {
@@ -3827,21 +3838,27 @@ function semanticRouteBackspace() {
 }
 
 function closeEscSurfaces() {
-  let closed = false;
-  if (searchActive) { clearSearch(); closed = true; }
-  if (procStatusPopup?.classList.contains('open')) { procStatusPopup.classList.remove('open'); closed = true; }
-  if (pinPanel.classList.contains('open')) { closePinPanel({ restoreFocus: true }); closed = true; }
-  if (helpPanel.classList.contains('open')) { closeHelp(); closed = true; }
-  const msgModal = document.getElementById('msg-modal');
-  if (msgModal?.classList.contains('open')) { msgModal.classList.remove('open'); closed = true; }
+  // Dismiss one surface at a time, highest visual z-order first.
+  // Modals (cover everything)
   const restartModal = document.getElementById('restart-modal');
-  if (restartModal?.classList.contains('open')) { closeRestartModal(false); closed = true; }
-  if (document.getElementById('agent-session-modal')?.classList.contains('open')) { closeAgentSessionModal(false); closed = true; }
-  if (document.getElementById('memory-modal')?.classList.contains('open')) { closeMemoryEditor(); closed = true; }
-  if (document.getElementById('topic-delete-modal')?.classList.contains('open')) { closeTopicDeleteModal(); closed = true; }
-  if (document.getElementById('preset-name-modal')?.classList.contains('open')) { _closePresetNameModal(null); closed = true; }
-  if (!sessionAdvisoryEl.hidden) { if (_advisoryDismissKey) localStorage.setItem(_advisoryDismissKey, '1'); sessionAdvisoryEl.hidden = true; closed = true; }
-  return closed;
+  if (restartModal?.classList.contains('open')) { closeRestartModal(false); return true; }
+  if (document.getElementById('agent-session-modal')?.classList.contains('open')) { closeAgentSessionModal(false); return true; }
+  const msgModal = document.getElementById('msg-modal');
+  if (msgModal?.classList.contains('open')) { msgModal.classList.remove('open'); return true; }
+  if (document.getElementById('memory-modal')?.classList.contains('open')) { closeMemoryEditor(); return true; }
+  if (document.getElementById('topic-delete-modal')?.classList.contains('open')) { closeTopicDeleteModal(); return true; }
+  if (document.getElementById('preset-name-modal')?.classList.contains('open')) { _closePresetNameModal(null); return true; }
+  // Floating popup
+  if (procStatusPopup?.classList.contains('open')) { procStatusPopup.classList.remove('open'); return true; }
+  // Search overlay
+  if (searchActive) { clearSearch(); return true; }
+  // Inline panels (below search, above composer)
+  if (pinPanel.classList.contains('open')) { closePinPanel({ restoreFocus: true }); return true; }
+  if (authPanel.classList.contains('open')) { closeAuthPanel(); return true; }
+  if (helpPanel.classList.contains('open')) { closeHelp(); return true; }
+  // Advisory bar (lowest)
+  if (!sessionAdvisoryEl.hidden) { if (_advisoryDismissKey) localStorage.setItem(_advisoryDismissKey, '1'); sessionAdvisoryEl.hidden = true; return true; }
+  return false;
 }
 
 input.addEventListener('keydown', (e) => {
@@ -3933,6 +3950,221 @@ input.addEventListener('keydown', (e) => {
     input.setSelectionRange(tag.length, tag.length);
     input.dispatchEvent(new Event('input'));
   }
+});
+
+// ── Auth sessions (ADR-0035) ────────────────────────────────────────────────
+// A harness whose account isn't logged in fails a turn with an error whose
+// text is tagged "[[cli-auth-required:<harness>]] ..." by the server
+// (agent/topic_queue.py). This offers an inline "Log in" button on that
+// error that swaps the composer (#form) for an embedded xterm.js panel
+// running the harness's own login command through the scoped-PTY endpoints
+// (agent/auth_sessions.py) — never a general shell, always one fixed
+// allowlisted command chosen server-side from the harness id alone.
+const authPanel = document.getElementById('auth-panel');
+const authPanelTitle = document.getElementById('auth-panel-title');
+const authPanelTerm = document.getElementById('auth-panel-term');
+const authPanelCancelBtn = document.getElementById('auth-panel-cancel-btn');
+const authPanelRetryBtn = document.getElementById('auth-panel-retry-btn');
+let _authSession = null; // { id, harness, es, term, onSuccessRetry }
+
+const HARNESS_LABELS = { claudecode: 'Claude Code', codex: 'Codex', cursor: 'Cursor', opencode: 'OpenCode', pi: 'Pi' };
+
+// Map agent slugs (claude, codex, …) to harness ids (claudecode, …).
+// claude/deepseek/cc-deepseek/deepcla/claude-live all run on the claudecode harness.
+function _agentToHarness(agent) {
+  if (!agent) return null;
+  const a = agent.toLowerCase();
+  if (a === 'claude' || a === 'claude-live' || a === 'deepseek' || a === 'cc-deepseek' || a === 'deepcla') return 'claudecode';
+  if (HARNESS_LABELS[a]) return a;
+  return null;
+}
+
+function parseAuthRequiredError(text) {
+  const m = /^\[\[cli-auth-required:([a-z]+)\]\]\s*/.exec(text || '');
+  if (!m) return null;
+  return { harness: m[1], message: text.slice(m[0].length) };
+}
+
+function authLoginButtonHtml(harness) {
+  const label = HARNESS_LABELS[harness] || harness;
+  return `<button type="button" class="auth-login-btn" data-harness="${harness}">Log in to ${label}</button> `;
+}
+
+function wireAuthLoginButtons(root, onSuccessRetry) {
+  root.querySelectorAll('.auth-login-btn').forEach(btn => {
+    btn.addEventListener('click', () => openAuthPanel(btn.dataset.harness, onSuccessRetry));
+  });
+}
+
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+async function openAuthPanel(harness, onSuccessRetry) {
+  if (_authSession) await closeAuthPanel();
+  form.classList.add('dimmed');
+  authPanel.classList.add('open');
+  authPanelRetryBtn.hidden = true;
+  authPanelTitle.textContent = `Log in — ${HARNESS_LABELS[harness] || harness}`;
+  authPanelTerm.innerHTML = '';
+
+  const term = new Terminal({
+    convertEol: true,
+    // No fixed cols/rows: a hardcoded 100 cols was both too narrow (Claude's
+    // login URL wrapped out of view since the chat composer is well under
+    // 100 cols * ~8px on desktop, let alone mobile) and, at 10 rows, too
+    // short — opencode's provider-picker (7+ entries) needs more than that,
+    // and once its frame exceeds the PTY's row count the terminal has to
+    // scroll, desyncing opencode's relative-cursor incremental redraw
+    // (reproduced outside Squid with a plain VT100 emulator, pyte). Fit to
+    // the actual #auth-panel-term box below instead.
+    fontSize: 13,
+    fontFamily: 'ui-monospace, SFMono, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
+    theme: { background: '#13131c' },
+  });
+  term.open(authPanelTerm);
+  const fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  // Compat shim: addon-fit reads `_core.viewport.scrollBarWidth`, but the
+  // vendored xterm.min.js build (version unpinned) neither exposes a public
+  // `viewport` alias for its private `_viewport` nor tracks a scrollBarWidth
+  // on it at all (its scrollbar appears to be a CSS overlay now, not
+  // JS-reserved layout space). Without this, proposeDimensions() computes
+  // NaN, fit() silently no-ops, and the terminal stays at xterm's 80x24
+  // default instead of the panel's real size — and earlier, before this
+  // whole shim existed, it threw outright reading `.scrollBarWidth` of
+  // undefined, which aborted openAuthPanel before it ever spawned the login
+  // process (why /login appeared to do nothing).
+  if (term._core && term._core.viewport == null) {
+    term._core.viewport = { scrollBarWidth: term._core._viewport?.scrollBarWidth ?? 0 };
+  }
+  // #auth-panel just flipped from display:none to flex this same tick, so
+  // its box has no layout yet — give it one frame before fit() measures it.
+  await new Promise(resolve => requestAnimationFrame(resolve));
+  fitAddon.fit();
+
+  // Make URLs clickable — avoids macOS "open with" system modal.
+  term.registerLinkProvider({
+    provideLinks(y, callback) {
+      const line = term.buffer.active.getLine(y);
+      if (!line) { callback([]); return; }
+      const text = line.translateToString();
+      if (!text) { callback([]); return; }
+      const links = [];
+      const re = /https?:\/\/[^\x00-\x1f\x7f\s<>"{}|\\^`]+/g;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        const url = m[0];
+        links.push({
+          text: url,
+          range: { start: { x: m.index, y }, end: { x: m.index + url.length, y } },
+          activate: (_ev, text) => { window.open(text, '_blank'); },
+        });
+      }
+      callback(links);
+    },
+  });
+
+  // Esc closes the auth panel (xterm.js swallows Esc for escape sequences,
+  // so it never reaches the document-level closeEscSurfaces handler).
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type === 'keydown' && e.key === 'Escape') { closeAuthPanel(); return false; }
+    return true;
+  });
+
+  // Re-fit on viewport/panel-width changes (e.g. rotating a phone, resizing
+  // the browser) and push the new size to the live PTY so the harness's TUI
+  // reflows instead of staying pinned to whatever size it started at.
+  let resizeTimer = null;
+  const handleResize = () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (!_authSession || _authSession.term !== term) return;
+      const prevCols = term.cols, prevRows = term.rows;
+      fitAddon.fit();
+      if (_authSession.id && (term.cols !== prevCols || term.rows !== prevRows)) {
+        fetch(`/auth/session/${_authSession.id}/resize`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cols: term.cols, rows: term.rows }),
+        }).catch(() => {});
+      }
+    }, 150);
+  };
+  window.addEventListener('resize', handleResize);
+
+  _authSession = { id: null, harness, term, fitAddon, handleResize, onSuccessRetry };
+
+  let res, data;
+  try {
+    // cols/rows travel with the spawn request itself (not a follow-up
+    // resize call) so the PTY has its real size before the child process
+    // execs — otherwise the harness's TUI can render its first frame at
+    // the PTY's default size and get a SIGWINCH mid-render once the resize
+    // arrives, which is what corrupted the opencode login list on up-arrow.
+    res = await fetch('/auth/session', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ harness, cols: term.cols, rows: term.rows }),
+    });
+    data = await res.json();
+  } catch (err) {
+    res = null;
+    data = { error: String(err) };
+  }
+  if (!res || !res.ok) {
+    term.write((data.error || 'Failed to start login').replace(/\n/g, '\r\n'));
+    authPanelTitle.textContent = data.error || 'Failed to start login';
+    return;
+  }
+
+  const es = new EventSource(`/auth/session/${data.id}/events`);
+  _authSession = { id: data.id, harness, es, term, fitAddon, handleResize, onSuccessRetry };
+
+  es.addEventListener('data', event => {
+    try { term.write(base64ToBytes(event.data)); } catch {}
+  });
+  es.addEventListener('exit', event => {
+    es.close();
+    const code = parseInt(event.data, 10);
+    if (code === 0) {
+      const retry = _authSession?.onSuccessRetry;
+      closeAuthPanel();
+      if (retry) retry();
+    } else {
+      authPanelTitle.textContent = `Exited (${code})`;
+      authPanelRetryBtn.hidden = false;
+    }
+  });
+
+  term.onData(input => {
+    if (!_authSession?.id) return;
+    fetch(`/auth/session/${_authSession.id}/input`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: input }),
+    }).catch(() => {});
+  });
+}
+
+async function closeAuthPanel() {
+  const session = _authSession;
+  _authSession = null;
+  if (session) {
+    if (session.handleResize) window.removeEventListener('resize', session.handleResize);
+    if (session.es) session.es.close();
+    if (session.id) fetch(`/auth/session/${session.id}/cancel`, { method: 'POST' }).catch(() => {});
+    if (session.term) session.term.dispose();
+  }
+  authPanel.classList.remove('open');
+  form.classList.remove('dimmed');
+}
+
+authPanelCancelBtn.addEventListener('click', () => closeAuthPanel());
+authPanelRetryBtn.addEventListener('click', () => {
+  const harness = _authSession?.harness;
+  const retry = _authSession?.onSuccessRetry;
+  if (harness) openAuthPanel(harness, retry);
 });
 
 async function sendMessage(text, opts = {}) {
@@ -4286,14 +4518,17 @@ async function sendMessage(text, opts = {}) {
     _activePollImmediate = null;
   }
 
-  function showError(text) {
+  function showError(errText) {
     revealResponseBubble();  // sets firstDataReceived, suppresses finally fallback
-    const errDisplay = normalizedErrorDisplay(text);
+    const authReq = parseAuthRequiredError(errText);
+    const errDisplay = normalizedErrorDisplay(authReq ? authReq.message : errText);
     // Don't wipe streamed content with a generic fallback message
     if (!errDisplay && raw) return;
     if (!shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) return;
     placeResponseBubble();
-    contentDiv.innerHTML = `<span class="msg-error">${errDisplay || 'Response interrupted.'}</span>`;
+    contentDiv.innerHTML = (authReq ? authLoginButtonHtml(authReq.harness) : '')
+      + `<span class="msg-error">${escapeHtml(errDisplay) || 'Response interrupted.'}</span>`;
+    if (authReq) wireAuthLoginButtons(contentDiv, () => sendMessage(text, opts));
     scrollToBottom();
   }
 
@@ -4305,7 +4540,9 @@ async function sendMessage(text, opts = {}) {
   }
 
   function discardInterruptedStatusBubble(errText) {
-    if (normalizedErrorDisplay(errText)) return false;
+    // showError always creates a response bubble (falls back to
+    // 'Response interrupted.'), so the thinking bubble should always
+    // be removed when an error arrives with no streamed content.
     thinkingFrozen = true;
     killBtn.style.display = 'none';
     thinkingBubble.remove();
@@ -6145,8 +6382,16 @@ function appendHistoryItem(item, container) {
 
   const asstContent = document.createElement('div');
   if (item.status === 'error') {
-    const raw = (item.content || '').split('\n')[0].replace(/^CLI exited \d+:\s*/, '').trim();
-    asstContent.innerHTML = `<span class="msg-error">${raw || 'Response interrupted.'}</span>`;
+    const authReq = parseAuthRequiredError(item.content || '');
+    const raw = ((authReq ? authReq.message : item.content) || '').split('\n')[0].replace(/^CLI exited \d+:\s*/, '').trim();
+    asstContent.innerHTML = (authReq ? authLoginButtonHtml(authReq.harness) : '')
+      + `<span class="msg-error">${escapeHtml(raw) || 'Response interrupted.'}</span>`;
+    // No auto-retry here (unlike the live-turn path in showError) — a
+    // history row only has item.prompt as plain text, not the original
+    // composer opts (route/broadcast/lookback) sendMessage needs to
+    // reconstruct the exact same send; the button still logs in, the user
+    // just resends manually afterward.
+    if (authReq) wireAuthLoginButtons(asstContent, null);
   } else if (item.status === 'cancelled') {
     asstContent.innerHTML = `<span class="msg-error">${cancelledTurnLabel(item.content)}</span>`;
   } else {

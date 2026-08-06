@@ -783,6 +783,8 @@ def test_worker_clears_session_on_prompt_too_long_text_response():
              patch("agent.stats_db.set_topic_session"), \
              patch("agent.stats_db.clear_topic_session") as clear_session, \
              patch("agent.stats_db.get_worktrees", return_value=[]), \
+             patch("agent.stats_db.get_completed_run_text", return_value=None), \
+             patch("agent.stats_db.get_completed_run_status_raw", return_value=""), \
              patch("agent.stats_db.save_stats"):
             await worker._process(item)
 
@@ -832,6 +834,8 @@ def test_worker_retries_fresh_on_prompt_too_long():
              patch("agent.stats_db.set_topic_session"), \
              patch("agent.stats_db.clear_topic_session") as clear_session, \
              patch("agent.stats_db.get_worktrees", return_value=[]), \
+             patch("agent.stats_db.get_completed_run_text", return_value=None), \
+             patch("agent.stats_db.get_completed_run_status_raw", return_value=""), \
              patch("agent.stats_db.save_stats"):
             await worker._process(item)
 
@@ -850,6 +854,52 @@ def test_worker_retries_fresh_on_prompt_too_long():
     status_chunks = [c for c in chunks if isinstance(c, dict) and "_status" in c]
     assert any("context window exceeded" in c["_status"].lower() for c in status_chunks)
     assert "success" in chunks
+
+
+def test_worker_keeps_session_on_auth_required():
+    async def fake_runner(prompt, **kwargs):
+        from agent.runners import CLIAuthRequired
+        if False:
+            yield ""
+        raise CLIAuthRequired("claudecode", "Claude auth failed")
+
+    async def run():
+        worker = TopicWorker("mai")
+        item = QueueItem(
+            seq=0,
+            topic="mai",
+            agent="clive",
+            prompt="continue",
+            context_history=[],
+            backend="claude",
+            model=None,
+            adhoc=False,
+            resume_session_id="stale-session-123",
+            msg_id=501,
+        )
+        with patch("agent.runners.runner_for_agent", return_value=fake_runner), \
+             patch("agent.stats_db.insert_run_event"), \
+             patch("agent.stats_db.update_assistant_message"), \
+             patch("agent.stats_db.set_topic_session"), \
+             patch("agent.stats_db.clear_topic_session") as clear_session, \
+             patch("agent.stats_db.get_worktrees", return_value=[]), \
+             patch("agent.stats_db.get_completed_run_text", return_value=None), \
+             patch("agent.stats_db.get_completed_run_status_raw", return_value=""), \
+             patch("agent.stats_db.save_stats"):
+            await worker._process(item)
+
+        chunks = []
+        while True:
+            chunk = await item.out_q.get()
+            chunks.append(chunk)
+            if chunk is None:
+                break
+        return clear_session.call_args, chunks
+
+    clear_call, chunks = asyncio.run(run())
+    assert clear_call is None
+    errors = [c["_error"] for c in chunks if isinstance(c, dict) and "_error" in c]
+    assert errors == ["[[cli-auth-required:claudecode]] Claude auth failed"]
 
 
 def test_worker_bug_emits_error_and_sentinel():

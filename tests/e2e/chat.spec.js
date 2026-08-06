@@ -1479,6 +1479,27 @@ test.describe('response bubble', () => {
     await expect(last).toHaveClass(/assistant/);
     await look(page);  // pause — observe: error message in bubble at bottom
   });
+
+  test('auth-required error shows login button before the error text', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(META, { event: 'error', data: '[[cli-auth-required:claudecode]] Not logged in — run /login' }),
+    }));
+
+    await sendMsg(page);
+    const errorBubble = page.locator(RESPONSE);
+    await expect(errorBubble).toBeVisible();
+    const loginBtn = errorBubble.locator('.auth-login-btn');
+    await expect(loginBtn).toHaveText('Log in to Claude Code');
+    await expect(errorBubble.locator(MSG_ERROR)).toContainText('Not logged in — run /login');
+
+    // Button must render first so it leads the message, not trail it.
+    const order = await errorBubble.locator('.auth-login-btn, .msg-error').evaluateAll(
+      els => els.map(el => el.className),
+    );
+    expect(order[0]).toContain('auth-login-btn');
+    await look(page);  // pause — observe: login button leads the error text
+  });
 });
 
 test.describe('parallel responses', () => {
