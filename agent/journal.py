@@ -138,7 +138,7 @@ async def _run_generation(prompt: str) -> str:
     if resolved:
         runner_kwargs = {
             "backend_id": resolved.harness,
-            "backend_env": resolved.execution_env(),
+            "backend_env": resolved.execution_env(model=model),
             "backend_settings": resolved.harness_settings(),
             "backend_args": resolved.args,
         }

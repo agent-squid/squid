@@ -114,6 +114,20 @@ OPENCODE_DEFAULT_MODEL = "opencode/deepseek-v4-flash-free"
 # Per-user tmp dir for context sync — avoids cross-user permission conflicts
 SQUID_HOME = f"/tmp/{os.getlogin()}/squid"
 
+# Per-user, per-agent tmp dir for sandboxed-$HOME agents (see ADR-0036).
+# Deliberately a sibling of SQUID_HOME, not nested inside it -- context_sync's
+# rsync runs with --delete against SQUID_HOME whenever ~/.squid/context/
+# changes, and would silently wipe a credential symlink or installed
+# plugins/skills sitting inside it. Under /tmp rather than ~/.squid/ for the
+# same reason ADR-0012 moved context off a path under the real $HOME:
+# discovery that walks up a directory tree looking for CLAUDE.md/config
+# would otherwise eventually reach the real $HOME and pick up its personal
+# CLAUDE.md/MCP config -- exactly the contamination sandboxing is meant to
+# prevent. Each agent gets its own subfolder (SQUID_HOMES/<agent>) so
+# Blank Home agents don't share plugins/skills/settings/history with
+# each other, only the sibling-of-SQUID_HOME root is shared as a concept.
+SQUID_HOMES = f"/tmp/{os.getlogin()}/squid-homes"
+
 # Per-turn Git worktree isolation (see ADR-0025). On by default; set
 # `worktree.enabled: false` in squid.yaml to use direct working-tree writes.
 _worktree_cfg = _cfg.get("worktree", {})

@@ -74,6 +74,7 @@ _TABLES = [
         model      TEXT,
         cwd        TEXT,
         timeout    INTEGER,
+        home_mode  TEXT NOT NULL DEFAULT 'user_home',
         created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )""",
     """CREATE TABLE IF NOT EXISTS topics (
@@ -363,6 +364,8 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_flow_route ON chat_messages(flow_route, completed_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_flow_run ON chat_messages(flow_run_id, id)")
         agent_columns = _table_columns(conn, "agents")
+        if "home_mode" not in agent_columns:
+            conn.execute("ALTER TABLE agents ADD COLUMN home_mode TEXT NOT NULL DEFAULT 'user_home'")
         has_legacy_backend = "backend" in agent_columns
         # Seed one default agent per installed harness (INSERT OR IGNORE — never overwrites user edits)
         for harness in sorted(SUPPORTED_HARNESSES):
@@ -513,6 +516,20 @@ def upsert_agent(name: str, harness: str, provider: Optional[str], model: Option
                 (name, harness, provider, model, cwd),
             )
     return bool(key_changed)
+
+
+def get_agent_home_mode(name: str) -> str:
+    """'user_home' (default, full inheritance) or 'blank_home' -- see ADR-0036."""
+    with _connect() as conn:
+        row = conn.execute("SELECT home_mode FROM agents WHERE name = ?", (name,)).fetchone()
+    return row["home_mode"] if row and row["home_mode"] else "user_home"
+
+
+def set_agent_home_mode(name: str, home_mode: str) -> None:
+    if home_mode not in ("user_home", "blank_home"):
+        raise ValueError(f"invalid home_mode: {home_mode!r}")
+    with _connect() as conn:
+        conn.execute("UPDATE agents SET home_mode = ? WHERE name = ?", (home_mode, name))
 
 
 def get_agent_sessions(name: str) -> list[dict]:

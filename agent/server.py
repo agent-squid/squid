@@ -55,7 +55,7 @@ from .config import (
 )
 from .harnesses import SUPPORTED_HARNESSES, _validate_harness_config, list_harnesses
 from .providers import Provider, _validate_provider, get_provider, public_providers, require_provider
-from .resolve import agent_ref_for_storage, resolve_agent, split_agent_ref
+from .resolve import agent_ref_for_storage, remove_pi_models_store, resolve_agent, split_agent_ref
 from .runners import list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic
 from .history import list_history, list_history_by_ids, list_history_around
 from .stats_db import get_usage_stats
@@ -89,7 +89,7 @@ from .stats_db import (
     get_session_injected_context, get_session_turn_count,
     get_topic_session, clear_topic_session,
     delete_topic, delete_topic_agent, set_topic_hidden, get_topic_agents, get_topic_agent_history,
-    clear_agent_sessions, get_agent_sessions,
+    clear_agent_sessions, get_agent_sessions, get_agent_home_mode, set_agent_home_mode,
     get_diff_revert_eligibility, record_git_diff_revert, get_message_gitdiff,
     search_messages, search_prompts,
     get_recent_prompts,
@@ -260,6 +260,7 @@ def _worktree_blocker_tools(blockers: list[dict]) -> list[dict]:
             "worktree_conflicts": conflicts,
             "integration_worktree_path": blocker.get("integration_worktree_path") or "",
             "worktree_blocker": True,
+            "worktree_msg_id": blocker.get("msg_id"),
             "files": files,
             "file_count": len(files),
             "additions": 0,
@@ -368,6 +369,11 @@ class AgentRequest(BaseModel):
     provider: Optional[str] = None
     model: Optional[str] = None
     cwd: Optional[str] = None
+    home_mode: Optional[Literal["user_home", "blank_home"]] = None
+
+
+class AgentHomeModeRequest(BaseModel):
+    home_mode: Literal["user_home", "blank_home"]
 
 
 class ConfigRequest(BaseModel):
@@ -1487,7 +1493,7 @@ def _annotate_history_worktree_state(payload: dict) -> None:
         wt_key = str(item.get("id") or "")
         if not wt_key:
             continue
-        records = get_worktrees(topic, wt_key)
+        records_by_key: dict[str, list[dict]] = {}
         changed = False
 
         for tool in tools:
@@ -1496,6 +1502,14 @@ def _annotate_history_worktree_state(payload: dict) -> None:
             status = tool.get("worktree_status") if tool.get("name") == "GitDiff" else tool.get("status")
             if not status:
                 continue
+
+            # A "worktree blocker" GitDiff entry describes another turn's
+            # still-unresolved worktree, not this message's own — look its
+            # state up under the original turn's msg_id, not this item's id.
+            tool_wt_key = str(tool.get("worktree_msg_id") or "") or wt_key
+            if tool_wt_key not in records_by_key:
+                records_by_key[tool_wt_key] = get_worktrees(topic, tool_wt_key)
+            records = records_by_key[tool_wt_key]
 
             source_repo = _tool_source_repo(tool)
             worktree_repo = tool.get("worktree_repo")
@@ -1521,8 +1535,8 @@ def _annotate_history_worktree_state(payload: dict) -> None:
                 try:
                     from .worktree import integration_worktree_path, worktree_path
                     repo_root = Path(source_repo).resolve()
-                    wt_path = worktree_path(repo_root, topic, wt_key)
-                    integration_path = integration_worktree_path(repo_root, topic, wt_key)
+                    wt_path = worktree_path(repo_root, topic, tool_wt_key)
+                    integration_path = integration_worktree_path(repo_root, topic, tool_wt_key)
                     if wt_path.exists() or integration_path.exists():
                         tool.setdefault("worktree_repo", str(wt_path))
                         if integration_path.exists():
@@ -1895,6 +1909,22 @@ async def update_config_yaml(req: ConfigRequest, request: Request):
     _cfg.clear()
     _cfg.update(parsed)
     _LOCALFILE_ROOTS[:] = _localfile_roots_from(parsed)
+
+    # Re-sync pi models.json for every pi agent — a provider's base_url
+    # may have changed in this config update even if no agent was touched.
+    for agent in list_agents():
+        harness = agent.get("harness", "")
+        if harness != "pi":
+            continue
+        provider_id = agent.get("provider")
+        if not provider_id:
+            continue
+        try:
+            resolved = resolve_agent(harness, provider_id)
+            resolved.sync_pi_provider(agent.get("model"))
+        except (ValueError, OSError):
+            pass
+
     return JSONResponse({
         "ok": True,
         "revision": revision,
@@ -1921,18 +1951,51 @@ async def create_agent(req: AgentRequest):
         return JSONResponse({"error": "harness is required"}, status_code=400)
     harness, provider = req.harness, req.provider
     try:
-        resolve_agent(harness, provider)
+        resolved = resolve_agent(harness, provider)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+    # Existing agent's home_mode, if any -- read before upsert_agent() so a
+    # brand-new agent (no prior row) never counts as a "change" that would
+    # try to clear sessions that can't exist yet.
+    prior = get_agent(req.name)
     key_changed = upsert_agent(req.name, harness, provider, req.model, req.cwd)
-    sessions_cleared = clear_agent_sessions(req.name) if key_changed else []
+    home_mode_changed = False
+    if req.home_mode is not None:
+        if prior is not None and prior.get("home_mode", "user_home") != req.home_mode:
+            home_mode_changed = True
+        set_agent_home_mode(req.name, req.home_mode)
+    sessions_cleared = clear_agent_sessions(req.name) if (key_changed or home_mode_changed) else []
+    # If this agent used to point pi at a different non-standard provider,
+    # drop the now-orphaned models.json entry before syncing the new one.
+    if prior and prior.get("harness") == "pi" and prior.get("provider") != provider:
+        remove_pi_models_store(prior["provider"], prior.get("model"))
+    # Sync pi models.json so non-standard providers can route to their
+    # custom endpoints (pi ignores env-var base URLs for providers it
+    # doesn't natively know).
+    resolved.sync_pi_provider(req.model)
     return JSONResponse({"ok": True, "sessions_cleared": sessions_cleared})
 
 
 @app.delete("/config/agents/{name}")
 async def remove_agent(name: str):
+    prior = get_agent(name)
     deleted = delete_agent(name)
+    if deleted and prior and prior.get("harness") == "pi":
+        remove_pi_models_store(prior["provider"], prior.get("model"))
     return JSONResponse({"ok": deleted})
+
+
+@app.put("/config/agents/{name}/home-mode")
+async def set_agent_home_mode_route(name: str, req: AgentHomeModeRequest):
+    if not get_agent(name):
+        return JSONResponse({"error": f"agent not found: {name}"}, status_code=404)
+    # A resumable session's transcript lives at a $HOME-relative path, so
+    # flipping home_mode orphans every session stored for this agent the
+    # same way changing harness/model/cwd does -- clear them the same way.
+    changed = get_agent_home_mode(name) != req.home_mode
+    set_agent_home_mode(name, req.home_mode)
+    sessions_cleared = clear_agent_sessions(name) if changed else []
+    return JSONResponse({"ok": True, "sessions_cleared": sessions_cleared})
 
 
 class StatsFilterPresetRequest(BaseModel):
@@ -2102,6 +2165,25 @@ async def _worktree_record_or_existing_paths(topic: str, wt_key: str, repo_root:
     if worktree_path(repo_root, topic, wt_key).exists() or integration_worktree_path(repo_root, topic, wt_key).exists():
         return {"status": "missing_registry"}, True
     return None, False
+
+
+@app.get("/chat/{msg_id}/worktree/status")
+async def worktree_blocker_status(msg_id: int, topic: str, repo: str):
+    """Side-effect-free status read, used by the auto-resolve client to check
+    what actually happened when the SSE stream drops before delivering the
+    final resolve_result event (the server-side resolve may have already
+    completed by then)."""
+    normalized_topic = _normalize_topic_response(topic)
+    if isinstance(normalized_topic, JSONResponse):
+        return normalized_topic
+    repo_root = _validate_repo_path(repo)
+    if repo_root is None:
+        return JSONResponse({"error": "invalid repo path"}, status_code=400)
+
+    rec, found = await _worktree_record_or_existing_paths(normalized_topic, str(msg_id), repo_root)
+    if not found:
+        return JSONResponse({"ok": True, "status": "synced"})
+    return JSONResponse({"ok": True, "status": rec.get("status") or "pending"})
 
 
 @app.post("/chat/{msg_id}/worktree/discard")

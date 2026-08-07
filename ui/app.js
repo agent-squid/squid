@@ -761,6 +761,7 @@ let _agentsCache = null;
 let _agentsCachePromise = null;
 let _squidHome = '/tmp/squid'; // updated from /health on first loadAgents()
 let agentTableSort = { key: 'runtime', dir: 'asc' };
+let agentFilterQuery = '';
 let _activePollImmediate = null; // fn to trigger an immediate status poll for the active stream
 
 function clearCachedSessionId(topic, agent) {
@@ -3374,7 +3375,7 @@ function confirmAgentSessionClear(agentName, topics) {
     const copy = document.getElementById('agent-session-modal-copy');
     const topicList = document.getElementById('agent-session-modal-topics');
     title.textContent = `Save changes to "${agentName}"?`;
-    copy.textContent = 'Changing runtime, model, or cwd will clear active sessions for this agent.';
+    copy.textContent = 'Changing runtime, model, cwd, or sandboxed HOME will clear active sessions for this agent.';
     topicList.textContent = (topics || []).map(topic => `#${topic}`).join(', ');
     const close = (ok) => {
       modal.classList.remove('open');
@@ -5911,6 +5912,25 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
               }
 
               if (!resolveResult || !resolveResult.ok) {
+                // The stream closed without a final resolve_result event
+                // (dropped connection, backgrounded tab, proxy buffering) —
+                // the server may have already finished the resolve before
+                // that happened, so check real state before declaring failure.
+                let liveStatus = null;
+                try {
+                  const statusRes = await fetch(`/chat/${msgId}/worktree/status?` +
+                    new URLSearchParams({ topic: messageTopic, repo: sourceRepo }));
+                  if (statusRes.ok) liveStatus = (await statusRes.json())?.status;
+                } catch {}
+                if (liveStatus === 'resolved' || liveStatus === 'synced') {
+                  thinkingBubble.classList.remove('msg-thinking');
+                  if (loader?.parentNode) loader.remove();
+                  thinkingContent.innerHTML = raw ? renderAssistantMarkdown(raw) : '';
+                  thinkingBubble.classList.add('history-item');
+                  markVisibleWorktreeResolved(msgId, sourceRepo,
+                    'Auto-resolved by the model. Future turns for this topic can start normally.');
+                  return;
+                }
                 throw new Error(resolveResult?.error || 'Auto-resolve failed');
               }
 
@@ -6422,7 +6442,13 @@ function appendHistoryItem(item, container) {
       const diffTools = changeTools(tools);
       let lastEl = asstBubble;
       for (const tool of diffTools) {
-        const block = makeToolBlock(tool, item.id, item.timestamp, item.topic || 'default');
+        // A "worktree blocker" GitDiff tool describes another (earlier) turn's
+        // still-unresolved worktree, not this message's own — resolve/discard
+        // actions and status lookups must target that original turn's id.
+        const toolMsgId = tool.worktree_blocker && tool.worktree_msg_id != null
+          ? tool.worktree_msg_id
+          : item.id;
+        const block = makeToolBlock(tool, toolMsgId, item.timestamp, item.topic || 'default');
         block.classList.add('history-item', 'tool-block-history');
         if (container) container.appendChild(block);
         else { lastEl.after(block); lastEl = block; }
@@ -11009,6 +11035,11 @@ async function saveConfigYaml() {
   }
 }
 
+function _updateHomeModeIcon(select) {
+  const icon = select.parentElement?.querySelector('.home-mode-icon');
+  if (icon) icon.textContent = select.value === 'blank_home' ? 'location_away' : 'location_home';
+}
+
 async function loadAgents() {
   const listEl = document.getElementById('agents-list');
   listEl.innerHTML = '<div class="empty">Loading…</div>';
@@ -11028,6 +11059,11 @@ async function loadAgents() {
     if (cwdInput) cwdInput.placeholder = `${_squidHome}/…`;
   }
   renderRuntimeCatalogs(health);
+  renderAgentTable(agents);
+}
+
+function renderAgentTable(agents) {
+  const listEl = document.getElementById('agents-list');
   if (!agents.length) {
     listEl.innerHTML = '<div class="empty">No agents yet. Add one below.</div>';
     return;
@@ -11048,7 +11084,12 @@ async function loadAgents() {
     const runtimeText = runtime.provider ? `${runtime.harness} / ${runtime.provider}` : runtime.harness;
     return { a, ref, runtime, runtimeText, runtimeSort: runtimeText || '', name: a.name || '' };
   }));
-  const rows = agentRows.map(({ a, ref, runtime, runtimeText }) => {
+  const filterQuery = agentFilterQuery.trim().toLowerCase();
+  const visibleRows = filterQuery
+    ? agentRows.filter(({ a, runtimeText }) =>
+        [a.name, runtimeText, a.model, a.cwd].filter(Boolean).join(' ').toLowerCase().includes(filterQuery))
+    : agentRows;
+  const rows = visibleRows.map(({ a, ref, runtime, runtimeText }) => {
     const model = a.model || '';
     const modelHtml = model
       ? `<span class="agent-model" title="${escapeHtml(model)}">${escapeHtml(model)}</span>`
@@ -11062,28 +11103,59 @@ async function loadAgents() {
     const homeLinkHtml = (a.cwd && a.cwd !== _squidHome)
       ? `<span class="agent-cwd-home agent-cwd-link col-default" data-cwd="${escapeHtml(_squidHome)}" title="Open default (${escapeHtml(_squidHome)}) in file viewer">⌂</span>`
       : '';
+    // Defaults to User Home for anything that isn't explicitly 'blank_home' --
+    // covers agents with a null cwd (default squid tmp home) the same as any
+    // other agent; home_mode is independent of cwd.
+    const homeMode = a.home_mode === 'blank_home' ? 'blank_home' : 'user_home';
+    const homeIcon = homeMode === 'blank_home' ? 'location_away' : 'location_home';
+    const homeHtml = `<span class="home-mode-field" title="User Home: today's behavior, full environment inheritance. Blank Home: isolated plugins/skills/settings/history; credential is still symlinked from your real HOME, not isolated.">
+        <span class="material-symbols-outlined home-mode-icon" aria-hidden="true">${homeIcon}</span>
+        <select class="home-mode-select agent-home-select" data-name="${escapeHtml(a.name)}" data-current="${homeMode}" aria-label="Sandboxed HOME for ${escapeHtml(a.name)}">
+          <option value="user_home"${homeMode === 'user_home' ? ' selected' : ''}>User Home</option>
+          <option value="blank_home"${homeMode === 'blank_home' ? ' selected' : ''}>Blank Home</option>
+        </select>
+      </span>`;
     return `
     <tr>
       <td><span class="agent-name">${escapeHtml(a.name)}</span></td>
       <td class="col-runtime">${escapeHtml(runtimeText)}</td>
       <td class="col-model">${modelHtml}</td>
+      <td class="col-home">${homeHtml}</td>
       <td class="col-cwd"><span class="agent-cwd-cell">${cwdHtml}${homeLinkHtml}</span></td>
       <td>
-        <button class="edit-btn" data-name="${escapeHtml(a.name)}" data-harness="${escapeHtml(runtime.harness)}" data-provider="${escapeHtml(runtime.provider || '')}" data-backend="${escapeHtml(ref || '')}" data-model="${escapeHtml(a.model || '')}" data-cwd="${escapeHtml(a.cwd || '')}" title="Edit agent">✎</button>
+        <button class="edit-btn" data-name="${escapeHtml(a.name)}" data-harness="${escapeHtml(runtime.harness)}" data-provider="${escapeHtml(runtime.provider || '')}" data-backend="${escapeHtml(ref || '')}" data-model="${escapeHtml(a.model || '')}" data-cwd="${escapeHtml(a.cwd || '')}" data-home-mode="${escapeHtml(homeMode)}" title="Edit agent">✎</button>
         <button class="del-btn" data-name="${escapeHtml(a.name)}" title="Delete agent (does not affect existing messages)">✕</button>
       </td>
     </tr>`;
   }).join('');
   const sortIndicator = key => agentTableSort.key === key ? (agentTableSort.dir === 'desc' ? 'v' : '^') : '';
   const ariaSort = key => agentTableSort.key === key ? (agentTableSort.dir === 'desc' ? 'descending' : 'ascending') : 'none';
-  listEl.innerHTML = `<table>
+  const bodyHtml = visibleRows.length
+    ? rows
+    : `<tr><td colspan="6" class="empty">No agents match "${escapeHtml(agentFilterQuery)}".</td></tr>`;
+  listEl.innerHTML = `
+    <div class="agent-filter-wrap">
+      <input id="agent-filter" class="agent-filter" type="text" placeholder="Filter agents…" aria-label="Filter agents" value="${escapeHtml(agentFilterQuery)}" />
+    </div>
+    <table>
     <thead><tr>
       <th aria-sort="${ariaSort('name')}"><button class="agent-sort-btn" data-sort="name" type="button">Name <span class="sort-indicator">${sortIndicator('name')}</span></button></th>
       <th class="col-runtime" aria-sort="${ariaSort('runtime')}"><button class="agent-sort-btn" data-sort="runtime" type="button">Runtime <span class="sort-indicator">${sortIndicator('runtime')}</span></button></th>
-      <th class="col-model">Model</th><th class="col-cwd">CWD</th><th></th>
+      <th class="col-model">Model</th><th class="col-home">Home</th><th class="col-cwd">CWD</th><th></th>
     </tr></thead>
-    <tbody>${rows}</tbody>
+    <tbody>${bodyHtml}</tbody>
   </table>`;
+
+  const filterInput = document.getElementById('agent-filter');
+  filterInput.addEventListener('input', () => {
+    agentFilterQuery = filterInput.value;
+    const cursorPos = filterInput.selectionStart;
+    renderAgentTable(agents);
+    const newInput = document.getElementById('agent-filter');
+    newInput.focus();
+    const pos = Math.min(cursorPos, newInput.value.length);
+    newInput.setSelectionRange(pos, pos);
+  });
 
   listEl.querySelectorAll('.agent-sort-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -11093,12 +11165,50 @@ async function loadAgents() {
       } else {
         agentTableSort = { key, dir: 'asc' };
       }
-      loadAgents();
+      renderAgentTable(agents);
     });
   });
 
   listEl.querySelectorAll('.agent-cwd-link').forEach(el => {
     el.addEventListener('click', () => openFileViewer(el.dataset.cwd));
+  });
+
+  listEl.querySelectorAll('.agent-home-select').forEach(sel => {
+    sel.addEventListener('change', async () => {
+      const name = sel.dataset.name;
+      const prevMode = sel.dataset.current;
+      const newMode = sel.value;
+      if (newMode === prevMode) return;
+      const statusEl = document.getElementById('agent-form-status');
+      const sessions = await fetch(`/config/agents/${encodeURIComponent(name)}/sessions`).then(r => r.ok ? r.json() : null).catch(() => null);
+      const activeTopics = sessions?.topics?.map(s => s.topic) ?? [];
+      if (activeTopics.length > 0) {
+        const ok = await confirmAgentSessionClear(name, activeTopics);
+        if (!ok) { sel.value = prevMode; return; }
+      }
+      try {
+        const res = await fetch(`/config/agents/${encodeURIComponent(name)}/home-mode`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ home_mode: newMode }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          sel.dataset.current = newMode;
+          _updateHomeModeIcon(sel);
+          _agentsCache = null;
+          if (statusEl) {
+            const cleared = data.sessions_cleared || [];
+            statusEl.textContent = cleared.length ? `home mode saved ✓ (cleared sessions: ${cleared.join(', ')})` : 'home mode saved ✓';
+            setTimeout(() => { statusEl.textContent = ''; }, 5000);
+          }
+        } else {
+          sel.value = prevMode;
+        }
+      } catch {
+        sel.value = prevMode;
+      }
+    });
   });
 
   listEl.querySelectorAll('.edit-btn').forEach(btn => {
@@ -11109,6 +11219,9 @@ async function loadAgents() {
       syncAgentModelControls(btn.dataset.harness, provider);
       document.getElementById('af-model').value   = btn.dataset.model;
       document.getElementById('af-cwd').value     = btn.dataset.cwd;
+      const afHomeMode = document.getElementById('af-home-mode');
+      afHomeMode.value = btn.dataset.homeMode === 'blank_home' ? 'blank_home' : 'user_home';
+      _updateHomeModeIcon(afHomeMode);
       document.getElementById('agent-form').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       document.getElementById('af-name').focus();
     });
@@ -11134,16 +11247,19 @@ function initAliases() {
   afProvider.addEventListener('change', () => {
     syncAgentModelControls(afHarness.value, afProvider.value || null);
   });
+  const afHomeMode = document.getElementById('af-home-mode');
+  afHomeMode.addEventListener('change', () => _updateHomeModeIcon(afHomeMode));
   document.getElementById('config-editor-reload').addEventListener('click', loadConfigYaml);
   document.getElementById('config-editor-save').addEventListener('click', saveConfigYaml);
 
   document.getElementById('agent-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const body = {
-      name:    document.getElementById('af-name').value.trim(),
+      name:      document.getElementById('af-name').value.trim(),
       ...selectedRuntime(),
-      model:   document.getElementById('af-model').value.trim() || null,
-      cwd:     document.getElementById('af-cwd').value.trim()   || null,
+      model:     document.getElementById('af-model').value.trim() || null,
+      cwd:       document.getElementById('af-cwd').value.trim()   || null,
+      home_mode: document.getElementById('af-home-mode').value,
     };
     if (!body.name) return;
 
@@ -11153,7 +11269,8 @@ function initAliases() {
       const keyChanged = (existing.harness || '') !== body.harness ||
                          (existing.provider || null) !== body.provider ||
                          (existing.model || null) !== body.model ||
-                         (existing.cwd || null) !== body.cwd;
+                         (existing.cwd || null) !== body.cwd ||
+                         (existing.home_mode || 'user_home') !== body.home_mode;
       if (keyChanged) {
         const sessions = await fetch(`/config/agents/${encodeURIComponent(body.name)}/sessions`).then(r => r.ok ? r.json() : null).catch(() => null);
         const activeTopics = sessions?.topics?.map(s => s.topic) ?? [];
@@ -11177,6 +11294,9 @@ function initAliases() {
         document.getElementById('af-name').value  = '';
         document.getElementById('af-model').value = '';
         document.getElementById('af-cwd').value   = '';
+        const afHomeModeReset = document.getElementById('af-home-mode');
+        afHomeModeReset.value = 'user_home';
+        _updateHomeModeIcon(afHomeModeReset);
         _agentsCache = null;
         loadAgents();
       } else {

@@ -75,7 +75,7 @@ harnesses:
     protocol:
       type: oneshot-cli
     default_provider: cursor
-    supported_apis: [/v1/chat/completions]
+    supported_apis: [/native/cursor]
 
   opencode:
     protocol:
@@ -96,7 +96,7 @@ harnesses:
 providers:
   # Native Claude Code. Uses the local `claude` CLI subscription/login.
   anthropic:
-    label: Claude
+    label: Anthropic
     color: "#AE5332"
     auth: {type: subscription}
     gauge: claude
@@ -110,7 +110,7 @@ providers:
 
   # Native Codex. Uses the local `codex` CLI subscription/login.
   openai:
-    label: GPT
+    label: OpenAI
     color: "#7070A0"
     auth: {type: subscription}
     gauge: codex
@@ -121,7 +121,7 @@ providers:
     color: "#8F8D8D"
     auth: {type: subscription}
     gauge: cursor
-    supported_apis: [/v1/chat/completions]
+    supported_apis: [/native/cursor]
 
   # OpenCode's own free-tier routing — zero config, no api key. Not the
   # default provider for the opencode harness (nvidia is, see below), kept
@@ -169,7 +169,7 @@ providers:
   #   label: DeepSeek
   #   color: "#4D9DE0"
   #   base_url: "https://api.deepseek.com/anthropic"
-  #   supported_apis: [/v1/chat/completions, /v1/messages]
+  #   supported_apis: [/v1/messages]
   #   auth:
   #     type: api_key
   #     api_key: {env: DEEPSEEK_API_KEY}
@@ -183,7 +183,7 @@ providers:
   #   label: Kimi
   #   color: "#4D6BFE"
   #   base_url: "https://api.moonshot.ai/anthropic"
-  #   supported_apis: [/v1/chat/completions, /v1/messages]
+  #   supported_apis: [/v1/messages]
   #   auth:
   #     type: api_key
   #     api_key: {env: MOONSHOT_API_KEY}

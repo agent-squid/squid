@@ -17,6 +17,7 @@ import subprocess
 import time
 from typing import AsyncGenerator, List, Optional, Union
 
+from . import sandbox_home
 from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, OPENCODE_PATH, PI_PATH, FIRST_BYTE_TIMEOUT, RESPONSE_TIMEOUT, PROXY_ENV
 
 # ---------------------------------------------------------------------------
@@ -487,6 +488,8 @@ async def _stream_lines(
     and blocking the subprocess before it can write to stdout.
     """
     env = _child_env(extra_env)
+    if agent:
+        env.update(sandbox_home.home_override_env(agent, backend))
     if topic:
         env["SQUID_TOPIC"] = topic
     if agent:
@@ -836,6 +839,8 @@ class _ClaudeInteractiveCLI:
             cmd += ["--resume", resume_session_id]
 
         env = _child_env(_claude_child_env(self.backend_id, self.backend_env))
+        if self.agent:
+            env.update(sandbox_home.home_override_env(self.agent, self.backend_id))
 
         self.proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -1147,7 +1152,11 @@ async def run_claude_interactive_cli(
         ):
             yield chunk
         return
-    key = (backend_id, topic, agent, cwd, model, tuple(backend_args))
+    # home_mode is an agent-level setting but still belongs in the per-(topic,
+    # agent) cache key so toggling it (User Home <-> Blank Home) doesn't
+    # silently reuse a live process spawned under the old HOME.
+    home_mode = sandbox_home.current_home_mode(agent)
+    key = (backend_id, topic, agent, cwd, model, tuple(backend_args), home_mode)
     session = _claude_interactive_sessions.get(key)
     if session is None:
         session = _ClaudeInteractiveCLI(

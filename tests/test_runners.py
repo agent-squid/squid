@@ -291,7 +291,7 @@ def test_claude_interactive_reuses_live_process_for_same_session_key():
         "second prompt",
     ]
     assert list(_claude_interactive_sessions) == [
-        ("claudecode", "work", "claude", "/tmp/project", None, ()),
+        ("claudecode", "work", "claude", "/tmp/project", None, (), "user_home"),
     ]
     assert _proc_registry[9001]["msg_id"] is None
     assert _proc_registry[9001]["state"] == "idle"
@@ -751,7 +751,7 @@ def test_claude_interactive_closes_process_after_idle_timeout():
     assert chunks[0] == "done"
     assert fake_proc.terminated is True
     assert 9003 not in _proc_registry
-    session = _claude_interactive_sessions[("claudecode", "work", "claude", "/tmp/project", None, ())]
+    session = _claude_interactive_sessions[("claudecode", "work", "claude", "/tmp/project", None, (), "user_home")]
     assert session.proc is None
     _clear()
 
@@ -950,7 +950,7 @@ def test_claude_interactive_soft_completes_on_ask_followup_question():
         chunks = asyncio.run(collect())
 
     assert chunks == ["Which branch should I use?"]
-    session = _claude_interactive_sessions[("claudecode", "work", "claude", "/tmp/project", None, ())]
+    session = _claude_interactive_sessions[("claudecode", "work", "claude", "/tmp/project", None, (), "user_home")]
     assert session.pending_followup == {"tool_use_id": "toolu_ask_1"}
     assert session.proc is not None and session.proc.returncode is None  # process kept alive
     _clear()

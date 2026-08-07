@@ -37,6 +37,7 @@
   --text-md:   0.78em;  /* secondary content, tool blocks, ac items */
   --text-body: 0.85em;  /* hints, button text, secondary body */
   --text-lg:   0.90em;  /* near-base secondary text */
+  --text-dense: 0.93em;  /* dense list/table rows (topics, agents, stats), compact popovers/tooltips */
 
   --mobile-view-top-space: 1.75rem;
 
@@ -1929,7 +1930,7 @@ body {
   padding: 0.45rem 0.75rem;
   color: #777;
   background: var(--bg);
-  font-size: 0.78rem;
+  font-size: var(--text-lg);
   line-height: 1.35;
 }
 #memory-help code {
@@ -2990,7 +2991,7 @@ body {
   padding: 0.45rem 0.7rem;
   box-shadow: 0 4px 12px rgba(0,0,0,0.4);
   color: var(--text-mid);
-  font-size: 0.82rem;
+  font-size: var(--text-dense);
   font-family: ui-sans-serif, system-ui, sans-serif;
   line-height: 1.45;
   white-space: normal;
@@ -3218,7 +3219,7 @@ body {
   min-height: 0;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
-  font-size: 13px;
+  font-size: var(--text-dense);
 }
 .topic-row,
 .topic-agent-row {
@@ -3522,7 +3523,7 @@ body {
   display: grid;
   gap: 0.16rem;
   color: var(--text-ghost);
-  font-size: 0.78rem;
+  font-size: var(--text-lg);
   cursor: default;
   white-space: normal;
   width: 100%;
@@ -3670,7 +3671,7 @@ body {
   display: grid;
   gap: 0.16rem;
   color: var(--text-ghost);
-  font-size: 0.78rem;
+  font-size: var(--text-lg);
 }
 .sc-series-popover .sc-extra-metric {
   width: 9.4rem;
@@ -3690,7 +3691,7 @@ body {
   display: inline-flex;
   align-items: center;
 }
-.sc-extra-remove { font-size: 0.9em; line-height: 1; }
+.sc-extra-remove { font-size: var(--text-lg); line-height: 1; }
 #sc-add-series:hover, .sc-extra-axis:hover, .sc-extra-remove:hover { border-color: #4a4a70; color: #9090c0; }
 #stats-chart-controls.breakdown-active #sc-add-series {
   display: none;
@@ -3712,7 +3713,7 @@ body {
   display: flex;
   flex-direction: column;
   flex: 1;
-  font-size: 13px;
+  font-size: var(--text-dense);
   min-height: 0;
   overflow: hidden;
 }
@@ -4115,7 +4116,7 @@ body {
 }
 #auth-panel-term .xterm { height: 100%; }
 .restore-hint {
-  font-size: 0.72rem;
+  font-size: var(--text-body);
   color: var(--text-dim);
   opacity: 1;
   transition: opacity 0.6s ease;
@@ -4333,7 +4334,7 @@ button {
   #codex-creds-save {
     width: 100%;
     min-height: 40px;
-    font-size: 0.9rem;
+    font-size: var(--text-lg);
   }
 
   #nav-tabs { display: none; }
@@ -4653,12 +4654,28 @@ button {
   overflow-x: auto;
   scrollbar-gutter: stable;
   flex: 1;
-  font-size: 13px;
+  font-size: var(--text-dense);
 }
 #agents-list table {
   width: 100%;
   border-collapse: collapse;
 }
+/* #settings-agents already contributes 0.5rem top / 0.2rem side padding
+   above this; add just enough here to match #topics-header-top's inset
+   (0.5rem 0.6rem) and reset the 13px ancestor font-size so var(--text-body)
+   resolves the same as it does for #topics-search (relative to body's 14px). */
+.agent-filter-wrap { padding: 0 0.4rem 0.5rem; font-size: 14px; }
+.agent-filter {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: #ccc;
+  font-size: var(--text-body);
+  padding: 0.35rem 0.55rem;
+}
+.agent-filter:focus { outline: none; border-color: #55556a; }
 #agents-list th, #agents-list td {
   padding: 0.3rem 0.75rem;
   text-align: left;
@@ -4697,6 +4714,44 @@ button {
 }
 #agents-list .agent-cwd-link:hover {
   color: #ffb87a;
+}
+/* Icon-only trigger, used for both the add/edit form field and the
+   per-row table cell: the <select> is a fully transparent, same-size
+   overlay on top of the icon -- clicking/tapping the icon opens the
+   native option list (which renders its own "User Home"/"Blank Home"
+   text regardless of how the closed trigger looks), so the closed state
+   stays icon-width instead of costing a full text-label's worth of space. */
+.home-mode-field {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+}
+.home-mode-icon {
+  font-size: 16px;
+  color: var(--text-dim);
+  font-variation-settings: 'FILL' 0, 'wght' 500, 'GRAD' 0, 'opsz' 20;
+  pointer-events: none;
+}
+.home-mode-select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+#agents-list th.col-home,
+#agents-list td.col-home {
+  text-align: center;
 }
 #agents-list thead th {
   color: var(--text-dim);
@@ -4769,6 +4824,14 @@ button {
 .agent-form-row input:focus-visible, .agent-form-row select:focus-visible {
   outline: none;
   border-color: var(--text-dim);
+}
+/* Higher specificity than ".agent-form-row select" above (two classes vs
+   one class + element) so the icon-only overlay isn't given a visible
+   background/border/padding by the generic form-control styling. */
+.agent-form-row .home-mode-select {
+  background: none;
+  border: 0;
+  padding: 0;
 }
 #af-name    { width: 80px; }
 #af-harness { width: 96px; }
@@ -5050,7 +5113,7 @@ button {
   border: 1px solid #3a3028;
   color: var(--text-muted);
   cursor: pointer;
-  font-size: 0.85em;
+  font-size: var(--text-body);
   padding: 0.1rem 0.4rem;
   border-radius: 4px;
   font-family: ui-monospace, monospace;
@@ -5327,10 +5390,10 @@ mark.search-kw-highlight {
   .agent-form-row {
     display: grid;
     grid-template-areas:
-      "name harness provider provider provider provider"
-      "model model picker cwd cwd save"
-      "status status status status status status";
-    grid-template-columns: minmax(0, 5.5rem) minmax(0, 6.6rem) 2rem minmax(0, 1fr) minmax(0, 1fr) 2rem;
+      "name harness provider provider provider provider provider"
+      "model model picker home cwd cwd save"
+      "status status status status status status status";
+    grid-template-columns: minmax(0, 5.5rem) minmax(0, 6.6rem) 2rem 1.6rem minmax(0, 1fr) minmax(0, 1fr) 2rem;
     gap: 0.3rem;
   }
 
@@ -5339,6 +5402,7 @@ mark.search-kw-highlight {
   #af-provider { grid-area: provider; }
   #af-model   { grid-area: model; }
   #af-model-picker { grid-area: picker; }
+  .agent-form-row .home-mode-field { grid-area: home; justify-self: center; }
   #af-cwd     { grid-area: cwd; }
   .agent-form-row button[type=submit] { grid-area: save; }
   #agent-form-status { grid-area: status; }

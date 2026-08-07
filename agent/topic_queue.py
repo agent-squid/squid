@@ -339,7 +339,7 @@ class TopicWorker:
             await item.out_q.put(None)
             return
         try:
-            backend_env = resolved.execution_env()
+            backend_env = resolved.execution_env(model=item.model)
         except ValueError as exc:
             await item.out_q.put({"_error": str(exc)})
             await item.out_q.put(None)
