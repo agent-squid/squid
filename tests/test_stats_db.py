@@ -1585,7 +1585,7 @@ def test_get_messages_by_ids_includes_compact_gitdiff_context(tmp_path, monkeypa
     messages = stats_db.get_messages_by_ids([assistant_id])
 
     assert messages == [
-        {"role": "user", "content": "implement change"},
+        {"role": "user", "content": "implement change", "topic": "squid", "agent": "codex"},
         {"role": "assistant", "content": (
             "implemented\n\n"
             "Changed files from this response:\n"
@@ -1599,7 +1599,7 @@ def test_get_messages_by_ids_includes_compact_gitdiff_context(tmp_path, monkeypa
             "- M app.py\n"
             "- A test_app.py\n"
             "</changed_files>"
-        )},
+        ), "topic": "squid", "agent": "codex"},
     ]
 
 

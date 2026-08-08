@@ -14,6 +14,7 @@ from agent import creds
 from agent import server
 from agent import stats_db
 from agent import worktree as worktree_mod
+from agent import providers as providers_mod
 from agent.providers import Gauge, Provider
 
 
@@ -1192,7 +1193,16 @@ def test_main_dispatches_start_command():
     start.assert_called_once_with(server._cfg["server"]["host"], server._cfg["server"]["port"])
 
 
-def test_public_agent_config_includes_provider_color():
+def test_public_agent_config_includes_provider_color(monkeypatch):
+    # Provider labels are user-configurable (squid.yaml `providers:` section
+    # replaces the shipped defaults wholesale — see providers.py's
+    # _configured_providers), so pin the "anthropic" entry here rather than
+    # asserting on whatever the machine running this test happens to have
+    # configured.
+    monkeypatch.setitem(
+        providers_mod.PROVIDERS, "anthropic",
+        Provider(id="anthropic", label="Claude", color="#AE5332", auth_type="subscription"),
+    )
     item = server._public_agent_config({
         "name": "haiku",
         "harness": "claudecode",

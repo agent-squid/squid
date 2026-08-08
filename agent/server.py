@@ -831,9 +831,11 @@ async def _prepare_chat_turn(
                     context_history = pinned_context + context_history
                 else:
                     lines = ["Relevant context from other sessions:\n<referenced_context>"]
-                    for msg in pinned_context:
-                        role = "User" if msg["role"] == "user" else "Assistant"
-                        lines.append(f"{role}: {msg['content'].strip()}")
+                    for i in range(0, len(pinned_context), 2):
+                        user_msg, asst_msg = pinned_context[i], pinned_context[i + 1]
+                        lines.append(f"From #{asst_msg['topic']}@{asst_msg['agent']}:")
+                        lines.append(f"User: {user_msg['content'].strip()}")
+                        lines.append(f"Assistant: {asst_msg['content'].strip()}")
                     lines.append("</referenced_context>\n")
                     prefix_blocks.append("\n".join(lines))
 

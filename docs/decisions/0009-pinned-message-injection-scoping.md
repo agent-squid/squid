@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-05-26
-updated: 2026-06-12
+updated: 2026-08-08
 ---
 # ADR-0009: Pinned Message Injection Scoping by Mode
 
@@ -40,11 +40,15 @@ the client filters the pin list through three checks in order:
 
 The server receives `pinned_ids: [id, ...]` in `POST /chat` and:
 
-1. Fetches rows via `get_messages_by_ids(filtered)` — assistant messages, `status='done'`
+1. Fetches rows via `get_messages_by_ids(filtered)` — assistant messages, `status='done'`.
+   Each returned pair also carries the origin `topic`/`agent` (needed to tell pins apart
+   when several land in one turn, e.g. a Squid Flow join — see [[0032-route-chains-with-cwd-profile-agents]])
 2. Deduplicates against the adhoc lookback window to avoid double-injecting context
    already in `context_history`
-3. For **session turns**: builds `effective_message` with a `<referenced_context>` prefix
-4. For **adhoc turns**: prepends fetched pairs to `context_history`
+3. For **session turns**: builds `effective_message` with a `<referenced_context>` prefix;
+   each pinned pair is labeled `From #topic@agent:` so multiple pins are distinguishable
+4. For **adhoc turns**: prepends fetched pairs to `context_history` (unlabeled — the model
+   just sees them as prior conversation turns)
 
 ### DB record at send time
 

@@ -1357,7 +1357,7 @@ def get_messages_by_ids(ids: list[int]) -> list[dict]:
     placeholders = ",".join("?" * len(ids))
     with _connect() as conn:
         rows = conn.execute(
-            f"""SELECT a.id, u.content AS user_content, a.content AS asst_content, a.context
+            f"""SELECT a.id, a.topic, a.agent, u.content AS user_content, a.content AS asst_content, a.context
                 FROM chat_messages a
                 JOIN chat_messages u ON u.id = a.reply_to
                 WHERE a.id IN ({placeholders})
@@ -1373,8 +1373,8 @@ def get_messages_by_ids(ids: list[int]) -> list[dict]:
         if gitdiff_summary:
             asst_content = f"{asst_content.rstrip()}\n\n{gitdiff_summary}"
         result.extend([
-            {"role": "user",      "content": row["user_content"]},
-            {"role": "assistant", "content": asst_content},
+            {"role": "user",      "content": row["user_content"], "topic": row["topic"], "agent": row["agent"]},
+            {"role": "assistant", "content": asst_content,        "topic": row["topic"], "agent": row["agent"]},
         ])
     return result
 

@@ -716,6 +716,8 @@ def test_continue_chain_dispatches_target_onto_its_own_topic(tmp_path, monkeypat
 
 def test_continue_chain_completes_a_round_trip_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    monkeypatch.setattr("agent.server.WORKTREE_ISOLATION_ENABLED", False)
+    monkeypatch.setattr("agent.config.WORKTREE_ISOLATION_ENABLED", False)
     stats_db.init_db()
     _seed_agent("codex")
     _seed_agent("revucla")
