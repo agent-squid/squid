@@ -4046,6 +4046,7 @@ async function openAuthPanel(harness, onSuccessRetry) {
   // its box has no layout yet — give it one frame before fit() measures it.
   await new Promise(resolve => requestAnimationFrame(resolve));
   fitAddon.fit();
+  term.focus();
 
   // Make URLs clickable — avoids macOS "open with" system modal.
   term.registerLinkProvider({
