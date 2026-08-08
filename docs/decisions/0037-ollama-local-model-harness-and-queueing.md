@@ -331,6 +331,7 @@ active, visible handoff instead of a silent wait on Ollama's own timer.
   provider-scoped lane, and Path A's placeholder-apiKey handling for pi are
   all shipped in `agent/providers.py`, `agent/resolve.py`, and
   `agent/topic_queue.py`, with test coverage in `tests/test_topic_queue.py`.
-  Path B (the standalone `ollama` harness/runner) remains unimplemented —
-  Path A (pi/opencode custom-provider) is the only integration path shipped
-  so far.
+  Path B (the standalone `ollama` harness/runner) is also shipped — see
+  `run_ollama` in `agent/runners.py` and the `ollama` entries in
+  `agent/harnesses.py`'s fixed harness set, protocol map, and runner
+  registry. Both integration paths are live.

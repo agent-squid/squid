@@ -13447,9 +13447,12 @@ function renderPinPanel() {
     html += `<div class="pin-section-label">Files</div>`;
     attachedFiles.forEach(file => {
       const st = _attachedFileStatus(file);
+      const lastSlash = file.path.lastIndexOf('/');
+      const dirPart = lastSlash >= 0 ? file.path.slice(0, lastSlash + 1) : '';
+      const namePart = lastSlash >= 0 ? file.path.slice(lastSlash + 1) : file.path;
       html += `<div class="pin-item" data-file-path="${escapeHtml(file.path)}">
         <span class="pin-item-tag"><span class="material-symbols-outlined" aria-hidden="true">description</span></span>
-        <span class="pin-item-preview">${escapeHtml(file.path)}</span>
+        <span class="pin-item-preview pin-item-preview-path" title="${escapeHtml(file.path)}"><span class="pin-item-path-dir">${escapeHtml(dirPart)}</span><span class="pin-item-path-name">${escapeHtml(namePart)}</span></span>
         <span class="pin-item-status ${st.cls}">${st.text}</span>
         <button class="pin-item-remove" data-file-remove="${escapeHtml(file.path)}" type="button">✕</button>
       </div>`;
@@ -15394,6 +15397,16 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
         return;
       }
       const ct = res.headers.get('content-type') || '';
+      if (ct.startsWith('image/')) {
+        pathKind = 'file';
+        pathIsText = false;
+        fileText = '';
+        markdownPreview = false;
+        updateNav();
+        editToolbar.hidden = true;
+        _renderImageFilePreview(body, path);
+        return;
+      }
       if (!ct.includes('text/') && !ct.includes('application/json') && !_isTextPath(path)) {
         if (!isInline) { modal.remove(); _fvNavigate = null; _fvHandlePopState = null; }
         window.open('/localfile?' + new URLSearchParams({ path, _t: Date.now() }), '_blank');
@@ -15685,6 +15698,18 @@ function _renderMarkdownFilePreview(container, text) {
   preview.className = 'fv-md-preview';
   preview.innerHTML = renderAssistantMarkdown(text || '');
   container.appendChild(preview);
+}
+
+function _renderImageFilePreview(container, path) {
+  container.classList.remove('fv-web-preview-body');
+  container.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.className = 'fv-image-preview';
+  const img = document.createElement('img');
+  img.alt = path.split('/').pop() || path;
+  img.src = '/localfile?' + new URLSearchParams({ path, _t: Date.now() });
+  wrap.appendChild(img);
+  container.appendChild(wrap);
 }
 
 function _renderWebFilePreview(container, path) {
