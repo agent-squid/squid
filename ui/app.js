@@ -14258,6 +14258,8 @@ function openFilesTabView() {
   openFileViewer(savedPath, null, null, document.getElementById('view-files'), null, null, { persistKey: 'browser' });
 }
 
+const FV_MAX_PREVIEW_BYTES = 2 * 1024 * 1024;
+
 function openFileViewer(initialPath, initialLine, initialEndLine, inlineContainer = null, initialChangedLines = null, pickOpts = null, viewerOpts = null) {
   document.getElementById('file-modal')?.remove();
   _fvNavigate = null;
@@ -15413,6 +15415,17 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
         if (isInline) { body.textContent = 'Opened in new tab'; }
         return;
       }
+      const contentLength = Number(res.headers.get('content-length'));
+      if (contentLength && contentLength > FV_MAX_PREVIEW_BYTES) {
+        pathKind = 'file';
+        pathIsText = ct.includes('text/') || ct.includes('application/json');
+        fileText = '';
+        markdownPreview = false;
+        updateNav();
+        editToolbar.hidden = true;
+        _renderTooLargeFilePreview(body, path, contentLength);
+        return;
+      }
       const text = await res.text();
       if (ct.includes('application/json')) {
         try {
@@ -15698,6 +15711,22 @@ function _renderMarkdownFilePreview(container, text) {
   preview.className = 'fv-md-preview';
   preview.innerHTML = renderAssistantMarkdown(text || '');
   container.appendChild(preview);
+}
+
+function _renderTooLargeFilePreview(container, path, size) {
+  container.classList.remove('fv-web-preview-body');
+  container.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.className = 'fv-too-large';
+  const msg = document.createElement('div');
+  msg.textContent = `File is ${_fmtSize(size)} — too large to preview inline (limit ${_fmtSize(FV_MAX_PREVIEW_BYTES)}).`;
+  const link = document.createElement('a');
+  link.href = '/localfile?' + new URLSearchParams({ path, _t: Date.now() });
+  link.target = '_blank';
+  link.rel = 'noopener';
+  link.textContent = 'Open in new tab';
+  wrap.append(msg, link);
+  container.appendChild(wrap);
 }
 
 function _renderImageFilePreview(container, path) {
