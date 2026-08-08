@@ -1036,6 +1036,11 @@ async def stream_response(
                 if text:
                     yield sse_event("status", text)
 
+            elif isinstance(chunk, dict) and "_loading" in chunk:
+                # ADR-0037: local-model load/unload visibility — payload is
+                # {"to": model} or {"to": model, "from": prev_model} on a switch.
+                yield sse_event("loading", json.dumps(chunk["_loading"]))
+
             else:
                 raw += chunk
                 yield sse_chunk(chunk)

@@ -36,14 +36,14 @@ is **queueing** plus **active load/unload management**, as two main
 features:
 
 1. Squid queues per `(topic, agent)`, parallel across topics
-   (`agent/topic_queue.py:758`: `queue_key = f"{topic}@{agent}" if agent
-   else topic`). That's correct for hosted APIs — Claude/Codex handle their
-   own concurrency — but wrong for a shared local Ollama daemon: two
-   different topics calling agents that both resolve to the same local
-   checkpoint (or even different checkpoints on the same daemon — see
-   below) get independent `TopicWorker`s dispatching in parallel, which for
-   one GPU means Ollama thrashes between loading/evicting models instead of
-   Squid queueing them in a visible, predictable order.
+   (`agent/topic_queue.py`: `queue_key = f"{topic}@{agent}" if agent else
+   topic`). That's correct for hosted APIs — Claude/Codex handle their own
+   concurrency — but wrong for a shared local Ollama daemon: two different
+   topics calling agents that both resolve to the same local checkpoint (or
+   even different checkpoints on the same daemon — see below) get
+   independent `TopicWorker`s dispatching in parallel, which for one GPU
+   means Ollama thrashes between loading/evicting models instead of Squid
+   queueing them in a visible, predictable order.
 2. Once requests are serialized through one lane, switching which model
    that lane is talking to should be something Squid actively drives, not
    something it just waits out. Ollama's own idle-eviction (default ~5
@@ -95,6 +95,7 @@ providers:
     label: Ollama
     base_url: http://localhost:11434/v1
     auth: {type: none}
+    parallel: false
 ```
 
 Reusing `auth.type: subscription` was considered — `sync_pi_provider`
@@ -104,24 +105,77 @@ correctness of intent: `subscription` means "the harness CLI handles its
 own browser login" everywhere else it's used (ADR-0028); labeling a local,
 credential-free daemon that way would mislead anyone reading `squid.yaml`
 into expecting a login flow that doesn't exist. This ADR adds a third
-`SUPPORTED_AUTH_TYPES` value, `none` (`agent/providers.py:20`).
-`missing_secrets()` (`agent/providers.py:79`) already only fires for
-`api_key`, so `none` needs no new logic there — just acceptance as a valid
-enum value.
+`SUPPORTED_AUTH_TYPES` value, `none` (`agent/providers.py`).
+`missing_secrets()` already only fires for `api_key`, so `none` needs no new
+logic there — just acceptance as a valid enum value.
 
-### Provider-scoped queueing, keyed by provider name
+`auth.type` is purely about credentials — it has no bearing on queueing.
+See "Provider-scoped queueing" below for the (separate) `parallel` field
+that actually drives serialization.
 
-No new field on `Provider`. Instead, `topic_queue.py`'s key derivation
-(`agent/topic_queue.py:758`) gains one conditional: when a resolved agent's
-provider has `auth.type == "none"`, the queue key becomes
-`f"provider:{provider_name}"` instead of `f"{topic}@{agent}"` — collapsing
-*every* agent, topic, and harness that resolves to that provider into one
-`TopicWorker`, i.e. one FIFO lane. Providers with any other auth type
-(`subscription`, `api_key`) keep today's per-`(topic, agent)` parallel
-behavior, unchanged. `auth.type: none` already means "local, credential-free
-daemon" (see above) — serial dispatch is just what that implies mechanically
-for a single-GPU box, so it doesn't need its own opt-in field; a second
-config knob would only be saying the same thing the auth type already says.
+### Pi's custom-provider auth requires *some* key, even for `none`
+
+Discovered while wiring Path A up against a real Ollama install: pi's
+custom-provider auth composer (`@earendil-works/pi-coding-agent`'s
+`provider-composer.js`) has no "no auth" concept. For any provider it
+doesn't natively recognize, it throws `"Provider is not configured"`
+unless it can resolve an `apiKey` or `oauth` — there's no third option.
+Writing no `apiKey` field into `~/.pi/agent/models.json` for an
+`auth.type: none` provider (the naively "correct" thing to do) means pi
+refuses the request before it ever reaches Ollama, even though Ollama
+itself never checks the `Authorization` header at all.
+
+The fix, in `agent/resolve.py`: `sync_pi_models_store()` gained a
+`placeholder_key` parameter, set from `sync_pi_provider()` via
+`self.provider.auth_type == "none"`. When true, it still writes the
+`$SQUID_PI_<PROVIDER>_API_KEY` reference into `models.json` even though
+there's no real credential. `execution_env()`'s pi branch then sets that
+env var to the literal string `"none"` whenever there's no resolved
+`api_key` and `auth_type == "none"` — any non-empty placeholder satisfies
+pi's auth composer, and Ollama ignores the header content entirely. This is
+the one place `auth.type == "none"` still drives behavior beyond labeling;
+everywhere else (queueing, load management) it's `parallel` that matters.
+
+### Provider-scoped queueing, keyed by provider name, driven by `parallel`
+
+A new `parallel: bool` field on `Provider` (`agent/providers.py`, default
+`True`) drives this — deliberately **not** derived from `auth.type`. An
+earlier version of this decision piggybacked serialization on
+`auth.type == "none"`, reasoning that "local, credential-free daemon"
+already implies "single physical resource." That conflated two independent
+properties: how a provider authenticates says nothing about how much
+concurrency its backend can actually serve. A multi-GPU Ollama box (or one
+tuned with `OLLAMA_NUM_PARALLEL`) can genuinely handle concurrent requests
+despite having `auth.type: none`; conversely a shared self-hosted endpoint
+sitting behind an `api_key` could still be one physical resource that needs
+serialization. `parallel` names the actual property instead of inferring it
+from an unrelated one, and can be set independently of `auth.type` in
+either direction.
+
+`topic_queue.py`'s key derivation (`TopicDispatcher.dispatch`) gains one
+conditional: when a resolved agent's provider has `parallel == False`, the
+queue key becomes `f"provider:{provider_name}"` instead of
+`f"{topic}@{agent}"` — collapsing *every* agent, topic, and harness that
+resolves to that provider into one `TopicWorker`, i.e. one FIFO lane.
+Providers with `parallel: true` (the default) keep today's per-`(topic,
+agent)` parallel behavior, unchanged. Because Ollama's own default is a
+single-GPU box that can't serve concurrent requests without thrashing, the
+shipped `ollama` provider entry sets `parallel: false` explicitly in
+`config/squid.yaml.example` — there's no implicit default tied to
+`auth.type` anymore, so this has to be spelled out in config rather than
+inferred.
+
+**Adhoc dispatches are included, not exempted.** Adhoc prompts normally get
+their own ephemeral `TopicWorker` and run fully in parallel
+(`self._adhoc_counter`), which is correct for hosted APIs. But an adhoc
+prompt against a `parallel: false` provider would otherwise bypass the
+shared lane entirely and contend with whatever session traffic is already
+queued on that same physical resource — exactly the thrashing this ADR
+exists to prevent. So the `parallel`-driven provider-scoped check runs
+*before* the adhoc branch in `dispatch()`: adhoc requests against a
+`parallel: false` provider join the same `provider:{name}` lane as session
+traffic; only providers with `parallel: true` still give adhoc its
+always-parallel, never-queued ephemeral worker.
 
 This is scoped by **provider name**, not by harness or by model, for two
 reasons that only became clear once Path A entered the picture:
@@ -153,10 +207,9 @@ lane under this scheme, but no real use case for that surfaced in the
 original discussion — it would mean two separate daemons/processes
 pretending to be one physical resource, which isn't how local setups are
 actually built. The existing `/queue` endpoint and
-`queue_depth()`/`position_of()` (`agent/topic_queue.py:212`,
-`agent/server.py:1346`) need no changes — they already report position
-within whatever worker owns a key; only the key derivation gains this
-auth-type-conditional branch.
+`queue_depth()`/`position_of()` (`agent/topic_queue.py`, `agent/server.py`)
+need no changes — they already report position within whatever worker owns
+a key; only the key derivation gains this `parallel`-conditional branch.
 
 ### Load-state visibility
 
@@ -164,19 +217,19 @@ Independent of which path dispatches the request, `topic_queue.py` can
 check Ollama's `GET {base_url}/api/ps` (resident-models list) right before
 handing a queued item to its runner. If the target model isn't resident,
 emit an SSE event before dispatch — same channel/shape as the existing
-`sse_event("queued", ...)` position event (`agent/server.py:995`), new
-event type `"loading"` carrying the model name, so the UI can show "Loading
-qwen25..." instead of an unexplained stall. This is gated on the provider's
-`auth.type == "none"` — the same providers where cold-load latency and
-hardware contention are real — rather than being harness-specific, so a
-Path-A (Pi) call gets the same visibility as a Path-B (chat-only) call. No
-polling loop is needed to detect "finished loading": the request itself
-blocks through the load, and the first streamed byte (Path B) or Pi's first
-protocol event (Path A) is the natural "now warm" signal. The `/api/ps`
-check itself is Ollama-specific; if a different local-model server joins
-this mechanism later under its own `auth: {type: none}` provider entry, it
-would need its own load-check implementation, not a shared one — not a
-problem this ADR needs to solve now with only one local backend in scope.
+`sse_event("queued", ...)` position event, new event type `"loading"`
+carrying the model name, so the UI can show "Loading qwen25..." instead of
+an unexplained stall. This is gated on the provider's `parallel == False` —
+the same providers where cold-load latency and hardware contention are
+real — rather than being harness-specific, so a Path-A (Pi) call gets the
+same visibility as a Path-B (chat-only) call. No polling loop is needed to
+detect "finished loading": the request itself blocks through the load, and
+the first streamed byte (Path B) or Pi's first protocol event (Path A) is
+the natural "now warm" signal. The `/api/ps` check itself is
+Ollama-specific; if a different local-model server joins this mechanism
+later under its own `parallel: false` provider entry, it would need its own
+load-check implementation, not a shared one — not a problem this ADR needs
+to solve now with only one local backend in scope.
 
 ### Active load/unload on model switch
 
@@ -184,20 +237,20 @@ The main feature this ADR adds on top of queueing: don't just wait on
 Ollama's idle timer, actively free the outgoing model when the lane is
 about to switch to a different one.
 
-Each `TopicWorker` serving a provider-scoped (`auth.type == "none"`) key
-already processes its queue strictly in order (that's the queueing decision above), so it's the
-one place that can track, in memory, "which model did this lane last
-dispatch." When the next queued item targets a *different* model than the
-last one, the worker sends an explicit unload for the outgoing model before
-handing the new item to its runner — Ollama supports this directly via
-`keep_alive: 0` on a request naming that model (`/api/chat` or
-`/v1/chat/completions`). This is a small addition to
-`TopicWorker._process` (`agent/topic_queue.py`), not a new component: the
-same function that already decides whether to emit the `"loading"` event
-(above) is the one that compares outgoing vs. incoming model and fires the
-unload. The result is deterministic: the old model's memory starts freeing
-before the new one starts loading, instead of sometime in the next five
-minutes.
+Each `TopicWorker` serving a provider-scoped (`parallel == False`) key
+already processes its queue strictly in order (that's the queueing decision
+above), so it's the one place that can track, in memory, "which model did
+this lane last dispatch." When the next queued item targets a *different*
+model than the last one, the worker sends an explicit unload for the
+outgoing model before handing the new item to its runner — Ollama supports
+this directly via `keep_alive: 0` on a request naming that model (`/api/chat`
+or `/v1/chat/completions`). This is a small addition to
+`TopicWorker._process`/`_sync_local_model` (`agent/topic_queue.py`), not a
+new component: the same function that already decides whether to emit the
+`"loading"` event (above) is the one that compares outgoing vs. incoming
+model and fires the unload. The result is deterministic: the old model's
+memory starts freeing before the new one starts loading, instead of
+sometime in the next five minutes.
 
 This reuses the `"loading"` SSE event rather than adding a second event
 type: its payload carries both model names — `{"to": "qwen30", "from":
@@ -224,23 +277,41 @@ active, visible handoff instead of a silent wait on Ollama's own timer.
   existing Pi custom-provider code path doesn't technically require it
   (`base_url` flows through regardless of auth type there); it prevents a
   local, credential-free provider from being mislabeled as "subscription"
-  (implying a login flow that doesn't exist).
-- No new field on `Provider` — the one behavioral core of this ADR piggybacks
-  on the existing `auth.type` instead. `agent/topic_queue.py`'s queue-key
-  derivation gains an auth-type-conditional branch: agents on an
-  `auth: {type: none}` provider share one FIFO lane keyed by provider name,
-  regardless of topic, agent, or harness. Every other provider's queueing is
-  unaffected. Multi-instance local setups (two GPUs, two daemons) still
-  parallelize for free, since each is its own provider entry/name.
+  (implying a login flow that doesn't exist). It also still gates one
+  narrow behavior: whether `sync_pi_provider`/`execution_env()` write a
+  placeholder API-key value, needed only because pi's own custom-provider
+  auth composer has no "no auth" concept (see "Pi's custom-provider auth
+  requires *some* key" above).
+- New `parallel: bool` field on `Provider` (default `True`), independent of
+  `auth.type`. This *replaces* an earlier version of this ADR that
+  piggybacked serialization on `auth.type == "none"` with no new field —
+  that conflated "how does this provider authenticate" with "can this
+  provider's backend serve concurrent requests," two properties that don't
+  actually move together (a multi-GPU local box wants `parallel: true`
+  despite `auth.type: none`; a shared api_key-auth endpoint might want
+  `parallel: false`). `agent/topic_queue.py`'s queue-key derivation keys off
+  `parallel == False`: those providers share one FIFO lane by provider name,
+  regardless of topic, agent, harness, or adhoc-ness. Providers with
+  `parallel: true` (the default) are unaffected — session traffic keeps
+  per-`(topic, agent)` parallel lanes, adhoc keeps its always-parallel
+  ephemeral workers. Multi-instance local setups (two GPUs, two daemons)
+  still parallelize for free, since each is its own provider entry/name.
+  Because there's no implicit default derived from `auth.type` anymore,
+  `config/squid.yaml.example`'s `ollama` entry sets `parallel: false`
+  explicitly.
+- Adhoc dispatches against a `parallel: false` provider now join the shared
+  provider-scoped lane instead of getting an always-parallel ephemeral
+  worker — closing a gap where adhoc traffic could otherwise thrash a local
+  daemon that session traffic was correctly being serialized against.
 - New SSE event type (`"loading"`) alongside the existing `"queued"` event,
-  gated on the provider's `auth.type == "none"`; the chat/status UI needs a
+  gated on the provider's `parallel == False`; the chat/status UI needs a
   handler for it. Additive to the event stream, no protocol break for
   existing consumers.
 - `TopicWorker` gains a small piece of in-memory state per provider-scoped
   lane — the last model it dispatched — used to decide when to emit an
   explicit `keep_alive: 0` unload call for the outgoing model before
   switching. This is the active-swap behavior that was the original goal
-  of this whole ADR; providers on other auth types are unaffected, and no
+  of this whole ADR; providers with `parallel: true` are unaffected, and no
   separate scheduler/background process is introduced — it's driven
   entirely by the existing dispatch loop.
 - The `"loading"` event's payload grows to carry both `to` and an optional
@@ -255,5 +326,11 @@ active, visible handoff instead of a silent wait on Ollama's own timer.
   `ollama pull`/model-download management, any new tool-use loop beyond
   what Pi (or another harness) already provides, and
   model-comparison/eval/stats-diffing across checkpoints.
-- Nothing in this ADR is implemented yet — it records a design decision to
-  guide a future change, not shipped code.
+- Implemented: `auth.type: none`, the `parallel` field and its queueing/
+  load-visibility/active-unload behavior, adhoc inclusion in the
+  provider-scoped lane, and Path A's placeholder-apiKey handling for pi are
+  all shipped in `agent/providers.py`, `agent/resolve.py`, and
+  `agent/topic_queue.py`, with test coverage in `tests/test_topic_queue.py`.
+  Path B (the standalone `ollama` harness/runner) remains unimplemented —
+  Path A (pi/opencode custom-provider) is the only integration path shipped
+  so far.

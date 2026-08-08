@@ -95,7 +95,8 @@ def _write_pi_models_file(doc: dict[str, Any]) -> None:
 
 def sync_pi_models_store(*, provider_id: str, base_url: str,
                          supported_apis: frozenset[str], label: str,
-                         has_api_key: bool, model: Optional[str] = None) -> None:
+                         has_api_key: bool, placeholder_key: bool = False,
+                         model: Optional[str] = None) -> None:
     """Register a custom provider in ``~/.pi/agent/models.json``.
 
     pi only recognizes ``baseUrl`` from a provider declared in this file —
@@ -105,10 +106,18 @@ def sync_pi_models_store(*, provider_id: str, base_url: str,
     ``execution_env()`` sets that same env var name for the pi subprocess.
     Call this when a pi agent is created or updated with a non-standard
     provider.
+
+    pi's custom-provider auth composer has no "no auth" concept: with
+    neither an ``apiKey`` nor ``oauth`` entry it throws "Provider is not
+    configured" before ever issuing the request. ``placeholder_key`` covers
+    ``auth.type: none`` providers (e.g. Ollama) — a credential-free local
+    daemon that ignores the Authorization header regardless of its value —
+    by still writing the ``$NAME`` reference so pi has *something* to
+    resolve; ``execution_env()`` fills that env var with a dummy value.
     """
     api_type = _pi_api_type(supported_apis, has_api_key=has_api_key)
     model_id = model or provider_id
-    api_key_ref = f"${_pi_api_key_env_var(provider_id)}" if has_api_key else None
+    api_key_ref = f"${_pi_api_key_env_var(provider_id)}" if (has_api_key or placeholder_key) else None
 
     doc = _load_pi_models_file()
     providers: dict[str, Any] = dict(doc.get("providers") or {})
@@ -261,6 +270,7 @@ class ResolvedAgent:
             supported_apis=self.provider.supported_apis,
             label=self.provider.label,
             has_api_key=bool(self.provider.resolved_api_key()),
+            placeholder_key=self.provider.auth_type == "none",
             model=model,
         )
 
@@ -297,15 +307,24 @@ class ResolvedAgent:
                 result.setdefault("ANTHROPIC_AUTH_TOKEN", api_key)
         elif self.harness == "codex" and api_key:
             result.setdefault("SQUID_BACKEND_API_KEY", api_key)
-        elif self.harness == "pi" and api_key:
+        elif self.harness == "pi":
             if self.provider.id in _STANDARD_PROVIDERS:
                 # pi's own native env var convention for a provider it
                 # recognizes directly (e.g. NVIDIA_API_KEY).
-                result.setdefault(f"{self.provider.id.upper()}_API_KEY", api_key)
-            else:
+                if api_key:
+                    result.setdefault(f"{self.provider.id.upper()}_API_KEY", api_key)
+            elif api_key:
                 # Must match the "$NAME" reference sync_pi_models_store()
                 # writes into models.json's apiKey field for this provider.
                 result.setdefault(_pi_api_key_env_var(self.provider.id), api_key)
+            elif self.provider.auth_type == "none":
+                # pi's custom-provider auth composer throws "Provider is not
+                # configured" unless it can resolve an apiKey or oauth — it
+                # has no "no auth" concept. Ollama (and any other auth:none
+                # local daemon) never checks the Authorization header, so any
+                # non-empty placeholder satisfies pi without granting real
+                # access to anything.
+                result.setdefault(_pi_api_key_env_var(self.provider.id), "none")
         elif self.harness == "opencode":
             if self.provider.id in _STANDARD_PROVIDERS:
                 # opencode's own native env var convention for a provider it
@@ -338,6 +357,11 @@ class ResolvedAgent:
                     }
                 }
                 result.setdefault("OPENCODE_CONFIG_CONTENT", json.dumps(config_content))
+        elif self.harness == "ollama" and base_url:
+            # ADR-0037, Path B: run_ollama has no subprocess to hand a base
+            # URL to via argv — read it back out of this same env dict
+            # instead, the one channel every runner already receives.
+            result.setdefault("OLLAMA_BASE_URL", base_url)
         return result
 
     def harness_settings(self) -> dict[str, Any]:

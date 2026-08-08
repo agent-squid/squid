@@ -5007,6 +5007,16 @@ async function sendMessage(text, opts = {}) {
             pollProcs();
             eventName = null;
 
+          } else if (eventName === 'loading') {
+            // ADR-0037: local-model (e.g. Ollama) active load/unload visibility.
+            try {
+              const info = JSON.parse(data);
+              setThinkingText(info.from
+                ? `#${topic} · switching ${info.from} → ${info.to}…`
+                : `#${topic} · loading ${info.to}…`);
+            } catch {}
+            eventName = null;
+
           } else if (eventName === 'stats') {
             try {
               const stats = JSON.parse(data);
@@ -5900,7 +5910,7 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
                       updatePreview();
                     } else if (eventName === 'error') {
                       throw new Error(data.trim() || 'Auto-resolve failed');
-                    } else if (eventName === 'done' || eventName === 'meta' || eventName === 'stats') {
+                    } else if (eventName === 'done' || eventName === 'meta' || eventName === 'stats' || eventName === 'loading') {
                       // internal turn — no per-event UI beyond the live text below
                     } else {
                       raw += data;
@@ -6628,6 +6638,16 @@ function reconnectPendingItem(item, wipBubble) {
   es.addEventListener('tool', event => {
     try {
       statusBuf += (statusBuf ? '\n' : '') + toolLabel(JSON.parse(event.data));
+      updatePreview();
+    } catch {}
+  });
+  es.addEventListener('loading', event => {
+    // ADR-0037: local-model (e.g. Ollama) active load/unload visibility.
+    try {
+      const info = JSON.parse(event.data);
+      statusBuf += (statusBuf ? '\n' : '') + (info.from
+        ? `switching ${info.from} → ${info.to}…`
+        : `loading ${info.to}…`);
       updatePreview();
     } catch {}
   });
@@ -10924,6 +10944,8 @@ function renderProvidersCatalog() {
     const color = info.color || '#888888';
     const authText = info.auth_type === 'api_key'
       ? (hasMissingSecrets ? `missing: ${missingSecrets.join(', ')}` : 'API key configured')
+      : info.auth_type === 'none'
+      ? 'no auth'
       : 'subscription auth';
     const statusClass = hasMissingSecrets ? 'bcat-status-miss' : 'bcat-status-ok';
     const statusMark = hasMissingSecrets ? '✗' : '✓';

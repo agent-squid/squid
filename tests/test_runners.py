@@ -3,6 +3,7 @@ Unit tests for runners.py process registry and kill functions.
 """
 import asyncio
 import json
+import json as _json  # unshadowed alias for use inside fakes with a `json=` kwarg
 import signal
 import time
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from agent.runners import (
     kill_proc_by_msg_id,
     list_active_procs,
     CLIAuthRequired,
+    CLIError,
     runner_for_backend,
     runner_for_harness,
     run_claude,
@@ -28,6 +30,7 @@ from agent.runners import (
     run_codex,
     run_cursor,
     run_echo,
+    run_ollama,
     run_opencode,
     run_pi,
 )
@@ -162,6 +165,92 @@ def test_run_echo_resumes_the_given_session_id():
 
     chunks = asyncio.run(collect())
     assert chunks[1]["_stats"]["session_id"] == "prior-session"
+
+
+# --- run_ollama (ADR-0037, Path B) ------------------------------------------
+
+
+class _FakeOllamaStreamResponse:
+    def __init__(self, lines, status_code=200):
+        self._lines = lines
+        self.status_code = status_code
+
+    async def aiter_lines(self):
+        for line in self._lines:
+            yield line
+
+    async def aread(self):
+        return b""
+
+
+class _FakeOllamaStreamCtx:
+    def __init__(self, resp):
+        self._resp = resp
+
+    async def __aenter__(self):
+        return self._resp
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeOllamaClient:
+    """Stands in for httpx.AsyncClient — no real network call.
+    captured[0] records the last (method, url, json) client.stream() call."""
+    captured = None
+
+    def __init__(self, *a, **kw):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def stream(self, method, url, json=None):
+        type(self).captured = (method, url, json)
+        lines = [
+            _json.dumps({"message": {"content": "Hello"}, "done": False}),
+            _json.dumps({"message": {"content": " world"}, "done": False}),
+            "",  # blank keep-alive line Ollama sometimes sends — must be skipped
+            _json.dumps({"done": True, "prompt_eval_count": 5, "eval_count": 2}),
+        ]
+        return _FakeOllamaStreamCtx(_FakeOllamaStreamResponse(lines))
+
+
+def test_run_ollama_streams_text_deltas_and_yields_stats():
+    async def collect():
+        with patch("httpx.AsyncClient", _FakeOllamaClient):
+            return [chunk async for chunk in run_ollama(
+                "hi", model="qwen2.5:7b", msg_id=7,
+                backend_env={"OLLAMA_BASE_URL": "http://localhost:11434/v1"},
+            )]
+
+    chunks = asyncio.run(collect())
+    text = "".join(c for c in chunks if isinstance(c, str))
+    stats = next(c["_stats"] for c in chunks if isinstance(c, dict) and "_stats" in c)
+    assert text == "Hello world"
+    assert stats["model"] == "qwen2.5:7b"
+    assert stats["input_tokens"] == 5
+    assert stats["output_tokens"] == 2
+    assert stats["session_id"] == "ollama-7"
+    method, url, payload = _FakeOllamaClient.captured
+    assert url == "http://localhost:11434/api/chat"
+    assert payload["model"] == "qwen2.5:7b"
+
+
+def test_run_ollama_raises_cli_error_on_non_200():
+    class ErrClient(_FakeOllamaClient):
+        def stream(self, method, url, json=None):
+            return _FakeOllamaStreamCtx(_FakeOllamaStreamResponse([], status_code=500))
+
+    async def collect():
+        with patch("httpx.AsyncClient", ErrClient):
+            return [chunk async for chunk in run_ollama("hi", model="qwen2.5:7b")]
+
+    with pytest.raises(CLIError):
+        asyncio.run(collect())
 
 
 def test_child_env_applies_backend_env(monkeypatch):

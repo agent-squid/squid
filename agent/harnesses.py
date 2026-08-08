@@ -24,7 +24,8 @@ from .config import CLAUDE_PATH, CODEX_PATH, CURSOR_PATH, OPENCODE_PATH, PI_PATH
 # unless the id is first found in SUPPORTED_HARNESSES) and keeps the
 # opt-in check in exactly one place.
 SUPPORTED_HARNESSES = frozenset(
-    {"claudecode", "codex", "cursor", "opencode", "pi"} | ({"echo"} if TEST_HARNESS_ENABLED else set())
+    {"claudecode", "codex", "cursor", "opencode", "pi", "ollama"}
+    | ({"echo"} if TEST_HARNESS_ENABLED else set())
 )
 SUPPORTED_PROTOCOLS = frozenset({"oneshot-cli", "interactive-cli", "interactive-pty"})
 _ID_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
@@ -36,6 +37,7 @@ SUPPORTED_PROTOCOLS_BY_HARNESS: dict[str, frozenset[str]] = {
     "cursor": frozenset({"oneshot-cli"}),
     "opencode": frozenset({"oneshot-cli"}),
     "pi": frozenset({"oneshot-cli"}),
+    "ollama": frozenset({"oneshot-cli"}),
     "echo": frozenset({"oneshot-cli"}),
 }
 _DEFAULT_PROTOCOL_BY_HARNESS: dict[str, str] = {
@@ -44,6 +46,7 @@ _DEFAULT_PROTOCOL_BY_HARNESS: dict[str, str] = {
     "cursor": "oneshot-cli",
     "opencode": "oneshot-cli",
     "pi": "oneshot-cli",
+    "ollama": "oneshot-cli",
     "echo": "oneshot-cli",
 }
 
@@ -55,6 +58,14 @@ _HARNESS_PATHS: dict[str, "str | None"] = {
     "cursor": CURSOR_PATH,
     "opencode": OPENCODE_PATH,
     "pi": PI_PATH,
+    # No CLI binary — run_ollama (ADR-0037, Path B) talks to the daemon's
+    # HTTP API directly, never shells out — so like "echo" below, a fixed
+    # sentinel makes is_installed() report true unconditionally rather than
+    # doing a live network reachability check on every call site (some of
+    # which, e.g. /health, are hot/latency-sensitive). Real reachability is
+    # still checked where it matters: per-turn, via the /api/ps residency
+    # check in topic_queue.py's provider-scoped load/unload handling.
+    "ollama": "ollama-daemon",
     # No real binary — run_echo never shells out — but is_installed() only
     # ever reports true/false from truthiness, so a fixed sentinel makes
     # Squid Echo always "installed" whenever it's enabled at all.
@@ -67,6 +78,7 @@ _DEFAULT_HARNESS_LABELS: dict[str, str] = {
     "cursor": "Cursor",
     "opencode": "OpenCode",
     "pi": "Pi",
+    "ollama": "Ollama",
     "echo": "Squid Echo",
 }
 
@@ -78,6 +90,7 @@ _HARNESS_INSTALL: dict[str, str] = {
     "cursor": "curl -fsS https://cursor.com/install | bash",
     "opencode": "curl -fsSL https://opencode.ai/install | bash",
     "pi": "curl -fsSL https://pi.dev/install.sh | sh",
+    "ollama": "curl -fsSL https://ollama.com/install.sh | sh",
     "echo": "built in — nothing to install; set SQUID_TEST_HARNESS=1 to enable",
 }
 
@@ -87,6 +100,7 @@ _DEFAULT_PROVIDER_BY_HARNESS: dict[str, str] = {
     "cursor": "cursor",
     "opencode": "nvidia",
     "pi": "nvidia",
+    "ollama": "ollama",
     "echo": "echo",
 }
 
@@ -96,6 +110,7 @@ _DEFAULT_SUPPORTED_APIS_BY_HARNESS: dict[str, frozenset[str]] = {
     "cursor": frozenset({"/native/cursor"}),
     "opencode": frozenset({"/v1/chat/completions", "/native/opencode"}),
     "pi": frozenset({"/v1/chat/completions"}),
+    "ollama": frozenset({"/native/ollama"}),
     "echo": frozenset({"/native/echo"}),
 }
 

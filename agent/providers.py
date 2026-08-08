@@ -2,10 +2,10 @@
 
 A provider owns everything about an API endpoint that doesn't depend on
 which harness is using it: label, color (quota-pool identity — see
-ADR-0028's "color ties to provider" decision), base_url, auth (api_key or
-subscription), gauge, models (a UI suggestion list, never server-validated),
-and the env/settings/args escape hatches that used to live on backend
-(ADR-0024).
+ADR-0028's "color ties to provider" decision), base_url, auth (api_key,
+subscription, or none — see ADR-0037 for the local-daemon `none` case),
+gauge, models (a UI suggestion list, never server-validated), and the
+env/settings/args escape hatches that used to live on backend (ADR-0024).
 """
 
 from __future__ import annotations
@@ -17,7 +17,10 @@ from typing import Any, Optional
 
 from .config import TEST_HARNESS_ENABLED, _cfg
 
-SUPPORTED_AUTH_TYPES = frozenset({"api_key", "subscription"})
+# "none" (ADR-0037): a local, credential-free daemon such as Ollama — no
+# secret to check for, and it's what agent/topic_queue.py keys its
+# provider-scoped serial-queueing behavior off of.
+SUPPORTED_AUTH_TYPES = frozenset({"api_key", "subscription", "none"})
 SUPPORTED_GAUGES = frozenset({"claude", "codex", "cursor", "deepseek", "kimi", "static", "none"})
 _ID_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 _COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -69,6 +72,7 @@ class Provider:
     base_url: Optional[str] = None
     auth_type: str = "subscription"
     api_key: Any = None
+    parallel: bool = True
     gauge: Gauge = field(default_factory=Gauge)
     models: tuple[str, ...] = ()
     supported_apis: frozenset[str] = field(default_factory=frozenset)
@@ -122,6 +126,7 @@ class Provider:
             "color": self.color,
             "base_url": self.base_url,
             "auth_type": self.auth_type,
+            "parallel": self.parallel,
             "missing_secrets": self.missing_secrets(),
             "gauge": self.gauge.public_dict(),
             "models": list(self.models),
@@ -202,6 +207,10 @@ def _validate_provider(provider_id: str, raw: Any) -> Provider:
     if auth_type == "api_key" and not api_key:
         raise ValueError(f"Provider {provider_id!r} auth.type is api_key but auth.api_key is not set")
 
+    parallel = raw.get("parallel", True)
+    if not isinstance(parallel, bool):
+        raise ValueError(f"Provider {provider_id!r} parallel must be a boolean")
+
     env = raw.get("env") or {}
     if not isinstance(env, dict):
         raise ValueError(f"Provider {provider_id!r} env must be a mapping")
@@ -229,7 +238,7 @@ def _validate_provider(provider_id: str, raw: Any) -> Provider:
     supported_apis = _validate_supported_apis(provider_id, raw.get("supported_apis"))
     gauge = _validate_gauge(provider_id, raw.get("gauge"))
 
-    return Provider(provider_id, label, color.upper(), base_url, auth_type, api_key,
+    return Provider(provider_id, label, color.upper(), base_url, auth_type, api_key, parallel,
                     gauge, tuple(models), supported_apis, env, settings, tuple(args))
 
 

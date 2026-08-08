@@ -5120,7 +5120,7 @@ button {
   white-space: nowrap;
 }
 #session-advisory-clear:hover { color: var(--text); border-color: #6a5040; }
-.advisory-clear-icon { display: none; }
+.advisory-clear-icon { display: none; font-size: 14px; }
 @media (max-width: 768px) {
   .advisory-clear-label { display: none; }
   .advisory-clear-icon { display: block; }

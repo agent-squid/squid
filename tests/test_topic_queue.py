@@ -931,3 +931,250 @@ def test_worker_bug_emits_error_and_sentinel():
     error, sentinel = asyncio.run(run())
     assert error == {"_error": "boom"}
     assert sentinel is None
+
+
+# --- ADR-0037: provider-scoped queueing + active load/unload ---------------
+
+
+def _fake_local_provider(provider_id="ollama"):
+    from agent.providers import Provider
+
+    return Provider(id=provider_id, label="Ollama", auth_type="none", parallel=False,
+                     base_url="http://localhost:11434/v1")
+
+
+def test_dispatch_collapses_local_provider_agents_into_one_shared_lane():
+    # Two different topics/agents that both resolve to a parallel: false
+    # provider must land in the same TopicWorker (one FIFO lane per physical
+    # resource), unlike every other provider which keeps per-(topic, agent)
+    # parallel lanes.
+    async def run():
+        dispatcher = TopicDispatcher()
+        with patch.object(TopicWorker, "start", lambda self: None), \
+             patch("agent.providers.get_provider", lambda pid: _fake_local_provider(pid)):
+            _out_q1, _seq1, worker1 = await dispatcher.dispatch(
+                topic="topicA", prompt="hi", context_history=[],
+                harness="pi", provider="ollama", agent="qwen25-pi",
+            )
+            _out_q2, _seq2, worker2 = await dispatcher.dispatch(
+                topic="topicB", prompt="hi", context_history=[],
+                harness="ollama", provider="ollama", agent="qwen30-ollama",
+            )
+        return worker1, worker2, dispatcher._workers
+
+    worker1, worker2, workers = asyncio.run(run())
+    assert worker1 is worker2
+    assert list(workers.keys()) == ["provider:ollama"]
+
+
+def test_dispatch_collapses_adhoc_into_shared_lane_for_local_provider():
+    # An adhoc prompt against a parallel: false provider must join the same
+    # shared lane as session traffic, not get its own always-parallel
+    # ephemeral worker — otherwise adhoc requests would thrash the local
+    # daemon/GPU alongside whatever's already queued there.
+    async def run():
+        dispatcher = TopicDispatcher()
+        with patch.object(TopicWorker, "start", lambda self: None), \
+             patch("agent.providers.get_provider", lambda pid: _fake_local_provider(pid)):
+            _out_q1, _seq1, worker1 = await dispatcher.dispatch(
+                topic="topicA", prompt="hi", context_history=[],
+                harness="pi", provider="ollama", agent="qwen25-pi",
+            )
+            _out_q2, _seq2, worker2 = await dispatcher.dispatch(
+                topic="topicB", prompt="hi", context_history=[],
+                harness="ollama", provider="ollama", agent="qwen30-ollama",
+                adhoc=True,
+            )
+        return worker1, worker2, dispatcher._workers
+
+    worker1, worker2, workers = asyncio.run(run())
+    assert worker1 is worker2
+    assert list(workers.keys()) == ["provider:ollama"]
+
+
+def test_dispatch_parallel_flag_overrides_auth_type():
+    # parallel is independent of auth.type: a credential-free provider that
+    # opts back into parallel: true must NOT collapse into a shared lane...
+    from agent.providers import Provider
+
+    async def run_parallel_none_auth():
+        dispatcher = TopicDispatcher()
+        beefy = Provider(id="ollama", label="Ollama", auth_type="none", parallel=True,
+                          base_url="http://localhost:11434/v1")
+        with patch.object(TopicWorker, "start", lambda self: None), \
+             patch("agent.providers.get_provider", lambda pid: beefy):
+            _out_q1, _seq1, worker1 = await dispatcher.dispatch(
+                topic="topicA", prompt="hi", context_history=[],
+                harness="pi", provider="ollama", agent="qwen25-pi",
+            )
+            _out_q2, _seq2, worker2 = await dispatcher.dispatch(
+                topic="topicB", prompt="hi", context_history=[],
+                harness="pi", provider="ollama", agent="qwen30-pi",
+            )
+        return worker1, worker2
+
+    worker1, worker2 = asyncio.run(run_parallel_none_auth())
+    assert worker1 is not worker2
+
+    # ...and conversely, an api_key/subscription provider marked
+    # parallel: false must collapse just like a none-auth one would.
+    async def run_serial_key_auth():
+        dispatcher = TopicDispatcher()
+        shared = Provider(id="shared-vllm", label="Shared vLLM", auth_type="api_key",
+                           api_key="secret", parallel=False, base_url="http://vllm.internal/v1")
+        with patch.object(TopicWorker, "start", lambda self: None), \
+             patch("agent.providers.get_provider", lambda pid: shared):
+            _out_q1, _seq1, worker1 = await dispatcher.dispatch(
+                topic="topicA", prompt="hi", context_history=[],
+                harness="pi", provider="shared-vllm", agent="a",
+            )
+            _out_q2, _seq2, worker2 = await dispatcher.dispatch(
+                topic="topicB", prompt="hi", context_history=[],
+                harness="pi", provider="shared-vllm", agent="b",
+            )
+        return worker1, worker2, dispatcher._workers
+
+    worker1, worker2, workers = asyncio.run(run_serial_key_auth())
+    assert worker1 is worker2
+    assert list(workers.keys()) == ["provider:shared-vllm"]
+
+
+def test_dispatch_keeps_parallel_lanes_for_non_local_provider():
+    async def run():
+        dispatcher = TopicDispatcher()
+        with patch.object(TopicWorker, "start", lambda self: None):
+            _out_q1, _seq1, worker1 = await dispatcher.dispatch(
+                topic="topicA", prompt="hi", context_history=[],
+                harness="codex", provider="openai", agent="codex-a",
+            )
+            _out_q2, _seq2, worker2 = await dispatcher.dispatch(
+                topic="topicB", prompt="hi", context_history=[],
+                harness="codex", provider="openai", agent="codex-b",
+            )
+        return worker1, worker2
+
+    worker1, worker2 = asyncio.run(run())
+    assert worker1 is not worker2
+
+
+def test_dispatch_falls_back_to_legacy_key_for_unknown_harness():
+    # default_provider_for() KeyErrors on an unresolvable harness — dispatch
+    # must swallow that and enqueue anyway so resolve_agent() inside
+    # _process() can report the real error, instead of raising before the
+    # item is even queued.
+    async def run():
+        dispatcher = TopicDispatcher()
+        with patch.object(TopicWorker, "start", lambda self: None), \
+             patch.object(TopicWorker, "enqueue", return_value=9):
+            _out_q, seq, worker = await dispatcher.dispatch(
+                topic="work", prompt="hi", context_history=[],
+                harness="not-a-real-harness", agent="ghost",
+            )
+        return seq, dispatcher._workers
+
+    seq, workers = asyncio.run(run())
+    assert seq == 9
+    assert list(workers.keys()) == ["work@ghost"]
+
+
+def test_drain_topic_scopes_to_requesting_topic_in_shared_provider_lane():
+    # A provider-scoped lane can hold items from multiple topics at once —
+    # draining topic A must not touch topic B's queued items.
+    async def run():
+        dispatcher = TopicDispatcher()
+        worker = TopicWorker("topicA")
+        dispatcher._workers["provider:ollama"] = worker
+        item_a = QueueItem(seq=0, topic="topicA", agent="qwen25-pi", prompt="p",
+                            context_history=[], backend="pi", model=None, msg_id=1)
+        item_b = QueueItem(seq=1, topic="topicB", agent="qwen30-ollama", prompt="p",
+                            context_history=[], backend="ollama", model=None, msg_id=2)
+        worker.q.put_nowait(item_a)
+        worker.q.put_nowait(item_b)
+
+        drained = dispatcher.drain_topic("topicA")
+        remaining = worker.queue_items()
+        return drained, remaining
+
+    with patch("agent.stats_db.mark_assistant_cancelled"):
+        drained, remaining = asyncio.run(run())
+    assert drained == 1
+    assert len(remaining) == 1
+    assert remaining[0]["topic"] == "topicB"
+
+
+def test_sync_local_model_emits_loading_event_and_unloads_on_switch():
+    async def run():
+        worker = TopicWorker("work")
+        provider = _fake_local_provider()
+        out_q: asyncio.Queue = asyncio.Queue()
+        posted = []
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"models": []}
+
+        class FakeClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get(self, url):
+                return FakeResponse()
+
+            async def post(self, url, json):
+                posted.append((url, json))
+                return FakeResponse()
+
+        with patch("httpx.AsyncClient", FakeClient):
+            await worker._sync_local_model(provider, "qwen2.5:7b", out_q)
+            first_event = await asyncio.wait_for(out_q.get(), timeout=1)
+            await worker._sync_local_model(provider, "qwen3:8b", out_q)
+            second_event = await asyncio.wait_for(out_q.get(), timeout=1)
+        return first_event, second_event, posted
+
+    first_event, second_event, posted = asyncio.run(run())
+    assert first_event == {"_loading": {"to": "qwen2.5:7b"}}
+    assert second_event == {"_loading": {"to": "qwen3:8b", "from": "qwen2.5:7b"}}
+    assert len(posted) == 1
+    assert posted[0][1]["model"] == "qwen2.5:7b"
+    assert posted[0][1]["keep_alive"] == 0
+
+
+def test_sync_local_model_stays_quiet_when_resident_and_unchanged():
+    async def run():
+        worker = TopicWorker("work")
+        worker._last_local_model = "qwen2.5:7b"
+        provider = _fake_local_provider()
+        out_q: asyncio.Queue = asyncio.Queue()
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"models": [{"model": "qwen2.5:7b"}]}
+
+        class FakeClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get(self, url):
+                return FakeResponse()
+
+        with patch("httpx.AsyncClient", FakeClient):
+            await worker._sync_local_model(provider, "qwen2.5:7b", out_q)
+        return out_q.empty()
+
+    assert asyncio.run(run()) is True

@@ -22,6 +22,7 @@
 | Cursor Agent | `cursor-agent` | `curl -fsS https://cursor.com/install \| bash` |
 | OpenCode | `opencode` | `curl -fsSL https://opencode.ai/install \| bash` |
 | Pi | `pi` | `curl -fsSL https://pi.dev/install.sh \| sh` |
+| Ollama *(optional, local models)* | `ollama` | `curl -fsSL https://ollama.com/install.sh \| sh` |
 
 2. Install and run AgentSquid!
 

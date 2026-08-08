@@ -192,6 +192,9 @@ class TopicWorker:
         self.q: asyncio.Queue = asyncio.Queue()
         self._processing_seq: Optional[int] = None
         self._next_seq: int = 0
+        # ADR-0037: last model this lane dispatched — only meaningful for a
+        # provider-scoped (parallel: false) lane, unused/always None otherwise.
+        self._last_local_model: Optional[str] = None
 
     def start(self):
         asyncio.create_task(self._run(), name=f"squid-worker-{self.topic}")
@@ -236,12 +239,18 @@ class TopicWorker:
         await self.q.put(item)
         return item.seq
 
-    def drain(self, pos: Optional[int] = None) -> int:
+    def drain(self, pos: Optional[int] = None, topic: Optional[str] = None) -> int:
         """Remove pending items from the queue (not the currently-running one).
         pos=None  → drain all
         pos=N>0   → remove Nth item (1-based, from front)
         pos=N<0   → remove Nth item from end (-1=last, -2=second-to-last, …)
         Cancelled items get an error sentinel so waiting SSE clients close cleanly.
+
+        topic, if given, scopes both pos indexing and the pos=None case to only
+        that topic's items. Needed for provider-scoped lanes (ADR-0037) shared
+        by multiple topics — draining topic A must not touch topic B's items
+        sitting in the same shared lane. No-op filter for exclusive lanes,
+        where every item already belongs to the one topic that owns them.
         """
         from .stats_db import mark_assistant_cancelled
         pending = []
@@ -257,28 +266,84 @@ class TopicWorker:
             item.out_q.put_nowait({"_error": "Cancelled"})
             item.out_q.put_nowait(None)
 
-        if pos is None:
-            for item in pending:
-                if item is not None:
-                    _cancel(item)
-            return len(pending)
+        def _in_scope(item):
+            return topic is None or item.topic == topic
 
         real = [i for i in pending if i is not None]
-        if not real:
-            return 0
 
-        # Convert to 0-based index
-        idx = (pos - 1) if pos > 0 else pos
-        if idx < -len(real) or idx >= len(real):
+        if pos is None:
+            removed = 0
+            for item in real:
+                if _in_scope(item):
+                    _cancel(item)
+                    removed += 1
+                else:
+                    self.q.put_nowait(item)
+            return removed
+
+        scoped_indices = [i for i, item in enumerate(real) if _in_scope(item)]
+        if not scoped_indices:
             for item in real:
                 self.q.put_nowait(item)
             return 0
 
-        removed = real.pop(idx)
-        _cancel(removed)
-        for item in real:
-            self.q.put_nowait(item)
+        # Convert to 0-based index within the scoped subsequence.
+        idx = (pos - 1) if pos > 0 else pos
+        if idx < -len(scoped_indices) or idx >= len(scoped_indices):
+            for item in real:
+                self.q.put_nowait(item)
+            return 0
+
+        target_idx = scoped_indices[idx]
+        for i, item in enumerate(real):
+            if i == target_idx:
+                _cancel(item)
+            else:
+                self.q.put_nowait(item)
         return 1
+
+    async def _sync_local_model(self, provider, model: str, out_q: asyncio.Queue) -> None:
+        """ADR-0037: active load/unload for a provider-scoped local-model
+        lane. Checks residency via Ollama's `GET /api/ps`, emits a
+        `"loading"` event (before dispatch) if the target model isn't
+        resident or this lane is switching to a different model than it
+        last dispatched, and actively unloads the outgoing model
+        (`keep_alive: 0`) on a switch instead of waiting on Ollama's own
+        idle-eviction timer. Ollama-specific — `/api/ps`/`keep_alive` are
+        its API, not a generic local-model-server contract; fine since it's
+        the only local backend in scope for this ADR."""
+        import httpx
+        base_url = (provider.base_url or "").rstrip("/")
+        native_base = base_url[:-3] if base_url.endswith("/v1") else base_url
+        prev_model = self._last_local_model
+
+        resident: set[str] = set()
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                r = await client.get(f"{native_base}/api/ps")
+            if r.status_code == 200:
+                resident = {m.get("model") for m in r.json().get("models", []) if m.get("model")}
+        except Exception:
+            log.debug("Ollama /api/ps check failed for provider=%s", provider.id, exc_info=True)
+
+        switching = bool(prev_model) and prev_model != model
+        if model not in resident or switching:
+            payload = {"to": model}
+            if switching:
+                payload["from"] = prev_model
+            await out_q.put({"_loading": payload})
+
+        if switching:
+            try:
+                async with httpx.AsyncClient(timeout=5) as client:
+                    await client.post(
+                        f"{native_base}/api/chat",
+                        json={"model": prev_model, "messages": [], "keep_alive": 0},
+                    )
+            except Exception:
+                log.debug("Ollama unload failed for model=%s provider=%s", prev_model, provider.id, exc_info=True)
+
+        self._last_local_model = model
 
     async def _run(self):
         while True:
@@ -344,6 +409,9 @@ class TopicWorker:
             await item.out_q.put({"_error": str(exc)})
             await item.out_q.put(None)
             return
+
+        if not resolved.provider.parallel and item.model:
+            await self._sync_local_model(resolved.provider, item.model, item.out_q)
 
         run_seq = 0
         raw = ""
@@ -750,7 +818,35 @@ class TopicDispatcher:
         worktree_setup_elapsed_ms: Optional[float] = None,
         worktree_isolated: bool = False,
     ) -> tuple[asyncio.Queue, int, TopicWorker]:
-        if adhoc:
+        from .resolve import split_agent_ref
+        resolved_harness, resolved_provider = split_agent_ref(harness or backend, provider)
+        # ADR-0037: agents on a provider marked `parallel: false` (e.g. a
+        # single-GPU local Ollama box) share one FIFO lane keyed by provider
+        # name — regardless of topic, agent, harness, or adhoc-ness — since
+        # the backing resource can't actually serve concurrent requests
+        # without thrashing. This is independent of auth.type: a
+        # credential-free provider on beefier hardware can set
+        # `parallel: true` to opt back into concurrency, and a shared
+        # api_key-auth endpoint can set `parallel: false` if it needs
+        # serialization too. This is checked before the adhoc branch so
+        # adhoc prompts against a serial-only provider queue behind session
+        # traffic on that same provider instead of firing in parallel and
+        # contending for the same resource. Every other provider keeps
+        # today's behavior (adhoc always parallel, session traffic
+        # per-(topic, agent) parallel lanes).
+        from .harnesses import default_provider_for
+        from .providers import get_provider
+        try:
+            provider_id = resolved_provider or default_provider_for(resolved_harness)
+            provider_obj = get_provider(provider_id)
+        except KeyError:
+            # Unknown harness — let resolve_agent() inside _process
+            # surface the real error to the caller as it does today,
+            # rather than failing before the item is even enqueued.
+            provider_obj = None
+        if provider_obj is not None and not provider_obj.parallel:
+            queue_key = f"provider:{provider_obj.id}"
+        elif adhoc:
             # Each adhoc message gets its own ephemeral worker — never queued, always parallel.
             self._adhoc_counter += 1
             queue_key = f"__adhoc_{self._adhoc_counter}"
@@ -758,8 +854,6 @@ class TopicDispatcher:
             queue_key = f"{topic}@{agent}" if agent else topic
         worker = self._get_or_create(queue_key, topic)
         self._sweep_worktrees(topic)
-        from .resolve import split_agent_ref
-        resolved_harness, resolved_provider = split_agent_ref(harness or backend, provider)
         item = QueueItem(
             seq=0, topic=topic, agent=agent,
             prompt=prompt, display_prompt=display_prompt, context_history=context_history,
@@ -775,8 +869,19 @@ class TopicDispatcher:
         return item.out_q, seq, worker
 
     def _workers_for_topic(self, topic: str) -> list[TopicWorker]:
-        """Return all workers whose queue key starts with this topic."""
-        return [w for k, w in self._workers.items() if k == topic or k.startswith(f"{topic}@")]
+        """Return all workers holding items for this topic: exclusive
+        per-(topic, agent) lanes (key match), plus any provider-scoped
+        shared lane (ADR-0037, key f"provider:{name}") currently holding at
+        least one queued item for this topic."""
+        result = []
+        for k, w in self._workers.items():
+            if k == topic or k.startswith(f"{topic}@"):
+                result.append(w)
+            elif k.startswith("provider:") and any(
+                item is not None and item.topic == topic for item in w.q._queue
+            ):
+                result.append(w)
+        return result
 
     def stop_topic(self, topic: str, agent: Optional[str] = None,
                    adhoc: Optional[bool] = None) -> int:
@@ -796,12 +901,12 @@ class TopicDispatcher:
         for msg_id in active_msg_ids_by_topic(topic, agent=agent, adhoc=adhoc):
             mark_assistant_cancelled(msg_id, "Cancelled")
         killed = kill_procs_by_topic(topic, agent=agent, adhoc=adhoc)
-        drained = sum(w.drain() for w in self._workers_for_topic(topic))
+        drained = sum(w.drain(topic=topic) for w in self._workers_for_topic(topic))
         return {"killed": killed, "drained": drained}
 
     def drain_topic(self, topic: str, pos: Optional[int] = None) -> int:
         """Drain pending items for topic across all agent lanes."""
-        return sum(w.drain(pos) for w in self._workers_for_topic(topic))
+        return sum(w.drain(pos, topic=topic) for w in self._workers_for_topic(topic))
 
     def all_queued_items(self) -> list[dict]:
         """Return pending (not yet running) items across all topic workers."""
