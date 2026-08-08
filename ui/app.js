@@ -6651,6 +6651,15 @@ function reconnectPendingItem(item, wipBubble) {
       updatePreview();
     } catch {}
   });
+  es.addEventListener('queued', event => {
+    // ADR-0037: provider-scoped FIFO lane — replayed so a flow-dispatched
+    // sibling turn (no live client) still shows it's waiting, not loading.
+    try {
+      const info = JSON.parse(event.data);
+      statusBuf += (statusBuf ? '\n' : '') + `#${info.topic} · queued — position ${info.position}`;
+      updatePreview();
+    } catch {}
+  });
   es.addEventListener('done', async () => {
     closed = true;
     es.close();

@@ -302,7 +302,7 @@ class TopicWorker:
                 self.q.put_nowait(item)
         return 1
 
-    async def _sync_local_model(self, provider, model: str, out_q: asyncio.Queue) -> None:
+    async def _sync_local_model(self, provider, model: str, out_q: asyncio.Queue, msg_id: Optional[int] = None) -> None:
         """ADR-0037: active load/unload for a provider-scoped local-model
         lane. Checks residency via Ollama's `GET /api/ps`, emits a
         `"loading"` event (before dispatch) if the target model isn't
@@ -331,6 +331,14 @@ class TopicWorker:
             payload = {"to": model}
             if switching:
                 payload["from"] = prev_model
+            if msg_id is not None:
+                from .stats_db import insert_run_event
+                # seq=1: reserved slot before _process's own run_seq counter
+                # (which now starts at 2, see below) so a reconnecting/
+                # flow-dispatched client can see load state on replay. Must be
+                # >= 0 since get_run_events()'s default after_seq=-1 filter is
+                # seq > after_seq, which would silently drop negative seqs.
+                insert_run_event(msg_id, 1, "loading", json.dumps(payload))
             await out_q.put({"_loading": payload})
 
         if switching:
@@ -411,9 +419,11 @@ class TopicWorker:
             return
 
         if not resolved.provider.parallel and item.model:
-            await self._sync_local_model(resolved.provider, item.model, item.out_q)
+            await self._sync_local_model(resolved.provider, item.model, item.out_q, msg_id=item.msg_id)
 
-        run_seq = 0
+        # 0 and 1 are reserved for the "queued" (dispatch()) and "loading"
+        # (_sync_local_model) run_events persisted before this turn started.
+        run_seq = 2
         raw = ""
         status_raw = ""
         tool_events: list[dict] = []
@@ -866,6 +876,15 @@ class TopicDispatcher:
             worktree_isolated=worktree_isolated,
         )
         seq = await worker.enqueue(item)
+        position = worker.position_of(seq)
+        if msg_id is not None and position > 0:
+            from .stats_db import insert_run_event
+            # seq=0: reserved slot, always ahead of the "loading" (seq=1) and
+            # _process's own run_seq counter (starts at 2, see _process), so a
+            # reconnecting/flow-dispatched client (which never sees the live
+            # SSE "queued" poll loop in stream_response) can still tell this
+            # turn sat behind others in a FIFO lane.
+            insert_run_event(msg_id, 0, "queued", json.dumps({"topic": topic, "position": position}))
         return item.out_q, seq, worker
 
     def _workers_for_topic(self, topic: str) -> list[TopicWorker]:

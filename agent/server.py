@@ -1657,7 +1657,7 @@ async def message_events(msg_id: int, after_seq: int = -1):
                 payload = event["payload"] or ""
                 if event_type == "text":
                     yield sse_chunk(payload)
-                elif event_type in {"stats", "status", "tool"}:
+                elif event_type in {"stats", "status", "tool", "loading", "queued"}:
                     yield sse_event(event_type, payload)
                 elif event_type == "done":
                     yield sse_event("done")
