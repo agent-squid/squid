@@ -53,6 +53,36 @@ def test_chat_messages_source_defaults_and_can_mark_system(tmp_path, monkeypatch
     assert stats_db.get_message(system_asst)["prompt_source"] == "workflow"
 
 
+def test_get_session_turn_boundaries_orders_by_turn_and_converts_to_epoch_ms(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    u1 = stats_db.insert_user_message("squid", "opencode", "first")
+    m1 = stats_db.insert_assistant_message("squid", "opencode", u1)
+    stats_db.update_assistant_message(m1, "reply one", "ses_abc", "done")
+
+    u2 = stats_db.insert_user_message("squid", "opencode", "second")
+    m2 = stats_db.insert_assistant_message("squid", "opencode", u2)
+    stats_db.update_assistant_message(m2, "reply two", "ses_abc", "done")
+
+    # A different session's turns must never leak in.
+    u3 = stats_db.insert_user_message("squid", "opencode", "other session")
+    m3 = stats_db.insert_assistant_message("squid", "opencode", u3)
+    stats_db.update_assistant_message(m3, "reply", "ses_other", "done")
+
+    turns = stats_db.get_session_turn_boundaries("ses_abc")
+
+    assert [t["msg_id"] for t in turns] == [m1, m2]
+    assert [t["turn_index"] for t in turns] == [1, 2]
+    assert all(isinstance(t["time_ms"], int) and t["time_ms"] > 0 for t in turns)
+
+
+def test_get_session_turn_boundaries_empty_for_unknown_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    assert stats_db.get_session_turn_boundaries("ses_does_not_exist") == []
+
+
 def test_message_annotations_store_bad_response_marker(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

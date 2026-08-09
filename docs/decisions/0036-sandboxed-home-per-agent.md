@@ -15,8 +15,13 @@ each installed CLI under a throwaway `HOME`:
 claudecode -> ~/.claude/.credentials.json, ~/.claude/settings.json
 codex      -> ~/.codex/auth.json, ~/.codex/config.toml, ~/.codex/plugins, ~/.codex/skills
 cursor     -> ~/.cursor/cli-config.json
-opencode   -> ~/.config/opencode/, ~/.local/share/opencode/  (XDG defaults, not confirmed
-              to hold the credential specifically — see Open items)
+opencode   -> ~/.local/share/opencode/opencode.db   (confirmed 2026-08-09 by inspecting it
+              directly: one SQLite DB holds `session`/`message`/`part` — the full
+              conversation history, not just credentials — plus a `credential` table for
+              any native-login provider. Custom/gateway providers, e.g. Ollama, DeepSeek,
+              don't touch this file at all — opencode takes those via the
+              OPENCODE_CONFIG_CONTENT env var instead, so they already worked under Blank
+              Home before this was resolved)
 pi         -> ~/.pi/agent/auth.json   (OAuth access/refresh tokens per provider,
               e.g. "anthropic"; written by `pi auth`. Also accepts a direct
               ANTHROPIC_API_KEY / ANTHROPIC_OAUTH_TOKEN env var, but any agent
@@ -128,9 +133,21 @@ codex      -> ~/.codex/auth.json
 cursor     -> ~/.cursor/cli-config.json   (holds more than just auth; linking
               the whole file is the current plan pending confirmation of a
               narrower credential-only key — see Open items)
-opencode   -> not yet located (see Open items)
+opencode   -> ~/.local/share/opencode/opencode.db
 pi         -> ~/.pi/agent/auth.json, ~/.pi/agent/models.json
 ```
+
+`opencode` is a symlink like the rest, not a special case like `claudecode`'s
+Keychain pull — despite being a SQLite DB rather than a flat file, it doesn't
+need copy-on-reconcile treatment. Verified directly: a symlinked WAL-mode
+DB's `-wal`/`-shm` sidecar files are named off the *realpath()-resolved*
+target, not the symlink's own directory, so a real-`HOME` process and a
+Blank Home process reading the same DB through the symlink share one
+consistent WAL state rather than diverging — confirmed by writing through
+the symlinked path and reading the change back from the real path
+immediately after, and separately by running a live `opencode` turn through
+a Blank Home sandbox and observing the new message land in the real
+`opencode.db`.
 
 ### `$HOME` is not the only variable that needs overriding
 
@@ -259,10 +276,25 @@ action, which just runs the same three steps on demand.
 - `cursor`'s `~/.cursor/cli-config.json` has not been inspected for whether
   it mixes credentials with non-credential state that shouldn't be copied
   into a sandbox wholesale.
-- `opencode`'s actual credential file has not been located in this pass —
-  `~/.config/opencode/` and `~/.local/share/opencode/` were confirmed as
-  XDG-default paths in use, but not which file inside them (if any, versus
-  e.g. `opencode.db`) holds the provider credential.
+- ~~`opencode`'s actual credential file has not been located~~ Resolved
+  2026-08-09: it's `~/.local/share/opencode/opencode.db`, a SQLite DB holding
+  sessions and any native-login credential together (see the symlink target
+  table above). Also fixed the same day: `/session-log` had no `opencode`
+  support at all (not Blank-Home-specific — it never worked, since there's
+  no per-session file the way the other harnesses have). First pass
+  synthesized a fake `.jsonl` file on disk to reuse the existing file-viewer
+  UI unmodified, but that risked misleading a user into thinking it was
+  opencode's own output, and left an ever-growing pile of orphaned files
+  under `~/.squid/artifacts/` that nothing ever cleaned up. Replaced same
+  day: `_opencode_session_transcript_rows()` reads the
+  `session_message`/`message`/`part` rows for a session directly out of
+  `opencode.db` (read-only, so it can't contend with opencode's own WAL
+  writer) and returns them as data, nothing written to disk; `/session-log`
+  returns them as `entries` + `source: "opencode-sqlite"` instead of `path`,
+  and the frontend renders them in a small dedicated modal
+  (`openOpencodeSessionModal`) that labels them explicitly as reconstructed
+  from opencode's SQLite log rather than opening them in the generic file
+  viewer.
 - Only `cursor-agent`'s binary was checked for hardcoded Keychain access;
   `codex` and `opencode` were not, so a non-`HOME` credential source for
   those is unverified, not ruled out.

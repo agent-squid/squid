@@ -1031,6 +1031,35 @@ def ensure_session_turn_index(msg_id: int, session_id: Optional[str]) -> Optiona
         return _ensure_session_turn_index(conn, msg_id, session_id)
 
 
+def get_session_turn_boundaries(session_id: str) -> list[dict]:
+    """Ordered (msg_id, turn_index, time_ms) for every completed turn squid
+    recorded against this session_id -- squid's own turn grouping, which a
+    raw session log (jsonl file or opencode's SQLite rows) has no notion of
+    on its own. `created_at` is when the turn's prompt was sent, i.e. the
+    start of everything that turn's log entries belong to."""
+    from datetime import datetime, timezone
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT id AS msg_id, session_turn_index, created_at
+               FROM chat_messages
+               WHERE session_id = ? AND role = 'assistant' AND session_turn_index IS NOT NULL
+               ORDER BY session_turn_index""",
+            (session_id,),
+        ).fetchall()
+    out = []
+    for row in rows:
+        d = dict(row)
+        dt = datetime.fromisoformat(d["created_at"].replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        out.append({
+            "msg_id": d["msg_id"],
+            "turn_index": d["session_turn_index"],
+            "time_ms": int(dt.timestamp() * 1000),
+        })
+    return out
+
+
 def attach_assistant_session(msg_id: int, session_id: Optional[str]) -> bool:
     if not session_id:
         return False

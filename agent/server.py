@@ -29,6 +29,7 @@ import logging.handlers
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -85,7 +86,7 @@ from .stats_db import (
     get_context_history, get_messages_by_ids, mark_orphaned_pending, get_message,
     get_message_previews, get_flow_run_messages,
     get_completed_run_text, get_completed_run_status_raw, get_run_events, get_run_event_snapshot,
-    ensure_session_turn_index,
+    ensure_session_turn_index, get_session_turn_boundaries,
     get_session_injected_context, get_session_turn_count,
     get_topic_session, clear_topic_session,
     delete_topic, delete_topic_agent, set_topic_hidden, get_topic_agents, get_topic_agent_history,
@@ -3066,6 +3067,46 @@ def _encode_cwd_dashes(cwd: str) -> str:
     return cwd.replace("/", "-")
 
 
+def _opencode_session_transcript_rows(home: Path, session_id: str) -> Optional[list[dict]]:
+    """Read an opencode session's rows directly out of its SQLite DB.
+
+    Unlike the other harnesses, opencode keeps sessions in one SQLite DB
+    (`opencode.db`) rather than a per-session file on disk -- there's no raw
+    transcript file to locate, and synthesizing a fake one on disk would
+    misrepresent this as opencode's own native output when it isn't.
+    Returns the raw rows (control events, per-turn messages, per-turn
+    content parts) in time order for the caller to render and label
+    honestly as reconstructed from SQLite. Opened read-only (`mode=ro`) so
+    this never contends with opencode's own WAL writer.
+    """
+    db_path = home / ".local" / "share" / "opencode" / "opencode.db"
+    if not db_path.is_file():
+        return None
+    entries: list[dict] = []
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+        conn.row_factory = sqlite3.Row
+        try:
+            for kind, sql in (
+                ("session_message", "SELECT id, type, seq, time_created, data FROM session_message WHERE session_id = ?"),
+                ("message", "SELECT id, time_created, data FROM message WHERE session_id = ?"),
+                ("part", "SELECT id, message_id, time_created, data FROM part WHERE session_id = ?"),
+            ):
+                for row in conn.execute(sql, (session_id,)):
+                    entry = dict(row)
+                    entry["kind"] = kind
+                    entry["data"] = json.loads(entry["data"])
+                    entries.append(entry)
+        finally:
+            conn.close()
+    except (sqlite3.Error, json.JSONDecodeError, OSError):
+        return None
+    if not entries:
+        return None
+    entries.sort(key=lambda e: e.get("time_created", 0))
+    return entries
+
+
 def _find_session_log(harness: str, session_id: str, cwd: str, agent: str = "") -> Optional[Path]:
     """Locate a coding agent's raw on-disk session transcript (.jsonl), if any.
 
@@ -3077,6 +3118,10 @@ def _find_session_log(harness: str, session_id: str, cwd: str, agent: str = "") 
     A Blank Home agent's harness subprocess runs with $HOME pointed at its sandbox
     directory (see sandbox_home.py / ADR-0036), so its transcript lives there too,
     not under the real $HOME -- look up the same home the subprocess actually used.
+
+    opencode has no branch here -- it keeps sessions in a SQLite DB, not a
+    per-session file, so there's nothing file-shaped to locate. See
+    _opencode_session_transcript_rows() and the /session-log route below.
     """
     if not session_id:
         return None
@@ -3112,11 +3157,43 @@ def _find_session_log(harness: str, session_id: str, cwd: str, agent: str = "") 
 
 @app.get("/session-log")
 async def session_log(agent: str, session_id: str, cwd: str = ""):
-    """Resolve the local raw transcript path for a session, if the harness stores one on disk."""
+    """Resolve a session's raw transcript for viewing.
+
+    Most harnesses store one file per session on disk -- returns `path` for
+    the existing file viewer to open directly. opencode stores sessions in a
+    SQLite DB instead, so there's no file to point at: returns `entries`
+    (the raw DB rows, in time order) plus `source` so the frontend can
+    render them in a dedicated view that's honest about where they came
+    from, rather than disguising them as a file opencode itself produced.
+
+    Either way also returns `turns`: squid's own per-turn timestamps for this
+    session_id, so the viewer can mark where one squid turn's raw log
+    entries end and the next begins -- a raw transcript (jsonl or SQLite) has
+    no notion of squid's turn grouping on its own.
+    """
     agent_cfg = get_agent(agent)
     harness = agent_cfg.get("harness") if agent_cfg else None
+    turns = get_session_turn_boundaries(session_id) if session_id else []
+    if harness == "opencode":
+        home = (
+            sandbox_home.sandbox_home_path(agent)
+            if agent and sandbox_home.current_home_mode(agent) == "blank_home"
+            else Path.home()
+        )
+        entries = _opencode_session_transcript_rows(home, session_id)
+        return JSONResponse({
+            "path": None,
+            "entries": entries,
+            "source": "opencode-sqlite" if entries else None,
+            "turns": turns,
+        })
     path = _find_session_log(harness, session_id, cwd, agent) if harness else None
-    return JSONResponse({"path": str(path) if path else None})
+    return JSONResponse({
+        "path": str(path) if path else None,
+        "entries": None,
+        "source": "file" if path else None,
+        "turns": turns,
+    })
 
 
 @app.post("/localfile")

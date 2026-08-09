@@ -37,9 +37,20 @@ _CREDENTIAL_RELPATHS: dict[str, tuple[str, ...]] = {
     "codex": (".codex/auth.json",),
     "cursor": (".cursor/cli-config.json",),
     "pi": (".pi/agent/auth.json", ".pi/agent/models.json"),
-    # opencode: credential file location not yet confirmed -- see ADR-0036
-    # Open items. Blank Home still isolates its config/plugins, but a
-    # sandboxed opencode agent comes up logged out until this is resolved.
+    # opencode keeps everything -- sessions, messages, and any native-login
+    # credential -- in one SQLite DB rather than loose files (confirmed by
+    # inspecting it directly: `session`/`message`/`part`/`credential` tables).
+    # One symlink covers both gaps that used to affect it: sessions were
+    # unresumable ("Error: Session not found") and native-login auth was
+    # unavailable under Blank Home. Custom/gateway providers (Ollama,
+    # DeepSeek, etc.) don't need this at all -- opencode takes those via the
+    # OPENCODE_CONFIG_CONTENT env var (agent/resolve.py), never a file, so
+    # they already worked under Blank Home before this fix. Verified the
+    # WAL-mode sidecar files (-wal/-shm) resolve safely through a symlink --
+    # SQLite computes their names from the realpath()-resolved target, not
+    # the symlink's own directory, so a real and a sandboxed process reading
+    # the same DB share the same WAL state rather than diverging.
+    "opencode": (".local/share/opencode/opencode.db",),
 }
 
 _XDG_VARS = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME")
@@ -92,6 +103,40 @@ def _read_macos_keychain_credential(service: str) -> Optional[str]:
     return result.stdout.rstrip("\n")
 
 
+def _reconcile_opencode_db(home: Path) -> None:
+    """opencode-specific reconciliation: never let a sandbox-local DB
+    overwrite the real one.
+
+    _reconcile_one's "regular file present -> copy it onto the real path"
+    branch is correct for a small single-value credential token (a
+    temp+rename refresh inside the sandbox left a fresher copy there). It is
+    wrong for opencode.db: a multi-session, multi-agent, potentially
+    many-MB SQLite file shared by every opencode agent. A regular file
+    sitting at the sandbox path here almost always means this agent ran
+    before the symlink fix existed and grew its own isolated local DB --
+    copying that onto the real path would silently destroy every other
+    agent's session history. Preserve it as a `.pre-symlink.bak` instead of
+    deleting or overwriting, then always link to the real (canonical) path.
+    """
+    rel = _CREDENTIAL_RELPATHS["opencode"][0]
+    real_path = Path.home() / rel
+    sandbox_path = home / rel
+    if not real_path.exists():
+        return  # nothing to link yet -- opencode never run on real HOME
+    if sandbox_path.is_symlink():
+        if sandbox_path.resolve() == real_path.resolve():
+            return
+        sandbox_path.unlink()
+    elif sandbox_path.exists():
+        backup = sandbox_path.with_name(sandbox_path.name + ".pre-symlink.bak")
+        if backup.exists():
+            sandbox_path.unlink()
+        else:
+            sandbox_path.rename(backup)
+    sandbox_path.parent.mkdir(parents=True, exist_ok=True)
+    sandbox_path.symlink_to(real_path)
+
+
 def _reconcile_claude_credential(home: Path) -> None:
     """claudecode-specific reconciliation: write the current Keychain token
     into the sandbox on every call instead of symlinking the file (see
@@ -116,8 +161,11 @@ def reconcile_credential_link(backend_id: str, home: Path) -> None:
     """Self-healing credential reconciliation -- see ADR-0036 "Storage and
     spawn mechanics". Idempotent, safe to call before every turn.
 
-    claudecode gets its own path (see _reconcile_claude_credential); every
-    other backend symlinks each of its relpaths (see _CREDENTIAL_RELPATHS):
+    claudecode gets its own path (see _reconcile_claude_credential); opencode
+    gets its own path too (see _reconcile_opencode_db -- its DB is too big
+    and too shared to trust with the copy-sandbox-onto-real credential-token
+    healing below). Every other backend symlinks each of its relpaths (see
+    _CREDENTIAL_RELPATHS):
 
     1. Already a symlink to the real path -- nothing to do.
     2. A regular file -- a temp+rename refresh severed the link. The
@@ -127,6 +175,9 @@ def reconcile_credential_link(backend_id: str, home: Path) -> None:
     """
     if backend_id == "claudecode":
         _reconcile_claude_credential(home)
+        return
+    if backend_id == "opencode":
+        _reconcile_opencode_db(home)
         return
     for rel in _CREDENTIAL_RELPATHS.get(backend_id, ()):
         _reconcile_one(Path.home() / rel, home / rel)

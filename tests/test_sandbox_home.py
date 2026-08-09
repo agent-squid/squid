@@ -107,3 +107,74 @@ def test_reconcile_credential_link_still_symlinks_other_backends(tmp_path, monke
     p = sandbox / ".codex" / "auth.json"
     assert p.is_symlink()
     assert p.resolve() == real_auth.resolve()
+
+
+def test_reconcile_credential_link_symlinks_opencode_sqlite_db(tmp_path, monkeypatch):
+    # opencode keeps sessions + native-login credentials in one SQLite DB
+    # rather than loose files -- one symlink must cover both.
+    real_home = tmp_path / "real_home"
+    db_dir = real_home / ".local" / "share" / "opencode"
+    db_dir.mkdir(parents=True)
+    real_db = db_dir / "opencode.db"
+    real_db.write_text("fake-db-content")
+
+    monkeypatch.setattr(Path, "home", lambda: real_home)
+
+    sandbox = tmp_path / "sandbox"
+    sandbox_home.reconcile_credential_link("opencode", sandbox)
+
+    p = sandbox / ".local" / "share" / "opencode" / "opencode.db"
+    assert p.is_symlink()
+    assert p.resolve() == real_db.resolve()
+
+
+def test_reconcile_opencode_db_preserves_preexisting_sandbox_db_instead_of_overwriting_real(tmp_path, monkeypatch):
+    # A sandbox that ran opencode before the symlink fix existed grew its own
+    # local DB at the sandbox path. Unlike a small credential token, this is
+    # a large multi-agent-shared DB -- copying it onto the real path the way
+    # _reconcile_one does for tokens would silently destroy every other
+    # agent's session history. It must be preserved as a backup, never
+    # copied over the real (canonical) DB.
+    real_home = tmp_path / "real_home"
+    db_dir = real_home / ".local" / "share" / "opencode"
+    db_dir.mkdir(parents=True)
+    real_db = db_dir / "opencode.db"
+    real_db.write_text("real-shared-db-with-everyones-sessions")
+
+    monkeypatch.setattr(Path, "home", lambda: real_home)
+
+    sandbox = tmp_path / "sandbox"
+    sandbox_db_dir = sandbox / ".local" / "share" / "opencode"
+    sandbox_db_dir.mkdir(parents=True)
+    stray_db = sandbox_db_dir / "opencode.db"
+    stray_db.write_text("stray-sandbox-local-db")
+
+    sandbox_home.reconcile_credential_link("opencode", sandbox)
+
+    p = sandbox_db_dir / "opencode.db"
+    assert p.is_symlink()
+    assert p.resolve() == real_db.resolve()
+    assert real_db.read_text() == "real-shared-db-with-everyones-sessions"  # untouched
+
+    backup = sandbox_db_dir / "opencode.db.pre-symlink.bak"
+    assert backup.exists()
+    assert not backup.is_symlink()
+    assert backup.read_text() == "stray-sandbox-local-db"
+
+
+def test_reconcile_opencode_db_is_idempotent_once_symlinked(tmp_path, monkeypatch):
+    real_home = tmp_path / "real_home"
+    db_dir = real_home / ".local" / "share" / "opencode"
+    db_dir.mkdir(parents=True)
+    real_db = db_dir / "opencode.db"
+    real_db.write_text("real-db")
+
+    monkeypatch.setattr(Path, "home", lambda: real_home)
+
+    sandbox = tmp_path / "sandbox"
+    sandbox_home.reconcile_credential_link("opencode", sandbox)
+    sandbox_home.reconcile_credential_link("opencode", sandbox)  # second call, already linked
+
+    p = sandbox / ".local" / "share" / "opencode" / "opencode.db"
+    assert p.is_symlink()
+    assert p.resolve() == real_db.resolve()

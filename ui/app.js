@@ -12562,7 +12562,7 @@ function showCtxPopup(spanEl) {
   }
   if (sid || cwd) {
     if (sid && agent) {
-      html += `<div class="ctx-popup-row ctx-popup-session-row" data-session-id="${escapeHtml(sid)}" data-agent="${escapeHtml(agent)}" data-cwd="${escapeHtml(cwd)}"><span class="ctx-popup-key">session</span><span class="ctx-popup-val ctx-popup-link" title="Open raw session log">${sid}</span></div>`;
+      html += `<div class="ctx-popup-row ctx-popup-session-row" data-session-id="${escapeHtml(sid)}" data-agent="${escapeHtml(agent)}" data-cwd="${escapeHtml(cwd)}" data-msg-id="${escapeHtml(msgId)}"><span class="ctx-popup-key">session</span><span class="ctx-popup-val ctx-popup-link" title="Open raw session log">${sid}</span></div>`;
     } else {
       html += `<div class="ctx-popup-row"><span class="ctx-popup-key">session</span><span class="ctx-popup-val">${sid}</span></div>`;
     }
@@ -12634,13 +12634,23 @@ function showCtxPopup(spanEl) {
     sessionRow.addEventListener('click', async () => {
       const valEl = sessionRow.querySelector('.ctx-popup-val');
       const original = valEl.textContent;
-      const { sessionId, agent: rowAgent, cwd: rowCwd } = sessionRow.dataset;
+      const { sessionId, agent: rowAgent, cwd: rowCwd, msgId: rowMsgId } = sessionRow.dataset;
       try {
         const q = new URLSearchParams({ agent: rowAgent, session_id: sessionId, cwd: rowCwd || '' });
-        const { path } = await fetch(`/session-log?${q}`).then(r => r.json());
+        const { path, entries, source, turns } = await fetch(`/session-log?${q}`).then(r => r.json());
         if (path) {
+          const text = await fetch('/localfile?' + new URLSearchParams({ path, _t: Date.now() })).then(r => r.text());
           _closeCtxPopup(popup);
-          openFileViewer(path);
+          openLogViewer(`session ${sessionId}`, _parseJsonlEntries(text), undefined, turns, rowMsgId);
+        } else if (entries) {
+          _closeCtxPopup(popup);
+          openLogViewer(
+            `opencode session ${sessionId}`, entries,
+            source === 'opencode-sqlite'
+              ? "Reconstructed from opencode's SQLite session log (opencode.db) — opencode has no per-session transcript file the way other harnesses do."
+              : undefined,
+            turns, rowMsgId,
+          );
         } else {
           valEl.textContent = 'no local transcript found';
           setTimeout(() => { valEl.textContent = original; }, 1500);
@@ -12837,6 +12847,235 @@ function renderTraceBody(msg, container) {
   }
   if (!statusRaw && !tools.length) {
     container.innerHTML = '<div class="ctx-popup-row" style="padding:1rem"><span class="ctx-popup-key">No trace recorded</span></div>';
+  }
+}
+
+// Turns a harness's raw .jsonl transcript into the same {kind, type,
+// time_created, data} shape _opencode_session_transcript_rows() returns for
+// opencode's SQLite rows, so both feed the same openLogViewer(). Field names
+// vary per harness (claudecode/codex/pi use timestamp+type, cursor uses
+// role+message with no timestamp) -- this reads what's there and falls back
+// to line position for entries with no parseable time.
+function _parseJsonlEntries(text) {
+  const entries = [];
+  let seq = 0;
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    seq += 1;
+    let data;
+    try { data = JSON.parse(line); } catch { data = { _unparsed: raw }; }
+    const type = (data && typeof data === 'object') ? (data.type || data.role || null) : null;
+    let time_created = null;
+    if (data && typeof data === 'object' && data.timestamp) {
+      const t = Date.parse(data.timestamp);
+      if (!Number.isNaN(t)) time_created = t;
+    }
+    entries.push({ kind: 'line', type, seq, time_created, data });
+  }
+  return entries;
+}
+
+function _logEntryLabel(entry) {
+  const parts = [];
+  if (entry.kind && entry.kind !== 'line') parts.push(entry.kind);
+  if (entry.type) parts.push(entry.type);
+  parts.push(entry.time_created ? new Date(entry.time_created).toLocaleString() : `line ${entry.seq}`);
+  return parts.join(' · ');
+}
+
+// Tags each entry with which squid turn it falls in, using /session-log's
+// `turns` (squid's own per-turn timestamps for this session_id -- the raw
+// log itself, jsonl or SQLite, has no notion of squid's turn grouping).
+// `turns` must be sorted ascending by time_ms, `entries` in chronological
+// order (both already are, from the server for opencode and from file order
+// for jsonl).
+//
+// Some jsonl line types carry no timestamp at all -- e.g. claudecode's
+// ai-title/last-prompt/mode metadata lines -- and they're not rare: one real
+// 42-turn session had 224 of out 1414 lines with no timestamp, scattered
+// throughout, not just at the start. Treating "no timestamp" as "before the
+// first turn" made that divider reappear constantly instead of once. Since
+// entries are already chronological, an untimed entry belongs with whatever
+// turn came immediately before it in the file. Only entries before the
+// *first* timestamped entry (no prior turn to inherit) stay untagged --
+// that's the one legitimate "before first turn" case.
+function _assignTurnIndices(entries, turns) {
+  if (!turns || !turns.length) return;
+  let lastTurn = null;
+  for (const e of entries) {
+    if (e.time_created == null) { e._turn = lastTurn; continue; }
+    let turn = null;
+    for (const t of turns) {
+      if (t.time_ms <= e.time_created) turn = t.turn_index;
+      else break;
+    }
+    e._turn = turn;
+    lastTurn = turn;
+  }
+}
+
+// A "turn" here is one squid prompt sent into this session through to
+// squid's recorded reply -- everything between this divider and the next
+// happened while the harness was processing that single prompt (which, for
+// an agentic turn, can be dozens of internal tool calls -- see the entry
+// count jump across dividers on a turn that did a lot of file/tool work).
+const _TURN_DIVIDER_HINT = 'One squid turn: everything below, up to the next divider, happened while the harness processed this one prompt (may include many internal tool calls).';
+
+function _makeTurnDivider(turnIndex, turnsByIndex) {
+  const div = document.createElement('div');
+  div.className = 'log-viewer-turn-divider';
+  div.title = _TURN_DIVIDER_HINT;
+  div.dataset.turn = turnIndex == null ? '' : String(turnIndex);
+  if (turnIndex == null) {
+    div.textContent = 'before first squid turn';
+  } else {
+    const t = turnsByIndex.get(turnIndex);
+    const when = t ? new Date(t.time_ms).toLocaleString() : '';
+    div.textContent = `squid turn ${turnIndex}${when ? ' · ' + when : ''}`;
+  }
+  return div;
+}
+
+// Case-insensitive JSON haystack for search, computed once and cached on the
+// entry -- a big session (one real one had 1414 log lines) re-stringifying
+// every entry's full data on every search keystroke is real, avoidable jank.
+function _entrySearchText(entry) {
+  if (entry._searchText == null) entry._searchText = JSON.stringify(entry.data).toLowerCase();
+  return entry._searchText;
+}
+
+function _makeLogEntryBlock(entry) {
+  const block = document.createElement('div');
+  block.className = 'tool-block trace-tool-block';
+  const toggle = document.createElement('button');
+  toggle.className = 'tool-toggle';
+  toggle.textContent = _logEntryLabel(entry);
+  const body = document.createElement('div');
+  body.className = 'tool-body';
+  const scroll = document.createElement('div');
+  scroll.className = 'diff-scroll';
+  const pre = document.createElement('pre');
+  pre.className = 'trace-tool-pre';
+  scroll.appendChild(pre);
+  body.appendChild(scroll);
+  // Pretty-printing (indent=2) is deferred to first expand, not done for
+  // every entry on every render -- most entries in a large session are
+  // never opened, so paying for that upfront (and again on every re-render
+  // from search/reverse) is wasted work.
+  toggle.addEventListener('click', () => {
+    if (!pre.textContent) pre.textContent = JSON.stringify(entry.data, null, 2);
+    block.classList.toggle('tool-expanded');
+  });
+  block.appendChild(toggle);
+  block.appendChild(body);
+  return block;
+}
+
+// Shared viewer for both opencode's SQLite-reconstructed session rows and a
+// harness's raw .jsonl transcript (once normalized by _parseJsonlEntries) --
+// same entry shape, same search/reverse-order toolbar either way.
+function openLogViewer(title, entries, bannerText, turns, currentMsgId) {
+  const modal = document.getElementById('msg-modal');
+  const titleEl = document.getElementById('msg-modal-title');
+  const body = document.getElementById('msg-modal-body');
+  titleEl.textContent = title;
+  body.innerHTML = '';
+  _assignTurnIndices(entries, turns);
+  const hasTurns = !!(turns && turns.length);
+  const turnsByIndex = new Map((turns || []).map(t => [t.turn_index, t]));
+
+  if (bannerText) {
+    const banner = document.createElement('div');
+    banner.className = 'trace-status';
+    banner.textContent = bannerText;
+    body.appendChild(banner);
+  }
+
+  const toolbar = document.createElement('div');
+  toolbar.className = 'log-viewer-toolbar';
+  const searchInput = document.createElement('input');
+  searchInput.type = 'text';
+  searchInput.placeholder = 'Search…';
+  searchInput.className = 'log-viewer-search';
+  const reverseBtn = document.createElement('button');
+  reverseBtn.type = 'button';
+  reverseBtn.className = 'log-viewer-reverse-btn';
+  const countEl = document.createElement('span');
+  countEl.className = 'log-viewer-count';
+  toolbar.appendChild(searchInput);
+  toolbar.appendChild(reverseBtn);
+  toolbar.appendChild(countEl);
+  body.appendChild(toolbar);
+
+  const list = document.createElement('div');
+  list.className = 'log-viewer-list';
+  body.appendChild(list);
+
+  // Newest-first by default: the biggest turn number (the most recent one)
+  // is what you see first, matching the button label below at all times --
+  // the label always names the order currently on screen, not an action.
+  let reversed = true;
+  const updateReverseLabel = () => { reverseBtn.textContent = reversed ? 'Newest first' : 'Oldest first'; };
+  const render = () => {
+    const q = searchInput.value.trim().toLowerCase();
+    const filtered = !q ? entries : entries.filter(e => (
+      _entrySearchText(e).includes(q)
+      || (e.type || '').toLowerCase().includes(q)
+      || (e.kind || '').toLowerCase().includes(q)
+    ));
+    const ordered = reversed ? filtered.slice().reverse() : filtered;
+    list.innerHTML = '';
+    if (!ordered.length) {
+      const empty = document.createElement('div');
+      empty.className = 'ctx-popup-row';
+      empty.style.padding = '1rem';
+      empty.textContent = q ? 'No entries match.' : 'No entries.';
+      list.appendChild(empty);
+    } else {
+      let lastTurn;
+      for (const entry of ordered) {
+        if (hasTurns && entry._turn !== lastTurn) {
+          lastTurn = entry._turn;
+          list.appendChild(_makeTurnDivider(lastTurn, turnsByIndex));
+        }
+        list.appendChild(_makeLogEntryBlock(entry));
+      }
+    }
+    countEl.textContent = q ? `${filtered.length} / ${entries.length}` : `${entries.length} entries`;
+  };
+
+  // Debounced -- rebuilding the whole list (list.innerHTML = '' + rebuild)
+  // on every keystroke is the other big cost on a large session; 150ms
+  // feels instant while typing but collapses a fast typist's keystrokes
+  // into one rebuild instead of one per character.
+  let searchDebounce = null;
+  searchInput.addEventListener('input', () => {
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(render, 150);
+  });
+  reverseBtn.addEventListener('click', () => {
+    reversed = !reversed;
+    updateReverseLabel();
+    render();
+  });
+
+  updateReverseLabel();
+  render();
+  modal.classList.add('open');
+
+  // Jump straight to the turn the popup was opened from, instead of always
+  // landing on the newest turn regardless of which message you came from.
+  if (currentMsgId != null && turns) {
+    const openedTurn = turns.find(t => String(t.msg_id) === String(currentMsgId));
+    if (openedTurn) {
+      const divider = list.querySelector(`[data-turn="${openedTurn.turn_index}"]`);
+      if (divider) {
+        divider.scrollIntoView({ block: 'start' });
+        divider.classList.add('log-viewer-turn-divider-target');
+        setTimeout(() => divider.classList.remove('log-viewer-turn-divider-target'), 2000);
+      }
+    }
   }
 }
 

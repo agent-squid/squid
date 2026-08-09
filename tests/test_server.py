@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 import subprocess
 import sys
 import types
@@ -1966,3 +1967,124 @@ def test_localfile_markdown_preview_allows_document_accept_without_fetch_metadat
         assert blocked_html.json()["error"] == "cross-origin file reads are not allowed"
     finally:
         server._LOCALFILE_ROOTS[:] = original_roots
+
+
+def _make_opencode_db(path, session_id, other_session_id="ses_other"):
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, data TEXT);
+        CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+        CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+        """
+    )
+    conn.execute(
+        "INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?)",
+        ("sm1", session_id, "agent-switched", 1, 100, '{"agent":"build"}'),
+    )
+    conn.execute(
+        "INSERT INTO message VALUES (?, ?, ?, ?)",
+        ("msg1", session_id, 200, '{"role":"user"}'),
+    )
+    conn.execute(
+        "INSERT INTO part VALUES (?, ?, ?, ?, ?)",
+        ("prt1", "msg1", session_id, 300, '{"type":"text","text":"hello"}'),
+    )
+    # A row for a different session must never leak into this session's transcript.
+    conn.execute(
+        "INSERT INTO message VALUES (?, ?, ?, ?)",
+        ("msg-other", other_session_id, 50, '{"role":"user"}'),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_opencode_session_transcript_reconstructs_rows_in_time_order(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    home = tmp_path / "harness_home"
+    db_dir = home / ".local" / "share" / "opencode"
+    db_dir.mkdir(parents=True)
+    _make_opencode_db(db_dir / "opencode.db", "ses_target")
+
+    entries = server._opencode_session_transcript_rows(home, "ses_target")
+    assert entries is not None
+    assert [e["kind"] for e in entries] == ["session_message", "message", "part"]
+    assert [e["time_created"] for e in entries] == sorted(e["time_created"] for e in entries)
+    assert all(e["data"] for e in entries)
+    # The other session's row must not appear.
+    assert all(e["id"] != "msg-other" for e in entries)
+
+
+def test_opencode_session_transcript_returns_none_for_missing_db(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert server._opencode_session_transcript_rows(tmp_path / "no_such_home", "ses_x") is None
+
+
+def test_opencode_session_transcript_returns_none_for_unknown_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    home = tmp_path / "harness_home"
+    db_dir = home / ".local" / "share" / "opencode"
+    db_dir.mkdir(parents=True)
+    _make_opencode_db(db_dir / "opencode.db", "ses_target")
+
+    assert server._opencode_session_transcript_rows(home, "ses_does_not_exist") is None
+
+
+def test_find_session_log_has_no_opencode_branch(tmp_path, monkeypatch):
+    # opencode has no per-session file -- _find_session_log stays file-only;
+    # /session-log routes opencode through _opencode_session_transcript_rows
+    # instead (see the endpoint test below), never through this function.
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    db_dir = tmp_path / ".local" / "share" / "opencode"
+    db_dir.mkdir(parents=True)
+    _make_opencode_db(db_dir / "opencode.db", "ses_target")
+
+    assert server._find_session_log("opencode", "ses_target", "/some/cwd", "") is None
+
+
+def test_session_log_endpoint_returns_entries_not_path_for_opencode(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    db_dir = tmp_path / ".local" / "share" / "opencode"
+    db_dir.mkdir(parents=True)
+    _make_opencode_db(db_dir / "opencode.db", "ses_target")
+    stats_db.upsert_agent("oc-viewer-test", "opencode", "opencode", "opencode/some-model", None)
+
+    res = TestClient(server.app).get(
+        "/session-log",
+        params={"agent": "oc-viewer-test", "session_id": "ses_target", "cwd": "/some/cwd"},
+    )
+    body = res.json()
+    assert body["path"] is None
+    assert body["source"] == "opencode-sqlite"
+    assert body["entries"] is not None
+    assert {e["kind"] for e in body["entries"]} == {"session_message", "message", "part"}
+    # No file should have been written anywhere for this -- entries are
+    # served straight from the DB read, never persisted to disk.
+    assert not (tmp_path / ".squid" / "artifacts").exists()
+
+
+def test_session_log_endpoint_includes_squid_turn_boundaries(tmp_path, monkeypatch):
+    # The raw transcript (opencode's SQLite rows here, but equally a jsonl
+    # file for other harnesses) has no notion of squid's own turn grouping --
+    # /session-log must also return squid's per-turn timestamps for this
+    # session_id so the viewer can mark where one turn ends and the next begins.
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    db_dir = tmp_path / ".local" / "share" / "opencode"
+    db_dir.mkdir(parents=True)
+    _make_opencode_db(db_dir / "opencode.db", "ses_target")
+    stats_db.upsert_agent("oc-turns-test", "opencode", "opencode", "opencode/some-model", None)
+
+    u1 = stats_db.insert_user_message("squid", "oc-turns-test", "first")
+    m1 = stats_db.insert_assistant_message("squid", "oc-turns-test", u1)
+    stats_db.update_assistant_message(m1, "reply one", "ses_target", "done")
+    u2 = stats_db.insert_user_message("squid", "oc-turns-test", "second")
+    m2 = stats_db.insert_assistant_message("squid", "oc-turns-test", u2)
+    stats_db.update_assistant_message(m2, "reply two", "ses_target", "done")
+
+    res = TestClient(server.app).get(
+        "/session-log",
+        params={"agent": "oc-turns-test", "session_id": "ses_target", "cwd": "/some/cwd"},
+    )
+    body = res.json()
+    assert [t["msg_id"] for t in body["turns"]] == [m1, m2]
+    assert [t["turn_index"] for t in body["turns"]] == [1, 2]
