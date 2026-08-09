@@ -260,16 +260,24 @@ def _claude_child_env(backend_id: str, backend_env: Optional[dict]) -> dict:
     return env_for_claude
 
 
+def _apply_env_overrides(env: dict, overrides: Optional[dict]) -> None:
+    """Merge overrides into env in place. A None value pops the key instead
+    of setting it literally -- subprocess env dicts can't hold None, only
+    str/bytes (see sandbox_home.home_override_env's XDG-clearing contract)."""
+    if not overrides:
+        return
+    for name, value in overrides.items():
+        if value is None:
+            env.pop(name, None)
+        else:
+            env[name] = value
+
+
 def _child_env(extra_env: Optional[dict] = None) -> dict:
     env = os.environ.copy()
     if PROXY_ENV:
         env.update(PROXY_ENV)
-    if extra_env:
-        for name, value in extra_env.items():
-            if value is None:
-                env.pop(name, None)
-            else:
-                env[name] = value
+    _apply_env_overrides(env, extra_env)
     return env
 
 
@@ -440,6 +448,19 @@ class _ClaudeStreamParser:
         elif t == "result":
             subtype = event.get("subtype")
             final_text = event.get("result", "")
+            # Check the structured error fields first -- `subtype` can lie.
+            # Observed live: a revoked-token 401 came back as
+            # {"is_error": true, "api_error_status": 401, "subtype": "success", ...},
+            # which would otherwise skip the subtype-error branch below and let
+            # the raw failure text through as if it were the assistant's answer.
+            if event.get("is_error"):
+                self.done = True
+                if event.get("api_error_status") == 401 or _claude_auth_result(final_text):
+                    raise CLIAuthRequired(
+                        "claudecode",
+                        "Claude auth failed (network down or token expired) — run: claude login",
+                    )
+                raise CLIError(final_text or f"Claude result: {subtype}")
             if subtype and subtype != "success":
                 self.done = True
                 raise CLIError(final_text or f"Claude result: {subtype}")
@@ -489,7 +510,7 @@ async def _stream_lines(
     """
     env = _child_env(extra_env)
     if agent:
-        env.update(sandbox_home.home_override_env(agent, backend))
+        _apply_env_overrides(env, sandbox_home.home_override_env(agent, backend))
     if topic:
         env["SQUID_TOPIC"] = topic
     if agent:
@@ -840,7 +861,7 @@ class _ClaudeInteractiveCLI:
 
         env = _child_env(_claude_child_env(self.backend_id, self.backend_env))
         if self.agent:
-            env.update(sandbox_home.home_override_env(self.agent, self.backend_id))
+            _apply_env_overrides(env, sandbox_home.home_override_env(self.agent, self.backend_id))
 
         self.proc = await asyncio.create_subprocess_exec(
             *cmd,

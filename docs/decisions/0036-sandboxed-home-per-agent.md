@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-08-06
-updated: 2026-08-06
+updated: 2026-08-08
 ---
 # ADR-0036: Sandboxed `$HOME` Per Agent
 
@@ -17,8 +17,17 @@ codex      -> ~/.codex/auth.json, ~/.codex/config.toml, ~/.codex/plugins, ~/.cod
 cursor     -> ~/.cursor/cli-config.json
 opencode   -> ~/.config/opencode/, ~/.local/share/opencode/  (XDG defaults, not confirmed
               to hold the credential specifically — see Open items)
-pi         -> ~/.pi   (no login command; auth is env-var only, ANTHROPIC_API_KEY /
-              ANTHROPIC_OAUTH_TOKEN — nothing to copy)
+pi         -> ~/.pi/agent/auth.json   (OAuth access/refresh tokens per provider,
+              e.g. "anthropic"; written by `pi auth`. Also accepts a direct
+              ANTHROPIC_API_KEY / ANTHROPIC_OAUTH_TOKEN env var, but any agent
+              that logged in via OAuth rather than a raw key depends on this
+              file — see Open items, this was initially and incorrectly
+              assumed to be env-var-only with nothing to link)
+              ~/.pi/agent/models.json   (squid-generated custom-provider
+              registry, agent/resolve.py's PI_MODELS_FILE — required for any
+              non-standard provider, e.g. Ollama; without it a sandboxed pi
+              fails with "Model ... not found" even when auth.json is linked
+              and valid)
 ```
 
 Running `codex login status` / `cursor-agent status` / `claude auth status`
@@ -74,12 +83,19 @@ every single turn would defeat the point. The two compose freely: a
 sandboxed-`HOME` agent still gets normal per-turn worktree isolation for its
 code roots, in every topic it's used from.
 
-### Credential linking: symlink, not copy
+### Credential linking: symlink, not copy (except `claudecode` on macOS)
 
 Squid symlinks the credential file from the real `$HOME` into the sandbox
 `HOME` (`ln -s <real path> <sandbox path>`) rather than copying it, so a
 token refresh on either side is picked up by the other automatically — no
 explicit "resync" action needed while the symlink holds.
+
+`claudecode` is the one exception, added 2026-08-08 (see Open items): on
+macOS its live token lives in Keychain, not the file, so there's no real
+path to symlink against that stays current. Squid instead re-reads the
+Keychain token and writes it into the sandbox as a plain file on every
+reconciliation pass — a deliberate copy, not a link, because there's nothing
+file-shaped on the real side to link to.
 
 This has two consequences a plain copy wouldn't, both worth stating
 explicitly rather than assuming symlink-in-place is free:
@@ -113,7 +129,7 @@ cursor     -> ~/.cursor/cli-config.json   (holds more than just auth; linking
               the whole file is the current plan pending confirmation of a
               narrower credential-only key — see Open items)
 opencode   -> not yet located (see Open items)
-pi         -> nothing to link; env-var auth is set directly per sandbox
+pi         -> ~/.pi/agent/auth.json, ~/.pi/agent/models.json
 ```
 
 ### `$HOME` is not the only variable that needs overriding
@@ -248,8 +264,41 @@ action, which just runs the same three steps on demand.
   XDG-default paths in use, but not which file inside them (if any, versus
   e.g. `opencode.db`) holds the provider credential.
 - Only `cursor-agent`'s binary was checked for hardcoded Keychain access;
-  `claude`, `codex`, and `opencode` were not, so a non-`HOME` credential
-  source for those is unverified, not ruled out.
+  `codex` and `opencode` were not, so a non-`HOME` credential source for
+  those is unverified, not ruled out.
+- **Confirmed and fixed 2026-08-08: `claude` uses macOS Keychain, and a plain
+  symlink of `~/.claude/.credentials.json` was not enough.** The `claude.exe`
+  binary contains Keychain string references, and in practice the *live*,
+  actively-refreshed OAuth token lives in the `Claude Code-credentials`
+  Keychain item — not reliably in the file. On a test machine the file's
+  token had already expired (`expiresAt` ~26h in the past) while the
+  Keychain token was still valid for hours, and real unsandboxed `claude`
+  calls succeeded without ever touching the file (mtime unchanged across a
+  successful run). Symlinking the stale file into a Blank Home sandbox
+  reproduced `"Failed to authenticate... OAuth access token has been
+  revoked"`.
+
+  Follow-up test clarified this isn't "Keychain overrides the file" — it's
+  that the file is a fully sufficient, self-contained credential store when
+  its content is current: writing the *current* Keychain token into a
+  sandbox as a plain standalone file (no symlink, no Keychain access from
+  the sandboxed process at all) authenticated successfully. The file only
+  looked untrustworthy because a plain symlink captures whatever was on disk
+  at link time, and ongoing refreshes on a real machine land in Keychain,
+  not the file, so the linked snapshot rots.
+
+  Fix (`agent/sandbox_home.py`, `_reconcile_claude_credential`): `claudecode`
+  is no longer handled through the generic `_CREDENTIAL_RELPATHS` symlink
+  path. On macOS, every reconciliation pass (before every turn, same
+  cadence as the old symlink check) shells out to `security
+  find-generic-password -s "Claude Code-credentials" -w` and writes that
+  token directly into the sandbox's `.credentials.json` as a plain file
+  (mode 0600) — always current, never a stale link. Falls back to the old
+  plain-symlink behavior when Keychain is unavailable (non-macOS — where
+  there's no Keychain/file divergence to begin with — or a locked/unreadable
+  Keychain, fail-open with a 5s timeout so a Keychain hiccup can't block a
+  turn). Verified end-to-end: a live `claude -p` call against a sandbox
+  populated this way authenticates correctly (`is_error: false`).
 - Whether each bundled harness refreshes its credential file in place
   (symlink survives) or via temp-file + `rename()` (symlink silently
   breaks) is unverified for `claude`, `codex`, `cursor`, and `opencode` —

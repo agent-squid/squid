@@ -1950,6 +1950,57 @@ def test_claude_auth_banner_raises_auth_required():
             asyncio.run(collect())
 
 
+def test_claude_revoked_token_result_raises_auth_required_despite_success_subtype():
+    # Observed live: Claude Code can report is_error=true / api_error_status=401
+    # while subtype still says "success" -- must not leak the raw failure text
+    # through as a normal assistant response, and must offer the login flow.
+    async def fake_stream_lines(*args, **kwargs):
+        yield json.dumps({
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": 401,
+            "result": "Failed to authenticate. API Error: 401 OAuth access token has been revoked.",
+            "usage": {},
+        })
+
+    async def collect():
+        return [chunk async for chunk in run_claude("hello", cwd="/tmp")]
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        with pytest.raises(CLIAuthRequired):
+            asyncio.run(collect())
+
+
+def test_claude_is_error_non_auth_result_raises_cli_error_not_response():
+    # A structured is_error result unrelated to auth (e.g. a rate limit or
+    # other API failure) must still raise, not stream as assistant text --
+    # and must not be misclassified as an auth failure.
+    async def fake_stream_lines(*args, **kwargs):
+        yield json.dumps({
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": 429,
+            "result": "Rate limited. Please retry later.",
+            "usage": {},
+        })
+
+    async def collect():
+        return [chunk async for chunk in run_claude("hello", cwd="/tmp")]
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        with pytest.raises(CLIError) as excinfo:
+            asyncio.run(collect())
+
+    assert not isinstance(excinfo.value, CLIAuthRequired)
+    assert "Rate limited" in str(excinfo.value)
+
+
 def test_claude_answer_about_login_text_is_not_auth_failure():
     async def fake_stream_lines(*args, **kwargs):
         yield json.dumps({

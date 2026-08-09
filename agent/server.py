@@ -103,6 +103,7 @@ from .stats_db import (
 )
 from .journal import _generate_journal, _current_week, list_topic_journals, read_journal
 from . import creds
+from . import sandbox_home
 
 BOOT_TIME = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 try:
@@ -3065,17 +3066,21 @@ def _encode_cwd_dashes(cwd: str) -> str:
     return cwd.replace("/", "-")
 
 
-def _find_session_log(harness: str, session_id: str, cwd: str) -> Optional[Path]:
+def _find_session_log(harness: str, session_id: str, cwd: str, agent: str = "") -> Optional[Path]:
     """Locate a coding agent's raw on-disk session transcript (.jsonl), if any.
 
     Each CLI encodes cwd into its session directory name differently; these are the
     conventions observed for each harness's own local session storage (not something
     Squid controls). Falls back to a recursive search under the harness's base dir if
     the direct guess misses, so a slightly-off encoding assumption still resolves.
+
+    A Blank Home agent's harness subprocess runs with $HOME pointed at its sandbox
+    directory (see sandbox_home.py / ADR-0036), so its transcript lives there too,
+    not under the real $HOME -- look up the same home the subprocess actually used.
     """
     if not session_id:
         return None
-    home = Path.home()
+    home = sandbox_home.sandbox_home_path(agent) if agent and sandbox_home.current_home_mode(agent) == "blank_home" else Path.home()
     try:
         if harness == "claudecode":
             base = home / ".claude" / "projects"
@@ -3110,7 +3115,7 @@ async def session_log(agent: str, session_id: str, cwd: str = ""):
     """Resolve the local raw transcript path for a session, if the harness stores one on disk."""
     agent_cfg = get_agent(agent)
     harness = agent_cfg.get("harness") if agent_cfg else None
-    path = _find_session_log(harness, session_id, cwd) if harness else None
+    path = _find_session_log(harness, session_id, cwd, agent) if harness else None
     return JSONResponse({"path": str(path) if path else None})
 
 

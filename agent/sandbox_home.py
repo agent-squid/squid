@@ -14,6 +14,8 @@ defeating the isolation. See SQUID_HOMES in agent/config.py.
 from __future__ import annotations
 
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -22,42 +24,41 @@ from .config import SQUID_HOMES
 
 _HOMES = Path(SQUID_HOMES)
 
-# Credential file to symlink into a Blank Home sandbox, relative to $HOME,
-# keyed by backend_id (matches the strings runners.py passes as `backend`).
-# Fixed table, never inferred by scanning $HOME -- see ADR-0036.
-_CREDENTIAL_RELPATHS: dict[str, str] = {
-    "claudecode": ".claude/.credentials.json",
-    "codex": ".codex/auth.json",
-    "cursor": ".cursor/cli-config.json",
+# Credential/generated-config files to symlink into a Blank Home sandbox,
+# relative to $HOME, keyed by backend_id (matches the strings runners.py
+# passes as `backend`). Fixed table, never inferred by scanning $HOME -- see
+# ADR-0036. Most backends need only their credential file; pi additionally
+# needs models.json, the squid-generated custom-provider registry
+# (agent/resolve.py's PI_MODELS_FILE) -- without it a sandboxed pi has no
+# record of non-standard providers like Ollama and fails with "Model ...
+# not found" even though auth is otherwise fine.
+_CREDENTIAL_RELPATHS: dict[str, tuple[str, ...]] = {
+    "claudecode": (".claude/.credentials.json",),
+    "codex": (".codex/auth.json",),
+    "cursor": (".cursor/cli-config.json",),
+    "pi": (".pi/agent/auth.json", ".pi/agent/models.json"),
     # opencode: credential file location not yet confirmed -- see ADR-0036
     # Open items. Blank Home still isolates its config/plugins, but a
     # sandboxed opencode agent comes up logged out until this is resolved.
-    # pi: auth is env-var only (ANTHROPIC_API_KEY / ANTHROPIC_OAUTH_TOKEN),
-    # nothing to link.
 }
 
 _XDG_VARS = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME")
+
+# On macOS, Claude Code's *live* OAuth token is refreshed into this Keychain
+# item, not (reliably) into ~/.claude/.credentials.json -- confirmed by
+# testing directly: a fresh Keychain-sourced token written standalone into a
+# sandbox authenticates correctly, while the plain-symlinked file goes stale
+# within hours once the real environment's background refreshes stop landing
+# in it (see ADR-0036). claudecode is handled separately from
+# _CREDENTIAL_RELPATHS/_reconcile_one for this reason.
+_MACOS_CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 
 
 def sandbox_home_path(agent: str) -> Path:
     return _HOMES / agent
 
 
-def reconcile_credential_link(backend_id: str, home: Path) -> None:
-    """Self-healing symlink reconciliation -- see ADR-0036 "Storage and spawn
-    mechanics". Idempotent, safe to call before every turn:
-
-    1. Already a symlink to the real path -- nothing to do.
-    2. A regular file -- a temp+rename refresh severed the link. The
-       sandbox copy is the freshest token (written most recently), so copy
-       it back onto the real path first, then delete it and relink.
-    3. Missing -- first provisioning, just link.
-    """
-    rel = _CREDENTIAL_RELPATHS.get(backend_id)
-    if rel is None:
-        return
-    real_path = Path.home() / rel
-    sandbox_path = home / rel
+def _reconcile_one(real_path: Path, sandbox_path: Path) -> None:
     if not real_path.exists():
         return  # nothing to link yet -- user hasn't logged in on real HOME
     if sandbox_path.is_symlink():
@@ -69,6 +70,66 @@ def reconcile_credential_link(backend_id: str, home: Path) -> None:
         sandbox_path.unlink()
     sandbox_path.parent.mkdir(parents=True, exist_ok=True)
     sandbox_path.symlink_to(real_path)
+
+
+def _read_macos_keychain_credential(service: str) -> Optional[str]:
+    """Read a generic-password Keychain item by service name, or None if
+    unavailable -- not macOS, item missing, keychain locked/inaccessible, or
+    the `security` CLI itself is missing. Never raises: Blank Home
+    reconciliation must fail open (see current_home_mode's docstring) rather
+    than block a turn on a Keychain hiccup."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", service, "-w"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return result.stdout.rstrip("\n")
+
+
+def _reconcile_claude_credential(home: Path) -> None:
+    """claudecode-specific reconciliation: write the current Keychain token
+    into the sandbox on every call instead of symlinking the file (see
+    _MACOS_CLAUDE_KEYCHAIN_SERVICE for why). Falls back to the plain
+    symlink otherwise -- still correct on non-macOS (no Keychain divergence
+    to begin with) and better than nothing if Keychain is momentarily
+    unreadable."""
+    rel = _CREDENTIAL_RELPATHS["claudecode"][0]
+    sandbox_path = home / rel
+    token = _read_macos_keychain_credential(_MACOS_CLAUDE_KEYCHAIN_SERVICE)
+    if token is None:
+        _reconcile_one(Path.home() / rel, sandbox_path)
+        return
+    sandbox_path.parent.mkdir(parents=True, exist_ok=True)
+    if sandbox_path.is_symlink() or sandbox_path.exists():
+        sandbox_path.unlink()
+    sandbox_path.write_text(token)
+    sandbox_path.chmod(0o600)
+
+
+def reconcile_credential_link(backend_id: str, home: Path) -> None:
+    """Self-healing credential reconciliation -- see ADR-0036 "Storage and
+    spawn mechanics". Idempotent, safe to call before every turn.
+
+    claudecode gets its own path (see _reconcile_claude_credential); every
+    other backend symlinks each of its relpaths (see _CREDENTIAL_RELPATHS):
+
+    1. Already a symlink to the real path -- nothing to do.
+    2. A regular file -- a temp+rename refresh severed the link. The
+       sandbox copy is the freshest token (written most recently), so copy
+       it back onto the real path first, then delete it and relink.
+    3. Missing -- first provisioning, just link.
+    """
+    if backend_id == "claudecode":
+        _reconcile_claude_credential(home)
+        return
+    for rel in _CREDENTIAL_RELPATHS.get(backend_id, ()):
+        _reconcile_one(Path.home() / rel, home / rel)
 
 
 def ensure_sandbox_home(agent: str, backend_id: str) -> Path:
