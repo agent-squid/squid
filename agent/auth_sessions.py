@@ -12,7 +12,7 @@ Also covers "install" sessions (harness install one-liners and the `ollama`
 provider's install one-liner, ADR-0037's amendment on 2026-08-09) and
 `ollama pull`/`ollama rm` model-management sessions. Pull accepts a validated
 Ollama model name as one argv element (never shell input); remove remains
-restricted to the provider's configured `models:` list.
+restricted to models reported by the local Ollama installation.
 
 Distinct from the `interactive-pty` *protocol* name declared in
 harnesses.py (ADR-0022) — that protocol has no implementation anywhere in
@@ -127,16 +127,18 @@ def _model_argv(action: str, model: str) -> list[str]:
     """Build a fixed-shape Ollama command without invoking a shell.
 
     Pull permits a validated registry model name; remove is deliberately
-    limited to configured models so free text cannot delete local data.
+    limited to models reported by ``ollama list`` so free text cannot delete
+    arbitrary local data.
     """
     if not OLLAMA_PATH:
         raise AuthSessionError("ollama CLI not found in PATH")
     if len(model) > 200 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9][A-Za-z0-9._-]*)?", model):
         raise AuthSessionError(f"{model!r} is not a valid ollama model name")
-    from .providers import get_provider
-    provider = get_provider("ollama")
-    if action == "rm" and (not provider or model not in provider.models):
-        raise AuthSessionError(f"{model!r} is not a configured ollama model")
+    if action == "rm":
+        from .providers import _installed_ollama_models
+        installed = _installed_ollama_models()
+        if installed is None or model not in installed:
+            raise AuthSessionError(f"{model!r} is not an installed ollama model")
     return [OLLAMA_PATH, action, model]
 
 

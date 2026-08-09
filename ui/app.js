@@ -11071,10 +11071,7 @@ function renderProvidersCatalog() {
       ? (gauge.text || 'static')
       : (GAUGE_CATALOG[gauge.type] || 'no gauge configured');
     const modelCount = (info.models || []).length;
-    const models = modelCount
-      ? `frequently used models: ${modelCount} · freeform selection`
-      : 'freeform model selection';
-    const yamlLink = ' · <a class="bcat-link bcat-yaml-link" href="#">edit YAML</a>';
+    const models = `frequently used models: <a class="bcat-link bcat-yaml-link" href="#">${modelCount}</a> · freeform selection`;
     const modelLibrary = id === 'ollama'
       ? ' · <a class="bcat-link" href="https://ollama.com/library" target="_blank" rel="noopener noreferrer">model library</a>'
       : '';
@@ -11118,7 +11115,7 @@ function renderProvidersCatalog() {
       <div class="bcat-name"><span class="bcat-dot" style="background:${escapeHtml(color)}"></span>${escapeHtml(label)}</div>
       <div class="bcat-coding">
         <span class="${statusClass}">${statusMark} ${escapeHtml(authText)}</span>
-        <span class="bcat-hint">${escapeHtml(models)}${yamlLink}${modelLibrary}</span>
+        <span class="bcat-hint">${models}${modelLibrary}</span>
         ${localHtml}
       </div>
       <div class="bcat-gauge"><span class="bcat-hint">${escapeHtml(gaugeText)}</span></div>

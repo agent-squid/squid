@@ -167,6 +167,7 @@ class Provider:
         return result
 
     def public_dict(self) -> dict[str, Any]:
+        models = list(self.models)
         result = {
             "label": self.label,
             "color": self.color,
@@ -175,7 +176,7 @@ class Provider:
             "parallel": self.parallel,
             "missing_secrets": self.missing_secrets(),
             "gauge": self.gauge.public_dict(),
-            "models": list(self.models),
+            "models": models,
             "supported_apis": sorted(self.supported_apis),
         }
         if self.id in _PROVIDER_INSTALL:
@@ -186,6 +187,19 @@ class Provider:
                 pulled = _installed_ollama_models()
                 if pulled is not None:
                     result["pulled_models"] = sorted(pulled)
+                    # `models:` remains a useful curated ordering, but local
+                    # Ollama installs are the source of truth. Include models
+                    # pulled outside Squid as well. Suppress the untagged
+                    # matching aliases added by _installed_ollama_models(),
+                    # then hide Ollama's implicit :latest tag in the UI.
+                    canonical = (
+                        model for model in pulled if f"{model}:latest" not in pulled
+                    )
+                    discovered = sorted(
+                        model[:-len(":latest")] if model.endswith(":latest") else model
+                        for model in canonical
+                    )
+                    result["models"] = list(dict.fromkeys((*models, *discovered)))
         return result
 
 

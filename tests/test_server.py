@@ -1217,6 +1217,23 @@ def test_public_agent_config_includes_provider_color(monkeypatch):
     assert item["provider_label"] == "Claude"
 
 
+def test_ollama_public_models_deduplicate_implicit_latest(monkeypatch):
+    monkeypatch.setitem(providers_mod._PROVIDER_BINARY_PATH, "ollama", "/usr/bin/ollama")
+    monkeypatch.setattr(
+        providers_mod,
+        "_installed_ollama_models",
+        lambda: {"qwen3.5-optimized", "qwen3.5-optimized:latest", "qwen3:8b"},
+    )
+    provider = Provider(
+        id="ollama", auth_type="none", models=("qwen3.5-optimized",),
+    )
+
+    result = provider.public_dict()
+
+    assert result["models"] == ["qwen3.5-optimized", "qwen3:8b"]
+    assert "qwen3.5-optimized:latest" in result["pulled_models"]
+
+
 def test_provider_static_quota_is_normalized_with_no_harness_involved():
     client = TestClient(server.app)
     response = client.get("/quota/provider/opencode")
