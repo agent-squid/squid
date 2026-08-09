@@ -8,6 +8,12 @@ server-side from ALLOWLISTED_LOGIN_COMMANDS, never constructed from user
 input, and input bytes sent to a session are forwarded only to that fixed
 process.
 
+Also covers "install" sessions (harness install one-liners and the `ollama`
+provider's install one-liner, ADR-0037's amendment on 2026-08-09) and
+`ollama pull`/`ollama rm` model-management sessions. Pull accepts a validated
+Ollama model name as one argv element (never shell input); remove remains
+restricted to the provider's configured `models:` list.
+
 Distinct from the `interactive-pty` *protocol* name declared in
 harnesses.py (ADR-0022) — that protocol has no implementation anywhere in
 the codebase today. This module is the first real PTY spawn/stream code in
@@ -20,6 +26,8 @@ import asyncio
 import fcntl
 import os
 import pty
+import re
+import shlex
 import signal
 import struct
 import termios
@@ -27,7 +35,7 @@ import time
 import uuid
 from typing import AsyncGenerator, Optional
 
-from .config import CLAUDE_PATH, CODEX_PATH, CURSOR_PATH, OPENCODE_PATH
+from .config import CLAUDE_PATH, CODEX_PATH, CURSOR_PATH, OLLAMA_PATH, OPENCODE_PATH
 from .runners import _register_proc, _deregister_proc, _signal_process_group
 
 # Sentinel topic under the existing process registry (agent/runners.py) so
@@ -94,12 +102,51 @@ def _login_env(harness_id: str) -> dict:
     return env
 
 
+def _install_argv(target_id: str) -> list[str]:
+    """Fixed, allowlisted install command for a harness or the `ollama`
+    provider. Never built from user input — same invariant as _login_argv.
+    Wrapped in `sh -c` because install one-liners are themselves fixed
+    strings (curl-pipe-sh), not user-supplied — identical trust model to the
+    settings catalog's existing copy-to-clipboard command, just executed
+    instead of pasted."""
+    if target_id == "ollama":
+        if OLLAMA_PATH:
+            raise AuthSessionError("ollama is already installed")
+        from .providers import provider_install_cmd
+        return ["sh", "-c", provider_install_cmd("ollama")]
+
+    from .harnesses import SUPPORTED_HARNESSES, harness_install_cmd, is_installed
+    if target_id not in SUPPORTED_HARNESSES:
+        raise AuthSessionError(f"Unknown install target {target_id!r}")
+    if is_installed(target_id):
+        raise AuthSessionError(f"{target_id} is already installed")
+    return ["sh", "-c", harness_install_cmd(target_id)]
+
+
+def _model_argv(action: str, model: str) -> list[str]:
+    """Build a fixed-shape Ollama command without invoking a shell.
+
+    Pull permits a validated registry model name; remove is deliberately
+    limited to configured models so free text cannot delete local data.
+    """
+    if not OLLAMA_PATH:
+        raise AuthSessionError("ollama CLI not found in PATH")
+    if len(model) > 200 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9][A-Za-z0-9._-]*)?", model):
+        raise AuthSessionError(f"{model!r} is not a valid ollama model name")
+    from .providers import get_provider
+    provider = get_provider("ollama")
+    if action == "rm" and (not provider or model not in provider.models):
+        raise AuthSessionError(f"{model!r} is not a configured ollama model")
+    return [OLLAMA_PATH, action, model]
+
+
 class AuthSession:
-    def __init__(self, session_id: str, harness_id: str, pid: int, master_fd: int):
+    def __init__(self, session_id: str, harness_id: str, pid: int, master_fd: int, display_command: str):
         self.id = session_id
         self.harness_id = harness_id
         self.pid = pid
         self.master_fd = master_fd
+        self.display_command = display_command
         self.state = "running"  # running -> exited
         self.returncode: Optional[int] = None
         self.created_at = time.monotonic()
@@ -175,20 +222,38 @@ def _spawn_pty(argv: list[str], env: dict, cols: int, rows: int) -> tuple[int, i
     return pid, master_fd
 
 
-async def create_session(harness_id: str, cols: int, rows: int) -> AuthSession:
-    argv = _login_argv(harness_id)  # raises AuthSessionError / NoLoginCommand
-    env = _login_env(harness_id)
+async def create_session(
+    target_id: str, cols: int, rows: int, mode: str = "login", model: Optional[str] = None,
+) -> AuthSession:
+    """`target_id` is a harness id for mode="login"/"install", or "ollama"
+    for mode="install"/"pull"/"remove". `model` is required for pull/remove
+    and is validated by _model_argv. Raises AuthSessionError /
+    NoLoginCommand."""
+    if mode == "login":
+        argv = _login_argv(target_id)
+        env = _login_env(target_id)
+    elif mode == "install":
+        argv = _install_argv(target_id)
+        env = os.environ.copy()
+    elif mode in ("pull", "remove"):
+        if not model:
+            raise AuthSessionError(f"mode={mode!r} requires a model")
+        argv = _model_argv("pull" if mode == "pull" else "rm", model)
+        env = os.environ.copy()
+    else:
+        raise AuthSessionError(f"Unknown auth-session mode {mode!r}")
 
     pid, master_fd = await asyncio.to_thread(_spawn_pty, argv, env, cols, rows)
     os.set_blocking(master_fd, False)
 
     session_id = uuid.uuid4().hex
-    session = AuthSession(session_id, harness_id, pid, master_fd)
+    session = AuthSession(session_id, target_id, pid, master_fd, shlex.join(argv))
     _sessions[session_id] = session
 
+    prompt = f"{mode}: {target_id}" + (f" {model}" if model else "")
     _register_proc(
-        pid, backend=harness_id, topic=_AUTH_SESSION_TOPIC, agent=harness_id,
-        adhoc=True, prompt=f"auth login: {harness_id}",
+        pid, backend=target_id, topic=_AUTH_SESSION_TOPIC, agent=target_id,
+        adhoc=True, prompt=prompt,
     )
 
     loop = asyncio.get_event_loop()

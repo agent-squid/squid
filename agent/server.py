@@ -1271,8 +1271,10 @@ async def processes():
 
 class AuthSessionRequest(BaseModel):
     harness: str
-    cols: int = 100
-    rows: int = 10
+    cols: int = Field(default=100, ge=20, le=500)
+    rows: int = Field(default=10, ge=5, le=200)
+    mode: Literal["login", "install", "pull", "remove"] = "login"
+    model: Optional[str] = None
 
 
 class AuthSessionInputRequest(BaseModel):
@@ -1280,23 +1282,36 @@ class AuthSessionInputRequest(BaseModel):
 
 
 class AuthSessionResizeRequest(BaseModel):
-    cols: int
-    rows: int
+    cols: int = Field(ge=20, le=500)
+    rows: int = Field(ge=5, le=200)
 
 
 @app.post("/auth/session")
 async def auth_session_create(req: AuthSessionRequest):
     from .auth_sessions import create_session, AuthSessionError, NoLoginCommand
 
-    if req.harness not in SUPPORTED_HARNESSES:
-        return JSONResponse({"error": f"Unknown harness {req.harness!r}"}, status_code=400)
+    if req.mode == "login":
+        if req.harness not in SUPPORTED_HARNESSES:
+            return JSONResponse({"error": f"Unknown harness {req.harness!r}"}, status_code=400)
+    elif req.mode == "install":
+        if req.harness not in SUPPORTED_HARNESSES and req.harness != "ollama":
+            return JSONResponse({"error": f"Unknown install target {req.harness!r}"}, status_code=400)
+    else:  # pull / remove
+        if req.harness != "ollama":
+            return JSONResponse({"error": f"mode={req.mode!r} is only supported for ollama"}, status_code=400)
+        if not req.model:
+            return JSONResponse({"error": "model is required"}, status_code=400)
     try:
-        session = await create_session(req.harness, req.cols, req.rows)
+        session = await create_session(req.harness, req.cols, req.rows, mode=req.mode, model=req.model)
     except NoLoginCommand as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except AuthSessionError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
-    return JSONResponse({"id": session.id, "harness": session.harness_id})
+    return JSONResponse({
+        "id": session.id,
+        "harness": session.harness_id,
+        "command": session.display_command,
+    })
 
 
 @app.get("/auth/session/{session_id}/events")
@@ -1379,7 +1394,9 @@ def _gauge_authed(gauge_type: str, provider: Provider) -> Optional[bool]:
 
 @app.get("/health")
 async def health():
-    providers = public_providers()
+    # to_thread: public_providers() now shells out to `ollama list` for any
+    # binary-backed provider, which would otherwise block the event loop.
+    providers = await asyncio.to_thread(public_providers)
     for provider_id, info in providers.items():
         info["gauge_authed"] = _gauge_authed(info["gauge"]["type"], require_provider(provider_id))
     return JSONResponse({

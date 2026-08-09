@@ -3966,6 +3966,12 @@ const authPanelTitle = document.getElementById('auth-panel-title');
 const authPanelTerm = document.getElementById('auth-panel-term');
 const authPanelCancelBtn = document.getElementById('auth-panel-cancel-btn');
 const authPanelRetryBtn = document.getElementById('auth-panel-retry-btn');
+const agentsAuthPanel = document.getElementById('agents-auth-panel');
+const agentsAuthPanelTitle = document.getElementById('agents-auth-panel-title');
+const agentsAuthPanelTerm = document.getElementById('agents-auth-panel-term');
+const agentsAuthPanelCancelBtn = document.getElementById('agents-auth-panel-cancel-btn');
+const agentsAuthPanelRetryBtn = document.getElementById('agents-auth-panel-retry-btn');
+const agentsAuthPanelHome = document.getElementById('agents-auth-panel-home');
 let _authSession = null; // { id, harness, es, term, onSuccessRetry }
 
 const HARNESS_LABELS = { claudecode: 'Claude Code', codex: 'Codex', cursor: 'Cursor', opencode: 'OpenCode', pi: 'Pi' };
@@ -4004,13 +4010,54 @@ function base64ToBytes(b64) {
   return bytes;
 }
 
-async function openAuthPanel(harness, onSuccessRetry) {
-  if (_authSession) await closeAuthPanel();
-  form.classList.add('dimmed');
-  authPanel.classList.add('open');
-  authPanelRetryBtn.hidden = true;
-  authPanelTitle.textContent = `Log in — ${HARNESS_LABELS[harness] || harness}`;
-  authPanelTerm.innerHTML = '';
+function _authPanelTitle(harness, mode, model) {
+  const label = HARNESS_LABELS[harness] || (harness === 'ollama' ? 'Ollama' : harness);
+  if (mode === 'install') return `Install — ${label}`;
+  if (mode === 'pull') return `Pulling ${model} — Ollama`;
+  if (mode === 'remove') return `Removing ${model} — Ollama`;
+  return `Log in — ${label}`;
+}
+
+function _authPanelDoneTitle(harness, mode, model) {
+  const label = HARNESS_LABELS[harness] || (harness === 'ollama' ? 'Ollama' : harness);
+  if (mode === 'install') return `Installed — ${label}`;
+  if (mode === 'pull') return `Pulled ${model} — Ollama`;
+  if (mode === 'remove') return `Removed ${model} — Ollama`;
+  return `Done — ${label}`;
+}
+
+function _setCatalogOperationBusy(busy) {
+  document.querySelectorAll('.bcat-install-btn, .bcat-pull-btn, .bcat-rm-btn').forEach(btn => {
+    if (busy) {
+      btn.dataset.operationWasDisabled = btn.disabled ? '1' : '0';
+      btn.disabled = true;
+    } else if (btn.dataset.operationWasDisabled !== undefined) {
+      btn.disabled = btn.dataset.operationWasDisabled === '1';
+      delete btn.dataset.operationWasDisabled;
+    }
+  });
+}
+
+async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
+  const mode = opts.mode || 'login';
+  const model = opts.model || null;
+  const isCatalogOperation = mode !== 'login';
+  const panel = isCatalogOperation ? agentsAuthPanel : authPanel;
+  const panelTitle = isCatalogOperation ? agentsAuthPanelTitle : authPanelTitle;
+  const panelTerm = isCatalogOperation ? agentsAuthPanelTerm : authPanelTerm;
+  const panelRetryBtn = isCatalogOperation ? agentsAuthPanelRetryBtn : authPanelRetryBtn;
+  const anchor = opts.anchor || (isCatalogOperation ? _authSession?.anchor : null);
+  if (_authSession) await closeAuthPanel({ refreshCatalog: false });
+  if (isCatalogOperation) {
+    if (anchor?.isConnected) anchor.after(panel);
+    else agentsAuthPanelHome.before(panel);
+  }
+  if (isCatalogOperation) _setCatalogOperationBusy(true);
+  if (!isCatalogOperation) form.classList.add('dimmed');
+  panel.classList.add('open');
+  panelRetryBtn.hidden = true;
+  panelTitle.textContent = _authPanelTitle(harness, mode, model);
+  panelTerm.innerHTML = '';
 
   const term = new Terminal({
     convertEol: true,
@@ -4026,7 +4073,7 @@ async function openAuthPanel(harness, onSuccessRetry) {
     fontFamily: 'ui-monospace, SFMono, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
     theme: { background: '#13131c' },
   });
-  term.open(authPanelTerm);
+  term.open(panelTerm);
   const fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   // Compat shim: addon-fit reads `_core.viewport.scrollBarWidth`, but the
@@ -4042,10 +4089,20 @@ async function openAuthPanel(harness, onSuccessRetry) {
   if (term._core && term._core.viewport == null) {
     term._core.viewport = { scrollBarWidth: term._core._viewport?.scrollBarWidth ?? 0 };
   }
+  const fitTerminal = () => {
+    fitAddon.fit();
+    const minCols = isCatalogOperation ? 30 : 20;
+    const cols = Math.max(minCols, Math.min(500, term.cols));
+    const rows = isCatalogOperation ? 10 : Math.max(5, Math.min(200, term.rows));
+    if (cols !== term.cols || rows !== term.rows) term.resize(cols, rows);
+  };
   // #auth-panel just flipped from display:none to flex this same tick, so
   // its box has no layout yet — give it one frame before fit() measures it.
   await new Promise(resolve => requestAnimationFrame(resolve));
-  fitAddon.fit();
+  fitTerminal();
+  // Catalog commands render animated progress against the PTY width they
+  // start with. Keep at least a small usable grid on very narrow phones;
+  // the Agents panel scrolls horizontally when the viewport cannot fit it.
   term.focus();
 
   // Make URLs clickable — avoids macOS "open with" system modal.
@@ -4085,9 +4142,13 @@ async function openAuthPanel(harness, onSuccessRetry) {
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
       if (!_authSession || _authSession.term !== term) return;
+      // ollama's progress renderer handles SIGWINCH poorly mid-frame. Keep
+      // both xterm and its PTY at their initial grid until the command exits.
+      if (isCatalogOperation && _authSession.running) return;
       const prevCols = term.cols, prevRows = term.rows;
-      fitAddon.fit();
-      if (_authSession.id && (term.cols !== prevCols || term.rows !== prevRows)) {
+      fitTerminal();
+      if (!isCatalogOperation && _authSession.running && _authSession.id &&
+          (term.cols !== prevCols || term.rows !== prevRows)) {
         fetch(`/auth/session/${_authSession.id}/resize`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ cols: term.cols, rows: term.rows }),
@@ -4097,7 +4158,8 @@ async function openAuthPanel(harness, onSuccessRetry) {
   };
   window.addEventListener('resize', handleResize);
 
-  _authSession = { id: null, harness, term, fitAddon, handleResize, onSuccessRetry };
+  _authSession = { id: null, harness, mode, model, panel, panelTitle, panelTerm,
+    panelRetryBtn, anchor, term, fitAddon, handleResize, onSuccessRetry, running: true };
 
   let res, data;
   try {
@@ -4108,7 +4170,7 @@ async function openAuthPanel(harness, onSuccessRetry) {
     // arrives, which is what corrupted the opencode login list on up-arrow.
     res = await fetch('/auth/session', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ harness, cols: term.cols, rows: term.rows }),
+      body: JSON.stringify({ harness, cols: term.cols, rows: term.rows, mode, model }),
     });
     data = await res.json();
   } catch (err) {
@@ -4116,27 +4178,48 @@ async function openAuthPanel(harness, onSuccessRetry) {
     data = { error: String(err) };
   }
   if (!res || !res.ok) {
-    term.write((data.error || 'Failed to start login').replace(/\n/g, '\r\n'));
-    authPanelTitle.textContent = data.error || 'Failed to start login';
+    term.write((data.error || 'Failed to start').replace(/\n/g, '\r\n'));
+    panelTitle.textContent = data.error || 'Failed to start';
+    panelRetryBtn.hidden = false;
+    _authSession.running = false;
+    if (isCatalogOperation) _setCatalogOperationBusy(false);
     return;
   }
 
+  // The PTY execs its allowlisted argv directly, without a shell prompt to
+  // echo it. Show the exact server-derived command before replay/live output.
+  term.write(`$ ${data.command}\r\n\r\n`);
   const es = new EventSource(`/auth/session/${data.id}/events`);
-  _authSession = { id: data.id, harness, es, term, fitAddon, handleResize, onSuccessRetry };
+  _authSession = { id: data.id, harness, mode, model, panel, panelTitle, panelTerm,
+    panelRetryBtn, anchor, es, term, fitAddon, handleResize, onSuccessRetry, running: true };
 
   es.addEventListener('data', event => {
     try { term.write(base64ToBytes(event.data)); } catch {}
   });
   es.addEventListener('exit', event => {
     es.close();
+    if (!_authSession || _authSession.id !== data.id) return;
+    _authSession.running = false;
+    if (isCatalogOperation) _setCatalogOperationBusy(false);
     const code = parseInt(event.data, 10);
     if (code === 0) {
       const retry = _authSession?.onSuccessRetry;
-      closeAuthPanel();
-      if (retry) retry();
+      const finishedMode = _authSession?.mode;
+      if (finishedMode && finishedMode !== 'login') {
+        panelTitle.textContent = _authPanelDoneTitle(harness, mode, model);
+        // The process is gone, so it is now safe to fit the retained result
+        // to the current viewport without sending SIGWINCH to ollama.
+        fitTerminal();
+      } else {
+        closeAuthPanel();
+        if (retry) retry();
+      }
     } else {
-      authPanelTitle.textContent = `Exited (${code})`;
-      authPanelRetryBtn.hidden = false;
+      panelTitle.textContent = `Exited (${code})`;
+      panelRetryBtn.hidden = false;
+      if (isCatalogOperation) {
+        fitTerminal();
+      }
     }
   });
 
@@ -4149,25 +4232,39 @@ async function openAuthPanel(harness, onSuccessRetry) {
   });
 }
 
-async function closeAuthPanel() {
+async function closeAuthPanel({ refreshCatalog = true } = {}) {
   const session = _authSession;
   _authSession = null;
   if (session) {
     if (session.handleResize) window.removeEventListener('resize', session.handleResize);
     if (session.es) session.es.close();
+    // The endpoint only signals a running child; for a completed session it
+    // simply releases the retained server-side replay buffer immediately.
     if (session.id) fetch(`/auth/session/${session.id}/cancel`, { method: 'POST' }).catch(() => {});
     if (session.term) session.term.dispose();
   }
-  authPanel.classList.remove('open');
+  (session?.panel || authPanel).classList.remove('open');
+  const wasCatalogOperation = session?.mode && session.mode !== 'login';
+  if (wasCatalogOperation) {
+    _setCatalogOperationBusy(false);
+    agentsAuthPanelHome.before(agentsAuthPanel);
+    if (refreshCatalog && typeof loadAgents === 'function') loadAgents();
+  }
   form.classList.remove('dimmed');
 }
 
 authPanelCancelBtn.addEventListener('click', () => closeAuthPanel());
-authPanelRetryBtn.addEventListener('click', () => {
+agentsAuthPanelCancelBtn.addEventListener('click', () => closeAuthPanel());
+function retryAuthSession() {
   const harness = _authSession?.harness;
   const retry = _authSession?.onSuccessRetry;
-  if (harness) openAuthPanel(harness, retry);
-});
+  const mode = _authSession?.mode;
+  const model = _authSession?.model;
+  const anchor = _authSession?.anchor;
+  if (harness) openAuthPanel(harness, retry, { mode, model, anchor });
+}
+authPanelRetryBtn.addEventListener('click', retryAuthSession);
+agentsAuthPanelRetryBtn.addEventListener('click', retryAuthSession);
 
 async function sendMessage(text, opts = {}) {
   const source = opts.source === 'workflow' || opts.source === 'diff_viewer' ? opts.source : 'human';
@@ -10884,6 +10981,9 @@ function refreshRuntimeMetadata(health) {
 function renderHarnessesCatalog(health) {
   const el = document.getElementById('harnesses-catalog');
   if (!el) return;
+  // Keep an inline operation terminal and its retained output alive across
+  // tab changes/health refreshes. Closing it triggers the deferred render.
+  if (el.contains(agentsAuthPanel)) return;
 
   const harnessIds = Object.keys(_harnessMetadata).sort((a, b) =>
     (_harnessMetadata[a].label || a).localeCompare(_harnessMetadata[b].label || b)
@@ -10912,6 +11012,7 @@ function renderHarnessesCatalog(health) {
         (installCmd ? `<div class="bcat-install">
           <code class="bcat-cmd">${escapeHtml(installCmd)}</code>
           <button class="bcat-copy" data-cmd="${escapeHtml(installCmd)}">copy</button>
+          <button class="bcat-install-btn" data-target="${escapeHtml(id)}">install</button>
         </div>` : '');
     }
 
@@ -10930,15 +11031,23 @@ function renderHarnessesCatalog(health) {
       });
     });
   });
+  el.querySelectorAll('.bcat-install-btn').forEach(btn => {
+    btn.addEventListener('click', () => openAuthPanel(btn.dataset.target, null, {
+      mode: 'install', anchor: btn.closest('.bcat-row'),
+    }));
+  });
 }
 
 function renderProvidersCatalog() {
   const el = document.getElementById('providers-catalog');
   if (!el) return;
+  if (el.contains(agentsAuthPanel)) return;
 
-  const providerIds = Object.keys(_providerMetadata).sort((a, b) =>
-    (_providerMetadata[a].label || a).localeCompare(_providerMetadata[b].label || b)
-  );
+  const providerIds = Object.keys(_providerMetadata).sort((a, b) => {
+    if (a === 'ollama') return -1;
+    if (b === 'ollama') return 1;
+    return (_providerMetadata[a].label || a).localeCompare(_providerMetadata[b].label || b);
+  });
   if (!providerIds.length) {
     el.innerHTML = '<div class="empty">No providers configured.</div>';
     return;
@@ -10961,17 +11070,105 @@ function renderProvidersCatalog() {
     const gaugeText = gauge.type === 'static'
       ? (gauge.text || 'static')
       : (GAUGE_CATALOG[gauge.type] || 'no gauge configured');
-    const models = (info.models || []).length ? `${info.models.length} model${info.models.length === 1 ? '' : 's'}` : 'models: freeform';
+    const modelCount = (info.models || []).length;
+    const models = modelCount
+      ? `frequently used models: ${modelCount} · freeform selection`
+      : 'freeform model selection';
+    const yamlLink = ' · <a class="bcat-link bcat-yaml-link" href="#">edit YAML</a>';
+    const modelLibrary = id === 'ollama'
+      ? ' · <a class="bcat-link" href="https://ollama.com/library" target="_blank" rel="noopener noreferrer">model library</a>'
+      : '';
 
-    return `<div class="bcat-row">
+    // Binary-backed providers (ollama today, see agent/providers.py's
+    // _PROVIDER_INSTALL) carry install_cmd/installed on top of the usual
+    // auth fields — install-or-manage-models row, not just an auth status.
+    const isBinaryBacked = info.install_cmd !== undefined;
+    let localHtml = '';
+    if (isBinaryBacked && !info.installed) {
+      localHtml = `<div class="bcat-install">
+        <code class="bcat-cmd">${escapeHtml(info.install_cmd)}</code>
+        <button class="bcat-copy" data-cmd="${escapeHtml(info.install_cmd)}">copy</button>
+        <button class="bcat-install-btn" data-target="${escapeHtml(id)}">install</button>
+      </div>`;
+    } else if (isBinaryBacked && info.installed) {
+      // pulled_models is absent when the backend couldn't ask ollama (CLI
+      // race, timeout) — fall back to both buttons enabled rather than
+      // guessing at pulled state.
+      const pulled = Array.isArray(info.pulled_models) ? new Set(info.pulled_models) : null;
+      const configuredModels = (info.models || []).map(m => {
+        const isPulled = pulled ? pulled.has(m) : null;
+        const pullDisabled = isPulled === true ? 'disabled' : '';
+        const rmDisabled = isPulled === false ? 'disabled' : '';
+        return `
+        <div class="bcat-model-row">
+          <code class="bcat-cmd">${escapeHtml(m)}</code>
+          <button class="bcat-pull-btn" data-provider="${escapeHtml(id)}" data-model="${escapeHtml(m)}" ${pullDisabled}>pull</button>
+          <button class="bcat-rm-btn" data-provider="${escapeHtml(id)}" data-model="${escapeHtml(m)}" ${rmDisabled}>remove</button>
+        </div>`;
+      }).join('');
+      localHtml = `<div class="bcat-models">${configuredModels}
+        <div class="bcat-model-row bcat-custom-model">
+          <input class="bcat-model-input" type="text" maxlength="200" placeholder="e.g. llama3.2:3b" aria-label="Ollama model name">
+          <button class="bcat-pull-btn" data-provider="${escapeHtml(id)}" disabled>pull</button>
+        </div>
+      </div>`;
+    }
+
+    return `<div class="bcat-row${id === 'ollama' ? ' bcat-row-ollama' : ''}">
       <div class="bcat-name"><span class="bcat-dot" style="background:${escapeHtml(color)}"></span>${escapeHtml(label)}</div>
       <div class="bcat-coding">
         <span class="${statusClass}">${statusMark} ${escapeHtml(authText)}</span>
-        <span class="bcat-hint">${escapeHtml(models)}</span>
+        <span class="bcat-hint">${escapeHtml(models)}${yamlLink}${modelLibrary}</span>
+        ${localHtml}
       </div>
       <div class="bcat-gauge"><span class="bcat-hint">${escapeHtml(gaugeText)}</span></div>
     </div>`;
   }).join('');
+
+  el.querySelectorAll('.bcat-copy').forEach(btn => {
+    btn.addEventListener('click', () => {
+      navigator.clipboard.writeText(btn.dataset.cmd).then(() => {
+        btn.textContent = 'copied';
+        setTimeout(() => { btn.textContent = 'copy'; }, 1500);
+      });
+    });
+  });
+  el.querySelectorAll('.bcat-yaml-link').forEach(link => {
+    link.addEventListener('click', event => {
+      event.preventDefault();
+      navigateView('settings');
+    });
+  });
+  el.querySelectorAll('.bcat-install-btn').forEach(btn => {
+    btn.addEventListener('click', () => openAuthPanel(btn.dataset.target, null, {
+      mode: 'install', anchor: btn.closest('.bcat-row'),
+    }));
+  });
+  el.querySelectorAll('.bcat-pull-btn').forEach(btn => {
+    const input = btn.closest('.bcat-custom-model')?.querySelector('.bcat-model-input');
+    const pull = () => {
+      const model = input ? input.value.trim() : btn.dataset.model;
+      if (!model) return;
+      openAuthPanel(btn.dataset.provider, null, {
+        mode: 'pull', model, anchor: btn.closest('.bcat-row'),
+      });
+    };
+    btn.addEventListener('click', pull);
+    if (input) {
+      input.addEventListener('input', () => { btn.disabled = !input.value.trim(); });
+      input.addEventListener('keydown', event => {
+        if (event.key === 'Enter' && input.value.trim()) {
+          event.preventDefault();
+          pull();
+        }
+      });
+    }
+  });
+  el.querySelectorAll('.bcat-rm-btn').forEach(btn => {
+    btn.addEventListener('click', () => openAuthPanel(btn.dataset.provider, null, {
+      mode: 'remove', model: btn.dataset.model, anchor: btn.closest('.bcat-row'),
+    }));
+  });
 }
 
 function renderRuntimeCatalogs(health) {

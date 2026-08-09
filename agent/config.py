@@ -71,6 +71,11 @@ CURSOR_CLI    = "cursor-agent"
 OPENCODE_CLI  = "opencode"
 PI_CLI        = "pi"
 
+# Ollama's own control binary (ADR-0037) — not a harness CLI, just what's
+# checked to decide whether the `ollama` provider is actually usable / worth
+# defaulting pi and opencode to (see bin/install.sh).
+OLLAMA_CLI    = "ollama"
+
 # Experimental runners exist for these CLIs but they are not configurable harnesses.
 COPILOT_CLI  = "copilot"
 AGY_CLI      = "agy"
@@ -107,6 +112,7 @@ CURSOR_PATH    = find_cli(CURSOR_CLI)
 OPENCODE_PATH  = find_cli(OPENCODE_CLI)
 PI_PATH        = find_cli(PI_CLI)
 AGY_PATH       = find_cli(AGY_CLI)
+OLLAMA_PATH    = find_cli(OLLAMA_CLI)
 
 # OpenCode free provider — no API key required
 OPENCODE_DEFAULT_MODEL = "opencode/deepseek-v4-flash-free"

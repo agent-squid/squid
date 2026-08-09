@@ -77,6 +77,12 @@ harnesses:
     default_provider: cursor
     supported_apis: [/native/cursor]
 
+  # default_provider: nvidia below is what a fresh install gets when the
+  # `ollama` binary isn't found. bin/install.sh checks for it and, when
+  # present, rewrites these two lines to `default_provider: ollama` in the
+  # copy it writes to ~/.squid/squid.yaml — this file on disk always shows
+  # the no-binary fallback. See the `ollama` provider entry below and
+  # docs/decisions/0037-ollama-local-model-harness-and-queueing.md.
   opencode:
     protocol:
       type: oneshot-cli
@@ -219,31 +225,37 @@ providers:
   #   models: [qwen2.5-coder-7b-4bit]
 
   # Ollama (ADR-0037): a local daemon, not a hosted API — no credential to
-  # supply, hence auth.type: none rather than api_key. `parallel: false` is
-  # what actually makes every agent resolving to this provider (regardless
-  # of harness) share one serial queue lane and get active load/unload on
-  # model switch, instead of the parallel-across-agents behavior every other
-  # provider gets by default — see
+  # supply, hence auth.type: none rather than api_key. Shipped uncommented
+  # (unlike the `local` example above) because it's always safe to have
+  # configured: nothing resolves to it unless a named agent is explicitly
+  # pointed at it, or bin/install.sh detected the `ollama` binary and set it
+  # as pi/opencode's default_provider (see the harnesses: section above).
+  # `parallel: false` is what actually makes every agent resolving to this
+  # provider (regardless of harness) share one serial queue lane and get
+  # active load/unload on model switch, instead of the parallel-across-agents
+  # behavior every other provider gets by default — see
   # docs/decisions/0037-ollama-local-model-harness-and-queueing.md. This is
   # independent of auth.type: a beefier multi-GPU box that can actually
   # serve concurrent requests can set `parallel: true` instead. Running more
   # than one local box? Give each its own provider entry (distinct name,
   # distinct base_url, e.g. ollama-gpu1/ollama-gpu2) to get independent
   # queues per physical resource.
-  # /v1/chat/completions makes this compatible with Path A (pi/opencode
-  # talking to Ollama as a custom provider); /native/ollama additionally
-  # makes it compatible with the standalone chat-only "ollama" harness
-  # (Path B — no tool-use loop, see the ADR).
-  # ollama:
-  #   label: Ollama
-  #   color: "#000000"
-  #   base_url: "http://localhost:11434/v1"
-  #   supported_apis: [/v1/chat/completions, /native/ollama]
-  #   auth:
-  #     type: none
-  #   parallel: false  # set true instead if this box can serve concurrent local requests (multi-GPU, OLLAMA_NUM_PARALLEL, ...)
-  #   gauge:
-  #     type: static
-  #     text: Local
-  #     title: no reset
-  #   models: [qwen2.5:7b, qwen3:8b, gemma3:12b]
+  # /v1/chat/completions makes this compatible with pi/opencode talking to
+  # Ollama as a custom provider — no ollama-specific harness needed; either
+  # harness's own tool-use loop runs as normal against the local checkpoint.
+  # models: qwen3.5:4b (tool-calling, laptop-sized, first entry = agent-form
+  # default) and gemma4:e4b as a second pick, plus the older qwen2.5/qwen3
+  # sizes already validated against Pi's custom-provider path.
+  ollama:
+    label: Ollama
+    color: "#000000"
+    base_url: "http://localhost:11434/v1"
+    supported_apis: [/v1/chat/completions]
+    auth:
+      type: none
+    parallel: false  # set true instead if this box can serve concurrent local requests (multi-GPU, OLLAMA_NUM_PARALLEL, ...)
+    gauge:
+      type: static
+      text: Local
+      title: no reset
+    models: [qwen3.5:4b, gemma4:e4b, qwen2.5:7b, qwen3:8b]

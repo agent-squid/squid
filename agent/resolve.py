@@ -357,11 +357,6 @@ class ResolvedAgent:
                     }
                 }
                 result.setdefault("OPENCODE_CONFIG_CONTENT", json.dumps(config_content))
-        elif self.harness == "ollama" and base_url:
-            # ADR-0037, Path B: run_ollama has no subprocess to hand a base
-            # URL to via argv — read it back out of this same env dict
-            # instead, the one channel every runner already receives.
-            result.setdefault("OLLAMA_BASE_URL", base_url)
         return result
 
     def harness_settings(self) -> dict[str, Any]:

@@ -947,7 +947,8 @@ def test_dispatch_collapses_local_provider_agents_into_one_shared_lane():
     # Two different topics/agents that both resolve to a parallel: false
     # provider must land in the same TopicWorker (one FIFO lane per physical
     # resource), unlike every other provider which keeps per-(topic, agent)
-    # parallel lanes.
+    # parallel lanes. Using two different harnesses (pi, opencode) confirms
+    # the lane is keyed by provider, not by harness.
     async def run():
         dispatcher = TopicDispatcher()
         with patch.object(TopicWorker, "start", lambda self: None), \
@@ -958,7 +959,7 @@ def test_dispatch_collapses_local_provider_agents_into_one_shared_lane():
             )
             _out_q2, _seq2, worker2 = await dispatcher.dispatch(
                 topic="topicB", prompt="hi", context_history=[],
-                harness="ollama", provider="ollama", agent="qwen30-ollama",
+                harness="opencode", provider="ollama", agent="qwen30-opencode",
             )
         return worker1, worker2, dispatcher._workers
 
@@ -982,7 +983,7 @@ def test_dispatch_collapses_adhoc_into_shared_lane_for_local_provider():
             )
             _out_q2, _seq2, worker2 = await dispatcher.dispatch(
                 topic="topicB", prompt="hi", context_history=[],
-                harness="ollama", provider="ollama", agent="qwen30-ollama",
+                harness="opencode", provider="ollama", agent="qwen30-opencode",
                 adhoc=True,
             )
         return worker1, worker2, dispatcher._workers

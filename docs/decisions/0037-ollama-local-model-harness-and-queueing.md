@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-08-07
-updated: 2026-08-07
+updated: 2026-08-09
 ---
 # ADR-0037: Local Models via Ollama — Provider-Scoped Queueing and Active Load/Unload Switching
 
@@ -54,9 +54,10 @@ features:
    this ADR: switching agents should feel like "turn off the old model,
    turn on the new one," not "wait a few minutes and hope."
 
-Explicitly out of scope, same as the original draft: automatic
-`ollama pull`/model-download management, and model-comparison/eval/stats
-tooling across checkpoints.
+Explicitly out of scope, same as the original draft: *unattended* automatic
+`ollama pull`/model-download management (see "Amendment: user-initiated
+pull/remove" below for what's now in scope instead), and
+model-comparison/eval/stats tooling across checkpoints.
 
 ## Decision
 
@@ -72,7 +73,8 @@ same `(harness, provider, model, cwd)` shape every agent already uses
 provider; nothing about that mechanism is Ollama-specific. This is the path
 that actually runs a local checkpoint as Pi's coding brain.
 
-**Path B (optional, secondary): a standalone chat-only `ollama` harness.**
+**Path B (optional, secondary; removed 2026-08-09, see Consequences): a
+standalone chat-only `ollama` harness.**
 Unchanged from the original draft — added to `agent/harnesses.py`'s fixed
 set, protocol `oneshot-cli`, install-check replaced by a daemon-reachability
 check (`GET {base_url}/api/tags`, since there's no CLI binary to
@@ -266,6 +268,67 @@ that picker is how a user actually triggers a switch, and it needs no
 changes. What's new is purely what happens underneath that switch: an
 active, visible handoff instead of a silent wait on Ollama's own timer.
 
+## Amendment (2026-08-09): default provider at install, user-initiated pull/remove
+
+Two follow-ups, added the same day as Path B's removal above, once Ollama
+moved from "supported if you hand-edit `squid.yaml`" to "offered by default."
+
+**`bin/install.sh` gates pi/opencode's default provider on the `ollama`
+binary.** `config/squid.yaml.example`'s `ollama:` provider entry ships
+uncommented now (previously commented-out like the `local` example above
+it) — always present in the shipped config, inert unless something resolves
+to it, since presence alone doesn't select it as anyone's default. The
+`harnesses.opencode.default_provider` / `harnesses.pi.default_provider`
+lines still read `nvidia` in the example file itself (the safe zero-binary
+default); `bin/install.sh` checks `command -v ollama` and, only when found,
+rewrites those two lines to `ollama` in the copy it writes to
+`~/.squid/squid.yaml` for a *fresh* install. An existing `~/.squid/squid.yaml`
+is never touched, so this changes only what a brand-new install defaults to,
+never a running user's config. `agent/providers.py` gained a small,
+provider-id-keyed parallel to `harnesses.py`'s `_HARNESS_PATHS`/
+`_HARNESS_INSTALL` — `_PROVIDER_BINARY_PATH`/`_PROVIDER_INSTALL` — so
+`GET /health`'s `providers` payload carries `installed`/`install_cmd` for
+`ollama` the same way it already does for harnesses, which is what the
+settings catalog's Install button (below) reads.
+
+**User-initiated pull/remove reuses the login PTY mechanism (ADR-0035),
+narrowing rather than reversing the "no automatic pull" line above.** The
+distinction that stays intact: *unattended* pulling (e.g. auto-pulling a
+model at agent-creation time with no confirmation) is still out of scope;
+a user clicking a button for one specific, pre-curated model is not the
+same risk and is now in scope. `agent/auth_sessions.py`'s `create_session`
+gained a `mode` parameter (`login` | `install` | `pull` | `remove`) alongside
+the existing harness-login argv construction:
+- `install` covers both harness install one-liners (`_HARNESS_INSTALL`,
+  already existed for the settings catalog's copy-to-clipboard command) and
+  the `ollama` provider's own install one-liner
+  (`_PROVIDER_INSTALL["ollama"]`) — same `sh -c <fixed string>` shape,
+  same "never built from user input" invariant the module's docstring
+  already commits to for login.
+- `pull`/`remove` run `ollama pull <model>` / `ollama rm <model>` as a plain
+  argv list (`[OLLAMA_PATH, action, model]`, no shell involved), where
+  `model` is checked server-side against the `ollama` provider's configured
+  `models:` list before the PTY ever spawns — a client can only ever trigger
+  one of the names an admin already put in `squid.yaml`, never an arbitrary
+  string, so this can't become an unbounded-download or delete-anything
+  vector regardless of what a request body claims.
+
+The settings UI's harness and provider catalogs (`renderHarnessesCatalog`/
+`renderProvidersCatalog`, `ui/app.js`) both gained an Install button next to
+the existing copy-to-clipboard command for anything reporting
+`installed: false`; the `ollama` provider row additionally lists its
+configured models with Pull/Remove buttons when the binary is present. All
+three reuse `openAuthPanel`'s existing xterm.js/SSE plumbing unchanged
+(ADR-0035) — only `mode`/`model` are new — including `ollama pull`'s native
+layered progress output, which renders directly in the panel instead of a
+generic spinner. There is deliberately no free-text model field anywhere in
+this UI, matching the curated-list-only design above. Not done in this pass:
+live per-model on-disk/resident state (`GET /api/tags` / `GET /api/ps`,
+referenced above for the `"loading"` SSE event) — the Pull/Remove buttons
+work whether or not a model is already present, but the catalog doesn't yet
+show which models already are; left for a follow-up rather than blocking
+this amendment on it.
+
 ## Consequences
 
 - No new harness or runner is required to get a local checkpoint running
@@ -318,20 +381,33 @@ active, visible handoff instead of a silent wait on Ollama's own timer.
   `from` model name, so a switch renders as one state ("Switching qwen25 →
   qwen30...") instead of a separate unload notice plus a separate load
   notice.
-- Path B (standalone `ollama` harness + `run_ollama` runner) remains
-  optional and independent — can ship, be deferred, or be dropped entirely
-  without affecting Path A or the provider-scoped queueing mechanism, since
-  both are provider-scoped rather than harness-scoped.
-- Explicitly out of scope, left for later ADRs if pursued: automatic
-  `ollama pull`/model-download management, any new tool-use loop beyond
-  what Pi (or another harness) already provides, and
+- Path B (standalone `ollama` harness + `run_ollama` runner) shipped
+  alongside Path A but was removed on 2026-08-09: Ollama is a provider
+  (an API endpoint + auth shape), not an execution mechanism, and every
+  real use case reaches it through an existing harness's tool-use loop
+  (Path A) rather than a bespoke chat-only runner. Removing it is exactly
+  the "can be dropped entirely without affecting Path A" case anticipated
+  above — `agent/harnesses.py`'s fixed harness set no longer has an
+  `ollama` entry, `run_ollama` is gone from `agent/runners.py`, and the
+  `ollama` provider's `supported_apis` in `config/squid.yaml.example`
+  dropped `/native/ollama` (that API tag existed solely to make the
+  provider "compatible with" the now-removed harness).
+- Explicitly out of scope, left for later ADRs if pursued: *unattended*
+  automatic `ollama pull`/model-download management (user-initiated
+  pull/remove via a button is in scope — see "Amendment" above), any new
+  tool-use loop beyond what Pi (or another harness) already provides, and
   model-comparison/eval/stats-diffing across checkpoints.
+- Amendment (2026-08-09): `bin/install.sh` now points pi/opencode's
+  `default_provider` at `ollama` for a fresh install when the `ollama`
+  binary is detected (never for an existing `~/.squid/squid.yaml`), and the
+  settings catalogs gained Install/Pull/Remove buttons reusing ADR-0035's
+  login PTY mechanism, gated by a curated `models:` allowlist server-side —
+  see "Amendment: default provider at install, user-initiated pull/remove"
+  above for the full reasoning.
 - Implemented: `auth.type: none`, the `parallel` field and its queueing/
   load-visibility/active-unload behavior, adhoc inclusion in the
   provider-scoped lane, and Path A's placeholder-apiKey handling for pi are
   all shipped in `agent/providers.py`, `agent/resolve.py`, and
   `agent/topic_queue.py`, with test coverage in `tests/test_topic_queue.py`.
-  Path B (the standalone `ollama` harness/runner) is also shipped — see
-  `run_ollama` in `agent/runners.py` and the `ollama` entries in
-  `agent/harnesses.py`'s fixed harness set, protocol map, and runner
-  registry. Both integration paths are live.
+  Path B (the standalone `ollama` harness/runner) shipped and was later
+  removed — see the note above. Only Path A is live today.

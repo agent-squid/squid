@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from .config import TEST_HARNESS_ENABLED, _cfg
+from .config import OLLAMA_PATH, TEST_HARNESS_ENABLED, _cfg
 
 # "none" (ADR-0037): a local, credential-free daemon such as Ollama — no
 # secret to check for, and it's what agent/topic_queue.py keys its
@@ -52,6 +53,51 @@ _DEFAULT_PROVIDERS: dict[str, dict[str, Any]] = {
         "supported_apis": ["/native/opencode"],
     },
 }
+
+# Providers backed by a local control binary rather than a hosted API — a
+# provider-level analogue of harnesses.py's _HARNESS_PATHS/_HARNESS_INSTALL,
+# for the one case (so far) where "is this provider usable" means "is a
+# daemon binary on PATH" instead of "is a credential configured." Checked
+# once at import, same as every other CLI path in agent/config.py.
+_PROVIDER_BINARY_PATH: dict[str, "str | None"] = {
+    "ollama": OLLAMA_PATH,
+}
+_PROVIDER_INSTALL: dict[str, str] = {
+    "ollama": "curl -fsSL https://ollama.com/install.sh | sh",
+}
+
+
+def _installed_ollama_models() -> Optional[set[str]]:
+    """Model names currently pulled into the local ollama daemon (`ollama
+    list`'s NAME column), or None if the CLI isn't on PATH or the call
+    fails/times out. Distinguishes "pulled" from merely "in the curated
+    models: suggestion list" so the UI can grey out whichever of pull/remove
+    doesn't apply to a given model — public_dict() below only calls this
+    when the ollama binary itself is already known installed."""
+    if not OLLAMA_PATH:
+        return None
+    try:
+        result = subprocess.run(
+            [OLLAMA_PATH, "list"], capture_output=True, text=True, timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    names: set[str] = set()
+    for line in result.stdout.splitlines()[1:]:  # skip "NAME ID SIZE MODIFIED" header
+        line = line.strip()
+        if not line:
+            continue
+        name = line.split()[0]
+        names.add(name)
+        # ollama always tags an untagged pull as :latest in `ollama list`,
+        # but a curated models: entry may omit the tag (e.g.
+        # "qwen3.5-optimized") — add the untagged alias too so pulled-state
+        # matching isn't tag-format-sensitive either way.
+        if name.endswith(":latest"):
+            names.add(name[: -len(":latest")])
+    return names
 
 
 @dataclass(frozen=True)
@@ -121,7 +167,7 @@ class Provider:
         return result
 
     def public_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "label": self.label,
             "color": self.color,
             "base_url": self.base_url,
@@ -132,6 +178,15 @@ class Provider:
             "models": list(self.models),
             "supported_apis": sorted(self.supported_apis),
         }
+        if self.id in _PROVIDER_INSTALL:
+            result["install_cmd"] = _PROVIDER_INSTALL[self.id]
+            installed = bool(_PROVIDER_BINARY_PATH.get(self.id))
+            result["installed"] = installed
+            if installed:
+                pulled = _installed_ollama_models()
+                if pulled is not None:
+                    result["pulled_models"] = sorted(pulled)
+        return result
 
 
 def _validate_secret(provider_id: str, field_name: str, value: Any) -> Any:
@@ -278,6 +333,17 @@ def require_provider(provider_id: str) -> Provider:
     if provider is None:
         raise ValueError(f"Unknown provider {provider_id!r}")
     return provider
+
+
+def provider_install_cmd(provider_id: str) -> str:
+    """Fixed allowlisted install one-liner for a binary-backed provider —
+    reused by auth_sessions.py's install-session PTY flow. Only defined for
+    providers in _PROVIDER_INSTALL (ollama today)."""
+    return _PROVIDER_INSTALL[provider_id]
+
+
+def is_provider_binary_installed(provider_id: str) -> bool:
+    return bool(_PROVIDER_BINARY_PATH.get(provider_id))
 
 
 def public_providers() -> dict[str, dict[str, Any]]:

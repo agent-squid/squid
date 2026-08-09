@@ -1972,73 +1972,6 @@ async def run_echo(
     }
 
 
-async def run_ollama(
-    prompt: str, cwd: Optional[str] = None, history: Optional[List[dict]] = None,
-    model: Optional[str] = None, topic: str = "", agent: str = "",
-    response_timeout: Optional[int] = None,
-    resume_session_id: Optional[str] = None,
-    adhoc: bool = False, msg_id: Optional[int] = None,
-    backend_id: str = "ollama", backend_env: Optional[dict] = None,
-    backend_settings: Optional[dict] = None, backend_args: tuple[str, ...] = (),
-    prompt_preview: Optional[str] = None,
-) -> AsyncGenerator[Union[str, dict], None]:
-    """Ollama, Path B (ADR-0037) — chat-only, no tool-use loop. No subprocess:
-    a streaming HTTP client against the daemon's native `/api/chat`, shaped
-    like run_echo above rather than the CLI-spawning runners. `/api/chat` is
-    stateless per call like every other oneshot-cli harness here, so history
-    is flattened into the prompt (_build_prompt) rather than resumed via
-    resume_session_id."""
-    import httpx
-    start = time.monotonic()
-    base_url = ((backend_env or {}).get("OLLAMA_BASE_URL") or "http://localhost:11434/v1").rstrip("/")
-    native_base = base_url[:-3] if base_url.endswith("/v1") else base_url
-    model_name = model or "ollama"
-    session_id = resume_session_id or f"ollama-{msg_id if msg_id is not None else 'adhoc'}"
-    full_prompt = _build_prompt(prompt, history)
-
-    input_tokens = 0
-    output_tokens = 0
-    timeout = httpx.Timeout(float(response_timeout or RESPONSE_TIMEOUT), connect=FIRST_BYTE_TIMEOUT)
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream(
-                "POST", f"{native_base}/api/chat",
-                json={"model": model_name, "messages": [{"role": "user", "content": full_prompt}], "stream": True},
-            ) as resp:
-                if resp.status_code != 200:
-                    body = (await resp.aread()).decode(errors="replace")
-                    raise CLIError(f"Ollama returned {resp.status_code}: {body[:500]}")
-                async for line in resp.aiter_lines():
-                    if not line.strip():
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    delta = (event.get("message") or {}).get("content") or ""
-                    if delta:
-                        yield delta
-                    if event.get("done"):
-                        input_tokens = event.get("prompt_eval_count") or 0
-                        output_tokens = event.get("eval_count") or 0
-    except httpx.ConnectError as exc:
-        raise CLIError(f"Ollama daemon unreachable at {native_base}: {exc}")
-
-    yield {
-        "_stats": {
-            "session_id": session_id,
-            "model": model_name,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cache_read_tokens": 0,
-            "cache_write_tokens": 0,
-            "history_input_tokens": _estimate_history_tokens(history),
-            "cost_usd": 0,
-            "duration_ms": int((time.monotonic() - start) * 1000),
-        }
-    }
-
-
 RUNNER_NAMES_BY_HARNESS = {
     "claudecode": "run_claude",
     "codex": "run_codex",
@@ -2047,7 +1980,6 @@ RUNNER_NAMES_BY_HARNESS = {
     "antigravity": "run_antigravity",
     "opencode": "run_opencode",
     "pi": "run_pi",
-    "ollama": "run_ollama",
     "echo": "run_echo",
 }
 
@@ -2058,7 +1990,6 @@ RUNNER_NAMES_BY_HARNESS_PROTOCOL = {
     ("cursor", "oneshot-cli"): "run_cursor",
     ("opencode", "oneshot-cli"): "run_opencode",
     ("pi", "oneshot-cli"): "run_pi",
-    ("ollama", "oneshot-cli"): "run_ollama",
     ("echo", "oneshot-cli"): "run_echo",
 }
 
