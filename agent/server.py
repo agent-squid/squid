@@ -3181,8 +3181,9 @@ async def session_log(agent: str, session_id: str, cwd: str = ""):
             else Path.home()
         )
         entries = _opencode_session_transcript_rows(home, session_id)
+        db_path = home / ".local" / "share" / "opencode" / "opencode.db"
         return JSONResponse({
-            "path": None,
+            "path": str(db_path.parent) if db_path.parent.exists() else None,
             "entries": entries,
             "source": "opencode-sqlite" if entries else None,
             "turns": turns,

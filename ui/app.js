@@ -12641,15 +12641,15 @@ function showCtxPopup(spanEl) {
         if (path) {
           const text = await fetch('/localfile?' + new URLSearchParams({ path, _t: Date.now() })).then(r => r.text());
           _closeCtxPopup(popup);
-          openLogViewer(`session ${sessionId}`, _parseJsonlEntries(text), undefined, turns, rowMsgId);
+          openLogViewer(sessionId, _parseJsonlEntries(text), undefined, turns, rowMsgId, path);
         } else if (entries) {
           _closeCtxPopup(popup);
           openLogViewer(
-            `opencode session ${sessionId}`, entries,
+            `opencode ${sessionId}`, entries,
             source === 'opencode-sqlite'
               ? "Reconstructed from opencode's SQLite session log (opencode.db) — opencode has no per-session transcript file the way other harnesses do."
               : undefined,
-            turns, rowMsgId,
+            turns, rowMsgId, path,
           );
         } else {
           valEl.textContent = 'no local transcript found';
@@ -12945,9 +12945,19 @@ function _entrySearchText(entry) {
   return entry._searchText;
 }
 
-function _makeLogEntryBlock(entry) {
+function _entryMatches(entry, q) {
+  return _entrySearchText(entry).includes(q)
+    || (entry.type || '').toLowerCase().includes(q)
+    || (entry.kind || '').toLowerCase().includes(q);
+}
+
+// entry._expanded persists across re-renders (list.innerHTML is rebuilt on
+// every keystroke/reverse-toggle) so a block a user opened -- or one the
+// search jumped to -- doesn't silently re-collapse out from under them.
+function _makeLogEntryBlock(entry, isMatch) {
   const block = document.createElement('div');
   block.className = 'tool-block trace-tool-block';
+  if (isMatch) block.classList.add('log-viewer-entry-match');
   const toggle = document.createElement('button');
   toggle.className = 'tool-toggle';
   toggle.textContent = _logEntryLabel(entry);
@@ -12963,9 +12973,19 @@ function _makeLogEntryBlock(entry) {
   // every entry on every render -- most entries in a large session are
   // never opened, so paying for that upfront (and again on every re-render
   // from search/reverse) is wasted work.
-  toggle.addEventListener('click', () => {
+  const expand = () => {
     if (!pre.textContent) pre.textContent = JSON.stringify(entry.data, null, 2);
-    block.classList.toggle('tool-expanded');
+    entry._expanded = true;
+    block.classList.add('tool-expanded');
+  };
+  if (entry._expanded) expand();
+  toggle.addEventListener('click', () => {
+    if (block.classList.contains('tool-expanded')) {
+      entry._expanded = false;
+      block.classList.remove('tool-expanded');
+    } else {
+      expand();
+    }
   });
   block.appendChild(toggle);
   block.appendChild(body);
@@ -12975,11 +12995,21 @@ function _makeLogEntryBlock(entry) {
 // Shared viewer for both opencode's SQLite-reconstructed session rows and a
 // harness's raw .jsonl transcript (once normalized by _parseJsonlEntries) --
 // same entry shape, same search/reverse-order toolbar either way.
-function openLogViewer(title, entries, bannerText, turns, currentMsgId) {
+function openLogViewer(title, entries, bannerText, turns, currentMsgId, sourcePath) {
   const modal = document.getElementById('msg-modal');
   const titleEl = document.getElementById('msg-modal-title');
   const body = document.getElementById('msg-modal-body');
-  titleEl.textContent = title;
+  if (sourcePath) {
+    titleEl.innerHTML = '';
+    const link = document.createElement('a');
+    link.textContent = title;
+    link.className = 'msg-modal-title-link';
+    link.title = `Open raw transcript: ${sourcePath}`;
+    link.addEventListener('click', () => openFileViewer(sourcePath));
+    titleEl.appendChild(link);
+  } else {
+    titleEl.textContent = title;
+  }
   body.innerHTML = '';
   _assignTurnIndices(entries, turns);
   const hasTurns = !!(turns && turns.length);
@@ -12998,12 +13028,28 @@ function openLogViewer(title, entries, bannerText, turns, currentMsgId) {
   searchInput.type = 'text';
   searchInput.placeholder = 'Search…';
   searchInput.className = 'log-viewer-search';
+  const prevMatchBtn = document.createElement('button');
+  prevMatchBtn.type = 'button';
+  prevMatchBtn.className = 'log-viewer-nav-btn';
+  prevMatchBtn.innerHTML = '<span class="material-symbols-outlined" aria-hidden="true">keyboard_arrow_up</span>';
+  prevMatchBtn.title = 'Previous match (Shift+Enter)';
+  prevMatchBtn.setAttribute('aria-label', 'Previous match');
+  prevMatchBtn.hidden = true;
+  const nextMatchBtn = document.createElement('button');
+  nextMatchBtn.type = 'button';
+  nextMatchBtn.className = 'log-viewer-nav-btn';
+  nextMatchBtn.innerHTML = '<span class="material-symbols-outlined" aria-hidden="true">keyboard_arrow_down</span>';
+  nextMatchBtn.title = 'Next match (Enter)';
+  nextMatchBtn.setAttribute('aria-label', 'Next match');
+  nextMatchBtn.hidden = true;
   const reverseBtn = document.createElement('button');
   reverseBtn.type = 'button';
   reverseBtn.className = 'log-viewer-reverse-btn';
   const countEl = document.createElement('span');
   countEl.className = 'log-viewer-count';
   toolbar.appendChild(searchInput);
+  toolbar.appendChild(prevMatchBtn);
+  toolbar.appendChild(nextMatchBtn);
   toolbar.appendChild(reverseBtn);
   toolbar.appendChild(countEl);
   body.appendChild(toolbar);
@@ -13011,26 +13057,43 @@ function openLogViewer(title, entries, bannerText, turns, currentMsgId) {
   const list = document.createElement('div');
   list.className = 'log-viewer-list';
   body.appendChild(list);
+  const scrollBody = list.parentElement;
+  const scrollToEl = el => {
+    const elRect = el.getBoundingClientRect();
+    const toolbarRect = toolbar.getBoundingClientRect();
+    scrollBody.scrollTop += elRect.top - toolbarRect.bottom - 6;
+  };
 
   // Newest-first by default: the biggest turn number (the most recent one)
   // is what you see first, matching the button label below at all times --
   // the label always names the order currently on screen, not an action.
   let reversed = true;
   const updateReverseLabel = () => { reverseBtn.textContent = reversed ? 'Newest first' : 'Oldest first'; };
+
+  // Search is find-in-page, not a filter: matching entries are highlighted
+  // and stepped through with the surrounding log still visible for context,
+  // rather than hiding everything else. A common keyword (e.g. "error")
+  // shouldn't force every hit open at once, so only `currentEntry` -- the
+  // one currently jumped to -- gets auto-expanded; other matches just get an
+  // accent-colored label (.log-viewer-entry-match) until you step to them.
+  let currentEntry = null;
   const render = () => {
     const q = searchInput.value.trim().toLowerCase();
-    const filtered = !q ? entries : entries.filter(e => (
-      _entrySearchText(e).includes(q)
-      || (e.type || '').toLowerCase().includes(q)
-      || (e.kind || '').toLowerCase().includes(q)
-    ));
-    const ordered = reversed ? filtered.slice().reverse() : filtered;
+    const ordered = reversed ? entries.slice().reverse() : entries;
+    const matches = q ? ordered.filter(e => _entryMatches(e, q)) : [];
+    if (q) {
+      if (!currentEntry || !matches.includes(currentEntry)) currentEntry = matches[0] || null;
+      if (currentEntry) currentEntry._expanded = true;
+    } else {
+      currentEntry = null;
+    }
+    const matchSet = q ? new Set(matches) : null;
     list.innerHTML = '';
     if (!ordered.length) {
       const empty = document.createElement('div');
       empty.className = 'ctx-popup-row';
       empty.style.padding = '1rem';
-      empty.textContent = q ? 'No entries match.' : 'No entries.';
+      empty.textContent = 'No entries.';
       list.appendChild(empty);
     } else {
       let lastTurn;
@@ -13039,10 +13102,33 @@ function openLogViewer(title, entries, bannerText, turns, currentMsgId) {
           lastTurn = entry._turn;
           list.appendChild(_makeTurnDivider(lastTurn, turnsByIndex));
         }
-        list.appendChild(_makeLogEntryBlock(entry));
+        const el = _makeLogEntryBlock(entry, matchSet?.has(entry));
+        if (entry === currentEntry) el.classList.add('log-viewer-current-match');
+        list.appendChild(el);
       }
     }
-    countEl.textContent = q ? `${filtered.length} / ${entries.length}` : `${entries.length} entries`;
+    if (q) highlightTextNodes(list, [q]);
+    prevMatchBtn.hidden = nextMatchBtn.hidden = !q;
+    if (q) {
+      const idx = matches.indexOf(currentEntry);
+      countEl.textContent = matches.length ? `match ${idx + 1} of ${matches.length}` : 'No matches';
+      const currentEl = list.querySelector('.log-viewer-current-match');
+      if (currentEl) scrollToEl(currentEl);
+    } else {
+      countEl.textContent = `${entries.length} entries`;
+    }
+  };
+
+  const stepMatch = delta => {
+    const q = searchInput.value.trim().toLowerCase();
+    if (!q) return;
+    const ordered = reversed ? entries.slice().reverse() : entries;
+    const matches = ordered.filter(e => _entryMatches(e, q));
+    if (!matches.length) return;
+    const cur = currentEntry ? matches.indexOf(currentEntry) : -1;
+    const idx = cur === -1 ? (delta > 0 ? 0 : matches.length - 1) : (cur + delta + matches.length) % matches.length;
+    currentEntry = matches[idx];
+    render();
   };
 
   // Debounced -- rebuilding the whole list (list.innerHTML = '' + rebuild)
@@ -13054,6 +13140,13 @@ function openLogViewer(title, entries, bannerText, turns, currentMsgId) {
     clearTimeout(searchDebounce);
     searchDebounce = setTimeout(render, 150);
   });
+  searchInput.addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    stepMatch(e.shiftKey ? -1 : 1);
+  });
+  prevMatchBtn.addEventListener('click', () => stepMatch(-1));
+  nextMatchBtn.addEventListener('click', () => stepMatch(1));
   reverseBtn.addEventListener('click', () => {
     reversed = !reversed;
     updateReverseLabel();
@@ -13071,7 +13164,7 @@ function openLogViewer(title, entries, bannerText, turns, currentMsgId) {
     if (openedTurn) {
       const divider = list.querySelector(`[data-turn="${openedTurn.turn_index}"]`);
       if (divider) {
-        divider.scrollIntoView({ block: 'start' });
+        scrollToEl(divider);
         divider.classList.add('log-viewer-turn-divider-target');
         setTimeout(() => divider.classList.remove('log-viewer-turn-divider-target'), 2000);
       }

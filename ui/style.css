@@ -1097,11 +1097,21 @@ body {
   border-bottom: 1px solid var(--surface-2);
 }
 .log-viewer-search {
-  flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+  flex: 1; background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px;
   color: var(--text-muted); font-family: 'JetBrains Mono', ui-monospace, monospace;
   font-size: var(--text-xs); height: 1.8rem; padding: 0.2rem 0.5rem;
 }
 .log-viewer-search:focus { outline: none; border-color: var(--accent); }
+.log-viewer-nav-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; border: none; border-radius: 3px;
+  color: var(--text-dim); cursor: pointer; padding: 0;
+  height: 1.8rem; width: 1.8rem;
+}
+.log-viewer-nav-btn .material-symbols-outlined { font-size: 18px; line-height: 1; }
+.log-viewer-nav-btn:hover { background: rgba(255,255,255,0.07); color: #ccc; }
+.log-viewer-entry-match > .tool-toggle { color: var(--accent-light); }
+.log-viewer-current-match { outline: 1px solid var(--accent); border-radius: 3px; }
 .log-viewer-reverse-btn {
   background: none; border: 1px solid var(--border); border-radius: 4px;
   color: var(--text-dim); cursor: pointer; font-size: var(--text-xs);
@@ -1646,6 +1656,10 @@ body {
   padding: 0.5rem 0.2rem;
 }
 .settings-label { font-weight: 600; color: var(--text); }
+.msg-modal-title-link {
+  font-size: var(--text-xs); color: var(--accent-light); cursor: pointer; text-decoration: none;
+}
+.msg-modal-title-link:hover { text-decoration: underline; }
 .agents-section-divider {
   border-top: 1px solid var(--border-faint);
   margin: 0.6rem 0 0.2rem;
