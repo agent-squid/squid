@@ -196,6 +196,41 @@ providers:
   #   gauge: kimi
   #   models: [kimi-k3]
 
+  # Fireworks AI through its Anthropic-compatible transport.
+  # Get an API key at https://app.fireworks.ai/settings/users/api-keys, then
+  # set FIREWORKS_API_KEY in the environment.
+  # fireworks:
+  #   label: Fireworks AI
+  #   color: "#6720ff"
+  #   base_url: "https://api.fireworks.ai/inference"
+  #   supported_apis: [/v1/messages]
+  #   auth:
+  #     type: api_key
+  #     api_key: {env: FIREWORKS_API_KEY}
+  #   gauge:
+  #     type: static
+  #     text: Pay as you go
+  #     title: no reset
+  #   models: [accounts/fireworks/models/deepseek-v3p1]
+
+  # Baseten Model APIs through its Anthropic-compatible transport.
+  # Get a workspace API key at https://app.baseten.co/settings/api_keys, then
+  # set BASETEN_API_KEY in the environment. Custom Truss deployments use
+  # deployment-specific URLs and should be configured as separate providers.
+  # baseten:
+  #   label: Baseten
+  #   color: "#19E76E"
+  #   base_url: "https://inference.baseten.co"
+  #   supported_apis: [/v1/messages]
+  #   auth:
+  #     type: api_key
+  #     api_key: {env: BASETEN_API_KEY}
+  #   gauge:
+  #     type: static
+  #     text: Pay as you go
+  #     title: no reset
+  #   models: [deepseek-ai/DeepSeek-V4-Pro]
+
   # Canonical base_url/auth.api_key fields are translated into harness-native
   # environment and settings. Raw env/settings/args remain available as
   # escapes.
