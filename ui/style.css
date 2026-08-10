@@ -1450,7 +1450,7 @@ body {
 }
 .bcat-row {
   display: grid;
-  grid-template-columns: 160px 1fr auto;
+  grid-template-columns: 7.5rem minmax(0, 1fr) auto;
   align-items: start;
   gap: 0.8rem;
   padding: 0.6rem 0;
@@ -1480,6 +1480,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 0.3rem;
+  min-width: 0;
 }
 .bcat-status-ok   { color: #4a7a4a; }
 .bcat-status-miss { color: #7a4a4a; }
@@ -1536,7 +1537,15 @@ body {
   align-items: center;
   gap: 0.4rem;
 }
-.bcat-custom-model { margin-top: 0.15rem; }
+.bcat-custom-model {
+  flex-wrap: nowrap;
+  margin-top: 0.15rem;
+}
+.bcat-custom-model .bcat-model-input {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
 .bcat-model-input {
   width: min(18rem, 100%);
   background: var(--surface-2);
@@ -5518,10 +5527,38 @@ mark.search-kw-highlight {
 }
 
 @media (max-width: 768px) {
+  #view-agents { overflow-x: hidden; }
+
+  .bcat-row {
+    grid-template-columns: 7.5rem minmax(0, 1fr);
+  }
+  .bcat-gauge {
+    grid-column: 2;
+    justify-content: flex-start;
+  }
+  .bcat-model-row {
+    flex-wrap: wrap;
+  }
+  .bcat-custom-model {
+    flex-wrap: nowrap;
+  }
+  .bcat-model-input {
+    min-width: 0;
+  }
+
   #agents-list {
     max-height: none;
     overflow-x: auto;
     overflow-y: visible;
+  }
+
+  #agents-list .agent-filter-wrap {
+    position: sticky;
+    left: 0;
+    z-index: 4;
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--surface);
   }
 
   #agents-list table {
