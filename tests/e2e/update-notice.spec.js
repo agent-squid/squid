@@ -47,7 +47,7 @@ test('hamburger, Settings, and Restart get a dot, and Settings explains restart 
   await page.locator('.hmenu-item[data-view="settings"]').click();
 
   const notice = page.locator('#settings-update-notice');
-  await expect(page.locator('#settings-version-info')).toHaveText('AgentSquid v0.1.0');
+  await expect(page.locator('#settings-version-info')).toHaveText('v0.1.0');
   const headerBox = await page.locator('#config-editor-header').boundingBox();
   const versionBox = await page.locator('#settings-version-info').boundingBox();
   const actionsBox = await page.locator('#config-editor-actions').boundingBox();

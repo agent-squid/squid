@@ -232,7 +232,7 @@ function renderSettingsUpdateNotice() {
 function renderSettingsVersion(version) {
   const el = document.getElementById('settings-version-info');
   if (!el) return;
-  el.textContent = version ? `AgentSquid v${version}` : '';
+  el.textContent = version ? `v${version}` : '';
 }
 
 function updateSettingsFromHealth(health) {
