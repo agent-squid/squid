@@ -295,8 +295,8 @@ settings catalog's Install button (below) reads.
 narrowing rather than reversing the "no automatic pull" line above.** The
 distinction that stays intact: *unattended* pulling (e.g. auto-pulling a
 model at agent-creation time with no confirmation) is still out of scope;
-a user clicking a button for one specific, pre-curated model is not the
-same risk and is now in scope. `agent/auth_sessions.py`'s `create_session`
+a user explicitly entering one model and clicking Pull is not the same risk
+and is now in scope. `agent/auth_sessions.py`'s `create_session`
 gained a `mode` parameter (`login` | `install` | `pull` | `remove`) alongside
 the existing harness-login argv construction:
 - `install` covers both harness install one-liners (`_HARNESS_INSTALL`,
@@ -306,28 +306,29 @@ the existing harness-login argv construction:
   same "never built from user input" invariant the module's docstring
   already commits to for login.
 - `pull`/`remove` run `ollama pull <model>` / `ollama rm <model>` as a plain
-  argv list (`[OLLAMA_PATH, action, model]`, no shell involved), where
-  `model` is checked server-side against the `ollama` provider's configured
-  `models:` list before the PTY ever spawns — a client can only ever trigger
-  one of the names an admin already put in `squid.yaml`, never an arbitrary
-  string, so this can't become an unbounded-download or delete-anything
-  vector regardless of what a request body claims.
+  argv list (`[OLLAMA_PATH, action, model]`, no shell involved). Pull accepts
+  a server-validated Ollama registry name (restricted character set and
+  length) entered explicitly by the user. Remove is narrower: immediately
+  before spawning the PTY, the server runs `ollama list` and accepts only a
+  model the local daemon reports as installed. Thus pull cannot become shell
+  input and remove cannot be used as a delete-arbitrary-data primitive.
 
 The settings UI's harness and provider catalogs (`renderHarnessesCatalog`/
 `renderProvidersCatalog`, `ui/app.js`) both gained an Install button next to
 the existing copy-to-clipboard command for anything reporting
 `installed: false`; the `ollama` provider row additionally lists its
-configured models with Pull/Remove buttons when the binary is present. All
+configured suggestion models plus models discovered through `ollama list`
+when the binary is present. Configured `models:` entries retain their curated
+order; newly discovered entries are appended. Ollama's implicit `:latest`
+tag is treated as equivalent to the untagged name and omitted from the
+display so the same model does not appear twice. Each installed model has a
+Remove button, and a free-text row accepts an explicit model name to Pull. All
 three reuse `openAuthPanel`'s existing xterm.js/SSE plumbing unchanged
 (ADR-0035) — only `mode`/`model` are new — including `ollama pull`'s native
 layered progress output, which renders directly in the panel instead of a
-generic spinner. There is deliberately no free-text model field anywhere in
-this UI, matching the curated-list-only design above. Not done in this pass:
-live per-model on-disk/resident state (`GET /api/tags` / `GET /api/ps`,
-referenced above for the `"loading"` SSE event) — the Pull/Remove buttons
-work whether or not a model is already present, but the catalog doesn't yet
-show which models already are; left for a follow-up rather than blocking
-this amendment on it.
+generic spinner. `GET /api/ps` remains separate: it reports models currently
+resident in memory for queue handoff, while `ollama list` reports models on
+disk for catalog and model-management state.
 
 ## Consequences
 
@@ -401,9 +402,12 @@ this amendment on it.
   `default_provider` at `ollama` for a fresh install when the `ollama`
   binary is detected (never for an existing `~/.squid/squid.yaml`), and the
   settings catalogs gained Install/Pull/Remove buttons reusing ADR-0035's
-  login PTY mechanism, gated by a curated `models:` allowlist server-side —
-  see "Amendment: default provider at install, user-initiated pull/remove"
-  above for the full reasoning.
+  login PTY mechanism. Pull accepts an explicitly entered, validated registry
+  model name; remove is restricted to models reported by `ollama list`.
+  Configured `models:` remain ordered UI suggestions, augmented with locally
+  discovered models and normalized to hide the implicit `:latest` tag — see
+  "Amendment: default provider at install, user-initiated pull/remove" above
+  for the full reasoning.
 - Implemented: `auth.type: none`, the `parallel` field and its queueing/
   load-visibility/active-unload behavior, adhoc inclusion in the
   provider-scoped lane, and Path A's placeholder-apiKey handling for pi are
