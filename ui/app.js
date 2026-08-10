@@ -2561,6 +2561,9 @@ function recordPrompt(text) {
   const t = text.trim();
   if (!t) return;
   const key = promptHistoryDedupKey(t);
+  if (hiddenPromptKeys.delete(key)) {
+    localStorage.setItem(HIDDEN_PROMPTS_KEY, JSON.stringify([...hiddenPromptKeys]));
+  }
   promptHistory = [t, ...promptHistory.filter(x => promptHistoryDedupKey(x) !== key)].slice(0, 200);
   saveStashedPrompt(t);
   promptHistoryPos = -1;

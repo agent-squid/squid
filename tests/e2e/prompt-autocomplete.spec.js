@@ -77,6 +77,26 @@ test('different-route items show a route chip button; same-route items do not', 
   await expect(page.locator('#autocomplete .ac-item', { hasText: '#squid@haiku!' }).locator('.ac-route-btn')).toContainText('#squid@haiku!');
 });
 
+test('resubmitting a removed prompt restores it to autocomplete', async ({ page }) => {
+  await mockBackend(page);
+  const entry = '#squid@haiku! push the changes';
+  await page.addInitScript(({ entry }) => {
+    localStorage.setItem('squid_hidden_prompts', JSON.stringify([`${entry}\u0000unused`]));
+  }, { entry });
+  await page.goto('/');
+
+  const key = await page.evaluate(entry => promptHistoryDedupKey(entry), entry);
+  await page.evaluate(({ entry, key }) => {
+    hiddenPromptKeys = new Set([key]);
+    localStorage.setItem('squid_hidden_prompts', JSON.stringify([key]));
+    recordPrompt(entry);
+  }, { entry, key });
+  await page.fill('#input', 'push');
+
+  await expect(page.locator('#autocomplete .ac-item', { hasText: '#squid@haiku! push the changes' })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('squid_hidden_prompts') || '[]'))).toEqual([]);
+});
+
 test('route agent tags use provider color from recent prompt metadata', async ({ page }) => {
   await mockBackend(page);
   await page.unroute('**/prompts/recent**');
