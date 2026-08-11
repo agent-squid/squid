@@ -147,21 +147,35 @@ Because a compromised or misused session here is equivalent to a
 compromised SSH key or remote-desktop credential, the following are treated
 as v1 requirements, not later hardening:
 
-- **End-to-end payload encryption, above and beyond TLS.** By default, the
-  Worker is an application-layer proxy: TLS terminates at Cloudflare's edge,
-  and command/response payloads pass through the Worker as plaintext before
-  being relayed. This differs from SSH and from WireGuard-based tunnels
-  (Tailscale included), where the relay/coordination layer only ever
-  handles encrypted bytes and is cryptographically blind to content. To
-  restore that property here, the phone and the AgentSquid instance must
-  hold a shared key (established at login, independent of TLS) and encrypt
-  command/response payloads before they reach the Worker. Without this, the
-  Worker — and by extension anyone who controls its code or the Cloudflare
-  account it runs under, including us as the deploying admin — can read
-  every command and result passing through it. With it, that access becomes
-  cryptographically impossible rather than merely against policy, which
-  also directly addresses the concern of an admin (deliberately or via a
-  compromised account) reaching into another user's session.
+- **End-to-end payload encryption via a device keypair, above and beyond
+  TLS.** By default, the Worker is an application-layer proxy: TLS
+  terminates at Cloudflare's edge, and command/response payloads pass
+  through the Worker as plaintext before being relayed. This differs from
+  SSH and from WireGuard-based tunnels (Tailscale included), where the
+  relay/coordination layer only ever handles encrypted bytes and is
+  cryptographically blind to content. To restore that property here:
+  - At `agentsquid login`, the local AgentSquid instance generates a
+    public/private keypair on the host machine. The private key never
+    leaves that machine — not stored server-side, not transmitted anywhere.
+    The public key is uploaded to the account record.
+  - Before sending a command, the phone/browser fetches the host's public
+    key and encrypts the command to it (standard public-key encryption —
+    e.g. libsodium `box`, or WebCrypto ECDH + AES-GCM in-browser) before
+    the request ever reaches the Worker.
+  - The Worker and Durable Object route the resulting ciphertext by
+    username only; they hold no key capable of decrypting it. The
+    AgentSquid instance decrypts on receipt, and encrypts its response back
+    to the phone's public key the same way.
+  - First connection between a given phone and a given host machine follows
+    a trust-on-first-use model, the same as SSH host-key verification.
+  - Without this, the Worker — and by extension anyone who controls its
+    code or the Cloudflare account it runs under, including us as the
+    deploying admin — can read every command and result passing through it.
+    With it, that access becomes cryptographically impossible rather than
+    merely against policy: there is no key on the broker side to compel,
+    subpoena, or accidentally expose. This directly addresses the concern
+    of an admin (deliberately or via a compromised account) reaching into
+    another user's session.
 - **No admin master key for session minting.** Any admin tooling must not
   be able to generate a valid session for an arbitrary username on its own.
   Sessions are only issuable through the user's own login flow or their
