@@ -153,6 +153,27 @@ CREATE TABLE run_events (
 );
 ```
 
+### `realtime_events` and `realtime_requests`
+
+`realtime_events.event_id` is the database-global WebSocket resume cursor;
+`run_seq` preserves the corresponding per-message order. `realtime_requests`
+stores idempotent mutation results by local principal and request ID. See
+`docs/realtime-protocol-v1.md` for delivery semantics.
+
+```sql
+CREATE TABLE realtime_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL, topic TEXT, agent TEXT, msg_id INTEGER,
+    run_seq INTEGER, payload TEXT NOT NULL DEFAULT '{}', created_at TEXT
+);
+CREATE INDEX idx_realtime_events_scope ON realtime_events(topic, agent, event_id);
+CREATE TABLE realtime_requests (
+    principal TEXT NOT NULL, request_id TEXT NOT NULL,
+    request_type TEXT NOT NULL, request_hash TEXT NOT NULL, result TEXT NOT NULL,
+    created_at TEXT, PRIMARY KEY (principal, request_id)
+);
+```
+
 ### `git_diff_reverts`
 ```sql
 CREATE TABLE git_diff_reverts (

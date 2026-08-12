@@ -6799,6 +6799,101 @@ async function replacePendingWithStoredItem(item, wipBubble) {
 
 const _flowRunWatchers = new Set();
 
+// ADR-0040 phase one: one shared socket reattaches running messages. New chat
+// submission stays on SSE until the command path reaches UI parity.
+const realtimeV1 = (() => {
+  if (!window.WebSocket) return null;
+  const clientIdKey = 'squid-realtime-v1-client-id';
+  let clientId = localStorage.getItem(clientIdKey);
+  if (!clientId) {
+    clientId = window.crypto?.randomUUID?.().replaceAll('-', '')
+      || `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}_${Math.random().toString(36).slice(2)}`;
+    localStorage.setItem(clientIdKey, clientId);
+  }
+  let socket = null;
+  let reconnectTimer = null;
+  let reconnectDelay = 500;
+  let needsSnapshot = true;
+  let cursor = Number(localStorage.getItem('squid-realtime-v1-cursor') || 0);
+  const watches = new Map();
+
+  const scopes = () => [...new Map([...watches.values()].map(watch => [
+    `${watch.topic}\0${watch.agent || ''}`,
+    { topic: watch.topic, ...(watch.agent ? { agent: watch.agent } : {}) },
+  ])).values()];
+
+  const subscribe = (freshScope = false) => {
+    if (socket?.readyState !== WebSocket.OPEN || !scopes().length) return;
+    socket.send(JSON.stringify({
+      v: 1,
+      type: 'subscribe',
+      payload: { client_id: clientId, scopes: scopes(), ...(freshScope ? {} : { cursor }) },
+    }));
+  };
+
+  const dispatchSnapshot = frame => {
+    cursor = Math.max(cursor, Number(frame.event_id || frame.payload?.cursor || 0));
+    for (const conversation of frame.payload?.conversations || []) {
+      for (const message of conversation.messages || []) {
+        const watch = watches.get(Number(message.id));
+        if (watch) watch.onSnapshot(message);
+      }
+    }
+  };
+
+  const dispatchEvent = frame => {
+    cursor = Math.max(cursor, Number(frame.event_id || 0));
+    localStorage.setItem('squid-realtime-v1-cursor', String(cursor));
+    const watch = watches.get(Number(frame.msg_id));
+    if (watch) watch.onEvent(frame);
+    if (socket?.readyState === WebSocket.OPEN && frame.event_id) {
+      socket.send(JSON.stringify({ v: 1, type: 'ack', payload: { event_id: cursor } }));
+    }
+  };
+
+  const connect = () => {
+    if (!watches.size || socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) return;
+    const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    socket = new WebSocket(`${scheme}//${location.host}/ws/v1`);
+    socket.onopen = () => { reconnectDelay = 500; };
+    socket.onmessage = event => {
+      let frame;
+      try { frame = JSON.parse(event.data); } catch { return; }
+      if (frame.type === 'hello') {
+        subscribe(needsSnapshot);
+        needsSnapshot = false;
+      }
+      else if (frame.type === 'snapshot') dispatchSnapshot(frame);
+      else if (frame.event_id) dispatchEvent(frame);
+      else if (frame.type === 'ping') socket.send(JSON.stringify({ v: 1, type: 'pong', payload: {} }));
+    };
+    socket.onclose = () => {
+      socket = null;
+      if (!watches.size) return;
+      clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(connect, reconnectDelay + Math.random() * 250);
+      reconnectDelay = Math.min(reconnectDelay * 2, 10000);
+    };
+  };
+
+  return {
+    watch(item, callbacks) {
+      const hadScope = [...watches.values()].some(watch => watch.topic === item.topic && watch.agent === item.agent);
+      watches.set(Number(item.id), { topic: item.topic, agent: item.agent || null, ...callbacks });
+      if (!hadScope) needsSnapshot = true;
+      connect();
+      if (socket?.readyState === WebSocket.OPEN) {
+        subscribe(needsSnapshot);
+        needsSnapshot = false;
+      }
+      return () => {
+        watches.delete(Number(item.id));
+        if (!watches.size && socket) socket.close(1000, 'no subscriptions');
+      };
+    },
+  };
+})();
+
 async function attachFlowStep(msgId) {
   if (messages.querySelector(`[data-msg-id="${msgId}"]`)) return;
   try {
@@ -6858,7 +6953,7 @@ function watchFlowRun(flowRunId, afterId, route = null) {
 }
 
 function reconnectPendingItem(item, wipBubble) {
-  if (!window.EventSource) {
+  if (!window.EventSource && !realtimeV1) {
     pollPendingItem(item, wipBubble);
     return;
   }
@@ -6882,6 +6977,39 @@ function reconnectPendingItem(item, wipBubble) {
     if (loader?.parentNode) loader.remove();
     live.textContent = item.content;
     updateThinkingHeightButton(wipBubble);
+  }
+
+  if (realtimeV1) {
+    const stop = realtimeV1.watch(item, {
+      onSnapshot(message) {
+        raw = message.content || '';
+        updatePreview();
+        if (message.status !== 'pending') finish();
+      },
+      onEvent(frame) {
+        const text = frame.payload?.text || '';
+        if (frame.type === 'chat.text') raw += text;
+        else if (frame.type === 'chat.status') statusBuf += (statusBuf ? '\n' : '') + text;
+        else if (frame.type === 'chat.tool') statusBuf += (statusBuf ? '\n' : '') + toolLabel(frame.payload);
+        else if (frame.type === 'chat.loading') statusBuf = frame.payload.from
+          ? `switching ${frame.payload.from} → ${frame.payload.to}…`
+          : `loading ${frame.payload.to}…`;
+        else if (frame.type === 'chat.processing') statusBuf = `#${frame.payload.topic || item.topic} · processing…`;
+        else if (frame.type === 'chat.queued') statusBuf += (statusBuf ? '\n' : '') + `#${frame.payload.topic} · queued — position ${frame.payload.position}`;
+        if (frame.type === 'chat.done' || frame.type === 'chat.error' || frame.type === 'message.changed' && frame.payload.status !== 'pending') finish();
+        else updatePreview();
+      },
+    });
+    let finishing = false;
+    async function finish() {
+      if (finishing) return;
+      finishing = true;
+      stop();
+      pendingPollTimers.delete(wipBubble);
+      await replacePendingWithStoredItem(item, wipBubble);
+    }
+    pendingPollTimers.set(wipBubble, stop);
+    return;
   }
 
   const es = new EventSource(`/chat/${item.id}/events`);

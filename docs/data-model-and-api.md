@@ -167,6 +167,18 @@ created_at TEXT                ISO8601
 UNIQUE(msg_id, seq)
 ```
 
+### `realtime_events` — global realtime publication log
+
+WebSocket replay uses a separate database-global `event_id`; it does not try
+to compare the independent `run_events.seq` values of parallel messages.
+Rows carry their topic/agent scope, message ID, optional per-run sequence, JSON
+payload, and creation time. `realtime_requests` stores request fingerprints and
+results so retried `chat.start` and `chat.cancel` mutations are idempotent.
+
+`GET /ws/v1` upgrades to the version 1 WebSocket protocol. Subscription starts
+with bounded replay or an authoritative 20-message snapshot containing all
+pending operations. Existing SSE endpoints remain available during migration.
+
 ---
 
 ### `git_diff_reverts` — reverted-file ledger

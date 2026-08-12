@@ -7,7 +7,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .config import SQUID_HOME
 from .harnesses import SUPPORTED_HARNESSES, is_installed
@@ -40,6 +40,7 @@ _REVIEW_AGENT_HARNESS: dict[str, str] = {
 _DB_PATH = Path(os.environ.get("SQUID_DB_PATH", Path.home() / ".squid" / "squid.db"))
 _SQUID_WORKTREE_PATH_RE = re.compile(r"(?:~|/[^`'\"<>\s]*)/\.squid/worktrees/[^`'\"<>\s),]+")
 _CHANGED_FILES_BLOCK_RE = re.compile(r"\n*Changed files from this response:\n<changed_files>.*?</changed_files>", re.DOTALL)
+_realtime_commit_listener: Optional[Callable[[int], None]] = None
 try:
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 except Exception:
@@ -138,6 +139,27 @@ _TABLES = [
         payload    TEXT,
         created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         UNIQUE(msg_id, seq)
+    )""",
+    """CREATE TABLE IF NOT EXISTS realtime_events (
+        event_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_type TEXT NOT NULL,
+        topic      TEXT,
+        agent      TEXT,
+        msg_id     INTEGER,
+        run_seq    INTEGER,
+        payload    TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    )""",
+    """CREATE INDEX IF NOT EXISTS idx_realtime_events_scope
+       ON realtime_events(topic, agent, event_id)""",
+    """CREATE TABLE IF NOT EXISTS realtime_requests (
+        principal   TEXT NOT NULL,
+        request_id  TEXT NOT NULL,
+        request_type TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        result      TEXT NOT NULL,
+        created_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        PRIMARY KEY (principal, request_id)
     )""",
     """CREATE TABLE IF NOT EXISTS git_diff_reverts (
         msg_id      INTEGER NOT NULL,
@@ -494,7 +516,7 @@ def upsert_agent(name: str, harness: str, provider: Optional[str], model: Option
             existing["cwd"] != cwd
         )
         if "backend" in _table_columns(conn, "agents"):
-            conn.execute(
+            cur = conn.execute(
                 """INSERT INTO agents (name, backend, harness, provider, model, cwd)
                    VALUES (?, ?, ?, ?, ?, ?)
                    ON CONFLICT(name) DO UPDATE SET
@@ -506,7 +528,7 @@ def upsert_agent(name: str, harness: str, provider: Optional[str], model: Option
                 (name, agent_ref_for_storage(harness, provider), harness, provider, model, cwd),
             )
         else:
-            conn.execute(
+            cur = conn.execute(
                 """INSERT INTO agents (name, harness, provider, model, cwd) VALUES (?, ?, ?, ?, ?)
                    ON CONFLICT(name) DO UPDATE SET
                      harness = excluded.harness,
@@ -975,6 +997,9 @@ def insert_user_message(
                VALUES (?, ?, 'user', ?, ?, 'done', ?, ?, ?, ?)""",
             (topic, agent, source, content, context_json, lookback, flow_run_id, flow_route),
         )
+        _insert_realtime_event(conn, "message.changed", topic, agent, cur.lastrowid, None, {
+            "id": cur.lastrowid, "role": "user", "status": "done", "content": content,
+        })
         return cur.lastrowid
 
 
@@ -991,6 +1016,9 @@ def insert_assistant_message(
                VALUES (?, ?, 'assistant', ?, ?, 'pending', ?, ?, ?)""",
             (topic, agent, source, reply_to, 1 if adhoc else 0, flow_run_id, flow_route),
         )
+        _insert_realtime_event(conn, "message.changed", topic, agent, cur.lastrowid, None, {
+            "id": cur.lastrowid, "role": "assistant", "status": "pending", "reply_to": reply_to,
+        })
         return cur.lastrowid
 
 
@@ -1094,7 +1122,7 @@ def update_assistant_message(
             if cur.rowcount:
                 _ensure_session_turn_index(conn, msg_id, session_id)
         else:
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE chat_messages SET content=?, session_id=?, status=?, context=?, status_raw=?,"
                 " completed_at=CASE WHEN ? THEN COALESCE(completed_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')) ELSE completed_at END"
                 " WHERE id=?",
@@ -1102,6 +1130,12 @@ def update_assistant_message(
             )
             if status == "done":
                 _ensure_session_turn_index(conn, msg_id, session_id)
+        row = conn.execute("SELECT topic, agent FROM chat_messages WHERE id=?", (msg_id,)).fetchone()
+        if cur.rowcount and row:
+            _insert_realtime_event(conn, "message.changed", row["topic"], row["agent"], msg_id, None, {
+                "id": msg_id, "role": "assistant", "status": status, "content": content,
+                "session_id": session_id,
+            })
 
 
 def _run_event_cancel_snapshot(conn: sqlite3.Connection, msg_id: int) -> dict:
@@ -1163,6 +1197,11 @@ def mark_assistant_cancelled(msg_id: int, reason: str = "Cancelled") -> bool:
                 msg_id,
             ),
         )
+        if cur.rowcount:
+            row = conn.execute("SELECT topic, agent, content FROM chat_messages WHERE id=?", (msg_id,)).fetchone()
+            _insert_realtime_event(conn, "message.changed", row["topic"], row["agent"], msg_id, None, {
+                "id": msg_id, "role": "assistant", "status": "cancelled", "content": row["content"] or "",
+            })
         return cur.rowcount > 0
 
 
@@ -3834,6 +3873,163 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
+def _insert_realtime_event(
+    conn: sqlite3.Connection, event_type: str, topic: Optional[str],
+    agent: Optional[str], msg_id: Optional[int], run_seq: Optional[int], payload,
+) -> int:
+    encoded = payload if isinstance(payload, str) else json.dumps(payload or {})
+    cur = conn.execute(
+        """INSERT INTO realtime_events
+           (event_type, topic, agent, msg_id, run_seq, payload)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (event_type, topic, agent, msg_id, run_seq, encoded),
+    )
+    event_id = int(cur.lastrowid)
+    # Commit the domain mutation and publication row together before waking
+    # sockets. The listener may run on a worker thread and must marshal itself
+    # onto its owning event loop.
+    conn.commit()
+    listener = _realtime_commit_listener
+    if listener:
+        listener(event_id)
+    return event_id
+
+
+def set_realtime_commit_listener(listener: Optional[Callable[[int], None]]) -> None:
+    global _realtime_commit_listener
+    _realtime_commit_listener = listener
+
+
+def insert_realtime_event(
+    event_type: str, topic: Optional[str], agent: Optional[str],
+    payload=None, msg_id: Optional[int] = None, run_seq: Optional[int] = None,
+) -> int:
+    with _connect() as conn:
+        return _insert_realtime_event(conn, event_type, topic, agent, msg_id, run_seq, payload)
+
+
+def get_realtime_cursor() -> int:
+    with _connect() as conn:
+        return int(conn.execute("SELECT COALESCE(MAX(event_id), 0) FROM realtime_events").fetchone()[0])
+
+
+def get_realtime_retained_range() -> tuple[Optional[int], int]:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT MIN(event_id), COALESCE(MAX(event_id), 0) FROM realtime_events"
+        ).fetchone()
+    return (int(row[0]) if row[0] is not None else None, int(row[1]))
+
+
+def prune_realtime_data(event_days: int = 7, max_events: int = 100_000, request_days: int = 7) -> dict:
+    with _connect() as conn:
+        conn.execute(
+            "DELETE FROM realtime_events WHERE datetime(created_at) < datetime('now', ?)",
+            (f"-{max(1, event_days)} days",),
+        )
+        count = int(conn.execute("SELECT COUNT(*) FROM realtime_events").fetchone()[0])
+        if count > max_events:
+            conn.execute(
+                """DELETE FROM realtime_events WHERE event_id <= (
+                       SELECT event_id FROM realtime_events ORDER BY event_id DESC LIMIT 1 OFFSET ?
+                   )""",
+                (max_events,),
+            )
+        conn.execute(
+            "DELETE FROM realtime_requests WHERE datetime(created_at) < datetime('now', ?)",
+            (f"-{max(1, request_days)} days",),
+        )
+        remaining = int(conn.execute("SELECT COUNT(*) FROM realtime_events").fetchone()[0])
+        requests = int(conn.execute("SELECT COUNT(*) FROM realtime_requests").fetchone()[0])
+    return {"events": remaining, "requests": requests}
+
+
+def get_realtime_events(after_event_id: int, scopes: list[dict], limit: int = 501) -> list[dict]:
+    clauses, params = [], [after_event_id]
+    for scope in scopes:
+        topic = scope.get("topic")
+        agent = scope.get("agent")
+        if not topic:
+            continue
+        if agent is None:
+            clauses.append("topic=?")
+            params.append(topic)
+        else:
+            clauses.append("(topic=? AND agent=?)")
+            params.extend((topic, agent))
+    if not clauses:
+        return []
+    params.append(limit)
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""SELECT event_id, event_type, topic, agent, msg_id, run_seq, payload, created_at
+                FROM realtime_events WHERE event_id>? AND ({' OR '.join(clauses)})
+                ORDER BY event_id LIMIT ?""",
+            params,
+        ).fetchall()
+    result = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["payload"] = json.loads(item["payload"])
+        except (TypeError, json.JSONDecodeError):
+            item["payload"] = {"text": item["payload"] or ""}
+        result.append(item)
+    return result
+
+
+def get_realtime_snapshot(scopes: list[dict], message_limit: int = 20) -> dict:
+    conversations = []
+    with _connect() as conn:
+        cursor = int(conn.execute("SELECT COALESCE(MAX(event_id), 0) FROM realtime_events").fetchone()[0])
+        for scope in scopes:
+            topic, agent = scope.get("topic"), scope.get("agent")
+            if not topic:
+                continue
+            agent_clause = "1=1" if agent is None else "agent=?"
+            args = [topic] if agent is None else [topic, agent]
+            recent = conn.execute(
+                f"""SELECT * FROM chat_messages WHERE topic=? AND {agent_clause}
+                    ORDER BY id DESC LIMIT ?""", (*args, message_limit),
+            ).fetchall()
+            pending = conn.execute(
+                f"""SELECT * FROM chat_messages WHERE topic=? AND {agent_clause}
+                    AND status='pending' ORDER BY id""", args,
+            ).fetchall()
+            by_id = {int(row["id"]): dict(row) for row in [*recent, *pending]}
+            for item in by_id.values():
+                if item["role"] == "assistant" and item["status"] == "pending":
+                    snap = _run_event_snapshot(conn, item["id"])
+                    item["content"] = snap.get("text") or item.get("content") or ""
+                    seq_row = conn.execute(
+                        "SELECT COALESCE(MAX(seq), -1) FROM run_events WHERE msg_id=?", (item["id"],),
+                    ).fetchone()
+                    item["run_seq"] = int(seq_row[0])
+            conversations.append({"scope": scope, "messages": sorted(by_id.values(), key=lambda row: row["id"])})
+    return {"cursor": cursor, "conversations": conversations}
+
+
+def get_realtime_request(principal: str, request_id: str) -> Optional[dict]:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT request_type, request_hash, result FROM realtime_requests WHERE principal=? AND request_id=?",
+            (principal, request_id),
+        ).fetchone()
+    if not row:
+        return None
+    return {"request_type": row["request_type"], "request_hash": row["request_hash"], "result": json.loads(row["result"])}
+
+
+def save_realtime_request(principal: str, request_id: str, request_type: str, request_hash: str, result: dict) -> dict:
+    with _connect() as conn:
+        conn.execute(
+            """INSERT OR IGNORE INTO realtime_requests
+               (principal, request_id, request_type, request_hash, result) VALUES (?, ?, ?, ?, ?)""",
+            (principal, request_id, request_type, request_hash, json.dumps(result)),
+        )
+    return get_realtime_request(principal, request_id)["result"]
+
+
 def insert_run_event(msg_id: int, seq: int, event_type: str, payload: Optional[str], created_at: Optional[str] = None) -> str:
     event_created_at = created_at or _utc_now_iso()
     with _connect() as conn:
@@ -3852,6 +4048,23 @@ def insert_run_event(msg_id: int, seq: int, event_type: str, payload: Optional[s
             ).fetchone()
             if row and row["created_at"]:
                 return row["created_at"]
+        else:
+            message = conn.execute("SELECT topic, agent FROM chat_messages WHERE id=?", (msg_id,)).fetchone()
+            if message:
+                event_payload = payload
+                if event_type in {"queued", "loading", "processing", "tool", "stats", "diag"} and payload:
+                    try:
+                        event_payload = json.loads(payload)
+                    except json.JSONDecodeError:
+                        pass
+                elif event_type in {"text", "status", "error"}:
+                    event_payload = {"text": payload or ""}
+                else:
+                    event_payload = {}
+                _insert_realtime_event(
+                    conn, f"chat.{event_type}", message["topic"], message["agent"],
+                    msg_id, seq, event_payload,
+                )
     return event_created_at
 
 

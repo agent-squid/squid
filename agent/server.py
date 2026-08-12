@@ -23,6 +23,7 @@ GET /health
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import logging.handlers
@@ -41,7 +42,7 @@ from pathlib import Path
 from typing import AsyncGenerator, Literal, Optional, Union
 
 import yaml
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -101,6 +102,9 @@ from .stats_db import (
     mark_worktree_status, delete_worktree, delete_all_worktrees,
     delete_all_topic_worktrees,
     allocate_id,
+    get_realtime_cursor, get_realtime_events, get_realtime_snapshot,
+    get_realtime_request, save_realtime_request, get_realtime_retained_range,
+    prune_realtime_data, set_realtime_commit_listener,
 )
 from .journal import _generate_journal, _current_week, list_topic_journals, read_journal
 from . import creds
@@ -316,9 +320,14 @@ async def _resume_stalled_flows_on_startup():
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    _realtime_notifier.start(asyncio.get_running_loop())
+    await asyncio.to_thread(prune_realtime_data)
     await _recover_orphaned_pending_on_startup()
     await _resume_stalled_flows_on_startup()
-    yield
+    try:
+        yield
+    finally:
+        _realtime_notifier.stop()
 
 
 app = FastAPI(title="Squid", version=SQUID_VERSION, lifespan=_lifespan)
@@ -3402,6 +3411,275 @@ async def revert_file_edit(req: LocalfileRevertEditRequest, request: Request):
     p.write_text(edit["before"])
     await asyncio.to_thread(save_file_edit, str(p), before, edit["before"])
     return JSONResponse({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# Versioned realtime protocol (ADR-0040)
+# ---------------------------------------------------------------------------
+
+_REALTIME_REPLAY_LIMIT = 500
+_REALTIME_SAFETY_POLL_SECONDS = 20.0
+_realtime_chat_tasks: set[asyncio.Task] = set()
+
+
+class _RealtimeNotifier:
+    """Best-effort live wake-up; the durable event log remains authoritative."""
+
+    def __init__(self):
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._condition: Optional[asyncio.Condition] = None
+        self._generation = 0
+
+    def start(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
+        self._condition = asyncio.Condition()
+        set_realtime_commit_listener(self.notify_committed)
+
+    def stop(self) -> None:
+        set_realtime_commit_listener(None)
+        loop = self._loop
+        if loop and not loop.is_closed():
+            loop.call_soon_threadsafe(self._bump)
+        self._loop = None
+
+    def notify_committed(self, _event_id: int) -> None:
+        loop = self._loop
+        if loop and not loop.is_closed():
+            loop.call_soon_threadsafe(self._bump, _event_id)
+
+    def _bump(self, event_id: int = 0) -> None:
+        self._generation += 1
+        condition = self._condition
+        if condition:
+            asyncio.create_task(self._wake(condition))
+        if event_id and event_id % 1000 == 0:
+            asyncio.create_task(asyncio.to_thread(prune_realtime_data))
+
+    @staticmethod
+    async def _wake(condition: asyncio.Condition) -> None:
+        async with condition:
+            condition.notify_all()
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    async def wait(self, observed: int) -> int:
+        condition = self._condition
+        if not condition or self._generation != observed:
+            return self._generation
+        try:
+            async with condition:
+                await asyncio.wait_for(
+                    condition.wait_for(lambda: self._generation != observed),
+                    timeout=_REALTIME_SAFETY_POLL_SECONDS,
+                )
+        except asyncio.TimeoutError:
+            pass
+        return self._generation
+
+
+_realtime_notifier = _RealtimeNotifier()
+
+
+def _realtime_envelope(event: dict) -> dict:
+    return {
+        "v": 1,
+        "type": event["event_type"],
+        "event_id": event["event_id"],
+        "request_id": None,
+        "scope": {"topic": event.get("topic"), "agent": event.get("agent")},
+        "msg_id": event.get("msg_id"),
+        "run_seq": event.get("run_seq"),
+        "payload": event.get("payload") or {},
+    }
+
+
+def _realtime_request_fingerprint(message_type: str, payload: dict) -> str:
+    canonical = json.dumps({"type": message_type, "payload": payload}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+async def _realtime_snapshot(scopes: list[dict]) -> dict:
+    snapshot = await asyncio.to_thread(get_realtime_snapshot, scopes, 20)
+    topics = {scope.get("topic") for scope in scopes}
+    snapshot["processes"] = [item for item in list_active_procs() if item.get("topic") in topics]
+    snapshot["queue"] = [item for item in dispatcher.all_queued_items() if item.get("topic") in topics]
+    return snapshot
+
+
+async def _run_realtime_chat(prepared: dict) -> None:
+    async for _chunk in stream_response(
+        prepared["effective_message"], prepared["topic"], prepared["agent"],
+        prepared["backend"], prepared["model"], prepared["cwd"],
+        prepared["context_history"], prepared["asst_msg_id"], prepared["response_timeout"],
+        resume_session_id=prepared["resume_session_id"], adhoc=prepared["adhoc"],
+        lookback=prepared["lookback"], code_roots=prepared["code_roots"],
+        display_prompt=prepared["display_prompt"], source_cwd=prepared["source_cwd"],
+        harness=prepared["harness"], provider=prepared["provider"],
+        worktree_setup_elapsed_ms=prepared["worktree_setup_elapsed_ms"],
+        worktree_isolated=prepared["worktree_isolated"], native_shell=prepared["native_shell"],
+        shell_pinned_contents=prepared["shell_pinned_contents"],
+        shell_attached_paths=prepared["shell_attached_paths"],
+        shell_topic_memory=prepared["shell_topic_memory"],
+    ):
+        pass
+
+
+async def _realtime_chat_start(payload: dict) -> dict:
+    try:
+        req = ChatRequest(**payload)
+    except Exception as exc:
+        return {"ok": False, "error": "invalid_frame", "detail": str(exc)}
+    if req.route:
+        return {"ok": False, "error": "invalid_frame", "detail": "route chains require explicit UI turns"}
+    flow_route = canonical_flow_route(req.flow_route)
+    flow_run_id = req.flow_run_id if flow_route else None
+    if flow_route and not flow_run_id:
+        flow_run_id = allocate_id("flow_run")
+    topic = _normalize_topic_response(req.topic)
+    if isinstance(topic, JSONResponse):
+        return {"ok": False, "error": "invalid_frame", "detail": "invalid topic"}
+    prepared = await _prepare_chat_turn(
+        message=req.message, topic=topic, agent=req.agent, adhoc=req.adhoc,
+        lookback=req.lookback, lookback_via_pins=req.lookback_via_pins,
+        pinned_ids=req.pinned_ids, attached_paths=req.attached_paths,
+        include_topic_memory=req.include_topic_memory, source=req.source,
+        flow_run_id=flow_run_id, flow_route=flow_route,
+    )
+    if isinstance(prepared, JSONResponse):
+        body = json.loads(prepared.body)
+        return {"ok": False, "error": body.get("error", "chat_start_failed"), "status": prepared.status_code}
+    await maybe_sync()
+    task = asyncio.create_task(_run_realtime_chat(prepared), name=f"squid-ws-chat-{prepared['asst_msg_id']}")
+    _realtime_chat_tasks.add(task)
+    task.add_done_callback(_realtime_chat_tasks.discard)
+    return {"ok": True, "msg_id": prepared["asst_msg_id"], "flow_run_id": flow_run_id}
+
+
+async def _handle_realtime_mutation(websocket: WebSocket, frame: dict, principal: str) -> None:
+    message_type = frame.get("type")
+    request_id = frame.get("request_id")
+    payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+    if not isinstance(request_id, str) or not request_id or message_type not in {"chat.start", "chat.cancel"}:
+        await websocket.send_json({"v": 1, "type": "error", "payload": {"code": "invalid_frame"}})
+        return
+    fingerprint = _realtime_request_fingerprint(message_type, payload)
+    previous = await asyncio.to_thread(get_realtime_request, principal, request_id)
+    if previous:
+        if previous["request_type"] != message_type or previous["request_hash"] != fingerprint:
+            await websocket.send_json({"v": 1, "type": "error", "request_id": request_id, "payload": {"code": "request_id_conflict"}})
+            return
+        result = previous["result"]
+    elif message_type == "chat.start":
+        result = await _realtime_chat_start(payload)
+        result = await asyncio.to_thread(save_realtime_request, principal, request_id, message_type, fingerprint, result)
+    else:
+        msg_id = payload.get("msg_id")
+        if not isinstance(msg_id, int):
+            result = {"ok": False, "error": "invalid_frame"}
+        else:
+            changed = await asyncio.to_thread(mark_assistant_cancelled, msg_id, "Cancelled")
+            killed = await asyncio.to_thread(kill_proc_by_msg_id, msg_id)
+            result = {"ok": True, "cancelled": changed, "killed": killed, "msg_id": msg_id}
+        result = await asyncio.to_thread(save_realtime_request, principal, request_id, message_type, fingerprint, result)
+    await websocket.send_json({"v": 1, "type": "command.result", "request_id": request_id, "payload": result})
+
+
+@app.websocket("/ws/v1")
+async def realtime_v1(websocket: WebSocket):
+    origin = websocket.headers.get("origin")
+    host = websocket.headers.get("host")
+    if origin and host and urllib.parse.urlparse(origin).netloc != host:
+        await websocket.close(code=1008, reason="origin not allowed")
+        return
+    await websocket.accept()
+    cursor = await asyncio.to_thread(get_realtime_cursor)
+    await websocket.send_json({
+        "v": 1, "type": "hello", "payload": {
+            "supported_versions": [1], "cursor": cursor,
+            "replay_limit": _REALTIME_REPLAY_LIMIT, "heartbeat_seconds": 20,
+        },
+    })
+    scopes: list[dict] = []
+    principal: Optional[str] = None
+    generation = _realtime_notifier.generation
+    try:
+        while True:
+            receive_task = asyncio.create_task(websocket.receive_json())
+            notify_task = asyncio.create_task(_realtime_notifier.wait(generation))
+            done, pending = await asyncio.wait(
+                {receive_task, notify_task}, return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            frame = receive_task.result() if receive_task in done else None
+            if notify_task in done:
+                generation = notify_task.result()
+            if frame is not None:
+                if frame.get("v") != 1:
+                    await websocket.send_json({"v": 1, "type": "error", "payload": {"code": "unsupported_version", "supported_versions": [1]}})
+                    continue
+                message_type = frame.get("type")
+                if message_type == "subscribe":
+                    subscribe_payload = frame.get("payload", {})
+                    client_id = subscribe_payload.get("client_id")
+                    if not isinstance(client_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", client_id):
+                        await websocket.send_json({"v": 1, "type": "error", "payload": {"code": "invalid_client_id"}})
+                        continue
+                    principal = f"local:{client_id}"
+                    requested = subscribe_payload.get("scopes", [])
+                    scopes = [scope for scope in requested if isinstance(scope, dict) and scope.get("topic")]
+                    requested_cursor = subscribe_payload.get("cursor")
+                    current = await asyncio.to_thread(get_realtime_cursor)
+                    await websocket.send_json({"v": 1, "type": "subscribed", "payload": {"scopes": scopes}})
+                    if not isinstance(requested_cursor, int) or requested_cursor < 0:
+                        snapshot = await _realtime_snapshot(scopes)
+                        cursor = snapshot["cursor"]
+                        await websocket.send_json({"v": 1, "type": "snapshot", "event_id": cursor, "payload": snapshot})
+                    else:
+                        retained_min, _ = await asyncio.to_thread(get_realtime_retained_range)
+                        cursor_expired = retained_min is not None and requested_cursor < retained_min - 1
+                        replay = [] if cursor_expired else await asyncio.to_thread(
+                            get_realtime_events, requested_cursor, scopes, _REALTIME_REPLAY_LIMIT + 1,
+                        )
+                        if cursor_expired or len(replay) > _REALTIME_REPLAY_LIMIT:
+                            snapshot = await _realtime_snapshot(scopes)
+                            cursor = snapshot["cursor"]
+                            await websocket.send_json({"v": 1, "type": "snapshot", "event_id": cursor, "payload": snapshot})
+                        else:
+                            for event in replay:
+                                await websocket.send_json(_realtime_envelope(event))
+                            cursor = replay[-1]["event_id"] if replay else current
+                    generation = _realtime_notifier.generation
+                    continue
+                elif message_type == "unsubscribe":
+                    scopes = []
+                    cursor = await asyncio.to_thread(get_realtime_cursor)
+                    await websocket.send_json({"v": 1, "type": "unsubscribed", "payload": {}})
+                elif message_type in {"chat.start", "chat.cancel"}:
+                    if not principal:
+                        await websocket.send_json({"v": 1, "type": "error", "payload": {"code": "client_identity_required"}})
+                    else:
+                        await _handle_realtime_mutation(websocket, frame, principal)
+                elif message_type == "ping":
+                    await websocket.send_json({"v": 1, "type": "pong", "payload": {}})
+                elif message_type not in {"ack", "pong"}:
+                    await websocket.send_json({"v": 1, "type": "error", "payload": {"code": "unsupported_type"}})
+            if scopes:
+                events = await asyncio.to_thread(get_realtime_events, cursor, scopes, _REALTIME_REPLAY_LIMIT + 1)
+                if len(events) > _REALTIME_REPLAY_LIMIT:
+                    snapshot = await _realtime_snapshot(scopes)
+                    cursor = snapshot["cursor"]
+                    await websocket.send_json({"v": 1, "type": "snapshot", "event_id": cursor, "payload": snapshot})
+                else:
+                    for event in events:
+                        await websocket.send_json(_realtime_envelope(event))
+                    if events:
+                        cursor = events[-1]["event_id"]
+    except WebSocketDisconnect:
+        return
 
 
 if UI_DIR.exists():
