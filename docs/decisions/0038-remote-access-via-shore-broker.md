@@ -106,6 +106,27 @@ giving users the shorter, single-domain URL.
   (Workers Free: ~100K requests/day; Durable Objects on Workers Free:
   ~1M requests/month, ~400K GB-seconds/month). No paid Cloudflare plan
   required to launch.
+- **Status/health updates are pushed over the WebSocket, not polled via
+  HTTP.** The Workers Free request quota (~100K/day) is consumed by every
+  request through the Worker, not just login/registration — a naive client
+  polling for status every few seconds would burn through a large share of
+  that daily budget from a single active session alone. The phone holds its
+  own WebSocket connection to the Durable Object (the same pattern already
+  used for the host machine's connection), and AgentSquid pushes
+  status/output events down it only when state actually changes, rather
+  than the phone re-requesting on an interval. WebSocket messages are
+  billed at a 20:1 ratio against the separate Durable Objects quota, not
+  1:1 against the Workers request limit. This also solves a second,
+  independent problem: without push, a change made from one device (e.g.
+  starting a job on desktop) wouldn't appear on another (e.g. the phone)
+  without a manual refresh. Push-based sync makes multi-device state
+  consistency (desktop and phone reflecting the same running state without
+  polling) a byproduct of the same mechanism, rather than a separate
+  feature to build — closer to how a chat app keeps devices in sync than to
+  a traditional request/response API. Request volume in this design scales
+  with polling frequency during active prompt/command execution × number of
+  concurrently active sessions, not with total registered user count —
+  idle accounts contribute negligible request volume.
 
 ### User registration
 
