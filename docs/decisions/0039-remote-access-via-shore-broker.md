@@ -75,6 +75,11 @@ Build the remote-access broker as a single Cloudflare Worker, backed by one
 Durable Object per registered username, reachable at
 `agentsquid.ai/@<username>`.
 
+The broker carries the versioned real-time application protocol defined by
+ADR-0040. Implement and validate that protocol locally before making the broker
+its remote transport; Shore must not define a second set of chat, lifecycle,
+reconnect, or replay semantics.
+
 ### Coexisting with the existing GitHub-Pages-hosted site
 
 `agentsquid.ai` already serves the project's marketing/docs site via GitHub
