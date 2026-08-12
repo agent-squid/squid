@@ -90,16 +90,20 @@ giving users the shorter, single-domain URL.
 
 - **No new DNS record for the broker itself** — it rides on the existing
   `agentsquid.ai` zone via a path-scoped Worker route, not a new hostname.
-- **One Durable Object per user**, addressed via `idFromName(username)`.
-  Cloudflare routes to the correct instance by name — no lookup table to
-  build or maintain ourselves.
+- **One Durable Object per user**, addressed via `idFromName(account_id)`.
+  A separate singleton
+  identity-index Durable Object maps normalized email addresses to immutable
+  account IDs and current usernames, and serializes uniqueness checks,
+  signup, recovery, and username changes. Per-user objects remain the source
+  of truth for account and device state.
 - **No `cloudflared` binary and no Cloudflare Tunnel resource.** Each
   AgentSquid instance opens an outbound WebSocket directly to the Worker
   (`wss://agentsquid.ai/@<username>/register`, or an equivalent registration
   path) and the owning Durable Object holds that connection, using WebSocket
   hibernation so an idle connection costs near-zero compute.
 - **Request flow**: a request to `agentsquid.ai/@<username>` hits the
-  Worker, which resolves the Durable Object for that username, forwards the
+  Worker, which resolves the immutable account ID through the identity index,
+  addresses that user's Durable Object, forwards the
   request down the held WebSocket to the user's local AgentSquid instance,
   and relays the response back.
 - Runs entirely on Cloudflare's free tier at expected early-stage volume
@@ -123,10 +127,10 @@ giving users the shorter, single-domain URL.
   consistency (desktop and phone reflecting the same running state without
   polling) a byproduct of the same mechanism, rather than a separate
   feature to build — closer to how a chat app keeps devices in sync than to
-  a traditional request/response API. Request volume in this design scales
-  with polling frequency during active prompt/command execution × number of
-  concurrently active sessions, not with total registered user count —
-  idle accounts contribute negligible request volume.
+  a traditional request/response API. Request and message volume in this
+  design scales with connections, commands, and emitted state changes, not
+  with polling frequency or total registered user count — idle accounts
+  contribute negligible volume.
 
 ### User registration
 
@@ -134,15 +138,19 @@ giving users the shorter, single-domain URL.
   magic-link (OAuth as a later addition, not required for v1).
 - At signup, the user claims a `username` (validated: alphanumeric,
   length-bounded, checked against a reserved-word blocklist). The username
-  is the Durable Object key and the path segment (`/@username`) — one
-  account, one username, one Durable Object.
+  is the public path segment (`/@username`); an immutable generated account
+  ID is the Durable Object key — one account, one username, one Durable
+  Object.
 - Account state (email, username, password/session metadata, created_at) is
   persisted in the user's own Durable Object storage (SQLite-backed, GA on
-  the Workers Free plan) — no separate database service needed.
+  the Workers Free plan). The identity index stores only the minimum global
+  mapping needed to resolve email login and enforce uniqueness; no separate
+  database service is needed. User objects are keyed by immutable account ID,
+  so a rename changes the route and index without moving account data.
 
 ### Authentication
 
-Two distinct authentication events, both handled by AgentSquid/the Worker,
+Three distinct authentication events, handled by AgentSquid/the Worker,
 not by Cloudflare Access:
 
 1. **Device registration (host machine → broker)**: on `agentsquid login`,
@@ -162,6 +170,15 @@ not by Cloudflare Access:
    `~/.ssh/authorized_keys` or running `ssh-add -D`. The Worker checks this
    session before proxying any request into the Durable Object's WebSocket.
 
+3. **Phone-to-host pairing**: browser login authenticates the account but
+   does not authorize commands by itself. A new phone generates a non-
+   extractable signing/encryption keypair and must be approved on the host
+   through a locally displayed one-time pairing code that commits to both
+   device public-key fingerprints. The host persists the approved phone key;
+   the phone pins the host key. Key changes require a new local pairing or an
+   explicit recovery flow that revokes prior device keys. The broker cannot
+   add or replace either key.
+
 ## Security
 
 Because a compromised or misused session here is equivalent to a
@@ -179,24 +196,31 @@ as v1 requirements, not later hardening:
     public/private keypair on the host machine. The private key never
     leaves that machine — not stored server-side, not transmitted anywhere.
     The public key is uploaded to the account record.
-  - Before sending a command, the phone/browser fetches the host's public
-    key and encrypts the command to it (standard public-key encryption —
-    e.g. libsodium `box`, or WebCrypto ECDH + AES-GCM in-browser) before
-    the request ever reaches the Worker.
+  - After pairing, the phone uses its pinned host key to establish an
+    authenticated encrypted channel. It signs every command envelope with
+    its approved device key. Each envelope includes the account and device
+    IDs, protocol version, monotonically increasing sequence number, unique
+    request ID, expiry, and ciphertext; all fields are covered by the
+    signature.
   - The Worker and Durable Object route the resulting ciphertext by
-    username only; they hold no key capable of decrypting it. The
-    AgentSquid instance decrypts on receipt, and encrypts its response back
-    to the phone's public key the same way.
-  - First connection between a given phone and a given host machine follows
-    a trust-on-first-use model, the same as SSH host-key verification.
-  - Without this, the Worker — and by extension anyone who controls its
-    code or the Cloudflare account it runs under, including us as the
-    deploying admin — can read every command and result passing through it.
-    With it, that access becomes cryptographically impossible rather than
-    merely against policy: there is no key on the broker side to compel,
-    subpoena, or accidentally expose. This directly addresses the concern
-    of an admin (deliberately or via a compromised account) reaching into
-    another user's session.
+    username only; they hold no key capable of decrypting or forging it. The
+    AgentSquid instance rejects unapproved device keys, expired envelopes,
+    duplicate request IDs, and non-increasing sequence numbers before
+    execution. It encrypts and signs responses to the paired phone key.
+  - Trust is established by the local pairing ceremony, not by a host key
+    fetched from the broker on first use. This prevents a malicious broker
+    from substituting keys or injecting commands encrypted with the public
+    host key.
+  - This makes passive broker access to command and response payloads
+    cryptographically impossible and prevents the broker protocol from
+    forging commands. It does not make a browser client delivered by that
+    same operator immune to a malicious software update: with the zero-
+    install requirement, the operator remains part of the active client
+    supply-chain trust boundary. Production must use immutable, versioned
+    client assets with a restrictive CSP and public reproducible-build
+    hashes, and must state this residual risk rather than claim the operator
+    can never influence an active session. Removing that trust entirely
+    would require a separately installed or independently distributed client.
 - **No admin master key for session minting.** Any admin tooling must not
   be able to generate a valid session for an arbitrary username on its own.
   Sessions are only issuable through the user's own login flow or their
@@ -212,22 +236,28 @@ as v1 requirements, not later hardening:
   OS user rather than whichever account performed the install, so a leaked
   session's blast radius is bounded by that user's permissions, not by
   whatever account happened to run the installer.
-- **Audit logging.** Every executed command should be logged with session
-  identity, source IP, and timestamp, stored somewhere a compromised session
-  cannot also erase. This is the difference between "we think we were
-  compromised" and "here is exactly what happened," and it is not optional
-  given the capability being exposed.
+- **Correlated, tamper-evident audit logging.** Before forwarding an envelope,
+  the broker appends its request ID, authenticated account/device/session
+  IDs, source IP, and receipt timestamp to an audit object. After validating
+  and executing it, the host appends a signed event containing the same
+  request ID, command hash, outcome, and host timestamp. The broker cannot
+  read the command, while the correlated records still attribute its hash
+  to the observed source. Records are hash-chained and exported to append-
+  only storage under separate credentials that neither a remote session nor
+  the host process can delete. Raw command text is excluded by default to
+  avoid creating a second store of secrets.
 - **If real admin access to a user's account is ever needed** (e.g.
   support), it should require deliberate, logged, ideally user-notified
   action, not silent default reach — an append-only audit log the admin
   account itself cannot quietly edit, and a notification to the affected
   user.
-- **Open product question, not yet resolved by this ADR:** whether the
-  mobile/remote path should default to a narrower command allowlist rather
-  than unrestricted shell execution, reserving full shell access for
-  trusted-network use. This is the single biggest lever over blast radius
-  if a credential does leak, and should be decided explicitly rather than
-  defaulting to full access.
+- **Remote execution is capability-scoped by default.** A paired phone may
+  use the existing dashboard and a versioned allowlist of non-destructive
+  AgentSquid operations, but cannot invoke arbitrary shell commands. Full
+  shell access requires a separate capability granted locally on the host
+  to a specific device, with an explicit warning, expiry (at most 24 hours),
+  audit event, and immediate revocation. It is never granted by account
+  login, pairing, or an administrator.
 
 ## Consequences
 
