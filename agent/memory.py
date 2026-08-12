@@ -248,7 +248,7 @@ def code_roots_prompt_block(
         "<squid_code_roots>",
         *root_lines,
         "</squid_code_roots>",
-        "Use these paths, not process cwd, as the codebase roots.",
+        "Use these paths, not cwd, as codebase roots.",
     ]
     if isolated:
         if backing:
@@ -259,11 +259,11 @@ def code_roots_prompt_block(
                 "</squid_backing_repos>",
             ])
         lines.append(
-            "Isolated Squid turn dir: edit here only; no `.git`; deps/cache dirs may be symlinks. "
-            "Trust writes; do not re-read just to confirm edits. Do not edit backing repo files directly. "
+            "Isolated Squid turn dir: edit here only; no `.git`. Do not edit backing repo files directly. "
             "Squid syncs isolated edits back to the backing repos after the response completes. "
             "For turns with file edits, do not run/suggest git commit, push, pull, branch, tag, PR, publish, or checkout switching. "
             "For git-only turns with no file edits, run requested git status, commit, push, pull, branch, tag, or PR commands only in the backing repos. "
-            "If asked to push changes, commit existing backing-repo changes first when needed, then push."
+            "When pushing, commit backing-repo changes if needed, then push only the current branch; "
+            "never use `git push --all` or `git push --mirror`, and never create or publish per-turn `sqd-*` branches."
         )
     return "\n".join(lines)

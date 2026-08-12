@@ -142,7 +142,9 @@ def test_isolated_code_roots_prompt_blocks_publish_with_code_changes():
     assert "do not run/suggest git commit, push, pull, branch, tag, PR, publish" in prompt
     assert "For git-only turns with no file edits" in prompt
     assert "run requested git status, commit, push, pull, branch, tag, or PR commands only in the backing repos" in prompt
-    assert "If asked to push changes, commit existing backing-repo changes first when needed, then push" in prompt
+    assert "then push only the current branch" in prompt
+    assert "never use `git push --all` or `git push --mirror`" in prompt
+    assert "never create or publish per-turn `sqd-*` branches" in prompt
     assert "Squid syncs isolated edits back to the backing repos after the response completes" in prompt
     assert len(prompt.split()) <= 125
 
@@ -156,6 +158,7 @@ def test_isolated_code_roots_prompt_forbids_git_recovery():
     assert "squid-publish" not in block
     assert "For git-only turns with no file edits" in block
     assert "commit, push" in block
+    assert "push only the current branch" in block
     assert "working in the real repo" not in block
     assert "git tag -f" not in block
     assert "run that against the process's working directory" not in block
