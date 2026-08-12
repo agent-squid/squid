@@ -446,6 +446,28 @@ class FinishedWorker:
         return 0
 
 
+def test_native_shell_uses_agent_cwd_without_worktree_setup(tmp_path):
+    code_root = tmp_path / "project"
+    code_root.mkdir()
+
+    with patch("agent.server.get_agent", return_value={"cwd": "/tmp/agent-cwd"}), \
+         patch("agent.server._resolve_agent_runtime", return_value=("codex", None, "codex", SimpleNamespace(fingerprint="f"))), \
+         patch("agent.server.upsert_topic"), \
+         patch("agent.server.topic_memory_squid_config", return_value={"code_roots": [str(code_root)]}), \
+         patch("agent.server._repo_roots_for_code_roots") as repo_roots, \
+         patch("agent.server.insert_user_message", return_value=201), \
+         patch("agent.server.insert_assistant_message", return_value=202):
+        prepared = asyncio.run(server._prepare_chat_turn(
+            message="! pwd", topic="squid", agent="codex",
+        ))
+
+    assert prepared["cwd"] == "/tmp/agent-cwd"
+    assert prepared["source_cwd"] == "/tmp/agent-cwd"
+    assert prepared["code_roots"] == []
+    assert prepared["native_shell"] is True
+    repo_roots.assert_not_called()
+
+
 def test_stream_response_passes_agent_cwd_and_code_roots_separately():
     captured = {}
 

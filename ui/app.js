@@ -3288,6 +3288,10 @@ async function restartServer() {
   }
   const feedbackEl = showCmdFeedback(upgrade ? 'upgrading…' : 'restart…');
   try {
+    const beforeBootTime = await fetch('/health')
+      .then(r => r.ok ? r.json() : null)
+      .then(health => health?.boot_time || null)
+      .catch(() => null);
     const res = await fetch('/cmd', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -3296,12 +3300,23 @@ async function restartServer() {
     const data = await res.json();
     if (!data.ok) { feedbackEl.textContent = upgrade ? `upgrade failed — ${data.error || 'restart cancelled'}` : 'restart failed'; return; }
     feedbackEl.textContent = 'restarting…';
-    // Poll /health until server is back up, then hard-refresh this tab.
+    // Re-exec keeps the same PID, and the old process may answer briefly
+    // after accepting the command. Wait for the new BOOT_TIME rather than
+    // treating the first successful health response as a completed restart.
+    let sawDown = false;
     const poll = async () => {
       try {
         const r = await fetch('/health');
-        if (r.ok) { doRefresh(); return; }
-      } catch {}
+        if (r.ok) {
+          const health = await r.json();
+          if (sawDown || (beforeBootTime && health.boot_time !== beforeBootTime)) {
+            doRefresh();
+            return;
+          }
+        } else {
+          sawDown = true;
+        }
+      } catch { sawDown = true; }
       setTimeout(poll, 500);
     };
     setTimeout(poll, 800);
@@ -3480,6 +3495,57 @@ function setCtxLabel(spanEl, adhoc, pinCount = 0, mem = false, sessionTurnCount 
   spanEl.textContent = `ctx: ${fmtCtxLabel(adhoc, pinCount, mem, sessionTurnCount)}`;
 }
 
+function setShellResultMetadata(spanEl, content) {
+  const match = String(content || '').match(/\[exit (-?\d+) · ([\d.]+)s · cwd: ([^\n\]]+)\]\s*$/);
+  if (!match) return;
+  spanEl.dataset.shellExit = match[1];
+  spanEl.dataset.shellElapsed = match[2];
+  spanEl.dataset.shellCwd = match[3];
+  spanEl.textContent = match[1] === '0'
+    ? 'ctx: shell · no LLM'
+    : `ctx: shell · exit ${match[1]} · no LLM`;
+}
+
+function shellResultOutput(content) {
+  return String(content || '').replace(/(?:\n)?\[exit -?\d+ · [\d.]+s · cwd: [^\n\]]+\]\s*$/, '');
+}
+
+function addShellFooter(afterEl, timestamp, metadataEl) {
+  if (!timestamp) return null;
+  const elapsed = metadataEl?.dataset.shellElapsed || '';
+  const exitCode = metadataEl?.dataset.shellExit || '';
+  const cwd = metadataEl?.dataset.shellCwd || '';
+  const el = document.createElement('div');
+  el.className = 'msg-time shell-footer';
+
+  const details = document.createElement('span');
+  details.className = 'shell-footer-details';
+  details.appendChild(document.createTextNode(fmtTime(timestamp)));
+  if (elapsed) details.appendChild(document.createTextNode(` · ${elapsed}s`));
+  if (exitCode) {
+    const exitEl = document.createElement('span');
+    exitEl.className = 'shell-footer-exit' + (exitCode === '0' ? '' : ' shell-footer-exit-error');
+    exitEl.textContent = ` · exit ${exitCode}`;
+    details.appendChild(exitEl);
+  }
+  el.appendChild(details);
+
+  if (cwd) {
+    const lastSlash = cwd.lastIndexOf('/');
+    const dirPart = lastSlash >= 0 ? cwd.slice(0, lastSlash + 1) : '';
+    const namePart = lastSlash >= 0 ? cwd.slice(lastSlash + 1) : cwd;
+    const cwdEl = document.createElement('button');
+    cwdEl.type = 'button';
+    cwdEl.className = 'shell-footer-cwd';
+    cwdEl.title = `Open ${cwd} in file viewer`;
+    cwdEl.innerHTML = `<span class="shell-footer-separator">·</span><span class="shell-footer-path" dir="ltr"><span class="shell-footer-path-dir">${escapeHtml(dirPart)}</span><span class="shell-footer-path-name">${escapeHtml(namePart)}</span></span>`;
+    cwdEl.addEventListener('click', () => openFileViewer(cwd));
+    el.appendChild(cwdEl);
+  }
+  afterEl.after(el);
+  return el;
+}
+
 const _lookbackUnselected = new Set(); // cleared when the active !N candidate set changes; never persisted
 let _lastLookbackSelectionKey = '';
 let _lastContextIndicatorKey = '';
@@ -3556,7 +3622,7 @@ function updateInContextMarkers() {
     const selectedForLookback = !!(singleTarget?.adhoc && activeIdSet.has(msgId));
 
     if (ctxSpan) {
-      ctxSpan.classList.toggle('ctx-live', inCtx);
+      ctxSpan.classList.toggle('ctx-live', ctxSpan.dataset.shell !== 'true' && inCtx);
       ctxSpan.classList.remove('ctx-injected');
     }
 
@@ -3974,6 +4040,7 @@ const agentsAuthPanelTitle = document.getElementById('agents-auth-panel-title');
 const agentsAuthPanelTerm = document.getElementById('agents-auth-panel-term');
 const agentsAuthPanelCancelBtn = document.getElementById('agents-auth-panel-cancel-btn');
 const agentsAuthPanelRetryBtn = document.getElementById('agents-auth-panel-retry-btn');
+const agentsAuthPanelRestartBtn = document.getElementById('agents-auth-panel-restart-btn');
 const agentsAuthPanelHome = document.getElementById('agents-auth-panel-home');
 let _authSession = null; // { id, harness, es, term, onSuccessRetry }
 
@@ -4059,6 +4126,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   if (!isCatalogOperation) form.classList.add('dimmed');
   panel.classList.add('open');
   panelRetryBtn.hidden = true;
+  if (isCatalogOperation) agentsAuthPanelRestartBtn.hidden = true;
   panelTitle.textContent = _authPanelTitle(harness, mode, model);
   panelTerm.innerHTML = '';
 
@@ -4209,7 +4277,10 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
       const retry = _authSession?.onSuccessRetry;
       const finishedMode = _authSession?.mode;
       if (finishedMode && finishedMode !== 'login') {
-        panelTitle.textContent = _authPanelDoneTitle(harness, mode, model);
+        const binaryInstalled = finishedMode === 'install';
+        panelTitle.textContent = _authPanelDoneTitle(harness, mode, model) +
+          (binaryInstalled ? ' — restart required' : '');
+        agentsAuthPanelRestartBtn.hidden = !binaryInstalled;
         // The process is gone, so it is now safe to fit the retained result
         // to the current viewport without sending SIGWINCH to ollama.
         fitTerminal();
@@ -4268,6 +4339,7 @@ function retryAuthSession() {
 }
 authPanelRetryBtn.addEventListener('click', retryAuthSession);
 agentsAuthPanelRetryBtn.addEventListener('click', retryAuthSession);
+agentsAuthPanelRestartBtn.addEventListener('click', () => { void restartServer(); });
 
 async function sendMessage(text, opts = {}) {
   const source = opts.source === 'workflow' || opts.source === 'diff_viewer' ? opts.source : 'human';
@@ -4275,6 +4347,7 @@ async function sendMessage(text, opts = {}) {
   const suppressChipTurnCount = !!opts.suppressChipTurnCount;
   const parsed = parseInput(text);
   const { lookback, route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, flowOrigins, message } = parsed;
+  const nativeShell = message.trimStart().startsWith('!');
   // Origin Broadcast (ADR-0032): N independent origins, one per sendMessage
   // call — the orchestrator (sendOriginBroadcast) tells each call which of
   // the parsed broadcastAgents it's responsible for via opts.broadcastTarget.
@@ -4459,6 +4532,7 @@ async function sendMessage(text, opts = {}) {
   // ── Response bubble (not yet in DOM — appended on first content chunk) ────────
   const bubble = document.createElement('div');
   bubble.className = 'msg assistant';
+  if (nativeShell) bubble.classList.add('shell-result');
   bubble.dataset.topic = topic;
   if (flowRoute) bubble.dataset.flowRoute = flowRoute;
   if (agent) bubble.dataset.agent = agent;
@@ -4474,7 +4548,13 @@ async function sendMessage(text, opts = {}) {
   responseHeader.appendChild(headerText);
   const liveCtxSpan = document.createElement('span');
   liveCtxSpan.className = 'user-ctx';
-  setCtxLabel(liveCtxSpan, adhoc);
+  if (nativeShell) {
+    liveCtxSpan.textContent = 'ctx: shell · no LLM';
+    liveCtxSpan.dataset.shell = 'true';
+    liveCtxSpan.dataset.hasTrace = 'false';
+  } else {
+    setCtxLabel(liveCtxSpan, adhoc);
+  }
   liveCtxSpan.dataset.topic = topic;
   if (flowRunId) liveCtxSpan.dataset.flowRunId = flowRunId;
   liveCtxSpan.addEventListener('click', e => { e.stopPropagation(); showCtxPopup(liveCtxSpan); });
@@ -4482,6 +4562,7 @@ async function sendMessage(text, opts = {}) {
   bubble.appendChild(responseHeader);
   bubble.appendChild(responsePromptFullDiv);
   const contentDiv = document.createElement('div');
+  if (nativeShell) contentDiv.className = 'shell-output';
   bubble.appendChild(contentDiv);
 
   // The response bubble lands wherever `messages` happens to end at the
@@ -4501,9 +4582,9 @@ async function sendMessage(text, opts = {}) {
 
   let firstDataReceived = false;
 
-  let quotaBackend = await resolveQuotaProvider(topic, agent);
-  let quotaBeforeSnapshot = await fetchQuotaForBackend(quotaBackend);
-  quotaTrackStart(quotaBackend);
+  let quotaBackend = nativeShell ? null : await resolveQuotaProvider(topic, agent);
+  let quotaBeforeSnapshot = nativeShell ? null : await fetchQuotaForBackend(quotaBackend);
+  if (!nativeShell) quotaTrackStart(quotaBackend);
   let lastSessionId = null;
   let statsEl = null;
   let doneTime = null;
@@ -4524,6 +4605,7 @@ async function sendMessage(text, opts = {}) {
   async function finalizeQuotaTracking() {
     if (quotaFinalized) return;
     quotaFinalized = true;
+    if (nativeShell) return;
     // Quota is a backend-wide meter, so this before/after difference is only an
     // observational signal. Parallel prompts have overlapping windows and can
     // double-count each other's usage; provider reporting lag can shift usage to
@@ -4655,7 +4737,13 @@ async function sendMessage(text, opts = {}) {
     if (!shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) return false;
     placeResponseBubble();
     raw = content || '';
-    contentDiv.innerHTML = renderAssistantMarkdown(raw);
+    if (nativeShell) {
+      bubble.classList.add('shell-result');
+      setShellResultMetadata(liveCtxSpan, raw);
+      contentDiv.textContent = shellResultOutput(raw);
+    } else {
+      contentDiv.innerHTML = renderAssistantMarkdown(raw);
+    }
     scrollToBottom();
     return true;
   }
@@ -4666,7 +4754,9 @@ async function sendMessage(text, opts = {}) {
 
   function addCompletionTimestamp() {
     if (!completionTimestampEl && !statsEl && doneTime && firstDataReceived) {
-      completionTimestampEl = addTimestamp(bubble, doneTime, false);
+      completionTimestampEl = nativeShell
+        ? addShellFooter(bubble, doneTime, liveCtxSpan)
+        : addTimestamp(bubble, doneTime, false);
     }
   }
 
@@ -4831,8 +4921,10 @@ async function sendMessage(text, opts = {}) {
           resolvedAgent = data.agent || resolvedAgent;
           addPinButton(bubble, msgId, topic, resolvedAgent, data.session_id || null);
           addBookmarkButton(bubble, msgId, topic, resolvedAgent);
-          addReplyButton(bubble, topic, resolvedAgent, !!adhoc);
-          addBadResponseButton(bubble, msgId, topic, resolvedAgent, !!data.marked_bad);
+          if (!nativeShell) {
+            addReplyButton(bubble, topic, resolvedAgent, !!adhoc);
+            addBadResponseButton(bubble, msgId, topic, resolvedAgent, !!data.marked_bad);
+          }
           const completedAt = data.completed_at || data.stats?.completed_at || doneTime;
           if (!statsEl && data.stats) statsEl = addStats(bubble, data.stats, completedAt);
           if (statsEl) {
@@ -4845,7 +4937,7 @@ async function sendMessage(text, opts = {}) {
           if (completedSessionId && !adhoc) _sessionIds[`${topic}@${resolvedAgent || '_'}`] = completedSessionId;
           liveCtxSpan.dataset.sessionTurnCount = String(liveSessionTurnCount);
           if (completedSessionId) liveCtxSpan.dataset.sessionId = completedSessionId;
-          setCtxLabel(liveCtxSpan, !!data.adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
+          if (!nativeShell) setCtxLabel(liveCtxSpan, !!data.adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
           if (!adhoc && !suppressChipTurnCount) _updateChipTurnCount(topic, resolvedAgent || null, completedSessionId || null, liveSessionTurnCount);
           markSessionContextDelivered(completedSessionId);
           evaluateAdvisory();
@@ -5080,7 +5172,7 @@ async function sendMessage(text, opts = {}) {
               if (meta.msg_id) {
                 queuePosition = null;
                 attachMsgId(meta.msg_id);
-                setCtxLabel(liveCtxSpan, adhoc);
+                if (!nativeShell) setCtxLabel(liveCtxSpan, adhoc);
                 bubble.dataset.topic = topic;
                 if (resolvedAgent) {
                   bubble.dataset.agent = resolvedAgent;
@@ -5091,8 +5183,10 @@ async function sendMessage(text, opts = {}) {
                 }
                 addPinButton(bubble, msgId, topic, resolvedAgent);
                 addBookmarkButton(bubble, msgId, topic, resolvedAgent);
-                addReplyButton(bubble, topic, resolvedAgent, !!adhoc);
-                addBadResponseButton(bubble, msgId, topic, resolvedAgent);
+                if (!nativeShell) {
+                  addReplyButton(bubble, topic, resolvedAgent, !!adhoc);
+                  addBadResponseButton(bubble, msgId, topic, resolvedAgent);
+                }
               }
             } catch {}
             eventName = null;
@@ -5134,7 +5228,7 @@ async function sendMessage(text, opts = {}) {
               }
               liveSessionTurnCount = parseInt(stats.session_turn_count || '0', 10) || 0;
               _advisoryTurnCount = liveSessionTurnCount;
-              setCtxLabel(liveCtxSpan, !!stats.adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
+              if (!nativeShell) setCtxLabel(liveCtxSpan, !!stats.adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
               liveCtxSpan.dataset.sessionTurnCount = String(liveSessionTurnCount);
               if (stats.session_id) liveCtxSpan.dataset.sessionId = stats.session_id;
               if (!adhoc && !suppressChipTurnCount) _updateChipTurnCount(topic, resolvedAgent || null, stats.session_id || null, liveSessionTurnCount);
@@ -5178,7 +5272,13 @@ async function sendMessage(text, opts = {}) {
             invalidateTopicsManageCache();
             doneTime = new Date().toISOString();
             if (firstDataReceived) {
-              contentDiv.innerHTML = renderAssistantMarkdown(raw);
+              if (nativeShell) {
+                bubble.classList.add('shell-result');
+                setShellResultMetadata(liveCtxSpan, raw);
+                contentDiv.textContent = shellResultOutput(raw);
+              } else {
+                contentDiv.innerHTML = renderAssistantMarkdown(raw);
+              }
               bubble.classList.add('history-item');
               if (shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) {
                 placeResponseBubble();
@@ -5194,7 +5294,7 @@ async function sendMessage(text, opts = {}) {
             if (flowRunId && msgId) watchFlowRun(flowRunId, msgId, flowRoute || route);
             if (flowRoute || route) refreshRouteTurnCounts(flowRoute || route, { force: true });
             // Update ctx label with pin count and store IDs for popup
-            setCtxLabel(liveCtxSpan, adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
+            if (!nativeShell) setCtxLabel(liveCtxSpan, adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
             liveCtxSpan.dataset.pinnedIds = JSON.stringify(_contextIds);
             liveCtxSpan.dataset.mem = _includeTopicMemory ? 'true' : 'false';
             markSessionContextDelivered(lastSessionId);
@@ -6450,6 +6550,8 @@ function appendHistoryItem(item, container) {
   const lb = item.stats?.lookback ?? 0;
   const asstBubble = document.createElement('div');
   asstBubble.className = 'msg assistant history-item';
+  const nativeShell = item.source === 'shell' || String(item.prompt || '').trimStart().startsWith('!');
+  if (nativeShell) asstBubble.classList.add('shell-result');
   if (item.id) asstBubble.dataset.msgId = String(item.id);
   asstBubble.dataset.topic = item.topic || 'default';
   if (item.agent) asstBubble.dataset.agent = item.agent;
@@ -6495,7 +6597,12 @@ function appendHistoryItem(item, container) {
       }
     }
   }
-  setCtxLabel(ctxSpan, !!item.adhoc, _pc.pins.length, _pc.mem, sessionTurnCount);
+  if (nativeShell) {
+    ctxSpan.textContent = 'ctx: shell · no LLM';
+    ctxSpan.dataset.shell = 'true';
+  } else {
+    setCtxLabel(ctxSpan, !!item.adhoc, _pc.pins.length, _pc.mem, sessionTurnCount);
+  }
   ctxSpan.dataset.sessionId = item.session_id || '';
   ctxSpan.dataset.flowRunId = item.flow_run_id || '';
   ctxSpan.dataset.cwd = item.stats?.cwd || '';
@@ -6504,7 +6611,8 @@ function appendHistoryItem(item, container) {
   ctxSpan.dataset.sessionTurnCount = String(sessionTurnCount);
   ctxSpan.dataset.pinnedIds = JSON.stringify(_pc.pins);
   ctxSpan.dataset.mem = _pc.mem ? 'true' : 'false';
-  ctxSpan.dataset.hasTrace = _hasTraceContent(item.status_raw, item.context, item.content || '') ? 'true' : 'false';
+  ctxSpan.dataset.hasTrace = nativeShell ? 'false' : (_hasTraceContent(item.status_raw, item.context, item.content || '') ? 'true' : 'false');
+  if (nativeShell) setShellResultMetadata(ctxSpan, item.content || '');
   ctxSpan.addEventListener('click', e => { e.stopPropagation(); showCtxPopup(ctxSpan); });
   asstHeader.appendChild(ctxSpan);
 
@@ -6512,6 +6620,7 @@ function appendHistoryItem(item, container) {
   asstBubble.appendChild(promptFullDiv);
 
   const asstContent = document.createElement('div');
+  if (nativeShell) asstContent.className = 'shell-output';
   if (item.status === 'error') {
     const authReq = parseAuthRequiredError(item.content || '');
     const raw = ((authReq ? authReq.message : item.content) || '').split('\n')[0].replace(/^CLI exited \d+:\s*/, '').trim();
@@ -6526,18 +6635,23 @@ function appendHistoryItem(item, container) {
   } else if (item.status === 'cancelled') {
     asstContent.innerHTML = `<span class="msg-error">${cancelledTurnLabel(item.content)}</span>`;
   } else {
-    asstContent.innerHTML = renderAssistantMarkdown(item.content || '');
+    if (nativeShell) asstContent.textContent = shellResultOutput(item.content || '');
+    else asstContent.innerHTML = renderAssistantMarkdown(item.content || '');
   }
   asstBubble.appendChild(asstContent);
   if (item.timestamp) asstBubble.dataset.ts = item.timestamp;
   if (item.id) addPinButton(asstBubble, item.id, item.topic || 'default', item.agent || null, item.session_id || null);
   if (item.id) addBookmarkButton(asstBubble, item.id, item.topic || 'default', item.agent || null);
-  if (item.id) addReplyButton(asstBubble, item.topic || 'default', item.agent || null, !!item.adhoc);
-  if (item.id) addBadResponseButton(asstBubble, item.id, item.topic || 'default', item.agent || null, !!item.marked_bad);
+  if (item.id && !nativeShell) addReplyButton(asstBubble, item.topic || 'default', item.agent || null, !!item.adhoc);
+  if (item.id && !nativeShell) addBadResponseButton(asstBubble, item.id, item.topic || 'default', item.agent || null, !!item.marked_bad);
 
   if (container) container.appendChild(asstBubble);
 
-  if (item.stats) {
+  if (nativeShell) {
+    const completedAt = item.completed_at || item.timestamp;
+    const footerEl = addShellFooter(asstBubble, completedAt, ctxSpan);
+    if (footerEl) footerEl.classList.add('history-item');
+  } else if (item.stats) {
     const completedAt = item.completed_at || item.stats?.completed_at || item.timestamp;
     const statsEl = addStats(asstBubble, item.stats, completedAt);
     statsEl.classList.add('history-item');
@@ -12749,6 +12863,7 @@ function showCtxPopup(spanEl) {
   const sessionTurnCount = parseInt(spanEl.dataset.sessionTurnCount || '0', 10) || 0;
   const pinIds = JSON.parse(spanEl.dataset.pinnedIds || '[]');
   const hasTrace = spanEl.dataset.hasTrace === 'true';
+  const shell = spanEl.dataset.shell === 'true';
 
   let html = '';
   if (msgId) {
@@ -12757,7 +12872,13 @@ function showCtxPopup(spanEl) {
   if (flowRunId) {
     html += `<div class="ctx-popup-row ctx-popup-jump-row" data-jump-flow-run-id="${escapeHtml(flowRunId)}"><span class="ctx-popup-key">flow run</span><span class="ctx-popup-val ctx-popup-link" title="/jump flow:${escapeHtml(flowRunId)}">${escapeHtml(flowRunId)}</span></div>`;
   }
-  if (sid || cwd) {
+  if (shell) {
+    const shellCwd = spanEl.dataset.shellCwd || '';
+    const shellExit = spanEl.dataset.shellExit || '';
+    if (shellCwd) html += `<div class="ctx-popup-row ctx-popup-cwd-row" data-cwd="${escapeHtml(shellCwd)}"><span class="ctx-popup-key">cwd</span><span class="ctx-popup-val ctx-popup-link" title="Open in file viewer">${escapeHtml(shellCwd)}</span></div>`;
+    if (shellExit) html += `<div class="ctx-popup-row"><span class="ctx-popup-key">exit</span><span class="ctx-popup-val">${escapeHtml(shellExit)}</span></div>`;
+  }
+  if (!shell && (sid || cwd)) {
     if (sid && agent) {
       html += `<div class="ctx-popup-row ctx-popup-session-row" data-session-id="${escapeHtml(sid)}" data-agent="${escapeHtml(agent)}" data-cwd="${escapeHtml(cwd)}" data-msg-id="${escapeHtml(msgId)}"><span class="ctx-popup-key">session</span><span class="ctx-popup-val ctx-popup-link" title="Open raw session log">${sid}</span></div>`;
     } else {
@@ -12767,17 +12888,17 @@ function showCtxPopup(spanEl) {
       html += `<div class="ctx-popup-row"><span class="ctx-popup-key">session context</span><span class="ctx-popup-val">${sessionTurnCount} turn${sessionTurnCount !== 1 ? 's' : ''}</span></div>`;
     }
     if (cwd) html += `<div class="ctx-popup-row ctx-popup-cwd-row" data-cwd="${escapeHtml(cwd)}"><span class="ctx-popup-key">cwd</span><span class="ctx-popup-val ctx-popup-link" title="Open in file viewer">${cwd}</span></div>`;
-  } else if (sessionTurnCount > 0) {
+  } else if (!shell && sessionTurnCount > 0) {
     html += `<div class="ctx-popup-row"><span class="ctx-popup-key">session context</span><span class="ctx-popup-val">${sessionTurnCount} turn${sessionTurnCount !== 1 ? 's' : ''}</span></div>`;
   }
-  if (mem && topic) {
+  if (!shell && mem && topic) {
     if (html) html += `<div class="ctx-popup-divider"></div>`;
     html += `<div class="ctx-popup-row ctx-popup-mem-row" data-topic="${topic}">
       <span class="ctx-popup-key">memory</span>
       <span class="ctx-popup-val ctx-popup-link">#${topic}</span>
     </div>`;
   }
-  if (pinIds.length) {
+  if (!shell && pinIds.length) {
     if (html) html += `<div class="ctx-popup-divider"></div>`;
     html += `<div class="ctx-popup-row"><span class="ctx-popup-key">pins</span></div>`;
     pinIds.forEach(id => {
@@ -12787,7 +12908,7 @@ function showCtxPopup(spanEl) {
       </div>`;
     });
   }
-  if (msgId && hasTrace) {
+  if (!shell && msgId && hasTrace) {
     if (html) html += `<div class="ctx-popup-divider"></div>`;
     html += `<div class="ctx-popup-row ctx-popup-trace-row" data-msg-id="${msgId}">
       <span class="ctx-popup-key">trace</span>

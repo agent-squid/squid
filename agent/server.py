@@ -686,6 +686,7 @@ async def _prepare_chat_turn(
     flow_route: Optional[str] = None,
     override_cwd: Optional[str] = None,
 ) -> Union[dict, JSONResponse]:
+    native_shell = message.lstrip().startswith("!")
     # 1. Resolve agent — explicit wins, else use topic sticky
     resolved_agent: Optional[str] = agent
     agent_config: dict = {}
@@ -725,7 +726,7 @@ async def _prepare_chat_turn(
     resume_session_id: Optional[str] = None
     cwd: Optional[str] = agent_cwd
 
-    if not adhoc and resolved_agent:
+    if not native_shell and not adhoc and resolved_agent:
         stored = get_topic_session(topic, resolved_agent)
         if stored:
             stored_fingerprint = stored.get("runtime_fingerprint")
@@ -748,6 +749,12 @@ async def _prepare_chat_turn(
 
     memory_config = topic_memory_squid_config(topic)
     code_roots = memory_config.get("code_roots") or []
+    if native_shell:
+        # Native commands use the resolved lane cwd, matching where the model
+        # starts, but bypass per-turn worktree creation and synchronization.
+        # Topic code roots describe scope; their ordering must not implicitly
+        # select a shell directory when more than one is configured.
+        code_roots = []
     if native_backend_command or harness == "echo":
         code_roots = []
     if override_cwd:
@@ -792,7 +799,7 @@ async def _prepare_chat_turn(
 
     memory_revision: Optional[str] = None
     memory_data_for_prompt: Optional[dict] = None
-    if not native_backend_command and include_topic_memory:
+    if not native_shell and not native_backend_command and include_topic_memory:
         memory_data_for_prompt = read_topic_memory(topic)
         if memory_data_for_prompt["content"].strip():
             memory_revision = memory_data_for_prompt.get("revision")
@@ -806,12 +813,17 @@ async def _prepare_chat_turn(
                                       source=source,
                                       flow_run_id=flow_run_id,
                                       flow_route=flow_route)
-    asst_msg_id = insert_assistant_message(topic, resolved_agent, user_msg_id, adhoc=adhoc, flow_run_id=flow_run_id, flow_route=flow_route)
-    attach_assistant_session(asst_msg_id, resume_session_id)
+    asst_msg_id = insert_assistant_message(
+        topic, resolved_agent, user_msg_id, adhoc=adhoc,
+        flow_run_id=flow_run_id, flow_route=flow_route,
+        source="shell" if native_shell else source,
+    )
+    if not native_shell:
+        attach_assistant_session(asst_msg_id, resume_session_id)
 
     effective_message = message
     prefix_blocks: list[str] = []
-    tracking_roots: list[str] = [] if native_backend_command else code_roots
+    tracking_roots: list[str] = [] if native_shell or native_backend_command else code_roots
 
     if memory_data_for_prompt:
         memory_content = memory_data_for_prompt["content"].strip()
@@ -823,7 +835,7 @@ async def _prepare_chat_turn(
                 "</topic_memory>",
             ]))
 
-    if not native_backend_command and pinned_ids:
+    if not native_shell and not native_backend_command and pinned_ids:
         lookback_id_set = set(context_ids or [])
         filtered = [pid for pid in pinned_ids if pid not in lookback_id_set]
         if filtered:
@@ -851,7 +863,7 @@ async def _prepare_chat_turn(
         len(pinned_ids) if pinned_ids else 0, include_topic_memory, message,
     )
     return {
-        "effective_message": effective_message,
+        "effective_message": message.lstrip()[1:].lstrip() if native_shell else effective_message,
         "topic": topic,
         "agent": resolved_agent,
         "backend": backend,
@@ -870,6 +882,7 @@ async def _prepare_chat_turn(
         "provider": provider,
         "worktree_setup_elapsed_ms": None,
         "worktree_isolated": False,
+        "native_shell": native_shell,
     }
 
 # ---------------------------------------------------------------------------
@@ -958,6 +971,7 @@ async def stream_response(
     provider: Optional[str] = None,
     worktree_setup_elapsed_ms: Optional[float] = None,
     worktree_isolated: bool = False,
+    native_shell: bool = False,
 ) -> AsyncGenerator[str, None]:
     yield sse_event("meta", json.dumps({
         "agent": agent,
@@ -966,6 +980,7 @@ async def stream_response(
         "model": model,
         "msg_id": asst_msg_id,
         "adhoc": adhoc,
+        "kind": "shell_result" if native_shell else "assistant",
     }))
 
     effective_cwd = cwd or SQUID_HOME
@@ -982,6 +997,7 @@ async def stream_response(
         display_prompt=display_prompt,
         worktree_setup_elapsed_ms=worktree_setup_elapsed_ms,
         worktree_isolated=worktree_isolated,
+        native_shell=native_shell,
     )
 
     raw = ""
@@ -1137,6 +1153,7 @@ async def chat(req: ChatRequest):
             provider=prepared["provider"],
             worktree_setup_elapsed_ms=prepared["worktree_setup_elapsed_ms"],
             worktree_isolated=prepared["worktree_isolated"],
+            native_shell=prepared["native_shell"],
         ),
         media_type="text/event-stream",
         headers={

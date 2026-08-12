@@ -169,6 +169,125 @@ class CLIError(RuntimeError):
     pass
 
 
+_BACKGROUND_SHELL_RE = re.compile(
+    r"(?:^|[;&|]\s*)(?:nohup|disown)\b|(?<![>&])&(?![>&])|\b(?:setsid|daemonize)\b"
+)
+NATIVE_SHELL_MAX_RUNTIME_S = 60
+NATIVE_SHELL_MAX_OUTPUT_LINES = 256
+NATIVE_SHELL_MAX_OUTPUT_BYTES = 256 * 1024
+
+
+def validate_native_shell_command(command: str) -> None:
+    """Reject common detach forms; this is a lifecycle guard, not a sandbox."""
+    if not command.strip():
+        raise CLIError("Shell command is empty after the leading !")
+    if _BACKGROUND_SHELL_RE.search(command):
+        raise CLIError(
+            "Background or detached commands are not supported. Run the process "
+            "in the foreground so Squid can stop it and capture its complete output."
+        )
+
+
+async def run_native_shell(
+    command: str, *, cwd: str, topic: str, agent: str = "",
+    msg_id: Optional[int] = None, response_timeout: Optional[int] = None,
+    **_kwargs,
+) -> AsyncGenerator[str, None]:
+    """Run one fresh login shell and stream byte-for-byte combined output."""
+    validate_native_shell_command(command)
+    shell = os.environ.get("SHELL") or "/bin/sh"
+    started = time.monotonic()
+    proc = await asyncio.create_subprocess_exec(
+        shell, "-lc", command,
+        cwd=cwd,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        preexec_fn=os.setpgrp,
+    )
+    _register_proc(
+        proc.pid, backend="shell", topic=topic, agent=agent,
+        msg_id=msg_id, prompt=command,
+    )
+    timeout = min(
+        response_timeout if response_timeout is not None else RESPONSE_TIMEOUT,
+        NATIVE_SHELL_MAX_RUNTIME_S,
+    )
+    deadline = asyncio.get_running_loop().time() + timeout
+    output_bytes = 0
+    output_lines = 0
+
+    async def stop_proc() -> None:
+        _signal_process_group(proc.pid, signal.SIGTERM)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=2)
+        except asyncio.TimeoutError:
+            _signal_process_group(proc.pid, signal.SIGKILL)
+            await proc.wait()
+        if proc.stdout:
+            await proc.stdout.read()
+
+    try:
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                await stop_proc()
+                elapsed = time.monotonic() - started
+                yield f"\n[command stopped: {timeout}s runtime limit]\n"
+                yield f"\n[exit {proc.returncode} · {elapsed:.2f}s · cwd: {cwd}]\n"
+                return
+            try:
+                chunk = await asyncio.wait_for(
+                    proc.stdout.read(65536), timeout=remaining
+                )
+            except asyncio.TimeoutError:
+                await stop_proc()
+                elapsed = time.monotonic() - started
+                yield f"\n[command stopped: {timeout}s runtime limit]\n"
+                yield f"\n[exit {proc.returncode} · {elapsed:.2f}s · cwd: {cwd}]\n"
+                return
+            if not chunk:
+                break
+            lines_left = NATIVE_SHELL_MAX_OUTPUT_LINES - output_lines
+            newline_positions = [i for i, byte in enumerate(chunk) if byte == 10]
+            line_cutoff = None
+            if lines_left <= 0:
+                line_cutoff = 0
+            elif len(newline_positions) > lines_left:
+                line_cutoff = newline_positions[lines_left - 1] + 1
+            elif len(newline_positions) == lines_left and newline_positions[-1] + 1 < len(chunk):
+                line_cutoff = newline_positions[-1] + 1
+            remaining_bytes = NATIVE_SHELL_MAX_OUTPUT_BYTES - output_bytes
+            byte_cutoff = max(0, remaining_bytes) if len(chunk) > remaining_bytes else None
+            if line_cutoff is not None or byte_cutoff is not None:
+                stopped_by_lines = line_cutoff is not None and (
+                    byte_cutoff is None or line_cutoff <= byte_cutoff
+                )
+                cutoff = line_cutoff if stopped_by_lines else byte_cutoff
+                if cutoff > 0:
+                    yield chunk[:cutoff].decode(errors="replace")
+                await stop_proc()
+                elapsed = time.monotonic() - started
+                if stopped_by_lines:
+                    reason = f"output exceeded {NATIVE_SHELL_MAX_OUTPUT_LINES} lines; redirect large output to a file"
+                else:
+                    reason = f"{NATIVE_SHELL_MAX_OUTPUT_BYTES} byte output limit"
+                yield f"\n[command stopped: {reason}]\n"
+                yield f"\n[exit {proc.returncode} · {elapsed:.2f}s · cwd: {cwd}]\n"
+                return
+            output_lines += len(newline_positions)
+            output_bytes += len(chunk)
+            yield chunk.decode(errors="replace")
+        returncode = await proc.wait()
+        elapsed = time.monotonic() - started
+        footer = f"\n[exit {returncode} · {elapsed:.2f}s · cwd: {cwd}]\n"
+        yield footer
+        if returncode:
+            raise CLIError(f"Shell command exited with status {returncode}")
+    finally:
+        _deregister_proc(proc.pid)
+
+
 class CLIAuthRequired(CLIError):
     """A CLIError whose root cause is a missing/expired login for `harness_id`.
 
@@ -214,7 +333,11 @@ def _claude_auth_result(text: str) -> bool:
     # something else entirely, and that must not be misdetected as the CLI's
     # own auth-failure banner.
     normalized = _ANSI_RE.sub("", text or "").strip()
-    return normalized.startswith("Not logged in") and "/login" in normalized
+    return (
+        normalized.startswith("Not logged in") and "/login" in normalized
+    ) or normalized.startswith(
+        "Failed to authenticate: OAuth session expired and could not be refreshed"
+    )
 
 
 async def _opencode_auth_required() -> bool:

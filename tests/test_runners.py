@@ -31,7 +31,94 @@ from agent.runners import (
     run_echo,
     run_opencode,
     run_pi,
+    run_native_shell,
+    validate_native_shell_command,
 )
+
+
+def test_native_shell_streams_output_and_reports_exit(tmp_path):
+    async def collect():
+        return "".join([chunk async for chunk in run_native_shell(
+            "printf 'hello'", cwd=str(tmp_path), topic="ops", msg_id=42,
+            response_timeout=5,
+        )])
+
+    output = asyncio.run(collect())
+    assert output.startswith("hello\n[exit 0 · ")
+    assert output.endswith(f" · cwd: {tmp_path}]\n")
+    assert not _proc_registry
+
+
+def test_native_shell_closes_stdin_for_interactive_commands(tmp_path):
+    async def collect():
+        return "".join([chunk async for chunk in run_native_shell(
+            "if read line; then printf 'unexpected input'; else printf 'stdin closed'; fi",
+            cwd=str(tmp_path), topic="ops", response_timeout=5,
+        )])
+
+    output = asyncio.run(collect())
+    assert output.startswith("stdin closed\n[exit 0 · ")
+    assert not _proc_registry
+
+
+@pytest.mark.parametrize("command", ["server &", "nohup server", "disown", "setsid server"])
+def test_native_shell_rejects_detached_commands(command):
+    with pytest.raises(CLIError, match="Background or detached"):
+        validate_native_shell_command(command)
+
+
+def test_native_shell_allows_redirection_ampersands():
+    validate_native_shell_command("tool 2>&1 && echo done")
+
+
+def test_native_shell_stops_at_output_limit(tmp_path):
+    async def collect():
+        chunks = []
+        with patch("agent.runners.NATIVE_SHELL_MAX_OUTPUT_BYTES", 32):
+            async for chunk in run_native_shell(
+                "yes x", cwd=str(tmp_path), topic="ops", response_timeout=5,
+            ):
+                chunks.append(chunk)
+        return "".join(chunks)
+
+    output = asyncio.run(collect())
+    assert output.startswith("x\n" * 16)
+    assert "[command stopped: 32 byte output limit]" in output
+    assert f" · cwd: {tmp_path}]\n" in output
+    assert not _proc_registry
+
+
+def test_native_shell_stops_before_257th_line(tmp_path):
+    async def collect():
+        return "".join([chunk async for chunk in run_native_shell(
+            "i=1; while [ $i -le 300 ]; do echo line-$i; i=$((i + 1)); done",
+            cwd=str(tmp_path), topic="ops", response_timeout=5,
+        )])
+
+    output = asyncio.run(collect())
+    captured, notice = output.split("\n[command stopped:", 1)
+    assert captured.splitlines() == [f"line-{i}" for i in range(1, 257)]
+    assert "output exceeded 256 lines; redirect large output to a file" in notice
+    assert "line-257" not in output
+    assert f" · cwd: {tmp_path}]\n" in output
+    assert not _proc_registry
+
+
+def test_native_shell_timeout_is_total_runtime(tmp_path):
+    async def collect():
+        chunks = []
+        with patch("agent.runners.NATIVE_SHELL_MAX_RUNTIME_S", 0.05):
+            async for chunk in run_native_shell(
+                "while true; do printf x; sleep 0.01; done",
+                cwd=str(tmp_path), topic="ops", response_timeout=5,
+            ):
+                chunks.append(chunk)
+        return "".join(chunks)
+
+    output = asyncio.run(collect())
+    assert "[command stopped: 0.05s runtime limit]" in output
+    assert f" · cwd: {tmp_path}]\n" in output
+    assert not _proc_registry
 
 
 def _clear():
@@ -1849,6 +1936,26 @@ def test_claude_auth_banner_raises_auth_required():
         yield json.dumps({
             "type": "result",
             "result": "Not logged in. Run /login to authenticate.",
+            "usage": {},
+        })
+
+    async def collect():
+        return [chunk async for chunk in run_claude("hello", cwd="/tmp")]
+
+    with patch("agent.runners.CLAUDE_PATH", "claude"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ):
+        with pytest.raises(CLIAuthRequired):
+            asyncio.run(collect())
+
+
+def test_claude_expired_oauth_session_raises_auth_required():
+    async def fake_stream_lines(*args, **kwargs):
+        yield json.dumps({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": True,
+            "result": "Failed to authenticate: OAuth session expired and could not be refreshed.",
             "usage": {},
         })
 

@@ -992,6 +992,20 @@ body {
 }
 .ctx-popup-jump-btn:hover { color: var(--accent); text-decoration: underline; }
 .msg.assistant { background: var(--surface-2); align-self: flex-start; line-height: 1.6; }
+.msg.assistant.shell-result { min-width: 0; }
+.msg.assistant.shell-result .response-header { font-family: system-ui, sans-serif; white-space: normal; }
+.msg.assistant.shell-result .shell-output {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--text-body);
+  line-height: 1.5;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+  white-space: pre;
+  -webkit-overflow-scrolling: touch;
+}
 .msg.assistant.has-reply-btn { display: flow-root; }
 
 /* markdown */
@@ -4216,7 +4230,8 @@ body {
   text-transform: uppercase;
 }
 #auth-panel-retry-btn,
-#agents-auth-panel-retry-btn {
+#agents-auth-panel-retry-btn,
+#agents-auth-panel-restart-btn {
   flex-shrink: 0;
   background: var(--surface-2);
   border: 1px solid var(--border);
@@ -4227,7 +4242,8 @@ body {
   padding: 0.15rem 0.55rem;
 }
 #auth-panel-retry-btn:hover,
-#agents-auth-panel-retry-btn:hover { color: var(--accent-light); }
+#agents-auth-panel-retry-btn:hover,
+#agents-auth-panel-restart-btn:hover { color: var(--accent-light); }
 #auth-panel-cancel-btn,
 #agents-auth-panel-cancel-btn {
   flex-shrink: 0;
@@ -5490,6 +5506,41 @@ mark.search-kw-highlight {
   align-self: flex-end;
   text-align: right;
 }
+.shell-footer {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 0.35rem;
+  max-width: 90%;
+  min-width: 0;
+}
+.shell-footer-details { flex: 0 0 auto; white-space: nowrap; }
+.shell-footer-exit-error { color: var(--danger); }
+.shell-footer-cwd {
+  align-items: baseline;
+  background: none;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  font: inherit;
+  margin: 0;
+  max-width: 100%;
+  min-width: 0;
+  padding: 0;
+  text-align: left;
+}
+.shell-footer-cwd:hover { color: var(--accent-light); }
+.shell-footer-separator { flex: 0 0 auto; margin-right: 0.35rem; }
+.shell-footer-path { display: flex; min-width: 0; }
+.shell-footer-path-dir {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shell-footer-path-name { flex-shrink: 0; white-space: nowrap; }
 
 /* live process dot */
 .proc-dot {

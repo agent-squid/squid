@@ -983,12 +983,13 @@ def insert_assistant_message(
     reply_to: int, adhoc: bool = False,
     flow_run_id: Optional[str] = None,
     flow_route: Optional[str] = None,
+    source: str = "human",
 ) -> int:
     with _connect() as conn:
         cur = conn.execute(
-            """INSERT INTO chat_messages (topic, agent, role, reply_to, status, adhoc, flow_run_id, flow_route)
-               VALUES (?, ?, 'assistant', ?, 'pending', ?, ?, ?)""",
-            (topic, agent, reply_to, 1 if adhoc else 0, flow_run_id, flow_route),
+            """INSERT INTO chat_messages (topic, agent, role, source, reply_to, status, adhoc, flow_run_id, flow_route)
+               VALUES (?, ?, 'assistant', ?, ?, 'pending', ?, ?, ?)""",
+            (topic, agent, source, reply_to, 1 if adhoc else 0, flow_run_id, flow_route),
         )
         return cur.lastrowid
 

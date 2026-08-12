@@ -183,6 +183,7 @@ class QueueItem:
     display_prompt: Optional[str] = None
     worktree_setup_elapsed_ms: Optional[float] = None
     worktree_isolated: bool = False
+    native_shell: bool = False
     out_q: asyncio.Queue = field(default_factory=asyncio.Queue)
 
 
@@ -406,7 +407,8 @@ class TopicWorker:
             await item.out_q.put({"_error": str(exc)})
             await item.out_q.put(None)
             return
-        runner = runner_for_agent(resolved, adhoc=item.adhoc)
+        from .runners import run_native_shell
+        runner = run_native_shell if item.native_shell else runner_for_agent(resolved, adhoc=item.adhoc)
         if runner is None:
             await item.out_q.put({"_error": f"Harness {resolved.harness!r} protocol {resolved.protocol!r} is not supported"})
             await item.out_q.put(None)
@@ -489,9 +491,9 @@ class TopicWorker:
             except Exception:
                 log.debug("worktree lookup skipped topic=%s msg_id=%s", item.topic, item.msg_id, exc_info=True)
         prefix_blocks: list[str] = []
-        if effective_protocol(resolved, adhoc=item.adhoc) == "oneshot-cli":
+        if not item.native_shell and effective_protocol(resolved, adhoc=item.adhoc) == "oneshot-cli":
             prefix_blocks.append(oneshot_protocol_prompt_block())
-        if tracking_roots:
+        if tracking_roots and not item.native_shell:
             code_roots_block = code_roots_prompt_block(
                 tracking_roots,
                 isolated=item.worktree_isolated,
@@ -525,6 +527,11 @@ class TopicWorker:
             backend_id=resolved.harness, backend_env=backend_env,
             backend_settings=resolved.harness_settings(), backend_args=resolved.args,
         )
+        if item.native_shell:
+            kwargs = dict(
+                cwd=effective_cwd, topic=item.topic, agent=item.agent or "",
+                msg_id=item.msg_id, response_timeout=item.timeout,
+            )
         if resolved.protocol.startswith("interactive-") and not item.adhoc:
             kwargs["interactive_idle_timeout_s"] = resolved.interactive.idle_timeout_seconds
         if item.resume_session_id:
@@ -827,6 +834,7 @@ class TopicDispatcher:
         display_prompt: Optional[str] = None,
         worktree_setup_elapsed_ms: Optional[float] = None,
         worktree_isolated: bool = False,
+        native_shell: bool = False,
     ) -> tuple[asyncio.Queue, int, TopicWorker]:
         from .resolve import split_agent_ref
         resolved_harness, resolved_provider = split_agent_ref(harness or backend, provider)
@@ -854,7 +862,11 @@ class TopicDispatcher:
             # surface the real error to the caller as it does today,
             # rather than failing before the item is even enqueued.
             provider_obj = None
-        if provider_obj is not None and not provider_obj.parallel:
+        if native_shell:
+            # Native commands use the resolved topic/agent lane, but do not
+            # inherit provider-wide serialization: no provider is involved.
+            queue_key = f"{topic}@{agent}" if agent else topic
+        elif provider_obj is not None and not provider_obj.parallel:
             queue_key = f"provider:{provider_obj.id}"
         elif adhoc:
             # Each adhoc message gets its own ephemeral worker — never queued, always parallel.
@@ -874,6 +886,7 @@ class TopicDispatcher:
             adhoc=adhoc, lookback=lookback, msg_id=msg_id,
             worktree_setup_elapsed_ms=worktree_setup_elapsed_ms,
             worktree_isolated=worktree_isolated,
+            native_shell=native_shell,
         )
         seq = await worker.enqueue(item)
         position = worker.position_of(seq)

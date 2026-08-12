@@ -383,6 +383,42 @@ def test_worker_does_not_persist_status_as_response_when_no_final_text():
     assert update_call.args[3] == "error"
 
 
+def test_native_shell_never_receives_llm_prompt_prefixes(tmp_path):
+    captured = {}
+
+    async def fake_shell(prompt, **kwargs):
+        captured["prompt"] = prompt
+        captured["cwd"] = kwargs["cwd"]
+        yield "ok\n"
+
+    async def run():
+        worker = TopicWorker("ops")
+        item = QueueItem(
+            seq=0,
+            topic="ops",
+            agent="codex",
+            prompt="ls -al",
+            context_history=[],
+            backend="codex",
+            cwd=str(tmp_path),
+            code_roots=[str(tmp_path)],
+            msg_id=11146,
+            native_shell=True,
+        )
+        with patch("agent.config.WORKTREE_ISOLATION_ENABLED", False), \
+             patch("agent.runners.run_native_shell", fake_shell), \
+             patch("agent.git_changes.prepare_trackers", return_value=[]), \
+             patch("agent.stats_db.get_worktrees", return_value=[]), \
+             patch("agent.stats_db.insert_run_event"), \
+             patch("agent.stats_db.update_assistant_message"), \
+             patch("agent.stats_db.set_topic_session"), \
+             patch("agent.stats_db.save_stats"):
+            await worker._process(item)
+
+    asyncio.run(run())
+    assert captured == {"prompt": "ls -al", "cwd": str(tmp_path)}
+
+
 def test_worker_emits_git_diff_tool_event(tmp_path):
     init_repo(tmp_path)
 

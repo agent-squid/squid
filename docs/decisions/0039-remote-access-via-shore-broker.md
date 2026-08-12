@@ -3,7 +3,7 @@ status: proposed
 date: 2026-08-11
 updated: 2026-08-11
 ---
-# ADR-0038: Remote access via a Cloudflare Workers + Durable Objects broker (agentsquid.ai/@username)
+# ADR-0039: Remote access via a Cloudflare Workers + Durable Objects broker (agentsquid.ai/@username)
 
 ## Context
 
