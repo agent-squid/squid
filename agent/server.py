@@ -55,7 +55,7 @@ from .config import (
     config_revision, config_text, write_config_text,
 )
 from .harnesses import SUPPORTED_HARNESSES, _validate_harness_config, list_harnesses
-from .providers import Provider, _validate_provider, get_provider, public_providers, require_provider
+from .providers import Provider, _validate_provider, get_provider, public_providers, reload_providers, require_provider
 from .resolve import agent_ref_for_storage, remove_pi_models_store, resolve_agent, split_agent_ref
 from .runners import list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic
 from .history import list_history, list_history_by_ids, list_history_around
@@ -1985,6 +1985,7 @@ async def update_config_yaml(req: ConfigRequest, request: Request):
 
     _cfg.clear()
     _cfg.update(parsed)
+    reload_providers()
     _LOCALFILE_ROOTS[:] = _localfile_roots_from(parsed)
 
     # Re-sync pi models.json for every pi agent — a provider's base_url

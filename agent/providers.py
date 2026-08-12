@@ -320,22 +320,31 @@ def _configured_providers() -> dict[str, Any]:
     return {name: dict(value) for name, value in _DEFAULT_PROVIDERS.items()}
 
 
-PROVIDERS: dict[str, Provider] = {
-    provider_id: _validate_provider(provider_id, raw)
-    for provider_id, raw in _configured_providers().items()
-}
+PROVIDERS: dict[str, Provider] = {}
 
-if TEST_HARNESS_ENABLED:
-    # Added after the config-driven dict, not folded into _DEFAULT_PROVIDERS,
-    # because a user's own `providers:` section *replaces* the defaults
-    # wholesale (see _configured_providers) rather than merging — Squid Echo
-    # must exist regardless of what's configured there. Its supported_apis
-    # is a private, made-up value no real provider declares, so it never
-    # shows up as "compatible" with any other harness and vice versa.
-    PROVIDERS["echo"] = Provider(
-        id="echo", label="Squid Echo", color="#888888",
-        auth_type="subscription", supported_apis=frozenset({"/native/echo"}),
-    )
+
+def reload_providers() -> None:
+    """Rebuild the provider registry after the in-memory config changes."""
+    providers = {
+        provider_id: _validate_provider(provider_id, raw)
+        for provider_id, raw in _configured_providers().items()
+    }
+    if TEST_HARNESS_ENABLED:
+        # Added after the config-driven dict, not folded into
+        # _DEFAULT_PROVIDERS, because a user's own `providers:` section
+        # replaces the defaults wholesale. Its private API value prevents
+        # compatibility with real harnesses.
+        providers["echo"] = Provider(
+            id="echo", label="Squid Echo", color="#888888",
+            auth_type="subscription", supported_apis=frozenset({"/native/echo"}),
+        )
+    # Mutate in place so modules that imported PROVIDERS keep seeing the
+    # current registry.
+    PROVIDERS.clear()
+    PROVIDERS.update(providers)
+
+
+reload_providers()
 
 
 def get_provider(provider_id: str) -> Optional[Provider]:

@@ -1656,7 +1656,54 @@ def test_yaml_config_can_be_read_validated_and_atomically_updated(tmp_path):
     finally:
         server._cfg.clear()
         server._cfg.update(original_cfg)
+        providers_mod.reload_providers()
         server._LOCALFILE_ROOTS[:] = original_roots
+
+
+def test_yaml_provider_update_refreshes_pi_models_config(tmp_path, monkeypatch):
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    config_path = state_dir / "squid.yaml"
+    original_cfg = dict(server._cfg)
+    original_providers = dict(providers_mod.PROVIDERS)
+    content = _config_yaml(tmp_path) + '''
+  baseten:
+    label: Baseten
+    color: "#19E76E"
+    base_url: "https://inference.baseten.co"
+    supported_apis: [/v1/chat/completions]
+    auth: {type: api_key, api_key: test-key}
+'''
+    config_path.write_text(content)
+    pi_models = tmp_path / "models.json"
+    monkeypatch.setattr("agent.resolve.PI_MODELS_FILE", str(pi_models))
+    monkeypatch.setattr(server, "list_agents", lambda: [{
+        "name": "pibt", "harness": "pi", "provider": "baseten",
+        "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+    }])
+
+    try:
+        with patch("agent.config._USER_CONFIG", config_path), \
+             patch.object(server, "_USER_CONFIG", config_path):
+            loaded = TestClient(server.app).get("/config/yaml").json()
+            updated = loaded["content"].replace(
+                "https://inference.baseten.co\"",
+                "https://inference.baseten.co/v1\"",
+            )
+            saved = TestClient(server.app).put("/config/yaml", json={
+                "content": updated,
+                "revision": loaded["revision"],
+            })
+
+        assert saved.status_code == 200
+        assert providers_mod.PROVIDERS["baseten"].base_url == "https://inference.baseten.co/v1"
+        models = json.loads(pi_models.read_text())
+        assert models["providers"]["baseten"]["baseUrl"] == "https://inference.baseten.co/v1"
+    finally:
+        server._cfg.clear()
+        server._cfg.update(original_cfg)
+        providers_mod.PROVIDERS.clear()
+        providers_mod.PROVIDERS.update(original_providers)
 
 
 def test_api_routes_are_registered_before_static_ui():
