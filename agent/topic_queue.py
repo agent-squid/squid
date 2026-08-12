@@ -12,6 +12,11 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 
+def _ollama_model_key(model: str) -> str:
+    """Treat Ollama's implicit ``:latest`` tag as the untagged model."""
+    return model[:-len(":latest")] if model.endswith(":latest") else model
+
+
 def remap_worktree_paths(text: str, worktree_sources: dict[str, str]) -> str:
     """Replace ephemeral Squid worktree path prefixes with source repo paths."""
     if not text or not worktree_sources:
@@ -326,12 +331,16 @@ class TopicWorker:
             async with httpx.AsyncClient(timeout=5) as client:
                 r = await client.get(f"{native_base}/api/ps")
             if r.status_code == 200:
-                resident = {m.get("model") for m in r.json().get("models", []) if m.get("model")}
+                resident = {
+                    _ollama_model_key(m["model"])
+                    for m in r.json().get("models", []) if m.get("model")
+                }
         except Exception:
             log.debug("Ollama /api/ps check failed for provider=%s", provider.id, exc_info=True)
 
-        switching = bool(prev_model) and prev_model != model
-        if model not in resident or switching:
+        model_key = _ollama_model_key(model)
+        switching = bool(prev_model) and _ollama_model_key(prev_model) != model_key
+        if model_key not in resident or switching:
             payload = {"to": model}
             if switching:
                 payload["from"] = prev_model
@@ -342,7 +351,7 @@ class TopicWorker:
                 # flow-dispatched client can see load state on replay. Must be
                 # >= 0 since get_run_events()'s default after_seq=-1 filter is
                 # seq > after_seq, which would silently drop negative seqs.
-                insert_run_event(msg_id, 1, "loading", json.dumps(payload))
+                insert_run_event(msg_id, 2, "loading", json.dumps(payload))
             await out_q.put({"_loading": payload})
 
         if switching:
@@ -364,6 +373,10 @@ class TopicWorker:
                 break
             self._processing_seq = item.seq
             try:
+                if item.msg_id is not None:
+                    from .stats_db import insert_run_event
+                    insert_run_event(item.msg_id, 1, "processing", json.dumps({"topic": item.topic}))
+                await item.out_q.put({"_processing": {"topic": item.topic}})
                 await self._process(item)
             except Exception as exc:
                 log.exception("Worker bug (topic=%s)", self.topic)
@@ -426,9 +439,8 @@ class TopicWorker:
         if not resolved.provider.parallel and item.model:
             await self._sync_local_model(resolved.provider, item.model, item.out_q, msg_id=item.msg_id)
 
-        # 0 and 1 are reserved for the "queued" (dispatch()) and "loading"
-        # (_sync_local_model) run_events persisted before this turn started.
-        run_seq = 2
+        # 0, 1, and 2 are reserved for queued, processing, and loading.
+        run_seq = 3
         raw = ""
         status_raw = ""
         tool_events: list[dict] = []
@@ -909,8 +921,8 @@ class TopicDispatcher:
         position = worker.position_of(seq)
         if msg_id is not None and position > 0:
             from .stats_db import insert_run_event
-            # seq=0: reserved slot, always ahead of the "loading" (seq=1) and
-            # _process's own run_seq counter (starts at 2, see _process), so a
+            # seq=0: ahead of processing/loading (seq=1/2) and _process's own
+            # run_seq counter (starts at 3, see _process), so a
             # reconnecting/flow-dispatched client (which never sees the live
             # SSE "queued" poll loop in stream_response) can still tell this
             # turn sat behind others in a FIFO lane.

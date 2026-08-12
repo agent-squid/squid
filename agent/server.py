@@ -1088,6 +1088,9 @@ async def stream_response(
                 # {"to": model} or {"to": model, "from": prev_model} on a switch.
                 yield sse_event("loading", json.dumps(chunk["_loading"]))
 
+            elif isinstance(chunk, dict) and "_processing" in chunk:
+                yield sse_event("processing", json.dumps(chunk["_processing"]))
+
             else:
                 raw += chunk
                 yield sse_chunk(chunk)
@@ -1726,7 +1729,7 @@ async def message_events(msg_id: int, after_seq: int = -1):
                 payload = event["payload"] or ""
                 if event_type == "text":
                     yield sse_chunk(payload)
-                elif event_type in {"stats", "status", "tool", "loading", "queued"}:
+                elif event_type in {"stats", "status", "tool", "loading", "processing", "queued"}:
                     yield sse_event(event_type, payload)
                 elif event_type == "done":
                     yield sse_event("done")

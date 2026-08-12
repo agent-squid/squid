@@ -110,6 +110,26 @@ def test_position_of_reflects_live_queue_after_earlier_item_cancelled():
     assert pos_second_after_cancel == 1
 
 
+def test_worker_marks_item_processing_before_runner_starts():
+    async def run():
+        worker = TopicWorker("work")
+        item = _make_item(seq=0, msg_id=101)
+        await worker.q.put(item)
+        await worker.q.put(None)
+
+        async def fake_process(_item):
+            await _item.out_q.put(None)
+
+        with patch.object(worker, "_process", fake_process), \
+             patch("agent.stats_db.insert_run_event") as insert_event:
+            await worker._run()
+        return await item.out_q.get(), insert_event.call_args
+
+    event, persisted = asyncio.run(run())
+    assert event == {"_processing": {"topic": "work"}}
+    assert persisted.args == (101, 1, "processing", '{"topic": "work"}')
+
+
 def test_worker_defers_worktree_setup_until_queued_item_runs(tmp_path, monkeypatch):
     stats_db.init_db()
     repo = tmp_path / "repo"
@@ -960,11 +980,13 @@ def test_worker_bug_emits_error_and_sentinel():
             await worker.q.put(None)
             await asyncio.wait_for(worker._run(), timeout=1)
 
+        processing = await asyncio.wait_for(item.out_q.get(), timeout=1)
         error = await asyncio.wait_for(item.out_q.get(), timeout=1)
         sentinel = await asyncio.wait_for(item.out_q.get(), timeout=1)
-        return error, sentinel
+        return processing, error, sentinel
 
-    error, sentinel = asyncio.run(run())
+    processing, error, sentinel = asyncio.run(run())
+    assert processing == {"_processing": {"topic": "work"}}
     assert error == {"_error": "boom"}
     assert sentinel is None
 
@@ -1245,3 +1267,43 @@ def test_sync_local_model_stays_quiet_when_resident_and_unchanged():
         return out_q.empty()
 
     assert asyncio.run(run()) is True
+
+
+def test_sync_local_model_treats_implicit_latest_as_resident_and_unchanged():
+    async def run():
+        worker = TopicWorker("work")
+        worker._last_local_model = "qwen3.5:latest"
+        provider = _fake_local_provider()
+        out_q: asyncio.Queue = asyncio.Queue()
+        posted = []
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"models": [{"model": "qwen3.5:latest"}]}
+
+        class FakeClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get(self, url):
+                return FakeResponse()
+
+            async def post(self, url, json):
+                posted.append((url, json))
+                return FakeResponse()
+
+        with patch("httpx.AsyncClient", FakeClient):
+            await worker._sync_local_model(provider, "qwen3.5", out_q)
+        return out_q.empty(), posted
+
+    quiet, posted = asyncio.run(run())
+    assert quiet is True
+    assert posted == []

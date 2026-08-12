@@ -5241,6 +5241,15 @@ async function sendMessage(text, opts = {}) {
             pollProcs();
             eventName = null;
 
+          } else if (eventName === 'processing') {
+            try {
+              const info = JSON.parse(data);
+              queuePosition = null;
+              setThinkingText(`#${info.topic || topic} · processing…`);
+            } catch {}
+            pollProcs();
+            eventName = null;
+
           } else if (eventName === 'loading') {
             // ADR-0037: local-model (e.g. Ollama) active load/unload visibility.
             try {
@@ -6899,9 +6908,16 @@ function reconnectPendingItem(item, wipBubble) {
     // ADR-0037: local-model (e.g. Ollama) active load/unload visibility.
     try {
       const info = JSON.parse(event.data);
-      statusBuf += (statusBuf ? '\n' : '') + (info.from
+      statusBuf = (info.from
         ? `switching ${info.from} → ${info.to}…`
         : `loading ${info.to}…`);
+      updatePreview();
+    } catch {}
+  });
+  es.addEventListener('processing', event => {
+    try {
+      const info = JSON.parse(event.data);
+      statusBuf = `#${info.topic || item.topic} · processing…`;
       updatePreview();
     } catch {}
   });
