@@ -3501,9 +3501,7 @@ function setShellResultMetadata(spanEl, content) {
   spanEl.dataset.shellExit = match[1];
   spanEl.dataset.shellElapsed = match[2];
   spanEl.dataset.shellCwd = match[3];
-  spanEl.textContent = match[1] === '0'
-    ? 'ctx: shell · no LLM'
-    : `ctx: shell · exit ${match[1]} · no LLM`;
+  spanEl.textContent = 'ctx: shell';
 }
 
 function shellResultOutput(content) {
@@ -4443,6 +4441,7 @@ async function sendMessage(text, opts = {}) {
   const thinkingLoader = addLoader(thinkingContent);
   let thinkingFrozen = false;
   let statusBuf = '';
+  let raw = '';
   let statusRecoveredFromDb = false;
   let userAborted = false;
 
@@ -4476,6 +4475,37 @@ async function sendMessage(text, opts = {}) {
   thinkingBubble.appendChild(killBtn);
   addThinkingHeightButton(thinkingBubble);
 
+  let shellRunningTimer = null;
+  let shellRunningStatus = null;
+  let shellTimeoutSeconds = 120;
+  if (nativeShell) {
+    shellRunningStatus = document.createElement('div');
+    shellRunningStatus.className = 'msg-time shell-footer shell-running-status';
+    const shellRunningText = document.createElement('span');
+    shellRunningText.className = 'shell-footer-details';
+    shellRunningStatus.appendChild(shellRunningText);
+    thinkingBubble.appendChild(shellRunningStatus);
+
+    const updateShellRunningStatus = () => {
+      const elapsed = Math.max(0, Math.floor((Date.now() - Date.parse(sendTime)) / 1000));
+      const remaining = Math.max(0, shellTimeoutSeconds - elapsed);
+      const remainingText = `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}`;
+      const outputState = raw.includes('[display stopped:')
+        ? 'output capped'
+        : raw ? 'streaming output' : 'no output';
+      shellRunningText.textContent = `Running · timeout in ${remainingText} · ${outputState}`;
+    };
+    updateShellRunningStatus();
+    shellRunningTimer = setInterval(updateShellRunningStatus, 1000);
+  }
+
+  function clearShellRunningStatus() {
+    if (shellRunningTimer) clearInterval(shellRunningTimer);
+    shellRunningTimer = null;
+    shellRunningStatus?.remove();
+    shellRunningStatus = null;
+  }
+
   function setThinkingText(text) {
     if (thinkingFrozen) return;
     statusBuf = text;
@@ -4495,6 +4525,7 @@ async function sendMessage(text, opts = {}) {
   function freezeThinking() {
     if (thinkingFrozen) return;
     thinkingFrozen = true;
+    clearShellRunningStatus();
     killBtn.style.display = 'none';
     if (thinkingLoader.parentNode) thinkingLoader.remove();
     if (statusBuf.trim()) {
@@ -4523,6 +4554,7 @@ async function sendMessage(text, opts = {}) {
 
   function removeThinking() {
     thinkingFrozen = true;
+    clearShellRunningStatus();
     killBtn.style.display = 'none';
     thinkingBubble.remove();
   }
@@ -4549,7 +4581,7 @@ async function sendMessage(text, opts = {}) {
   const liveCtxSpan = document.createElement('span');
   liveCtxSpan.className = 'user-ctx';
   if (nativeShell) {
-    liveCtxSpan.textContent = 'ctx: shell · no LLM';
+    liveCtxSpan.textContent = 'ctx: shell';
     liveCtxSpan.dataset.shell = 'true';
     liveCtxSpan.dataset.hasTrace = 'false';
   } else {
@@ -4595,7 +4627,6 @@ async function sendMessage(text, opts = {}) {
   let completionRendered = false;
   let completionTimestampEl = null;
   let detachedPolling = false;
-  let raw = '';
   let resolvedAgent = agent;  // updated by meta event
   let liveSessionTurnCount = 0;
   const liveToolEvents = [];
@@ -4728,6 +4759,7 @@ async function sendMessage(text, opts = {}) {
     // 'Response interrupted.'), so the thinking bubble should always
     // be removed when an error arrives with no streamed content.
     thinkingFrozen = true;
+    clearShellRunningStatus();
     killBtn.style.display = 'none';
     thinkingBubble.remove();
     return true;
@@ -4767,6 +4799,7 @@ async function sendMessage(text, opts = {}) {
     }
     updateThinkingPreview();
     thinkingFrozen = true;
+    clearShellRunningStatus();
     killBtn.style.display = 'none';
     if (thinkingLoader.parentNode) thinkingLoader.remove();
     thinkingBubble.style.display = '';
@@ -4776,6 +4809,7 @@ async function sendMessage(text, opts = {}) {
 
   function renderCancelledThinking(label) {
     thinkingFrozen = true;
+    clearShellRunningStatus();
     killBtn.style.display = 'none';
     if (thinkingLoader.parentNode) thinkingLoader.remove();
     thinkingContent.className = '';
@@ -5019,12 +5053,14 @@ async function sendMessage(text, opts = {}) {
   const _includeTopicMemory = _topicMemoryForSend.selected;
   const _lookbackItems = _activeLookbackItems(adhoc, lookback);
   const _lookbackIds = _lookbackItems.map(item => item.id);
-  const _pinnedIds = _injectablePinnedIds(topic, _effectiveAgent, adhoc, lookback);
+  const _pinnedIds = nativeShell
+    ? getPinnedItems().map(item => item.id)
+    : _injectablePinnedIds(topic, _effectiveAgent, adhoc, lookback);
   const _extraPinnedIds = Array.isArray(opts.extraPinnedIds) ? opts.extraPinnedIds : [];
   const _contextIds = [...new Set([..._lookbackIds, ..._pinnedIds, ..._extraPinnedIds])];
   await pruneMissingAttachedFiles();
   const _attachedFiles = _attachedFilesState({ topic, agent: _effectiveAgent, adhoc }).selected;
-  const _messageForServer = _attachedFiles.length
+  const _messageForServer = !nativeShell && _attachedFiles.length
     ? `${message}\n\nFiles:\n${_attachedFiles.map(f => `- ${f.path}`).join('\n')}`
     : message;
 
@@ -5036,9 +5072,10 @@ async function sendMessage(text, opts = {}) {
       body: JSON.stringify({
         message: _messageForServer, topic, agent, lookback, adhoc, source,
         ...(flowRoute ? { flow_route: flowRoute, ...(flowRunId ? { flow_run_id: flowRunId } : {}) } : {}),
-        ...(adhoc && lookback > 0 ? { lookback_via_pins: true } : {}),
+        ...(!nativeShell && adhoc && lookback > 0 ? { lookback_via_pins: true } : {}),
         ...(_includeTopicMemory ? { include_topic_memory: true } : {}),
         ...(_contextIds.length ? { pinned_ids: _contextIds } : {}),
+        ...(nativeShell && _attachedFiles.length ? { attached_paths: _attachedFiles.map(f => f.path) } : {}),
       }),
       // For UI sends, !N is resolved into explicit pinned_ids from the current list.
       signal: controller.signal,
@@ -5075,7 +5112,7 @@ async function sendMessage(text, opts = {}) {
     if (!msgId) attachMsgId(res.headers.get('X-Squid-Msg-Id'));
     _lookbackUnselected.clear();
     _lastLookbackSelectionKey = '';
-    if (_contextIds.length && !adhoc) {
+    if (!nativeShell && _contextIds.length && !adhoc) {
       const pendingKey = `${topic}@${_effectiveAgent || '_'}`;
       _pendingSessionInjectedIds[pendingKey] = [...new Set([
         ...(_pendingSessionInjectedIds[pendingKey] || []),
@@ -5084,7 +5121,7 @@ async function sendMessage(text, opts = {}) {
       updatePinCount();
       if (pinPanel.classList.contains('open')) renderPinPanel();
     }
-    if (_includeTopicMemory && !adhoc) {
+    if (!nativeShell && _includeTopicMemory && !adhoc) {
       const memoryKey = _memoryInjectedKey(topic, _effectiveAgent);
       _pendingSessionMemoryRevisions[memoryKey] = _topicMemoryForSend.revision;
       delete _memorySelectionOverrides[_memoryOverrideKey(topic, _effectiveAgent, false)];
@@ -5129,6 +5166,9 @@ async function sendMessage(text, opts = {}) {
           if (eventName === 'meta') {
             try {
               const meta = JSON.parse(data);
+              if (nativeShell && Number.isFinite(meta.shell_timeout) && meta.shell_timeout > 0) {
+                shellTimeoutSeconds = meta.shell_timeout;
+              }
               resolvedAgent = meta.agent || null;
               const metaRuntime = runtimeRef(meta.harness || '', meta.provider || null);
               if (meta.provider) {
@@ -6598,7 +6638,7 @@ function appendHistoryItem(item, container) {
     }
   }
   if (nativeShell) {
-    ctxSpan.textContent = 'ctx: shell · no LLM';
+    ctxSpan.textContent = 'ctx: shell';
     ctxSpan.dataset.shell = 'true';
   } else {
     setCtxLabel(ctxSpan, !!item.adhoc, _pc.pins.length, _pc.mem, sessionTurnCount);

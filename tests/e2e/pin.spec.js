@@ -310,6 +310,50 @@ test('session send turns attached file badge gray once delivered', async ({ page
   await expect(sentMessages[1]).not.toContain('Files:');
 });
 
+test('native shell sends literal command with selected context paths', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/topics/squid/memory', r => r.fulfill({ json: {
+    topic: 'squid', exists: true, content: MEMORY_WITH_SKIP,
+    path: '~/.squid/context/topics/squid/memory.md',
+    squid: { code_roots: [], code_roots_skipped: true, code_roots_missing: false },
+  }}));
+  await page.route('**/topics/squid/session?agent=claude', r => r.fulfill({
+    json: { session_id: null, cwd: null },
+  }));
+  let sentBody = null;
+  await page.route('**/chat', async route => {
+    sentBody = route.request().postDataJSON();
+    await route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        { event: 'meta', data: { agent: 'claude', msg_id: 1, adhoc: false, kind: 'shell_result', shell_timeout: 120 } },
+        { data: 'ok\n[exit 0 · 0.01s · cwd: /tmp]\n' },
+        DONE,
+      ),
+    });
+  });
+
+  await page.goto('/');
+  await seedPin(page, { id: 77, topic: 'other', agent: 'codex', content: 'Pinned context' });
+  await seedAttachedFile(page, '/private/tmp/Screenshot.png');
+  await page.fill('#input', '#squid@claude ! printf ok');
+  await page.click('#pin-btn');
+  if (await page.locator('[data-memory-toggle]').textContent() === 'Off') {
+    await page.locator('[data-memory-toggle]').click();
+  }
+  await page.click('#pin-btn');
+  await page.focus('#input');
+  await page.keyboard.press('Enter');
+  await expect.poll(() => sentBody).not.toBeNull();
+
+  expect(sentBody.message).toBe('! printf ok');
+  expect(sentBody.pinned_ids).toEqual([77]);
+  expect(sentBody.attached_paths).toEqual(['/private/tmp/Screenshot.png']);
+  expect(sentBody.include_topic_memory).toBe(true);
+  const attachedFiles = await page.evaluate(() => JSON.parse(localStorage.getItem('attachedFiles') || '[]'));
+  expect(attachedFiles).toHaveLength(1);
+});
+
 test('session send prunes missing attached files before submitting', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
   await page.route('**/topics/squid/memory', r => r.fulfill({

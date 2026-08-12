@@ -18,6 +18,8 @@ server:
 agent:
   first_byte_timeout: 600
   response_timeout: 3600
+  # How long a native `!` shell command may run before Squid stops it (ADR-0038).
+  shell_timeout: 120
 
 updates:
   # What to do when a newer AgentSquid release is available and the user restarts.

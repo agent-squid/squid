@@ -1055,6 +1055,11 @@ body {
   scrollbar-width: thin;
   scrollbar-color: #2a2a40 transparent;
 }
+.shell-running-status {
+  margin-top: 0.45rem;
+  font-style: normal;
+  padding: 0;
+}
 .msg-thinking.thinking-tall .thinking-live { max-height: 12em; }
 .thinking-toggle {
   background: none; border: none; cursor: pointer;
@@ -5497,7 +5502,7 @@ mark.search-kw-highlight {
 
 /* per-message timestamps */
 .msg-time {
-  font-size: var(--text-2xs);
+  font-size: 0.72rem;
   color: #484858;
   padding: 0 0.4rem 0.1rem;
   align-self: flex-start;
@@ -5515,7 +5520,7 @@ mark.search-kw-highlight {
   min-width: 0;
 }
 .shell-footer-details { flex: 0 0 auto; white-space: nowrap; }
-.shell-footer-exit-error { color: var(--danger); }
+.shell-footer-exit-error { color: #8a3535; }
 .shell-footer-cwd {
   align-items: baseline;
   background: none;

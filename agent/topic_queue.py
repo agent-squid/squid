@@ -184,6 +184,9 @@ class QueueItem:
     worktree_setup_elapsed_ms: Optional[float] = None
     worktree_isolated: bool = False
     native_shell: bool = False
+    shell_pinned_contents: Optional[list[str]] = None
+    shell_attached_paths: Optional[list[str]] = None
+    shell_topic_memory: Optional[str] = None
     out_q: asyncio.Queue = field(default_factory=asyncio.Queue)
 
 
@@ -530,7 +533,10 @@ class TopicWorker:
         if item.native_shell:
             kwargs = dict(
                 cwd=effective_cwd, topic=item.topic, agent=item.agent or "",
-                msg_id=item.msg_id, response_timeout=item.timeout,
+                msg_id=item.msg_id,
+                pinned_contents=item.shell_pinned_contents or [],
+                attached_paths=item.shell_attached_paths or [],
+                topic_memory=item.shell_topic_memory,
             )
         if resolved.protocol.startswith("interactive-") and not item.adhoc:
             kwargs["interactive_idle_timeout_s"] = resolved.interactive.idle_timeout_seconds
@@ -835,6 +841,9 @@ class TopicDispatcher:
         worktree_setup_elapsed_ms: Optional[float] = None,
         worktree_isolated: bool = False,
         native_shell: bool = False,
+        shell_pinned_contents: Optional[list[str]] = None,
+        shell_attached_paths: Optional[list[str]] = None,
+        shell_topic_memory: Optional[str] = None,
     ) -> tuple[asyncio.Queue, int, TopicWorker]:
         from .resolve import split_agent_ref
         resolved_harness, resolved_provider = split_agent_ref(harness or backend, provider)
@@ -863,9 +872,14 @@ class TopicDispatcher:
             # rather than failing before the item is even enqueued.
             provider_obj = None
         if native_shell:
-            # Native commands use the resolved topic/agent lane, but do not
-            # inherit provider-wide serialization: no provider is involved.
-            queue_key = f"{topic}@{agent}" if agent else topic
+            # Native commands do not inherit provider-wide serialization: no
+            # provider is involved. Normal commands remain sequential in the
+            # resolved lane; an explicit adhoc selector opts into parallelism.
+            if adhoc:
+                self._adhoc_counter += 1
+                queue_key = f"__adhoc_{self._adhoc_counter}"
+            else:
+                queue_key = f"{topic}@{agent}" if agent else topic
         elif provider_obj is not None and not provider_obj.parallel:
             queue_key = f"provider:{provider_obj.id}"
         elif adhoc:
@@ -887,6 +901,9 @@ class TopicDispatcher:
             worktree_setup_elapsed_ms=worktree_setup_elapsed_ms,
             worktree_isolated=worktree_isolated,
             native_shell=native_shell,
+            shell_pinned_contents=shell_pinned_contents,
+            shell_attached_paths=shell_attached_paths,
+            shell_topic_memory=shell_topic_memory,
         )
         seq = await worker.enqueue(item)
         position = worker.position_of(seq)

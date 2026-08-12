@@ -3,6 +3,7 @@ Unit tests for runners.py process registry and kill functions.
 """
 import asyncio
 import json
+import os
 import signal
 import time
 from types import SimpleNamespace
@@ -33,6 +34,7 @@ from agent.runners import (
     run_pi,
     run_native_shell,
     validate_native_shell_command,
+    _sweep_native_shell_spool_dir,
 )
 
 
@@ -47,6 +49,27 @@ def test_native_shell_streams_output_and_reports_exit(tmp_path):
     assert output.startswith("hello\n[exit 0 · ")
     assert output.endswith(f" · cwd: {tmp_path}]\n")
     assert not _proc_registry
+
+
+def test_native_shell_exposes_selected_context_as_paths(tmp_path):
+    attachment = tmp_path / "report file.txt"
+    attachment.write_text("attachment", encoding="utf-8")
+
+    async def collect():
+        return "".join([chunk async for chunk in run_native_shell(
+            "printf '%s|%s|%s|%s|%s|%s|%s' \"$SQUID_PINNED_COUNT\" \"$(cat \"$SQUID_PINNED_1\")\" "
+            "\"$SQUID_ATTACHED_COUNT\" \"$(cat \"$SQUID_ATTACHED_1\")\" "
+            "\"$(cat \"$SQUID_TOPIC_MEMORY\")\" \"$SQUID_PINNED_1\" \"$SQUID_TOPIC_MEMORY\"",
+            cwd=str(tmp_path), topic="ops", pinned_contents=["pinned response"],
+            attached_paths=[str(attachment)], topic_memory="topic memory",
+        )])
+
+    output = asyncio.run(collect())
+    values = output.split("\n[exit", 1)[0].split("|")
+    assert values[:5] == ["1", "pinned response", "1", "attachment", "topic memory"]
+    assert not os.path.exists(values[5])
+    assert not os.path.exists(values[6])
+    assert attachment.exists()
 
 
 def test_native_shell_closes_stdin_for_interactive_commands(tmp_path):
@@ -71,37 +94,206 @@ def test_native_shell_allows_redirection_ampersands():
     validate_native_shell_command("tool 2>&1 && echo done")
 
 
-def test_native_shell_stops_at_output_limit(tmp_path):
+def test_native_shell_spool_contains_full_output_including_display_prefix(tmp_path):
+    """Regression for the review finding that the spool file only held the
+    post-truncation tail: it must hold everything, including the part
+    that's also shown truncated in chat."""
+    spool_dir = tmp_path / "spool"
+
+    async def collect():
+        with patch("agent.runners.NATIVE_SHELL_MAX_OUTPUT_BYTES", 11), \
+             patch("agent.runners.NATIVE_SHELL_SPOOL_DIR", str(spool_dir)):
+            return "".join([chunk async for chunk in run_native_shell(
+                "printf 'AAAAAAAAAA\\nBBBBBBBBBB\\nCCCCCCCCCC\\n'",
+                cwd=str(tmp_path), topic="ops",
+            )])
+
+    output = asyncio.run(collect())
+    assert output.startswith("AAAAAAAAAA\n")
+    assert "[full output saved to: " in output
+    assert not _proc_registry
+    spool_files = list(spool_dir.glob("squid-shell-*.log"))
+    assert len(spool_files) == 1
+    assert spool_files[0].read_bytes() == b"AAAAAAAAAA\nBBBBBBBBBB\nCCCCCCCCCC\n"
+
+
+def test_native_shell_stops_display_before_65th_line(tmp_path):
+    spool_dir = tmp_path / "spool"
+
+    async def collect():
+        with patch("agent.runners.NATIVE_SHELL_SPOOL_DIR", str(spool_dir)):
+            return "".join([chunk async for chunk in run_native_shell(
+                "i=1; while [ $i -le 300 ]; do echo line-$i; i=$((i + 1)); done",
+                cwd=str(tmp_path), topic="ops",
+            )])
+
+    output = asyncio.run(collect())
+    captured, notice = output.split("\n[display stopped:", 1)
+    assert captured.splitlines() == [f"line-{i}" for i in range(1, 65)]
+    assert "output exceeded 64 lines — command keeps running; output will be saved to disk" in notice
+    assert "line-65" not in captured
+    assert f" · cwd: {tmp_path}]\n" in output
+    assert not _proc_registry
+    spool_files = list(spool_dir.glob("squid-shell-*.log"))
+    assert spool_files[0].read_text().splitlines() == [f"line-{i}" for i in range(1, 301)]
+
+
+def test_native_shell_labels_spool_as_incomplete_when_ceiling_hit(tmp_path):
+    """Regression for the review finding that hitting the spool-size ceiling
+    was silently mislabeled 'full output saved'. Also covers the follow-up
+    finding that the ceiling must not itself kill the process -- discarding
+    output past the cap is fine, but the command should keep running until
+    it exits or the real timeout fires, same as if it were never truncated."""
+    spool_dir = tmp_path / "spool"
+
     async def collect():
         chunks = []
-        with patch("agent.runners.NATIVE_SHELL_MAX_OUTPUT_BYTES", 32):
+        with patch("agent.runners.NATIVE_SHELL_MAX_OUTPUT_BYTES", 8), \
+             patch("agent.runners.NATIVE_SHELL_MAX_SPOOL_BYTES", 16), \
+             patch("agent.runners.NATIVE_SHELL_MAX_RUNTIME_S", 0.2), \
+             patch("agent.runners.NATIVE_SHELL_SPOOL_DIR", str(spool_dir)):
             async for chunk in run_native_shell(
-                "yes x", cwd=str(tmp_path), topic="ops", response_timeout=5,
+                "yes x", cwd=str(tmp_path), topic="ops",
             ):
                 chunks.append(chunk)
         return "".join(chunks)
 
     output = asyncio.run(collect())
-    assert output.startswith("x\n" * 16)
-    assert "[command stopped: 32 byte output limit]" in output
-    assert f" · cwd: {tmp_path}]\n" in output
+    assert "truncated at 16 bytes — command produced more" in output
+    assert "[full output saved to: " not in output
+    # "yes x" produces far more than 16 bytes almost instantly -- if the
+    # ceiling itself stopped the command, the 0.2s timeout notice would
+    # never appear because it'd already be dead well before then.
+    assert "[command stopped after 0.2s" in output
     assert not _proc_registry
+    spool_files = list(spool_dir.glob("squid-shell-*.log"))
+    assert len(spool_files[0].read_bytes()) == 16
 
 
-def test_native_shell_stops_before_257th_line(tmp_path):
+def test_native_shell_spool_sweep_prunes_oldest_by_count(tmp_path):
+    with patch("agent.runners.NATIVE_SHELL_SPOOL_DIR", str(tmp_path)), \
+         patch("agent.runners.NATIVE_SHELL_SPOOL_MAX_FILES", 3), \
+         patch("agent.runners.NATIVE_SHELL_SPOOL_MAX_TOTAL_BYTES", 10_000_000):
+        for i in range(5):
+            p = tmp_path / f"squid-shell-{i}.log"
+            p.write_bytes(b"x")
+            os.utime(p, (i, i))
+        _sweep_native_shell_spool_dir()
+
+    remaining = sorted(p.name for p in tmp_path.glob("squid-shell-*.log"))
+    assert remaining == ["squid-shell-2.log", "squid-shell-3.log", "squid-shell-4.log"]
+
+
+def test_native_shell_spool_sweep_prunes_oldest_by_total_size(tmp_path):
+    with patch("agent.runners.NATIVE_SHELL_SPOOL_DIR", str(tmp_path)), \
+         patch("agent.runners.NATIVE_SHELL_SPOOL_MAX_FILES", 100), \
+         patch("agent.runners.NATIVE_SHELL_SPOOL_MAX_TOTAL_BYTES", 25):
+        for i in range(5):
+            p = tmp_path / f"squid-shell-{i}.log"
+            p.write_bytes(b"x" * 10)
+            os.utime(p, (i, i))
+        _sweep_native_shell_spool_dir()
+
+    remaining = sorted(p.name for p in tmp_path.glob("squid-shell-*.log"))
+    assert remaining == ["squid-shell-3.log", "squid-shell-4.log"]
+
+
+def test_native_shell_spool_sweep_reserves_room_for_incoming_file(tmp_path):
+    """Regression for the review finding that the sweep ran before creating
+    the new file without reserving room for it, letting the directory end up
+    one file over the declared cap."""
+    with patch("agent.runners.NATIVE_SHELL_SPOOL_DIR", str(tmp_path)), \
+         patch("agent.runners.NATIVE_SHELL_SPOOL_MAX_FILES", 3), \
+         patch("agent.runners.NATIVE_SHELL_SPOOL_MAX_TOTAL_BYTES", 10_000_000):
+        for i in range(3):
+            p = tmp_path / f"squid-shell-{i}.log"
+            p.write_bytes(b"x")
+            os.utime(p, (i, i))
+        # 3 existing files already sit exactly at the cap -- a plain sweep()
+        # with no reservation would leave all 3 untouched, so the directory
+        # would hold 4 once the new file lands.
+        _sweep_native_shell_spool_dir(reserve_files=1, reserve_bytes=0)
+
+    remaining = sorted(p.name for p in tmp_path.glob("squid-shell-*.log"))
+    assert remaining == ["squid-shell-1.log", "squid-shell-2.log"]
+
+
+def test_native_shell_spool_sweep_skips_actively_written_files(tmp_path):
+    """Regression for the review finding that concurrent native commands
+    could have their in-progress spool file deleted out from under them."""
+    from agent.runners import _active_spool_paths
+
+    active = tmp_path / "squid-shell-active.log"
+    active.write_bytes(b"x")
+    os.utime(active, (0, 0))  # oldest mtime -- would normally be evicted first
+    for i in range(1, 4):
+        p = tmp_path / f"squid-shell-other-{i}.log"
+        p.write_bytes(b"x")
+        os.utime(p, (i, i))
+
+    _active_spool_paths.add(str(active))
+    try:
+        with patch("agent.runners.NATIVE_SHELL_SPOOL_DIR", str(tmp_path)), \
+             patch("agent.runners.NATIVE_SHELL_SPOOL_MAX_FILES", 2), \
+             patch("agent.runners.NATIVE_SHELL_SPOOL_MAX_TOTAL_BYTES", 10_000_000):
+            _sweep_native_shell_spool_dir()
+    finally:
+        _active_spool_paths.discard(str(active))
+
+    remaining = sorted(p.name for p in tmp_path.glob("squid-shell-*.log"))
+    assert remaining == ["squid-shell-active.log", "squid-shell-other-3.log"]
+
+
+def test_native_shell_spool_sweep_keeps_failed_deletion_in_totals(tmp_path):
+    old = tmp_path / "squid-shell-old.log"
+    middle = tmp_path / "squid-shell-middle.log"
+    new = tmp_path / "squid-shell-new.log"
+    for i, path in enumerate((old, middle, new)):
+        path.write_bytes(b"x" * 10)
+        os.utime(path, (i, i))
+
+    real_remove = os.remove
+
+    def remove_unless_old(path):
+        if path == str(old):
+            raise PermissionError(path)
+        real_remove(path)
+
+    with patch("agent.runners.NATIVE_SHELL_SPOOL_DIR", str(tmp_path)), \
+         patch("agent.runners.NATIVE_SHELL_SPOOL_MAX_FILES", 100), \
+         patch("agent.runners.NATIVE_SHELL_SPOOL_MAX_TOTAL_BYTES", 15), \
+         patch("agent.runners.os.remove", side_effect=remove_unless_old):
+        _sweep_native_shell_spool_dir()
+
+    # The failed removal still counts, so both later candidates must be
+    # removed to get as close to the byte cap as the undeletable file allows.
+    assert sorted(p.name for p in tmp_path.glob("squid-shell-*.log")) == [old.name]
+
+
+def test_native_shell_timeout_after_truncation_still_spools(tmp_path):
+    """Regression for the review finding that stop_proc()'s drain on timeout
+    discarded buffered bytes instead of spooling them."""
+    spool_dir = tmp_path / "spool"
+
     async def collect():
-        return "".join([chunk async for chunk in run_native_shell(
-            "i=1; while [ $i -le 300 ]; do echo line-$i; i=$((i + 1)); done",
-            cwd=str(tmp_path), topic="ops", response_timeout=5,
-        )])
+        chunks = []
+        with patch("agent.runners.NATIVE_SHELL_MAX_OUTPUT_BYTES", 8), \
+             patch("agent.runners.NATIVE_SHELL_MAX_RUNTIME_S", 0.3), \
+             patch("agent.runners.NATIVE_SHELL_SPOOL_DIR", str(spool_dir)):
+            async for chunk in run_native_shell(
+                "while true; do printf x; sleep 0.01; done",
+                cwd=str(tmp_path), topic="ops",
+            ):
+                chunks.append(chunk)
+        return "".join(chunks)
 
     output = asyncio.run(collect())
-    captured, notice = output.split("\n[command stopped:", 1)
-    assert captured.splitlines() == [f"line-{i}" for i in range(1, 257)]
-    assert "output exceeded 256 lines; redirect large output to a file" in notice
-    assert "line-257" not in output
-    assert f" · cwd: {tmp_path}]\n" in output
+    assert "[display stopped:" in output
+    assert "[command stopped after 0.3s" in output
     assert not _proc_registry
+    spool_files = list(spool_dir.glob("squid-shell-*.log"))
+    assert len(spool_files) == 1
+    assert spool_files[0].read_bytes()
 
 
 def test_native_shell_timeout_is_total_runtime(tmp_path):
@@ -110,13 +302,17 @@ def test_native_shell_timeout_is_total_runtime(tmp_path):
         with patch("agent.runners.NATIVE_SHELL_MAX_RUNTIME_S", 0.05):
             async for chunk in run_native_shell(
                 "while true; do printf x; sleep 0.01; done",
-                cwd=str(tmp_path), topic="ops", response_timeout=5,
+                cwd=str(tmp_path), topic="ops",
             ):
                 chunks.append(chunk)
         return "".join(chunks)
 
     output = asyncio.run(collect())
-    assert "[command stopped: 0.05s runtime limit]" in output
+    assert (
+        "[command stopped after 0.05s — if this wasn't expected to finish "
+        "quickly and isn't waiting on interactive input, rerun with a "
+        "longer timeout]"
+    ) in output
     assert f" · cwd: {tmp_path}]\n" in output
     assert not _proc_registry
 

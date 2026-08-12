@@ -49,7 +49,7 @@ from pydantic import BaseModel, Field
 
 from .config import (
     CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH,
-    OPENCODE_PATH, SQUID_HOME, RESPONSE_TIMEOUT, WORKTREE_ISOLATION_ENABLED,
+    OPENCODE_PATH, SQUID_HOME, RESPONSE_TIMEOUT, NATIVE_SHELL_TIMEOUT, WORKTREE_ISOLATION_ENABLED,
     UPDATES_INSTALL_ON_RESTART,
     _USER_CONFIG, _cfg,
     config_revision, config_text, write_config_text,
@@ -347,6 +347,7 @@ class ChatRequest(BaseModel):
     lookback_via_pins: bool = Field(False)
     adhoc: bool = Field(False)
     pinned_ids: Optional[list[int]] = None
+    attached_paths: Optional[list[str]] = None
     include_topic_memory: bool = Field(False)
     flow_run_id: Optional[str] = None
     flow_route: Optional[str] = None
@@ -542,6 +543,10 @@ def _validate_config_content(content: str) -> dict:
         value = agent_cfg.get(field)
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"agent.{field} must be a positive integer")
+    if "shell_timeout" in agent_cfg:
+        value = agent_cfg.get("shell_timeout")
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError("agent.shell_timeout must be a positive integer")
 
     _validate_harness_config(parsed.get("harnesses"))
 
@@ -680,6 +685,7 @@ async def _prepare_chat_turn(
     lookback: int = 0,
     lookback_via_pins: bool = False,
     pinned_ids: Optional[list[int]] = None,
+    attached_paths: Optional[list[str]] = None,
     include_topic_memory: bool = False,
     source: str = "human",
     flow_run_id: Optional[str] = None,
@@ -799,9 +805,9 @@ async def _prepare_chat_turn(
 
     memory_revision: Optional[str] = None
     memory_data_for_prompt: Optional[dict] = None
-    if not native_shell and not native_backend_command and include_topic_memory:
+    if not native_backend_command and include_topic_memory:
         memory_data_for_prompt = read_topic_memory(topic)
-        if memory_data_for_prompt["content"].strip():
+        if not native_shell and memory_data_for_prompt["content"].strip():
             memory_revision = memory_data_for_prompt.get("revision")
 
     stored_context_ids = list({*(context_ids or []), *(pinned_ids or [])}) or None
@@ -824,8 +830,19 @@ async def _prepare_chat_turn(
     effective_message = message
     prefix_blocks: list[str] = []
     tracking_roots: list[str] = [] if native_shell or native_backend_command else code_roots
+    shell_pinned_contents: list[str] = []
+    shell_topic_memory: Optional[str] = None
 
-    if memory_data_for_prompt:
+    if native_shell and pinned_ids:
+        shell_pinned_contents = [
+            item["content"] for item in get_messages_by_ids(pinned_ids)
+            if item.get("role") == "assistant"
+        ]
+
+    if native_shell and memory_data_for_prompt:
+        shell_topic_memory = memory_data_for_prompt["content"]
+
+    if memory_data_for_prompt and not native_shell:
         memory_content = memory_data_for_prompt["content"].strip()
         if memory_content:
             prefix_blocks.append("\n".join([
@@ -883,6 +900,9 @@ async def _prepare_chat_turn(
         "worktree_setup_elapsed_ms": None,
         "worktree_isolated": False,
         "native_shell": native_shell,
+        "shell_pinned_contents": shell_pinned_contents,
+        "shell_attached_paths": list(attached_paths or []) if native_shell else [],
+        "shell_topic_memory": shell_topic_memory,
     }
 
 # ---------------------------------------------------------------------------
@@ -972,6 +992,9 @@ async def stream_response(
     worktree_setup_elapsed_ms: Optional[float] = None,
     worktree_isolated: bool = False,
     native_shell: bool = False,
+    shell_pinned_contents: Optional[list[str]] = None,
+    shell_attached_paths: Optional[list[str]] = None,
+    shell_topic_memory: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     yield sse_event("meta", json.dumps({
         "agent": agent,
@@ -981,6 +1004,7 @@ async def stream_response(
         "msg_id": asst_msg_id,
         "adhoc": adhoc,
         "kind": "shell_result" if native_shell else "assistant",
+        **({"shell_timeout": NATIVE_SHELL_TIMEOUT} if native_shell else {}),
     }))
 
     effective_cwd = cwd or SQUID_HOME
@@ -998,6 +1022,9 @@ async def stream_response(
         worktree_setup_elapsed_ms=worktree_setup_elapsed_ms,
         worktree_isolated=worktree_isolated,
         native_shell=native_shell,
+        shell_pinned_contents=shell_pinned_contents,
+        shell_attached_paths=shell_attached_paths,
+        shell_topic_memory=shell_topic_memory,
     )
 
     raw = ""
@@ -1131,6 +1158,7 @@ async def chat(req: ChatRequest):
         lookback=req.lookback,
         lookback_via_pins=req.lookback_via_pins,
         pinned_ids=req.pinned_ids,
+        attached_paths=req.attached_paths,
         include_topic_memory=req.include_topic_memory,
         source=req.source,
         flow_run_id=flow_run_id,
@@ -1154,6 +1182,9 @@ async def chat(req: ChatRequest):
             worktree_setup_elapsed_ms=prepared["worktree_setup_elapsed_ms"],
             worktree_isolated=prepared["worktree_isolated"],
             native_shell=prepared["native_shell"],
+            shell_pinned_contents=prepared["shell_pinned_contents"],
+            shell_attached_paths=prepared["shell_attached_paths"],
+            shell_topic_memory=prepared["shell_topic_memory"],
         ),
         media_type="text/event-stream",
         headers={

@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from agent import creds
@@ -36,6 +37,30 @@ providers:
     auth: {{type: subscription}}
     gauge: codex
 '''
+
+
+def test_validate_config_content_accepts_missing_shell_timeout(tmp_path):
+    parsed = server._validate_config_content(_config_yaml(tmp_path))
+    assert "shell_timeout" not in parsed["agent"]
+
+
+def test_validate_config_content_accepts_valid_shell_timeout(tmp_path):
+    content = _config_yaml(tmp_path).replace(
+        "  response_timeout: 1800\n",
+        "  response_timeout: 1800\n  shell_timeout: 90\n",
+    )
+    parsed = server._validate_config_content(content)
+    assert parsed["agent"]["shell_timeout"] == 90
+
+
+@pytest.mark.parametrize("bad_value", ["0", "-5", "true", "\"abc\""])
+def test_validate_config_content_rejects_invalid_shell_timeout(tmp_path, bad_value):
+    content = _config_yaml(tmp_path).replace(
+        "  response_timeout: 1800\n",
+        f"  response_timeout: 1800\n  shell_timeout: {bad_value}\n",
+    )
+    with pytest.raises(ValueError, match="agent.shell_timeout must be a positive integer"):
+        server._validate_config_content(content)
 
 
 def test_worktree_diff_blocked_until_synced():
@@ -454,17 +479,21 @@ def test_native_shell_uses_agent_cwd_without_worktree_setup(tmp_path):
          patch("agent.server._resolve_agent_runtime", return_value=("codex", None, "codex", SimpleNamespace(fingerprint="f"))), \
          patch("agent.server.upsert_topic"), \
          patch("agent.server.topic_memory_squid_config", return_value={"code_roots": [str(code_root)]}), \
+         patch("agent.server.read_topic_memory", return_value={
+             "topic": "squid", "content": "remember this", "revision": "rev-1",
+         }), \
          patch("agent.server._repo_roots_for_code_roots") as repo_roots, \
          patch("agent.server.insert_user_message", return_value=201), \
          patch("agent.server.insert_assistant_message", return_value=202):
         prepared = asyncio.run(server._prepare_chat_turn(
-            message="! pwd", topic="squid", agent="codex",
+            message="! pwd", topic="squid", agent="codex", include_topic_memory=True,
         ))
 
     assert prepared["cwd"] == "/tmp/agent-cwd"
     assert prepared["source_cwd"] == "/tmp/agent-cwd"
     assert prepared["code_roots"] == []
     assert prepared["native_shell"] is True
+    assert prepared["shell_topic_memory"] == "remember this"
     repo_roots.assert_not_called()
 
 

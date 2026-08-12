@@ -14,11 +14,12 @@ import random
 import re
 import signal
 import subprocess
+import tempfile
 import time
 from typing import AsyncGenerator, List, Optional, Union
 
 from . import sandbox_home
-from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, OPENCODE_PATH, PI_PATH, FIRST_BYTE_TIMEOUT, RESPONSE_TIMEOUT, PROXY_ENV
+from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, OPENCODE_PATH, PI_PATH, FIRST_BYTE_TIMEOUT, RESPONSE_TIMEOUT, NATIVE_SHELL_TIMEOUT, NATIVE_SHELL_SPOOL_DIR, PROXY_ENV
 
 # ---------------------------------------------------------------------------
 # Process registry
@@ -172,9 +173,67 @@ class CLIError(RuntimeError):
 _BACKGROUND_SHELL_RE = re.compile(
     r"(?:^|[;&|]\s*)(?:nohup|disown)\b|(?<![>&])&(?![>&])|\b(?:setsid|daemonize)\b"
 )
-NATIVE_SHELL_MAX_RUNTIME_S = 60
-NATIVE_SHELL_MAX_OUTPUT_LINES = 256
+# Configurable via agent.shell_timeout in squid.yaml (ADR-0038 prior-art
+# note: OpenCode defaults to 2 min and lets the caller override per call;
+# Pi has no default at all and relies purely on human cancellation). We keep
+# a fixed default here and let config raise or lower it.
+NATIVE_SHELL_MAX_RUNTIME_S = NATIVE_SHELL_TIMEOUT
+NATIVE_SHELL_MAX_OUTPUT_LINES = 64
 NATIVE_SHELL_MAX_OUTPUT_BYTES = 256 * 1024
+# Once the display cap above is hit, output keeps streaming to a spool file
+# on disk instead of killing the process (matches pi/OpenCode: only the
+# display truncates, not execution). This bounds that file's size.
+NATIVE_SHELL_MAX_SPOOL_BYTES = 10 * 1024 * 1024
+# Retention for accumulated spool files, checked whenever a new one is
+# opened. /tmp reclamation timing is platform-dependent, so a long-running
+# server with many large truncated commands could otherwise accumulate
+# spool files indefinitely.
+NATIVE_SHELL_SPOOL_MAX_FILES = 200
+NATIVE_SHELL_SPOOL_MAX_TOTAL_BYTES = 500 * 1024 * 1024
+
+# Paths of spool files currently open for writing by an in-flight command.
+# The sweep below must never remove one of these: concurrent native commands
+# (different topics/agents run in parallel) share this directory, and
+# unlinking a file a writer still holds open would silently break the path
+# already advertised to that other command's chat message, even though the
+# writer itself keeps writing into the now-deleted inode without error.
+_active_spool_paths: set[str] = set()
+
+
+def _sweep_native_shell_spool_dir(*, reserve_files: int = 0, reserve_bytes: int = 0) -> None:
+    """Delete oldest inactive spool files until under the count/size
+    retention caps, reserving room for a file about to be created so the
+    caps hold after that file is added too."""
+    try:
+        entries = []
+        total_files = 0
+        total_bytes = 0
+        with os.scandir(NATIVE_SHELL_SPOOL_DIR) as it:
+            for entry in it:
+                if not entry.is_file() or not entry.name.startswith("squid-shell-"):
+                    continue
+                try:
+                    stat = entry.stat()
+                except OSError:
+                    continue
+                total_files += 1
+                total_bytes += stat.st_size
+                if entry.path in _active_spool_paths:
+                    continue
+                entries.append((stat.st_mtime, stat.st_size, entry.path))
+    except FileNotFoundError:
+        return
+    entries.sort()  # oldest mtime first
+    max_files = NATIVE_SHELL_SPOOL_MAX_FILES - reserve_files
+    max_bytes = NATIVE_SHELL_SPOOL_MAX_TOTAL_BYTES - reserve_bytes
+    while entries and (total_files > max_files or total_bytes > max_bytes):
+        _, size, path = entries.pop(0)
+        try:
+            os.remove(path)
+        except OSError:
+            continue
+        total_files -= 1
+        total_bytes -= size
 
 
 def validate_native_shell_command(command: str) -> None:
@@ -190,16 +249,37 @@ def validate_native_shell_command(command: str) -> None:
 
 async def run_native_shell(
     command: str, *, cwd: str, topic: str, agent: str = "",
-    msg_id: Optional[int] = None, response_timeout: Optional[int] = None,
+    msg_id: Optional[int] = None,
+    pinned_contents: Optional[list[str]] = None,
+    attached_paths: Optional[list[str]] = None,
+    topic_memory: Optional[str] = None,
     **_kwargs,
 ) -> AsyncGenerator[str, None]:
     """Run one fresh login shell and stream byte-for-byte combined output."""
     validate_native_shell_command(command)
     shell = os.environ.get("SHELL") or "/bin/sh"
     started = time.monotonic()
+    context_dir = tempfile.TemporaryDirectory(prefix="squid-shell-context-")
+    context_env = os.environ.copy()
+    pinned_contents = pinned_contents or []
+    attached_paths = attached_paths or []
+    context_env["SQUID_PINNED_COUNT"] = str(len(pinned_contents))
+    context_env["SQUID_ATTACHED_COUNT"] = str(len(attached_paths))
+    for index, content in enumerate(pinned_contents, 1):
+        path = Path(context_dir.name) / f"pinned-{index}.txt"
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o600)
+        context_env[f"SQUID_PINNED_{index}"] = str(path)
+    for index, path in enumerate(attached_paths, 1):
+        context_env[f"SQUID_ATTACHED_{index}"] = str(Path(path).expanduser().resolve())
+    if topic_memory is not None:
+        memory_path = Path(context_dir.name) / "topic-memory.md"
+        memory_path.write_text(topic_memory, encoding="utf-8")
+        memory_path.chmod(0o600)
+        context_env["SQUID_TOPIC_MEMORY"] = str(memory_path)
     proc = await asyncio.create_subprocess_exec(
         shell, "-lc", command,
-        cwd=cwd,
+        cwd=cwd, env=context_env,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
@@ -209,13 +289,68 @@ async def run_native_shell(
         proc.pid, backend="shell", topic=topic, agent=agent,
         msg_id=msg_id, prompt=command,
     )
-    timeout = min(
-        response_timeout if response_timeout is not None else RESPONSE_TIMEOUT,
-        NATIVE_SHELL_MAX_RUNTIME_S,
-    )
+    timeout = NATIVE_SHELL_MAX_RUNTIME_S
     deadline = asyncio.get_running_loop().time() + timeout
     output_bytes = 0
     output_lines = 0
+    truncated = False
+    spool_path: Optional[str] = None
+    spool_file = None
+    spool_bytes = 0
+    spool_capped = False
+    # Everything read so far, before truncation starts. Bounded by
+    # NATIVE_SHELL_MAX_OUTPUT_BYTES (~256KB) since this only accumulates
+    # while still under the display cap. Backfilled into the spool file the
+    # moment truncation starts, so that file holds the command's actual full
+    # output rather than just what came after the display cutoff.
+    raw_buffer = bytearray()
+
+    def timeout_notice() -> str:
+        return (
+            f"\n[command stopped after {timeout}s — if this wasn't expected to "
+            "finish quickly and isn't waiting on interactive input, rerun with "
+            "a longer timeout]\n"
+        )
+
+    async def open_spool() -> None:
+        nonlocal spool_path, spool_file
+        os.makedirs(NATIVE_SHELL_SPOOL_DIR, exist_ok=True)
+        await asyncio.to_thread(
+            _sweep_native_shell_spool_dir,
+            reserve_files=1,
+            reserve_bytes=NATIVE_SHELL_MAX_SPOOL_BYTES,
+        )
+        fd, spool_path = tempfile.mkstemp(dir=NATIVE_SHELL_SPOOL_DIR, prefix="squid-shell-", suffix=".log")
+        spool_file = os.fdopen(fd, "wb")
+        _active_spool_paths.add(spool_path)
+
+    async def spool_write(data: bytes) -> None:
+        """Append to the spool file, opening it lazily. Honors the total
+        spool-size ceiling and flags spool_capped instead of silently
+        dropping bytes without a trace."""
+        nonlocal spool_bytes, spool_capped
+        if not data or spool_capped:
+            return
+        if spool_file is None:
+            await open_spool()
+        room = NATIVE_SHELL_MAX_SPOOL_BYTES - spool_bytes
+        if len(data) > room:
+            data = data[:room]
+            spool_capped = True
+        if data:
+            spool_file.write(data)
+            spool_bytes += len(data)
+
+    def spool_footer() -> str:
+        if not spool_path:
+            return ""
+        if spool_capped:
+            return (
+                f"\n[output saved to: {spool_path} "
+                f"(truncated at {NATIVE_SHELL_MAX_SPOOL_BYTES} bytes — command "
+                "produced more)]\n"
+            )
+        return f"\n[full output saved to: {spool_path}]\n"
 
     async def stop_proc() -> None:
         _signal_process_group(proc.pid, signal.SIGTERM)
@@ -225,7 +360,9 @@ async def run_native_shell(
             _signal_process_group(proc.pid, signal.SIGKILL)
             await proc.wait()
         if proc.stdout:
-            await proc.stdout.read()
+            drained = await proc.stdout.read()
+            if drained and truncated:
+                await spool_write(drained)
 
     try:
         while True:
@@ -233,7 +370,9 @@ async def run_native_shell(
             if remaining <= 0:
                 await stop_proc()
                 elapsed = time.monotonic() - started
-                yield f"\n[command stopped: {timeout}s runtime limit]\n"
+                yield timeout_notice()
+                if spool_path:
+                    yield spool_footer()
                 yield f"\n[exit {proc.returncode} · {elapsed:.2f}s · cwd: {cwd}]\n"
                 return
             try:
@@ -243,11 +382,27 @@ async def run_native_shell(
             except asyncio.TimeoutError:
                 await stop_proc()
                 elapsed = time.monotonic() - started
-                yield f"\n[command stopped: {timeout}s runtime limit]\n"
+                yield timeout_notice()
+                if spool_path:
+                    yield spool_footer()
                 yield f"\n[exit {proc.returncode} · {elapsed:.2f}s · cwd: {cwd}]\n"
                 return
             if not chunk:
                 break
+
+            if truncated:
+                # Display cap already hit — keep the process running and spool
+                # further output to disk instead of showing or discarding it
+                # (matches pi/OpenCode: only the display truncates, not
+                # execution). Once the spool itself is full, further output
+                # is discarded but the process is still left running — the
+                # spool ceiling bounds disk usage, not the command's
+                # lifetime. Only the real timeout or natural exit stops it
+                # from here.
+                await spool_write(chunk)
+                continue
+
+            raw_buffer.extend(chunk)
             lines_left = NATIVE_SHELL_MAX_OUTPUT_LINES - output_lines
             newline_positions = [i for i, byte in enumerate(chunk) if byte == 10]
             line_cutoff = None
@@ -266,25 +421,35 @@ async def run_native_shell(
                 cutoff = line_cutoff if stopped_by_lines else byte_cutoff
                 if cutoff > 0:
                     yield chunk[:cutoff].decode(errors="replace")
-                await stop_proc()
-                elapsed = time.monotonic() - started
+                truncated = True
                 if stopped_by_lines:
-                    reason = f"output exceeded {NATIVE_SHELL_MAX_OUTPUT_LINES} lines; redirect large output to a file"
+                    reason = f"output exceeded {NATIVE_SHELL_MAX_OUTPUT_LINES} lines"
                 else:
                     reason = f"{NATIVE_SHELL_MAX_OUTPUT_BYTES} byte output limit"
-                yield f"\n[command stopped: {reason}]\n"
-                yield f"\n[exit {proc.returncode} · {elapsed:.2f}s · cwd: {cwd}]\n"
-                return
+                yield (
+                    f"\n[display stopped: {reason} — command keeps running; "
+                    "output will be saved to disk]\n"
+                )
+                await spool_write(bytes(raw_buffer))
+                raw_buffer = bytearray()
+                continue
             output_lines += len(newline_positions)
             output_bytes += len(chunk)
             yield chunk.decode(errors="replace")
         returncode = await proc.wait()
         elapsed = time.monotonic() - started
+        if truncated:
+            yield spool_footer()
         footer = f"\n[exit {returncode} · {elapsed:.2f}s · cwd: {cwd}]\n"
         yield footer
         if returncode:
             raise CLIError(f"Shell command exited with status {returncode}")
     finally:
+        context_dir.cleanup()
+        if spool_file:
+            spool_file.close()
+        if spool_path:
+            _active_spool_paths.discard(spool_path)
         _deregister_proc(proc.pid)
 
 

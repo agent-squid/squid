@@ -972,6 +972,36 @@ def test_worker_bug_emits_error_and_sentinel():
 # --- ADR-0037: provider-scoped queueing + active load/unload ---------------
 
 
+def test_dispatch_native_shell_uses_sequential_lane_unless_adhoc():
+    async def run():
+        dispatcher = TopicDispatcher()
+        with patch.object(TopicWorker, "start", lambda self: None):
+            _out1, _seq1, normal1 = await dispatcher.dispatch(
+                topic="ops", prompt="sleep 1", context_history=[],
+                harness="codex", agent="codex", native_shell=True,
+            )
+            _out2, _seq2, normal2 = await dispatcher.dispatch(
+                topic="ops", prompt="pwd", context_history=[],
+                harness="codex", agent="codex", native_shell=True,
+            )
+            _out3, _seq3, adhoc1 = await dispatcher.dispatch(
+                topic="ops", prompt="top", context_history=[],
+                harness="codex", agent="codex", native_shell=True, adhoc=True,
+            )
+            _out4, _seq4, adhoc2 = await dispatcher.dispatch(
+                topic="ops", prompt="date", context_history=[],
+                harness="codex", agent="codex", native_shell=True, adhoc=True,
+            )
+        return normal1, normal2, adhoc1, adhoc2, list(dispatcher._workers)
+
+    normal1, normal2, adhoc1, adhoc2, keys = asyncio.run(run())
+    assert normal1 is normal2
+    assert adhoc1 is not normal1
+    assert adhoc2 is not normal1
+    assert adhoc1 is not adhoc2
+    assert keys == ["ops@codex", "__adhoc_1", "__adhoc_2"]
+
+
 def _fake_local_provider(provider_id="ollama"):
     from agent.providers import Provider
 

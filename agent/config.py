@@ -97,6 +97,13 @@ FIRST_BYTE_TIMEOUT: int = _cfg["agent"]["first_byte_timeout"]
 # Hard cap on total response time per request
 RESPONSE_TIMEOUT: int = _cfg["agent"]["response_timeout"]
 
+# How long a native `!` shell command may run before Squid stops it
+# (ADR-0038). Deliberately separate from response_timeout: a shell command
+# is a different kind of operation than an LLM turn and shouldn't inherit
+# that value. Read with .get(), not required like the fields above, so an
+# existing squid.yaml without this key still loads.
+NATIVE_SHELL_TIMEOUT: int = int(_cfg["agent"].get("shell_timeout", 120))
+
 _updates_cfg = _cfg.get("updates", {})
 UPDATES_INSTALL_ON_RESTART: str = str(_updates_cfg.get("install_on_restart", "ask")).lower()
 if UPDATES_INSTALL_ON_RESTART not in {"ask", "always", "never"}:
@@ -133,6 +140,13 @@ SQUID_HOME = f"/tmp/{os.getlogin()}/squid"
 # Blank Home agents don't share plugins/skills/settings/history with
 # each other, only the sibling-of-SQUID_HOME root is shared as a concept.
 SQUID_HOMES = f"/tmp/{os.getlogin()}/squid-homes"
+
+# Per-user tmp dir for native `!` shell command spool files (ADR-0038) — full
+# stdout/stderr past the in-chat display cap. Sibling of SQUID_HOME for the
+# same reason SQUID_HOMES is: SQUID_HOME is emptied by context_sync's
+# `rsync --delete` whenever ~/.squid/context/ changes, and would silently
+# delete spool files sitting inside it.
+NATIVE_SHELL_SPOOL_DIR = f"/tmp/{os.getlogin()}/squid-shell-logs"
 
 # Per-turn Git worktree isolation (see ADR-0025). On by default; set
 # `worktree.enabled: false` in squid.yaml to use direct working-tree writes.

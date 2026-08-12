@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-08-10
-updated: 2026-08-10
+updated: 2026-08-12
 ---
 # ADR-0038: Native Shell Commands with a Scoped Terminal Escape Hatch
 
@@ -56,6 +56,7 @@ The input contract is:
 ```text
 #ops ! make clean                queued, sequential native command
 #ops@codex ! git status          native command using the resolved lane/cwd
+#ops@codex! ! git status         adhoc native command, runs in parallel
 #ops@codex! investigate this     unchanged: adhoc LLM turn
 ```
 
@@ -64,11 +65,12 @@ message without it follows normal agent dispatch; it is not implicitly
 transformed into `echo`. Literal output remains explicit (`! echo hello`). The
 marker makes the transition from chat text to local code execution intentional.
 
-The selector's trailing `!` remains exclusively an adhoc-agent marker and must
-not be overloaded as shell syntax. Native commands use the resolved
-topic/agent lane and working directory and are queued sequentially, but each
-receives a fresh shell. Neither `cd` nor other shell state persists across
-messages.
+The selector's trailing `!` remains the adhoc-turn marker and is not shell
+syntax. It applies consistently to both LLM and native turns: a native command
+without it uses the resolved topic/agent lane and is queued sequentially,
+while an explicitly adhoc native command receives its own ephemeral worker and
+runs in parallel. Both forms use the resolved working directory and receive a
+fresh shell. Neither `cd` nor other shell state persists across messages.
 
 This deliberately changes leading-`!` behavior: agent CLIs no longer receive
 those messages or interpret their results. UI and help text must state that a
@@ -133,6 +135,68 @@ existing explicit-context path, and only that later agent turn consumes model
 tokens. Large results remain expandable or downloadable in chat. Pinning must
 show the amount of context being added and allow truncation or selection of an
 excerpt rather than silently sending an unbounded log.
+
+### Passing selected context to a shell command
+
+Selected topic memory, pinned responses, and attached files are available to every native
+shell command through indexed environment variables. Squid does not append
+context to the command text or write its contents directly into environment
+variables. A command that does not reference the variables simply ignores the
+available context.
+
+The naming contract is:
+
+```sh
+SQUID_PINNED_COUNT=2
+SQUID_PINNED_1=/private/tmp/.../pinned-1.txt
+SQUID_PINNED_2=/private/tmp/.../pinned-2.txt
+SQUID_TOPIC_MEMORY=/private/tmp/.../topic-memory.md
+SQUID_ATTACHED_COUNT=1
+SQUID_ATTACHED_1=/path/to/report.csv
+```
+
+Indexes are one-based and contiguous within each category, following the
+context cart's displayed order. `SQUID_PINNED_N` always names a UTF-8 temporary
+file containing the selected message's content. This includes pinned native
+shell results: shell output is stored as a normal typed message, can be pinned,
+and is exposed to a later shell command by the same `SQUID_PINNED_N` contract.
+The original message remains the durable source; the temporary text file is
+only a command-scoped representation.
+
+When topic memory is selected, `SQUID_TOPIC_MEMORY` names a UTF-8 temporary
+file containing it. The variable is unset when memory is not selected. Like
+pinned-message files, it is command-scoped and does not imply that memory was
+delivered or consumed.
+
+`SQUID_ATTACHED_N` names the existing resolved attachment path. Squid does not
+copy, modify, or delete the attached file. Filenames and message contents are
+never interpolated into shell source, so whitespace, newlines, and shell
+metacharacters do not alter the submitted command. Consumers must quote path
+variables normally:
+
+```sh
+sed -n '1,120p' "$SQUID_PINNED_1" "$SQUID_TOPIC_MEMORY"
+wc -c -- "$SQUID_ATTACHED_1"
+```
+
+Squid creates pinned-message files in a private command-specific temporary
+directory with restrictive permissions. The directory and its generated files
+are removed when the tracked command finishes, times out, or is cancelled.
+Detached descendants are unsupported and must not rely on those paths after
+the tracked command ends. Count variables are always present with `0` when a
+category is empty; indexed variables beyond the count are unset.
+
+Making context available to a shell is not context delivery. Squid cannot know
+whether the command read a variable or file, so it does not prune pins, mark
+them or memory injected, or mark attachments delivered. They remain selected for a later
+shell or LLM turn. The shell-result context badge may indicate that selected
+context was available, but must not claim it was consumed.
+
+No JSON manifest is part of the initial interface. Numbered path variables
+cover the required memory, ordered pins, and attachments with ordinary shell tools and
+avoid requiring `jq` or another parser. If future consumers require richer
+per-item metadata, Squid may add a versioned `SQUID_CONTEXT_FILE` manifest
+without changing the indexed-variable contract.
 
 ### Background and detached processes
 
@@ -243,6 +307,68 @@ execute local code. Users can run `! echo ...` explicitly.
 Rejected. Non-interactive subcommands, version checks, and auth/status commands
 are legitimate shell operations. Interactive sessions are instead offered the
 scoped terminal without silently changing execution targets.
+
+## Prior Art
+
+Added 2026-08-11 while scoping follow-up work on the timeout, output-retention,
+and interactive-command gaps left open by the initial implementation. Reviewed
+the shell/bash tool implementations of two open-source local coding agents
+installed on this machine: `@earendil-works/pi-coding-agent` (source in its
+published npm package, `dist/core/tools/bash.js`) and `sst/opencode`
+(`packages/opencode/src/tool/shell.ts`, fetched from GitHub — the local
+`opencode-ai` npm package only ships a compiled binary).
+
+Neither tool attempts static classification of "known interactive commands"
+(`vi`, `tail -f`, REPLs, etc.). Both spawn with no TTY (stdin ignored or
+piped, never a pty) and instead bound the interactive/hanging case with a
+timeout plus cancellation, not pre-emptive pattern matching:
+
+- **Pi** ships with *no default timeout* on its bash tool — the schema
+  documents "no default timeout" and leaves an unbounded hang to be stopped
+  by the interactive UI's cancel/abort affordance (`AbortSignal` →
+  `killProcessTree`). It assumes a human is present to notice and cancel.
+- **OpenCode** defaults to a 2-minute timeout
+  (`flags.bashDefaultTimeoutMs ?? 2 * 60 * 1000`) that the model can override
+  per call via a `timeout` parameter. On expiry it does not emit a bare
+  limit notice; it tells the model *why* and what to do: "shell tool
+  terminated command after exceeding timeout ... If this command is expected
+  to take longer and is not waiting for interactive input, retry with a
+  larger timeout value." This lets the caller self-diagnose an interactive
+  hang and either raise the timeout or stop, rather than Squid's current
+  generic `[command stopped: {timeout}s runtime limit]`.
+
+Both tools also converge independently on the same output-retention pattern:
+truncate what's shown live (a sliding-window tail kept in memory) but keep
+streaming full output to a scratch file once the display cap is hit, then
+report that file's path in the result (pi: `Full output: <path>`; OpenCode:
+`Full output saved to: <path>`). Neither one terminates the process just
+because the output cap was hit — only the display truncates, not execution.
+This differs from Squid's current behavior, where `run_native_shell` kills
+the process outright once `NATIVE_SHELL_MAX_OUTPUT_LINES` /
+`NATIVE_SHELL_MAX_OUTPUT_BYTES` is exceeded (`agent/runners.py:251-277`).
+
+OpenCode additionally parses each command with tree-sitter (bash and
+PowerShell grammars) to identify which files/directories it touches, and
+gates access to directories outside the resolved project root behind an
+explicit permission prompt. This is a materially more sophisticated safety
+layer than anything described in this ADR's Security Boundary section, but
+it addresses a different problem (unexpected filesystem blast radius) than
+the interactive-command/output-retention gaps above, and is a much larger
+lift — noted here as a future option, not folded into the near-term plan
+below.
+
+Implication for this ADR: a static interactive-command denylist (considered
+as a possible interim fix) is weaker than what either prior-art tool does,
+and is exactly the kind of pattern-matching this ADR's Security Boundary
+section already says "cannot establish that a shell command is safe." The
+validated alternative — configurable timeout with an actionable message,
+plus spooling truncated output to disk instead of killing the process — is
+adopted as the near-term plan for the "Truly configurable timeout" and
+"Large-output viewing/download" gaps instead. The interactive-hang case
+itself (`vi`, `tail -f`) remains unsolved by all three tools structurally;
+all three bound it with a timeout and rely on cancellation/retry rather than
+pre-detecting it, so Squid's existing process-registry stop/cancel path
+(ADR-0018) is the operative mitigation until the scoped terminal ships.
 
 ## Consequences
 
