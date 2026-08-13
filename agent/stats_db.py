@@ -2247,12 +2247,27 @@ def _append_stats_in_filter(clauses: list[str], params: list, expr: str, values:
     params.extend(values)
 
 
-_STATS_STATUS_VALUES = {"done", "error", "cancelled"}
+_STATS_STATUS_VALUES = {"done", "error", "cancelled", "shell"}
 _STATS_FLOW_VALUES = {"all", "single", "multi"}
 
 
 def _stats_status_values(status: str) -> list[str]:
     return [s for s in _stats_filter_values(status) if s in _STATS_STATUS_VALUES]
+
+
+def _append_stats_status_filter(clauses: list[str], params: list, statuses: list[str], alias: str = "cm") -> None:
+    """Filter mutually exclusive UI categories; shell turns have ordinary terminal statuses."""
+    if not statuses:
+        return
+    categories: list[str] = []
+    if "shell" in statuses:
+        categories.append(f"{alias}.source = 'shell'")
+    terminal = [status for status in statuses if status != "shell"]
+    if terminal:
+        placeholders = ",".join("?" for _ in terminal)
+        categories.append(f"({alias}.source != 'shell' AND {alias}.status IN ({placeholders}))")
+        params.extend(terminal)
+    clauses.append(f"({' OR '.join(categories)})")
 
 
 def _stats_flow_value(flow: str) -> str:
@@ -2820,7 +2835,7 @@ def get_aggregated_stats(
     _append_stats_anchor_upper(cm_clauses, cm_params, "re.created_at", anchor)
     _append_stats_in_filter(cm_clauses, cm_params, "cm.agent", agents)
     _append_stats_in_filter(cm_clauses, cm_params, "cm.topic", topics)
-    _append_stats_in_filter(cm_clauses, cm_params, "cm.status", statuses)
+    _append_stats_status_filter(cm_clauses, cm_params, statuses)
 
     if adhoc == "session":
         cm_clauses.append("COALESCE(cm.adhoc, 0) = 0")
@@ -2837,7 +2852,7 @@ def get_aggregated_stats(
     _append_stats_anchor_upper(count_clauses, count_params, "COALESCE(cm.completed_at, cm.created_at)", anchor)
     _append_stats_in_filter(count_clauses, count_params, "cm.agent", agents)
     _append_stats_in_filter(count_clauses, count_params, "cm.topic", topics)
-    _append_stats_in_filter(count_clauses, count_params, "cm.status", statuses)
+    _append_stats_status_filter(count_clauses, count_params, statuses)
     if adhoc == "session":
         count_clauses.append("COALESCE(cm.adhoc, 0) = 0")
     elif adhoc == "adhoc":
@@ -2973,7 +2988,7 @@ def get_stats_by_turn(
     _append_stats_anchor_upper(clauses, params, turn_time_expr, anchor)
     _append_stats_in_filter(clauses, params, "cm.agent", agents)
     _append_stats_in_filter(clauses, params, "cm.topic", topics)
-    _append_stats_in_filter(clauses, params, "cm.status", statuses)
+    _append_stats_status_filter(clauses, params, statuses)
     if adhoc == "session":
         clauses.append("COALESCE(cm.adhoc, 0) = 0")
     elif adhoc == "adhoc":
@@ -3214,7 +3229,7 @@ def get_stats_by_breakdown(
     _append_stats_anchor_upper(cm_clauses, cm_params, "re.created_at", anchor)
     _append_stats_in_filter(cm_clauses, cm_params, "cm.agent", agents)
     _append_stats_in_filter(cm_clauses, cm_params, "cm.topic", topics)
-    _append_stats_in_filter(cm_clauses, cm_params, "cm.status", statuses)
+    _append_stats_status_filter(cm_clauses, cm_params, statuses)
 
     if adhoc == "session":
         cm_clauses.append("COALESCE(adhoc, 0) = 0")
@@ -3248,7 +3263,7 @@ def get_stats_by_breakdown(
     _append_stats_anchor_upper(count_clauses, count_params, "COALESCE(cm.completed_at, cm.created_at)", anchor)
     _append_stats_in_filter(count_clauses, count_params, "cm.agent", agents)
     _append_stats_in_filter(count_clauses, count_params, "cm.topic", topics)
-    _append_stats_in_filter(count_clauses, count_params, "cm.status", statuses)
+    _append_stats_status_filter(count_clauses, count_params, statuses)
     if adhoc == "session":
         count_clauses.append("COALESCE(cm.adhoc, 0) = 0")
     elif adhoc == "adhoc":

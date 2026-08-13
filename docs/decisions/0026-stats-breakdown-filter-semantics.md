@@ -459,6 +459,39 @@ Reasons to keep structured state instead of URL persistence:
 - It avoids stale URL state changing the active tab or Stats controls after
   refresh.
 
+## Amendment: Terminal and Shell Categories (2026-08-13)
+
+The Stats status control intentionally presents four mutually exclusive,
+user-facing categories: `Complete`, `Error`, `Cancelled`, and `Shell`.
+
+`Shell` is derived from `chat_messages.source = 'shell'`; it is not a persisted
+terminal status. Shell turns still have an underlying `done`, `error`, or
+`cancelled` status. For the current compact filter, however, every shell turn
+belongs to the `Shell` category, while `Complete`, `Error`, and `Cancelled`
+apply only to non-shell assistant turns. In particular, filtering by
+`Complete` must not include successful shell executions.
+
+This categorization is a deliberate pragmatic simplification. It keeps one
+small control and fixes shell executions inflating ordinary completed-response
+statistics, but it cannot express intersections such as "errored shell turns."
+The API may continue accepting `shell` in the existing `status` parameter as a
+derived query category; this does not redefine the database status vocabulary.
+
+Do not add an `execution_type` column or another filter until a concrete need
+for outcome-by-execution queries appears. When that need exists, split the
+current control into independent dimensions:
+
+- outcome: `done`, `error`, or `cancelled`;
+- execution type: `agent` or `shell` (initially derivable from `source`);
+- flow: `single` or `multi`, which remains an independent orchestration
+  dimension derived from `flow_run_id`.
+
+The existing `source` field should not become a general execution-type filter:
+values such as `human`, `workflow`, and `diff_viewer` describe message origin,
+whereas `shell` currently also identifies an execution mechanism. If future
+requirements need both concepts independently, preserve `source` for origin
+and introduce a separate execution-type dimension then.
+
 ## Non-Goals
 
 - No exact micro-selection UI is introduced here. Users cannot select only

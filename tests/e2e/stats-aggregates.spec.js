@@ -841,6 +841,9 @@ test('response status filter is a multiselect that scopes the stats request', as
 
   await page.locator('#sf-status-toggle').click();
   await expect(page.locator('#sf-status-menu')).toBeVisible();
+  await expect(page.locator('#sf-status-menu label')).toHaveText([
+    'Complete', 'Error', 'Cancelled', 'Shell',
+  ]);
   await page.locator('#sf-status-menu input[value="done"]').check();
   await expect(page.locator('#sf-status-toggle')).toHaveText('Complete');
   await expect(page.locator('#sf-status-toggle')).toHaveClass(/active/);
@@ -851,15 +854,20 @@ test('response status filter is a multiselect that scopes the stats request', as
   // Value order follows menu (DOM) order — done, error, cancelled — not click order.
   await expect.poll(() => statsRequests.at(-1)?.status).toBe('done,cancelled');
 
-  // Selecting all three is equivalent to no filter, but the UI still reports
+  // Selecting three still reports an explicit selection.
   // it as an explicit selection rather than silently reverting to "All".
   await page.locator('#sf-status-menu input[value="error"]').check();
   await expect(page.locator('#sf-status-toggle')).toHaveText('3 Statuses');
   await expect.poll(() => statsRequests.at(-1)?.status).toBe('done,error,cancelled');
 
+  await page.locator('#sf-status-menu input[value="shell"]').check();
+  await expect(page.locator('#sf-status-toggle')).toHaveText('4 Statuses');
+  await expect.poll(() => statsRequests.at(-1)?.status).toBe('done,error,cancelled,shell');
+
   await page.locator('#sf-status-menu input[value="done"]').uncheck();
   await page.locator('#sf-status-menu input[value="cancelled"]').uncheck();
   await page.locator('#sf-status-menu input[value="error"]').uncheck();
+  await page.locator('#sf-status-menu input[value="shell"]').uncheck();
   await expect(page.locator('#sf-status-toggle')).toHaveText('All Status');
   await expect(page.locator('#sf-status-toggle')).not.toHaveClass(/active/);
   await expect.poll(() => statsRequests.at(-1)?.status).toBeUndefined();

@@ -8485,7 +8485,7 @@ let statsPeriod = 'turn';
 let statsBreakdown = '';
 // anchor: null means "now"; otherwise an ISO timestamp the days/hours window ends at.
 let statsFilters = { days: -3, agents: [], topics: [], adhoc: 'all', status: [], flow: 'all', anchor: null };
-const STATS_STATUS_LABELS = { done: 'Complete', error: 'Error', cancelled: 'Cancelled' };
+const STATS_STATUS_LABELS = { done: 'Complete', error: 'Error', cancelled: 'Cancelled', shell: 'Shell' };
 // statsFilters.days doubles as an hours flag: negative values mean
 // "-days" hours (e.g. -3 = 3h). Only the 'turn' grain offers sub-day ranges,
 // since coarser grains bucket by hour/day/week and hours would be meaningless there.

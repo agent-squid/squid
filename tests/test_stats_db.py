@@ -1314,6 +1314,27 @@ def test_get_stats_by_turn_filters_by_agent_topic_and_adhoc(tmp_path, monkeypatc
     assert [r["msg_id"] for r in stats_db.get_stats_by_turn(days=0, adhoc="session")] == [codex_asst]
 
 
+def test_stats_status_filter_separates_shell_from_complete(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user_id = stats_db.insert_user_message("squid", "codex", "normal")
+    complete_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    stats_db.update_assistant_message(complete_id, "ok", "session-normal", "done")
+
+    shell_user_id = stats_db.insert_user_message("squid", "codex", "!pwd")
+    shell_id = stats_db.insert_assistant_message("squid", "codex", shell_user_id, source="shell")
+    stats_db.update_assistant_message(shell_id, "/tmp", None, "done")
+
+    assert [r["msg_id"] for r in stats_db.get_stats_by_turn(days=0, status="done")] == [complete_id]
+    assert [r["msg_id"] for r in stats_db.get_stats_by_turn(days=0, status="shell")] == [shell_id]
+    assert {
+        r["msg_id"] for r in stats_db.get_stats_by_turn(days=0, status="done,shell")
+    } == {complete_id, shell_id}
+    assert stats_db.get_aggregated_stats(period="daily", days=0, status="done")[0]["total_turns"] == 1
+    assert stats_db.get_aggregated_stats(period="daily", days=0, status="shell")[0]["total_turns"] == 1
+
+
 def test_stats_filters_by_single_or_multi_flow(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
