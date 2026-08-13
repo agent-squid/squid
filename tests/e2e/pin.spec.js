@@ -354,6 +354,48 @@ test('native shell sends literal command with selected context paths', async ({ 
   expect(attachedFiles).toHaveLength(1);
 });
 
+test('native shell running timer starts after queued command begins processing', async ({ page }) => {
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+
+  await page.addInitScript(() => {
+    const orig = window.fetch;
+    window.fetch = async (url, opts) => {
+      const requestUrl = typeof url === 'string' ? url : url?.url || '';
+      if (!requestUrl.includes('/chat')) return orig(url, opts);
+      const { readable, writable } = new TransformStream();
+      const writer = writable.getWriter();
+      const enc = new TextEncoder();
+      writer.write(enc.encode(
+        'event: queued\ndata: {"topic":"squid","position":1}\n\n'
+      ));
+      window._testSseWriter = writer;
+      window._testSseEncoder = enc;
+      return new Response(readable, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+      });
+    };
+  });
+  await page.goto('/');
+
+  await page.fill('#input', '#squid@claude ! sleep 10');
+  await page.keyboard.press('Enter');
+
+  const status = page.locator('.shell-running-status');
+  await expect(status).toHaveText('Queued · timeout starts when command runs');
+  await page.waitForTimeout(1200);
+  await expect(status).toHaveText('Queued · timeout starts when command runs');
+
+  await page.evaluate(async () => {
+    await window._testSseWriter.write(window._testSseEncoder.encode(
+      'event: processing\ndata: {"topic":"squid"}\n\n'
+    ));
+  });
+  await expect(status).toContainText('Running · timeout in 2:00');
+
+  await page.evaluate(() => window._testSseWriter?.close().catch(() => {}));
+});
+
 test('session send prunes missing attached files before submitting', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
   await page.route('**/topics/squid/memory', r => r.fulfill({

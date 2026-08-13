@@ -4477,6 +4477,8 @@ async function sendMessage(text, opts = {}) {
 
   let shellRunningTimer = null;
   let shellRunningStatus = null;
+  let shellRunningStartedAt = null;
+  let shellWaitingQueued = false;
   let shellTimeoutSeconds = 120;
   if (nativeShell) {
     shellRunningStatus = document.createElement('div');
@@ -4487,7 +4489,13 @@ async function sendMessage(text, opts = {}) {
     thinkingBubble.appendChild(shellRunningStatus);
 
     const updateShellRunningStatus = () => {
-      const elapsed = Math.max(0, Math.floor((Date.now() - Date.parse(sendTime)) / 1000));
+      if (!shellRunningStartedAt) {
+        shellRunningText.textContent = shellWaitingQueued
+          ? 'Queued · timeout starts when command runs'
+          : 'Waiting to start · timeout starts when command runs';
+        return;
+      }
+      const elapsed = Math.max(0, Math.floor((Date.now() - shellRunningStartedAt) / 1000));
       const remaining = Math.max(0, shellTimeoutSeconds - elapsed);
       const remainingText = `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}`;
       const outputState = raw.includes('[display stopped:')
@@ -4495,8 +4503,8 @@ async function sendMessage(text, opts = {}) {
         : raw ? 'streaming output' : 'no output';
       shellRunningText.textContent = `Running · timeout in ${remainingText} · ${outputState}`;
     };
+    shellRunningStatus._update = updateShellRunningStatus;
     updateShellRunningStatus();
-    shellRunningTimer = setInterval(updateShellRunningStatus, 1000);
   }
 
   function clearShellRunningStatus() {
@@ -4504,6 +4512,18 @@ async function sendMessage(text, opts = {}) {
     shellRunningTimer = null;
     shellRunningStatus?.remove();
     shellRunningStatus = null;
+  }
+
+  function startShellRunningStatus() {
+    if (!nativeShell || shellRunningStartedAt) return;
+    shellRunningStartedAt = Date.now();
+    shellRunningStatus?._update?.();
+    shellRunningTimer = setInterval(() => shellRunningStatus?._update?.(), 1000);
+  }
+
+  function refreshShellWaitingStatus() {
+    if (!nativeShell || shellRunningStartedAt) return;
+    shellRunningStatus?._update?.();
   }
 
   function setThinkingText(text) {
@@ -5168,6 +5188,7 @@ async function sendMessage(text, opts = {}) {
               const meta = JSON.parse(data);
               if (nativeShell && Number.isFinite(meta.shell_timeout) && meta.shell_timeout > 0) {
                 shellTimeoutSeconds = meta.shell_timeout;
+                refreshShellWaitingStatus();
               }
               resolvedAgent = meta.agent || null;
               const metaRuntime = runtimeRef(meta.harness || '', meta.provider || null);
@@ -5235,8 +5256,10 @@ async function sendMessage(text, opts = {}) {
             try {
               const info = JSON.parse(data);
               queuePosition = info.position;
+              shellWaitingQueued = true;
               killBtn.style.display = '';
               setThinkingText(`#${info.topic} · queued — position ${info.position}`);
+              refreshShellWaitingStatus();
             } catch {}
             pollProcs();
             eventName = null;
@@ -5245,7 +5268,9 @@ async function sendMessage(text, opts = {}) {
             try {
               const info = JSON.parse(data);
               queuePosition = null;
+              shellWaitingQueued = false;
               setThinkingText(`#${info.topic || topic} · processing…`);
+              startShellRunningStatus();
             } catch {}
             pollProcs();
             eventName = null;
@@ -5370,6 +5395,7 @@ async function sendMessage(text, opts = {}) {
 
           } else {
             // Actual response content — accumulate and show in thinking preview
+            startShellRunningStatus();
             if (!firstDataReceived) revealResponseBubble();
             if (dataLineCount > 1) raw += '\n';
             else if (raw.length && data.length && /[.!?]$/.test(raw) && /^[A-Z]/.test(data)) raw += ' ';

@@ -767,6 +767,50 @@ def test_drain_timeout_keeps_message_pending_instead_of_empty_error():
     assert update_call.kwargs["only_if_pending"] is True
 
 
+def test_native_shell_drain_timeout_starts_after_processing_event():
+    async def run():
+        out_q = asyncio.Queue()
+        time_values = iter([100.0, 100.0, 105.0])
+        wait_timeouts = []
+        wait_calls = 0
+
+        async def fake_wait_for(awaitable, timeout):
+            nonlocal wait_calls
+            wait_calls += 1
+            wait_timeouts.append(timeout)
+            if wait_calls == 1:
+                awaitable.close()
+                raise asyncio.TimeoutError()
+            if wait_calls == 2:
+                awaitable.close()
+                return {"_processing": {"topic": "squid"}}
+            if wait_calls == 3:
+                awaitable.close()
+                return "done"
+            awaitable.close()
+            return None
+
+        with patch("agent.server.asyncio.wait_for", fake_wait_for), \
+             patch("agent.server.asyncio.get_event_loop") as get_loop, \
+             patch("agent.server.update_assistant_message") as update_message:
+            get_loop.return_value.time.side_effect = lambda: next(time_values)
+            await server._drain_to_completion(
+                out_q,
+                123,
+                "",
+                "",
+                None,
+                drain_timeout=10,
+                native_shell=True,
+            )
+            return wait_timeouts, update_message.call_args
+
+    wait_timeouts, update_call = asyncio.run(run())
+    assert wait_timeouts == [30.0, 30.0, 10.0, 5.0]
+    assert update_call.args[1] == "done"
+    assert update_call.args[3] == "done"
+
+
 def test_backend_native_chat_command_detection_excludes_squid_commands():
     assert server._is_backend_native_chat_command("/usage")
     assert server._is_backend_native_chat_command("/cost")

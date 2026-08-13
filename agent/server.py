@@ -933,26 +933,33 @@ async def _drain_to_completion(
     adhoc: bool = False,
     lookback: int = 0,
     drain_timeout: Optional[int] = None,
+    native_shell: bool = False,
 ) -> None:
     """Drain the worker queue after client disconnect; save final content to DB."""
     loop = asyncio.get_event_loop()
-    deadline = loop.time() + float(drain_timeout if drain_timeout is not None else RESPONSE_TIMEOUT)
+    timeout_s = float(drain_timeout if drain_timeout is not None else RESPONSE_TIMEOUT)
+    command_started = not native_shell or bool(raw or status_raw or tool_events)
+    deadline = loop.time() + timeout_s if command_started else None
     tool_events = list(tool_events or [])
     timed_out = False
     try:
         while True:
-            left = deadline - loop.time()
-            if left <= 0:
+            left = None if deadline is None else deadline - loop.time()
+            if left is not None and left <= 0:
                 log.warning("drain timeout msg_id=%s, saving partial", msg_id)
                 timed_out = True
                 break
             try:
-                chunk = await asyncio.wait_for(out_q.get(), timeout=min(left, 30.0))
+                wait_timeout = 30.0 if left is None else min(left, 30.0)
+                chunk = await asyncio.wait_for(out_q.get(), timeout=wait_timeout)
             except asyncio.TimeoutError:
                 continue
             if chunk is None:
                 break
             if isinstance(chunk, dict):
+                if native_shell and not command_started and "_processing" in chunk:
+                    command_started = True
+                    deadline = loop.time() + timeout_s
                 if "_tool" in chunk:
                     tool_events.append(chunk["_tool"])
                 if "_status" in chunk:
@@ -1135,7 +1142,7 @@ async def stream_response(
                     out_q, asst_msg_id, raw, status_raw, session_id, tool_events,
                     topic=topic, agent=agent, backend=backend, model=model,
                     cwd=effective_cwd, adhoc=adhoc, lookback=lookback,
-                    drain_timeout=response_timeout,
+                    drain_timeout=response_timeout, native_shell=native_shell,
                 ),
                 name=f"squid-drain-{asst_msg_id}",
             )
