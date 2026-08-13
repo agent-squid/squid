@@ -13,11 +13,11 @@ totally orders publication commits. It does not claim that parallel work ran in
 that order.
 
 A connection has one applied cursor: the greatest delivered `event_id` whose
-relevant effects it has installed. Subscription filters do not create separate
-number spaces. Event IDs can therefore jump: a client can advance from event 40
-to event 44 when 41-43 belonged to other scopes. On resume, the server scans
-the global range and sends only authorized, subscribed events; it never reveals
-the skipped payloads.
+relevant effects it has installed. The ordinary Squid UI receives lightweight
+chat lifecycle events as one authorized global transcript rather than changing
+topic/agent subscriptions with the composer route. Event IDs can still jump
+when intervening events are unauthorized or belong to unwatched high-volume
+resources. On resume, the server never reveals skipped payloads.
 
 `run_events.seq` remains local to one assistant message. A `chat.text` payload
 contains `run_seq`, allowing complete-text snapshots and later deltas to be
@@ -43,7 +43,9 @@ Every message is UTF-8 JSON with these common fields:
 - `event_id`: required on replayable server events and snapshots; absent on
   client commands and ephemeral server messages.
 - `request_id`: required UUID or ULID on mutations and echoed by their result.
-- `scope`: stable authorization and subscription identifiers.
+- `scope`: stable authorization metadata and, for explicitly watched resources,
+  subscription identifiers. Chat topic/agent values do not define separate UI
+  transcripts.
 - `payload`: type-specific object.
 
 Unknown optional fields are ignored. Unknown types produce `error` with code
@@ -54,17 +56,19 @@ with `frame_too_large`.
 
 1. Server sends `hello` with `supported_versions`, limits, heartbeat interval,
    and current server cursor.
-2. Client sends `subscribe` with version, scopes, an optional last applied
-   cursor, and a persisted random `client_id` of 16-128 URL-safe characters.
-3. Server authorizes every scope and responds with `subscribed`, then either
+2. Client sends `subscribe` with version, its requested global lifecycle feed,
+   any explicit resource watches, an optional last applied cursor, and a
+   persisted random `client_id` of 16-128 URL-safe characters.
+3. Server authorizes the request and responds with `subscribed`, then either
    replays a bounded contiguous range or sends `snapshot` at watermark `N`.
 4. Client atomically installs events and periodically sends `ack` containing
    its greatest applied delivered `event_id`.
 5. `ping`/`pong` detects dead peers. Reconnect does not cancel work.
 
-Changing subscriptions does not rewind the cursor. A newly added scope receives
-a snapshot at the current watermark; it cannot use a cursor accumulated while
-that scope was unsubscribed to reconstruct unseen history.
+Changing the composer route or history filter does not change subscriptions.
+If authorization expands, or an explicitly watched resource is newly added, it
+receives a snapshot at the current watermark; a cursor accumulated without
+access to that state cannot reconstruct it.
 
 After a publication transaction commits, the single Squid server process wakes
 connections through a process-global generation counter. Connections query the
@@ -96,17 +100,18 @@ Phase-one replayable server events are `chat.meta`, `chat.queued`,
 
 A subscription snapshot contains:
 
-- the latest 20 messages in each requested conversation scope;
-- all pending operations in scope, even if older than those 20 messages;
+- the latest 20 authorized messages in the global transcript active window;
+- all authorized pending operations, even if older than those 20 messages;
 - current process, queue, and message state;
 - complete accumulated content and `run_seq` for pending assistant messages;
 - durable tool results needed to render that active window.
 
 The server reads state consistently at watermark `N`, buffers later matching
 events, sends the snapshot with `event_id: N`, then sends events after `N`.
-Installation replaces the subscribed client state atomically. Events at or
-below the installed cursor and text deltas at or below installed `run_seq` are
-ignored.
+Installation reconciles the authorized active-window cache atomically by
+stable domain ID. It does not replace unrelated HTTP history pages or reset the
+visible transcript. Events at or below the installed cursor and text deltas at
+or below installed `run_seq` are ignored.
 
 Replay rolls over to a snapshot when configured count, byte, age, retention,
 continuity, restart, or compatibility limits fail.

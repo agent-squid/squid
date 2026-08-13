@@ -1,7 +1,9 @@
 # Postmortem: WebSocket UI migration regression
 
-**Date:** 2026-08-12  
-**Status:** Reverted before release  
+**Date:** 2026-08-12
+
+**Status:** Reverted before release
+
 **Related decision:** [ADR-0040](../decisions/0040-versioned-realtime-protocol-over-websocket.md)
 
 ## Summary
@@ -33,6 +35,10 @@ path. No persisted chat data was lost.
   turn counts after transcript rebuilds, producing stale or misplaced counts.
 - Multi-agent routes multiplied refreshes because events from every subscribed
   scope could rebuild the same global transcript.
+- The persisted global cursor behaved unexpectedly as subscription scopes
+  changed. A cursor proves progress through the global event log; it does not
+  prove that the client observed events for a scope that was not subscribed at
+  the time.
 
 ## What changed
 
@@ -55,6 +61,10 @@ that the existing UI depends on:
   completed history.
 - A turn count belongs to a specific route/session/render target, not simply
   the last matching DOM element at callback time.
+- A real-time bubble must be registered by message identity while it is live,
+  then unregistered and removed from the live registry when it becomes
+  terminal. Its final response is a completed-history item, not a second live
+  item.
 
 ## Root cause
 
@@ -87,6 +97,12 @@ history-filter state.
 - Protocol tests established delivery behavior but did not establish UI
   invariants under repeated snapshots and events.
 - There was no dedicated client-side reconciliation layer keyed by message ID.
+- The live-bubble registry had no single, enforced terminal cleanup contract,
+  allowing a completed message to remain registered while a final history
+  representation was added.
+- One persisted cursor was treated too much like per-scope observation state.
+  Adding or restoring a subscription after the cursor advanced could not
+  recover that scope's missed state by replay alone.
 - Function naming did not communicate that `reloadHistory()` is destructive.
 - The snapshot's bounded working set was mistaken for a replacement for the
   complete visible transcript.
@@ -97,9 +113,15 @@ history-filter state.
 
 ### Preserve UI ownership boundaries
 
-- Composer routing, history filtering, and real-time subscription scope must
-  remain separate state. Changing a composer chip must not alter visible
-  history unless the user explicitly invokes a history-filter action.
+- Treat Squid's transcript as one multi-participant chat. Globally unique
+  `msg_id` identifies a message; topic, agent, adhoc, and flow route are
+  routing/filter metadata, not separate client-owned transcripts.
+- Composer routing, history filtering, and real-time delivery must remain
+  separate state. Changing a composer chip must not alter visible history or
+  which lightweight message lifecycle events the client receives.
+- Deliver lightweight message creation/status/completion events globally to an
+  authorized Squid client. Use optional per-`msg_id` watches for high-volume
+  text and tool deltas when bandwidth requires it.
 - Only explicit navigation actions may call the destructive history reset.
   Rename it to `resetHistoryForNavigation()` before further migration work so
   call sites communicate that contract.
@@ -109,14 +131,36 @@ history-filter state.
 ### Reconcile by stable identity
 
 - Apply `message.changed` to one message model keyed by `msg_id`.
-- Update an existing pending bubble in place. On terminal transition, move it
-  according to the existing completion-placement rule exactly once.
+- Register exactly one live bubble for a pending `msg_id`. Registration must be
+  idempotent across command response, snapshot, replay, and reconnect.
+- Update that pending bubble in place. On terminal transition, atomically
+  unregister it, remove its live DOM group, and install one completed-history
+  representation. Repeated terminal events must be no-ops.
+- Place the final response by its authoritative `completed_at` value, using
+  message ID only as the deterministic tiebreaker. Do not leave it at request
+  start position or append it solely by event-arrival time.
 - Add an unknown message only when it belongs to the explicitly visible scope;
   otherwise update the cache without changing the transcript.
 - Install snapshots into the subscribed state cache, then reconcile affected
   identities. A snapshot must not replace unrelated visible history.
 - Bind turn-count updates to `(topic, agent, session_id)` and a stable render
   identity. Discard callbacks whose target or session is no longer current.
+
+### Treat cursor and authorization as separate dimensions
+
+- Keep the global cursor as transport progress only. It orders delivered
+  events across the connection; it is not a history filter or composer route.
+- Install the authorized global active-window snapshot at a declared
+  watermark. If authorization expands, install the newly authorized state
+  from a snapshot rather than assuming the existing cursor covered it.
+- Do not persist a cursor until the corresponding event or snapshot has been
+  successfully applied to client state. Sending an acknowledgement and
+  writing local storage are consequences of application, not receipt.
+- Composer-route changes must not replace the global lifecycle subscription or
+  remove the only owner of a live message watcher. Per-message watches have an
+  independent lifecycle keyed by `msg_id`.
+- Reconnect must deduplicate with both global `event_id` and per-message
+  `run_seq`; neither identifier substitutes for the other.
 
 ### Stage transport migration
 
@@ -127,8 +171,8 @@ Migrate one behavior at a time, retaining the previous path as a comparison:
 3. Reconcile terminal state for those pending messages.
 4. Move new-chat submission while keeping response rendering behavior fixed.
 5. Move cancellation separately.
-6. Add broader conversation discovery only after explicit-scope semantics and
-   collection reconciliation are tested.
+6. Enable global conversation discovery only after collection reconciliation,
+   authorization, and active-window snapshot semantics are tested.
 
 Do not combine transport migration with route-count presentation changes.
 
@@ -138,7 +182,10 @@ End-to-end tests must assert all of the following while snapshots and duplicate
 or repeated `message.changed` events are delivered:
 
 - Existing message DOM nodes retain identity; the transcript is never emptied.
-- Completed and pending turns preserve the specified ordering.
+- A pending message has exactly one registered live bubble before completion
+  and none afterward, including under duplicate snapshots and terminal events.
+- Completed and pending turns preserve the specified ordering; final responses
+  are placed by `completed_at` with message ID as the tiebreaker.
 - Scroll position is stable unless the user was already following the bottom.
 - A sticky composer topic does not activate or modify the history filter.
 - Explicit topic, agent, adhoc, flow, bookmark, and bad-response filters remain
@@ -148,6 +195,12 @@ or repeated `message.changed` events are delivered:
 - Route and context turn counts remain attached to the correct session and
   render target after delayed responses.
 - Reconnect snapshots, duplicate events, and multi-scope routes are idempotent.
+- Changing the composer route does not change lifecycle-event coverage, the
+  active-window snapshot, or the explicit history filter.
+- Expanding authorization installs newly visible state from a snapshot without
+  assuming that the existing global cursor observed it.
+- Events are acknowledged and the cursor persisted only after successful
+  application; a simulated apply failure remains recoverable on reconnect.
 - The WebSocket and SSE paths produce equivalent final rendered content during
   the migration period.
 

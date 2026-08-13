@@ -66,6 +66,9 @@ transferred by HTTP rather than embedded in frames.
   `event_id`; domain-local sequences remain explicit payload fields.
 - Domain identifiers such as `msg_id`, `flow_run_id`, and `session_id` remain
   explicit fields; clients must not infer identity from arrival order.
+- The chat transcript is one multi-participant collection keyed by globally
+  unique `msg_id`. Topic, agent, adhoc, and flow route are message metadata and
+  authorization attributes, not client transcript identities.
 - Frames have documented size limits. Unknown optional fields are ignored;
   unknown required message types receive a protocol error.
 
@@ -172,8 +175,12 @@ registry alone cannot satisfy that requirement.
 
 ### Connection lifecycle and delivery
 
-- A connection subscribes only to the topics, messages, flows, processes, or
-  auth sessions it is authorized to observe.
+- An authorized Squid UI receives the lightweight global chat lifecycle needed
+  to keep its active transcript window synchronized. Composer route and history
+  filter never change that delivery coverage.
+- High-volume text and tool deltas may use per-`msg_id` watches. Flow, process,
+  and auth resources may retain explicit resource subscriptions where their
+  authorization or lifecycle requires them.
 - Reconnect uses the last acknowledged event cursor. The server replays the
   retained range or sends a current snapshot when that range is unavailable.
 - WebSocket ordering applies only to one live connection. Application-level
@@ -191,10 +198,10 @@ registry alone cannot satisfy that requirement.
 
 ### Bounded catch-up and snapshot rollover
 
-A reconnecting client sends its last applied global cursor. A scope newly added
-after that cursor receives a current snapshot rather than replaying events the
-client was not previously authorized and subscribed to observe.
-The server chooses between two catch-up modes:
+A reconnecting client sends its last applied global cursor. If its authorization
+expands after that cursor, newly authorized state arrives in a current snapshot
+rather than being reconstructed from events the client was not authorized to
+observe. The server chooses between two catch-up modes:
 
 1. **Replay** when the missing range is retained, contiguous, understood by
    the client, and small enough to send efficiently. The server sends the
@@ -235,9 +242,10 @@ would corrupt the response. Durable tool results required to render the
 conversation are included; transient tool progress is collapsed to current
 tool state.
 
-Snapshot installation is atomic at the subscription scope. It replaces the
-client's corresponding cached state and advances its cursor to the snapshot
-watermark before later events are applied. Duplicate events at or below the
+Snapshot installation is atomic for the authorized active window. It reconciles
+that window by stable domain ID and advances the cursor to the snapshot
+watermark before later events are applied. It must not replace unrelated HTTP
+history pages or reset the visible transcript. Duplicate events at or below the
 installed cursor are ignored.
 
 Snapshots contain only the bounded working set needed to render the current
@@ -246,6 +254,45 @@ that window, current queue/process/message state, and relevant metadata. Older
 conversation pages and expanded historical tool details remain pull-based HTTP
 resources. Scrolling upward fetches those pages; the WebSocket keeps the active
 window synchronized.
+
+### Client state and transcript reconciliation
+
+SSE, WebSocket events, snapshots, and HTTP history pages feed one normalized
+turn model. Transport code must not maintain a separate visual representation
+or directly reset transcript navigation. The client maintains application
+state independently from DOM state:
+
+- messages are keyed by globally unique `msg_id`;
+- the user prompt and assistant response form one turn group through
+  `reply_to`;
+- one pending `msg_id` has at most one registered live group and one optional
+  high-volume message watch;
+- `event_id` orders transport application, while `run_seq` deduplicates one
+  message's streamed deltas; neither determines transcript display order; and
+- completed turns are ordered by authoritative `completed_at`, with `msg_id`
+  as the deterministic tiebreaker.
+
+A terminal transition is one idempotent application operation. It finalizes
+content, tools, stats, and completion time; unregisters the per-message watch;
+removes the live registration; and installs exactly one completed turn at its
+completion-order position. Duplicate snapshots or terminal events do nothing
+after that transition has been applied. The user prompt remains part of the
+turn throughout; it is not independently hidden merely because the assistant
+response is pending.
+
+Realtime reconciliation preserves composer route, explicit history filter,
+search state, pagination boundaries, and scroll anchor. Messages outside the
+active window may update the client cache but do not force pagination or broad
+DOM replacement. The destructive history reset is reserved for explicit
+navigation such as changing a history filter, leaving search, or jumping back
+to the latest window; realtime handlers must never call it.
+
+Development builds should enforce these invariants where practical:
+
+- no more than one live group or completed turn exists for a `msg_id`;
+- terminal messages have no live registration or per-message watch;
+- composer-route changes do not mutate history-filter or delivery state; and
+- applying a realtime event never invokes the destructive history reset.
 
 ### HTTP boundary
 
@@ -296,7 +343,8 @@ session identity. The client ID is an idempotency namespace, not authorization.
 
 During migration the UI supports `auto`, `websocket`, and `sse` transport
 modes. `auto` prefers WebSocket and falls back to SSE. Both paths invoke the
-same application operations and consume the same persisted events.
+same normalized reconciliation operations and produce the same turn lifecycle
+and final rendering.
 
 The server supports the current and immediately previous protocol versions.
 SSE remains the compatibility fallback during migration; removal requires a
@@ -347,3 +395,11 @@ pagination alongside live updates, and client/server protocol-version skew.
 Tests must also cover commit-before-notify ordering, a publish racing the wait
 transition, worker-thread publication, retained-cursor rollover, safety-poll
 recovery, and notifier shutdown.
+
+Browser parity tests must additionally prove that SSE and WebSocket produce the
+same normalized turn and final DOM; a pending `msg_id` has one live group and
+none after completion; duplicate or reordered terminal events create no extra
+turn; final turns are placed by `completed_at` plus `msg_id`; changing the
+composer route does not change the history filter or lifecycle feed; explicit
+filters, pagination, and scroll anchors survive realtime events; and snapshots
+reconcile the active window without emptying or replacing the transcript.
