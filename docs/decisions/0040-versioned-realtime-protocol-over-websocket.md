@@ -85,6 +85,38 @@ Exact schemas belong in the API specification, not only in this ADR.
 The version 1 wire contract is defined in
 [`docs/realtime-protocol-v1.md`](../realtime-protocol-v1.md).
 
+An attempted browser migration on 2026-08-12 exposed UI ownership and
+reconciliation requirements that are not wire-protocol concerns. Its failure,
+impact, and required migration gates are documented in the
+[WebSocket UI migration postmortem](../postmortems/2026-08-12-websocket-ui-regression.md).
+
+### Implementation status (2026-08-12)
+
+The ADR is partially implemented. The current browser use is deliberately
+narrower than the server protocol: WebSocket reattaches pending assistant
+messages after page load or reconnect, while the ordinary new-chat path still
+submits and streams over SSE.
+
+| Area | Status | Current behavior |
+| --- | --- | --- |
+| `/ws/v1`, v1 envelopes, `hello`, version rejection | Implemented | The server exposes one JSON WebSocket endpoint and accepts protocol version 1. |
+| Subscribe, unsubscribe, scoped replay, snapshot fallback | Partial | Topic/agent scopes, cursor replay, a 500-event rollover, retained-cursor rollover, and 20-message snapshots exist. Scope authorization, replay byte/age/compatibility/gap limits, and a transactionally buffered snapshot boundary do not. |
+| Durable global event log and wake-up | Implemented | `realtime_events` supplies global cursors; commits wake sockets through a process-global generation notifier with a 20-second safety poll. Seven-day/100,000-event cleanup exists. |
+| Chat event publication | Implemented on the server | Persisted run events publish `chat.queued`, `chat.loading`, `chat.processing`, `chat.status`, `chat.tool`, `chat.text`, `chat.stats`, `chat.done`, and `chat.error`; message mutations publish `message.changed`. |
+| Running-message browser reattachment | Implemented | The UI prefers WebSocket snapshots/events for pending messages, reconnects with jittered exponential backoff, persists its cursor, sends acknowledgements, and falls back to SSE when WebSocket is unavailable. |
+| New chat submission and cancellation | Partial | The server implements idempotent `chat.start` and `chat.cancel` commands and persisted results. The browser still uses the existing HTTP/SSE submission path and does not send these commands over WebSocket. |
+| Process and queue state | Partial | Snapshots include current process and queue state, but no `process.changed` or `queue.changed` events are published or consumed by the UI; existing HTTP refresh remains authoritative. |
+| Flow | Not implemented | `flow.step.created` is not published or consumed; the browser polls for new Flow steps. |
+| CLI authentication | Not implemented | `auth.*` messages are not implemented; ADR-0035's SSE-plus-HTTP transport remains in use. |
+| Backpressure and frame limits | Not implemented | Sends are direct and there is no bounded/coalescing outbound queue, `slow_consumer` handling, or configured inbound frame-size enforcement. |
+| Heartbeat and acknowledgements | Partial | `ping` receives `pong` and the UI sends `ack`, but the server does not initiate heartbeat pings or use acknowledged cursors to manage delivery. |
+| Protocol compatibility | Partial | Unsupported versions fail explicitly, but only v1 is supported rather than the current and immediately previous versions. |
+| Shore relay | Not implemented | ADR-0039's broker transport, pairing, encryption, capabilities, and audit work remain future work. |
+
+SSE endpoints therefore remain required. WebSocket is currently the primary
+transport only for reattaching an already-running message, not for all live
+commands and updates described by this decision.
+
 ### Event production and persistence
 
 Execution must be separated from transport:
