@@ -356,6 +356,7 @@ test('kill button appears on thinking bubble and sends stop_msg with msg_id', as
 
   expect(cmdBody?.command).toBe('stop_msg');
   expect(cmdBody?.msg_id).toBe(42);
+  await expect(page.locator('.msg-thinking .msg-error')).toHaveText('Cancelled.');
 
   // Close the held stream so the page can clean up
   await page.evaluate(() => window._testSseWriter?.close().catch(() => {}));

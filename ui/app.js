@@ -4465,11 +4465,12 @@ async function sendMessage(text, opts = {}) {
       renderCancelledThinking('Dequeued.');
       pollProcs();
     } else if (msgId) {
-      await fetch('/cmd', {
+      const stopRes = await fetch('/cmd', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ command: 'stop_msg', topic, msg_id: msgId }),
-      }).catch(() => {});
+      }).catch(() => null);
+      if (stopRes?.ok) renderCancelledThinking('Cancelled.');
     }
   });
   thinkingBubble.appendChild(killBtn);

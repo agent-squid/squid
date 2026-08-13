@@ -341,10 +341,39 @@ session identity. The client ID is an idempotency namespace, not authorization.
 8. Retire superseded SSE endpoints only after compatibility fallback is no
    longer needed and parity tests pass.
 
-During migration the UI supports `auto`, `websocket`, and `sse` transport
-modes. `auto` prefers WebSocket and falls back to SSE. Both paths invoke the
-same normalized reconciliation operations and produce the same turn lifecycle
-and final rendering.
+During migration the operator can select the browser transport in
+`~/.squid/squid.yaml`:
+
+```yaml
+realtime:
+  transport: auto  # auto | websocket | sse
+```
+
+The server validates this setting and includes the effective mode in the UI
+bootstrap configuration. `auto` is the default when the section or key is
+absent; it prefers WebSocket and falls back to SSE. `websocket` forces the
+WebSocket path and surfaces connection or protocol failures rather than
+silently switching transports. `sse` disables browser WebSocket use and keeps
+all live operations on the compatibility HTTP/SSE paths. A configuration
+change takes effect after the server restart required for YAML changes.
+
+This is an application-wide migration control, not a per-tab preference, so
+local storage and query-string overrides must not supersede it. The setting may
+be removed in the separate compatibility decision that retires SSE. Both paths
+invoke the same normalized reconciliation operations and produce the same turn
+lifecycle and final rendering.
+
+Transport selection does not change the conversation schema, transcript
+ordering, or indexes. Domain writes to `chat_messages` and `run_events`, and
+publication to `realtime_events`, remain transport-neutral even in `sse` mode;
+continuing to publish the realtime log permits comparison, replay testing, and
+switching modes without a data migration. `realtime_events.event_id` orders
+delivery through the global realtime cursor, while `run_events.seq`/`run_seq`
+orders and deduplicates deltas within one message. Neither controls transcript
+display order, which remains `completed_at` with `msg_id` as its deterministic
+tiebreaker. The existing `(topic, agent, event_id)` realtime index is therefore
+independent of the selected transport and no transport-specific index is
+introduced.
 
 The server supports the current and immediately previous protocol versions.
 SSE remains the compatibility fallback during migration; removal requires a

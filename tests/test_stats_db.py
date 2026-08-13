@@ -959,7 +959,7 @@ def test_history_items_include_session_turn_count(tmp_path, monkeypatch):
     assert stats_db.get_message(pending_asst_id)["session_turn_count"] == 3
 
 
-def test_history_items_include_stats_event_completed_at(tmp_path, monkeypatch):
+def test_history_items_prefer_stored_completed_at(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
 
@@ -968,7 +968,10 @@ def test_history_items_include_stats_event_completed_at(tmp_path, monkeypatch):
     stats_db.update_assistant_message(asst_id, "response", "session-1", "done")
     stats_db.insert_run_event(asst_id, 0, "stats", json.dumps({"input_tokens": 10}))
     with sqlite3.connect(tmp_path / "squid.db") as conn:
-        conn.execute("UPDATE chat_messages SET created_at=? WHERE id=?", ("2026-07-15T10:50:07Z", asst_id))
+        conn.execute(
+            "UPDATE chat_messages SET created_at=?, completed_at=? WHERE id=?",
+            ("2026-07-15T10:50:07Z", "2026-07-15T11:07:00Z", asst_id),
+        )
         conn.execute(
             "UPDATE run_events SET created_at=? WHERE msg_id=? AND event_type='stats'",
             ("2026-07-15T11:06:43Z", asst_id),
@@ -978,8 +981,8 @@ def test_history_items_include_stats_event_completed_at(tmp_path, monkeypatch):
     status = stats_db.get_message(asst_id)
 
     assert item["timestamp"] == "2026-07-15T10:50:07Z"
-    assert item["completed_at"] == "2026-07-15T11:06:43Z"
-    assert status["completed_at"] == "2026-07-15T11:06:43Z"
+    assert item["completed_at"] == "2026-07-15T11:07:00Z"
+    assert status["completed_at"] == "2026-07-15T11:07:00Z"
 
 
 def test_get_messages_flat_uses_per_turn_stats_not_latest_session_row(tmp_path, monkeypatch):
@@ -1044,8 +1047,14 @@ def test_history_orders_by_completed_at_not_message_id(tmp_path, monkeypatch):
     stats_db.insert_run_event(fast_asst_id, 0, "stats", json.dumps({"input_tokens": 10}), created_at="2026-07-15T12:10:28Z")
 
     with sqlite3.connect(tmp_path / "squid.db") as conn:
-        conn.execute("UPDATE chat_messages SET created_at=? WHERE id=?", ("2026-07-15T12:06:46Z", slow_asst_id))
-        conn.execute("UPDATE chat_messages SET created_at=? WHERE id=?", ("2026-07-15T12:09:14Z", fast_asst_id))
+        conn.execute(
+            "UPDATE chat_messages SET created_at=?, completed_at=? WHERE id=?",
+            ("2026-07-15T12:06:46Z", "2026-07-15T12:15:25Z", slow_asst_id),
+        )
+        conn.execute(
+            "UPDATE chat_messages SET created_at=?, completed_at=? WHERE id=?",
+            ("2026-07-15T12:09:14Z", "2026-07-15T12:10:28Z", fast_asst_id),
+        )
 
     history = stats_db.get_messages_flat(topic="squid", limit=10)["items"]
 
@@ -1062,6 +1071,8 @@ def test_history_around_uses_completed_at_keyset(tmp_path, monkeypatch):
         asst_id = stats_db.insert_assistant_message("squid", "codex", user_id, adhoc=False)
         stats_db.update_assistant_message(asst_id, response, "session-1", "done")
         stats_db.insert_run_event(asst_id, 0, "stats", json.dumps({"input_tokens": 1}), created_at=completed_at)
+        with sqlite3.connect(tmp_path / "squid.db") as conn:
+            conn.execute("UPDATE chat_messages SET completed_at=? WHERE id=?", (completed_at, asst_id))
         return asst_id
 
     oldest = done_turn("oldest", "oldest response", "2026-07-15T10:00:00Z")
@@ -1141,9 +1152,32 @@ def test_mark_orphaned_pending_recovers_only_completed_run_text(tmp_path, monkey
     content_row = stats_db.get_message(content_asst_id)
     assert content_row["status"] == "done"
     assert content_row["content"] == "recovered content"
+    assert content_row["completed_at"] is not None
     empty_row = stats_db.get_message(empty_asst_id)
     assert empty_row["status"] == "error"
     assert empty_row["content"] == ""
+    assert empty_row["completed_at"] is not None
+
+
+def test_history_prefers_stored_completion_time_over_legacy_stats_time(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    first_user = stats_db.insert_user_message("squid", "codex", "first")
+    first_asst = stats_db.insert_assistant_message("squid", "codex", first_user)
+    stats_db.update_assistant_message(first_asst, "first response", "session-1", "done")
+    stats_db.insert_run_event(first_asst, 0, "stats", "{}", created_at="2026-07-15T12:30:00Z")
+
+    second_user = stats_db.insert_user_message("squid", "codex", "second")
+    second_asst = stats_db.insert_assistant_message("squid", "codex", second_user)
+    stats_db.update_assistant_message(second_asst, "second response", "session-2", "done")
+
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        conn.execute("UPDATE chat_messages SET completed_at=? WHERE id=?", ("2026-07-15T12:10:00Z", first_asst))
+        conn.execute("UPDATE chat_messages SET completed_at=? WHERE id=?", ("2026-07-15T12:20:00Z", second_asst))
+
+    history = stats_db.get_messages_flat(topic="squid", limit=10)["items"]
+    assert [item["id"] for item in history[:2]] == [second_asst, first_asst]
 
 
 def test_mark_orphaned_pending_respects_created_at_cutoff(tmp_path, monkeypatch):

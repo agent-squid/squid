@@ -1555,13 +1555,19 @@ def mark_orphaned_pending(before_created_at: Optional[str] = None) -> int:
             final_text, status_raw = _completed_run_snapshot(conn, row["id"]) or (None, None)
             if final_text:
                 conn.execute(
-                    "UPDATE chat_messages SET content=?, status='done', status_raw=COALESCE(status_raw, ?) WHERE id=?",
+                    """UPDATE chat_messages
+                       SET content=?, status='done', status_raw=COALESCE(status_raw, ?),
+                           completed_at=COALESCE(completed_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                       WHERE id=?""",
                     (final_text, status_raw, row["id"]),
                 )
                 _ensure_session_turn_index(conn, row["id"], row["session_id"])
             else:
                 conn.execute(
-                    "UPDATE chat_messages SET content='', status='error' WHERE id=?",
+                    """UPDATE chat_messages
+                       SET content='', status='error',
+                           completed_at=COALESCE(completed_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                       WHERE id=?""",
                     (row["id"],),
                 )
             count += 1
@@ -2213,12 +2219,13 @@ def _append_stats_anchor_upper(clauses: list[str], params: list, column: str, an
 
 
 def _turn_end_expr(alias: str) -> str:
-    # Canonical "when did this turn end": the run_events 'stats' event fired at
-    # completion, well before the turn's chat_messages row is marked done (git
-    # diff emit + worktree sync happen in between) — falls back to the row's
-    # own created_at (turn start) for legacy turns with no stats event.
+    # Canonical "when did this turn end": current terminal paths persist
+    # completed_at on chat_messages. Older rows may predate that column, so use
+    # their final stats event before falling back to created_at. Pending rows
+    # naturally take the created_at fallback and retain their start position.
     return (
         f"COALESCE("
+        f"{alias}.completed_at, "
         f"(SELECT re.created_at FROM run_events re "
         f"WHERE re.msg_id = {alias}.id AND re.event_type = 'stats' "
         f"ORDER BY re.id DESC LIMIT 1), {alias}.created_at)"
