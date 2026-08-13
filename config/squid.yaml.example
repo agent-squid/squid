@@ -280,9 +280,8 @@ providers:
   # /v1/chat/completions makes this compatible with pi/opencode talking to
   # Ollama as a custom provider — no ollama-specific harness needed; either
   # harness's own tool-use loop runs as normal against the local checkpoint.
-  # models: qwen3.5:4b (tool-calling, laptop-sized, first entry = agent-form
-  # default) and gemma4:e4b as a second pick, plus the older qwen2.5/qwen3
-  # sizes already validated against Pi's custom-provider path.
+  # models: gemma4:12b (first entry = agent-form default), gemma4:e4b,
+  # qwen3.5:9b, and the laptop-sized qwen3.5:4b.
   ollama:
     label: Ollama
     color: "#000000"
@@ -295,4 +294,4 @@ providers:
       type: static
       text: Local
       title: no reset
-    models: [qwen3.5:4b, gemma4:e4b, qwen2.5:7b, qwen3:8b]
+    models: [gemma4:12b, gemma4:e4b, qwen3.5:9b, qwen3.5:4b]
