@@ -1,7 +1,7 @@
 ---
 status: proposed
 date: 2026-08-12
-updated: 2026-08-12
+updated: 2026-08-14
 ---
 # ADR-0040: Versioned real-time application protocol over WebSocket
 
@@ -93,12 +93,13 @@ reconciliation requirements that are not wire-protocol concerns. Its failure,
 impact, and required migration gates are documented in the
 [WebSocket UI migration postmortem](../postmortems/2026-08-12-websocket-ui-regression.md).
 
-### Implementation status (2026-08-12)
+### Implementation status (2026-08-14)
 
-The ADR is partially implemented. The current browser use is deliberately
-narrower than the server protocol: WebSocket reattaches pending assistant
-messages after page load or reconnect, while the ordinary new-chat path still
-submits and streams over SSE.
+The ADR is partially implemented. WebSocket is now the browser's primary chat
+transport in `auto` and `websocket` modes: it submits and cancels turns, streams
+their lifecycle events, and reattaches pending assistant messages after page
+load or reconnect. The HTTP/SSE path remains available as a compatibility
+fallback and through the explicit `sse` migration mode.
 
 | Area | Status | Current behavior |
 | --- | --- | --- |
@@ -116,9 +117,10 @@ submits and streams over SSE.
 | Protocol compatibility | Partial | Unsupported versions fail explicitly, but only v1 is supported rather than the current and immediately previous versions. |
 | Shore relay | Not implemented | ADR-0039's broker transport, pairing, encryption, capabilities, and audit work remain future work. |
 
-SSE endpoints therefore remain required. WebSocket is currently the primary
-transport only for reattaching an already-running message, not for all live
-commands and updates described by this decision.
+SSE endpoints therefore remain required for migration fallback, CLI
+authentication, and the live families not yet moved to WebSocket. WebSocket is
+currently primary for browser chat commands and lifecycle updates, but not yet
+for all live commands and state updates described by this decision.
 
 ### Event production and persistence
 
