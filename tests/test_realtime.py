@@ -46,6 +46,34 @@ def test_realtime_snapshot_is_bounded_but_keeps_old_pending(tmp_path, monkeypatc
     assert len(messages) == 21
 
 
+def test_global_lifecycle_scope_discovers_turns_across_topics(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    first_user = stats_db.insert_user_message("desktop", "codex", "one")
+    first_msg = stats_db.insert_assistant_message("desktop", "codex", first_user)
+    second_user = stats_db.insert_user_message("mobile", "claude", "two")
+    second_msg = stats_db.insert_assistant_message("mobile", "claude", second_user)
+
+    scope = [{"lifecycle": "global"}]
+    events = stats_db.get_realtime_events(0, scope)
+    assert {event["topic"] for event in events} == {"desktop", "mobile"}
+    snapshot = stats_db.get_realtime_snapshot(scope, 20)
+    message_ids = {message["id"] for message in snapshot["conversations"][0]["messages"]}
+    assert {first_msg, second_msg} <= message_ids
+
+
+def test_global_lifecycle_snapshot_bounds_pending_rows(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    pending_ids = []
+    for index in range(5):
+        user_id = stats_db.insert_user_message("topic", "codex", f"turn {index}")
+        pending_ids.append(stats_db.insert_assistant_message("topic", "codex", user_id))
+
+    snapshot = stats_db.get_realtime_snapshot([{"lifecycle": "global"}], message_limit=2)
+    messages = snapshot["conversations"][0]["messages"]
+    returned_pending = [message["id"] for message in messages if message["status"] == "pending"]
+    assert returned_pending == pending_ids[-2:]
+
+
 def test_websocket_subscribe_snapshot_live_event_and_idempotent_cancel(tmp_path, monkeypatch):
     _fresh_db(tmp_path, monkeypatch)
     user_id = stats_db.insert_user_message("squid", "codex", "hello")

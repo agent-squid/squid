@@ -1102,6 +1102,18 @@ def attach_assistant_session(msg_id: int, session_id: Optional[str]) -> bool:
         return cur.rowcount > 0
 
 
+def rebind_pending_assistant_session(msg_id: int, session_id: Optional[str]) -> bool:
+    """Replace enqueue-time session metadata before a queued turn starts."""
+    with _connect() as conn:
+        cur = conn.execute(
+            """UPDATE chat_messages SET session_id = ?
+               WHERE id = ? AND role = 'assistant' AND status = 'pending'
+                 AND session_turn_index IS NULL""",
+            (session_id, msg_id),
+        )
+        return cur.rowcount > 0
+
+
 def update_assistant_message(
     msg_id: int, content: str, session_id: Optional[str], status: str = "done",
     context: Optional[str] = None,
@@ -3969,6 +3981,9 @@ def prune_realtime_data(event_days: int = 7, max_events: int = 100_000, request_
 def get_realtime_events(after_event_id: int, scopes: list[dict], limit: int = 501) -> list[dict]:
     clauses, params = [], [after_event_id]
     for scope in scopes:
+        if scope.get("lifecycle") == "global":
+            clauses.append("1=1")
+            continue
         topic = scope.get("topic")
         agent = scope.get("agent")
         if not topic:
@@ -4001,10 +4016,35 @@ def get_realtime_events(after_event_id: int, scopes: list[dict], limit: int = 50
 
 
 def get_realtime_snapshot(scopes: list[dict], message_limit: int = 20) -> dict:
+    # Pending rows should normally be few, but stale rows must not turn every
+    # reconnect into an unbounded query plus two follow-up queries per row.
+    pending_limit = max(1, message_limit)
     conversations = []
     with _connect() as conn:
         cursor = int(conn.execute("SELECT COALESCE(MAX(event_id), 0) FROM realtime_events").fetchone()[0])
         for scope in scopes:
+            if scope.get("lifecycle") == "global":
+                recent = conn.execute(
+                    "SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?", (message_limit,),
+                ).fetchall()
+                pending = conn.execute(
+                    "SELECT * FROM chat_messages WHERE status='pending' ORDER BY id DESC LIMIT ?",
+                    (pending_limit,),
+                ).fetchall()
+                by_id = {int(row["id"]): dict(row) for row in [*recent, *pending]}
+                for item in by_id.values():
+                    if item["role"] == "assistant" and item["status"] == "pending":
+                        snap = _run_event_snapshot(conn, item["id"])
+                        item["content"] = snap.get("text") or item.get("content") or ""
+                        seq_row = conn.execute(
+                            "SELECT COALESCE(MAX(seq), -1) FROM run_events WHERE msg_id=?", (item["id"],),
+                        ).fetchone()
+                        item["run_seq"] = int(seq_row[0])
+                conversations.append({
+                    "scope": scope,
+                    "messages": sorted(by_id.values(), key=lambda row: row["id"]),
+                })
+                continue
             topic, agent = scope.get("topic"), scope.get("agent")
             if not topic:
                 continue
@@ -4016,7 +4056,7 @@ def get_realtime_snapshot(scopes: list[dict], message_limit: int = 20) -> dict:
             ).fetchall()
             pending = conn.execute(
                 f"""SELECT * FROM chat_messages WHERE topic=? AND {agent_clause}
-                    AND status='pending' ORDER BY id""", args,
+                    AND status='pending' ORDER BY id DESC LIMIT ?""", (*args, pending_limit),
             ).fetchall()
             by_id = {int(row["id"]): dict(row) for row in [*recent, *pending]}
             for item in by_id.values():

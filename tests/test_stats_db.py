@@ -959,6 +959,18 @@ def test_history_items_include_session_turn_count(tmp_path, monkeypatch):
     assert stats_db.get_message(pending_asst_id)["session_turn_count"] == 3
 
 
+def test_rebind_pending_assistant_session_replaces_enqueue_time_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    user_id = stats_db.insert_user_message("squid", "codex", "queued")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    assert stats_db.attach_assistant_session(msg_id, "old-session")
+    assert stats_db.rebind_pending_assistant_session(msg_id, "new-session")
+    assert stats_db.get_message(msg_id)["session_id"] == "new-session"
+    assert stats_db.rebind_pending_assistant_session(msg_id, None)
+    assert stats_db.get_message(msg_id)["session_id"] is None
+
+
 def test_history_items_prefer_stored_completed_at(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

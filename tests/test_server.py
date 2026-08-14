@@ -6,11 +6,12 @@ import sys
 import types
 from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from fastapi.responses import JSONResponse
 
 from agent import creds
 from agent import server
@@ -51,6 +52,32 @@ def test_validate_config_content_accepts_valid_shell_timeout(tmp_path):
     )
     parsed = server._validate_config_content(content)
     assert parsed["agent"]["shell_timeout"] == 90
+
+
+@pytest.mark.parametrize("transport", ["auto", "websocket", "sse"])
+def test_validate_config_content_accepts_realtime_transport(tmp_path, transport):
+    content = _config_yaml(tmp_path).replace("agent:\n", f"realtime:\n  transport: {transport}\nagent:\n")
+    parsed = server._validate_config_content(content)
+    assert parsed["realtime"]["transport"] == transport
+
+
+def test_validate_config_content_defaults_realtime_transport_to_auto(tmp_path):
+    parsed = server._validate_config_content(_config_yaml(tmp_path))
+    assert server.realtime_transport(parsed) == "auto"
+
+
+@pytest.mark.parametrize("realtime", ["websocket", "{transport: invalid}"])
+def test_validate_config_content_rejects_invalid_realtime_config(tmp_path, realtime):
+    content = _config_yaml(tmp_path).replace("agent:\n", f"realtime: {realtime}\nagent:\n")
+    with pytest.raises(ValueError, match="realtime"):
+        server._validate_config_content(content)
+
+
+def test_realtime_config_endpoint_uses_effective_mode(monkeypatch):
+    monkeypatch.setattr(server, "REALTIME_TRANSPORT", "sse")
+    response = TestClient(server.app).get("/config/realtime")
+    assert response.json() == {"transport": "sse"}
+    assert response.headers["cache-control"] == "no-store"
 
 
 @pytest.mark.parametrize("bad_value", ["0", "-5", "true", "\"abc\""])
@@ -471,6 +498,24 @@ class FinishedWorker:
         return 0
 
 
+def test_realtime_chat_start_preserves_persisted_error_details():
+    response = JSONResponse({
+        "error": "worktree sync requires attention",
+        "msg_id": 202,
+        "worktrees": [{"repo_root": "/repo", "worktree_path": "/worktree"}],
+    }, status_code=409)
+    with patch("agent.server._prepare_chat_turn", new=AsyncMock(return_value=response)):
+        result = asyncio.run(server._realtime_chat_start({"message": "hello", "topic": "squid"}))
+
+    assert result == {
+        "ok": False,
+        "error": "worktree sync requires attention",
+        "msg_id": 202,
+        "worktrees": [{"repo_root": "/repo", "worktree_path": "/worktree"}],
+        "status": 409,
+    }
+
+
 def test_native_shell_uses_agent_cwd_without_worktree_setup(tmp_path):
     code_root = tmp_path / "project"
     code_root.mkdir()
@@ -495,6 +540,24 @@ def test_native_shell_uses_agent_cwd_without_worktree_setup(tmp_path):
     assert prepared["native_shell"] is True
     assert prepared["shell_topic_memory"] == "remember this"
     repo_roots.assert_not_called()
+
+
+def test_override_cwd_is_the_prepared_configured_cwd():
+    with patch("agent.server.get_agent", return_value={"cwd": "/tmp/agent-cwd"}), \
+         patch("agent.server._resolve_agent_runtime", return_value=("codex", None, "codex", SimpleNamespace(fingerprint="f"))), \
+         patch("agent.server.upsert_topic"), \
+         patch("agent.server.topic_memory_squid_config", return_value={"code_roots": ["/repo"]}), \
+         patch("agent.server.get_context_history", return_value=([], [])), \
+         patch("agent.server.get_messages_by_ids", return_value=[]), \
+         patch("agent.server.insert_user_message", return_value=201), \
+         patch("agent.server.insert_assistant_message", return_value=202):
+        prepared = asyncio.run(server._prepare_chat_turn(
+            message="inspect", topic="squid", agent="codex", adhoc=True,
+            override_cwd="/tmp/integration-worktree",
+        ))
+
+    assert prepared["cwd"] == "/tmp/integration-worktree"
+    assert prepared["configured_cwd"] == "/tmp/integration-worktree"
 
 
 def test_stream_response_passes_agent_cwd_and_code_roots_separately():

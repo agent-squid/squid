@@ -803,6 +803,7 @@ def test_worker_persists_agent_cwd_for_sessions_with_code_roots(tmp_path):
              patch("agent.runners.run_codex", fake_runner), \
              patch("agent.stats_db.insert_run_event"), \
              patch("agent.stats_db.update_assistant_message"), \
+             patch("agent.stats_db.get_topic_session", return_value=None), \
              patch("agent.stats_db.set_topic_session") as set_topic_session, \
              patch("agent.stats_db.save_stats"):
             await worker._process(item)
@@ -811,6 +812,211 @@ def test_worker_persists_agent_cwd_for_sessions_with_code_roots(tmp_path):
     call_args = asyncio.run(run())
     assert call_args.args[:4] == ("work", "codex", "thread-1", "/agent/config/cwd")
     assert len(call_args.args[4]) == 16  # backend configuration fingerprint
+
+
+def test_queued_turn_inherits_session_when_it_starts():
+    captured = {}
+
+    async def fake_runner(_prompt, **kwargs):
+        captured.update(kwargs)
+        yield {"_stats": {"session_id": "session-from-first-turn"}}
+
+    async def run():
+        worker = TopicWorker("work")
+        item = QueueItem(
+            seq=1, topic="work", agent="codex", prompt="second",
+            context_history=[], backend="codex", cwd="/old/cwd",
+            source_cwd="/old/cwd", configured_cwd="/configured/cwd", adhoc=False, msg_id=794,
+            refresh_session_at_start=True,
+        )
+        with patch("agent.config.WORKTREE_ISOLATION_ENABLED", False), \
+             patch("agent.runners.run_codex", fake_runner), \
+             patch("agent.runners.runner_for_agent", return_value=fake_runner), \
+             patch("agent.stats_db.get_topic_session", return_value={
+                 "session_id": "session-from-first-turn",
+                 "cwd": "/new/cwd",
+                 "runtime_fingerprint": None,
+             }), \
+             patch("agent.stats_db.rebind_pending_assistant_session") as rebind_session, \
+             patch("agent.stats_db.insert_run_event"), \
+             patch("agent.stats_db.update_assistant_message"), \
+             patch("agent.stats_db.set_topic_session"), \
+             patch("agent.stats_db.get_worktrees", return_value=[]), \
+             patch("agent.stats_db.save_stats"):
+            await worker._process(item)
+        return item, rebind_session.call_args
+
+    item, rebind_call = asyncio.run(run())
+    assert captured["resume_session_id"] == "session-from-first-turn"
+    assert captured["cwd"] == "/new/cwd"
+    assert item.source_cwd == "/new/cwd"
+    assert rebind_call.args == (794, "session-from-first-turn")
+
+
+def test_queued_turn_does_not_start_after_pending_row_was_cancelled():
+    runner_called = False
+
+    async def fake_runner(_prompt, **kwargs):
+        nonlocal runner_called
+        runner_called = True
+        yield "unexpected"
+
+    async def run():
+        worker = TopicWorker("work")
+        item = QueueItem(
+            seq=1, topic="work", agent="codex", prompt="cancelled",
+            context_history=[], backend="codex", cwd=None, source_cwd=None,
+            configured_cwd=None, adhoc=False, msg_id=800,
+            refresh_session_at_start=True,
+        )
+        with patch("agent.config.WORKTREE_ISOLATION_ENABLED", False), \
+             patch("agent.runners.runner_for_agent", return_value=fake_runner), \
+             patch("agent.stats_db.get_topic_session", return_value=None), \
+             patch("agent.stats_db.rebind_pending_assistant_session", return_value=False):
+            await worker._process(item)
+        return await item.out_q.get(), await item.out_q.get()
+
+    error, sentinel = asyncio.run(run())
+    assert error == {"_error": "Cancelled before start"}
+    assert sentinel is None
+    assert not runner_called
+
+
+def test_queued_turn_clears_session_with_stale_runtime_fingerprint():
+    captured = {}
+
+    async def fake_runner(_prompt, **kwargs):
+        captured.update(kwargs)
+        yield "fresh"
+
+    async def run():
+        worker = TopicWorker("work")
+        item = QueueItem(
+            seq=1, topic="work", agent="codex", prompt="second",
+            context_history=[], backend="codex", cwd="/old/cwd",
+            source_cwd="/old/cwd", configured_cwd="/configured/cwd",
+            adhoc=False, msg_id=799, refresh_session_at_start=True,
+        )
+        with patch("agent.config.WORKTREE_ISOLATION_ENABLED", False), \
+             patch("agent.runners.run_codex", fake_runner), \
+             patch("agent.runners.runner_for_agent", return_value=fake_runner), \
+             patch("agent.stats_db.get_topic_session", return_value={
+                 "session_id": "stale-session", "cwd": "/stale/cwd",
+                 "runtime_fingerprint": "stale-fingerprint",
+             }), \
+             patch("agent.stats_db.clear_topic_session") as clear_session, \
+             patch("agent.stats_db.rebind_pending_assistant_session") as rebind_session, \
+             patch("agent.stats_db.insert_run_event"), \
+             patch("agent.stats_db.update_assistant_message"), \
+             patch("agent.stats_db.get_worktrees", return_value=[]):
+            await worker._process(item)
+        return clear_session.call_args, rebind_session.call_args
+
+    clear_call, rebind_call = asyncio.run(run())
+    assert "resume_session_id" not in captured
+    assert captured["cwd"] == "/configured/cwd"
+    assert clear_call.args == ("work", "codex")
+    assert rebind_call.args == (799, None)
+
+
+def test_queued_native_shell_inherits_latest_session_cwd_without_resuming():
+    captured = {}
+
+    async def fake_shell(_prompt, **kwargs):
+        captured.update(kwargs)
+        yield "ok"
+
+    async def run():
+        worker = TopicWorker("work")
+        item = QueueItem(
+            seq=1, topic="work", agent="codex", prompt="pwd",
+            context_history=[], backend="codex", cwd="/old/cwd",
+            source_cwd="/old/cwd", configured_cwd="/configured/cwd", native_shell=True, msg_id=795,
+            refresh_session_at_start=True,
+        )
+        with patch("agent.config.WORKTREE_ISOLATION_ENABLED", False), \
+             patch("agent.runners.run_native_shell", fake_shell), \
+             patch("agent.stats_db.get_topic_session", return_value={
+                 "session_id": "session-from-first-turn",
+                 "cwd": "/new/cwd",
+                 "runtime_fingerprint": None,
+             }), \
+             patch("agent.stats_db.rebind_pending_assistant_session") as rebind_session, \
+             patch("agent.stats_db.insert_run_event"), \
+             patch("agent.stats_db.update_assistant_message"), \
+             patch("agent.stats_db.get_worktrees", return_value=[]):
+            await worker._process(item)
+        return rebind_session.call_args
+
+    rebind_call = asyncio.run(run())
+    assert captured["cwd"] == "/new/cwd"
+    assert "resume_session_id" not in captured
+    assert rebind_call is None
+
+
+def test_queued_turn_drops_stale_session_when_preceding_turn_cleared_it():
+    captured = {}
+
+    async def fake_runner(_prompt, **kwargs):
+        captured.update(kwargs)
+        yield "fresh"
+
+    async def run():
+        worker = TopicWorker("work")
+        item = QueueItem(
+            seq=1, topic="work", agent="codex", prompt="second",
+            context_history=[], backend="codex", cwd="/old/session/cwd",
+            source_cwd="/old/session/cwd", configured_cwd="/agent/cwd",
+            resume_session_id="stale-session", adhoc=False, msg_id=796,
+            refresh_session_at_start=True,
+        )
+        with patch("agent.config.WORKTREE_ISOLATION_ENABLED", False), \
+             patch("agent.runners.run_codex", fake_runner), \
+             patch("agent.runners.runner_for_agent", return_value=fake_runner), \
+             patch("agent.stats_db.get_topic_session", return_value=None), \
+             patch("agent.stats_db.rebind_pending_assistant_session") as rebind_session, \
+             patch("agent.stats_db.insert_run_event"), \
+             patch("agent.stats_db.update_assistant_message"), \
+             patch("agent.stats_db.get_worktrees", return_value=[]):
+            await worker._process(item)
+        return item, rebind_session.call_args
+
+    item, rebind_call = asyncio.run(run())
+    assert "resume_session_id" not in captured
+    assert captured["cwd"] == "/agent/cwd"
+    assert item.resume_session_id is None
+    assert rebind_call.args == (796, None)
+
+
+def test_queued_turn_without_configured_cwd_drops_stale_session_cwd():
+    captured = {}
+
+    async def fake_runner(_prompt, **kwargs):
+        captured.update(kwargs)
+        yield "fresh"
+
+    async def run():
+        worker = TopicWorker("work")
+        item = QueueItem(
+            seq=1, topic="work", agent="codex", prompt="second",
+            context_history=[], backend="codex", cwd="/stale/session/cwd",
+            source_cwd="/stale/session/cwd", configured_cwd=None,
+            resume_session_id="stale-session", adhoc=False, msg_id=797,
+            refresh_session_at_start=True,
+        )
+        with patch("agent.config.WORKTREE_ISOLATION_ENABLED", False), \
+             patch("agent.runners.run_codex", fake_runner), \
+             patch("agent.runners.runner_for_agent", return_value=fake_runner), \
+             patch("agent.stats_db.get_topic_session", return_value=None), \
+             patch("agent.stats_db.rebind_pending_assistant_session"), \
+             patch("agent.stats_db.insert_run_event"), \
+             patch("agent.stats_db.update_assistant_message"), \
+             patch("agent.stats_db.get_worktrees", return_value=[]):
+            await worker._process(item)
+
+    asyncio.run(run())
+    assert captured["cwd"] != "/stale/session/cwd"
+    assert "resume_session_id" not in captured
 
 
 def test_worker_clears_session_on_prompt_too_long_text_response():

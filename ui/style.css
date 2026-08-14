@@ -1047,6 +1047,11 @@ body {
   font-style: normal;
 }
 .msg.assistant.msg-thinking .loader span { background: var(--text-dim); }
+.thinking-waiting {
+  margin-left: 0.55rem;
+  color: var(--text-dim);
+  font-style: italic;
+}
 .thinking-live {
   max-height: 6em;
   overflow-y: auto;

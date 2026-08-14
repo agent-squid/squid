@@ -32,6 +32,16 @@ def _load_config() -> dict:
     return yaml.safe_load(_USER_CONFIG.read_text())
 
 
+def realtime_transport(config: dict) -> str:
+    realtime = config.get("realtime", {})
+    if not isinstance(realtime, dict):
+        raise ValueError("realtime must be a mapping")
+    transport = realtime.get("transport", "auto")
+    if transport not in {"auto", "websocket", "sse"}:
+        raise ValueError("realtime.transport must be one of: auto, websocket, sse")
+    return transport
+
+
 def config_text() -> str:
     return _USER_CONFIG.read_text(encoding="utf-8")
 
@@ -63,6 +73,7 @@ def write_config_text(content: str, expected_revision: Optional[str] = None) -> 
     return config_revision(content)
 
 _cfg = _load_config()
+REALTIME_TRANSPORT: str = realtime_transport(_cfg)
 
 # CLI executable names — override via env if installed elsewhere
 CLAUDE_CLI    = "claude"

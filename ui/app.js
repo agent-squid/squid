@@ -12,6 +12,11 @@ const pinPanel        = document.getElementById('pin-panel');
 const pinCountEl      = document.getElementById('pin-count');
 const bookmarkBtn     = document.getElementById('chip-bookmark-btn');
 
+const realtimeTransportMode = fetch('/config/realtime', { cache: 'no-store' })
+  .then(response => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
+  .then(config => ['auto', 'websocket', 'sse'].includes(config.transport) ? config.transport : 'sse')
+  .catch(() => 'sse');
+
 window.scrollTo(0, 0);
 
 // Android PWA: dvh can be wrong after location.reload(); override with actual visual height
@@ -788,10 +793,21 @@ function clearCachedSessionId(topic, agent) {
 }
 
 function _setKnownSessionTurnCount(topic, agent, count, sessionId = null) {
-  if (!agent || count == null) return;
+  if (!agent || count == null) return false;
   const n = parseInt(count, 10) || 0;
-  _sessionTurnCountsByRoute[`${topic}@${agent}`] = n;
-  if (sessionId) _sessionTurnCounts[sessionId] = n;
+  const routeKey = `${topic}@${agent}`;
+  if (sessionId) {
+    const sessionCount = _sessionTurnCounts[sessionId];
+    if (sessionCount == null || n >= sessionCount) _sessionTurnCounts[sessionId] = n;
+    // Historical/global transcript rows may belong to an older session for
+    // this route. Keep their per-session metadata without changing the
+    // composer count until the route is authoritatively bound to that SID.
+    if ((_sessionIds[routeKey] || null) !== sessionId) return true;
+  }
+  const currentCount = _sessionTurnCountsByRoute[routeKey];
+  if (sessionId && sessionId === (_sessionIds[routeKey] || null) && currentCount != null && n < currentCount) return false;
+  _sessionTurnCountsByRoute[routeKey] = n;
+  return true;
 }
 
 // ── topic chip ────────────────────────────────────────────────────────────────
@@ -1136,6 +1152,7 @@ function setTopicChip(topic, agent, adhoc = false, lookback = 0, opts = {}) {
       } else {
         _scheduleChipTurnCountUpdate(topic, agent);
       }
+      refreshComposerSessionCount(topic, agent);
     } else {
       clearTimeout(_chipTurnCountTimer);
       _chipTurnCountTimer = null;
@@ -1183,9 +1200,10 @@ function _renderChipTurnCount(count, opts = {}) {
 }
 
 function _updateChipTurnCount(topic, agent, sessionId, count) {
-  _setKnownSessionTurnCount(topic, agent, count, sessionId);
+  const accepted = _setKnownSessionTurnCount(topic, agent, count, sessionId);
+  if (!accepted || sessionId && (_sessionIds[`${topic}@${agent}`] || null) !== sessionId) return;
   if (!stickyChip || stickyChip.adhoc || stickyChip.suppressTurnCount || stickyChip.route || stickyChip.topic !== topic || (stickyChip.agent || null) !== (agent || null)) return;
-  _renderChipTurnCount(count, { allowZero: true });
+  _renderChipTurnCount(_knownSessionTurnCount(topic, agent) ?? count, { allowZero: true });
 }
 
 let _chipTurnCountTimer = null;
@@ -1943,6 +1961,14 @@ let historyHasNewer = false;
 let historyWindowEdgesArmed = false;
 let historyTopPaginationArmed = true;
 const pendingPollTimers = new WeakMap();
+let resolveInitialHistoryReady;
+const initialHistoryReady = new Promise(resolve => { resolveInitialHistoryReady = resolve; });
+
+function markInitialHistoryReady() {
+  if (!resolveInitialHistoryReady) return;
+  resolveInitialHistoryReady();
+  resolveInitialHistoryReady = null;
+}
 
 function invalidateHistoryLoad() {
   historyGeneration++;
@@ -2070,7 +2096,10 @@ async function loadHistory() {
     const res = await fetch(url);
     data = await res.json();
   } catch {
-    if (generation === historyGeneration) historyLoading = false;
+    if (generation === historyGeneration) {
+      historyLoading = false;
+      markInitialHistoryReady();
+    }
     return;
   }
 
@@ -2085,6 +2114,7 @@ async function loadHistory() {
   const anchor = topSentinel ? topSentinel.nextSibling : messages.firstChild;
   messages.insertBefore(fragment, anchor);
   messages.scrollTop += messages.scrollHeight - prevHeight;
+  markInitialHistoryReady();
 
   historyOffset += items.length;
   historyExhausted = !has_more;
@@ -4390,12 +4420,11 @@ async function sendMessage(text, opts = {}) {
   // it via opts.suppressUserBubble instead of duplicating it per agent.
   const userBubble = opts.suppressUserBubble ? null : makeUserBubble(message, topic, agent, null, adhoc, lookback, source, broadcastAgents, displayFlowRoute);
   const userTopicTag = userBubble ? userBubble.querySelector('.topic-tag') : null;
-  // The live user bubble now renders the route flow itself (displayFlowRoute),
-  // so it already reads as the one prompt driving every masked head — the
-  // start marker is a graph annotation on top of it, not a header above it.
-  // It goes after the bubble it belongs to (and, for a broadcast, above the
-  // bubble-less per-head markers appended by the sibling sendMessage calls
-  // that follow this one) regardless of single- vs multi-head.
+  // A route marker is the leading annotation for its prompt group. Keep it
+  // immediately before the user bubble so filtering and later completion do
+  // not detach the marker from the prompt it describes. Suppressed broadcast
+  // heads have no user bubble; their marker stays with the response instead.
+  if (chainMarker && userBubble) messages.appendChild(chainMarker);
   if (userBubble) {
     messages.appendChild(userBubble);
     const userTimeEl = addTimestamp(userBubble, sendTime, true);
@@ -4408,7 +4437,7 @@ async function sendMessage(text, opts = {}) {
     // Non-blocking nudge — fires async after the message is already in flight
     maybeShowCodeRootsNudge(topic, userBubble);
   }
-  if (chainMarker) messages.appendChild(chainMarker);
+  if (chainMarker && !userBubble) messages.appendChild(chainMarker);
 
   // ── Thinking bubble (visible immediately, shows status/queue/loader) ──────────
   // Same route+prompt header shape as the history/WIP bubble (makeWipBubble,
@@ -4622,15 +4651,12 @@ async function sendMessage(text, opts = {}) {
   // moment its first content arrives — not necessarily right after
   // thinkingBubble's old slot, since concurrent heads (Origin Broadcast) or
   // other topics can append in between while this one is still streaming.
-  // chainMarker was placed right before thinkingBubble, which gets removed
-  // once this bubble is ready (removeThinking/freezeThinking) — so without
-  // relocating it here too, the marker is orphaned above whatever now sits
-  // in that old slot instead of above its own response. insertBefore moves
-  // an already-attached node rather than duplicating it, so this is safe to
-  // call every time the bubble is (re)placed.
+  // A normal route marker remains attached to its user prompt. A suppressed
+  // broadcast head has no user bubble, so its marker follows that head's
+  // response placement instead.
   function placeResponseBubble() {
     if (!bubble.parentNode) messages.appendChild(bubble);
-    if (chainMarker) messages.insertBefore(chainMarker, bubble);
+    if (chainMarker && !userBubble) messages.insertBefore(chainMarker, bubble);
   }
 
   let firstDataReceived = false;
@@ -4771,14 +4797,17 @@ async function sendMessage(text, opts = {}) {
   function normalizedErrorDisplay(text) {
     return (text || 'Response interrupted.')
       .split('\n')[0]
-      .replace(/^CLI exited \d+:\s*/, '')
+      .replace(/^CLI exited -?\d+:\s*/, '')
       .trim();
   }
 
   function discardInterruptedStatusBubble(errText) {
-    // showError always creates a response bubble (falls back to
-    // 'Response interrupted.'), so the thinking bubble should always
-    // be removed when an error arrives with no streamed content.
+    // Preserve meaningful progress/status as a frozen thought trace for an
+    // ordinary backend error. Explicit process termination has no useful
+    // continuation, so it retains the historical behavior of removing the
+    // status bubble and showing only the normalized terminal error.
+    const terminated = /^CLI exited\s+(?:-(?:2|9|15)|13[07]|143)\b/i.test(String(errText || '').trim());
+    if (statusBuf.trim() && !terminated) return false;
     thinkingFrozen = true;
     clearShellRunningStatus();
     killBtn.style.display = 'none';
@@ -4994,6 +5023,7 @@ async function sendMessage(text, opts = {}) {
           if (completedSessionId) liveCtxSpan.dataset.sessionId = completedSessionId;
           if (!nativeShell) setCtxLabel(liveCtxSpan, !!data.adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
           if (!adhoc && !suppressChipTurnCount) _updateChipTurnCount(topic, resolvedAgent || null, completedSessionId || null, liveSessionTurnCount);
+          if (chainMarker && !adhoc) updateRouteChainMarkerTurnCount(chainMarker, 'origin', liveSessionTurnCount);
           markSessionContextDelivered(completedSessionId);
           evaluateAdvisory();
           let storedTools = [];
@@ -5084,20 +5114,61 @@ async function sendMessage(text, opts = {}) {
   const _messageForServer = !nativeShell && _attachedFiles.length
     ? `${message}\n\nFiles:\n${_attachedFiles.map(f => `- ${f.path}`).join('\n')}`
     : message;
+  const chatPayload = {
+    message: _messageForServer, topic, agent, lookback, adhoc, source,
+    ...(flowRoute ? { flow_route: flowRoute, ...(flowRunId ? { flow_run_id: flowRunId } : {}) } : {}),
+    ...(!nativeShell && adhoc && lookback > 0 ? { lookback_via_pins: true } : {}),
+    ...(_includeTopicMemory ? { include_topic_memory: true } : {}),
+    ...(_contextIds.length ? { pinned_ids: _contextIds } : {}),
+    ...(nativeShell && _attachedFiles.length ? { attached_paths: _attachedFiles.map(f => f.path) } : {}),
+  };
 
   try {
     startProcPoll({ hold: true });
+    const transportMode = await realtimeTransportMode;
+    if (transportMode !== 'sse' && realtimeV1) {
+      try {
+        const result = await realtimeV1.start(chatPayload);
+        if (!result.ok) {
+          if (result.msg_id) attachMsgId(result.msg_id);
+          if (result.status === 409 && Array.isArray(result.worktrees) && result.worktrees.length) {
+            freezeThinking();
+            showError(result.error || 'Worktree sync requires attention before starting another turn.');
+            renderWorktreeBlockers(result.worktrees);
+            completionRendered = true;
+            return;
+          }
+          const err = new Error(result.detail || result.error || 'Unable to start response.');
+          err.realtimeCommandResult = true;
+          throw err;
+        }
+        flowRunId = result.flow_run_id || flowRunId;
+        if (opts.onFlowRunId) { opts.onFlowRunId(flowRunId); flowRunIdEmitted = true; }
+        attachMsgId(result.msg_id);
+        _lookbackUnselected.clear();
+        _lastLookbackSelectionKey = '';
+        detachedPolling = true;
+        reconnectPendingItem({
+          id: msgId,
+          topic,
+          agent: resolvedAgent || agent,
+          adhoc,
+          content: '',
+          status: 'pending',
+        }, thinkingBubble);
+        return { flowRunId, msgId };
+      } catch (err) {
+        if (transportMode === 'websocket' || err.realtimeCommandResult) throw err;
+        // A transport failure before command.result may fall back in auto mode.
+        // A command.result is authoritative and must never be submitted again.
+      }
+    } else if (transportMode === 'websocket') {
+      throw new Error('WebSocket transport is unavailable in this browser.');
+    }
     const res = await fetch('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message: _messageForServer, topic, agent, lookback, adhoc, source,
-        ...(flowRoute ? { flow_route: flowRoute, ...(flowRunId ? { flow_run_id: flowRunId } : {}) } : {}),
-        ...(!nativeShell && adhoc && lookback > 0 ? { lookback_via_pins: true } : {}),
-        ...(_includeTopicMemory ? { include_topic_memory: true } : {}),
-        ...(_contextIds.length ? { pinned_ids: _contextIds } : {}),
-        ...(nativeShell && _attachedFiles.length ? { attached_paths: _attachedFiles.map(f => f.path) } : {}),
-      }),
+      body: JSON.stringify(chatPayload),
       // For UI sends, !N is resolved into explicit pinned_ids from the current list.
       signal: controller.signal,
     });
@@ -5307,6 +5378,7 @@ async function sendMessage(text, opts = {}) {
               liveCtxSpan.dataset.sessionTurnCount = String(liveSessionTurnCount);
               if (stats.session_id) liveCtxSpan.dataset.sessionId = stats.session_id;
               if (!adhoc && !suppressChipTurnCount) _updateChipTurnCount(topic, resolvedAgent || null, stats.session_id || null, liveSessionTurnCount);
+              if (chainMarker && !adhoc) updateRouteChainMarkerTurnCount(chainMarker, 'origin', liveSessionTurnCount);
               if (stats.cwd) liveCtxSpan.dataset.cwd = stats.cwd;
               if (resolvedAgent) liveCtxSpan.dataset.agent = resolvedAgent;
               if (stats.session_id && !adhoc && stickyChip && !stickyChip.adhoc) {
@@ -6151,6 +6223,13 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
               thinkingBubble.appendChild(thinkingContent);
               loader = addLoader(thinkingContent);
               messages.appendChild(thinkingBubble);
+              const attachResolveMsgId = value => {
+                const resolveMsgId = parseInt(value || '', 10);
+                if (!Number.isFinite(resolveMsgId) || resolveMsgId <= 0) return;
+                thinkingBubble.dataset.msgId = String(resolveMsgId);
+                reconcilePendingBubble(resolveMsgId, thinkingBubble);
+              };
+              attachResolveMsgId(res.headers.get('X-Squid-Msg-Id'));
               scrollToBottom();
 
               let raw = '';
@@ -6181,12 +6260,31 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
                     const data = field.startsWith(' ') ? field.slice(1) : field;
                     if (eventName === 'resolve_result') {
                       try { resolveResult = JSON.parse(data); } catch {}
-                    } else if (eventName === 'status' || eventName === 'tool') {
+                    } else if (eventName === 'status') {
                       statusBuf += (statusBuf ? '\n' : '') + data;
+                      updatePreview();
+                    } else if (eventName === 'tool') {
+                      let label = data;
+                      try { label = toolLabel(JSON.parse(data)); } catch {}
+                      statusBuf += (statusBuf ? '\n' : '') + label;
+                      updatePreview();
+                    } else if (eventName === 'processing') {
+                      try {
+                        const info = JSON.parse(data);
+                        statusBuf = `#${info.topic || messageTopic} · processing…`;
+                      } catch { statusBuf = 'processing…'; }
+                      updatePreview();
+                    } else if (eventName === 'queued') {
+                      try {
+                        const info = JSON.parse(data);
+                        statusBuf += (statusBuf ? '\n' : '') + `#${info.topic || messageTopic} · queued — position ${info.position}`;
+                      } catch {}
                       updatePreview();
                     } else if (eventName === 'error') {
                       throw new Error(data.trim() || 'Auto-resolve failed');
-                    } else if (eventName === 'done' || eventName === 'meta' || eventName === 'stats' || eventName === 'loading') {
+                    } else if (eventName === 'meta') {
+                      try { attachResolveMsgId(JSON.parse(data).msg_id); } catch {}
+                    } else if (eventName === 'done' || eventName === 'stats' || eventName === 'loading') {
                       // internal turn — no per-event UI beyond the live text below
                     } else {
                       raw += data;
@@ -6568,7 +6666,7 @@ function historyRouteChainMarkerForItem(item, nextItem, prevItem) {
   if (historyItemMatchesRouteOrigin(item, routeChainParts(ownRoute))) {
     return ownRoute;
   }
-  const nextRoute = nextItem?.prompt_source === 'workflow'
+  const nextRoute = (nextItem?.prompt_source === 'workflow' || nextItem?.prompt_source === 'system')
     ? historyRouteChainFromPrompt(nextItem.prompt)
     : '';
   const nextParts = routeChainParts(nextRoute);
@@ -6716,6 +6814,10 @@ function appendHistoryItem(item, container) {
   }
   asstBubble.appendChild(asstContent);
   if (item.timestamp) asstBubble.dataset.ts = item.timestamp;
+  if (item.completed_at || item.timestamp) {
+    asstBubble.dataset.completedAt = item.completed_at || item.timestamp;
+    asstBubble.dataset.orderAt = item.completed_at || item.timestamp;
+  }
   if (item.id) addPinButton(asstBubble, item.id, item.topic || 'default', item.agent || null, item.session_id || null);
   if (item.id) addBookmarkButton(asstBubble, item.id, item.topic || 'default', item.agent || null);
   if (item.id && !nativeShell) addReplyButton(asstBubble, item.topic || 'default', item.agent || null, !!item.adhoc);
@@ -6760,6 +6862,33 @@ function appendHistoryItem(item, container) {
   return asstBubble;
 }
 
+function completedTurnKey(item) {
+  return [String(item.completed_at || item.timestamp || ''), Number(item.id) || 0];
+}
+
+function compareCompletedTurnKeys(left, right) {
+  const timeOrder = left[0].localeCompare(right[0]);
+  return timeOrder || left[1] - right[1];
+}
+
+function insertCompletedHistoryItem(item) {
+  const wasAtBottom = isAtBottom();
+  const previousHeight = messages.scrollHeight;
+  const fragment = document.createDocumentFragment();
+  const bubble = appendHistoryItem(item, fragment);
+  const key = completedTurnKey(item);
+  const anchor = [...messages.querySelectorAll(':scope > .msg.assistant.history-item[data-msg-id]')]
+    .find(existing => compareCompletedTurnKeys([
+      existing.dataset.orderAt || existing.dataset.completedAt || existing.dataset.ts || '',
+      Number(existing.dataset.msgId) || 0,
+    ], key) > 0) || bottomSentinel;
+  const anchorAboveViewport = !!anchor && anchor.getBoundingClientRect().top < messages.getBoundingClientRect().top;
+  messages.insertBefore(fragment, anchor || null);
+  if (wasAtBottom) scrollToBottom();
+  else if (anchorAboveViewport) messages.scrollTop += messages.scrollHeight - previousHeight;
+  return bubble;
+}
+
 function makeWipBubble(item) {
   const bubble = document.createElement('div');
   bubble.className = 'msg assistant msg-thinking history-item';
@@ -6767,6 +6896,7 @@ function makeWipBubble(item) {
   bubble.dataset.topic = item.topic || 'default';
   if (item.agent) bubble.dataset.agent = item.agent;
   if (item.adhoc != null) bubble.dataset.adhoc = item.adhoc ? 'true' : 'false';
+  if (item.timestamp) bubble.dataset.orderAt = item.timestamp;
 
   // Recovered pending rows have no preceding user bubble after a refresh, so
   // give them the same prompt-bearing header as completed history responses.
@@ -6806,6 +6936,23 @@ function makeWipBubble(item) {
   return bubble;
 }
 
+function insertPendingHistoryItem(item) {
+  const wasAtBottom = isAtBottom();
+  const previousHeight = messages.scrollHeight;
+  const bubble = makeWipBubble(item);
+  const key = [String(item.timestamp || ''), Number(item.id) || 0];
+  const anchor = [...messages.querySelectorAll(':scope > .msg.assistant.history-item[data-msg-id]')]
+    .find(existing => compareCompletedTurnKeys([
+      existing.dataset.orderAt || existing.dataset.completedAt || existing.dataset.ts || '',
+      Number(existing.dataset.msgId) || 0,
+    ], key) > 0) || bottomSentinel;
+  const anchorAboveViewport = !!anchor && anchor.getBoundingClientRect().top < messages.getBoundingClientRect().top;
+  messages.insertBefore(bubble, anchor || null);
+  if (wasAtBottom) scrollToBottom();
+  else if (anchorAboveViewport) messages.scrollTop += messages.scrollHeight - previousHeight;
+  return bubble;
+}
+
 async function replacePendingWithStoredItem(item, wipBubble) {
   try {
     const res = await fetch(`/chat/${item.id}/status`);
@@ -6815,19 +6962,19 @@ async function replacePendingWithStoredItem(item, wipBubble) {
     if (data.status === 'error' && !String(data.content || '').trim()) return;
     wipBubble.remove();
     if (!shouldShowNewResponse(data)) return;
-    appendHistoryItem(data, messages);
+    insertCompletedHistoryItem(data);
+    if (data.agent && !data.adhoc) refreshComposerSessionCount(data.topic || item.topic || 'default', data.agent);
     updateInContextMarkers();
     updatePinCount();
     if (pinPanel.classList.contains('open')) renderPinPanel();
     refreshAllRevertButtons();
-    scrollToBottom();
+    if (isAtBottom()) scrollToBottom();
   } catch {}
 }
 
 const _flowRunWatchers = new Set();
 
-// ADR-0040 phase one: one shared socket reattaches running messages. New chat
-// submission stays on SSE until the command path reaches UI parity.
+// ADR-0040: one shared socket carries migrated chat commands and watches.
 const realtimeV1 = (() => {
   if (!window.WebSocket) return null;
   const clientIdKey = 'squid-realtime-v1-client-id';
@@ -6841,12 +6988,33 @@ const realtimeV1 = (() => {
   let reconnectTimer = null;
   let reconnectDelay = 500;
   let needsSnapshot = true;
+  let subscribed = false;
   let cursor = Number(localStorage.getItem('squid-realtime-v1-cursor') || 0);
+  let globalEnabled = false;
+  let onDiscover = null;
   const watches = new Map();
+  const commands = new Map();
+  const commandTimeoutMs = 5000;
 
-  const scopes = () => [...new Map([...watches.values()].map(watch => [
-    `${watch.topic}\0${watch.agent || ''}`,
-    { topic: watch.topic, ...(watch.agent ? { agent: watch.agent } : {}) },
+  const rejectCommand = (requestId, message, authoritative = false) => {
+    const command = commands.get(requestId);
+    if (!command) return;
+    commands.delete(requestId);
+    clearTimeout(command.timeout);
+    const error = new Error(message);
+    if (authoritative) error.realtimeCommandResult = true;
+    command.reject(error);
+  };
+
+  const scopes = () => [...new Map([
+    ...(globalEnabled ? [['__global_lifecycle__', null]] : []),
+    ...[...watches.values()].map(watch => [watch.topic, watch.agent]),
+    ...[...commands.values()].map(command => [command.topic, command.agent]),
+  ].map(([topic, agent]) => [
+    `${topic}\0${agent || ''}`,
+    topic === '__global_lifecycle__'
+      ? { lifecycle: 'global' }
+      : { topic, ...(agent ? { agent } : {}) },
   ])).values()];
 
   const subscribe = (freshScope = false) => {
@@ -6858,45 +7026,106 @@ const realtimeV1 = (() => {
     }));
   };
 
-  const dispatchSnapshot = frame => {
+  const markApplied = frame => {
     cursor = Math.max(cursor, Number(frame.event_id || frame.payload?.cursor || 0));
-    for (const conversation of frame.payload?.conversations || []) {
-      for (const message of conversation.messages || []) {
-        const watch = watches.get(Number(message.id));
-        if (watch) watch.onSnapshot(message);
-      }
-    }
-  };
-
-  const dispatchEvent = frame => {
-    cursor = Math.max(cursor, Number(frame.event_id || 0));
     localStorage.setItem('squid-realtime-v1-cursor', String(cursor));
-    const watch = watches.get(Number(frame.msg_id));
-    if (watch) watch.onEvent(frame);
-    if (socket?.readyState === WebSocket.OPEN && frame.event_id) {
+    if (socket?.readyState === WebSocket.OPEN && cursor) {
       socket.send(JSON.stringify({ v: 1, type: 'ack', payload: { event_id: cursor } }));
     }
   };
 
+  const dispatchSnapshot = frame => {
+    for (const conversation of frame.payload?.conversations || []) {
+      for (const message of conversation.messages || []) {
+        if (message.role === 'assistant') onDiscover?.(message);
+        const watch = watches.get(Number(message.id));
+        if (watch) {
+          watch.runSeq = Math.max(watch.runSeq, Number(message.run_seq || 0));
+          watch.onSnapshot(message);
+        }
+      }
+    }
+    markApplied(frame);
+  };
+
+  const dispatchEvent = frame => {
+    if (frame.type === 'message.changed' && frame.payload?.role === 'assistant') {
+      onDiscover?.({ ...frame.payload, id: frame.msg_id, ...frame.scope });
+      if (frame.payload.status && frame.payload.status !== 'pending' && frame.scope?.agent) {
+        refreshComposerSessionCount(frame.scope.topic || 'default', frame.scope.agent);
+      }
+    } else if (frame.type?.startsWith('chat.') && frame.msg_id != null && !watches.has(Number(frame.msg_id))) {
+      onDiscover?.({ id: frame.msg_id, status: 'pending', ...frame.scope });
+    }
+    const watch = watches.get(Number(frame.msg_id));
+    if (watch) {
+      const hasRunSeq = frame.run_seq != null || frame.payload?.run_seq != null;
+      const runSeq = Number(frame.run_seq ?? frame.payload?.run_seq);
+      if (frame.type !== 'chat.text' || !hasRunSeq || runSeq > watch.runSeq) {
+        watch.onEvent(frame);
+        if (frame.type === 'chat.text' && hasRunSeq) watch.runSeq = runSeq;
+      }
+    }
+    markApplied(frame);
+  };
+
   const connect = () => {
-    if (!watches.size || socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) return;
+    if ((!globalEnabled && !watches.size && !commands.size) || socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) return;
     const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    socket = new WebSocket(`${scheme}//${location.host}/ws/v1`);
-    socket.onopen = () => { reconnectDelay = 500; };
-    socket.onmessage = event => {
+    const connectingSocket = new WebSocket(`${scheme}//${location.host}/ws/v1`);
+    socket = connectingSocket;
+    connectingSocket.onopen = () => {
+      reconnectDelay = 500;
+      for (const watch of watches.values()) watch.onAvailable?.();
+    };
+    connectingSocket.onmessage = event => {
+      if (socket !== connectingSocket) return;
       let frame;
       try { frame = JSON.parse(event.data); } catch { return; }
       if (frame.type === 'hello') {
         subscribe(needsSnapshot);
         needsSnapshot = false;
       }
+      else if (frame.type === 'subscribed') {
+        subscribed = true;
+        for (const watch of watches.values()) watch.onAvailable?.();
+        for (const command of commands.values()) {
+          if (!command.sent) {
+            command.sent = true;
+            command.everSent = true;
+            socket.send(JSON.stringify(command.frame));
+          }
+        }
+      }
+      else if (frame.type === 'command.result' && commands.has(frame.request_id)) {
+        const command = commands.get(frame.request_id);
+        commands.delete(frame.request_id);
+        clearTimeout(command.timeout);
+        command.resolve(frame.payload || {});
+      }
+      else if (frame.type === 'error' && frame.request_id && commands.has(frame.request_id)) {
+        rejectCommand(frame.request_id, frame.payload?.code || 'WebSocket command failed', true);
+      }
       else if (frame.type === 'snapshot') dispatchSnapshot(frame);
       else if (frame.event_id) dispatchEvent(frame);
       else if (frame.type === 'ping') socket.send(JSON.stringify({ v: 1, type: 'pong', payload: {} }));
     };
-    socket.onclose = () => {
+    connectingSocket.onclose = () => {
+      if (socket !== connectingSocket) return;
       socket = null;
-      if (!watches.size) return;
+      const unavailable = !subscribed;
+      subscribed = false;
+      if (unavailable) {
+        for (const watch of [...watches.values()]) watch.onUnavailable?.();
+        for (const [requestId, command] of [...commands]) {
+          if (!command.everSent) {
+            rejectCommand(requestId, 'WebSocket connection failed');
+          }
+        }
+      } else {
+        for (const command of commands.values()) command.sent = false;
+      }
+      if (!globalEnabled && !watches.size && !commands.size) return;
       clearTimeout(reconnectTimer);
       reconnectTimer = setTimeout(connect, reconnectDelay + Math.random() * 250);
       reconnectDelay = Math.min(reconnectDelay * 2, 10000);
@@ -6904,9 +7133,65 @@ const realtimeV1 = (() => {
   };
 
   return {
+    resume() {
+      if (!globalEnabled && !watches.size && !commands.size) return;
+      needsSnapshot = true;
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+      if (socket) {
+        const staleSocket = socket;
+        socket = null;
+        subscribed = false;
+        staleSocket.close(1000, 'foreground resume');
+      }
+      connect();
+    },
+    enableGlobal(discover) {
+      globalEnabled = true;
+      onDiscover = discover;
+      needsSnapshot = true;
+      connect();
+      if (socket?.readyState === WebSocket.OPEN) {
+        subscribe(true);
+        needsSnapshot = false;
+      }
+    },
+    start(payload) {
+      const requestId = window.crypto?.randomUUID?.()
+        || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+      const promise = new Promise((resolve, reject) => {
+        const command = {
+          topic: payload.topic,
+          agent: payload.agent || null,
+          frame: { v: 1, type: 'chat.start', request_id: requestId, payload },
+          sent: false,
+          everSent: false,
+          resolve,
+          reject,
+          timeout: null,
+        };
+        command.timeout = setTimeout(() => {
+          rejectCommand(
+            requestId,
+            command.everSent ? 'WebSocket command timed out after submission.' : 'WebSocket connection timed out.',
+            command.everSent,
+          );
+        }, commandTimeoutMs);
+        commands.set(requestId, command);
+      });
+      needsSnapshot = true;
+      connect();
+      if (socket?.readyState === WebSocket.OPEN) subscribe(true);
+      return promise;
+    },
     watch(item, callbacks) {
-      const hadScope = [...watches.values()].some(watch => watch.topic === item.topic && watch.agent === item.agent);
-      watches.set(Number(item.id), { topic: item.topic, agent: item.agent || null, ...callbacks });
+      const hadScope = globalEnabled || [...watches.values()].some(watch => watch.topic === item.topic && watch.agent === item.agent);
+      watches.set(Number(item.id), {
+        topic: item.topic,
+        agent: item.agent || null,
+        runSeq: item.run_seq == null ? -1 : Number(item.run_seq),
+        ...callbacks,
+      });
       if (!hadScope) needsSnapshot = true;
       connect();
       if (socket?.readyState === WebSocket.OPEN) {
@@ -6915,11 +7200,46 @@ const realtimeV1 = (() => {
       }
       return () => {
         watches.delete(Number(item.id));
-        if (!watches.size && socket) socket.close(1000, 'no subscriptions');
+        if (!globalEnabled && !watches.size && socket) socket.close(1000, 'no subscriptions');
       };
     },
   };
 })();
+
+const realtimeDiscoveries = new Set();
+
+async function discoverRealtimeTurn(message) {
+  const msgId = Number(message.id);
+  if (!Number.isFinite(msgId) || messages.querySelector(`[data-msg-id="${msgId}"]`) || realtimeDiscoveries.has(msgId)) return;
+  realtimeDiscoveries.add(msgId);
+  try {
+    let item = null;
+    for (const delay of [0, 150, 500]) {
+      if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+      if (messages.querySelector(`[data-msg-id="${msgId}"]`)) return;
+      try {
+        const res = await fetch(`/chat/${msgId}/status`);
+        if (res.ok) {
+          item = await res.json();
+          break;
+        }
+      } catch {}
+    }
+    if (!item) return;
+    if (messages.querySelector(`[data-msg-id="${msgId}"]`) || !shouldShowNewResponse(item)) return;
+    if (item.status === 'pending') {
+      const bubble = insertPendingHistoryItem(item);
+      reconnectPendingItem(item, bubble);
+    } else if (item.status !== 'error' || String(item.content || '').trim()) {
+      insertCompletedHistoryItem(item);
+      if (item.agent && !item.adhoc) refreshComposerSessionCount(item.topic || 'default', item.agent);
+    }
+    if (isAtBottom()) scrollToBottom();
+  } catch {
+  } finally {
+    realtimeDiscoveries.delete(msgId);
+  }
+}
 
 async function attachFlowStep(msgId) {
   if (messages.querySelector(`[data-msg-id="${msgId}"]`)) return;
@@ -6979,23 +7299,42 @@ function watchFlowRun(flowRunId, afterId, route = null) {
   tick();
 }
 
-function reconnectPendingItem(item, wipBubble) {
-  if (!window.EventSource && !realtimeV1) {
+async function reconnectPendingItem(item, wipBubble, { forceSse = false } = {}) {
+  const transportMode = forceSse ? 'sse' : await realtimeTransportMode;
+  if (!wipBubble.isConnected) return;
+  const useWebSocket = transportMode !== 'sse' && !!realtimeV1;
+  if (!window.EventSource && !useWebSocket) {
+    if (transportMode === 'websocket') {
+      const live = wipBubble.querySelector('.thinking-live');
+      if (live) live.textContent = 'WebSocket transport is unavailable in this browser.';
+      return;
+    }
     pollPendingItem(item, wipBubble);
     return;
   }
 
   const live = wipBubble.querySelector('.thinking-live');
-  const loader = live?.querySelector('.loader');
+  let loader = live?.querySelector('.loader');
   let raw = '';
   let statusBuf = '';
   let closed = false;
+  let waitingForUpdates = false;
 
   const updatePreview = () => {
     if (!live) return;
-    if (loader?.parentNode) loader.remove();
     const text = (statusBuf ? statusBuf.trimEnd() + (raw ? '\n\n' : '') : '') + raw;
-    live.textContent = text.trim();
+    if (text.trim()) {
+      waitingForUpdates = false;
+      live.textContent = text.trim();
+      loader = null;
+    } else if (waitingForUpdates) {
+      live.textContent = '';
+      loader = addLoader(live);
+      const waiting = document.createElement('span');
+      waiting.className = 'thinking-waiting';
+      waiting.textContent = 'Waiting for new updates…';
+      live.appendChild(waiting);
+    }
     live.scrollTop = live.scrollHeight;
     updateThinkingHeightButton(wipBubble);
   };
@@ -7006,10 +7345,14 @@ function reconnectPendingItem(item, wipBubble) {
     updateThinkingHeightButton(wipBubble);
   }
 
-  if (realtimeV1) {
-    const stop = realtimeV1.watch(item, {
+  if (useWebSocket) {
+    let stop = () => {};
+    let finishing = false;
+    let unavailableHandled = false;
+    stop = realtimeV1.watch(item, {
       onSnapshot(message) {
         raw = message.content || '';
+        waitingForUpdates = !raw && !statusBuf;
         updatePreview();
         if (message.status !== 'pending') finish();
       },
@@ -7026,8 +7369,29 @@ function reconnectPendingItem(item, wipBubble) {
         if (frame.type === 'chat.done' || frame.type === 'chat.error' || frame.type === 'message.changed' && frame.payload.status !== 'pending') finish();
         else updatePreview();
       },
+      onUnavailable() {
+        if (unavailableHandled) return;
+        unavailableHandled = true;
+        if (transportMode === 'auto' && window.EventSource) {
+          stop();
+          pendingPollTimers.delete(wipBubble);
+          reconnectPendingItem(item, wipBubble, { forceSse: true });
+        } else {
+          statusBuf = 'WebSocket connection failed; retrying…';
+          updatePreview();
+        }
+      },
+      onAvailable() {
+        unavailableHandled = false;
+        if (statusBuf === 'WebSocket connection failed; retrying…') {
+          statusBuf = '';
+          // Replace the connection error already rendered in the live node;
+          // without a new event updatePreview() would otherwise leave it there.
+          waitingForUpdates = true;
+          updatePreview();
+        }
+      },
     });
-    let finishing = false;
     async function finish() {
       if (finishing) return;
       finishing = true;
@@ -7227,14 +7591,23 @@ function makeUserBubble(text, topic, agent, backendFallback = null, adhoc = fals
   return div;
 }
 
-function appendRouteChainTurnCount(parent, count) {
+function appendRouteChainTurnCount(parent, count, step) {
   if (count == null || count < 0) return;
   const countSpan = document.createElement('span');
   countSpan.className = 'chip-turn-count route-chain-turn-count';
+  countSpan.dataset.routeStep = step;
   countSpan.textContent = `·${count}t`;
   countSpan.classList.toggle('mid', count > 10 && count <= 20);
   countSpan.classList.toggle('high', count > 20);
   parent.appendChild(countSpan);
+}
+
+function updateRouteChainMarkerTurnCount(marker, step, count) {
+  const countSpan = marker?.querySelector(`.route-chain-turn-count[data-route-step="${step}"]`);
+  if (!countSpan || count == null || count < 0) return;
+  countSpan.textContent = `·${count}t`;
+  countSpan.classList.toggle('mid', count > 10 && count <= 20);
+  countSpan.classList.toggle('high', count > 20);
 }
 
 function makeRouteChainMarker(route, opts = {}) {
@@ -7272,7 +7645,7 @@ function makeRouteChainMarker(route, opts = {}) {
     setAgentSlugColor(freshSpan, originAgent);
     div.appendChild(freshSpan);
   }
-  appendRouteChainTurnCount(div, opts.turnCounts?.origin);
+  appendRouteChainTurnCount(div, opts.turnCounts?.origin, 'origin');
 
   const arrowSpan = document.createElement('span');
   arrowSpan.className = 'route-chain-arrow';
@@ -7299,7 +7672,7 @@ function makeRouteChainMarker(route, opts = {}) {
     setAgentSlugColor(freshSpan, targetAgent);
     div.appendChild(freshSpan);
   }
-  appendRouteChainTurnCount(div, opts.turnCounts?.target);
+  appendRouteChainTurnCount(div, opts.turnCounts?.target, 'target');
   return div;
 }
 
@@ -14010,16 +14383,19 @@ function _getSessionMeta(topic, agent) {
   }
   if (_sessionLookupCache[key]) return _sessionLookupCache[key];
   _sessionLookupCache[key] = { session_id: null, cwd: null, loading: true };
+  const sessionIdAtRequest = _sessionIds[key] || null;
   fetch(`/topics/${encodeURIComponent(topic)}/session?agent=${encodeURIComponent(agent)}`)
     .then(r => r.ok ? r.json() : null)
     .then(data => {
       if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+      const currentSessionId = _sessionIds[key] || null;
+      if (currentSessionId !== sessionIdAtRequest && data.session_id !== currentSessionId) return;
       _sessionLookupCache[key] = { ...(data || { session_id: null, cwd: null }), loading: false };
+      if (data?.session_id) _sessionIds[`${topic}@${agent}`] = data.session_id;
       if (data.session_turn_count != null) {
         _setKnownSessionTurnCount(topic, agent, data.session_turn_count, data.session_id || null);
       }
       if (data?.session_id) {
-        _sessionIds[`${topic}@${agent}`] = data.session_id;
         _rememberSessionMemoryRevision(topic, agent, data);
         if (data.injected_ids?.length) {
           const inj = getInjectedInto();
@@ -14041,6 +14417,29 @@ function _getSessionMeta(topic, agent) {
   return _sessionLookupCache[key];
 }
 
+const _composerSessionRefreshSeq = {};
+
+async function refreshComposerSessionCount(topic, agent) {
+  if (!agent) return;
+  const key = `${topic}@${agent}`;
+  const seq = (_composerSessionRefreshSeq[key] || 0) + 1;
+  _composerSessionRefreshSeq[key] = seq;
+  try {
+    const res = await fetch(`/topics/${encodeURIComponent(topic)}/session?agent=${encodeURIComponent(agent)}`);
+    if (!res.ok || _composerSessionRefreshSeq[key] !== seq) return;
+    const data = await res.json();
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+    _sessionLookupCache[key] = { ...data, loading: false };
+    if (data.session_id) _sessionIds[key] = data.session_id;
+    else delete _sessionIds[key];
+    _setKnownSessionTurnCount(topic, agent, data.session_turn_count ?? 0, data.session_id || null);
+    if (stickyChip && !stickyChip.adhoc && !stickyChip.route
+        && stickyChip.topic === topic && stickyChip.agent === agent) {
+      _renderChipTurnCount(data.session_turn_count ?? 0, { allowZero: true });
+    }
+  } catch {}
+}
+
 async function refreshRouteTurnCounts(route, opts = {}) {
   const targets = _routePersistentSessionTargets(route);
   if (!targets.length) return;
@@ -14052,19 +14451,24 @@ async function refreshRouteTurnCounts(route, opts = {}) {
     const now = Date.now();
     if (force && now - (_routeTurnCountRefreshAt[key] || 0) < minAgeMs) return;
     _routeTurnCountRefreshAt[key] = now;
+    const sessionIdAtRequest = _sessionIds[key] || null;
     try {
       const res = await fetch(`/topics/${encodeURIComponent(target.topic)}/session?agent=${encodeURIComponent(target.agent)}`);
       if (!res.ok) return;
       const data = await res.json();
       if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+      const currentSessionId = _sessionIds[key] || null;
+      if (currentSessionId !== sessionIdAtRequest && data.session_id !== currentSessionId) return;
       _sessionLookupCache[key] = { ...(data || { session_id: null, cwd: null }), loading: false };
       if (data?.session_id) {
         _sessionIds[key] = data.session_id;
+        if (data.session_turn_count != null
+            && !_setKnownSessionTurnCount(target.topic, target.agent, data.session_turn_count, data.session_id)) return;
         _rememberSessionMemoryRevision(target.topic, target.agent, data);
       } else {
         delete _sessionIds[key];
       }
-      if (data && data.session_turn_count != null) {
+      if (data && data.session_turn_count != null && !data.session_id) {
         _setKnownSessionTurnCount(target.topic, target.agent, data.session_turn_count, data.session_id || null);
       }
     } catch {}
@@ -16647,6 +17051,9 @@ updateComposerActionTitles();
 updateActiveQuotaGauge();
 initMobileViewNavigation();
 initPullToRefresh();
+Promise.all([realtimeTransportMode, initialHistoryReady]).then(([mode]) => {
+  if (mode !== 'sse') realtimeV1?.enableGlobal(discoverRealtimeTurn);
+}).catch(() => {});
 // Discover processes that survived a refresh; polling stops again when idle.
 startProcPoll();
 showBootBanner();
@@ -16685,6 +17092,7 @@ function recoverForegroundState() {
     if (activeQuotaBackend) fetchQuotaForBackend(activeQuotaBackend);
   }).catch(() => {});
   if (_activePollImmediate) _activePollImmediate();
+  realtimeV1?.resume();
   recoverPendingBubbles();
   startProcPoll();
   if (stickyChip?.route && !stickyChip.broadcastAgents) {

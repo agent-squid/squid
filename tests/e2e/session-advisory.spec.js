@@ -21,6 +21,7 @@ function statsEvent(turnCount) {
 }
 
 async function mockBackend(page) {
+  await page.route('**/config/realtime', r => r.fulfill({ json: { transport: 'sse' } }));
   await page.route('**/health',          r => r.fulfill({ json: { status: 'ok', boot_time: new Date().toISOString() } }));
   await page.route('**/history**',       r => r.fulfill({ json: { items: [], has_more: false } }));
   await page.route('**/quota**',         r => r.fulfill({ json: {} }));
@@ -58,6 +59,34 @@ test.describe('session advisory', () => {
     await expect(page.locator('#session-advisory')).toBeHidden();
   });
 
+  test('stale session lookup cannot overwrite a newer turn count', async ({ page }) => {
+    await page.evaluate(() => {
+      _sessionIds['test@claude'] = 'test-sid';
+      _updateChipTurnCount('test', 'claude', 'test-sid', 12);
+      _setKnownSessionTurnCount('test', 'claude', 11, 'test-sid');
+    });
+    await expect(page.locator('#topic-chip .chip-turn-count')).toHaveText('·12t');
+    expect(await page.evaluate(() => _knownSessionTurnCount('test', 'claude'))).toBe(12);
+  });
+
+  test('route selection refreshes a cached zero after another device creates the session', async ({ page }) => {
+    let turnCount = 0;
+    let requests = 0;
+    await page.route('**/topics/test/session?agent=claude', route => {
+      requests++;
+      return route.fulfill({ json: turnCount
+        ? { session_id: 'shared-session', session_turn_count: turnCount, cwd: null }
+        : { session_id: null, session_turn_count: 0, cwd: null } });
+    });
+
+    await page.evaluate(() => setTopicChip('test', 'claude', false));
+    await expect(page.locator('#topic-chip .chip-turn-count')).toHaveText('·0t');
+    turnCount = 1;
+    await page.evaluate(() => setTopicChip('test', 'claude', false));
+    await expect(page.locator('#topic-chip .chip-turn-count')).toHaveText('·1t');
+    expect(requests).toBeGreaterThanOrEqual(2);
+  });
+
   test('shows at 10 turns', async ({ page }) => {
     await sendTurns(page, 10);
     await expect(page.locator('#session-advisory')).toBeVisible();
@@ -77,7 +106,8 @@ test.describe('session advisory', () => {
   });
 
   test('hidden for adhoc route', async ({ page }) => {
-    // switch to adhoc
+    // Route replacement is explicit while a sticky chip is active.
+    await page.evaluate(() => clearTopicChip());
     await page.fill('#input', '#test@claude! hello');
     let fulfill;
     await page.route('**/chat', route => { fulfill = body => route.fulfill({ status: 200, headers: SSE_HEADERS, body }); });

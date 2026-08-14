@@ -260,7 +260,10 @@ window synchronized.
 SSE, WebSocket events, snapshots, and HTTP history pages feed one normalized
 turn model. Transport code must not maintain a separate visual representation
 or directly reset transcript navigation. The client maintains application
-state independently from DOM state:
+state independently from DOM state. The concrete client-side store and
+idempotent reconciler that implement these invariants as one architecture,
+rather than per-call-site discipline, are specified in
+[ADR-0041](0041-normalized-client-transcript-store-and-reconciler.md).
 
 - messages are keyed by globally unique `msg_id`;
 - the user prompt and assistant response form one turn group through

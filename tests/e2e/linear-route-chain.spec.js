@@ -1,5 +1,11 @@
 const { test, expect } = require('@playwright/test');
 
+test.beforeEach(async ({ page }) => {
+  // These are compatibility-path and Flow-polling tests. Keep the real global
+  // WebSocket lifecycle from becoming a second, unmocked transcript producer.
+  await page.route('**/config/realtime', r => r.fulfill({ json: { transport: 'sse' } }));
+});
+
 test('composer sends only the origin turn for a one-way route chain; server-dispatched target renders when discovered', async ({ page }) => {
   // Route chain continuation (target/return handoffs) now runs server-side
   // (agent/flow.py) so it survives a refresh — the browser never POSTs those
@@ -308,7 +314,7 @@ test('composer sends simple one-way route chain with persistent target session',
 
   await expect(page.locator('.route-chain-marker')).toContainText('#squid@codex');
   await expect(page.locator('.route-chain-marker')).toContainText('@revucla');
-  await expect(page.locator('.route-chain-marker .route-chain-turn-count')).toHaveText(['·7t', '·18t']);
+  await expect(page.locator('.route-chain-marker .route-chain-turn-count')).toHaveText(['·8t', '·18t']);
   await expect(page.locator('.route-chain-marker')).toHaveCount(1);
 
   // Only the origin is ever POSTed — the target handoff (persistent lane) is
@@ -365,7 +371,7 @@ test('route chain composer suppresses single-session clear advisory', async ({ p
 
   await expect(page.locator('#topic-chip')).toHaveClass(/route-chain/);
   await expect(page.locator('#topic-chip .chip-turn-count')).toHaveCount(0);
-  await expect(page.locator('.route-chain-marker .route-chain-turn-count')).toContainText(['·17t']);
+  await expect(page.locator('.route-chain-marker .route-chain-turn-count')).toContainText(['·18t']);
   await expect(page.locator('#session-advisory')).toBeHidden();
 });
 

@@ -179,6 +179,7 @@ class QueueItem:
     backend: Optional[str] = None
     cwd: Optional[str] = None
     source_cwd: Optional[str] = None
+    configured_cwd: Optional[str] = None
     code_roots: Optional[list[str]] = None
     timeout: Optional[int] = None
     resume_session_id: Optional[str] = None
@@ -192,6 +193,7 @@ class QueueItem:
     shell_pinned_contents: Optional[list[str]] = None
     shell_attached_paths: Optional[list[str]] = None
     shell_topic_memory: Optional[str] = None
+    refresh_session_at_start: bool = False
     out_q: asyncio.Queue = field(default_factory=asyncio.Queue)
 
 
@@ -406,6 +408,8 @@ class TopicWorker:
         from .stats_db import (
             get_completed_run_status_raw,
             get_completed_run_text,
+            get_topic_session,
+            rebind_pending_assistant_session,
             insert_run_event,
             _utc_now_iso,
             update_assistant_message,
@@ -435,6 +439,31 @@ class TopicWorker:
             await item.out_q.put({"_error": str(exc)})
             await item.out_q.put(None)
             return
+
+        # Session-dependent state is authoritative when this FIFO item starts,
+        # not when its HTTP request entered the queue. A prior queued turn may
+        # have established or replaced the session (and its cwd) meanwhile.
+        if item.refresh_session_at_start and item.agent and not item.adhoc:
+            item.resume_session_id = None
+            item.cwd = item.configured_cwd
+            item.source_cwd = item.configured_cwd
+            stored = get_topic_session(item.topic, item.agent)
+            if stored:
+                stored_fingerprint = stored.get("runtime_fingerprint")
+                if stored_fingerprint and stored_fingerprint != resolved.fingerprint:
+                    clear_topic_session(item.topic, item.agent)
+                else:
+                    item.cwd = stored["cwd"]
+                    item.source_cwd = stored["cwd"]
+                    if not item.native_shell:
+                        item.resume_session_id = stored["session_id"]
+            if not item.native_shell and item.msg_id is not None:
+                if not rebind_pending_assistant_session(item.msg_id, item.resume_session_id):
+                    # The row was cancelled or otherwise finalized after it
+                    # left the FIFO. Do not start a runner for a dead turn.
+                    await item.out_q.put({"_error": "Cancelled before start"})
+                    await item.out_q.put(None)
+                    return
 
         if not resolved.provider.parallel and item.model:
             await self._sync_local_model(resolved.provider, item.model, item.out_q, msg_id=item.msg_id)
@@ -843,6 +872,7 @@ class TopicDispatcher:
         agent: Optional[str] = None,
         cwd: Optional[str] = None,
         source_cwd: Optional[str] = None,
+        configured_cwd: Optional[str] = None,
         response_timeout: Optional[int] = None,
         resume_session_id: Optional[str] = None,
         adhoc: bool = False,
@@ -907,6 +937,7 @@ class TopicDispatcher:
             prompt=prompt, display_prompt=display_prompt, context_history=context_history,
             harness=resolved_harness, provider=resolved_provider, backend=backend,
             model=model, cwd=cwd, source_cwd=source_cwd,
+            configured_cwd=configured_cwd,
             code_roots=code_roots, timeout=response_timeout,
             resume_session_id=resume_session_id,
             adhoc=adhoc, lookback=lookback, msg_id=msg_id,
@@ -916,6 +947,7 @@ class TopicDispatcher:
             shell_pinned_contents=shell_pinned_contents,
             shell_attached_paths=shell_attached_paths,
             shell_topic_memory=shell_topic_memory,
+            refresh_session_at_start=True,
         )
         seq = await worker.enqueue(item)
         position = worker.position_of(seq)

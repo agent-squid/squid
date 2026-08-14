@@ -713,6 +713,7 @@ async def _dispatch_next_step(flow_run_id: str, step: dict) -> None:
         code_roots=prepared["code_roots"],
         display_prompt=prepared["display_prompt"],
         source_cwd=prepared["source_cwd"],
+        configured_cwd=prepared["configured_cwd"],
         harness=prepared["harness"],
         provider=prepared["provider"],
     ):

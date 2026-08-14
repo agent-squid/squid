@@ -22,6 +22,9 @@ const DONE  = { event: 'done',  data: '' };
 // ── mock setup ────────────────────────────────────────────────────────────────
 
 async function mockBackend(page) {
+  // Compatibility-path tests must not also attach the real global WebSocket
+  // lifecycle. Dedicated WebSocket tests override this route explicitly.
+  await page.route('**/config/realtime', r => r.fulfill({ json: { transport: 'sse' } }));
   await page.route('**/health',        r => r.fulfill({ json: { status: 'ok', boot_time: new Date().toISOString() } }));
   await page.route('**/history**',     r => r.fulfill({ json: { items: [], has_more: false } }));
   await page.route('**/quota**',       r => r.fulfill({ json: {} }));
@@ -70,6 +73,227 @@ const RESPONSE  = '.msg.assistant:not(.msg-thinking)';
 const MSG_ERROR = '.msg-error';
 
 // ── tests ─────────────────────────────────────────────────────────────────────
+
+test('websocket transport starts and completes a new chat without POST /chat', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__chatStartFrame = null;
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        this.readyState = MockWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+        } else if (frame.type === 'chat.start') {
+          window.__chatStartFrame = frame;
+          setTimeout(() => {
+            this.receive({ v: 1, type: 'command.result', request_id: frame.request_id,
+              payload: { ok: true, msg_id: 83, flow_run_id: null } });
+            setTimeout(() => {
+              this.receive({ v: 1, type: 'chat.text', event_id: 1, msg_id: 83, run_seq: 0,
+                payload: { text: 'WebSocket response' } });
+              this.receive({ v: 1, type: 'chat.done', event_id: 2, msg_id: 83, run_seq: 1, payload: {} });
+            });
+          });
+        }
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = MockWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+  let httpChatRequests = 0;
+  await page.route('**/chat', route => {
+    httpChatRequests++;
+    return route.abort();
+  });
+  await page.route('**/chat/83/status', route => route.fulfill({ json: {
+    id: 83,
+    role: 'assistant',
+    reply_to: 82,
+    topic: 'default',
+    agent: 'claude',
+    backend: 'claude',
+    adhoc: false,
+    status: 'done',
+    prompt: 'hello over ws',
+    content: 'WebSocket response',
+    completed_at: new Date().toISOString(),
+  }}));
+
+  await page.goto('/');
+  await sendMsg(page, 'hello over ws');
+
+  await expect(page.locator(RESPONSE).filter({ hasText: 'WebSocket response' })).toBeVisible();
+  expect(httpChatRequests).toBe(0);
+  expect(await page.evaluate(() => ({
+    type: window.__chatStartFrame?.type,
+    hasRequestId: !!window.__chatStartFrame?.request_id,
+    message: window.__chatStartFrame?.payload?.message,
+  }))).toEqual({ type: 'chat.start', hasRequestId: true, message: 'hello over ws' });
+});
+
+test('auto transport falls back to POST /chat when websocket fails before subscribe', async ({ page }) => {
+  await page.addInitScript(() => {
+    class FailedWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        this.readyState = FailedWebSocket.CONNECTING;
+        setTimeout(() => { this.readyState = 3; this.onclose?.(); });
+      }
+      close() {}
+    }
+    window.WebSocket = FailedWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'auto' } }));
+  let httpChatRequests = 0;
+  await page.route('**/chat', route => {
+    httpChatRequests++;
+    return route.fulfill({ status: 200, headers: SSE_HEADERS,
+      body: sse(META, { data: 'SSE fallback response' }, DONE) });
+  });
+
+  await page.goto('/');
+  await sendMsg(page, 'fallback safely');
+
+  await expect(page.locator(RESPONSE)).toContainText('SSE fallback response');
+  expect(httpChatRequests).toBe(1);
+});
+
+test('auto transport falls back when websocket opens but never subscribes', async ({ page }) => {
+  test.setTimeout(15_000);
+  await page.addInitScript(() => {
+    class StalledWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        this.readyState = StalledWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = StalledWebSocket.OPEN;
+          this.onopen?.();
+        });
+      }
+      send() {}
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = StalledWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'auto' } }));
+  let httpChatRequests = 0;
+  await page.route('**/chat', route => {
+    httpChatRequests++;
+    return route.fulfill({ status: 200, headers: SSE_HEADERS,
+      body: sse(META, { data: 'SSE timeout fallback' }, DONE) });
+  });
+
+  await page.goto('/');
+  await sendMsg(page, 'fallback after timeout');
+
+  await expect(page.locator(RESPONSE)).toContainText('SSE timeout fallback', { timeout: 10_000 });
+  expect(httpChatRequests).toBe(1);
+});
+
+test('auto transport does not resubmit a command that times out after send', async ({ page }) => {
+  test.setTimeout(15_000);
+  await page.addInitScript(() => {
+    class StalledResultWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        this.readyState = StalledResultWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = StalledResultWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+        }
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = StalledResultWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'auto' } }));
+  let httpChatRequests = 0;
+  await page.route('**/chat', route => {
+    httpChatRequests++;
+    return route.abort();
+  });
+
+  await page.goto('/');
+  await sendMsg(page, 'do not duplicate after timeout');
+
+  await expect(page.locator(MSG_ERROR)).toContainText('timed out after submission', { timeout: 10_000 });
+  expect(httpChatRequests).toBe(0);
+});
+
+test('auto transport does not resubmit a rejected websocket command over HTTP', async ({ page }) => {
+  await page.addInitScript(() => {
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        this.readyState = MockWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+        } else if (frame.type === 'chat.start') {
+          setTimeout(() => this.receive({
+            v: 1, type: 'command.result', request_id: frame.request_id,
+            payload: {
+              ok: false, status: 409, msg_id: 84,
+              error: 'worktree sync requires attention',
+              worktrees: [{ repo_root: '/repo', worktree_path: '/worktree', status: 'pending' }],
+            },
+          }));
+        }
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = MockWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'auto' } }));
+  let httpChatRequests = 0;
+  await page.route('**/chat', route => {
+    httpChatRequests++;
+    return route.abort();
+  });
+
+  await page.goto('/');
+  await sendMsg(page, 'blocked once');
+
+  await expect(page.locator('.msg-error')).toContainText('worktree sync requires attention');
+  await expect(page.locator('.tool-block')).toHaveCount(1);
+  expect(httpChatRequests).toBe(0);
+});
 
 test.describe('response bubble', () => {
   test.beforeEach(async ({ page }) => {
@@ -875,6 +1099,52 @@ test.describe('response bubble', () => {
     expect(discardBody).toEqual({ topic: 'default', repo: '/tmp/repo' });
   });
 
+  test('auto-resolve reconciles its globally discovered bubble by message id', async ({ page }) => {
+    await page.route('**/chat/1/diff-revert-status**', route => route.fulfill({ json: {} }));
+    await page.route('**/chat/1/worktree/auto-resolve', async route => {
+      await page.evaluate(() => {
+        const recovered = makeWipBubble({ id: 91, topic: 'default', agent: 'claude', adhoc: true,
+          prompt: 'Auto-resolve merge conflict', content: '' });
+        messages.appendChild(recovered);
+      });
+      await route.fulfill({
+        status: 200,
+        headers: { ...SSE_HEADERS, 'X-Squid-Msg-Id': '91' },
+        body: sse(
+          { event: 'meta', data: { agent: 'claude', msg_id: 91, adhoc: true } },
+          { event: 'processing', data: { topic: 'default' } },
+          { data: 'Resolved exactly once' },
+          DONE,
+          { event: 'resolve_result', data: { ok: true, files: ['ui/app.js'] } },
+        ),
+      });
+    });
+    await page.route('**/chat', route => route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        META,
+        { event: 'tool', data: {
+          name: 'GitDiff', repo: '/tmp/repo', worktree_repo: '/tmp/worktree', worktree_status: 'pending',
+          file_count: 1, additions: 1, deletions: 0, files: [{ status: 'M', path: 'ui/app.js' }],
+          diff: 'diff --git a/ui/app.js b/ui/app.js\n@@ -1 +1 @@\n+changed',
+        } },
+        { event: 'tool', data: {
+          name: 'WorktreeSync', status: 'conflict', repo: '/tmp/repo', worktree_repo: '/tmp/worktree',
+          integration_worktree_path: '/tmp/integration', conflicts: ['ui/app.js'],
+        } },
+        { data: 'Original response' }, DONE,
+      ),
+    }));
+
+    await sendMsg(page);
+    await page.getByRole('button', { name: 'Auto-Resolve' }).click();
+    const resolved = page.locator('.msg.assistant[data-msg-id="91"]');
+    await expect(resolved).toHaveCount(1);
+    await expect(resolved).toContainText('Resolved exactly once');
+    await expect(resolved).not.toContainText('{"topic":"default"}');
+    await expect(page.locator(`${THINKING}[data-msg-id="91"]`)).not.toBeAttached();
+  });
+
   test('blocked worktree response renders controls for original turn', async ({ page }) => {
     let retryUrl = null;
     let retryBody = null;
@@ -1399,7 +1669,7 @@ test.describe('response bubble', () => {
       body: sse(
         META,
         { event: 'status', data: 'Let me find the file browser header.' },
-        { event: 'error', data: 'CLI exited 143: ' },
+        { event: 'error', data: 'CLI exited -15: ' },
       ),
     }));
 
@@ -1408,6 +1678,48 @@ test.describe('response bubble', () => {
     await expect(page.locator(THINKING)).not.toBeAttached();
     await expect(page.locator(RESPONSE)).toHaveCount(1);
     await expect(page.locator(RESPONSE).locator(MSG_ERROR)).toHaveText('Response interrupted.');
+  });
+
+  test('websocket recovery replaces its connection error with waiting state', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__webSocket = null;
+      window.__webSockets = [];
+      class MockWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        constructor() {
+          this.readyState = MockWebSocket.CONNECTING;
+          window.__webSocket = this;
+          window.__webSockets.push(this);
+          setTimeout(() => {
+            this.readyState = MockWebSocket.OPEN;
+            this.onopen?.();
+            this.receive({ v: 1, type: 'hello', payload: {} });
+          });
+        }
+        send() {}
+        receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+        close() { this.readyState = 3; this.onclose?.(); }
+      }
+      window.WebSocket = MockWebSocket;
+    });
+    await mockBackend(page);
+    await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+    await page.route('**/history**', route => route.fulfill({ json: {
+      items: [{ id: 86, topic: 'squid', agent: 'claude', backend: 'claude', status: 'pending',
+        prompt: 'recover me', content: '', adhoc: false }],
+      has_more: false,
+    }}));
+
+    await page.goto('/');
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+    const live = page.locator(`${THINKING}[data-msg-id="86"] .thinking-live`);
+    await page.evaluate(() => window.__webSocket.onclose?.());
+    await expect(live).toContainText('WebSocket connection failed; retrying…');
+    await page.waitForFunction(() => window.__webSockets.length >= 2 && window.__webSocket.readyState === 1);
+    await page.evaluate(() => window.__webSocket.receive({ v: 1, type: 'subscribed', payload: {} }));
+    await expect(live).toContainText('Waiting for new updates…');
+    await expect(live).not.toContainText('WebSocket connection failed');
   });
 
   test('interrupted stream before meta keeps a recovering status bubble', async ({ page }) => {
@@ -1536,6 +1848,431 @@ test.describe('parallel responses', () => {
 });
 
 test.describe('recovered pending responses', () => {
+  test('initial history installs before global snapshot discovery', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__webSocket = null;
+      class MockWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        constructor() {
+          this.readyState = MockWebSocket.CONNECTING;
+          window.__webSocket = this;
+          setTimeout(() => {
+            this.readyState = MockWebSocket.OPEN;
+            this.onopen?.();
+            this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+          });
+        }
+        send(data) {
+          const frame = JSON.parse(data);
+          if (frame.type === 'subscribe') {
+            this.subscribe = frame;
+            setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+          }
+        }
+        receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+        close() { this.readyState = 3; this.onclose?.(); }
+      }
+      window.WebSocket = MockWebSocket;
+    });
+    await mockBackend(page);
+    await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+    let releaseHistory;
+    let historyRequestedResolve;
+    const historyRequested = new Promise(resolve => { historyRequestedResolve = resolve; });
+    await page.route('**/history**', route => {
+      releaseHistory = () => route.fulfill({ json: { items: [
+        { id: 202, role: 'assistant', topic: 'squid', agent: 'codex', status: 'done',
+          prompt: 'newest', content: 'response 202', timestamp: '2027-01-01T00:00:00Z',
+          completed_at: '2027-01-01T00:00:03Z' },
+        { id: 200, role: 'assistant', topic: 'squid', agent: 'codex', status: 'done',
+          prompt: 'oldest', content: 'response 200', timestamp: '2027-01-01T00:00:00Z',
+          completed_at: '2027-01-01T00:00:01Z' },
+      ], has_more: false } });
+      historyRequestedResolve();
+    });
+    await page.route('**/chat/198/status', route => route.fulfill({ json: {
+      id: 198, role: 'assistant', topic: 'squid', agent: 'codex', status: 'done',
+      prompt: 'middle', content: 'response 198', timestamp: '2027-01-01T00:00:00Z',
+      completed_at: '2027-01-01T00:00:02Z',
+    }}));
+
+    await page.goto('/');
+    await historyRequested;
+    expect(await page.evaluate(() => window.__webSocket)).toBeNull();
+    releaseHistory();
+    await page.waitForFunction(() => window.__webSocket?.subscribe);
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'snapshot', event_id: 10, payload: { conversations: [{ messages: [
+        { id: 198, role: 'assistant', topic: 'squid', agent: 'codex', status: 'done' },
+      ] }] },
+    }));
+
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id]')).toHaveCount(3);
+    expect(await page.locator('.msg.assistant.history-item[data-msg-id]').evaluateAll(
+      nodes => nodes.map(node => Number(node.dataset.msgId)),
+    )).toEqual([200, 198, 202]);
+  });
+
+  test('empty reconnect snapshot shows a waiting state until activity resumes', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__webSocket = null;
+      class MockWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        constructor() {
+          this.readyState = MockWebSocket.CONNECTING;
+          window.__webSocket = this;
+          setTimeout(() => {
+            this.readyState = MockWebSocket.OPEN;
+            this.onopen?.();
+            this.receive({ v: 1, type: 'hello', payload: {} });
+          });
+        }
+        send() {}
+        receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+        close() { this.readyState = 3; this.onclose?.(); }
+      }
+      window.WebSocket = MockWebSocket;
+    });
+    await mockBackend(page);
+    await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+    await page.route('**/history**', route => route.fulfill({ json: {
+      items: [{ id: 85, topic: 'squid', agent: 'claude', backend: 'claude', status: 'pending',
+        prompt: 'idle mobile', content: '', adhoc: false }],
+      has_more: false,
+    }}));
+
+    await page.goto('/');
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'snapshot', event_id: 10, payload: { conversations: [{
+        messages: [{ id: 85, status: 'pending', content: '' }],
+      }] },
+    }));
+    const live = page.locator(`${THINKING}[data-msg-id="85"] .thinking-live`);
+    await expect(live.locator('.loader')).toBeVisible();
+    await expect(live).toContainText('Waiting for new updates…');
+
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'chat.status', event_id: 11, msg_id: 85, payload: { text: 'Working again' },
+    }));
+    await expect(live).toHaveText('Working again');
+    await expect(live.locator('.thinking-waiting')).not.toBeAttached();
+  });
+
+  test('global lifecycle discovers a desktop turn and reconnect completion stays deduplicated', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__webSockets = [];
+      class MockWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        constructor() {
+          this.readyState = MockWebSocket.CONNECTING;
+          window.__webSockets.push(this);
+          setTimeout(() => {
+            this.readyState = MockWebSocket.OPEN;
+            this.onopen?.();
+            this.receive({ v: 1, type: 'hello', payload: {} });
+          });
+        }
+        send(data) {
+          const frame = JSON.parse(data);
+          if (frame.type === 'subscribe') {
+            this.subscribe = frame;
+            setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+          }
+        }
+        receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+        close() {
+          this.readyState = 3;
+          const handler = this.onclose;
+          setTimeout(() => handler?.());
+        }
+      }
+      window.WebSocket = MockWebSocket;
+    });
+    await mockBackend(page);
+    await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+    let completed = false;
+    let routeTurnCount = 0;
+    await page.route('**/topics/desktop/session?agent=codex', route => route.fulfill({ json: {
+      session_id: 'desktop-session', session_turn_count: routeTurnCount, cwd: null,
+    }}));
+    await page.route('**/chat/91/status', route => route.fulfill({ json: {
+      id: 91, role: 'assistant', reply_to: 90, topic: 'desktop', agent: 'codex', adhoc: false,
+      prompt: 'started elsewhere', status: completed ? 'done' : 'pending',
+      content: completed ? 'Finished while asleep' : 'Started on desktop',
+      completed_at: completed ? new Date().toISOString() : null,
+    }}));
+    const discoveredCompletions = {
+      100: { delay: 80, completed_at: '2027-01-01T00:00:01Z' },
+      102: { delay: 5, completed_at: '2027-01-01T00:00:02Z' },
+      104: { delay: 30, completed_at: '2027-01-01T00:00:03Z' },
+    };
+    for (const [id, completion] of Object.entries(discoveredCompletions)) {
+      await page.route(`**/chat/${id}/status`, async route => {
+        await new Promise(resolve => setTimeout(resolve, completion.delay));
+        await route.fulfill({ json: {
+          id: Number(id), role: 'assistant', topic: 'desktop', agent: 'codex', adhoc: false,
+          prompt: `turn ${id}`, status: 'done', content: `response ${id}`,
+          timestamp: '2027-01-01T00:00:00Z', completed_at: completion.completed_at,
+        }});
+      });
+    }
+    const discoveredPending = {
+      106: { delay: 60, timestamp: '2027-01-02T00:00:01Z' },
+      108: { delay: 5, timestamp: '2027-01-02T00:00:02Z' },
+    };
+    for (const [id, pending] of Object.entries(discoveredPending)) {
+      await page.route(`**/chat/${id}/status`, async route => {
+        await new Promise(resolve => setTimeout(resolve, pending.delay));
+        await route.fulfill({ json: {
+          id: Number(id), role: 'assistant', topic: 'desktop', agent: 'codex', adhoc: false,
+          prompt: `turn ${id}`, status: 'pending', content: `working ${id}`, timestamp: pending.timestamp,
+        }});
+      });
+    }
+
+    await page.goto('/');
+    await page.waitForFunction(() => window.__webSockets[0]?.subscribe);
+    await page.evaluate(() => setTopicChip('desktop', 'codex', false));
+    await expect(page.locator('#topic-chip .chip-turn-count')).toHaveText('·0t');
+    expect(await page.evaluate(() => window.__webSockets[0].subscribe.payload.scopes))
+      .toContainEqual({ lifecycle: 'global' });
+    await page.evaluate(() => window.__webSockets[0].receive({
+      v: 1, type: 'chat.tool', event_id: 1, msg_id: 91, run_seq: 0,
+      scope: { topic: 'desktop', agent: 'codex' },
+      payload: { name: 'Bash', command: 'echo discovered without message.changed' },
+    }));
+    await expect(page.locator(`${THINKING}[data-msg-id="91"]`)).toContainText('Started on desktop');
+
+    await setPageHidden(page, true);
+    await setPageHidden(page, false);
+    await page.waitForFunction(() => window.__webSockets.length >= 2 && window.__webSockets.at(-1)?.subscribe);
+    completed = true;
+    routeTurnCount = 1;
+    await page.evaluate(() => {
+      const resumed = window.__webSockets.at(-1);
+      resumed.receive({ v: 1, type: 'snapshot', event_id: 4, payload: { conversations: [{
+        messages: [{ id: 91, role: 'assistant', topic: 'desktop', agent: 'codex',
+          status: 'pending', content: 'Finished while asleep', run_seq: 3 }],
+      }] } });
+      const done = { v: 1, type: 'message.changed', event_id: 5, msg_id: 91,
+        scope: { topic: 'desktop', agent: 'codex' },
+        payload: { id: 91, role: 'assistant', status: 'done', content: 'Finished while asleep' } };
+      resumed.receive(done);
+      resumed.receive(done);
+    });
+
+    await expect(page.locator(`${RESPONSE}[data-msg-id="91"]`)).toHaveCount(1);
+    await expect(page.locator(`${RESPONSE}[data-msg-id="91"]`)).toContainText('Finished while asleep');
+    await expect(page.locator(`${THINKING}[data-msg-id="91"]`)).not.toBeAttached();
+    await expect(page.locator('#topic-chip .chip-turn-count')).toHaveText('·1t');
+
+    await page.evaluate(() => window.__webSockets.at(-1).receive({
+      v: 1, type: 'snapshot', event_id: 6, payload: { conversations: [{ messages: [
+        { id: 100, role: 'assistant', status: 'done' },
+        { id: 102, role: 'assistant', status: 'done' },
+        { id: 104, role: 'assistant', status: 'done' },
+      ] }] },
+    }));
+    await expect(page.locator(`${RESPONSE}[data-msg-id="100"], ${RESPONSE}[data-msg-id="102"], ${RESPONSE}[data-msg-id="104"]`))
+      .toHaveCount(3);
+    expect(await page.locator(`${RESPONSE}[data-msg-id]`).evaluateAll(nodes =>
+      nodes.map(node => Number(node.dataset.msgId)).filter(id => [100, 102, 104].includes(id))))
+      .toEqual([100, 102, 104]);
+
+    await page.evaluate(() => window.__webSockets.at(-1).receive({
+      v: 1, type: 'snapshot', event_id: 7, payload: { conversations: [{ messages: [
+        { id: 106, role: 'assistant', status: 'pending' },
+        { id: 108, role: 'assistant', status: 'pending' },
+      ] }] },
+    }));
+    await expect(page.locator(`${THINKING}[data-msg-id="106"], ${THINKING}[data-msg-id="108"]`)).toHaveCount(2);
+    expect(await page.locator(`${THINKING}[data-msg-id]`).evaluateAll(nodes =>
+      nodes.map(node => Number(node.dataset.msgId)).filter(id => [106, 108].includes(id))))
+      .toEqual([106, 108]);
+
+    expect(await page.evaluate(() => {
+      _sessionIds['desktop@codex'] = 'current-session';
+      _setKnownSessionTurnCount('desktop', 'codex', 3, 'current-session');
+      _setKnownSessionTurnCount('desktop', 'codex', 12, 'historical-session');
+      return {
+        route: _knownSessionTurnCount('desktop', 'codex'),
+        historical: _sessionTurnCounts['historical-session'],
+      };
+    })).toEqual({ route: 3, historical: 12 });
+  });
+
+  test('foreground resume replaces a stale websocket and restores missed content from snapshot', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__webSockets = [];
+      class MockWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        constructor() {
+          this.readyState = MockWebSocket.CONNECTING;
+          window.__webSockets.push(this);
+          setTimeout(() => {
+            this.readyState = MockWebSocket.OPEN;
+            this.onopen?.();
+            this.receive({ v: 1, type: 'hello', payload: {} });
+          });
+        }
+        send(data) {
+          const frame = JSON.parse(data);
+          if (frame.type === 'subscribe') {
+            this.subscribe = frame;
+            setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+          }
+        }
+        receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+        close() {
+          this.readyState = 3;
+          const closeHandler = this.onclose;
+          setTimeout(() => closeHandler?.());
+        }
+      }
+      window.WebSocket = MockWebSocket;
+    });
+    await mockBackend(page);
+    await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+    await page.route('**/history**', route => route.fulfill({ json: {
+      items: [{ id: 84, topic: 'squid', agent: 'claude', backend: 'claude', status: 'pending',
+        prompt: 'mobile suspension', content: 'Before lock', adhoc: false }],
+      has_more: false,
+    }}));
+
+    await page.goto('/');
+    await page.waitForFunction(() => window.__webSockets[0]?.subscribe);
+    await page.evaluate(() => {
+      const first = window.__webSockets[0];
+      first.receive({ v: 1, type: 'snapshot', event_id: 20, payload: { conversations: [{
+        messages: [{ id: 84, status: 'pending', content: 'Before lock', run_seq: 2 }],
+      }] } });
+    });
+    await setPageHidden(page, true);
+    await setPageHidden(page, false);
+    await page.waitForFunction(() => window.__webSockets.length >= 2 && window.__webSockets.at(-1)?.subscribe);
+    await page.evaluate(() => {
+      const resumed = window.__webSockets.at(-1);
+      resumed.receive({ v: 1, type: 'snapshot', event_id: 24, payload: { conversations: [{
+        messages: [{ id: 84, status: 'pending', content: 'Before lock and while asleep', run_seq: 6 }],
+      }] } });
+      resumed.receive({ v: 1, type: 'chat.text', event_id: 25, msg_id: 84, run_seq: 7,
+        payload: { text: ' plus live' } });
+    });
+
+    await expect(page.locator(`${THINKING}[data-msg-id="84"] .thinking-live`))
+      .toHaveText('Before lock and while asleep plus live');
+    expect(await page.evaluate(() => localStorage.getItem('squid-realtime-v1-cursor'))).toBe('25');
+  });
+
+  test('websocket snapshots advance the applied cursor and text replay deduplicates by run sequence', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__webSocketSent = [];
+      window.__webSocket = null;
+      class MockWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        constructor() {
+          this.readyState = MockWebSocket.CONNECTING;
+          window.__webSocket = this;
+          setTimeout(() => {
+            this.readyState = MockWebSocket.OPEN;
+            this.onopen?.();
+            this.receive({ v: 1, type: 'hello', payload: {} });
+          });
+        }
+        send(data) { window.__webSocketSent.push(JSON.parse(data)); }
+        receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+        close() { this.readyState = 3; this.onclose?.(); }
+      }
+      window.WebSocket = MockWebSocket;
+    });
+    await mockBackend(page);
+    await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+    await page.route('**/history**', route => route.fulfill({ json: {
+      items: [{
+        id: 82,
+        topic: 'squid',
+        agent: 'claude',
+        backend: 'claude',
+        status: 'pending',
+        prompt: 'deduplicate replay',
+        content: '',
+        adhoc: false,
+      }],
+      has_more: false,
+    }}));
+
+    await page.goto('/');
+    await page.waitForFunction(() => window.__webSocketSent.some(frame => frame.type === 'subscribe'));
+    await page.evaluate(() => {
+      window.__webSocket.receive({
+        v: 1,
+        type: 'snapshot',
+        event_id: 10,
+        payload: { conversations: [{ messages: [{ id: 82, status: 'pending', content: 'Base', run_seq: 4 }] }] },
+      });
+      window.__webSocket.receive({
+        v: 1, type: 'chat.text', event_id: 11, msg_id: 82, run_seq: 4, payload: { text: ' BAD_REPLAY' },
+      });
+      window.__webSocket.receive({
+        v: 1, type: 'chat.text', event_id: 12, msg_id: 82, run_seq: 5, payload: { text: ' plus' },
+      });
+    });
+
+    await expect(page.locator(THINKING)).toContainText('Base plus');
+    await expect(page.locator(THINKING)).not.toContainText('BAD_REPLAY');
+    expect(await page.evaluate(() => ({
+      cursor: localStorage.getItem('squid-realtime-v1-cursor'),
+      ackIds: window.__webSocketSent.filter(frame => frame.type === 'ack').map(frame => frame.payload.event_id),
+    }))).toEqual({ cursor: '12', ackIds: [10, 11, 12] });
+  });
+
+  test('sse transport mode does not create a WebSocket', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__webSocketCount = 0;
+      window.__eventSources = [];
+      window.WebSocket = class {
+        constructor() { window.__webSocketCount++; }
+      };
+      window.EventSource = class {
+        constructor(url) {
+          this.url = url;
+          this.listeners = {};
+          window.__eventSources.push(this);
+        }
+        addEventListener(type, callback) { this.listeners[type] = callback; }
+        close() {}
+      };
+    });
+    await mockBackend(page);
+    await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'sse' } }));
+    await page.route('**/history**', route => route.fulfill({ json: {
+      items: [{
+        id: 81,
+        topic: 'squid',
+        agent: 'claude',
+        backend: 'claude',
+        status: 'pending',
+        prompt: 'transport toggle',
+        content: 'History partial',
+        adhoc: false,
+      }],
+      has_more: false,
+    }}));
+
+    await page.goto('/');
+    await page.waitForFunction(() => window.__eventSources.length === 1);
+    expect(await page.evaluate(() => ({
+      webSockets: window.__webSocketCount,
+      eventSourceUrl: window.__eventSources[0].url,
+    }))).toEqual({ webSockets: 0, eventSourceUrl: '/chat/81/events' });
+  });
+
   test('poll fallback keeps retrying after transient status failure', async ({ page }) => {
     await page.addInitScript(() => {
       Object.defineProperty(window, 'EventSource', { configurable: true, value: undefined });

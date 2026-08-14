@@ -51,9 +51,9 @@ from pydantic import BaseModel, Field
 from .config import (
     CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH,
     OPENCODE_PATH, SQUID_HOME, RESPONSE_TIMEOUT, NATIVE_SHELL_TIMEOUT, WORKTREE_ISOLATION_ENABLED,
-    UPDATES_INSTALL_ON_RESTART,
+    REALTIME_TRANSPORT, UPDATES_INSTALL_ON_RESTART,
     _USER_CONFIG, _cfg,
-    config_revision, config_text, write_config_text,
+    config_revision, config_text, realtime_transport, write_config_text,
 )
 from .harnesses import SUPPORTED_HARNESSES, _validate_harness_config, list_harnesses
 from .providers import Provider, _validate_provider, get_provider, public_providers, reload_providers, require_provider
@@ -557,6 +557,8 @@ def _validate_config_content(content: str) -> dict:
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError("agent.shell_timeout must be a positive integer")
 
+    realtime_transport(parsed)
+
     _validate_harness_config(parsed.get("harnesses"))
 
     providers = parsed.get("providers")
@@ -778,6 +780,7 @@ async def _prepare_chat_turn(
         # worktree, so skip isolation/blocker checks entirely.
         code_roots = []
         cwd = override_cwd
+        agent_cwd = override_cwd
     source_cwd = cwd
 
     if WORKTREE_ISOLATION_ENABLED and code_roots:
@@ -904,6 +907,7 @@ async def _prepare_chat_turn(
         "code_roots": tracking_roots,
         "display_prompt": message,
         "source_cwd": source_cwd,
+        "configured_cwd": agent_cwd,
         "harness": harness,
         "provider": provider,
         "worktree_setup_elapsed_ms": None,
@@ -1003,6 +1007,7 @@ async def stream_response(
     code_roots: Optional[list[str]] = None,
     display_prompt: Optional[str] = None,
     source_cwd: Optional[str] = None,
+    configured_cwd: Optional[str] = None,
     harness: Optional[str] = None,
     provider: Optional[str] = None,
     worktree_setup_elapsed_ms: Optional[float] = None,
@@ -1030,6 +1035,7 @@ async def stream_response(
         harness=dispatch_harness, provider=dispatch_provider,
         model=model, agent=agent, cwd=effective_cwd,
         source_cwd=source_cwd,
+        configured_cwd=configured_cwd,
         response_timeout=response_timeout,
         resume_session_id=resume_session_id,
         adhoc=adhoc, lookback=lookback, msg_id=asst_msg_id,
@@ -1196,6 +1202,7 @@ async def chat(req: ChatRequest):
             code_roots=prepared["code_roots"],
             display_prompt=prepared["display_prompt"],
             source_cwd=prepared["source_cwd"],
+            configured_cwd=prepared["configured_cwd"],
             harness=prepared["harness"],
             provider=prepared["provider"],
             worktree_setup_elapsed_ms=prepared["worktree_setup_elapsed_ms"],
@@ -1987,6 +1994,13 @@ async def get_config_yaml(request: Request):
     })
 
 
+@app.get("/config/realtime")
+async def get_realtime_config(request: Request):
+    if not _same_origin(request):
+        return JSONResponse({"error": "cross-origin configuration reads are not allowed"}, status_code=403)
+    return JSONResponse({"transport": REALTIME_TRANSPORT}, headers={"Cache-Control": "no-store"})
+
+
 @app.put("/config/yaml")
 async def update_config_yaml(req: ConfigRequest, request: Request):
     if not _same_origin(request):
@@ -2450,6 +2464,7 @@ async def auto_resolve_worktree_conflict(msg_id: int, req: WorktreeDiscardReques
             code_roots=prepared["code_roots"],
             display_prompt=prepared["display_prompt"],
             source_cwd=prepared["source_cwd"],
+            configured_cwd=prepared["configured_cwd"],
             harness=prepared["harness"],
             provider=prepared["provider"],
         ):
@@ -3509,6 +3524,10 @@ def _realtime_request_fingerprint(message_type: str, payload: dict) -> str:
 
 async def _realtime_snapshot(scopes: list[dict]) -> dict:
     snapshot = await asyncio.to_thread(get_realtime_snapshot, scopes, 20)
+    if any(scope.get("lifecycle") == "global" for scope in scopes):
+        snapshot["processes"] = list_active_procs()
+        snapshot["queue"] = dispatcher.all_queued_items()
+        return snapshot
     topics = {scope.get("topic") for scope in scopes}
     snapshot["processes"] = [item for item in list_active_procs() if item.get("topic") in topics]
     snapshot["queue"] = [item for item in dispatcher.all_queued_items() if item.get("topic") in topics]
@@ -3523,6 +3542,7 @@ async def _run_realtime_chat(prepared: dict) -> None:
         resume_session_id=prepared["resume_session_id"], adhoc=prepared["adhoc"],
         lookback=prepared["lookback"], code_roots=prepared["code_roots"],
         display_prompt=prepared["display_prompt"], source_cwd=prepared["source_cwd"],
+        configured_cwd=prepared["configured_cwd"],
         harness=prepared["harness"], provider=prepared["provider"],
         worktree_setup_elapsed_ms=prepared["worktree_setup_elapsed_ms"],
         worktree_isolated=prepared["worktree_isolated"], native_shell=prepared["native_shell"],
@@ -3556,7 +3576,8 @@ async def _realtime_chat_start(payload: dict) -> dict:
     )
     if isinstance(prepared, JSONResponse):
         body = json.loads(prepared.body)
-        return {"ok": False, "error": body.get("error", "chat_start_failed"), "status": prepared.status_code}
+        return {"ok": False, **body, "error": body.get("error", "chat_start_failed"),
+                "status": prepared.status_code}
     await maybe_sync()
     task = asyncio.create_task(_run_realtime_chat(prepared), name=f"squid-ws-chat-{prepared['asst_msg_id']}")
     _realtime_chat_tasks.add(task)
@@ -3637,7 +3658,11 @@ async def realtime_v1(websocket: WebSocket):
                         continue
                     principal = f"local:{client_id}"
                     requested = subscribe_payload.get("scopes", [])
-                    scopes = [scope for scope in requested if isinstance(scope, dict) and scope.get("topic")]
+                    scopes = [
+                        scope for scope in requested
+                        if isinstance(scope, dict)
+                        and (scope.get("topic") or scope.get("lifecycle") == "global")
+                    ]
                     requested_cursor = subscribe_payload.get("cursor")
                     current = await asyncio.to_thread(get_realtime_cursor)
                     await websocket.send_json({"v": 1, "type": "subscribed", "payload": {"scopes": scopes}})
