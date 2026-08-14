@@ -1037,7 +1037,7 @@ body {
 .msg.assistant.msg-thinking {
   font-size: var(--text-md);
   font-style: italic;
-  color: #555566;
+  color: var(--text-mid);
   padding: 0.45rem 1.8rem 1.35rem 0.9rem;
   background: var(--bg);
 }
@@ -5444,21 +5444,19 @@ mark.search-kw-highlight {
   white-space: nowrap;
 }
 .history-prompt {
+  color: var(--text-lo);
   cursor: pointer;
-  opacity: 0.75;
   display: inline-flex;
   align-items: baseline;
   gap: 0.3em;
   max-width: min(55ch, calc(100% - 1rem));
   vertical-align: bottom;
 }
-.history-prompt:hover {
-  opacity: 1;
-}
+.history-prompt:hover,
+.history-prompt.expanded { color: var(--text-mid); }
 .history-prompt-truncated {
   min-width: 0;
   overflow: hidden;
-  opacity: 0.85;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -5518,9 +5516,10 @@ mark.search-kw-highlight {
 }
 .shell-footer {
   align-items: baseline;
+  color: var(--text-mid);
   display: flex;
   flex-wrap: wrap;
-  gap: 0 0.35rem;
+  gap: 0;
   max-width: 90%;
   min-width: 0;
 }
@@ -5541,7 +5540,7 @@ mark.search-kw-highlight {
   text-align: left;
 }
 .shell-footer-cwd:hover { color: var(--accent-light); }
-.shell-footer-separator { flex: 0 0 auto; margin-right: 0.35rem; }
+.shell-footer-separator { flex: 0 0 auto; margin: 0 0.35rem; }
 .shell-footer-path { display: flex; min-width: 0; }
 .shell-footer-path-dir {
   flex-shrink: 1;

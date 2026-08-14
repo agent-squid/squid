@@ -143,6 +143,50 @@ test('websocket transport starts and completes a new chat without POST /chat', a
   }))).toEqual({ type: 'chat.start', hasRequestId: true, message: 'hello over ws' });
 });
 
+test('websocket processing event starts the native shell timeout clock', async ({ page }) => {
+  await page.addInitScript(() => {
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        this.readyState = MockWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+        } else if (frame.type === 'chat.start') {
+          setTimeout(() => {
+            this.receive({ v: 1, type: 'command.result', request_id: frame.request_id,
+              payload: { ok: true, msg_id: 84, flow_run_id: null } });
+            setTimeout(() => this.receive({
+              v: 1, type: 'chat.processing', event_id: 1, msg_id: 84, run_seq: 0,
+              payload: { topic: 'default' },
+            }));
+          });
+        }
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = MockWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+
+  await page.goto('/');
+  await sendMsg(page, '! top');
+
+  const status = page.locator('.shell-running-status');
+  await expect(status).toContainText('Running · timeout in 2:00');
+  await expect(status).toContainText('Running · timeout in 1:59', { timeout: 2500 });
+});
+
 test('websocket transport cancels a running chat without POST /cmd', async ({ page }) => {
   await page.addInitScript(() => {
     window.__chatCancelFrame = null;
@@ -2712,8 +2756,12 @@ test.describe('recovered pending responses', () => {
     await expect(recovered.locator('.response-header')).toBeVisible();
     await expect(recovered.locator('.response-header-text')).toContainText('long-running task');
     await expect(recovered.locator('.history-prompt')).toBeVisible();
+    expect(await recovered.evaluate(el => getComputedStyle(el).color)).toBe('rgb(136, 136, 136)');
+    expect(await recovered.locator('.history-prompt').evaluate(el => getComputedStyle(el).color)).toBe('rgb(102, 102, 102)');
     await recovered.locator('.history-prompt').click();
     await expect(recovered.locator('.history-prompt-full.visible')).toHaveText('long-running task');
+    expect(await recovered.locator('.history-prompt.expanded').evaluate(el => getComputedStyle(el).color)).toBe('rgb(136, 136, 136)');
+    expect(await recovered.locator('.history-prompt-full.visible').evaluate(el => getComputedStyle(el).color)).toBe('rgb(136, 136, 136)');
 
     await fulfill(sse(META, { event: 'status', data: 'Still working...' }));
 

@@ -3566,8 +3566,12 @@ function addShellFooter(afterEl, timestamp, metadataEl) {
     cwdEl.type = 'button';
     cwdEl.className = 'shell-footer-cwd';
     cwdEl.title = `Open ${cwd} in file viewer`;
-    cwdEl.innerHTML = `<span class="shell-footer-separator">·</span><span class="shell-footer-path" dir="ltr"><span class="shell-footer-path-dir">${escapeHtml(dirPart)}</span><span class="shell-footer-path-name">${escapeHtml(namePart)}</span></span>`;
+    cwdEl.innerHTML = `<span class="shell-footer-path" dir="ltr"><span class="shell-footer-path-dir">${escapeHtml(dirPart)}</span><span class="shell-footer-path-name">${escapeHtml(namePart)}</span></span>`;
     cwdEl.addEventListener('click', () => openFileViewer(cwd));
+    const separator = document.createElement('span');
+    separator.className = 'shell-footer-separator';
+    separator.textContent = '·';
+    el.appendChild(separator);
     el.appendChild(cwdEl);
   }
   afterEl.after(el);
@@ -5189,6 +5193,7 @@ async function sendMessage(text, opts = {}) {
           status: 'pending',
         }, thinkingBubble, {
           onStored: data => markSessionContextDelivered(data.session_id || data.stats?.session_id || null),
+          onProcessing: startShellRunningStatus,
         });
         return { flowRunId, msgId };
       } catch (err) {
@@ -7378,7 +7383,7 @@ function watchFlowRun(flowRunId, afterId, route = null) {
   tick();
 }
 
-async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStored = null } = {}) {
+async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStored = null, onProcessing = null } = {}) {
   const transportMode = forceSse ? 'sse' : await realtimeTransportMode;
   if (!wipBubble.isConnected) return;
   const useWebSocket = transportMode !== 'sse' && !!realtimeV1;
@@ -7443,7 +7448,10 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
         else if (frame.type === 'chat.loading') statusBuf = frame.payload.from
           ? `switching ${frame.payload.from} → ${frame.payload.to}…`
           : `loading ${frame.payload.to}…`;
-        else if (frame.type === 'chat.processing') statusBuf = `#${frame.payload.topic || item.topic} · processing…`;
+        else if (frame.type === 'chat.processing') {
+          statusBuf = `#${frame.payload.topic || item.topic} · processing…`;
+          onProcessing?.();
+        }
         else if (frame.type === 'chat.queued') statusBuf += (statusBuf ? '\n' : '') + `#${frame.payload.topic} · queued — position ${frame.payload.position}`;
         if (frame.type === 'chat.done' || frame.type === 'chat.error' || frame.type === 'message.changed' && frame.payload.status !== 'pending') finish();
         else updatePreview();

@@ -354,6 +354,21 @@ test('native shell sends literal command with selected context paths', async ({ 
   expect(sentBody.include_topic_memory).toBe(true);
   const attachedFiles = await page.evaluate(() => JSON.parse(localStorage.getItem('attachedFiles') || '[]'));
   expect(attachedFiles).toHaveLength(1);
+  await page.evaluate(() => {
+    const anchor = document.createElement('div');
+    anchor.className = 'test-shell-footer-anchor';
+    document.body.appendChild(anchor);
+    const metadata = document.createElement('span');
+    metadata.dataset.shellExit = '0';
+    metadata.dataset.shellElapsed = '0.01';
+    metadata.dataset.shellCwd = '/tmp';
+    addShellFooter(anchor, new Date().toISOString(), metadata);
+  });
+  const shellFooter = page.locator('.test-shell-footer-anchor + .shell-footer');
+  await expect(shellFooter.locator(':scope > .shell-footer-separator')).toHaveText('·');
+  await expect(shellFooter.locator('.shell-footer-cwd')).toHaveText('/tmp');
+  await expect(shellFooter.locator('.shell-footer-cwd .shell-footer-separator')).toHaveCount(0);
+  expect(await shellFooter.evaluate(el => getComputedStyle(el).color)).toBe('rgb(136, 136, 136)');
 });
 
 test('in-flight native shell does not hide context from the next session prompt', async ({ page }) => {
