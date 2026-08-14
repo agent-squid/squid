@@ -117,6 +117,14 @@ fallback and through the explicit `sse` migration mode.
 | Protocol compatibility | Partial | Unsupported versions fail explicitly, but only v1 is supported rather than the current and immediately previous versions. |
 | Shore relay | Not implemented | ADR-0039's broker transport, pairing, encryption, capabilities, and audit work remain future work. |
 
+**Next milestone:** finish the subscription and recovery foundation before
+adding another live message family. Establish a transactionally consistent
+snapshot boundary that buffers events after its watermark, enforce scope
+authorization, and add the snapshot-race regression test. After that gate,
+publish and consume `process.changed` and `queue.changed` so process and queue
+state no longer depends on HTTP refreshes. Flow and CLI authentication remain
+the following migration phase.
+
 SSE endpoints therefore remain required for migration fallback, CLI
 authentication, and the live families not yet moved to WebSocket. WebSocket is
 currently primary for browser chat commands and lifecycle updates, but not yet
