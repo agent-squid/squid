@@ -1110,10 +1110,18 @@ body {
   border-bottom: 1px solid var(--surface-2);
 }
 .trace-tool-block { font-size: var(--text-body); }
+.trace-tool-header { display: flex; align-items: stretch; background: #161620; border-radius: 3px; }
+.trace-tool-header .tool-toggle { flex: 1; min-width: 0; width: auto; }
 .trace-tool-pre {
   margin: 0; padding: 0.5em 0.8em; white-space: pre-wrap; word-break: break-word;
   font-family: ui-monospace, monospace; font-size: var(--text-body);
 }
+.trace-tool-copy {
+  flex: 0 0 auto; width: 2.2rem; padding: 0; border: 0; border-radius: 3px;
+  background: transparent; color: var(--text-muted); cursor: pointer;
+}
+.trace-tool-copy:hover { color: var(--text); background: #1c1c2a; }
+.trace-tool-copy .material-symbols-outlined { font-size: 16px; line-height: 1; }
 .log-viewer-toolbar {
   display: flex; align-items: center; gap: 0.5rem;
   position: sticky; top: 0; z-index: 1;

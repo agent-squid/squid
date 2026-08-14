@@ -836,7 +836,8 @@ test.describe('response bubble', () => {
     await expect(page.locator('#msg-modal-body')).not.toContainText('Final answer text');
 
     await children.nth(1).locator('.tool-toggle').click();
-    await expect(children.nth(1).locator('.trace-tool-pre')).toContainText('"command": "ls -la"');
+    await expect(children.nth(1).locator('.trace-tool-pre')).toHaveText('ls -la');
+    await expect(children.nth(1).getByRole('button', { name: 'Copy command' })).toBeVisible();
   });
 
   test('ctx popup has no thought trace link when nothing was recorded', async ({ page }) => {

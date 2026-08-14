@@ -5671,7 +5671,9 @@ function toolLabel(tool) {
   if (name === 'WorktreeSync') return `Worktree sync: ${tool.status || 'unknown'}`;
   if (name === 'Read' || name === 'Edit' || name === 'Write' || name === 'MultiEdit' || name === 'Diff')
     return `${name}: ${tool.file || ''}`;
-  if (name === 'Bash') return `Bash: ${truncate(tool.command || '', 70)}`;
+  if (name === 'Bash') {
+    return `Bash: ${truncate(tool.command || '', bashPreviewLimit())}`;
+  }
   if (name === 'Agent') return `Agent: ${truncate(tool.description || '', 70)}`;
   if (name === 'WebFetch' || name === 'WebSearch') return `${name}: ${truncate(tool.query || '', 70)}`;
   if (name === 'TodoWrite') { const n = (tool.todos || []).length; return `TodoWrite: ${n} item${n !== 1 ? 's' : ''}`; }
@@ -6000,7 +6002,7 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
     const label = document.createElement('span');
     label.className = 'tool-label';
     if (name === 'Read')   label.textContent = 'Read: ' + (tool.file || '');
-    else if (name === 'Bash')  label.textContent = 'Bash: ' + truncate(tool.command || '', 100);
+    else if (name === 'Bash')  label.textContent = 'Bash: ' + truncate(tool.command || '', bashPreviewLimit());
     else if (name === 'Agent') label.textContent = 'Agent: ' + truncate(tool.description || '', 80);
     else if (name === 'WebFetch' || name === 'WebSearch')
       label.textContent = name + ': ' + truncate(tool.query || '', 80);
@@ -8177,6 +8179,10 @@ function addTimestamp(afterEl, isoStr, alignRight = false) {
 function truncate(str, max) {
   if (!str) return '';
   return str.length <= max ? str : str.slice(0, max - 1) + '…';
+}
+
+function bashPreviewLimit() {
+  return window.matchMedia?.('(max-width: 768px)').matches ? 60 : 220;
 }
 
 function addMessage(role, content) {
@@ -13741,6 +13747,8 @@ async function openMsgModal(msgId) {
 function makeTraceToolBlock(tool) {
   const block = document.createElement('div');
   block.className = 'tool-block trace-tool-block';
+  const header = document.createElement('div');
+  header.className = 'trace-tool-header';
   const toggle = document.createElement('button');
   toggle.className = 'tool-toggle';
   toggle.textContent = toolLabel(tool);
@@ -13750,11 +13758,37 @@ function makeTraceToolBlock(tool) {
   scroll.className = 'diff-scroll';
   const pre = document.createElement('pre');
   pre.className = 'trace-tool-pre';
-  pre.textContent = JSON.stringify(tool, null, 2);
+  pre.textContent = tool.name === 'Bash' ? (tool.command || '') : JSON.stringify(tool, null, 2);
   scroll.appendChild(pre);
   body.appendChild(scroll);
+  if (tool.name === 'Bash' && tool.command) {
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'trace-tool-copy';
+    copy.setAttribute('aria-label', 'Copy command');
+    copy.title = 'Copy command';
+    copy.innerHTML = '<span class="material-symbols-outlined" aria-hidden="true">content_copy</span>';
+    copy.addEventListener('click', async e => {
+      e.stopPropagation();
+      const icon = copy.querySelector('.material-symbols-outlined');
+      try {
+        await navigator.clipboard.writeText(tool.command);
+        icon.textContent = 'check';
+        copy.title = 'Copied';
+      } catch {
+        icon.textContent = 'error';
+        copy.title = 'Copy failed';
+      }
+      setTimeout(() => {
+        icon.textContent = 'content_copy';
+        copy.title = 'Copy command';
+      }, 1200);
+    });
+    header.appendChild(copy);
+  }
   toggle.addEventListener('click', () => block.classList.toggle('tool-expanded'));
-  block.appendChild(toggle);
+  header.prepend(toggle);
+  block.appendChild(header);
   block.appendChild(body);
   return block;
 }
