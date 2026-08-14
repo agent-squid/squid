@@ -37,6 +37,7 @@ import time
 import urllib.parse
 import urllib.request
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 from typing import AsyncGenerator, Literal, Optional, Union
@@ -102,8 +103,8 @@ from .stats_db import (
     mark_worktree_status, delete_worktree, delete_all_worktrees,
     delete_all_topic_worktrees,
     allocate_id,
-    get_realtime_cursor, get_realtime_events, get_realtime_snapshot,
-    get_realtime_request, save_realtime_request, get_realtime_retained_range,
+    get_realtime_cursor, get_realtime_snapshot,
+    get_realtime_request, save_realtime_request, get_realtime_replay,
     prune_realtime_data, set_realtime_commit_listener,
 )
 from .journal import _generate_journal, _current_week, list_topic_journals, read_journal
@@ -3446,6 +3447,8 @@ async def revert_file_edit(req: LocalfileRevertEditRequest, request: Request):
 # ---------------------------------------------------------------------------
 
 _REALTIME_REPLAY_LIMIT = 500
+_REALTIME_REPLAY_BYTE_LIMIT = 512 * 1024
+_REALTIME_REPLAY_MAX_AGE_SECONDS = 24 * 60 * 60
 _REALTIME_SAFETY_POLL_SECONDS = 20.0
 _realtime_chat_tasks: set[asyncio.Task] = set()
 
@@ -3521,6 +3524,44 @@ def _realtime_envelope(event: dict) -> dict:
         "run_seq": event.get("run_seq"),
         "payload": event.get("payload") or {},
     }
+
+
+_REALTIME_V1_REPLAY_TYPES = {
+    "chat.meta", "chat.queued", "chat.status", "chat.loading", "chat.processing",
+    "chat.tool", "chat.text", "chat.stats", "chat.done", "chat.error",
+    "process.changed", "queue.changed", "message.changed", "flow.step.created",
+}
+
+
+def _realtime_replay_rollover_reason(requested_cursor: int, window: dict, events: list[dict]) -> Optional[str]:
+    current = window["current"]
+    if requested_cursor > current:
+        return "future_cursor"
+    expected_count = current - requested_cursor
+    if window["global_event_count"] != expected_count:
+        return "replay_gap"
+    if window["scoped_event_count"] > _REALTIME_REPLAY_LIMIT:
+        return "event_count"
+    oldest = window.get("oldest_created_at")
+    if oldest:
+        try:
+            created = datetime.fromisoformat(oldest.replace("Z", "+00:00"))
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            if (datetime.now(timezone.utc) - created).total_seconds() > _REALTIME_REPLAY_MAX_AGE_SECONDS:
+                return "event_age"
+        except (TypeError, ValueError):
+            return "event_age"
+    encoded_bytes = 0
+    for event in events:
+        if event.get("event_type") not in _REALTIME_V1_REPLAY_TYPES:
+            return "incompatible_event"
+        encoded_bytes += len(json.dumps(
+            _realtime_envelope(event), separators=(",", ":"), ensure_ascii=False,
+        ).encode("utf-8"))
+        if encoded_bytes > _REALTIME_REPLAY_BYTE_LIMIT:
+            return "event_bytes"
+    return None
 
 
 def _realtime_request_fingerprint(message_type: str, payload: dict) -> str:
@@ -3632,7 +3673,10 @@ async def realtime_v1(websocket: WebSocket):
     await websocket.send_json({
         "v": 1, "type": "hello", "payload": {
             "supported_versions": [1], "cursor": cursor,
-            "replay_limit": _REALTIME_REPLAY_LIMIT, "heartbeat_seconds": 20,
+            "replay_limit": _REALTIME_REPLAY_LIMIT,
+            "replay_byte_limit": _REALTIME_REPLAY_BYTE_LIMIT,
+            "replay_max_age_seconds": _REALTIME_REPLAY_MAX_AGE_SECONDS,
+            "heartbeat_seconds": 20,
         },
     })
     scopes: list[dict] = []
@@ -3670,26 +3714,24 @@ async def realtime_v1(websocket: WebSocket):
                         and (scope.get("topic") or scope.get("lifecycle") == "global")
                     ]
                     requested_cursor = subscribe_payload.get("cursor")
-                    current = await asyncio.to_thread(get_realtime_cursor)
                     await websocket.send_json({"v": 1, "type": "subscribed", "payload": {"scopes": scopes}})
                     if not isinstance(requested_cursor, int) or requested_cursor < 0:
                         snapshot = await _realtime_snapshot(scopes)
                         cursor = snapshot["cursor"]
                         await websocket.send_json({"v": 1, "type": "snapshot", "event_id": cursor, "payload": snapshot})
                     else:
-                        retained_min, _ = await asyncio.to_thread(get_realtime_retained_range)
-                        cursor_expired = retained_min is not None and requested_cursor < retained_min - 1
-                        replay = [] if cursor_expired else await asyncio.to_thread(
-                            get_realtime_events, requested_cursor, scopes, _REALTIME_REPLAY_LIMIT + 1,
+                        window, replay = await asyncio.to_thread(
+                            get_realtime_replay, requested_cursor, scopes, _REALTIME_REPLAY_LIMIT + 1,
                         )
-                        if cursor_expired or len(replay) > _REALTIME_REPLAY_LIMIT:
+                        rollover = _realtime_replay_rollover_reason(requested_cursor, window, replay)
+                        if rollover:
                             snapshot = await _realtime_snapshot(scopes)
                             cursor = snapshot["cursor"]
                             await websocket.send_json({"v": 1, "type": "snapshot", "event_id": cursor, "payload": snapshot})
                         else:
                             for event in replay:
                                 await websocket.send_json(_realtime_envelope(event))
-                            cursor = replay[-1]["event_id"] if replay else current
+                            cursor = window["current"]
                     generation = _realtime_notifier.generation
                     continue
                 elif message_type == "unsubscribe":
@@ -3706,16 +3748,18 @@ async def realtime_v1(websocket: WebSocket):
                 elif message_type not in {"ack", "pong"}:
                     await websocket.send_json({"v": 1, "type": "error", "payload": {"code": "unsupported_type"}})
             if scopes:
-                events = await asyncio.to_thread(get_realtime_events, cursor, scopes, _REALTIME_REPLAY_LIMIT + 1)
-                if len(events) > _REALTIME_REPLAY_LIMIT:
+                window, events = await asyncio.to_thread(
+                    get_realtime_replay, cursor, scopes, _REALTIME_REPLAY_LIMIT + 1,
+                )
+                rollover = _realtime_replay_rollover_reason(cursor, window, events)
+                if rollover:
                     snapshot = await _realtime_snapshot(scopes)
                     cursor = snapshot["cursor"]
                     await websocket.send_json({"v": 1, "type": "snapshot", "event_id": cursor, "payload": snapshot})
                 else:
                     for event in events:
                         await websocket.send_json(_realtime_envelope(event))
-                    if events:
-                        cursor = events[-1]["event_id"]
+                    cursor = window["current"]
     except WebSocketDisconnect:
         return
 

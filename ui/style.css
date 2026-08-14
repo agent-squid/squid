@@ -767,7 +767,7 @@ body {
 }
 .quota-status-row {
   display: grid;
-  grid-template-columns: minmax(96px, 1fr) 48px minmax(110px, 1.4fr);
+  grid-template-columns: minmax(96px, 1fr) 96px minmax(110px, 1.4fr);
   gap: 0.6rem;
   align-items: center;
   color: #777;
@@ -790,6 +790,7 @@ body {
   color: var(--text-mid);
   font-variant-numeric: tabular-nums;
   text-align: right;
+  white-space: nowrap;
 }
 .quota-status-detail {
   color: var(--text-dim);

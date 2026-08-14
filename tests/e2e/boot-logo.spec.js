@@ -28,7 +28,7 @@ async function mockBoot(page, variant, opts = {}) {
   await page.route('**/health', route => route.fulfill({
     json: { status: 'ok', boot_time: '2026-07-14T12:00:00Z', harnesses: [], total_prompts: 0, first_seen: '2026-01-01T00:00:00Z' },
   }));
-  await page.route('**/insights.json', route => route.fulfill({
+  await page.route('**/insights.json*', route => route.fulfill({
     json: insights || {
       measures: {
         period: '7d',
@@ -88,6 +88,16 @@ test('boot logo variants: art, squid-only, talking-squid', async ({ page }) => {
   await page.reload();
   await expect(page.locator('.boot-logo-talking-squid .boot-logo-icon')).toBeVisible();
   await expect(page.locator('.boot-logo-talking-squid .boot-logo-bubble')).toHaveText('More Done, Less Tokens.');
+});
+
+test('narrow refresh settles at the bottom of the boot banner', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 700 });
+  await mockBoot(page, 2);
+  await page.goto('/');
+  await expect(page.locator('.boot-logo-icon')).toBeVisible();
+  await expect.poll(() => page.locator('#messages').evaluate(el => (
+    el.scrollHeight - el.scrollTop - el.clientHeight
+  ))).toBeLessThan(2);
 });
 
 test('talking squid shows streak message on day 7', async ({ page }) => {

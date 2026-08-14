@@ -6903,7 +6903,7 @@ function insertCompletedHistoryItem(item) {
     ], key) > 0) || bottomSentinel;
   const anchorAboveViewport = !!anchor && anchor.getBoundingClientRect().top < messages.getBoundingClientRect().top;
   messages.insertBefore(fragment, anchor || null);
-  if (wasAtBottom) scrollToBottom();
+  if (wasAtBottom) scrollToBottom(true);
   else if (anchorAboveViewport) messages.scrollTop += messages.scrollHeight - previousHeight;
   return bubble;
 }
@@ -6984,7 +6984,7 @@ function insertPendingHistoryItem(item) {
     ], key) > 0) || bottomSentinel;
   const anchorAboveViewport = !!anchor && anchor.getBoundingClientRect().top < messages.getBoundingClientRect().top;
   messages.insertBefore(bubble, anchor || null);
-  if (wasAtBottom) scrollToBottom();
+  if (wasAtBottom) scrollToBottom(true);
   else if (anchorAboveViewport) messages.scrollTop += messages.scrollHeight - previousHeight;
   return bubble;
 }
@@ -6997,7 +6997,15 @@ async function replacePendingWithStoredItem(item, wipBubble, onStored = null) {
     if (data.status !== 'done' && data.status !== 'error' && data.status !== 'cancelled') return;
     if (data.status === 'error' && !String(data.content || '').trim()) return;
     onStored?.(data);
+    // Removing a finished wip bubble that sits above the viewport (e.g. another
+    // bubble is still streaming below where the user is reading) shrinks the
+    // content above without moving scrollTop, which visually yanks the view
+    // upward. Compensate before insertCompletedHistoryItem does its own
+    // (unrelated) compensation for the new item it inserts.
+    const wipRect = wipBubble.getBoundingClientRect();
+    const wipAboveViewport = wipRect.bottom <= messages.getBoundingClientRect().top;
     wipBubble.remove();
+    if (wipAboveViewport) messages.scrollTop -= wipRect.height;
     if (!shouldShowNewResponse(data)) return;
     insertCompletedHistoryItem(data);
     if (data.agent && !data.adhoc) refreshComposerSessionCount(data.topic || item.topic || 'default', data.agent);
@@ -7978,8 +7986,8 @@ function isAtBottom() {
   return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 150;
 }
 
-function scrollToBottom() {
-  if (isAtBottom()) messages.scrollTop = messages.scrollHeight;
+function scrollToBottom(force = false) {
+  if (force || isAtBottom()) messages.scrollTop = messages.scrollHeight;
 }
 
 function addLoader(bubble) {
@@ -13428,7 +13436,7 @@ function bootLogoHtml(bubbleText) {
   const variant = Number.isInteger(forced) && forced >= 0 && forced <= 2
     ? forced
     : Math.floor(Math.random() * 3);
-  const logo = '<img class="boot-logo-icon" src="/favicon.png" alt="" />';
+  const logo = '<img class="boot-logo-icon" src="/favicon.png" width="400" height="400" alt="" />';
   const bubble = bubbleText ? `<div class="boot-logo-bubble">${bubbleText}</div>` : '';
   if (variant === 0) {
     return `<pre class="boot-art">${BOOT_LOGO_ART}</pre>` +
@@ -13438,6 +13446,31 @@ function bootLogoHtml(bubbleText) {
     return `<div class="boot-logo-lockup boot-logo-squid-only">${logo}</div>`;
   }
   return `<div class="boot-logo-lockup boot-logo-talking-squid">${logo}${bubble}</div>`;
+}
+
+async function appendBootBannerAtBottom(el) {
+  await initialHistoryReady;
+  const shouldFollow = isAtBottom();
+  messages.appendChild(el);
+  if (!shouldFollow) return;
+
+  messages.scrollTop = messages.scrollHeight;
+  const alignedTop = messages.scrollTop;
+  const images = [...el.querySelectorAll('img')];
+  await Promise.all(images.map(img => img.complete
+    ? Promise.resolve()
+    : new Promise(resolve => {
+        img.addEventListener('load', resolve, { once: true });
+        img.addEventListener('error', resolve, { once: true });
+      })));
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+  // Preserve an intentional user scroll made while the logo was loading. If
+  // Safari merely left scrollTop unchanged while late layout grew scrollHeight,
+  // finish the original follow-to-bottom operation.
+  if (isAtBottom() || Math.abs(messages.scrollTop - alignedTop) < 2) {
+    messages.scrollTop = messages.scrollHeight;
+  }
 }
 
 async function showBootBanner() {
@@ -13471,7 +13504,7 @@ async function showBootBanner() {
     el.innerHTML = bootLogoHtml(bubbleText) +
       `<div class="boot-meta">AgentSquid${bootTime ? `  ·  started ${bootTime}` : ''}</div>` +
       (!navigator.onLine ? `<div class="boot-offline">no internet — LLM calls will fail</div>` : '');
-    messages.appendChild(el);
+    await appendBootBannerAtBottom(el);
 
     const anyAvailable = (data.harnesses || []).some(h => h.installed);
     if (!anyAvailable) {
@@ -13503,10 +13536,10 @@ async function showBootBanner() {
           });
         });
       });
+      const shouldFollowSetup = isAtBottom();
       messages.appendChild(setup);
+      if (shouldFollowSetup) messages.scrollTop = messages.scrollHeight;
     }
-
-    messages.scrollTop = messages.scrollHeight;
   } catch {
     const isLocal = ['127.0.0.1', 'localhost', '::1'].includes(location.hostname);
     const msg = !navigator.onLine
@@ -13518,8 +13551,7 @@ async function showBootBanner() {
     el.className = 'boot-banner';
     el.innerHTML = bootLogoHtml(BOOT_FALLBACK_TEXT) +
       `<div class="boot-offline">${msg}</div>`;
-    messages.appendChild(el);
-    messages.scrollTop = messages.scrollHeight;
+    await appendBootBannerAtBottom(el);
   }
 }
 

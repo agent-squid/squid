@@ -3947,12 +3947,62 @@ def get_realtime_cursor() -> int:
         return int(conn.execute("SELECT COALESCE(MAX(event_id), 0) FROM realtime_events").fetchone()[0])
 
 
-def get_realtime_retained_range() -> tuple[Optional[int], int]:
+def _realtime_scope_sql(scopes: list[dict]) -> tuple[list[str], list]:
+    clauses, params = [], []
+    for scope in scopes:
+        if scope.get("lifecycle") == "global":
+            return ["1=1"], []
+        topic = scope.get("topic")
+        agent = scope.get("agent")
+        if not topic:
+            continue
+        if agent is None:
+            clauses.append("topic=?")
+            params.append(topic)
+        else:
+            clauses.append("(topic=? AND agent=?)")
+            params.extend((topic, agent))
+    return clauses, params
+
+
+def get_realtime_replay(after_event_id: int, scopes: list[dict], limit: int = 501) -> tuple[dict, list[dict]]:
+    """Read replay metadata and scoped events at one durable watermark."""
+    clauses, scope_params = _realtime_scope_sql(scopes)
     with _connect() as conn:
-        row = conn.execute(
-            "SELECT MIN(event_id), COALESCE(MAX(event_id), 0) FROM realtime_events"
-        ).fetchone()
-    return (int(row[0]) if row[0] is not None else None, int(row[1]))
+        # sqlite3 does not start a read transaction for SELECT statements, so
+        # begin explicitly to keep pruning/publication from changing the range
+        # between the continuity check and scoped event read.
+        conn.execute("BEGIN")
+        current = int(conn.execute(
+            "SELECT COALESCE(MAX(event_id), 0) FROM realtime_events"
+        ).fetchone()[0])
+        global_count = int(conn.execute(
+            """SELECT COUNT(*)
+               FROM realtime_events WHERE event_id>? AND event_id<=?""",
+            (after_event_id, current),
+        ).fetchone()[0])
+        if clauses:
+            scoped_row = conn.execute(
+                f"""SELECT COUNT(*), MIN(created_at) FROM realtime_events
+                    WHERE event_id>? AND event_id<=? AND ({' OR '.join(clauses)})""",
+                (after_event_id, current, *scope_params),
+            ).fetchone()
+            rows = conn.execute(
+                f"""SELECT event_id, event_type, topic, agent, msg_id, run_seq, payload, created_at
+                    FROM realtime_events WHERE event_id>? AND event_id<=?
+                    AND ({' OR '.join(clauses)}) ORDER BY event_id LIMIT ?""",
+                (after_event_id, current, *scope_params, limit),
+            ).fetchall()
+        else:
+            scoped_row = (0, None)
+            rows = []
+    window = {
+        "current": current,
+        "global_event_count": global_count,
+        "scoped_event_count": int(scoped_row[0]),
+        "oldest_created_at": scoped_row[1],
+    }
+    return window, _decode_realtime_event_rows(rows)
 
 
 def prune_realtime_data(event_days: int = 7, max_events: int = 100_000, request_days: int = 7) -> dict:
@@ -3979,31 +4029,21 @@ def prune_realtime_data(event_days: int = 7, max_events: int = 100_000, request_
 
 
 def get_realtime_events(after_event_id: int, scopes: list[dict], limit: int = 501) -> list[dict]:
-    clauses, params = [], [after_event_id]
-    for scope in scopes:
-        if scope.get("lifecycle") == "global":
-            clauses.append("1=1")
-            continue
-        topic = scope.get("topic")
-        agent = scope.get("agent")
-        if not topic:
-            continue
-        if agent is None:
-            clauses.append("topic=?")
-            params.append(topic)
-        else:
-            clauses.append("(topic=? AND agent=?)")
-            params.extend((topic, agent))
+    clauses, scope_params = _realtime_scope_sql(scopes)
     if not clauses:
         return []
-    params.append(limit)
     with _connect() as conn:
         rows = conn.execute(
             f"""SELECT event_id, event_type, topic, agent, msg_id, run_seq, payload, created_at
                 FROM realtime_events WHERE event_id>? AND ({' OR '.join(clauses)})
                 ORDER BY event_id LIMIT ?""",
-            params,
+            (after_event_id, *scope_params, limit),
         ).fetchall()
+
+    return _decode_realtime_event_rows(rows)
+
+
+def _decode_realtime_event_rows(rows) -> list[dict]:
     result = []
     for row in rows:
         item = dict(row)

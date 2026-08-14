@@ -163,6 +163,119 @@ def test_pruned_cursor_rolls_over_to_snapshot(tmp_path, monkeypatch):
         assert ws.receive_json()["type"] == "snapshot"
 
 
+def test_internal_realtime_log_gap_rolls_over_to_snapshot(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    for index in range(4):
+        stats_db.insert_realtime_event("message.changed", "squid", "codex", {"id": index})
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        conn.execute("DELETE FROM realtime_events WHERE event_id=3")
+
+    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        ws.receive_json()
+        ws.send_json({
+            "v": 1, "type": "subscribe",
+            "payload": {
+                "client_id": CLIENT_ID,
+                "cursor": 1,
+                "scopes": [{"topic": "squid", "agent": "codex"}],
+            },
+        })
+        assert ws.receive_json()["type"] == "subscribed"
+        assert ws.receive_json()["type"] == "snapshot"
+
+
+def test_replay_rolls_over_when_serialized_events_exceed_byte_limit(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    monkeypatch.setattr(server, "_REALTIME_REPLAY_BYTE_LIMIT", 64)
+    stats_db.insert_realtime_event(
+        "message.changed", "squid", "codex", {"content": "x" * 100},
+    )
+
+    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        ws.receive_json()
+        ws.send_json({
+            "v": 1, "type": "subscribe",
+            "payload": {
+                "client_id": CLIENT_ID,
+                "cursor": 0,
+                "scopes": [{"topic": "squid", "agent": "codex"}],
+            },
+        })
+        assert ws.receive_json()["type"] == "subscribed"
+        assert ws.receive_json()["type"] == "snapshot"
+
+
+def test_replay_rolls_over_for_old_or_incompatible_events(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    event_id = stats_db.insert_realtime_event("future.event", "squid", "codex", {})
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        conn.execute(
+            "UPDATE realtime_events SET created_at=datetime('now', '-2 days') WHERE event_id=?",
+            (event_id,),
+        )
+    window, events = stats_db.get_realtime_replay(
+        0, [{"topic": "squid", "agent": "codex"}],
+    )
+    assert server._realtime_replay_rollover_reason(0, window, events) == "event_age"
+
+    monkeypatch.setattr(server, "_REALTIME_REPLAY_MAX_AGE_SECONDS", 3 * 24 * 60 * 60)
+    assert server._realtime_replay_rollover_reason(0, window, events) == "incompatible_event"
+
+
+def test_future_realtime_cursor_rolls_over():
+    assert server._realtime_replay_rollover_reason(
+        5, {
+            "current": 4, "global_event_count": 0,
+            "scoped_event_count": 0, "oldest_created_at": None,
+        }, [],
+    ) == "future_cursor"
+
+
+def test_unrelated_events_do_not_force_scoped_replay_rollover(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    old_id = stats_db.insert_realtime_event(
+        "message.changed", "other", "codex", {"id": "old"},
+    )
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        conn.execute(
+            "UPDATE realtime_events SET created_at=datetime('now', '-2 days') WHERE event_id=?",
+            (old_id,),
+        )
+    for index in range(server._REALTIME_REPLAY_LIMIT):
+        stats_db.insert_realtime_event("message.changed", "other", "codex", {"id": index})
+    expected_id = stats_db.insert_realtime_event(
+        "message.changed", "squid", "codex", {"id": "expected"},
+    )
+
+    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        ws.receive_json()
+        ws.send_json({
+            "v": 1, "type": "subscribe",
+            "payload": {
+                "client_id": CLIENT_ID,
+                "cursor": 0,
+                "scopes": [{"topic": "squid", "agent": "codex"}],
+            },
+        })
+        assert ws.receive_json()["type"] == "subscribed"
+        replay = ws.receive_json()
+        assert replay["type"] == "message.changed"
+        assert replay["event_id"] == expected_id
+
+
+def test_realtime_replay_is_bounded_by_its_atomic_watermark(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    first_id = stats_db.insert_realtime_event(
+        "message.changed", "squid", "codex", {"id": 1},
+    )
+    window, events = stats_db.get_realtime_replay(
+        0, [{"topic": "squid", "agent": "codex"}],
+    )
+    assert window["current"] == first_id
+    assert [event["event_id"] for event in events] == [first_id]
+    assert window["global_event_count"] == window["scoped_event_count"] == 1
+
+
 def test_mutation_requires_client_identity(tmp_path, monkeypatch):
     _fresh_db(tmp_path, monkeypatch)
     with TestClient(server.app).websocket_connect("/ws/v1") as ws:

@@ -982,6 +982,33 @@ test.describe('response bubble', () => {
     ))).toBeLessThan(150);
   });
 
+  test('completed response keeps following bottom when its insertion exceeds the threshold', async ({ page }) => {
+    await expect(page.locator('#messages')).toBeVisible();
+    await page.evaluate(() => {
+      const messages = document.getElementById('messages');
+      messages.innerHTML = '';
+      for (let i = 0; i < 12; i++) {
+        const bubble = document.createElement('div');
+        bubble.className = 'msg assistant';
+        bubble.style.minHeight = '100px';
+        bubble.textContent = `older response ${i}`;
+        messages.appendChild(bubble);
+      }
+      messages.scrollTop = messages.scrollHeight;
+      insertCompletedHistoryItem({
+        id: 999,
+        topic: 'squid',
+        agent: 'codex',
+        content: 'large completed response '.repeat(150),
+        completed_at: '2026-08-14T12:00:00Z',
+      });
+    });
+
+    await expect.poll(() => page.locator('#messages').evaluate(el => (
+      el.scrollHeight - el.scrollTop - el.clientHeight
+    ))).toBeLessThan(2);
+  });
+
   test('renders Codex unified diff tool blocks', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200, headers: SSE_HEADERS,

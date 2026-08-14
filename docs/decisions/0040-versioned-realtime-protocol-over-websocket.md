@@ -104,7 +104,7 @@ fallback and through the explicit `sse` migration mode.
 | Area | Status | Current behavior |
 | --- | --- | --- |
 | `/ws/v1`, v1 envelopes, `hello`, version rejection | Implemented | The server exposes one JSON WebSocket endpoint and accepts protocol version 1. |
-| Subscribe, unsubscribe, scoped replay, snapshot fallback | Partial | Topic/agent scopes, cursor replay, a 500-event rollover, retained-cursor rollover, and 20-message snapshots exist. Scope authorization, replay byte/age/compatibility/gap limits, and a transactionally buffered snapshot boundary do not. |
+| Subscribe, unsubscribe, scoped replay, snapshot fallback | Partial | Topic/agent scopes, cursor replay, count/byte/age/compatibility/gap rollover, retained-cursor rollover, and 20-message snapshots exist. Scope authorization and a transactionally buffered snapshot boundary remain incomplete. |
 | Durable global event log and wake-up | Implemented | `realtime_events` supplies global cursors; commits wake sockets through a process-global generation notifier with a 20-second safety poll. Seven-day/100,000-event cleanup exists. |
 | Chat event publication | Implemented on the server | Persisted run events publish `chat.queued`, `chat.loading`, `chat.processing`, `chat.status`, `chat.tool`, `chat.text`, `chat.stats`, `chat.done`, and `chat.error`; message mutations publish `message.changed`. |
 | Running-message browser reattachment | Implemented | The UI prefers WebSocket snapshots/events for pending messages, reconnects with jittered exponential backoff, persists its cursor, sends acknowledgements, and falls back to SSE when WebSocket is unavailable. |
