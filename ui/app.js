@@ -4483,23 +4483,28 @@ async function sendMessage(text, opts = {}) {
   killBtn.style.display = 'none';
   killBtn.addEventListener('click', async () => {
     killBtn.disabled = true;
-    userAborted = true;
-    controller.abort();
-    if (queuePosition !== null) {
-      await fetch('/cmd', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: 'deq', topic, pos: queuePosition }),
-      }).catch(() => {});
-      renderCancelledThinking('Dequeued.');
-      pollProcs();
-    } else if (msgId) {
-      const stopRes = await fetch('/cmd', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: 'stop_msg', topic, msg_id: msgId }),
-      }).catch(() => null);
-      if (stopRes?.ok) renderCancelledThinking('Cancelled.');
+    clearCancellationError(thinkingBubble);
+    try {
+      if (queuePosition !== null) {
+        const response = await fetch('/cmd', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: 'deq', topic, pos: queuePosition }),
+        });
+        if (!response.ok) throw new Error('Unable to remove queued prompt.');
+        userAborted = true;
+        controller.abort();
+        renderCancelledThinking('Dequeued.');
+        pollProcs();
+      } else if (msgId) {
+        await cancelRealtimeMessage(msgId, topic, agent);
+        userAborted = true;
+        controller.abort();
+        renderCancelledThinking('Cancelled.');
+      }
+    } catch (error) {
+      killBtn.disabled = false;
+      showCancellationError(thinkingBubble, error);
     }
   });
   thinkingBubble.appendChild(killBtn);
@@ -4960,6 +4965,35 @@ async function sendMessage(text, opts = {}) {
     }
   }
 
+  function markSessionContextPending() {
+    // Native shell context belongs only to that command; it is never delivered
+    // into (or retained by) the lane's resumable chat session.
+    if (nativeShell) return;
+    if (_contextIds.length && !adhoc) {
+      const pendingKey = `${topic}@${_effectiveAgent || '_'}`;
+      _pendingSessionInjectedIds[pendingKey] = [...new Set([
+        ...(_pendingSessionInjectedIds[pendingKey] || []),
+        ..._contextIds,
+      ])];
+    }
+    if (_includeTopicMemory && !adhoc) {
+      const memoryKey = _memoryInjectedKey(topic, _effectiveAgent);
+      _pendingSessionMemoryRevisions[memoryKey] = _topicMemoryForSend.revision;
+      delete _memorySelectionOverrides[_memoryOverrideKey(topic, _effectiveAgent, false)];
+    }
+    if (_attachedFiles.length && !adhoc) {
+      const pendingKey = `${topic}@${_effectiveAgent || '_'}`;
+      _pendingSessionAttachedFiles[pendingKey] = [...new Set([
+        ...(_pendingSessionAttachedFiles[pendingKey] || []),
+        ..._attachedFiles.map(f => f.path),
+      ])];
+    }
+    if ((_contextIds.length || _includeTopicMemory || _attachedFiles.length) && !adhoc) {
+      updatePinCount();
+      if (pinPanel.classList.contains('open')) renderPinPanel();
+    }
+  }
+
   function startStatusFallback(id) {
     if (statusTimer || !id) return;
     const MAX_POLLS = 960;  // 32 min at 2s intervals — covers 30 min default timeout
@@ -5111,16 +5145,13 @@ async function sendMessage(text, opts = {}) {
   const _contextIds = [...new Set([..._lookbackIds, ..._pinnedIds, ..._extraPinnedIds])];
   await pruneMissingAttachedFiles();
   const _attachedFiles = _attachedFilesState({ topic, agent: _effectiveAgent, adhoc }).selected;
-  const _messageForServer = !nativeShell && _attachedFiles.length
-    ? `${message}\n\nFiles:\n${_attachedFiles.map(f => `- ${f.path}`).join('\n')}`
-    : message;
   const chatPayload = {
-    message: _messageForServer, topic, agent, lookback, adhoc, source,
+    message, topic, agent, lookback, adhoc, source,
     ...(flowRoute ? { flow_route: flowRoute, ...(flowRunId ? { flow_run_id: flowRunId } : {}) } : {}),
     ...(!nativeShell && adhoc && lookback > 0 ? { lookback_via_pins: true } : {}),
     ...(_includeTopicMemory ? { include_topic_memory: true } : {}),
     ...(_contextIds.length ? { pinned_ids: _contextIds } : {}),
-    ...(nativeShell && _attachedFiles.length ? { attached_paths: _attachedFiles.map(f => f.path) } : {}),
+    ...(_attachedFiles.length ? { attached_paths: _attachedFiles.map(f => f.path) } : {}),
   };
 
   try {
@@ -5147,6 +5178,7 @@ async function sendMessage(text, opts = {}) {
         attachMsgId(result.msg_id);
         _lookbackUnselected.clear();
         _lastLookbackSelectionKey = '';
+        markSessionContextPending();
         detachedPolling = true;
         reconnectPendingItem({
           id: msgId,
@@ -5155,7 +5187,9 @@ async function sendMessage(text, opts = {}) {
           adhoc,
           content: '',
           status: 'pending',
-        }, thinkingBubble);
+        }, thinkingBubble, {
+          onStored: data => markSessionContextDelivered(data.session_id || data.stats?.session_id || null),
+        });
         return { flowRunId, msgId };
       } catch (err) {
         if (transportMode === 'websocket' || err.realtimeCommandResult) throw err;
@@ -5204,31 +5238,7 @@ async function sendMessage(text, opts = {}) {
     if (!msgId) attachMsgId(res.headers.get('X-Squid-Msg-Id'));
     _lookbackUnselected.clear();
     _lastLookbackSelectionKey = '';
-    if (!nativeShell && _contextIds.length && !adhoc) {
-      const pendingKey = `${topic}@${_effectiveAgent || '_'}`;
-      _pendingSessionInjectedIds[pendingKey] = [...new Set([
-        ...(_pendingSessionInjectedIds[pendingKey] || []),
-        ..._contextIds,
-      ])];
-      updatePinCount();
-      if (pinPanel.classList.contains('open')) renderPinPanel();
-    }
-    if (!nativeShell && _includeTopicMemory && !adhoc) {
-      const memoryKey = _memoryInjectedKey(topic, _effectiveAgent);
-      _pendingSessionMemoryRevisions[memoryKey] = _topicMemoryForSend.revision;
-      delete _memorySelectionOverrides[_memoryOverrideKey(topic, _effectiveAgent, false)];
-      updatePinCount();
-      if (pinPanel.classList.contains('open')) renderPinPanel();
-    }
-    if (_attachedFiles.length && !adhoc) {
-      const pendingKey = `${topic}@${_effectiveAgent || '_'}`;
-      _pendingSessionAttachedFiles[pendingKey] = [...new Set([
-        ...(_pendingSessionAttachedFiles[pendingKey] || []),
-        ..._attachedFiles.map(f => f.path),
-      ])];
-      updatePinCount();
-      if (pinPanel.classList.contains('open')) renderPinPanel();
-    }
+    markSessionContextPending();
 
     const reader  = res.body.getReader();
     const decoder = new TextDecoder();
@@ -6834,8 +6844,10 @@ function appendHistoryItem(item, container) {
     const statsEl = addStats(asstBubble, item.stats, completedAt);
     statsEl.classList.add('history-item');
     addDeepDiveButton(asstBubble, item.topic || 'default', item.agent || null, !!item.adhoc, statsEl, item.id, completedAt);
-  } else if (item.timestamp) {
-    const tsEl = addTimestamp(asstBubble, item.timestamp);
+  } else if (item.completed_at || item.timestamp) {
+    // Completed history is ordered by completed_at. Label it with the same
+    // authoritative time so slow turns do not appear chronologically inverted.
+    const tsEl = addTimestamp(asstBubble, item.completed_at || item.timestamp);
     if (tsEl) tsEl.classList.add('history-item');
   }
 
@@ -6928,12 +6940,29 @@ function makeWipBubble(item) {
   killBtn.textContent = '×';
   killBtn.addEventListener('click', async () => {
     killBtn.disabled = true;
-    await fetch('/cmd', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: 'stop_msg', msg_id: item.id }) }).catch(() => {});
+    clearCancellationError(bubble);
+    try {
+      await cancelRealtimeMessage(item.id, item.topic, item.agent);
+    } catch (error) {
+      killBtn.disabled = false;
+      showCancellationError(bubble, error);
+    }
   });
   bubble.appendChild(killBtn);
   addThinkingHeightButton(bubble);
   return bubble;
+}
+
+function clearCancellationError(container) {
+  container?.querySelector(':scope > .cancel-error')?.remove();
+}
+
+function showCancellationError(container, error) {
+  clearCancellationError(container);
+  const message = document.createElement('div');
+  message.className = 'msg-error cancel-error';
+  message.textContent = error?.message || 'Unable to cancel response.';
+  container?.appendChild(message);
 }
 
 function insertPendingHistoryItem(item) {
@@ -6953,13 +6982,14 @@ function insertPendingHistoryItem(item) {
   return bubble;
 }
 
-async function replacePendingWithStoredItem(item, wipBubble) {
+async function replacePendingWithStoredItem(item, wipBubble, onStored = null) {
   try {
     const res = await fetch(`/chat/${item.id}/status`);
     if (!res.ok || !wipBubble.parentNode) return;
     const data = await res.json();
     if (data.status !== 'done' && data.status !== 'error' && data.status !== 'cancelled') return;
     if (data.status === 'error' && !String(data.content || '').trim()) return;
+    onStored?.(data);
     wipBubble.remove();
     if (!shouldShowNewResponse(data)) return;
     insertCompletedHistoryItem(data);
@@ -6996,13 +7026,14 @@ const realtimeV1 = (() => {
   const commands = new Map();
   const commandTimeoutMs = 5000;
 
-  const rejectCommand = (requestId, message, authoritative = false) => {
+  const rejectCommand = (requestId, message, authoritative = false, timedOut = false) => {
     const command = commands.get(requestId);
     if (!command) return;
     commands.delete(requestId);
     clearTimeout(command.timeout);
     const error = new Error(message);
     if (authoritative) error.realtimeCommandResult = true;
+    if (timedOut) error.realtimeCommandTimedOut = true;
     command.reject(error);
   };
 
@@ -7132,6 +7163,36 @@ const realtimeV1 = (() => {
     };
   };
 
+  const sendCommand = ({ type, payload, topic, agent = null, freshScope = false, timeoutMessage }) => {
+    const requestId = window.crypto?.randomUUID?.()
+      || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    const promise = new Promise((resolve, reject) => {
+      const command = {
+        topic,
+        agent,
+        frame: { v: 1, type, request_id: requestId, payload },
+        sent: false,
+        everSent: false,
+        resolve,
+        reject,
+        timeout: null,
+      };
+      command.timeout = setTimeout(() => {
+        rejectCommand(
+          requestId,
+          command.everSent ? timeoutMessage : 'WebSocket connection timed out.',
+          command.everSent,
+          command.everSent,
+        );
+      }, commandTimeoutMs);
+      commands.set(requestId, command);
+    });
+    if (freshScope) needsSnapshot = true;
+    connect();
+    if (socket?.readyState === WebSocket.OPEN) subscribe(freshScope);
+    return promise;
+  };
+
   return {
     resume() {
       if (!globalEnabled && !watches.size && !commands.size) return;
@@ -7157,32 +7218,23 @@ const realtimeV1 = (() => {
       }
     },
     start(payload) {
-      const requestId = window.crypto?.randomUUID?.()
-        || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-      const promise = new Promise((resolve, reject) => {
-        const command = {
-          topic: payload.topic,
-          agent: payload.agent || null,
-          frame: { v: 1, type: 'chat.start', request_id: requestId, payload },
-          sent: false,
-          everSent: false,
-          resolve,
-          reject,
-          timeout: null,
-        };
-        command.timeout = setTimeout(() => {
-          rejectCommand(
-            requestId,
-            command.everSent ? 'WebSocket command timed out after submission.' : 'WebSocket connection timed out.',
-            command.everSent,
-          );
-        }, commandTimeoutMs);
-        commands.set(requestId, command);
+      return sendCommand({
+        type: 'chat.start',
+        payload,
+        topic: payload.topic,
+        agent: payload.agent || null,
+        freshScope: true,
+        timeoutMessage: 'WebSocket command timed out after submission.',
       });
-      needsSnapshot = true;
-      connect();
-      if (socket?.readyState === WebSocket.OPEN) subscribe(true);
-      return promise;
+    },
+    cancel(msgId, topic, agent) {
+      return sendCommand({
+        type: 'chat.cancel',
+        payload: { msg_id: msgId },
+        topic,
+        agent: agent || null,
+        timeoutMessage: 'WebSocket cancellation timed out after submission.',
+      });
     },
     watch(item, callbacks) {
       const hadScope = globalEnabled || [...watches.values()].some(watch => watch.topic === item.topic && watch.agent === item.agent);
@@ -7205,6 +7257,33 @@ const realtimeV1 = (() => {
     },
   };
 })();
+
+async function cancelRealtimeMessage(msgId, topic = 'default', agent = null) {
+  const transportMode = await realtimeTransportMode;
+  if (transportMode !== 'sse' && realtimeV1) {
+    try {
+      const result = await realtimeV1.cancel(Number(msgId), topic || 'default', agent);
+      if (!result.ok) {
+        const error = new Error(result.error || 'Unable to cancel response.');
+        error.realtimeCommandResult = true;
+        throw error;
+      }
+      return true;
+    } catch (error) {
+      if (transportMode === 'websocket' ||
+          (error.realtimeCommandResult && !error.realtimeCommandTimedOut)) throw error;
+    }
+  } else if (transportMode === 'websocket') {
+    throw new Error('WebSocket transport is unavailable in this browser.');
+  }
+  const response = await fetch('/cmd', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command: 'stop_msg', topic, msg_id: Number(msgId) }),
+  });
+  if (!response.ok) throw new Error('Unable to cancel response.');
+  return true;
+}
 
 const realtimeDiscoveries = new Set();
 
@@ -7299,7 +7378,7 @@ function watchFlowRun(flowRunId, afterId, route = null) {
   tick();
 }
 
-async function reconnectPendingItem(item, wipBubble, { forceSse = false } = {}) {
+async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStored = null } = {}) {
   const transportMode = forceSse ? 'sse' : await realtimeTransportMode;
   if (!wipBubble.isConnected) return;
   const useWebSocket = transportMode !== 'sse' && !!realtimeV1;
@@ -7375,7 +7454,7 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false } = {}) 
         if (transportMode === 'auto' && window.EventSource) {
           stop();
           pendingPollTimers.delete(wipBubble);
-          reconnectPendingItem(item, wipBubble, { forceSse: true });
+          reconnectPendingItem(item, wipBubble, { forceSse: true, onStored });
         } else {
           statusBuf = 'WebSocket connection failed; retrying…';
           updatePreview();
@@ -7397,7 +7476,7 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false } = {}) 
       finishing = true;
       stop();
       pendingPollTimers.delete(wipBubble);
-      await replacePendingWithStoredItem(item, wipBubble);
+      await replacePendingWithStoredItem(item, wipBubble, onStored);
     }
     pendingPollTimers.set(wipBubble, stop);
     return;
@@ -7453,7 +7532,7 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false } = {}) 
     closed = true;
     es.close();
     pendingPollTimers.delete(wipBubble);
-    await replacePendingWithStoredItem(item, wipBubble);
+    await replacePendingWithStoredItem(item, wipBubble, onStored);
   });
   es.addEventListener('error', async event => {
     if (closed) return;
@@ -7463,7 +7542,7 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false } = {}) 
     if (event.data) {
       if (live) live.innerHTML = `<span class="msg-error">${event.data}</span>`;
       updateThinkingHeightButton(wipBubble);
-      await replacePendingWithStoredItem(item, wipBubble);
+      await replacePendingWithStoredItem(item, wipBubble, onStored);
       return;
     }
     pollPendingItem(item, wipBubble);
@@ -10564,11 +10643,22 @@ function renderProcPopup(processes, queued) {
     btn.addEventListener('click', async e => {
       e.stopPropagation();
       btn.disabled = true; btn.textContent = '…';
-      const b = btn.dataset.msgid
-        ? { command: 'stop_msg', msg_id: parseInt(btn.dataset.msgid) }
-        : { command: 'stop', topic: btn.dataset.topic, agent: btn.dataset.agent };
-      await fetch('/cmd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
-      await pollProcs();
+      try {
+        if (btn.dataset.msgid) {
+          await cancelRealtimeMessage(
+            parseInt(btn.dataset.msgid), btn.dataset.topic, btn.dataset.agent,
+          );
+        } else {
+          const b = { command: 'stop', topic: btn.dataset.topic, agent: btn.dataset.agent };
+          const response = await fetch('/cmd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
+          if (!response.ok) throw new Error('Unable to stop process.');
+        }
+        await pollProcs();
+      } catch (error) {
+        btn.disabled = false;
+        btn.textContent = 'Retry';
+        btn.title = error?.message || 'Unable to stop process.';
+      }
     });
   });
 

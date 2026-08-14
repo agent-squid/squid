@@ -885,6 +885,12 @@ async def _prepare_chat_turn(
     if prefix_blocks:
         effective_message = "\n\n".join(prefix_blocks + [message])
 
+    if attached_paths and not native_shell:
+        effective_message = "\n\n".join([
+            effective_message,
+            "Files:\n" + "\n".join(f"- {path}" for path in attached_paths),
+        ])
+
     log.info(
         "chat  topic=%s  agent=%s  harness=%s  provider=%s  backend=%s  model=%s  adhoc=%s  resume=%s  ctx=%d  pinned=%d  memory=%s  msg=%.80r",
         topic, resolved_agent, harness, provider, backend, model, adhoc,

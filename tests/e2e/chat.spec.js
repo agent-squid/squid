@@ -143,6 +143,221 @@ test('websocket transport starts and completes a new chat without POST /chat', a
   }))).toEqual({ type: 'chat.start', hasRequestId: true, message: 'hello over ws' });
 });
 
+test('websocket transport cancels a running chat without POST /cmd', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__chatCancelFrame = null;
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        this.readyState = MockWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+        } else if (frame.type === 'chat.start') {
+          setTimeout(() => this.receive({ v: 1, type: 'command.result', request_id: frame.request_id,
+            payload: { ok: true, msg_id: 85, flow_run_id: null } }));
+        } else if (frame.type === 'chat.cancel') {
+          window.__chatCancelFrame = frame;
+          setTimeout(() => this.receive({ v: 1, type: 'command.result', request_id: frame.request_id,
+            payload: { ok: true, cancelled: true, killed: true, msg_id: 85 } }));
+        }
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = MockWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+  let cmdRequests = 0;
+  await page.route('**/cmd', route => { cmdRequests++; return route.abort(); });
+
+  await page.goto('/');
+  await sendMsg(page, 'cancel over ws');
+  await expect(page.locator(THINKING).locator('.thinking-kill-btn')).toBeVisible();
+  await page.locator(THINKING).locator('.thinking-kill-btn').click();
+
+  await expect(page.locator(THINKING)).toContainText('Cancelled.');
+  expect(cmdRequests).toBe(0);
+  expect(await page.evaluate(() => ({
+    type: window.__chatCancelFrame?.type,
+    hasRequestId: !!window.__chatCancelFrame?.request_id,
+    msgId: window.__chatCancelFrame?.payload?.msg_id,
+  }))).toEqual({ type: 'chat.cancel', hasRequestId: true, msgId: 85 });
+});
+
+test('auto transport falls back to POST /cmd when websocket cancel is unavailable', async ({ page }) => {
+  await page.addInitScript(() => {
+    class FailedWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        this.readyState = FailedWebSocket.CONNECTING;
+        setTimeout(() => { this.readyState = 3; this.onclose?.(); });
+      }
+      close() {}
+    }
+    window.WebSocket = FailedWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'auto' } }));
+  let cmdBody = null;
+  await page.route('**/cmd', async route => {
+    cmdBody = route.request().postDataJSON();
+    await route.fulfill({ json: { ok: true, killed: 1 } });
+  });
+
+  await page.goto('/');
+  expect(await page.evaluate(() => cancelRealtimeMessage(86, 'squid', 'codex'))).toBe(true);
+  expect(cmdBody).toEqual({ command: 'stop_msg', topic: 'squid', msg_id: 86 });
+});
+
+test('auto transport falls back to POST /cmd when websocket cancel times out after send', async ({ page }) => {
+  await page.addInitScript(() => {
+    class UnacknowledgedCancelWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        this.readyState = UnacknowledgedCancelWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = UnacknowledgedCancelWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+        }
+        // The server receives chat.cancel but its command.result is lost.
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = UnacknowledgedCancelWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'auto' } }));
+  let cmdBody = null;
+  await page.route('**/cmd', async route => {
+    cmdBody = route.request().postDataJSON();
+    await route.fulfill({ json: { ok: true, killed: 1 } });
+  });
+
+  await page.goto('/');
+  expect(await page.evaluate(() => cancelRealtimeMessage(88, 'squid', 'codex'))).toBe(true);
+  expect(cmdBody).toEqual({ command: 'stop_msg', topic: 'squid', msg_id: 88 });
+});
+
+test('failed websocket cancel keeps the running chat retryable and shows the error', async ({ page }) => {
+  await page.addInitScript(() => {
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        this.readyState = MockWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+        } else if (frame.type === 'chat.start') {
+          setTimeout(() => this.receive({ v: 1, type: 'command.result', request_id: frame.request_id,
+            payload: { ok: true, msg_id: 87, flow_run_id: null } }));
+        } else if (frame.type === 'chat.cancel') {
+          setTimeout(() => this.receive({ v: 1, type: 'command.result', request_id: frame.request_id,
+            payload: { ok: false, error: 'cancel rejected by server' } }));
+        }
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = MockWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+
+  await page.goto('/');
+  await sendMsg(page, 'cancel should fail visibly');
+  const thinking = page.locator(THINKING);
+  const killBtn = thinking.locator('.thinking-kill-btn');
+  await expect(killBtn).toBeVisible();
+  await killBtn.click();
+
+  await expect(thinking.locator('.cancel-error')).toHaveText('cancel rejected by server');
+  await expect(killBtn).toBeEnabled();
+  await expect(thinking).toBeVisible();
+});
+
+test('websocket submission sends an attachment once without rewriting the displayed prompt', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__chatStartFrames = [];
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        this.readyState = MockWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+        } else if (frame.type === 'chat.start') {
+          window.__chatStartFrames.push(frame);
+          const msgId = 90 + window.__chatStartFrames.length;
+          setTimeout(() => this.receive({ v: 1, type: 'command.result', request_id: frame.request_id,
+            payload: { ok: true, msg_id: msgId, flow_run_id: null } }));
+        }
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = MockWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+  await page.route('**/localfile/check-paths', async route => {
+    const { paths } = route.request().postDataJSON();
+    await route.fulfill({ json: { paths: paths.map(path => ({ path, resolved_path: path, exists: true, is_file: true })) } });
+  });
+
+  await page.goto('/');
+  await page.evaluate(() => {
+    localStorage.setItem('attachedFiles', JSON.stringify([{ path: '/tmp/screenshot.png', name: 'screenshot.png' }]));
+    updatePinCount();
+  });
+  await sendMsg(page, '#squid@claude first prompt');
+  await page.waitForFunction(() => window.__chatStartFrames.length === 1);
+  await expect(page.locator('#pin-btn')).toHaveClass(/has-context-pending/);
+  await sendMsg(page, '#squid@claude second prompt');
+  await page.waitForFunction(() => window.__chatStartFrames.length === 2);
+
+  const payloads = await page.evaluate(() => window.__chatStartFrames.map(frame => frame.payload));
+  expect(payloads[0].message).toBe('first prompt');
+  expect(payloads[0].attached_paths).toEqual(['/tmp/screenshot.png']);
+  expect(payloads[1].message).toBe('#squid@claude second prompt');
+  expect(payloads[1].attached_paths).toBeUndefined();
+});
+
 test('auto transport falls back to POST /chat when websocket fails before subscribe', async ({ page }) => {
   await page.addInitScript(() => {
     class FailedWebSocket {

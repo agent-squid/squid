@@ -271,12 +271,12 @@ test('session send turns attached file badge gray once delivered', async ({ page
     },
   }));
   await page.route('**/topics/squid/session?agent=claude', r => r.fulfill({
-    json: { session_id: null, cwd: null },
+    json: { session_id: 'test-sess-abc', cwd: null },
   }));
 
-  const sentMessages = [];
+  const sentBodies = [];
   await page.route('**/chat', async route => {
-    sentMessages.push(route.request().postDataJSON().message);
+    sentBodies.push(route.request().postDataJSON());
     await route.fulfill({
       status: 200, headers: SSE_HEADERS,
       body: sse(META, { data: 'session response' }, STATS, DONE),
@@ -296,7 +296,8 @@ test('session send turns attached file badge gray once delivered', async ({ page
   await page.focus('#input');
   await page.keyboard.press('Enter');
   await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toBeVisible();
-  expect(sentMessages[0]).toContain('Files:\n- /Users/haebin/Work/squid/pyproject.toml');
+  expect(sentBodies[0].message).toBe('hello');
+  expect(sentBodies[0].attached_paths).toEqual(['/Users/haebin/Work/squid/pyproject.toml']);
 
   await expect(page.locator('#pin-count')).toHaveText('1');
   await expect(page.locator('#pin-btn')).toHaveClass(/has-saved-pins/);
@@ -307,7 +308,8 @@ test('session send turns attached file badge gray once delivered', async ({ page
 
   await page.fill('#input', '#squid@claude again');
   await page.keyboard.press('Enter');
-  await expect(sentMessages[1]).not.toContain('Files:');
+  expect(sentBodies[1].message).toBe('#squid@claude again');
+  expect(sentBodies[1].attached_paths).toBeUndefined();
 });
 
 test('native shell sends literal command with selected context paths', async ({ page }) => {
@@ -352,6 +354,85 @@ test('native shell sends literal command with selected context paths', async ({ 
   expect(sentBody.include_topic_memory).toBe(true);
   const attachedFiles = await page.evaluate(() => JSON.parse(localStorage.getItem('attachedFiles') || '[]'));
   expect(attachedFiles).toHaveLength(1);
+});
+
+test('in-flight native shell does not hide context from the next session prompt', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__chatStartPayloads = [];
+    class PendingShellWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        this.readyState = PendingShellWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = PendingShellWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+        } else if (frame.type === 'chat.start') {
+          window.__chatStartPayloads.push(frame.payload);
+          setTimeout(() => this.receive({
+            v: 1,
+            type: 'command.result',
+            request_id: frame.request_id,
+            payload: { ok: true, msg_id: 100 + window.__chatStartPayloads.length, flow_run_id: null },
+          }));
+        }
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = PendingShellWebSocket;
+  });
+  await mockBackend(page, { topic: 'squid', agent: 'claude' });
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+  await page.route('**/topics/squid/memory', route => route.fulfill({ json: {
+    topic: 'squid', exists: true, content: MEMORY_WITH_SKIP,
+    path: '~/.squid/context/topics/squid/memory.md',
+    squid: { code_roots: [], code_roots_skipped: true, code_roots_missing: false },
+  }}));
+  await page.route('**/topics/squid/session?agent=claude', route => route.fulfill({
+    json: { session_id: null, cwd: null },
+  }));
+
+  await page.goto('/');
+  await seedPin(page, { id: 77, topic: 'other', agent: 'codex', content: 'Pinned context' });
+  await seedAttachedFile(page, '/private/tmp/Screenshot.png');
+  await page.fill('#input', '#squid@claude ! printf ok');
+  await page.click('#pin-btn');
+  if (await page.locator('[data-memory-toggle]').textContent() === 'Off') {
+    await page.locator('[data-memory-toggle]').click();
+  }
+  await page.click('#pin-btn');
+  await page.focus('#input');
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => window.__chatStartPayloads.length === 1);
+
+  expect(await page.evaluate(() => ({
+    pins: _pendingSessionInjectedIds['squid@claude'] || [],
+    memory: _pendingSessionMemoryRevisions['squid@claude'] || null,
+    files: _pendingSessionAttachedFiles['squid@claude'] || [],
+  }))).toEqual({ pins: [], memory: null, files: [] });
+
+  await page.fill('#input', '#squid@claude normal prompt');
+  await page.focus('#input');
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => window.__chatStartPayloads.length === 2);
+
+  const payloads = await page.evaluate(() => window.__chatStartPayloads);
+  expect(payloads[0]).toMatchObject({
+    message: '! printf ok', pinned_ids: [77], include_topic_memory: true,
+    attached_paths: ['/private/tmp/Screenshot.png'],
+  });
+  expect(payloads[1]).toMatchObject({
+    message: '#squid@claude normal prompt', pinned_ids: [77], include_topic_memory: true,
+    attached_paths: ['/private/tmp/Screenshot.png'],
+  });
 });
 
 test('native shell running timer starts after queued command begins processing', async ({ page }) => {

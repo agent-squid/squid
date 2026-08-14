@@ -542,6 +542,23 @@ def test_native_shell_uses_agent_cwd_without_worktree_setup(tmp_path):
     repo_roots.assert_not_called()
 
 
+def test_chat_attachments_enrich_effective_prompt_without_changing_display_prompt():
+    with patch("agent.server.get_agent", return_value={"cwd": "/tmp/agent-cwd"}), \
+         patch("agent.server._resolve_agent_runtime", return_value=("codex", None, "codex", SimpleNamespace(fingerprint="f"))), \
+         patch("agent.server.upsert_topic"), \
+         patch("agent.server.topic_memory_squid_config", return_value={"code_roots": []}), \
+         patch("agent.server.get_context_history", return_value=([], [])), \
+         patch("agent.server.insert_user_message", return_value=201), \
+         patch("agent.server.insert_assistant_message", return_value=202):
+        prepared = asyncio.run(server._prepare_chat_turn(
+            message="inspect this", topic="squid", agent="codex",
+            attached_paths=["/tmp/screenshot.png"],
+        ))
+
+    assert prepared["display_prompt"] == "inspect this"
+    assert prepared["effective_message"] == "inspect this\n\nFiles:\n- /tmp/screenshot.png"
+
+
 def test_override_cwd_is_the_prepared_configured_cwd():
     with patch("agent.server.get_agent", return_value={"cwd": "/tmp/agent-cwd"}), \
          patch("agent.server._resolve_agent_runtime", return_value=("codex", None, "codex", SimpleNamespace(fingerprint="f"))), \
