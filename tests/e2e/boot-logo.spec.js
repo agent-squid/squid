@@ -1,5 +1,14 @@
 const { test, expect } = require('@playwright/test');
 
+// The app registers a service worker (ui/sw.js) on window 'load'. The new
+// tests below deliberately hold the page open for over a second while
+// waiting on delayed mocked routes — long enough in practice for the SW to
+// register, update-check, and (if its cached version differs from a prior
+// test run's) trigger app.js's own controllerchange -> location.reload(),
+// silently restarting the whole scenario mid-test. Block it, matching the
+// existing precedent in stats-aggregates.spec.js.
+test.use({ serviceWorkers: 'block' });
+
 function todayKey() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -90,7 +99,7 @@ test('boot logo variants: art, squid-only, talking-squid', async ({ page }) => {
   await expect(page.locator('.boot-logo-talking-squid .boot-logo-bubble')).toHaveText('More Done, Less Tokens.');
 });
 
-test('narrow refresh settles at the bottom of the boot banner', async ({ page }) => {
+test('narrow load settles at the bottom of the boot banner', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 700 });
   await mockBoot(page, 2);
   await page.goto('/');
@@ -98,6 +107,100 @@ test('narrow refresh settles at the bottom of the boot banner', async ({ page })
   await expect.poll(() => page.locator('#messages').evaluate(el => (
     el.scrollHeight - el.scrollTop - el.clientHeight
   ))).toBeLessThan(2);
+  // Set as early as possible (inline in <head>), not from app.js — verify
+  // it's already in effect on the very first load, no reload needed.
+  expect(await page.evaluate(() => history.scrollRestoration)).toBe('manual');
+});
+
+// Enough items, each long enough to wrap several lines, to guarantee
+// #messages actually overflows a 700px-tall mobile viewport — otherwise
+// scrollTop assignments below are indistinguishable no-ops (scrollHeight <=
+// clientHeight means every position reads as "at the bottom").
+function tallHistoryItems(n) {
+  return Array.from({ length: n }, (_, i) => ({
+    id: 100 + i,
+    role: 'assistant',
+    reply_to: 50 + i,
+    topic: 'default',
+    agent: 'claude',
+    backend: 'claude',
+    adhoc: false,
+    status: 'done',
+    prompt: `prompt ${i}`,
+    content: `Response ${i}: `.repeat(40),
+    completed_at: new Date(Date.now() - (n - i) * 60000).toISOString(),
+  }));
+}
+
+// The old version of this test reloaded after setting #messages.scrollTop =
+// 0, expecting that to simulate a browser restoring a stale scroll
+// position. It didn't: the JS realm and DOM are torn down and rebuilt fresh
+// on reload, so the assignment never survives to be "restored" — the test
+// passed regardless of whether any fix was in place. These two replace it
+// by exercising the actual mechanism Squid now uses to recover: history
+// loads (and its own pagination-compensation scrolling) finishes quickly,
+// then the boot banner's logo image is deliberately slowed, holding the
+// final "bootstrap settled" realignment open. Something (standing in for
+// native restoration, CSS scroll anchoring, or a realtime-snapshot race —
+// Squid can't tell which one hits in the field) knocks #messages off bottom
+// during that window; the final realignment must correct it once everything
+// Squid controls has actually settled — but must not override a real user
+// scroll made during that same window.
+async function slowBootLogoImage(page, delayMs = 1500) {
+  await page.route('**/favicon.png', async route => {
+    await new Promise(resolve => setTimeout(resolve, delayMs));
+    await route.fulfill({ status: 404, body: '' });
+  });
+}
+
+test('final realignment corrects the transcript to bottom once history and boot banner settle', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 700 });
+  await mockBoot(page, 2);
+  await page.route('**/history**', route => route.fulfill({ json: { items: tallHistoryItems(20), has_more: false } }));
+  await slowBootLogoImage(page);
+  // page.goto() defaults to waiting for the 'load' event, which itself
+  // waits on the deliberately-slowed boot-logo image — so by the time goto()
+  // would normally resolve, bootBannerSettled has already fired. Resolve
+  // earlier so the test can interfere with scroll position *during* the
+  // delay window instead of after it.
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+
+  // History is tall and unthrottled — give its own pagination-compensation
+  // scrolling time to finish, then knock the view off bottom while the
+  // slowed boot-logo image still holds the final realignment open.
+  await page.waitForTimeout(150);
+  await page.locator('#messages').evaluate(el => { el.scrollTop = 0; });
+
+  await expect.poll(() => page.locator('#messages').evaluate(el => (
+    el.scrollHeight - el.scrollTop - el.clientHeight
+  )), { timeout: 5000 }).toBeLessThan(2);
+});
+
+test('a manual scroll during startup is not overridden by the final realignment', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 700 });
+  await mockBoot(page, 2);
+  await page.route('**/history**', route => route.fulfill({ json: { items: tallHistoryItems(20), has_more: false } }));
+  await slowBootLogoImage(page);
+  // page.goto() defaults to waiting for the 'load' event, which itself
+  // waits on the deliberately-slowed boot-logo image — so by the time goto()
+  // would normally resolve, bootBannerSettled has already fired. Resolve
+  // earlier so the test can interfere with scroll position *during* the
+  // delay window instead of after it.
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+
+  await page.waitForTimeout(150);
+  await page.locator('#messages').evaluate(el => { el.scrollTop = 0; });
+  const box = await page.locator('#messages').boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.wheel(0, 10);
+
+  // Long enough for the (1500ms-delayed) settle signal to have resolved
+  // and, if the guard failed, for the realignment to have already fired.
+  await page.waitForTimeout(2000);
+  const gap = await page.locator('#messages').evaluate(el => (
+    el.scrollHeight - el.scrollTop - el.clientHeight
+  ));
+  expect(gap).toBeGreaterThan(2);
 });
 
 test('talking squid shows streak message on day 7', async ({ page }) => {

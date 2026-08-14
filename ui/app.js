@@ -12,11 +12,27 @@ const pinPanel        = document.getElementById('pin-panel');
 const pinCountEl      = document.getElementById('pin-count');
 const bookmarkBtn     = document.getElementById('chip-bookmark-btn');
 
+// Startup-only guard for the post-bootstrap final realignment further down
+// this file: if the user starts interacting with the transcript before that
+// realignment runs, it must not override an in-progress manual scroll.
+// `scroll` itself isn't used here — Squid's own programmatic scrollTop
+// assignments during bootstrap fire `scroll` events too and would produce
+// false positives; wheel/touchstart/pointerdown only fire for genuine input.
+let _transcriptTouchedDuringBoot = false;
+(() => {
+  const markTouched = () => { _transcriptTouchedDuringBoot = true; };
+  messages.addEventListener('wheel', markTouched, { once: true, passive: true });
+  messages.addEventListener('touchstart', markTouched, { once: true, passive: true });
+  messages.addEventListener('pointerdown', markTouched, { once: true });
+})();
+
 const realtimeTransportMode = fetch('/config/realtime', { cache: 'no-store' })
   .then(response => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
   .then(config => ['auto', 'websocket', 'sse'].includes(config.transport) ? config.transport : 'sse')
   .catch(() => 'sse');
 
+// history.scrollRestoration is set as early as possible in index.html's
+// <head> instead of here — see the comment there.
 window.scrollTo(0, 0);
 
 // Android PWA: dvh can be wrong after location.reload(); override with actual visual height
@@ -1970,6 +1986,20 @@ function markInitialHistoryReady() {
   resolveInitialHistoryReady = null;
 }
 
+// Unlike initialHistoryReady (resolved after just the *first* page),
+// resolves once the startup pagination chain in loadHistory() has actually
+// stopped auto-continuing — either exhausted or the viewport is full and
+// it's back to waiting on a real scroll-triggered IntersectionObserver
+// event. Used only to gate the one-shot final bottom realignment below.
+let resolveHistoryBootstrapSettled;
+const historyBootstrapSettled = new Promise(resolve => { resolveHistoryBootstrapSettled = resolve; });
+
+function markHistoryBootstrapSettled() {
+  if (!resolveHistoryBootstrapSettled) return;
+  resolveHistoryBootstrapSettled();
+  resolveHistoryBootstrapSettled = null;
+}
+
 function invalidateHistoryLoad() {
   historyGeneration++;
   historyLoading = false;
@@ -2099,6 +2129,7 @@ async function loadHistory() {
     if (generation === historyGeneration) {
       historyLoading = false;
       markInitialHistoryReady();
+      markHistoryBootstrapSettled();
     }
     return;
   }
@@ -2127,6 +2158,7 @@ async function loadHistory() {
   if (historyExhausted && topSentinel) {
     topSentinel.remove();
     topSentinel = null;
+    markHistoryBootstrapSettled();
   } else if (!historyExhausted && topSentinel) {
     // If sentinel is still visible after inserting items, load next page immediately
     // (IntersectionObserver only fires on state changes, not continuously)
@@ -2134,7 +2166,13 @@ async function loadHistory() {
     const mr = messages.getBoundingClientRect();
     if (sr.bottom >= mr.top && sr.top <= mr.bottom) {
       loadHistory();
+    } else {
+      // Viewport is full; back to waiting on a real scroll-triggered
+      // IntersectionObserver event. The auto-chain has stopped.
+      markHistoryBootstrapSettled();
     }
+  } else {
+    markHistoryBootstrapSettled();
   }
   updateScrollButtonVisibility();
 }
@@ -4406,6 +4444,11 @@ async function sendMessage(text, opts = {}) {
   const liveHiddenByScope = searchActive ||
     (hasHistoryFilterScope() && !itemMatchesFilter({ topic, agent, adhoc, flow_route: flowRoute }, historyFilter));
 
+  // Declared this early (before any of the several one-shot follow-to-bottom
+  // requestAnimationFrame calls below) so each can guard against firing after
+  // the turn has already completed and positioned the response bubble itself
+  // — a late callback would otherwise silently override that positioning.
+  let thinkingFrozen = false;
   let chainMarker = null;
   const renderSuppressedHeadMarker = opts.suppressUserBubble && flowOrigins && flowOrigins.length > 1;
   if (source === 'human' && route && chainTarget && (!opts.suppressUserBubble || renderSuppressedHeadMarker)) {
@@ -4436,7 +4479,7 @@ async function sendMessage(text, opts = {}) {
       userBubble.classList.add('live-hidden');
       userTimeEl?.classList.add('live-hidden');
     }
-    requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
+    requestAnimationFrame(() => { if (!thinkingFrozen) messages.scrollTop = messages.scrollHeight; });
 
     // Non-blocking nudge — fires async after the message is already in flight
     maybeShowCodeRootsNudge(topic, userBubble);
@@ -4472,7 +4515,6 @@ async function sendMessage(text, opts = {}) {
   thinkingBubble.appendChild(thinkingContent);
   messages.appendChild(thinkingBubble);
   const thinkingLoader = addLoader(thinkingContent);
-  let thinkingFrozen = false;
   let statusBuf = '';
   let raw = '';
   let statusRecoveredFromDb = false;
@@ -4618,7 +4660,12 @@ async function sendMessage(text, opts = {}) {
     thinkingBubble.remove();
   }
 
-  requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
+  // Scrolls to reveal the new thinking bubble. Deferred a frame so its
+  // just-inserted layout is measurable. If the turn finishes fast enough
+  // that 'done' (and its own, more informed scroll positioning) lands
+  // before this frame, thinkingFrozen is already true — skip so this stale
+  // scroll doesn't override it.
+  requestAnimationFrame(() => { if (!thinkingFrozen) messages.scrollTop = messages.scrollHeight; });
 
   // ── Response bubble (not yet in DOM — appended on first content chunk) ────────
   const bubble = document.createElement('div');
@@ -4779,7 +4826,7 @@ async function sendMessage(text, opts = {}) {
     firstDataReceived = true;
     // Bubble stays out of DOM until done — content streams into thinkingBubble as preview
     if (thinkingLoader.parentNode) thinkingLoader.remove();
-    requestAnimationFrame(() => { messages.scrollTop = messages.scrollHeight; });
+    requestAnimationFrame(() => { if (!thinkingFrozen) messages.scrollTop = messages.scrollHeight; });
   }
 
   function stopStatusFallback() {
@@ -4826,6 +4873,7 @@ async function sendMessage(text, opts = {}) {
 
   function showStoredResponse(content) {
     if (!shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) return false;
+    const wasAtBottom = isAtBottom();
     placeResponseBubble();
     raw = content || '';
     if (nativeShell) {
@@ -4835,7 +4883,7 @@ async function sendMessage(text, opts = {}) {
     } else {
       contentDiv.innerHTML = renderAssistantMarkdown(raw);
     }
-    scrollToBottom();
+    if (wasAtBottom) scrollToRevealBubble(bubble);
     return true;
   }
 
@@ -5184,6 +5232,13 @@ async function sendMessage(text, opts = {}) {
         _lastLookbackSelectionKey = '';
         markSessionContextPending();
         detachedPolling = true;
+        // From here on, the WS reconnect flow (not this closure's thinking-preview
+        // machinery) owns the wip bubble's lifecycle — including removing/replacing
+        // it on completion. Mark thinkingFrozen so the early "reveal thinking bubble"
+        // requestAnimationFrame (scheduled at bubble creation, before this branch
+        // runs) no-ops if it fires late instead of clobbering the completion path's
+        // own scroll positioning.
+        thinkingFrozen = true;
         reconnectPendingItem({
           id: msgId,
           topic,
@@ -5443,10 +5498,11 @@ async function sendMessage(text, opts = {}) {
               }
               bubble.classList.add('history-item');
               if (shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) {
+                const wasAtBottom = isAtBottom();
                 placeResponseBubble();
                 if (statsEl) messages.appendChild(statsEl); // stats goes between bubble and diffs, not after
                 renderCompletionTools(liveToolEvents);
-                scrollToBottom();
+                if (wasAtBottom) scrollToRevealBubble(bubble);
               }
             }
             // Later chain steps (target handoff, "<>" return) are dispatched
@@ -6890,7 +6946,7 @@ function compareCompletedTurnKeys(left, right) {
   return timeOrder || left[1] - right[1];
 }
 
-function insertCompletedHistoryItem(item) {
+function insertCompletedHistoryItem(item, { reconcile = false } = {}) {
   const wasAtBottom = isAtBottom();
   const previousHeight = messages.scrollHeight;
   const fragment = document.createDocumentFragment();
@@ -6903,7 +6959,13 @@ function insertCompletedHistoryItem(item) {
     ], key) > 0) || bottomSentinel;
   const anchorAboveViewport = !!anchor && anchor.getBoundingClientRect().top < messages.getBoundingClientRect().top;
   messages.insertBefore(fragment, anchor || null);
-  if (wasAtBottom) scrollToBottom(true);
+  // Snapshot rows reconcile the bounded HTTP history already on screen. They
+  // are not newly completed responses, so revealing an older inserted row can
+  // yank a refreshed transcript away from its newest message.
+  if (wasAtBottom) {
+    if (reconcile) messages.scrollTop = messages.scrollHeight;
+    else scrollToRevealBubble(bubble);
+  }
   else if (anchorAboveViewport) messages.scrollTop += messages.scrollHeight - previousHeight;
   return bubble;
 }
@@ -6984,7 +7046,7 @@ function insertPendingHistoryItem(item) {
     ], key) > 0) || bottomSentinel;
   const anchorAboveViewport = !!anchor && anchor.getBoundingClientRect().top < messages.getBoundingClientRect().top;
   messages.insertBefore(bubble, anchor || null);
-  if (wasAtBottom) scrollToBottom(true);
+  if (wasAtBottom) scrollToRevealBubble(bubble);
   else if (anchorAboveViewport) messages.scrollTop += messages.scrollHeight - previousHeight;
   return bubble;
 }
@@ -7083,7 +7145,7 @@ const realtimeV1 = (() => {
   const dispatchSnapshot = frame => {
     for (const conversation of frame.payload?.conversations || []) {
       for (const message of conversation.messages || []) {
-        if (message.role === 'assistant') onDiscover?.(message);
+        if (message.role === 'assistant') onDiscover?.(message, { reconcile: true });
         const watch = watches.get(Number(message.id));
         if (watch) {
           watch.runSeq = Math.max(watch.runSeq, Number(message.run_seq || 0));
@@ -7302,7 +7364,7 @@ async function cancelRealtimeMessage(msgId, topic = 'default', agent = null) {
 
 const realtimeDiscoveries = new Set();
 
-async function discoverRealtimeTurn(message) {
+async function discoverRealtimeTurn(message, { reconcile = false } = {}) {
   const msgId = Number(message.id);
   if (!Number.isFinite(msgId) || messages.querySelector(`[data-msg-id="${msgId}"]`) || realtimeDiscoveries.has(msgId)) return;
   realtimeDiscoveries.add(msgId);
@@ -7325,7 +7387,7 @@ async function discoverRealtimeTurn(message) {
       const bubble = insertPendingHistoryItem(item);
       reconnectPendingItem(item, bubble);
     } else if (item.status !== 'error' || String(item.content || '').trim()) {
-      insertCompletedHistoryItem(item);
+      insertCompletedHistoryItem(item, { reconcile });
       if (item.agent && !item.adhoc) refreshComposerSessionCount(item.topic || 'default', item.agent);
     }
     if (isAtBottom()) scrollToBottom();
@@ -7988,6 +8050,19 @@ function isAtBottom() {
 
 function scrollToBottom(force = false) {
   if (force || isAtBottom()) messages.scrollTop = messages.scrollHeight;
+}
+
+// Following a new bubble to the literal bottom skips past its own content
+// when the bubble is taller than the viewport, forcing a scroll back up to
+// read it from the top. Land on the bubble's top instead in that case, so
+// the user sees the head of the response and scrolls down through it —
+// same direction as reading the rest of the transcript.
+function scrollToRevealBubble(bubble) {
+  if (bubble.offsetHeight > messages.clientHeight) {
+    messages.scrollTop += bubble.getBoundingClientRect().top - messages.getBoundingClientRect().top;
+  } else {
+    messages.scrollTop = messages.scrollHeight;
+  }
 }
 
 function addLoader(bubble) {
@@ -17220,7 +17295,18 @@ Promise.all([realtimeTransportMode, initialHistoryReady]).then(([mode]) => {
 }).catch(() => {});
 // Discover processes that survived a refresh; polling stops again when idle.
 startProcPoll();
-showBootBanner();
+const bootBannerSettled = showBootBanner();
+// Final defense-in-depth bottom realignment, once per page load. Neither
+// history pagination's own scrollTop compensation nor the boot banner's own
+// settle logic (appendBootBannerAtBottom) are strictly serialized against
+// content the realtime WebSocket layer inserts during this same window, and
+// this can't rule out interference from the browser's own scroll handling
+// on some mobile browsers either — so re-assert bottom once everything
+// Squid controls has settled, winning whichever race actually happened,
+// unless the user already started scrolling the transcript themselves.
+Promise.all([historyBootstrapSettled, bootBannerSettled]).then(() => {
+  if (!_transcriptTouchedDuringBoot) messages.scrollTop = messages.scrollHeight;
+}).catch(() => {});
 try {
   const saved = JSON.parse(localStorage.getItem('squid_sticky_chip') || 'null');
   if (saved?.topic) {

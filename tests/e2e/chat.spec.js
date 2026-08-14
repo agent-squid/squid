@@ -143,6 +143,96 @@ test('websocket transport starts and completes a new chat without POST /chat', a
   }))).toEqual({ type: 'chat.start', hasRequestId: true, message: 'hello over ws' });
 });
 
+test('websocket tall response scrolls to reveal its top even if the reveal rAF fires late', async ({ page }) => {
+  // sendMessage() schedules a one-shot requestAnimationFrame right when the
+  // thinking bubble is created, to follow *it* into view. It's guarded by
+  // thinkingFrozen so a late-firing callback (completion already rendered
+  // and positioned the response bubble by the time the browser gets around
+  // to it) no-ops instead of stomping that positioning back to the literal
+  // bottom. Hold every rAF scheduled from send-time onward so this test
+  // controls exactly when that callback fires, instead of hoping real
+  // scheduling exposes the race — a passing test here means the guard
+  // actually works, not that the mock happened to be fast enough.
+  await page.addInitScript(() => {
+    window.__heldRafs = [];
+    window.__holdRafs = false;
+    const realRaf = window.requestAnimationFrame.bind(window);
+    window.requestAnimationFrame = cb => {
+      if (window.__holdRafs) { window.__heldRafs.push(cb); return window.__heldRafs.length; }
+      return realRaf(cb);
+    };
+    window.__flushRafs = () => { window.__heldRafs.splice(0).forEach(cb => cb()); };
+
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        this.readyState = MockWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+        } else if (frame.type === 'chat.start') {
+          setTimeout(() => {
+            this.receive({ v: 1, type: 'command.result', request_id: frame.request_id,
+              payload: { ok: true, msg_id: 85, flow_run_id: null } });
+            setTimeout(() => {
+              this.receive({ v: 1, type: 'chat.done', event_id: 1, msg_id: 85, run_seq: 1, payload: {} });
+            });
+          });
+        }
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = MockWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+  const longContent = Array.from({ length: 200 }, (_, i) =>
+    `Paragraph sentence number ${i + 1} with several words to force wrapping across many lines in the bubble.`
+  ).join(' ');
+  await page.route('**/chat/85/status', route => route.fulfill({ json: {
+    id: 85, role: 'assistant', reply_to: 84, topic: 'default', agent: 'claude', backend: 'claude',
+    adhoc: false, status: 'done', prompt: 'hello over ws', content: longContent,
+    completed_at: new Date().toISOString(),
+  }}));
+
+  await page.goto('/');
+  await page.evaluate(() => { window.__holdRafs = true; });
+  await sendMsg(page, 'hello over ws');
+
+  const response = page.locator(RESPONSE).filter({ hasText: 'Paragraph sentence number 1 ' });
+  await expect(response).toBeVisible();
+
+  const readPositions = () => page.evaluate(() => {
+    const el = document.querySelector('.msg.assistant:not(.msg-thinking)');
+    const container = document.getElementById('messages');
+    return {
+      bubbleTop: el.getBoundingClientRect().top,
+      messagesTop: container.getBoundingClientRect().top,
+      atBottom: container.scrollHeight - container.scrollTop - container.clientHeight < 150,
+    };
+  });
+
+  const before = await readPositions();
+  expect(Math.abs(before.bubbleTop - before.messagesTop)).toBeLessThan(2);
+  expect(before.atBottom).toBe(false);
+
+  // Flush the held rAFs, including the stale "reveal thinking bubble" one
+  // queued at send time — confirm it doesn't override the positioning above.
+  await page.evaluate(() => window.__flushRafs());
+
+  const after = await readPositions();
+  expect(Math.abs(after.bubbleTop - after.messagesTop)).toBeLessThan(2);
+});
+
 test('websocket processing event starts the native shell timeout clock', async ({ page }) => {
   await page.addInitScript(() => {
     class MockWebSocket {
@@ -621,6 +711,37 @@ test.describe('response bubble', () => {
     await look(page);  // pause — observe: stats line is last child, bubble above it
   });
 
+  test('response taller than the viewport scrolls to reveal its top, not its tail', async ({ page }) => {
+    const longText = Array.from({ length: 200 }, (_, i) =>
+      `Paragraph sentence number ${i + 1} with several words to force wrapping across many lines in the bubble.`
+    ).join(' ');
+    await page.route('**/chat', r => r.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(META, { data: longText }, DONE),
+    }));
+
+    await sendMsg(page);
+    const response = page.locator(RESPONSE);
+    await expect(response).toBeVisible();
+    await expect(response).toContainText('Paragraph sentence number 1 ');
+
+    // Landing at the literal bottom would skip past the whole response,
+    // requiring a scroll back up to read it. Land on its top instead, so
+    // scrolling down keeps reading in the natural direction.
+    const { bubbleTop, messagesTop, atBottom } = await page.evaluate(() => {
+      const el = document.querySelector('.msg.assistant:not(.msg-thinking)');
+      const container = document.getElementById('messages');
+      return {
+        bubbleTop: el.getBoundingClientRect().top,
+        messagesTop: container.getBoundingClientRect().top,
+        atBottom: container.scrollHeight - container.scrollTop - container.clientHeight < 150,
+      };
+    });
+    expect(Math.abs(bubbleTop - messagesTop)).toBeLessThan(2);
+    expect(atBottom).toBe(false);
+    await look(page);  // pause — observe: top of the long response visible, not its tail
+  });
+
   test('renders response tildes literally instead of strikethrough', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200,
@@ -982,7 +1103,12 @@ test.describe('response bubble', () => {
     ))).toBeLessThan(150);
   });
 
-  test('completed response keeps following bottom when its insertion exceeds the threshold', async ({ page }) => {
+  test('completed response scrolls to reveal its top when its insertion exceeds the threshold', async ({ page }) => {
+    // Landing at the literal bottom would skip past a tall completed item
+    // entirely, forcing a scroll back up to read it from the start. This
+    // applies to any completed-item insertion the user was following at the
+    // bottom for — not just their own just-sent message — including a turn
+    // discovered from another tab/session via the realtime layer.
     await expect(page.locator('#messages')).toBeVisible();
     await page.evaluate(() => {
       const messages = document.getElementById('messages');
@@ -1004,9 +1130,17 @@ test.describe('response bubble', () => {
       });
     });
 
-    await expect.poll(() => page.locator('#messages').evaluate(el => (
-      el.scrollHeight - el.scrollTop - el.clientHeight
-    ))).toBeLessThan(2);
+    const { bubbleTop, messagesTop, atBottom } = await page.evaluate(() => {
+      const el = document.querySelector('[data-msg-id="999"]');
+      const container = document.getElementById('messages');
+      return {
+        bubbleTop: el.getBoundingClientRect().top,
+        messagesTop: container.getBoundingClientRect().top,
+        atBottom: container.scrollHeight - container.scrollTop - container.clientHeight < 2,
+      };
+    });
+    expect(Math.abs(bubbleTop - messagesTop)).toBeLessThan(2);
+    expect(atBottom).toBe(false);
   });
 
   test('renders Codex unified diff tool blocks', async ({ page }) => {
@@ -2136,6 +2270,7 @@ test.describe('parallel responses', () => {
 
 test.describe('recovered pending responses', () => {
   test('initial history installs before global snapshot discovery', async ({ page }) => {
+    await page.setViewportSize({ width: 600, height: 500 });
     await page.addInitScript(() => {
       window.__webSocket = null;
       class MockWebSocket {
@@ -2170,7 +2305,7 @@ test.describe('recovered pending responses', () => {
     await page.route('**/history**', route => {
       releaseHistory = () => route.fulfill({ json: { items: [
         { id: 202, role: 'assistant', topic: 'squid', agent: 'codex', status: 'done',
-          prompt: 'newest', content: 'response 202', timestamp: '2027-01-01T00:00:00Z',
+          prompt: 'newest', content: 'response 202\n'.repeat(80), timestamp: '2027-01-01T00:00:00Z',
           completed_at: '2027-01-01T00:00:03Z' },
         { id: 200, role: 'assistant', topic: 'squid', agent: 'codex', status: 'done',
           prompt: 'oldest', content: 'response 200', timestamp: '2027-01-01T00:00:00Z',
@@ -2189,6 +2324,7 @@ test.describe('recovered pending responses', () => {
     expect(await page.evaluate(() => window.__webSocket)).toBeNull();
     releaseHistory();
     await page.waitForFunction(() => window.__webSocket?.subscribe);
+    await page.locator('#messages').evaluate(el => { el.scrollTop = el.scrollHeight; });
     await page.evaluate(() => window.__webSocket.receive({
       v: 1, type: 'snapshot', event_id: 10, payload: { conversations: [{ messages: [
         { id: 198, role: 'assistant', topic: 'squid', agent: 'codex', status: 'done' },
@@ -2199,6 +2335,9 @@ test.describe('recovered pending responses', () => {
     expect(await page.locator('.msg.assistant.history-item[data-msg-id]').evaluateAll(
       nodes => nodes.map(node => Number(node.dataset.msgId)),
     )).toEqual([200, 198, 202]);
+    await expect.poll(() => page.locator('#messages').evaluate(
+      el => el.scrollHeight - el.scrollTop - el.clientHeight,
+    )).toBeLessThan(2);
   });
 
   test('empty reconnect snapshot shows a waiting state until activity resumes', async ({ page }) => {

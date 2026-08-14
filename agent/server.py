@@ -3569,6 +3569,26 @@ def _realtime_request_fingerprint(message_type: str, payload: dict) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def _authorize_realtime_scopes(requested) -> Optional[list[dict]]:
+    """Authorize phase-one scopes for the fully trusted local Squid session."""
+    if not isinstance(requested, list) or not requested:
+        return None
+    scopes = []
+    for scope in requested:
+        if not isinstance(scope, dict):
+            return None
+        if scope == {"lifecycle": "global"}:
+            scopes.append(scope)
+            continue
+        topic = scope.get("topic")
+        agent = scope.get("agent")
+        if (set(scope) - {"topic", "agent"} or not isinstance(topic, str)
+                or not topic.strip() or (agent is not None and not isinstance(agent, str))):
+            return None
+        scopes.append({"topic": topic, **({"agent": agent} if agent is not None else {})})
+    return scopes
+
+
 async def _realtime_snapshot(scopes: list[dict]) -> dict:
     snapshot = await asyncio.to_thread(get_realtime_snapshot, scopes, 20)
     if any(scope.get("lifecycle") == "global" for scope in scopes):
@@ -3706,13 +3726,16 @@ async def realtime_v1(websocket: WebSocket):
                     if not isinstance(client_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", client_id):
                         await websocket.send_json({"v": 1, "type": "error", "payload": {"code": "invalid_client_id"}})
                         continue
-                    principal = f"local:{client_id}"
                     requested = subscribe_payload.get("scopes", [])
-                    scopes = [
-                        scope for scope in requested
-                        if isinstance(scope, dict)
-                        and (scope.get("topic") or scope.get("lifecycle") == "global")
-                    ]
+                    authorized_scopes = _authorize_realtime_scopes(requested)
+                    if authorized_scopes is None:
+                        await websocket.send_json({
+                            "v": 1, "type": "error",
+                            "payload": {"code": "unauthorized_scope"},
+                        })
+                        continue
+                    principal = f"local:{client_id}"
+                    scopes = authorized_scopes
                     requested_cursor = subscribe_payload.get("cursor")
                     await websocket.send_json({"v": 1, "type": "subscribed", "payload": {"scopes": scopes}})
                     if not isinstance(requested_cursor, int) or requested_cursor < 0:
@@ -3733,7 +3756,6 @@ async def realtime_v1(websocket: WebSocket):
                                 await websocket.send_json(_realtime_envelope(event))
                             cursor = window["current"]
                     generation = _realtime_notifier.generation
-                    continue
                 elif message_type == "unsubscribe":
                     scopes = []
                     cursor = await asyncio.to_thread(get_realtime_cursor)

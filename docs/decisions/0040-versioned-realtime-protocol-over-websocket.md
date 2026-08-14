@@ -104,7 +104,7 @@ fallback and through the explicit `sse` migration mode.
 | Area | Status | Current behavior |
 | --- | --- | --- |
 | `/ws/v1`, v1 envelopes, `hello`, version rejection | Implemented | The server exposes one JSON WebSocket endpoint and accepts protocol version 1. |
-| Subscribe, unsubscribe, scoped replay, snapshot fallback | Partial | Topic/agent scopes, cursor replay, count/byte/age/compatibility/gap rollover, retained-cursor rollover, and 20-message snapshots exist. Scope authorization and a transactionally buffered snapshot boundary remain incomplete. |
+| Subscribe, unsubscribe, scoped replay, snapshot fallback | Implemented for direct local access | Topic/agent and global lifecycle scopes are explicitly authorized, and malformed or unsupported scopes fail with `unauthorized_scope`. Cursor replay, bounded rollover, retained-cursor rollover, and 20-message snapshots exist. Snapshot state and its watermark share one database read transaction, followed by an immediate durable-log drain of events committed after the watermark. Shore authorization remains part of ADR-0039. |
 | Durable global event log and wake-up | Implemented | `realtime_events` supplies global cursors; commits wake sockets through a process-global generation notifier with a 20-second safety poll. Seven-day/100,000-event cleanup exists. |
 | Chat event publication | Implemented on the server | Persisted run events publish `chat.queued`, `chat.loading`, `chat.processing`, `chat.status`, `chat.tool`, `chat.text`, `chat.stats`, `chat.done`, and `chat.error`; message mutations publish `message.changed`. |
 | Running-message browser reattachment | Implemented | The UI prefers WebSocket snapshots/events for pending messages, reconnects with jittered exponential backoff, persists its cursor, sends acknowledgements, and falls back to SSE when WebSocket is unavailable. |
@@ -117,13 +117,9 @@ fallback and through the explicit `sse` migration mode.
 | Protocol compatibility | Partial | Unsupported versions fail explicitly, but only v1 is supported rather than the current and immediately previous versions. |
 | Shore relay | Not implemented | ADR-0039's broker transport, pairing, encryption, capabilities, and audit work remain future work. |
 
-**Next milestone:** finish the subscription and recovery foundation before
-adding another live message family. Establish a transactionally consistent
-snapshot boundary that buffers events after its watermark, enforce scope
-authorization, and add the snapshot-race regression test. After that gate,
-publish and consume `process.changed` and `queue.changed` so process and queue
-state no longer depends on HTTP refreshes. Flow and CLI authentication remain
-the following migration phase.
+**Next milestone:** publish and consume `process.changed` and `queue.changed`
+so process and queue state no longer depends on HTTP refreshes. Flow and CLI
+authentication remain the following migration phase.
 
 SSE endpoints therefore remain required for migration fallback, CLI
 authentication, and the live families not yet moved to WebSocket. WebSocket is

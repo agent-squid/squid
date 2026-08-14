@@ -870,6 +870,11 @@ body {
   padding-bottom: 2rem;
   scrollbar-color: #2a2a40 transparent;
   scrollbar-width: thin;
+  /* Squid owns this scroller's position explicitly throughout async history
+     bootstrap. Native scroll anchoring would otherwise adjust scrollTop on
+     its own whenever content shifts above the viewport during that window,
+     independently of (and potentially fighting) that logic. */
+  overflow-anchor: none;
 }
 #messages:focus { outline: none; }
 #messages::-webkit-scrollbar { width: 5px; }

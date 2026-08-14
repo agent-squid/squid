@@ -120,6 +120,61 @@ def test_websocket_rejects_protocol_version_skew(tmp_path, monkeypatch):
         assert error["payload"]["code"] == "unsupported_version"
 
 
+def test_websocket_rejects_unauthorized_scope(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        ws.receive_json()
+        ws.send_json({
+            "v": 1, "type": "subscribe",
+            "payload": {
+                "client_id": CLIENT_ID,
+                "scopes": [{"lifecycle": "other"}],
+            },
+        })
+        error = ws.receive_json()
+        assert error["type"] == "error"
+        assert error["payload"]["code"] == "unauthorized_scope"
+        ws.send_json({
+            "v": 1, "type": "chat.cancel", "request_id": "rejected-scope",
+            "payload": {"msg_id": 1},
+        })
+        error = ws.receive_json()
+        assert error["type"] == "error"
+        assert error["payload"]["code"] == "client_identity_required"
+
+
+def test_event_racing_snapshot_is_delivered_immediately(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    original_snapshot = server._realtime_snapshot
+    raced_event_id = None
+
+    async def snapshot_then_publish(scopes):
+        nonlocal raced_event_id
+        snapshot = await original_snapshot(scopes)
+        raced_event_id = stats_db.insert_realtime_event(
+            "message.changed", "squid", "codex", {"id": "raced"},
+        )
+        return snapshot
+
+    monkeypatch.setattr(server, "_realtime_snapshot", snapshot_then_publish)
+    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        ws.receive_json()
+        ws.send_json({
+            "v": 1, "type": "subscribe",
+            "payload": {
+                "client_id": CLIENT_ID,
+                "scopes": [{"topic": "squid", "agent": "codex"}],
+            },
+        })
+        assert ws.receive_json()["type"] == "subscribed"
+        snapshot = ws.receive_json()
+        assert snapshot["type"] == "snapshot"
+        assert snapshot["event_id"] < raced_event_id
+        raced = ws.receive_json()
+        assert raced["type"] == "message.changed"
+        assert raced["event_id"] == raced_event_id
+
+
 def test_realtime_listener_runs_after_event_commit_from_worker_thread(tmp_path, monkeypatch):
     _fresh_db(tmp_path, monkeypatch)
     observed = []

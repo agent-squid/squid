@@ -4061,6 +4061,11 @@ def get_realtime_snapshot(scopes: list[dict], message_limit: int = 20) -> dict:
     pending_limit = max(1, message_limit)
     conversations = []
     with _connect() as conn:
+        # Keep the event watermark and every materialized message read on one
+        # SQLite snapshot. Domain mutations publish their realtime row in the
+        # same transaction, so anything absent here must have event_id > cursor
+        # and will be delivered by the caller's post-snapshot drain.
+        conn.execute("BEGIN")
         cursor = int(conn.execute("SELECT COALESCE(MAX(event_id), 0) FROM realtime_events").fetchone()[0])
         for scope in scopes:
             if scope.get("lifecycle") == "global":
