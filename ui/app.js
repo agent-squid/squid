@@ -8281,7 +8281,7 @@ function truncate(str, max) {
 }
 
 function bashPreviewLimit() {
-  return window.matchMedia?.('(max-width: 768px)').matches ? 60 : 220;
+  return window.matchMedia?.('(max-width: 768px)').matches ? 40 : 220;
 }
 
 function addMessage(role, content) {
