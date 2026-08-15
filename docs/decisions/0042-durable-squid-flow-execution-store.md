@@ -45,10 +45,16 @@ part of this decision:
 - A step links to at most one prepared chat turn for an attempt. Retrying a
   claim must not create a second turn for the same dispatch key.
 - Dependencies refer to stable step identities, not message arrival order.
+- Origin steps use `branch_index = -1`: an origin may be shared by several
+  fan-out branches or participate in a join, so assigning it to one branch
+  would be misleading. Target and return steps carry their actual branch.
 - `flow_run_id` and `flow_step_id` remain on related transcript rows so the
   operational and conversation views can be joined without sharing ownership.
 - Run status is derived from, or transactionally maintained with, step state;
   it must not drift as an independently editable summary.
+- `execution_mode` is an explicit activation boundary. Pre-cutover plans are
+  `shadow` and must never be claimed or recovered; executor-owned plans are
+  `durable`. Only new runs may enter durable mode—shadow runs are not promoted.
 
 ### Lifecycle
 
@@ -57,10 +63,13 @@ Initial step states are `pending`, `scheduled`, `claimed`, `running`, `done`,
 `completed`, `failed`, and `cancelled`.
 
 A step becomes eligible only when its persisted dependencies are terminal in
-the required successful state. A delayed step stores an absolute `due_at`;
-process sleep time is only a wake-up optimization. Claiming eligible work is
-an atomic conditional database update. The claimant then idempotently prepares
-the associated chat turn and records its message IDs before dispatch.
+the required successful state. The persisted plan retains a relative
+`delay_seconds`; when the dependencies complete, the executor materializes the
+step's absolute `due_at` transactionally. A delayed step without `due_at` is
+not claimable, and process sleep time is only a wake-up optimization. Claiming
+eligible work is an atomic conditional database update. The claimant then
+idempotently prepares the associated chat turn and records its message IDs
+before dispatch.
 
 On startup, and at a periodic safety interval, the single supported server
 process scans for due scheduled work, unclaimed eligible work, and stale claims.
@@ -104,6 +113,12 @@ lifecycle and scheduling facts cannot be recovered reliably. New runs use the
 durable store. Boot recovery continues to recognize incomplete legacy v0.1
 runs during a bounded compatibility period.
 
+Plans recorded before executor cutover use `execution_mode = shadow`. They are
+excluded from every claim, due-time materialization, and recovery query and are
+pruned at startup when older than seven days. Cutover creates only new runs as
+`durable`, preventing already transcript-executed shadow plans from being
+dispatched again.
+
 ## Consequences
 
 - Good: scheduled and active flows survive server restarts with explicit state.
@@ -124,4 +139,6 @@ preparation, restart during a delay, stale-claim reconciliation, cancellation
 races, dependency gating, terminal run-state calculation, event-after-commit
 ordering, snapshot consistency, and legacy-run compatibility. Replaying or
 reprocessing the same dispatch key must never create a duplicate logical step
-or chat turn.
+or chat turn. Delay tests must prove that `due_at` is based on dependency
+completion, is materialized once, and survives restart without early or
+duplicate dispatch.

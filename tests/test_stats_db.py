@@ -213,7 +213,7 @@ def test_flow_run_plan_is_created_atomically_with_constraints(tmp_path, monkeypa
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
 
-    run = stats_db.create_flow_run("run-1", "#squid@codex>@claude", 42, _flow_plan())
+    run = stats_db.create_flow_run("run-1", "#squid@codex>@claude", 42, _flow_plan(), execution_mode="durable")
 
     assert run["status"] == "scheduled"
     steps = stats_db.get_flow_steps("run-1")
@@ -224,16 +224,16 @@ def test_flow_run_plan_is_created_atomically_with_constraints(tmp_path, monkeypa
     duplicate_key = _flow_plan()
     duplicate_key[1]["dispatch_key"] = duplicate_key[0]["dispatch_key"]
     with pytest.raises(sqlite3.IntegrityError):
-        stats_db.create_flow_run("run-2", "#squid@codex>@claude", 43, duplicate_key)
+        stats_db.create_flow_run("run-2", "#squid@codex>@claude", 43, duplicate_key, execution_mode="durable")
     assert stats_db.get_flow_run("run-2") is None
 
-    stats_db.create_flow_run("run-3", "#squid@codex>@claude", 44, _flow_plan())
+    stats_db.create_flow_run("run-3", "#squid@codex>@claude", 44, _flow_plan(), execution_mode="durable")
     assert [step["step_id"] for step in stats_db.get_flow_steps("run-3")] == ["origin", "target"]
 
     cyclic = _flow_plan()
     cyclic[0]["dependencies"] = ["target"]
     with pytest.raises(ValueError, match="acyclic"):
-        stats_db.create_flow_run("run-4", "#squid@codex>@claude", 45, cyclic)
+        stats_db.create_flow_run("run-4", "#squid@codex>@claude", 45, cyclic, execution_mode="durable")
     assert stats_db.get_flow_run("run-4") is None
 
 
@@ -245,7 +245,7 @@ def test_flow_plan_accepts_zero_as_a_stable_step_id(tmp_path, monkeypatch):
         {"step_id": 1, "leg": "target", "topic": "squid", "agent": "claude", "dependencies": [0]},
     ]
 
-    stats_db.create_flow_run("run-1", "#squid@codex>@claude", 42, plan)
+    stats_db.create_flow_run("run-1", "#squid@codex>@claude", 42, plan, execution_mode="durable")
 
     steps = stats_db.get_flow_steps("run-1")
     assert [step["step_id"] for step in steps] == ["0", "1"]
@@ -258,10 +258,10 @@ def test_flow_plan_validates_required_fields_and_timestamps(tmp_path, monkeypatc
     missing_topic = _flow_plan()
     del missing_topic[0]["topic"]
     with pytest.raises(ValueError, match="topic must be a non-empty string"):
-        stats_db.create_flow_run("run-1", "#squid@codex>@claude", 42, missing_topic)
+        stats_db.create_flow_run("run-1", "#squid@codex>@claude", 42, missing_topic, execution_mode="durable")
     invalid_due = _flow_plan("not-a-time")
     with pytest.raises(ValueError, match="due_at must be an ISO-8601 UTC timestamp"):
-        stats_db.create_flow_run("run-2", "#squid@codex>@claude", 43, invalid_due)
+        stats_db.create_flow_run("run-2", "#squid@codex>@claude", 43, invalid_due, execution_mode="durable")
     assert stats_db.get_flow_run("run-1") is None
     assert stats_db.get_flow_run("run-2") is None
 
@@ -270,7 +270,7 @@ def test_init_db_migrates_flow_step_primary_key_to_run_scope(tmp_path, monkeypat
     db_path = tmp_path / "squid.db"
     monkeypatch.setattr(stats_db, "_DB_PATH", db_path)
     stats_db.init_db()
-    stats_db.create_flow_run("run-1", "#squid@codex", 1, [_flow_plan()[0]])
+    stats_db.create_flow_run("run-1", "#squid@codex", 1, [_flow_plan()[0]], execution_mode="durable")
 
     # Recreate the previously shipped development shape with step_id as the
     # sole primary key, then verify init_db preserves its rows while migrating.
@@ -330,9 +330,11 @@ def test_flow_step_claim_is_atomic_due_and_dependency_gated(tmp_path, monkeypatc
     stats_db.init_db()
     stats_db.create_flow_run(
         "run-1", "#squid@codex>@claude", 42, _flow_plan("2026-08-15T12:00:00Z"),
+        execution_mode="durable",
     )
     stats_db.create_flow_run(
         "run-2", "#squid@codex>@claude", 43, _flow_plan("2026-08-15T12:00:00Z"),
+        execution_mode="durable",
     )
 
     assert stats_db.claim_flow_step("run-1", "target", "2026-08-15T13:00:00Z") is None
@@ -357,6 +359,7 @@ def test_flow_timestamp_normalization_preserves_subsecond_due_order(tmp_path, mo
     stats_db.create_flow_run(
         "run-1", "#squid@codex", 42,
         [{**_flow_plan()[0], "due_at": "2026-08-15T10:00:00.123Z"}],
+        execution_mode="durable",
     )
 
     assert stats_db.get_due_flow_steps("2026-08-15T10:00:00Z") == []
@@ -365,10 +368,134 @@ def test_flow_timestamp_normalization_preserves_subsecond_due_order(tmp_path, mo
     )] == ["origin"]
 
 
+def test_delayed_flow_step_requires_materialized_due_at(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    plan = _flow_plan()
+    plan[0]["delay_seconds"] = 300
+    stats_db.create_flow_run("run-1", "#squid@codex", 42, [plan[0]], execution_mode="durable")
+
+    assert stats_db.get_due_flow_steps("2026-08-15T12:00:00Z") == []
+    assert stats_db.claim_flow_step("run-1", "origin", "2026-08-15T12:00:00Z") is None
+
+
+def test_shadow_flow_plan_is_never_claimed_recovered_or_materialized(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    plan = _flow_plan()
+    plan[1].pop("due_at")
+    plan[1]["delay_seconds"] = 60
+    run = stats_db.create_flow_run(
+        "run-1", "#squid@codex=:1m>@claude", 42, plan,
+        execution_mode="shadow",
+    )
+    with stats_db._connect() as conn:
+        conn.execute(
+            """UPDATE flow_steps SET status='done',
+                      completed_at='2026-08-15T11:00:00.000000Z'
+                 WHERE flow_run_id='run-1' AND step_id='origin'"""
+        )
+
+    stats_db.init_db()
+
+    assert run["execution_mode"] == "shadow"
+    assert stats_db.claim_flow_step("run-1", "target", "2026-08-15T12:00:00Z") is None
+    assert stats_db.get_due_flow_steps("2026-08-15T12:00:00Z") == []
+    target = {step["step_id"]: step for step in stats_db.get_flow_steps("run-1")}["target"]
+    assert target["status"] == "pending"
+    assert target["due_at"] is None
+
+
+def test_init_db_prunes_only_expired_shadow_flow_plans(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    stats_db.create_flow_run(
+        "shadow-old", "#squid@codex>@claude", 1, _flow_plan(), execution_mode="shadow",
+    )
+    stats_db.create_flow_run(
+        "durable-old", "#squid@codex>@claude", 2, _flow_plan(), execution_mode="durable",
+    )
+    with stats_db._connect() as conn:
+        conn.execute(
+            "UPDATE flow_runs SET created_at='2000-01-01T00:00:00.000000Z'"
+        )
+
+    stats_db.init_db()
+
+    assert stats_db.get_flow_run("shadow-old") is None
+    assert stats_db.get_flow_steps("shadow-old") == []
+    assert stats_db.get_flow_run("durable-old")["execution_mode"] == "durable"
+
+
+def test_init_db_marks_pre_activation_flow_runs_as_shadow(tmp_path, monkeypatch):
+    db_path = tmp_path / "squid.db"
+    monkeypatch.setattr(stats_db, "_DB_PATH", db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """CREATE TABLE flow_runs (
+                   flow_run_id TEXT PRIMARY KEY, route TEXT NOT NULL,
+                   original_prompt_msg_id INTEGER, status TEXT NOT NULL DEFAULT 'scheduled',
+                   error TEXT, cancellation_reason TEXT,
+                   created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT
+               )"""
+        )
+        conn.execute(
+            """INSERT INTO flow_runs (flow_run_id, route, created_at)
+               VALUES ('legacy-shadow', '#squid@codex>@claude', '2026-08-15T10:00:00.000000Z')"""
+        )
+
+    stats_db.init_db()
+
+    assert stats_db.get_flow_run("legacy-shadow")["execution_mode"] == "shadow"
+
+
+def test_dependency_completion_materializes_delayed_step_due_at_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    plan = _flow_plan()
+    plan[1].pop("due_at")
+    plan[1]["delay_seconds"] = 300
+    stats_db.create_flow_run("run-1", "#squid@codex=:5m>@claude", 42, plan, execution_mode="durable")
+    stats_db.claim_flow_step("run-1", "origin", "2026-08-15T10:00:00Z")
+
+    assert stats_db.transition_flow_step(
+        "run-1", "origin", "claimed", "done", "2026-08-15T11:00:00Z",
+    )
+    target = {step["step_id"]: step for step in stats_db.get_flow_steps("run-1")}["target"]
+    assert target["status"] == "scheduled"
+    assert target["due_at"] == "2026-08-15T11:05:00.000000Z"
+    assert target["updated_at"] == "2026-08-15T11:00:00.000000Z"
+    assert stats_db.claim_flow_step("run-1", "target", "2026-08-15T11:04:59Z") is None
+    assert stats_db.claim_flow_step("run-1", "target", "2026-08-15T11:05:00Z") is not None
+
+
+def test_init_db_recovers_unmaterialized_delayed_step(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    monkeypatch.setattr(stats_db, "_utc_now_iso", lambda: "2026-08-15T12:34:56Z")
+    stats_db.init_db()
+    plan = _flow_plan()
+    plan[1].pop("due_at")
+    plan[1]["delay_seconds"] = 120
+    stats_db.create_flow_run("run-1", "#squid@codex=:2m>@claude", 42, plan, execution_mode="durable")
+    with stats_db._connect() as conn:
+        conn.execute(
+            """UPDATE flow_steps SET status='done',
+                      completed_at='2026-08-15T11:00:00.000000Z'
+                 WHERE flow_run_id='run-1' AND step_id='origin'"""
+        )
+
+    stats_db.init_db()
+
+    target = {step["step_id"]: step for step in stats_db.get_flow_steps("run-1")}["target"]
+    assert target["status"] == "scheduled"
+    assert target["due_at"] == "2026-08-15T11:02:00.000000Z"
+    assert target["updated_at"] == "2026-08-15T12:34:56.000000Z"
+
+
 def test_releasing_claim_clears_claimed_at(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
-    stats_db.create_flow_run("run-1", "#squid@codex", 42, [_flow_plan()[0]])
+    stats_db.create_flow_run("run-1", "#squid@codex", 42, [_flow_plan()[0]], execution_mode="durable")
     stats_db.claim_flow_step("run-1", "origin", "2026-08-15T10:00:00Z")
 
     assert stats_db.transition_flow_step(
@@ -381,7 +508,7 @@ def test_releasing_claim_clears_claimed_at(tmp_path, monkeypatch):
 def test_flow_recovery_queries_message_link_and_terminal_run(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
-    stats_db.create_flow_run("run-1", "#squid@codex>@claude", 42, _flow_plan())
+    stats_db.create_flow_run("run-1", "#squid@codex>@claude", 42, _flow_plan(), execution_mode="durable")
 
     assert [step["step_id"] for step in stats_db.get_due_flow_steps("2026-08-15T10:00:00Z")] == ["origin"]
     stats_db.claim_flow_step("run-1", "origin", "2026-08-15T10:00:00Z")
@@ -404,7 +531,7 @@ def test_flow_failed_run_preserves_step_error(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
     plan = _flow_plan()
-    stats_db.create_flow_run("run-1", "#squid@codex", 42, plan)
+    stats_db.create_flow_run("run-1", "#squid@codex", 42, plan, execution_mode="durable")
 
     stats_db.claim_flow_step("run-1", "origin", "2026-08-15T10:00:00Z")
     stats_db.transition_flow_step(
@@ -429,7 +556,7 @@ def test_flow_failed_run_chooses_earliest_error_deterministically(tmp_path, monk
         {"step_id": "later", "branch_index": 0, "leg": "origin", "topic": "squid", "agent": "codex"},
         {"step_id": "earlier", "branch_index": 1, "leg": "origin", "topic": "squid", "agent": "claude"},
     ]
-    stats_db.create_flow_run("run-1", "#squid@codex,#squid@claude", 42, plan)
+    stats_db.create_flow_run("run-1", "#squid@codex,#squid@claude", 42, plan, execution_mode="durable")
     stats_db.claim_flow_step("run-1", "later", "2026-08-15T10:00:00Z")
     stats_db.claim_flow_step("run-1", "earlier", "2026-08-15T10:00:00Z")
 
@@ -446,7 +573,7 @@ def test_flow_failed_run_chooses_earliest_error_deterministically(tmp_path, monk
 def test_flow_run_cancellation_is_terminal_and_prevents_claims(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
-    stats_db.create_flow_run("run-1", "#squid@codex>@claude", 42, _flow_plan())
+    stats_db.create_flow_run("run-1", "#squid@codex>@claude", 42, _flow_plan(), execution_mode="durable")
 
     assert stats_db.cancel_flow_run("run-1", "2026-08-15T10:00:00Z", "stopped by user")
     assert not stats_db.cancel_flow_run("run-1", "2026-08-15T10:01:00Z", "again")
@@ -460,7 +587,7 @@ def test_flow_run_cancellation_is_terminal_and_prevents_claims(tmp_path, monkeyp
 def test_flow_run_delete_cascades_to_steps(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
-    stats_db.create_flow_run("run-1", "#squid@codex>@claude", 42, _flow_plan())
+    stats_db.create_flow_run("run-1", "#squid@codex>@claude", 42, _flow_plan(), execution_mode="durable")
 
     with stats_db._connect() as conn:
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1

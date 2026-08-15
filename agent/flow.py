@@ -311,6 +311,98 @@ def parse_flow_route(route: Optional[str]) -> Optional[dict]:
     }
 
 
+def durable_flow_plan(route: Optional[str]) -> list[dict]:
+    """Compile a parsed route into the complete ADR-0042 step DAG."""
+    chain = parse_flow_route(route)
+    if not chain:
+        return []
+    steps: list[dict] = []
+    origin_ids: dict[int, str] = {}
+
+    for branch in chain["branches"]:
+        for origin in branch["origins"]:
+            key = id(origin)
+            if key in origin_ids:
+                continue
+            step_id = f"origin:{len(origin_ids)}"
+            origin_ids[key] = step_id
+            steps.append({
+                "step_id": step_id,
+                # Origins can be shared by fan-out branches or joined into one
+                # branch, so they do not truthfully belong to one branch.
+                "branch_index": -1,
+                "leg": "origin",
+                "topic": origin["topic"],
+                "agent": origin["agent"],
+                "fresh": origin["fresh"],
+                "dispatch_key": step_id,
+            })
+
+    for branch_index, branch in enumerate(chain["branches"]):
+        dependencies = [origin_ids[id(origin)] for origin in branch["origins"]]
+        op = branch["op"]
+        if op["type"] == "scheduled":
+            delay = _duration_seconds(op.get("wait"))
+            target = branch["targets"][0]
+            for repeat_index in range(op["count"]):
+                step_id = f"branch:{branch_index}:target:{repeat_index}"
+                step = {
+                    "step_id": step_id,
+                    "branch_index": branch_index,
+                    "leg": "target",
+                    "repeat_index": repeat_index,
+                    "dependencies": dependencies,
+                    "topic": target["topic"],
+                    "agent": target["agent"],
+                    "fresh": target["fresh"],
+                    "dispatch_key": step_id,
+                }
+                if delay:
+                    step["delay_seconds"] = delay * (repeat_index + 1)
+                steps.append(step)
+            continue
+
+        previous = dependencies
+        delay = _duration_seconds(op.get("wait"))
+        for round_index in range(op.get("rounds", 1)):
+            target_ids = []
+            for target_index, target in enumerate(branch["targets"]):
+                step_id = f"branch:{branch_index}:round:{round_index}:target:{target_index}"
+                step = {
+                    "step_id": step_id,
+                    "branch_index": branch_index,
+                    "leg": "target",
+                    "repeat_index": round_index,
+                    "dependencies": previous,
+                    "topic": target["topic"],
+                    "agent": target["agent"],
+                    "fresh": target["fresh"],
+                    "dispatch_key": step_id,
+                }
+                if delay:
+                    step["delay_seconds"] = delay
+                steps.append(step)
+                target_ids.append(step_id)
+            origin = branch["origins"][0]
+            return_id = f"branch:{branch_index}:round:{round_index}:return"
+            return_step = {
+                "step_id": return_id,
+                "branch_index": branch_index,
+                "leg": "return",
+                "repeat_index": round_index,
+                "dependencies": target_ids,
+                "topic": origin["topic"],
+                "agent": origin["agent"],
+                "fresh": origin["fresh"],
+                "dispatch_key": return_id,
+            }
+            if delay:
+                return_step["delay_seconds"] = delay
+            steps.append(return_step)
+            previous = [return_id]
+    return steps
+
+
 def chain_handoff_prompt(route: str, previous_agent: str, next_agent: str, next_fresh: bool, original_prompt: str) -> str:
     """Port of the UI's chainHandoffPrompt (ui/app.js) — must stay in sync with it."""
     target_suffix = "!" if next_fresh else ""

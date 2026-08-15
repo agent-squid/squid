@@ -516,6 +516,31 @@ def test_realtime_chat_start_preserves_persisted_error_details():
     }
 
 
+def test_flow_plan_failure_prevents_http_and_websocket_execution():
+    prepared = {"user_msg_id": 201, "asst_msg_id": 202}
+    error = "Durable Flow plan could not be persisted. The turn was not started."
+    request = server.ChatRequest(
+        message="hello", topic="squid", agent="codex",
+        flow_route="#squid@codex>@review",
+    )
+    with patch("agent.server.allocate_id", return_value="1"), \
+         patch("agent.server._prepare_chat_turn", new=AsyncMock(return_value=prepared)), \
+         patch("agent.server._persist_flow_plan", return_value=error), \
+         patch("agent.server._run_realtime_chat") as run_realtime:
+        http_result = asyncio.run(server.chat(request))
+        websocket_result = asyncio.run(server._realtime_chat_start(request.model_dump()))
+
+    assert http_result.status_code == 500
+    assert json.loads(http_result.body) == {
+        "error": "flow_plan_persistence_failed", "detail": error, "msg_id": 202,
+    }
+    assert websocket_result == {
+        "ok": False, "error": "flow_plan_persistence_failed", "detail": error,
+        "status": 500, "msg_id": 202,
+    }
+    run_realtime.assert_not_called()
+
+
 def test_native_shell_uses_agent_cwd_without_worktree_setup(tmp_path):
     code_root = tmp_path / "project"
     code_root.mkdir()
@@ -1072,6 +1097,7 @@ def test_chat_allocates_short_flow_run_id_for_routed_turn():
          patch("agent.server.topic_memory_squid_config", return_value={}), \
          patch("agent.server.insert_user_message", return_value=201) as insert_user_message, \
          patch("agent.server.insert_assistant_message", return_value=202) as insert_assistant_message, \
+         patch("agent.server.create_flow_run") as create_flow_run, \
          patch("agent.server.update_assistant_message"), \
          patch.object(server.dispatcher, "dispatch", fake_dispatch):
         res = client.post("/chat", json={
@@ -1086,6 +1112,21 @@ def test_chat_allocates_short_flow_run_id_for_routed_turn():
     allocate_id.assert_called_once_with("flow_run")
     assert insert_user_message.call_args.kwargs["flow_run_id"] == "1"
     assert insert_assistant_message.call_args.kwargs["flow_run_id"] == "1"
+    create_flow_run.assert_called_once()
+    assert create_flow_run.call_args.args[:3] == ("1", "#squid@codex>@revuqwen", 201)
+    assert create_flow_run.call_args.kwargs == {
+        "if_not_exists": True, "execution_mode": "shadow",
+    }
+
+
+def test_flow_plan_failure_terminally_reconciles_prepared_turn():
+    prepared = {"user_msg_id": 201, "asst_msg_id": 202}
+    with patch("agent.server.create_flow_run", side_effect=sqlite3.OperationalError("disk full")), \
+         patch("agent.server.update_assistant_message") as update_message:
+        error = server._persist_flow_plan("1", "#squid@codex>@review", prepared)
+
+    assert error == "Durable Flow plan could not be persisted. The turn was not started."
+    update_message.assert_called_once_with(202, error, None, "error", only_if_pending=True)
 
 
 def test_clear_command_kills_only_session_lane():

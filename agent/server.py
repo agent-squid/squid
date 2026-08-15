@@ -106,6 +106,7 @@ from .stats_db import (
     get_realtime_cursor, get_realtime_snapshot,
     get_realtime_request, save_realtime_request, get_realtime_replay,
     insert_realtime_event, prune_realtime_data, set_realtime_commit_listener,
+    create_flow_run,
 )
 from .journal import _generate_journal, _current_week, list_topic_journals, read_journal
 from . import creds
@@ -716,6 +717,28 @@ def canonical_flow_route(route: Optional[str]) -> Optional[str]:
     return ",".join(parts)
 
 
+def _persist_flow_plan(flow_run_id: Optional[str], flow_route: Optional[str], prepared: dict) -> Optional[str]:
+    if not flow_run_id or not flow_route:
+        return None
+    from .flow import durable_flow_plan
+    plan = durable_flow_plan(flow_route)
+    if not plan:
+        return None
+    try:
+        create_flow_run(
+            flow_run_id, flow_route, prepared["user_msg_id"], plan,
+            if_not_exists=True, execution_mode="shadow",
+        )
+    except Exception:
+        log.exception("durable Flow plan persistence failed flow_run_id=%s route=%s", flow_run_id, flow_route)
+        error = "Durable Flow plan could not be persisted. The turn was not started."
+        update_assistant_message(
+            prepared["asst_msg_id"], error, None, "error", only_if_pending=True,
+        )
+        return error
+    return None
+
+
 async def _prepare_chat_turn(
     *,
     message: str,
@@ -934,6 +957,7 @@ async def _prepare_chat_turn(
         "model": model,
         "cwd": cwd,
         "context_history": context_history,
+        "user_msg_id": user_msg_id,
         "asst_msg_id": asst_msg_id,
         "response_timeout": response_timeout,
         "resume_session_id": resume_session_id,
@@ -1226,6 +1250,13 @@ async def chat(req: ChatRequest):
     )
     if isinstance(prepared, JSONResponse):
         return prepared
+    flow_plan_error = _persist_flow_plan(flow_run_id, flow_route, prepared)
+    if flow_plan_error:
+        return JSONResponse(
+            {"error": "flow_plan_persistence_failed", "detail": flow_plan_error,
+             "msg_id": prepared["asst_msg_id"]},
+            status_code=500,
+        )
     await maybe_sync()
     return StreamingResponse(
         stream_response(
@@ -3684,6 +3715,13 @@ async def _realtime_chat_start(payload: dict) -> dict:
         body = json.loads(prepared.body)
         return {"ok": False, **body, "error": body.get("error", "chat_start_failed"),
                 "status": prepared.status_code}
+    flow_plan_error = _persist_flow_plan(flow_run_id, flow_route, prepared)
+    if flow_plan_error:
+        return {
+            "ok": False, "error": "flow_plan_persistence_failed",
+            "detail": flow_plan_error, "status": 500,
+            "msg_id": prepared["asst_msg_id"],
+        }
     await maybe_sync()
     task = asyncio.create_task(_run_realtime_chat(prepared), name=f"squid-ws-chat-{prepared['asst_msg_id']}")
     _realtime_chat_tasks.add(task)

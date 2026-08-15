@@ -84,6 +84,14 @@ CREATE TABLE chat_messages (
 turns so they're visible in Stats without a restart. See
 [ADR-0033](decisions/0033-cancelled-and-error-turn-capture.md).
 
+Known schema correction: `reply_to` currently uses the default restrictive
+foreign-key delete behavior. It must migrate to
+`REFERENCES chat_messages(id) ON DELETE SET NULL` so deleting a scoped user
+row cannot fail merely because a retained assistant row references it. The
+SQLite table-rebuild migration must preserve existing rows and include a
+regression test for deleting session history when related adhoc history is
+retained.
+
 Squid Flow run ids are allocated from `id_counters` namespace `flow_run` and
 stored as text (`"1"`, `"2"`, `"3"`, ...). Existing UUID-style values are valid
 legacy data.

@@ -110,7 +110,7 @@ fallback and through the explicit `sse` migration mode.
 | Running-message browser reattachment | Implemented | The UI prefers WebSocket snapshots/events for pending messages, reconnects with jittered exponential backoff, persists its cursor, sends acknowledgements, and falls back to SSE when WebSocket is unavailable. |
 | New chat submission and cancellation | Implemented | The browser uses idempotent `chat.start` and `chat.cancel` commands in WebSocket mode. Auto mode falls back to the HTTP/SSE compatibility path only when a command was not submitted; SSE mode retains the compatibility path. |
 | Process and queue state | Implemented | Snapshots and authoritative `process.changed`/`queue.changed` events update the browser status model; HTTP refresh remains only as pre-snapshot and SSE compatibility recovery. |
-| Flow | Not implemented | Flow messages persist, but execution/scheduling state is reconstructed from them and in-flight delayed dispatches are held in memory. `flow.step.created` is not published or consumed; the browser polls for new Flow steps. |
+| Flow | Shadow plan persistence implemented; runtime migration pending | New Flow submissions persist a canonical `flow_runs`/`flow_steps` DAG with dependency, repeat, round-trip, and relative-delay metadata, explicitly marked `shadow`. Claim, recovery, and due-time materialization ignore shadow runs, which remain owned by the transcript executor; expired shadow plans are pruned at startup after seven days. ADR-0042's durable lifecycle primitives and database tests exist, but production execution does not yet drive them. `flow.step.created` is not published or consumed, and the browser still polls for new Flow steps. |
 | CLI authentication | Not implemented | `auth.*` messages are not implemented; ADR-0035's SSE-plus-HTTP transport remains in use. |
 | Backpressure and frame limits | Not implemented | Sends are direct and there is no bounded/coalescing outbound queue, `slow_consumer` handling, or configured inbound frame-size enforcement. |
 | Heartbeat and acknowledgements | Partial | `ping` receives `pong` and the UI sends `ack`, but the server does not initiate heartbeat pings or use acknowledged cursors to manage delivery. |
@@ -119,21 +119,44 @@ fallback and through the explicit `sse` migration mode.
 
 ### Remaining implementation sequence
 
-The next milestone is the Flow migration. It begins with the durable execution
-store specified by [ADR-0042](0042-durable-squid-flow-execution-store.md); that
-work must not be deferred until after realtime delivery. Flow messages already
-persist in `chat_messages`, but the server currently reconstructs execution
-state from transcript rows and keeps in-flight delayed dispatches in memory.
+The next milestone is still the Flow migration, but ADR-0042's persistence
+foundation is now present, and new submissions create durable runs and steps.
+The database
+enforces run-scoped dispatch identity and dependency validity, supports atomic
+claims and lifecycle transitions, and exposes due-work and stale-claim
+recovery queries. Those primitives have focused database coverage. They are
+not yet connected to the production executor, which still reconstructs state
+from `chat_messages` and schedules delays in memory.
 
-Once that state boundary exists, each committed new Flow step publishes
-`flow.step.created` with its `flow_run_id` and message identity. The browser
-consumes that event through the existing realtime message reconciliation path,
-including replay and snapshot reconciliation, and stops the 1.5-second step
-poll while WebSocket is active. The polling endpoint remains only for `sse`
-mode and `auto` fallback until SSE retirement. This milestone is complete when
-server tests cover restart and duplicate-dispatch races, and browser tests
-cover live delivery, reconnect/replay without duplicate steps, snapshot
-rollover, and SSE/WebSocket rendering parity.
+During this pre-cutover phase those plans use `execution_mode = shadow`.
+Durable claims, recovery, and delayed-step materialization must select only
+`execution_mode = durable`; the cutover applies that mode only to newly owned
+runs. Shadow plans are diagnostic; startup cleanup removes plans older than
+seven days, preventing both future redispatch and unbounded accumulation
+across ordinary restarts.
+
+Complete the Flow milestone in this order:
+
+1. Replace transcript-derived continuation decisions with durable dependency
+   eligibility and atomic step claims. When a delayed step's dependencies
+   complete, materialize its absolute `due_at` from persisted
+   `delay_seconds`; a delayed step without `due_at` must remain unclaimable.
+   Link each claim to exactly one prepared chat turn before dispatch.
+2. Add startup and periodic recovery for due work and stale claims, including
+   restart-before/after-turn-preparation, delayed-step, cancellation, and
+   ambiguous external-process cases. Retain legacy transcript recovery only
+   for pre-migration runs during the bounded compatibility period.
+3. Publish `flow.step.created` in the same database transaction as the step
+   state/message linkage, and include authoritative Flow state in scoped
+   snapshots. Notification remains strictly after commit.
+4. Consume `flow.step.created` through the browser's existing stable-message
+   reconciliation path. Stop the 1.5-second Flow-step poll while WebSocket is
+   active; retain it only for `sse` mode and `auto` fallback until SSE
+   retirement.
+5. Close the milestone with server tests for restart, cancellation, stale
+   claims, event-after-commit, and duplicate-dispatch races, plus browser tests
+   for live delivery, reconnect/replay without duplicate steps, snapshot
+   rollover, and SSE/WebSocket rendering parity.
 
 After Flow, the remaining ADR-0040 work is, in order:
 

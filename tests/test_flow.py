@@ -14,6 +14,30 @@ def _seed_agent(name):
     stats_db.upsert_agent(name, "codex", None, None, cwd="/tmp/project")
 
 
+def test_durable_flow_plan_compiles_repeats_and_roundtrip_dependencies():
+    scheduled = flow.durable_flow_plan("#squid@codex=2:5m>@review")
+
+    assert [step["step_id"] for step in scheduled] == [
+        "origin:0", "branch:0:target:0", "branch:0:target:1",
+    ]
+    assert scheduled[1]["dependencies"] == ["origin:0"]
+    assert scheduled[1]["delay_seconds"] == 300
+    assert scheduled[2]["delay_seconds"] == 600
+    assert scheduled[0]["branch_index"] == -1
+
+    roundtrip = flow.durable_flow_plan("#squid@codex<2>@review")
+    assert roundtrip[1]["dependencies"] == ["origin:0"]
+    assert roundtrip[2]["dependencies"] == ["branch:0:round:0:target:0"]
+    assert roundtrip[3]["dependencies"] == ["branch:0:round:0:return"]
+    assert roundtrip[4]["dependencies"] == ["branch:0:round:1:target:0"]
+
+    fanout = flow.durable_flow_plan("#squid@codex>@review,@test")
+    assert [step["branch_index"] for step in fanout if step["leg"] == "origin"] == [-1]
+
+    joined = flow.durable_flow_plan("#squid@codex+@review>@test")
+    assert [step["branch_index"] for step in joined if step["leg"] == "origin"] == [-1, -1]
+
+
 def _seed_chain(route, rows):
     """rows: list of (role, agent, content, status) tuples, built in order.
     role='user' inserts a user message; role='assistant' replies to the most

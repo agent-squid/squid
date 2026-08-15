@@ -6,7 +6,7 @@ import sqlite3
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -160,6 +160,8 @@ _TABLES = [
         flow_run_id           TEXT PRIMARY KEY,
         route                 TEXT NOT NULL,
         original_prompt_msg_id INTEGER,
+        execution_mode        TEXT NOT NULL DEFAULT 'shadow'
+                              CHECK(execution_mode IN ('shadow', 'durable')),
         status                TEXT NOT NULL DEFAULT 'scheduled'
                               CHECK(status IN ('scheduled', 'running', 'completed', 'failed', 'cancelled')),
         error                 TEXT,
@@ -180,6 +182,7 @@ _TABLES = [
         fresh            INTEGER NOT NULL DEFAULT 0 CHECK(fresh IN (0, 1)),
         status           TEXT NOT NULL DEFAULT 'pending'
                          CHECK(status IN ('pending', 'scheduled', 'claimed', 'running', 'done', 'error', 'cancelled')),
+        delay_seconds    INTEGER NOT NULL DEFAULT 0 CHECK(delay_seconds >= 0),
         due_at           TEXT,
         dispatch_key     TEXT NOT NULL,
         claimed_at       TEXT,
@@ -386,6 +389,7 @@ def _migrate_flow_steps_run_scoped_identity(conn: sqlite3.Connection) -> None:
             fresh INTEGER NOT NULL DEFAULT 0 CHECK(fresh IN (0, 1)),
             status TEXT NOT NULL DEFAULT 'pending'
                    CHECK(status IN ('pending', 'scheduled', 'claimed', 'running', 'done', 'error', 'cancelled')),
+            delay_seconds INTEGER NOT NULL DEFAULT 0 CHECK(delay_seconds >= 0),
             due_at TEXT,
             dispatch_key TEXT NOT NULL,
             claimed_at TEXT,
@@ -526,19 +530,32 @@ def _validate_flow_plan(steps: list[dict]) -> dict[str, list[str]]:
     return dependency_map
 
 
-def create_flow_run(flow_run_id: str, route: str, original_prompt_msg_id: Optional[int], steps: list[dict]) -> dict:
+def create_flow_run(flow_run_id: str, route: str, original_prompt_msg_id: Optional[int], steps: list[dict],
+                    *, execution_mode: str, if_not_exists: bool = False) -> dict:
     """Persist a complete run plan atomically. A duplicate run id/key fails."""
     if not flow_run_id or not route or not steps:
         raise ValueError("flow_run_id, route, and at least one step are required")
+    if execution_mode not in ("shadow", "durable"):
+        raise ValueError("execution_mode must be shadow or durable")
     dependency_map = _validate_flow_plan(steps)
     conn = _connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT * FROM flow_runs WHERE flow_run_id=?", (flow_run_id,),
+        ).fetchone()
+        if existing:
+            if not if_not_exists:
+                raise sqlite3.IntegrityError("duplicate flow_run_id")
+            if existing["route"] != route or existing["execution_mode"] != execution_mode:
+                raise ValueError("flow_run_id already belongs to a different route or execution mode")
+            conn.rollback()
+            return dict(existing)
         conn.execute(
             """INSERT INTO flow_runs
-               (flow_run_id, route, original_prompt_msg_id, status)
-               VALUES (?, ?, ?, 'scheduled')""",
-            (flow_run_id, route, original_prompt_msg_id),
+               (flow_run_id, route, original_prompt_msg_id, execution_mode, status)
+               VALUES (?, ?, ?, ?, 'scheduled')""",
+            (flow_run_id, route, original_prompt_msg_id, execution_mode),
         )
         for step in steps:
             dependencies = dependency_map[str(step["step_id"])]
@@ -547,11 +564,12 @@ def create_flow_run(flow_run_id: str, route: str, original_prompt_msg_id: Option
             conn.execute(
                 """INSERT INTO flow_steps
                    (step_id, flow_run_id, branch_index, leg, repeat_index, dependencies,
-                    topic, agent, fresh, status, due_at, dispatch_key)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    topic, agent, fresh, status, delay_seconds, due_at, dispatch_key)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (str(step["step_id"]), flow_run_id, int(step.get("branch_index", 0)),
                  step.get("leg", "origin"), int(step.get("repeat_index", 0)), json.dumps(dependencies),
                  step["topic"], step["agent"], int(bool(step.get("fresh"))), status,
+                 max(0, int(step.get("delay_seconds", 0))),
                  due_at, step.get("dispatch_key") or str(step["step_id"])),
             )
         conn.commit()
@@ -588,7 +606,9 @@ def claim_flow_step(flow_run_id: str, step_id: str, now: str) -> Optional[dict]:
             f"""SELECT s.* FROM flow_steps s JOIN flow_runs r USING(flow_run_id)
                WHERE s.flow_run_id=? AND s.step_id=?
                  AND s.status IN ({_FLOW_CLAIMABLE_STATUS_SQL})
+                 AND (s.delay_seconds=0 OR s.due_at IS NOT NULL)
                  AND (s.due_at IS NULL OR s.due_at<=?)
+                 AND r.execution_mode='durable'
                  AND r.status NOT IN ('completed', 'failed', 'cancelled')
                  AND {_FLOW_DEPENDENCIES_DONE_SQL}""",
             (flow_run_id, step_id, *_FLOW_CLAIMABLE_STEP_STATUSES, now),
@@ -702,6 +722,53 @@ def _cancel_blocked_flow_steps(conn: sqlite3.Connection, flow_run_id: str, now: 
         )
 
 
+def _materialize_ready_flow_due_times(conn: sqlite3.Connection, materialized_at: str,
+                                      flow_run_id: Optional[str] = None) -> int:
+    """Set delayed steps' absolute due time once all dependencies are done."""
+    materialized_at = _flow_timestamp(materialized_at, "materialized_at")
+    params: tuple = ()
+    run_filter = ""
+    if flow_run_id is not None:
+        run_filter = " AND s.flow_run_id=?"
+        params = (flow_run_id,)
+    rows = conn.execute(
+        f"""SELECT s.flow_run_id, s.step_id, s.delay_seconds, s.dependencies,
+                   s.created_at
+              FROM flow_steps s JOIN flow_runs r USING(flow_run_id)
+             WHERE s.status='pending' AND s.delay_seconds>0 AND s.due_at IS NULL
+               AND r.execution_mode='durable'
+               AND r.status NOT IN ('completed','failed','cancelled')
+               AND {_FLOW_DEPENDENCIES_DONE_SQL}{run_filter}""",
+        params,
+    ).fetchall()
+    changed = 0
+    for row in rows:
+        dependencies = json.loads(row["dependencies"])
+        if dependencies:
+            placeholders = ",".join("?" for _ in dependencies)
+            completed = conn.execute(
+                f"""SELECT MAX(completed_at) FROM flow_steps
+                     WHERE flow_run_id=? AND step_id IN ({placeholders})""",
+                (row["flow_run_id"], *dependencies),
+            ).fetchone()[0]
+            base = completed
+        else:
+            base = row["created_at"]
+        if not base:
+            continue
+        parsed = datetime.fromisoformat(base.replace("Z", "+00:00"))
+        due_at = (parsed + timedelta(seconds=row["delay_seconds"])).astimezone(
+            timezone.utc
+        ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+        changed += conn.execute(
+            """UPDATE flow_steps SET status='scheduled', due_at=?, updated_at=?
+                 WHERE flow_run_id=? AND step_id=? AND status='pending'
+                   AND delay_seconds>0 AND due_at IS NULL""",
+            (due_at, materialized_at, row["flow_run_id"], row["step_id"]),
+        ).rowcount
+    return changed
+
+
 def transition_flow_step(flow_run_id: str, step_id: str, from_status: str, to_status: str,
                          now: str, error: Optional[str] = None) -> bool:
     if from_status not in _FLOW_STEP_STATUSES or to_status not in _FLOW_STEP_STATUSES:
@@ -729,6 +796,8 @@ def transition_flow_step(flow_run_id: str, step_id: str, from_status: str, to_st
              flow_run_id, step_id, from_status),
         ).rowcount
         if changed:
+            if to_status == "done":
+                _materialize_ready_flow_due_times(conn, now, row["flow_run_id"])
             if to_status in ("error", "cancelled"):
                 _cancel_blocked_flow_steps(conn, row["flow_run_id"], now)
             _refresh_flow_run(conn, row["flow_run_id"], now)
@@ -777,7 +846,9 @@ def get_due_flow_steps(now: str) -> list[dict]:
         rows = conn.execute(
             f"""SELECT s.* FROM flow_steps s JOIN flow_runs r USING(flow_run_id)
                WHERE s.status IN ({_FLOW_CLAIMABLE_STATUS_SQL})
+                 AND (s.delay_seconds=0 OR s.due_at IS NOT NULL)
                  AND (s.due_at IS NULL OR s.due_at<=?)
+                 AND r.execution_mode='durable'
                  AND r.status NOT IN ('completed','failed','cancelled')
                  AND {_FLOW_DEPENDENCIES_DONE_SQL}
                ORDER BY COALESCE(s.due_at, s.created_at), s.step_id""",
@@ -792,6 +863,7 @@ def get_stale_flow_claims(before: str) -> list[dict]:
         rows = conn.execute(
             """SELECT s.* FROM flow_steps s JOIN flow_runs r USING(flow_run_id)
                WHERE s.status='claimed' AND s.claimed_at<?
+                 AND r.execution_mode='durable'
                  AND r.status NOT IN ('completed','failed','cancelled')
                ORDER BY s.claimed_at, s.step_id""",
             (before,),
@@ -804,7 +876,27 @@ def init_db() -> None:
     try:
         for ddl in _TABLES:
             conn.execute(ddl)
+        flow_run_columns = _table_columns(conn, "flow_runs")
+        if "execution_mode" not in flow_run_columns:
+            # All pre-cutover plans were executed by the transcript scheduler.
+            conn.execute(
+                "ALTER TABLE flow_runs ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'shadow' "
+                "CHECK(execution_mode IN ('shadow', 'durable'))"
+            )
         _migrate_flow_steps_run_scoped_identity(conn)
+        flow_step_columns = _table_columns(conn, "flow_steps")
+        if "delay_seconds" not in flow_step_columns:
+            conn.execute(
+                "ALTER TABLE flow_steps ADD COLUMN delay_seconds INTEGER NOT NULL DEFAULT 0 CHECK(delay_seconds >= 0)"
+            )
+        shadow_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(
+            timespec="microseconds"
+        ).replace("+00:00", "Z")
+        conn.execute(
+            "DELETE FROM flow_runs WHERE execution_mode='shadow' AND created_at<?",
+            (shadow_cutoff,),
+        )
+        _materialize_ready_flow_due_times(conn, _utc_now_iso())
         conn.execute("CREATE INDEX IF NOT EXISTS idx_flow_steps_ready ON flow_steps(status, due_at, flow_run_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_flow_steps_claimed ON flow_steps(status, claimed_at)")
         _migrate_message_annotations_schema(conn)
