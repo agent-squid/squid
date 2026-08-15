@@ -28,7 +28,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,100..700,0..1,0" />
   <link rel="stylesheet" href="/vendor/atom-one-dark.min.css" />
   <link rel="stylesheet" href="/vendor/xterm.css" />
-  <link rel="stylesheet" href="style.css?v=20260814-022" />
+  <link rel="stylesheet" href="style.css?v=20260814-023" />
   <script src="/vendor/highlight.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/vendor/qrcode.min.js"></script>
@@ -37,7 +37,11 @@
   <script type="module">
     const B = 'https://esm.sh/';
     const ti = url => import(url).catch(() => ({}));
-    window._cmPromise = (async () => {
+    // CodeMirror and its language packs are only needed when an editor opens.
+    // Deferring these remote imports keeps them from competing with the app
+    // shell and initial history request during startup.
+    window._cmPromise = null;
+    window.loadCodeMirror = () => window._cmPromise ||= (async () => {
       // `codemirror` (CM6 meta-package) and all @codemirror/lang-*@6 packages
       // share the same /@codemirror/state@^6.0.0 dep URL on esm.sh, so they
       // use one module instance and instanceof checks work across packages.
@@ -799,6 +803,6 @@
   <div id="app-tooltip"></div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script src="flow-lang.js?v=20260721-003"></script>
-  <script src="app.js?v=20260814-022"></script>
+  <script src="app.js?v=20260814-023"></script>
 </body>
 </html>

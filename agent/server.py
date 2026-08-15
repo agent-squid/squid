@@ -1684,7 +1684,11 @@ async def search(q: str, limit: int = 100, topic: Optional[str] = None,
 @app.get("/prompts/recent")
 async def prompts_recent(limit: int = 50):
     limit = min(limit, 200)
-    return JSONResponse({"items": get_recent_prompts(limit=limit), "agents": _public_agent_map()})
+    items, agents = await asyncio.gather(
+        asyncio.to_thread(get_recent_prompts, limit=limit),
+        asyncio.to_thread(_public_agent_map),
+    )
+    return JSONResponse({"items": items, "agents": agents})
 
 
 @app.get("/chat/previews")

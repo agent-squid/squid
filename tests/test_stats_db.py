@@ -830,6 +830,17 @@ def test_recent_prompts_returns_limit_unique_routed_prompts(tmp_path, monkeypatc
     assert stats_db.get_recent_prompts(limit=6)[-1] == "#squid@haiku! push the changes"
 
 
+def test_recent_prompts_reply_lookup_is_indexed(tmp_path, monkeypatch):
+    db_path = tmp_path / "stats.db"
+    monkeypatch.setattr(stats_db, "_DB_PATH", db_path)
+    stats_db.init_db()
+
+    with sqlite3.connect(db_path) as conn:
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(chat_messages)")}
+
+    assert "idx_chat_messages_reply_role_id" in indexes
+
+
 def test_recent_prompts_keep_default_adhoc_prompts_plain(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

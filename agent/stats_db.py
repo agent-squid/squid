@@ -118,6 +118,8 @@ _TABLES = [
         completed_at TEXT,
         created_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )""",
+    """CREATE INDEX IF NOT EXISTS idx_chat_messages_reply_role_id
+       ON chat_messages(reply_to, role, id)""",
     """CREATE TABLE IF NOT EXISTS id_counters (
         namespace TEXT PRIMARY KEY,
         next_id   INTEGER NOT NULL

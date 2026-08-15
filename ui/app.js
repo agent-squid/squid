@@ -12102,7 +12102,7 @@ async function loadConfigYaml() {
       window._configCmView = _configCmView;
     } else {
       // Fallback: wait for CM to load
-      const ok = await (window._cmPromise || Promise.resolve(false));
+      const ok = await (window.loadCodeMirror?.() || Promise.resolve(false));
       if (ok) return loadConfigYaml();
       container.textContent = data.content;
       container.style.whiteSpace = 'pre-wrap';
@@ -16567,7 +16567,7 @@ function openFileViewer(initialPath, initialLine, initialEndLine, inlineContaine
   async function enterEditMode(text) {
     if (!window._cm) {
       editBtn.textContent = '…';
-      const ok = await (window._cmPromise || Promise.resolve(false));
+      const ok = await (window.loadCodeMirror?.() || Promise.resolve(false));
       editBtn.innerHTML = FV_ICON_PENCIL;
       if (!ok) {
         body.innerHTML = '';
