@@ -1,7 +1,7 @@
 ---
 status: proposed
 date: 2026-08-12
-updated: 2026-08-14
+updated: 2026-08-15
 ---
 # ADR-0040: Versioned real-time application protocol over WebSocket
 
@@ -93,7 +93,7 @@ reconciliation requirements that are not wire-protocol concerns. Its failure,
 impact, and required migration gates are documented in the
 [WebSocket UI migration postmortem](../postmortems/2026-08-12-websocket-ui-regression.md).
 
-### Implementation status (2026-08-14)
+### Implementation status (2026-08-15)
 
 The ADR is partially implemented. WebSocket is now the browser's primary chat
 transport in `auto` and `websocket` modes: it submits and cancels turns, streams
@@ -110,15 +110,42 @@ fallback and through the explicit `sse` migration mode.
 | Running-message browser reattachment | Implemented | The UI prefers WebSocket snapshots/events for pending messages, reconnects with jittered exponential backoff, persists its cursor, sends acknowledgements, and falls back to SSE when WebSocket is unavailable. |
 | New chat submission and cancellation | Implemented | The browser uses idempotent `chat.start` and `chat.cancel` commands in WebSocket mode. Auto mode falls back to the HTTP/SSE compatibility path only when a command was not submitted; SSE mode retains the compatibility path. |
 | Process and queue state | Implemented | Snapshots and authoritative `process.changed`/`queue.changed` events update the browser status model; HTTP refresh remains only as pre-snapshot and SSE compatibility recovery. |
-| Flow | Not implemented | `flow.step.created` is not published or consumed; the browser polls for new Flow steps. |
+| Flow | Not implemented | Flow messages persist, but execution/scheduling state is reconstructed from them and in-flight delayed dispatches are held in memory. `flow.step.created` is not published or consumed; the browser polls for new Flow steps. |
 | CLI authentication | Not implemented | `auth.*` messages are not implemented; ADR-0035's SSE-plus-HTTP transport remains in use. |
 | Backpressure and frame limits | Not implemented | Sends are direct and there is no bounded/coalescing outbound queue, `slow_consumer` handling, or configured inbound frame-size enforcement. |
 | Heartbeat and acknowledgements | Partial | `ping` receives `pong` and the UI sends `ack`, but the server does not initiate heartbeat pings or use acknowledged cursors to manage delivery. |
 | Protocol compatibility | Partial | Unsupported versions fail explicitly, but only v1 is supported rather than the current and immediately previous versions. |
 | Shore relay | Not implemented | ADR-0039's broker transport, pairing, encryption, capabilities, and audit work remain future work. |
 
-**Next milestone:** publish and consume `flow.step.created` so Flow no longer
-polls for new steps. CLI authentication remains the following migration phase.
+### Remaining implementation sequence
+
+The next milestone is the Flow migration. It begins with the durable execution
+store specified by [ADR-0042](0042-durable-squid-flow-execution-store.md); that
+work must not be deferred until after realtime delivery. Flow messages already
+persist in `chat_messages`, but the server currently reconstructs execution
+state from transcript rows and keeps in-flight delayed dispatches in memory.
+
+Once that state boundary exists, each committed new Flow step publishes
+`flow.step.created` with its `flow_run_id` and message identity. The browser
+consumes that event through the existing realtime message reconciliation path,
+including replay and snapshot reconciliation, and stops the 1.5-second step
+poll while WebSocket is active. The polling endpoint remains only for `sse`
+mode and `auto` fallback until SSE retirement. This milestone is complete when
+server tests cover restart and duplicate-dispatch races, and browser tests
+cover live delivery, reconnect/replay without duplicate steps, snapshot
+rollover, and SSE/WebSocket rendering parity.
+
+After Flow, the remaining ADR-0040 work is, in order:
+
+1. Migrate ADR-0035's CLI-auth PTY interaction to the `auth.*` family while
+   retaining its scoped session and security model.
+2. Add bounded outbound queues, coalescing, `slow_consumer` closure, inbound
+   frame-size enforcement, and server-initiated heartbeat handling.
+3. Use acknowledgements for delivery bookkeeping and support the current and
+   immediately previous protocol versions.
+4. Close the remaining required-verification gaps, then make a separate
+   compatibility decision before removing SSE.
+5. Implement ADR-0039's Shore relay over the proven protocol.
 
 SSE endpoints therefore remain required for migration fallback, CLI
 authentication, and the live families not yet moved to WebSocket. WebSocket is
@@ -335,19 +362,13 @@ session plus that client ID; a reverse-proxy source IP is never an identity.
 Shore replaces the local session component with its authenticated device or
 session identity. The client ID is an idempotency namespace, not authorization.
 
-### Migration sequence
+### Migration control
 
-1. Specify and test envelopes, schemas, authorization, ordering, replay,
-   idempotency, backpressure, and version negotiation.
-2. Extract a transport-neutral event publisher from the current SSE generators.
-3. Add `/ws/v1` while retaining all current HTTP/SSE behavior.
-4. Migrate process/queue/message state and running-message reattachment first.
-5. Migrate new chat submission and streaming.
-6. Migrate Flow and CLI-auth PTY interaction in later phases.
-7. Implement ADR-0039 over the proven protocol, including its device pairing,
-   signed encrypted envelopes, capabilities, and audit requirements.
-8. Retire superseded SSE endpoints only after compatibility fallback is no
-   longer needed and parity tests pass.
+The completed migration phases established the v1 envelope and durable event
+publisher, added `/ws/v1` alongside HTTP/SSE, and moved browser chat,
+reattachment, process, queue, and message state to the new transport. Current
+status and the single authoritative order for unfinished phases are maintained
+in [Remaining implementation sequence](#remaining-implementation-sequence).
 
 During migration the operator can select the browser transport in
 `~/.squid/squid.yaml`:

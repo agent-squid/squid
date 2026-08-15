@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-07-15
-updated: 2026-07-20
+updated: 2026-08-15
 ---
 # ADR-0032: Route Chains and Squid Flow with CWD-Profile Agents
 
@@ -10,6 +10,10 @@ updated: 2026-07-20
 > the [Squid Flow v0.1 Whitepaper](../squid-flow-whitepaper.md). This ADR is
 > the decision record — scope boundary and rationale; the whitepaper is the
 > implementation reference.
+>
+> Durable run/step state, scheduling, dispatch claims, restart recovery, and
+> the query boundary for operational visibility are specified separately in
+> [ADR-0042](0042-durable-squid-flow-execution-store.md).
 
 ## Context and Problem Statement
 
@@ -57,9 +61,10 @@ resolve to the identical stored `flow_route`.
 
 The broader Squid Flow syntax in this ADR remains the accepted direction, but
 multi-hop chains, `;` DAG clauses, cycles, and unbounded `=*` loops are outside
-v0.1. Delayed `:T` forms use an in-memory async delay in the current
-implementation; if the server restarts while a delayed handoff is sleeping,
-that pending delayed handoff is lost.
+v0.1. Delayed `:T` forms currently use an in-memory async delay; if the server
+restarts while a delayed handoff is sleeping, that pending delayed handoff is
+lost. ADR-0042 replaces transcript inference and in-memory scheduling with a
+durable execution store without changing the route semantics defined here.
 
 A chain target may be a full `#topic@agent` route, a bare `@agent`, or a
 bare `#topic` that inherits the source agent. Target fan-out, origin-side
@@ -627,8 +632,8 @@ times, one day apart.
 
 Unbounded graph cycles are invalid. A cyclic Squid Flow must include an
 explicit bound or schedule, such as `@c=5:1d>@a`. The v0.1 implementation uses
-in-memory delayed dispatch for `:T`; persisted pending handoffs are a later
-durability improvement, not part of v0.1.
+in-memory delayed dispatch for `:T`; ADR-0042 defines the durable replacement
+for that implementation limitation.
 
 The v0.1 implementation supports the single-operator subset while using the
 same Squid Flow representation internally. Cyclic and multi-clause graph flows
