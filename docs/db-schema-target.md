@@ -96,6 +96,14 @@ Squid Flow run ids are allocated from `id_counters` namespace `flow_run` and
 stored as text (`"1"`, `"2"`, `"3"`, ...). Existing UUID-style values are valid
 legacy data.
 
+```sql
+CREATE INDEX idx_chat_messages_reply_role_id ON chat_messages(reply_to, role, id);
+```
+
+Covers the recent-prompts/agent-map lookups that walk assistant replies by
+`reply_to`; part of a fix (alongside moving that work off the async event
+loop) that took the query from 8.59s to 11.2ms on a 206 MB database.
+
 ### `id_counters`
 ```sql
 CREATE TABLE id_counters (
@@ -181,6 +189,67 @@ CREATE TABLE realtime_requests (
     created_at TEXT, PRIMARY KEY (principal, request_id)
 );
 ```
+
+### `flow_runs` and `flow_steps`
+
+Durable Squid Flow execution state, independent of the `chat_messages`
+transcript. `flow_runs.execution_mode` is an activation boundary: `shadow`
+plans predate executor cutover and are never claimed or recovered; `durable`
+plans are owned end-to-end by the executor. `flow_steps.dispatch_key` is
+unique per run and identifies one logical step, so retrying a claim cannot
+create a second chat turn for the same step. `branch_index = -1` marks an
+origin step, which may be shared by several fan-out branches or a join rather
+than owned by one branch. See
+[ADR-0042](decisions/0042-durable-squid-flow-execution-store.md) for the full
+lifecycle and recovery model.
+
+```sql
+CREATE TABLE flow_runs (
+    flow_run_id            TEXT PRIMARY KEY,
+    route                  TEXT NOT NULL,
+    original_prompt_msg_id INTEGER,
+    execution_mode         TEXT NOT NULL DEFAULT 'shadow'
+                           CHECK(execution_mode IN ('shadow', 'durable')),
+    status                 TEXT NOT NULL DEFAULT 'scheduled'
+                           CHECK(status IN ('scheduled', 'running', 'completed', 'failed', 'cancelled')),
+    error                  TEXT,
+    cancellation_reason    TEXT,
+    created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    started_at             TEXT,
+    completed_at           TEXT
+);
+CREATE TABLE flow_steps (
+    step_id          TEXT NOT NULL,
+    flow_run_id      TEXT NOT NULL REFERENCES flow_runs(flow_run_id) ON DELETE CASCADE,
+    branch_index     INTEGER NOT NULL DEFAULT 0,  -- -1 = origin step, shared across branches/joins
+    leg              TEXT NOT NULL,
+    repeat_index     INTEGER NOT NULL DEFAULT 0,
+    dependencies     TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(dependencies)), -- JSON [step_id, …]
+    topic            TEXT NOT NULL,
+    agent            TEXT NOT NULL,
+    fresh            INTEGER NOT NULL DEFAULT 0 CHECK(fresh IN (0, 1)),
+    status           TEXT NOT NULL DEFAULT 'pending'
+                     CHECK(status IN ('pending', 'scheduled', 'claimed', 'running', 'done', 'error', 'cancelled')),
+    delay_seconds    INTEGER NOT NULL DEFAULT 0 CHECK(delay_seconds >= 0), -- relative; due_at is materialized once dependencies complete
+    due_at           TEXT,
+    dispatch_key     TEXT NOT NULL,
+    claimed_at       TEXT,
+    attempt          INTEGER NOT NULL DEFAULT 0,
+    user_msg_id      INTEGER,
+    assistant_msg_id INTEGER,
+    error            TEXT,
+    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    started_at       TEXT,
+    completed_at     TEXT,
+    updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY(flow_run_id, step_id),
+    UNIQUE(flow_run_id, dispatch_key)
+);
+```
+
+Shadow plans older than seven days are pruned at startup. `flow_run_id` and
+`flow_step_id` on `chat_messages` (see above) join the operational and
+conversation views without either owning the other.
 
 ### `git_diff_reverts`
 ```sql
@@ -294,6 +363,7 @@ predates them — additive-only, no down migration:
 - `topics.last_adhoc_at TEXT`
 - `chat_messages.completed_at TEXT`
 - `chat_messages.flow_run_id TEXT`
+- `chat_messages.flow_step_id TEXT`
 - `chat_messages.flow_route TEXT`
 
 ---
