@@ -2441,6 +2441,241 @@ test.describe('recovered pending responses', () => {
     )).toEqual([400, 401, 402, 403]);
   });
 
+  test('reconnecting websocket replays without duplicating an already-attached flow step', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__webSockets = [];
+      class MockWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        constructor() {
+          this.readyState = MockWebSocket.CONNECTING;
+          window.__webSockets.push(this);
+          setTimeout(() => {
+            this.readyState = MockWebSocket.OPEN;
+            this.onopen?.();
+            this.receive({ v: 1, type: 'hello', payload: {} });
+          });
+        }
+        send(data) {
+          const frame = JSON.parse(data);
+          if (frame.type === 'subscribe') {
+            this.subscribe = frame;
+            setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+          }
+        }
+        receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+        close() {
+          this.readyState = 3;
+          const handler = this.onclose;
+          setTimeout(() => handler?.());
+        }
+      }
+      window.WebSocket = MockWebSocket;
+    });
+    await mockBackend(page);
+    await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+    await page.route('**/chat/601/status', route => route.fulfill({ json: {
+      id: 601, role: 'assistant', topic: 'squid', agent: 'claude', status: 'done',
+      prompt: 'Flow handoff 601', content: 'Flow result 601', source: 'workflow',
+      flow_run_id: 'run-601', flow_step_id: 'step-601',
+      timestamp: '2027-01-01T00:00:00Z', completed_at: '2027-01-01T00:00:01Z',
+    }}));
+    await page.route('**/chat/602/status', route => route.fulfill({ json: {
+      id: 602, role: 'assistant', topic: 'squid', agent: 'claude', status: 'done',
+      prompt: 'Flow handoff 602', content: 'Flow result 602', source: 'workflow',
+      flow_run_id: 'run-601', flow_step_id: 'step-602',
+      timestamp: '2027-01-01T00:00:00Z', completed_at: '2027-01-01T00:00:02Z',
+    }}));
+
+    await page.goto('/');
+    await page.waitForFunction(() => window.__webSockets[0]?.subscribe);
+    await page.evaluate(() => window.__webSockets[0].receive({
+      v: 1, type: 'flow.step.created', event_id: 30, msg_id: 601,
+      scope: { topic: 'squid', agent: 'claude' },
+      payload: { flow_run_id: 'run-601', step_id: 'step-601', assistant_msg_id: 601 },
+    }));
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="601"]'))
+      .toContainText('Flow result 601');
+
+    // The connection drops and a fresh socket reconnects. The server replays
+    // from the last acknowledged cursor, which includes the event already
+    // applied plus the next one — the applied cursor must suppress the replay.
+    await page.evaluate(() => window.__webSockets[0].close());
+    await page.waitForFunction(() => window.__webSockets.length >= 2 && window.__webSockets.at(-1)?.subscribe);
+    await page.evaluate(() => {
+      const resumed = window.__webSockets.at(-1);
+      resumed.receive({
+        v: 1, type: 'flow.step.created', event_id: 30, msg_id: 601,
+        scope: { topic: 'squid', agent: 'claude' },
+        payload: { flow_run_id: 'run-601', step_id: 'step-601', assistant_msg_id: 601 },
+      });
+      resumed.receive({
+        v: 1, type: 'flow.step.created', event_id: 31, msg_id: 602,
+        scope: { topic: 'squid', agent: 'claude' },
+        payload: { flow_run_id: 'run-601', step_id: 'step-602', assistant_msg_id: 602 },
+      });
+    });
+
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="602"]'))
+      .toContainText('Flow result 602');
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id]')).toHaveCount(2);
+    expect(await page.locator('.msg.assistant.history-item[data-msg-id]').evaluateAll(
+      nodes => nodes.map(node => Number(node.dataset.msgId)),
+    )).toEqual([601, 602]);
+  });
+
+  test('flow snapshot rollover preserves an already-attached step and resumes live delivery', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__webSocket = null;
+      class MockWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        constructor() {
+          this.readyState = MockWebSocket.CONNECTING;
+          window.__webSocket = this;
+          setTimeout(() => {
+            this.readyState = MockWebSocket.OPEN;
+            this.onopen?.();
+            this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+          });
+        }
+        send(data) {
+          if (JSON.parse(data).type === 'subscribe') {
+            setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+          }
+        }
+        receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+        close() { this.readyState = 3; this.onclose?.(); }
+      }
+      window.WebSocket = MockWebSocket;
+    });
+    await mockBackend(page);
+    await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+    await page.route('**/chat/701/status', route => route.fulfill({ json: {
+      id: 701, role: 'assistant', topic: 'squid', agent: 'claude', status: 'done',
+      prompt: 'Flow handoff 701', content: 'Flow result 701', source: 'workflow',
+      flow_run_id: 'run-701', flow_step_id: 'step-701',
+      timestamp: '2027-01-01T00:00:00Z', completed_at: '2027-01-01T00:00:01Z',
+    }}));
+    await page.route('**/chat/702/status', route => route.fulfill({ json: {
+      id: 702, role: 'assistant', topic: 'squid', agent: 'claude', status: 'done',
+      prompt: 'Flow handoff 702', content: 'Flow result 702', source: 'workflow',
+      flow_run_id: 'run-701', flow_step_id: 'step-702',
+      timestamp: '2027-01-01T00:00:00Z', completed_at: '2027-01-01T00:00:02Z',
+    }}));
+
+    await page.goto('/');
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'flow.step.created', event_id: 40, msg_id: 701,
+      scope: { topic: 'squid', agent: 'claude' },
+      payload: { flow_run_id: 'run-701', step_id: 'step-701', assistant_msg_id: 701 },
+    }));
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="701"]'))
+      .toContainText('Flow result 701');
+
+    // The server decides the retained range is unavailable and rolls over to
+    // a fresh snapshot instead of replaying. Flow state in a snapshot stays
+    // out of the transcript (verified above), so the already-applied step
+    // must survive the rollover untouched rather than being duplicated or
+    // dropped.
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'snapshot', event_id: 45, payload: {
+        cursor_reset: true,
+        conversations: [{ messages: [] }],
+        flow_steps: [{ assistant_msg_id: 701 }],
+      },
+    }));
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="701"]'))
+      .toContainText('Flow result 701');
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id]')).toHaveCount(1);
+
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'flow.step.created', event_id: 46, msg_id: 702,
+      scope: { topic: 'squid', agent: 'claude' },
+      payload: { flow_run_id: 'run-701', step_id: 'step-702', assistant_msg_id: 702 },
+    }));
+
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="702"]'))
+      .toContainText('Flow result 702');
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id]')).toHaveCount(2);
+    expect(await page.locator('.msg.assistant.history-item[data-msg-id]').evaluateAll(
+      nodes => nodes.map(node => Number(node.dataset.msgId)),
+    )).toEqual([701, 702]);
+  });
+
+  test('websocket delivers a completed flow step through the live event path', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__webSocket = null;
+      class MockWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        constructor() {
+          this.readyState = MockWebSocket.CONNECTING;
+          window.__webSocket = this;
+          setTimeout(() => {
+            this.readyState = MockWebSocket.OPEN;
+            this.onopen?.();
+            this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+          });
+        }
+        send(data) {
+          if (JSON.parse(data).type === 'subscribe') {
+            setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+          }
+        }
+        receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+        close() { this.readyState = 3; this.onclose?.(); }
+      }
+      window.WebSocket = MockWebSocket;
+    });
+    await mockBackend(page);
+    await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+    await page.route('**/chat/801/status', route => route.fulfill({ json: {
+      id: 801, role: 'assistant', topic: 'squid', agent: 'claude', status: 'done',
+      prompt: 'Flow handoff 801', content: 'Flow result 801', source: 'workflow',
+      flow_run_id: 'run-801', flow_step_id: 'step-801',
+      timestamp: '2027-01-01T00:00:00Z', completed_at: '2027-01-01T00:00:01Z',
+    }}));
+
+    await page.goto('/');
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'flow.step.created', event_id: 50, msg_id: 801,
+      scope: { topic: 'squid', agent: 'claude' },
+      payload: { flow_run_id: 'run-801', step_id: 'step-801', assistant_msg_id: 801 },
+    }));
+
+    // Same final assertion as the sse-mode parity test below: both
+    // transports must converge on one normalized turn for the same step.
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="801"]'))
+      .toContainText('Flow result 801');
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id]')).toHaveCount(1);
+  });
+
+  test('sse-mode flow polling renders the same completed flow step as websocket delivery', async ({ page }) => {
+    await mockBackend(page);
+    await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'sse' } }));
+    await page.route('**/chat/801/status', route => route.fulfill({ json: {
+      id: 801, role: 'assistant', topic: 'squid', agent: 'claude', status: 'done',
+      prompt: 'Flow handoff 801', content: 'Flow result 801', source: 'workflow',
+      flow_run_id: 'run-801', flow_step_id: 'step-801',
+      timestamp: '2027-01-01T00:00:00Z', completed_at: '2027-01-01T00:00:01Z',
+    }}));
+    await page.route('**/chat/flow/run-801/steps**', route => route.fulfill({ json: {
+      messages: [{ id: 801, role: 'assistant' }], complete: true,
+    }}));
+
+    await page.goto('/');
+    await page.evaluate(() => watchFlowRun('run-801', 800));
+
+    // Same final assertion as the websocket-mode parity test above: both
+    // transports must converge on one normalized turn for the same step.
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="801"]'))
+      .toContainText('Flow result 801');
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id]')).toHaveCount(1);
+  });
+
   test('initial history installs before global snapshot discovery', async ({ page }) => {
     await page.setViewportSize({ width: 600, height: 500 });
     await page.addInitScript(() => {

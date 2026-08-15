@@ -110,7 +110,7 @@ fallback and through the explicit `sse` migration mode.
 | Running-message browser reattachment | Implemented | The UI prefers WebSocket snapshots/events for pending messages, reconnects with jittered exponential backoff, persists its cursor, sends acknowledgements, and falls back to SSE when WebSocket is unavailable. |
 | New chat submission and cancellation | Implemented | The browser uses idempotent `chat.start` and `chat.cancel` commands in WebSocket mode. Auto mode falls back to the HTTP/SSE compatibility path only when a command was not submitted; SSE mode retains the compatibility path. |
 | Process and queue state | Implemented | Snapshots and authoritative `process.changed`/`queue.changed` events update the browser status model; HTTP refresh remains only as pre-snapshot and SSE compatibility recovery. |
-| Flow | Realtime migration implemented; milestone verification pending | New Flow submissions use ADR-0042's durable executor and recovery. Step/message linkage publishes `flow.step.created` in the same transaction, scoped snapshots include linked durable step state, and the browser reconciles both through stable assistant message IDs. The 1.5-second step poll is disabled while WebSocket is active and retained for `sse` mode and `auto` fallback. Pre-cutover shadow and legacy runs remain with the transcript executor. |
+| Flow | Implemented | New Flow submissions use ADR-0042's durable executor and recovery. Step/message linkage publishes `flow.step.created` in the same transaction, scoped snapshots include linked durable step state, and the browser reconciles both through stable assistant message IDs. The 1.5-second step poll is disabled while WebSocket is active and retained for `sse` mode and `auto` fallback. Pre-cutover shadow and legacy runs remain with the transcript executor. The milestone's server tests (restart, cancellation, stale claims, event-after-commit, duplicate-dispatch races) are in `tests/test_flow.py`/`tests/test_realtime.py`; its browser tests (live delivery, reconnect/replay without duplicate steps, snapshot rollover, SSE/WebSocket rendering parity) are in `tests/e2e/chat.spec.js`. |
 | CLI authentication | Not implemented | `auth.*` messages are not implemented; ADR-0035's SSE-plus-HTTP transport remains in use. |
 | Backpressure and frame limits | Not implemented | Sends are direct and there is no bounded/coalescing outbound queue, `slow_consumer` handling, or configured inbound frame-size enforcement. |
 | Heartbeat and acknowledgements | Partial | `ping` receives `pong` and the UI sends `ack`, but the server does not initiate heartbeat pings or use acknowledged cursors to manage delivery. |
@@ -127,12 +127,16 @@ claimed/running state, dispatch due work, and restore delayed wakeups. Existing
 shadow and transcript-only runs remain on the legacy executor and are never
 promoted.
 
-Close the Flow milestone with server tests for restart, cancellation, stale
-   claims, event-after-commit, and duplicate-dispatch races, plus browser tests
-   for live delivery, reconnect/replay without duplicate steps, snapshot
-   rollover, and SSE/WebSocket rendering parity.
+The Flow milestone is closed. Server-side tests cover restart, cancellation,
+   stale-claim reconciliation, event-after-commit ordering, and
+   duplicate-dispatch races (`tests/test_flow.py`, `tests/test_realtime.py`).
+   Browser tests cover live delivery and completion-order step insertion,
+   reconnect/replay without duplicate steps (the applied cursor suppresses a
+   replayed `flow.step.created`), snapshot rollover (an already-attached step
+   survives a `cursor_reset` snapshot untouched), and SSE/WebSocket rendering
+   parity for a completed step (`tests/e2e/chat.spec.js`).
 
-After Flow, the remaining ADR-0040 work is, in order:
+The remaining ADR-0040 work is, in order:
 
 1. Migrate ADR-0035's CLI-auth PTY interaction to the `auth.*` family while
    retaining its scoped session and security model.
