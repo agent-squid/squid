@@ -251,6 +251,85 @@ def test_realtime_listener_runs_after_event_commit_from_worker_thread(tmp_path, 
     assert observed == ["message.changed"]
 
 
+def test_linked_flow_step_publishes_after_linkage_commit(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    user_id = stats_db.insert_user_message(
+        "squid", "codex", "origin", flow_run_id="run-1", flow_step_id="origin",
+    )
+    msg_id = stats_db.insert_assistant_message(
+        "squid", "codex", user_id, flow_run_id="run-1", flow_step_id="origin",
+    )
+    stats_db.create_flow_run("run-1", "#squid@codex>@claude", user_id, [{
+        "step_id": "origin", "topic": "squid", "agent": "codex",
+    }], execution_mode="durable")
+    observed = []
+
+    def listener(event_id):
+        with sqlite3.connect(tmp_path / "squid.db") as conn:
+            conn.row_factory = sqlite3.Row
+            event = conn.execute(
+                "SELECT event_type FROM realtime_events WHERE event_id=?", (event_id,),
+            ).fetchone()
+            step = conn.execute(
+                "SELECT assistant_msg_id FROM flow_steps WHERE flow_run_id='run-1' AND step_id='origin'",
+            ).fetchone()
+            observed.append((event["event_type"], step["assistant_msg_id"]))
+
+    stats_db.set_realtime_commit_listener(listener)
+    try:
+        assert stats_db.link_flow_step_messages("run-1", "origin", user_id, msg_id)
+    finally:
+        stats_db.set_realtime_commit_listener(None)
+
+    assert observed == [("flow.step.created", msg_id)]
+    events = stats_db.get_realtime_events(0, [{"lifecycle": "global"}])
+    created = next(event for event in events if event["event_type"] == "flow.step.created")
+    assert created["msg_id"] == msg_id
+    assert created["payload"] == {
+        "flow_run_id": "run-1",
+        "step_id": "origin",
+        "user_msg_id": user_id,
+        "assistant_msg_id": msg_id,
+        "route": "#squid@codex>@claude",
+        "status": "pending",
+    }
+
+
+def test_realtime_snapshot_includes_linked_flow_step_state(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    user_id = stats_db.insert_user_message(
+        "squid", "codex", "origin", flow_run_id="run-1", flow_step_id="origin",
+    )
+    msg_id = stats_db.insert_assistant_message(
+        "squid", "codex", user_id, flow_run_id="run-1", flow_step_id="origin",
+    )
+    stats_db.create_flow_run("run-1", "#squid@codex>@claude", user_id, [
+        {"step_id": "origin", "topic": "squid", "agent": "codex"},
+        {"step_id": "target", "topic": "squid", "agent": "claude", "dependencies": ["origin"]},
+    ], execution_mode="durable")
+    stats_db.link_flow_step_messages("run-1", "origin", user_id, msg_id)
+
+    snapshot = stats_db.get_realtime_snapshot([{"lifecycle": "global"}], 20)
+
+    assert [run["flow_run_id"] for run in snapshot["flow_runs"]] == ["run-1"]
+    assert [step["step_id"] for step in snapshot["flow_steps"]] == ["origin", "target"]
+    assert snapshot["flow_steps"][0]["assistant_msg_id"] == msg_id
+    assert snapshot["flow_steps"][1]["assistant_msg_id"] is None
+
+
+def test_scoped_realtime_snapshot_includes_only_authorized_active_flow_steps(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    stats_db.create_flow_run("run-1", "#squid@codex>@claude", None, [
+        {"step_id": "origin", "topic": "squid", "agent": "codex"},
+        {"step_id": "target", "topic": "private", "agent": "claude", "dependencies": ["origin"]},
+    ], execution_mode="durable")
+
+    snapshot = stats_db.get_realtime_snapshot([{"topic": "squid", "agent": "codex"}], 20)
+
+    assert [run["flow_run_id"] for run in snapshot["flow_runs"]] == ["run-1"]
+    assert [(step["topic"], step["agent"]) for step in snapshot["flow_steps"]] == [("squid", "codex")]
+
+
 def test_pruned_cursor_rolls_over_to_snapshot(tmp_path, monkeypatch):
     _fresh_db(tmp_path, monkeypatch)
     for index in range(5):

@@ -7173,6 +7173,9 @@ const realtimeV1 = (() => {
       if (frame.payload.status && frame.payload.status !== 'pending' && frame.scope?.agent) {
         refreshComposerSessionCount(frame.scope.topic || 'default', frame.scope.agent);
       }
+    } else if (frame.type === 'flow.step.created') {
+      const msgId = Number(frame.payload?.assistant_msg_id ?? frame.msg_id);
+      if (Number.isFinite(msgId)) attachFlowStep(msgId);
     } else if (frame.type?.startsWith('chat.') && frame.msg_id != null && !watches.has(Number(frame.msg_id))) {
       onDiscover?.({ id: frame.msg_id, status: 'pending', ...frame.scope });
     }
@@ -7287,6 +7290,9 @@ const realtimeV1 = (() => {
   };
 
   return {
+    isActive() {
+      return subscribed && socket?.readyState === WebSocket.OPEN;
+    },
     resume() {
       if (!globalEnabled && !watches.size && !commands.size) return;
       needsSnapshot = true;
@@ -7422,11 +7428,10 @@ async function attachFlowStep(msgId) {
     if (messages.querySelector(`[data-msg-id="${msgId}"]`)) return;
     if (!shouldShowNewResponse(data)) return;
     if (data.status === 'pending') {
-      const wipBubble = makeWipBubble(data);
-      messages.appendChild(wipBubble);
+      const wipBubble = insertPendingHistoryItem(data);
       reconnectPendingItem(data, wipBubble);
     } else {
-      appendHistoryItem(data, messages);
+      insertCompletedHistoryItem(data);
     }
     scrollToBottom();
   } catch {}
@@ -7441,12 +7446,26 @@ function watchFlowRun(flowRunId, afterId, route = null) {
   if (!flowRunId || _flowRunWatchers.has(flowRunId)) return;
   _flowRunWatchers.add(flowRunId);
   let cursor = afterId;
-  let polls = 0;
-  const MAX_POLLS = 400; // ~10 min at 1.5s — well past any single-step timeout
-  const timer = setInterval(tick, 1500);
+  let ticks = 0;
+  const MAX_TICKS = 400; // ~10 min at 1.5s — bounds active and dormant watchers
+  let timer = null;
 
   async function tick() {
-    polls++;
+    ticks++;
+    if (ticks >= MAX_TICKS) {
+      clearInterval(timer);
+      _flowRunWatchers.delete(flowRunId);
+      return;
+    }
+    const transportMode = await realtimeTransportMode;
+    if (transportMode === 'websocket') {
+      clearInterval(timer);
+      _flowRunWatchers.delete(flowRunId);
+      return;
+    }
+    // In auto mode the timer remains dormant while realtime is healthy so it
+    // can resume HTTP recovery immediately if the socket disconnects.
+    if (transportMode === 'auto' && realtimeV1?.isActive()) return;
     try {
       const res = await fetch(`/chat/flow/${encodeURIComponent(flowRunId)}/steps?after_id=${cursor}`);
       if (res.ok) {
@@ -7463,12 +7482,18 @@ function watchFlowRun(flowRunId, afterId, route = null) {
         }
       }
     } catch {}
-    if (polls >= MAX_POLLS) {
-      clearInterval(timer);
-      _flowRunWatchers.delete(flowRunId);
-    }
   }
-  tick();
+  realtimeTransportMode.then(mode => {
+    if (mode === 'websocket') {
+      _flowRunWatchers.delete(flowRunId);
+      return;
+    }
+    timer = setInterval(tick, 1500);
+    tick();
+  }).catch(() => {
+    timer = setInterval(tick, 1500);
+    tick();
+  });
 }
 
 async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStored = null, onProcessing = null } = {}) {

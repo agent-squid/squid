@@ -2,8 +2,8 @@
 
 This document specifies the version 1 application protocol selected by
 ADR-0040. JSON messages are carried by `/ws/v1`; SSE remains a migration
-fallback. Phase one covers chat and process, queue, and message state. Flow and
-CLI authentication are reserved message families for later phases.
+fallback. Phase one covers chat, Flow-step discovery, and process, queue, and
+message state. CLI authentication is reserved for a later phase.
 
 ## Ordering and cursor model
 
@@ -101,6 +101,10 @@ list. `queue.changed` carries `payload.queue`, the authoritative current queued
 item list. Both replace the corresponding snapshot collection rather than
 being applied as deltas.
 
+`flow.step.created` is committed with a durable Flow step's message linkage.
+Its payload carries `flow_run_id`, `step_id`, `user_msg_id`,
+`assistant_msg_id`, `route`, and the linked step's current `status`.
+
 ## Snapshot
 
 A subscription snapshot contains:
@@ -110,6 +114,9 @@ A subscription snapshot contains:
 - current process, queue, and message state;
 - complete accumulated content and `run_seq` for pending assistant messages;
 - durable tool results needed to render that active window.
+- authoritative run and step state for active durable Flows and for Flows
+  represented in the active message window; scoped subscriptions receive only
+  their authorized steps.
 
 The server reads state consistently at watermark `N`, buffers later matching
 events, sends the snapshot with `event_id: N`, then sends events after `N`.

@@ -717,6 +717,7 @@ def claim_flow_step(flow_run_id: str, step_id: str, now: str) -> Optional[dict]:
 def link_flow_step_messages(flow_run_id: str, step_id: str, user_msg_id: int, assistant_msg_id: int) -> bool:
     """Idempotently bind the one prepared chat turn belonging to a step."""
     conn = _connect()
+    event_id = None
     try:
         conn.execute("BEGIN IMMEDIATE")
         changed = conn.execute(
@@ -733,7 +734,25 @@ def link_flow_step_messages(flow_run_id: str, step_id: str, user_msg_id: int, as
                      AND (flow_step_id IS NULL OR flow_step_id=?)""",
                 (step_id, user_msg_id, assistant_msg_id, flow_run_id, step_id),
             )
+            step = conn.execute(
+                """SELECT s.*, r.route FROM flow_steps s
+                   JOIN flow_runs r USING(flow_run_id)
+                   WHERE s.flow_run_id=? AND s.step_id=?""",
+                (flow_run_id, step_id),
+            ).fetchone()
+            event_id = _insert_realtime_event_row(
+                conn, "flow.step.created", step["topic"], step["agent"],
+                assistant_msg_id, None, {
+                    "flow_run_id": flow_run_id,
+                    "step_id": step_id,
+                    "user_msg_id": user_msg_id,
+                    "assistant_msg_id": assistant_msg_id,
+                    "route": step["route"],
+                    "status": step["status"],
+                },
+            )
             conn.commit()
+            _notify_realtime_commit(event_id)
             return True
         row = conn.execute(
             """SELECT user_msg_id, assistant_msg_id FROM flow_steps
@@ -4579,7 +4598,7 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
-def _insert_realtime_event(
+def _insert_realtime_event_row(
     conn: sqlite3.Connection, event_type: str, topic: Optional[str],
     agent: Optional[str], msg_id: Optional[int], run_seq: Optional[int], payload,
 ) -> int:
@@ -4590,14 +4609,27 @@ def _insert_realtime_event(
            VALUES (?, ?, ?, ?, ?, ?)""",
         (event_type, topic, agent, msg_id, run_seq, encoded),
     )
-    event_id = int(cur.lastrowid)
+    return int(cur.lastrowid)
+
+
+def _notify_realtime_commit(event_id: int) -> None:
     # Commit the domain mutation and publication row together before waking
     # sockets. The listener may run on a worker thread and must marshal itself
     # onto its owning event loop.
-    conn.commit()
     listener = _realtime_commit_listener
     if listener:
         listener(event_id)
+
+
+def _insert_realtime_event(
+    conn: sqlite3.Connection, event_type: str, topic: Optional[str],
+    agent: Optional[str], msg_id: Optional[int], run_seq: Optional[int], payload,
+) -> int:
+    event_id = _insert_realtime_event_row(
+        conn, event_type, topic, agent, msg_id, run_seq, payload,
+    )
+    conn.commit()
+    _notify_realtime_commit(event_id)
     return event_id
 
 
@@ -4727,11 +4759,26 @@ def _decode_realtime_event_rows(rows) -> list[dict]:
     return result
 
 
+def _flow_scope_sql(filters: list[tuple[str, Optional[str]]], alias: str = "s") -> tuple[str, list]:
+    clauses, params = [], []
+    for topic, agent in filters:
+        if agent is None:
+            clauses.append(f"{alias}.topic=?")
+            params.append(topic)
+        else:
+            clauses.append(f"({alias}.topic=? AND {alias}.agent=?)")
+            params.extend((topic, agent))
+    return " OR ".join(clauses), params
+
+
 def get_realtime_snapshot(scopes: list[dict], message_limit: int = 20) -> dict:
     # Pending rows should normally be few, but stale rows must not turn every
     # reconnect into an unbounded query plus two follow-up queries per row.
     pending_limit = max(1, message_limit)
     conversations = []
+    flow_run_ids = set()
+    flow_scope_filters = []
+    global_flow_scope = False
     with _connect() as conn:
         # Keep the event watermark and every materialized message read on one
         # SQLite snapshot. Domain mutations publish their realtime row in the
@@ -4741,6 +4788,7 @@ def get_realtime_snapshot(scopes: list[dict], message_limit: int = 20) -> dict:
         cursor = int(conn.execute("SELECT COALESCE(MAX(event_id), 0) FROM realtime_events").fetchone()[0])
         for scope in scopes:
             if scope.get("lifecycle") == "global":
+                global_flow_scope = True
                 recent = conn.execute(
                     "SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?", (message_limit,),
                 ).fetchall()
@@ -4761,12 +4809,14 @@ def get_realtime_snapshot(scopes: list[dict], message_limit: int = 20) -> dict:
                     "scope": scope,
                     "messages": sorted(by_id.values(), key=lambda row: row["id"]),
                 })
+                flow_run_ids.update(item["flow_run_id"] for item in by_id.values() if item.get("flow_run_id"))
                 continue
             topic, agent = scope.get("topic"), scope.get("agent")
             if not topic:
                 continue
             agent_clause = "1=1" if agent is None else "agent=?"
             args = [topic] if agent is None else [topic, agent]
+            flow_scope_filters.append((topic, agent))
             recent = conn.execute(
                 f"""SELECT * FROM chat_messages WHERE topic=? AND {agent_clause}
                     ORDER BY id DESC LIMIT ?""", (*args, message_limit),
@@ -4785,7 +4835,51 @@ def get_realtime_snapshot(scopes: list[dict], message_limit: int = 20) -> dict:
                     ).fetchone()
                     item["run_seq"] = int(seq_row[0])
             conversations.append({"scope": scope, "messages": sorted(by_id.values(), key=lambda row: row["id"])})
-    return {"cursor": cursor, "conversations": conversations}
+            flow_run_ids.update(item["flow_run_id"] for item in by_id.values() if item.get("flow_run_id"))
+
+        if global_flow_scope:
+            active = conn.execute(
+                """SELECT flow_run_id FROM flow_runs
+                   WHERE execution_mode='durable'
+                     AND status NOT IN ('completed', 'failed', 'cancelled')"""
+            ).fetchall()
+            flow_run_ids.update(row["flow_run_id"] for row in active)
+        elif flow_scope_filters:
+            scope_sql, scope_params = _flow_scope_sql(flow_scope_filters)
+            active = conn.execute(
+                f"""SELECT DISTINCT r.flow_run_id FROM flow_runs r
+                    JOIN flow_steps s USING(flow_run_id)
+                    WHERE r.execution_mode='durable'
+                      AND r.status NOT IN ('completed', 'failed', 'cancelled')
+                      AND ({scope_sql})""",
+                scope_params,
+            ).fetchall()
+            flow_run_ids.update(row["flow_run_id"] for row in active)
+
+        flow_runs, flow_steps = [], []
+        if flow_run_ids:
+            run_placeholders = ",".join("?" for _ in flow_run_ids)
+            run_params = sorted(flow_run_ids)
+            flow_runs = [dict(row) for row in conn.execute(
+                f"SELECT * FROM flow_runs WHERE flow_run_id IN ({run_placeholders}) ORDER BY flow_run_id",
+                run_params,
+            ).fetchall()]
+            step_scope = ""
+            step_params = []
+            if not global_flow_scope:
+                step_sql, step_params = _flow_scope_sql(flow_scope_filters)
+                step_scope = f" AND ({step_sql})"
+            rows = conn.execute(
+                f"""SELECT s.*, r.route FROM flow_steps s JOIN flow_runs r USING(flow_run_id)
+                    WHERE s.flow_run_id IN ({run_placeholders}){step_scope}
+                    ORDER BY s.flow_run_id, s.branch_index, s.repeat_index, s.step_id""",
+                [*run_params, *step_params],
+            ).fetchall()
+            flow_steps = [_flow_step_dict(row) for row in rows]
+    return {
+        "cursor": cursor, "conversations": conversations,
+        "flow_runs": flow_runs, "flow_steps": flow_steps,
+    }
 
 
 def get_realtime_request(principal: str, request_id: str) -> Optional[dict]:

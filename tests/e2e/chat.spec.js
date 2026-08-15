@@ -2269,6 +2269,178 @@ test.describe('parallel responses', () => {
 });
 
 test.describe('recovered pending responses', () => {
+  test('healthy realtime Flow watcher expires without HTTP polling', async ({ page }) => {
+    await page.addInitScript(() => {
+      const nativeSetInterval = window.setInterval.bind(window);
+      window.setInterval = (callback, delay, ...args) =>
+        nativeSetInterval(callback, delay === 1500 ? 1 : delay, ...args);
+      class MockWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        constructor() {
+          this.readyState = MockWebSocket.CONNECTING;
+          window.__webSocket = this;
+          setTimeout(() => {
+            this.readyState = MockWebSocket.OPEN;
+            this.onopen?.();
+            this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+          });
+        }
+        send(data) {
+          if (JSON.parse(data).type === 'subscribe') {
+            this.serverSubscribed = true;
+            this.receive({ v: 1, type: 'subscribed', payload: {} });
+          }
+        }
+        receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+        close() { this.readyState = 3; this.onclose?.(); }
+      }
+      window.WebSocket = MockWebSocket;
+    });
+    await mockBackend(page);
+    await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'auto' } }));
+    let polls = 0;
+    await page.route('**/chat/flow/run-expire/steps**', route => {
+      polls++;
+      route.fulfill({ json: { messages: [], complete: false } });
+    });
+
+    await page.goto('/');
+    await page.waitForFunction(() => window.__webSocket?.serverSubscribed);
+    await page.evaluate(() => watchFlowRun('run-expire', 10));
+    await expect.poll(() => page.evaluate(
+      () => _flowRunWatchers.has('run-expire'),
+    ), { timeout: 4000 }).toBe(false);
+    expect(polls).toBe(0);
+  });
+
+  test('auto mode resumes Flow polling when realtime disconnects', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__webSockets = [];
+      window.__allowSockets = true;
+      class MockWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        constructor() {
+          this.readyState = MockWebSocket.CONNECTING;
+          window.__webSockets.push(this);
+          window.__activeWebSocket = this;
+          if (window.__allowSockets) setTimeout(() => {
+            this.readyState = MockWebSocket.OPEN;
+            this.onopen?.();
+            this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+          });
+        }
+        send(data) {
+          if (JSON.parse(data).type === 'subscribe') {
+            this.serverSubscribed = true;
+            this.receive({ v: 1, type: 'subscribed', payload: {} });
+          }
+        }
+        receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+        close() {
+          this.readyState = 3;
+          const handler = this.onclose;
+          setTimeout(() => handler?.());
+        }
+      }
+      window.WebSocket = MockWebSocket;
+    });
+    await mockBackend(page);
+    await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'auto' } }));
+    let polls = 0;
+    await page.route('**/chat/flow/run-auto/steps**', route => {
+      polls++;
+      route.fulfill({ json: { messages: [], complete: false } });
+    });
+
+    await page.goto('/');
+    await page.waitForFunction(() => window.__activeWebSocket?.serverSubscribed);
+    expect(await page.evaluate(() => realtimeTransportMode)).toBe('auto');
+    expect(await page.evaluate(() => realtimeV1.isActive())).toBe(true);
+    await page.evaluate(() => watchFlowRun('run-auto', 10));
+    await page.waitForTimeout(1700);
+    const activePolls = polls;
+    await page.waitForTimeout(1700);
+    expect(polls).toBe(activePolls);
+    await page.evaluate(() => {
+      window.__allowSockets = false;
+      window.__activeWebSocket.close();
+    });
+    await expect.poll(() => polls, { timeout: 4000 }).toBeGreaterThan(activePolls);
+  });
+
+  test('Flow snapshot state stays out of transcript and live steps use completion order', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__webSocket = null;
+      class MockWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        constructor() {
+          this.readyState = MockWebSocket.CONNECTING;
+          window.__webSocket = this;
+          setTimeout(() => {
+            this.readyState = MockWebSocket.OPEN;
+            this.onopen?.();
+            this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+          });
+        }
+        send(data) {
+          if (JSON.parse(data).type === 'subscribe') {
+            setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+          }
+        }
+        receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+        close() { this.readyState = 3; this.onclose?.(); }
+      }
+      window.WebSocket = MockWebSocket;
+    });
+    await mockBackend(page);
+    await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+    let statusRequests = 0;
+    const completions = { 400: '00:00:00.500', 401: '00:00:01', 402: '00:00:02', 403: '00:00:03' };
+    for (const [id, completed] of Object.entries(completions)) {
+      await page.route(`**/chat/${id}/status`, route => {
+        statusRequests++;
+        route.fulfill({ json: {
+          id: Number(id), role: 'assistant', topic: 'squid', agent: 'claude', status: 'done',
+          prompt: `Flow handoff ${id}`, content: `Flow result ${id}`, source: 'workflow',
+          flow_run_id: 'run-401', flow_step_id: `step-${id}`,
+          timestamp: '2027-01-01T00:00:00Z', completed_at: `2027-01-01T${completed}Z`,
+        }});
+      });
+    }
+
+    await page.goto('/');
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'snapshot', event_id: 10, payload: {
+        conversations: [{ messages: [{
+          id: 400, role: 'assistant', topic: 'squid', agent: 'claude', status: 'done',
+        }] }],
+        flow_steps: [401, 403, 402].map(assistant_msg_id => ({ assistant_msg_id })),
+      },
+    }));
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="400"]'))
+      .toContainText('Flow result 400');
+    expect(statusRequests).toBe(1);
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="401"]')).not.toBeAttached();
+    await page.evaluate(() => {
+      for (const [event_id, assistant_msg_id] of [[11, 401], [12, 403], [13, 402]]) {
+        window.__webSocket.receive({
+          v: 1, type: 'flow.step.created', event_id, msg_id: assistant_msg_id,
+          scope: { topic: 'squid', agent: 'claude' },
+          payload: { flow_run_id: 'run-401', step_id: `step-${assistant_msg_id}`, assistant_msg_id },
+        });
+      }
+    });
+
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id]')).toHaveCount(4);
+    expect(await page.locator('.msg.assistant.history-item[data-msg-id]').evaluateAll(
+      nodes => nodes.map(node => Number(node.dataset.msgId)),
+    )).toEqual([400, 401, 402, 403]);
+  });
+
   test('initial history installs before global snapshot discovery', async ({ page }) => {
     await page.setViewportSize({ width: 600, height: 500 });
     await page.addInitScript(() => {
