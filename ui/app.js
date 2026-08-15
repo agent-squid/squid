@@ -7134,8 +7134,9 @@ const realtimeV1 = (() => {
     }));
   };
 
-  const markApplied = frame => {
-    cursor = Math.max(cursor, Number(frame.event_id || frame.payload?.cursor || 0));
+  const markApplied = (frame, { resetCursor = false } = {}) => {
+    const appliedCursor = Number(frame.event_id || frame.payload?.cursor || 0);
+    cursor = resetCursor ? appliedCursor : Math.max(cursor, appliedCursor);
     localStorage.setItem('squid-realtime-v1-cursor', String(cursor));
     if (socket?.readyState === WebSocket.OPEN && cursor) {
       socket.send(JSON.stringify({ v: 1, type: 'ack', payload: { event_id: cursor } }));
@@ -7143,21 +7144,31 @@ const realtimeV1 = (() => {
   };
 
   const dispatchSnapshot = frame => {
+    const resetCursor = frame.payload?.cursor_reset === true;
+    if (Number(frame.event_id || 0) < cursor && !resetCursor) return;
+    applyRealtimeProcessState(frame.payload?.processes, frame.payload?.queue);
     for (const conversation of frame.payload?.conversations || []) {
       for (const message of conversation.messages || []) {
         if (message.role === 'assistant') onDiscover?.(message, { reconcile: true });
         const watch = watches.get(Number(message.id));
         if (watch) {
-          watch.runSeq = Math.max(watch.runSeq, Number(message.run_seq || 0));
+          watch.runSeq = resetCursor
+            ? Number(message.run_seq || 0)
+            : Math.max(watch.runSeq, Number(message.run_seq || 0));
           watch.onSnapshot(message);
         }
       }
     }
-    markApplied(frame);
+    markApplied(frame, { resetCursor });
   };
 
   const dispatchEvent = frame => {
-    if (frame.type === 'message.changed' && frame.payload?.role === 'assistant') {
+    if (Number(frame.event_id || 0) <= cursor) return;
+    if (frame.type === 'process.changed') {
+      applyRealtimeProcessState(frame.payload?.processes, null);
+    } else if (frame.type === 'queue.changed') {
+      applyRealtimeProcessState(null, frame.payload?.queue);
+    } else if (frame.type === 'message.changed' && frame.payload?.role === 'assistant') {
       onDiscover?.({ ...frame.payload, id: frame.msg_id, ...frame.scope });
       if (frame.payload.status && frame.payload.status !== 'pending' && frame.scope?.agent) {
         refreshComposerSessionCount(frame.scope.topic || 'default', frame.scope.agent);
@@ -7221,6 +7232,11 @@ const realtimeV1 = (() => {
     connectingSocket.onclose = () => {
       if (socket !== connectingSocket) return;
       socket = null;
+      if (globalEnabled) {
+        realtimeTransportMode.then(mode => {
+          if (mode === 'auto') releaseRealtimeProcessState();
+        }).catch(() => {});
+      }
       const unavailable = !subscribed;
       subscribed = false;
       if (unavailable) {
@@ -10613,6 +10629,20 @@ function formatIdleDuration(seconds) {
   return `${(value / 86400).toFixed(1)}d`;
 }
 
+function currentProcDuration(row, field = 'duration_s') {
+  const baseline = Number(row?.[field]);
+  if (!Number.isFinite(baseline)) return baseline;
+  const receivedAt = Number(row?._realtimeReceivedAtMs);
+  if (!Number.isFinite(receivedAt)) return baseline;
+  return baseline + Math.max(0, Date.now() - receivedAt) / 1000;
+}
+
+function formatRunningDuration(row) {
+  const value = currentProcDuration(row);
+  if (!Number.isFinite(value)) return '—';
+  return `${value.toFixed(1).replace(/\.0$/, '')}s`;
+}
+
 function updateProcStatusDot(processes, queued) {
   const active = processes.some(r => !isIdleProc(r));
   const hasIdle = !active && processes.some(isIdleProc);
@@ -10702,7 +10732,7 @@ function renderProcPopup(processes, queued) {
         <tr>
           <td><span class="proc-dot"></span>#${r.topic || '—'}@${r.agent || '—'}</td>
           <td class="proc-queue-preview">${r.prompt_preview || '—'}</td>
-          <td>${r.duration_s}s</td>
+          <td>${formatRunningDuration(r)}</td>
           <td>${procStopButton(r)}</td>
         </tr>`).join('');
       body += `<div class="proc-section-label">Running</div>
@@ -10725,7 +10755,7 @@ function renderProcPopup(processes, queued) {
         <tr>
           <td><span class="proc-dot proc-dot-idle"></span>#${r.topic || '—'}@${r.agent || '—'}</td>
           <td class="proc-queue-preview">${r.prompt_preview || 'warm session'}</td>
-          <td>${formatIdleDuration(r.state_duration_s ?? r.duration_s)}</td>
+          <td>${formatIdleDuration(currentProcDuration(r, r.state_duration_s == null ? 'duration_s' : 'state_duration_s'))}</td>
           <td>${procStopButton(r)}</td>
         </tr>`).join('');
       body += `<div class="proc-section-label">Idle Live Sessions <span class="help-icon" data-tooltip="Idle sessions stay warm between prompts. Currently, only Claude Code supports the interactive-cli protocol that keeps them alive."><svg width="12" height="12" viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7.5" cy="7.5" r="6.5"/><path d="M5.8 5.8a1.7 1.7 0 0 1 3.4 0c0 1.1-1.7 1.7-1.7 2.9"/><circle cx="7.5" cy="11" r="0.6" fill="currentColor" stroke="none"/></svg></span></div>
@@ -10793,8 +10823,42 @@ function toggleProcPopup() {
 
 let cachedProcRows  = [];
 let cachedQueueRows = [];
+let realtimeProcessStateReceived = false;
+
+function applyRealtimeProcessState(processes, queued) {
+  if (!Array.isArray(processes) && !Array.isArray(queued)) return;
+  realtimeProcessStateReceived = true;
+  // Invalidate an HTTP recovery poll that began before this newer socket
+  // state arrived so its response cannot restore stale rows afterward.
+  procPollSeq++;
+  if (Array.isArray(processes)) {
+    const receivedAt = Date.now();
+    cachedProcRows = processes.map(row => ({ ...row, _realtimeReceivedAtMs: receivedAt }));
+  }
+  if (Array.isArray(queued)) cachedQueueRows = queued;
+  updateProcStatusDot(cachedProcRows, cachedQueueRows);
+  if (procStatusPopup.classList.contains('open')) renderProcPopup(cachedProcRows, cachedQueueRows);
+  const hasActive = cachedProcRows.some(r => !isIdleProc(r));
+  if (hasActive || cachedQueueRows.length || procPollHolds > 0 || procStatusPopup.classList.contains('open')) {
+    startProcPoll();
+  } else {
+    stopProcPoll();
+  }
+}
+
+function releaseRealtimeProcessState() {
+  if (!realtimeProcessStateReceived) return;
+  realtimeProcessStateReceived = false;
+  startProcPoll();
+}
 
 async function pollProcs() {
+  if (realtimeProcessStateReceived) {
+    if (procStatusPopup.classList.contains('open')) renderProcPopup(cachedProcRows, cachedQueueRows);
+    const hasActive = cachedProcRows.some(r => !isIdleProc(r));
+    if (!hasActive && !cachedQueueRows.length && procPollHolds === 0 && !procStatusPopup.classList.contains('open')) stopProcPoll();
+    return;
+  }
   const seq = ++procPollSeq;
   try {
     const [procRes, queueRes] = await Promise.all([fetch('/processes'), fetch('/queue')]);

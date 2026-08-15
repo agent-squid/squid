@@ -109,7 +109,7 @@ fallback and through the explicit `sse` migration mode.
 | Chat event publication | Implemented on the server | Persisted run events publish `chat.queued`, `chat.loading`, `chat.processing`, `chat.status`, `chat.tool`, `chat.text`, `chat.stats`, `chat.done`, and `chat.error`; message mutations publish `message.changed`. |
 | Running-message browser reattachment | Implemented | The UI prefers WebSocket snapshots/events for pending messages, reconnects with jittered exponential backoff, persists its cursor, sends acknowledgements, and falls back to SSE when WebSocket is unavailable. |
 | New chat submission and cancellation | Implemented | The browser uses idempotent `chat.start` and `chat.cancel` commands in WebSocket mode. Auto mode falls back to the HTTP/SSE compatibility path only when a command was not submitted; SSE mode retains the compatibility path. |
-| Process and queue state | Partial | Snapshots include current process and queue state, but no `process.changed` or `queue.changed` events are published or consumed by the UI; existing HTTP refresh remains authoritative. |
+| Process and queue state | Implemented | Snapshots and authoritative `process.changed`/`queue.changed` events update the browser status model; HTTP refresh remains only as pre-snapshot and SSE compatibility recovery. |
 | Flow | Not implemented | `flow.step.created` is not published or consumed; the browser polls for new Flow steps. |
 | CLI authentication | Not implemented | `auth.*` messages are not implemented; ADR-0035's SSE-plus-HTTP transport remains in use. |
 | Backpressure and frame limits | Not implemented | Sends are direct and there is no bounded/coalescing outbound queue, `slow_consumer` handling, or configured inbound frame-size enforcement. |
@@ -117,9 +117,8 @@ fallback and through the explicit `sse` migration mode.
 | Protocol compatibility | Partial | Unsupported versions fail explicitly, but only v1 is supported rather than the current and immediately previous versions. |
 | Shore relay | Not implemented | ADR-0039's broker transport, pairing, encryption, capabilities, and audit work remain future work. |
 
-**Next milestone:** publish and consume `process.changed` and `queue.changed`
-so process and queue state no longer depends on HTTP refreshes. Flow and CLI
-authentication remain the following migration phase.
+**Next milestone:** publish and consume `flow.step.created` so Flow no longer
+polls for new steps. CLI authentication remains the following migration phase.
 
 SSE endpoints therefore remain required for migration fallback, CLI
 authentication, and the live families not yet moved to WebSocket. WebSocket is

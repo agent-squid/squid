@@ -7,7 +7,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
 
@@ -198,8 +198,9 @@ class QueueItem:
 
 
 class TopicWorker:
-    def __init__(self, topic: str):
+    def __init__(self, topic: str, on_queue_changed: Optional[Callable[[], None]] = None):
         self.topic = topic
+        self._on_queue_changed = on_queue_changed
         self.q: asyncio.Queue = asyncio.Queue()
         self._processing_seq: Optional[int] = None
         self._next_seq: int = 0
@@ -248,6 +249,8 @@ class TopicWorker:
         item.seq = self._next_seq
         self._next_seq += 1
         await self.q.put(item)
+        if self._on_queue_changed:
+            self._on_queue_changed()
         return item.seq
 
     def drain(self, pos: Optional[int] = None, topic: Optional[str] = None) -> int:
@@ -290,6 +293,8 @@ class TopicWorker:
                     removed += 1
                 else:
                     self.q.put_nowait(item)
+            if removed and self._on_queue_changed:
+                self._on_queue_changed()
             return removed
 
         scoped_indices = [i for i, item in enumerate(real) if _in_scope(item)]
@@ -311,6 +316,8 @@ class TopicWorker:
                 _cancel(item)
             else:
                 self.q.put_nowait(item)
+        if self._on_queue_changed:
+            self._on_queue_changed()
         return 1
 
     async def _sync_local_model(self, provider, model: str, out_q: asyncio.Queue, msg_id: Optional[int] = None) -> None:
@@ -373,6 +380,8 @@ class TopicWorker:
             item = await self.q.get()
             if item is None:
                 break
+            if self._on_queue_changed:
+                self._on_queue_changed()
             self._processing_seq = item.seq
             try:
                 if item.msg_id is not None:
@@ -834,13 +843,21 @@ class TopicWorker:
 
 
 class TopicDispatcher:
-    def __init__(self):
+    def __init__(self, queue_change_listener: Optional[Callable[[list[dict]], None]] = None):
         self._workers: dict[str, TopicWorker] = {}
         self._adhoc_counter: int = 0
+        self._queue_change_listener = queue_change_listener
+
+    def set_queue_change_listener(self, listener: Optional[Callable[[list[dict]], None]]) -> None:
+        self._queue_change_listener = listener
+
+    def _notify_queue_changed(self) -> None:
+        if self._queue_change_listener:
+            self._queue_change_listener(self.all_queued_items())
 
     def _get_or_create(self, key: str, topic: str) -> TopicWorker:
         if key not in self._workers:
-            worker = TopicWorker(topic)
+            worker = TopicWorker(topic, self._notify_queue_changed)
             worker.start()
             self._workers[key] = worker
         return self._workers[key]

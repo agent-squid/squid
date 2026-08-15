@@ -79,6 +79,22 @@ def test_queue_preview_uses_display_prompt_not_augmented_prompt():
     assert asyncio.run(run())[0]["prompt_preview"] == "fix app"
 
 
+def test_queue_listener_receives_authoritative_state_on_enqueue_and_dequeue():
+    states = []
+
+    async def run():
+        dispatcher = TopicDispatcher(lambda rows: states.append(rows))
+        with patch.object(TopicWorker, "start", lambda self: None):
+            worker = dispatcher._get_or_create("work", "work")
+            item = _make_item(0, 124)
+            await worker.enqueue(item)
+            worker.drain()
+
+    asyncio.run(run())
+    assert states[0][0]["msg_id"] == 124
+    assert states[-1] == []
+
+
 def _make_item(seq, msg_id):
     return QueueItem(
         seq=seq, topic="work", agent="codex", prompt="p", display_prompt=None,

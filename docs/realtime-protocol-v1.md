@@ -96,6 +96,11 @@ Phase-one replayable server events are `chat.meta`, `chat.queued`,
 `chat.stats`, `chat.done`, `chat.error`, `process.changed`, `queue.changed`, and
 `message.changed`. Terminal events are idempotent by `event_id` and domain ID.
 
+`process.changed` carries `payload.processes`, the authoritative current process
+list. `queue.changed` carries `payload.queue`, the authoritative current queued
+item list. Both replace the corresponding snapshot collection rather than
+being applied as deltas.
+
 ## Snapshot
 
 A subscription snapshot contains:
@@ -112,6 +117,12 @@ Installation reconciles the authorized active-window cache atomically by
 stable domain ID. It does not replace unrelated HTTP history pages or reset the
 visible transcript. Events at or below the installed cursor and text deltas at
 or below installed `run_seq` are ignored.
+
+A snapshot includes `payload.cursor_reset: true` when it establishes a fresh
+cursor or recovers from a client cursor ahead of the server (for example after
+a database restore). The client must accept that snapshot even when its
+`event_id` is lower than the locally persisted cursor, replace the cursor with
+the snapshot watermark, and resume from that watermark.
 
 Replay rolls over to a snapshot when configured count, byte, age, retention,
 continuity, restart, or compatibility limits fail.

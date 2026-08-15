@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sqlite3
 import threading
@@ -72,6 +73,59 @@ def test_global_lifecycle_snapshot_bounds_pending_rows(tmp_path, monkeypatch):
     messages = snapshot["conversations"][0]["messages"]
     returned_pending = [message["id"] for message in messages if message["status"] == "pending"]
     assert returned_pending == pending_ids[-2:]
+
+
+def test_process_and_queue_changes_are_replayable_global_state(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    processes = [{"pid": 12, "topic": "squid", "agent": "codex", "state": "running"}]
+    queue = [{"msg_id": 34, "topic": "other", "agent": "claude", "position": 1}]
+
+    server._publish_process_changed(processes)
+    server._publish_queue_changed(queue)
+
+    events = stats_db.get_realtime_events(0, [{"lifecycle": "global"}])
+    assert [(event["event_type"], event["payload"]) for event in events] == [
+        ("process.changed", {"processes": processes}),
+        ("queue.changed", {"queue": queue}),
+    ]
+    assert stats_db.get_realtime_events(0, [{"topic": "squid", "agent": "codex"}]) == []
+
+
+def test_process_and_queue_publication_failure_does_not_escape(monkeypatch, caplog):
+    def fail_publish(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database busy")
+
+    monkeypatch.setattr(server, "insert_realtime_event", fail_publish)
+    server._publish_process_changed([{"pid": 12}])
+    server._publish_queue_changed([{"msg_id": 34}])
+
+    assert "Failed to publish realtime process state" in caplog.text
+    assert "Failed to publish realtime queue state" in caplog.text
+
+
+def test_server_startup_publishes_authoritative_process_and_queue_state(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+
+    with TestClient(server.app):
+        pass
+
+    events = stats_db.get_realtime_events(0, [{"lifecycle": "global"}])
+    lifecycle = [event for event in events if event["event_type"] in {"process.changed", "queue.changed"}]
+    assert [event["event_type"] for event in lifecycle[:2]] == ["process.changed", "queue.changed"]
+    assert lifecycle[0]["payload"] == {"processes": []}
+    assert lifecycle[1]["payload"] == {"queue": []}
+
+
+def test_realtime_notifier_stop_wakes_existing_waiter():
+    async def run():
+        notifier = server._RealtimeNotifier()
+        notifier.start(asyncio.get_running_loop())
+        waiter = asyncio.create_task(notifier.wait(notifier.generation))
+        await asyncio.sleep(0)
+        notifier.stop()
+        return await asyncio.wait_for(waiter, timeout=0.5)
+
+    assert asyncio.run(run()) == 1
 
 
 def test_websocket_subscribe_snapshot_live_event_and_idempotent_cancel(tmp_path, monkeypatch):
@@ -284,6 +338,25 @@ def test_future_realtime_cursor_rolls_over():
             "scoped_event_count": 0, "oldest_created_at": None,
         }, [],
     ) == "future_cursor"
+
+
+def test_future_cursor_snapshot_explicitly_resets_client_cursor(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        ws.receive_json()
+        ws.send_json({
+            "v": 1, "type": "subscribe",
+            "payload": {
+                "client_id": CLIENT_ID,
+                "cursor": 50,
+                "scopes": [{"lifecycle": "global"}],
+            },
+        })
+        assert ws.receive_json()["type"] == "subscribed"
+        snapshot = ws.receive_json()
+        assert snapshot["type"] == "snapshot"
+        assert snapshot["event_id"] < 50
+        assert snapshot["payload"]["cursor_reset"] is True
 
 
 def test_unrelated_events_do_not_force_scoped_replay_rollover(tmp_path, monkeypatch):

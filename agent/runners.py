@@ -16,7 +16,7 @@ import signal
 import subprocess
 import tempfile
 import time
-from typing import AsyncGenerator, List, Optional, Union
+from typing import AsyncGenerator, Callable, List, Optional, Union
 
 from . import sandbox_home
 from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, OPENCODE_PATH, PI_PATH, FIRST_BYTE_TIMEOUT, RESPONSE_TIMEOUT, NATIVE_SHELL_TIMEOUT, NATIVE_SHELL_SPOOL_DIR, PROXY_ENV
@@ -26,6 +26,17 @@ from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH
 # ---------------------------------------------------------------------------
 
 _proc_registry: dict[int, dict] = {}
+_process_change_listener: Optional[Callable[[list[dict]], None]] = None
+
+
+def set_process_change_listener(listener: Optional[Callable[[list[dict]], None]]) -> None:
+    global _process_change_listener
+    _process_change_listener = listener
+
+
+def _notify_process_changed() -> None:
+    if _process_change_listener:
+        _process_change_listener(list_active_procs())
 
 
 def _register_proc(pid: int, backend: str, topic: str, agent: str,
@@ -46,10 +57,12 @@ def _register_proc(pid: int, backend: str, topic: str, agent: str,
         "state_since": now,
         "started_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    _notify_process_changed()
 
 
 def _deregister_proc(pid: int) -> None:
-    _proc_registry.pop(pid, None)
+    if _proc_registry.pop(pid, None) is not None:
+        _notify_process_changed()
 
 
 def _update_proc(pid: int, **updates) -> None:
@@ -57,6 +70,7 @@ def _update_proc(pid: int, **updates) -> None:
         if "state" in updates and updates["state"] != _proc_registry[pid].get("state"):
             updates.setdefault("state_since", time.monotonic())
         _proc_registry[pid].update(updates)
+        _notify_process_changed()
 
 
 def _signal_process_group(pid: int, sig: signal.Signals) -> bool:

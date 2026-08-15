@@ -59,7 +59,7 @@ from .config import (
 from .harnesses import SUPPORTED_HARNESSES, _validate_harness_config, list_harnesses
 from .providers import Provider, _validate_provider, get_provider, public_providers, reload_providers, require_provider
 from .resolve import agent_ref_for_storage, remove_pi_models_store, resolve_agent, split_agent_ref
-from .runners import list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic
+from .runners import list_active_procs, kill_all_procs, kill_procs_by_topic, kill_proc_by_msg_id, get_active_agent_for_topic, set_process_change_listener
 from .history import list_history, list_history_by_ids, list_history_around
 from .stats_db import get_usage_stats
 from .topic_queue import TopicDispatcher
@@ -105,7 +105,7 @@ from .stats_db import (
     allocate_id,
     get_realtime_cursor, get_realtime_snapshot,
     get_realtime_request, save_realtime_request, get_realtime_replay,
-    prune_realtime_data, set_realtime_commit_listener,
+    insert_realtime_event, prune_realtime_data, set_realtime_commit_listener,
 )
 from .journal import _generate_journal, _current_week, list_topic_journals, read_journal
 from . import creds
@@ -151,6 +151,25 @@ class _AccessLogNoiseFilter(logging.Filter):
 
 
 logging.getLogger("uvicorn.access").addFilter(_AccessLogNoiseFilter())
+
+def _publish_process_changed(processes: list[dict]) -> None:
+    try:
+        insert_realtime_event("process.changed", None, None, {"processes": processes})
+    except Exception:
+        # Process bookkeeping is authoritative. A transient realtime-log
+        # failure must not turn a successful spawn/state change into a runner
+        # failure; snapshots and later events repair client state.
+        log.exception("Failed to publish realtime process state")
+
+
+def _publish_queue_changed(queue: list[dict]) -> None:
+    try:
+        insert_realtime_event("queue.changed", None, None, {"queue": queue})
+    except Exception:
+        # The item is already enqueued/dequeued when this callback runs. Keep
+        # domain behavior intact and let a later event or snapshot reconcile.
+        log.exception("Failed to publish realtime queue state")
+
 
 dispatcher = TopicDispatcher()
 
@@ -322,12 +341,21 @@ async def _resume_stalled_flows_on_startup():
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     _realtime_notifier.start(asyncio.get_running_loop())
+    set_process_change_listener(_publish_process_changed)
+    dispatcher.set_queue_change_listener(_publish_queue_changed)
     await asyncio.to_thread(prune_realtime_data)
+    # Process and queue registries are intentionally in-memory. Publishing
+    # their authoritative startup state advances the durable cursor after a
+    # server restart, so a reconnecting client cannot retain pre-restart rows.
+    _publish_process_changed(list_active_procs())
+    _publish_queue_changed(dispatcher.all_queued_items())
     await _recover_orphaned_pending_on_startup()
     await _resume_stalled_flows_on_startup()
     try:
         yield
     finally:
+        set_process_change_listener(None)
+        dispatcher.set_queue_change_listener(None)
         _realtime_notifier.stop()
 
 
@@ -3473,9 +3501,17 @@ class _RealtimeNotifier:
     def stop(self) -> None:
         set_realtime_commit_listener(None)
         loop = self._loop
-        if loop and not loop.is_closed():
-            loop.call_soon_threadsafe(self._bump)
+        condition = self._condition
+        self._generation += 1
         self._loop = None
+        self._condition = None
+        if loop and not loop.is_closed() and condition:
+            # wait() has already captured this condition. Wake that exact
+            # object after advancing the generation, even though start() may
+            # later install a new condition for another event loop.
+            loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(self._wake(condition)),
+            )
 
     def notify_committed(self, _event_id: int) -> None:
         loop = self._loop
@@ -3744,6 +3780,7 @@ async def realtime_v1(websocket: WebSocket):
                     await websocket.send_json({"v": 1, "type": "subscribed", "payload": {"scopes": scopes}})
                     if not isinstance(requested_cursor, int) or requested_cursor < 0:
                         snapshot = await _realtime_snapshot(scopes)
+                        snapshot["cursor_reset"] = True
                         cursor = snapshot["cursor"]
                         await websocket.send_json({"v": 1, "type": "snapshot", "event_id": cursor, "payload": snapshot})
                     else:
@@ -3753,6 +3790,7 @@ async def realtime_v1(websocket: WebSocket):
                         rollover = _realtime_replay_rollover_reason(requested_cursor, window, replay)
                         if rollover:
                             snapshot = await _realtime_snapshot(scopes)
+                            snapshot["cursor_reset"] = rollover == "future_cursor"
                             cursor = snapshot["cursor"]
                             await websocket.send_json({"v": 1, "type": "snapshot", "event_id": cursor, "payload": snapshot})
                         else:
@@ -3780,6 +3818,7 @@ async def realtime_v1(websocket: WebSocket):
                 rollover = _realtime_replay_rollover_reason(cursor, window, events)
                 if rollover:
                     snapshot = await _realtime_snapshot(scopes)
+                    snapshot["cursor_reset"] = rollover == "future_cursor"
                     cursor = snapshot["cursor"]
                     await websocket.send_json({"v": 1, "type": "snapshot", "event_id": cursor, "payload": snapshot})
                 else:

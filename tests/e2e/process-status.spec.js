@@ -26,6 +26,109 @@ function runningProcess() {
   return [{ msg_id: 42, topic: 'squid', agent: 'claude', prompt_preview: 'working', duration_s: 1 }];
 }
 
+test('realtime process and queue state replaces HTTP polling state', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('squid-realtime-v1-cursor', '50');
+    const nativeSetInterval = window.setInterval.bind(window);
+    const nativeClearInterval = window.clearInterval.bind(window);
+    window.__threeSecondIntervals = new Set();
+    window.setInterval = (callback, delay, ...args) => {
+      const id = nativeSetInterval(callback, delay, ...args);
+      if (delay === 3000) window.__threeSecondIntervals.add(id);
+      return id;
+    };
+    window.clearInterval = id => {
+      window.__threeSecondIntervals.delete(id);
+      return nativeClearInterval(id);
+    };
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        window.__processSockets ||= [];
+        window.__processSockets.push(this);
+        window.__processSocket = this;
+        this.didSnapshot = false;
+        this.readyState = MockWebSocket.CONNECTING;
+        if (window.__blockProcessSockets) {
+          setTimeout(() => {
+            this.readyState = 3;
+            this.onclose?.();
+          });
+          return;
+        }
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => {
+            this.receive({ v: 1, type: 'subscribed', payload: {} });
+            if (!this.didSnapshot) {
+              this.didSnapshot = true;
+              this.receive({ v: 1, type: 'snapshot', event_id: 1, payload: {
+                cursor_reset: true, processes: runningProcessForBrowser(), queue: [], conversations: [],
+              } });
+            }
+          });
+        }
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; }
+    }
+    function runningProcessForBrowser() {
+      return [{ msg_id: 42, topic: 'squid', agent: 'claude', prompt_preview: 'working', duration_s: 1 }];
+    }
+    window.WebSocket = MockWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', r => r.fulfill({ json: { transport: 'auto' } }));
+  await page.goto('/');
+
+  const tracker = page.locator('#proc-status');
+  await expect(tracker).toHaveClass(/has-procs/);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('squid-realtime-v1-cursor'))).toBe('1');
+  await tracker.click();
+  await expect(page.locator('#proc-status-popup')).toContainText('#squid@claude');
+  const runningTime = page.locator('#proc-status-popup tbody tr').first().locator('td').nth(2);
+  const initialRunningTime = await runningTime.textContent();
+  await expect.poll(() => runningTime.textContent(), { timeout: 5_000 }).not.toBe(initialRunningTime);
+  await page.evaluate(() => {
+    for (const socket of window.__processSockets) {
+      socket.receive({ v: 1, type: 'process.changed', event_id: 2, payload: { processes: [] } });
+      socket.receive({ v: 1, type: 'queue.changed', event_id: 3, payload: { queue: [
+        { msg_id: 51, topic: 'other', agent: 'codex', prompt_preview: 'waiting', position: 1 },
+      ] } });
+    }
+  });
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('squid-realtime-v1-cursor'))).toBe('3');
+  await expect(page.locator('#proc-status-popup')).toContainText('#other@codex');
+
+  await page.evaluate(() => {
+    for (const socket of window.__processSockets) {
+      socket.receive({ v: 1, type: 'queue.changed', event_id: 4, payload: { queue: [] } });
+    }
+  });
+  await expect(tracker).not.toHaveClass(/has-procs/);
+  await page.locator('#proc-popup-close').click();
+  await expect.poll(() => page.evaluate(() => window.__threeSecondIntervals.size)).toBe(0);
+
+  await page.route('**/processes', r => r.fulfill({ json: [
+    { msg_id: 61, topic: 'fallback', agent: 'codex', prompt_preview: 'recovering', duration_s: 2 },
+  ] }));
+  await page.evaluate(() => {
+    window.__blockProcessSockets = true;
+    window.__processSocket.readyState = 3;
+    window.__processSocket.onclose?.();
+  });
+  await tracker.click();
+  await expect(page.locator('#proc-status-popup')).toContainText('#fallback@codex');
+});
+
 test('tracker discovers a process after refresh and clears when it finishes', async ({ page }) => {
   await mockBackend(page);
   let running = true;
