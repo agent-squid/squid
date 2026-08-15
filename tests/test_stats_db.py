@@ -358,7 +358,7 @@ def test_flow_timestamp_normalization_preserves_subsecond_due_order(tmp_path, mo
     stats_db.init_db()
     stats_db.create_flow_run(
         "run-1", "#squid@codex", 42,
-        [{**_flow_plan()[0], "due_at": "2026-08-15T10:00:00.123Z"}],
+        [{**_flow_plan()[0], "leg": "target", "due_at": "2026-08-15T10:00:00.123Z"}],
         execution_mode="durable",
     )
 
@@ -510,7 +510,7 @@ def test_flow_recovery_queries_message_link_and_terminal_run(tmp_path, monkeypat
     stats_db.init_db()
     stats_db.create_flow_run("run-1", "#squid@codex>@claude", 42, _flow_plan(), execution_mode="durable")
 
-    assert [step["step_id"] for step in stats_db.get_due_flow_steps("2026-08-15T10:00:00Z")] == ["origin"]
+    assert stats_db.get_due_flow_steps("2026-08-15T10:00:00Z") == []
     stats_db.claim_flow_step("run-1", "origin", "2026-08-15T10:00:00Z")
     assert stats_db.link_flow_step_messages("run-1", "origin", 100, 101)
     assert stats_db.link_flow_step_messages("run-1", "origin", 100, 101)
@@ -582,6 +582,51 @@ def test_flow_run_cancellation_is_terminal_and_prevents_claims(tmp_path, monkeyp
     assert run["cancellation_reason"] == "stopped by user"
     assert {step["status"] for step in stats_db.get_flow_steps("run-1")} == {"cancelled"}
     assert stats_db.claim_flow_step("run-1", "origin", "2026-08-15T10:02:00Z") is None
+
+
+def test_message_cancellation_transitions_linked_durable_step(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    user_id = stats_db.insert_user_message(
+        "squid", "codex", "go", flow_run_id="run-1",
+    )
+    assistant_id = stats_db.insert_assistant_message(
+        "squid", "codex", user_id, flow_run_id="run-1",
+    )
+    stats_db.create_flow_run(
+        "run-1", "#squid@codex>@claude", user_id, _flow_plan(), execution_mode="durable",
+    )
+    stats_db.claim_flow_step("run-1", "origin", "2026-08-15T10:00:00Z")
+    stats_db.link_flow_step_messages("run-1", "origin", user_id, assistant_id)
+    stats_db.transition_flow_step(
+        "run-1", "origin", "claimed", "running", "2026-08-15T10:00:01Z",
+    )
+
+    assert stats_db.mark_assistant_cancelled(assistant_id, "Cancelled")
+    assert not stats_db.cancel_flow_step_for_message(
+        assistant_id, "2026-08-15T10:02:00Z", "Cancelled",
+    )
+    assert stats_db.get_message(assistant_id)["status"] == "cancelled"
+    steps = {step["step_id"]: step for step in stats_db.get_flow_steps("run-1")}
+    assert steps["origin"]["status"] == "cancelled"
+    assert steps["target"]["status"] == "cancelled"
+    assert stats_db.get_flow_run("run-1")["status"] == "cancelled"
+
+
+def test_due_flow_steps_can_be_scoped_to_one_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    stats_db.create_flow_run(
+        "run-1", "#squid@codex", 1,
+        [{**_flow_plan()[0], "leg": "target"}], execution_mode="durable",
+    )
+    stats_db.create_flow_run(
+        "run-2", "#squid@codex", 2,
+        [{**_flow_plan()[0], "leg": "target"}], execution_mode="durable",
+    )
+
+    due = stats_db.get_due_flow_steps("2026-08-15T10:00:00Z", flow_run_id="run-2")
+    assert [(step["flow_run_id"], step["step_id"]) for step in due] == [("run-2", "origin")]
 
 
 def test_flow_run_delete_cascades_to_steps(tmp_path, monkeypatch):

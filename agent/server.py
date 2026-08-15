@@ -106,8 +106,9 @@ from .stats_db import (
     get_realtime_cursor, get_realtime_snapshot,
     get_realtime_request, save_realtime_request, get_realtime_replay,
     insert_realtime_event, prune_realtime_data, set_realtime_commit_listener,
-    create_flow_run, get_flow_steps, claim_flow_step, link_flow_step_messages,
-    transition_flow_step, _utc_now_iso,
+    create_flow_run, get_flow_run, get_flow_steps, claim_flow_step,
+    link_flow_step_messages, transition_flow_step, cancel_flow_run,
+    _utc_now_iso,
 )
 from .journal import _generate_journal, _current_week, list_topic_journals, read_journal
 from . import creds
@@ -334,7 +335,13 @@ async def _recover_orphaned_pending_on_startup():
 
 
 async def _resume_stalled_flows_on_startup():
-    from .flow import sweep_incomplete_flows
+    from .flow import recover_durable_flows, sweep_incomplete_flows
+    durable = await recover_durable_flows(startup=True)
+    if durable["reconciled"] or durable["dispatched"]:
+        log.warning(
+            "Recovered durable Squid Flow work reconciled=%d dispatched=%d",
+            durable["reconciled"], durable["dispatched"],
+        )
     resumed = await sweep_incomplete_flows()
     if resumed:
         log.warning("Resumed %d stalled Squid Flow chain(s) on startup", resumed)
@@ -353,9 +360,18 @@ async def _lifespan(_app: FastAPI):
     _publish_queue_changed(dispatcher.all_queued_items())
     await _recover_orphaned_pending_on_startup()
     await _resume_stalled_flows_on_startup()
+    from .flow import maintain_durable_flows
+    durable_maintenance = asyncio.create_task(
+        maintain_durable_flows(), name="squid-flow-durable-maintenance",
+    )
     try:
         yield
     finally:
+        durable_maintenance.cancel()
+        try:
+            await durable_maintenance
+        except asyncio.CancelledError:
+            pass
         set_process_change_listener(None)
         dispatcher.set_queue_change_listener(None)
         _realtime_notifier.stop()
@@ -725,11 +741,16 @@ def _persist_flow_plan(flow_run_id: Optional[str], flow_route: Optional[str], pr
     plan = durable_flow_plan(flow_route)
     if not plan:
         return None
+    created_run = False
+    claimed_origin_id: Optional[str] = None
+    origin_running = False
     try:
+        existing_run = get_flow_run(flow_run_id)
         create_flow_run(
             flow_run_id, flow_route, prepared["user_msg_id"], plan,
             if_not_exists=True, execution_mode="durable",
         )
+        created_run = existing_run is None
         origin = next(
             (step for step in get_flow_steps(flow_run_id)
              if step["leg"] == "origin"
@@ -741,15 +762,28 @@ def _persist_flow_plan(flow_run_id: Optional[str], flow_route: Optional[str], pr
         now = _utc_now_iso()
         if not origin or not claim_flow_step(flow_run_id, origin["step_id"], now):
             raise RuntimeError("durable Flow origin could not be claimed")
+        claimed_origin_id = origin["step_id"]
         if not link_flow_step_messages(
             flow_run_id, origin["step_id"], prepared["user_msg_id"], prepared["asst_msg_id"],
         ):
             raise RuntimeError("durable Flow origin could not be linked")
         if not transition_flow_step(flow_run_id, origin["step_id"], "claimed", "running", now):
             raise RuntimeError("durable Flow origin could not enter running state")
+        origin_running = True
     except Exception:
         log.exception("durable Flow plan persistence failed flow_run_id=%s route=%s", flow_run_id, flow_route)
         error = "Durable Flow plan could not be persisted. The turn was not started."
+        try:
+            if created_run:
+                cancel_flow_run(flow_run_id, _utc_now_iso(), error)
+            elif claimed_origin_id:
+                transition_flow_step(
+                    flow_run_id, claimed_origin_id,
+                    "running" if origin_running else "claimed",
+                    "error", _utc_now_iso(), error=error,
+                )
+        except Exception:
+            log.exception("failed to terminally reconcile Flow activation flow_run_id=%s", flow_run_id)
         update_assistant_message(
             prepared["asst_msg_id"], error, None, "error", only_if_pending=True,
         )

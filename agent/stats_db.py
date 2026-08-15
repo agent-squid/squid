@@ -608,6 +608,64 @@ def get_flow_step_for_message(msg_id: int) -> Optional[dict]:
     return _flow_step_dict(row) if row else None
 
 
+def get_prepared_flow_step_messages(flow_run_id: str, step_id: str) -> Optional[dict]:
+    """Find a prepared turn tagged before its flow-step linkage committed."""
+    with _connect() as conn:
+        row = conn.execute(
+            """SELECT u.id AS user_msg_id, a.id AS assistant_msg_id
+                 FROM chat_messages a
+                 JOIN chat_messages u ON u.id=a.reply_to
+                WHERE a.flow_run_id=? AND a.flow_step_id=? AND a.role='assistant'
+                  AND u.flow_run_id=a.flow_run_id AND u.flow_step_id=a.flow_step_id
+                  AND u.role='user'
+                ORDER BY a.id LIMIT 1""",
+            (flow_run_id, step_id),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def _cancel_flow_step_for_message(conn: sqlite3.Connection, msg_id: int,
+                                  now: str, reason: str) -> bool:
+    row = conn.execute(
+        """SELECT s.flow_run_id, s.step_id
+             FROM flow_steps s JOIN flow_runs r USING(flow_run_id)
+            WHERE (s.user_msg_id=? OR s.assistant_msg_id=?)
+              AND s.status NOT IN ('done','error','cancelled')
+              AND r.execution_mode='durable'
+              AND r.status NOT IN ('completed','failed','cancelled')""",
+        (msg_id, msg_id),
+    ).fetchone()
+    if not row:
+        return False
+    changed = conn.execute(
+        """UPDATE flow_steps SET status='cancelled', error=COALESCE(error, ?),
+                  completed_at=COALESCE(completed_at, ?), updated_at=?
+           WHERE flow_run_id=? AND step_id=?
+             AND status NOT IN ('done','error','cancelled')""",
+        (reason, now, now, row["flow_run_id"], row["step_id"]),
+    ).rowcount
+    if changed:
+        _cancel_blocked_flow_steps(conn, row["flow_run_id"], now)
+        _refresh_flow_run(conn, row["flow_run_id"], now)
+    return bool(changed)
+
+
+def cancel_flow_step_for_message(msg_id: int, now: str, reason: str = "Cancelled") -> bool:
+    """Cancel a linked durable step and any descendants it makes ineligible."""
+    now = _flow_timestamp(now, "now")
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        changed = _cancel_flow_step_for_message(conn, msg_id, now, reason)
+        conn.commit()
+        return changed
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def claim_flow_step(flow_run_id: str, step_id: str, now: str) -> Optional[dict]:
     """Atomically claim one due, dependency-ready step; return None if ineligible."""
     now = _flow_timestamp(now, "now")
@@ -858,19 +916,24 @@ def cancel_flow_run(flow_run_id: str, now: str, reason: Optional[str] = None) ->
         conn.close()
 
 
-def get_due_flow_steps(now: str) -> list[dict]:
+def get_due_flow_steps(now: str, flow_run_id: Optional[str] = None) -> list[dict]:
     now = _flow_timestamp(now, "now")
+    run_filter = " AND s.flow_run_id=?" if flow_run_id is not None else ""
+    params = (*_FLOW_CLAIMABLE_STEP_STATUSES, now)
+    if flow_run_id is not None:
+        params += (flow_run_id,)
     with _connect() as conn:
         rows = conn.execute(
             f"""SELECT s.* FROM flow_steps s JOIN flow_runs r USING(flow_run_id)
                WHERE s.status IN ({_FLOW_CLAIMABLE_STATUS_SQL})
+                 AND s.leg<>'origin'
                  AND (s.delay_seconds=0 OR s.due_at IS NOT NULL)
                  AND (s.due_at IS NULL OR s.due_at<=?)
                  AND r.execution_mode='durable'
                  AND r.status NOT IN ('completed','failed','cancelled')
-                 AND {_FLOW_DEPENDENCIES_DONE_SQL}
+                 AND {_FLOW_DEPENDENCIES_DONE_SQL}{run_filter}
                ORDER BY COALESCE(s.due_at, s.created_at), s.step_id""",
-            (*_FLOW_CLAIMABLE_STEP_STATUSES, now),
+            params,
         ).fetchall()
     return [_flow_step_dict(row) for row in rows]
 
@@ -887,6 +950,29 @@ def get_stale_flow_claims(before: str) -> list[dict]:
             (before,),
         ).fetchall()
     return [_flow_step_dict(row) for row in rows]
+
+
+def get_running_flow_steps() -> list[dict]:
+    """Running durable steps requiring reconciliation after process restart."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT s.* FROM flow_steps s JOIN flow_runs r USING(flow_run_id)
+               WHERE s.status='running' AND r.execution_mode='durable'
+                 AND r.status NOT IN ('completed','failed','cancelled')
+               ORDER BY s.started_at, s.step_id"""
+        ).fetchall()
+    return [_flow_step_dict(row) for row in rows]
+
+
+def get_active_durable_flow_run_ids() -> list[str]:
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT flow_run_id FROM flow_runs
+               WHERE execution_mode='durable'
+                 AND status NOT IN ('completed','failed','cancelled')
+               ORDER BY flow_run_id"""
+        ).fetchall()
+    return [row["flow_run_id"] for row in rows]
 
 
 def init_db() -> None:
@@ -1771,6 +1857,8 @@ def get_run_event_snapshot(msg_id: int) -> dict:
 
 def mark_assistant_cancelled(msg_id: int, reason: str = "Cancelled") -> bool:
     with _connect() as conn:
+        now = _utc_now_iso()
+        conn.execute("BEGIN IMMEDIATE")
         snapshot = _run_event_cancel_snapshot(conn, msg_id)
         cur = conn.execute(
             """UPDATE chat_messages
@@ -1794,6 +1882,7 @@ def mark_assistant_cancelled(msg_id: int, reason: str = "Cancelled") -> bool:
             _insert_realtime_event(conn, "message.changed", row["topic"], row["agent"], msg_id, None, {
                 "id": msg_id, "role": "assistant", "status": "cancelled", "content": row["content"] or "",
             })
+            _cancel_flow_step_for_message(conn, msg_id, now, reason)
         return cur.rowcount > 0
 
 
@@ -2123,9 +2212,11 @@ def get_flow_run_ids_with_row_counts(counts: tuple[int, ...]) -> list[str]:
     placeholders = ",".join("?" * len(counts))
     with _connect() as conn:
         rows = conn.execute(
-            f"""SELECT flow_run_id FROM chat_messages
-                WHERE flow_run_id IS NOT NULL
-                GROUP BY flow_run_id
+            f"""SELECT m.flow_run_id FROM chat_messages m
+                LEFT JOIN flow_runs r ON r.flow_run_id=m.flow_run_id
+                WHERE m.flow_run_id IS NOT NULL
+                  AND (r.flow_run_id IS NULL OR r.execution_mode='shadow')
+                GROUP BY m.flow_run_id
                 HAVING COUNT(*) IN ({placeholders})""",
             counts,
         ).fetchall()

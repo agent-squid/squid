@@ -1097,6 +1097,7 @@ def test_chat_allocates_short_flow_run_id_for_routed_turn():
          patch("agent.server.topic_memory_squid_config", return_value={}), \
          patch("agent.server.insert_user_message", return_value=201) as insert_user_message, \
          patch("agent.server.insert_assistant_message", return_value=202) as insert_assistant_message, \
+         patch("agent.server.get_flow_run", return_value=None), \
          patch("agent.server.create_flow_run") as create_flow_run, \
          patch("agent.server.get_flow_steps", return_value=[{
              "step_id": "origin:0", "leg": "origin", "topic": "squid",
@@ -1128,12 +1129,51 @@ def test_chat_allocates_short_flow_run_id_for_routed_turn():
 
 def test_flow_plan_failure_terminally_reconciles_prepared_turn():
     prepared = {"user_msg_id": 201, "asst_msg_id": 202}
-    with patch("agent.server.create_flow_run", side_effect=sqlite3.OperationalError("disk full")), \
+    with patch("agent.server.get_flow_run", return_value=None), \
+         patch("agent.server.create_flow_run", side_effect=sqlite3.OperationalError("disk full")), \
+         patch("agent.server.cancel_flow_run") as cancel_run, \
          patch("agent.server.update_assistant_message") as update_message:
         error = server._persist_flow_plan("1", "#squid@codex>@review", prepared)
 
     assert error == "Durable Flow plan could not be persisted. The turn was not started."
+    cancel_run.assert_not_called()
     update_message.assert_called_once_with(202, error, None, "error", only_if_pending=True)
+
+
+def test_flow_origin_activation_failure_cancels_created_run():
+    prepared = {
+        "topic": "squid", "agent": "codex", "user_msg_id": 201, "asst_msg_id": 202,
+    }
+    with patch("agent.server.get_flow_run", return_value=None), \
+         patch("agent.server.create_flow_run"), \
+         patch("agent.server.get_flow_steps", return_value=[{
+             "step_id": "origin:0", "leg": "origin", "topic": "squid",
+             "agent": "codex", "assistant_msg_id": None,
+         }]), \
+         patch("agent.server.claim_flow_step", return_value={"step_id": "origin:0"}), \
+         patch("agent.server.link_flow_step_messages", return_value=False), \
+         patch("agent.server.cancel_flow_run", return_value=True) as cancel_run, \
+         patch("agent.server.update_assistant_message"):
+        error = server._persist_flow_plan("1", "#squid@codex>@review", prepared)
+
+    assert error is not None
+    cancel_run.assert_called_once()
+
+
+def test_flow_activation_conflict_does_not_cancel_existing_run():
+    prepared = {"user_msg_id": 201, "asst_msg_id": 202}
+    with patch("agent.server.get_flow_run", return_value={
+             "flow_run_id": "1", "route": "#squid@codex>@existing",
+         }), \
+         patch("agent.server.create_flow_run", side_effect=ValueError("different route")), \
+         patch("agent.server.cancel_flow_run") as cancel_run, \
+         patch("agent.server.transition_flow_step") as transition_step, \
+         patch("agent.server.update_assistant_message"):
+        error = server._persist_flow_plan("1", "#squid@codex>@review", prepared)
+
+    assert error is not None
+    cancel_run.assert_not_called()
+    transition_step.assert_not_called()
 
 
 def test_clear_command_kills_only_session_lane():

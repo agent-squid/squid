@@ -405,9 +405,12 @@ class TopicWorker:
         from . import flow
 
         async def _run():
-            if error and await flow.complete_durable_step(msg_id, error=error):
-                return
-            await flow.continue_chain(msg_id)
+            try:
+                if error and await flow.complete_durable_step(msg_id, error=error):
+                    return
+                await flow.continue_chain(msg_id)
+            except Exception:
+                log.exception("flow completion hook failed msg_id=%s", msg_id)
 
         asyncio.create_task(_run(), name=f"squid-chain-{msg_id}")
 

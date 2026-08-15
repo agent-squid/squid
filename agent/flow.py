@@ -17,7 +17,7 @@ import json
 import logging
 import re
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from .stats_db import (
@@ -28,7 +28,11 @@ from .stats_db import (
     get_flow_run_id_for_message,
     get_flow_run_ids_with_row_counts,
     get_flow_step_for_message,
+    get_prepared_flow_step_messages,
     get_flow_steps,
+    get_running_flow_steps,
+    get_active_durable_flow_run_ids,
+    get_stale_flow_claims,
     get_message,
     link_flow_step_messages,
     transition_flow_step,
@@ -42,6 +46,7 @@ _ATOM_RE = re.compile(rf"^(?:#({_NAME}))?(?:@({_NAME}))?(!?)$")
 _DURATION_RE = re.compile(r"^(\d+)([smhd])$")
 _SCHEDULED_DISPATCHES: set[tuple] = set()
 _DURABLE_WAKEUPS: set[tuple[str, str]] = set()
+_DURABLE_STALE_CLAIM_SECONDS = 600
 
 
 def chain_route_text(
@@ -905,15 +910,24 @@ async def _dispatch_claimed_durable_step(flow_run_id: str, step: dict) -> bool:
 
 
 async def _dispatch_ready_durable_steps(flow_run_id: str) -> int:
-    dispatched = 0
     now = _utc_now_iso()
-    for step in get_due_flow_steps(now):
-        if step["flow_run_id"] != flow_run_id:
+    claimed_steps = []
+    for step in get_due_flow_steps(now, flow_run_id=flow_run_id):
+        if step.get("leg") == "origin":
+            log.error(
+                "refusing scheduler dispatch of client-owned Flow origin flow_run_id=%s step_id=%s",
+                flow_run_id, step["step_id"],
+            )
             continue
         claimed = claim_flow_step(flow_run_id, step["step_id"], now)
-        if claimed and await _dispatch_claimed_durable_step(flow_run_id, claimed):
-            dispatched += 1
-    return dispatched
+        if claimed:
+            claimed_steps.append(claimed)
+    if not claimed_steps:
+        return 0
+    results = await asyncio.gather(*(
+        _dispatch_claimed_durable_step(flow_run_id, step) for step in claimed_steps
+    ))
+    return sum(bool(result) for result in results)
 
 
 def _schedule_durable_wakeups(flow_run_id: str) -> None:
@@ -949,6 +963,8 @@ async def complete_durable_step(msg_id: int, *, error: Optional[str] = None) -> 
     step = get_flow_step_for_message(msg_id)
     if not step:
         return False
+    if step["status"] in {"done", "error", "cancelled"}:
+        return True
     target = "error" if error else "done"
     if not transition_flow_step(
         step["flow_run_id"], step["step_id"], step["status"], target,
@@ -959,6 +975,89 @@ async def complete_durable_step(msg_id: int, *, error: Optional[str] = None) -> 
         await _dispatch_ready_durable_steps(step["flow_run_id"])
         _schedule_durable_wakeups(step["flow_run_id"])
     return True
+
+
+def _reconcile_durable_step(step: dict, *, startup: bool) -> bool:
+    """Resolve one abandoned claim/running step from its durable chat state."""
+    flow_run_id = step["flow_run_id"]
+    step_id = step["step_id"]
+    assistant_id = step.get("assistant_msg_id")
+    if not assistant_id and step["status"] == "claimed":
+        prepared = get_prepared_flow_step_messages(flow_run_id, step_id)
+        if prepared and link_flow_step_messages(
+            flow_run_id, step_id, prepared["user_msg_id"], prepared["assistant_msg_id"],
+        ):
+            assistant_id = prepared["assistant_msg_id"]
+    message = get_message(assistant_id) if assistant_id else None
+    now = _utc_now_iso()
+
+    if (not message and startup and step["status"] == "claimed"
+            and step["leg"] != "origin"):
+        released_status = "scheduled" if step.get("due_at") else "pending"
+        return transition_flow_step(
+            flow_run_id, step_id, "claimed", released_status, now,
+        )
+
+    message_status = (message or {}).get("status")
+    if message_status == "done":
+        target, error = "done", None
+    elif message_status == "cancelled":
+        target, error = "cancelled", "Cancelled before durable Flow recovery"
+    elif message_status == "error":
+        target = "error"
+        error = (message or {}).get("content") or "Flow turn failed before recovery"
+    else:
+        target = "error"
+        error = (
+            "Flow turn state was ambiguous after server restart"
+            if startup else "Flow claim expired before dispatch state became durable"
+        )
+    return transition_flow_step(
+        flow_run_id, step_id, step["status"], target, now, error=error,
+    )
+
+
+async def recover_durable_flows(*, startup: bool = False) -> dict[str, int]:
+    """Reconcile abandoned work, dispatch due steps, and restore delay wakeups."""
+    now = datetime.now(timezone.utc)
+    before = (
+        now + timedelta(seconds=1) if startup
+        else now - timedelta(seconds=_DURABLE_STALE_CLAIM_SECONDS)
+    ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    recoverable = get_stale_flow_claims(before)
+    if startup:
+        recoverable.extend(get_running_flow_steps())
+
+    reconciled = 0
+    for step in recoverable:
+        try:
+            reconciled += int(_reconcile_durable_step(step, startup=startup))
+        except Exception:
+            log.exception(
+                "durable Flow recovery failed flow_run_id=%s step_id=%s",
+                step["flow_run_id"], step["step_id"],
+            )
+
+    now_iso = _utc_now_iso()
+    due_run_ids = {step["flow_run_id"] for step in get_due_flow_steps(now_iso)}
+    dispatched = sum(await asyncio.gather(*(
+        _dispatch_ready_durable_steps(flow_run_id) for flow_run_id in due_run_ids
+    ))) if due_run_ids else 0
+
+    active_run_ids = get_active_durable_flow_run_ids()
+    for flow_run_id in active_run_ids:
+        _schedule_durable_wakeups(flow_run_id)
+    return {"reconciled": reconciled, "dispatched": dispatched}
+
+
+async def maintain_durable_flows() -> None:
+    """Periodic safety scan; notifications and sleepers remain optimizations."""
+    while True:
+        await asyncio.sleep(20)
+        try:
+            await recover_durable_flows()
+        except Exception:
+            log.exception("durable Flow periodic recovery failed")
 
 
 async def _dispatch_or_schedule(flow_run_id: str, step: dict) -> bool:

@@ -31,6 +31,22 @@ def init_repo(path):
     git(path, "commit", "-m", "base")
 
 
+def test_flow_completion_hook_contains_background_errors(caplog):
+    async def fail_completion(*_args, **_kwargs):
+        raise RuntimeError("database busy")
+
+    async def run():
+        worker = TopicWorker("work")
+        with patch("agent.flow.complete_durable_step", fail_completion):
+            worker._trigger_chain_continuation(42, error="failed")
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(run())
+    assert "flow completion hook failed msg_id=42" in caplog.text
+
+
 def test_dispatch_preserves_lookback_on_queue_item():
     captured = {}
 

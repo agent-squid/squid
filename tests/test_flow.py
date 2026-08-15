@@ -73,6 +73,260 @@ def test_durable_flow_cutover_links_origin_and_claims_next_step(tmp_path, monkey
     assert steps["branch:0:target:0"]["status"] == "claimed"
     dispatch.assert_awaited_once()
 
+
+def test_ready_durable_steps_are_dispatched_concurrently(monkeypatch):
+    steps = [
+        {"flow_run_id": "run-1", "step_id": "a"},
+        {"flow_run_id": "run-1", "step_id": "b"},
+    ]
+    started = set()
+    both_started = None
+    release = None
+
+    async def dispatch(_flow_run_id, step):
+        started.add(step["step_id"])
+        if len(started) == 2:
+            both_started.set()
+        await release.wait()
+        return True
+
+    monkeypatch.setattr(
+        flow, "get_due_flow_steps",
+        lambda _now, flow_run_id=None: [
+            step for step in steps if step["flow_run_id"] == flow_run_id
+        ],
+    )
+    monkeypatch.setattr(flow, "claim_flow_step", lambda _run_id, step_id, _now: {
+        "flow_run_id": "run-1", "step_id": step_id,
+    })
+    monkeypatch.setattr(flow, "_dispatch_claimed_durable_step", dispatch)
+
+    async def run():
+        nonlocal both_started, release
+        both_started = asyncio.Event()
+        release = asyncio.Event()
+        task = asyncio.create_task(flow._dispatch_ready_durable_steps("run-1"))
+        await asyncio.wait_for(both_started.wait(), timeout=1)
+        release.set()
+        return await task
+
+    assert asyncio.run(run()) == 2
+    assert started == {"a", "b"}
+
+
+def test_durable_duplicate_origins_link_distinct_steps(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    route = "#squid@qwen!,@qwen!>@qwen!"
+    assistant_ids = []
+    for _ in range(2):
+        user_id = stats_db.insert_user_message(
+            "squid", "qwen", "go", flow_run_id="run-1", flow_route=route,
+        )
+        assistant_id = stats_db.insert_assistant_message(
+            "squid", "qwen", user_id, flow_run_id="run-1", flow_route=route,
+        )
+        assert server._persist_flow_plan("run-1", route, {
+            "topic": "squid", "agent": "qwen",
+            "user_msg_id": user_id, "asst_msg_id": assistant_id,
+        }) is None
+        assistant_ids.append(assistant_id)
+
+    origins = [
+        step for step in stats_db.get_flow_steps("run-1") if step["leg"] == "origin"
+    ]
+    assert {step["assistant_msg_id"] for step in origins} == set(assistant_ids)
+    assert {step["status"] for step in origins} == {"running"}
+
+
+def test_dispatcher_never_preempts_delayed_client_origin(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    route = "#squid@qwen!,@qwen!>@qwen!"
+    first_user = stats_db.insert_user_message(
+        "squid", "qwen", "go", flow_run_id="run-1", flow_route=route,
+    )
+    first_assistant = stats_db.insert_assistant_message(
+        "squid", "qwen", first_user, flow_run_id="run-1", flow_route=route,
+    )
+    assert server._persist_flow_plan("run-1", route, {
+        "topic": "squid", "agent": "qwen",
+        "user_msg_id": first_user, "asst_msg_id": first_assistant,
+    }) is None
+
+    async def finish_first():
+        with patch.object(
+            flow, "_dispatch_claimed_durable_step", new=AsyncMock(return_value=True),
+        ):
+            return await flow.complete_durable_step(first_assistant)
+
+    assert asyncio.run(finish_first())
+    origins = [
+        step for step in stats_db.get_flow_steps("run-1") if step["leg"] == "origin"
+    ]
+    assert [(step["status"], step["assistant_msg_id"]) for step in origins] == [
+        ("done", first_assistant), ("pending", None),
+    ]
+
+    second_user = stats_db.insert_user_message(
+        "squid", "qwen", "go", flow_run_id="run-1", flow_route=route,
+    )
+    second_assistant = stats_db.insert_assistant_message(
+        "squid", "qwen", second_user, flow_run_id="run-1", flow_route=route,
+    )
+    assert server._persist_flow_plan("run-1", route, {
+        "topic": "squid", "agent": "qwen",
+        "user_msg_id": second_user, "asst_msg_id": second_assistant,
+    }) is None
+    origins = [
+        step for step in stats_db.get_flow_steps("run-1") if step["leg"] == "origin"
+    ]
+    assert {step["assistant_msg_id"] for step in origins} == {
+        first_assistant, second_assistant,
+    }
+
+
+def test_startup_recovery_requeues_unprepared_claim_and_dispatches_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    route = "#squid@codex>@review"
+    stats_db.create_flow_run(
+        "run-1", route, None, flow.durable_flow_plan(route), execution_mode="durable",
+    )
+    stats_db.claim_flow_step("run-1", "origin:0", "2026-08-15T10:00:00Z")
+    stats_db.transition_flow_step(
+        "run-1", "origin:0", "claimed", "done", "2026-08-15T10:01:00Z",
+    )
+    target_id = "branch:0:target:0"
+    stats_db.claim_flow_step("run-1", target_id, "2026-08-15T10:02:00Z")
+
+    async def run():
+        with patch.object(
+            flow, "_dispatch_claimed_durable_step", new=AsyncMock(return_value=True),
+        ) as dispatch:
+            result = await flow.recover_durable_flows(startup=True)
+            return result, dispatch
+
+    result, dispatch = asyncio.run(run())
+    assert result == {"reconciled": 1, "dispatched": 1}
+    target = {
+        step["step_id"]: step for step in stats_db.get_flow_steps("run-1")
+    }[target_id]
+    assert target["status"] == "claimed"
+    dispatch.assert_awaited_once()
+
+
+def test_startup_recovery_does_not_synthesize_abandoned_origin(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    route = "#squid@codex>@review"
+    stats_db.create_flow_run(
+        "run-1", route, None, flow.durable_flow_plan(route), execution_mode="durable",
+    )
+    stats_db.claim_flow_step("run-1", "origin:0", "2026-08-15T10:00:00Z")
+
+    assert asyncio.run(flow.recover_durable_flows(startup=True)) == {
+        "reconciled": 1, "dispatched": 0,
+    }
+    steps = {step["step_id"]: step for step in stats_db.get_flow_steps("run-1")}
+    assert steps["origin:0"]["status"] == "error"
+    assert steps["branch:0:target:0"]["status"] == "cancelled"
+
+
+def test_startup_recovery_finishes_persisted_output_and_advances_flow(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    route = "#squid@codex>@review"
+    user_id = stats_db.insert_user_message(
+        "squid", "codex", "go", flow_run_id="run-1", flow_route=route,
+    )
+    assistant_id = stats_db.insert_assistant_message(
+        "squid", "codex", user_id, flow_run_id="run-1", flow_route=route,
+    )
+    stats_db.create_flow_run(
+        "run-1", route, user_id, flow.durable_flow_plan(route), execution_mode="durable",
+    )
+    stats_db.claim_flow_step("run-1", "origin:0", "2026-08-15T10:00:00Z")
+    stats_db.link_flow_step_messages("run-1", "origin:0", user_id, assistant_id)
+    stats_db.transition_flow_step(
+        "run-1", "origin:0", "claimed", "running", "2026-08-15T10:00:01Z",
+    )
+    stats_db.update_assistant_message(assistant_id, "finished", None, "done")
+
+    async def run():
+        with patch.object(
+            flow, "_dispatch_claimed_durable_step", new=AsyncMock(return_value=True),
+        ):
+            return await flow.recover_durable_flows(startup=True)
+
+    assert asyncio.run(run()) == {"reconciled": 1, "dispatched": 1}
+    steps = {step["step_id"]: step for step in stats_db.get_flow_steps("run-1")}
+    assert steps["origin:0"]["status"] == "done"
+    assert steps["branch:0:target:0"]["status"] == "claimed"
+
+
+def test_startup_recovery_adopts_turn_prepared_before_step_link(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    route = "#squid@codex>@review"
+    plan = flow.durable_flow_plan(route)
+    stats_db.create_flow_run("run-1", route, None, plan, execution_mode="durable")
+    stats_db.claim_flow_step("run-1", "origin:0", "2026-08-15T10:00:00Z")
+    stats_db.transition_flow_step(
+        "run-1", "origin:0", "claimed", "done", "2026-08-15T10:01:00Z",
+    )
+    target_id = "branch:0:target:0"
+    stats_db.claim_flow_step("run-1", target_id, "2026-08-15T10:02:00Z")
+    user_id = stats_db.insert_user_message(
+        "squid", "review", "handoff", flow_run_id="run-1",
+        flow_route=route, flow_step_id=target_id,
+    )
+    assistant_id = stats_db.insert_assistant_message(
+        "squid", "review", user_id, flow_run_id="run-1",
+        flow_route=route, flow_step_id=target_id,
+    )
+    stats_db.update_assistant_message(assistant_id, "finished", None, "done")
+
+    assert asyncio.run(flow.recover_durable_flows(startup=True)) == {
+        "reconciled": 1, "dispatched": 0,
+    }
+    target = {
+        step["step_id"]: step for step in stats_db.get_flow_steps("run-1")
+    }[target_id]
+    assert target["user_msg_id"] == user_id
+    assert target["assistant_msg_id"] == assistant_id
+    assert target["status"] == "done"
+    assert stats_db.get_flow_run("run-1")["status"] == "completed"
+
+
+def test_startup_recovery_terminally_reconciles_interrupted_running_turn(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    route = "#squid@codex>@review"
+    user_id = stats_db.insert_user_message(
+        "squid", "codex", "go", flow_run_id="run-1", flow_route=route,
+    )
+    assistant_id = stats_db.insert_assistant_message(
+        "squid", "codex", user_id, flow_run_id="run-1", flow_route=route,
+    )
+    stats_db.create_flow_run(
+        "run-1", route, user_id, flow.durable_flow_plan(route), execution_mode="durable",
+    )
+    stats_db.claim_flow_step("run-1", "origin:0", "2026-08-15T10:00:00Z")
+    stats_db.link_flow_step_messages("run-1", "origin:0", user_id, assistant_id)
+    stats_db.transition_flow_step(
+        "run-1", "origin:0", "claimed", "running", "2026-08-15T10:00:01Z",
+    )
+    stats_db.mark_orphaned_pending()
+
+    assert asyncio.run(flow.recover_durable_flows(startup=True)) == {
+        "reconciled": 1, "dispatched": 0,
+    }
+    steps = {step["step_id"]: step for step in stats_db.get_flow_steps("run-1")}
+    assert steps["origin:0"]["status"] == "error"
+    assert steps["branch:0:target:0"]["status"] == "cancelled"
+    assert stats_db.get_flow_run("run-1")["status"] == "failed"
+
     joined = flow.durable_flow_plan("#squid@codex+@review>@test")
     assert [step["branch_index"] for step in joined if step["leg"] == "origin"] == [-1, -1]
 
@@ -877,3 +1131,23 @@ def test_sweep_is_a_noop_when_nothing_is_stalled(tmp_path, monkeypatch):
     ])
 
     assert asyncio.run(flow.sweep_incomplete_flows()) == 0
+
+
+def test_legacy_sweep_excludes_durable_runs(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    route = "#squid@codex>@revucla"
+    user_id = stats_db.insert_user_message(
+        "squid", "codex", "review this", flow_run_id="durable-1", flow_route=route,
+    )
+    assistant_id = stats_db.insert_assistant_message(
+        "squid", "codex", user_id, flow_run_id="durable-1", flow_route=route,
+    )
+    stats_db.create_flow_run(
+        "durable-1", route, user_id, flow.durable_flow_plan(route), execution_mode="durable",
+    )
+    stats_db.update_assistant_message(assistant_id, "done", None, "done")
+
+    with patch.object(flow, "_dispatch_or_schedule", new=AsyncMock()) as dispatch:
+        assert asyncio.run(flow.sweep_incomplete_flows()) == 0
+        dispatch.assert_not_awaited()
