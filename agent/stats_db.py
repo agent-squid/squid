@@ -6,6 +6,7 @@ import sqlite3
 import json
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -109,6 +110,7 @@ _TABLES = [
         context     TEXT,
         status_raw  TEXT,
         flow_run_id TEXT,
+        flow_step_id TEXT,
         flow_route  TEXT,
         session_turn_index INTEGER,
         lookback    INTEGER DEFAULT 0,
@@ -154,6 +156,44 @@ _TABLES = [
     )""",
     """CREATE INDEX IF NOT EXISTS idx_realtime_events_scope
        ON realtime_events(topic, agent, event_id)""",
+    """CREATE TABLE IF NOT EXISTS flow_runs (
+        flow_run_id           TEXT PRIMARY KEY,
+        route                 TEXT NOT NULL,
+        original_prompt_msg_id INTEGER,
+        status                TEXT NOT NULL DEFAULT 'scheduled'
+                              CHECK(status IN ('scheduled', 'running', 'completed', 'failed', 'cancelled')),
+        error                 TEXT,
+        cancellation_reason   TEXT,
+        created_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        started_at            TEXT,
+        completed_at          TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS flow_steps (
+        step_id          TEXT NOT NULL,
+        flow_run_id      TEXT NOT NULL REFERENCES flow_runs(flow_run_id) ON DELETE CASCADE,
+        branch_index     INTEGER NOT NULL DEFAULT 0,
+        leg              TEXT NOT NULL,
+        repeat_index     INTEGER NOT NULL DEFAULT 0,
+        dependencies     TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(dependencies)),
+        topic            TEXT NOT NULL,
+        agent            TEXT NOT NULL,
+        fresh            INTEGER NOT NULL DEFAULT 0 CHECK(fresh IN (0, 1)),
+        status           TEXT NOT NULL DEFAULT 'pending'
+                         CHECK(status IN ('pending', 'scheduled', 'claimed', 'running', 'done', 'error', 'cancelled')),
+        due_at           TEXT,
+        dispatch_key     TEXT NOT NULL,
+        claimed_at       TEXT,
+        attempt          INTEGER NOT NULL DEFAULT 0,
+        user_msg_id      INTEGER,
+        assistant_msg_id INTEGER,
+        error            TEXT,
+        created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        started_at       TEXT,
+        completed_at     TEXT,
+        updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        PRIMARY KEY(flow_run_id, step_id),
+        UNIQUE(flow_run_id, dispatch_key)
+    )""",
     """CREATE TABLE IF NOT EXISTS realtime_requests (
         principal   TEXT NOT NULL,
         request_id  TEXT NOT NULL,
@@ -240,6 +280,7 @@ _TABLES = [
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(_DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
@@ -325,6 +366,47 @@ def _migrate_bookmarks_to_annotations(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE bookmarks")
 
 
+def _migrate_flow_steps_run_scoped_identity(conn: sqlite3.Connection) -> None:
+    # This migration targets the one previously used development schema. It
+    # also tolerates older subsets of these columns (new columns take their
+    # defaults), but intentionally fails rather than discarding unknown data.
+    columns = {row["name"]: row for row in conn.execute("PRAGMA table_info(flow_steps)")}
+    if columns["flow_run_id"]["pk"] == 1 and columns["step_id"]["pk"] == 2:
+        return
+    conn.execute(
+        """CREATE TABLE flow_steps_new (
+            step_id TEXT NOT NULL,
+            flow_run_id TEXT NOT NULL REFERENCES flow_runs(flow_run_id) ON DELETE CASCADE,
+            branch_index INTEGER NOT NULL DEFAULT 0,
+            leg TEXT NOT NULL,
+            repeat_index INTEGER NOT NULL DEFAULT 0,
+            dependencies TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(dependencies)),
+            topic TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            fresh INTEGER NOT NULL DEFAULT 0 CHECK(fresh IN (0, 1)),
+            status TEXT NOT NULL DEFAULT 'pending'
+                   CHECK(status IN ('pending', 'scheduled', 'claimed', 'running', 'done', 'error', 'cancelled')),
+            due_at TEXT,
+            dispatch_key TEXT NOT NULL,
+            claimed_at TEXT,
+            attempt INTEGER NOT NULL DEFAULT 0,
+            user_msg_id INTEGER,
+            assistant_msg_id INTEGER,
+            error TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            started_at TEXT,
+            completed_at TEXT,
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            PRIMARY KEY(flow_run_id, step_id),
+            UNIQUE(flow_run_id, dispatch_key)
+        )"""
+    )
+    names = ", ".join(columns)
+    conn.execute(f"INSERT INTO flow_steps_new ({names}) SELECT {names} FROM flow_steps")
+    conn.execute("DROP TABLE flow_steps")
+    conn.execute("ALTER TABLE flow_steps_new RENAME TO flow_steps")
+
+
 def allocate_id(namespace: str) -> str:
     namespace = (namespace or "").strip()
     if not namespace:
@@ -354,11 +436,377 @@ def allocate_id(namespace: str) -> str:
         conn.close()
 
 
+# ── durable Squid Flow execution ─────────────────────────────────────────────
+
+_FLOW_STEP_STATUSES = frozenset({"pending", "scheduled", "claimed", "running", "done", "error", "cancelled"})
+_FLOW_TERMINAL_STEP_STATUSES = frozenset({"done", "error", "cancelled"})
+_FLOW_STEP_TRANSITIONS = {
+    "pending": frozenset({"claimed", "cancelled"}),
+    "scheduled": frozenset({"claimed", "cancelled"}),
+    "claimed": frozenset({"pending", "scheduled", "running", "done", "error", "cancelled"}),
+    "running": frozenset({"done", "error", "cancelled"}),
+    "done": frozenset(),
+    "error": frozenset(),
+    "cancelled": frozenset(),
+}
+_FLOW_CLAIMABLE_STEP_STATUSES = tuple(sorted(
+    status for status, targets in _FLOW_STEP_TRANSITIONS.items() if "claimed" in targets
+))
+_FLOW_CLAIMABLE_STATUS_SQL = ",".join("?" for _ in _FLOW_CLAIMABLE_STEP_STATUSES)
+_FLOW_DEPENDENCIES_DONE_SQL = """NOT EXISTS (
+    SELECT 1 FROM json_each(s.dependencies) dependency
+    LEFT JOIN flow_steps required
+      ON required.flow_run_id=s.flow_run_id
+     AND required.step_id=dependency.value
+    WHERE required.step_id IS NULL OR required.status<>'done'
+)"""
+
+
+def _flow_step_dict(row: sqlite3.Row) -> dict:
+    item = dict(row)
+    item["dependencies"] = json.loads(item["dependencies"])
+    item["fresh"] = bool(item["fresh"])
+    return item
+
+
+def _flow_timestamp(value: str, field: str) -> str:
+    """Normalize scheduler timestamps so SQLite text ordering is chronological."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be an ISO-8601 UTC timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{field} must be an ISO-8601 UTC timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{field} must include a timezone")
+    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _validate_flow_plan(steps: list[dict]) -> dict[str, list[str]]:
+    normalized_step_ids = [
+        "" if step.get("step_id") is None else str(step["step_id"])
+        for step in steps
+    ]
+    step_ids = set(normalized_step_ids)
+    if "" in step_ids or len(step_ids) != len(steps):
+        raise ValueError("step_id values must be non-empty and unique")
+    dependency_map = {}
+    for step in steps:
+        step_id = str(step["step_id"])
+        for field in ("topic", "agent"):
+            value = step.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"flow step {field} must be a non-empty string")
+        dependencies = [str(value) for value in step.get("dependencies", [])]
+        if len(set(dependencies)) != len(dependencies):
+            raise ValueError("step dependencies must not contain duplicates")
+        if any(value not in step_ids for value in dependencies):
+            raise ValueError("step dependencies must refer to steps in the same run")
+        dependency_map[step_id] = dependencies
+        status = step.get("status", "scheduled" if step.get("due_at") else "pending")
+        if status not in ("pending", "scheduled"):
+            raise ValueError("new flow steps must be pending or scheduled")
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(step_id: str) -> None:
+        if step_id in visiting:
+            raise ValueError("flow step dependencies must be acyclic")
+        if step_id in visited:
+            return
+        visiting.add(step_id)
+        for dependency in dependency_map[step_id]:
+            visit(dependency)
+        visiting.remove(step_id)
+        visited.add(step_id)
+
+    for step_id in step_ids:
+        visit(step_id)
+    return dependency_map
+
+
+def create_flow_run(flow_run_id: str, route: str, original_prompt_msg_id: Optional[int], steps: list[dict]) -> dict:
+    """Persist a complete run plan atomically. A duplicate run id/key fails."""
+    if not flow_run_id or not route or not steps:
+        raise ValueError("flow_run_id, route, and at least one step are required")
+    dependency_map = _validate_flow_plan(steps)
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """INSERT INTO flow_runs
+               (flow_run_id, route, original_prompt_msg_id, status)
+               VALUES (?, ?, ?, 'scheduled')""",
+            (flow_run_id, route, original_prompt_msg_id),
+        )
+        for step in steps:
+            dependencies = dependency_map[str(step["step_id"])]
+            status = step.get("status", "scheduled" if step.get("due_at") else "pending")
+            due_at = _flow_timestamp(step["due_at"], "due_at") if step.get("due_at") else None
+            conn.execute(
+                """INSERT INTO flow_steps
+                   (step_id, flow_run_id, branch_index, leg, repeat_index, dependencies,
+                    topic, agent, fresh, status, due_at, dispatch_key)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (str(step["step_id"]), flow_run_id, int(step.get("branch_index", 0)),
+                 step.get("leg", "origin"), int(step.get("repeat_index", 0)), json.dumps(dependencies),
+                 step["topic"], step["agent"], int(bool(step.get("fresh"))), status,
+                 due_at, step.get("dispatch_key") or str(step["step_id"])),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return get_flow_run(flow_run_id)
+
+
+def get_flow_run(flow_run_id: str) -> Optional[dict]:
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM flow_runs WHERE flow_run_id=?", (flow_run_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_flow_steps(flow_run_id: str) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM flow_steps WHERE flow_run_id=? ORDER BY branch_index, repeat_index, step_id",
+            (flow_run_id,),
+        ).fetchall()
+    return [_flow_step_dict(row) for row in rows]
+
+
+def claim_flow_step(flow_run_id: str, step_id: str, now: str) -> Optional[dict]:
+    """Atomically claim one due, dependency-ready step; return None if ineligible."""
+    now = _flow_timestamp(now, "now")
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            f"""SELECT s.* FROM flow_steps s JOIN flow_runs r USING(flow_run_id)
+               WHERE s.flow_run_id=? AND s.step_id=?
+                 AND s.status IN ({_FLOW_CLAIMABLE_STATUS_SQL})
+                 AND (s.due_at IS NULL OR s.due_at<=?)
+                 AND r.status NOT IN ('completed', 'failed', 'cancelled')
+                 AND {_FLOW_DEPENDENCIES_DONE_SQL}""",
+            (flow_run_id, step_id, *_FLOW_CLAIMABLE_STEP_STATUSES, now),
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            return None
+        changed = conn.execute(
+            f"""UPDATE flow_steps SET status='claimed', claimed_at=?, attempt=attempt+1,
+                      updated_at=?
+               WHERE flow_run_id=? AND step_id=?
+                 AND status IN ({_FLOW_CLAIMABLE_STATUS_SQL})""",
+            (now, now, flow_run_id, step_id, *_FLOW_CLAIMABLE_STEP_STATUSES),
+        ).rowcount
+        if not changed:
+            conn.rollback()
+            return None
+        conn.execute(
+            """UPDATE flow_runs SET status='running', started_at=COALESCE(started_at, ?)
+               WHERE flow_run_id=?""",
+            (now, row["flow_run_id"]),
+        )
+        claimed = conn.execute(
+            "SELECT * FROM flow_steps WHERE flow_run_id=? AND step_id=?",
+            (flow_run_id, step_id),
+        ).fetchone()
+        conn.commit()
+        return _flow_step_dict(claimed)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def link_flow_step_messages(flow_run_id: str, step_id: str, user_msg_id: int, assistant_msg_id: int) -> bool:
+    """Idempotently bind the one prepared chat turn belonging to a step."""
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        changed = conn.execute(
+            """UPDATE flow_steps SET user_msg_id=?, assistant_msg_id=?,
+                      updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+               WHERE flow_run_id=? AND step_id=?
+                 AND user_msg_id IS NULL AND assistant_msg_id IS NULL""",
+            (user_msg_id, assistant_msg_id, flow_run_id, step_id),
+        ).rowcount
+        if changed:
+            conn.commit()
+            return True
+        row = conn.execute(
+            """SELECT user_msg_id, assistant_msg_id FROM flow_steps
+               WHERE flow_run_id=? AND step_id=?""",
+            (flow_run_id, step_id),
+        ).fetchone()
+        conn.rollback()
+        if not row:
+            return False
+        if (row["user_msg_id"], row["assistant_msg_id"]) != (user_msg_id, assistant_msg_id):
+            raise ValueError("flow step is already linked to a different chat turn")
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _refresh_flow_run(conn: sqlite3.Connection, flow_run_id: str, now: str) -> None:
+    rows = conn.execute(
+        """SELECT status, error, completed_at, step_id FROM flow_steps
+           WHERE flow_run_id=?
+           ORDER BY completed_at IS NULL, completed_at, step_id""",
+        (flow_run_id,),
+    ).fetchall()
+    statuses = [row["status"] for row in rows]
+    if not statuses or any(status not in _FLOW_TERMINAL_STEP_STATUSES for status in statuses):
+        return
+    run_status = "failed" if "error" in statuses else "cancelled" if "cancelled" in statuses else "completed"
+    run_error = next((row["error"] for row in rows if row["status"] == "error" and row["error"]), None)
+    conn.execute(
+        """UPDATE flow_runs SET status=?, error=COALESCE(error, ?),
+                  completed_at=COALESCE(completed_at, ?) WHERE flow_run_id=?""",
+        (run_status, run_error, now, flow_run_id),
+    )
+
+
+def _cancel_blocked_flow_steps(conn: sqlite3.Connection, flow_run_id: str, now: str) -> None:
+    """Make dependency failure terminal while leaving independent branches live."""
+    while True:
+        rows = conn.execute(
+            "SELECT step_id, status, dependencies FROM flow_steps WHERE flow_run_id=?",
+            (flow_run_id,),
+        ).fetchall()
+        statuses = {row["step_id"]: row["status"] for row in rows}
+        blocked = [
+            row["step_id"] for row in rows
+            if row["status"] in ("pending", "scheduled")
+            and any(statuses.get(dependency) in ("error", "cancelled")
+                    for dependency in json.loads(row["dependencies"]))
+        ]
+        if not blocked:
+            return
+        placeholders = ",".join("?" for _ in blocked)
+        conn.execute(
+            f"""UPDATE flow_steps SET status='cancelled', error='dependency did not complete',
+                       completed_at=COALESCE(completed_at, ?), updated_at=?
+                  WHERE flow_run_id=? AND step_id IN ({placeholders})
+                    AND status IN ('pending', 'scheduled')""",
+            (now, now, flow_run_id, *blocked),
+        )
+
+
+def transition_flow_step(flow_run_id: str, step_id: str, from_status: str, to_status: str,
+                         now: str, error: Optional[str] = None) -> bool:
+    if from_status not in _FLOW_STEP_STATUSES or to_status not in _FLOW_STEP_STATUSES:
+        raise ValueError("invalid flow step status")
+    if to_status not in _FLOW_STEP_TRANSITIONS[from_status]:
+        raise ValueError(f"invalid flow step transition: {from_status} -> {to_status}")
+    now = _flow_timestamp(now, "now")
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT flow_run_id FROM flow_steps WHERE flow_run_id=? AND step_id=?",
+            (flow_run_id, step_id),
+        ).fetchone()
+        if not row:
+            conn.rollback()
+            return False
+        changed = conn.execute(
+            """UPDATE flow_steps SET status=?, error=?,
+                      claimed_at=CASE WHEN ? IN ('pending','scheduled') THEN NULL ELSE claimed_at END,
+                      started_at=CASE WHEN ?='running' THEN COALESCE(started_at, ?) ELSE started_at END,
+                      completed_at=CASE WHEN ? IN ('done','error','cancelled') THEN COALESCE(completed_at, ?) ELSE completed_at END,
+                      updated_at=? WHERE flow_run_id=? AND step_id=? AND status=?""",
+            (to_status, error, to_status, to_status, now, to_status, now, now,
+             flow_run_id, step_id, from_status),
+        ).rowcount
+        if changed:
+            if to_status in ("error", "cancelled"):
+                _cancel_blocked_flow_steps(conn, row["flow_run_id"], now)
+            _refresh_flow_run(conn, row["flow_run_id"], now)
+        conn.commit()
+        return bool(changed)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def cancel_flow_run(flow_run_id: str, now: str, reason: Optional[str] = None) -> bool:
+    """Atomically persist run cancellation and prevent any subsequent claim."""
+    now = _flow_timestamp(now, "now")
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        changed = conn.execute(
+            """UPDATE flow_runs SET status='cancelled', cancellation_reason=?,
+                      completed_at=COALESCE(completed_at, ?)
+               WHERE flow_run_id=? AND status NOT IN ('completed', 'failed', 'cancelled')""",
+            (reason, now, flow_run_id),
+        ).rowcount
+        if not changed:
+            conn.rollback()
+            return False
+        conn.execute(
+            """UPDATE flow_steps SET status='cancelled', error=COALESCE(error, ?),
+                      completed_at=COALESCE(completed_at, ?), updated_at=?
+               WHERE flow_run_id=? AND status NOT IN ('done', 'error', 'cancelled')""",
+            (reason, now, now, flow_run_id),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def get_due_flow_steps(now: str) -> list[dict]:
+    now = _flow_timestamp(now, "now")
+    with _connect() as conn:
+        rows = conn.execute(
+            f"""SELECT s.* FROM flow_steps s JOIN flow_runs r USING(flow_run_id)
+               WHERE s.status IN ({_FLOW_CLAIMABLE_STATUS_SQL})
+                 AND (s.due_at IS NULL OR s.due_at<=?)
+                 AND r.status NOT IN ('completed','failed','cancelled')
+                 AND {_FLOW_DEPENDENCIES_DONE_SQL}
+               ORDER BY COALESCE(s.due_at, s.created_at), s.step_id""",
+            (*_FLOW_CLAIMABLE_STEP_STATUSES, now),
+        ).fetchall()
+    return [_flow_step_dict(row) for row in rows]
+
+
+def get_stale_flow_claims(before: str) -> list[dict]:
+    before = _flow_timestamp(before, "before")
+    with _connect() as conn:
+        rows = conn.execute(
+            """SELECT s.* FROM flow_steps s JOIN flow_runs r USING(flow_run_id)
+               WHERE s.status='claimed' AND s.claimed_at<?
+                 AND r.status NOT IN ('completed','failed','cancelled')
+               ORDER BY s.claimed_at, s.step_id""",
+            (before,),
+        ).fetchall()
+    return [_flow_step_dict(row) for row in rows]
+
+
 def init_db() -> None:
     conn = _connect()
     try:
         for ddl in _TABLES:
             conn.execute(ddl)
+        _migrate_flow_steps_run_scoped_identity(conn)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_flow_steps_ready ON flow_steps(status, due_at, flow_run_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_flow_steps_claimed ON flow_steps(status, claimed_at)")
         _migrate_message_annotations_schema(conn)
         _migrate_bookmarks_to_annotations(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_message_annotations_kind ON message_annotations (kind, created_at DESC)")
@@ -378,6 +826,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE chat_messages ADD COLUMN completed_at TEXT")
         if "flow_run_id" not in message_columns:
             conn.execute("ALTER TABLE chat_messages ADD COLUMN flow_run_id TEXT")
+        if "flow_step_id" not in message_columns:
+            conn.execute("ALTER TABLE chat_messages ADD COLUMN flow_step_id TEXT")
         if "flow_route" not in message_columns:
             conn.execute("ALTER TABLE chat_messages ADD COLUMN flow_route TEXT")
         worktree_columns = _table_columns(conn, "worktrees")
@@ -387,6 +837,7 @@ def init_db() -> None:
             conn.execute("ALTER TABLE worktrees ADD COLUMN integration_worktree_path TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_flow_route ON chat_messages(flow_route, completed_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_flow_run ON chat_messages(flow_run_id, id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_flow_step ON chat_messages(flow_step_id, id)")
         agent_columns = _table_columns(conn, "agents")
         if "home_mode" not in agent_columns:
             conn.execute("ALTER TABLE agents ADD COLUMN home_mode TEXT NOT NULL DEFAULT 'user_home'")
@@ -841,6 +1292,19 @@ def delete_topic_agent(topic: str, agent: str, adhoc: Optional[bool] = None) -> 
                 "DELETE FROM message_annotations WHERE msg_id IN (SELECT id FROM chat_messages WHERE topic=? AND agent=? AND (adhoc=0 OR adhoc IS NULL))",
                 (topic, agent),
             )
+            # User rows do not carry the assistant turn's adhoc flag. An
+            # adhoc assistant can therefore survive this filtered delete
+            # while referencing a user row that is about to be removed.
+            # Detach surviving replies before the foreign key is enforced.
+            conn.execute(
+                """UPDATE chat_messages SET reply_to=NULL
+                   WHERE reply_to IN (
+                       SELECT id FROM chat_messages
+                       WHERE topic=? AND agent=? AND (adhoc=0 OR adhoc IS NULL)
+                   )
+                     AND NOT (topic=? AND agent=? AND (adhoc=0 OR adhoc IS NULL))""",
+                (topic, agent, topic, agent),
+            )
             conn.execute(
                 "DELETE FROM chat_messages WHERE topic=? AND agent=? AND (adhoc=0 OR adhoc IS NULL)",
                 (topic, agent),
@@ -983,6 +1447,7 @@ def insert_user_message(
     source: str = "human",
     flow_run_id: Optional[str] = None,
     flow_route: Optional[str] = None,
+    flow_step_id: Optional[str] = None,
 ) -> int:
     if source not in {"human", "workflow", "diff_viewer"}:
         source = "human"
@@ -995,9 +1460,10 @@ def insert_user_message(
         context_json = None
     with _connect() as conn:
         cur = conn.execute(
-            """INSERT INTO chat_messages (topic, agent, role, source, content, status, context, lookback, flow_run_id, flow_route)
-               VALUES (?, ?, 'user', ?, ?, 'done', ?, ?, ?, ?)""",
-            (topic, agent, source, content, context_json, lookback, flow_run_id, flow_route),
+            """INSERT INTO chat_messages
+               (topic, agent, role, source, content, status, context, lookback, flow_run_id, flow_route, flow_step_id)
+               VALUES (?, ?, 'user', ?, ?, 'done', ?, ?, ?, ?, ?)""",
+            (topic, agent, source, content, context_json, lookback, flow_run_id, flow_route, flow_step_id),
         )
         _insert_realtime_event(conn, "message.changed", topic, agent, cur.lastrowid, None, {
             "id": cur.lastrowid, "role": "user", "status": "done", "content": content,
@@ -1011,12 +1477,14 @@ def insert_assistant_message(
     flow_run_id: Optional[str] = None,
     flow_route: Optional[str] = None,
     source: str = "human",
+    flow_step_id: Optional[str] = None,
 ) -> int:
     with _connect() as conn:
         cur = conn.execute(
-            """INSERT INTO chat_messages (topic, agent, role, source, reply_to, status, adhoc, flow_run_id, flow_route)
-               VALUES (?, ?, 'assistant', ?, ?, 'pending', ?, ?, ?)""",
-            (topic, agent, source, reply_to, 1 if adhoc else 0, flow_run_id, flow_route),
+            """INSERT INTO chat_messages
+               (topic, agent, role, source, reply_to, status, adhoc, flow_run_id, flow_route, flow_step_id)
+               VALUES (?, ?, 'assistant', ?, ?, 'pending', ?, ?, ?, ?)""",
+            (topic, agent, source, reply_to, 1 if adhoc else 0, flow_run_id, flow_route, flow_step_id),
         )
         _insert_realtime_event(conn, "message.changed", topic, agent, cur.lastrowid, None, {
             "id": cur.lastrowid, "role": "assistant", "status": "pending", "reply_to": reply_to,
@@ -1519,7 +1987,8 @@ def get_flow_run_messages(flow_run_id: str) -> list[dict]:
     full step sequence used to derive what (if anything) runs next."""
     with _connect() as conn:
         rows = conn.execute(
-            """SELECT id, role, topic, agent, source, reply_to, adhoc, content, status, context, flow_route, created_at
+            """SELECT id, role, topic, agent, source, reply_to, adhoc, content, status, context,
+                      flow_step_id, flow_route, created_at
                FROM chat_messages
                WHERE flow_run_id = ?
                ORDER BY id""",
