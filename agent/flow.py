@@ -17,12 +17,22 @@ import json
 import logging
 import re
 import asyncio
+from datetime import datetime, timezone
 from typing import Optional
 
 from .stats_db import (
+    claim_flow_step,
+    get_due_flow_steps,
+    get_flow_run,
     get_flow_run_messages,
     get_flow_run_id_for_message,
     get_flow_run_ids_with_row_counts,
+    get_flow_step_for_message,
+    get_flow_steps,
+    get_message,
+    link_flow_step_messages,
+    transition_flow_step,
+    _utc_now_iso,
 )
 
 log = logging.getLogger(__name__)
@@ -31,6 +41,7 @@ _NAME = r"[A-Za-z0-9_.-]+"
 _ATOM_RE = re.compile(rf"^(?:#({_NAME}))?(?:@({_NAME}))?(!?)$")
 _DURATION_RE = re.compile(r"^(\d+)([smhd])$")
 _SCHEDULED_DISPATCHES: set[tuple] = set()
+_DURABLE_WAKEUPS: set[tuple[str, str]] = set()
 
 
 def chain_route_text(
@@ -812,6 +823,144 @@ async def _dispatch_next_step(flow_run_id: str, step: dict) -> None:
         pass  # no live client — TopicWorker + this generator already persisted everything
 
 
+def _durable_dispatch_step(flow_run_id: str, step: dict) -> Optional[dict]:
+    """Build the existing handoff input from authoritative durable state."""
+    run = get_flow_run(flow_run_id)
+    if not run or run.get("execution_mode") != "durable":
+        return None
+    steps = {item["step_id"]: item for item in get_flow_steps(flow_run_id)}
+    dependencies = [steps.get(step_id) for step_id in step.get("dependencies", [])]
+    if any(not dependency or not dependency.get("assistant_msg_id") for dependency in dependencies):
+        return None
+    original = get_message(run["original_prompt_msg_id"]) if run.get("original_prompt_msg_id") else None
+    previous_agents = [dependency["agent"] for dependency in dependencies]
+    return {
+        **step,
+        "route": run["route"],
+        "previous_agent": previous_agents[0] if len(previous_agents) == 1 else "+".join(
+            f"@{agent}" for agent in previous_agents
+        ),
+        "previous_msg_ids": [dependency["assistant_msg_id"] for dependency in dependencies],
+        "original_prompt": (original or {}).get("content", ""),
+    }
+
+
+async def _dispatch_claimed_durable_step(flow_run_id: str, step: dict) -> bool:
+    """Prepare, link, and start one already-claimed durable continuation."""
+    from .server import _prepare_chat_turn, stream_response
+    from .context_sync import maybe_sync
+    from fastapi.responses import JSONResponse
+
+    dispatch = _durable_dispatch_step(flow_run_id, step)
+    if not dispatch:
+        transition_flow_step(
+            flow_run_id, step["step_id"], "claimed", "error", _utc_now_iso(),
+            error="durable Flow dependencies could not be resolved",
+        )
+        return False
+    prompt = chain_handoff_prompt(
+        dispatch["route"], dispatch["previous_agent"], dispatch["agent"],
+        dispatch["fresh"], dispatch["original_prompt"],
+    )
+    running = False
+    try:
+        prepared = await _prepare_chat_turn(
+            message=prompt, topic=dispatch["topic"], agent=dispatch["agent"],
+            adhoc=dispatch["fresh"], lookback=0,
+            pinned_ids=dispatch["previous_msg_ids"], source="workflow",
+            flow_run_id=flow_run_id, flow_route=dispatch["route"],
+            flow_step_id=step["step_id"],
+        )
+        if isinstance(prepared, JSONResponse):
+            raise RuntimeError("chat turn preparation was rejected")
+        if not link_flow_step_messages(
+            flow_run_id, step["step_id"], prepared["user_msg_id"], prepared["asst_msg_id"],
+        ):
+            raise RuntimeError("prepared chat turn could not be linked")
+        if not transition_flow_step(
+            flow_run_id, step["step_id"], "claimed", "running", _utc_now_iso(),
+        ):
+            raise RuntimeError("claimed step could not enter running state")
+        running = True
+        await maybe_sync()
+        async for _event in stream_response(
+            prepared["effective_message"], prepared["topic"], prepared["agent"],
+            prepared["backend"], prepared["model"], prepared["cwd"],
+            prepared["context_history"], prepared["asst_msg_id"], prepared["response_timeout"],
+            resume_session_id=prepared["resume_session_id"], adhoc=prepared["adhoc"],
+            lookback=prepared["lookback"], code_roots=prepared["code_roots"],
+            display_prompt=prepared["display_prompt"], source_cwd=prepared["source_cwd"],
+            configured_cwd=prepared["configured_cwd"], harness=prepared["harness"],
+            provider=prepared["provider"],
+        ):
+            pass
+        return True
+    except Exception as exc:
+        log.exception("durable Flow dispatch failed flow_run_id=%s step_id=%s", flow_run_id, step["step_id"])
+        transition_flow_step(
+            flow_run_id, step["step_id"], "running" if running else "claimed",
+            "error", _utc_now_iso(), error=str(exc),
+        )
+        return False
+
+
+async def _dispatch_ready_durable_steps(flow_run_id: str) -> int:
+    dispatched = 0
+    now = _utc_now_iso()
+    for step in get_due_flow_steps(now):
+        if step["flow_run_id"] != flow_run_id:
+            continue
+        claimed = claim_flow_step(flow_run_id, step["step_id"], now)
+        if claimed and await _dispatch_claimed_durable_step(flow_run_id, claimed):
+            dispatched += 1
+    return dispatched
+
+
+def _schedule_durable_wakeups(flow_run_id: str) -> None:
+    """Use persisted due times for live wake-up; recovery owns restart safety."""
+    now = datetime.now(timezone.utc)
+    for step in get_flow_steps(flow_run_id):
+        if step["status"] != "scheduled" or not step.get("due_at"):
+            continue
+        key = (flow_run_id, step["step_id"])
+        if key in _DURABLE_WAKEUPS:
+            continue
+        due = datetime.fromisoformat(step["due_at"].replace("Z", "+00:00"))
+        delay = max(0.0, (due - now).total_seconds())
+        _DURABLE_WAKEUPS.add(key)
+
+        async def wake(wakeup_key: tuple[str, str] = key, wait: float = delay) -> None:
+            try:
+                await asyncio.sleep(wait)
+                await _dispatch_ready_durable_steps(wakeup_key[0])
+            except Exception:
+                log.exception(
+                    "durable Flow due-time wake failed flow_run_id=%s step_id=%s",
+                    wakeup_key[0], wakeup_key[1],
+                )
+            finally:
+                _DURABLE_WAKEUPS.discard(wakeup_key)
+
+        asyncio.create_task(wake(), name=f"squid-flow-durable-delay-{flow_run_id}-{step['step_id']}")
+
+
+async def complete_durable_step(msg_id: int, *, error: Optional[str] = None) -> bool:
+    """Persist a worker terminal outcome and dispatch newly eligible work."""
+    step = get_flow_step_for_message(msg_id)
+    if not step:
+        return False
+    target = "error" if error else "done"
+    if not transition_flow_step(
+        step["flow_run_id"], step["step_id"], step["status"], target,
+        _utc_now_iso(), error=error,
+    ):
+        return True
+    if not error:
+        await _dispatch_ready_durable_steps(step["flow_run_id"])
+        _schedule_durable_wakeups(step["flow_run_id"])
+    return True
+
+
 async def _dispatch_or_schedule(flow_run_id: str, step: dict) -> bool:
     delay = int(step.get("delay_seconds") or 0)
     schedule_key = step.get("schedule_key")
@@ -850,6 +999,8 @@ async def continue_chain(msg_id: int) -> None:
     Squid Flow route chain with more steps to run, dispatch the next one —
     entirely server-side, independent of any connected browser tab."""
     try:
+        if await complete_durable_step(msg_id):
+            return
         flow_run_id = get_flow_run_id_for_message(msg_id)
         if not flow_run_id:
             return

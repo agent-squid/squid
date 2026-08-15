@@ -397,7 +397,7 @@ class TopicWorker:
                 self._processing_seq = None
             self.q.task_done()
 
-    def _trigger_chain_continuation(self, msg_id: int) -> None:
+    def _trigger_chain_continuation(self, msg_id: int, error: Optional[str] = None) -> None:
         """Fire-and-forget: if msg_id is a step in a Squid Flow route chain
         with more steps to run, dispatch the next one server-side. Runs
         independent of this worker's own queue so it never blocks the next
@@ -405,6 +405,8 @@ class TopicWorker:
         from . import flow
 
         async def _run():
+            if error and await flow.complete_durable_step(msg_id, error=error):
+                return
             await flow.continue_chain(msg_id)
 
         asyncio.create_task(_run(), name=f"squid-chain-{msg_id}")
@@ -805,8 +807,10 @@ class TopicWorker:
                                      "done" if content else "error", context=context_json,
                                      status_raw=status_raw, only_if_pending=True)
             insert_run_event(item.msg_id, run_seq, "done", None)
-            if content and item.msg_id:
-                self._trigger_chain_continuation(item.msg_id)
+            if item.msg_id:
+                self._trigger_chain_continuation(
+                    item.msg_id, None if content else "agent returned no output",
+                )
 
         except Exception as exc:
             err_text = str(exc)
@@ -836,6 +840,9 @@ class TopicWorker:
                 insert_run_event(item.msg_id, run_seq, "error", err_text)
             except Exception:
                 pass
+            if item.msg_id:
+                terminal_error = None if raw or recovered_content else err_text
+                self._trigger_chain_continuation(item.msg_id, terminal_error)
             await item.out_q.put({"_error": err_text})
 
         finally:

@@ -34,6 +34,45 @@ def test_durable_flow_plan_compiles_repeats_and_roundtrip_dependencies():
     fanout = flow.durable_flow_plan("#squid@codex>@review,@test")
     assert [step["branch_index"] for step in fanout if step["leg"] == "origin"] == [-1]
 
+
+def test_durable_flow_cutover_links_origin_and_claims_next_step(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+    route = "#squid@codex>@review"
+    user_id = stats_db.insert_user_message(
+        "squid", "codex", "review this", flow_run_id="run-1", flow_route=route,
+    )
+    assistant_id = stats_db.insert_assistant_message(
+        "squid", "codex", user_id, flow_run_id="run-1", flow_route=route,
+    )
+    prepared = {
+        "topic": "squid", "agent": "codex",
+        "user_msg_id": user_id, "asst_msg_id": assistant_id,
+    }
+
+    assert server._persist_flow_plan("run-1", route, prepared) is None
+    run = stats_db.get_flow_run("run-1")
+    steps = {step["step_id"]: step for step in stats_db.get_flow_steps("run-1")}
+    assert run["execution_mode"] == "durable"
+    assert steps["origin:0"]["status"] == "running"
+    assert steps["origin:0"]["user_msg_id"] == user_id
+    assert steps["origin:0"]["assistant_msg_id"] == assistant_id
+    assert stats_db.get_message(assistant_id)["flow_step_id"] == "origin:0"
+
+    async def run_completion():
+        with patch.object(
+            flow, "_dispatch_claimed_durable_step", new=AsyncMock(return_value=True),
+        ) as dispatch:
+            handled = await flow.complete_durable_step(assistant_id)
+            return handled, dispatch
+
+    handled, dispatch = asyncio.run(run_completion())
+    assert handled
+    steps = {step["step_id"]: step for step in stats_db.get_flow_steps("run-1")}
+    assert steps["origin:0"]["status"] == "done"
+    assert steps["branch:0:target:0"]["status"] == "claimed"
+    dispatch.assert_awaited_once()
+
     joined = flow.durable_flow_plan("#squid@codex+@review>@test")
     assert [step["branch_index"] for step in joined if step["leg"] == "origin"] == [-1, -1]
 

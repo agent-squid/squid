@@ -1098,6 +1098,13 @@ def test_chat_allocates_short_flow_run_id_for_routed_turn():
          patch("agent.server.insert_user_message", return_value=201) as insert_user_message, \
          patch("agent.server.insert_assistant_message", return_value=202) as insert_assistant_message, \
          patch("agent.server.create_flow_run") as create_flow_run, \
+         patch("agent.server.get_flow_steps", return_value=[{
+             "step_id": "origin:0", "leg": "origin", "topic": "squid",
+             "agent": "codex", "assistant_msg_id": None,
+         }]), \
+         patch("agent.server.claim_flow_step", return_value={"step_id": "origin:0"}), \
+         patch("agent.server.link_flow_step_messages", return_value=True), \
+         patch("agent.server.transition_flow_step", return_value=True), \
          patch("agent.server.update_assistant_message"), \
          patch.object(server.dispatcher, "dispatch", fake_dispatch):
         res = client.post("/chat", json={
@@ -1115,7 +1122,7 @@ def test_chat_allocates_short_flow_run_id_for_routed_turn():
     create_flow_run.assert_called_once()
     assert create_flow_run.call_args.args[:3] == ("1", "#squid@codex>@revuqwen", 201)
     assert create_flow_run.call_args.kwargs == {
-        "if_not_exists": True, "execution_mode": "shadow",
+        "if_not_exists": True, "execution_mode": "durable",
     }
 
 

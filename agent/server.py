@@ -106,7 +106,8 @@ from .stats_db import (
     get_realtime_cursor, get_realtime_snapshot,
     get_realtime_request, save_realtime_request, get_realtime_replay,
     insert_realtime_event, prune_realtime_data, set_realtime_commit_listener,
-    create_flow_run,
+    create_flow_run, get_flow_steps, claim_flow_step, link_flow_step_messages,
+    transition_flow_step, _utc_now_iso,
 )
 from .journal import _generate_journal, _current_week, list_topic_journals, read_journal
 from . import creds
@@ -727,8 +728,25 @@ def _persist_flow_plan(flow_run_id: Optional[str], flow_route: Optional[str], pr
     try:
         create_flow_run(
             flow_run_id, flow_route, prepared["user_msg_id"], plan,
-            if_not_exists=True, execution_mode="shadow",
+            if_not_exists=True, execution_mode="durable",
         )
+        origin = next(
+            (step for step in get_flow_steps(flow_run_id)
+             if step["leg"] == "origin"
+             and step["topic"] == prepared["topic"]
+             and step["agent"] == prepared["agent"]
+             and step["assistant_msg_id"] is None),
+            None,
+        )
+        now = _utc_now_iso()
+        if not origin or not claim_flow_step(flow_run_id, origin["step_id"], now):
+            raise RuntimeError("durable Flow origin could not be claimed")
+        if not link_flow_step_messages(
+            flow_run_id, origin["step_id"], prepared["user_msg_id"], prepared["asst_msg_id"],
+        ):
+            raise RuntimeError("durable Flow origin could not be linked")
+        if not transition_flow_step(flow_run_id, origin["step_id"], "claimed", "running", now):
+            raise RuntimeError("durable Flow origin could not enter running state")
     except Exception:
         log.exception("durable Flow plan persistence failed flow_run_id=%s route=%s", flow_run_id, flow_route)
         error = "Durable Flow plan could not be persisted. The turn was not started."
@@ -753,6 +771,7 @@ async def _prepare_chat_turn(
     source: str = "human",
     flow_run_id: Optional[str] = None,
     flow_route: Optional[str] = None,
+    flow_step_id: Optional[str] = None,
     override_cwd: Optional[str] = None,
 ) -> Union[dict, JSONResponse]:
     native_shell = message.lstrip().startswith("!")
@@ -882,11 +901,13 @@ async def _prepare_chat_turn(
                                       lookback=lookback,
                                       source=source,
                                       flow_run_id=flow_run_id,
-                                      flow_route=flow_route)
+                                      flow_route=flow_route,
+                                      flow_step_id=flow_step_id)
     asst_msg_id = insert_assistant_message(
         topic, resolved_agent, user_msg_id, adhoc=adhoc,
         flow_run_id=flow_run_id, flow_route=flow_route,
         source="shell" if native_shell else source,
+        flow_step_id=flow_step_id,
     )
     if not native_shell:
         attach_assistant_session(asst_msg_id, resume_session_id)

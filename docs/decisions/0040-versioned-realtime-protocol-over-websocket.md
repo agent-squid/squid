@@ -110,7 +110,7 @@ fallback and through the explicit `sse` migration mode.
 | Running-message browser reattachment | Implemented | The UI prefers WebSocket snapshots/events for pending messages, reconnects with jittered exponential backoff, persists its cursor, sends acknowledgements, and falls back to SSE when WebSocket is unavailable. |
 | New chat submission and cancellation | Implemented | The browser uses idempotent `chat.start` and `chat.cancel` commands in WebSocket mode. Auto mode falls back to the HTTP/SSE compatibility path only when a command was not submitted; SSE mode retains the compatibility path. |
 | Process and queue state | Implemented | Snapshots and authoritative `process.changed`/`queue.changed` events update the browser status model; HTTP refresh remains only as pre-snapshot and SSE compatibility recovery. |
-| Flow | Shadow plan persistence implemented; runtime migration pending | New Flow submissions persist a canonical `flow_runs`/`flow_steps` DAG with dependency, repeat, round-trip, and relative-delay metadata, explicitly marked `shadow`. Claim, recovery, and due-time materialization ignore shadow runs, which remain owned by the transcript executor; expired shadow plans are pruned at startup after seven days. ADR-0042's durable lifecycle primitives and database tests exist, but production execution does not yet drive them. `flow.step.created` is not published or consumed, and the browser still polls for new Flow steps. |
+| Flow | Durable executor cut over for new runs; recovery pending | New Flow submissions persist a canonical `flow_runs`/`flow_steps` DAG in `durable` mode. Origins are claimed and linked to their prepared chat turns before dispatch; successful and failed worker outcomes drive persisted step/run transitions; and newly eligible continuations use dependency-gated atomic claims rather than transcript inference. Delayed continuations use their materialized `due_at` for an in-process wake-up. Pre-cutover shadow and legacy runs remain with the transcript executor and shadow plans are pruned after seven days. Startup/periodic due-work and stale-claim recovery is not yet connected, so durable delayed work is not yet restart-safe. `flow.step.created` is accepted by the replay type registry but is not yet published or consumed, and the browser still polls for new Flow steps. |
 | CLI authentication | Not implemented | `auth.*` messages are not implemented; ADR-0035's SSE-plus-HTTP transport remains in use. |
 | Backpressure and frame limits | Not implemented | Sends are direct and there is no bounded/coalescing outbound queue, `slow_consumer` handling, or configured inbound frame-size enforcement. |
 | Heartbeat and acknowledgements | Partial | `ping` receives `pong` and the UI sends `ack`, but the server does not initiate heartbeat pings or use acknowledged cursors to manage delivery. |
@@ -119,41 +119,29 @@ fallback and through the explicit `sse` migration mode.
 
 ### Remaining implementation sequence
 
-The next milestone is still the Flow migration, but ADR-0042's persistence
-foundation is now present, and new submissions create durable runs and steps.
-The database
-enforces run-scoped dispatch identity and dependency validity, supports atomic
-claims and lifecycle transitions, and exposes due-work and stale-claim
-recovery queries. Those primitives have focused database coverage. They are
-not yet connected to the production executor, which still reconstructs state
-from `chat_messages` and schedules delays in memory.
-
-During this pre-cutover phase those plans use `execution_mode = shadow`.
-Durable claims, recovery, and delayed-step materialization must select only
-`execution_mode = durable`; the cutover applies that mode only to newly owned
-runs. Shadow plans are diagnostic; startup cleanup removes plans older than
-seven days, preventing both future redispatch and unbounded accumulation
-across ordinary restarts.
+The Flow executor now owns newly submitted runs through ADR-0042's durable
+store. It claims and links origins, advances persisted lifecycle state from
+worker outcomes, claims eligible continuations, and uses persisted dependency
+message links to prepare handoffs. Existing shadow and transcript-only runs
+remain on the legacy executor and are never promoted. Delayed work uses
+persisted absolute due times for live in-process wake-up, but the durable
+recovery loop is still required to survive a restart or reconcile an ambiguous
+claim.
 
 Complete the Flow milestone in this order:
 
-1. Replace transcript-derived continuation decisions with durable dependency
-   eligibility and atomic step claims. When a delayed step's dependencies
-   complete, materialize its absolute `due_at` from persisted
-   `delay_seconds`; a delayed step without `due_at` must remain unclaimable.
-   Link each claim to exactly one prepared chat turn before dispatch.
-2. Add startup and periodic recovery for due work and stale claims, including
-   restart-before/after-turn-preparation, delayed-step, cancellation, and
-   ambiguous external-process cases. Retain legacy transcript recovery only
+1. Add startup and periodic recovery around the existing due-work and
+   stale-claim queries, including restart-before/after-turn-preparation,
+   delayed-step, cancellation, and ambiguous external-process cases. Retain legacy transcript recovery only
    for pre-migration runs during the bounded compatibility period.
-3. Publish `flow.step.created` in the same database transaction as the step
+2. Publish `flow.step.created` in the same database transaction as the step
    state/message linkage, and include authoritative Flow state in scoped
    snapshots. Notification remains strictly after commit.
-4. Consume `flow.step.created` through the browser's existing stable-message
+3. Consume `flow.step.created` through the browser's existing stable-message
    reconciliation path. Stop the 1.5-second Flow-step poll while WebSocket is
    active; retain it only for `sse` mode and `auto` fallback until SSE
    retirement.
-5. Close the milestone with server tests for restart, cancellation, stale
+4. Close the milestone with server tests for restart, cancellation, stale
    claims, event-after-commit, and duplicate-dispatch races, plus browser tests
    for live delivery, reconnect/replay without duplicate steps, snapshot
    rollover, and SSE/WebSocket rendering parity.

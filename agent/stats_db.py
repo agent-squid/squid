@@ -596,6 +596,18 @@ def get_flow_steps(flow_run_id: str) -> list[dict]:
     return [_flow_step_dict(row) for row in rows]
 
 
+def get_flow_step_for_message(msg_id: int) -> Optional[dict]:
+    """Return the durable step linked to either side of a prepared chat turn."""
+    with _connect() as conn:
+        row = conn.execute(
+            """SELECT s.* FROM flow_steps s JOIN flow_runs r USING(flow_run_id)
+               WHERE (s.user_msg_id=? OR s.assistant_msg_id=?)
+                 AND r.execution_mode='durable'""",
+            (msg_id, msg_id),
+        ).fetchone()
+    return _flow_step_dict(row) if row else None
+
+
 def claim_flow_step(flow_run_id: str, step_id: str, now: str) -> Optional[dict]:
     """Atomically claim one due, dependency-ready step; return None if ineligible."""
     now = _flow_timestamp(now, "now")
@@ -657,6 +669,12 @@ def link_flow_step_messages(flow_run_id: str, step_id: str, user_msg_id: int, as
             (user_msg_id, assistant_msg_id, flow_run_id, step_id),
         ).rowcount
         if changed:
+            conn.execute(
+                """UPDATE chat_messages SET flow_step_id=?
+                   WHERE id IN (?, ?) AND flow_run_id=?
+                     AND (flow_step_id IS NULL OR flow_step_id=?)""",
+                (step_id, user_msg_id, assistant_msg_id, flow_run_id, step_id),
+            )
             conn.commit()
             return True
         row = conn.execute(
@@ -2154,7 +2172,7 @@ def get_message(msg_id: int) -> Optional[dict]:
         row = conn.execute(
             f"""SELECT m.id, m.role, m.topic, m.agent,
                       m.content, m.status, m.source, m.adhoc, m.session_id,
-                      m.flow_run_id, m.flow_route,
+                      m.flow_run_id, m.flow_step_id, m.flow_route,
                       m.context, m.status_raw, m.created_at AS timestamp,
                       {_turn_end_expr("m")} AS completed_at, m.reply_to,
                       m.quota_delta, m.quota_before AS msg_quota_before, m.quota_after AS msg_quota_after,
