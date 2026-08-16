@@ -940,6 +940,71 @@ test.describe('response bubble', () => {
     expect(userTexts[0]).not.toContain("what's your model?");
   });
 
+  test('filter round-trip keeps the newest live prompt at the bottom when history includes it as pending', async ({ page }) => {
+    // The real /history endpoint returns the still-running turn as a pending row
+    // (its completed_at falls back to created_at, the newest timestamp), so it
+    // sorts to the top of the page. Anchoring to that pending row must NOT treat
+    // the live group as "not newer than the page" and push completed history
+    // below it — the running prompt has the latest timestamp and stays at the
+    // bottom.
+    await mockBackend(page);
+    let exposeHistory = false;
+    await page.route('**/history**', route => route.fulfill({ json: {
+      items: exposeHistory ? [
+        { id: 8, role: 'assistant', topic: 'squid', agent: 'deepseek', status: 'pending', content: '', prompt: 'running', timestamp: '2026-08-15T12:00:00Z', completed_at: '2026-08-15T12:00:00Z' },
+        { id: 7, role: 'assistant', topic: 'squid', agent: 'opencode', status: 'done', content: 'Pushed', prompt: 'push', timestamp: '2026-08-15T11:30:00Z', completed_at: '2026-08-15T11:30:00Z' },
+        { id: 6, role: 'assistant', topic: 'squid', agent: 'deepseek', status: 'done', content: 'Hi', prompt: 'say hi', timestamp: '2026-08-15T11:00:00Z', completed_at: '2026-08-15T11:00:00Z' },
+        { id: 5, role: 'assistant', topic: 'squid', agent: 'deepseek', status: 'done', content: 'Hi', prompt: 'say hi', timestamp: '2026-08-15T11:00:00Z', completed_at: '2026-08-15T11:00:00Z' },
+      ] : [],
+      has_more: false,
+    }}));
+
+    await page.goto('/');
+
+    let chatReq = 0;
+    const prompts = ['say hi', 'say hi', 'push', 'running'];
+    const agents = ['deepseek', 'deepseek', 'opencode', 'deepseek'];
+    await page.route('**/chat', route => {
+      chatReq++;
+      const id = chatReq; // 1-based turn -> msg_id 5..8 below
+      const meta = { event: 'meta', data: { agent: agents[id - 1] ?? 'deepseek', backend: 'claude', msg_id: id + 4, adhoc: true } };
+      // Turns 5, 6, 7 complete; turn 8 stays in flight (no done).
+      if (chatReq <= 3) {
+        return route.fulfill({ status: 200, headers: SSE_HEADERS, body: sse(meta, { data: 'done-' + (id + 4) }, DONE) });
+      }
+      return route.fulfill({ status: 200, headers: SSE_HEADERS, body: sse(meta, { data: 'streaming...' }) });
+    });
+
+    await sendMsg(page, 'say hi');
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="5"]')).toBeAttached();
+    await sendMsg(page, 'say hi');
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="6"]')).toBeAttached();
+    await sendMsg(page, 'push');
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="7"]')).toBeAttached();
+    await sendMsg(page, 'running');
+    await expect(page.locator('.msg.assistant.msg-thinking[data-msg-id="8"]')).toBeAttached();
+
+    exposeHistory = true;
+    await page.evaluate(() => applyHistoryFilter({ topic: 'squid', agent: null, adhoc: null, flow_route: null }));
+    await page.evaluate(() => clearFilter());
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="5"]')).toBeAttached({ timeout: 5_000 });
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="6"]')).toBeAttached({ timeout: 5_000 });
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="7"]')).toBeAttached({ timeout: 5_000 });
+
+    const order = await page.locator('#messages > .msg.assistant[data-msg-id]').evaluateAll(
+      nodes => nodes.map(node => Number(node.dataset.msgId)),
+    );
+    expect(order).toEqual([5, 6, 7, 8]);
+
+    // The live group keeps its standalone user bubble; completed turns re-fetch
+    // with the prompt embedded, so no leftover "say hi"/"push" user bubbles.
+    const userTexts = await page.locator('#messages > .msg.user').evaluateAll(
+      nodes => nodes.map(node => node.textContent.trim()),
+    );
+    expect(userTexts).toHaveLength(1);
+    expect(userTexts[0]).toContain('running');
+  });
+
   test('context indicator shows compact session turn, memory, and pin counts', async ({ page }) => {
     await page.route('**/topics/*/memory', r => r.fulfill({ json: {
       topic: 'squid',

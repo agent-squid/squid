@@ -1,9 +1,9 @@
-const CACHE_NAME = 'squid-pwa-v20260815-017';
+const CACHE_NAME = 'squid-pwa-v20260815-018';
 const APP_SHELL = [
   '/',
   '/index.html',
-  '/style.css?v=20260815-017',
-  '/app.js?v=20260815-017',
+  '/style.css?v=20260815-018',
+  '/app.js?v=20260815-018',
   '/flow-lang.js?v=20260722-001',
   '/vendor/highlight.min.js',
   '/vendor/atom-one-dark.min.css',

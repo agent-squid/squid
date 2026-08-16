@@ -2178,7 +2178,17 @@ async function loadHistory() {
   // compensation below yank the view down instead of holding it in place.
   let anchor;
   if (historyOffset === 0 && items.length) {
-    anchor = anchorBeforeNextLiveGroup(items[0].id);
+    // A still-running (pending) turn sorts to the top of this page — its
+    // completed_at falls back to created_at, the newest timestamp — so
+    // `items[0]` is often the live group itself, not the newest completed
+    // message. Anchoring to it would treat the live group as "not newer" than
+    // the page and shove every completed message below it. Anchor to the newest
+    // *completed* item instead; live groups are positioned relative to
+    // completed history, never to themselves.
+    const newestCompleted = items.find(item => item.status !== 'pending');
+    if (newestCompleted) {
+      anchor = anchorBeforeNextLiveGroup(newestCompleted.id);
+    }
     if (!anchor) {
       // No live group is newer than this page, so any preserved live groups are
       // all older than it. Anchor after the last of them instead of falling back
