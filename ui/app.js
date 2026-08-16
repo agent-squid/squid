@@ -5841,9 +5841,12 @@ async function sendMessage(text, opts = {}) {
       }
     }
     addCompletionTimestamp();
+    // A failed or rejected turn can still move the account quota meter, and the
+    // before/after snapshot is already in hand — finalize (and record) it here so
+    // every path out of sendMessage captures it, not only the successful one.
+    if (!detachedPolling) await finalizeQuotaTracking();
   }
 
-  if (!detachedPolling) await finalizeQuotaTracking();
   return { flowRunId, msgId };
 }
 
