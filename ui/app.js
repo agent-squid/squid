@@ -1317,7 +1317,7 @@ function searchScopeText(state) {
   if (state.flow_route) return state.flow_route;
   let scope = '';
   if (state.explicitAll) scope = '#all';
-  else if (state.topic) scope = `#${state.topic}`;
+  else if (state.topic) scope = `#${state.topic}${state.topicSubtree ? '*' : ''}`;
   if (state.agent) {
     scope += `@${state.agent}`;
     if (state.adhoc === true) scope += '!';
@@ -1694,6 +1694,7 @@ function persistSearchFilterScope(state) {
   historyFilter = {
     flow_route: state.flow_route || null,
     topic: state.flow_route ? null : (state.topic || null),
+    topicSubtree: state.flow_route ? false : !!state.topicSubtree,
     agent: state.flow_route ? null : (state.agent || null),
     adhoc: state.flow_route ? null : (state.adhoc ?? null),
     explicitAll: !!state.explicitAll,
@@ -1754,7 +1755,7 @@ function applyHistoryFilter(filter) {
 
 function clearFilter() {
   if (searchActive && searchState) {
-    searchState = { ...searchState, flow_route: null, topic: null, agent: null, adhoc: null, explicitAll: false };
+    searchState = { ...searchState, flow_route: null, topic: null, topicSubtree: false, agent: null, adhoc: null, explicitAll: false };
     persistSearchFilterScope(searchState);
     searchLoading = false;
     document.querySelectorAll('.search-result-item').forEach(el => el.remove());
@@ -1883,7 +1884,7 @@ function _updateFilterBadge() {
   const badge = document.getElementById('filter-badge');
   const labelEl = document.getElementById('filter-badge-label');
   const activeState = (searchActive && searchState) ? searchState : historyFilter;
-  const { topic, agent, adhoc, flow_route } = activeState;
+  const { topic, agent, adhoc, flow_route, topicSubtree } = activeState;
   const explicitAll = !!activeState.explicitAll;
 
   if (!flow_route && !topic && !agent && !explicitAll && !bookmarkOnlyHistory && !badOnlyHistory) {
@@ -1915,7 +1916,7 @@ function _updateFilterBadge() {
   } else if (topic || explicitAll) {
     const t = document.createElement('span');
     t.className = 'tag-topic';
-    t.textContent = '#' + (explicitAll ? 'all' : topic);
+    t.textContent = '#' + (explicitAll ? 'all' : topic) + (topicSubtree ? '*' : '');
     addSegment('topic', t, () => removeFilterSegment('topic'));
   }
   if (agent) {
@@ -1955,10 +1956,17 @@ function _updateFilterBadge() {
   updateFilterButton();
 }
 
+function topicMatchesFilter(itemTopic, filter) {
+  if (!filter.topic) return true;
+  const topic = itemTopic || 'default';
+  if (filter.topicSubtree) return topic === filter.topic || topic.startsWith(filter.topic + '.');
+  return topic === filter.topic;
+}
+
 function itemMatchesFilter(item, filter) {
   if (!filter) return true;
   if (filter.flow_route && (item.flow_route || item.flowRoute || null) !== filter.flow_route) return false;
-  if (filter.topic && (item.topic || 'default') !== filter.topic) return false;
+  if (!topicMatchesFilter(item.topic, filter)) return false;
   if (filter.agent && (item.agent || null) !== filter.agent) return false;
   if (filter.adhoc !== null && filter.adhoc !== undefined && !!item.adhoc !== filter.adhoc) return false;
   return true;
@@ -1976,6 +1984,7 @@ function removeFilterSegment(kind) {
   const next = { ...active };
   if (kind === 'topic') {
     next.topic = null;
+    next.topicSubtree = false;
     next.explicitAll = false;
   } else if (kind === 'flow') {
     next.flow_route = null;
@@ -1997,7 +2006,7 @@ function removeFilterSegment(kind) {
     _updateFilterBadge();
     loadSearchResults();
   } else {
-    reloadHistory({ flow_route: next.flow_route || null, topic: next.topic || null, agent: next.agent || null, adhoc: next.adhoc ?? null });
+    reloadHistory({ flow_route: next.flow_route || null, topic: next.topic || null, topicSubtree: !!next.topicSubtree, agent: next.agent || null, adhoc: next.adhoc ?? null });
   }
 }
 
@@ -2106,6 +2115,7 @@ function historyUrlParams() {
   const params = new URLSearchParams();
   if (historyFilter.flow_route) params.set('flow_route', historyFilter.flow_route);
   if (historyFilter.topic) params.set('topic', historyFilter.topic);
+  if (historyFilter.topicSubtree) params.set('topic_subtree', 'true');
   if (historyFilter.agent) params.set('agent', historyFilter.agent);
   if (historyFilter.adhoc != null) params.set('adhoc', historyFilter.adhoc);
   if (bookmarkOnlyHistory) params.set('bookmarked', 'true');
@@ -2529,12 +2539,13 @@ function parseScopeInput(text, { allowAll = false } = {}) {
       : null;
   }
 
-  const topicMatch = scope.match(new RegExp(`^#(${TOPIC_SLUG_SRC})(?:@([\\w-]+)([!+*])?)?$`));
+  const topicMatch = scope.match(new RegExp(`^#(${TOPIC_SLUG_SRC})(\\*)?(?:@([\\w-]+)([!+*])?)?$`));
   if (topicMatch) {
-    const agent = topicMatch[2] || null;
-    const mode = topicMatch[3] || '';
+    const agent = topicMatch[3] || null;
+    const mode = topicMatch[4] || '';
     return {
       topic: topicMatch[1].toLowerCase(),
+      topicSubtree: !!topicMatch[2],
       agent,
       adhoc: agent ? (mode === '+' || mode === '*' ? null : mode === '!') : null,
       explicitAll: false,
@@ -2633,33 +2644,36 @@ function startSearch(rawArgs) {
   const parsed = parseSearchInput(rawArgs);
 
   if (!parsed.keywords) {
-    showCmdFeedback('Usage: /s [#topic[@agent[!|*]] | #topic@agent>@agent | @agent[!|*] | #all] keywords…');
+    showCmdFeedback('Usage: /s [#topic[*][@agent[!|*]] | #topic@agent>@agent | @agent[!|*] | #all] keywords…');
     return;
   }
 
-  let flow_route, topic, agent, adhoc;
+  let flow_route, topic, agent, adhoc, topicSubtree;
   const explicitAll = parsed.explicitAll;
   if (parsed.explicitScope) {
     // explicit scope typed in command overrides the active filter
     flow_route = parsed.flow_route || null;
     topic = parsed.topic;
+    topicSubtree = !!parsed.topicSubtree;
     agent = parsed.agent || null;
     adhoc = parsed.adhoc;
   } else if (historyFilter.flow_route || historyFilter.topic || historyFilter.agent) {
     // active history filter (set by /filter or tag click)
     flow_route = historyFilter.flow_route || null;
     topic = historyFilter.topic || null;
+    topicSubtree = !!historyFilter.topicSubtree;
     agent = historyFilter.agent || null;
     adhoc = historyFilter.adhoc ?? null;
   } else {
     // fall back to sticky chip (current chat context)
     flow_route = stickyChip?.route ? canonicalFlowRoute(stickyChip.route) : null;
     topic = flow_route ? null : (stickyChip?.topic || null);
+    topicSubtree = false;
     agent = flow_route ? null : (stickyChip?.agent || null);
     adhoc = flow_route ? null : (stickyChip?.adhoc ? true : false);
   }
 
-  searchState = { flow_route, topic, agent, adhoc, explicitAll, keywords: parsed.keywords };
+  searchState = { flow_route, topic, topicSubtree, agent, adhoc, explicitAll, keywords: parsed.keywords };
   searchActive = true;
   searchLoading = false;
 
@@ -3117,6 +3131,7 @@ async function loadSearchResults() {
   if (bookmarkOnlyHistory) url += '&bookmarked=true';
   if (badOnlyHistory) url += '&marked_bad=true';
   if (searchState.topic) url += `&topic=${encodeURIComponent(searchState.topic)}`;
+  if (searchState.topicSubtree) url += '&topic_subtree=true';
   if (searchState.agent) url += `&agent=${encodeURIComponent(searchState.agent)}`;
   if (searchState.adhoc !== null && searchState.adhoc !== undefined) url += `&adhoc=${searchState.adhoc}`;
   if (searchState.flow_route) url += `&flow_route=${encodeURIComponent(searchState.flow_route)}`;
@@ -3180,8 +3195,8 @@ const SQUID_COMMANDS = [
   { name: 'deq',          desc: 'drain queue (deq N removes Nth item)',               args: true  },
   { name: 'restart',      desc: 'restart the squid server — kills any in-flight prompts (confirms first)', args: false },
   { name: 'refresh',      desc: 'hard refresh this browser tab — clears cache, server untouched', args: false },
-  { name: 'f', alias: 'filter', desc: 'filter — e.g. /f #topic  ·  /f @agent!  ·  /f reset', args: true },
-  { name: 's', alias: 'search', desc: 'search — e.g. /s #topic kw  ·  /s @agent! kw  ·  /s #all kw', args: true },
+  { name: 'f', alias: 'filter', desc: 'filter — e.g. /f #topic  ·  /f #topic*  ·  /f @agent!  ·  /f reset', args: true },
+  { name: 's', alias: 'search', desc: 'search — e.g. /s #topic kw  ·  /s #topic* kw  ·  /s @agent! kw  ·  /s #all kw', args: true },
   { name: 'jump', alias: 'j', desc: 'jump to message or flow id — e.g. /jump 12345 · /jump flow:71', args: true },
   { name: 'bookmarks', alias: 'bm', desc: 'toggle bookmarked responses only',         args: false },
   { name: 'bad',        desc: 'toggle marked bad responses only',                     args: false },
@@ -3271,7 +3286,7 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0, opt
   if (cmd.command === 'filter') {
     const scope = parseScopeInput(cmd.args);
     if (scope === null) {
-      showCmdFeedback('Usage: /f [#topic[@agent[!|*]] | #topic@agent>@agent | @agent[!|*] | reset]');
+      showCmdFeedback('Usage: /f [#topic[*][@agent[!|*]] | #topic@agent>@agent | @agent[!|*] | reset]');
       return;
     }
     if (scope?.flow_route) filterByFlowRoute(scope.flow_route);
@@ -3287,7 +3302,7 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0, opt
 
   if (cmd.command === 'search') {
     if (!cmd.args) {
-      showCmdFeedback('Usage: /s [#topic[@agent[!|*]] | #topic@agent>@agent | @agent[!|*] | #all] keywords…');
+      showCmdFeedback('Usage: /s [#topic[*][@agent[!|*]] | #topic@agent>@agent | @agent[!|*] | #all] keywords…');
       return;
     }
     startSearch(cmd.args);
@@ -15953,7 +15968,7 @@ updateSearchButton();
 function formatFilterCommand(state) {
   if (state.flow_route) return `/f ${state.flow_route}`;
   let scope = '';
-  if (state.topic) scope = '#' + state.topic;
+  if (state.topic) scope = '#' + state.topic + (state.topicSubtree ? '*' : '');
   if (state.agent) {
     scope += '@' + state.agent;
     if (state.adhoc === true) scope += '!';
@@ -16060,7 +16075,7 @@ function formatSearchCommand(state) {
   if (state.flow_route) {
     cmd += state.flow_route + ' ';
   } else if (state.explicitAll || state.topic) {
-    cmd += state.explicitAll ? '#all' : '#' + state.topic;
+    cmd += state.explicitAll ? '#all' : '#' + state.topic + (state.topicSubtree ? '*' : '');
     if (state.agent) cmd += '@' + state.agent;
     if (state.agent && state.adhoc === true) cmd += '!';
     else if (state.agent && state.adhoc === null) cmd += '*';

@@ -11,7 +11,7 @@ from .stats_db import (
 def list_history(topic: Optional[str] = None, agent: Optional[str] = None,
                  adhoc: Optional[bool] = None, offset: int = 0, limit: int = 20,
                  flow_route: Optional[str] = None, bookmarked: bool = False,
-                 marked_bad: bool = False) -> dict:
+                 marked_bad: bool = False, topic_subtree: bool = False) -> dict:
     return get_messages_flat(
         topic=topic,
         agent=agent,
@@ -21,6 +21,7 @@ def list_history(topic: Optional[str] = None, agent: Optional[str] = None,
         flow_route=flow_route,
         bookmarked=bookmarked,
         marked_bad=marked_bad,
+        topic_subtree=topic_subtree,
     )
 
 
@@ -35,7 +36,8 @@ def list_history_around(msg_id: Optional[int] = None, flow_run_id: Optional[str]
                         cursor_id: Optional[int] = None, limit: int = 20,
                         topic: Optional[str] = None, agent: Optional[str] = None,
                         adhoc: Optional[bool] = None, flow_route: Optional[str] = None,
-                        bookmarked: bool = False, marked_bad: bool = False) -> dict:
+                        bookmarked: bool = False, marked_bad: bool = False,
+                        topic_subtree: bool = False) -> dict:
     if direction and cursor_completed_at and cursor_id is not None:
         return get_messages_from_cursor(
             direction=direction,
@@ -48,6 +50,7 @@ def list_history_around(msg_id: Optional[int] = None, flow_run_id: Optional[str]
             flow_route=flow_route,
             bookmarked=bookmarked,
             marked_bad=marked_bad,
+            topic_subtree=topic_subtree,
         )
     if msg_id is None:
         if flow_run_id:
@@ -61,6 +64,7 @@ def list_history_around(msg_id: Optional[int] = None, flow_run_id: Optional[str]
                 flow_route=flow_route,
                 bookmarked=bookmarked,
                 marked_bad=marked_bad,
+                topic_subtree=topic_subtree,
             )
         return {"items": [], "found": False, "has_older": False, "has_newer": False}
     return get_messages_around(
@@ -73,4 +77,5 @@ def list_history_around(msg_id: Optional[int] = None, flow_run_id: Optional[str]
         flow_route=flow_route,
         bookmarked=bookmarked,
         marked_bad=marked_bad,
+        topic_subtree=topic_subtree,
     )

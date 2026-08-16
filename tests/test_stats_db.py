@@ -2613,3 +2613,39 @@ def test_mark_worktree_synced_updates_status_and_last_used(tmp_path, monkeypatch
     after = stats_db.get_worktrees("t", "901")[0]
     assert after["status"] == "synced"
     assert after["last_used_at"] >= before["last_used_at"]
+
+
+def _seed_topic_history(topics):
+    for topic in topics:
+        uid = stats_db.insert_user_message(topic, "codex", "prompt")
+        stats_db.insert_assistant_message(topic, "codex", uid)
+
+
+def test_topic_subtree_filter_matches_segment_boundary(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    _seed_topic_history(["t1", "t1.cat1", "t1.cat2", "t1.cat1.sub1", "t1aaa", "t10"])
+
+    def topics(topic, subtree=False):
+        payload = stats_db.get_messages_flat(topic=topic, topic_subtree=subtree)
+        return {item["topic"] for item in payload["items"]}
+
+    # Subtree: t1 plus every dot-separated descendant — not sibling prefixes.
+    assert topics("t1", subtree=True) == {"t1", "t1.cat1", "t1.cat2", "t1.cat1.sub1"}
+    # Exact is unchanged.
+    assert topics("t1") == {"t1"}
+    # Wildcard works at any depth.
+    assert topics("t1.cat1", subtree=True) == {"t1.cat1", "t1.cat1.sub1"}
+    assert topics("t1.cat1") == {"t1.cat1"}
+
+
+def test_topic_subtree_filter_escapes_like_wildcards(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    # 't1_cat' must not LIKE-match 't1acat' — '_' is a slug character, not a wildcard.
+    _seed_topic_history(["t1_cat", "t1_cat.sub", "t1acat", "t1acat.sub"])
+
+    payload = stats_db.get_messages_flat(topic="t1_cat", topic_subtree=True)
+    assert {item["topic"] for item in payload["items"]} == {"t1_cat", "t1_cat.sub"}

@@ -648,3 +648,60 @@ test('a recovered pending item is shown only while it matches the active filter'
   await page.waitForTimeout(300);
   await expect(page.locator('.msg-thinking.history-item')).toHaveCount(0);
 });
+
+test('/f #topic* filters the whole subtree and sends topic_subtree=true', async ({ page }) => {
+  await mockBackend(page);
+
+  let capturedUrl = null;
+  await page.route('**/history**', async route => {
+    capturedUrl = route.request().url();
+    await route.fulfill({ json: { items: [], has_more: false } });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '/f #squid*');
+  await page.keyboard.press('Enter');
+
+  await page.waitForTimeout(300);
+  expect(capturedUrl).toMatch(/topic=squid/);
+  expect(capturedUrl).toMatch(/topic_subtree=true/);
+  await expect(page.locator('.filter-scope-topic')).toContainText('#squid*');
+});
+
+test('/f #topic.cat* filters a nested subtree at any depth', async ({ page }) => {
+  await mockBackend(page);
+
+  let capturedUrl = null;
+  await page.route('**/history**', async route => {
+    capturedUrl = route.request().url();
+    await route.fulfill({ json: { items: [], has_more: false } });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '/f #squid.cat1*');
+  await page.keyboard.press('Enter');
+
+  await page.waitForTimeout(300);
+  expect(capturedUrl).toMatch(/topic=squid\.cat1/);
+  expect(capturedUrl).toMatch(/topic_subtree=true/);
+  await expect(page.locator('.filter-scope-topic')).toContainText('#squid.cat1*');
+});
+
+test('/f #topic* without a wildcard stays exact (no topic_subtree param)', async ({ page }) => {
+  await mockBackend(page);
+
+  let capturedUrl = null;
+  await page.route('**/history**', async route => {
+    capturedUrl = route.request().url();
+    await route.fulfill({ json: { items: [], has_more: false } });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', '/f #squid');
+  await page.keyboard.press('Enter');
+
+  await page.waitForTimeout(300);
+  expect(capturedUrl).toMatch(/topic=squid/);
+  expect(capturedUrl).not.toMatch(/topic_subtree/);
+  await expect(page.locator('.filter-scope-topic')).toContainText('#squid');
+});

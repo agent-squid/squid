@@ -518,3 +518,22 @@ test('a completed live response is not added to the visible list while searching
 
   await expect(page.locator('.msg.assistant:not(.msg-thinking)').filter({ hasText: 'New response' })).toHaveCount(0);
 });
+
+test('explicit #topic* search scope sends topic_subtree=true', async ({ page }) => {
+  await mockBackend(page);
+  await page.unroute('**/search**');
+  const searchUrls = [];
+  await page.route('**/search**', route => {
+    searchUrls.push(route.request().url());
+    return route.fulfill({ json: { items: [] } });
+  });
+  await page.goto('/');
+
+  await page.fill('#input', '/s #squid* needle');
+  await page.keyboard.press('Enter');
+
+  const last = searchUrls[searchUrls.length - 1];
+  expect(last).toContain('topic=squid');
+  expect(last).toContain('topic_subtree=true');
+  await expect(page.locator('#filter-badge-label')).toContainText('#squid*');
+});

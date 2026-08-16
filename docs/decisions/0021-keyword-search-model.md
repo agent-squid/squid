@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-06-16
-updated: 2026-07-15
+updated: 2026-08-16
 ---
 # ADR-0021: Keyword Search Model and Conventions
 
@@ -112,6 +112,7 @@ controls which topic, agent, and session type is searched.
 |--------|-------|-------|--------------|
 | *(none)* | from active filter or sticky chip | same | from active filter or sticky chip |
 | `#topic` | specified | all | none (session + adhoc) |
+| `#topic*` | specified subtree | all | none (session + adhoc) |
 | `#topic@agent` | specified | exact | session-only |
 | `#topic@agent!` | specified | exact | adhoc-only |
 | `#topic@agent+` | specified | exact | none (session + adhoc) |
@@ -125,6 +126,14 @@ lane, `!` means the adhoc lane, and `+` means both (`parseScopeInput` in
 `ui/app.js`). `+` does not prefix-match agent names and is not valid on a
 topic. A bare `#topic` is already the whole topic across every agent and
 execution mode.
+
+A trailing `*` on the topic segment selects the **subtree**: `#topic*` matches
+`topic` plus every dot-separated descendant (`topic.cat1`, `topic.cat1.sub1`),
+but not `topicaaa` — the wildcard binds at the segment boundary, not as a
+string prefix (see ADR-0008). It applies to search exactly as it does to
+`/filter`: the scope is sent as `topic=<slug>&topic_subtree=true`, and the SQL
+predicate is `topic = <slug> OR topic LIKE '<slug>.%'` (with `_`/`%` escaped in
+the slug).
 
 When no explicit scope is given, scope resolution follows this priority:
 

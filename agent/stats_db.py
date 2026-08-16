@@ -2303,10 +2303,30 @@ def get_message(msg_id: int) -> Optional[dict]:
     return result
 
 
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _topic_filter_clause(topic: Optional[str], topic_subtree: bool,
+                         params: list, alias: str = "m") -> str:
+    """Topic WHERE clause. Exact match by default; with topic_subtree a topic
+    matches itself plus every dot-separated descendant — 't1' matches 't1',
+    't1.cat1', 't1.cat1.sub1' but not 't1aaa' (segment-boundary wildcard,
+    ADR-0008)."""
+    if not topic:
+        return ""
+    if topic_subtree:
+        params.append(topic)
+        params.append(_escape_like(topic) + ".%")
+        return f"({alias}.topic = ? OR {alias}.topic LIKE ? ESCAPE '\\')"
+    params.append(topic)
+    return f"{alias}.topic = ?"
+
+
 def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
                       adhoc: Optional[bool] = None, offset: int = 0, limit: int = 20,
                       flow_route: Optional[str] = None, bookmarked: bool = False,
-                      marked_bad: bool = False) -> dict:
+                      marked_bad: bool = False, topic_subtree: bool = False) -> dict:
     where = "WHERE m.role = 'assistant'"
     params: list = []
     bookmark_join = (
@@ -2318,8 +2338,7 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
         if marked_bad else ""
     )
     if topic:
-        where += " AND m.topic = ?"
-        params.append(topic)
+        where += " AND " + _topic_filter_clause(topic, topic_subtree, params)
     if agent:
         where += " AND m.agent = ?"
         params.append(agent)
@@ -2377,7 +2396,8 @@ def get_messages_flat(topic: Optional[str] = None, agent: Optional[str] = None,
 
 def _history_filter_sql(topic: Optional[str] = None, agent: Optional[str] = None,
                         adhoc: Optional[bool] = None, flow_route: Optional[str] = None,
-                        bookmarked: bool = False, marked_bad: bool = False) -> tuple[str, list, str, str]:
+                        bookmarked: bool = False, marked_bad: bool = False,
+                        topic_subtree: bool = False) -> tuple[str, list, str, str]:
     where = "WHERE m.role = 'assistant'"
     params: list = []
     bookmark_join = (
@@ -2389,8 +2409,7 @@ def _history_filter_sql(topic: Optional[str] = None, agent: Optional[str] = None
         if marked_bad else ""
     )
     if topic:
-        where += " AND m.topic = ?"
-        params.append(topic)
+        where += " AND " + _topic_filter_clause(topic, topic_subtree, params)
     if agent:
         where += " AND m.agent = ?"
         params.append(agent)
@@ -2447,12 +2466,13 @@ def _history_cursor(item: Optional[dict]) -> Optional[dict]:
 def get_messages_around(msg_id: int, before: int = 20, after: int = 20,
                         topic: Optional[str] = None, agent: Optional[str] = None,
                         adhoc: Optional[bool] = None, flow_route: Optional[str] = None,
-                        bookmarked: bool = False, marked_bad: bool = False) -> dict:
+                        bookmarked: bool = False, marked_bad: bool = False,
+                        topic_subtree: bool = False) -> dict:
     before = max(0, min(int(before), 100))
     after = max(0, min(int(after), 100))
     where, params, bookmark_join, marked_bad_join = _history_filter_sql(
         topic=topic, agent=agent, adhoc=adhoc, flow_route=flow_route,
-        bookmarked=bookmarked, marked_bad=marked_bad,
+        bookmarked=bookmarked, marked_bad=marked_bad, topic_subtree=topic_subtree,
     )
     with _connect() as conn:
         target_rows = _history_rows(
@@ -2505,13 +2525,14 @@ def get_messages_around(msg_id: int, before: int = 20, after: int = 20,
 def get_messages_around_flow(flow_run_id: str, before: int = 20, after: int = 20,
                              topic: Optional[str] = None, agent: Optional[str] = None,
                              adhoc: Optional[bool] = None, flow_route: Optional[str] = None,
-                             bookmarked: bool = False, marked_bad: bool = False) -> dict:
+                             bookmarked: bool = False, marked_bad: bool = False,
+                             topic_subtree: bool = False) -> dict:
     flow_run_id = str(flow_run_id or "").strip()
     if not flow_run_id:
         return {"items": [], "flow_run_id": flow_run_id, "found": False, "has_older": False, "has_newer": False}
     where, params, bookmark_join, marked_bad_join = _history_filter_sql(
         topic=topic, agent=agent, adhoc=adhoc, flow_route=flow_route,
-        bookmarked=bookmarked, marked_bad=marked_bad,
+        bookmarked=bookmarked, marked_bad=marked_bad, topic_subtree=topic_subtree,
     )
     with _connect() as conn:
         anchors = _history_rows(
@@ -2535,6 +2556,7 @@ def get_messages_around_flow(flow_run_id: str, before: int = 20, after: int = 20
         flow_route=flow_route,
         bookmarked=bookmarked,
         marked_bad=marked_bad,
+        topic_subtree=topic_subtree,
     )
     payload["flow_run_id"] = flow_run_id
     return payload
@@ -2544,11 +2566,11 @@ def get_messages_from_cursor(direction: str, cursor_completed_at: str, cursor_id
                              limit: int = 20, topic: Optional[str] = None,
                              agent: Optional[str] = None, adhoc: Optional[bool] = None,
                              flow_route: Optional[str] = None, bookmarked: bool = False,
-                             marked_bad: bool = False) -> dict:
+                             marked_bad: bool = False, topic_subtree: bool = False) -> dict:
     limit = max(1, min(int(limit), 100))
     where, params, bookmark_join, marked_bad_join = _history_filter_sql(
         topic=topic, agent=agent, adhoc=adhoc, flow_route=flow_route,
-        bookmarked=bookmarked, marked_bad=marked_bad,
+        bookmarked=bookmarked, marked_bad=marked_bad, topic_subtree=topic_subtree,
     )
     if direction == "newer":
         cursor_where = where + f" AND ({_turn_end_expr('m')} > ? OR ({_turn_end_expr('m')} = ? AND m.id > ?))"
@@ -2622,7 +2644,7 @@ def _build_fts_match(q: str) -> str:
 def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = None,
                     adhoc: Optional[bool] = None, limit: int = 100,
                     bookmarked: bool = False, flow_route: Optional[str] = None,
-                    marked_bad: bool = False) -> dict:
+                    marked_bad: bool = False, topic_subtree: bool = False) -> dict:
     terms = _build_fts_match(q)
     if not terms:
         return {"items": []}
@@ -2635,8 +2657,7 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
     params: list = [terms]
 
     if topic:
-        where_parts.append("m.topic = ?")
-        params.append(topic)
+        where_parts.append(_topic_filter_clause(topic, topic_subtree, params))
     if agent:
         where_parts.append("m.agent = ?")
         params.append(agent)
@@ -2692,7 +2713,7 @@ def search_messages(q: str, topic: Optional[str] = None, agent: Optional[str] = 
 def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = None,
                    adhoc: Optional[bool] = None, limit: int = 100,
                    bookmarked: bool = False, flow_route: Optional[str] = None,
-                   marked_bad: bool = False) -> dict:
+                   marked_bad: bool = False, topic_subtree: bool = False) -> dict:
     """Search user prompts via prompts_fts. Returns assistant reply items (same shape as
     search_messages) so the frontend can render them with appendPromptOnlyHistoryItem."""
     terms = _build_fts_match(q)
@@ -2707,8 +2728,7 @@ def search_prompts(q: str, topic: Optional[str] = None, agent: Optional[str] = N
     params: list = [terms]
 
     if topic:
-        where_parts.append("m.topic = ?")
-        params.append(topic)
+        where_parts.append(_topic_filter_clause(topic, topic_subtree, params))
     if agent:
         where_parts.append("m.agent = ?")
         params.append(agent)

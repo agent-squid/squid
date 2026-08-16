@@ -28,7 +28,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,100..700,0..1,0" />
   <link rel="stylesheet" href="/vendor/atom-one-dark.min.css" />
   <link rel="stylesheet" href="/vendor/xterm.css" />
-  <link rel="stylesheet" href="style.css?v=20260816-003" />
+  <link rel="stylesheet" href="style.css?v=20260816-005" />
   <script src="/vendor/highlight.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/vendor/qrcode.min.js"></script>
@@ -275,6 +275,7 @@
           <div class="help-row"><code>/deq</code><span>drain entire pending queue</span></div>
           <div class="help-row"><code>/deq N</code><span>remove Nth item (1=first, -1=last)</span></div>
           <div class="help-row"><code>/f, /filter</code><span>filter history using the same scope syntax as search</span></div>
+          <div class="help-row"><code>/f #topic*</code><span>topic + its dot-separated subtopics (e.g. #work* → #work, #work.cat1, #work.cat1.sub1)</span></div>
           <div class="help-row"><code>/filter reset</code><span>clear the active filter</span></div>
           <div class="help-row"><code>/bookmarks, /bm</code><span>toggle to show only bookmarked responses</span></div>
           <div class="help-row"><code>/bad</code><span>toggle to show only marked bad responses</span></div>
@@ -293,6 +294,7 @@
           <div class="help-row"><span>Scope is inherited from the active filter or sticky chip — or set it explicitly in the command:</span></div>
           <div class="help-row"><code>/s fix bug</code><span>search in current scope</span></div>
           <div class="help-row"><code>/s #topic kw</code><span>all agents in topic (session + adhoc)</span></div>
+          <div class="help-row"><code>/s #topic* kw</code><span>topic + its dot-separated subtopics, all agents</span></div>
           <div class="help-row"><code>/s #topic@agent kw</code><span>agent's session lane in topic</span></div>
           <div class="help-row"><code>/s #topic@agent! kw</code><span>agent's adhoc lane in topic</span></div>
           <div class="help-row"><code>/s #topic@agent+ kw</code><span>both lanes for the exact agent in topic</span></div>
@@ -804,6 +806,6 @@
   <div id="app-tooltip"></div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script src="flow-lang.js?v=20260721-003"></script>
-  <script src="app.js?v=20260816-003"></script>
+  <script src="app.js?v=20260816-005"></script>
 </body>
 </html>

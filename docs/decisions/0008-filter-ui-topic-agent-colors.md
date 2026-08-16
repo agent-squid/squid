@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-05-25
+updated: 2026-08-16
 ---
 # ADR-0008: `#topic` and `@agent` as Separately Colored Clickable Filters
 
@@ -38,6 +39,7 @@ the composer for editing; an existing draft can be recovered with Up.
 |---|---|
 | `/f`, `/filter` | Apply the current input's full lane as the history filter |
 | `/f #work` | Filter the whole topic |
+| `/f #work*` | Filter a topic and its dot-separated subtopics |
 | `/f @claude-opus!` | Filter an agent lane across all topics |
 | `/f @claude-opus*` | Filter both modes for an agent across all topics |
 | `/f #work@claude-opus!` | Filter one topic and agent lane |
@@ -50,10 +52,34 @@ part of the agent segment; removing that segment removes both the agent and lane
 | Input | History filter |
 |---|---|
 | `/f #work` | `topic=work` — all agents, all turn types |
+| `/f #work*` | `topic=work&topic_subtree=true` — `work` plus every `work.*` descendant |
 | `/f #work@claude-opus` | `topic=work&agent=claude-opus&adhoc=false` — session turns only |
 | `/f @claude-opus!` | `agent=claude-opus&adhoc=true` — across all topics |
 | `/f @claude-opus*` | `agent=claude-opus` — session and adhoc across all topics |
 | `/f reset` | no params — full history |
+
+### Topic subtree wildcard (`*`)
+
+A trailing `*` on a topic in a filter scope selects the **whole subtree** — the topic
+itself plus every dot-separated descendant — using a segment boundary, not string-prefix
+matching:
+
+| Pattern | Matches | Does not match |
+|---|---|---|
+| `#work` | `work` (exact) | `work.cat1`, `workaaa` |
+| `#work*` | `work`, `work.cat1`, `work.cat1.sub1` | `workaaa`, `work10` |
+| `#work.cat1*` | `work.cat1`, `work.cat1.sub1` | `work.cat1x`, `work.cat10` |
+
+The predicate is `topic == work OR topic LIKE 'work.%'` (equivalently
+`topic === 'work' || topic.startsWith('work.')` client-side). Because `*` binds at the
+segment boundary, `workaaa` — a *sibling* topic whose name merely shares the string prefix —
+never matches; it is not part of the `work` collection. The wildcard matches any depth
+(`work.cat1.sub1` included) with no `**`-style recursion. `*` is safe to reserve for this
+meaning because topic slugs are `[a-z0-9_]+(?:\.[a-z0-9_]+)*` and can never contain `*`.
+
+The `*` suffix is distinct from the existing `@agent*` adhoc-mode suffix: it sits on the
+topic segment (`#work*@claude-opus` = subtree + one agent lane; `#work@claude-opus*` = exact
+topic + both agent modes).
 
 For sent messages the server resolves a null agent from the topic's sticky agent or the
 default agent, and the chip updates post-response. But `/filter` is processed before any

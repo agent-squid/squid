@@ -1694,7 +1694,7 @@ async def health():
 async def history(offset: int = 0, limit: int = 5, topic: Optional[str] = None,
                   agent: Optional[str] = None, adhoc: Optional[bool] = None,
                   flow_route: Optional[str] = None, bookmarked: bool = False,
-                  marked_bad: bool = False):
+                  marked_bad: bool = False, topic_subtree: bool = False):
     if topic is not None:
         normalized = _normalize_topic_response(topic)
         if isinstance(normalized, JSONResponse):
@@ -1710,6 +1710,7 @@ async def history(offset: int = 0, limit: int = 5, topic: Optional[str] = None,
         flow_route=canonical_flow_route(flow_route),
         bookmarked=bookmarked,
         marked_bad=marked_bad,
+        topic_subtree=topic_subtree,
     )
     await asyncio.to_thread(_annotate_history_worktree_state, payload)
     return JSONResponse(payload)
@@ -1738,7 +1739,7 @@ async def history_around(msg_id: Optional[int] = None, flow_run_id: Optional[str
                          limit: int = 20, topic: Optional[str] = None,
                          agent: Optional[str] = None, adhoc: Optional[bool] = None,
                          flow_route: Optional[str] = None, bookmarked: bool = False,
-                         marked_bad: bool = False):
+                         marked_bad: bool = False, topic_subtree: bool = False):
     if topic is not None:
         normalized = _normalize_topic_response(topic)
         if isinstance(normalized, JSONResponse):
@@ -1762,6 +1763,7 @@ async def history_around(msg_id: Optional[int] = None, flow_run_id: Optional[str
         flow_route=canonical_flow_route(flow_route),
         bookmarked=bookmarked,
         marked_bad=marked_bad,
+        topic_subtree=topic_subtree,
     )
     await asyncio.to_thread(_annotate_history_worktree_state, payload)
     return JSONResponse(payload)
@@ -1863,7 +1865,8 @@ def _annotate_history_worktree_state(payload: dict) -> None:
 async def search(q: str, limit: int = 100, topic: Optional[str] = None,
                  agent: Optional[str] = None, adhoc: Optional[bool] = None,
                  role: str = "assistant", bookmarked: bool = False,
-                 flow_route: Optional[str] = None, marked_bad: bool = False):
+                 flow_route: Optional[str] = None, marked_bad: bool = False,
+                 topic_subtree: bool = False):
     if topic is not None:
         normalized = _normalize_topic_response(topic)
         if isinstance(normalized, JSONResponse):
@@ -1872,8 +1875,8 @@ async def search(q: str, limit: int = 100, topic: Optional[str] = None,
     limit = min(limit, 100)
     flow_route = canonical_flow_route(flow_route)
     if role == "user":
-        return JSONResponse(search_prompts(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit, bookmarked=bookmarked, flow_route=flow_route, marked_bad=marked_bad))
-    return JSONResponse(search_messages(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit, bookmarked=bookmarked, flow_route=flow_route, marked_bad=marked_bad))
+        return JSONResponse(search_prompts(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit, bookmarked=bookmarked, flow_route=flow_route, marked_bad=marked_bad, topic_subtree=topic_subtree))
+    return JSONResponse(search_messages(q=q, topic=topic, agent=agent, adhoc=adhoc, limit=limit, bookmarked=bookmarked, flow_route=flow_route, marked_bad=marked_bad, topic_subtree=topic_subtree))
 
 
 @app.get("/prompts/recent")
