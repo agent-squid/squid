@@ -795,6 +795,151 @@ test.describe('response bubble', () => {
     expect(historyReloads).toBe(0);
   });
 
+  test('filter round-trip keeps an older live prompt above newer completed history', async ({ page }) => {
+    await page.addInitScript(() => {
+      class MockWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        constructor() {
+          this.readyState = MockWebSocket.CONNECTING;
+          setTimeout(() => {
+            this.readyState = MockWebSocket.OPEN;
+            this.onopen?.();
+            this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+          });
+        }
+        send(data) {
+          const frame = JSON.parse(data);
+          if (frame.type === 'subscribe') {
+            setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+          } else if (frame.type === 'chat.start') {
+            // The live prompt gets msg_id 5, older than the completed history
+            // below. Never send chat.done — the turn stays in flight.
+            setTimeout(() => this.receive({ v: 1, type: 'command.result', request_id: frame.request_id,
+              payload: { ok: true, msg_id: 5, flow_run_id: null } }));
+          }
+        }
+        receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+        close() { this.readyState = 3; this.onclose?.(); }
+      }
+      window.WebSocket = MockWebSocket;
+    });
+    await mockBackend(page);
+    await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+    // Completed messages newer than the in-flight prompt (msg 5).
+    await page.route('**/history**', route => route.fulfill({ json: {
+      items: [
+        { id: 7, role: 'assistant', topic: 'squid', agent: 'claude', status: 'done', content: 'Done 7', prompt: 'p7', timestamp: '2026-08-15T12:00:00Z' },
+        { id: 6, role: 'assistant', topic: 'squid', agent: 'claude', status: 'done', content: 'Done 6', prompt: 'p6', timestamp: '2026-08-15T11:00:00Z' },
+      ],
+      has_more: false,
+    }}));
+
+    await page.goto('/');
+    await sendMsg(page, 'slow live prompt');
+    await expect(page.locator('.msg.assistant.msg-thinking[data-msg-id="5"]')).toBeAttached();
+
+    // Toggle a filter on and back off. reloadHistory() preserves the live group
+    // but clears completed history, which loadHistory() must re-anchor below the
+    // older live prompt — not above it.
+    await page.evaluate(() => applyHistoryFilter({ topic: 'squid', agent: null, adhoc: null, flow_route: null }));
+    await page.evaluate(() => clearFilter());
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="6"]')).toBeAttached({ timeout: 5_000 });
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="7"]')).toBeAttached({ timeout: 5_000 });
+
+    const order = await page.locator('#messages > .msg.assistant[data-msg-id]').evaluateAll(
+      nodes => nodes.map(node => Number(node.dataset.msgId)),
+    );
+    expect(order).toEqual([5, 6, 7]);
+  });
+
+  test('filter round-trip does not flip a completed response above its own user prompt', async ({ page }) => {
+    await page.addInitScript(() => {
+      let startCount = 0;
+      class MockWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        constructor() {
+          this.readyState = MockWebSocket.CONNECTING;
+          window.__mockWs = this;
+          setTimeout(() => {
+            this.readyState = MockWebSocket.OPEN;
+            this.onopen?.();
+            this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+          });
+        }
+        send(data) {
+          const frame = JSON.parse(data);
+          if (frame.type === 'subscribe') {
+            setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+          } else if (frame.type === 'chat.start') {
+            startCount++;
+            const msgId = startCount === 1 ? 6 : 7;
+            setTimeout(() => this.receive({ v: 1, type: 'command.result', request_id: frame.request_id,
+              payload: { ok: true, msg_id: msgId, flow_run_id: null } }));
+          }
+        }
+        receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+        close() { this.readyState = 3; this.onclose?.(); }
+      }
+      window.WebSocket = MockWebSocket;
+    });
+    await mockBackend(page);
+    await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+    await page.route('**/chat/6/status', route => route.fulfill({ json: {
+      id: 6, role: 'assistant', reply_to: 5, topic: 'default', agent: 'claude', backend: 'claude',
+      adhoc: false, status: 'done', prompt: "what's your model?", content: 'Done 6',
+      completed_at: '2026-08-15T12:00:00Z',
+    }}));
+    let exposeHistory = false;
+    await page.route('**/history**', route => route.fulfill({ json: {
+      items: exposeHistory ? [{
+        id: 6, role: 'assistant', topic: 'default', agent: 'claude', status: 'done',
+        content: 'Done 6', prompt: "what's your model?", timestamp: '2026-08-15T12:00:00Z',
+      }] : [],
+      has_more: false,
+    }}));
+
+    await page.goto('/');
+    await sendMsg(page, "what's your model?");
+    await expect(page.locator('.msg.assistant.msg-thinking[data-msg-id="6"]')).toBeAttached();
+    await sendMsg(page, 'hi');
+    await expect(page.locator('.msg.assistant.msg-thinking[data-msg-id="7"]')).toBeAttached();
+
+    // Complete msg 6 *after* msg 7 has started, so its completed response is
+    // inserted below the still-live msg 7 group and the two user bubbles end up
+    // adjacent with no assistant element between them.
+    await page.evaluate(() => {
+      window.__mockWs.receive({ v: 1, type: 'chat.text', event_id: 1, msg_id: 6, run_seq: 0, payload: { text: 'Done 6' } });
+      window.__mockWs.receive({ v: 1, type: 'chat.done', event_id: 2, msg_id: 6, run_seq: 1, payload: {} });
+    });
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="6"]')).toBeAttached({ timeout: 5_000 });
+
+    const preOrder = await page.locator('#messages > .msg.assistant[data-msg-id]').evaluateAll(
+      nodes => nodes.map(node => Number(node.dataset.msgId)),
+    );
+    expect(preOrder).toEqual([7, 6]);
+
+    exposeHistory = true;
+    await page.evaluate(() => applyHistoryFilter({ topic: 'squid', agent: null, adhoc: null, flow_route: null }));
+    await page.evaluate(() => clearFilter());
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="6"]')).toBeAttached({ timeout: 5_000 });
+
+    const order = await page.locator('#messages > .msg.assistant[data-msg-id]').evaluateAll(
+      nodes => nodes.map(node => Number(node.dataset.msgId)),
+    );
+    expect(order).toEqual([6, 7]);
+    // The completed turn's standalone user bubble must be gone — its prompt is
+    // embedded in the re-fetched history item. A leftover "what's your model?"
+    // bubble here is the flipped "response first, then user prompt" symptom.
+    const userTexts = await page.locator('#messages > .msg.user').evaluateAll(
+      nodes => nodes.map(node => node.textContent.trim()),
+    );
+    expect(userTexts).toHaveLength(1);
+    expect(userTexts[0]).toContain('hi');
+    expect(userTexts[0]).not.toContain("what's your model?");
+  });
+
   test('context indicator shows compact session turn, memory, and pin counts', async ({ page }) => {
     await page.route('**/topics/*/memory', r => r.fulfill({ json: {
       topic: 'squid',

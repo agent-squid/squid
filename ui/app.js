@@ -1771,24 +1771,41 @@ function clearFilter() {
 // scope is active they stay hidden (can't be evaluated against keywords until it lands in
 // the DB), but while a filter scope is active each group is shown or hidden based on whether
 // its own topic/agent/adhoc (tracked on the thinking bubble's dataset) matches the filter.
+// Elements that make up the live group headed by `thinking`, in DOM order:
+// [route-chain-marker?][user bubble][#code-roots-prompt?][msg-time][thinking].
+// The backward walk stops at the first user bubble so a *previous* turn's user
+// bubble/timestamp is never swept in. A completed response can render below a
+// still-streaming group (concurrent turns append their response bubble at the
+// end), leaving two turns' user bubbles adjacent with no assistant element
+// between them. Without the stop, the older turn's prompt would be re-anchored
+// with the newer live turn and end up *below* its own re-fetched response.
+function liveGroupElements(thinking) {
+  const group = [thinking];
+  let el = thinking.previousElementSibling;
+  let sawUser = false;
+  while (el) {
+    const marker = el.classList.contains('route-chain-marker') || el.id === 'code-roots-prompt';
+    if (marker) {
+      group.push(el);
+    } else if (!sawUser && el.classList.contains('msg-time')) {
+      group.push(el);
+    } else if (!sawUser && el.classList.contains('msg') && el.classList.contains('user')) {
+      group.push(el);
+      sawUser = true;
+    } else {
+      break;
+    }
+    el = el.previousElementSibling;
+  }
+  return group.reverse();
+}
+
 function collectLiveGroupElements() {
   const group = new Set();
   document.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)').forEach(thinking => {
-    group.add(thinking);
-    let el = thinking.previousElementSibling;
-    while (el && isLiveGroupPreviousElement(el)) {
-      group.add(el);
-      el = el.previousElementSibling;
-    }
+    liveGroupElements(thinking).forEach(el => group.add(el));
   });
   return group;
-}
-
-function isLiveGroupPreviousElement(el) {
-  return el.classList.contains('msg-time')
-    || el.classList.contains('route-chain-marker')
-    || el.id === 'code-roots-prompt'
-    || (el.classList.contains('msg') && el.classList.contains('user'));
 }
 
 // A freshly-fetched history page always anchors to "before the first live
@@ -1801,25 +1818,13 @@ function anchorBeforeNextLiveGroup(maxId) {
   for (const thinking of thinkings) {
     const key = thinking.dataset.msgId ? parseInt(thinking.dataset.msgId, 10) : Infinity;
     if (key <= maxId) continue;
-    let first = thinking;
-    let el = thinking.previousElementSibling;
-    while (el && isLiveGroupPreviousElement(el)) {
-      first = el;
-      el = el.previousElementSibling;
-    }
-    return first;
+    return liveGroupElements(thinking)[0];
   }
   return null;
 }
 
 function setLiveGroupHidden(hidden) {
   document.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)').forEach(thinking => {
-    const group = [thinking];
-    let el = thinking.previousElementSibling;
-    while (el && isLiveGroupPreviousElement(el)) {
-      group.push(el);
-      el = el.previousElementSibling;
-    }
     // Search scope can't be matched client-side (keywords aren't tracked on the live
     // bubble), so a search in progress forces the whole group hidden. A filter scope can
     // be matched — only hide groups that don't belong to it.
@@ -1829,7 +1834,7 @@ function setLiveGroupHidden(hidden) {
       adhoc: thinking.dataset.adhoc === '1',
       flow_route: thinking.dataset.flowRoute || null,
     }, historyFilter));
-    group.forEach(node => node.classList.toggle('live-hidden', stayHidden));
+    liveGroupElements(thinking).forEach(node => node.classList.toggle('live-hidden', stayHidden));
   });
 }
 
@@ -2171,9 +2176,22 @@ async function loadHistory() {
   // already rendered, so it must anchor at the very top — anchoring it before a
   // live group instead would land it mid-transcript and make the scrollTop
   // compensation below yank the view down instead of holding it in place.
-  const anchor = (historyOffset === 0 && items.length ? anchorBeforeNextLiveGroup(items[0].id) : null)
-    || (topSentinel ? topSentinel.nextSibling : messages.firstChild);
-  messages.insertBefore(fragment, anchor);
+  let anchor;
+  if (historyOffset === 0 && items.length) {
+    anchor = anchorBeforeNextLiveGroup(items[0].id);
+    if (!anchor) {
+      // No live group is newer than this page, so any preserved live groups are
+      // all older than it. Anchor after the last of them instead of falling back
+      // to the top sentinel — the fallback would render those older prompts
+      // *below* newer completed messages, i.e. as the most recent ones.
+      const thinkings = document.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)');
+      anchor = thinkings.length ? thinkings[thinkings.length - 1].nextSibling : undefined;
+    }
+  }
+  if (anchor === undefined) {
+    anchor = topSentinel ? topSentinel.nextSibling : messages.firstChild;
+  }
+  messages.insertBefore(fragment, anchor || null);
   messages.scrollTop += messages.scrollHeight - prevHeight;
   markInitialHistoryReady();
 
