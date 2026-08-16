@@ -8,6 +8,7 @@ as the last item when usage data is available (claude only).
 import asyncio
 import base64
 import json
+import logging
 import os
 from pathlib import Path
 import random
@@ -20,6 +21,8 @@ from typing import AsyncGenerator, Callable, List, Optional, Union
 
 from . import sandbox_home
 from .config import CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH, OPENCODE_PATH, PI_PATH, FIRST_BYTE_TIMEOUT, RESPONSE_TIMEOUT, NATIVE_SHELL_TIMEOUT, NATIVE_SHELL_SPOOL_DIR, PROXY_ENV
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Process registry
@@ -791,6 +794,22 @@ class _ClaudeStreamParser:
         return chunks
 
 
+def _attach_session(msg_id: Optional[int], session_id: Optional[str]) -> None:
+    """Persist a harness-reported session id the moment it is known, so a turn
+    that later fails or is cancelled still links back to its raw session log.
+
+    COALESCE — never overwrites an already-attached id. Best-effort: a failure
+    to attach must not fail the turn itself.
+    """
+    if not msg_id or not session_id:
+        return
+    from .stats_db import attach_assistant_session
+    try:
+        attach_assistant_session(msg_id, session_id)
+    except Exception:
+        log.warning("attach_assistant_session failed msg_id=%s", msg_id, exc_info=True)
+
+
 async def _stream_lines(
     cmd: List[str],
     cwd: Optional[str] = None,
@@ -1084,9 +1103,13 @@ async def run_claude(
     parser = _ClaudeStreamParser(history, emit_init_diag=msg_id is not None)
     env_for_claude = _claude_child_env(backend_id, backend_env)
 
+    session_attached = False
     async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, prompt_preview=prompt_preview, extra_env=env_for_claude):
         for chunk in parser.feed_line(line):
             yield chunk
+        if parser.session_id and not session_attached:
+            _attach_session(msg_id, parser.session_id)
+            session_attached = True
 
 
 # After ask_followup_question tool use is detected, wait this long for a result
@@ -1330,6 +1353,7 @@ class _ClaudeInteractiveCLI:
                 label = turn_agent_label.strip() or "Agent"
                 return [{"_status": f"[{label}] {text}\n"}]
 
+            session_attached = False
             try:
                 while True:
                     remaining = deadline - asyncio.get_event_loop().time()
@@ -1388,6 +1412,9 @@ class _ClaudeInteractiveCLI:
                         turn_live_chunks = []
 
                     chunks = parser.feed_line(line_text)
+                    if parser.session_id and not session_attached:
+                        _attach_session(msg_id, parser.session_id)
+                        session_attached = True
                     for chunk in chunks:
                         if isinstance(chunk, dict) and "_diag" in chunk:
                             yield chunk
@@ -1584,9 +1611,11 @@ async def run_codex(
         params = event.get("params") if isinstance(event.get("params"), dict) else {}
         if t == "thread.started":
             thread_id = event.get("thread_id")
+            _attach_session(msg_id, thread_id)
         elif t == "session_meta":
             payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
             thread_id = payload.get("id") or thread_id
+            _attach_session(msg_id, thread_id)
         elif t in ("event_msg", "response_item"):
             payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
             if payload.get("type") in ("image_generation_call", "image_generation_end"):
@@ -1841,6 +1870,7 @@ async def run_cursor(
 
         if t == "system":
             session_id = event.get("session_id")
+            _attach_session(msg_id, session_id)
 
         elif t == "thinking" and event.get("subtype") == "delta":
             text = event.get("text", "")
@@ -2062,6 +2092,7 @@ async def run_opencode(
 
         if session_id is None:
             session_id = event.get("sessionID")
+            _attach_session(msg_id, session_id)
 
         if t == "text":
             text = event.get("part", {}).get("text", "")
@@ -2153,6 +2184,7 @@ async def run_pi(
 
     start_ms = time.monotonic() * 1000
     session_id: Optional[str] = None
+    session_attached = False
     final_text_yielded = False
     final_message: dict = {}
     total_input = total_output = total_cache_read = total_cache_write = 0
@@ -2169,6 +2201,9 @@ async def run_pi(
         t = event.get("type", "")
         if t == "session":
             session_id = event.get("id") or session_id
+            if session_id and not session_attached:
+                _attach_session(msg_id, session_id)
+                session_attached = True
         elif t == "message_update":
             update = event.get("assistantMessageEvent") or {}
             if not isinstance(update, dict):

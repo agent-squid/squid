@@ -1456,6 +1456,21 @@ def test_rebind_pending_assistant_session_replaces_enqueue_time_session(tmp_path
     assert stats_db.get_message(msg_id)["session_id"] is None
 
 
+def test_update_assistant_message_does_not_wipe_attached_session_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user_id = stats_db.insert_user_message("squid", "codex", "prompt")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    assert stats_db.attach_assistant_session(msg_id, "sess-123")
+
+    # An error write that never learned a session id (the failure/cancel path)
+    # must not erase the id already attached at capture time.
+    stats_db.update_assistant_message(msg_id, "boom", None, "error", only_if_pending=True)
+
+    assert stats_db.get_message(msg_id)["session_id"] == "sess-123"
+
+
 def test_history_items_prefer_stored_completed_at(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

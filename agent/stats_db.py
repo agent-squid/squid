@@ -1811,7 +1811,7 @@ def update_assistant_message(
     with _connect() as conn:
         if only_if_pending:
             cur = conn.execute(
-                "UPDATE chat_messages SET content=?, session_id=?, status=?, context=?, status_raw=?,"
+                "UPDATE chat_messages SET content=?, session_id=COALESCE(session_id, ?), status=?, context=?, status_raw=?,"
                 " completed_at=CASE WHEN ? THEN COALESCE(completed_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')) ELSE completed_at END"
                 " WHERE id=? AND status='pending'",
                 (content, session_id, status, context, status_raw, 1 if terminal else 0, msg_id),
@@ -1820,7 +1820,7 @@ def update_assistant_message(
                 _ensure_session_turn_index(conn, msg_id, session_id)
         else:
             cur = conn.execute(
-                "UPDATE chat_messages SET content=?, session_id=?, status=?, context=?, status_raw=?,"
+                "UPDATE chat_messages SET content=?, session_id=COALESCE(session_id, ?), status=?, context=?, status_raw=?,"
                 " completed_at=CASE WHEN ? THEN COALESCE(completed_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')) ELSE completed_at END"
                 " WHERE id=?",
                 (content, session_id, status, context, status_raw, 1 if terminal else 0, msg_id),
