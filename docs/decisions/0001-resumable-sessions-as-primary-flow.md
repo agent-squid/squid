@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-05-25
-updated: 2026-07-15
+updated: 2026-08-16
 ---
 # ADR-0001: Session Management — Resumable and Adhoc Modes
 
@@ -66,8 +66,8 @@ in the agent-creation UI):
 | Claude Code (`claudecode`) | `--resume SESSION_ID`   | `system.session_id` |
 | Codex (`codex`)            | `exec resume SESSION_ID`| `thread.started.thread_id` |
 | Cursor (`cursor`)          | `--resume SESSION_ID`   | `system.session_id` |
-| OpenCode (`opencode`)      | `--resume SESSION_ID`   | `system.session_id` |
-| Pi (`pi`)                  | `--resume SESSION_ID`   | `system.session_id` |
+| OpenCode (`opencode`)      | `--session SESSION_ID`  | `sessionID` (top-level envelope) |
+| Pi (`pi`)                  | `--session-id SESSION_ID`| `session.id`       |
 
 Copilot and Antigravity (`run_copilot`/`run_antigravity` in `agent/runners.py`)
 remain experimental runners — implemented but not part of
@@ -77,9 +77,13 @@ ADR-0024's "Consequences"). Their resume mechanics (`--resume=SESSION_ID` /
 Antigravity) still work the same way if invoked directly, but aren't exposed
 through the harness catalog.
 
-All harnesses emit a session/thread identifier in their first event. Squid
-captures this and stores it after every response, so a `/clear` followed by a
-new message immediately establishes a fresh session_id for the next turn.
+All supported harnesses emit a session/thread identifier in their first event,
+and each runner captures it into a local variable as soon as it arrives. Squid
+stores it after every response, so a `/clear` followed by a new message
+immediately establishes a fresh session_id for the next turn. On a terminal
+path that never reaches a `stats` event (error or cancellation), the captured
+id is persisted via `COALESCE` so the turn still links back to its raw harness
+session log (see ADR-0033).
 
 ## Stale Session Recovery
 

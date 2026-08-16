@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-07-15
+updated: 2026-08-16
 ---
 # ADR-0033: Terminal Status Capture for Cancelled Turns
 
@@ -104,6 +105,29 @@ a restart-time sweep.
    Stats chart metrics and table measures ("Cancelled" / "Errors"),
    sum-only (they're counts, not distributions — no avg/percentile).
 
+11. **Session id is persisted on the terminal path via `COALESCE`** (amended
+    2026-08-16). Every supported harness (claudecode, codex, cursor, opencode,
+    pi) emits its session/thread identifier in its first event (see ADR-0001),
+    and each runner captures it into a local variable as soon as it arrives —
+    well before any usage stats are known. Points 3–4 above only preserve that
+    id for resumed turns (attached at dispatch) or once a `stats` run_event has
+    arrived; an adhoc turn, or the first turn of a session, that fails or is
+    cancelled before the final `stats` event still lost its session link. This
+    amendment closes that gap by coalescing instead of overwriting:
+
+    - `update_assistant_message` writes `session_id = COALESCE(session_id, ?)`
+      rather than a plain `session_id = ?`, so the error/final-write path cannot
+      erase an id that was already attached.
+    - The worker's end-of-run path calls `attach_assistant_session` (a bare
+      `COALESCE(session_id, ?)` with no `status`/`only_if_pending` guard) after
+      the subprocess exits. This is required for cancellation: the cancel mark
+      has already set `status='cancelled'` and won the `only_if_pending` race
+      (point 6), so the post-kill write must not go through
+      `update_assistant_message`.
+
+    If the CLI dies before it emits its first event, no session exists yet and
+    the id is correctly left NULL — there is nothing to link.
+
 ## Consequences
 
 - Every terminal outcome is visible in Stats immediately, including
@@ -114,6 +138,9 @@ a restart-time sweep.
 - Cancelled/errored turns with no `stats` run_event show zeroed
   tokens/cost/duration in by-turn drilldowns — they contribute to
   `cancelled_turns`/`error_turns` counts, not to usage totals.
+- Adhoc and first-turn failures/cancels now retain their `session_id`, so
+  every terminal row links back to the raw harness session log for
+  investigation — not just resumed turns.
 
 **Deferred from the original design** (see prior discussion) — this pass
 covers the DB/stats plumbing, not the full durable-event-log design:
