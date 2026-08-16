@@ -4753,7 +4753,7 @@ async function sendMessage(text, opts = {}) {
   thinkingHeaderText.className = 'response-header-text';
   let thinkingHeaderTag = makeTopicTag(topic, agent, { adhoc, lookback });
   thinkingHeaderText.appendChild(thinkingHeaderTag);
-  thinkingHeaderText.appendChild(document.createTextNode('  '));
+  thinkingHeaderText.appendChild(document.createTextNode('  '));
   const { promptToggle: thinkingPromptToggle, promptFullDiv: thinkingPromptFullDiv } = makeHistoryPromptToggle(message);
   thinkingHeaderText.appendChild(thinkingPromptToggle);
   thinkingHeader.appendChild(thinkingHeaderText);
@@ -4768,6 +4768,10 @@ async function sendMessage(text, opts = {}) {
   let raw = '';
   let statusRecoveredFromDb = false;
   let userAborted = false;
+  // Terminal status of this turn. Defaults to 'error' so any path that exits
+  // without a clean completion is treated as a failed turn for quota purposes;
+  // flipped to 'done'/'cancelled' on the completion/kill signals below.
+  let turnStatus = 'error';
 
   // Kill button — shown once msg_id is known, hidden when done
   const killBtn = document.createElement('button');
@@ -4788,12 +4792,14 @@ async function sendMessage(text, opts = {}) {
         });
         if (!response.ok) throw new Error('Unable to remove queued prompt.');
         userAborted = true;
+        turnStatus = 'cancelled';
         controller.abort();
         renderCancelledThinking('Dequeued.');
         pollProcs();
       } else if (msgId) {
         await cancelRealtimeMessage(msgId, topic, agent);
         userAborted = true;
+        turnStatus = 'cancelled';
         controller.abort();
         renderCancelledThinking('Cancelled.');
       }
@@ -4929,7 +4935,7 @@ async function sendMessage(text, opts = {}) {
   const headerText = document.createElement('span');
   headerText.className = 'response-header-text';
   headerText.appendChild(responseHeaderTag);
-  headerText.appendChild(document.createTextNode('  '));
+  headerText.appendChild(document.createTextNode('  '));
   const { promptToggle: responsePromptToggle, promptFullDiv: responsePromptFullDiv } = makeHistoryPromptToggle(message);
   headerText.appendChild(responsePromptToggle);
   responseHeader.appendChild(headerText);
@@ -5002,7 +5008,30 @@ async function sendMessage(text, opts = {}) {
       && quotaBeforeSnapshot?.pct != null && quotaAfterSnapshot?.pct != null;
     const quotaBefore = usePct ? quotaBeforeSnapshot.pct : (quotaBeforeSnapshot?.raw ?? null);
     const quotaAfter = usePct ? quotaAfterSnapshot.pct : (quotaAfterSnapshot?.raw ?? null);
-    if (quotaBefore !== null && quotaAfter !== null && quotaAfter !== quotaBefore) {
+    const hasSnapshot = quotaBefore !== null && quotaAfter !== null;
+    // A turn whose meter didn't move (provider reporting lag, or a small spend
+    // that rounds to zero) still records a 0 delta rather than null — null
+    // reads as "not captured" in stats, and for balance gauges like DeepSeek an
+    // unchanged balance is the common case. Only a terminal failure with no
+    // meter reading at all falls through to the explicit 0 below.
+    const terminalFailure = turnStatus !== 'done';
+    const recordQuota = (before, after) => {
+      if (msgId) {
+        fetch(`/chat/${msgId}/quota-delta`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ before, after }),
+        }).catch(() => {});
+      }
+      if (lastSessionId) {
+        fetch('/stats/quota-delta', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: lastSessionId, before, after }),
+        }).catch(() => {});
+      }
+    };
+    if (hasSnapshot) {
       // Balance-based gauges report a decreasing balance; flip sign so usage
       // always shows as positive (consistent with utilization % gauges).
       const isBalanceMeter = isBalanceGauge(quotaBackend) && !usePct;
@@ -5017,20 +5046,11 @@ async function sendMessage(text, opts = {}) {
       // context, so balance snapshots are normalized here instead.
       const recordQuotaBefore = isBalanceMeter && quotaBefore > quotaAfter ? quotaAfter : quotaBefore;
       const recordQuotaAfter = isBalanceMeter && quotaBefore > quotaAfter ? quotaBefore : quotaAfter;
-      if (msgId) {
-        fetch(`/chat/${msgId}/quota-delta`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ before: recordQuotaBefore, after: recordQuotaAfter }),
-        }).catch(() => {});
-      }
-      if (lastSessionId) {
-        fetch('/stats/quota-delta', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session_id: lastSessionId, before: recordQuotaBefore, after: recordQuotaAfter }),
-        }).catch(() => {});
-      }
+      recordQuota(recordQuotaBefore, recordQuotaAfter);
+    } else if (terminalFailure) {
+      // No meter reading at all, but the turn still ended terminal — record a
+      // zero delta so stats reflect "captured, nothing moved" instead of null.
+      recordQuota(0, 0);
     }
     quotaTrackEnd(quotaBackend);
   }
@@ -5323,6 +5343,7 @@ async function sendMessage(text, opts = {}) {
           if (completionRendered || completedFromStatus) return;
           completedFromStatus = true;
           completionRendered = true;
+          turnStatus = 'done';
           stopStatusFallback();
           doneTime = new Date().toISOString();
           const reconnectMsg = 'Connection interrupted — recovering…';
@@ -5379,6 +5400,7 @@ async function sendMessage(text, opts = {}) {
         } else if (data.status === 'error') {
           if (!String(data.content || '').trim()) return;
           completedFromStatus = true;
+          turnStatus = 'error';
           stopStatusFallback();
           if (raw || firstDataReceived) {
             parkInterruptedPartial(data.content || raw);
@@ -5390,6 +5412,7 @@ async function sendMessage(text, opts = {}) {
           finalizeQuotaTracking();
         } else if (data.status === 'cancelled') {
           completedFromStatus = true;
+          turnStatus = 'cancelled';
           stopStatusFallback();
           renderCancelledThinking(cancelledTurnLabel(data.content));
           controller.abort();
@@ -5679,6 +5702,7 @@ async function sendMessage(text, opts = {}) {
           } else if (eventName === 'stats') {
             try {
               const stats = JSON.parse(data);
+              turnStatus = 'done';
               lastSessionId = stats.session_id ?? null;
               if (stats.session_id && !adhoc) {
                 _sessionIds[`${topic}@${resolvedAgent || '_'}`] = stats.session_id;
@@ -5731,6 +5755,7 @@ async function sendMessage(text, opts = {}) {
               continue;
             }
             completionRendered = true;
+            turnStatus = 'done';
             stopStatusFallback();
             liveCtxSpan.dataset.hasTrace = (statusBuf.trim() || liveToolEvents.length) ? 'true' : 'false';
             removeThinking();
@@ -5769,6 +5794,7 @@ async function sendMessage(text, opts = {}) {
             eventName = null;
 
           } else if (eventName === 'error') {
+            turnStatus = 'error';
             stopStatusFallback();
             const errLine = data.trim();
             if (raw || firstDataReceived) {
@@ -7158,7 +7184,7 @@ function appendHistoryItem(item, container) {
     const completedAt = item.completed_at || item.stats?.completed_at || item.timestamp;
     const statsEl = addStats(asstBubble, item.stats, completedAt);
     statsEl.classList.add('history-item');
-    addDeepDiveButton(asstBubble, item.topic || 'default', item.agent || null, !!item.adhoc, statsEl, item.id, completedAt);
+    addDeepDiveButton(asstBubble, item.topic || 'default', item.agent || null, !!item.adhoc, statsEl, item.id, completedAt, item.status || 'done');
   } else if (item.completed_at || item.timestamp) {
     // Completed history is ordered by completed_at. Label it with the same
     // authoritative time so slow turns do not appear chronologically inverted.
@@ -15745,7 +15771,7 @@ function addPinButton(bubbleEl, msgId, topic, agent, sessionId = null) {
   (header || bubbleEl).appendChild(btn);
 }
 
-function addDeepDiveButton(bubbleEl, topic, agent, adhoc, statsEl, msgId, timestamp) {
+function addDeepDiveButton(bubbleEl, topic, agent, adhoc, statsEl, msgId, timestamp, status = 'done') {
   if (!statsEl) statsEl = bubbleEl.nextElementSibling;
   if (!statsEl || !statsEl.classList.contains('stats')) return;
   const existing = statsEl.querySelector('.stats-deep-dive-btn');
@@ -15757,8 +15783,8 @@ function addDeepDiveButton(bubbleEl, topic, agent, adhoc, statsEl, msgId, timest
     btn.innerHTML = `<span class="material-symbols-outlined">ssid_chart</span>`;
     btn.addEventListener('click', e => {
       e.stopPropagation();
-      if (msgId) _navigateToAnchoredStats(topic, agent, adhoc, msgId, timestamp);
-      else _navigateToDeepDive(topic, agent, adhoc);
+      if (msgId) _navigateToAnchoredStats(topic, agent, adhoc, msgId, timestamp, status);
+      else _navigateToDeepDive(topic, agent, adhoc, status);
     });
     statsEl.appendChild(btn);
   }
@@ -15840,11 +15866,14 @@ async function replyToMessage(bubbleEl, topic, agent, adhoc) {
   if (pinPanel.classList.contains('open')) renderPinPanel();
 }
 
-async function _navigateToDeepDive(topic, agent, adhoc) {
+async function _navigateToDeepDive(topic, agent, adhoc, status = 'done') {
   const state = _deepDiveStatsState();
   if (topic) state.dimensions.topic = { mode: 'selected', values: [topic] };
   if (agent) state.dimensions.agent = { mode: 'selected', values: [agent] };
   state.dimensions.session_type = { mode: 'selected', values: [adhoc ? 'adhoc' : 'session'] };
+  // Error/cancelled turns aren't completed, so the completed-only default
+  // would filter the inspected turn out — widen to all statuses instead.
+  if (status !== 'done') state.dimensions.status = { mode: 'all', values: [] };
 
   _activeStatsPresetId = null;
   _applyStatsState(state);
@@ -15862,11 +15891,14 @@ async function _navigateToDeepDive(topic, agent, adhoc) {
   }
 }
 
-async function _navigateToAnchoredStats(topic, agent, adhoc, msgId, timestamp) {
+async function _navigateToAnchoredStats(topic, agent, adhoc, msgId, timestamp, status = 'done') {
   const state = _deepDiveStatsState();
   if (topic) state.dimensions.topic = { mode: 'selected', values: [topic] };
   if (agent) state.dimensions.agent = { mode: 'selected', values: [agent] };
   state.dimensions.session_type = { mode: 'selected', values: [adhoc ? 'adhoc' : 'session'] };
+  // Error/cancelled turns aren't completed, so the completed-only default
+  // would filter the inspected turn out — widen to all statuses instead.
+  if (status !== 'done') state.dimensions.status = { mode: 'all', values: [] };
   // Keep Deep Dive's normal range and anchor that window at this turn's end
   // time, then flag its row once the table renders.
   state.time = { ...state.time, anchor: timestamp || new Date().toISOString() };
