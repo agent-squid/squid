@@ -120,6 +120,15 @@ UPDATES_INSTALL_ON_RESTART: str = str(_updates_cfg.get("install_on_restart", "as
 if UPDATES_INSTALL_ON_RESTART not in {"ask", "always", "never"}:
     UPDATES_INSTALL_ON_RESTART = "ask"
 
+# Opt-in for the macOS keychain-unlock auth-session mode (see
+# docs/plans/cursor-keychain-unlock-remediation.md) to be reachable from a
+# non-loopback client — e.g. another device on the tailnet via
+# `tailscale serve`. Off by default: typing a Mac login-keychain password
+# from a client that isn't the local machine is a deliberate, opt-in
+# tradeoff, not a default.
+_auth_cfg = _cfg.get("auth", {})
+ALLOW_REMOTE_KEYCHAIN_UNLOCK: bool = bool(_auth_cfg.get("allow_remote_keychain_unlock", False))
+
 def find_cli(name: str) -> Optional[str]:
     return shutil.which(name)
 

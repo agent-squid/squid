@@ -4253,6 +4253,7 @@ body {
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
+#auth-panel-unlock-btn,
 #auth-panel-retry-btn,
 #agents-auth-panel-retry-btn,
 #agents-auth-panel-restart-btn {
@@ -4265,6 +4266,7 @@ body {
   font-size: var(--text-sm);
   padding: 0.15rem 0.55rem;
 }
+#auth-panel-unlock-btn:hover,
 #auth-panel-retry-btn:hover,
 #agents-auth-panel-retry-btn:hover,
 #agents-auth-panel-restart-btn:hover { color: var(--accent-light); }

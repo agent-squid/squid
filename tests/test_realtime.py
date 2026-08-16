@@ -1,11 +1,13 @@
 import asyncio
+import base64
 import json
+import os
 import sqlite3
 import threading
 
 from fastapi.testclient import TestClient
 
-from agent import server, stats_db
+from agent import auth_sessions, server, stats_db
 
 
 CLIENT_ID = "testclient0000000000000001"
@@ -494,3 +496,386 @@ def test_mutation_requires_client_identity(tmp_path, monkeypatch):
         error = ws.receive_json()
         assert error["type"] == "error"
         assert error["payload"]["code"] == "client_identity_required"
+
+
+def _subscribe_auth(ws):
+    """Subscribe a scope to establish principal; drain hello/subscribed/snapshot."""
+    assert ws.receive_json()["type"] == "hello"
+    ws.send_json({
+        "v": 1, "type": "subscribe",
+        "payload": {"client_id": CLIENT_ID, "scopes": [{"topic": "squid", "agent": "codex"}]},
+    })
+    assert ws.receive_json()["type"] == "subscribed"
+    assert ws.receive_json()["type"] == "snapshot"
+
+
+def _receive_command_result(ws):
+    frame = ws.receive_json()
+    while frame["type"] != "command.result":
+        frame = ws.receive_json()
+    return frame["payload"]
+
+
+def _fake_cancel(counter):
+    async def cancel(session_id):
+        counter["n"] += 1
+        return True
+    return cancel
+
+
+def test_auth_start_streams_live_output_and_done(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    # Real create_session with a pipe standing in for the PTY master fd, so the
+    # reader/broadcast/pump path is exercised without forking a login CLI.
+    read_fd, write_fd = os.pipe()
+    monkeypatch.setattr(auth_sessions, "_spawn_pty", lambda argv, env, cols, rows: (99999, read_fd))
+    monkeypatch.setattr(auth_sessions, "_register_proc", lambda *a, **k: None)
+    monkeypatch.setattr(auth_sessions, "_deregister_proc", lambda *a, **k: None)
+    monkeypatch.setattr(auth_sessions, "_signal_process_group", lambda *a, **k: None)
+
+    async def fake_finalize(session):
+        session.mark_exited(0)
+    monkeypatch.setattr(auth_sessions, "_finalize", fake_finalize)
+
+    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        _subscribe_auth(ws)
+        ws.send_json({
+            "v": 1, "type": "auth.start", "request_id": "auth-start-1",
+            "payload": {"harness": "claudecode", "mode": "login", "cols": 80, "rows": 24},
+        })
+        result = _receive_command_result(ws)
+        assert result["ok"] is True
+        assert result["session_id"]
+
+        os.write(write_fd, b"live")
+        frame = ws.receive_json()
+        assert frame["type"] == "auth.output"
+        assert frame["payload"]["session_id"] == result["session_id"]
+        assert base64.b64decode(frame["payload"]["data"]) == b"live"
+
+        os.close(write_fd)
+        frame = ws.receive_json()
+        assert frame["type"] == "auth.done"
+        assert frame["payload"]["session_id"] == result["session_id"]
+        assert frame["payload"]["returncode"] == 0
+
+
+def test_auth_done_reports_failure_when_session_already_reaped(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    read_fd, write_fd = os.pipe()
+    monkeypatch.setattr(auth_sessions, "_spawn_pty", lambda argv, env, cols, rows: (99999, read_fd))
+    monkeypatch.setattr(auth_sessions, "_register_proc", lambda *a, **k: None)
+    monkeypatch.setattr(auth_sessions, "_deregister_proc", lambda *a, **k: None)
+    monkeypatch.setattr(auth_sessions, "_signal_process_group", lambda *a, **k: None)
+
+    async def reap_then_finalize(session):
+        # cancel_session (idle reaper / server-side cancel) pops the session from
+        # _sessions synchronously right after _closed fires, racing the pump's
+        # drain of the done sentinel. Reproduce that: mark exited — even with a
+        # clean 0 — then drop it before the pump reads the code. A reaped session
+        # must not be reported as success (returncode null would coerce to 0).
+        session.mark_exited(0)
+        auth_sessions._sessions.pop(session.id, None)
+    monkeypatch.setattr(auth_sessions, "_finalize", reap_then_finalize)
+
+    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        _subscribe_auth(ws)
+        ws.send_json({
+            "v": 1, "type": "auth.start", "request_id": "auth-start-1",
+            "payload": {"harness": "claudecode", "mode": "login", "cols": 80, "rows": 24},
+        })
+        result = _receive_command_result(ws)
+        assert result["ok"] is True
+
+        os.close(write_fd)
+        frame = ws.receive_json()
+        assert frame["type"] == "auth.done"
+        assert frame["payload"]["session_id"] == result["session_id"]
+        assert frame["payload"]["returncode"] == -1
+
+
+def test_auth_start_resend_replays_ring_without_second_session(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    read_fd, write_fd = os.pipe()
+    spawn_calls = {"n": 0}
+
+    def counting_spawn(argv, env, cols, rows):
+        spawn_calls["n"] += 1
+        return (99999, read_fd)
+    monkeypatch.setattr(auth_sessions, "_spawn_pty", counting_spawn)
+    monkeypatch.setattr(auth_sessions, "_register_proc", lambda *a, **k: None)
+    monkeypatch.setattr(auth_sessions, "_deregister_proc", lambda *a, **k: None)
+    monkeypatch.setattr(auth_sessions, "_signal_process_group", lambda *a, **k: None)
+
+    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        _subscribe_auth(ws)
+        payload = {"harness": "claudecode", "mode": "login", "cols": 80, "rows": 24}
+        ws.send_json({"v": 1, "type": "auth.start", "request_id": "auth-start-1", "payload": payload})
+        result = _receive_command_result(ws)
+        assert result["ok"] is True
+        assert spawn_calls["n"] == 1
+
+        # Emit some output so the ring buffer is non-empty, then resend the same
+        # auth.start (reconnect replay) — it must not spawn again and must
+        # replay the buffered bytes first.
+        os.write(write_fd, b"buffered")
+        frame = ws.receive_json()
+        assert frame["type"] == "auth.output"
+        assert base64.b64decode(frame["payload"]["data"]) == b"buffered"
+
+        ws.send_json({"v": 1, "type": "auth.start", "request_id": "auth-start-1", "payload": payload})
+        replayed = _receive_command_result(ws)
+        assert replayed["session_id"] == result["session_id"]
+        assert spawn_calls["n"] == 1
+
+        frame = ws.receive_json()
+        assert frame["type"] == "auth.output"
+        assert frame["payload"]["session_id"] == result["session_id"]
+        assert base64.b64decode(frame["payload"]["data"]) == b"buffered"
+
+
+def test_auth_input_resize_cancel_fire_and_forget(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    writes = []
+    resizes = []
+    cancels = {"n": 0}
+
+    async def fake_create_session(target_id, cols, rows, mode="login", model=None):
+        session = auth_sessions.AuthSession("fake-session", target_id, 99999, -1, f"{mode}: {target_id}")
+        auth_sessions._sessions[session.id] = session
+        return session
+    monkeypatch.setattr(auth_sessions, "create_session", fake_create_session)
+    monkeypatch.setattr(auth_sessions, "write_input", lambda session, data: (writes.append((session.id, data)), session.touch()))
+    monkeypatch.setattr(auth_sessions, "resize", lambda session, cols, rows: resizes.append((session.id, cols, rows)))
+    monkeypatch.setattr(auth_sessions, "cancel_session", _fake_cancel(cancels))
+
+    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        _subscribe_auth(ws)
+        ws.send_json({
+            "v": 1, "type": "auth.start", "request_id": "auth-start-1",
+            "payload": {"harness": "claudecode", "mode": "login", "cols": 80, "rows": 24},
+        })
+        result = _receive_command_result(ws)
+        assert result["ok"] is True and result["session_id"] == "fake-session"
+
+        ws.send_json({"v": 1, "type": "auth.input", "request_id": "input-1", "payload": {"session_id": "fake-session", "data": "hi"}})
+        assert _receive_command_result(ws) == {"ok": True}
+        assert writes == [("fake-session", b"hi")]
+
+        ws.send_json({"v": 1, "type": "auth.resize", "request_id": "resize-1", "payload": {"session_id": "fake-session", "cols": 100, "rows": 30}})
+        assert _receive_command_result(ws) == {"ok": True}
+        assert resizes == [("fake-session", 100, 30)]
+
+        # Fire-and-forget types must not persist idempotency rows.
+        principal = f"local:{CLIENT_ID}"
+        assert stats_db.get_realtime_request(principal, "input-1") is None
+        assert stats_db.get_realtime_request(principal, "resize-1") is None
+
+        # auth.cancel is fire-and-forget like input/resize, not an idempotent
+        # mutation: the client (closeAuthPanel) never reads its result and
+        # mints a fresh request_id every call, so there is nothing to replay
+        # and persisting a row for it was pure dead weight. Each send re-runs
+        # cancel_session (safe: a real cancel_session on an already-gone
+        # session just returns False, it doesn't error).
+        ws.send_json({"v": 1, "type": "auth.cancel", "request_id": "cancel-1", "payload": {"session_id": "fake-session"}})
+        first = _receive_command_result(ws)
+        ws.send_json({"v": 1, "type": "auth.cancel", "request_id": "cancel-1", "payload": {"session_id": "fake-session"}})
+        second = _receive_command_result(ws)
+        assert first == second == {"ok": True, "cancelled": True, "session_id": "fake-session"}
+        assert cancels["n"] == 2
+        assert stats_db.get_realtime_request(principal, "cancel-1") is None
+
+
+def test_create_session_unlock_mode_spawns_fixed_argv_on_darwin(monkeypatch):
+    # See docs/plans/cursor-keychain-unlock-remediation.md — mode="unlock" is
+    # the allowlisted `security unlock-keychain` PTY session, never built from
+    # user input, gated to darwin.
+    monkeypatch.setattr(auth_sessions.sys, "platform", "darwin")
+    read_fd, write_fd = os.pipe()
+    spawned = {}
+
+    def fake_spawn(argv, env, cols, rows):
+        spawned["argv"] = argv
+        return 99999, read_fd
+    monkeypatch.setattr(auth_sessions, "_spawn_pty", fake_spawn)
+    monkeypatch.setattr(auth_sessions, "_register_proc", lambda *a, **k: None)
+    monkeypatch.setattr(auth_sessions, "_deregister_proc", lambda *a, **k: None)
+    monkeypatch.setattr(auth_sessions, "_signal_process_group", lambda *a, **k: None)
+
+    async def fake_finalize(session):
+        session.mark_exited(0)
+    monkeypatch.setattr(auth_sessions, "_finalize", fake_finalize)
+
+    async def run():
+        return await auth_sessions.create_session("keychain", 80, 24, mode="unlock")
+    session = None
+    try:
+        session = asyncio.run(run())
+        assert spawned["argv"] == ["security", "unlock-keychain"]
+        assert session.display_command == "security unlock-keychain"
+    finally:
+        os.close(write_fd)
+        if session:
+            auth_sessions._sessions.pop(session.id, None)
+
+
+def test_create_session_unlock_mode_raises_on_non_darwin(monkeypatch):
+    monkeypatch.setattr(auth_sessions.sys, "platform", "linux")
+
+    async def run():
+        await auth_sessions.create_session("keychain", 80, 24, mode="unlock")
+
+    try:
+        asyncio.run(run())
+        assert False, "expected AuthSessionError"
+    except auth_sessions.AuthSessionError:
+        pass
+
+
+def test_resize_touches_idle_timer():
+    # resize() must refresh last_activity so the idle reaper doesn't reap a
+    # session a client is actively resizing (window drags / rotation produce
+    # resizes with no input). Regression for the WS and HTTP resize paths.
+    master_fd, slave_fd = os.openpty()
+    try:
+        session = auth_sessions.AuthSession("s", "claudecode", 99999, master_fd, "claude auth login")
+        session.last_activity = 0.0
+        auth_sessions.resize(session, 100, 30)
+        assert session.last_activity > 0.0
+    finally:
+        os.close(slave_fd)
+        os.close(master_fd)
+
+
+def test_keychain_unlock_allowed_gate(monkeypatch):
+    # Direct unit coverage of the gate itself (see the fail-closed rationale
+    # in its docstring): a raw loopback peer with no forwarding markers is
+    # the only thing that passes. Presence of a forwarding header must deny
+    # regardless of its value, since X-Forwarded-For is attacker-controlled
+    # input a remote client can set to anything, including "127.0.0.1".
+    monkeypatch.setattr(server, "ALLOW_REMOTE_KEYCHAIN_UNLOCK", False)
+    allowed = server._keychain_unlock_allowed
+
+    assert allowed({}, "127.0.0.1") is True
+    assert allowed({}, "::1") is True
+    assert allowed({}, "testclient") is False  # not a loopback address at all
+    assert allowed({}, None) is False
+    # The spoof this gate exists to stop: a remote client simply sets XFF to
+    # a loopback-looking value itself.
+    assert allowed({"x-forwarded-for": "127.0.0.1"}, "127.0.0.1") is False
+    assert allowed({"x-forwarded-for": "100.101.102.103"}, "127.0.0.1") is False
+    assert allowed({"tailscale-user-login": "someone@example.com"}, "127.0.0.1") is False
+    # Fail-closed must hold for every common forwarding marker, not just XFF —
+    # a proxy that sets only X-Real-IP or RFC 7239 Forwarded is still remote.
+    assert allowed({"x-real-ip": "127.0.0.1"}, "127.0.0.1") is False
+    assert allowed({"forwarded": "for=127.0.0.1"}, "127.0.0.1") is False
+
+    monkeypatch.setattr(server, "ALLOW_REMOTE_KEYCHAIN_UNLOCK", True)
+    assert allowed({"x-forwarded-for": "100.101.102.103"}, "127.0.0.1") is True
+
+
+def test_auth_start_unlock_loopback_gate(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    monkeypatch.setattr(auth_sessions.sys, "platform", "darwin")
+    monkeypatch.setattr(server, "ALLOW_REMOTE_KEYCHAIN_UNLOCK", False)
+    # A real PTY pair, not a pipe — write_input() writes to the master fd
+    # (simulating typing the keychain password at the prompt), which a
+    # one-directional pipe can't support.
+    master_fd, slave_fd = os.openpty()
+    spawn_calls = {"n": 0}
+
+    def counting_spawn(argv, env, cols, rows):
+        spawn_calls["n"] += 1
+        assert argv == ["security", "unlock-keychain"]
+        return 99999, master_fd
+    monkeypatch.setattr(auth_sessions, "_spawn_pty", counting_spawn)
+    monkeypatch.setattr(auth_sessions, "_register_proc", lambda *a, **k: None)
+    monkeypatch.setattr(auth_sessions, "_deregister_proc", lambda *a, **k: None)
+    monkeypatch.setattr(auth_sessions, "_signal_process_group", lambda *a, **k: None)
+
+    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        _subscribe_auth(ws)
+        # TestClient's own peer address ("testclient") isn't a loopback IP and
+        # no X-Forwarded-For is set, so the default-deny path is exercised
+        # without needing to fabricate a real remote address.
+        ws.send_json({
+            "v": 1, "type": "auth.start", "request_id": "unlock-remote",
+            "payload": {"harness": "keychain", "mode": "unlock", "cols": 80, "rows": 24},
+        })
+        refused = _receive_command_result(ws)
+        assert refused == {
+            "ok": False, "error": "unlock_requires_local",
+            "detail": "Keychain unlock is only available from a loopback client "
+                      "unless auth.allow_remote_keychain_unlock is enabled.",
+        }
+        assert spawn_calls["n"] == 0
+
+    with TestClient(server.app).websocket_connect(
+        "/ws/v1", headers={"x-forwarded-for": "127.0.0.1"},
+    ) as ws:
+        _subscribe_auth(ws)
+        # The spoof this gate exists to stop: a remote (tailnet) client can
+        # set X-Forwarded-For to a loopback-looking value itself. The raw TCP
+        # peer being loopback proves nothing either — tailscale serve
+        # reverse-proxies to this server over loopback, so every tailnet
+        # request also arrives with a 127.0.0.1 peer. The mere presence of
+        # the header must deny, regardless of its value.
+        ws.send_json({
+            "v": 1, "type": "auth.start", "request_id": "unlock-spoofed",
+            "payload": {"harness": "keychain", "mode": "unlock", "cols": 80, "rows": 24},
+        })
+        refused_spoof = _receive_command_result(ws)
+        assert refused_spoof["ok"] is False
+        assert refused_spoof["error"] == "unlock_requires_local"
+        assert spawn_calls["n"] == 0
+
+    # The only case that's actually allowed: a direct connection (no
+    # forwarding headers at all) whose raw TCP peer is genuinely loopback —
+    # simulated here via TestClient's own `client` address, since a proxy
+    # never sits in front of a truly direct connection to add headers.
+    with TestClient(server.app, client=("127.0.0.1", 54321)).websocket_connect("/ws/v1") as ws:
+        _subscribe_auth(ws)
+        ws.send_json({
+            "v": 1, "type": "auth.start", "request_id": "unlock-local",
+            "payload": {"harness": "keychain", "mode": "unlock", "cols": 80, "rows": 24},
+        })
+        allowed = _receive_command_result(ws)
+        assert allowed["ok"] is True
+        assert allowed["command"] == "security unlock-keychain"
+        assert spawn_calls["n"] == 1
+
+        # Same fire-and-forget guarantee as other auth input: the keychain
+        # password never gets persisted as part of a realtime_request row.
+        principal = f"local:{CLIENT_ID}"
+        ws.send_json({
+            "v": 1, "type": "auth.input", "request_id": "unlock-input-1",
+            "payload": {"session_id": allowed["session_id"], "data": "hunter2\n"},
+        })
+        assert _receive_command_result(ws) == {"ok": True}
+        assert stats_db.get_realtime_request(principal, "unlock-input-1") is None
+
+    os.close(slave_fd)
+
+
+def test_auth_start_unlock_allowed_remotely_when_opted_in(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    monkeypatch.setattr(auth_sessions.sys, "platform", "darwin")
+    monkeypatch.setattr(server, "ALLOW_REMOTE_KEYCHAIN_UNLOCK", True)
+    read_fd, write_fd = os.pipe()
+    monkeypatch.setattr(auth_sessions, "_spawn_pty", lambda argv, env, cols, rows: (99999, read_fd))
+    monkeypatch.setattr(auth_sessions, "_register_proc", lambda *a, **k: None)
+    monkeypatch.setattr(auth_sessions, "_deregister_proc", lambda *a, **k: None)
+    monkeypatch.setattr(auth_sessions, "_signal_process_group", lambda *a, **k: None)
+
+    with TestClient(server.app).websocket_connect(
+        "/ws/v1", headers={"x-forwarded-for": "100.101.102.103"},
+    ) as ws:
+        _subscribe_auth(ws)
+        ws.send_json({
+            "v": 1, "type": "auth.start", "request_id": "unlock-opt-in",
+            "payload": {"harness": "keychain", "mode": "unlock", "cols": 80, "rows": 24},
+        })
+        result = _receive_command_result(ws)
+        assert result["ok"] is True
+
+    os.close(write_fd)

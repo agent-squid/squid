@@ -4105,6 +4105,7 @@ const authPanelTitle = document.getElementById('auth-panel-title');
 const authPanelTerm = document.getElementById('auth-panel-term');
 const authPanelCancelBtn = document.getElementById('auth-panel-cancel-btn');
 const authPanelRetryBtn = document.getElementById('auth-panel-retry-btn');
+const authPanelUnlockBtn = document.getElementById('auth-panel-unlock-btn');
 const agentsAuthPanel = document.getElementById('agents-auth-panel');
 const agentsAuthPanelTitle = document.getElementById('agents-auth-panel-title');
 const agentsAuthPanelTerm = document.getElementById('agents-auth-panel-term');
@@ -4143,6 +4144,25 @@ function wireAuthLoginButtons(root, onSuccessRetry) {
   });
 }
 
+// While a `cursor` login session streams, watch its decoded output for the
+// locked-keychain signature and surface the unlock affordance the first time
+// it appears. Accumulates onto the session across chunks (rather than
+// matching a single chunk) since the CLI's error line is not guaranteed to
+// land in one PTY read, and decodes with a persistent per-session
+// TextDecoder so a multibyte character split across chunk boundaries doesn't
+// corrupt the match. Matching the raw decoded bytes (not the xterm-rendered
+// text) makes this robust to any ANSI codes around the phrase.
+function _scanAuthOutputForKeychainLock(bytes) {
+  if (!_authSession || _authSession.harness !== 'cursor' || _authSession.mode !== 'login') return;
+  if (_authSession.keychainLockDetected) return;
+  if (!_authSession.outputDecoder) _authSession.outputDecoder = new TextDecoder();
+  _authSession.outputText = (_authSession.outputText || '') + _authSession.outputDecoder.decode(bytes, { stream: true });
+  if (/keychain is locked/i.test(_authSession.outputText)) {
+    _authSession.keychainLockDetected = true;
+    authPanelUnlockBtn.hidden = false;
+  }
+}
+
 function base64ToBytes(b64) {
   const bin = atob(b64);
   const bytes = new Uint8Array(bin.length);
@@ -4152,6 +4172,7 @@ function base64ToBytes(b64) {
 
 function _authPanelTitle(harness, mode, model) {
   const label = HARNESS_LABELS[harness] || (harness === 'ollama' ? 'Ollama' : harness);
+  if (mode === 'unlock') return 'Unlock macOS keychain';
   if (mode === 'install') return `Install — ${label}`;
   if (mode === 'pull') return `Pulling ${model} — Ollama`;
   if (mode === 'remove') return `Removing ${model} — Ollama`;
@@ -4160,6 +4181,7 @@ function _authPanelTitle(harness, mode, model) {
 
 function _authPanelDoneTitle(harness, mode, model) {
   const label = HARNESS_LABELS[harness] || (harness === 'ollama' ? 'Ollama' : harness);
+  if (mode === 'unlock') return 'Keychain unlocked';
   if (mode === 'install') return `Installed — ${label}`;
   if (mode === 'pull') return `Pulled ${model} — Ollama`;
   if (mode === 'remove') return `Removed ${model} — Ollama`;
@@ -4181,7 +4203,11 @@ function _setCatalogOperationBusy(busy) {
 async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   const mode = opts.mode || 'login';
   const model = opts.model || null;
-  const isCatalogOperation = mode !== 'login';
+  // "unlock" (the macOS keychain-unlock remediation) reuses the plain login
+  // panel — it's triggered from inside an in-progress cursor login and should
+  // replace that same panel's content, not the separate Agents catalog panel
+  // that install/pull/remove use.
+  const isCatalogOperation = mode !== 'login' && mode !== 'unlock';
   const panel = isCatalogOperation ? agentsAuthPanel : authPanel;
   const panelTitle = isCatalogOperation ? agentsAuthPanelTitle : authPanelTitle;
   const panelTerm = isCatalogOperation ? agentsAuthPanelTerm : authPanelTerm;
@@ -4196,6 +4222,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   if (!isCatalogOperation) form.classList.add('dimmed');
   panel.classList.add('open');
   panelRetryBtn.hidden = true;
+  if (!isCatalogOperation) authPanelUnlockBtn.hidden = true;
   if (isCatalogOperation) agentsAuthPanelRestartBtn.hidden = true;
   panelTitle.textContent = _authPanelTitle(harness, mode, model);
   panelTerm.innerHTML = '';
@@ -4290,10 +4317,14 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
       fitTerminal();
       if (!isCatalogOperation && _authSession.running && _authSession.id &&
           (term.cols !== prevCols || term.rows !== prevRows)) {
-        fetch(`/auth/session/${_authSession.id}/resize`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cols: term.cols, rows: term.rows }),
-        }).catch(() => {});
+        if (_authSession.transport === 'ws') {
+          realtimeV1?.authSend('auth.resize', { session_id: _authSession.id, cols: term.cols, rows: term.rows });
+        } else {
+          fetch(`/auth/session/${_authSession.id}/resize`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cols: term.cols, rows: term.rows }),
+          }).catch(() => {});
+        }
       }
     }, 150);
   };
@@ -4302,51 +4333,18 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   _authSession = { id: null, harness, mode, model, panel, panelTitle, panelTerm,
     panelRetryBtn, anchor, term, fitAddon, handleResize, onSuccessRetry, running: true };
 
-  let res, data;
-  try {
-    // cols/rows travel with the spawn request itself (not a follow-up
-    // resize call) so the PTY has its real size before the child process
-    // execs — otherwise the harness's TUI can render its first frame at
-    // the PTY's default size and get a SIGWINCH mid-render once the resize
-    // arrives, which is what corrupted the opencode login list on up-arrow.
-    res = await fetch('/auth/session', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ harness, cols: term.cols, rows: term.rows, mode, model }),
-    });
-    data = await res.json();
-  } catch (err) {
-    res = null;
-    data = { error: String(err) };
-  }
-  if (!res || !res.ok) {
-    term.write((data.error || 'Failed to start').replace(/\n/g, '\r\n'));
-    panelTitle.textContent = data.error || 'Failed to start';
-    panelRetryBtn.hidden = false;
+  const finishExit = (code) => {
+    if (!_authSession) return;
     _authSession.running = false;
     if (isCatalogOperation) _setCatalogOperationBusy(false);
-    return;
-  }
-
-  // The PTY execs its allowlisted argv directly, without a shell prompt to
-  // echo it. Show the exact server-derived command before replay/live output.
-  term.write(`$ ${data.command}\r\n\r\n`);
-  const es = new EventSource(`/auth/session/${data.id}/events`);
-  _authSession = { id: data.id, harness, mode, model, panel, panelTitle, panelTerm,
-    panelRetryBtn, anchor, es, term, fitAddon, handleResize, onSuccessRetry, running: true };
-
-  es.addEventListener('data', event => {
-    try { term.write(base64ToBytes(event.data)); } catch {}
-  });
-  es.addEventListener('exit', event => {
-    es.close();
-    if (!_authSession || _authSession.id !== data.id) return;
-    _authSession.running = false;
-    if (isCatalogOperation) _setCatalogOperationBusy(false);
-    const code = parseInt(event.data, 10);
     if (code === 0) {
       const retry = _authSession?.onSuccessRetry;
       const finishedMode = _authSession?.mode;
-      if (finishedMode && finishedMode !== 'login') {
+      // "unlock" behaves like "login" on success — close the panel and let
+      // onSuccessRetry (wired by the unlock affordance below) re-open the
+      // original cursor login, rather than staying open like a catalog
+      // install/pull/remove result does.
+      if (finishedMode && finishedMode !== 'login' && finishedMode !== 'unlock') {
         const binaryInstalled = finishedMode === 'install';
         panelTitle.textContent = _authPanelDoneTitle(harness, mode, model) +
           (binaryInstalled ? ' — restart required' : '');
@@ -4365,6 +4363,142 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
         fitTerminal();
       }
     }
+  };
+
+  // cols/rows travel with the spawn request itself (not a follow-up resize
+  // call) so the PTY has its real size before the child process execs —
+  // otherwise the harness's TUI can render its first frame at the PTY's
+  // default size and get a SIGWINCH mid-render once the resize arrives, which
+  // is what corrupted the opencode login list on up-arrow.
+  const transportMode = await realtimeTransportMode;
+  let data;
+  let authError = null;
+  // The in-flight session object (id:null, no transport) this invocation
+  // created above. Cancel/Esc during either await below runs closeAuthPanel,
+  // which nulls _authSession and disposes the term — so once an await resolves
+  // we must not write to the disposed term or resurrect _authSession on a dead
+  // panel, and any PTY the server already spawned has to be cancelled.
+  const pendingSession = _authSession;
+  if (transportMode !== 'sse' && realtimeV1) {
+    try {
+      data = await realtimeV1.startAuth(
+        { harness, cols: term.cols, rows: term.rows, mode, model },
+        frame => {
+          if (!_authSession || frame.payload?.session_id !== _authSession.id) return;
+          if (frame.type === 'auth.output') {
+            try {
+              const bytes = base64ToBytes(frame.payload.data);
+              term.write(bytes);
+              _scanAuthOutputForKeychainLock(bytes);
+            } catch {}
+          } else if (frame.type === 'auth.done') {
+            // A reaped session (idle timeout / server-side cancel) can arrive with
+            // returncode null; Number(null) is 0, which would read as success and
+            // fire onSuccessRetry as if the login had completed.
+            const code = frame.payload.returncode;
+            finishExit(code == null ? -1 : Number(code));
+          }
+        },
+      );
+    } catch (err) {
+      data = null;
+      authError = err;
+    }
+    if (_authSession !== pendingSession) {
+      // Closed (Cancel/Esc) or superseded while startAuth was in flight. The
+      // server already spawned a PTY when it returned ok — cancel it so it
+      // doesn't leak until the idle reaper, and don't resurrect the panel.
+      if (data && data.ok === true && data.session_id) {
+        realtimeV1.authSend('auth.cancel', { session_id: data.session_id });
+      }
+      return;
+    }
+    if (data && data.ok === true) {
+      // The PTY execs its allowlisted argv directly, without a shell prompt to
+      // echo it. Show the exact server-derived command before replay/live output.
+      term.write(`$ ${data.command}\r\n\r\n`);
+      _authSession = { id: data.session_id, harness, mode, model, panel, panelTitle, panelTerm,
+        panelRetryBtn, anchor, term, fitAddon, handleResize, onSuccessRetry, running: true, transport: 'ws' };
+      term.onData(input => {
+        if (!_authSession?.id) return;
+        realtimeV1.authSend('auth.input', { session_id: _authSession.id, data: input });
+      });
+      return;
+    }
+    if (data && data.ok === false) {
+      // Authoritative server rejection (unknown harness, CLI not found, ...) —
+      // not a transport failure, so surface it instead of retrying over HTTP.
+      realtimeV1.clearAuth();
+      term.write(((data.detail || data.error) || 'Failed to start').replace(/\n/g, '\r\n'));
+      // Keep the title short and stable — the full detail lives in the
+      // terminal body above, not the panel header.
+      panelTitle.textContent = 'Failed to start';
+      panelRetryBtn.hidden = false;
+      _authSession.running = false;
+      if (isCatalogOperation) _setCatalogOperationBusy(false);
+      return;
+    }
+    // Transport failure (timeout/connection). In websocket mode there is no
+    // HTTP fallback; in auto mode fall through to the HTTP/SSE path below —
+    // but only when the command never reached the server. A command that was
+    // sent (authError.realtimeCommandResult) is authoritative even on timeout:
+    // the server may already have spawned the PTY, so re-submitting over HTTP
+    // would spawn a second one.
+    realtimeV1.clearAuth();
+    if (transportMode === 'websocket' || (authError && authError.realtimeCommandResult)) {
+      term.write('Failed to start'.replace(/\n/g, '\r\n'));
+      panelTitle.textContent = 'Failed to start';
+      panelRetryBtn.hidden = false;
+      _authSession.running = false;
+      if (isCatalogOperation) _setCatalogOperationBusy(false);
+      return;
+    }
+  }
+
+  let res;
+  try {
+    res = await fetch('/auth/session', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ harness, cols: term.cols, rows: term.rows, mode, model }),
+    });
+    data = await res.json();
+  } catch (err) {
+    res = null;
+    data = { error: String(err) };
+  }
+  if (_authSession !== pendingSession) {
+    // Cancel/Esc during the fetch: the server already spawned the session
+    // (res.ok) — cancel it and don't resurrect the panel.
+    if (res && res.ok && data && data.id) {
+      fetch(`/auth/session/${data.id}/cancel`, { method: 'POST' }).catch(() => {});
+    }
+    return;
+  }
+  if (!res || !res.ok) {
+    term.write((data.error || 'Failed to start').replace(/\n/g, '\r\n'));
+    panelTitle.textContent = 'Failed to start';
+    panelRetryBtn.hidden = false;
+    _authSession.running = false;
+    if (isCatalogOperation) _setCatalogOperationBusy(false);
+    return;
+  }
+
+  term.write(`$ ${data.command}\r\n\r\n`);
+  const es = new EventSource(`/auth/session/${data.id}/events`);
+  _authSession = { id: data.id, harness, mode, model, panel, panelTitle, panelTerm,
+    panelRetryBtn, anchor, es, term, fitAddon, handleResize, onSuccessRetry, running: true, transport: 'sse' };
+
+  es.addEventListener('data', event => {
+    try {
+      const bytes = base64ToBytes(event.data);
+      term.write(bytes);
+      _scanAuthOutputForKeychainLock(bytes);
+    } catch {}
+  });
+  es.addEventListener('exit', event => {
+    es.close();
+    if (!_authSession || _authSession.id !== data.id) return;
+    finishExit(parseInt(event.data, 10));
   });
 
   term.onData(input => {
@@ -4382,13 +4516,17 @@ async function closeAuthPanel({ refreshCatalog = true } = {}) {
   if (session) {
     if (session.handleResize) window.removeEventListener('resize', session.handleResize);
     if (session.es) session.es.close();
+    if (session.transport === 'ws') realtimeV1?.clearAuth();
     // The endpoint only signals a running child; for a completed session it
     // simply releases the retained server-side replay buffer immediately.
-    if (session.id) fetch(`/auth/session/${session.id}/cancel`, { method: 'POST' }).catch(() => {});
+    if (session.id) {
+      if (session.transport === 'ws') realtimeV1?.authSend('auth.cancel', { session_id: session.id });
+      else fetch(`/auth/session/${session.id}/cancel`, { method: 'POST' }).catch(() => {});
+    }
     if (session.term) session.term.dispose();
   }
   (session?.panel || authPanel).classList.remove('open');
-  const wasCatalogOperation = session?.mode && session.mode !== 'login';
+  const wasCatalogOperation = session?.mode && session.mode !== 'login' && session.mode !== 'unlock';
   if (wasCatalogOperation) {
     _setCatalogOperationBusy(false);
     agentsAuthPanelHome.before(agentsAuthPanel);
@@ -4399,6 +4537,20 @@ async function closeAuthPanel({ refreshCatalog = true } = {}) {
 
 authPanelCancelBtn.addEventListener('click', () => closeAuthPanel());
 agentsAuthPanelCancelBtn.addEventListener('click', () => closeAuthPanel());
+authPanelUnlockBtn.addEventListener('click', () => {
+  // Consented, not automatic: the user must click this and then type their
+  // own macOS keychain password at the prompt. On success, re-run the
+  // original cursor login that surfaced the locked-keychain error; on
+  // failure (or a non-loopback client refused by the server's
+  // unlock_requires_local gate), the failure/refusal is left on screen by
+  // openAuthPanel's existing error handling — no extra handling needed here.
+  const originalHarness = _authSession?.harness;
+  const originalRetry = _authSession?.onSuccessRetry;
+  if (!originalHarness) return;
+  openAuthPanel('keychain', () => {
+    openAuthPanel(originalHarness, originalRetry, { mode: 'login' });
+  }, { mode: 'unlock' });
+});
 function retryAuthSession() {
   const harness = _authSession?.harness;
   const retry = _authSession?.onSuccessRetry;
@@ -7099,6 +7251,7 @@ const realtimeV1 = (() => {
   let cursor = Number(localStorage.getItem('squid-realtime-v1-cursor') || 0);
   let globalEnabled = false;
   let onDiscover = null;
+  let onAuthFrame = null;
   const watches = new Map();
   const commands = new Map();
   const commandTimeoutMs = 5000;
@@ -7117,7 +7270,7 @@ const realtimeV1 = (() => {
   const scopes = () => [...new Map([
     ...(globalEnabled ? [['__global_lifecycle__', null]] : []),
     ...[...watches.values()].map(watch => [watch.topic, watch.agent]),
-    ...[...commands.values()].map(command => [command.topic, command.agent]),
+    ...[...commands.values()].filter(command => !command.unscoped).map(command => [command.topic, command.agent]),
   ].map(([topic, agent]) => [
     `${topic}\0${agent || ''}`,
     topic === '__global_lifecycle__'
@@ -7230,6 +7383,9 @@ const realtimeV1 = (() => {
       }
       else if (frame.type === 'snapshot') dispatchSnapshot(frame);
       else if (frame.event_id) dispatchEvent(frame);
+      else if (frame.type === 'auth.output' || frame.type === 'auth.done') {
+        onAuthFrame?.(frame);
+      }
       else if (frame.type === 'ping') socket.send(JSON.stringify({ v: 1, type: 'pong', payload: {} }));
     };
     connectingSocket.onclose = () => {
@@ -7259,13 +7415,14 @@ const realtimeV1 = (() => {
     };
   };
 
-  const sendCommand = ({ type, payload, topic, agent = null, freshScope = false, timeoutMessage }) => {
+  const sendCommand = ({ type, payload, topic, agent = null, freshScope = false, timeoutMessage, unscoped = false }) => {
     const requestId = window.crypto?.randomUUID?.()
       || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
     const promise = new Promise((resolve, reject) => {
       const command = {
         topic,
         agent,
+        unscoped,
         frame: { v: 1, type, request_id: requestId, payload },
         sent: false,
         everSent: false,
@@ -7334,6 +7491,40 @@ const realtimeV1 = (() => {
         agent: agent || null,
         timeoutMessage: 'WebSocket cancellation timed out after submission.',
       });
+    },
+    startAuth(payload, onFrame) {
+      onAuthFrame = onFrame;
+      // auth.start is `unscoped` (filtered out of scopes()), so it does not itself
+      // keep subscribe() from no-oping, and sendCommand only flushes a queued
+      // command after a `subscribed` frame. It therefore depends on enableGlobal()
+      // having run at boot in websocket mode — that keeps the global lifecycle
+      // scope present so subscribe() actually sends and a `subscribed` reply
+      // arrives to flush the queued auth.start. If that boot subscription is ever
+      // made conditional, auth.start will sit unsent until the command timeout and
+      // then fall back to HTTP (auto) or fail outright (websocket).
+      return sendCommand({
+        type: 'auth.start',
+        payload,
+        topic: null,
+        agent: null,
+        unscoped: true,
+        freshScope: false,
+        timeoutMessage: 'WebSocket command timed out after submission.',
+      });
+    },
+    authSend(type, payload) {
+      if (socket?.readyState !== WebSocket.OPEN) return false;
+      socket.send(JSON.stringify({
+        v: 1,
+        type,
+        request_id: window.crypto?.randomUUID?.()
+          || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+        payload,
+      }));
+      return true;
+    },
+    clearAuth() {
+      onAuthFrame = null;
     },
     watch(item, callbacks) {
       const hadScope = globalEnabled || [...watches.values()].some(watch => watch.topic === item.topic && watch.agent === item.agent);

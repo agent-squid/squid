@@ -1,6 +1,7 @@
 ---
 status: accepted
 date: 2026-08-06
+updated: 2026-08-15
 ---
 # ADR-0035: CLI Auth Sessions via Scoped PTY over SSE
 
@@ -119,10 +120,110 @@ process registry so existing stop/timeout controls reach it. An idle timeout
 closes orphaned sessions (e.g. a closed browser tab) rather than leaking
 processes indefinitely.
 
+## Amendment (2026-08-15): macOS keychain-unlock remediation
+
+`cursor-agent login` fails immediately, before it ever reaches an
+interactive prompt, when the macOS login keychain is locked:
+
+```
+Error: Your macOS login keychain is locked.
+Run security unlock-keychain and try again.
+```
+
+Cursor's keychain precheck is fire-and-done — it cannot be satisfied from
+inside the login flow itself. Previously the only workaround was to unlock
+the keychain from a separate terminal and reboot the whole Squid server,
+because the server is launched detached
+(`nohup python -m agent.server &`, `bin/start.sh`) and an unlock done in a
+*different* macOS security/audit session is invisible to it.
+
+**Investigated first: does `cursor-agent` have a keychain-free auth path at
+all, the way `pi` uses `ANTHROPIC_API_KEY`?** It does define `CURSOR_API_KEY`
+/`CURSOR_AUTH_TOKEN` env vars as alternatives to `cursor-agent login` — but
+this doesn't help here: the keychain precheck runs unconditionally at CLI
+startup, before argument/env parsing picks an auth source. Confirmed
+empirically — `CURSOR_API_KEY=<value> cursor-agent --version` still fails
+with the same locked-keychain error, with no subcommand ever reached. There
+is no way to avoid the keychain for this CLI, so the in-session-unlock
+remediation below is necessary rather than a documentation-only fix.
+
+**In-session unlock, not out-of-band + reboot.** `pty.fork()` calls
+`setsid()` but does not create a new audit session, so every PTY child Squid
+spawns (including auth sessions) inherits the server process's
+security/audit session — the same one a subsequently-spawned `cursor-agent
+login` inherits. An interactive `security unlock-keychain` run inside a
+Squid PTY session therefore unlocks the keychain for the server's own
+session, and the next `cursor-agent login` sees it unlocked. No reboot
+required. This adds a fourth `create_session` mode, `unlock`, alongside
+`login`/`install`/`pull`/`remove` (ADR-0037's amendment): fixed argv
+`["security", "unlock-keychain"]` (no path, so it prompts interactively for
+the default/login keychain), macOS-only (`AuthSessionError` on any other
+`sys.platform`), never built from user input — same invariant as every
+other mode here. The password itself never enters Squid's storage: `security`
+disables terminal echo during the prompt, so it never appears in the ring
+buffer or an `auth.output` frame; only the raw `auth.input` bytes cross the
+wire, which were already unpersisted for every auth-session mode.
+
+**Loopback-only by default, fail-closed.** Unlocking is typing a macOS
+login-keychain password — treated with the same caution as the password
+itself. Squid is reachable beyond literally-local already (`tailscale serve`
+onto the tailnet), so a naive "the server binds to loopback" argument is not
+sufficient. `agent/server.py`'s `_keychain_unlock_allowed` gates
+`mode="unlock"` on the request's raw TCP peer resolving to loopback
+(`127.0.0.1`/`::1`), separately at both the WebSocket (`auth.start`) and
+HTTP (`POST /auth/session`) entry points, and rejects a non-loopback caller
+with `unlock_requires_local` instead of spawning.
+
+The raw TCP peer address is not trusted alone as proof of *localness*:
+`tailscale serve` reverse-proxies to this server over loopback, so a tailnet
+client's connection also arrives with a loopback peer address at the ASGI
+layer. It is trustworthy as proof of remoteness being absent, though, since
+the server binds only `127.0.0.1` and a remote client cannot forge a
+loopback source address against that bind. The gate does not attempt to
+recover "the real client IP" from `X-Forwarded-For` — that header is
+client-supplied, not server-verified, and a remote caller can set it to
+`127.0.0.1` itself to impersonate a local client (an earlier version of this
+gate did exactly this and was caught in review before it shipped: it fell
+back to trusting the *first* comma-separated value in `X-Forwarded-For`,
+which a spoofed header defeats outright, and which some reverse proxies
+*append to* rather than replace, defeating it even for a well-intentioned
+proxy). Instead the gate is fail-closed on the header's mere presence: any
+`X-Forwarded-For`, `X-Real-IP`, RFC 7239 `Forwarded`, or
+`Tailscale-User-Login` header denies the request immediately, regardless of
+value, since a direct, unproxied local connection never sets any of them —
+only a request with none of these headers and a genuinely loopback raw peer
+passes. An explicit opt-in,
+`auth.allow_remote_keychain_unlock` in `squid.yaml` (default `false`), lets a
+user accept typing their Mac keychain password from another tailnet device
+if they choose to — it bypasses the whole check, not just the header logic.
+This opt-in is independent of, and should remain more restrictive than,
+whatever principal model a future ADR-0039 Shore relay connection uses — a
+Shore-relayed request is never treated as loopback by this gate, regardless
+of the opt-in flag.
+
+**UI.** `ui/app.js` watches decoded output from a streaming `cursor` login
+session for the locked-keychain signature (`keychain is locked`,
+case-insensitive, matched against accumulated decoded text so it is robust
+to ANSI codes and to the message landing across multiple PTY reads). On a
+match it shows an "Unlock keychain & retry" affordance in the same login
+panel — never auto-run, since the user must consent to typing their own
+password. Clicking it opens a `mode="unlock"` session in that same panel,
+reusing `openAuthPanel`'s existing WS/SSE transport plumbing unchanged; a
+clean exit (0) automatically re-issues the original `cursor` login, a
+nonzero exit leaves the failure and a Retry button, same as any other auth
+session. If the server refuses with `unlock_requires_local` (a non-loopback
+client without the opt-in), that message is surfaced in place of a password
+prompt — the server's gate is the actual authority, the client-side
+affordance is only ever an offer.
+
 ## Consequences
 
 - Good: users can complete OAuth/device-code login for any harness without
   leaving Squid or opening a separate terminal.
+- Good (2026-08-15 amendment): a locked macOS login keychain no longer
+  requires an out-of-band unlock plus a full server reboot to unblock
+  `cursor-agent login` — the fix runs in-session, gated to a loopback client
+  by default with an explicit opt-in for tailnet use.
 - Good: no new realtime transport — chat keeps its existing SSE model, and
   the auth session reuses the same mental model (SSE out, POST in) instead
   of adding WebSocket infrastructure the rest of the app doesn't have.

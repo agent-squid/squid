@@ -2,8 +2,8 @@
 
 This document specifies the version 1 application protocol selected by
 ADR-0040. JSON messages are carried by `/ws/v1`; SSE remains a migration
-fallback. Phase one covers chat, Flow-step discovery, and process, queue, and
-message state. CLI authentication is reserved for a later phase.
+fallback. Phase one covers chat, Flow-step discovery, process, queue, and
+message state, and CLI authentication over the socket.
 
 ## Ordering and cursor model
 
@@ -78,10 +78,12 @@ Reconnect and restart recovery always use the durable cursor.
 
 ## Commands and results
 
-Phase-one client mutations are `chat.start` and `chat.cancel`. The server
-persists the `(principal, request_id)` result before acknowledging it. A retry
-returns the same `command.result`; it does not execute again. Conflicting reuse
-of a request ID produces `request_id_conflict`.
+Phase-one client mutations are `chat.start`, `chat.cancel`, and `auth.start`.
+The server persists the `(principal, request_id)` result before acknowledging
+it. A retry returns the same `command.result`; it does not execute again.
+Conflicting reuse of a request ID produces `request_id_conflict`. `auth.cancel`
+is not in this set — see "CLI authentication" below, where it is grouped with
+`auth.input`/`auth.resize` as fire-and-forget instead.
 
 For direct local/Tailscale connections, `principal` combines the authenticated
 local session with the browser's persisted `client_id`; proxy source IP is not
@@ -104,6 +106,65 @@ being applied as deltas.
 `flow.step.created` is committed with a durable Flow step's message linkage.
 Its payload carries `flow_run_id`, `step_id`, `user_msg_id`,
 `assistant_msg_id`, `route`, and the linked step's current `status`.
+
+## CLI authentication
+
+CLI authentication (`auth.*`) moves the ADR-0035 PTY login/install/model
+sessions onto `/ws/v1`, mirroring `chat.*`. The PTY and security model is
+unchanged; SSE remains the migration fallback. Messages:
+
+- `auth.start` — idempotent mutation via `request_id`. Payload
+  `{harness, mode, model?, cols, rows}`. Result
+  `{ok, session_id, harness, command}` or `{ok:false, error, detail}`.
+  `mode` is one of `login`, `install`, `pull`, `remove`, or `unlock`.
+  `unlock` (see `docs/decisions/0035-cli-auth-sessions-via-scoped-pty.md`'s
+  keychain-unlock amendment) runs the fixed, allowlisted `security
+  unlock-keychain` command — macOS only, and gated to a loopback client
+  address by default. A non-loopback caller is rejected with
+  `{ok:false, error:"unlock_requires_local", detail}` instead of spawning,
+  unless the server's `auth.allow_remote_keychain_unlock` config is enabled.
+  The raw TCP peer alone is not proof of localness: `tailscale serve`
+  reverse-proxies over loopback, so a tailnet client also arrives with a
+  loopback peer address. The gate is fail-closed instead of trying to parse a
+  trusted client address out of `X-Forwarded-For` (client-supplied, and
+  therefore spoofable — a remote caller can send `X-Forwarded-For:
+  127.0.0.1` itself): the mere *presence* of any forwarding marker —
+  `X-Forwarded-For`, `X-Real-IP`, RFC 7239 `Forwarded`, or
+  `Tailscale-User-Login` — denies the request outright, regardless of value,
+  since a direct local connection never sets any of them. Only a connection
+  with none of these headers and a genuinely loopback raw peer address is
+  allowed. The equivalent HTTP path (`POST /auth/session`) applies the same
+  gate and returns `{"error": "unlock_requires_local"}` with HTTP 400.
+- `auth.input` — fire-and-forget, NOT persisted. Payload `{session_id, data}`;
+  `data` is the raw UTF-8 input string (as the HTTP route accepts it). Result
+  `{ok:true}` or `{ok:false, error:"unknown_session"}`.
+- `auth.resize` — fire-and-forget, NOT persisted. Payload `{session_id, cols,
+  rows}`. Result `{ok:true}` or `{ok:false, error:"unknown_session"}`.
+- `auth.cancel` — fire-and-forget, NOT persisted (not an idempotent mutation,
+  despite `request_id` still being required on the envelope like every other
+  command). Payload `{session_id}`. Result `{ok, cancelled, session_id}`.
+  Calling it more than once for the same session is already safe without an
+  idempotency guard: a session already gone by the second call just yields
+  `cancelled: false`.
+- `auth.output` (server→client) — `{v:1, type:"auth.output",
+  payload:{session_id, data}}`; `data` is a base64-encoded PTY chunk.
+  **Transient — not stored in `realtime_events` and not replayable.**
+- `auth.done` (server→client) — `{v:1, type:"auth.done",
+  payload:{session_id, returncode}}`. **Transient.** `returncode` is always
+  numeric — the process's real exit code on a natural exit, or `-1` when the
+  session was already reaped (idle timeout / server-side cancel), so a reaped
+  login is never reported as success.
+
+`auth.start` registers the calling socket as the session's output listener:
+`auth.output` / `auth.done` frames are pushed directly to that socket, so no
+`subscribe` scope covers them and they never enter the durable log. A reconnect
+that resends `auth.start` with the same `request_id` re-attaches the socket to
+the still-live session and replays its ring buffer. **Known limitation:** the
+server supports that re-attach, but the current client sends `auth.start` once
+and issues `auth.input`/`auth.resize`/`auth.cancel` fire-and-forget — it does
+not resend on reconnect, so a socket dropped mid-login does not resume output.
+Acceptable for short login flows, but the re-attach path is not currently
+reachable from the UI.
 
 ## Snapshot
 

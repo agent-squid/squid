@@ -3396,3 +3396,365 @@ test.describe('recovered pending responses', () => {
     await expect(page.locator('#messages > .msg.assistant').last()).toContainText('Recovered final response');
   });
 });
+
+// ── CLI auth panel transport (ADR-0040 step 1) ───────────────────────────────
+
+test('websocket transport drives the auth panel over WS without POST /auth/session', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__authFrames = [];
+    window.__ws = null;
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        window.__ws = this;
+        this.readyState = MockWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+        } else if (frame.type === 'auth.start') {
+          window.__authFrames.push(frame);
+          setTimeout(() => this.receive({ v: 1, type: 'command.result', request_id: frame.request_id,
+            payload: { ok: true, session_id: 'sess-1', harness: 'claudecode', command: 'claude auth login --claudeai' } }));
+        } else if (frame.type === 'auth.input' || frame.type === 'auth.resize' || frame.type === 'auth.cancel') {
+          window.__authFrames.push(frame);
+        }
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = MockWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+  let httpAuthRequests = 0;
+  await page.route('**/auth/session', route => {
+    httpAuthRequests++;
+    return route.abort();
+  });
+
+  await page.goto('/');
+  await page.evaluate(() => openAuthPanel('claudecode', null));
+
+  await page.waitForFunction(() => window.__authFrames.some(f => f.type === 'auth.start'));
+  expect(httpAuthRequests).toBe(0);
+  const start = await page.evaluate(() => window.__authFrames.find(f => f.type === 'auth.start'));
+  expect(start.payload).toMatchObject({ harness: 'claudecode', mode: 'login' });
+  expect(typeof start.request_id).toBe('string');
+  expect(start.request_id.length).toBeGreaterThan(0);
+
+  // Streamed output + done arrive over the socket; a clean exit (0) on the
+  // login flow closes the panel, which in turn cancels the WS session.
+  await page.evaluate(() => {
+    window.__ws.receive({ v: 1, type: 'auth.output', payload: { session_id: 'sess-1', data: btoa('login output') } });
+    window.__ws.receive({ v: 1, type: 'auth.done', payload: { session_id: 'sess-1', returncode: 0 } });
+  });
+  await expect(page.locator('#auth-panel')).not.toHaveClass(/open/);
+  await page.waitForFunction(() => window.__authFrames.some(f => f.type === 'auth.cancel'));
+});
+
+test('websocket auth.done with null returncode reports failure, not success', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__ws = null;
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        window.__ws = this;
+        this.readyState = MockWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+        } else if (frame.type === 'auth.start') {
+          setTimeout(() => this.receive({ v: 1, type: 'command.result', request_id: frame.request_id,
+            payload: { ok: true, session_id: 'sess-1', harness: 'claudecode', command: 'claude auth login --claudeai' } }));
+        }
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = MockWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+
+  await page.goto('/');
+  await page.evaluate(() => openAuthPanel('claudecode', null));
+
+  // A reaped session (idle timeout / server-side cancel) arrives with returncode
+  // null; Number(null) === 0 would read as success and close the panel + fire the
+  // retry. The client must report Exited (-1) and keep the panel open instead.
+  await page.evaluate(() => window.__ws.receive({ v: 1, type: 'auth.done', payload: { session_id: 'sess-1', returncode: null } }));
+  await expect(page.locator('#auth-panel-title')).toHaveText('Exited (-1)');
+  await expect(page.locator('#auth-panel')).toHaveClass(/open/);
+  await expect(page.locator('#auth-panel-retry-btn')).toBeVisible();
+});
+
+test('sse transport keeps the auth panel on the HTTP path', async ({ page }) => {
+  await page.addInitScript(() => {
+    // No WebSocket should be created in sse mode; record any auth.start just
+    // in case so the assertion below is meaningful rather than vacuously empty.
+    window.__authFrames = [];
+  });
+  await mockBackend(page); // defaults to transport: sse
+  let httpAuthRequests = 0;
+  await page.route('**/auth/session', route => {
+    httpAuthRequests++;
+    return route.fulfill({ status: 200, headers: { 'Content-Type': 'application/json' },
+      json: { id: 'http-sess-1', harness: 'claudecode', command: 'claude auth login --claudeai' } });
+  });
+
+  await page.goto('/');
+  await page.evaluate(() => openAuthPanel('claudecode', null));
+
+  await expect.poll(() => httpAuthRequests).toBe(1);
+  expect(await page.evaluate(() => window.__authFrames.length)).toBe(0);
+  await expect(page.locator('#auth-panel')).toHaveClass(/open/);
+});
+
+// ── Keychain-unlock remediation (docs/plans/cursor-keychain-unlock-remediation.md) ──
+
+const KEYCHAIN_LOCKED_OUTPUT =
+  'Error: Your macOS login keychain is locked.\nRun security unlock-keychain and try again.';
+
+test('locked-keychain cursor login output shows the unlock affordance', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__authFrames = [];
+    window.__ws = null;
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        window.__ws = this;
+        this.readyState = MockWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+        } else if (frame.type === 'auth.start') {
+          window.__authFrames.push(frame);
+          setTimeout(() => this.receive({ v: 1, type: 'command.result', request_id: frame.request_id,
+            payload: { ok: true, session_id: `sess-${window.__authFrames.length}`, harness: frame.payload.harness, command: 'cursor login' } }));
+        }
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = MockWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+
+  await page.goto('/');
+  await page.evaluate(() => openAuthPanel('cursor', null));
+  await page.waitForFunction(() => window.__authFrames.some(f => f.type === 'auth.start'));
+
+  await expect(page.locator('#auth-panel-unlock-btn')).toBeHidden();
+  await page.evaluate((output) => {
+    window.__ws.receive({ v: 1, type: 'auth.output', payload: { session_id: 'sess-1', data: btoa(output) } });
+  }, KEYCHAIN_LOCKED_OUTPUT);
+  await expect(page.locator('#auth-panel-unlock-btn')).toBeVisible();
+});
+
+test('completing the unlock (exit 0) auto-retries the original cursor login', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__authFrames = [];
+    window.__ws = null;
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        window.__ws = this;
+        this.readyState = MockWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+        } else if (frame.type === 'auth.start') {
+          window.__authFrames.push(frame);
+          const command = frame.payload.mode === 'unlock' ? 'security unlock-keychain' : 'cursor login';
+          setTimeout(() => this.receive({ v: 1, type: 'command.result', request_id: frame.request_id,
+            payload: { ok: true, session_id: `sess-${window.__authFrames.length}`, harness: frame.payload.harness, command } }));
+        }
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = MockWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+
+  await page.goto('/');
+  await page.evaluate(() => openAuthPanel('cursor', null));
+  await page.waitForFunction(() => window.__authFrames.length === 1);
+
+  await page.evaluate((output) => {
+    window.__ws.receive({ v: 1, type: 'auth.output', payload: { session_id: 'sess-1', data: btoa(output) } });
+  }, KEYCHAIN_LOCKED_OUTPUT);
+  await page.click('#auth-panel-unlock-btn');
+
+  await page.waitForFunction(() => window.__authFrames.length === 2);
+  const unlockStart = await page.evaluate(() => window.__authFrames[1]);
+  expect(unlockStart.payload.mode).toBe('unlock');
+  await expect(page.locator('#auth-panel-title')).toHaveText('Unlock macOS keychain');
+
+  // The unlock exits 0 (password accepted) — the original cursor login must
+  // be automatically re-issued, not just close the panel.
+  await page.evaluate(() => {
+    window.__ws.receive({ v: 1, type: 'auth.done', payload: { session_id: 'sess-2', returncode: 0 } });
+  });
+  await page.waitForFunction(() => window.__authFrames.length === 3);
+  const retryStart = await page.evaluate(() => window.__authFrames[2]);
+  expect(retryStart.payload).toMatchObject({ harness: 'cursor', mode: 'login' });
+  await expect(page.locator('#auth-panel')).toHaveClass(/open/);
+});
+
+test('server unlock_requires_local refusal is surfaced without a password prompt', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__authFrames = [];
+    window.__ws = null;
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        window.__ws = this;
+        this.readyState = MockWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+        } else if (frame.type === 'auth.start') {
+          window.__authFrames.push(frame);
+          const payload = frame.payload.mode === 'unlock'
+            ? { ok: false, error: 'unlock_requires_local',
+                detail: 'Keychain unlock is only available from a loopback client unless auth.allow_remote_keychain_unlock is enabled.' }
+            : { ok: true, session_id: `sess-${window.__authFrames.length}`, harness: frame.payload.harness, command: 'cursor login' };
+          setTimeout(() => this.receive({ v: 1, type: 'command.result', request_id: frame.request_id, payload }));
+        } else if (frame.type === 'auth.input') {
+          window.__authFrames.push(frame);
+        }
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = MockWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+
+  await page.goto('/');
+  await page.evaluate(() => openAuthPanel('cursor', null));
+  await page.waitForFunction(() => window.__authFrames.length === 1);
+
+  await page.evaluate((output) => {
+    window.__ws.receive({ v: 1, type: 'auth.output', payload: { session_id: 'sess-1', data: btoa(output) } });
+  }, KEYCHAIN_LOCKED_OUTPUT);
+  await page.click('#auth-panel-unlock-btn');
+
+  await page.waitForFunction(() => window.__authFrames.length === 2);
+  // The refusal detail goes to the terminal body; the panel title stays a
+  // short, stable label instead of echoing the full message.
+  await expect(page.locator('#auth-panel-title')).toHaveText('Failed to start');
+  await expect(page.locator('#auth-panel-retry-btn')).toBeVisible();
+
+  // No onData listener is ever wired for a session that failed to start, so
+  // typing at the terminal cannot reach the server as a password.
+  await page.locator('#auth-panel-term').click();
+  await page.keyboard.type('hunter2');
+  expect(await page.evaluate(() => window.__authFrames.some(f => f.type === 'auth.input'))).toBe(false);
+});
+
+test('cancelling during the auth.start round-trip cancels the spawned session, not resurrects the panel', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__authFrames = [];
+    window.__ws = null;
+    window.__pendingAuthStart = null;
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        window.__ws = this;
+        this.readyState = MockWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+        } else if (frame.type === 'auth.start') {
+          window.__authFrames.push(frame);
+          // Hold the command.result open so the test can cancel while the
+          // auth.start round-trip is still in flight.
+          window.__pendingAuthStart = frame;
+        } else if (frame.type === 'auth.cancel') {
+          window.__authFrames.push(frame);
+        }
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = MockWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+
+  await page.goto('/');
+  // Don't await the panel open — it blocks on the held command.result.
+  await page.evaluate(() => { window.__openAuthPanel = openAuthPanel('claudecode', null); });
+  await page.waitForFunction(() => window.__pendingAuthStart);
+
+  // Cancel while auth.start is in flight; the server has already spawned the
+  // PTY, but the client doesn't have its session_id yet.
+  await page.evaluate(() => closeAuthPanel());
+
+  // The command.result finally lands for the session that was just spawned.
+  await page.evaluate(() => {
+    const frame = window.__pendingAuthStart;
+    window.__ws.receive({ v: 1, type: 'command.result', request_id: frame.request_id,
+      payload: { ok: true, session_id: 'sess-1', harness: 'claudecode', command: 'claude auth login' } });
+  });
+
+  // The orphaned session must be cancelled, and the panel must stay closed
+  // (no resurrection onto the disposed terminal).
+  await page.waitForFunction(() => window.__authFrames.some(f => f.type === 'auth.cancel'));
+  const cancelFrame = await page.evaluate(() => window.__authFrames.find(f => f.type === 'auth.cancel'));
+  expect(cancelFrame.payload).toEqual({ session_id: 'sess-1' });
+  await expect(page.locator('#auth-panel')).not.toHaveClass(/open/);
+});

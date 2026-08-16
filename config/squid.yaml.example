@@ -32,6 +32,18 @@ updates:
   # never: restart without attempting an upgrade.
   install_on_restart: ask
 
+auth:
+  # The macOS keychain-unlock auth-session mode (fixes "Your macOS login
+  # keychain is locked" on `cursor-agent login`) is loopback-only by default,
+  # even though this server is reachable over the tailnet via `tailscale
+  # serve` too. This check fails closed: any request proxied through
+  # `tailscale serve` is treated as remote and refused, even from your own
+  # tailnet URL on the same machine — open the app at its loopback address
+  # (http://127.0.0.1:<port>) to unlock, or set this true only if you accept
+  # typing your Mac login-keychain password from another device on your
+  # tailnet.
+  allow_remote_keychain_unlock: false
+
 worktree:
   # Per-turn code-root isolation. Set enabled: false to use direct writes.
   enabled: true

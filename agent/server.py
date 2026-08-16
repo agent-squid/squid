@@ -24,6 +24,7 @@ GET /health
 import asyncio
 import base64
 import hashlib
+import ipaddress
 import json
 import logging
 import logging.handlers
@@ -52,7 +53,7 @@ from pydantic import BaseModel, Field
 from .config import (
     CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH,
     OPENCODE_PATH, SQUID_HOME, RESPONSE_TIMEOUT, NATIVE_SHELL_TIMEOUT, WORKTREE_ISOLATION_ENABLED,
-    REALTIME_TRANSPORT, UPDATES_INSTALL_ON_RESTART,
+    REALTIME_TRANSPORT, UPDATES_INSTALL_ON_RESTART, ALLOW_REMOTE_KEYCHAIN_UNLOCK,
     _USER_CONFIG, _cfg,
     config_revision, config_text, realtime_transport, write_config_text,
 )
@@ -629,6 +630,82 @@ def _origin_candidates(request: Request) -> set[str]:
     if forwarded_host:
         candidates.add(f"{forwarded_proto or request.url.scheme}://{forwarded_host}".rstrip("/"))
     return candidates
+
+
+def _keychain_unlock_allowed(headers, direct_host: Optional[str]) -> bool:
+    """Loopback gate for the macOS keychain-unlock auth-session mode (see
+    docs/plans/cursor-keychain-unlock-remediation.md).
+
+    `direct_host` (the raw TCP peer) is unreliable as *proof of remoteness*
+    on its own: `tailscale serve` reverse-proxies to this server over
+    loopback, so a tailnet client also arrives with a 127.0.0.1 peer address.
+    It's still trustworthy as proof of *localness*, though — the server only
+    ever binds 127.0.0.1 (enforced elsewhere), so a raw peer address can't be
+    spoofed to loopback by a remote client the way a header can.
+
+    X-Forwarded-For is attacker-controlled input, not a trusted client
+    address — a remote client can simply send `X-Forwarded-For: 127.0.0.1`
+    itself, and some proxies append to rather than replace an existing
+    value, so parsing "the real client IP" out of it is not safe here. Fail
+    closed instead: treat the mere *presence* of any forwarding/identity
+    header as proof the request came through a proxy (tailscale serve or
+    otherwise), hence remote, regardless of its value. A direct local browser
+    talking to 127.0.0.1 never sets these.
+    """
+    if ALLOW_REMOTE_KEYCHAIN_UNLOCK:
+        return True
+    # Any of the common proxy/forwarding markers makes a request remote: the
+    # proxy-standard X-Forwarded-For and RFC 7239 Forwarded, the de-facto
+    # X-Real-IP, and Tailscale-User-Login (set by `tailscale serve` when it
+    # forwards a tailnet identity). Checking all of them keeps the gate
+    # fail-closed even if a specific proxy sets only one.
+    if (
+        headers.get("x-forwarded-for")
+        or headers.get("x-real-ip")
+        or headers.get("forwarded")
+        or headers.get("tailscale-user-login")
+    ):
+        return False
+    if not direct_host:
+        return False
+    try:
+        return ipaddress.ip_address(direct_host).is_loopback
+    except ValueError:
+        return False
+
+
+def _auth_session_validation_error(
+    harness: str,
+    mode: str,
+    model: Optional[str],
+    headers,
+    direct_host: Optional[str],
+) -> Optional[str]:
+    """Semantic validation shared by the HTTP (POST /auth/session) and
+    WebSocket (auth.start) auth-session spawn paths.
+
+    Returns an error string on failure, or None when the request is valid.
+    The mode/harness allowlist and the keychain-unlock loopback gate live here
+    in one place so the two entry points cannot drift (ADR-0035). The caller
+    maps the string to its own wire shape: HTTP surfaces it as `error`, WS as
+    `invalid_frame`/`detail` — except "unlock_requires_local", which both
+    surfaces as the `unlock_requires_local` code.
+    """
+    if mode == "login":
+        if harness not in SUPPORTED_HARNESSES:
+            return f"Unknown harness {harness!r}"
+    elif mode == "install":
+        if harness not in SUPPORTED_HARNESSES and harness != "ollama":
+            return f"Unknown install target {harness!r}"
+    elif mode == "unlock":
+        if not _keychain_unlock_allowed(headers, direct_host):
+            return "unlock_requires_local"
+    else:  # pull / remove
+        if harness != "ollama":
+            return f"mode={mode!r} is only supported for ollama"
+        if not model:
+            return "model is required"
+    return None
 
 
 def _same_origin(request: Request) -> bool:
@@ -1468,7 +1545,7 @@ class AuthSessionRequest(BaseModel):
     harness: str
     cols: int = Field(default=100, ge=20, le=500)
     rows: int = Field(default=10, ge=5, le=200)
-    mode: Literal["login", "install", "pull", "remove"] = "login"
+    mode: Literal["login", "install", "pull", "remove", "unlock"] = "login"
     model: Optional[str] = None
 
 
@@ -1482,20 +1559,13 @@ class AuthSessionResizeRequest(BaseModel):
 
 
 @app.post("/auth/session")
-async def auth_session_create(req: AuthSessionRequest):
+async def auth_session_create(req: AuthSessionRequest, request: Request):
     from .auth_sessions import create_session, AuthSessionError, NoLoginCommand
 
-    if req.mode == "login":
-        if req.harness not in SUPPORTED_HARNESSES:
-            return JSONResponse({"error": f"Unknown harness {req.harness!r}"}, status_code=400)
-    elif req.mode == "install":
-        if req.harness not in SUPPORTED_HARNESSES and req.harness != "ollama":
-            return JSONResponse({"error": f"Unknown install target {req.harness!r}"}, status_code=400)
-    else:  # pull / remove
-        if req.harness != "ollama":
-            return JSONResponse({"error": f"mode={req.mode!r} is only supported for ollama"}, status_code=400)
-        if not req.model:
-            return JSONResponse({"error": "model is required"}, status_code=400)
+    direct_host = request.client.host if request.client else None
+    error = _auth_session_validation_error(req.harness, req.mode, req.model, request.headers, direct_host)
+    if error:
+        return JSONResponse({"error": error}, status_code=400)
     try:
         session = await create_session(req.harness, req.cols, req.rows, mode=req.mode, model=req.model)
     except NoLoginCommand as exc:
@@ -3784,24 +3854,190 @@ async def _realtime_chat_start(payload: dict) -> dict:
     return {"ok": True, "msg_id": prepared["asst_msg_id"], "flow_run_id": flow_run_id}
 
 
-async def _handle_realtime_mutation(websocket: WebSocket, frame: dict, principal: str) -> None:
+def _detach_auth_listener(session_id: Optional[str], q: Optional[asyncio.Queue]) -> None:
+    """Remove a connection's auth output queue from its session's listeners.
+
+    No-op when either is unset. The queue may already be gone (an exited
+    session's listeners are only dropped at disconnect, and a re-attach swaps
+    the queue first), so guard the remove like stream_events does.
+    """
+    if q is None:
+        return
+    from .auth_sessions import get_session
+
+    session = get_session(session_id) if session_id else None
+    if session is not None:
+        try:
+            session.listeners.remove(q)
+        except ValueError:
+            pass
+
+
+def _attach_auth_listener(session_id: str) -> Optional[tuple[str, asyncio.Queue]]:
+    """Re-attach to a still-live session for an idempotent auth.start replay.
+
+    Returns (session_id, queue) to wire the pump, or None when the session is
+    already gone (post-exit retention lapsed) — the caller then returns the
+    stored result unchanged.
+    """
+    from .auth_sessions import attach_listener, get_session
+
+    session = get_session(session_id)
+    if not session:
+        return None
+    return (session_id, attach_listener(session))
+
+
+async def _realtime_auth_start(payload: dict, websocket: WebSocket) -> tuple[dict, Optional[tuple[str, asyncio.Queue]]]:
+    """Validate and spawn an auth session; return (result, attach).
+
+    Shares its semantic validation with the HTTP /auth/session route via
+    _auth_session_validation_error. On success the caller persists the result,
+    then realtime_v1 installs the attach so its pump drains the session's
+    output. attach is None on failure.
+    """
+    from .auth_sessions import (
+        AuthSessionError, NoLoginCommand, attach_listener, create_session,
+    )
+
+    harness = payload.get("harness")
+    cols = payload.get("cols", 100)
+    rows = payload.get("rows", 10)
+    mode = payload.get("mode", "login")
+    model = payload.get("model")
+
+    if not isinstance(harness, str) or not harness.strip():
+        return {"ok": False, "error": "invalid_frame", "detail": "harness is required"}, None
+    if not isinstance(cols, int) or not isinstance(rows, int) or not (20 <= cols <= 500) or not (5 <= rows <= 200):
+        return {"ok": False, "error": "invalid_frame", "detail": "cols/rows out of range"}, None
+    if mode not in ("login", "install", "pull", "remove", "unlock"):
+        return {"ok": False, "error": "invalid_frame", "detail": f"Unknown auth-session mode {mode!r}"}, None
+
+    direct_host = websocket.client.host if websocket.client else None
+    error = _auth_session_validation_error(harness, mode, model, websocket.headers, direct_host)
+    if error == "unlock_requires_local":
+        return {
+            "ok": False, "error": "unlock_requires_local",
+            "detail": "Keychain unlock is only available from a loopback client "
+                      "unless auth.allow_remote_keychain_unlock is enabled.",
+        }, None
+    if error:
+        return {"ok": False, "error": "invalid_frame", "detail": error}, None
+
+    try:
+        session = await create_session(harness, cols, rows, mode=mode, model=model)
+    except NoLoginCommand as exc:
+        return {"ok": False, "error": "no_login_command", "detail": str(exc)}, None
+    except AuthSessionError as exc:
+        return {"ok": False, "error": "auth_session_error", "detail": str(exc)}, None
+
+    result = {
+        "ok": True,
+        "session_id": session.id,
+        "harness": session.harness_id,
+        "command": session.display_command,
+    }
+    return result, (session.id, attach_listener(session))
+
+
+async def _handle_auth_input(websocket: WebSocket, frame: dict) -> None:
+    from .auth_sessions import AuthSessionError, get_session, write_input
+
+    request_id = frame.get("request_id")
+    payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+    session_id = payload.get("session_id")
+    data = payload.get("data")
+    if not isinstance(request_id, str) or not request_id or not isinstance(session_id, str) or not isinstance(data, str):
+        await websocket.send_json({"v": 1, "type": "error", "payload": {"code": "invalid_frame"}})
+        return
+    session = get_session(session_id)
+    if not session:
+        await websocket.send_json({"v": 1, "type": "command.result", "request_id": request_id, "payload": {"ok": False, "error": "unknown_session"}})
+        return
+    try:
+        write_input(session, data.encode())
+    except AuthSessionError as exc:
+        await websocket.send_json({"v": 1, "type": "command.result", "request_id": request_id, "payload": {"ok": False, "error": str(exc)}})
+        return
+    await websocket.send_json({"v": 1, "type": "command.result", "request_id": request_id, "payload": {"ok": True}})
+
+
+async def _handle_auth_resize(websocket: WebSocket, frame: dict) -> None:
+    from .auth_sessions import get_session, resize
+
+    request_id = frame.get("request_id")
+    payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+    session_id = payload.get("session_id")
+    cols = payload.get("cols")
+    rows = payload.get("rows")
+    if (not isinstance(request_id, str) or not request_id or not isinstance(session_id, str)
+            or not isinstance(cols, int) or not isinstance(rows, int)
+            or not (20 <= cols <= 500) or not (5 <= rows <= 200)):
+        await websocket.send_json({"v": 1, "type": "error", "payload": {"code": "invalid_frame"}})
+        return
+    session = get_session(session_id)
+    if not session:
+        await websocket.send_json({"v": 1, "type": "command.result", "request_id": request_id, "payload": {"ok": False, "error": "unknown_session"}})
+        return
+    resize(session, cols, rows)
+    await websocket.send_json({"v": 1, "type": "command.result", "request_id": request_id, "payload": {"ok": True}})
+
+
+async def _handle_auth_cancel(websocket: WebSocket, frame: dict) -> None:
+    """Fire-and-forget, like _handle_auth_input/_handle_auth_resize — not
+    routed through _handle_realtime_mutation's idempotent-mutation path.
+
+    The client (closeAuthPanel, ui/app.js) never reads this command's result
+    and mints a fresh request_id on every call (authSend(), not the
+    idempotent sendCommand() chat/auth.start use), so persisting a
+    (principal, request_id) row for it was pure write-only dead weight: a
+    row nothing ever looks up, on every panel close. cancel_session() is
+    already safe to call more than once for the same session id (a second
+    call just finds nothing left in _sessions and returns False), so no
+    idempotency guard is needed to make repeat cancels safe.
+    """
+    from .auth_sessions import cancel_session
+
+    request_id = frame.get("request_id")
+    payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+    session_id = payload.get("session_id")
+    if not isinstance(request_id, str) or not request_id or not isinstance(session_id, str) or not session_id:
+        await websocket.send_json({"v": 1, "type": "error", "payload": {"code": "invalid_frame"}})
+        return
+    cancelled = await cancel_session(session_id)
+    await websocket.send_json({"v": 1, "type": "command.result", "request_id": request_id,
+                                "payload": {"ok": True, "cancelled": cancelled, "session_id": session_id}})
+
+
+async def _handle_realtime_mutation(websocket: WebSocket, frame: dict, principal: str) -> Optional[tuple[str, asyncio.Queue]]:
     message_type = frame.get("type")
     request_id = frame.get("request_id")
     payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
-    if not isinstance(request_id, str) or not request_id or message_type not in {"chat.start", "chat.cancel"}:
+    if not isinstance(request_id, str) or not request_id or message_type not in {
+        "chat.start", "chat.cancel", "auth.start",
+    }:
         await websocket.send_json({"v": 1, "type": "error", "payload": {"code": "invalid_frame"}})
-        return
+        return None
     fingerprint = _realtime_request_fingerprint(message_type, payload)
     previous = await asyncio.to_thread(get_realtime_request, principal, request_id)
+    attach: Optional[tuple[str, asyncio.Queue]] = None
     if previous:
         if previous["request_type"] != message_type or previous["request_hash"] != fingerprint:
             await websocket.send_json({"v": 1, "type": "error", "request_id": request_id, "payload": {"code": "request_id_conflict"}})
-            return
+            return None
         result = previous["result"]
+        if message_type == "auth.start" and result.get("ok") and result.get("session_id"):
+            # Reconnect replay: re-wire output to this socket for the still-live
+            # session. If it already exited and was reaped, the stored result is
+            # returned unchanged and the client sees no further output.
+            attach = _attach_auth_listener(result["session_id"])
     elif message_type == "chat.start":
         result = await _realtime_chat_start(payload)
         result = await asyncio.to_thread(save_realtime_request, principal, request_id, message_type, fingerprint, result)
-    else:
+    elif message_type == "auth.start":
+        result, attach = await _realtime_auth_start(payload, websocket)
+        result = await asyncio.to_thread(save_realtime_request, principal, request_id, message_type, fingerprint, result)
+    else:  # chat.cancel
         msg_id = payload.get("msg_id")
         if not isinstance(msg_id, int):
             result = {"ok": False, "error": "invalid_frame"}
@@ -3811,6 +4047,7 @@ async def _handle_realtime_mutation(websocket: WebSocket, frame: dict, principal
             result = {"ok": True, "cancelled": changed, "killed": killed, "msg_id": msg_id}
         result = await asyncio.to_thread(save_realtime_request, principal, request_id, message_type, fingerprint, result)
     await websocket.send_json({"v": 1, "type": "command.result", "request_id": request_id, "payload": result})
+    return attach
 
 
 @app.websocket("/ws/v1")
@@ -3834,12 +4071,19 @@ async def realtime_v1(websocket: WebSocket):
     scopes: list[dict] = []
     principal: Optional[str] = None
     generation = _realtime_notifier.generation
+    auth_output_q: Optional[asyncio.Queue] = None
+    auth_session_id: Optional[str] = None
     try:
         while True:
             receive_task = asyncio.create_task(websocket.receive_json())
             notify_task = asyncio.create_task(_realtime_notifier.wait(generation))
+            wait_set = {receive_task, notify_task}
+            output_task: Optional[asyncio.Task] = None
+            if auth_output_q is not None:
+                output_task = asyncio.create_task(auth_output_q.get())
+                wait_set.add(output_task)
             done, pending = await asyncio.wait(
-                {receive_task, notify_task}, return_when=asyncio.FIRST_COMPLETED,
+                wait_set, return_when=asyncio.FIRST_COMPLETED,
             )
             for task in pending:
                 task.cancel()
@@ -3847,6 +4091,33 @@ async def realtime_v1(websocket: WebSocket):
             frame = receive_task.result() if receive_task in done else None
             if notify_task in done:
                 generation = notify_task.result()
+            if output_task is not None and output_task in done:
+                chunk = output_task.result()
+                if chunk is None:
+                    from .auth_sessions import get_session
+                    session = get_session(auth_session_id) if auth_session_id else None
+                    # A cancel-driven exit (idle reaper / server-side cancel) pops the
+                    # session from _sessions the moment _closed fires, racing this
+                    # drain. When the session is already gone, report a failure code
+                    # rather than null — the client coerces null to 0 (success), so a
+                    # reaped login would otherwise read as a completed auth.
+                    returncode = session.returncode if session is not None else -1
+                    session_id = auth_session_id
+                    _detach_auth_listener(auth_session_id, auth_output_q)
+                    auth_output_q = None
+                    auth_session_id = None
+                    await websocket.send_json({
+                        "v": 1, "type": "auth.done",
+                        "payload": {"session_id": session_id, "returncode": returncode},
+                    })
+                else:
+                    await websocket.send_json({
+                        "v": 1, "type": "auth.output",
+                        "payload": {
+                            "session_id": auth_session_id,
+                            "data": base64.b64encode(chunk).decode("ascii"),
+                        },
+                    })
             if frame is not None:
                 if frame.get("v") != 1:
                     await websocket.send_json({"v": 1, "type": "error", "payload": {"code": "unsupported_version", "supported_versions": [1]}})
@@ -3894,11 +4165,20 @@ async def realtime_v1(websocket: WebSocket):
                     scopes = []
                     cursor = await asyncio.to_thread(get_realtime_cursor)
                     await websocket.send_json({"v": 1, "type": "unsubscribed", "payload": {}})
-                elif message_type in {"chat.start", "chat.cancel"}:
+                elif message_type in {"chat.start", "chat.cancel", "auth.start"}:
                     if not principal:
                         await websocket.send_json({"v": 1, "type": "error", "payload": {"code": "client_identity_required"}})
                     else:
-                        await _handle_realtime_mutation(websocket, frame, principal)
+                        attach = await _handle_realtime_mutation(websocket, frame, principal)
+                        if attach is not None:
+                            _detach_auth_listener(auth_session_id, auth_output_q)
+                            auth_session_id, auth_output_q = attach
+                elif message_type == "auth.input":
+                    await _handle_auth_input(websocket, frame)
+                elif message_type == "auth.resize":
+                    await _handle_auth_resize(websocket, frame)
+                elif message_type == "auth.cancel":
+                    await _handle_auth_cancel(websocket, frame)
                 elif message_type == "ping":
                     await websocket.send_json({"v": 1, "type": "pong", "payload": {}})
                 elif message_type not in {"ack", "pong"}:
@@ -3918,6 +4198,7 @@ async def realtime_v1(websocket: WebSocket):
                         await websocket.send_json(_realtime_envelope(event))
                     cursor = window["current"]
     except WebSocketDisconnect:
+        _detach_auth_listener(auth_session_id, auth_output_q)
         return
 
 

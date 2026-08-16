@@ -14,6 +14,12 @@ provider's install one-liner, ADR-0037's amendment on 2026-08-09) and
 Ollama model name as one argv element (never shell input); remove remains
 restricted to models reported by the local Ollama installation.
 
+Also covers an "unlock" session (macOS-only): a fixed `security
+unlock-keychain` command run interactively in a PTY so a locked login
+keychain can be unlocked from inside the same security/audit session a
+subsequently-spawned `cursor-agent login` inherits, without rebooting the
+server. See docs/plans/cursor-keychain-unlock-remediation.md.
+
 Distinct from the `interactive-pty` *protocol* name declared in
 harnesses.py (ADR-0022) — that protocol has no implementation anywhere in
 the codebase today. This module is the first real PTY spawn/stream code in
@@ -30,6 +36,7 @@ import re
 import shlex
 import signal
 import struct
+import sys
 import termios
 import time
 import uuid
@@ -121,6 +128,20 @@ def _install_argv(target_id: str) -> list[str]:
     if is_installed(target_id):
         raise AuthSessionError(f"{target_id} is already installed")
     return ["sh", "-c", harness_install_cmd(target_id)]
+
+
+def _unlock_argv() -> list[str]:
+    """Fixed, allowlisted `security unlock-keychain` command — no path, so it
+    prompts interactively for the default/login keychain. Never built from
+    user input, same invariant as _login_argv. macOS-only: pty.fork() inherits
+    the server process's security/audit session rather than creating a new
+    one, so an unlock run here unlocks the keychain for that same session —
+    the one a subsequently-spawned `cursor-agent login` inherits too. See
+    docs/plans/cursor-keychain-unlock-remediation.md.
+    """
+    if sys.platform != "darwin":
+        raise AuthSessionError("keychain unlock is only available on macOS")
+    return ["security", "unlock-keychain"]
 
 
 def _model_argv(action: str, model: str) -> list[str]:
@@ -229,7 +250,9 @@ async def create_session(
 ) -> AuthSession:
     """`target_id` is a harness id for mode="login"/"install", or "ollama"
     for mode="install"/"pull"/"remove". `model` is required for pull/remove
-    and is validated by _model_argv. Raises AuthSessionError /
+    and is validated by _model_argv. mode="unlock" ignores `target_id` for
+    argv purposes (fixed `security unlock-keychain` command) — it is still
+    used as the session's registry/prompt label. Raises AuthSessionError /
     NoLoginCommand."""
     if mode == "login":
         argv = _login_argv(target_id)
@@ -241,6 +264,9 @@ async def create_session(
         if not model:
             raise AuthSessionError(f"mode={mode!r} requires a model")
         argv = _model_argv("pull" if mode == "pull" else "rm", model)
+        env = os.environ.copy()
+    elif mode == "unlock":
+        argv = _unlock_argv()
         env = os.environ.copy()
     else:
         raise AuthSessionError(f"Unknown auth-session mode {mode!r}")
@@ -358,6 +384,25 @@ async def stream_events(session: AuthSession) -> AsyncGenerator[bytes, None]:
             pass
 
 
+def attach_listener(session: AuthSession) -> asyncio.Queue:
+    """Register a fresh output queue and prime it with the ring buffer.
+
+    Appends the queue to session.listeners, then snapshots the buffer with NO
+    await in between (broadcast runs synchronously on the loop from the reader
+    callback, so nothing can interleave) — same ordering guarantee as
+    stream_events. If the session already exited, also enqueue the done
+    sentinel so the caller emits auth.done immediately.
+    """
+    q: asyncio.Queue = asyncio.Queue()
+    session.listeners.append(q)
+    snapshot = bytes(session.buffer)
+    if snapshot:
+        q.put_nowait(snapshot)
+    if session.state == "exited":
+        q.put_nowait(None)
+    return q
+
+
 def write_input(session: AuthSession, data: bytes) -> None:
     if session.state != "running":
         raise AuthSessionError("session is not running")
@@ -368,6 +413,10 @@ def write_input(session: AuthSession, data: bytes) -> None:
 def resize(session: AuthSession, cols: int, rows: int) -> None:
     if session.state != "running":
         return
+    # Resizes are the same class of "still here" signal as input — a client
+    # dragging a window or rotating a device sends only resizes, never input,
+    # so without this the idle reaper could kill a live session mid-use.
+    session.touch()
     winsize = struct.pack("HHHH", rows, cols, 0, 0)
     fcntl.ioctl(session.master_fd, termios.TIOCSWINSZ, winsize)
 
