@@ -277,3 +277,49 @@ test('scroll button abandons jump window and reloads latest history page', async
   expect(historyRequests.some(q => q.includes('offset=0') && q.includes('limit=5'))).toBe(true);
   expect(aroundRequests.some(q => q.includes('direction=newer'))).toBe(false);
 });
+
+test('scroll-up pagination anchors older pages at the top even with a live group present', async ({ page }) => {
+  await mockApp(page);
+
+  const tall = 'x\n'.repeat(120); // tall enough to fill the viewport and stop the auto-chain
+  await page.route('**/history**', route => {
+    const url = new URL(route.request().url());
+    const offset = Number(url.searchParams.get('offset') || '0');
+    if (offset === 0) {
+      return route.fulfill({ json: {
+        items: [
+          { id: 202, role: 'assistant', topic: 'squid', agent: 'claude', content: tall, status: 'done', prompt: 'p', completed_at: '2026-07-15T10:02:00Z' },
+          { id: 201, role: 'assistant', topic: 'squid', agent: 'claude', content: tall, status: 'done', prompt: 'p', completed_at: '2026-07-15T10:01:00Z' },
+        ],
+        has_more: true,
+      } });
+    }
+    return route.fulfill({ json: {
+      items: [
+        { id: 200, role: 'assistant', topic: 'squid', agent: 'claude', content: 'older completed', status: 'done', prompt: 'p', completed_at: '2026-07-15T09:00:00Z' },
+      ],
+      has_more: false,
+    } });
+  });
+
+  await page.goto('/');
+  await page.waitForFunction(() => document.querySelector('.msg.assistant.history-item[data-msg-id="202"]'));
+
+  // A still-running turn newer than everything fetched so far. The buggy
+  // anchor locked onto this group and inserted older pages before it (i.e. at
+  // the bottom) instead of at the top of the transcript.
+  await page.evaluate(() => {
+    const thinking = document.createElement('div');
+    thinking.className = 'msg-thinking';
+    thinking.dataset.msgId = '300';
+    document.getElementById('messages').appendChild(thinking);
+  });
+
+  await page.evaluate(() => { historyExhausted = false; loadHistory(); });
+  await page.waitForFunction(() => document.querySelector('.msg.assistant.history-item[data-msg-id="200"]'));
+
+  const ids = await page.locator('#messages > .msg.assistant.history-item').evaluateAll(
+    rows => rows.map(row => row.dataset.msgId)
+  );
+  expect(ids).toEqual(['200', '201', '202']);
+});

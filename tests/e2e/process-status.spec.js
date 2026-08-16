@@ -593,3 +593,40 @@ test('done polling fallback freezes persisted status_raw', async ({ page }) => {
   await expect(thinking.locator('.thinking-body')).toContainText('Reading files');
   await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toContainText('Recovered final response');
 });
+
+test('clicking a running row in the status popup jumps to its thinking bubble', async ({ page }) => {
+  await mockBackend(page);
+  // Chat stream stays open (status event only, no 'done') so the thinking
+  // bubble for msg_id 1 remains live in the DOM while we poll /processes.
+  await page.route('**/chat', r => r.fulfill({
+    status: 200, headers: SSE_HEADERS,
+    body: sse(META, { event: 'status', data: 'Working...' }),
+  }));
+  await page.route('**/processes', r => r.fulfill({ json: [
+    { msg_id: 1, topic: 'squid', agent: 'claude', prompt_preview: 'working', duration_s: 1 },
+  ] }));
+
+  await page.goto('/');
+  await page.fill('#input', 'jump test');
+  await page.keyboard.press('Enter');
+
+  const thinking = page.locator(THINKING);
+  await expect(thinking).toBeVisible();
+
+  // Push the bubble far below the fold so a jump is actually needed.
+  await page.evaluate(() => {
+    const pad = document.createElement('div');
+    pad.style.height = '4000px';
+    document.getElementById('messages').prepend(pad);
+    document.getElementById('messages').scrollTop = 0;
+  });
+
+  await page.locator('#proc-status').click();
+  const row = page.locator('#proc-status-popup tr[data-jump-msgid="1"]');
+  await expect(row).toBeVisible();
+  await row.click();
+
+  await expect(page.locator('#proc-status-popup')).not.toHaveClass(/open/);
+  await expect(thinking).toHaveClass(/msg-jump-highlight/);
+  await expect(thinking).toBeInViewport();
+});

@@ -1,11 +1,14 @@
 import asyncio
 import base64
 import json
+import logging
 import os
 import sqlite3
 import threading
 
+import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from agent import auth_sessions, server, stats_db
 
@@ -169,11 +172,13 @@ def test_websocket_subscribe_snapshot_live_event_and_idempotent_cancel(tmp_path,
 def test_websocket_rejects_protocol_version_skew(tmp_path, monkeypatch):
     _fresh_db(tmp_path, monkeypatch)
     with TestClient(server.app).websocket_connect("/ws/v1") as ws:
-        ws.receive_json()
+        hello = ws.receive_json()
+        assert hello["payload"]["supported_versions"] == [1]
         ws.send_json({"v": 99, "type": "ping", "payload": {}})
         error = ws.receive_json()
         assert error["type"] == "error"
         assert error["payload"]["code"] == "unsupported_version"
+        assert error["payload"]["supported_versions"] == [1]
 
 
 def test_websocket_rejects_unauthorized_scope(tmp_path, monkeypatch):
@@ -879,3 +884,249 @@ def test_auth_start_unlock_allowed_remotely_when_opted_in(tmp_path, monkeypatch)
         assert result["ok"] is True
 
     os.close(write_fd)
+
+
+def test_outbound_queue_coalesces_process_changed():
+    async def run():
+        outbound = server._RealtimeOutbound(4)
+        assert outbound.enqueue({"type": "chat.text", "event_id": 1}) is True
+        assert outbound.enqueue({"type": "process.changed", "payload": {"processes": [1]}}) is True
+        assert outbound.enqueue({"type": "process.changed", "payload": {"processes": [2]}}) is True
+        assert outbound.enqueue({"type": "queue.changed", "payload": {"queue": [1]}}) is True
+        assert outbound.enqueue({"type": "queue.changed", "payload": {"queue": [2]}}) is True
+        assert len(outbound) == 3  # chat.text + one process.changed + one queue.changed
+        # Non-coalescible frames overflow at the limit.
+        assert outbound.enqueue({"type": "chat.text", "event_id": 2}) is True
+        assert len(outbound) == 4
+        assert outbound.enqueue({"type": "chat.text", "event_id": 3}) is False
+        # Coalescible frames never overflow — they replace in place.
+        assert outbound.enqueue({"type": "process.changed", "payload": {"processes": [3]}}) is True
+        assert len(outbound) == 4
+        n = len(outbound)
+        frames = [await outbound.get() for _ in range(n)]
+        types = [frame["type"] for frame in frames]
+        assert types.count("process.changed") == 1
+        assert types.count("queue.changed") == 1
+        process = next(frame for frame in frames if frame["type"] == "process.changed")
+        assert process["payload"] == {"processes": [3]}
+        return True
+
+    assert asyncio.run(run()) is True
+
+
+def test_slow_consumer_closes_with_resumable_error(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    monkeypatch.setattr(server, "_REALTIME_OUTBOUND_QUEUE_LIMIT", 4)
+
+    async def stalled_sender(_websocket, _outbound):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(server, "_ws_sender", stalled_sender)
+
+    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        assert ws.receive_json()["type"] == "hello"
+        # Each inbound ping enqueues one non-coalescible pong; the stalled
+        # sender never drains, so the 5th overflows the bounded queue.
+        for _ in range(5):
+            ws.send_json({"v": 1, "type": "ping", "payload": {}})
+        error = ws.receive_json()
+        assert error["type"] == "error"
+        assert error["payload"] == {"code": "slow_consumer", "resumable": True}
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+        assert exc.value.code == 1013
+
+
+def test_frame_too_large_closes_connection(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    monkeypatch.setattr(server, "_REALTIME_MAX_FRAME_BYTES", 64)
+    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        assert ws.receive_json()["type"] == "hello"
+        ws.send_text("x" * 65)
+        error = ws.receive_json()
+        assert error["type"] == "error"
+        assert error["payload"]["code"] == "frame_too_large"
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+        assert exc.value.code == 1009
+
+
+def test_malformed_frames_get_invalid_frame(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        assert ws.receive_json()["type"] == "hello"
+        ws.send_text("not json")
+        error = ws.receive_json()
+        assert error["type"] == "error"
+        assert error["payload"]["code"] == "invalid_frame"
+        ws.send_text("[1, 2]")
+        error = ws.receive_json()
+        assert error["type"] == "error"
+        assert error["payload"]["code"] == "invalid_frame"
+        # The connection stays open after malformed frames.
+        ws.send_json({"v": 1, "type": "ping", "payload": {}})
+        assert ws.receive_json()["type"] == "pong"
+
+
+def test_server_initiated_heartbeat_and_dead_peer_close(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    monkeypatch.setattr(server, "_REALTIME_HEARTBEAT_SECONDS", 1)
+    monkeypatch.setattr(server, "_REALTIME_HEARTBEAT_MISS_LIMIT", 2)
+
+    # A peer that never sends is closed after the miss limit.
+    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        assert ws.receive_json()["type"] == "hello"
+        assert ws.receive_json()["type"] == "ping"
+        with pytest.raises(WebSocketDisconnect) as exc:
+            while True:
+                ws.receive_json()
+        assert exc.value.code == 1001
+
+    # A peer that answers pings stays open and keeps receiving pings.
+    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        assert ws.receive_json()["type"] == "hello"
+        for _ in range(2):
+            assert ws.receive_json()["type"] == "ping"
+            ws.send_json({"v": 1, "type": "pong", "payload": {}})
+
+
+def test_ack_cursor_is_recorded_and_clamped(tmp_path, monkeypatch, caplog):
+    _fresh_db(tmp_path, monkeypatch)
+    with caplog.at_level(logging.DEBUG, logger="agent.server"):
+        with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ws.send_json({"v": 1, "type": "ack", "payload": {"event_id": 0}})
+            ws.send_json({"v": 1, "type": "ack", "payload": {"event_id": 999999}})
+            # Valid acks produce no error frame; the connection stays open.
+            ws.send_json({"v": 1, "type": "ping", "payload": {}})
+            assert ws.receive_json()["type"] == "pong"
+            # An invalid ack yields invalid_frame.
+            ws.send_json({"v": 1, "type": "ack", "payload": {"event_id": "nope"}})
+            error = ws.receive_json()
+            assert error["type"] == "error"
+            assert error["payload"]["code"] == "invalid_frame"
+    assert "clamped" in caplog.text
+
+
+def test_subscribe_replay_under_outbound_pressure_preserves_order(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    monkeypatch.setattr(server, "_REALTIME_OUTBOUND_QUEUE_LIMIT", 8)
+    ids = [
+        stats_db.insert_realtime_event("message.changed", "squid", "codex", {"id": index})
+        for index in range(30)
+    ]
+
+    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        assert ws.receive_json()["type"] == "hello"
+        ws.send_json({
+            "v": 1, "type": "subscribe",
+            "payload": {"client_id": CLIENT_ID, "cursor": 0, "scopes": [{"topic": "squid", "agent": "codex"}]},
+        })
+        assert ws.receive_json()["type"] == "subscribed"
+        received = []
+        for _ in range(30):
+            frame = ws.receive_json()
+            assert frame["type"] == "message.changed"
+            received.append(frame["event_id"])
+    assert received == ids
+    assert received == sorted(received)
+
+
+def test_reconnect_replays_from_last_applied_cursor(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    user_id = stats_db.insert_user_message("squid", "codex", "hello")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+
+    subscribe = {
+        "v": 1, "type": "subscribe",
+        "payload": {"client_id": CLIENT_ID, "scopes": [{"topic": "squid", "agent": "codex"}]},
+    }
+
+    # Disconnect before chat metadata: snapshot at cursor 0, then drop the
+    # socket before the turn's meta/text are published.
+    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        ws.receive_json()
+        ws.send_json(subscribe)
+        assert ws.receive_json()["type"] == "subscribed"
+        snapshot = ws.receive_json()
+        assert snapshot["type"] == "snapshot"
+        first_cursor = snapshot["event_id"]
+
+    stats_db.insert_run_event(msg_id, 0, "meta", None)
+    stats_db.insert_run_event(msg_id, 1, "text", "partial")
+
+    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        ws.receive_json()
+        subscribe["payload"]["cursor"] = first_cursor
+        ws.send_json(subscribe)
+        assert ws.receive_json()["type"] == "subscribed"
+        replayed = [ws.receive_json(), ws.receive_json()]
+        assert [(frame["type"], frame["run_seq"]) for frame in replayed] == [
+            ("chat.meta", 0), ("chat.text", 1),
+        ]
+        last_cursor = replayed[-1]["event_id"]
+
+    # Disconnect after chat metadata: reconnect from the last applied cursor;
+    # the already-applied meta/text are not re-delivered, only the new done.
+    stats_db.insert_run_event(msg_id, 2, "done", None)
+    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        ws.receive_json()
+        subscribe["payload"]["cursor"] = last_cursor
+        ws.send_json(subscribe)
+        assert ws.receive_json()["type"] == "subscribed"
+        replay = ws.receive_json()
+        assert replay["type"] == "chat.done"
+        assert replay["event_id"] > last_cursor
+
+
+def test_multiple_simultaneous_clients_receive_live_events(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    user_id = stats_db.insert_user_message("squid", "codex", "hello")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    second_id = "testclient0000000000000002"
+
+    with TestClient(server.app) as client, \
+         client.websocket_connect("/ws/v1") as first, \
+         client.websocket_connect("/ws/v1") as second:
+        for client_id, ws in ((CLIENT_ID, first), (second_id, second)):
+            ws.receive_json()
+            ws.send_json({
+                "v": 1, "type": "subscribe",
+                "payload": {"client_id": client_id, "scopes": [{"topic": "squid", "agent": "codex"}]},
+            })
+            assert ws.receive_json()["type"] == "subscribed"
+            assert ws.receive_json()["type"] == "snapshot"
+
+        stats_db.insert_run_event(msg_id, 0, "text", "both see this")
+
+        for ws in (first, second):
+            event = ws.receive_json()
+            assert event["type"] == "chat.text"
+            assert event["payload"] == {"text": "both see this"}
+
+
+def test_safety_poll_recovers_a_lost_notification(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    monkeypatch.setattr(server, "_REALTIME_SAFETY_POLL_SECONDS", 0.1)
+
+    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        ws.receive_json()
+        ws.send_json({
+            "v": 1, "type": "subscribe",
+            "payload": {"client_id": CLIENT_ID, "scopes": [{"topic": "squid", "agent": "codex"}]},
+        })
+        assert ws.receive_json()["type"] == "subscribed"
+        assert ws.receive_json()["type"] == "snapshot"
+
+        # Drop the commit listener so the commit below does not wake the
+        # socket, then commit directly to the durable log. The 20s safety poll
+        # (patched to 0.1s) must still drain it after its timeout.
+        stats_db.set_realtime_commit_listener(None)
+        try:
+            stats_db.insert_realtime_event("message.changed", "squid", "codex", {"id": "polled"})
+        finally:
+            stats_db.set_realtime_commit_listener(server._realtime_notifier.notify_committed)
+
+        event = ws.receive_json()
+        assert event["type"] == "message.changed"
+        assert event["payload"] == {"id": "polled"}

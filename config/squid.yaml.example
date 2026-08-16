@@ -25,6 +25,12 @@ agent:
 # migrated live features and falls back to their compatibility SSE path.
 realtime:
   transport: auto  # auto | websocket | sse
+  # Per-connection outbound queue depth before a slow client is closed (1013).
+  #outbound_queue_limit: 256
+  # Max inbound WebSocket frame size in bytes before frame_too_large (1009).
+  #max_frame_bytes: 262144
+  # Server-initiated ping interval in seconds (2 missed = dead-peer close).
+  #heartbeat_seconds: 20
 
 updates:
   # What to do when a newer AgentSquid release is available and the user restarts.

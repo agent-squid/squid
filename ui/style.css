@@ -740,6 +740,8 @@ body {
   vertical-align: middle;
 }
 #proc-status-popup td:first-child { color: var(--text-mid); }
+.proc-row-jumpable { cursor: pointer; }
+.proc-row-jumpable:hover td { background: var(--surface-3); }
 .proc-stop-btn {
   background: transparent;
   border: 1px solid var(--border);

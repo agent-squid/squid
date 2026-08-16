@@ -1,9 +1,37 @@
 # Plan: ADR-0040 remaining steps 1–2 — backpressure, heartbeat, acks, version machinery
 
 Execute the steps in order. Each step has objective, files, actions, and an
-acceptance check. Steps 1–4 are server-only and verifiable by the tests in
-step 5 before any client work. Line numbers reference the tree at authoring
-time (post-`ba330ca`) and drift as you edit — anchor on function names.
+acceptance check. Steps 1–2 and 4 are server-only; step 3 is also effectively
+server-only (see the "Client already conforms" note below). All are verifiable
+by the tests in step 5. Line numbers reference the current tree and drift as
+you edit — anchor on function names, not line numbers.
+
+**Key anchors (verified against current tree):**
+- `realtime_v1` — `agent/server.py:4054` (the `/ws/v1` handler).
+- Auth handlers: `_handle_auth_input` (3943), `_handle_auth_resize` (3965),
+  `_handle_auth_cancel` (3986), `_handle_realtime_mutation` (4012).
+- The receive is **wrapped in a task**: `receive_task =
+  asyncio.create_task(websocket.receive_json())` (4078); the frame is read at
+  `frame = receive_task.result()` (4091). Frame parsing/size logic in step 2
+  therefore lives at the *result* site, not the create-task site.
+- `hello` sent directly at 4062 (`heartbeat_seconds` hardcoded to 20 at 4068).
+- Inbound `v` check at 4122; silent `ack`/`pong` accept via the else-guard at
+  4184 (`elif message_type not in {"ack", "pong"}`).
+- `_authorize_realtime_scopes` (3767), `_realtime_envelope` (3711),
+  `_REALTIME_REPLAY_LIMIT` (3636), `_RealtimeNotifier` (3643).
+
+**Client already conforms — do NOT rebuild it.** The realtime client in
+`ui/app.js` (the `connect()`/`onmessage` closure, ~7247–7416) *already*:
+answers `ping` with `pong` (`7389`, placed after the `event_id` branch so it
+is not swallowed — a `ping` frame carries no `event_id`); sends `ack`
+`{event_id: cursor}` on every apply (`markApplied`, 7295); resumes from the
+persisted `squid-realtime-v1-cursor` on reconnect (`subscribe` sends `cursor`,
+7286); and reconnects with jittered backoff on **every** close code — its
+`onclose` (7391) does not read or special-case any code, so a `1013`
+`slow_consumer` close already resumes correctly. Server error frames without a
+`request_id` (`slow_consumer`, `frame_too_large`, `unsupported_version`) fall
+through the `onmessage` chain harmlessly and the ensuing close drives the
+reconnect. **This work therefore needs no client edit** (see step 3).
 
 Scope: ADR-0040 "Remaining implementation sequence" items 1 and 2
 (`docs/decisions/0040-versioned-realtime-protocol-over-websocket.md:139-147`).
@@ -101,21 +129,26 @@ overflow.
      first; if len == maxsize and frame is non-coalescible, return False;
      else append, set the event, return True.
    - `async get()` waits on the event and pops left.
-4. In `realtime_v1` (`server.py:4053`):
+4. In `realtime_v1` (`server.py:4054`):
    - Instantiate `_RealtimeOutbound` and a sender task
      `asyncio.create_task(_ws_sender(websocket, outbound))` right after
-     `accept()`. `_ws_sender` loops `await websocket.send_json(await
-     outbound.get())`.
+     `accept()` (4060). `_ws_sender` loops `await websocket.send_json(await
+     outbound.get())`. The `hello` frame at 4062 may stay a direct send (it is
+     the first frame, before any backlog can exist) or go through the queue —
+     either is fine; do not overthink it.
    - Add the sender task to every `asyncio.wait` wait_set alongside
      `receive_task`/`notify_task`/`output_task`. If the sender task is in
      `done`, its exception (e.g. `WebSocketDisconnect` on send) must tear
      down the connection: re-raise/break into the existing
      `except WebSocketDisconnect` cleanup.
-   - Replace ALL `await websocket.send_json(...)` in `realtime_v1`,
-     `_handle_realtime_mutation`, `_handle_auth_input`, `_handle_auth_resize`,
-     `_handle_auth_cancel`, and the auth-output/auth-done pump
-     (`server.py:3891-4210`) with `outbound.enqueue(...)`; pass `outbound`
-     into the handler functions as a new parameter.
+   - Replace ALL `await websocket.send_json(...)` in `realtime_v1`
+     (4062–4199), `_handle_realtime_mutation` (4012), `_handle_auth_input`
+     (3943), `_handle_auth_resize` (3965), `_handle_auth_cancel` (3986), and
+     the auth-output/auth-done pump inside `realtime_v1` (4109–4120) with
+     `outbound.enqueue(...)`; pass `outbound` into the handler functions as a
+     new parameter. Note the handlers currently take `(websocket, frame, ...)`
+     — add `outbound` and stop passing `websocket` for send purposes (they may
+     still need it for nothing else; audit each).
    - On `enqueue` returning False: best-effort direct
      `await websocket.send_json({"v": 1, "type": "error", "payload":
      {"code": "slow_consumer", "resumable": True}})` inside try/except, then
@@ -141,20 +174,29 @@ frame order is preserved).
 
 **Actions:**
 
-1. Replace `websocket.receive_json()` (`server.py:4078`) with
-   `frame_raw = await websocket.receive_text()` (catch
-   `WebSocketDisconnect` as today). If
-   `len(frame_raw.encode("utf-8")) > _REALTIME_MAX_FRAME_BYTES`: direct-send
-   `{"v":1,"type":"error","payload":{"code":"frame_too_large"}}` (bypass the
-   queue — the connection is about to die and the queue may be full), then
-   `close(code=1009)` and return.
+The receive is task-wrapped: `receive_task =
+asyncio.create_task(websocket.receive_json())` at 4078, read as
+`frame = receive_task.result()` at 4091. Do the size/parse work at the *result*
+site, not the create-task site.
+
+1. Change the task to `websocket.receive_text()` (4078); it still raises
+   `WebSocketDisconnect` on disconnect, caught by the outer `try` as today.
+   At the result site (4091), let `frame_raw = receive_task.result()` (now a
+   `str`). If `len(frame_raw.encode("utf-8")) > _REALTIME_MAX_FRAME_BYTES`:
+   direct-send `{"v":1,"type":"error","payload":{"code":"frame_too_large"}}`
+   (bypass the queue — the connection is about to die and the queue may be
+   full), then `await websocket.close(code=1009)` and return.
 2. Wrap `json.loads(frame_raw)`; on `ValueError` enqueue the existing
    `invalid_frame` error envelope and `continue`. Require the result to be a
-   `dict`; non-dict JSON (arrays, scalars) also gets `invalid_frame`.
-3. `receive_bytes` frames: Starlette's `receive()` would surface them via
-   `receive_text` raising — verify behavior and treat any non-text receive as
-   `invalid_frame` + continue, or close with 1003. Pick one, document it in
-   the protocol doc.
+   `dict`; non-dict JSON (arrays, scalars) also gets `invalid_frame`. The old
+   flow set `frame = receive_task.result()` unconditionally — the new flow
+   assigns `frame` only after a successful decode, so guard the downstream
+   `if frame is not None:` block accordingly.
+3. Binary frames: Starlette's `WebSocket.receive_text()` reads
+   `message["text"]` and raises **`KeyError`** when a bytes frame arrives.
+   Catch it alongside the decode failure and treat a binary frame as
+   `invalid_frame` + `continue` (do not close). Document this choice in the
+   protocol doc.
 
 **Acceptance:** new tests (step 5) for oversized frame → `frame_too_large` +
 close, and for `not json` / `[1,2]` → `invalid_frame` and the connection
@@ -165,39 +207,49 @@ stays open.
 **Objective:** server sends `ping` every `heartbeat_seconds`; closes
 connections with no inbound frame for `miss_limit` intervals.
 
-**Files:** `agent/server.py`, `ui/app.js`.
+**Files:** `agent/server.py` only. **No client change is required** — the
+client already replies `pong` (`ui/app.js:7389`); see the "Client already
+conforms" note in the preamble. Do not edit `ui/app.js`, and therefore do not
+bump the PWA version (the mandatory 5-spot bump only applies when `ui/app.js`,
+`style.css`, or `index.html` actually change).
 
 **Actions:**
 
 1. In `realtime_v1`: track `last_inbound = loop.time()`, updated on every
-   successfully received frame (any type). Add a heartbeat wait entry to the
-   select loop: `asyncio.create_task(asyncio.sleep(_REALTIME_HEARTBEAT_SECONDS))`
-   in the wait_set (recreate each iteration like `notify_task`). When it
-   completes: if `loop.time() - last_inbound > _REALTIME_HEARTBEAT_SECONDS *
-   _REALTIME_HEARTBEAT_MISS_LIMIT`, close (code 1001 or 1011 — pick 1001
-   "going away"; document) and return; else `outbound.enqueue({"v": 1,
-   "type": "ping", "payload": {}})`.
-   - Note the safety poll already caps `notifier.wait()` at 20s; the
-     heartbeat sleep aligns with that, so worst-case ping period is ~2×
-     interval — acceptable; do not add timer precision machinery.
+   successfully received frame (any type — ack, pong, command). Add a
+   heartbeat entry to the select loop. **Use an absolute deadline, not a bare
+   `asyncio.sleep(interval)` recreated each iteration** — the loop re-wakes on
+   *every* outbound event too, and a recreated sleep would be cancelled and
+   restarted each wake, so on a chatty-but-dead-inbound peer the timer would
+   never fire. Instead compute `heartbeat_task =
+   asyncio.create_task(asyncio.sleep(max(0, next_ping_at - loop.time())))`
+   where `next_ping_at` is advanced by `_REALTIME_HEARTBEAT_SECONDS` only when
+   the sleep actually completes. When it completes: if `loop.time() -
+   last_inbound > _REALTIME_HEARTBEAT_SECONDS * _REALTIME_HEARTBEAT_MISS_LIMIT`,
+   close (code 1001 "going away"; document) and return; else
+   `outbound.enqueue({"v": 1, "type": "ping", "payload": {}})` and set
+   `next_ping_at = loop.time() + _REALTIME_HEARTBEAT_SECONDS`.
+   - The safety poll caps `notifier.wait()` at 20s, so the loop wakes at least
+     that often regardless; the deadline check above makes ping timing robust
+     without any precision machinery.
 2. Source `hello.payload.heartbeat_seconds` from the constant/config instead
    of the hardcoded `20` (`server.py:4068`).
-3. Client (`ui/app.js`, the realtime client around line 7240-7400): on
-   incoming frame `type === 'ping'`, respond `{v: 1, type: 'pong', payload: {}}`.
-   Check the frame dispatch in `onmessage` — server `ping` must be handled
-   before the event-dispatch switch so it isn't swallowed as an unknown type.
-4. Client: treat server closes with code 1013 (`slow_consumer`) as ordinary
-   reconnects — the existing jittered backoff + persisted-cursor resume
-   already does the right thing; just make sure no code path special-cases
-   1013 as fatal. Add a console.warn with the close code.
-5. **Version bump (mandatory per project convention):** after editing
-   `ui/app.js`, bump the version string in all 5 spots across `ui/sw.js` and
-   `ui/index.html` or the PWA serves stale cache.
+3. Client `ping`→`pong`: **already implemented** at `ui/app.js:7389`,
+   correctly placed after the `else if (frame.event_id)` branch (a `ping`
+   carries no `event_id`, so it is not swallowed). Nothing to do — just
+   confirm it during review.
+4. Client `slow_consumer`/1013 reconnect: **already works.** `onclose`
+   (`ui/app.js:7391`) reconnects on every close code with jittered backoff and
+   resumes from the persisted cursor; there is no fatal special-case to
+   remove. Skip the optional close-code `console.warn` — adding it would force
+   a `ui/app.js` edit and the 5-spot PWA version bump (invalidating every
+   client's cache) for a diagnostic log, which is not worth it. Leave the
+   client untouched.
 
-**Acceptance:** new test: a client that never sends anything gets a `ping`
-within ~1.5× interval (patch the constants small in the test) and is closed
-after the miss limit. Client change verified by the e2e heartbeat assertion
-in step 5 (or manual: devtools shows pong replies).
+**Acceptance:** new server test (step 5): a client that never sends anything
+receives a `ping` within ~1.5× interval (patch the constants small) and is
+closed after the miss limit; a client that sends `pong` (or any frame) stays
+open. No e2e/client assertion needed — the client path is unchanged.
 
 ## Step 4 — Ack bookkeeping and version machinery
 
@@ -296,4 +348,7 @@ compatibility decision the ADR reserves.
   and `tests/e2e/chat.spec.js` unaffected or extended per step 6.
 - ADR-0040 status table and remaining-sequence list updated; protocol doc
   error/heartbeat/ack sections match the implementation.
-- UI version strings bumped in all 5 spots (`ui/sw.js` + `ui/index.html`).
+- **No `ui/` files changed** (this work is server-only — see step 3), so the
+  PWA version bump does NOT apply. Only bump the 5 version spots
+  (`ui/sw.js` + `ui/index.html`) if you end up editing `ui/app.js`,
+  `style.css`, or `index.html` for a reason this plan did not anticipate.

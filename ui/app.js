@@ -1791,6 +1791,27 @@ function isLiveGroupPreviousElement(el) {
     || (el.classList.contains('msg') && el.classList.contains('user'));
 }
 
+// A freshly-fetched history page always anchors to "before the first live
+// group newer than it" rather than blindly "before every live group": with
+// concurrent turns across topics, a completed message can sit chronologically
+// between two still-in-flight ones, and inserting every reload before all
+// live groups would push that message below one it actually precedes.
+function anchorBeforeNextLiveGroup(maxId) {
+  const thinkings = document.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)');
+  for (const thinking of thinkings) {
+    const key = thinking.dataset.msgId ? parseInt(thinking.dataset.msgId, 10) : Infinity;
+    if (key <= maxId) continue;
+    let first = thinking;
+    let el = thinking.previousElementSibling;
+    while (el && isLiveGroupPreviousElement(el)) {
+      first = el;
+      el = el.previousElementSibling;
+    }
+    return first;
+  }
+  return null;
+}
+
 function setLiveGroupHidden(hidden) {
   document.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)').forEach(thinking => {
     const group = [thinking];
@@ -2135,14 +2156,23 @@ async function loadHistory() {
   }
 
   // Search/filter navigation may have superseded this request while it was in flight.
-  if (generation !== historyGeneration) return;
+  if (generation !== historyGeneration) { historyLoading = false; return; }
 
   const { items, has_more } = data;
   const prevHeight = messages.scrollHeight;
   const fragment = document.createDocumentFragment();
   appendHistoryItems(items, fragment);
 
-  const anchor = topSentinel ? topSentinel.nextSibling : messages.firstChild;
+  // items are newest-first (server ORDER BY completed_at DESC), so items[0] is
+  // this page's most recent id — used to find the right live-group slot. That
+  // slot only exists on the initial latest page (offset 0), when completed
+  // history has just been cleared and the only DOM above the live groups is the
+  // sentinel. On scroll-up pagination the fetched page is older than everything
+  // already rendered, so it must anchor at the very top — anchoring it before a
+  // live group instead would land it mid-transcript and make the scrollTop
+  // compensation below yank the view down instead of holding it in place.
+  const anchor = (historyOffset === 0 && items.length ? anchorBeforeNextLiveGroup(items[0].id) : null)
+    || (topSentinel ? topSentinel.nextSibling : messages.firstChild);
   messages.insertBefore(fragment, anchor);
   messages.scrollTop += messages.scrollHeight - prevHeight;
   markInitialHistoryReady();
@@ -7747,16 +7777,16 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
       onEvent(frame) {
         const text = frame.payload?.text || '';
         if (frame.type === 'chat.text') raw += text;
-        else if (frame.type === 'chat.status') statusBuf += (statusBuf ? '\n' : '') + text;
-        else if (frame.type === 'chat.tool') statusBuf += (statusBuf ? '\n' : '') + toolLabel(frame.payload);
-        else if (frame.type === 'chat.loading') statusBuf = frame.payload.from
+        else if (frame.type === 'chat.status') statusBuf += text;
+        else if (frame.type === 'chat.tool') statusBuf += (statusBuf && !statusBuf.endsWith('\n') ? '\n' : '') + toolLabel(frame.payload) + '\n';
+        else if (frame.type === 'chat.loading') statusBuf = (frame.payload.from
           ? `switching ${frame.payload.from} → ${frame.payload.to}…`
-          : `loading ${frame.payload.to}…`;
+          : `loading ${frame.payload.to}…`) + '\n';
         else if (frame.type === 'chat.processing') {
-          statusBuf = `#${frame.payload.topic || item.topic} · processing…`;
+          statusBuf = `#${frame.payload.topic || item.topic} · processing…\n`;
           onProcessing?.();
         }
-        else if (frame.type === 'chat.queued') statusBuf += (statusBuf ? '\n' : '') + `#${frame.payload.topic} · queued — position ${frame.payload.position}`;
+        else if (frame.type === 'chat.queued') statusBuf += (statusBuf && !statusBuf.endsWith('\n') ? '\n' : '') + `#${frame.payload.topic} · queued — position ${frame.payload.position}\n`;
         if (frame.type === 'chat.done' || frame.type === 'chat.error' || frame.type === 'message.changed' && frame.payload.status !== 'pending') finish();
         else updatePreview();
       },
@@ -7805,12 +7835,14 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
     updatePreview();
   };
   es.addEventListener('status', event => {
-    statusBuf += (statusBuf ? '\n' : '') + event.data;
+    // event.data already has real embedded newlines rejoined by SSE
+    // multi-data-line parsing — don't add another one between chunks.
+    statusBuf += event.data;
     updatePreview();
   });
   es.addEventListener('tool', event => {
     try {
-      statusBuf += (statusBuf ? '\n' : '') + toolLabel(JSON.parse(event.data));
+      statusBuf += (statusBuf && !statusBuf.endsWith('\n') ? '\n' : '') + toolLabel(JSON.parse(event.data)) + '\n';
       updatePreview();
     } catch {}
   });
@@ -7820,14 +7852,14 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
       const info = JSON.parse(event.data);
       statusBuf = (info.from
         ? `switching ${info.from} → ${info.to}…`
-        : `loading ${info.to}…`);
+        : `loading ${info.to}…`) + '\n';
       updatePreview();
     } catch {}
   });
   es.addEventListener('processing', event => {
     try {
       const info = JSON.parse(event.data);
-      statusBuf = `#${info.topic || item.topic} · processing…`;
+      statusBuf = `#${info.topic || item.topic} · processing…\n`;
       updatePreview();
     } catch {}
   });
@@ -7836,7 +7868,7 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
     // sibling turn (no live client) still shows it's waiting, not loading.
     try {
       const info = JSON.parse(event.data);
-      statusBuf += (statusBuf ? '\n' : '') + `#${info.topic} · queued — position ${info.position}`;
+      statusBuf += (statusBuf && !statusBuf.endsWith('\n') ? '\n' : '') + `#${info.topic} · queued — position ${info.position}\n`;
       updatePreview();
     } catch {}
   });
@@ -10945,7 +10977,7 @@ function renderProcPopup(processes, queued) {
   } else {
     if (running.length) {
       const rows = running.map(r => `
-        <tr>
+        <tr class="${r.msg_id ? 'proc-row-jumpable' : ''}" data-jump-msgid="${r.msg_id || ''}">
           <td><span class="proc-dot"></span>#${r.topic || '—'}@${r.agent || '—'}</td>
           <td class="proc-queue-preview">${r.prompt_preview || '—'}</td>
           <td>${formatRunningDuration(r)}</td>
@@ -11001,6 +11033,23 @@ function renderProcPopup(processes, queued) {
         btn.disabled = false;
         btn.textContent = 'Retry';
         btn.title = error?.message || 'Unable to stop process.';
+      }
+    });
+  });
+
+  procStatusPopup.querySelectorAll('tr[data-jump-msgid]').forEach(row => {
+    const msgId = parseInt(row.dataset.jumpMsgid, 10);
+    if (!Number.isFinite(msgId)) return;
+    row.addEventListener('click', e => {
+      if (e.target.closest('.proc-stop-btn')) return;
+      procStatusPopup.classList.remove('open');
+      const bubble = messages.querySelector(`.msg-thinking[data-msg-id="${msgId}"]`);
+      if (bubble) {
+        bubble.scrollIntoView({ block: 'center' });
+        bubble.classList.add('msg-jump-highlight');
+        setTimeout(() => bubble.classList.remove('msg-jump-highlight'), 1800);
+      } else {
+        jumpToMessage(msgId);
       }
     });
   });

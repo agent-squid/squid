@@ -112,9 +112,9 @@ fallback and through the explicit `sse` migration mode.
 | Process and queue state | Implemented | Snapshots and authoritative `process.changed`/`queue.changed` events update the browser status model; HTTP refresh remains only as pre-snapshot and SSE compatibility recovery. |
 | Flow | Implemented | New Flow submissions use ADR-0042's durable executor and recovery. Step/message linkage publishes `flow.step.created` in the same transaction, scoped snapshots include linked durable step state, and the browser reconciles both through stable assistant message IDs. The 1.5-second step poll is disabled while WebSocket is active and retained for `sse` mode and `auto` fallback. Pre-cutover shadow and legacy runs remain with the transcript executor. The milestone's server tests (restart, cancellation, stale claims, event-after-commit, duplicate-dispatch races) are in `tests/test_flow.py`/`tests/test_realtime.py`; its browser tests (live delivery, reconnect/replay without duplicate steps, snapshot rollover, SSE/WebSocket rendering parity) are in `tests/e2e/chat.spec.js`. |
 | CLI authentication | Implemented | ADR-0035's PTY login/install/model sessions run over `auth.*` on `/ws/v1`. The HTTP/SSE path remains alongside as the migration fallback (SSE removal is a separate decision). `auth.output`/`auth.done` are transient and never enter `realtime_events`; `auth.start` registers the calling socket as the session's output listener. A reaped session (idle timeout / server-side cancel) reports `auth.done` with `returncode: -1` rather than null so the client never treats an abandoned login as success. Known limitation: the server-side re-attach on a resent `auth.start` is implemented and tested, but the client sends `auth.start` once and does not resend on reconnect, so it is not currently reachable from the UI. |
-| Backpressure and frame limits | Not implemented | Sends are direct and there is no bounded/coalescing outbound queue, `slow_consumer` handling, or configured inbound frame-size enforcement. |
-| Heartbeat and acknowledgements | Partial | `ping` receives `pong` and the UI sends `ack`, but the server does not initiate heartbeat pings or use acknowledged cursors to manage delivery. |
-| Protocol compatibility | Partial | Unsupported versions fail explicitly, but only v1 is supported rather than the current and immediately previous versions. |
+| Backpressure and frame limits | Implemented | A per-connection bounded outbound queue is drained by a dedicated sender task; `process.changed`/`queue.changed` coalesce in place, non-coalescible overflow closes `slow_consumer` (1013), and inbound frames are size-checked (`frame_too_large`, 1009). Limits are configurable via `realtime.outbound_queue_limit`/`realtime.max_frame_bytes`. |
+| Heartbeat and acknowledgements | Implemented | The server initiates `ping` every `realtime.heartbeat_seconds` and closes dead peers after two missed intervals (1001); inbound `ack` cursors are recorded and clamped as advisory bookkeeping while resumption stays cursor-driven. |
+| Protocol compatibility | Implemented (v1 only) | The supported-version set is centralized (`unsupported_version` echoes it); adding a future v2 is an additive one-line change plus a handler fork rather than a rewrite. |
 | Shore relay | Not implemented | ADR-0039's broker transport, pairing, encryption, capabilities, and audit work remain future work. |
 
 ### Remaining implementation sequence
@@ -138,13 +138,8 @@ The Flow milestone is closed. Server-side tests cover restart, cancellation,
 
 The remaining ADR-0040 work is, in order:
 
-1. Add bounded outbound queues, coalescing, `slow_consumer` closure, inbound
-   frame-size enforcement, and server-initiated heartbeat handling.
-2. Use acknowledgements for delivery bookkeeping and support the current and
-   immediately previous protocol versions.
-3. Close the remaining required-verification gaps, then make a separate
-   compatibility decision before removing SSE.
-4. Implement ADR-0039's Shore relay over the proven protocol.
+1. Make a separate compatibility decision before removing SSE.
+2. Implement ADR-0039's Shore relay over the proven protocol.
 
 SSE endpoints therefore remain required for migration fallback, CLI
 authentication, and the live families not yet moved to WebSocket. WebSocket is
@@ -460,3 +455,39 @@ turn; final turns are placed by `completed_at` plus `msg_id`; changing the
 composer route does not change the history filter or lifecycle feed; explicit
 filters, pagination, and scroll anchors survive realtime events; and snapshots
 reconcile the active window without emptying or replacing the transcript.
+
+### Verification mapping
+
+Server items (all in `tests/test_realtime.py` unless noted):
+
+- [x] Disconnects before chat metadata — `test_reconnect_replays_from_last_applied_cursor`
+- [x] Disconnects after chat metadata — `test_reconnect_replays_from_last_applied_cursor`
+- [x] Reconnect replay — `test_reconnect_replays_from_last_applied_cursor`
+- [x] Replay-window expiry and snapshot fallback — `test_pruned_cursor_rolls_over_to_snapshot`, `test_internal_realtime_log_gap_rolls_over_to_snapshot`
+- [x] Count/byte/age threshold rollover — `test_realtime_replay_is_bounded_by_its_atomic_watermark` (count), `test_replay_rolls_over_when_serialized_events_exceed_byte_limit` (byte), `test_replay_rolls_over_for_old_or_incompatible_events` (age)
+- [x] Update racing snapshot creation — `test_event_racing_snapshot_is_delivered_immediately`
+- [x] Full accumulated pending text followed by later deltas — `test_realtime_snapshot_is_bounded_but_keeps_old_pending`, `test_global_lifecycle_snapshot_bounds_pending_rows`, `test_realtime_log_has_global_cursor_and_local_run_sequence`
+- [x] Duplicate mutation requests — `test_websocket_subscribe_snapshot_live_event_and_idempotent_cancel`, `test_auth_start_resend_replays_ring_without_second_session`
+- [x] Slow consumers — `test_slow_consumer_closes_with_resumable_error`
+- [x] Cancellation races — `test_websocket_subscribe_snapshot_live_event_and_idempotent_cancel`; browser `cancelling during the auth.start round-trip cancels the spawned session, not resurrects the panel`
+- [x] Server restart during a run — `tests/test_flow.py` `test_startup_recovery_*`; `test_server_startup_publishes_authoritative_process_and_queue_state`
+- [x] Multiple simultaneous clients — `test_multiple_simultaneous_clients_receive_live_events`
+- [x] Terminal-event deduplication — `test_reconnect_replays_from_last_applied_cursor`; browser `websocket snapshots advance the applied cursor and text replay deduplicates by run sequence`
+- [x] Historical pagination alongside live updates — browser `search back keeps one status bubble when live meta arrives after history`, `initial history installs before global snapshot discovery`
+- [x] Client/server protocol-version skew — `test_websocket_rejects_protocol_version_skew`
+- [x] Commit-before-notify ordering — `test_realtime_listener_runs_after_event_commit_from_worker_thread`, `test_linked_flow_step_publishes_after_linkage_commit`
+- [x] Publish racing the wait transition — `test_event_racing_snapshot_is_delivered_immediately`
+- [x] Worker-thread publication — `test_realtime_listener_runs_after_event_commit_from_worker_thread`
+- [x] Retained-cursor rollover — `test_pruned_cursor_rolls_over_to_snapshot`, `test_future_realtime_cursor_rolls_over`
+- [x] Safety-poll recovery — `test_safety_poll_recovers_a_lost_notification`
+- [x] Notifier shutdown — `test_realtime_notifier_stop_wakes_existing_waiter`
+
+Browser parity items (all in `tests/e2e/chat.spec.js`):
+
+- [x] SSE and WebSocket produce the same normalized turn and final DOM — `sse-mode flow polling renders the same completed flow step as websocket delivery`
+- [x] A pending `msg_id` has one live group and none after completion — `two concurrent responses both land at bottom without early bubble insertion`, `status events are hidden after final response completes`
+- [x] Duplicate or reordered terminal events create no extra turn — `reconnecting websocket replays without duplicating an already-attached flow step`, `global lifecycle discovers a desktop turn and reconnect completion stays deduplicated`, `websocket snapshots advance the applied cursor and text replay deduplicates by run sequence`
+- [x] Final turns are placed by `completed_at` plus `msg_id` — `Flow snapshot state stays out of transcript and live steps use completion order`
+- [x] Changing the composer route does not change the history filter or lifecycle feed — `clicking a header route sets composer route without filtering history`, `global lifecycle discovers a desktop turn and reconnect completion stays deduplicated`
+- [x] Explicit filters, pagination, and scroll anchors survive realtime events — `search back keeps one status bubble when live meta arrives after history`, `returning from another tab preserves scrolled-up chat position`, `completed response moves to bottom instead of replacing its status bubble`
+- [x] Snapshots reconcile the active window without emptying or replacing the transcript — `foreground resume replaces a stale websocket and restores missed content from snapshot`, `empty reconnect snapshot shows a waiting state until activity resumes`, `flow snapshot rollover preserves an already-attached step and resumes live delivery`

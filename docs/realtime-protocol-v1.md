@@ -49,8 +49,9 @@ Every message is UTF-8 JSON with these common fields:
 - `payload`: type-specific object.
 
 Unknown optional fields are ignored. Unknown types produce `error` with code
-`unsupported_type`. Frames above the configured limit close the connection
-with `frame_too_large`.
+`unsupported_type`. Frames above the configured byte limit close the connection
+with `frame_too_large` and close code 1009. A binary WebSocket frame (rather
+than UTF-8 JSON text) is treated as `invalid_frame`; the connection stays open.
 
 ## Connection lifecycle
 
@@ -62,8 +63,14 @@ with `frame_too_large`.
 3. Server authorizes the request and responds with `subscribed`, then either
    replays a bounded contiguous range or sends `snapshot` at watermark `N`.
 4. Client atomically installs events and periodically sends `ack` containing
-   its greatest applied delivered `event_id`.
-5. `ping`/`pong` detects dead peers. Reconnect does not cancel work.
+   its greatest applied delivered `event_id`. Acknowledgements are advisory
+   bookkeeping on the server (recorded for observability and clamped to the
+   current cursor); resumption is driven by the cursor the client sends in
+   `subscribe`, not by the server's ack history.
+5. `ping`/`pong` detects dead peers. The server initiates a `ping` every
+   `heartbeat_seconds` and closes the connection (code 1001) if no inbound
+   frame of any type arrives within two intervals. Any inbound frame — ack,
+   pong, or command — counts as liveness. Reconnect does not cancel work.
 
 Changing the composer route or history filter does not change subscriptions.
 If authorization expands, or an explicitly watched resource is newly added, it
@@ -213,13 +220,19 @@ second RPC protocol inside the socket.
 
 ## Compatibility and errors
 
-The server supports the current and immediately previous protocol versions.
-Negotiation failure returns `unsupported_version` with the supported set before
-closing. Other stable error codes include `unauthorized_scope`, `invalid_frame`,
-`unsupported_type`, `frame_too_large`, `request_id_conflict`, `replay_gap`, and
-`slow_consumer`. Errors state whether reconnect/resume is safe and never expose
-events from unauthorized scopes.
+Only protocol version 1 is defined; the supported-version set is centralized so
+supporting an immediately previous version later is an additive change.
+Negotiation failure returns `unsupported_version` with the configured supported
+set before continuing. Stable error codes are `unsupported_version`,
+`invalid_client_id`, `unauthorized_scope`, `client_identity_required`,
+`invalid_frame`, `unsupported_type`, `frame_too_large`, `request_id_conflict`,
+and `slow_consumer`. `replay_gap` and the other rollover reasons are not error
+frames — they trigger a snapshot fallback. Errors never expose events from
+unauthorized scopes.
 
-Outbound queues and frames are bounded. Coalescible state replaces older queued
-state for the same domain object. Overflow involving non-coalescible events
-closes with `slow_consumer`, after which the client resumes from its last ack.
+Outbound queues and frames are bounded. Coalescible state (`process.changed`,
+`queue.changed`) replaces older queued state of the same type. Overflow
+involving a non-coalescible event sends a best-effort `slow_consumer` error
+(`resumable: true`) and closes with code 1013, after which the client resumes
+from the cursor it sends in `subscribe`. An oversized inbound frame closes with
+`frame_too_large` and code 1009. A heartbeat timeout closes with code 1001.

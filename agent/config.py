@@ -42,6 +42,28 @@ def realtime_transport(config: dict) -> str:
     return transport
 
 
+def _realtime_int(config: dict, key: str, default: int) -> int:
+    realtime = config.get("realtime", {})
+    if not isinstance(realtime, dict):
+        raise ValueError("realtime must be a mapping")
+    value = realtime.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"realtime.{key} must be a positive integer")
+    return value
+
+
+def realtime_outbound_queue_limit(config: dict) -> int:
+    return _realtime_int(config, "outbound_queue_limit", 256)
+
+
+def realtime_max_frame_bytes(config: dict) -> int:
+    return _realtime_int(config, "max_frame_bytes", 256 * 1024)
+
+
+def realtime_heartbeat_seconds(config: dict) -> int:
+    return _realtime_int(config, "heartbeat_seconds", 20)
+
+
 def config_text() -> str:
     return _USER_CONFIG.read_text(encoding="utf-8")
 
@@ -74,6 +96,9 @@ def write_config_text(content: str, expected_revision: Optional[str] = None) -> 
 
 _cfg = _load_config()
 REALTIME_TRANSPORT: str = realtime_transport(_cfg)
+REALTIME_OUTBOUND_QUEUE_LIMIT: int = realtime_outbound_queue_limit(_cfg)
+REALTIME_MAX_FRAME_BYTES: int = realtime_max_frame_bytes(_cfg)
+REALTIME_HEARTBEAT_SECONDS: int = realtime_heartbeat_seconds(_cfg)
 
 # CLI executable names — override via env if installed elsewhere
 CLAUDE_CLI    = "claude"
