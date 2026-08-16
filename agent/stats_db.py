@@ -1825,7 +1825,10 @@ def update_assistant_message(
                 " WHERE id=?",
                 (content, session_id, status, context, status_raw, 1 if terminal else 0, msg_id),
             )
-            if status == "done":
+            if terminal:
+                # A session id means the harness actually started the turn and
+                # spent tokens, so any terminal outcome (done/error/cancelled)
+                # counts as a real turn — not just a clean completion.
                 _ensure_session_turn_index(conn, msg_id, session_id)
         row = conn.execute("SELECT topic, agent FROM chat_messages WHERE id=?", (msg_id,)).fetchone()
         if cur.rowcount and row:
@@ -1897,11 +1900,14 @@ def mark_assistant_cancelled(msg_id: int, reason: str = "Cancelled") -> bool:
             ),
         )
         if cur.rowcount:
-            row = conn.execute("SELECT topic, agent, content FROM chat_messages WHERE id=?", (msg_id,)).fetchone()
+            row = conn.execute("SELECT topic, agent, content, session_id FROM chat_messages WHERE id=?", (msg_id,)).fetchone()
             _insert_realtime_event(conn, "message.changed", row["topic"], row["agent"], msg_id, None, {
                 "id": msg_id, "role": "assistant", "status": "cancelled", "content": row["content"] or "",
             })
             _cancel_flow_step_for_message(conn, msg_id, now, reason)
+            # A cancelled turn that reached a session id still spent tokens, so
+            # it earns a turn index just like a clean completion would.
+            _ensure_session_turn_index(conn, msg_id, row["session_id"])
         return cur.rowcount > 0
 
 
@@ -2273,6 +2279,7 @@ def mark_orphaned_pending(before_created_at: Optional[str] = None) -> int:
                        WHERE id=?""",
                     (row["id"],),
                 )
+                _ensure_session_turn_index(conn, row["id"], row["session_id"])
             count += 1
         return count
 
@@ -3300,7 +3307,12 @@ def _attach_turn_stats(row: dict) -> None:
     """Parse the per-turn run_events 'stats' payload (row['stats_payload']) into
     row['stats']. Each turn's own numbers live in run_events keyed by msg_id;
     session_stats is keyed by session_id and only ever holds the latest turn's
-    numbers, so it cannot be used here for a specific historical message."""
+    numbers, so it cannot be used here for a specific historical message.
+
+    Terminal turns without a `stats` event (cancelled/errored) still get a
+    `stats` object carrying whatever we *can* provide: the observed quota
+    snapshot (msg_quota_before/after/delta, recorded by the client after the
+    turn) and an elapsed wall-clock duration (completed_at - created_at)."""
     payload_raw = row.pop("stats_payload", None)
     try:
         payload = json.loads(payload_raw) if payload_raw else {}
@@ -3309,7 +3321,13 @@ def _attach_turn_stats(row: dict) -> None:
     msg_quota_before = row.pop("msg_quota_before", None)
     msg_quota_after = row.pop("msg_quota_after", None)
     quota_delta = row.pop("quota_delta", None)
-    if not payload:
+    duration_ms = payload.get("duration_ms")
+    if duration_ms is None:
+        duration_ms = _elapsed_ms_between(row.get("timestamp"), row.get("completed_at"))
+    has_stats = bool(payload) or any(
+        v is not None for v in (msg_quota_before, msg_quota_after, quota_delta, duration_ms)
+    )
+    if not has_stats:
         return
     harness = payload.get("harness")
     provider = payload.get("provider")
@@ -3320,7 +3338,7 @@ def _attach_turn_stats(row: dict) -> None:
         "cache_write_tokens": payload.get("cache_write_tokens"),
         "history_input_tokens": payload.get("history_input_tokens"),
         "cost_usd": payload.get("cost_usd"),
-        "duration_ms": payload.get("duration_ms"),
+        "duration_ms": duration_ms,
         "lookback": payload.get("lookback"),
         "backend": agent_ref_for_storage(harness, provider) if harness else None,
         "model": payload.get("model"),
@@ -3723,7 +3741,9 @@ def get_stats_by_turn(
         with _connect() as conn:
             rows = conn.execute(
                 f"""SELECT cm.id AS msg_id, {turn_time_expr} AS period, cm.topic,
-                           cm.agent, cm.adhoc, cm.status, cm.quota_delta, re.payload,
+                           cm.agent, cm.adhoc, cm.status, cm.quota_delta,
+                           cm.created_at AS cm_created_at, cm.completed_at AS cm_completed_at,
+                           re.payload,
                            {_marked_bad_expr("cm")} AS marked_bad
                     FROM chat_messages cm
                     LEFT JOIN run_events re
@@ -3759,7 +3779,8 @@ def get_stats_by_turn(
         row["cache_read_tokens"] = stats.get("cache_read_tokens") or 0
         row["cache_write_tokens"] = stats.get("cache_write_tokens") or 0
         row["cost_usd"] = stats.get("cost_usd")
-        row["duration_ms"] = stats.get("duration_ms")
+        elapsed = _elapsed_ms_between(row.pop("cm_created_at", None), row.pop("cm_completed_at", None))
+        row["duration_ms"] = stats.get("duration_ms") or elapsed
         result.append(row)
     return result
 
@@ -4616,6 +4637,31 @@ def get_file_edit_by_id(edit_id: int) -> Optional[dict]:
 def _utc_now_iso() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def _elapsed_ms_between(start: Optional[str], end: Optional[str]) -> Optional[int]:
+    """Wall-clock milliseconds between two ISO-8601 timestamps, or None when
+    either side is missing/unparseable or the window is inverted. This is the
+    elapsed-time fallback for terminal turns that never reported a model-side
+    duration — cancelled/errored turns have no `stats` event, so their
+    `completed_at` (finish) minus `created_at` (dispatch) is all we have."""
+    from datetime import datetime, timezone
+
+    def _ms(value: Optional[str]) -> Optional[int]:
+        if not value:
+            return None
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1000)
+
+    s, e = _ms(start), _ms(end)
+    if s is None or e is None or e < s:
+        return None
+    return e - s
 
 
 def _insert_realtime_event_row(

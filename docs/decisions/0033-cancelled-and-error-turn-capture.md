@@ -60,8 +60,8 @@ a restart-time sweep.
    newly-created assistant row before the CLI starts. This preserves JSONL /
    run-event traceability for resumed turns that are cancelled before any
    stats or final message update arrives. This attachment is metadata-only:
-   it does not assign `session_turn_index`, which remains tied to the normal
-   stats/final-completion path.
+   it does not itself assign `session_turn_index`; turn indexing happens on
+   the terminal write (point 12).
 
 5. **Cancellation is recorded at stop-request time, before the kill signal**:
    - `stop_topic` / `stopall_topic` (backing `/cmd stop` and `/cmd stopall`)
@@ -128,6 +128,36 @@ a restart-time sweep.
     If the CLI dies before it emits its first event, no session exists yet and
     the id is correctly left NULL — there is nothing to link.
 
+12. **A terminal turn that reached a session id earns a turn index** (amended
+    2026-08-16). A session id means the harness actually started the turn and
+    spent tokens, so it is a legitimate turn even if it later errors or is
+    cancelled. `mark_assistant_cancelled` and the terminal `error` write in
+    `update_assistant_message` therefore call `_ensure_session_turn_index`
+    whenever the row has a `session_id`, so `get_session_turn_count` and the
+    `session_turn_count`/`sess Nt` display advance for cancelled/errored turns
+    exactly as they do for `done` turns. Adhoc rows and rows with no
+    `session_id` remain unindexed (the latter because no session exists to
+    count against).
+
+13. **Terminal turns without a `stats` event still get per-turn attributes**
+    (amended 2026-08-16). A cancelled/errored turn is killed before the
+    harness emits its `result`/`stats` event, so model-side tokens/cost/duration
+    are genuinely unknowable. Whatever *can* be provided is surfaced anyway:
+
+    - **Elapsed wall-clock duration** — derived as `completed_at - created_at`
+      (finish minus dispatch) via `_elapsed_ms_between`, used as the
+      `duration_ms` fallback in `get_stats_by_turn` and `_attach_turn_stats`
+      when no `stats` payload reported a model-side duration.
+    - **Quota delta** — the observed account-meter change already recorded by
+      the client after the turn (`update_message_quota_snapshot` →
+      `chat_messages.quota_before/after/delta`) is no longer discarded in
+      `_attach_turn_stats`; it now appears on the message's `stats` object even
+      when there is no `stats` run_event.
+
+    Tokens/cost remain zeroed for these turns (nothing reported them), so they
+    still contribute to `cancelled_turns`/`error_turns` counts rather than to
+    usage totals.
+
 ## Consequences
 
 - Every terminal outcome is visible in Stats immediately, including
@@ -135,12 +165,16 @@ a restart-time sweep.
 - `completed_at` gives an accurate finish time for time-bucketing,
   independent of both dispatch time (`created_at`) and whether a `stats`
   run_event ever arrived.
-- Cancelled/errored turns with no `stats` run_event show zeroed
-  tokens/cost/duration in by-turn drilldowns — they contribute to
-  `cancelled_turns`/`error_turns` counts, not to usage totals.
+- Cancelled/errored turns with no `stats` run_event show zeroed tokens/cost,
+  but a derived elapsed wall-clock duration and the observed quota delta where
+  available — they contribute to `cancelled_turns`/`error_turns` counts, not to
+  token/cost usage totals.
 - Adhoc and first-turn failures/cancels now retain their `session_id`, so
   every terminal row links back to the raw harness session log for
   investigation — not just resumed turns.
+- Cancelled/errored turns that reached a session id now advance the session
+  turn count, matching the intuition that a session id means tokens were
+  spent and the turn is a real turn.
 
 **Deferred from the original design** (see prior discussion) — this pass
 covers the DB/stats plumbing, not the full durable-event-log design:

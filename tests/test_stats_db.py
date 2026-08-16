@@ -1933,7 +1933,9 @@ def test_cancelled_resumed_turn_keeps_session_id_before_stats(tmp_path, monkeypa
             (asst,),
         ).fetchone()
 
-    assert row == ("session-1", None, "cancelled")
+    # Session id is preserved AND a turn index is assigned: reaching a session
+    # means tokens were spent, so a cancelled turn is a legitimate turn.
+    assert row == ("session-1", 1, "cancelled")
 
 
 def test_cancelled_turn_recovers_available_run_event_attributes(tmp_path, monkeypatch):
@@ -1967,6 +1969,71 @@ def test_cancelled_turn_recovers_available_run_event_attributes(tmp_path, monkey
         "mem": True,
         "mem_revision": "rev-1",
     }
+
+
+def test_cancelled_turns_advance_session_turn_count(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    u1 = stats_db.insert_user_message("squid", "codex", "first")
+    a1 = stats_db.insert_assistant_message("squid", "codex", u1, adhoc=False)
+    stats_db.attach_assistant_session(a1, "session-1")
+    assert stats_db.mark_assistant_cancelled(a1, "Cancelled")
+
+    u2 = stats_db.insert_user_message("squid", "codex", "second")
+    a2 = stats_db.insert_assistant_message("squid", "codex", u2, adhoc=False)
+    stats_db.attach_assistant_session(a2, "session-1")
+    assert stats_db.mark_assistant_cancelled(a2, "Cancelled")
+
+    assert stats_db.get_session_turn_count("session-1") == 2
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        rows = conn.execute(
+            "SELECT session_turn_index FROM chat_messages"
+            " WHERE session_id='session-1' AND role='assistant' ORDER BY id",
+        ).fetchall()
+    assert [r[0] for r in rows] == [1, 2]
+
+
+def test_error_turn_with_session_id_earns_turn_index(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user = stats_db.insert_user_message("squid", "codex", "fail this")
+    asst = stats_db.insert_assistant_message("squid", "codex", user, adhoc=False)
+    stats_db.attach_assistant_session(asst, "session-1")
+    stats_db.update_assistant_message(asst, "boom", "session-1", "error")
+
+    assert stats_db.get_session_turn_count("session-1") == 1
+    row = stats_db.get_message(asst)
+    assert row["session_turn_count"] == 1
+
+
+def test_cancelled_turn_surfaces_elapsed_duration_and_quota(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user = stats_db.insert_user_message("squid", "codex", "stop this")
+    asst = stats_db.insert_assistant_message("squid", "codex", user, adhoc=False)
+    stats_db.attach_assistant_session(asst, "session-1")
+    stats_db.update_message_quota_snapshot(asst, 40.0, 41.5)
+    assert stats_db.mark_assistant_cancelled(asst, "Cancelled")
+
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        conn.execute(
+            "UPDATE chat_messages SET created_at='2026-07-15T10:00:00Z',"
+            " completed_at='2026-07-15T10:00:05Z' WHERE id=?",
+            (asst,),
+        )
+
+    msg = stats_db.get_message(asst)
+    assert msg["stats"]["duration_ms"] == 5000
+    assert msg["stats"]["quota_delta"] == 1.5
+    assert msg["stats"]["msg_quota_before"] == 40.0
+    assert msg["stats"]["msg_quota_after"] == 41.5
+
+    by_turn = {row["msg_id"]: row for row in stats_db.get_stats_by_turn(days=0)}
+    assert by_turn[asst]["duration_ms"] == 5000
+    assert by_turn[asst]["quota_delta"] == 1.5
 
 
 def test_agent_session_breakdown_keeps_agent_session_variants_separate(tmp_path, monkeypatch):
