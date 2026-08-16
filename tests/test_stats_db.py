@@ -1895,7 +1895,10 @@ def test_terminal_non_success_turns_are_stats_rows_without_usage(tmp_path, monke
     assert by_turn[cancelled_asst]["status"] == "cancelled"
     assert by_turn[cancelled_asst]["cancelled_turns"] == 1
     assert by_turn[cancelled_asst]["error_turns"] == 0
-    assert by_turn[cancelled_asst]["input_tokens"] == 0
+    # No stats event exists for this turn, so tokens are unknown, not zero —
+    # None (not 0) lets the UI render "—" instead of a misleading "0 tokens".
+    assert by_turn[cancelled_asst]["input_tokens"] is None
+    assert by_turn[cancelled_asst]["output_tokens"] is None
     assert by_turn[error_asst]["status"] == "error"
     assert by_turn[error_asst]["error_turns"] == 1
 
@@ -2005,6 +2008,30 @@ def test_error_turn_with_session_id_earns_turn_index(tmp_path, monkeypatch):
 
     assert stats_db.get_session_turn_count("session-1") == 1
     row = stats_db.get_message(asst)
+    assert row["session_turn_count"] == 1
+
+
+def test_error_turn_earns_turn_index_when_caller_local_session_id_is_stale(tmp_path, monkeypatch):
+    """Regression for the real server.py/topic_queue.py call shape: their local
+    `session_id` var is only ever set from a harness's final stats event, so on
+    an error/timeout that happens before that event it's still None even though
+    runners.py's mid-stream _attach_session already persisted the session id to
+    the row via attach_assistant_session's own COALESCE. update_assistant_message
+    must read the row's actual session_id back, not trust its own None argument."""
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    user = stats_db.insert_user_message("squid", "codex", "fail this")
+    asst = stats_db.insert_assistant_message("squid", "codex", user, adhoc=False)
+    # Mid-stream attach (runners.py's _attach_session), independent of the
+    # caller's own local session_id tracking.
+    stats_db.attach_assistant_session(asst, "session-1")
+    # The real error-path call: the caller's local session_id is still None.
+    stats_db.update_assistant_message(asst, "boom", None, "error")
+
+    assert stats_db.get_session_turn_count("session-1") == 1
+    row = stats_db.get_message(asst)
+    assert row["session_id"] == "session-1"
     assert row["session_turn_count"] == 1
 
 

@@ -810,6 +810,25 @@ def _attach_session(msg_id: Optional[int], session_id: Optional[str]) -> None:
         log.warning("attach_assistant_session failed msg_id=%s", msg_id, exc_info=True)
 
 
+def _session_attacher(msg_id: Optional[int]):
+    """Bind msg_id once and return a callable that fires _attach_session at
+    most one time per streamed turn. attach_assistant_session's own COALESCE
+    already makes a repeat attach a safe no-op, so this guard exists purely
+    to skip the redundant DB round-trip on every subsequent line/event a
+    turn's session id keeps appearing on — the same 3-line
+    `session_attached` flag was previously duplicated at each call site."""
+    attached = False
+
+    def attach(session_id: Optional[str]) -> None:
+        nonlocal attached
+        if attached or not session_id:
+            return
+        _attach_session(msg_id, session_id)
+        attached = True
+
+    return attach
+
+
 async def _stream_lines(
     cmd: List[str],
     cwd: Optional[str] = None,
@@ -1103,13 +1122,16 @@ async def run_claude(
     parser = _ClaudeStreamParser(history, emit_init_diag=msg_id is not None)
     env_for_claude = _claude_child_env(backend_id, backend_env)
 
-    session_attached = False
+    attach_session = _session_attacher(msg_id)
     async for line in _stream_lines(cmd, cwd=cwd, backend=backend_id, topic=topic, agent=agent, adhoc=adhoc, msg_id=msg_id, response_timeout=response_timeout, prompt=prompt, prompt_preview=prompt_preview, extra_env=env_for_claude):
-        for chunk in parser.feed_line(line):
+        chunks = parser.feed_line(line)
+        # Attach before yielding this line's chunks, not after: if the
+        # consumer cancels/closes this generator while suspended at one of
+        # those yields, GeneratorExit skips everything past it, and this is
+        # the only line where parser.session_id first became available.
+        attach_session(parser.session_id)
+        for chunk in chunks:
             yield chunk
-        if parser.session_id and not session_attached:
-            _attach_session(msg_id, parser.session_id)
-            session_attached = True
 
 
 # After ask_followup_question tool use is detected, wait this long for a result
@@ -1353,7 +1375,7 @@ class _ClaudeInteractiveCLI:
                 label = turn_agent_label.strip() or "Agent"
                 return [{"_status": f"[{label}] {text}\n"}]
 
-            session_attached = False
+            attach_session = _session_attacher(msg_id)
             try:
                 while True:
                     remaining = deadline - asyncio.get_event_loop().time()
@@ -1412,9 +1434,7 @@ class _ClaudeInteractiveCLI:
                         turn_live_chunks = []
 
                     chunks = parser.feed_line(line_text)
-                    if parser.session_id and not session_attached:
-                        _attach_session(msg_id, parser.session_id)
-                        session_attached = True
+                    attach_session(parser.session_id)
                     for chunk in chunks:
                         if isinstance(chunk, dict) and "_diag" in chunk:
                             yield chunk
@@ -2184,7 +2204,7 @@ async def run_pi(
 
     start_ms = time.monotonic() * 1000
     session_id: Optional[str] = None
-    session_attached = False
+    attach_session = _session_attacher(msg_id)
     final_text_yielded = False
     final_message: dict = {}
     total_input = total_output = total_cache_read = total_cache_write = 0
@@ -2201,9 +2221,7 @@ async def run_pi(
         t = event.get("type", "")
         if t == "session":
             session_id = event.get("id") or session_id
-            if session_id and not session_attached:
-                _attach_session(msg_id, session_id)
-                session_attached = True
+            attach_session(session_id)
         elif t == "message_update":
             update = event.get("assistantMessageEvent") or {}
             if not isinstance(update, dict):

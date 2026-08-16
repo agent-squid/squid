@@ -4974,6 +4974,13 @@ async function sendMessage(text, opts = {}) {
 
   let quotaBackend = nativeShell ? null : await resolveQuotaProvider(topic, agent);
   let quotaBeforeSnapshot = nativeShell ? null : await fetchQuotaForBackend(quotaBackend);
+  // fetchQuotaForBackend's null return conflates "this backend has no quota
+  // concept at all" with "the read failed" — resolve that once here (after
+  // fetchQuotaForBackend's own call already ensured quota metadata is
+  // loaded) so finalizeQuotaTracking's terminal-failure fallback only ever
+  // fires for a backend that genuinely has a meter to report on.
+  const quotaBackendHasConfig = !nativeShell && !!quotaBackend
+    && !!quotaConfigFor(quotaStatusProviderKey(quotaBackend));
   if (!nativeShell) quotaTrackStart(quotaBackend);
   let lastSessionId = null;
   let statsEl = null;
@@ -5047,9 +5054,14 @@ async function sendMessage(text, opts = {}) {
       const recordQuotaBefore = isBalanceMeter && quotaBefore > quotaAfter ? quotaAfter : quotaBefore;
       const recordQuotaAfter = isBalanceMeter && quotaBefore > quotaAfter ? quotaBefore : quotaAfter;
       recordQuota(recordQuotaBefore, recordQuotaAfter);
-    } else if (terminalFailure) {
-      // No meter reading at all, but the turn still ended terminal — record a
-      // zero delta so stats reflect "captured, nothing moved" instead of null.
+    } else if (terminalFailure && quotaBackendHasConfig && quotaBefore === null && quotaAfter === null) {
+      // No meter reading at all — not "the after-read failed but we had a
+      // real before" (that would discard real data, so record nothing
+      // instead), and not "this backend has no quota concept" (recording a
+      // 0 delta there would fabricate stats for a meter that never existed).
+      // Only when the backend genuinely has quota tracking and neither read
+      // landed does a terminal turn still record a zero delta, so stats
+      // reflect "captured, nothing moved" instead of null.
       recordQuota(0, 0);
     }
     quotaTrackEnd(quotaBackend);

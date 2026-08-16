@@ -1816,8 +1816,7 @@ def update_assistant_message(
                 " WHERE id=? AND status='pending'",
                 (content, session_id, status, context, status_raw, 1 if terminal else 0, msg_id),
             )
-            if cur.rowcount:
-                _ensure_session_turn_index(conn, msg_id, session_id)
+            index_turn = bool(cur.rowcount)
         else:
             cur = conn.execute(
                 "UPDATE chat_messages SET content=?, session_id=COALESCE(session_id, ?), status=?, context=?, status_raw=?,"
@@ -1825,12 +1824,19 @@ def update_assistant_message(
                 " WHERE id=?",
                 (content, session_id, status, context, status_raw, 1 if terminal else 0, msg_id),
             )
-            if terminal:
-                # A session id means the harness actually started the turn and
-                # spent tokens, so any terminal outcome (done/error/cancelled)
-                # counts as a real turn — not just a clean completion.
-                _ensure_session_turn_index(conn, msg_id, session_id)
-        row = conn.execute("SELECT topic, agent FROM chat_messages WHERE id=?", (msg_id,)).fetchone()
+            index_turn = terminal
+        row = conn.execute("SELECT topic, agent, session_id FROM chat_messages WHERE id=?", (msg_id,)).fetchone()
+        if index_turn and row:
+            # A session id means the harness actually started the turn and
+            # spent tokens, so any terminal outcome (done/error/cancelled)
+            # counts as a real turn — not just a clean completion. Use the
+            # row's actual (post-COALESCE) session_id, not this call's own
+            # parameter: runners.py's mid-stream _attach_session may have
+            # already persisted it while this caller's local session_id is
+            # still None (e.g. an error/timeout before the harness's final
+            # stats event) — matching mark_assistant_cancelled/
+            # mark_orphaned_pending, which both read it off the row too.
+            _ensure_session_turn_index(conn, msg_id, row["session_id"])
         if cur.rowcount and row:
             _insert_realtime_event(conn, "message.changed", row["topic"], row["agent"], msg_id, None, {
                 "id": msg_id, "role": "assistant", "status": status, "content": content,
@@ -3774,13 +3780,18 @@ def get_stats_by_turn(
         row["cancelled_turns"] = 1 if row.get("status") == "cancelled" else 0
         row["marked_bad"] = 1 if row.get("marked_bad") else 0
         row["message_ids"] = [row["msg_id"]]
-        row["input_tokens"] = stats.get("input_tokens") or 0
-        row["output_tokens"] = stats.get("output_tokens") or 0
-        row["cache_read_tokens"] = stats.get("cache_read_tokens") or 0
-        row["cache_write_tokens"] = stats.get("cache_write_tokens") or 0
+        row["input_tokens"] = stats.get("input_tokens")
+        row["output_tokens"] = stats.get("output_tokens")
+        row["cache_read_tokens"] = stats.get("cache_read_tokens")
+        row["cache_write_tokens"] = stats.get("cache_write_tokens")
         row["cost_usd"] = stats.get("cost_usd")
-        elapsed = _elapsed_ms_between(row.pop("cm_created_at", None), row.pop("cm_completed_at", None))
-        row["duration_ms"] = stats.get("duration_ms") or elapsed
+        duration_ms = stats.get("duration_ms")
+        if duration_ms is None:
+            duration_ms = _elapsed_ms_between(row.pop("cm_created_at", None), row.pop("cm_completed_at", None))
+        else:
+            row.pop("cm_created_at", None)
+            row.pop("cm_completed_at", None)
+        row["duration_ms"] = duration_ms
         result.append(row)
     return result
 

@@ -514,6 +514,80 @@ test('detached status fallback timeout finalizes active quota tracking', async (
   }
 });
 
+test('terminal turn on a backend with no quota gauge records no fabricated quota delta', async ({ page }) => {
+  await mockShell(page);
+  // Anthropic has no `gauge` field at all here — "no quota concept for this
+  // backend", distinct from a transient fetch failure.
+  await page.route('**/health', route => route.fulfill({
+    json: {
+      status: 'ok',
+      harnesses: [{ id: 'claudecode', installed: true, default_provider: 'anthropic', compatible_providers: ['anthropic'] }],
+      providers: { anthropic: { label: 'Claude' } },
+    },
+  }));
+  const quotaProviderCalls = [];
+  await page.route('**/quota/provider/*', route => {
+    quotaProviderCalls.push(route.request().url());
+    return route.abort();
+  });
+  const quotaDeltaCalls = [];
+  await page.route('**/chat/*/quota-delta', route => {
+    quotaDeltaCalls.push(route.request().postDataJSON());
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.route('**/stats/quota-delta', route => {
+    quotaDeltaCalls.push(route.request().postDataJSON());
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.route('**/chat', route => route.fulfill({
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream', 'X-Squid-Msg-Id': '10' },
+    body: 'event: meta\ndata: {"agent":"codex","msg_id":10,"adhoc":true}\n\ndata:partial\n\n',
+  }));
+  await page.route('**/chat/10/status', route => route.fulfill({ json: {
+    id: 10,
+    role: 'assistant',
+    topic: 'default',
+    agent: 'codex',
+    adhoc: true,
+    status: 'error',
+    content: 'boom',
+  } }));
+
+  await page.goto('/');
+  await page.evaluate(() => {
+    window.__squidStatusIntervals = [];
+    const realSetInterval = window.setInterval.bind(window);
+    window.setInterval = (callback, delay, ...args) => {
+      if (delay === 2000) {
+        const handle = { callback, args, delay };
+        window.__squidStatusIntervals.push(handle);
+        return handle;
+      }
+      return realSetInterval(callback, delay, ...args);
+    };
+    window.__restoreSquidIntervals = () => { window.setInterval = realSetInterval; };
+  });
+
+  try {
+    await page.fill('#input', 'hello');
+    await page.locator('#input').press('Enter');
+    await page.waitForFunction(() => window.__squidStatusIntervals.length > 0);
+    // Single poll returning status:'error' drives finalizeQuotaTracking()
+    // through its 1s internal delay before the (non-)POST would fire.
+    await page.evaluate(async () => {
+      await window.__squidStatusIntervals[0].callback();
+    });
+    await expect(page.locator('.msg-thinking-done')).toContainText('boom');
+    await page.waitForTimeout(1500);
+
+    expect(quotaProviderCalls).toHaveLength(0);
+    expect(quotaDeltaCalls).toHaveLength(0);
+  } finally {
+    await page.evaluate(() => window.__restoreSquidIntervals?.());
+  }
+});
+
 test('percentage quota gauges retain their reset countdown', async ({ page }) => {
   await mockShell(page);
   await page.route('**/quota/provider/*', route => {
