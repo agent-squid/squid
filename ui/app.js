@@ -8480,6 +8480,8 @@ function addStats(bubble, stats, timestamp) {
   // input < (cacheRead + cacheWrite).
   // ─────────────────────────────────────────────────────────────────────────────────────
   const { isSplit, newInput: newThis, cacheRead, cacheWrite, total: inp } = _splitInputTokens(stats);
+  const inputKnown  = _tokenInputKnown(stats);
+  const outputKnown = _tokenOutputKnown(stats);
   const detailLabel = isSplit ? ` (${fmtNum(newThis)} new)`
                     : cacheRead > 0 ? ` (${fmtNum(newThis)} uncached)`
                     : '';
@@ -8496,7 +8498,7 @@ function addStats(bubble, stats, timestamp) {
   el.appendChild(document.createTextNode(timePrefix));
   const inpSpan = document.createElement('span');
   inpSpan.className = inputTokenClass;
-  inpSpan.textContent = `↑ ${fmtNum(inp)}`;
+  inpSpan.textContent = inputKnown ? `↑ ${fmtNum(inp)}` : '↑ —';
   el.appendChild(inpSpan);
   if (detailLabel) {
     const detailSpan = document.createElement('span');
@@ -8510,7 +8512,7 @@ function addStats(bubble, stats, timestamp) {
     cacheSpan.textContent = cacheStr;
     el.appendChild(cacheSpan);
   }
-  el.appendChild(document.createTextNode(`  ↓ ${fmtNum(out)} tokens${dur}`));
+  el.appendChild(document.createTextNode(`  ↓ ${outputKnown ? fmtNum(out) : '—'} tokens${dur}`));
 
   const qdSpan = document.createElement('span');
   qdSpan.className = 'stats-quota-delta';
@@ -9746,6 +9748,24 @@ function _splitInputTokens(row) {
   return { isSplit, newInput, cacheRead, cacheWrite, total: newInput + cacheRead };
 }
 
+// A token field is "known" only when the backend actually reported a finite
+// number. Absent/null fields mean "we don't know how many tokens were used" —
+// not "zero tokens" — so callers render "—" instead of a misleading 0.
+function _tokenFieldKnown(row, key) {
+  return typeof row[key] === 'number' && Number.isFinite(row[key]);
+}
+function _tokenInputKnown(row) {
+  return _tokenFieldKnown(row, 'input_tokens')
+    || _tokenFieldKnown(row, 'cache_read_tokens')
+    || _tokenFieldKnown(row, 'cache_write_tokens');
+}
+function _tokenOutputKnown(row) {
+  return _tokenFieldKnown(row, 'output_tokens');
+}
+function _fmtToken(n, known) {
+  return known ? fmtNum(n) : '—';
+}
+
 function _statsInputTokens(row) {
   return _splitInputTokens(row).total;
 }
@@ -9759,6 +9779,7 @@ function _cacheHitRate(row) {
 function _avgTokensPerTurn(row) {
   const turns = row.total_turns || 0;
   if (!turns) return null;
+  if (!_tokenInputKnown(row) && !_tokenOutputKnown(row)) return null;
   return (_statsInputTokens(row) + (row.output_tokens || 0)) / turns;
 }
 
@@ -9962,7 +9983,7 @@ const STATS_TABLE_MEASURES = [
   {
     key: 'avg_tokens_turn', label: 'Avg Tokens/Turn',
     row: r => { const v = _avgTokensPerTurn(r); return v != null ? fmtNum(v) : '—'; },
-    total: t => t.turns ? fmtNum((t.tokens_in + t.tokens_out) / t.turns) : '—',
+    total: t => (t.turns && (t.tokens_in_known || t.tokens_out_known)) ? fmtNum((t.tokens_in + t.tokens_out) / t.turns) : '—',
   },
   {
     key: 'cache_hit_rate', label: 'Cache Hit %', title: 'Cache reads as a share of total input tokens',
@@ -9972,19 +9993,19 @@ const STATS_TABLE_MEASURES = [
       return denom > 0 ? `${((t.cache_read / denom) * 100).toFixed(1)}%` : '—';
     },
   },
-  { key: 'cache_read', label: 'Cache Read', row: r => fmtNum(_splitInputTokens(r).cacheRead), total: t => fmtNum(t.cache_read || 0) },
-  { key: 'cache_write', label: 'Cache Write', row: r => fmtNum(_splitInputTokens(r).cacheWrite), total: t => fmtNum(t.cache_write || 0) },
+  { key: 'cache_read', label: 'Cache Read', row: r => _fmtToken(_splitInputTokens(r).cacheRead, _tokenInputKnown(r)), total: t => _fmtToken(t.cache_read, t.tokens_in_known) },
+  { key: 'cache_write', label: 'Cache Write', row: r => _fmtToken(_splitInputTokens(r).cacheWrite, _tokenInputKnown(r)), total: t => _fmtToken(t.cache_write, t.tokens_in_known) },
   { key: 'cancelled_turns', label: 'Cancelled', row: r => fmtNum(r.cancelled_turns || 0), total: t => fmtNum(t.cancelled_turns || 0) },
   { key: 'cost', label: 'Cost', row: r => _formatCost(r.cost_usd), total: t => _formatCost(t.cost || 0) },
   { key: 'duration', label: 'Duration', row: r => r.duration_ms != null ? `${(r.duration_ms / 1000).toFixed(1)}s` : '—', total: t => t.duration != null ? `${(t.duration / 1000).toFixed(1)}s` : '—' },
   { key: 'error_turns', label: 'Errors', row: r => fmtNum(r.error_turns || 0), total: t => fmtNum(t.error_turns || 0) },
   { key: 'marked_bad', label: 'Bad Responses', row: r => fmtNum(r.marked_bad || 0), total: t => fmtNum(t.marked_bad || 0) },
-  { key: 'new_input', label: 'New Input', row: r => fmtNum(_splitInputTokens(r).newInput), total: t => fmtNum(t.new_input || 0) },
+  { key: 'new_input', label: 'New Input', row: r => _fmtToken(_splitInputTokens(r).newInput, _tokenInputKnown(r)), total: t => _fmtToken(t.new_input, t.tokens_in_known) },
   { key: 'quota', label: 'Quota Delta', title: 'Observed account meter change; not exact attributed usage', row: r => _formatQuotaDelta(r.quota_delta), total: t => _formatQuotaDelta(t.quota) },
   { key: 'sessions', label: 'Sessions', row: r => r.sessions || 0, total: t => t.sessions || 0 },
-  { key: 'tokens_in', label: 'Tokens In', row: r => fmtNum(_statsInputTokens(r)), total: t => fmtNum(t.tokens_in || 0) },
-  { key: 'tokens_out', label: 'Tokens Out', row: r => fmtNum(r.output_tokens || 0), total: t => fmtNum(t.tokens_out || 0) },
-  { key: 'tokens_total', label: 'Total Tokens', row: r => fmtNum(_statsInputTokens(r) + (r.output_tokens || 0)), total: t => fmtNum((t.tokens_in || 0) + (t.tokens_out || 0)) },
+  { key: 'tokens_in', label: 'Tokens In', row: r => _fmtToken(_statsInputTokens(r), _tokenInputKnown(r)), total: t => _fmtToken(t.tokens_in, t.tokens_in_known) },
+  { key: 'tokens_out', label: 'Tokens Out', row: r => _fmtToken(r.output_tokens, _tokenOutputKnown(r)), total: t => _fmtToken(t.tokens_out, t.tokens_out_known) },
+  { key: 'tokens_total', label: 'Total Tokens', row: r => _fmtToken(_statsInputTokens(r) + (r.output_tokens || 0), _tokenInputKnown(r) || _tokenOutputKnown(r)), total: t => _fmtToken((t.tokens_in || 0) + (t.tokens_out || 0), t.tokens_in_known || t.tokens_out_known) },
 ];
 
 function _firstSelectedNonTurnMeasure() {
@@ -10128,6 +10149,7 @@ function _statsTotals(rows) {
     marked_bad: 0,
     tokens_in: 0, tokens_out: 0, cost: 0, quota: null, duration: null,
     cache_read: 0, cache_write: 0, new_input: 0,
+    tokens_in_known: false, tokens_out_known: false,
   };
   for (const r of rows) {
     const split = _splitInputTokens(r);
@@ -10137,6 +10159,8 @@ function _statsTotals(rows) {
     totals.error_turns += r.error_turns || 0;
     totals.cancelled_turns += r.cancelled_turns || 0;
     totals.marked_bad += r.marked_bad || 0;
+    if (_tokenInputKnown(r)) totals.tokens_in_known = true;
+    if (_tokenOutputKnown(r)) totals.tokens_out_known = true;
     totals.tokens_in += split.total;
     totals.tokens_out += r.output_tokens || 0;
     totals.cost += r.cost_usd || 0;

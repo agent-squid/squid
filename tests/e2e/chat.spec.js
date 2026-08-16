@@ -711,6 +711,23 @@ test.describe('response bubble', () => {
     await look(page);  // pause — observe: stats line is last child, bubble above it
   });
 
+  test('stats footer shows unknown tokens as em-dash instead of zero', async ({ page }) => {
+    // A stats event with no token fields: the backend didn't record usage, so
+    // the footer must not invent "0 tokens in/out" — it shows "—" instead.
+    await page.route('**/chat', r => r.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(META, { data: 'Response text' }, { event: 'stats', data: { session_id: 'test-sid', duration_ms: 500 } }, DONE),
+    }));
+
+    await sendMsg(page);
+    const stats = page.locator('#messages > .stats');
+    await expect(stats).toBeVisible();
+    await expect(stats).toContainText('↑ —');
+    await expect(stats).toContainText('↓ —');
+    await expect(stats).not.toContainText('↑ 0');
+    await expect(stats).not.toContainText('↓ 0');
+  });
+
   test('response taller than the viewport scrolls to reveal its top, not its tail', async ({ page }) => {
     const longText = Array.from({ length: 200 }, (_, i) =>
       `Paragraph sentence number ${i + 1} with several words to force wrapping across many lines in the bubble.`
