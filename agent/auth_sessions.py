@@ -64,6 +64,11 @@ AUTH_SESSION_IDLE_TIMEOUT_SECONDS = 1200
 # slightly after spawn still sees the banner/URL/code instead of missing it.
 _REPLAY_BUFFER_CAP = 64 * 1024
 
+# Single source of truth for the auth-session mode allowlist, shared by the
+# HTTP Pydantic model, the WS inline check, and _auth_session_validation_error
+# (all in server.py) so the four spots cannot drift (ADR-0035).
+AUTH_SESSION_MODES: tuple[str, ...] = ("login", "install", "pull", "remove", "unlock")
+
 
 class AuthSessionError(RuntimeError):
     pass
@@ -407,7 +412,10 @@ def write_input(session: AuthSession, data: bytes) -> None:
     if session.state != "running":
         raise AuthSessionError("session is not running")
     session.touch()
-    os.write(session.master_fd, data)
+    try:
+        os.write(session.master_fd, data)
+    except OSError as exc:
+        raise AuthSessionError(f"failed to write input: {exc}") from exc
 
 
 def resize(session: AuthSession, cols: int, rows: int) -> None:

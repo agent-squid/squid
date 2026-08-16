@@ -151,7 +151,7 @@ if UPDATES_INSTALL_ON_RESTART not in {"ask", "always", "never"}:
 # `tailscale serve`. Off by default: typing a Mac login-keychain password
 # from a client that isn't the local machine is a deliberate, opt-in
 # tradeoff, not a default.
-_auth_cfg = _cfg.get("auth", {})
+_auth_cfg = _cfg.get("auth") or {}
 ALLOW_REMOTE_KEYCHAIN_UNLOCK: bool = bool(_auth_cfg.get("allow_remote_keychain_unlock", False))
 
 def find_cli(name: str) -> Optional[str]:

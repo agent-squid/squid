@@ -37,7 +37,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
-from collections import deque
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
@@ -51,6 +51,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .auth_sessions import AUTH_SESSION_MODES
 from .config import (
     CLAUDE_PATH, CODEX_PATH, COPILOT_PATH, CURSOR_PATH, AGY_PATH,
     OPENCODE_PATH, SQUID_HOME, RESPONSE_TIMEOUT, NATIVE_SHELL_TIMEOUT, WORKTREE_ISOLATION_ENABLED,
@@ -702,11 +703,13 @@ def _auth_session_validation_error(
     elif mode == "unlock":
         if not _keychain_unlock_allowed(headers, direct_host):
             return "unlock_requires_local"
-    else:  # pull / remove
+    elif mode in ("pull", "remove"):
         if harness != "ollama":
             return f"mode={mode!r} is only supported for ollama"
         if not model:
             return "model is required"
+    else:
+        return f"Unknown auth-session mode {mode!r}"
     return None
 
 
@@ -1547,7 +1550,7 @@ class AuthSessionRequest(BaseModel):
     harness: str
     cols: int = Field(default=100, ge=20, le=500)
     rows: int = Field(default=10, ge=5, le=200)
-    mode: Literal["login", "install", "pull", "remove", "unlock"] = "login"
+    mode: Literal[AUTH_SESSION_MODES] = "login"
     model: Optional[str] = None
 
 
@@ -1566,6 +1569,12 @@ async def auth_session_create(req: AuthSessionRequest, request: Request):
 
     direct_host = request.client.host if request.client else None
     error = _auth_session_validation_error(req.harness, req.mode, req.model, request.headers, direct_host)
+    if error == "unlock_requires_local":
+        return JSONResponse({
+            "error": error,
+            "detail": "Keychain unlock is only available from a loopback client "
+                      "unless auth.allow_remote_keychain_unlock is enabled.",
+        }, status_code=400)
     if error:
         return JSONResponse({"error": error}, status_code=400)
     try:
@@ -3730,35 +3739,42 @@ class _RealtimeOutbound:
     Coalescing is limited to state-replacement frames (`process.changed` /
     `queue.changed`): enqueueing one drops any still-queued frame of the same
     type. A non-coalescible frame over the limit reports overflow (False) so
-    the caller can close `slow_consumer`. A plain deque + Event replaces
-    `asyncio.Queue` because coalescing needs in-place removal of pending
-    entries and maxsize enforcement is trivial to do by hand.
+    the caller can close `slow_consumer`. An OrderedDict keyed by frame type
+    (coalescible) or a per-frame sequence number (non-coalescible) replaces
+    `asyncio.Queue` because it gives O(1) replace-in-place for coalescing —
+    unlike a deque, which needs a full O(n) rebuild to drop a same-type entry
+    — while still popping in FIFO order via `popitem(last=False)`.
     """
 
     def __init__(self, limit: int) -> None:
         self._limit = limit
-        self._deque: deque = deque()
+        self._items: "OrderedDict[object, dict]" = OrderedDict()
+        self._seq = 0
         self._not_empty = asyncio.Event()
 
     def enqueue(self, frame: dict) -> bool:
         frame_type = frame.get("type")
         if frame_type in _REALTIME_COALESCIBLE_TYPES:
-            self._deque = deque(f for f in self._deque if f.get("type") != frame_type)
-        elif len(self._deque) >= self._limit:
-            return False
-        self._deque.append(frame)
+            key: object = frame_type
+            self._items.pop(key, None)
+        else:
+            if len(self._items) >= self._limit:
+                return False
+            self._seq += 1
+            key = self._seq
+        self._items[key] = frame
         self._not_empty.set()
         return True
 
     async def get(self) -> dict:
         await self._not_empty.wait()
-        frame = self._deque.popleft()
-        if not self._deque:
+        _, frame = self._items.popitem(last=False)
+        if not self._items:
             self._not_empty.clear()
         return frame
 
     def __len__(self) -> int:
-        return len(self._deque)
+        return len(self._items)
 
 
 async def _ws_sender(websocket: WebSocket, outbound: _RealtimeOutbound) -> None:
@@ -3768,6 +3784,34 @@ async def _ws_sender(websocket: WebSocket, outbound: _RealtimeOutbound) -> None:
         await websocket.send_json(frame)
 
 
+async def _realtime_terminate(
+    websocket: WebSocket,
+    sender_task: asyncio.Task,
+    code: int,
+    reason: str = "",
+    final_frame: Optional[dict] = None,
+) -> None:
+    """Stop the sender, then send an optional final frame and close.
+
+    `_ws_sender` is the only task that may write to the socket (single-writer
+    invariant). Terminal paths — slow_consumer, heartbeat timeout,
+    frame_too_large — call this so they cancel and reap the sender first,
+    guaranteeing this coroutine is the sole remaining writer before it
+    touches the socket. A direct `send_json`/`close` alongside a live sender
+    races it and can raise an unhandled `RuntimeError`. Only for terminal
+    paths that then return or unwind; never during a cancellation unwind
+    (see `realtime_v1`'s finally).
+    """
+    sender_task.cancel()
+    await asyncio.gather(sender_task, return_exceptions=True)
+    if final_frame is not None:
+        try:
+            await websocket.send_json(final_frame)
+        except Exception:
+            pass
+    await websocket.close(code=code, reason=reason)
+
+
 async def _realtime_send(
     websocket: WebSocket,
     outbound: _RealtimeOutbound,
@@ -3775,25 +3819,19 @@ async def _realtime_send(
     principal: Optional[str],
     last_acked_cursor: int,
 ) -> None:
-    """Enqueue an outbound frame, closing `slow_consumer` on overflow.
+    """Enqueue an outbound frame, raising on overflow.
 
-    Raises `_RealtimeSlowConsumer` after the close so the caller unwinds
-    through the connection's cleanup path instead of continuing to enqueue.
+    Raises `_RealtimeSlowConsumer` on overflow so the caller unwinds through
+    the connection's cleanup path instead of continuing to enqueue. The
+    terminal slow_consumer error frame + close are performed by the caller
+    via `_realtime_terminate` after the sender has been stopped.
     """
     if outbound.enqueue(frame):
         return
-    try:
-        await websocket.send_json({
-            "v": 1, "type": "error",
-            "payload": {"code": "slow_consumer", "resumable": True},
-        })
-    except Exception:
-        pass
     log.warning(
         "Realtime slow consumer (principal=%s, last_acked_cursor=%s, queue_depth=%s) — closing 1013",
         principal, last_acked_cursor, len(outbound),
     )
-    await websocket.close(code=1013)
     raise _RealtimeSlowConsumer()
 
 
@@ -3999,7 +4037,7 @@ async def _realtime_auth_start(payload: dict, websocket: WebSocket) -> tuple[dic
         return {"ok": False, "error": "invalid_frame", "detail": "harness is required"}, None
     if not isinstance(cols, int) or not isinstance(rows, int) or not (20 <= cols <= 500) or not (5 <= rows <= 200):
         return {"ok": False, "error": "invalid_frame", "detail": "cols/rows out of range"}, None
-    if mode not in ("login", "install", "pull", "remove", "unlock"):
+    if mode not in AUTH_SESSION_MODES:
         return {"ok": False, "error": "invalid_frame", "detail": f"Unknown auth-session mode {mode!r}"}, None
 
     direct_host = websocket.client.host if websocket.client else None
@@ -4211,7 +4249,7 @@ async def realtime_v1(websocket: WebSocket):
                 generation = notify_task.result()
             if heartbeat_task in done:
                 if loop.time() - last_inbound > _REALTIME_HEARTBEAT_SECONDS * _REALTIME_HEARTBEAT_MISS_LIMIT:
-                    await websocket.close(code=1001, reason="heartbeat timeout")
+                    await _realtime_terminate(websocket, sender_task, 1001, reason="heartbeat timeout")
                     return
                 await _realtime_send(websocket, outbound, {"v": 1, "type": "ping", "payload": {}}, principal, last_acked_cursor)
                 next_ping_at = loop.time() + _REALTIME_HEARTBEAT_SECONDS
@@ -4247,11 +4285,9 @@ async def realtime_v1(websocket: WebSocket):
                 continue
             if frame_raw is not None:
                 if len(frame_raw.encode("utf-8")) > _REALTIME_MAX_FRAME_BYTES:
-                    try:
-                        await websocket.send_json({"v": 1, "type": "error", "payload": {"code": "frame_too_large"}})
-                    except Exception:
-                        pass
-                    await websocket.close(code=1009)
+                    await _realtime_terminate(websocket, sender_task, 1009, final_frame={
+                        "v": 1, "type": "error", "payload": {"code": "frame_too_large"},
+                    })
                     return
                 try:
                     frame = json.loads(frame_raw)
@@ -4319,12 +4355,15 @@ async def realtime_v1(websocket: WebSocket):
                         if attach is not None:
                             _detach_auth_listener(auth_session_id, auth_output_q)
                             auth_session_id, auth_output_q = attach
-                elif message_type == "auth.input":
-                    await _handle_auth_input(websocket, frame, outbound, principal, last_acked_cursor)
-                elif message_type == "auth.resize":
-                    await _handle_auth_resize(websocket, frame, outbound, principal, last_acked_cursor)
-                elif message_type == "auth.cancel":
-                    await _handle_auth_cancel(websocket, frame, outbound, principal, last_acked_cursor)
+                elif message_type in {"auth.input", "auth.resize", "auth.cancel"}:
+                    if not principal:
+                        await _realtime_send(websocket, outbound, {"v": 1, "type": "error", "payload": {"code": "client_identity_required"}}, principal, last_acked_cursor)
+                    elif message_type == "auth.input":
+                        await _handle_auth_input(websocket, frame, outbound, principal, last_acked_cursor)
+                    elif message_type == "auth.resize":
+                        await _handle_auth_resize(websocket, frame, outbound, principal, last_acked_cursor)
+                    else:
+                        await _handle_auth_cancel(websocket, frame, outbound, principal, last_acked_cursor)
                 elif message_type == "ping":
                     await _realtime_send(websocket, outbound, {"v": 1, "type": "pong", "payload": {}}, principal, last_acked_cursor)
                 elif message_type == "ack":
@@ -4359,7 +4398,9 @@ async def realtime_v1(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     except _RealtimeSlowConsumer:
-        pass
+        await _realtime_terminate(websocket, sender_task, 1013, final_frame={
+            "v": 1, "type": "error", "payload": {"code": "slow_consumer", "resumable": True},
+        })
     except asyncio.CancelledError:
         # Bare connection-scope cancellation (server shutdown or TestClient
         # teardown). The child tasks are cancelled below; swallowing the

@@ -3670,6 +3670,78 @@ test('websocket transport drives the auth panel over WS without POST /auth/sessi
   await page.waitForFunction(() => window.__authFrames.some(f => f.type === 'auth.cancel'));
 });
 
+test('foreground resume() resends the live auth.start so the server can re-attach', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__authFrames = [];
+    window.__ws = null;
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        window.__ws = this;
+        this.readyState = MockWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+        } else if (frame.type === 'auth.start') {
+          window.__authFrames.push(frame);
+          setTimeout(() => this.receive({ v: 1, type: 'command.result', request_id: frame.request_id,
+            payload: { ok: true, session_id: 'sess-1', harness: 'claudecode', command: 'claude auth login --claudeai' } }));
+        } else if (frame.type === 'auth.input' || frame.type === 'auth.resize' || frame.type === 'auth.cancel') {
+          window.__authFrames.push(frame);
+        }
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = MockWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+
+  await page.goto('/');
+  await page.evaluate(() => openAuthPanel('claudecode', null));
+  await page.waitForFunction(() => window.__authFrames.some(f => f.type === 'auth.start'));
+  const firstStart = await page.evaluate(() => window.__authFrames.find(f => f.type === 'auth.start'));
+  const socketBeforeResume = await page.evaluateHandle(() => window.__ws);
+
+  // Simulate the visibilitychange handler backgrounding then foregrounding
+  // the tab (e.g. to complete an OAuth redirect) — resume() force-closes the
+  // socket and opens a new one, per ui/app.js's visibilitychange listener.
+  // (The page's own pageshow/visibilitychange listeners may also fire their
+  // own resume() calls independently in this headless environment — that's
+  // fine, every resend still carries the same idempotent request_id.)
+  await page.evaluate(() => realtimeV1.resume());
+
+  // Wait for a *new* socket (identity, not count, since background
+  // recovery listeners may cycle through more than one) to come up and
+  // carry a resent auth.start with the original request_id.
+  await page.waitForFunction(
+    ([staleSocket, requestId]) => window.__ws && window.__ws !== staleSocket
+      && window.__ws.readyState === 1
+      && window.__authFrames.filter(f => f.type === 'auth.start' && f.request_id === requestId).length >= 2,
+    [socketBeforeResume, firstStart.request_id],
+  );
+
+  const frames = await page.evaluate(() => window.__authFrames.filter(f => f.type === 'auth.start'));
+  expect(frames.length).toBeGreaterThanOrEqual(2);
+  // Every resend must be the *same* idempotent request, not a new spawn.
+  for (const frame of frames) expect(frame.request_id).toBe(firstStart.request_id);
+
+  // The panel is still usable on the new socket after the reattach.
+  await page.evaluate(() => {
+    window.__ws.receive({ v: 1, type: 'auth.output', payload: { session_id: 'sess-1', data: btoa('still here') } });
+  });
+  await expect(page.locator('#auth-panel')).toHaveClass(/open/);
+});
+
 test('websocket auth.done with null returncode reports failure, not success', async ({ page }) => {
   await page.addInitScript(() => {
     window.__ws = null;

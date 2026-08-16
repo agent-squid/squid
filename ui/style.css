@@ -5264,6 +5264,9 @@ button {
      than cramping/overflowing the surrounding bubble; short tags are
      unaffected since there's nothing to scroll. */
   max-width: 100%;
+  /* Route is priority 1 — never shrink it to make room for the prompt; if it
+     outgrows the header it caps here and scrolls horizontally instead. */
+  flex-shrink: 0;
   overflow-x: auto;
   overflow-y: hidden;
   /* The horizontal scrollbar (when a long lineage triggers one) is drawn
@@ -5457,6 +5460,12 @@ mark.search-kw-highlight {
 }
 .response-header-text {
   flex: 1;
+  min-width: 0;
+  /* Flex so the route (topic tag, flex-shrink:0) stays fully visible and the
+     prompt truncates into whatever space is left — instead of the old nowrap
+     layout pushing the prompt (and its ▼ caret) past the clip entirely. */
+  display: flex;
+  align-items: baseline;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -5468,6 +5477,10 @@ mark.search-kw-highlight {
   align-items: baseline;
   gap: 0.3em;
   max-width: min(55ch, calc(100% - 1rem));
+  /* Prompt is priority 2 — shrink/truncate it (down to just the ▼ caret)
+     before the route ever narrows. */
+  min-width: 0;
+  flex-shrink: 1;
   vertical-align: bottom;
 }
 .history-prompt:hover,

@@ -1823,6 +1823,22 @@ function anchorBeforeNextLiveGroup(maxId) {
   return null;
 }
 
+// Shared by every call site that inserts a batch of completed history items
+// reaching the "live" edge (the newest completed messages, adjacent to any
+// still-in-flight turns): loadHistory's offset-0 page, resetHistoryToLatest,
+// jumpToMessage's initial window when it has no newer cursor, and
+// loadHistoryWindow('newer')'s last page. Returns a real anchor node,
+// `null` for "no live groups newer than this batch — insert after the last
+// one", or `undefined` when there are no live groups at all so the caller
+// should fall back to its own default insertion point.
+function anchorForLiveEdgePage(items) {
+  const newestCompleted = items.find(item => item.status !== 'pending');
+  const anchor = newestCompleted ? anchorBeforeNextLiveGroup(newestCompleted.id) : null;
+  if (anchor) return anchor;
+  const thinkings = document.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)');
+  return thinkings.length ? thinkings[thinkings.length - 1].nextSibling : undefined;
+}
+
 function setLiveGroupHidden(hidden) {
   document.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)').forEach(thinking => {
     // Search scope can't be matched client-side (keywords aren't tracked on the live
@@ -2181,22 +2197,10 @@ async function loadHistory() {
     // A still-running (pending) turn sorts to the top of this page — its
     // completed_at falls back to created_at, the newest timestamp — so
     // `items[0]` is often the live group itself, not the newest completed
-    // message. Anchoring to it would treat the live group as "not newer" than
-    // the page and shove every completed message below it. Anchor to the newest
-    // *completed* item instead; live groups are positioned relative to
-    // completed history, never to themselves.
-    const newestCompleted = items.find(item => item.status !== 'pending');
-    if (newestCompleted) {
-      anchor = anchorBeforeNextLiveGroup(newestCompleted.id);
-    }
-    if (!anchor) {
-      // No live group is newer than this page, so any preserved live groups are
-      // all older than it. Anchor after the last of them instead of falling back
-      // to the top sentinel — the fallback would render those older prompts
-      // *below* newer completed messages, i.e. as the most recent ones.
-      const thinkings = document.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)');
-      anchor = thinkings.length ? thinkings[thinkings.length - 1].nextSibling : undefined;
-    }
+    // message. anchorForLiveEdgePage() anchors to the newest *completed* item
+    // instead; live groups are positioned relative to completed history,
+    // never to themselves.
+    anchor = anchorForLiveEdgePage(items);
   }
   if (anchor === undefined) {
     anchor = topSentinel ? topSentinel.nextSibling : messages.firstChild;
@@ -2264,7 +2268,16 @@ async function loadHistoryWindow(direction) {
   appendHistoryItems(data.items || [], fragment);
 
   if (direction === 'newer') {
-    const anchor = bottomSentinel || null;
+    // Once this page has no further cursor, it reaches the live edge — the
+    // same completed-vs-in-flight ordering concern loadHistory's offset-0
+    // page has — so anchor relative to any live groups instead of always
+    // inserting before bottomSentinel, which would land newer completed
+    // items after live groups that actually postdate them.
+    let anchor = bottomSentinel || null;
+    if (!data.has_more) {
+      const liveAnchor = anchorForLiveEdgePage(data.items || []);
+      if (liveAnchor !== undefined) anchor = liveAnchor;
+    }
     messages.insertBefore(fragment, anchor);
     historyNewerCursor = data.newer_cursor || historyNewerCursor;
     historyHasNewer = !!data.has_more;
@@ -2323,10 +2336,16 @@ async function resetHistoryToLatest() {
   });
   setLiveGroupHidden(hasHistoryFilterScope() || hasResponseOnlyFilter());
 
+  const items = data.items || [];
   const fragment = document.createDocumentFragment();
-  appendHistoryItems(data.items || [], fragment);
-  messages.appendChild(fragment);
-  historyOffset = (data.items || []).length;
+  appendHistoryItems(items, fragment);
+  // This is the same "newest completed page, adjacent to any live groups"
+  // case loadHistory's offset-0 page anchors for — a blind appendChild here
+  // would land newest-completed messages after live groups that actually
+  // postdate them.
+  const anchor = items.length ? anchorForLiveEdgePage(items) : undefined;
+  messages.insertBefore(fragment, anchor || null);
+  historyOffset = items.length;
   historyExhausted = !data.has_more;
   historyLoading = false;
 
@@ -2458,9 +2477,14 @@ async function jumpToMessage(msgId, flowRunId = null) {
     });
     setLiveGroupHidden(hasHistoryFilterScope() || hasResponseOnlyFilter());
 
+    const jumpItems = data.items || [];
     const fragment = document.createDocumentFragment();
-    appendHistoryItems(data.items || [], fragment);
-    messages.appendChild(fragment);
+    appendHistoryItems(jumpItems, fragment);
+    // A window with no newer cursor reaches the live edge, same as
+    // loadHistory's offset-0 page — anchor relative to live groups instead
+    // of blindly appending after them.
+    const jumpAnchor = (!data.has_newer && jumpItems.length) ? anchorForLiveEdgePage(jumpItems) : undefined;
+    messages.insertBefore(fragment, jumpAnchor || null);
     historyOlderCursor = data.older_cursor || null;
     historyNewerCursor = data.newer_cursor || null;
     historyHasOlder = !!data.has_older;
@@ -4533,7 +4557,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
     return;
   }
   if (!res || !res.ok) {
-    term.write((data.error || 'Failed to start').replace(/\n/g, '\r\n'));
+    term.write(((data.detail || data.error) || 'Failed to start').replace(/\n/g, '\r\n'));
     panelTitle.textContent = 'Failed to start';
     panelRetryBtn.hidden = false;
     _authSession.running = false;
@@ -7310,6 +7334,13 @@ const realtimeV1 = (() => {
   let globalEnabled = false;
   let onDiscover = null;
   let onAuthFrame = null;
+  // request_id of the auth.start command for the currently-open auth panel,
+  // once it has resolved ok — kept out of `commands`' normal delete-on-resolve
+  // path (see the command.result handler below) so a reconnect resends the
+  // same idempotent request and the server re-attaches this socket to the
+  // still-live PTY (agent/server.py _handle_realtime_mutation replay).
+  // Cleared in clearAuth().
+  let activeAuthRequestId = null;
   const watches = new Map();
   const commands = new Map();
   const commandTimeoutMs = 5000;
@@ -7432,9 +7463,20 @@ const realtimeV1 = (() => {
       }
       else if (frame.type === 'command.result' && commands.has(frame.request_id)) {
         const command = commands.get(frame.request_id);
-        commands.delete(frame.request_id);
         clearTimeout(command.timeout);
-        command.resolve(frame.payload || {});
+        // A successful auth.start is kept (not deleted) so a future reconnect
+        // resends this same request_id — see activeAuthRequestId above. Every
+        // other command (and a failed auth.start, which spawned nothing to
+        // reattach to) is removed as before.
+        if (command.frame.type === 'auth.start' && frame.payload?.ok) {
+          activeAuthRequestId = frame.request_id;
+        } else {
+          commands.delete(frame.request_id);
+        }
+        if (!command.resolved) {
+          command.resolved = true;
+          command.resolve(frame.payload || {});
+        }
       }
       else if (frame.type === 'error' && frame.request_id && commands.has(frame.request_id)) {
         rejectCommand(frame.request_id, frame.payload?.code || 'WebSocket command failed', true);
@@ -7484,6 +7526,7 @@ const realtimeV1 = (() => {
         frame: { v: 1, type, request_id: requestId, payload },
         sent: false,
         everSent: false,
+        resolved: false,
         resolve,
         reject,
         timeout: null,
@@ -7517,6 +7560,13 @@ const realtimeV1 = (() => {
         const staleSocket = socket;
         socket = null;
         subscribed = false;
+        // socket is nulled before close() so the stale socket's own onclose
+        // handler no-ops (`socket !== connectingSocket`) instead of racing
+        // this reconnect — but that also skips onclose's `sent = false`
+        // reset, so do it here too or a resolved-but-kept command (e.g. a
+        // live auth.start, see activeAuthRequestId) would never get resent
+        // on the new connection.
+        for (const command of commands.values()) command.sent = false;
         staleSocket.close(1000, 'foreground resume');
       }
       connect();
@@ -7583,6 +7633,10 @@ const realtimeV1 = (() => {
     },
     clearAuth() {
       onAuthFrame = null;
+      if (activeAuthRequestId) {
+        commands.delete(activeAuthRequestId);
+        activeAuthRequestId = null;
+      }
     },
     watch(item, callbacks) {
       const hadScope = globalEnabled || [...watches.values()].some(watch => watch.topic === item.topic && watch.agent === item.agent);
