@@ -739,3 +739,197 @@ test('kimi balance gauge shows balance, budget pct, and saves max budget', async
   await expect.poll(() => budgetCalls.length).toBe(2);
   expect(budgetCalls[1]).toEqual({ method: 'DELETE', body: null });
 });
+
+test('websocket-completed turn records its quota delta', async ({ page }) => {
+  // A turn completed over the WebSocket transport never runs sendMessage's SSE
+  // tail, so its quota finalize has to fire from the reconnect flow's onStored
+  // (see reconnectPendingItem). Regression: WebSocket migration dropped quota
+  // recording to ~0 for real-gauge providers.
+  await page.addInitScript(() => {
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        this.readyState = MockWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+        } else if (frame.type === 'chat.start') {
+          setTimeout(() => {
+            this.receive({ v: 1, type: 'command.result', request_id: frame.request_id,
+              payload: { ok: true, msg_id: 83, flow_run_id: null } });
+            setTimeout(() => {
+              this.receive({ v: 1, type: 'chat.done', event_id: 2, msg_id: 83, run_seq: 1, payload: {} });
+            });
+          });
+        }
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = MockWebSocket;
+  });
+  await mockShell(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+  // Before-meter is read at send (raw 42); the after-meter read happens ~1s
+  // after the turn completes. Flip the gauge once the row is on screen so the
+  // finalize read sees 44 and both the label and POSTs carry a +2 pp delta.
+  let afterRead = false;
+  await page.route('**/quota/provider/*', route => route.fulfill({
+    json: { status: 'ok', raw: afterRead ? 44 : 42, used_percent: afterRead ? 44 : 42 },
+  }));
+  const quotaDeltaCalls = [];
+  await page.route('**/chat/*/quota-delta', route => {
+    quotaDeltaCalls.push({ path: new URL(route.request().url()).pathname, body: route.request().postDataJSON() });
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.route('**/stats/quota-delta', route => {
+    quotaDeltaCalls.push({ path: new URL(route.request().url()).pathname, body: route.request().postDataJSON() });
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.route('**/chat/83/status', route => route.fulfill({ json: {
+    id: 83,
+    role: 'assistant',
+    topic: 'default',
+    agent: 'claude',
+    backend: 'claude',
+    adhoc: false,
+    status: 'done',
+    prompt: 'hello over ws',
+    content: 'WebSocket response',
+    session_id: 'ws-sess-1',
+    stats: { session_id: 'ws-sess-1' },
+    completed_at: new Date().toISOString(),
+  }}));
+
+  await page.goto('/');
+  await page.fill('#input', 'hello over ws');
+  await page.locator('#input').press('Enter');
+
+  await expect(page.locator('.msg.assistant:not(.msg-thinking)').filter({ hasText: 'WebSocket response' })).toBeVisible();
+  afterRead = true;
+
+  // finalizeQuotaTurn waits 1s (its observational read gap) before the POSTs,
+  // then resolves the just-rendered row's .stats sibling to stamp the label.
+  await expect.poll(() => quotaDeltaCalls.length, { timeout: 5000 }).toBe(2);
+  expect(quotaDeltaCalls).toContainEqual({ path: '/chat/83/quota-delta', body: { before: 42, after: 44 } });
+  expect(quotaDeltaCalls).toContainEqual({ path: '/stats/quota-delta', body: { session_id: 'ws-sess-1', before: 42, after: 44 } });
+  await expect(page.locator('.msg[data-msg-id="83"] + .stats .stats-quota-delta')).toContainText('+2 pp');
+});
+
+test('websocket meta provider reassignment discards the stale before-snapshot', async ({ page }) => {
+  // The send-time provider guess (no topic/agent → 'anthropic') reads the
+  // before-meter immediately. When the server's `meta` event reveals the real
+  // provider differs (here: cursor), the before-snapshot was read from the
+  // wrong meter and must be discarded — otherwise finalizeQuotaTurn would
+  // fabricate a cross-meter delta (42 vs 99). Regression: `meta` provider
+  // reassignment only ran on the SSE path; WS clients never re-keyed their
+  // quotaTurn backend.
+  await page.addInitScript(() => {
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        this.readyState = MockWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+        } else if (frame.type === 'chat.start') {
+          setTimeout(() => {
+            this.receive({ v: 1, type: 'command.result', request_id: frame.request_id,
+              payload: { ok: true, msg_id: 83, flow_run_id: null } });
+            setTimeout(() => {
+              this.receive({ v: 1, type: 'chat.meta', event_id: 3, msg_id: 83, run_seq: 0,
+                payload: { provider: 'cursor', agent: 'cursor-agent', harness: 'claudecode', model: null, msg_id: 83, adhoc: false, kind: 'assistant' } });
+              setTimeout(() => {
+                this.receive({ v: 1, type: 'chat.done', event_id: 4, msg_id: 83, run_seq: 1, payload: {} });
+              });
+            });
+          });
+        }
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = MockWebSocket;
+  });
+  await page.route('**/health', route => route.fulfill({
+    json: {
+      status: 'ok',
+      harnesses: [{ id: 'claudecode', installed: true, default_provider: 'anthropic', compatible_providers: ['anthropic'] }],
+      providers: {
+        anthropic: { label: 'Claude', gauge: { type: 'claude' }, gauge_authed: true },
+        cursor: { label: 'Cursor', gauge: { type: 'cursor' }, gauge_authed: true },
+      },
+    },
+  }));
+  await page.route('**/config/agents', route => route.fulfill({ json: [] }));
+  await page.route('**/topics', route => route.fulfill({ json: [] }));
+  await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: false } }));
+  await page.route('**/queue', route => route.fulfill({ json: [] }));
+  await page.route('**/processes', route => route.fulfill({ json: [] }));
+  await page.route('**/topics/**', route => route.fulfill({ json: {} }));
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+  const quotaProviderReads = [];
+  await page.route('**/quota/provider/*', route => {
+    const path = new URL(route.request().url()).pathname;
+    quotaProviderReads.push(path);
+    const provider = path.split('/').pop();
+    const raw = provider === 'cursor' ? 99 : 42;
+    return route.fulfill({
+      json: { status: 'ok', raw, used_percent: raw, reset_at: null, title: `${provider} · $${raw}` },
+    });
+  });
+  const quotaDeltaCalls = [];
+  await page.route('**/chat/*/quota-delta', route => {
+    quotaDeltaCalls.push({ path: new URL(route.request().url()).pathname, body: route.request().postDataJSON() });
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.route('**/stats/quota-delta', route => {
+    quotaDeltaCalls.push({ path: new URL(route.request().url()).pathname, body: route.request().postDataJSON() });
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.route('**/chat/83/status', route => route.fulfill({ json: {
+    id: 83,
+    role: 'assistant',
+    topic: 'default',
+    agent: 'cursor-agent',
+    backend: 'cursor',
+    adhoc: false,
+    status: 'done',
+    prompt: 'hello over ws',
+    content: 'WebSocket response',
+    session_id: 'ws-sess-2',
+    stats: { session_id: 'ws-sess-2' },
+    completed_at: new Date().toISOString(),
+  }}));
+
+  await page.goto('/');
+  await page.fill('#input', 'hello over ws');
+  await page.locator('#input').press('Enter');
+
+  await expect(page.locator('.msg.assistant:not(.msg-thinking)').filter({ hasText: 'WebSocket response' })).toBeVisible();
+
+  // finalizeQuotaTurn reads the corrected backend (cursor) ~1s after done; that
+  // read landing proves the meta event re-keyed the turn's quotaBackend.
+  await expect.poll(() => quotaProviderReads.includes('/quota/provider/cursor'), { timeout: 5000 }).toBe(true);
+  // The before-snapshot came from anthropic (42) while the corrected backend is
+  // cursor (99). A cross-meter delta must not be recorded: the before-snapshot
+  // was nulled on reassignment, so no quota-delta POST ever fires.
+  await page.waitForTimeout(300);
+  expect(quotaDeltaCalls).toEqual([]);
+});

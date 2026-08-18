@@ -355,12 +355,12 @@ class TopicWorker:
                 payload["from"] = prev_model
             if msg_id is not None:
                 from .stats_db import insert_run_event
-                # seq=1: reserved slot before _process's own run_seq counter
-                # (which now starts at 2, see below) so a reconnecting/
+                # seq=3: reserved slot before _process's own run_seq counter
+                # (which starts at 4, see below) so a reconnecting/
                 # flow-dispatched client can see load state on replay. Must be
                 # >= 0 since get_run_events()'s default after_seq=-1 filter is
                 # seq > after_seq, which would silently drop negative seqs.
-                insert_run_event(msg_id, 2, "loading", json.dumps(payload))
+                insert_run_event(msg_id, 3, "loading", json.dumps(payload))
             await out_q.put({"_loading": payload})
 
         if switching:
@@ -386,7 +386,7 @@ class TopicWorker:
             try:
                 if item.msg_id is not None:
                     from .stats_db import insert_run_event
-                    insert_run_event(item.msg_id, 1, "processing", json.dumps({"topic": item.topic}))
+                    insert_run_event(item.msg_id, 2, "processing", json.dumps({"topic": item.topic}))
                 await item.out_q.put({"_processing": {"topic": item.topic}})
                 await self._process(item)
             except Exception as exc:
@@ -482,8 +482,8 @@ class TopicWorker:
         if not resolved.provider.parallel and item.model:
             await self._sync_local_model(resolved.provider, item.model, item.out_q, msg_id=item.msg_id)
 
-        # 0, 1, and 2 are reserved for queued, processing, and loading.
-        run_seq = 3
+        # 0, 1, 2, and 3 are reserved for meta, queued, processing, and loading.
+        run_seq = 4
         raw = ""
         status_raw = ""
         tool_events: list[dict] = []
@@ -980,12 +980,12 @@ class TopicDispatcher:
         position = worker.position_of(seq)
         if msg_id is not None and position > 0:
             from .stats_db import insert_run_event
-            # seq=0: ahead of processing/loading (seq=1/2) and _process's own
-            # run_seq counter (starts at 3, see _process), so a
+            # seq=1: ahead of processing/loading (seq=2/3) and _process's own
+            # run_seq counter (starts at 4, see _process), so a
             # reconnecting/flow-dispatched client (which never sees the live
             # SSE "queued" poll loop in stream_response) can still tell this
-            # turn sat behind others in a FIFO lane.
-            insert_run_event(msg_id, 0, "queued", json.dumps({"topic": topic, "position": position}))
+            # turn sat behind others in a FIFO lane. seq=0 is the meta event.
+            insert_run_event(msg_id, 1, "queued", json.dumps({"topic": topic, "position": position}))
         return item.out_q, seq, worker
 
     def _workers_for_topic(self, topic: str) -> list[TopicWorker]:

@@ -1763,6 +1763,40 @@ def test_quota_delta_preserves_negative_meter_changes(tmp_path, monkeypatch):
     assert by_msg[asst_id]["quota_delta"] == -2.5
 
 
+def test_aggregated_chart_quota_reads_message_quota_delta(tmp_path, monkeypatch):
+    """Quota delta is recorded client-side into chat_messages.quota_delta after
+    the turn, never into the run_events "stats" payload. The chart's quota
+    series must read it from the message row (via the fallback-aware helper),
+    not from the stats payload — otherwise chart_quota_* comes back empty."""
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    def make_turn(content: str, before: float, after: float) -> None:
+        uid = stats_db.insert_user_message("squid", "codex", "hello")
+        aid = stats_db.insert_assistant_message("squid", "codex", uid, adhoc=False)
+        stats_db.update_assistant_message(aid, content, "session-1", "done")
+        # The stats payload has no quota fields — mirroring the real runner.
+        stats_db.insert_run_event(aid, 0, "stats", json.dumps(
+            {"input_tokens": 10, "output_tokens": 5, "cost_usd": 0.25}
+        ))
+        stats_db.update_message_quota_snapshot(aid, before, after)
+
+    make_turn("one", 40.0, 42.5)   # delta 2.5
+    make_turn("two", 42.5, 43.0)   # delta 0.5
+
+    rows = stats_db.get_aggregated_stats(
+        days=0,
+        chart_series=[
+            {"metric": "quota", "agg": "sum"},
+            {"metric": "quota", "agg": "avg"},
+        ],
+    )
+
+    assert rows[0]["quota_delta"] == 3.0
+    assert rows[0]["chart_quota_sum"] == 3.0
+    assert rows[0]["chart_quota_avg"] == 1.5
+
+
 def test_get_stats_by_turn_uses_per_turn_stats_not_stale_session_row(tmp_path, monkeypatch):
     """A resumed session shares one session_stats row across turns, so session_stats
     only ever holds the *latest* turn's numbers. get_stats_by_turn must instead read

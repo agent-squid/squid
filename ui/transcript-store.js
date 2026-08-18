@@ -1,0 +1,341 @@
+// Normalized client transcript store and reducer — ADR-0041.
+//
+// The store and its action vocabulary live here, standalone and
+// dependency-free; it owns no DOM. app.js feeds it via shadowInstallHistoryPage
+// (HTTP history) today, with the remaining producers (WS snapshot, WS events,
+// SSE) wired in per the ADR's "Migration sequence" section.
+//
+// Wire-level field names (msg_id, reply_to, completed_at, ...) are ADR-0040's
+// concern; this module accepts them as-is on read but stores camelCase
+// internally so producers stay free to normalize at the adapter boundary.
+
+(function (global) {
+  'use strict';
+
+  // chat_messages.status vocabulary (agent/stats_db.py): 'pending', 'scheduled',
+  // 'claimed', 'running', 'done', 'error', 'cancelled' — 'done' is the terminal
+  // success state on the wire, not 'completed'.
+  const TERMINAL_STATUSES = new Set(['done', 'error', 'cancelled']);
+
+  function isTerminal(status) {
+    return TERMINAL_STATUSES.has(status);
+  }
+
+  // snake_case -> camelCase for the identity/ordering fields every producer
+  // shares; unknown fields pass through unchanged so callers can carry
+  // arbitrary content/tools/stats/route payloads.
+  function normalizeRow(row) {
+    const out = { ...row };
+    if ('msg_id' in out) { out.msgId = out.msg_id; delete out.msg_id; }
+    if ('reply_to' in out) { out.replyTo = out.reply_to; delete out.reply_to; }
+    if ('completed_at' in out) { out.completedAt = out.completed_at; delete out.completed_at; }
+    if ('created_at' in out) { out.createdAt = out.created_at; delete out.created_at; }
+    if ('queued_at' in out) { out.queuedAt = out.queued_at; delete out.queued_at; }
+    return out;
+  }
+
+  function identityConflict(existing, incoming) {
+    if (!existing) return null;
+    if (incoming.role !== undefined && existing.role !== undefined && incoming.role !== existing.role) {
+      return `role mismatch for msg ${existing.msgId}: ${existing.role} -> ${incoming.role}`;
+    }
+    if (incoming.replyTo !== undefined && existing.replyTo !== undefined && incoming.replyTo !== existing.replyTo) {
+      return `reply_to mismatch for msg ${existing.msgId}: ${existing.replyTo} -> ${incoming.replyTo}`;
+    }
+    return null;
+  }
+
+  // Authoritative merge (history pages, snapshots): every field the caller
+  // declares replaces the stored value outright, except a terminal status
+  // can never be downgraded back to a non-terminal one.
+  function mergeAuthoritative(existing, fields) {
+    const merged = existing ? { ...existing } : { tools: [], stats: {} };
+    for (const key of Object.keys(fields)) {
+      if (fields[key] === undefined) continue;
+      if (key === 'status' && existing && isTerminal(existing.status) && !isTerminal(fields[key])) continue;
+      merged[key] = fields[key];
+    }
+    return merged;
+  }
+
+  // Sparse merge (lifecycle patches, run-event deltas): omitted fields are
+  // left untouched, never cleared. Same terminal-status monotonicity rule.
+  function mergeSparse(existing, patch) {
+    const merged = existing ? { ...existing } : { tools: [], stats: {} };
+    for (const key of Object.keys(patch)) {
+      if (patch[key] === undefined) continue;
+      if (key === 'status' && existing && isTerminal(existing.status) && !isTerminal(patch[key])) continue;
+      merged[key] = patch[key];
+    }
+    return merged;
+  }
+
+  function createTranscriptStore() {
+    const messagesById = new Map();
+    const turnsByAssistantId = new Map();
+    const pendingReconcile = new Set();
+    const lastRunSeqByAssistantId = new Map();
+    // promptMsgId -> assistantMsgId, kept in step with messagesById so a
+    // user-role message can find its turn without scanning every message.
+    const assistantByReplyTo = new Map();
+    let lastAppliedEventId = 0;
+
+    const view = {
+      loadedMessageIds: new Set(),
+      pageBoundaries: [],
+      activeWindowIds: new Set(),
+      visibleScope: null,
+    };
+
+    function markDirty(assistantMsgId) {
+      if (assistantMsgId != null) pendingReconcile.add(assistantMsgId);
+    }
+
+    // A message record's own identity determines which turn it belongs to:
+    // an assistant message is its own turn key; a user message's turn key
+    // is whichever assistant message replies to it (if known yet).
+    function turnKeyFor(msg) {
+      if (msg.role === 'assistant') return msg.msgId;
+      if (msg.role === 'user') return assistantByReplyTo.get(msg.msgId) ?? null;
+      return null;
+    }
+
+    function upsertTurn(assistantMsgId) {
+      const assistantMsg = messagesById.get(assistantMsgId);
+      if (!assistantMsg) return;
+      const promptMsg = assistantMsg.replyTo != null ? messagesById.get(assistantMsg.replyTo) : null;
+      turnsByAssistantId.set(assistantMsgId, {
+        assistantMsgId,
+        promptMsgId: assistantMsg.replyTo ?? null,
+        status: assistantMsg.status,
+        createdAt: assistantMsg.queuedAt ?? assistantMsg.createdAt ?? null,
+        completedAt: assistantMsg.completedAt ?? null,
+        tools: assistantMsg.tools ?? [],
+        stats: assistantMsg.stats ?? {},
+        route: assistantMsg.route,
+        promptContent: promptMsg ? promptMsg.content : undefined,
+        // Full-fidelity render payload (ADR-0041 Stage 4): a producer that
+        // wants the store to be able to *render* a turn, not just track its
+        // identity/ordering, attaches its original denormalized row here.
+        // Enumerating every display field individually (topic, agent, adhoc,
+        // session_id, prompt_context, tool context, ...) as its own tracked
+        // property would drift out of sync with the renderer it feeds; this
+        // stays a single opaque passthrough, same policy as normalizeRow's
+        // "unknown fields pass through unchanged" for messages.
+        raw: assistantMsg.raw,
+      });
+      markDirty(assistantMsgId);
+    }
+
+    function putMessage(msg) {
+      messagesById.set(msg.msgId, msg);
+      if (msg.role === 'assistant') {
+        if (msg.replyTo != null) assistantByReplyTo.set(msg.replyTo, msg.msgId);
+        upsertTurn(msg.msgId);
+      } else {
+        const key = turnKeyFor(msg);
+        if (key != null) upsertTurn(key);
+      }
+    }
+
+    function dirtySnapshot() {
+      return [...pendingReconcile];
+    }
+
+    // Validates identity across the whole batch, not just against
+    // pre-transaction store state: two rows for the same msg_id within one
+    // page/snapshot must not be allowed to silently overwrite each other's
+    // identity (e.g. one flipping the other's role).
+    function findBatchConflict(rows) {
+      const seen = new Map();
+      for (const row of rows) {
+        if (row.msgId == null) return 'row missing msg_id';
+        const baseline = seen.has(row.msgId) ? seen.get(row.msgId) : messagesById.get(row.msgId);
+        const conflict = identityConflict(baseline, row);
+        if (conflict) return conflict;
+        seen.set(row.msgId, baseline ? { ...baseline, ...row } : row);
+      }
+      return null;
+    }
+
+    function installHistoryPage(page, boundary) {
+      if (!Array.isArray(page)) return { ok: false, error: 'installHistoryPage: page must be an array', dirty: dirtySnapshot() };
+      const rows = page.map(normalizeRow);
+      const batchConflict = findBatchConflict(rows);
+      if (batchConflict) return { ok: false, error: `installHistoryPage: ${batchConflict}`, dirty: dirtySnapshot() };
+      for (const row of rows) {
+        const merged = mergeAuthoritative(messagesById.get(row.msgId), row);
+        putMessage(merged);
+        view.loadedMessageIds.add(row.msgId);
+      }
+      if (boundary !== undefined) view.pageBoundaries.push(boundary);
+      return { ok: true, dirty: dirtySnapshot() };
+    }
+
+    function installSnapshot(snapshot, eventId) {
+      if (!snapshot || !Array.isArray(snapshot.messages)) {
+        return { ok: false, error: 'installSnapshot: snapshot.messages must be an array', dirty: dirtySnapshot() };
+      }
+      const numericEventId = Number(eventId);
+      if (!Number.isFinite(numericEventId)) {
+        return { ok: false, error: 'installSnapshot: event_id must be numeric', dirty: dirtySnapshot() };
+      }
+      if (numericEventId <= lastAppliedEventId) {
+        // At-or-below watermark: no-op, but surface any still-outstanding
+        // reconcile work so a prior render failure can be retried.
+        return { ok: true, dirty: dirtySnapshot(), noop: true };
+      }
+      const rows = snapshot.messages.map(normalizeRow);
+      const batchConflict = findBatchConflict(rows);
+      if (batchConflict) return { ok: false, error: `installSnapshot: ${batchConflict}`, dirty: dirtySnapshot() };
+      for (const row of rows) {
+        const merged = mergeAuthoritative(messagesById.get(row.msgId), row);
+        putMessage(merged);
+      }
+      view.activeWindowIds = new Set(rows.map(r => r.msgId));
+      lastAppliedEventId = numericEventId;
+      return { ok: true, dirty: dirtySnapshot() };
+    }
+
+    function applyMessagePatch(msgId, patch, eventId) {
+      if (msgId == null) return { ok: false, error: 'applyMessagePatch: msg_id required', dirty: dirtySnapshot() };
+      const numericEventId = Number(eventId);
+      if (!Number.isFinite(numericEventId)) {
+        return { ok: false, error: 'applyMessagePatch: event_id must be numeric', dirty: dirtySnapshot() };
+      }
+      if (numericEventId <= lastAppliedEventId) {
+        return { ok: true, dirty: dirtySnapshot(), noop: true };
+      }
+      const normalized = normalizeRow(patch || {});
+      const existing = messagesById.get(msgId);
+      const conflict = identityConflict(existing, normalized);
+      if (conflict) return { ok: false, error: `applyMessagePatch: ${conflict}`, dirty: dirtySnapshot() };
+      const merged = mergeSparse(existing, { ...normalized, msgId });
+      putMessage(merged);
+      lastAppliedEventId = numericEventId;
+      return { ok: true, dirty: dirtySnapshot() };
+    }
+
+    function applyRunEvent(msgId, runSeq, kind, payload, eventId) {
+      if (msgId == null) return { ok: false, error: 'applyRunEvent: msg_id required', dirty: dirtySnapshot() };
+      const numericEventId = Number(eventId);
+      if (!Number.isFinite(numericEventId)) {
+        return { ok: false, error: 'applyRunEvent: event_id must be numeric', dirty: dirtySnapshot() };
+      }
+      if (numericEventId <= lastAppliedEventId) {
+        return { ok: true, dirty: dirtySnapshot(), noop: true };
+      }
+      const numericRunSeq = Number(runSeq);
+      const lastRunSeq = lastRunSeqByAssistantId.get(msgId) ?? -1;
+      if (Number.isFinite(numericRunSeq) && numericRunSeq <= lastRunSeq) {
+        // event_id already advanced past a prior duplicate/out-of-order
+        // run_seq for this message; run-level payload is still a no-op.
+        lastAppliedEventId = numericEventId;
+        return { ok: true, dirty: dirtySnapshot(), noop: true };
+      }
+
+      const existing = messagesById.get(msgId);
+      const conflict = identityConflict(existing, { role: 'assistant' });
+      if (conflict) return { ok: false, error: `applyRunEvent: ${conflict}`, dirty: dirtySnapshot() };
+
+      let patch = { msgId, role: 'assistant' };
+      switch (kind) {
+        case 'text': {
+          const priorContent = existing?.content ?? '';
+          const delta = payload?.delta ?? '';
+          patch.content = payload?.mode === 'replace' ? (payload.text ?? '') : priorContent + delta;
+          break;
+        }
+        case 'tool': {
+          const priorTools = existing?.tools ?? [];
+          const toolId = payload?.id;
+          const idx = toolId == null ? -1 : priorTools.findIndex(t => t.id === toolId);
+          const nextTools = idx === -1 ? [...priorTools, payload] : priorTools.map((t, i) => (i === idx ? { ...t, ...payload } : t));
+          patch.tools = nextTools;
+          break;
+        }
+        case 'status': {
+          if (payload?.status !== undefined) patch.status = payload.status;
+          if (payload?.completed_at !== undefined) patch.completedAt = payload.completed_at;
+          if (payload?.completedAt !== undefined) patch.completedAt = payload.completedAt;
+          break;
+        }
+        case 'stats': {
+          patch.stats = { ...(existing?.stats ?? {}), ...(payload ?? {}) };
+          break;
+        }
+        default:
+          return { ok: false, error: `applyRunEvent: unknown kind '${kind}'`, dirty: dirtySnapshot() };
+      }
+
+      const merged = mergeSparse(existing, patch);
+      putMessage(merged);
+      lastRunSeqByAssistantId.set(msgId, Number.isFinite(numericRunSeq) ? Math.max(lastRunSeq, numericRunSeq) : lastRunSeq);
+      lastAppliedEventId = numericEventId;
+      return { ok: true, dirty: dirtySnapshot() };
+    }
+
+    function setVisibleScope(scope) {
+      view.visibleScope = scope;
+      return { ok: true, dirty: dirtySnapshot() };
+    }
+
+    function clearReconciled(assistantMsgIds) {
+      for (const id of assistantMsgIds) pendingReconcile.delete(id);
+    }
+
+    function getOrderedTurnIds() {
+      const completed = [];
+      const pending = [];
+      for (const turn of turnsByAssistantId.values()) {
+        if (isTerminal(turn.status)) completed.push(turn);
+        else pending.push(turn);
+      }
+      completed.sort((a, b) => {
+        const at = a.completedAt ?? '';
+        const bt = b.completedAt ?? '';
+        if (at !== bt) return at < bt ? -1 : 1;
+        return a.assistantMsgId - b.assistantMsgId;
+      });
+      pending.sort((a, b) => {
+        const at = a.createdAt ?? '';
+        const bt = b.createdAt ?? '';
+        if (at !== bt) return at < bt ? -1 : 1;
+        return a.assistantMsgId - b.assistantMsgId;
+      });
+      return {
+        completed: completed.map(t => t.assistantMsgId),
+        pending: pending.map(t => t.assistantMsgId),
+      };
+    }
+
+    return {
+      installHistoryPage,
+      installSnapshot,
+      applyMessagePatch,
+      applyRunEvent,
+      setVisibleScope,
+      getMessage: msgId => messagesById.get(msgId),
+      getTurn: assistantMsgId => turnsByAssistantId.get(assistantMsgId),
+      getPendingReconcile: dirtySnapshot,
+      clearReconciled,
+      getOrderedTurnIds,
+      isTerminal,
+      getLastAppliedEventId: () => lastAppliedEventId,
+      getView: () => ({
+        loadedMessageIds: [...view.loadedMessageIds],
+        pageBoundaries: [...view.pageBoundaries],
+        activeWindowIds: [...view.activeWindowIds],
+        visibleScope: view.visibleScope,
+      }),
+    };
+  }
+
+  const SquidTranscriptStore = { createTranscriptStore };
+
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = SquidTranscriptStore;
+  } else {
+    global.SquidTranscriptStore = SquidTranscriptStore;
+  }
+})(typeof window !== 'undefined' ? window : globalThis);

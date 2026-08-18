@@ -31,6 +31,12 @@ const realtimeTransportMode = fetch('/config/realtime', { cache: 'no-store' })
   .then(config => ['auto', 'websocket', 'sse'].includes(config.transport) ? config.transport : 'sse')
   .catch(() => 'sse');
 
+// ADR-0041 Stage 4: HTTP history renders from the normalized store instead
+// of #messages directly only when explicitly opted in — resolved once,
+// client-side only (no server round trip needed, unlike realtimeTransportMode
+// above). Default stays the existing direct-DOM path.
+const historyRendererMode = new URLSearchParams(location.search).get('renderer') === 'store' ? 'store' : 'dom';
+
 // history.scrollRestoration is set as early as possible in index.html's
 // <head> instead of here — see the comment there.
 window.scrollTo(0, 0);
@@ -1840,6 +1846,40 @@ function anchorForLiveEdgePage(items) {
   return thinkings.length ? thinkings[thinkings.length - 1].nextSibling : undefined;
 }
 
+// getAnchor for createHistoryRegistry (ADR-0041 Stage 4): where one completed
+// turn group must be inserted, given `next` (the already-placed newer
+// completed neighbor, or null for the newest group this pass). Completed
+// turns sort by completed_at, but live (still-running) turn groups hold their
+// position by *start* time among them — the direct-DOM insert paths key live
+// bubbles on data-order-at (insertPendingHistoryItem/insertCompletedHistoryItem):
+// a turn that ended before a live group started belongs above it, one that
+// ended after belongs below. So this must be answered per turn, not once for
+// the whole completed set — a single block-wide anchor (and a msg_id proxy
+// for "newer", as anchorBeforeNextLiveGroup computes for page loads) can't
+// express that interleave and strands the live bubble on the wrong side of
+// turns that finished while it was running. Insert before whichever sits
+// higher: `next`, or the first node of any live group whose start is later
+// than this turn's completedAt. A live bubble with no start recorded yet was
+// just submitted — newer than any completion — so it always qualifies. With
+// no candidate the turn belongs below every live group: before
+// bottomSentinel, else at the end of #messages.
+function historyStoreAnchor(assistantMsgId, next) {
+  const completedAt = assistantMsgId != null
+    ? (transcriptStore?.getTurn(assistantMsgId)?.completedAt ?? null)
+    : null;
+  const thinkings = document.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)');
+  let anchor = next ?? null;
+  thinkings.forEach(thinking => {
+    const start = thinking.dataset.orderAt || null;
+    if (start && (!completedAt || start <= completedAt)) return;
+    const first = liveGroupElements(thinking)[0];
+    if (!first) return;
+    if (!anchor || (first.compareDocumentPosition(anchor) & Node.DOCUMENT_POSITION_FOLLOWING)) anchor = first;
+  });
+  if (anchor) return anchor;
+  return bottomSentinel || null;
+}
+
 function setLiveGroupHidden(hidden) {
   document.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)').forEach(thinking => {
     // Search scope can't be matched client-side (keywords aren't tracked on the live
@@ -1869,6 +1909,9 @@ function reloadHistory(filter = {}) {
   invalidateHistoryLoad();
   if (topSentinel) { topSentinel.remove(); topSentinel = null; }
   if (bottomSentinel) { bottomSentinel.remove(); bottomSentinel = null; }
+  // Must run before the raw DOM sweep below removes reconciler-owned nodes —
+  // see reset()'s own comment in reconciler.js.
+  historyReconciler?.reset();
   document.querySelectorAll('.history-item, .boot-banner, .tool-block-history, #messages > .cmd-feedback').forEach(el => el.remove());
   // Remove live (non-history) messages too — completed ones are in the DB and will reload
   const preserveForLive = collectLiveGroupElements();
@@ -2123,7 +2166,91 @@ function historyUrlParams() {
   return params;
 }
 
-function appendHistoryItems(items, fragment) {
+// ADR-0041 Stage 2: HTTP history is the first producer wired into the
+// normalized transcript store — it feeds the store alongside (renderer=dom,
+// the default) or instead of (renderer=store) the existing direct-DOM path.
+// Exposed on window so tests can assert store/DOM parity.
+// Guarded: this must never be able to break the direct-DOM path it runs
+// alongside, including if transcript-store.js itself failed to load.
+const transcriptStore = window.SquidTranscriptStore?.createTranscriptStore?.() ?? null;
+window.__transcriptStore = transcriptStore;
+
+// ADR-0041 Stage 3/4: only constructed under renderer=store, and only once
+// the store above and both scripts it depends on actually loaded — a failure
+// of either must fall back to direct-DOM, not throw during page init.
+// container is the real #messages; every appendHistoryItems call site's
+// cleanup sweep (reloadHistory/resetHistoryToLatest/jumpToMessage) must call
+// historyReconciler?.reset() before it removes reconciler-owned nodes itself
+// (see reset()'s own comment in reconciler.js for why).
+const historyReconciler = (historyRendererMode === 'store' && transcriptStore
+  && window.createHistoryRegistry && window.SquidReconciler)
+  ? window.SquidReconciler.createReconciler({
+      store: transcriptStore,
+      registry: window.createHistoryRegistry({ container: messages, getAnchor: historyStoreAnchor }),
+    })
+  : null;
+
+// chat_messages.status vocabulary (agent/stats_db.py): 'pending', 'scheduled',
+// 'claimed', 'running', 'done', 'error', 'cancelled' — mirrors transcript-store.js's
+// TERMINAL_STATUSES so the adapter only claims a completion time once one applies.
+const HISTORY_TERMINAL_STATUSES = new Set(['done', 'error', 'cancelled']);
+
+// A history row is a denormalized turn (assistant message with its prompt's
+// text inlined); the store wants the two as separate linked messages, so
+// split it back apart. item.reply_to is the prompt message's own id.
+function historyItemToStoreRows(item) {
+  const rows = [];
+  if (item.reply_to != null) {
+    rows.push({ msg_id: item.reply_to, role: 'user', content: item.prompt ?? '' });
+  }
+  // _turn_end_expr (agent/stats_db.py) coalesces completed_at down to
+  // created_at for still-pending rows, so it is never actually null on the
+  // wire — only trust it as a completion time once the status is terminal.
+  const completedAt = HISTORY_TERMINAL_STATUSES.has(item.status) ? (item.completed_at || item.timestamp || null) : null;
+  rows.push({
+    msg_id: item.id,
+    role: 'assistant',
+    reply_to: item.reply_to ?? null,
+    content: item.content ?? '',
+    status: item.status,
+    completed_at: completedAt,
+    created_at: item.timestamp || null,
+    stats: item.stats || {},
+    // Stage 2 only fed identity/ordering fields into the store — enough to
+    // prove dedup/ordering parity, not enough to actually render from (no
+    // topic/agent/adhoc/session_id/prompt_context/tool context/etc.). Rather
+    // than growing this call site's field list every time a renderer needs
+    // one more of those, carry the original row through as-is; historyRegistry
+    // (Stage 4) renders straight from it via turn.raw instead of reassembling
+    // an item shape field-by-field from the store.
+    raw: item,
+  });
+  return rows;
+}
+
+function shadowInstallHistoryPage(items, boundary) {
+  if (!transcriptStore) return;
+  const rows = [];
+  for (const item of items) {
+    if (item.id == null) continue;
+    rows.push(...historyItemToStoreRows(item));
+  }
+  if (!rows.length) return;
+  const result = transcriptStore.installHistoryPage(rows, boundary);
+  if (!result.ok) console.error('[transcript-store] shadow installHistoryPage failed:', result.error);
+  // In dom-renderer mode (the default) nothing ever calls historyReconciler
+  // .reconcile() to drain the store's dirty set — it's shadow-mode-only, kept
+  // for cross-check parity, never rendered from — so it would otherwise grow
+  // unbounded with every page load for the life of the tab.
+  if (!historyReconciler) transcriptStore.clearReconciled(result.dirty);
+}
+
+function appendHistoryItems(items, fragment, boundary) {
+  shadowInstallHistoryPage(items, boundary);
+  // Prompt-only mode renders a different, reduced representation
+  // (appendPromptOnlyHistoryItem) that historyRegistry doesn't build —
+  // stay on direct-DOM for it regardless of the flag.
+  const useReconciler = !!historyReconciler && !promptOnlyHistory;
   const chronologicalItems = [...items].reverse();
   for (let i = 0; i < chronologicalItems.length; i += 1) {
     const item = chronologicalItems[i];
@@ -2150,10 +2277,21 @@ function appendHistoryItems(items, fragment) {
       continue;
     }
 
+    // Completed items render through historyReconciler under renderer=store
+    // (see its declaration above) — it owns #messages directly via its own
+    // render()/reorder(), not this function's fragment. The caller must run
+    // reconcile() *after* it inserts this fragment: reorder() interleaves
+    // completed turns with live turn groups by time (historyStoreAnchor), so
+    // a pending wip bubble still sitting in the detached fragment would be
+    // invisible to the placement pass and the completed block would settle
+    // on the wrong side of it.
+    if (useReconciler) continue;
+
     const routeMarker = historyRouteChainMarkerForItem(item, chronologicalItems[i + 1], chronologicalItems[i - 1]);
     appendHistoryRouteChainMarker(routeMarker, item, fragment);
     appendHistoryItem(item, fragment);
   }
+  return useReconciler;
 }
 
 async function loadHistory() {
@@ -2192,7 +2330,7 @@ async function loadHistory() {
   const { items, has_more } = data;
   const prevHeight = messages.scrollHeight;
   const fragment = document.createDocumentFragment();
-  appendHistoryItems(items, fragment);
+  const useReconciler = appendHistoryItems(items, fragment, { kind: 'offset', offset: historyOffset, hasMore: has_more });
 
   // items are newest-first (server ORDER BY completed_at DESC), so items[0] is
   // this page's most recent id — used to find the right live-group slot. That
@@ -2216,6 +2354,8 @@ async function loadHistory() {
     anchor = topSentinel ? topSentinel.nextSibling : messages.firstChild;
   }
   messages.insertBefore(fragment, anchor || null);
+  // After the fragment insert, not before — see appendHistoryItems' comment.
+  if (useReconciler) historyReconciler.reconcile();
   messages.scrollTop += messages.scrollHeight - prevHeight;
   markInitialHistoryReady();
 
@@ -2275,7 +2415,7 @@ async function loadHistoryWindow(direction) {
 
   const prevHeight = messages.scrollHeight;
   const fragment = document.createDocumentFragment();
-  appendHistoryItems(data.items || [], fragment);
+  const useReconciler = appendHistoryItems(data.items || [], fragment, { kind: 'window', direction, cursor, hasMore: data.has_more });
 
   if (direction === 'newer') {
     // Once this page has no further cursor, it reaches the live edge — the
@@ -2299,6 +2439,8 @@ async function loadHistoryWindow(direction) {
     historyHasOlder = !!data.has_more;
   }
 
+  // After the fragment insert, not before — see appendHistoryItems' comment.
+  if (useReconciler) historyReconciler.reconcile();
   historyLoading = false;
   updateInContextMarkers();
   refreshAllRevertButtons();
@@ -2339,6 +2481,9 @@ async function resetHistoryToLatest() {
   }
   if (generation !== historyGeneration) return;
 
+  // Must run before the raw DOM sweep below removes reconciler-owned nodes —
+  // see reset()'s own comment in reconciler.js.
+  historyReconciler?.reset();
   document.querySelectorAll('.history-item, .boot-banner, .search-result-item, .tool-block-history, #messages > .cmd-feedback').forEach(el => el.remove());
   const preserveForLive = collectLiveGroupElements();
   document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .route-chain-marker').forEach(el => {
@@ -2348,13 +2493,15 @@ async function resetHistoryToLatest() {
 
   const items = data.items || [];
   const fragment = document.createDocumentFragment();
-  appendHistoryItems(items, fragment);
+  const useReconciler = appendHistoryItems(items, fragment, { kind: 'offset', offset: 0, hasMore: data.has_more });
   // This is the same "newest completed page, adjacent to any live groups"
   // case loadHistory's offset-0 page anchors for — a blind appendChild here
   // would land newest-completed messages after live groups that actually
   // postdate them.
   const anchor = items.length ? anchorForLiveEdgePage(items) : undefined;
   messages.insertBefore(fragment, anchor || null);
+  // After the fragment insert, not before — see appendHistoryItems' comment.
+  if (useReconciler) historyReconciler.reconcile();
   historyOffset = items.length;
   historyExhausted = !data.has_more;
   historyLoading = false;
@@ -2480,6 +2627,9 @@ async function jumpToMessage(msgId, flowRunId = null) {
     }
     if (topSentinel) { topSentinel.remove(); topSentinel = null; }
     if (bottomSentinel) { bottomSentinel.remove(); bottomSentinel = null; }
+    // Must run before the raw DOM sweep below removes reconciler-owned nodes —
+    // see reset()'s own comment in reconciler.js.
+    historyReconciler?.reset();
     document.querySelectorAll('.history-item, .boot-banner, .search-result-item, .tool-block-history, #messages > .cmd-feedback').forEach(el => el.remove());
     const preserveForLive = collectLiveGroupElements();
     document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .route-chain-marker').forEach(el => {
@@ -2489,12 +2639,14 @@ async function jumpToMessage(msgId, flowRunId = null) {
 
     const jumpItems = data.items || [];
     const fragment = document.createDocumentFragment();
-    appendHistoryItems(jumpItems, fragment);
+    const useReconciler = appendHistoryItems(jumpItems, fragment, { kind: 'jump', msgId, flowRunId, hasOlder: data.has_older, hasNewer: data.has_newer });
     // A window with no newer cursor reaches the live edge, same as
     // loadHistory's offset-0 page — anchor relative to live groups instead
     // of blindly appending after them.
     const jumpAnchor = (!data.has_newer && jumpItems.length) ? anchorForLiveEdgePage(jumpItems) : undefined;
     messages.insertBefore(fragment, jumpAnchor || null);
+    // After the fragment insert, not before — see appendHistoryItems' comment.
+    if (useReconciler) historyReconciler.reconcile();
     historyOlderCursor = data.older_cursor || null;
     historyNewerCursor = data.newer_cursor || null;
     historyHasOlder = !!data.has_older;
@@ -2685,6 +2837,11 @@ function startSearch(rawArgs) {
   invalidateHistoryLoad();
 
   // Clear pane
+  // Must run before the sweep below removes reconciler-owned nodes — see
+  // reset()'s own comment in reconciler.js. Search results themselves don't
+  // render through the reconciler, but this still wipes whatever
+  // loadHistory/loadHistoryWindow rendered before search started.
+  historyReconciler?.reset();
   document.querySelectorAll('.history-item, .boot-banner, .search-result-item, .tool-block-history').forEach(el => el.remove());
   const preserveForLive = collectLiveGroupElements();
   document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .cmd-feedback').forEach(el => {
@@ -4972,16 +5129,32 @@ async function sendMessage(text, opts = {}) {
 
   let firstDataReceived = false;
 
-  let quotaBackend = nativeShell ? null : await resolveQuotaProvider(topic, agent);
-  let quotaBeforeSnapshot = nativeShell ? null : await fetchQuotaForBackend(quotaBackend);
+  // Per-turn quota state shared by both completion paths (SSE and WebSocket).
+  // quotaBackend/quotaBeforeSnapshot live on the handle because the meta event
+  // can reassign them mid-turn; msgId/lastSessionId/turnStatus/statsEl stay
+  // locals (the rest of sendMessage reads/writes them) and are copied onto the
+  // handle at finalize time. The finalize logic itself is module-level
+  // (finalizeQuotaTurn) so the WebSocket completion path can reach it too.
+  const quotaTurn = {
+    nativeShell,
+    quotaBackend: nativeShell ? null : await resolveQuotaProvider(topic, agent),
+    quotaBeforeSnapshot: null,
+    quotaBackendHasConfig: false,
+    msgId: null,
+    lastSessionId: null,
+    turnStatus: null,
+    statsEl: null,
+    finalized: false,
+  };
+  quotaTurn.quotaBeforeSnapshot = nativeShell ? null : await fetchQuotaForBackend(quotaTurn.quotaBackend);
   // fetchQuotaForBackend's null return conflates "this backend has no quota
   // concept at all" with "the read failed" — resolve that once here (after
   // fetchQuotaForBackend's own call already ensured quota metadata is
-  // loaded) so finalizeQuotaTracking's terminal-failure fallback only ever
+  // loaded) so finalizeQuotaTurn's terminal-failure fallback only ever
   // fires for a backend that genuinely has a meter to report on.
-  const quotaBackendHasConfig = !nativeShell && !!quotaBackend
-    && !!quotaConfigFor(quotaStatusProviderKey(quotaBackend));
-  if (!nativeShell) quotaTrackStart(quotaBackend);
+  quotaTurn.quotaBackendHasConfig = !nativeShell && !!quotaTurn.quotaBackend
+    && !!quotaConfigFor(quotaStatusProviderKey(quotaTurn.quotaBackend));
+  if (!nativeShell) quotaTrackStart(quotaTurn.quotaBackend);
   let lastSessionId = null;
   let statsEl = null;
   let doneTime = null;
@@ -4996,75 +5169,13 @@ async function sendMessage(text, opts = {}) {
   let liveSessionTurnCount = 0;
   const liveToolEvents = [];
   const controller = new AbortController();
-  let quotaFinalized = false;
 
   async function finalizeQuotaTracking() {
-    if (quotaFinalized) return;
-    quotaFinalized = true;
-    if (nativeShell) return;
-    // Quota is a backend-wide meter, so this before/after difference is only an
-    // observational signal. Parallel prompts have overlapping windows and can
-    // double-count each other's usage; provider reporting lag can shift usage to
-    // a later turn. Do not treat or aggregate it as exact per-prompt attribution.
-    // See ADR-0023.
-    await new Promise(r => setTimeout(r, 1000));
-    const quotaAfterSnapshot = await fetchQuotaForBackend(quotaBackend);
-    // Balance-based gauges (DeepSeek/Kimi) with a max budget: use the computed
-    // percentage so the delta represents budget-% change, not raw dollars.
-    const usePct = isBalanceGauge(quotaBackend)
-      && quotaBeforeSnapshot?.pct != null && quotaAfterSnapshot?.pct != null;
-    const quotaBefore = usePct ? quotaBeforeSnapshot.pct : (quotaBeforeSnapshot?.raw ?? null);
-    const quotaAfter = usePct ? quotaAfterSnapshot.pct : (quotaAfterSnapshot?.raw ?? null);
-    const hasSnapshot = quotaBefore !== null && quotaAfter !== null;
-    // A turn whose meter didn't move (provider reporting lag, or a small spend
-    // that rounds to zero) still records a 0 delta rather than null — null
-    // reads as "not captured" in stats, and for balance gauges like DeepSeek an
-    // unchanged balance is the common case. Only a terminal failure with no
-    // meter reading at all falls through to the explicit 0 below.
-    const terminalFailure = turnStatus !== 'done';
-    const recordQuota = (before, after) => {
-      if (msgId) {
-        fetch(`/chat/${msgId}/quota-delta`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ before, after }),
-        }).catch(() => {});
-      }
-      if (lastSessionId) {
-        fetch('/stats/quota-delta', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session_id: lastSessionId, before, after }),
-        }).catch(() => {});
-      }
-    };
-    if (hasSnapshot) {
-      // Balance-based gauges report a decreasing balance; flip sign so usage
-      // always shows as positive (consistent with utilization % gauges).
-      const isBalanceMeter = isBalanceGauge(quotaBackend) && !usePct;
-      const rawDiff = quotaAfter - quotaBefore;
-      const d = Math.round((isBalanceMeter ? -rawDiff : rawDiff) * 10) / 10;
-      if (statsEl && d > 0) {
-        const deltaEl = statsEl.querySelector('.stats-quota-delta');
-        deltaEl.textContent = `  ·  +${d} pp`;
-        deltaEl.title = 'Observed account quota-meter change; not exact message usage';
-      }
-      // Persist the sign exactly as intended. The DB layer has no backend/gauge
-      // context, so balance snapshots are normalized here instead.
-      const recordQuotaBefore = isBalanceMeter && quotaBefore > quotaAfter ? quotaAfter : quotaBefore;
-      const recordQuotaAfter = isBalanceMeter && quotaBefore > quotaAfter ? quotaBefore : quotaAfter;
-      recordQuota(recordQuotaBefore, recordQuotaAfter);
-    } else if (terminalFailure && quotaBackendHasConfig && quotaBefore === null && quotaAfter === null) {
-      // No meter reading at all — not "the after-read failed but we had a
-      // real before" (that would discard real data, so record nothing
-      // instead), and not "this backend has no quota concept" (recording a
-      // 0 delta there would fabricate stats for a meter that never existed).
-      // Only when the backend genuinely has quota tracking and neither read
-      // landed does a terminal turn still record a zero delta, so stats
-      // reflect "captured, nothing moved" instead of null.
-      recordQuota(0, 0);
-    }
-    quotaTrackEnd(quotaBackend);
+    quotaTurn.msgId = msgId;
+    quotaTurn.lastSessionId = lastSessionId;
+    quotaTurn.turnStatus = turnStatus;
+    quotaTurn.statsEl = statsEl;
+    await finalizeQuotaTurn(quotaTurn);
   }
 
   function attachMsgId(id) {
@@ -5531,8 +5642,26 @@ async function sendMessage(text, opts = {}) {
           content: '',
           status: 'pending',
         }, thinkingBubble, {
-          onStored: data => markSessionContextDelivered(data.session_id || data.stats?.session_id || null),
+          onStored: data => {
+            markSessionContextDelivered(data.session_id || data.stats?.session_id || null);
+            // The WebSocket completion path returns before sendMessage's SSE
+            // tail, so finalize quota here — the stored row carries the same
+            // session_id and terminal status the SSE 'stats' event would have.
+            quotaTurn.msgId = msgId;
+            quotaTurn.lastSessionId = data.session_id || data.stats?.session_id || null;
+            quotaTurn.turnStatus = data.status;
+            quotaTurn.statsEl = null;
+            finalizeQuotaTurn(quotaTurn);
+          },
           onProcessing: startShellRunningStatus,
+          onMeta: meta => {
+            // The SSE 'meta' event corrects the send-time provider guess; the
+            // WS path gets the same correction via the recorded chat.meta
+            // frame (see server.stream_response). reassignQuotaBackend moves
+            // activeCount tracking and quotaBackendHasConfig along with it so
+            // we never fabricate a cross-meter delta or leak the poll count.
+            reassignQuotaBackend(quotaTurn, meta?.provider);
+          },
         });
         return { flowRunId, msgId };
       } catch (err) {
@@ -5618,12 +5747,7 @@ async function sendMessage(text, opts = {}) {
               }
               resolvedAgent = meta.agent || null;
               const metaRuntime = runtimeRef(meta.harness || '', meta.provider || null);
-              if (meta.provider) {
-                quotaBackend = meta.provider;
-                if (quotaBeforeSnapshot?.backend && quotaBeforeSnapshot.backend !== quotaBackend) {
-                  quotaBeforeSnapshot = null;
-                }
-              }
+              reassignQuotaBackend(quotaTurn, meta.provider);
               const resolvedAdhoc = adhoc; // server echoes back what we sent; use closure as reliable source
               const newTag = makeTopicTag(topic, resolvedAgent, { adhoc: resolvedAdhoc, clickable: true, lookback, backend: metaRuntime || null });
               responseHeaderTag.replaceWith(newTag);
@@ -7227,6 +7351,105 @@ function appendHistoryItem(item, container) {
   return asstBubble;
 }
 
+// ADR-0041 Stage 3/4 (partial): a reconciler registry for the HTTP-history
+// producer, implementing reconciler.js's render(turn, ctx)/reorder(order,
+// groups) contract.
+//
+// Uses a *keyed DOM range* rather than a wrapper element: render() returns
+// the flat ordered node list appendHistoryItem/appendHistoryRouteChainMarker
+// already produce (route-marker?, bubble, stats/footer, tool-block(s)*), and
+// the reconciler's own `groups` map (not adjacency) remembers which nodes
+// belong to which assistant msg_id across calls. A wrapper div would be
+// simpler to reason about, but #messages leans on direct-child selectors for
+// live-group/sentinel bookkeeping (anchorForLiveEdgePage, setLiveGroupHidden)
+// and on plain `.history-item` removal in reloadHistory/resetHistoryToLatest
+// — a wrapper would either break the former or leave the latter orphaning
+// empty wrapper divs. Keyed-range nodes stay flat #messages children exactly
+// as today, so none of that has to change.
+//
+// Wired into loadHistory/loadHistoryWindow (via appendHistoryItems' useReconciler
+// branch), resetHistoryToLatest, jumpToMessage, and startSearch. The latter three
+// are filter-driven resets that discard previously-rendered turns outside the new
+// scope — each calls historyReconciler?.reset() before its own raw `.history-item`
+// DOM cleanup, so the reconciler drops its bookkeeping for those nodes first and
+// won't later reattach them on the next reorder() and silently resurrect turns the
+// filter change was meant to hide.
+//
+// container: the DOM element render()'s nodes are built into and reorder()
+// places them under (the real #messages in production; an isolated test
+// container in tests). getAnchor: (assistantMsgId, next) => Node|null, the
+// node that turn's nodes must be inserted before, given the already-placed
+// newer neighbor `next` (null for the newest group of a pass) — asked per
+// turn, not once per pass, because production interleaves completed turns
+// with live turn groups by time (see historyStoreAnchor) and no single
+// block-wide anchor can express that. Defaults to chaining each group to
+// `next` (i.e. plain end-of-container append for the newest), matching a
+// plain isolated test container's semantics.
+function createHistoryRegistry({ container, getAnchor = (assistantMsgId, next) => next ?? null } = {}) {
+  if (!container) throw new Error('createHistoryRegistry: container is required');
+
+  function render(turn, ctx) {
+    if (!ctx.store.isTerminal(turn.status)) {
+      // Pending turns aren't this producer's cutover yet — they still render
+      // via the direct-DOM wip-bubble path (reconnectPendingItem). Succeed
+      // with an empty node set so the id clears from pendingReconcile instead
+      // of being retried forever.
+      return { nodes: [] };
+    }
+    const item = turn.raw;
+    if (!item) return null;
+    // Matches appendHistoryItems' own skip for a completed row with nothing
+    // to show (no reply text, no tool trace) — shadowInstallHistoryPage
+    // installs every row into the store unconditionally, so this filter has
+    // to be reapplied here rather than upstream, or the store-driven path
+    // would render bubbles the direct-DOM path silently never did.
+    if (!item.content && !item.context) return { nodes: [] };
+
+    const order = ctx.store.getOrderedTurnIds().completed;
+    const idx = order.indexOf(turn.assistantMsgId);
+    const nextItem = idx >= 0 && idx + 1 < order.length ? ctx.store.getTurn(order[idx + 1])?.raw : undefined;
+    const prevItem = idx > 0 ? ctx.store.getTurn(order[idx - 1])?.raw : undefined;
+
+    const scratch = document.createDocumentFragment();
+    const route = historyRouteChainMarkerForItem(item, nextItem, prevItem);
+    appendHistoryRouteChainMarker(route, item, scratch);
+    appendHistoryItem(item, scratch);
+    return { nodes: [...scratch.childNodes] };
+  }
+
+  // Re-places every up-to-date completed group each pass (not just this
+  // pass's newly-dirty ids — `groups` is the reconciler's full accumulated
+  // set), in store order. Walks newest-to-oldest, threading `next` as "the
+  // node this one must immediately precede": each group first re-anchors
+  // `next` through getAnchor (which may raise it above a live turn group
+  // this turn predates — see historyStoreAnchor), then the group's own
+  // nodes chain onto it last-to-first. That makes the no-op check correct
+  // per-node instead of only for the very last one: an
+  // already-correctly-ordered set never triggers an insertBefore, since a
+  // node comparing against "the fixed anchor" for every node (rather than
+  // its actual next-in-chain neighbor) would spuriously re-move every node
+  // but the last on each pass — including ones nothing about actually
+  // changed, corrupting order the next time an unrelated id goes dirty.
+  function reorder(order, groups) {
+    let next = null;
+    for (let i = order.completed.length - 1; i >= 0; i -= 1) {
+      const group = groups.get(order.completed[i]);
+      if (!group || !group.nodes.length) continue;
+      next = getAnchor(order.completed[i], next);
+      for (let j = group.nodes.length - 1; j >= 0; j -= 1) {
+        const node = group.nodes[j];
+        if (node.parentNode !== container || node.nextSibling !== next) {
+          container.insertBefore(node, next);
+        }
+        next = node;
+      }
+    }
+  }
+
+  return { render, reorder };
+}
+window.createHistoryRegistry = createHistoryRegistry;
+
 function completedTurnKey(item) {
   return [String(item.completed_at || item.timestamp || ''), Number(item.id) || 0];
 }
@@ -7338,6 +7561,12 @@ function insertPendingHistoryItem(item) {
   messages.insertBefore(bubble, anchor || null);
   if (wasAtBottom) scrollToRevealBubble(bubble);
   else if (anchorAboveViewport) messages.scrollTop += messages.scrollHeight - previousHeight;
+  // This bubble is a new live group discovered outside the store/reconciler
+  // entirely (realtime pending-turn discovery isn't a migrated producer) —
+  // if historyReconciler already anchored completed turns using "no live
+  // groups yet", nothing else will ever re-trigger that placement now that
+  // one exists. See reposition()'s own comment in reconciler.js.
+  historyReconciler?.reposition();
   return bubble;
 }
 
@@ -7855,7 +8084,7 @@ function watchFlowRun(flowRunId, afterId, route = null) {
   });
 }
 
-async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStored = null, onProcessing = null } = {}) {
+async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStored = null, onProcessing = null, onMeta = null } = {}) {
   const transportMode = forceSse ? 'sse' : await realtimeTransportMode;
   if (!wipBubble.isConnected) return;
   const useWebSocket = transportMode !== 'sse' && !!realtimeV1;
@@ -7871,8 +8100,19 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
 
   const live = wipBubble.querySelector('.thinking-live');
   let loader = live?.querySelector('.loader');
-  let raw = '';
-  let statusBuf = '';
+  // WebSocket path: seed from the discovery snapshot. A turn discovered
+  // mid-stream already has journaled output in item.content (chat.text
+  // streamers) and/or item.status_raw (claudecode streams its in-progress
+  // text as chat.status — runners.py keeps deltas in the status bubble
+  // because Claude can revise them before the result event). The frames that
+  // produced those were dispatched before this watch existed, and the durable
+  // cursor has moved past them, so they never replay. Without the seed the
+  // next live frame overwrites the preview with only the newest chunk — the
+  // bubble appears to miss every update until chat.done restores the full
+  // text. The SSE path must NOT seed: /chat/{id}/events replays the whole
+  // journal from seq 0, so seeding would duplicate the text.
+  let raw = useWebSocket ? (item.content || '') : '';
+  let statusBuf = useWebSocket ? (item.status_raw || '') : '';
   let closed = false;
   let waitingForUpdates = false;
 
@@ -7895,9 +8135,9 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
     updateThinkingHeightButton(wipBubble);
   };
 
-  if (item.content && live) {
+  if ((item.content || statusBuf) && live) {
     if (loader?.parentNode) loader.remove();
-    live.textContent = item.content;
+    live.textContent = item.content || statusBuf.trimEnd();
     updateThinkingHeightButton(wipBubble);
   }
 
@@ -7925,6 +8165,7 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
           onProcessing?.();
         }
         else if (frame.type === 'chat.queued') statusBuf += (statusBuf && !statusBuf.endsWith('\n') ? '\n' : '') + `#${frame.payload.topic} · queued — position ${frame.payload.position}\n`;
+        else if (frame.type === 'chat.meta') onMeta?.(frame.payload);
         if (frame.type === 'chat.done' || frame.type === 'chat.error' || frame.type === 'message.changed' && frame.payload.status !== 'pending') finish();
         else updatePreview();
       },
@@ -8009,6 +8250,12 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
       statusBuf += (statusBuf && !statusBuf.endsWith('\n') ? '\n' : '') + `#${info.topic} · queued — position ${info.position}\n`;
       updatePreview();
     } catch {}
+  });
+  es.addEventListener('meta', event => {
+    // Mirrors the WS reconnect branch's 'chat.meta' handling above, so an
+    // SSE-transport reconnect can also correct a wrong send-time provider
+    // guess (see reassignQuotaBackend).
+    try { onMeta?.(JSON.parse(event.data)); } catch {}
   });
   es.addEventListener('done', async () => {
     closed = true;
@@ -8456,12 +8703,16 @@ function scrollToBottom(force = false) {
 
 // Following a new bubble to the literal bottom skips past its own content
 // when the bubble is taller than the viewport, forcing a scroll back up to
-// read it from the top. Land on the bubble's top instead in that case, so
-// the user sees the head of the response and scrolls down through it —
-// same direction as reading the rest of the transcript.
+// read it from the top. Peek just the head of the bubble into the bottom
+// slice of the viewport instead, so prior transcript context stays visible
+// above it and the user scrolls down to read the rest — same direction as
+// reading the rest of the transcript.
+const BUBBLE_PEEK_FRACTION = 0.15;
+
 function scrollToRevealBubble(bubble) {
   if (bubble.offsetHeight > messages.clientHeight) {
-    messages.scrollTop += bubble.getBoundingClientRect().top - messages.getBoundingClientRect().top;
+    const bubbleTop = bubble.getBoundingClientRect().top - messages.getBoundingClientRect().top;
+    messages.scrollTop += bubbleTop - messages.clientHeight * (1 - BUBBLE_PEEK_FRACTION);
   } else {
     messages.scrollTop = messages.scrollHeight;
   }
@@ -8828,6 +9079,110 @@ function quotaTrackEnd(backend) {
   _stopQuotaPoll();
 }
 
+// Corrects a quotaTurn's send-time provider guess once the resolved provider
+// arrives (WS chat.meta frame or SSE 'meta' event). Must move activeCount
+// tracking and recompute quotaBackendHasConfig too, not just the backend
+// field: leaving activeCount on the guessed backend can leak +1 there
+// forever (stalling _stopQuotaPoll), and a stale hasConfig would let
+// finalizeQuotaTurn's terminal-failure fallback fabricate a 0,0 delta
+// against a resolved backend that has no meter at all.
+function reassignQuotaBackend(quotaTurn, provider) {
+  if (!provider || provider === quotaTurn.quotaBackend) return;
+  if (quotaTurn.nativeShell) { quotaTurn.quotaBackend = provider; return; }
+  quotaTrackEnd(quotaTurn.quotaBackend);
+  quotaTurn.quotaBackend = provider;
+  quotaTurn.quotaBackendHasConfig = !!quotaConfigFor(quotaStatusProviderKey(provider));
+  if (quotaTurn.quotaBeforeSnapshot?.backend && quotaTurn.quotaBeforeSnapshot.backend !== provider) {
+    quotaTurn.quotaBeforeSnapshot = null;
+  }
+  quotaTrackStart(provider);
+}
+
+// Records the observed account-quota delta for a turn and updates the inline
+// stats label. Shared by the SSE and WebSocket completion paths — each one
+// builds a quotaTurn handle (see sendMessage) and calls this once the turn is
+// terminal. Transport-agnostic: the only inputs are the handle's per-turn state
+// plus the module-level quota helpers.
+async function finalizeQuotaTurn(qt) {
+  if (qt.finalized) return;
+  qt.finalized = true;
+  if (qt.nativeShell) return;
+  // Quota is a backend-wide meter, so this before/after difference is only an
+  // observational signal. Parallel prompts have overlapping windows and can
+  // double-count each other's usage; provider reporting lag can shift usage to
+  // a later turn. Do not treat or aggregate it as exact per-prompt attribution.
+  // See ADR-0023.
+  await new Promise(r => setTimeout(r, 1000));
+  const quotaAfterSnapshot = await fetchQuotaForBackend(qt.quotaBackend);
+  // Balance-based gauges (DeepSeek/Kimi) with a max budget: use the computed
+  // percentage so the delta represents budget-% change, not raw dollars.
+  const usePct = isBalanceGauge(qt.quotaBackend)
+    && qt.quotaBeforeSnapshot?.pct != null && quotaAfterSnapshot?.pct != null;
+  const quotaBefore = usePct ? qt.quotaBeforeSnapshot.pct : (qt.quotaBeforeSnapshot?.raw ?? null);
+  const quotaAfter = usePct ? quotaAfterSnapshot.pct : (quotaAfterSnapshot?.raw ?? null);
+  const hasSnapshot = quotaBefore !== null && quotaAfter !== null;
+  // A turn whose meter didn't move (provider reporting lag, or a small spend
+  // that rounds to zero) still records a 0 delta rather than null — null
+  // reads as "not captured" in stats, and for balance gauges like DeepSeek an
+  // unchanged balance is the common case. Only a terminal failure with no
+  // meter reading at all falls through to the explicit 0 below.
+  const terminalFailure = qt.turnStatus !== 'done';
+  const recordQuota = (before, after) => {
+    if (qt.msgId) {
+      fetch(`/chat/${qt.msgId}/quota-delta`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ before, after }),
+      }).catch(() => {});
+    }
+    if (qt.lastSessionId) {
+      fetch('/stats/quota-delta', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: qt.lastSessionId, before, after }),
+      }).catch(() => {});
+    }
+  };
+  if (hasSnapshot) {
+    // Balance-based gauges report a decreasing balance; flip sign so usage
+    // always shows as positive (consistent with utilization % gauges).
+    const isBalanceMeter = isBalanceGauge(qt.quotaBackend) && !usePct;
+    const rawDiff = quotaAfter - quotaBefore;
+    const d = Math.round((isBalanceMeter ? -rawDiff : rawDiff) * 10) / 10;
+    if (d > 0) {
+      // SSE captures the rendered stats element from its 'stats' event; the
+      // WebSocket path finalizes from onStored, which runs before
+      // insertCompletedHistoryItem renders the row. Resolve lazily there — by
+      // the time the after-read lands (the 1s sleep above) the bubble and its
+      // .stats sibling are already in the DOM.
+      const statsEl = qt.statsEl
+        || document.querySelector(`.msg[data-msg-id="${qt.msgId}"]`)?.nextElementSibling;
+      if (statsEl?.classList.contains('stats')) {
+        const deltaEl = statsEl.querySelector('.stats-quota-delta');
+        if (deltaEl) {
+          deltaEl.textContent = `  ·  +${d} pp`;
+          deltaEl.title = 'Observed account quota-meter change; not exact message usage';
+        }
+      }
+    }
+    // Persist the sign exactly as intended. The DB layer has no backend/gauge
+    // context, so balance snapshots are normalized here instead.
+    const recordQuotaBefore = isBalanceMeter && quotaBefore > quotaAfter ? quotaAfter : quotaBefore;
+    const recordQuotaAfter = isBalanceMeter && quotaBefore > quotaAfter ? quotaBefore : quotaAfter;
+    recordQuota(recordQuotaBefore, recordQuotaAfter);
+  } else if (terminalFailure && qt.quotaBackendHasConfig && quotaBefore === null && quotaAfter === null) {
+    // No meter reading at all — not "the after-read failed but we had a
+    // real before" (that would discard real data, so record nothing
+    // instead), and not "this backend has no quota concept" (recording a
+    // 0 delta there would fabricate stats for a meter that never existed).
+    // Only when the backend genuinely has quota tracking and neither read
+    // landed does a terminal turn still record a zero delta, so stats
+    // reflect "captured, nothing moved" instead of null.
+    recordQuota(0, 0);
+  }
+  quotaTrackEnd(qt.quotaBackend);
+}
+
 function setQuotaSnapshot(backend, snapshot) {
   quotaSnapshots[backend] = { backend, ...snapshot };
   if (procStatusPopup?.classList.contains('open')) {
@@ -9167,7 +9522,7 @@ function initQuota() {
         <circle id="${cfg.sevenDayArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('anthropic')}"
                 stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
                 transform="rotate(-90 9 9)"/>
-        <text id="${cfg.sevenDayLabelId}" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
+        <text id="${cfg.sevenDayLabelId}" class="quota-pie-text" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
       </svg>
       <span id="${cfg.sevenDaySuffixId}" class="quota-7d-suffix">7D</span>
     </span>
@@ -9177,7 +9532,7 @@ function initQuota() {
         <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('anthropic')}"
                 stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
                 transform="rotate(-90 9 9)"/>
-        <text id="${cfg.fiveHourPctId}" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
+        <text id="${cfg.fiveHourPctId}" class="quota-pie-text" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
       </svg>
       <span id="${cfg.labelId}"></span>
     </span>`;
@@ -9226,7 +9581,7 @@ function initCodexQuota() {
         <circle id="${cfg.sevenDayArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('codex')}"
                 stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
                 transform="rotate(-90 9 9)"/>
-        <text id="${cfg.sevenDayLabelId}" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
+        <text id="${cfg.sevenDayLabelId}" class="quota-pie-text" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
       </svg>
       <span id="${cfg.sevenDaySuffixId}" class="quota-7d-suffix">7D</span>
     </span>
@@ -9236,7 +9591,7 @@ function initCodexQuota() {
         <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('codex')}"
                 stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
                 transform="rotate(-90 9 9)"/>
-        <text id="${cfg.fiveHourPctId}" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
+        <text id="${cfg.fiveHourPctId}" class="quota-pie-text" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
       </svg>
       <span id="${cfg.labelId}"></span>
     </span>`;
@@ -9261,7 +9616,7 @@ function initBalanceQuota(gaugeType) {
         <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor(gaugeType)}"
                 stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
                 transform="rotate(-90 9 9)"/>
-        <text id="${cfg.fiveHourPctId}" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff"></text>
+        <text id="${cfg.fiveHourPctId}" class="quota-pie-text" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff"></text>
       </svg>
       <span id="${cfg.labelId}">—</span>
     </span>`;
@@ -9415,7 +9770,7 @@ function initCursorQuota() {
         <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('cursor')}"
                 stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
                 transform="rotate(-90 9 9)"/>
-        <text id="${cfg.fiveHourPctId}" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
+        <text id="${cfg.fiveHourPctId}" class="quota-pie-text" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
       </svg>
       <span id="${cfg.labelId}"></span>
     </span>`;

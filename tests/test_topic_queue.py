@@ -159,7 +159,7 @@ def test_worker_marks_item_processing_before_runner_starts():
 
     event, persisted = asyncio.run(run())
     assert event == {"_processing": {"topic": "work"}}
-    assert persisted.args == (101, 1, "processing", '{"topic": "work"}')
+    assert persisted.args == (101, 2, "processing", '{"topic": "work"}')
 
 
 def test_worker_defers_worktree_setup_until_queued_item_runs(tmp_path, monkeypatch):

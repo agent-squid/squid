@@ -109,7 +109,7 @@ from .stats_db import (
     allocate_id,
     get_realtime_cursor, get_realtime_snapshot,
     get_realtime_request, save_realtime_request, get_realtime_replay,
-    insert_realtime_event, prune_realtime_data, set_realtime_commit_listener,
+    insert_run_event, insert_realtime_event, prune_realtime_data, set_realtime_commit_listener,
     create_flow_run, get_flow_run, get_flow_steps, claim_flow_step,
     link_flow_step_messages, transition_flow_step, cancel_flow_run,
     _utc_now_iso,
@@ -1213,7 +1213,7 @@ async def stream_response(
     shell_attached_paths: Optional[list[str]] = None,
     shell_topic_memory: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
-    yield sse_event("meta", json.dumps({
+    meta_payload = {
         "agent": agent,
         "harness": harness,
         "provider": provider,
@@ -1222,7 +1222,15 @@ async def stream_response(
         "adhoc": adhoc,
         "kind": "shell_result" if native_shell else "assistant",
         **({"shell_timeout": NATIVE_SHELL_TIMEOUT} if native_shell else {}),
-    }))
+    }
+    yield sse_event("meta", json.dumps(meta_payload))
+    # Record the same meta for the WebSocket path, whose realtime runner
+    # consumes this generator and discards every chunk — the SSE 'meta' event
+    # never reaches a WS client. seq=0 reserves the slot ahead of
+    # queued/processing/loading (1/2/3) so the resolved provider lands before
+    # the client's after-meter read; it is in the replay allowlist so a
+    # reconnecting client gets it too.
+    insert_run_event(asst_msg_id, 0, "meta", json.dumps(meta_payload))
 
     effective_cwd = cwd or SQUID_HOME
     dispatch_harness, dispatch_provider = split_agent_ref(harness or backend, provider)
@@ -1961,7 +1969,7 @@ async def message_events(msg_id: int, after_seq: int = -1):
                 payload = event["payload"] or ""
                 if event_type == "text":
                     yield sse_chunk(payload)
-                elif event_type in {"stats", "status", "tool", "loading", "processing", "queued"}:
+                elif event_type in {"stats", "status", "tool", "loading", "processing", "queued", "meta"}:
                     yield sse_event(event_type, payload)
                 elif event_type == "done":
                     yield sse_event("done")

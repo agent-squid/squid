@@ -143,6 +143,180 @@ test('websocket transport starts and completes a new chat without POST /chat', a
   }))).toEqual({ type: 'chat.start', hasRequestId: true, message: 'hello over ws' });
 });
 
+test('mid-stream discovered turn keeps journaled text when live chunks arrive', async ({ page }) => {
+  // A turn another client started is discovered via the global lifecycle
+  // scope: the first chat.* frame for the unknown msg id triggers a
+  // /chat/{id}/status fetch whose content already holds everything journaled
+  // so far. The watch attaches AFTER those frames dispatched (and the durable
+  // cursor has moved past them, so they never replay), so the preview
+  // accumulator must seed from that snapshot — otherwise the next live
+  // chat.text frame replaces the whole preview with just the newest chunk and
+  // the bubble shows nothing useful until chat.done restores the full text.
+  await page.addInitScript(() => {
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        this.readyState = MockWebSocket.CONNECTING;
+        window.__mockWs = this;
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => {
+            this.receive({ v: 1, type: 'subscribed', payload: {} });
+            window.__subscribed = true;
+          });
+        }
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = MockWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+  let turnStatus = 'pending';
+  await page.route('**/chat/95/status', route => route.fulfill({ json: {
+    id: 95,
+    role: 'assistant',
+    reply_to: 94,
+    topic: 'default',
+    agent: 'claude',
+    adhoc: false,
+    status: turnStatus,
+    prompt: 'count for me',
+    timestamp: '2026-08-18T12:00:00Z',
+    content: turnStatus === 'pending'
+      ? 'first chunk second chunk '
+      : 'first chunk second chunk third chunk ',
+    ...(turnStatus === 'pending' ? {} : { completed_at: '2026-08-18T12:00:05Z' }),
+  }}));
+
+  await page.goto('/');
+  await expect.poll(() => page.evaluate(() => !!window.__subscribed)).toBe(true);
+
+  // Unknown msg id → discovery. This frame's text is in the status snapshot.
+  await page.evaluate(() => window.__mockWs.receive({
+    v: 1, type: 'chat.text', event_id: 1, msg_id: 95, run_seq: 4,
+    scope: { topic: 'default', agent: 'claude' },
+    payload: { text: 'first chunk ' },
+  }));
+  const live = page.locator(`${THINKING} .thinking-live`);
+  await expect(live).toContainText('first chunk second chunk');
+
+  // The next live chunk must append to the snapshot, not replace it.
+  await page.evaluate(() => window.__mockWs.receive({
+    v: 1, type: 'chat.text', event_id: 2, msg_id: 95, run_seq: 6,
+    scope: { topic: 'default', agent: 'claude' },
+    payload: { text: 'third chunk ' },
+  }));
+  await expect(live).toContainText('first chunk second chunk');
+  await expect(live).toContainText('third chunk');
+
+  // Completion swaps the wip bubble for the stored full text.
+  turnStatus = 'done';
+  await page.evaluate(() => window.__mockWs.receive({
+    v: 1, type: 'chat.done', event_id: 3, msg_id: 95, run_seq: 7,
+    scope: { topic: 'default', agent: 'claude' }, payload: {},
+  }));
+  await expect(page.locator(RESPONSE)
+    .filter({ hasText: 'first chunk second chunk third chunk' })).toBeVisible();
+});
+
+test('mid-stream discovered claude-style turn keeps journaled status text', async ({ page }) => {
+  // claudecode streams in-progress assistant text as chat.status frames (the
+  // result event is the final response), journaled as run_events 'status'
+  // rows and exposed on /chat/{id}/status as status_raw. A late-discovering
+  // client must seed its status accumulator from status_raw for the same
+  // reason as the chat.text path above — otherwise everything streamed
+  // before the watch attached vanishes from the preview until completion.
+  await page.addInitScript(() => {
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        this.readyState = MockWebSocket.CONNECTING;
+        window.__mockWs = this;
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => {
+            this.receive({ v: 1, type: 'subscribed', payload: {} });
+            window.__subscribed = true;
+          });
+        }
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = MockWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+  let turnStatus = 'pending';
+  await page.route('**/chat/96/status', route => route.fulfill({ json: {
+    id: 96,
+    role: 'assistant',
+    reply_to: 95,
+    topic: 'default',
+    agent: 'claude',
+    adhoc: false,
+    status: turnStatus,
+    prompt: 'write me a story',
+    timestamp: '2026-08-18T12:00:00Z',
+    content: turnStatus === 'pending' ? '' : 'The complete story.',
+    status_raw: turnStatus === 'pending' ? 'The be' : null,
+    ...(turnStatus === 'pending' ? {} : { completed_at: '2026-08-18T12:00:05Z' }),
+  }}));
+
+  await page.goto('/');
+  await expect.poll(() => page.evaluate(() => !!window.__subscribed)).toBe(true);
+
+  // Unknown msg id → discovery; this frame's text is in the status snapshot.
+  await page.evaluate(() => window.__mockWs.receive({
+    v: 1, type: 'chat.status', event_id: 1, msg_id: 96, run_seq: 4,
+    scope: { topic: 'default', agent: 'claude' },
+    payload: { text: 'The be' },
+  }));
+  const live = page.locator(`${THINKING} .thinking-live`);
+  await expect(live).toContainText('The be');
+
+  // The next live status chunk must append to the snapshot, not replace it.
+  await page.evaluate(() => window.__mockWs.receive({
+    v: 1, type: 'chat.status', event_id: 2, msg_id: 96, run_seq: 5,
+    scope: { topic: 'default', agent: 'claude' },
+    payload: { text: 'ach ' },
+  }));
+  await expect(live).toContainText('The beach');
+
+  await page.evaluate(() => window.__mockWs.receive({
+    v: 1, type: 'chat.status', event_id: 3, msg_id: 96, run_seq: 6,
+    scope: { topic: 'default', agent: 'claude' },
+    payload: { text: 'at dawn' },
+  }));
+  await expect(live).toContainText('The beach at dawn');
+
+  turnStatus = 'done';
+  await page.evaluate(() => window.__mockWs.receive({
+    v: 1, type: 'chat.done', event_id: 4, msg_id: 96, run_seq: 7,
+    scope: { topic: 'default', agent: 'claude' }, payload: {},
+  }));
+  await expect(page.locator(RESPONSE)
+    .filter({ hasText: 'The complete story.' })).toBeVisible();
+});
+
 test('websocket tall response scrolls to reveal its top even if the reveal rAF fires late', async ({ page }) => {
   // sendMessage() schedules a one-shot requestAnimationFrame right when the
   // thinking bubble is created, to follow *it* into view. It's guarded by

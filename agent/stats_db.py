@@ -3072,9 +3072,6 @@ def _stats_payload_metric_value(stats: dict, metric: str) -> Optional[float]:
         return value if isinstance(value, (int, float)) else None
     if metric == "tokens_out":
         return num("output_tokens")
-    if metric == "quota":
-        value = stats.get("quota_delta")
-        return value if isinstance(value, (int, float)) else None
     if metric == "duration":
         value = stats.get("duration_ms")
         return (value / 1000) if isinstance(value, (int, float)) else None
@@ -3212,6 +3209,12 @@ def _stats_add_payload_to_aggregate(
             continue
         if metric == "marked_bad":
             value = 1 if marked_bad else 0
+        elif metric == "quota":
+            # Quota delta is recorded client-side into chat_messages.quota_delta
+            # after the turn completes — never into the run_events "stats"
+            # payload — so resolve it with the fallback-aware helper (the same
+            # one the scalar total uses above) rather than the raw payload lookup.
+            value = _stats_payload_quota_delta(stats, quota_delta)
         else:
             value = _stats_payload_metric_value(stats, metric)
         if value is not None:
@@ -5002,7 +5005,7 @@ def insert_run_event(msg_id: int, seq: int, event_type: str, payload: Optional[s
             message = conn.execute("SELECT topic, agent FROM chat_messages WHERE id=?", (msg_id,)).fetchone()
             if message:
                 event_payload = payload
-                if event_type in {"queued", "loading", "processing", "tool", "stats", "diag"} and payload:
+                if event_type in {"queued", "loading", "processing", "tool", "stats", "diag", "meta"} and payload:
                     try:
                         event_payload = json.loads(payload)
                     except json.JSONDecodeError:
