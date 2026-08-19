@@ -34,7 +34,12 @@ const realtimeTransportMode = fetch('/config/realtime', { cache: 'no-store' })
 // ADR-0041 Stage 4: HTTP history renders from the normalized store instead
 // of #messages directly only when explicitly opted in — resolved once,
 // client-side only (no server round trip needed, unlike realtimeTransportMode
-// above). Default stays the existing direct-DOM path.
+// above). Default stays the existing direct-DOM path: flipping it (tried
+// 2026-08-18) surfaced real gaps — deep-dive-button.spec.js (7 tests) and
+// reply-button.spec.js (5 tests) fail wholesale under renderer=store, plus
+// one chat.spec.js filter round-trip case, because historyRegistry.render()
+// doesn't yet reproduce every data attribute/DOM detail those features read
+// off a history turn. Fix those before retrying the flip.
 const historyRendererMode = new URLSearchParams(location.search).get('renderer') === 'store' ? 'store' : 'dom';
 
 // history.scrollRestoration is set as early as possible in index.html's
