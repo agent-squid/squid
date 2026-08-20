@@ -66,6 +66,25 @@ test('a terminal status is monotonic: a duplicate or older pending patch cannot 
   expect((await store.evaluate(s => s.getMessage(7))).status).toBe('done');
 });
 
+// A run-event-sourced message (text/tool/stats deltas) has no status field at
+// all until a 'status' event or lifecycle patch reports one — that "unknown"
+// must not be misread as terminal, or isTerminal()'s monotonicity guard
+// silently drops the real 'running' status that arrives right after (ADR-0041
+// Gap 1's fix normalizes a missing status to terminal only at the HTTP-history
+// producer's own edge, not in this shared classifier — see historyItemToStoreRows).
+test('a status-less streamed message accepts a later running status, then a real terminal one', async ({ page }) => {
+  const store = await freshStore(page);
+  await store.evaluate(s => s.applyRunEvent(9, 0, 'text', { delta: 'hello' }, 1));
+  expect((await store.evaluate(s => s.getMessage(9))).status).toBeUndefined();
+  expect(await store.evaluate(s => s.isTerminal(s.getTurn(9).status))).toBe(false);
+
+  await store.evaluate(s => s.applyMessagePatch(9, { status: 'running' }, 2));
+  expect((await store.evaluate(s => s.getMessage(9))).status).toBe('running');
+
+  await store.evaluate(s => s.applyMessagePatch(9, { status: 'done', completed_at: '2026-08-20T00:00:00Z' }, 3));
+  expect((await store.evaluate(s => s.getMessage(9))).status).toBe('done');
+});
+
 test('sparse run-event patches never erase fields they omit', async ({ page }) => {
   const store = await freshStore(page);
   await store.evaluate(s => s.applyRunEvent(9, 0, 'text', { delta: 'hello ' }, 1));

@@ -1858,16 +1858,22 @@ function anchorForLiveEdgePage(items) {
 // position by *start* time among them — the direct-DOM insert paths key live
 // bubbles on data-order-at (insertPendingHistoryItem/insertCompletedHistoryItem):
 // a turn that ended before a live group started belongs above it, one that
-// ended after belongs below. So this must be answered per turn, not once for
-// the whole completed set — a single block-wide anchor (and a msg_id proxy
-// for "newer", as anchorBeforeNextLiveGroup computes for page loads) can't
-// express that interleave and strands the live bubble on the wrong side of
-// turns that finished while it was running. Insert before whichever sits
-// higher: `next`, or the first node of any live group whose start is later
-// than this turn's completedAt. A live bubble with no start recorded yet was
-// just submitted — newer than any completion — so it always qualifies. With
-// no candidate the turn belongs below every live group: before
-// bottomSentinel, else at the end of #messages.
+// ended after belongs below (history-store-renderer.spec.js's "live id newer
+// than completed ids" test proves id order and start/end-time order can
+// disagree, so id can't replace this comparison when data-order-at exists).
+// The composer-live-send thinking bubble (sendMessage) never stamps
+// data-order-at though — only the direct-DOM history-pending path does — so
+// for that bubble this can't be answered by time at all; fall back to
+// msg_id, the same submission-order proxy anchorBeforeNextLiveGroup already
+// uses for the page-load case. So this must be answered per turn, not once
+// for the whole completed set — a single block-wide anchor can't express the
+// interleave and strands the live bubble on the wrong side of turns that
+// finished while it was running. Insert before whichever sits higher:
+// `next`, or the first node of any live group proven (by start time, or by
+// msg_id when start is unknown) to be newer than this turn. A live bubble
+// with neither signal was just submitted — newer than any completion — so
+// it always qualifies. With no candidate the turn belongs below every live
+// group: before bottomSentinel, else at the end of #messages.
 function historyStoreAnchor(assistantMsgId, next) {
   const completedAt = assistantMsgId != null
     ? (transcriptStore?.getTurn(assistantMsgId)?.completedAt ?? null)
@@ -1876,7 +1882,12 @@ function historyStoreAnchor(assistantMsgId, next) {
   let anchor = next ?? null;
   thinkings.forEach(thinking => {
     const start = thinking.dataset.orderAt || null;
-    if (start && (!completedAt || start <= completedAt)) return;
+    if (start) {
+      if (!completedAt || start <= completedAt) return;
+    } else {
+      const liveId = thinking.dataset.msgId ? parseInt(thinking.dataset.msgId, 10) : Infinity;
+      if (assistantMsgId != null && assistantMsgId > liveId) return;
+    }
     const first = liveGroupElements(thinking)[0];
     if (!first) return;
     if (!anchor || (first.compareDocumentPosition(anchor) & Node.DOCUMENT_POSITION_FOLLOWING)) anchor = first;
@@ -2208,16 +2219,27 @@ function historyItemToStoreRows(item) {
   if (item.reply_to != null) {
     rows.push({ msg_id: item.reply_to, role: 'user', content: item.prompt ?? '' });
   }
+  // A row with a missing status (some fixtures/older rows omit the field
+  // entirely) must still render as completed, matching the old direct-DOM
+  // path's leniency (ADR-0041 Gap 1) — normalized here, at this producer's
+  // own edge, rather than by loosening transcript-store.js's shared
+  // isTerminal() allowlist. That allowlist must stay strict: producers 2/3's
+  // run-event patches (applyRunEvent's 'text'/'tool'/'stats' kinds) create a
+  // message with no status at all while it's genuinely still streaming, and
+  // mergeSparse's terminal-status monotonicity guard would misread that
+  // "unknown" as "terminal," silently dropping the real 'running' status
+  // patch that arrives right after.
+  const status = item.status ?? 'done';
   // _turn_end_expr (agent/stats_db.py) coalesces completed_at down to
   // created_at for still-pending rows, so it is never actually null on the
   // wire — only trust it as a completion time once the status is terminal.
-  const completedAt = HISTORY_TERMINAL_STATUSES.has(item.status) ? (item.completed_at || item.timestamp || null) : null;
+  const completedAt = HISTORY_TERMINAL_STATUSES.has(status) ? (item.completed_at || item.timestamp || null) : null;
   rows.push({
     msg_id: item.id,
     role: 'assistant',
     reply_to: item.reply_to ?? null,
     content: item.content ?? '',
-    status: item.status,
+    status,
     completed_at: completedAt,
     created_at: item.timestamp || null,
     stats: item.stats || {},

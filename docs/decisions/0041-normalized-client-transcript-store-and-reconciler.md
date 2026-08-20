@@ -1,7 +1,7 @@
 ---
 status: proposed
 date: 2026-08-13
-updated: 2026-08-13
+updated: 2026-08-20
 ---
 # ADR-0041: Normalized client transcript store and reconciler
 
@@ -180,16 +180,51 @@ migration steps (Flow, CLI authentication) — those may proceed against the
 existing direct-DOM path and get migrated onto the reconciler afterward, one
 producer at a time, per step 6 above.
 
+## Benefits
+
+The primary benefit is that transcript correctness becomes a property of one
+state model and one write path, rather than a convention every asynchronous
+producer must reproduce. Concretely, this architecture:
+
+- prevents collection-wide flicker and loss of local UI state because a live
+  event reconciles only affected turn IDs instead of destroying and rebuilding
+  `#messages` through `reloadHistory()`;
+- makes command responses, history pages, SSE, snapshots, replay, reconnect,
+  and duplicate events converge on the same result regardless of arrival order,
+  eliminating a broad class of timing-combination bugs;
+- guarantees one visible turn and one live registration per message identity,
+  so terminal transitions cannot leave duplicate responses, stale watchers, or
+  orphaned route, tool, stats, and timestamp nodes;
+- preserves the user's selected history scope, pagination window, scroll
+  anchor, and composer route independently, preventing delivery events from
+  accidentally changing navigation or filtering state;
+- produces deterministic completion ordering from authoritative data rather
+  than DOM insertion timing, so reconnects and delayed events do not reorder
+  the conversation unpredictably;
+- gives every transport and future producer one small normalized action
+  contract, reducing integration work and preventing transport-specific DOM
+  behavior from accumulating again;
+- enables fast reducer-level permutation and idempotency tests for invariants
+  that otherwise require slower, less precise browser tests; and
+- narrows failures and rollback to one producer or renderer owner at a time,
+  reducing the risk of completing the WebSocket migration and later client
+  changes.
+
+The resulting user-visible benefit is a stable transcript under streaming,
+reconnect, pagination, and filtering. The engineering benefit is that adding a
+new event source no longer requires re-solving transcript identity, ordering,
+deduplication, terminal cleanup, and DOM ownership at each call site.
+
 ## Consequences
 
-- Good: collapses a broad class of timing-combination bugs (duplicate turns,
-  flicker, filter leakage, and orphaned turn-group nodes) into invariants
-  enforced once, rather than re-derived at each call site. Session-count races
-  still require the separate identity validation described above.
-- Good: ADR-0040's and the postmortem's reconciliation invariants become
-  directly testable against the store, not only observable through
-  end-to-end DOM assertions.
-- Good: decouples reconciler risk from transport migration risk; each can be
+- Good: transcript identity, ordering, deduplication, and lifecycle invariants
+  have one implementation and one owner. Session-count races still require the
+  separate identity validation described above.
+- Good: transports and future producers integrate through normalized actions
+  without acquiring DOM ownership.
+- Good: reducer tests can verify state invariants directly, while end-to-end
+  tests remain responsible for the final projection and user-visible behavior.
+- Good: reconciler risk is decoupled from transport migration risk; each can be
   verified, shipped, and rolled back independently.
 - Bad: old and new implementations temporarily coexist per producer for
   comparison and rollback, although only one may render a turn group at a

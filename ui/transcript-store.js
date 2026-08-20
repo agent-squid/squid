@@ -14,7 +14,16 @@
 
   // chat_messages.status vocabulary (agent/stats_db.py): 'pending', 'scheduled',
   // 'claimed', 'running', 'done', 'error', 'cancelled' — 'done' is the terminal
-  // success state on the wire, not 'completed'.
+  // success state on the wire, not 'completed'. Kept as an explicit allowlist,
+  // not a denylist of known non-terminal values: a run-event-sourced message
+  // (applyRunEvent's 'text'/'tool'/'stats' kinds) legitimately has no status at
+  // all while still streaming, and mergeSparse's terminal-status monotonicity
+  // guard must not misread that "unknown" as "terminal" — doing so silently
+  // drops the real 'running' status patch that arrives right after (a missing
+  // status meant "this producer hasn't reported one yet," not "this is done").
+  // A history row with a missing status (ADR-0041 Gap 1) is normalized to a
+  // real terminal value at that producer's own edge instead (see
+  // historyItemToStoreRows in ui/app.js), not by loosening this allowlist.
   const TERMINAL_STATUSES = new Set(['done', 'error', 'cancelled']);
 
   function isTerminal(status) {

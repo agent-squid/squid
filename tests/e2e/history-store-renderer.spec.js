@@ -131,6 +131,32 @@ test('renderer=store: jump renders a bounded window, then older/newer pagination
   expect(ids).toEqual(['97', '98', '100', '102', '103']);
 });
 
+// ADR-0041 Gap 1: a history row with no explicit `status` field (some
+// fixtures/older server rows omit it, e.g. deep-dive-button.spec.js) must
+// still render as a completed turn, matching the old direct-DOM path's
+// leniency — its completed-item branch ran for anything that wasn't
+// explicitly 'pending'. Before the fix, historyItemToStoreRows only set
+// completed_at for an explicit terminal status and isTerminal only
+// recognized an explicit terminal status, so the row rendered nowhere.
+test('renderer=store: a history row with no status field still renders as completed', async ({ page }) => {
+  await mockApp(page);
+
+  await page.route('**/history**', route => route.fulfill({
+    json: {
+      items: [{
+        id: 1, role: 'assistant', topic: 'squid', agent: 'claude',
+        content: 'response with no status field', prompt: 'p1',
+        timestamp: '2026-07-15T10:00:00Z',
+      }],
+      has_more: false,
+    },
+  }));
+
+  await page.goto('/?renderer=store');
+  await expect(page.locator('.msg[data-msg-id="1"]')).toBeVisible();
+  await expect(page.locator('.msg[data-msg-id="1"]')).toContainText('response with no status field');
+});
+
 test('renderer=store: a topic filter change (reloadHistory) does not resurrect turns the previous scope rendered', async ({ page }) => {
   await mockApp(page);
 
