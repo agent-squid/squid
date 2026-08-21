@@ -2275,6 +2275,67 @@ function shadowInstallHistoryPage(items, boundary) {
   if (!historyReconciler) transcriptStore.clearReconciled(result.dirty);
 }
 
+// ADR-0041 Stage 2 (producer 4, SSE): mirrors shadowApplyEvent (WS lifecycle
+// events) for the two SSE-based delivery paths — the primary POST /chat
+// streaming response (sendMessage's own hand-rolled parser) and the
+// reconnect/fallback GET /chat/{msg_id}/events (EventSource, in
+// reconnectPendingItem). Store-only, no render change.
+//
+// SSE has no global event_id — the realtime v1 protocol's cursor is a
+// WS-only concept (this transport predates it and is compatibility-only,
+// migrated last per the ADR) — so eventId is left undefined here, which
+// (per transcript-store.js's applyRunEvent) skips the global watermark
+// entirely and relies only on this message's own run_seq. That run_seq is
+// not invented locally — it's the real agent/stats_db.py run_events.seq,
+// now threaded through agent/topic_queue.py's out_q and onto the wire as
+// each SSE frame's `id:` field (agent/server.py's sse_chunk/sse_event), and
+// read back here via the browser's own event.lastEventId.
+//
+// 'status' frames (the CLI's raw status_raw thinking buffer, accumulated
+// separately as statusBuf by both SSE consumers) are deliberately not fed
+// here — a different concept from applyRunEvent's 'status' kind
+// (payload.status/completed_at, a lifecycle transition), matching producer
+// 3's WS chat.status omission for the same reason. 'queued' has no single
+// event-scoped seq on this transport (stream_response generates it from a
+// live position poll, not from a stored run_event) and isn't a message
+// fact either, so it's skipped too, same as WS's queue.changed.
+function shadowApplySseRunEvent(msgId, kind, event) {
+  if (!transcriptStore) return;
+  // Both callers' "no id seen" sentinel must map to NaN here, not just '':
+  // a native EventSource's lastEventId defaults to '', but the hand-rolled
+  // parser's dataId starts as JS null — Number(null) is 0, a valid finite
+  // number that would otherwise sail past applyRunEvent's non-finite guard
+  // and apply unprotected (caught in #squid@codex review before publish).
+  const runSeq = (event.lastEventId == null || event.lastEventId === '') ? NaN : Number(event.lastEventId);
+  let payload;
+  if (kind === 'text') {
+    payload = { delta: event.data ?? '' };
+  } else {
+    try { payload = JSON.parse(event.data); } catch { return; }
+  }
+  const result = transcriptStore.applyRunEvent(Number(msgId), runSeq, kind, payload, undefined);
+  if (!result.ok) console.error('[transcript-store] shadow SSE applyRunEvent failed:', result.error);
+  if (!historyReconciler) transcriptStore.clearReconciled(result.dirty);
+}
+
+// Terminal SSE state (done/error) is not forced through a sequenced
+// applyRunEvent patch — a completion isn't a delta with a meaningful
+// run_seq relative to what preceded it. Instead, like a fresh HTTP history
+// load, it re-fetches the authoritative row and installs it via
+// installHistoryPage, which has never required event_id (see
+// shadowInstallHistoryPage above) — the same authoritative-row path
+// producer 1 already uses.
+async function shadowInstallSseCompletion(msgId) {
+  if (!transcriptStore) return;
+  try {
+    const res = await fetch(`/chat/${msgId}/status`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.id == null) return;
+    shadowInstallHistoryPage([data]);
+  } catch {}
+}
+
 function appendHistoryItems(items, fragment, boundary) {
   shadowInstallHistoryPage(items, boundary);
   // Prompt-only mode renders a different, reduced representation
@@ -5784,6 +5845,20 @@ async function sendMessage(text, opts = {}) {
     let buf = '';
     let eventName = null;
     let dataLineCount = 0;
+    // ADR-0041 producer 4: the real run_events.seq now on the wire as each
+    // frame's `id:` field (agent/server.py) — mirrors how a native
+    // EventSource exposes it as event.lastEventId, so shadowApplySseRunEvent
+    // can be shared between this hand-rolled parser and the reconnect
+    // path's real EventSource without caring which one is calling it.
+    let dataId = null;
+    // sse_chunk (agent/server.py) can split one multi-line text delta across
+    // several `data:` lines sharing one `id:` — a native EventSource joins
+    // those into one event.data before dispatch, but this hand-rolled parser
+    // sees each line separately. Buffer them and feed the shadow store once
+    // at the blank-line event boundary below, not per line: calling
+    // applyRunEvent per line would drop every line after the first (same
+    // run_seq, so the second call's run_seq <= what the first just set).
+    let textBuf = '';
 
     while (true) {
       const { done, value } = await reader.read();
@@ -5794,7 +5869,9 @@ async function sendMessage(text, opts = {}) {
       buf = lines.pop();
 
       for (const line of lines) {
-        if (line.startsWith('event:')) {
+        if (line.startsWith('id:')) {
+          dataId = line.slice(3).trim();
+        } else if (line.startsWith('event:')) {
           eventName = line.slice(6).trim();
           dataLineCount = 0;
         } else if (line.startsWith('data:')) {
@@ -5931,6 +6008,7 @@ async function sendMessage(text, opts = {}) {
               }
               evaluateAdvisory();
             } catch {}
+            shadowApplySseRunEvent(msgId, 'stats', { data, lastEventId: dataId });
             eventName = null;
 
           } else if (eventName === 'tool') {
@@ -5941,6 +6019,7 @@ async function sendMessage(text, opts = {}) {
               statusBuf += label + '\n';
               updateThinkingPreview();
             } catch {}
+            shadowApplySseRunEvent(msgId, 'tool', { data, lastEventId: dataId });
             eventName = null;
 
           } else if (eventName === 'status') {
@@ -5957,6 +6036,7 @@ async function sendMessage(text, opts = {}) {
               continue;
             }
             completionRendered = true;
+            shadowInstallSseCompletion(msgId);
             turnStatus = 'done';
             stopStatusFallback();
             liveCtxSpan.dataset.hasTrace = (statusBuf.trim() || liveToolEvents.length) ? 'true' : 'false';
@@ -5996,6 +6076,7 @@ async function sendMessage(text, opts = {}) {
             eventName = null;
 
           } else if (eventName === 'error') {
+            shadowInstallSseCompletion(msgId);
             turnStatus = 'error';
             stopStatusFallback();
             const errLine = data.trim();
@@ -6022,11 +6103,25 @@ async function sendMessage(text, opts = {}) {
             else if (raw.length && data.length && /[.!?]$/.test(raw) && /^[A-Z]/.test(data)) raw += ' ';
             raw += data;
             updateThinkingPreview();
+            // Buffer this event's joined lines; the shadow feed dispatches
+            // once at the blank-line boundary below (see textBuf's own
+            // comment). Only the multi-line join within one event is
+            // replicated here — not the cross-event sentence-boundary space
+            // `raw` inserts above, which is UI polish with no server-side
+            // counterpart (topic_queue.py's own `raw += chunk` has no such
+            // heuristic), so this keeps the store's content a more faithful
+            // mirror of the real persisted text than `raw` itself is.
+            textBuf += (dataLineCount > 1 ? '\n' : '') + data;
           }
 
         } else if (line === '') {
+          if (textBuf) {
+            shadowApplySseRunEvent(msgId, 'text', { data: textBuf, lastEventId: dataId });
+            textBuf = '';
+          }
           eventName = null;
           dataLineCount = 0;
+          dataId = null;
         }
       }
     }
@@ -8379,18 +8474,30 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
   es.onmessage = event => {
     raw += event.data;
     updatePreview();
+    shadowApplySseRunEvent(item.id, 'text', event);
   };
   es.addEventListener('status', event => {
     // event.data already has real embedded newlines rejoined by SSE
     // multi-data-line parsing — don't add another one between chunks.
     statusBuf += event.data;
     updatePreview();
+    // Not fed to the store — see shadowApplySseRunEvent's header comment.
   });
   es.addEventListener('tool', event => {
     try {
       statusBuf += (statusBuf && !statusBuf.endsWith('\n') ? '\n' : '') + toolLabel(JSON.parse(event.data)) + '\n';
       updatePreview();
     } catch {}
+    shadowApplySseRunEvent(item.id, 'tool', event);
+  });
+  es.addEventListener('stats', event => {
+    // No direct-DOM renderer has ever consumed this event on the reconnect
+    // path (there was no listener for it before ADR-0041 producer 4 — the
+    // stats display comes from replacePendingWithStoredItem's post-done
+    // fetch instead), so this listener exists purely to feed the shadow
+    // store, matching shadow mode's "store-only, no render change" rule
+    // with an empty behavior change for direct-DOM.
+    shadowApplySseRunEvent(item.id, 'stats', event);
   });
   es.addEventListener('loading', event => {
     // ADR-0037: local-model (e.g. Ollama) active load/unload visibility.
@@ -8428,6 +8535,7 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
     closed = true;
     es.close();
     pendingPollTimers.delete(wipBubble);
+    shadowInstallSseCompletion(item.id);
     await replacePendingWithStoredItem(item, wipBubble, onStored);
   });
   es.addEventListener('error', async event => {
@@ -8438,6 +8546,7 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
     if (event.data) {
       if (live) live.innerHTML = `<span class="msg-error">${event.data}</span>`;
       updateThinkingHeightButton(wipBubble);
+      shadowInstallSseCompletion(item.id);
       await replacePendingWithStoredItem(item, wipBubble, onStored);
       return;
     }

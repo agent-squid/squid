@@ -118,6 +118,58 @@ test('event_id at or below the watermark is a no-op; run_seq at or below its own
   expect(await store.evaluate(s => s.getLastAppliedEventId())).toBe(101);
 });
 
+// SSE (producer 4) has no global event_id on the wire at all — this proves
+// applyRunEvent's eventId param is genuinely optional, not just permissive:
+// omitting it must not touch the shared global watermark WS calls rely on,
+// while still gating on this message's own run_seq. A fabricated/local
+// global id was rejected during ADR-0041 design specifically because it
+// could poison that shared watermark for real WS-sourced calls — this test
+// exists to keep that property honest.
+test('applyRunEvent with no event_id (SSE) skips the global watermark and does not advance it, but still gates on its own run_seq', async ({ page }) => {
+  const store = await freshStore(page);
+  // A prior WS-style call establishes a real global watermark.
+  await store.evaluate(s => s.applyRunEvent(60, 0, 'text', { delta: 'ws ' }, 5));
+  expect(await store.evaluate(s => s.getLastAppliedEventId())).toBe(5);
+
+  // An SSE-style call (event_id omitted) for a different message must not
+  // be rejected by that watermark, and must not advance it either.
+  const sse1 = await store.evaluate(s => s.applyRunEvent(61, 0, 'text', { delta: 'sse ' }));
+  expect(sse1.ok).toBe(true);
+  expect((await store.evaluate(s => s.getMessage(61))).content).toBe('sse ');
+  expect(await store.evaluate(s => s.getLastAppliedEventId())).toBe(5);
+
+  // Its own run_seq still dedups a stale/duplicate delta.
+  const sse2 = await store.evaluate(s => s.applyRunEvent(61, 0, 'text', { delta: 'dup' }));
+  expect(sse2.noop).toBe(true);
+  expect((await store.evaluate(s => s.getMessage(61))).content).toBe('sse ');
+
+  const sse3 = await store.evaluate(s => s.applyRunEvent(61, 1, 'text', { delta: 'more' }));
+  expect(sse3.ok).toBe(true);
+  expect((await store.evaluate(s => s.getMessage(61))).content).toBe('sse more');
+});
+
+// run_seq is documented as mandatory, not best-effort — a producer that
+// can't supply a valid one (e.g. a missing/stripped SSE `id:` line) must be
+// rejected outright, not silently applied with no dedup guard. Applying it
+// anyway would mean a later replay of that same frame gets accepted as a
+// fresh delta instead of a duplicate, since the per-message watermark never
+// advanced to reject it (caught in #squid@codex review before publish).
+test('applyRunEvent rejects a non-finite run_seq instead of silently applying it unprotected', async ({ page }) => {
+  const store = await freshStore(page);
+  const missing = await store.evaluate(s => s.applyRunEvent(80, undefined, 'text', { delta: 'a' }));
+  expect(missing.ok).toBe(false);
+  expect(await store.evaluate(s => s.getMessage(80))).toBeUndefined();
+
+  const nan = await store.evaluate(s => s.applyRunEvent(80, NaN, 'text', { delta: 'a' }));
+  expect(nan.ok).toBe(false);
+  expect(await store.evaluate(s => s.getMessage(80))).toBeUndefined();
+
+  // A valid run_seq afterward still works normally — the rejection isn't sticky.
+  const ok = await store.evaluate(s => s.applyRunEvent(80, 0, 'text', { delta: 'a' }));
+  expect(ok.ok).toBe(true);
+  expect((await store.evaluate(s => s.getMessage(80))).content).toBe('a');
+});
+
 test('completed turns order by (completed_at, msg_id); pending turns keep creation order and are not mixed in', async ({ page }) => {
   const store = await freshStore(page);
   await store.evaluate(s => s.installHistoryPage([
@@ -465,5 +517,198 @@ test.describe('WS lifecycle events producer (shadow mode)', () => {
     const tools = await page.evaluate(() => window.__transcriptStore.getMessage(40).tools);
     expect(tools).toHaveLength(1);
     expect(tools[0]).toMatchObject({ tool_use_id: 'toolu_1', result: 'ok' });
+  });
+});
+
+// ── Stage 2: SSE producer, shadow mode ──────────────────────────────────────
+// app.js now also feeds SSE-transport frames into window.__transcriptStore
+// alongside their existing direct-DOM handling — both the primary POST
+// /chat streaming response (sendMessage's own hand-rolled parser) and the
+// reconnect GET /chat/{msg_id}/events (EventSource, in
+// reconnectPendingItem) — via shadowApplySseRunEvent/
+// shadowInstallSseCompletion, mirroring shadowApplyEvent. Unlike WS, SSE has
+// no global event_id: text/tool/stats deltas are gated only by the real
+// run_events.seq now carried on the wire as each frame's `id:` field
+// (agent/server.py's sse_chunk/sse_event, fed from agent/topic_queue.py's
+// out_q); terminal done/error re-fetch the authoritative row instead of
+// applying a sequenced patch (see shadowInstallSseCompletion's own comment
+// in ui/app.js).
+
+test.describe('SSE producer (shadow mode)', () => {
+  test('a fresh POST /chat SSE stream renders the DOM as before and feeds text/tool/stats deltas into the store by their real run_events.seq', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200,
+      headers: {
+        'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
+        'X-Squid-Msg-Id': '50',
+      },
+      body:
+        'event: meta\ndata: {"agent":"claude","backend":"claude","msg_id":50,"adhoc":false}\n\n' +
+        'id: 4\nevent: tool\ndata: {"tool_use_id":"t1","name":"Bash","command":"ls"}\n\n' +
+        'id: 5\ndata: Hello \n\n' +
+        'id: 6\ndata: world\n\n' +
+        'id: 7\nevent: stats\ndata: {"session_id":"sid-1","input_tokens":3,"output_tokens":2}\n\n' +
+        'id: 8\nevent: done\ndata: \n\n',
+    }));
+    await page.route('**/chat/50/status', r => r.fulfill({ json: {
+      // agent/stats_db.py's get_message (backing this real endpoint) always
+      // attaches a stats object via _attach_turn_stats, not an empty one.
+      id: 50, role: 'assistant', status: 'done', content: 'Hello world',
+      stats: { session_id: 'sid-1', input_tokens: 3, output_tokens: 2 },
+      completed_at: '2026-08-21T00:00:00Z',
+    }}));
+
+    await page.fill('#input', 'hi');
+    await page.keyboard.press('Enter');
+
+    // Direct-DOM path is unaffected: it renders from the stream's own
+    // accumulated raw text, never from the shadow completion's /status fetch.
+    await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toContainText('Hello world');
+
+    // The completion install is its own async fetch (not awaited by the
+    // direct-DOM 'done' branch), so wait for it to land before asserting on
+    // fields it alone is responsible for (status/completedAt).
+    await expect.poll(() => page.evaluate(() => window.__transcriptStore.getTurn(50)?.status)).toBe('done');
+
+    const snapshot = await page.evaluate(() => {
+      const s = window.__transcriptStore;
+      return { message: s.getMessage(50), turn: s.getTurn(50) };
+    });
+    // content came from the run_seq-ordered deltas (applyRunEvent), and
+    // matches what the authoritative completion install also reports —
+    // proving both paths agree, not just that one silently overwrote the other.
+    expect(snapshot.message.content).toBe('Hello world');
+    expect(snapshot.message.tools).toHaveLength(1);
+    expect(snapshot.message.tools[0]).toMatchObject({ tool_use_id: 't1', name: 'Bash' });
+    expect(snapshot.message.stats).toMatchObject({ session_id: 'sid-1', input_tokens: 3 });
+    expect(snapshot.turn.completedAt).toBe('2026-08-21T00:00:00Z');
+  });
+
+  test('a multi-line text delta on the primary POST /chat path is not truncated in the store (sse_chunk can split one delta across several data: lines sharing one id:)', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200,
+      headers: {
+        'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
+        'X-Squid-Msg-Id': '55',
+      },
+      // One delta ("line one\nline two") encoded exactly as agent/server.py's
+      // sse_chunk would: one id:, two data: lines, one blank-line boundary.
+      // A second, single-line delta follows to prove normal deltas still
+      // append correctly after a multi-line one. No 'done' event on purpose:
+      // sending one would let shadowInstallSseCompletion's authoritative
+      // /status fetch overwrite content with the "correct" value regardless
+      // of whether delta accumulation actually worked, masking exactly the
+      // regression this test exists to catch (a prior version of this test
+      // did include 'done' plus a /status mock returning this same string —
+      // #squid@codex's review caught that it would still pass even with the
+      // truncation bug reintroduced, since the completion install always
+      // wins in the end). Omitting 'done' isolates the delta path itself.
+      body:
+        'event: meta\ndata: {"agent":"claude","backend":"claude","msg_id":55,"adhoc":false}\n\n' +
+        'id: 4\ndata: line one\ndata: line two\n\n' +
+        'id: 5\ndata:  and more\n\n',
+    }));
+
+    await page.fill('#input', 'hi');
+    await page.keyboard.press('Enter');
+
+    await expect.poll(() => page.evaluate(() => window.__transcriptStore.getMessage(55)?.content))
+      .toBe('line one\nline two and more');
+  });
+
+  test('a text delta with no id: line on the primary POST /chat path is rejected, not silently applied as run_seq 0', async ({ page }) => {
+    // dataId starts as JS null and only becomes non-null once an id: line
+    // is actually seen — Number(null) is 0, a valid finite number that
+    // shadowApplySseRunEvent must not hand to applyRunEvent as a real
+    // run_seq (it would apply unprotected instead of being rejected, and
+    // could later collide with a genuine low run_seq). Caught in
+    // #squid@codex review before publish: the prior fix only special-cased
+    // event.lastEventId === '' (EventSource's own "no id" sentinel), not
+    // null/undefined (this hand-rolled parser's).
+    await page.route('**/chat', r => r.fulfill({
+      status: 200,
+      headers: {
+        'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
+        'X-Squid-Msg-Id': '56',
+      },
+      body:
+        'event: meta\ndata: {"agent":"claude","backend":"claude","msg_id":56,"adhoc":false}\n\n' +
+        'data: no id here\n\n' +
+        'id: 4\ndata: this one has an id\n\n',
+    }));
+
+    await page.fill('#input', 'hi');
+    await page.keyboard.press('Enter');
+
+    // If the id-less frame had been accepted, its text would prefix this.
+    await expect.poll(() => page.evaluate(() => window.__transcriptStore.getMessage(56)?.content))
+      .toBe('this one has an id');
+  });
+
+  test('a reconnected pending item (page load) renders the DOM as before via its own discovery fetch, and feeds run_events.seq-based deltas into the store from the SSE frames themselves', async ({ page }) => {
+    await page.unroute('**/history**');
+    await page.route('**/history**', r => r.fulfill({ json: {
+      items: [
+        { id: 70, role: 'assistant', reply_to: 69, topic: 'default', agent: 'claude', adhoc: false,
+          status: 'pending', prompt: 'still going', timestamp: '2026-08-21T00:00:00Z', completed_at: '2026-08-21T00:00:00Z' },
+      ],
+      has_more: false,
+    }}));
+    await page.route('**/chat/70/events**', r => r.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' },
+      body:
+        'id: 4\nevent: tool\ndata: {"tool_use_id":"t2","name":"Read","file":"x.py"}\n\n' +
+        'id: 5\ndata: Reconnected \n\n' +
+        'id: 6\ndata: text\n\n' +
+        'id: 7\nevent: done\ndata: \n\n',
+    }));
+    await page.route('**/chat/70/status', r => r.fulfill({ json: {
+      // reply_to must match the history row's (69) — get_message's real row
+      // always carries it, and the store's identity-conflict guard would
+      // otherwise reject this completion install against the reply_to the
+      // initial pending-row install already established for msg 70.
+      id: 70, role: 'assistant', reply_to: 69, status: 'done', content: 'Reconnected text',
+      completed_at: '2026-08-21T00:05:00Z',
+    }}));
+
+    await page.reload();
+
+    // Direct-DOM path is unaffected: it still resolves the pending bubble
+    // via its own reconnect flow, not from the shadow feed.
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="70"]')).toHaveCount(1);
+    await expect.poll(() => page.evaluate(() => window.__transcriptStore.getTurn(70)?.status)).toBe('done');
+
+    const snapshot = await page.evaluate(() => {
+      const s = window.__transcriptStore;
+      return { message: s.getMessage(70) };
+    });
+    expect(snapshot.message.content).toBe('Reconnected text');
+    expect(snapshot.message.tools).toHaveLength(1);
+    expect(snapshot.message.tools[0]).toMatchObject({ tool_use_id: 't2', name: 'Read' });
+  });
+
+  test('a duplicate/replayed SSE frame (same run_events.seq) is a no-op in the store', async ({ page }) => {
+    await page.unroute('**/history**');
+    await page.route('**/history**', r => r.fulfill({ json: {
+      items: [
+        { id: 71, role: 'assistant', reply_to: 69, topic: 'default', agent: 'claude', adhoc: false,
+          status: 'pending', prompt: 'still going', timestamp: '2026-08-21T00:00:00Z', completed_at: '2026-08-21T00:00:00Z' },
+      ],
+      has_more: false,
+    }}));
+    // A real reconnect always replays from the start (after_seq defaults to
+    // -1 server-side) — a duplicate id for the same delta must not double it.
+    await page.route('**/chat/71/events**', r => r.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' },
+      body:
+        'id: 4\ndata: hello\n\n' +
+        'id: 4\ndata: hello\n\n' +
+        'id: 5\ndata: !\n\n',
+    }));
+
+    await page.reload();
+    await expect.poll(() => page.evaluate(() => window.__transcriptStore.getMessage(71)?.content)).toBe('hello!');
   });
 });

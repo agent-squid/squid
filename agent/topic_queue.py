@@ -361,7 +361,7 @@ class TopicWorker:
                 # >= 0 since get_run_events()'s default after_seq=-1 filter is
                 # seq > after_seq, which would silently drop negative seqs.
                 insert_run_event(msg_id, 3, "loading", json.dumps(payload))
-            await out_q.put({"_loading": payload})
+            await out_q.put({"_loading": payload, "_seq": 3})
 
         if switching:
             try:
@@ -387,7 +387,7 @@ class TopicWorker:
                 if item.msg_id is not None:
                     from .stats_db import insert_run_event
                     insert_run_event(item.msg_id, 2, "processing", json.dumps({"topic": item.topic}))
-                await item.out_q.put({"_processing": {"topic": item.topic}})
+                await item.out_q.put({"_processing": {"topic": item.topic}, "_seq": 2})
                 await self._process(item)
             except Exception as exc:
                 log.exception("Worker bug (topic=%s)", self.topic)
@@ -493,7 +493,7 @@ class TopicWorker:
             nonlocal run_seq
             tool_events.append(tool)
             insert_run_event(item.msg_id, run_seq, "tool", json.dumps(tool))
-            await item.out_q.put({"_tool": tool})
+            await item.out_q.put({"_tool": tool, "_seq": run_seq})
             run_seq += 1
 
         async def _emit_text(text: str):
@@ -502,7 +502,7 @@ class TopicWorker:
                 return
             raw += text
             insert_run_event(item.msg_id, run_seq, "text", text)
-            await item.out_q.put(text)
+            await item.out_q.put({"_text": text, "_seq": run_seq})
             run_seq += 1
 
         proc_cwd = item.cwd or SQUID_HOME  # subprocess working dir (may be a worktree path)
@@ -661,17 +661,17 @@ class TopicWorker:
                         completed_at = _utc_now_iso()
                         enriched["completed_at"] = completed_at
                         insert_run_event(item.msg_id, run_seq, "stats", json.dumps(enriched), created_at=completed_at)
-                        await item.out_q.put({"_stats": enriched})
+                        await item.out_q.put({"_stats": enriched, "_seq": run_seq})
                     elif "_tool" in chunk:
                         await _emit_tool(chunk["_tool"])
                         continue
                     elif "_status" in chunk:
                         status_raw += chunk["_status"]
                         insert_run_event(item.msg_id, run_seq, "status", chunk["_status"])
-                        await item.out_q.put(chunk)
+                        await item.out_q.put({**chunk, "_seq": run_seq})
                     elif "_error" in chunk:
                         insert_run_event(item.msg_id, run_seq, "error", chunk["_error"])
-                        await item.out_q.put(chunk)
+                        await item.out_q.put({**chunk, "_seq": run_seq})
                     elif "_diag" in chunk:
                         insert_run_event(item.msg_id, run_seq, "diag", json.dumps(chunk["_diag"]))
                 else:
@@ -694,8 +694,8 @@ class TopicWorker:
                         + (f"  model: {item.model}" if item.model else "")
                     )
                     insert_run_event(item.msg_id, run_seq, "status", status)
+                    await item.out_q.put({"_status": status, "_seq": run_seq})
                     run_seq += 1
-                    await item.out_q.put({"_status": status})
                     kwargs.pop("resume_session_id", None)
                     await _stream(effective_prompt, **kwargs)
                 elif item.resume_session_id and "prompt is too long" in exc_str.lower():
@@ -709,8 +709,8 @@ class TopicWorker:
                         + (f"  model: {item.model}" if item.model else "")
                     )
                     insert_run_event(item.msg_id, run_seq, "status", status)
+                    await item.out_q.put({"_status": status, "_seq": run_seq})
                     run_seq += 1
-                    await item.out_q.put({"_status": status})
                     kwargs.pop("resume_session_id", None)
                     await _stream(effective_prompt, **kwargs)
                 else:
@@ -846,7 +846,7 @@ class TopicWorker:
             if item.msg_id:
                 terminal_error = None if raw or recovered_content else err_text
                 self._trigger_chain_continuation(item.msg_id, terminal_error)
-            await item.out_q.put({"_error": err_text})
+            await item.out_q.put({"_error": err_text, "_seq": run_seq})
 
         finally:
             await item.out_q.put(None)

@@ -225,21 +225,48 @@
       return { ok: true, dirty: dirtySnapshot() };
     }
 
+    // eventId is optional: WS (producers 2/3) always pass a real numeric
+    // global cursor and participate in the lastAppliedEventId watermark
+    // below. SSE (producer 4) has no global cursor on the wire at all — it
+    // predates ADR-0040's realtime protocol and is compatibility-only — so
+    // it calls this with eventId left `undefined`, which skips the global
+    // watermark entirely and relies only on this message's own runSeq
+    // (sourced from the real run_events.seq now carried on the SSE wire,
+    // see agent/server.py's sse_chunk/sse_event `id:` field). This is safe
+    // because one SSE connection only ever carries one message's deltas, so
+    // there is no cross-message ordering for it to lose by not
+    // participating in the global cursor. A fabricated/local global id was
+    // considered and rejected: because the watermark is shared store-wide,
+    // an invented value could sit below or above the real WS cursor and
+    // silently drop legitimate producer-2/3 events for the rest of the
+    // session.
     function applyRunEvent(msgId, runSeq, kind, payload, eventId) {
       if (msgId == null) return { ok: false, error: 'applyRunEvent: msg_id required', dirty: dirtySnapshot() };
-      const numericEventId = Number(eventId);
-      if (!Number.isFinite(numericEventId)) {
-        return { ok: false, error: 'applyRunEvent: event_id must be numeric', dirty: dirtySnapshot() };
-      }
-      if (numericEventId <= lastAppliedEventId) {
-        return { ok: true, dirty: dirtySnapshot(), noop: true };
+      const hasEventId = eventId !== undefined;
+      let numericEventId;
+      if (hasEventId) {
+        numericEventId = Number(eventId);
+        if (!Number.isFinite(numericEventId)) {
+          return { ok: false, error: 'applyRunEvent: event_id must be numeric', dirty: dirtySnapshot() };
+        }
+        if (numericEventId <= lastAppliedEventId) {
+          return { ok: true, dirty: dirtySnapshot(), noop: true };
+        }
       }
       const numericRunSeq = Number(runSeq);
+      // run_seq is mandatory, not best-effort: a producer with no valid
+      // sequence for this delta (e.g. a dropped/missing SSE `id:` line) must
+      // not silently apply unprotected — that would accept a replay as a
+      // fresh delta and duplicate content. Reject instead of falling through
+      // with no dedup guard.
+      if (!Number.isFinite(numericRunSeq)) {
+        return { ok: false, error: 'applyRunEvent: run_seq must be numeric', dirty: dirtySnapshot() };
+      }
       const lastRunSeq = lastRunSeqByAssistantId.get(msgId) ?? -1;
-      if (Number.isFinite(numericRunSeq) && numericRunSeq <= lastRunSeq) {
+      if (numericRunSeq <= lastRunSeq) {
         // event_id already advanced past a prior duplicate/out-of-order
         // run_seq for this message; run-level payload is still a no-op.
-        lastAppliedEventId = numericEventId;
+        if (hasEventId) lastAppliedEventId = numericEventId;
         return { ok: true, dirty: dirtySnapshot(), noop: true };
       }
 
@@ -283,8 +310,8 @@
 
       const merged = mergeSparse(existing, patch);
       putMessage(merged);
-      lastRunSeqByAssistantId.set(msgId, Number.isFinite(numericRunSeq) ? Math.max(lastRunSeq, numericRunSeq) : lastRunSeq);
-      lastAppliedEventId = numericEventId;
+      lastRunSeqByAssistantId.set(msgId, Math.max(lastRunSeq, numericRunSeq));
+      if (hasEventId) lastAppliedEventId = numericEventId;
       return { ok: true, dirty: dirtySnapshot() };
     }
 

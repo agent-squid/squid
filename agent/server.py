@@ -780,18 +780,20 @@ _OUT_Q_POLL_TIMEOUT = 1.0  # seconds
 _HEARTBEAT_TICKS = 10      # emit a heartbeat after this many idle poll timeouts (~10s)
 
 
-def sse_chunk(data: str) -> str:
+def sse_chunk(data: str, event_id: Optional[int] = None) -> str:
     normalized = data.replace("\r\n", "\n").replace("\r", "\n")
     lines = normalized.split("\n")
     encoded = "\n".join("data:" + (" " if line.startswith(" ") else "") + line for line in lines)
-    return encoded + "\n\n"
+    prefix = f"id: {event_id}\n" if event_id is not None else ""
+    return prefix + encoded + "\n\n"
 
-def sse_event(event: str, data: str = "") -> str:
+def sse_event(event: str, data: str = "", event_id: Optional[int] = None) -> str:
     # SSE represents multiline payloads as repeated data fields. Preserve the
     # original line structure instead of emitting bare continuation lines.
     normalized = data.replace("\r\n", "\n").replace("\r", "\n")
     encoded = normalized.replace("\n", "\ndata: ")
-    return f"event: {event}\ndata: {encoded}\n\n"
+    prefix = f"id: {event_id}\n" if event_id is not None else ""
+    return f"{prefix}event: {event}\ndata: {encoded}\n\n"
 
 
 def _normalize_topic_response(topic: str) -> Union[str, JSONResponse]:
@@ -1169,8 +1171,8 @@ async def _drain_to_completion(
                 if "_stats" in chunk and not session_id:
                     stats = dict(chunk["_stats"])
                     session_id = stats.get("session_id")
-            else:
-                raw += chunk
+                if "_text" in chunk:
+                    raw += chunk["_text"]
     except Exception:
         log.exception("drain error msg_id=%s", msg_id)
 
@@ -1280,6 +1282,15 @@ async def stream_response(
             if chunk is None:
                 break
 
+            # ADR-0041 producer 4: every dict chunk topic_queue.py puts onto
+            # out_q now carries the same run_events.seq it persisted under
+            # (see topic_queue.py's insert_run_event call sites) so this SSE
+            # stream can put a real, replay-compatible `id:` on the wire
+            # instead of inventing one — the terminal done/error events
+            # deliberately don't carry one; a reconnecting client re-fetches
+            # the authoritative row for those instead of replaying a delta.
+            chunk_seq = chunk.get("_seq") if isinstance(chunk, dict) else None
+
             if isinstance(chunk, dict) and "_error" in chunk:
                 err_text = chunk["_error"]
                 if raw:
@@ -1297,29 +1308,30 @@ async def stream_response(
                 session_id = stats.get("session_id")
                 if session_id and not adhoc:
                     stats["session_turn_count"] = ensure_session_turn_index(asst_msg_id, session_id)
-                yield sse_event("stats", json.dumps(stats))
+                yield sse_event("stats", json.dumps(stats), event_id=chunk_seq)
 
             elif isinstance(chunk, dict) and "_tool" in chunk:
                 tool_events.append(chunk["_tool"])
-                yield sse_event("tool", json.dumps(chunk["_tool"]))
+                yield sse_event("tool", json.dumps(chunk["_tool"]), event_id=chunk_seq)
 
             elif isinstance(chunk, dict) and "_status" in chunk:
                 status_raw += chunk["_status"]
                 text = chunk["_status"]
                 if text:
-                    yield sse_event("status", text)
+                    yield sse_event("status", text, event_id=chunk_seq)
 
             elif isinstance(chunk, dict) and "_loading" in chunk:
                 # ADR-0037: local-model load/unload visibility — payload is
                 # {"to": model} or {"to": model, "from": prev_model} on a switch.
-                yield sse_event("loading", json.dumps(chunk["_loading"]))
+                yield sse_event("loading", json.dumps(chunk["_loading"]), event_id=chunk_seq)
 
             elif isinstance(chunk, dict) and "_processing" in chunk:
-                yield sse_event("processing", json.dumps(chunk["_processing"]))
+                yield sse_event("processing", json.dumps(chunk["_processing"]), event_id=chunk_seq)
 
-            else:
-                raw += chunk
-                yield sse_chunk(chunk)
+            elif isinstance(chunk, dict) and "_text" in chunk:
+                text = chunk["_text"]
+                raw += text
+                yield sse_chunk(text, event_id=chunk_seq)
                 now = time.monotonic()
                 if raw and now - last_partial_save >= 0.5:
                     context_json = json.dumps(tool_events) if tool_events else None
@@ -1968,18 +1980,18 @@ async def message_events(msg_id: int, after_seq: int = -1):
                 event_type = event["event_type"]
                 payload = event["payload"] or ""
                 if event_type == "text":
-                    yield sse_chunk(payload)
+                    yield sse_chunk(payload, event_id=event["seq"])
                 elif event_type in {"stats", "status", "tool", "loading", "processing", "queued", "meta"}:
-                    yield sse_event(event_type, payload)
+                    yield sse_event(event_type, payload, event_id=event["seq"])
                 elif event_type == "done":
-                    yield sse_event("done")
+                    yield sse_event("done", event_id=event["seq"])
                     return
                 elif event_type == "error":
                     current = get_message(msg_id)
                     if current and current.get("status") == "done":
-                        yield sse_event("done")
+                        yield sse_event("done", event_id=event["seq"])
                         return
-                    yield sse_event("error", payload)
+                    yield sse_event("error", payload, event_id=event["seq"])
                     return
 
             current = get_message(msg_id)

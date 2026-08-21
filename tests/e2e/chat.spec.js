@@ -9,9 +9,10 @@ const SSE_HEADERS = {
 };
 
 function sse(...events) {
-  return events.map(({ event, data }) => {
+  return events.map(({ event, data, id }) => {
     const str = typeof data === 'string' ? data : JSON.stringify(data);
-    return event ? `event: ${event}\ndata: ${str}\n\n` : `data: ${str}\n\n`;
+    const idLine = id != null ? `id: ${id}\n` : '';
+    return idLine + (event ? `event: ${event}\ndata: ${str}\n\n` : `data: ${str}\n\n`);
   }).join('');
 }
 

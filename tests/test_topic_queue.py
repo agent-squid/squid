@@ -158,7 +158,7 @@ def test_worker_marks_item_processing_before_runner_starts():
         return await item.out_q.get(), insert_event.call_args
 
     event, persisted = asyncio.run(run())
-    assert event == {"_processing": {"topic": "work"}}
+    assert event == {"_processing": {"topic": "work"}, "_seq": 2}
     assert persisted.args == (101, 2, "processing", '{"topic": "work"}')
 
 
@@ -295,8 +295,8 @@ def test_worker_keeps_status_out_of_persisted_response():
     assert update_call.args[1] == "Final response only."
     assert update_call.args[3] == "done"
     assert chunks[:2] == [
-        {"_status": "Checking the code..."},
-        "Final response only.",
+        {"_status": "Checking the code...", "_seq": 4},
+        {"_text": "Final response only.", "_seq": 5},
     ]
 
 
@@ -355,7 +355,7 @@ def test_worker_remaps_worktree_paths_before_stream_and_persist():
 
     update_call, chunks = asyncio.run(run())
     expected = "See [app.py](/Users/alice/Work/squid/app.py:12)"
-    assert chunks[:1] == [expected]
+    assert chunks[:1] == [{"_text": expected, "_seq": 4}]
     assert update_call.args[1] == expected
 
 
@@ -399,7 +399,7 @@ def test_worker_remaps_worktree_paths_split_across_chunks():
         return update_message.call_args, chunks
 
     update_call, chunks = asyncio.run(run())
-    content = "".join(chunk for chunk in chunks if isinstance(chunk, str))
+    content = "".join(chunk["_text"] for chunk in chunks if isinstance(chunk, dict) and "_text" in chunk)
     expected = "See [app.py](/Users/alice/Work/squid/app.py:12)"
     assert content == expected
     assert update_call.args[1] == expected
@@ -1093,7 +1093,7 @@ def test_worker_clears_session_on_prompt_too_long_text_response():
     clear_call, chunks = asyncio.run(run())
     assert clear_call is not None, "clear_topic_session must be called when text response is 'Prompt is too long'"
     assert clear_call.args == ("mai", "clive")
-    assert "Prompt is too long" in chunks
+    assert any(isinstance(c, dict) and c.get("_text") == "Prompt is too long" for c in chunks)
 
 
 def test_worker_retries_fresh_on_prompt_too_long():
@@ -1147,7 +1147,7 @@ def test_worker_retries_fresh_on_prompt_too_long():
     assert clear_call.args == ("mai", "clive")
     status_chunks = [c for c in chunks if isinstance(c, dict) and "_status" in c]
     assert any("context window exceeded" in c["_status"].lower() for c in status_chunks)
-    assert "success" in chunks
+    assert any(isinstance(c, dict) and c.get("_text") == "success" for c in chunks)
 
 
 def test_worker_keeps_session_on_auth_required():
@@ -1224,7 +1224,7 @@ def test_worker_bug_emits_error_and_sentinel():
         return processing, error, sentinel
 
     processing, error, sentinel = asyncio.run(run())
-    assert processing == {"_processing": {"topic": "work"}}
+    assert processing == {"_processing": {"topic": "work"}, "_seq": 2}
     assert error == {"_error": "boom"}
     assert sentinel is None
 
@@ -1467,8 +1467,8 @@ def test_sync_local_model_emits_loading_event_and_unloads_on_switch():
         return first_event, second_event, posted
 
     first_event, second_event, posted = asyncio.run(run())
-    assert first_event == {"_loading": {"to": "qwen2.5:7b"}}
-    assert second_event == {"_loading": {"to": "qwen3:8b", "from": "qwen2.5:7b"}}
+    assert first_event == {"_loading": {"to": "qwen2.5:7b"}, "_seq": 3}
+    assert second_event == {"_loading": {"to": "qwen3:8b", "from": "qwen2.5:7b"}, "_seq": 3}
     assert len(posted) == 1
     assert posted[0][1]["model"] == "qwen2.5:7b"
     assert posted[0][1]["keep_alive"] == 0

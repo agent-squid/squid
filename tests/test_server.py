@@ -840,7 +840,7 @@ def test_drain_to_completion_continues_after_idle_timeout():
             if calls == 1:
                 raise asyncio.TimeoutError()
             if calls == 2:
-                return "final after idle"
+                return {"_text": "final after idle"}
             return None
 
         with patch("agent.server.asyncio.wait_for", fake_wait_for), \
@@ -891,7 +891,7 @@ def test_native_shell_drain_timeout_starts_after_processing_event():
                 return {"_processing": {"topic": "squid"}}
             if wait_calls == 3:
                 awaitable.close()
-                return "done"
+                return {"_text": "done"}
             awaitable.close()
             return None
 
