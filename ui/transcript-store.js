@@ -257,8 +257,12 @@
         }
         case 'tool': {
           const priorTools = existing?.tools ?? [];
-          const toolId = payload?.id;
-          const idx = toolId == null ? -1 : priorTools.findIndex(t => t.id === toolId);
+          // Real tool payloads (agent/topic_queue.py's `_emit_tool`) key on
+          // `tool_use_id`, not `id` — a WS-sourced tool start/result pair
+          // would otherwise never match its own prior entry and just pile up
+          // as duplicate tools[] rows instead of updating one in place.
+          const toolId = payload?.id ?? payload?.tool_use_id;
+          const idx = toolId == null ? -1 : priorTools.findIndex(t => (t.id ?? t.tool_use_id) === toolId);
           const nextTools = idx === -1 ? [...priorTools, payload] : priorTools.map((t, i) => (i === idx ? { ...t, ...payload } : t));
           patch.tools = nextTools;
           break;

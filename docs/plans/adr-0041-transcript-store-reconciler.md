@@ -21,7 +21,7 @@ scope per the ADR) and get migrated afterward, one at a time.
 | Stage | Producer 1 (HTTP history) | Producer 2 (WS snapshot) | Producer 3 (WS events) | Producer 4 (SSE) |
 |---|---|---|---|---|
 | 1. Store + reducer | ✅ done | — (shared store) | — (shared store) | — (shared store) |
-| 2. Shadow mode | ✅ `shadowInstallHistoryPage` | ✅ `shadowInstallSnapshot` (2026-08-20) | ❌ not started | ❌ not started |
+| 2. Shadow mode | ✅ `shadowInstallHistoryPage` | ✅ `shadowInstallSnapshot` (2026-08-20) | ✅ `shadowApplyEvent` (2026-08-21) | ❌ not started |
 | 3. Reconciler + cutover | ⚠️ partial — see below | ❌ | ❌ | ❌ |
 | 4. Completion order/route markers/dedup in reconciler | ⚠️ partial | ❌ | ❌ | ❌ |
 | 5. Retire direct-DOM path | ✅ default flipped to `renderer=store` 2026-08-20 (`?renderer=dom` kept as one-cycle rollback; direct-DOM branch not yet deleted) | ❌ | ❌ | ❌ |
@@ -29,9 +29,13 @@ scope per the ADR) and get migrated afterward, one at a time.
 Files: `ui/transcript-store.js`, `ui/reconciler.js`, wiring in `ui/app.js`
 (search `ADR-0041`). Tests: `tests/e2e/transcript-store.spec.js`,
 `reconciler.spec.js`, `history-registry.spec.js`, `history-store-renderer.spec.js`
-(37 tests, all green with `--workers=1`; the default parallel run is flaky —
-different tests intermittently fail from worker contention, not a real bug —
-so use `--workers=1` for a trustworthy local read of this suite).
+(40 tests total; each file is green on its own with `--workers=1`). The
+default parallel run is flaky from worker contention as previously noted —
+2026-08-20/21 testing also found running all four files together is flaky
+even at `--workers=1` (a different small subset intermittently fails each
+time, reproducing identically on an unmodified tree, so it's pre-existing
+suite-level flakiness, not tied to any one change). Read this suite one file
+at a time for a trustworthy result.
 
 ### What "partial" means for producer 1
 
@@ -260,14 +264,110 @@ turn/message/order. Verified: those 3 plus all 34 pre-existing ADR-0041 store
 tests (37 total) and the full `chat.spec.js` (102 tests) pass with
 `--workers=1`. PWA cache bumped to `v20260820-007`.
 
+## 2026-08-21: producer 3 (WS lifecycle events) Stage 2, shadow mode
+
+Added `shadowApplyEvent(frame)` in `ui/app.js`, inside the `realtimeV1` IIFE
+right before `dispatchEvent`, and call it from `dispatchEvent` (right after
+the existing `frame.event_id <= cursor` gate, before the per-type branching)
+— store-only, no render change, mirroring `shadowInstallSnapshot`.
+
+`message.changed` is the only frame type on this transport that ever reports
+an authoritative status/content transition — every `_insert_realtime_event(
+conn, "message.changed", ...)` call site in `agent/stats_db.py` always
+includes `id`/`role`/`status`/`content` (sometimes `reply_to`/`session_id`).
+`chat.done`/`chat.error` carry no message fields of their own (`insert_run_event`
+in `agent/topic_queue.py` passes `payload=None` for `"done"` and a plain
+error string for `"error"`), so they have nothing to add beyond what a
+`message.changed` frame already will — not wired. `chat.text`/`chat.tool`/
+`chat.stats` map onto `applyRunEvent`'s existing `'text'`/`'tool'`/`'stats'`
+kinds; every run-event-sourced `chat.*` frame shares one server-side
+`run_seq` counter per assistant message (`agent/topic_queue.py`'s
+`run_seq += 1`, incremented across all event kinds for that message), which
+is exactly what `applyRunEvent`'s own per-`msgId` monotonicity check assumes.
+
+Two known gaps, neither fixed here (same posture as producer 2's
+`cursor_reset` gap — shadow mode doesn't render, so nothing depends on
+either yet):
+- `applyRunEvent`'s `'tool'` case dedupes an incoming tool payload by
+  `payload.id`, but real tool payloads (`topic_queue.py`'s `_emit_tool`) key
+  on `tool_use_id`/`name` instead — every `chat.tool` frame fed in lands as a
+  new `tools[]` entry rather than updating one in place. This is a
+  pre-existing mismatch in `transcript-store.js` itself, not introduced by
+  this wiring.
+- `flow.step.created` carries only identity fields (`flow_run_id`/`step_id`/
+  `assistant_msg_id`), not enough to construct a meaningful store row
+  without an extra fetch Stage 2 intentionally avoids. Not wired — the flow
+  step's own `message.changed` event (fired when the step message row is
+  created) covers it instead.
+
+Tests: `tests/e2e/transcript-store.spec.js`, new `describe('WS lifecycle
+events producer (shadow mode)')` block (3 tests) — a `message.changed`
+discovery renders the DOM from its own `/chat/{id}/status` fetch unchanged
+while the store picks up the frame's own payload instead (proving the two
+are fed independently, not from each other); `chat.text` deltas accumulate
+into the store message's `content` in `run_seq` order; a `chat.tool` frame at
+or below the applied `event_id` watermark is a no-op, same as the snapshot
+producer. Verified: those 3 plus all 14 pre-existing ADR-0041 store tests in
+this file (17 total, `--workers=1`) and the full `chat.spec.js` (102 tests,
+`--workers=1`, two runs — the first had 3 unrelated failures that all passed
+individually and on a clean second full run, matching this doc's
+already-documented suite-level flakiness under load, not a regression).
+PWA cache bumped to `v20260820-010`.
+
+### 2026-08-21 fix — tool identity used the wrong field (caught in pre-publish review)
+
+A `#squid@codex` review of this change before publish caught that the
+"known gap" above was left as a documented bug instead of an actual fix, and
+that the watermark test next to it didn't exercise the real broken path (it
+only proved a stale `event_id` is a no-op, never two live tool updates for
+the same call). Both points were verified against the code/DB directly, not
+taken on faith — the same review's second finding (the "Note on durability"
+paragraph above was guessing at the loss mechanism instead of checking) was
+corrected in place, in that paragraph.
+
+Fixed in `ui/transcript-store.js`'s `applyRunEvent` `'tool'` case: the
+dedup key now falls back to `payload?.tool_use_id` when `payload?.id` is
+absent, and the existing-entry lookup checks `t.id ?? t.tool_use_id` the
+same way — matching real tool payload shape instead of only the
+speculative `id` field. Added `transcript-store.spec.js` test "two real
+chat.tool updates for the same tool_use_id merge into one entry, not two"
+(18 tests in this file now, all pass with `--workers=1`; full `chat.spec.js`
+also re-verified, 100/102 with the 2 failures being the same
+already-documented auth-panel flake family, confirmed by passing
+individually on retry). PWA cache bumped to `v20260820-011`.
+
+**Note on durability:** this exact change was built and verified once
+before, on 2026-08-20 (as turn `13474`), but was lost before ever being
+committed. Root cause, confirmed against the `worktrees` table rather than
+guessed: `squid|13474|/Users/haebin/Work/squid|discarded|2026-08-21 01:31:39`
+— that turn's worktree was explicitly discarded via
+`POST /chat/{msg_id}/worktree/discard` while a later turn was stuck on
+"Blocked: worktree sync requires attention before starting another turn."
+Discarding a blocked worktree is a real, intentional recovery action in
+`agent/server.py`, not an accidental revert — it just also destroys whatever
+uncommitted change that turn was carrying, with nothing else anchoring it.
+Rebuilt from scratch here. If this doc is being read after another gap,
+check `git log -S"shadowApplyEvent" -- ui/app.js` first — if it returns
+nothing, the code is gone again and this section is describing work that
+needs to be redone, not work that exists.
+
 ## Next steps
 
-1. Start producer 3 (WS lifecycle events, Stage 2 shadow mode) — wire
-   `dispatchEvent`'s `message.changed`/`chat.*`/`flow.step.created` handling
-   (`ui/app.js`, same `realtimeV1` IIFE) to also call
-   `transcriptStore.applyMessagePatch(...)`/`applyRunEvent(...)`, store-only,
-   no render change, mirroring `shadowInstallSnapshot`. Add parity tests
-   analogous to the new WS snapshot shadow-mode block.
-2. After producer 1 has run as the real default for "one cycle" with no
+1. Start producer 4 (SSE, Stage 2 shadow mode) — the ADR calls this
+   compatibility-only and migrates it last; scope the shadow-mode adapter
+   once producers 2/3 have both been live long enough to show whether the
+   "identity/ordering fields only" pattern holds up, since SSE's payload
+   shapes (`sse()` helper / `META`/`STATS`/`DONE` events in
+   `tests/e2e/chat.spec.js`) haven't been cross-checked against the store's
+   field expectations yet the way WS's have been.
+2. Stage 3/4 (reconciler cutover; completion order/route markers/dedup) for
+   producers 2 and 3 — actually rendering pending/live turns from the store
+   instead of direct-DOM. This is the risky part: producer 1's own Stage 3/4
+   took three rounds of gap-discovery (Gaps 1–3 above) found only by running
+   the full suite, not by inspection. Do not attempt this as a quick pass —
+   budget it the same way, with a real before/after full-suite comparison
+   per gap found.
+3. After producer 1 has run as the real default for "one cycle" with no
    rollback needed, delete the disabled direct-DOM history-rendering branch
-   and the `?renderer=dom` escape hatch.
+   and the `?renderer=dom` escape hatch. Not yet — the flip landed
+   2026-08-20.

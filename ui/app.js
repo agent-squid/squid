@@ -7798,8 +7798,66 @@ const realtimeV1 = (() => {
     markApplied(frame, { resetCursor });
   };
 
+  // ADR-0041 Stage 2 (producer 3, WS lifecycle events): mirrors
+  // shadowInstallSnapshot for the WS snapshot producer — feeds the store
+  // from every relevant lifecycle event so store/DOM parity can be verified
+  // before any render depends on it. Store-only, no render change.
+  //
+  // message.changed carries the only authoritative status/content
+  // transition on this transport (agent/stats_db.py's _insert_realtime_event
+  // call sites always include id/role/status/content there); chat.done and
+  // chat.error carry no message fields of their own (empty payload / plain
+  // string respectively — see topic_queue.py's insert_run_event call sites),
+  // so there is nothing for them to feed the store beyond what a
+  // message.changed frame already will. chat.text/chat.tool/chat.stats map
+  // onto applyRunEvent's existing 'text'/'tool'/'stats' kinds; every
+  // run_event-sourced chat.* frame shares one server-side run_seq counter
+  // per assistant message (agent/topic_queue.py's `run_seq += 1`), matching
+  // applyRunEvent's own per-msgId monotonicity check.
+  //
+  // applyRunEvent dedupes tool start/result updates by `id` or the
+  // `tool_use_id` emitted by topic_queue.py, so repeated chat.tool frames for
+  // one call update a single tools[] entry.
+  //
+  // flow.step.created carries only identity fields (flow_run_id/step_id/
+  // assistant_msg_id), not enough to construct a meaningful store row
+  // without an extra fetch Stage 2 intentionally avoids — the flow step's
+  // own message.changed event (fired when the step message is created)
+  // covers it instead.
+  const shadowApplyEvent = frame => {
+    if (!transcriptStore) return;
+    let result = null;
+    if (frame.type === 'message.changed' && frame.payload?.id != null) {
+      result = transcriptStore.applyMessagePatch(frame.payload.id, {
+        role: frame.payload.role,
+        status: frame.payload.status,
+        content: frame.payload.content,
+        reply_to: frame.payload.reply_to,
+      }, frame.event_id);
+    } else if (frame.type === 'chat.text' && frame.msg_id != null) {
+      result = transcriptStore.applyRunEvent(
+        Number(frame.msg_id), Number(frame.run_seq ?? 0), 'text',
+        { delta: frame.payload?.text ?? '' }, frame.event_id,
+      );
+    } else if (frame.type === 'chat.tool' && frame.msg_id != null) {
+      result = transcriptStore.applyRunEvent(
+        Number(frame.msg_id), Number(frame.run_seq ?? 0), 'tool',
+        frame.payload, frame.event_id,
+      );
+    } else if (frame.type === 'chat.stats' && frame.msg_id != null) {
+      result = transcriptStore.applyRunEvent(
+        Number(frame.msg_id), Number(frame.run_seq ?? 0), 'stats',
+        frame.payload, frame.event_id,
+      );
+    }
+    if (!result) return;
+    if (!result.ok) console.error('[transcript-store] shadow applyEvent failed:', result.error);
+    if (!historyReconciler) transcriptStore.clearReconciled(result.dirty);
+  };
+
   const dispatchEvent = frame => {
     if (Number(frame.event_id || 0) <= cursor) return;
+    shadowApplyEvent(frame);
     if (frame.type === 'process.changed') {
       applyRealtimeProcessState(frame.payload?.processes, null);
     } else if (frame.type === 'queue.changed') {

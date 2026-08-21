@@ -343,3 +343,127 @@ test.describe('WS snapshot producer (shadow mode)', () => {
     expect(status).toBe('done');
   });
 });
+
+// ── Stage 2: WS lifecycle events producer, shadow mode ──────────────────────
+// app.js now also feeds message.changed/chat.text/chat.tool/chat.stats
+// lifecycle frames into window.__transcriptStore alongside their existing
+// direct-DOM handling (shadowApplyEvent, mirroring shadowInstallSnapshot).
+// These tests drive the live page over a mocked WebSocket so the same frame
+// produces both the DOM and the store state, and check the two stay in
+// parity without a second render.
+
+test.describe('WS lifecycle events producer (shadow mode)', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__webSocket = null;
+      class MockWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        constructor() {
+          this.readyState = MockWebSocket.CONNECTING;
+          window.__webSocket = this;
+          setTimeout(() => {
+            this.readyState = MockWebSocket.OPEN;
+            this.onopen?.();
+            this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+          });
+        }
+        send(data) {
+          const frame = JSON.parse(data);
+          if (frame.type === 'subscribe') {
+            setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+          }
+        }
+        receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+        close() { this.readyState = 3; this.onclose?.(); }
+      }
+      window.WebSocket = MockWebSocket;
+    });
+    await page.unroute('**/config/realtime');
+    await page.route('**/config/realtime', r => r.fulfill({ json: { transport: 'websocket' } }));
+  });
+
+  test('a message.changed event for a newly-discovered turn renders the DOM via the existing discovery fetch, and patches the store from the frame itself', async ({ page }) => {
+    await page.route('**/chat/12/status', r => r.fulfill({ json: {
+      id: 12, role: 'assistant', reply_to: 11, topic: 'default', agent: 'claude',
+      adhoc: false, status: 'done', prompt: 'hello', content: 'fetched content',
+      completed_at: '2026-08-20T00:00:00Z',
+    }}));
+    await page.reload();
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'message.changed', event_id: 5, msg_id: 12,
+      payload: { id: 12, role: 'assistant', status: 'done', content: 'frame content', reply_to: 11 },
+    }));
+
+    // Direct-DOM path is unaffected: discovery still renders from its own
+    // /chat/{id}/status fetch, not from the frame's own content field.
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="12"]'))
+      .toContainText('fetched content');
+
+    const message = await page.evaluate(() => window.__transcriptStore.getMessage(12));
+    // The store, in contrast, is fed straight from the frame's own payload.
+    expect(message).toMatchObject({ role: 'assistant', status: 'done', content: 'frame content', replyTo: 11 });
+  });
+
+  test('chat.text run-events accumulate into the store message content in run_seq order', async ({ page }) => {
+    await page.reload();
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'message.changed', event_id: 1, msg_id: 20,
+      payload: { id: 20, role: 'assistant', status: 'pending', reply_to: 19 },
+    }));
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'chat.text', event_id: 2, msg_id: 20, run_seq: 4, payload: { text: 'hello ' },
+    }));
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'chat.text', event_id: 3, msg_id: 20, run_seq: 5, payload: { text: 'world' },
+    }));
+
+    const content = await page.evaluate(() => window.__transcriptStore.getMessage(20).content);
+    expect(content).toBe('hello world');
+  });
+
+  test('a chat.tool event at or below the applied event_id watermark is a store no-op, same as the snapshot producer', async ({ page }) => {
+    await page.reload();
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'message.changed', event_id: 10, msg_id: 30,
+      payload: { id: 30, role: 'assistant', status: 'pending', reply_to: 29 },
+    }));
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'chat.tool', event_id: 10, msg_id: 30, run_seq: 4,
+      payload: { name: 'Read', tool_use_id: 'toolu_1' },
+    }));
+
+    const tools = await page.evaluate(() => window.__transcriptStore.getMessage(30).tools);
+    expect(tools).toEqual([]);
+  });
+
+  test('two real chat.tool updates for the same tool_use_id merge into one entry, not two', async ({ page }) => {
+    await page.reload();
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'message.changed', event_id: 1, msg_id: 40,
+      payload: { id: 40, role: 'assistant', status: 'pending', reply_to: 39 },
+    }));
+    // Start: the tool call is announced, no result yet.
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'chat.tool', event_id: 2, msg_id: 40, run_seq: 4,
+      payload: { name: 'Read', tool_use_id: 'toolu_1', file: 'app.js' },
+    }));
+    // Result: the same tool_use_id reports completion.
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'chat.tool', event_id: 3, msg_id: 40, run_seq: 5,
+      payload: { name: 'Read', tool_use_id: 'toolu_1', file: 'app.js', result: 'ok' },
+    }));
+
+    const tools = await page.evaluate(() => window.__transcriptStore.getMessage(40).tools);
+    expect(tools).toHaveLength(1);
+    expect(tools[0]).toMatchObject({ tool_use_id: 'toolu_1', result: 'ok' });
+  });
+});
