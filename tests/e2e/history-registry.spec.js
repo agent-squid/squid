@@ -157,55 +157,57 @@ test('pending range collection treats a recovered history wip as self-contained'
   expect(summary).toEqual(['recovered']);
 });
 
-// Safety-boundary invariant, not a feature test: a composer-live thinking
-// bubble (sendMessage's own, never insertPendingHistoryItem/makeWipBubble's)
-// never carries `.history-item` — confirmed by reading every
-// classList.add('history-item') call site in ui/app.js. Adoption's selector
-// requires it, so this bubble type must never be touched here. This matters
-// because a composer-live turn is a genuine multi-node group (route-marker?,
-// user bubble, msg-time, thinking — see liveGroupElements' own header
-// comment), unlike a self-contained wip bubble; adopting only `.msg-thinking`
-// from a multi-node group and letting reorder() reposition it would split it
-// from its own prompt (flagged in a #squid@codex pre-publish review). The
-// real fix for that — collecting an ownership-safe multi-node range for a
-// composer-live group — is Stage 3(b) work, not done yet (see Next steps).
-// Until then, this boundary is what keeps the gap merely latent instead of
-// live: pin it down explicitly so a future selector change can't loosen it
-// by accident without this test catching it.
-test('render() never adopts or repositions a composer-live thinking bubble (no .history-item)', async ({ page }) => {
+test('pending range collection rejects a timestamp owned by another composer turn', async ({ page }) => {
+  const summary = await page.evaluate(() => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const user = document.createElement('div');
+    user.className = 'msg user';
+    user.dataset.liveGroupId = 'live-1';
+    const time = document.createElement('div');
+    time.className = 'msg-time';
+    time.dataset.liveGroupId = 'live-2';
+    time.dataset.testMarker = 'foreign-time';
+    const thinking = document.createElement('div');
+    thinking.className = 'msg assistant msg-thinking';
+    thinking.dataset.liveGroupId = 'live-1';
+    thinking.dataset.testMarker = 'thinking';
+    container.append(user, time, thinking);
+    return window.existingPendingNodeRange(thinking).map(node => node.dataset.testMarker);
+  });
+  expect(summary).toEqual(['thinking']);
+});
+
+test('render() adopts a composer-live prompt and thinking bubble as one owned range', async ({ page }) => {
   const rig = await freshRig(page);
   await rig.evaluate(({ container }) => {
-    // Same shape sendMessage's own thinkingBubble has: 'msg assistant
-    // msg-thinking', no 'history-item', with a genuine preceding user
-    // bubble + msg-time sibling (the real multi-node group) that must not
-    // be touched either.
     const userBubble = document.createElement('div');
     userBubble.className = 'msg user';
     userBubble.dataset.ts = '2026-08-21T00:00:01Z';
+    userBubble.dataset.liveGroupId = 'live-95';
+    userBubble.dataset.testMarker = 'user';
     const userTime = document.createElement('div');
     userTime.className = 'msg-time';
+    userTime.dataset.liveGroupId = 'live-95';
+    userTime.dataset.testMarker = 'time';
     const thinking = document.createElement('div');
     thinking.className = 'msg assistant msg-thinking';
     thinking.dataset.msgId = '95';
     thinking.dataset.orderAt = '2026-08-21T00:00:01Z';
-    thinking.dataset.testMarker = 'composer-live';
+    thinking.dataset.liveGroupId = 'live-95';
+    thinking.dataset.testMarker = 'thinking';
     container.append(userBubble, userTime, thinking);
   });
   await rig.evaluate(({ store }) => store.installHistoryPage(window.historyItemToStoreRows({
     id: 95, reply_to: 94, prompt: 'still going', status: 'pending', topic: 'squid', agent: 'codex',
   })));
   const result = await rig.evaluate(({ reconciler }) => reconciler.reconcile());
-  expect(result.ok).toBe(true); // succeeds with an empty (unadopted) node set, not a failure
-
-  // Untouched: still exactly the three original nodes, in original order,
-  // same identities — reorder() never got a group to reposition for id 95.
-  const summary = await rig.evaluate(({ container }) =>
-    [...container.children].map(el => ({ cls: el.className, marker: el.dataset.testMarker || null })));
-  expect(summary).toEqual([
-    { cls: 'msg user', marker: null },
-    { cls: 'msg-time', marker: null },
-    { cls: 'msg assistant msg-thinking', marker: 'composer-live' },
-  ]);
+  expect(result.ok).toBe(true);
+  const summary = await rig.evaluate(({ reconciler }) => ({
+    markers: reconciler.getGroup(95).nodes.map(node => node.dataset.testMarker),
+    root: reconciler.getGroup(95).pendingRoot.dataset.testMarker,
+  }));
+  expect(summary).toEqual({ markers: ['user', 'time', 'thinking'], root: 'thinking' });
 });
 
 // Once pending turns are adopted (above), a turn that just finished has a
@@ -272,6 +274,35 @@ test('render() atomically removes its adopted pending bubble when the store owns
   await expect(page.locator('#history-registry-test-container > .msg.assistant[data-msg-id="91"]')).toHaveCount(1);
   await expect(page.locator('#history-registry-test-container .msg-thinking[data-msg-id="91"]')).toHaveCount(0);
   await expect(page.locator('#history-registry-test-container .msg.assistant[data-msg-id="91"]')).toContainText('finished');
+});
+
+test('composer pending->completed replacement removes only thinking and preserves its prompt range', async ({ page }) => {
+  const rig = await freshRig(page);
+  await rig.evaluate(({ container }) => {
+    for (const [tag, cls] of [['user', 'msg user'], ['time', 'msg-time'], ['thinking', 'msg assistant msg-thinking']]) {
+      const node = document.createElement('div');
+      node.className = cls;
+      node.dataset.liveGroupId = 'live-96';
+      node.dataset.testMarker = tag;
+      if (tag === 'thinking') node.dataset.msgId = '96';
+      container.appendChild(node);
+    }
+  });
+  await rig.evaluate(({ store, reconciler }) => {
+    store.installHistoryPage(window.historyItemToStoreRows({
+      id: 96, reply_to: 95, prompt: 'keep me', status: 'pending', topic: 'squid', agent: 'codex',
+    }));
+    reconciler.reconcile();
+    store.installHistoryPage(window.historyItemToStoreRows({
+      id: 96, reply_to: 95, prompt: 'keep me', content: 'finished', status: 'done',
+      topic: 'squid', agent: 'codex', completed_at: '2026-08-21T00:00:00Z',
+    }));
+    reconciler.reconcile();
+  });
+  const markers = await rig.evaluate(({ container }) =>
+    [...container.children].map(node => node.dataset.testMarker || node.dataset.msgId || null));
+  expect(markers).toEqual(['user', 'time', '96', null]);
+  await expect(page.locator('#history-registry-test-container .msg-thinking[data-msg-id="96"]')).toHaveCount(0);
 });
 
 test('terminal render uses live turn content instead of a stale raw snapshot', async ({ page }) => {
@@ -538,6 +569,43 @@ test("reorder() places a pending group via getPendingAnchor, interleaved between
   const ids = await rig.evaluate(({ container }) =>
     [...container.querySelectorAll(':scope > .msg[data-msg-id]')].map(el => el.dataset.msgId));
   expect(ids).toEqual(['10', '50', '100']);
+});
+
+test('reorder() keys a routed composer group by its thinking root, not its leading route marker', async ({ page }) => {
+  const rig = await pendingAnchorRig(page, [
+    { id: 10, reply_to: 9, content: 'oldest done turn', status: 'done', topic: 'squid', completed_at: '2026-08-21T00:00:01Z' },
+    { id: 100, reply_to: 99, content: 'newest done turn', status: 'done', topic: 'squid', completed_at: '2026-08-21T00:00:09Z' },
+  ]);
+  await rig.evaluate(({ reconciler }) => reconciler.reconcile());
+
+  await rig.evaluate(({ container }) => {
+    const nodes = [
+      ['route', 'route-chain-marker'],
+      ['user', 'msg user'],
+      ['time', 'msg-time'],
+      ['thinking', 'msg assistant msg-thinking'],
+    ].map(([marker, className]) => {
+      const node = document.createElement('div');
+      node.className = className;
+      node.dataset.liveGroupId = 'live-50';
+      node.dataset.testMarker = marker;
+      return node;
+    });
+    const thinking = nodes[3];
+    thinking.dataset.msgId = '50';
+    thinking.dataset.orderAt = '2026-08-21T00:00:05Z';
+    container.prepend(...nodes);
+  });
+  await rig.evaluate(({ store }) => store.installHistoryPage(window.historyItemToStoreRows({
+    id: 50, reply_to: 49, prompt: 'still going', status: 'pending', topic: 'squid', agent: 'codex',
+  })));
+  const result = await rig.evaluate(({ reconciler }) => reconciler.reconcile());
+  expect(result.ok).toBe(true);
+
+  const order = await rig.evaluate(({ container }) => [...container.children]
+    .map(node => node.dataset.testMarker || node.dataset.msgId || null)
+    .filter(Boolean));
+  expect(order).toEqual(['10', 'route', 'user', 'time', 'thinking', '100']);
 });
 
 test('reorder() places multiple pending groups in creation order using only getPendingAnchor, never chaining them to each other', async ({ page }) => {

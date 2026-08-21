@@ -1830,6 +1830,9 @@ function existingPendingNodeRange(thinking) {
   const trailing = [];
   let el = thinking.previousElementSibling;
   while (el && (el.classList.contains('msg-time') || el.id === 'code-roots-prompt')) {
+    // Composer timestamps are explicitly owned. A mismatched or legacy
+    // timestamp is not a neutral spacer and must not be moved with this turn.
+    if (el.classList.contains('msg-time') && el.dataset.liveGroupId !== owner) return [thinking];
     trailing.push(el);
     el = el.previousElementSibling;
   }
@@ -7660,11 +7663,15 @@ function createHistoryRegistry({
     if (!ctx.store.isTerminal(turn.status)) {
       // Pending rendering remains owned by reconnectPendingItem: it owns the
       // complete status buffer, transport watcher, filtering and completion.
-      // Adopt its recovered-history bubble only for placement bookkeeping;
-      // never write into it or build an unwatched duplicate from store state.
+      // Adopt its existing bubble only for placement bookkeeping; never write
+      // into it or build an unwatched duplicate from store state. Recovered
+      // history wips are self-contained; composer-live turns use their
+      // ownership-safe full range so placement cannot split prompt/thinking.
       if (ctx.previousGroup && ctx.previousGroup.nodes.every(n => n.isConnected)) return ctx.previousGroup;
-      const existing = container.querySelector(`.msg.assistant.msg-thinking.history-item[data-msg-id="${turn.assistantMsgId}"]`);
-      return { nodes: existing ? [existing] : [] };
+      const existing = container.querySelector(`.msg.assistant.msg-thinking.history-item[data-msg-id="${turn.assistantMsgId}"]`)
+        || container.querySelector(`.msg.assistant.msg-thinking[data-live-group-id][data-msg-id="${turn.assistantMsgId}"]`);
+      const nodes = existing ? existingPendingNodeRange(existing) : [];
+      return { nodes, pendingRoot: existing || null };
     }
     if (!turn.raw) return null;
     // raw is the last full producer row and may lag sequenced live patches.
@@ -7735,11 +7742,14 @@ function createHistoryRegistry({
     appendHistoryRouteChainMarker(route, item, scratch);
     appendHistoryItem(item, scratch);
     const nodes = [...scratch.childNodes];
-    // Store-owned pending -> terminal transition: replace the old group in
-    // this reconcile pass. A direct-DOM transition has already removed its
-    // wip node and is adopted above, making this a no-op for that path.
+    // Store-owned pending -> terminal transition: remove the wip root in this
+    // reconcile pass. A recovered group contains only that root. A composer
+    // group also contains its route/prompt/timestamp; those are retained just
+    // like the existing direct-DOM completion path retains them.
     if (ctx.previousBucket === 'pending') {
-      for (const node of ctx.previousGroup?.nodes || []) node.remove();
+      const root = ctx.previousGroup?.pendingRoot;
+      if (root) root.remove();
+      else for (const node of ctx.previousGroup?.nodes || []) node.remove();
     }
     return { nodes };
   }
@@ -7793,7 +7803,7 @@ function createHistoryRegistry({
     for (const id of order.pending) {
       const group = groups.get(id);
       if (!group || !group.nodes.length) continue;
-      const anchor = getPendingAnchor(id, group.nodes[0]) ?? null;
+      const anchor = getPendingAnchor(id, group.pendingRoot ?? group.nodes[0]) ?? null;
       for (let j = group.nodes.length - 1; j >= 0; j -= 1) {
         const node = group.nodes[j];
         const nextNode = j === group.nodes.length - 1 ? anchor : group.nodes[j + 1];

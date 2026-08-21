@@ -1484,6 +1484,31 @@ without broadening pending adoption or changing render ownership yet.
 Regression tests prove an older completed timestamp is not stolen and a
 recovered wip remains a one-node range. PWA cache bumped to `v20260821-018`.
 
+## 2026-08-21: Stage 3(b) — composer-live range adoption
+
+Pending registry rendering now adopts both recovered history wips and
+ownership-tagged composer-live groups. Composer adoption uses the complete
+`existingPendingNodeRange()` so placement cannot separate the route/prompt/
+timestamp from its thinking bubble; the latter is recorded as `pendingRoot`.
+On a store-owned terminal transition only that root is removed, preserving
+the prompt-side range exactly as the direct-DOM completion path does. The
+collector now also rejects a `.msg-time` owned by another composer group.
+Pending content mutation, bubble construction, filtering, and transport
+watchers remain direct-DOM-owned. Registry regression coverage verifies full
+composer adoption, mismatched-timestamp rejection, and prompt preservation
+through terminal replacement. PWA cache bumped to `v20260821-019`.
+
+### Stage 3(b) composer adoption review fix — pending anchor uses the root
+
+Fixed a routed-composer placement bug caught in review: pending `reorder()`
+was passing `group.nodes[0]` to `getPendingAnchor`, but a composer's leading
+node is its route marker or user prompt and does not carry the thinking
+bubble's complete `(orderAt, msgId)` key. It now uses `group.pendingRoot`,
+falling back to `nodes[0]` for older/synthetic groups. Added a production-
+shape anchor test proving a routed composer that starts between two completed
+turns remains between them instead of jumping above the oldest history row.
+PWA cache bumped to `v20260821-020`.
+
 ## Next steps
 
 1. **Producer 2 Stage 3 (pending-turn reconciler cutover) — not started.**
