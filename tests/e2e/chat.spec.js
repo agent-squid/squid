@@ -509,15 +509,25 @@ test('websocket transport cancels a running chat without POST /cmd', async ({ pa
   });
   await mockBackend(page);
   await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+  await page.route('**/topics/default/session?agent=claude', async route => {
+    const cancelled = await page.evaluate(() => !!window.__chatCancelFrame);
+    return route.fulfill({ json: {
+      session_id: 'cancelled-session',
+      session_turn_count: cancelled ? 1 : 0,
+      cwd: null,
+    }});
+  });
   let cmdRequests = 0;
   await page.route('**/cmd', route => { cmdRequests++; return route.abort(); });
 
   await page.goto('/');
-  await sendMsg(page, 'cancel over ws');
+  await sendMsg(page, '#default@claude cancel over ws');
+  await expect(page.locator('#topic-chip .chip-turn-count')).toHaveText('·0t');
   await expect(page.locator(THINKING).locator('.thinking-kill-btn')).toBeVisible();
   await page.locator(THINKING).locator('.thinking-kill-btn').click();
 
   await expect(page.locator(THINKING)).toContainText('Cancelled.');
+  await expect(page.locator('#topic-chip .chip-turn-count')).toHaveText('·1t');
   expect(cmdRequests).toBe(0);
   expect(await page.evaluate(() => ({
     type: window.__chatCancelFrame?.type,

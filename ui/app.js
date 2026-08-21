@@ -2378,7 +2378,8 @@ function appendHistoryItems(items, fragment, boundary) {
       continue;
     }
 
-    if (!item.content && !item.context && !['pending', 'error', 'cancelled'].includes(item.status)) continue;
+    const nativeShell = item.source === 'shell' || String(item.prompt || '').trimStart().startsWith('!');
+    if (!item.content && !item.context && !nativeShell && !['pending', 'error', 'cancelled'].includes(item.status)) continue;
 
     if (item.status === 'pending') {
       // Queued/in-flight items already carry topic/agent/adhoc from the DB row, so a
@@ -5105,6 +5106,9 @@ async function sendMessage(text, opts = {}) {
         turnStatus = 'cancelled';
         controller.abort();
         renderCancelledThinking('Cancelled.');
+        if (!adhoc && !suppressChipTurnCount) {
+          await refreshComposerSessionCount(topic, resolvedAgent || agent);
+        }
       }
     } catch (error) {
       killBtn.disabled = false;
@@ -5686,6 +5690,9 @@ async function sendMessage(text, opts = {}) {
           turnStatus = 'cancelled';
           stopStatusFallback();
           renderCancelledThinking(cancelledTurnLabel(data.content));
+          if (!adhoc && !suppressChipTurnCount) {
+            await refreshComposerSessionCount(topic, resolvedAgent || agent);
+          }
           controller.abort();
           finalizeQuotaTracking();
         } else if (data.status === 'pending') {
@@ -7601,24 +7608,24 @@ function createHistoryRegistry({
 
   function render(turn, ctx) {
     if (!ctx.store.isTerminal(turn.status)) {
-      // Pending-turn *building* isn't this producer's cutover yet — a live
-      // bubble is still built and content-updated via the direct-DOM
-      // wip-bubble path (reconnectPendingItem/makeWipBubble). But adopt
-      // whatever node that path already built as this turn's registered
-      // group (instead of an inert `{ nodes: [] }`), so groups/bucketOf
-      // correctly track pending turns — real bookkeeping identity the
-      // eventual live-to-terminal cutover (ctx.previousBucket/nextBucket)
-      // needs. Reusing the same live node in place when it's still on
-      // screen (rather than re-querying every pass, which can run many
-      // times a second while streaming) also means never touching a node
-      // reconnectPendingItem is actively mutating. reorder() still only
-      // places order.completed, so this has no visible/positional effect.
+      // Pending rendering remains owned by reconnectPendingItem: it owns the
+      // complete status buffer, transport watcher, filtering and completion.
+      // Adopt its recovered-history bubble only for placement bookkeeping;
+      // never write into it or build an unwatched duplicate from store state.
       if (ctx.previousGroup && ctx.previousGroup.nodes.every(n => n.isConnected)) return ctx.previousGroup;
       const existing = container.querySelector(`.msg.assistant.msg-thinking.history-item[data-msg-id="${turn.assistantMsgId}"]`);
       return { nodes: existing ? [existing] : [] };
     }
-    const item = turn.raw;
-    if (!item) return null;
+    if (!turn.raw) return null;
+    // raw is the last full producer row and may lag sequenced live patches.
+    // Render lifecycle/content fields from the current normalized turn while
+    // retaining raw's full-fidelity display metadata.
+    const item = {
+      ...turn.raw,
+      status: turn.status,
+      content: turn.content,
+      completed_at: turn.completedAt ?? turn.raw.completed_at,
+    };
     // Matches appendHistoryItems' own skip for a successful completed row
     // with nothing to show (no reply text, no tool trace). Error/cancelled
     // rows still have a synthesized terminal label in appendHistoryItem.
@@ -7626,7 +7633,8 @@ function createHistoryRegistry({
     // installs every row into the store unconditionally, so this filter has
     // to be reapplied here rather than upstream, or the store-driven path
     // would render bubbles the direct-DOM path silently never did.
-    if (!item.content && !item.context && !['error', 'cancelled'].includes(item.status)) return { nodes: [] };
+    const nativeShell = item.source === 'shell' || String(item.prompt || '').trimStart().startsWith('!');
+    if (!item.content && !item.context && !nativeShell && !['error', 'cancelled'].includes(item.status)) return { nodes: [] };
 
     // The first time this id is completed-bucket-owned by this reconciler
     // (ctx.previousBucket is 'pending' or null, never 'completed'), a node
@@ -7676,7 +7684,14 @@ function createHistoryRegistry({
     const route = historyRouteChainMarkerForItem(item, nextItem, prevItem);
     appendHistoryRouteChainMarker(route, item, scratch);
     appendHistoryItem(item, scratch);
-    return { nodes: [...scratch.childNodes] };
+    const nodes = [...scratch.childNodes];
+    // Store-owned pending -> terminal transition: replace the old group in
+    // this reconcile pass. A direct-DOM transition has already removed its
+    // wip node and is adopted above, making this a no-op for that path.
+    if (ctx.previousBucket === 'pending') {
+      for (const node of ctx.previousGroup?.nodes || []) node.remove();
+    }
+    return { nodes };
   }
 
   // Re-places every up-to-date completed group each pass (not just this
@@ -7784,7 +7799,10 @@ function insertCompletedHistoryItem(item, { reconcile = false } = {}) {
   // bookkeeping has no idea this id was ever rendered outside of it. Clear
   // it here, the one place every direct-DOM completed-item insert funnels
   // through, instead of chasing every call site that might have dirtied it.
-  if (item.id != null && historyReconciler) transcriptStore?.clearReconciled([item.id]);
+  if (item.id != null && historyReconciler) {
+    historyReconciler.forget(item.id);
+    transcriptStore?.clearReconciled([item.id]);
+  }
   return bubble;
 }
 
@@ -7894,6 +7912,10 @@ async function replacePendingWithStoredItem(item, wipBubble, onStored = null) {
     const wipRect = wipBubble.getBoundingClientRect();
     const wipAboveViewport = wipRect.bottom <= messages.getBoundingClientRect().top;
     wipBubble.remove();
+    // This direct-DOM completion path removed a group the reconciler may
+    // previously have adopted. Forget its detached node before any unrelated
+    // reconcile/reorder pass can put it back.
+    historyReconciler?.forget(item.id);
     if (wipAboveViewport) messages.scrollTop -= wipRect.height;
     if (!shouldShowNewResponse(data)) return;
     insertCompletedHistoryItem(data);
@@ -8424,7 +8446,9 @@ async function discoverRealtimeTurn(message, { reconcile = false } = {}) {
     if (item.status === 'pending') {
       const bubble = insertPendingHistoryItem(item);
       reconnectPendingItem(item, bubble);
-    } else if (item.content || item.context || ['error', 'cancelled'].includes(item.status)) {
+    } else if (item.content || item.context
+        || item.source === 'shell' || String(item.prompt || '').trimStart().startsWith('!')
+        || ['error', 'cancelled'].includes(item.status)) {
       insertCompletedHistoryItem(item, { reconcile });
       if (item.agent && !item.adhoc) refreshComposerSessionCount(item.topic || 'default', item.agent);
     }

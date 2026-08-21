@@ -118,6 +118,15 @@
       registry.reorder(store.getOrderedTurnIds(), new Map(groups));
     }
 
+    // A still-unmigrated producer can replace/remove one rendered group
+    // directly. Drop only that id's registry identity so a later placement
+    // pass cannot reattach its now-detached nodes. Store state and dirtiness
+    // remain the caller's responsibility.
+    function forget(assistantMsgId) {
+      groups.delete(assistantMsgId);
+      bucketOf.delete(assistantMsgId);
+    }
+
     // For a caller that discards its own rendered nodes outside the
     // reconciler — a filter/scope change or a jump that wipes and rebuilds
     // its DOM region directly, rather than an incremental store update. The
@@ -151,6 +160,7 @@
       reconcile,
       reconcileAndAck,
       reposition,
+      forget,
       reset,
       getGroup: assistantMsgId => groups.get(assistantMsgId),
       getGroupCount: () => groups.size,

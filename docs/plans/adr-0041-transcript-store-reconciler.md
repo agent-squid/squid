@@ -1425,6 +1425,36 @@ codex-unflagged casualty of the same semantic change, fixed in a session
 prior to this one) reconfirmed passing. No `ui/app.js` changes this
 session — only tests — so no PWA cache bump.
 
+## 2026-08-21: Stage 3(b) pre-publish review remediation — premature pending ownership rolled back
+
+The first attempt to make `createHistoryRegistry.render()` build and patch
+pending bubbles was blocked in review and corrected before publish. It gave
+the reconciler only partial ownership while `reconnectPendingItem` still
+owned filtering, the transport watcher, the complete `statusBuf`, and
+completion. That produced four live-path hazards: store patches could
+truncate the richer watcher display; filtered rows could be rebuilt anyway;
+store-built bubbles had no watcher; and direct-DOM completion could leave a
+detached adopted group registered and later resurrected by `reorder()`.
+
+Pending rendering is therefore back at the established boundary: the
+registry adopts self-contained `.history-item` wip bubbles for placement but
+does not build or mutate them. `reconciler.forget(id)` now lets direct-DOM
+handoffs remove one adopted identity without resetting unrelated groups;
+`replacePendingWithStoredItem` and `insertCompletedHistoryItem` call it before
+clearing/assuming ownership. Terminal rendering now overlays current
+`turn.status`, `turn.content`, and `turn.completedAt` onto the full-fidelity
+raw row, preventing a stale snapshot from dropping the live final response.
+Empty successful native-shell turns are explicitly renderable in history and
+realtime discovery so their exit metadata/footer is not lost.
+
+Regression coverage: pending store rows remain unwatched/unbuilt; adopted
+pending content is not overwritten by partial store narrative; `forget()`
+excludes a detached group from later placement; terminal rendering uses live
+content; and empty native-shell success renders. Focused
+`history-registry.spec.js` + `history-store-renderer.spec.js` +
+`reconciler.spec.js`: 35/35, `--workers=1`. PWA cache bumped to
+`v20260821-015`.
+
 ## Next steps
 
 1. **Producer 2 Stage 3 (pending-turn reconciler cutover) — not started.**

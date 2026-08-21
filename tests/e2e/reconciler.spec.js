@@ -44,6 +44,9 @@ async function freshRig(page) {
 }
 
 test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register = () => Promise.resolve({});
+  });
   await mockBackend(page);
   await page.goto('/');
 });
@@ -284,4 +287,20 @@ test('reposition() re-places already-rendered groups without requiring a dirty i
   const lastReorder = await rig.evaluate(({ calls }) => calls.reorder.at(-1));
   expect(lastReorder.completed).toEqual([90]);
   expect(lastReorder.groupIds).toEqual([90]);
+});
+
+test('forget() drops one direct-DOM-owned group so reorder cannot resurrect it', async ({ page }) => {
+  const rig = await freshRig(page);
+  await rig.evaluate(({ store }) => store.applyMessagePatch(100, {
+    role: 'assistant', status: 'running', queued_at: '2026-08-17T00:00:00Z',
+  }, 1));
+  await rig.evaluate(({ reconciler }) => reconciler.reconcile());
+  expect(await rig.evaluate(({ reconciler }) => reconciler.getGroupCount())).toBe(1);
+
+  await rig.evaluate(({ reconciler }) => reconciler.forget(100));
+  expect(await rig.evaluate(({ reconciler }) => reconciler.getGroup(100))).toBeUndefined();
+  await rig.evaluate(({ reconciler }) => reconciler.reposition());
+  const lastReorder = await rig.evaluate(({ calls }) => calls.reorder.at(-1));
+  expect(lastReorder.pending).toContain(100); // store still knows the turn
+  expect(lastReorder.groupIds).not.toContain(100); // detached group cannot be placed
 });

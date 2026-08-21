@@ -43,19 +43,27 @@ async function freshRig(page, items = []) {
 }
 
 test.beforeEach(async ({ page }) => {
+  // This suite validates source modules served by the test web server. Do
+  // not let a prior PWA worker race navigation and supply a mixed cache
+  // generation (which otherwise intermittently leaves one of the globals
+  // below undefined between tests).
+  await page.addInitScript(() => {
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register = () => Promise.resolve({});
+    }
+  });
   await mockBackend(page);
   await page.goto('/');
 });
 
-test('render() no-ops for a pending turn and leaves it dirty-cleared with nothing in the DOM', async ({ page }) => {
+test('render() does not build an unwatched pending turn from store state', async ({ page }) => {
   const rig = await freshRig(page, [
-    { id: 5, reply_to: 4, prompt: 'still going', status: 'pending', topic: 'squid', agent: 'codex' },
+    { id: 5, reply_to: 4, prompt: 'still going', content: 'partial reply', status_raw: 'working…', status: 'pending', topic: 'squid', agent: 'codex' },
   ]);
   const result = await rig.evaluate(({ reconciler }) => reconciler.reconcile());
   expect(result.ok).toBe(true);
   expect(result.reconciledIds).toEqual([5]);
-  const html = await rig.evaluate(({ container }) => container.innerHTML);
-  expect(html).toBe('');
+  await expect(page.locator('#history-registry-test-container')).toBeEmpty();
 });
 
 // Pending-turn *rendering* is still direct-DOM (reconnectPendingItem builds
@@ -72,6 +80,9 @@ test('render() adopts an already-on-screen wip bubble for a pending turn, and re
     bubble.className = 'msg assistant msg-thinking history-item';
     bubble.dataset.msgId = '80';
     bubble.dataset.testMarker = 'original';
+    const live = document.createElement('div');
+    live.className = 'thinking-live';
+    bubble.appendChild(live);
     container.appendChild(bubble);
   });
   await rig.evaluate(({ store }) => store.installHistoryPage(window.historyItemToStoreRows({
@@ -96,6 +107,9 @@ test('render() adopts an already-on-screen wip bubble for a pending turn, and re
   });
   expect(stableAcrossPasses).toBe(true);
   await expect(bubbles).toHaveAttribute('data-test-marker', 'mutated-live');
+  // The transport watcher owns this content; a store reconcile must not
+  // overwrite it with its incomplete narrative subset.
+  await expect(bubbles.locator('.thinking-live')).toHaveText('');
 });
 
 // Safety-boundary invariant, not a feature test: a composer-live thinking
@@ -190,6 +204,54 @@ test('render() adopts the real completed node on a pending->completed transition
   const nodes = page.locator('#history-registry-test-container [data-msg-id="90"]');
   await expect(nodes).toHaveCount(1); // not duplicated
   await expect(nodes).toHaveAttribute('data-test-marker', 'real-completed-node'); // adopted the real node, not the stale wip bubble
+});
+
+test('render() atomically removes its adopted pending bubble when the store owns completion', async ({ page }) => {
+  const rig = await freshRig(page);
+  await rig.evaluate(({ container }) => {
+    const wip = document.createElement('div');
+    wip.className = 'msg assistant msg-thinking history-item';
+    wip.dataset.msgId = '91';
+    container.appendChild(wip);
+  });
+  await rig.evaluate(({ store }) => store.installHistoryPage(window.historyItemToStoreRows({
+    id: 91, reply_to: 89, prompt: 'still going', content: 'partial', status: 'pending', topic: 'squid', agent: 'codex',
+  })));
+  await rig.evaluate(({ reconciler }) => reconciler.reconcile());
+  await rig.evaluate(({ store }) => store.installHistoryPage(window.historyItemToStoreRows({
+    id: 91, reply_to: 89, prompt: 'still going', content: 'finished', status: 'done',
+    topic: 'squid', agent: 'codex', completed_at: '2026-08-21T00:00:00Z',
+  })));
+  const result = await rig.evaluate(({ reconciler }) => reconciler.reconcile());
+  expect(result.ok).toBe(true);
+  await expect(page.locator('#history-registry-test-container > .msg.assistant[data-msg-id="91"]')).toHaveCount(1);
+  await expect(page.locator('#history-registry-test-container .msg-thinking[data-msg-id="91"]')).toHaveCount(0);
+  await expect(page.locator('#history-registry-test-container .msg.assistant[data-msg-id="91"]')).toContainText('finished');
+});
+
+test('terminal render uses live turn content instead of a stale raw snapshot', async ({ page }) => {
+  const rig = await freshRig(page, [{
+    id: 92, reply_to: 89, prompt: 'work', content: '', status: 'pending', topic: 'squid', agent: 'codex',
+  }]);
+  await rig.evaluate(({ store, reconciler }) => {
+    reconciler.reconcile();
+    store.applyRunEvent(92, 1, 'text', { delta: 'live final answer' });
+    store.applyRunEvent(92, 2, 'status', { status: 'done', completed_at: '2026-08-21T00:00:00Z' });
+  });
+  const result = await rig.evaluate(({ reconciler }) => reconciler.reconcile());
+  expect(result.ok).toBe(true);
+  await expect(page.locator('#history-registry-test-container > .msg.assistant[data-msg-id="92"]')).toContainText('live final answer');
+});
+
+test('terminal render preserves an empty successful native-shell result', async ({ page }) => {
+  const rig = await freshRig(page, [{
+    id: 93, reply_to: 89, prompt: '! true', content: '', status: 'done', source: 'shell',
+    topic: 'squid', completed_at: '2026-08-21T00:00:00Z', stats: { exit_code: 0, duration_ms: 2 },
+  }]);
+  const result = await rig.evaluate(({ reconciler }) => reconciler.reconcile());
+  expect(result.ok).toBe(true);
+  await expect(page.locator('#history-registry-test-container > .msg.assistant.shell-result[data-msg-id="93"]')).toHaveCount(1);
+  await expect(page.locator('#history-registry-test-container .shell-footer')).toBeVisible();
 });
 
 test('render() builds the same bubble appendHistoryItem produces for a completed turn', async ({ page }) => {
