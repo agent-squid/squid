@@ -338,6 +338,35 @@
       return { ok: true, dirty: dirtySnapshot() };
     }
 
+    // ADR-0041 Stage 4 prerequisite: fill a turn's render payload (raw) when
+    // a producer has a denormalized row but only ever fed identity/ordering
+    // fields. The WS lifecycle producer's message.changed branch
+    // (applyMessagePatch) carries id/role/status/content but never the full
+    // display row (topic/agent/adhoc/prompt/...), so a turn discovered purely
+    // via that transport has no raw and the pending renderer cannot build or
+    // adopt from it. attachRaw fills only `raw` — never content/status/
+    // run_seq/watermark — so a still-streaming turn's live-accumulated fields
+    // are not clobbered or double-counted (installHistoryPage would be: it
+    // replaces content authoritatively while leaving lastRunSeqByAssistantId
+    // untouched, so the next applyRunEvent delta would re-append text the row
+    // already contained). First writer wins: an existing raw (e.g. a WS
+    // snapshot's chat_messages row) is never overwritten by a later discovery
+    // fetch of a different shape. An unknown msg_id is a silent no-op, not an
+    // error — a flow step whose message.changed was missed (or discovered via
+    // the SSE polling fallback, which never fed the store) simply isn't
+    // tracked here yet; a later snapshot or history load installs it.
+    function attachRaw(msgId, raw) {
+      if (msgId == null) return { ok: false, error: 'attachRaw: msg_id required', dirty: dirtySnapshot() };
+      if (raw == null) return { ok: false, error: 'attachRaw: raw required', dirty: dirtySnapshot() };
+      const existing = messagesById.get(msgId);
+      if (!existing) return { ok: true, dirty: dirtySnapshot(), noop: true };
+      if (existing.raw != null) return { ok: true, dirty: dirtySnapshot(), noop: true };
+      messagesById.set(msgId, { ...existing, raw });
+      const turn = turnsByAssistantId.get(msgId);
+      if (turn) turnsByAssistantId.set(msgId, { ...turn, raw });
+      return { ok: true, dirty: dirtySnapshot() };
+    }
+
     function setVisibleScope(scope) {
       view.visibleScope = scope;
       return { ok: true, dirty: dirtySnapshot() };
@@ -377,6 +406,7 @@
       installSnapshot,
       applyMessagePatch,
       applyRunEvent,
+      attachRaw,
       setVisibleScope,
       getMessage: msgId => messagesById.get(msgId),
       getTurn: assistantMsgId => turnsByAssistantId.get(assistantMsgId),

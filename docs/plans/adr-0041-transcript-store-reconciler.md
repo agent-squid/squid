@@ -1533,6 +1533,94 @@ again placement-only; preview mutation stays deferred until a store-built
 pending bubble has explicit single-writer ownership and watcher attachment.
 PWA cache bumped to `v20260821-022`.
 
+### Stage 3(b) — store-built recovered pending bubbles
+
+Recovered HTTP-history pending rows now skip `appendHistoryItems`'s direct-DOM
+construction under `renderer=store`. The registry builds the existing
+`makeWipBubble` shape, places it through the pending reorder pass, and only
+then invokes `reconnectPendingItem`; watcher mounting is recorded before the
+callback so re-entry cannot attach twice. Existing recovered and composer-live
+bubbles remain adopt-only and are never preview-patched, preserving the
+transport watcher's single-writer ownership. Construction is restricted to
+denormalized HTTP rows carrying their own `prompt`; raw WS snapshot rows lack
+the display/scope fields needed to build safely and remain discovery-owned.
+Regression coverage proves post-placement, one-time watcher attachment and
+unchanged watcher-owned content. Focused registry/renderer/reconciler suites:
+41/41; recovered-pending and filter-round-trip chat paths: 20/20. PWA cache
+bumped to `v20260821-023`.
+
+### 2026-08-21: Stage 3(b) prerequisite — turn.raw filled for WS-lifecycle-discovered turns
+
+Closed the last data gap a pending renderer faces on the WS lifecycle
+producer: `turn.raw` was entirely absent for a turn discovered purely via
+that transport (`shadowApplyEvent`'s `message.changed` branch feeds
+`applyMessagePatch` with identity/status/content only, never the denormalized
+display row). The direct-DOM discovery path (`discoverRealtimeTurn` /
+`attachFlowStep`) already fetches the authoritative `/chat/{id}/status` row
+to build its own bubble; that same row is now also fed into the store, so a
+later render pass can build/adopt from it.
+
+**Store (`transcript-store.js`):** new `attachRaw(msgId, raw)` action —
+raw-only, watermark-independent, first-writer-wins. It sets only `raw` on an
+existing message and its turn, never content/status/run_seq/
+`lastAppliedEventId`, and never marks the turn dirty. This is deliberate:
+`installHistoryPage` cannot serve this — its authoritative merge overwrites
+`content` while leaving `lastRunSeqByAssistantId` untouched, so a
+still-streaming turn's next `applyRunEvent` delta would re-append text the
+row already contained (double-count). The first-writer-wins guard keeps a WS
+snapshot's raw `chat_messages` row from being replaced by a discovery fetch
+of a different (denormalized, prompt-bearing) shape, which would otherwise
+make `buildPending` construct a bubble the snapshot producer is explicitly
+still discovery-owned for.
+
+**Wiring (`ui/app.js`):** `shadowAttachRealtimeRow(item)` calls `attachRaw`
+and is invoked from `discoverRealtimeTurn` and `attachFlowStep` right after
+the `/status` fetch resolves, in the same synchronous block as the
+direct-DOM bubble insert — so no `reconcile()` can run between raw-attach
+and DOM placement, and the pending renderer still adopts the direct-DOM
+bubble rather than building a second one. Store-only, no render change.
+
+Tests: `transcript-store.spec.js` "attachRaw fills turn.raw without touching
+live content/status or re-dirtying the turn" (raw-only + watermark/no-dirty
+proof), "attachRaw is a first-writer-wins no-op when a raw payload already
+exists" (snapshot raw survives a discovery fetch), and "a
+message.changed-discovered turn gains its full row on turn.raw from the
+discovery fetch, without overwriting live content" (UI-driven, WS lifecycle
+producer block). Verified: `transcript-store.spec.js` 38/38,
+`history-registry.spec.js` + `reconciler.spec.js` +
+`history-store-renderer.spec.js` 41/41, and the targeted `chat.spec.js`
+discovery/filter/flow/recovered-pending selection 24/24 (all `--workers=1`,
+`--retries=2`). PWA cache bumped to `v20260821-024`.
+
+### 2026-08-21: Stage 3(b) — registered pending completion transitions atomically
+
+`replacePendingWithStoredItem` now hands a terminal authoritative row to the
+store/reconciler when the exact wip bubble is already registered as that
+turn's `pendingRoot`. The store bucket change and registry render happen in
+one synchronous pass: terminal rendering removes the old thinking root,
+builds the completed range from the fetched row plus live normalized fields,
+and reorders it without the former direct-DOM remove/forget/insert gap.
+Watcher cleanup remains where it was — every EventSource/WebSocket/poller
+caller stops itself before invoking replacement — so the reconciler never
+owns transport teardown or the kill-button listener.
+
+The handoff is deliberately identity-gated. An unregistered live bubble (or
+a filtered/search result that must disappear rather than render) stays on the
+existing direct-DOM fallback; otherwise the reconciler would have no previous
+group telling it which node to remove. A stable non-transitioning sibling is
+used as the scroll anchor for non-bottom readers, avoiding incorrect whole-
+height compensation when the pending root and completed range lie on opposite
+sides of the viewport. Failed registry rendering also falls back safely via
+the existing forget/direct-insert path.
+
+Success is keyed to this message's presence in `reconciledIds`, not the
+pass-wide `ok`: an unrelated dirty turn may fail in the same pass without
+forcing a duplicate direct-DOM fallback for a completion that did reconcile.
+
+Verified: registry/renderer/reconciler suites 41/41 and the full real
+recovered-pending chat block 19/19. PWA cache bumped to
+`v20260821-025`.
+
 1. **Producer 2 Stage 3 (pending-turn reconciler cutover) — not started.**
    (Separately: the completed-turn duplicate-render bug found while scoping
    this — direct-DOM bypass call sites vs. `render()`'s dirty-id
@@ -1541,60 +1629,32 @@ PWA cache bumped to `v20260821-022`.
    Sharpened by the 2026-08-21 scoping entries into four concrete gaps: (a)
    — **done** — `createHistoryRegistry.reorder()` now places pending groups
    too, via a new `getPendingAnchor` option (see the entry directly above);
-   (b) `render()` must reuse/patch DOM nodes in place per pending turn (via
-   `ctx.previousGroup`) rather than rebuild on every delta, or stale nodes
-   leak and the kill button's listener gets torn down repeatedly — **the
-   adoption half of this is done** (`render()` reuses the same wip-bubble
-   node across passes instead of re-querying or rebuilding), but adoption
-   alone isn't the render cutover — nothing yet makes `render()` *build* a
-   pending node from store state, or patch an already-adopted one's content
-   on a delta, and this is now the one remaining piece of (a)/(b) that's
-   still unstarted. **New, confirmed by the 2026-08-21 pre-publish review
-   entry above:** whatever eventually builds or adopts a composer-live
-   turn's group must collect its real, ownership-safe multi-node range
-   (route-marker?, user bubble, msg-time, thinking — see `liveGroupElements`)
-   before adoption's selector is ever broadened to match it — reusing
-   `liveGroupElements` naively is not safe for a *recovered* wip-bubble
-   adoption (no ownership check on the backward walk; risks stealing an
-   unrelated older completed turn's own trailing timestamp), so this needs
-   its own purpose-built range-collector, the same way `existingCompletedNodeRange`
-   is a purpose-built forward walk rather than a reuse of something designed
-   for a different context. A regression test
-   (`history-registry.spec.js`, "render() never adopts or repositions a
-   composer-live thinking bubble") pins today's boundary (composer-live
-   bubbles lack `.history-item` and are therefore never touched) — that test
-   will need to change, deliberately, the day this is actually built; (c) —
+   (b) — **partial** — `render()` reuses adopted nodes and now builds recovered
+   HTTP-history wips once, with watcher attachment deferred until after
+   placement. Existing watcher-owned bubbles deliberately remain adopt-only:
+   the store cannot faithfully reconstruct tool/queue ordering yet, so
+   preview patching would reintroduce two divergent writers. Pure WS rows are
+   also not built because they lack the denormalized prompt/scope payload;
+   discovery still owns those. (c) —
    **done** — the live narrative buffer now has a
    store home (`turn.narrative` for live deltas, `turn.raw.status_raw` for
    already-fetched rows), with `chat.status` wired end-to-end on WS, and (d)
    — **done** — `turn.content` now tracks live-streamed text independent of
    a stale `turn.raw`.
    The remaining WS narrative frames and SSE's sequenced narrative frames are
-   now wired (see the entry above). `render()` actually building or
-   patching pending nodes (the remainder of (b)) is still the actual risky
-   work and is unstarted — `renderer=store` is the **live default** today
-   (not opt-in), so once `render()` starts building or mutating pending
-   nodes itself (rather than only adopting direct-DOM's), it takes effect in
-   production immediately; budget it with its own dedicated before/after
-   suite rounds when it's picked up, same as producer 1's Stage 3/4 needed
-   (and same as gap (a) itself needed this session, including a redesign of
-   one test that didn't isolate what it claimed to on the first attempt —
-   see the entry above). Also still open: `turn.raw` is entirely
-   absent for a turn discovered purely via WS lifecycle events
-   (`shadowApplyEvent`'s `message.changed` branch calls `applyMessagePatch`
-   with no `raw` field) — unlike a snapshot- or history-sourced pending row,
-   so a pending renderer can't always assume `turn.raw.topic`/`agent`/etc.
-   exist; needs either a fallback fetch (mirroring how `makeWipBubble` gets
-   its fields from the initial discovery response today) or accepting a
-   render() failure (dirty-and-retried, per the existing failure contract)
-   until a snapshot fills it in. Also still open from the prior entry:
-   wiring the reconciler's atomic live-to-terminal bucket transition
-   (`previousBucket`/`nextBucket`) to replace `replacePendingWithStoredItem`'s
-   direct-DOM swap, including explicit removal of the old bucket's nodes
-   (nothing does this automatically — `reorder()` never removes a node
-   absent from the new `groups` map); and deciding how
-   `reconnectPendingItem`'s kill-button/cancel wiring and EventSource
-   reattachment survive once the wip bubble node is reconciler-owned. Budget
+   now wired (see the entry above). `turn.raw` was entirely absent for a turn
+   discovered purely via WS lifecycle events; that gap is now closed — the
+   discovery path's own `/chat/{id}/status` fetch feeds its denormalized row
+   into the store via a new raw-only `attachRaw` action (see the entry
+   directly above), so a pending renderer can rely on `turn.raw.topic`/
+   `agent`/etc. existing for any WS-lifecycle-discovered turn, not just
+   snapshot- or history-sourced ones. The registered live-to-terminal bucket
+   transition is now wired through `replacePendingWithStoredItem`; unregistered
+   or hidden completions retain the direct-DOM fallback. Watcher/cancel
+   teardown deliberately remains transport-owned and runs before that handoff.
+   The remaining cutover decision is whether adopted watcher-owned previews
+   should ever move to store mutation (currently unsafe because tool and SSE
+   queue ordering are not faithfully represented there). Budget
    this the same way producer 1's own Stage 3/4 needed — three rounds of
    gap-discovery via full before/after suite runs, not inspection.
 2. Producers 3 and 4 need the same two-part treatment (Stage 4 field-carry

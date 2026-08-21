@@ -66,6 +66,53 @@ test('render() does not build an unwatched pending turn from store state', async
   await expect(page.locator('#history-registry-test-container')).toBeEmpty();
 });
 
+test('render() builds a recovered pending bubble and mounts its watcher once, after placement', async ({ page }) => {
+  const rig = await page.evaluateHandle(() => {
+    const store = window.SquidTranscriptStore.createTranscriptStore();
+    const container = document.createElement('div');
+    container.id = 'history-registry-test-container';
+    document.body.appendChild(container);
+    const mounts = [];
+    const registry = window.createHistoryRegistry({
+      container,
+      buildPending(item) {
+        const bubble = document.createElement('div');
+        bubble.className = 'msg assistant msg-thinking history-item';
+        bubble.dataset.msgId = String(item.id);
+        const live = document.createElement('div');
+        live.className = 'thinking-live';
+        live.textContent = 'watcher-owned';
+        bubble.appendChild(live);
+        return bubble;
+      },
+      mountPending(item, bubble) {
+        mounts.push({ id: item.id, connected: bubble.isConnected });
+      },
+    });
+    const reconciler = window.SquidReconciler.createReconciler({ store, registry });
+    store.installHistoryPage(window.historyItemToStoreRows({
+      id: 6, reply_to: 5, prompt: 'recover me', status: 'pending', topic: 'squid',
+    }));
+    return { store, container, reconciler, mounts };
+  });
+
+  const first = await rig.evaluate(({ reconciler, mounts }) => {
+    const result = reconciler.reconcile();
+    return { result, mounts: [...mounts] };
+  });
+  expect(first.result.ok).toBe(true);
+  expect(first.mounts).toEqual([{ id: 6, connected: true }]);
+  await expect(page.locator('#history-registry-test-container .msg-thinking[data-msg-id="6"]')).toHaveCount(1);
+
+  const second = await rig.evaluate(({ store, reconciler, mounts }) => {
+    store.applyRunEvent(6, 1, 'text', { delta: 'store delta' });
+    reconciler.reconcile();
+    return mounts.length;
+  });
+  expect(second).toBe(1);
+  await expect(page.locator('#history-registry-test-container .thinking-live')).toHaveText('watcher-owned');
+});
+
 // Pending-turn *rendering* is still direct-DOM (reconnectPendingItem builds
 // and live-mutates the wip bubble) — but render() now adopts whatever node
 // that path already built as the turn's registered group, real bookkeeping

@@ -166,6 +166,63 @@ test('turn.content tracks the live-accumulated message content, independent of a
   expect(turn.raw.content).toBe('stale snapshot text');
 });
 
+// ADR-0041 Stage 4 prerequisite: attachRaw fills the render payload for a
+// turn discovered via a producer that only ever fed identity/ordering fields
+// (WS lifecycle events), without disturbing the live-accumulated state a
+// still-streaming turn already has. installHistoryPage cannot serve this —
+// its authoritative merge would overwrite content and leave
+// lastRunSeqByAssistantId behind, double-counting the next delta.
+test('attachRaw fills turn.raw without touching live content/status or re-dirtying the turn', async ({ page }) => {
+  const store = await freshStore(page);
+  await store.evaluate(s => {
+    s.applyRunEvent(70, 0, 'text', { delta: 'live' }, 1);
+    s.applyMessagePatch(70, { status: 'pending' }, 2);
+    s.clearReconciled([70]);
+  });
+  const watermark = await store.evaluate(s => s.getLastAppliedEventId());
+  expect(await store.evaluate(s => s.getTurn(70).raw)).toBeUndefined();
+
+  const result = await store.evaluate(s => s.attachRaw(70, {
+    id: 70, role: 'assistant', topic: 'default', agent: 'claude', adhoc: false,
+    prompt: 'hi', status: 'pending', content: 'stale db content',
+  }));
+  expect(result.ok).toBe(true);
+
+  const after = await store.evaluate(s => ({ msg: s.getMessage(70), turn: s.getTurn(70), id: s.getLastAppliedEventId() }));
+  expect(after.turn.raw).toMatchObject({ topic: 'default', agent: 'claude', prompt: 'hi' });
+  // Raw-only: the live-accumulated content and status are untouched, the
+  // watermark does not move, and the cleared turn is not re-dirtied.
+  expect(after.msg.content).toBe('live');
+  expect(after.msg.status).toBe('pending');
+  expect(after.id).toBe(watermark);
+  expect(result.dirty).not.toContain(70);
+});
+
+test('attachRaw is a first-writer-wins no-op when a raw payload already exists', async ({ page }) => {
+  const store = await freshStore(page);
+  await store.evaluate(s => s.installSnapshot({ messages: [
+    { msg_id: 71, role: 'assistant', status: 'pending', raw: { id: 71, topic: 'snapshot-topic' } },
+  ] }, 1));
+
+  const again = await store.evaluate(s => s.attachRaw(71, { id: 71, role: 'assistant', topic: 'discovery-topic', prompt: 'hi' }));
+  expect(again.noop).toBe(true);
+  // The snapshot's own raw row wins; the discovery fetch must not replace it
+  // (a WS snapshot row has no `prompt`, so replacing it would wrongly make
+  // buildPending construct a bubble from a different shape than Stage 4 intends).
+  expect((await store.evaluate(s => s.getTurn(71))).raw.topic).toBe('snapshot-topic');
+});
+
+test('attachRaw on an untracked msg_id is a silent no-op, not an error', async ({ page }) => {
+  const store = await freshStore(page);
+  // A flow step discovered via the SSE polling fallback (or whose
+  // message.changed was missed) is not in the store — attaching raw there
+  // must not be treated as a failure that spams the console each poll.
+  const result = await store.evaluate(s => s.attachRaw(72, { id: 72, role: 'assistant', prompt: 'hi' }));
+  expect(result.ok).toBe(true);
+  expect(result.noop).toBe(true);
+  expect(await store.evaluate(s => s.getTurn(72))).toBeUndefined();
+});
+
 test('event_id at or below the watermark is a no-op; run_seq at or below its own watermark is a no-op', async ({ page }) => {
   const store = await freshStore(page);
   await store.evaluate(s => s.applyRunEvent(11, 5, 'text', { delta: 'a' }, 100));
@@ -571,6 +628,36 @@ test.describe('WS lifecycle events producer (shadow mode)', () => {
     const message = await page.evaluate(() => window.__transcriptStore.getMessage(12));
     // The store, in contrast, is fed straight from the frame's own payload.
     expect(message).toMatchObject({ role: 'assistant', status: 'done', content: 'frame content', replyTo: 11 });
+  });
+
+  // ADR-0041 Stage 4 prerequisite: a message.changed frame carries identity/
+  // status/content but not the denormalized display row, so the store has no
+  // turn.raw for it. The discovery fetch (discoverRealtimeTurn) already has
+  // the full row — it must feed it into the store as raw without letting the
+  // row's content clobber what the frame (or later chat.text deltas) set.
+  test('a message.changed-discovered turn gains its full row on turn.raw from the discovery fetch, without overwriting live content', async ({ page }) => {
+    await page.route('**/chat/15/status', r => r.fulfill({ json: {
+      id: 15, role: 'assistant', reply_to: 14, topic: 'default', agent: 'claude',
+      adhoc: false, status: 'pending', prompt: 'hello', content: 'stale db content',
+    }}));
+    await page.reload();
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'message.changed', event_id: 1, msg_id: 15,
+      payload: { id: 15, role: 'assistant', status: 'pending', reply_to: 14 },
+    }));
+
+    // Wait for discovery's own /chat/{id}/status fetch to resolve and build
+    // the bubble (the same fetch that attaches raw).
+    await expect(page.locator('.msg.assistant.msg-thinking.history-item[data-msg-id="15"]'))
+      .toBeVisible();
+
+    const turn = await page.evaluate(() => window.__transcriptStore.getTurn(15));
+    expect(turn.raw).toMatchObject({ topic: 'default', agent: 'claude', prompt: 'hello' });
+    expect(turn.status).toBe('pending');
+    // The discovery row's content must not leak into the message — raw-only.
+    expect(await page.evaluate(() => window.__transcriptStore.getMessage(15).content)).toBeUndefined();
   });
 
   test('chat.text run-events accumulate into the store message content in run_seq order', async ({ page }) => {

@@ -2260,7 +2260,17 @@ const historyReconciler = (historyRendererMode === 'store' && transcriptStore
   && window.createHistoryRegistry && window.SquidReconciler)
   ? window.SquidReconciler.createReconciler({
       store: transcriptStore,
-      registry: window.createHistoryRegistry({ container: messages, getAnchor: historyStoreAnchor, getPendingAnchor: historyStorePendingAnchor }),
+      registry: window.createHistoryRegistry({
+        container: messages,
+        getAnchor: historyStoreAnchor,
+        getPendingAnchor: historyStorePendingAnchor,
+        // Only HTTP-history rows are full denormalized render payloads. A WS
+        // snapshot's raw assistant row has no inlined prompt/scope metadata;
+        // leave it unbuilt until discovery supplies the real bubble.
+        buildPending: item => Object.prototype.hasOwnProperty.call(item, 'prompt')
+          && itemMatchesFilter(item, historyFilter) ? makeWipBubble(item) : null,
+        mountPending: (item, bubble) => reconnectPendingItem(item, bubble),
+      }),
     })
   : null;
 
@@ -2390,6 +2400,23 @@ async function shadowInstallSseCompletion(msgId) {
   } catch {}
 }
 
+// ADR-0041 Stage 4 prerequisite: a turn discovered purely via WS lifecycle
+// events (shadowApplyEvent's message.changed branch) has no raw payload in
+// the store — the frame carries identity/status/content only, not the
+// denormalized display row (topic/agent/adhoc/prompt/...). The direct-DOM
+// discovery path (discoverRealtimeTurn / attachFlowStep) already fetches the
+// authoritative /chat/{id}/status row to build its bubble; feed that same
+// row's raw into the store so a later render pass can build/adopt from it.
+// Raw-only and fill-if-missing (transcript-store.js's attachRaw): never
+// touches live content/status/run_seq, so a still-streaming turn's
+// accumulated fields can't be clobbered or double-counted, and an existing
+// raw (a WS snapshot's chat_messages row) is left untouched.
+function shadowAttachRealtimeRow(item) {
+  if (!transcriptStore || item?.id == null) return;
+  const result = transcriptStore.attachRaw(Number(item.id), item);
+  if (!result.ok) console.error('[transcript-store] shadow attachRaw failed:', result.error);
+}
+
 function appendHistoryItems(items, fragment, boundary) {
   shadowInstallHistoryPage(items, boundary);
   // Prompt-only mode renders a different, reduced representation
@@ -2414,6 +2441,10 @@ function appendHistoryItems(items, fragment, boundary) {
     if (!item.content && !item.context && !nativeShell && !['pending', 'error', 'cancelled'].includes(item.status)) continue;
 
     if (item.status === 'pending') {
+      // Under renderer=store the registry constructs the recovered bubble,
+      // places it under #messages, and only then mounts its transport watcher.
+      // Composer-live bubbles already in the DOM are still adopted as-is.
+      if (useReconciler) continue;
       // Queued/in-flight items already carry topic/agent/adhoc from the DB row, so a
       // filter scope can be checked directly — only skip ones that don't belong to it.
       if (!itemMatchesFilter(item, historyFilter)) continue;
@@ -7656,22 +7687,34 @@ function createHistoryRegistry({
   container,
   getAnchor = (assistantMsgId, next) => next ?? null,
   getPendingAnchor = (assistantMsgId, root) => null,
+  buildPending = null,
+  mountPending = null,
 } = {}) {
   if (!container) throw new Error('createHistoryRegistry: container is required');
 
   function render(turn, ctx) {
     if (!ctx.store.isTerminal(turn.status)) {
-      // Pending rendering remains owned by reconnectPendingItem: it owns the
-      // complete status buffer, transport watcher, filtering and completion.
-      // Adopt its existing bubble only for placement bookkeeping; never write
-      // into it or build an unwatched duplicate from store state. Recovered
-      // history wips are self-contained; composer-live turns use their
-      // ownership-safe full range so placement cannot split prompt/thinking.
+      // Existing recovered/composer bubbles are adopted without mutation so
+      // their active watcher remains the only preview writer. A recovered
+      // history row with no DOM node is built through the injected factory;
+      // reorder() mounts its watcher only after placement, so reconnectPendingItem
+      // never sees the detached node and returns early. Composer-live turns use
+      // their ownership-safe full range so placement cannot split prompt/thinking.
       if (ctx.previousGroup && ctx.previousGroup.nodes.every(n => n.isConnected)) return ctx.previousGroup;
       const existing = container.querySelector(`.msg.assistant.msg-thinking.history-item[data-msg-id="${turn.assistantMsgId}"]`)
         || container.querySelector(`.msg.assistant.msg-thinking[data-live-group-id][data-msg-id="${turn.assistantMsgId}"]`);
       const nodes = existing ? existingPendingNodeRange(existing) : [];
-      return { nodes, pendingRoot: existing || null };
+      if (existing || !turn.raw || typeof buildPending !== 'function') {
+        return { nodes, pendingRoot: existing || null };
+      }
+      const bubble = buildPending(turn.raw);
+      if (!bubble) return { nodes: [], pendingRoot: null };
+      return {
+        nodes: [bubble],
+        pendingRoot: bubble,
+        pendingItem: turn.raw,
+        pendingNeedsMount: true,
+      };
     }
     if (!turn.raw) return null;
     // raw is the last full producer row and may lag sequenced live patches.
@@ -7782,9 +7825,9 @@ function createHistoryRegistry({
       }
     }
 
-    // Pending groups (currently only ever adopted from an already-on-screen
-    // wip bubble — render()'s pending branch never builds one itself yet).
-    // Each is placed independently, via its own getPendingAnchor call keyed
+    // Pending groups are either adopted from an already-on-screen live bubble
+    // or built for a recovered history row. Each is placed independently,
+    // via its own getPendingAnchor call keyed
     // off its own root node — never chained onto another pending group the
     // way the completed loop above chains onto `next`, because nothing
     // before Stage 3 has ever needed to reposition one live bubble relative
@@ -7810,6 +7853,12 @@ function createHistoryRegistry({
         if (node.parentNode !== container || node.nextSibling !== nextNode) {
           container.insertBefore(node, nextNode);
         }
+      }
+      if (group.pendingNeedsMount && group.pendingRoot?.isConnected && typeof mountPending === 'function') {
+        // Flip before invoking external watcher code so any synchronous
+        // re-entry cannot attach a second watcher to the same bubble.
+        group.pendingNeedsMount = false;
+        mountPending(group.pendingItem, group.pendingRoot);
       }
     }
   }
@@ -7849,8 +7898,9 @@ function insertCompletedHistoryItem(item, { reconcile = false } = {}) {
   }
   else if (anchorAboveViewport) messages.scrollTop += messages.scrollHeight - previousHeight;
   // This bubble was just rendered directly, bypassing historyReconciler
-  // entirely (realtime discovery/flow-step-attach/pending->completed swap
-  // are not migrated call sites) — but shadowInstallHistoryPage or a
+  // entirely (realtime discovery/flow-step-attach and the unregistered
+  // pending->completed fallback are not migrated call sites) — but
+  // shadowInstallHistoryPage or a
   // shadow run-event apply may have already left this same id dirty in the
   // store (they dirty unconditionally, with no "is it already on screen"
   // check of their own). Left alone, the next unrelated reconcile() pass
@@ -7964,6 +8014,45 @@ async function replacePendingWithStoredItem(item, wipBubble, onStored = null) {
     const data = await res.json();
     if (data.status !== 'done' && data.status !== 'error' && data.status !== 'cancelled') return;
     onStored?.(data);
+    const registeredPending = historyReconciler?.getGroup(item.id);
+    if (registeredPending?.pendingRoot === wipBubble && shouldShowNewResponse(data)) {
+      const wasAtBottom = isAtBottom();
+      const viewportTop = messages.getBoundingClientRect().top;
+      // Preserve a stable, non-transitioning sibling's viewport position.
+      // Measuring the whole scrollHeight delta is wrong when the old pending
+      // root and the newly ordered completed range land on opposite sides of
+      // the viewport.
+      const oldNodes = new Set(registeredPending.nodes);
+      const visualAnchor = [...messages.children].find(node =>
+        !oldNodes.has(node) && node.getBoundingClientRect().bottom > viewportTop);
+      const visualAnchorTop = visualAnchor?.getBoundingClientRect().top ?? null;
+
+      // The authoritative fetched row changes the store bucket; render() sees
+      // previousBucket=pending and replaces the registered root with the
+      // completed range in this same synchronous reconcile pass. The watcher
+      // has already stopped/closed before every caller reaches this function.
+      shadowInstallHistoryPage([data]);
+      const result = historyReconciler.reconcile();
+      // `ok` covers every dirty id in this pass. An unrelated render may fail
+      // while this turn still transitions successfully, so key the fallback
+      // decision to this id rather than the aggregate result.
+      if (result.reconciledIds.includes(Number(item.id))) {
+        refreshDateDividers();
+        if (wasAtBottom) scrollToBottom();
+        else if (visualAnchor?.isConnected && visualAnchorTop != null) {
+          messages.scrollTop += visualAnchor.getBoundingClientRect().top - visualAnchorTop;
+        }
+        if (data.agent && !data.adhoc) refreshComposerSessionCount(data.topic || item.topic || 'default', data.agent);
+        updateInContextMarkers();
+        updatePinCount();
+        if (pinPanel.classList.contains('open')) renderPinPanel();
+        refreshAllRevertButtons();
+        return;
+      }
+      // A failed render for this id stays dirty by contract. Fall through to
+      // the direct-DOM recovery path, which forgets that stale identity and
+      // clears the dirty id in insertCompletedHistoryItem.
+    }
     // Removing a finished wip bubble that sits above the viewport (e.g. another
     // bubble is still streaming below where the user is reading) shrinks the
     // content above without moving scrollTop, which visually yanks the view
@@ -8519,6 +8608,7 @@ async function discoverRealtimeTurn(message, { reconcile = false } = {}) {
     }
     if (!item) return;
     if (messages.querySelector(`[data-msg-id="${msgId}"]`) || !shouldShowNewResponse(item)) return;
+    shadowAttachRealtimeRow(item);
     if (item.status === 'pending') {
       const bubble = insertPendingHistoryItem(item);
       reconnectPendingItem(item, bubble);
@@ -8543,6 +8633,7 @@ async function attachFlowStep(msgId) {
     const data = await res.json();
     if (messages.querySelector(`[data-msg-id="${msgId}"]`)) return;
     if (!shouldShowNewResponse(data)) return;
+    shadowAttachRealtimeRow(data);
     if (data.status === 'pending') {
       const wipBubble = insertPendingHistoryItem(data);
       reconnectPendingItem(data, wipBubble);
