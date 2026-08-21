@@ -542,7 +542,7 @@ test('terminal turn on a backend with no quota gauge records no fabricated quota
   await page.route('**/chat', route => route.fulfill({
     status: 200,
     headers: { 'Content-Type': 'text/event-stream', 'X-Squid-Msg-Id': '10' },
-    body: 'event: meta\ndata: {"agent":"codex","msg_id":10,"adhoc":true}\n\ndata:partial\n\n',
+    body: 'event: meta\ndata: {"agent":"codex","msg_id":10,"adhoc":true}\n\n',
   }));
   await page.route('**/chat/10/status', route => route.fulfill({ json: {
     id: 10,
@@ -551,7 +551,7 @@ test('terminal turn on a backend with no quota gauge records no fabricated quota
     agent: 'codex',
     adhoc: true,
     status: 'error',
-    content: 'boom',
+    content: '',
   } }));
 
   await page.goto('/');
@@ -578,7 +578,10 @@ test('terminal turn on a backend with no quota gauge records no fabricated quota
     await page.evaluate(async () => {
       await window.__squidStatusIntervals[0].callback();
     });
-    await expect(page.locator('.msg-thinking-done')).toContainText('boom');
+    // An empty terminal error must still replace/finalize the live thinking
+    // state, matching the fallback rendered after a history refresh.
+    await expect(page.locator('.msg-thinking:not(.msg-thinking-done)')).not.toBeAttached();
+    await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toContainText('Response interrupted.');
     await page.waitForTimeout(1500);
 
     expect(quotaProviderCalls).toHaveLength(0);

@@ -98,6 +98,57 @@ test('render() adopts an already-on-screen wip bubble for a pending turn, and re
   await expect(bubbles).toHaveAttribute('data-test-marker', 'mutated-live');
 });
 
+// Safety-boundary invariant, not a feature test: a composer-live thinking
+// bubble (sendMessage's own, never insertPendingHistoryItem/makeWipBubble's)
+// never carries `.history-item` — confirmed by reading every
+// classList.add('history-item') call site in ui/app.js. Adoption's selector
+// requires it, so this bubble type must never be touched here. This matters
+// because a composer-live turn is a genuine multi-node group (route-marker?,
+// user bubble, msg-time, thinking — see liveGroupElements' own header
+// comment), unlike a self-contained wip bubble; adopting only `.msg-thinking`
+// from a multi-node group and letting reorder() reposition it would split it
+// from its own prompt (flagged in a #squid@codex pre-publish review). The
+// real fix for that — collecting an ownership-safe multi-node range for a
+// composer-live group — is Stage 3(b) work, not done yet (see Next steps).
+// Until then, this boundary is what keeps the gap merely latent instead of
+// live: pin it down explicitly so a future selector change can't loosen it
+// by accident without this test catching it.
+test('render() never adopts or repositions a composer-live thinking bubble (no .history-item)', async ({ page }) => {
+  const rig = await freshRig(page);
+  await rig.evaluate(({ container }) => {
+    // Same shape sendMessage's own thinkingBubble has: 'msg assistant
+    // msg-thinking', no 'history-item', with a genuine preceding user
+    // bubble + msg-time sibling (the real multi-node group) that must not
+    // be touched either.
+    const userBubble = document.createElement('div');
+    userBubble.className = 'msg user';
+    userBubble.dataset.ts = '2026-08-21T00:00:01Z';
+    const userTime = document.createElement('div');
+    userTime.className = 'msg-time';
+    const thinking = document.createElement('div');
+    thinking.className = 'msg assistant msg-thinking';
+    thinking.dataset.msgId = '95';
+    thinking.dataset.orderAt = '2026-08-21T00:00:01Z';
+    thinking.dataset.testMarker = 'composer-live';
+    container.append(userBubble, userTime, thinking);
+  });
+  await rig.evaluate(({ store }) => store.installHistoryPage(window.historyItemToStoreRows({
+    id: 95, reply_to: 94, prompt: 'still going', status: 'pending', topic: 'squid', agent: 'codex',
+  })));
+  const result = await rig.evaluate(({ reconciler }) => reconciler.reconcile());
+  expect(result.ok).toBe(true); // succeeds with an empty (unadopted) node set, not a failure
+
+  // Untouched: still exactly the three original nodes, in original order,
+  // same identities — reorder() never got a group to reposition for id 95.
+  const summary = await rig.evaluate(({ container }) =>
+    [...container.children].map(el => ({ cls: el.className, marker: el.dataset.testMarker || null })));
+  expect(summary).toEqual([
+    { cls: 'msg user', marker: null },
+    { cls: 'msg-time', marker: null },
+    { cls: 'msg assistant msg-thinking', marker: 'composer-live' },
+  ]);
+});
+
 // Once pending turns are adopted (above), a turn that just finished has a
 // non-null but stale, pending-shaped ctx.previousGroup — gating the
 // completed-branch adoption search on `!ctx.previousGroup` (as it used to
@@ -304,6 +355,114 @@ test('reorder() is a DOM no-op for already-placed groups on an unrelated update'
   });
   expect(nodeIdentityStable).toBe(true);
   expect(before.length).toBeGreaterThan(0);
+});
+
+// Same rig as freshRig, but wires a getPendingAnchor mirroring
+// historyStorePendingAnchor's real production shape (ui/app.js): scan every
+// `.msg.assistant.history-item[data-msg-id]` bubble — completed *or*
+// pending, same selector, deliberately not bucket-specific — for the first
+// one whose own key exceeds the pending group's root node's key
+// (data-order-at/data-ts, falling back to msg_id), insert before it. The
+// default getPendingAnchor (`() => null`, used by every other test in this
+// file) always appends at the end, which can't exercise real interleaving —
+// these two tests need the real algorithm to prove reorder()'s pending loop
+// actually calls it correctly and converges to the right order.
+async function pendingAnchorRig(page, items = []) {
+  return page.evaluateHandle((rows) => {
+    const store = window.SquidTranscriptStore.createTranscriptStore();
+    const container = document.createElement('div');
+    container.id = 'history-registry-test-container';
+    document.body.appendChild(container);
+    const getPendingAnchor = (assistantMsgId, rootNode) => {
+      const key = [rootNode?.dataset.orderAt || rootNode?.dataset.ts || '', Number(rootNode?.dataset.msgId) || 0];
+      return [...container.querySelectorAll(':scope > .msg.assistant.history-item[data-msg-id]')]
+        .find(existing => {
+          const existingKey = [existing.dataset.orderAt || existing.dataset.completedAt || existing.dataset.ts || '', Number(existing.dataset.msgId) || 0];
+          const timeOrder = existingKey[0].localeCompare(key[0]);
+          return (timeOrder || existingKey[1] - key[1]) > 0;
+        }) || null;
+    };
+    const registry = window.createHistoryRegistry({ container, getPendingAnchor });
+    const reconciler = window.SquidReconciler.createReconciler({ store, registry });
+    for (const item of rows) {
+      store.installHistoryPage(window.historyItemToStoreRows(item));
+    }
+    return { store, container, reconciler };
+  }, items);
+}
+
+// Deliberately places the pending turn *between* two completed turns, not
+// above or below both. The completed loop's own default getAnchor chains
+// each completed group onto the next-newest one (or, for the newest, onto
+// "the end of container") regardless of any pending groups present — with
+// only one completed turn, or a pending turn at either extreme, that chaining
+// can coincidentally reproduce the correct-looking order even if the pending
+// loop below never ran at all (caught empirically: an earlier version of
+// this test with a single completed turn still passed with the pending loop
+// entirely disabled). Requiring the pending turn to land in the *middle*
+// closes that gap — the completed loop only ever repositions completed
+// groups relative to each other, never relative to a pending one, so nothing
+// but getPendingAnchor's own comparison can produce this result.
+test("reorder() places a pending group via getPendingAnchor, interleaved between two completed groups by time", async ({ page }) => {
+  const rig = await pendingAnchorRig(page, [
+    { id: 10, reply_to: 9, content: 'oldest done turn', status: 'done', topic: 'squid', completed_at: '2026-08-21T00:00:01Z' },
+    { id: 100, reply_to: 99, content: 'newest done turn', status: 'done', topic: 'squid', completed_at: '2026-08-21T00:00:09Z' },
+  ]);
+  await rig.evaluate(({ reconciler }) => reconciler.reconcile()); // places both completed turns first
+
+  // A pending turn that started between the two completed turns' times
+  // belongs between them. Appended at the very front on purpose — the wrong
+  // position, and not one either loop's own "chain onto the next completed
+  // group"/"append at the end" default would reach by coincidence.
+  await rig.evaluate(({ container }) => {
+    const bubble = document.createElement('div');
+    bubble.className = 'msg assistant msg-thinking history-item';
+    bubble.dataset.msgId = '50';
+    bubble.dataset.orderAt = '2026-08-21T00:00:05Z';
+    bubble.dataset.ts = '2026-08-21T00:00:05Z';
+    container.prepend(bubble);
+  });
+  await rig.evaluate(({ store }) => store.installHistoryPage(window.historyItemToStoreRows({
+    id: 50, reply_to: 49, prompt: 'still going', status: 'pending', topic: 'squid', agent: 'codex',
+  })));
+  const result = await rig.evaluate(({ reconciler }) => reconciler.reconcile());
+  expect(result.ok).toBe(true);
+
+  const ids = await rig.evaluate(({ container }) =>
+    [...container.querySelectorAll(':scope > .msg[data-msg-id]')].map(el => el.dataset.msgId));
+  expect(ids).toEqual(['10', '50', '100']);
+});
+
+test('reorder() places multiple pending groups in creation order using only getPendingAnchor, never chaining them to each other', async ({ page }) => {
+  const rig = await pendingAnchorRig(page);
+  // Two pending turns, installed oldest id/createdAt first — getOrderedTurnIds
+  // sorts order.pending oldest-first, and each is placed independently
+  // (this loop deliberately never threads a `next` between pending groups
+  // the way the completed loop does), so correct relative order has to fall
+  // out of the anchor search + iteration order alone, not explicit chaining.
+  await rig.evaluate(({ container }) => {
+    const older = document.createElement('div');
+    older.className = 'msg assistant msg-thinking history-item';
+    older.dataset.msgId = '10';
+    older.dataset.orderAt = '2026-08-21T00:00:01Z';
+    const newer = document.createElement('div');
+    newer.className = 'msg assistant msg-thinking history-item';
+    newer.dataset.msgId = '20';
+    newer.dataset.orderAt = '2026-08-21T00:00:02Z';
+    // Appended in reverse (newer first) so a correct result can't be an
+    // accident of DOM insertion order already matching.
+    container.append(newer, older);
+  });
+  await rig.evaluate(({ store }) => {
+    store.installHistoryPage(window.historyItemToStoreRows({ id: 10, reply_to: 9, prompt: 'a', status: 'pending', topic: 'squid' }));
+    store.installHistoryPage(window.historyItemToStoreRows({ id: 20, reply_to: 19, prompt: 'b', status: 'pending', topic: 'squid' }));
+  });
+  const result = await rig.evaluate(({ reconciler }) => reconciler.reconcile());
+  expect(result.ok).toBe(true);
+
+  const ids = await rig.evaluate(({ container }) =>
+    [...container.querySelectorAll(':scope > .msg[data-msg-id]')].map(el => el.dataset.msgId));
+  expect(ids).toEqual(['10', '20']);
 });
 
 test('route markers render the same way as the direct-DOM path for a matching handoff', async ({ page }) => {

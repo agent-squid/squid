@@ -1215,37 +1215,266 @@ rate here rather than silently re-asserting "known flake, ignore" — worth
 a real look if it keeps reproducing this reliably in a future session. PWA
 cache bumped to `v20260821-010`.
 
+## 2026-08-21: producer 2 Stage 3 gap (a) — reorder() gains pending-placement, shipped
+
+Scoped the pending-turn render cutover from scratch (reading `reconciler.js`,
+`render()`/`reorder()`, `historyStoreAnchor`, `insertPendingHistoryItem`, and
+`transcript-store.js`'s `getOrderedTurnIds` line-by-line, not from this doc's
+own prior summaries) before touching anything, per the Next-steps note about
+budgeting this properly. Found gap (a) — `reorder()` has zero
+pending-placement logic — is smaller and lower-risk than the prior scoping
+entry assumed, and shipped it. Gap (b) (render()/patch a pending node from
+store state) is unstarted; see below.
+
+**Key design finding: `reorder()`'s pending loop doesn't need `store`
+threaded through the reconciler.js contract.** `historyStoreAnchor` (the
+production `getAnchor`) already solves completed-vs-pending interleaving
+today by querying live DOM state (`data-order-at`/`data-msg-id` off
+`#messages > .msg-thinking` nodes) rather than consulting the store — a
+pending group's sort key can be read the same way, straight off its own
+already-rendered root node's `dataset`, once `render()`'s pending branch has
+adopted it (the 2026-08-21 entry above). This meant no reconciler.js contract
+change was needed — only a second constructor option on
+`createHistoryRegistry`, `getPendingAnchor(assistantMsgId, rootNode) ->
+Node|null`, mirroring `getAnchor`'s own shape and default
+(`() => null`, i.e. append at the end, matching every existing test).
+
+**Second finding: `insertPendingHistoryItem`'s own anchor search already
+treats completed and pending bubbles uniformly** — its selector
+(`.msg.assistant.history-item[data-msg-id]`) matches wip bubbles too (they
+carry the same three classes), so it was never "pending vs. completed-only"
+the way the first design pass assumed. `historyStorePendingAnchor`
+(`ui/app.js`, next to `historyStoreAnchor`) mirrors that exactly, and —
+worked out by tracing insertBefore semantics rather than assumed —
+iterating `order.pending` oldest-first with each group's anchor computed
+independently (never chained to the previous pending group's position, unlike
+the completed loop's own `next`-threading) is sufficient to also produce
+correct pending-vs-pending order as an emergent property: an older group's
+`insertBefore` call never affects a newer group's own anchor search (a
+`.msg-thinking` node can't compare as "later" than a genuinely later one), so
+each subsequent newer group's own insertBefore naturally lands after it.
+
+**Third finding, checked before trusting the design: could this new pending
+loop fight `historyStoreAnchor`'s own completed-loop placement (oscillation,
+or drifting the two out of sync)?** No — they read the same underlying
+`data-order-at`/`data-msg-id`/`data-completed-at` attributes but neither loop
+ever *writes* them, and the completed loop always runs first within one
+`reorder()` call, so the pending loop only ever positions itself relative to
+already-settled completed nodes. Recomputing both every pass converges to a
+stable fixed point rather than oscillating.
+
+Implementation: `reorder()`'s new `for (const id of order.pending)` block
+(`ui/app.js`, `createHistoryRegistry`) and `historyStorePendingAnchor` (next
+to `historyStoreAnchor`), wired into the production `historyReconciler`
+construction via `getPendingAnchor: historyStorePendingAnchor`.
+
+**A genuinely risky-feeling change, unlike the prior bookkeeping-only
+prerequisites** — this is the first ADR-0041 change this session that
+actively *repositions* an already-on-screen live bubble on every reconcile
+pass, where before (direct-DOM) it was placed once and never moved again.
+Given `renderer=store` is the live default, this takes effect in production
+immediately. Decided to ship rather than gate it behind a flag (matching the
+"still pre-launch, no users" reasoning from the entry above) but held it to
+the full verification bar rather than treating it as another inert
+prerequisite.
+
+**Two test-quality gaps found and fixed in the test itself, not the
+implementation, while verifying with the revert-and-confirm-it-fails
+discipline this doc has used before:**
+- The first draft of the "interleaved with a completed group" test used only
+  one completed turn. Reverting the new pending loop and rerunning it still
+  passed — the completed loop's own default `getAnchor` (`next ?? null`)
+  unconditionally chains each completed group onto the next, or (for the
+  newest) to "the end of container," entirely independent of any pending
+  node present; with only one completed turn, that default coincidentally
+  reproduces "pending ends up before the completed turn" even with the new
+  loop doing nothing. Fixed by requiring the pending turn to land *between*
+  two completed turns instead — a position neither loop's own default
+  chaining behavior can reach by coincidence, which does fail correctly with
+  the loop disabled.
+- The multi-pending-group test (proving pending-vs-pending order is a correct
+  emergent property, not a bug) was checked the same way from the start and
+  caught the disabled case immediately — no fix needed there, included here
+  only to record that both new tests were verified this way, not just the
+  one that needed a redesign.
+
+Verified: `history-registry.spec.js` 12/12 (2 new — the redesigned
+interleaving test plus the multi-pending-group test), combined with
+`transcript-store.spec.js` + `reconciler.spec.js` +
+`history-store-renderer.spec.js` 62/62, all `--workers=1`. Full
+`chat.spec.js` (`--workers=1`, ~4.8min): 101/102 — the one failure is the
+CLI-auth flake test flagged as elevated in the entry above; reran it alone
+with `--retries=1` and it cleared on the first retry this time ("1 flaky,"
+not the consistent 6/6 failures from last session) — consistent with the
+prior entry's conclusion that the elevated rate was session-load-related,
+not a real regression. PWA cache bumped to `v20260821-011`.
+
+**Not attempted this session:** gap (b) — `render()` actually *building* a
+pending node from store state (not just adopting one direct-DOM already
+built) and patching it in place on a delta. This is the harder, genuinely
+architecture-changing half of Stage 3 — see Next steps below, unchanged in
+substance from the prior entry's scoping.
+
+## 2026-08-21: pre-publish review of the gap (a) work — one real gap confirmed-but-not-live, one unrelated test regression fixed
+
+A `#squid@codex` review of the gap (a) entry above ("review the current
+change before publish") found two issues. Both investigated properly before
+acting — the first via a full reachability trace (not just static reasoning:
+grepped every `classList.add('history-item')` call site in `ui/app.js`), the
+second via reading the actual production code the failing test exercises,
+not just patching the assertion to whatever made it pass.
+
+**1. Pending reorder moves only the adopted `.msg-thinking` bubble — real
+architectural gap, confirmed *not currently reachable*.** `liveGroupElements`
+(`ui/app.js` ~1797, the composer-live path's own established multi-node
+group logic) proves a live turn's group can genuinely be
+`[route-marker?, user bubble, msg-time, thinking]`, not always one node —
+`reorder()`'s pending loop only ever moves `group.nodes`, and `render()`'s
+pending branch only ever adopts the single `.msg.assistant.msg-thinking.
+history-item` node it queries for. Traced every place that builds a live/
+pending bubble to check if this selector could ever match a real multi-node
+composer-live group: `makeWipBubble` (the only builder that adds
+`.history-item`) is genuinely self-contained — its prompt renders via an
+inline toggle, not a separate sibling — so it's correctly single-node.
+`sendMessage`'s own `thinkingBubble` never gets `.history-item` anywhere in
+the file. `reconcilePendingBubble` actively removes a duplicate wip bubble
+once a composer-submitted turn claims its real msg_id, so the two shapes
+never coexist under one id either. Net: the adoption selector's `.history-
+item` gate excludes composer-live bubbles entirely — the split-group
+corruption codex described is a correct prediction about the *design*
+(single-node assumption) but not reachable through the code as written.
+Cross-checked with `#squid@codex` (referenced transcript in this turn),
+which agreed with the trace and proposed the same treatment: don't broaden
+adoption now (using `liveGroupElements` on a wip-bubble adoption would
+introduce a *worse*, real bug — its backward walk has no ownership check, so
+a wip bubble legitimately inserted right after an unrelated older completed
+turn's own trailing `.msg-time`/stats element, which is exactly how
+`historyStorePendingAnchor` places one, would have that older turn's own
+timestamp silently stolen into the wip bubble's "group" and dragged along on
+every reposition). Added the invariant test `#squid@codex` also suggested:
+"render() never adopts or repositions a composer-live thinking bubble (no
+.history-item)" (`history-registry.spec.js`) — builds the real multi-node
+shape (user bubble + msg-time + `.msg-thinking` with no `.history-item`),
+reconciles, and asserts all three nodes are completely untouched (same
+identities, same order, `render()` succeeds with an empty node set rather
+than adopting anything). This pins the current safety boundary down
+explicitly, so a future change to the adoption selector can't loosen it
+without this test failing — and documents, in a form that survives past this
+session, that collecting an ownership-safe multi-node range for a
+composer-live group is required *before* Stage 3(b) lets `render()` build or
+adopt that shape for real (folded into Next steps below).
+
+**2. The empty-error semantic change broke two tests, not the one flagged.**
+codex's own selected run only caught `chat.spec.js:2324`
+("stream error with message id keeps polling until final completion" was
+apparently not in that run's selection) — running the full suite here found
+a second, structurally identical failure at the same location pattern
+(`statusCalls`-mocked `/status` sequence: pending → empty error → done),
+`chat.spec.js:2375`. Both tests asserted the *old* behavior: an empty
+terminal error used to be silently skipped so polling could continue toward
+a later, contradictory `done` — that guard (`if (!String(data.content ||
+'').trim()) return;`) was intentionally removed from three call sites this
+session (`sendMessage`'s inline status-fallback poller, its SSE `error`-event
+handler, and `replacePendingWithStoredItem`) as part of validating that
+`error` is a real terminal status per `agent/stats_db.py` (never revised
+back to `pending`/`done` after the fact) — codex confirmed this backend
+behavior and agreed the code change is correct, just that the tests needed
+replacing, not deleting.
+
+Read the actual resulting code path for each test rather than guessing at
+the new expected DOM state:
+- `chat.spec.js:2324`'s empty SSE body forces the connection-drop fallback
+  path (`startStatusFallback`). Its first poll (`status: 'pending', content:
+  'Partial response'`) sets `raw = 'Partial response'` *before* the second,
+  empty-error poll ever runs — so by the time the error branch executes,
+  `raw || firstDataReceived` is already true, taking the
+  `parkInterruptedPartial` branch (freezes the thinking bubble with whatever
+  was received, appends "Connection interrupted.") rather than
+  `showError`'s branch (which would place a separate response bubble). No
+  separate `.msg-error` bubble is ever created — only `.msg-thinking-done`
+  containing "Partial response" + "Connection interrupted.". Rewrote the test
+  to assert exactly that, plus `statusCalls === 2` (polling stops at the
+  terminal error, the mock's third, unreachable branch was deleted).
+- `chat.spec.js:2375`'s SSE stream carries a real `event: error, data:
+  'Connection lost'` frame, handled by a *different* code path (the SSE
+  reader's own inline `error` branch, not the connection-drop fallback) that
+  calls `showError('Connection lost')` immediately (a real, non-empty error
+  message — unaffected by the guard removal) *and* separately starts
+  `startStatusFallback` as an additional safety-net poller. Rewrote the test
+  to mock every `/status` call as a terminal empty error (removing the
+  now-unreachable third `done` branch) and assert the already-shown
+  "Connection lost" bubble is what's left — not a second, less informative
+  "Response interrupted." bubble the fallback poller's own empty-error
+  handling could otherwise have overwritten it with.
+  `expect(statusCalls).toBe(2)` here surprised initially (expected 1) —
+  root-caused rather than loosened to a vague bound: `shadowInstallSseCompletion`
+  (`ui/app.js` ~2350, store-only, called from the same SSE error handler)
+  does its own independent one-shot `/status` fetch alongside
+  `startStatusFallback`'s own single terminal poll — two legitimate,
+  deterministic, non-repeating callers of the same endpoint, not a race.
+
+Verified: `history-registry.spec.js` 13/13 (1 new), `chat.spec.js`
+(`--workers=1`, ~5.3–5.7min, run twice): 100/102 both times — the 2 failures
+each run were from the already-documented CLI-auth flake family plus, on the
+first run only, one WS-transport test in the `recovered pending responses`
+block that passed cleanly both standalone and on the second full run
+(matching this doc's own prior findings that block is flaky under load, not
+tied to any change here — no flow/WS code touched this session).
+`quota.spec.js`'s own already-updated empty-error test (a third,
+codex-unflagged casualty of the same semantic change, fixed in a session
+prior to this one) reconfirmed passing. No `ui/app.js` changes this
+session — only tests — so no PWA cache bump.
+
 ## Next steps
 
 1. **Producer 2 Stage 3 (pending-turn reconciler cutover) — not started.**
    (Separately: the completed-turn duplicate-render bug found while scoping
    this — direct-DOM bypass call sites vs. `render()`'s dirty-id
    reconciliation — was a real, already-shipped production bug, not part of
-   the pending-turn cutover itself, and is now fixed; see the entry above.)
-   Sharpened by the 2026-08-21 scoping entries into three concrete gaps: (a)
-   `createHistoryRegistry.reorder()` has zero pending-placement logic today;
+   the pending-turn cutover itself, and is now fixed; see the entries above.)
+   Sharpened by the 2026-08-21 scoping entries into four concrete gaps: (a)
+   — **done** — `createHistoryRegistry.reorder()` now places pending groups
+   too, via a new `getPendingAnchor` option (see the entry directly above);
    (b) `render()` must reuse/patch DOM nodes in place per pending turn (via
    `ctx.previousGroup`) rather than rebuild on every delta, or stale nodes
    leak and the kill button's listener gets torn down repeatedly — **the
-   adoption half of this is now done** (see the entry directly above:
-   `render()` reuses the same wip-bubble node across passes instead of
-   re-querying or rebuilding), but adoption alone isn't the render cutover —
-   nothing yet makes `render()` *build* a pending node from store state, or
-   patch an already-adopted one's content on a delta; (c) — **done** — the
-   live narrative buffer now has a store home (`turn.narrative` for live
-   deltas, `turn.raw.status_raw` for already-fetched rows), with
-   `chat.status` wired end-to-end on WS, and (d) — **done** —
-   `turn.content` now tracks live-streamed text independent of a stale
-   `turn.raw`.
+   adoption half of this is done** (`render()` reuses the same wip-bubble
+   node across passes instead of re-querying or rebuilding), but adoption
+   alone isn't the render cutover — nothing yet makes `render()` *build* a
+   pending node from store state, or patch an already-adopted one's content
+   on a delta, and this is now the one remaining piece of (a)/(b) that's
+   still unstarted. **New, confirmed by the 2026-08-21 pre-publish review
+   entry above:** whatever eventually builds or adopts a composer-live
+   turn's group must collect its real, ownership-safe multi-node range
+   (route-marker?, user bubble, msg-time, thinking — see `liveGroupElements`)
+   before adoption's selector is ever broadened to match it — reusing
+   `liveGroupElements` naively is not safe for a *recovered* wip-bubble
+   adoption (no ownership check on the backward walk; risks stealing an
+   unrelated older completed turn's own trailing timestamp), so this needs
+   its own purpose-built range-collector, the same way `existingCompletedNodeRange`
+   is a purpose-built forward walk rather than a reuse of something designed
+   for a different context. A regression test
+   (`history-registry.spec.js`, "render() never adopts or repositions a
+   composer-live thinking bubble") pins today's boundary (composer-live
+   bubbles lack `.history-item` and are therefore never touched) — that test
+   will need to change, deliberately, the day this is actually built; (c) —
+   **done** — the live narrative buffer now has a
+   store home (`turn.narrative` for live deltas, `turn.raw.status_raw` for
+   already-fetched rows), with `chat.status` wired end-to-end on WS, and (d)
+   — **done** — `turn.content` now tracks live-streamed text independent of
+   a stale `turn.raw`.
    Still open before (c)/(d) are fully "parity-ready": `chat.loading`/
    `chat.processing`/`chat.queued` (replace-mode) and SSE's own `'status'`
-   frames are not wired to the store yet. The real render/patch machinery in
-   (a)/(b) is still the actual risky work and is unstarted — `renderer=store`
-   is the **live default** today (not opt-in), so once `render()` starts
-   building or mutating pending nodes itself (rather than only adopting
-   direct-DOM's), it takes effect in production immediately; budget it with
-   its own dedicated before/after suite rounds when it's picked up, same as
-   producer 1's Stage 3/4 needed. Also still open: `turn.raw` is entirely
+   frames are not wired to the store yet. `render()` actually building or
+   patching pending nodes (the remainder of (b)) is still the actual risky
+   work and is unstarted — `renderer=store` is the **live default** today
+   (not opt-in), so once `render()` starts building or mutating pending
+   nodes itself (rather than only adopting direct-DOM's), it takes effect in
+   production immediately; budget it with its own dedicated before/after
+   suite rounds when it's picked up, same as producer 1's Stage 3/4 needed
+   (and same as gap (a) itself needed this session, including a redesign of
+   one test that didn't isolate what it claimed to on the first attempt —
+   see the entry above). Also still open: `turn.raw` is entirely
    absent for a turn discovered purely via WS lifecycle events
    (`shadowApplyEvent`'s `message.changed` branch calls `applyMessagePatch`
    with no `raw` field) — unlike a snapshot- or history-sourced pending row,

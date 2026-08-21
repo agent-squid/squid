@@ -157,6 +157,26 @@ test('renderer=store: a history row with no status field still renders as comple
   await expect(page.locator('.msg[data-msg-id="1"]')).toContainText('response with no status field');
 });
 
+test('renderer=store: an empty error row renders the terminal fallback', async ({ page }) => {
+  await mockApp(page);
+
+  await page.route('**/history**', route => route.fulfill({
+    json: {
+      items: [{
+        id: 2, role: 'assistant', topic: 'squid', agent: 'claude',
+        content: '', context: null, status: 'error', prompt: 'failed prompt',
+        timestamp: '2026-07-15T10:00:00Z', completed_at: '2026-07-15T10:00:01Z',
+      }],
+      has_more: false,
+    },
+  }));
+
+  await page.goto('/?renderer=store');
+  const response = page.locator('.msg.assistant.history-item[data-msg-id="2"]');
+  await expect(response).toBeVisible();
+  await expect(response.locator('.msg-error')).toHaveText('Response interrupted.');
+});
+
 test('renderer=store: a topic filter change (reloadHistory) does not resurrect turns the previous scope rendered', async ({ page }) => {
   await mockApp(page);
 

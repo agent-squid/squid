@@ -1899,6 +1899,28 @@ function historyStoreAnchor(assistantMsgId, next) {
   return bottomSentinel || null;
 }
 
+// getPendingAnchor for createHistoryRegistry (ADR-0041 Stage 3 prerequisite):
+// where one pending (live) turn's own group belongs, mirroring
+// insertPendingHistoryItem's own anchor search exactly — same selector (every
+// `.msg.assistant.history-item[data-msg-id]` bubble, completed *or* pending;
+// a wip bubble carries those same three classes, so this naturally orders a
+// pending group against other pending groups too, not just completed ones,
+// without needing a separate comparison path), same key shape, same
+// `compareCompletedTurnKeys` — just re-run every reconcile() pass instead of
+// once at insertion time. Reads the pending group's own sort key off its
+// already-rendered root node (`rootNode.dataset`), the same way
+// historyStoreAnchor above reads a live bubble's `data-order-at` — not from
+// the store — so this has no dependency on `store` being threaded through
+// the reconciler.js render/reorder contract.
+function historyStorePendingAnchor(assistantMsgId, rootNode) {
+  const key = [rootNode?.dataset.orderAt || rootNode?.dataset.ts || '', Number(rootNode?.dataset.msgId) || 0];
+  return [...messages.querySelectorAll(':scope > .msg.assistant.history-item[data-msg-id]')]
+    .find(existing => compareCompletedTurnKeys([
+      existing.dataset.orderAt || existing.dataset.completedAt || existing.dataset.ts || '',
+      Number(existing.dataset.msgId) || 0,
+    ], key) > 0) || bottomSentinel || null;
+}
+
 function setLiveGroupHidden(hidden) {
   document.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)').forEach(thinking => {
     // Search scope can't be matched client-side (keywords aren't tracked on the live
@@ -2205,7 +2227,7 @@ const historyReconciler = (historyRendererMode === 'store' && transcriptStore
   && window.createHistoryRegistry && window.SquidReconciler)
   ? window.SquidReconciler.createReconciler({
       store: transcriptStore,
-      registry: window.createHistoryRegistry({ container: messages, getAnchor: historyStoreAnchor }),
+      registry: window.createHistoryRegistry({ container: messages, getAnchor: historyStoreAnchor, getPendingAnchor: historyStorePendingAnchor }),
     })
   : null;
 
@@ -2356,7 +2378,7 @@ function appendHistoryItems(items, fragment, boundary) {
       continue;
     }
 
-    if (!item.content && !item.context && item.status !== 'pending') continue;
+    if (!item.content && !item.context && !['pending', 'error', 'cancelled'].includes(item.status)) continue;
 
     if (item.status === 'pending') {
       // Queued/in-flight items already carry topic/agent/adhoc from the DB row, so a
@@ -5648,7 +5670,6 @@ async function sendMessage(text, opts = {}) {
           controller.abort();
           finalizeQuotaTracking();
         } else if (data.status === 'error') {
-          if (!String(data.content || '').trim()) return;
           completedFromStatus = true;
           turnStatus = 'error';
           stopStatusFallback();
@@ -7571,7 +7592,11 @@ function existingCompletedNodeRange(bubble) {
   return nodes;
 }
 
-function createHistoryRegistry({ container, getAnchor = (assistantMsgId, next) => next ?? null } = {}) {
+function createHistoryRegistry({
+  container,
+  getAnchor = (assistantMsgId, next) => next ?? null,
+  getPendingAnchor = (assistantMsgId, root) => null,
+} = {}) {
   if (!container) throw new Error('createHistoryRegistry: container is required');
 
   function render(turn, ctx) {
@@ -7594,12 +7619,14 @@ function createHistoryRegistry({ container, getAnchor = (assistantMsgId, next) =
     }
     const item = turn.raw;
     if (!item) return null;
-    // Matches appendHistoryItems' own skip for a completed row with nothing
-    // to show (no reply text, no tool trace) — shadowInstallHistoryPage
+    // Matches appendHistoryItems' own skip for a successful completed row
+    // with nothing to show (no reply text, no tool trace). Error/cancelled
+    // rows still have a synthesized terminal label in appendHistoryItem.
+    // shadowInstallHistoryPage
     // installs every row into the store unconditionally, so this filter has
     // to be reapplied here rather than upstream, or the store-driven path
     // would render bubbles the direct-DOM path silently never did.
-    if (!item.content && !item.context) return { nodes: [] };
+    if (!item.content && !item.context && !['error', 'cancelled'].includes(item.status)) return { nodes: [] };
 
     // The first time this id is completed-bucket-owned by this reconciler
     // (ctx.previousBucket is 'pending' or null, never 'completed'), a node
@@ -7677,6 +7704,37 @@ function createHistoryRegistry({ container, getAnchor = (assistantMsgId, next) =
           container.insertBefore(node, next);
         }
         next = node;
+      }
+    }
+
+    // Pending groups (currently only ever adopted from an already-on-screen
+    // wip bubble — render()'s pending branch never builds one itself yet).
+    // Each is placed independently, via its own getPendingAnchor call keyed
+    // off its own root node — never chained onto another pending group the
+    // way the completed loop above chains onto `next`, because nothing
+    // before Stage 3 has ever needed to reposition one live bubble relative
+    // to another (insertPendingHistoryItem places a new one once, keyed off
+    // its own timestamp against every existing history-item bubble
+    // regardless of bucket, and never revisits it again). Recomputing this
+    // unconditionally every pass is still safe and convergent: a group's
+    // own key (read off its root node's dataset, not the store — see
+    // getPendingAnchor's production implementation) never changes between
+    // passes, the no-op check below only moves a node that's actually out
+    // of place, and this loop never writes dataset.orderAt/msg-id itself —
+    // the attributes getAnchor's own production implementation
+    // (historyStoreAnchor) reads to place completed groups above — so it
+    // can't destabilize that loop's decisions, which already ran and
+    // settled above.
+    for (const id of order.pending) {
+      const group = groups.get(id);
+      if (!group || !group.nodes.length) continue;
+      const anchor = getPendingAnchor(id, group.nodes[0]) ?? null;
+      for (let j = group.nodes.length - 1; j >= 0; j -= 1) {
+        const node = group.nodes[j];
+        const nextNode = j === group.nodes.length - 1 ? anchor : group.nodes[j + 1];
+        if (node.parentNode !== container || node.nextSibling !== nextNode) {
+          container.insertBefore(node, nextNode);
+        }
       }
     }
   }
@@ -7827,7 +7885,6 @@ async function replacePendingWithStoredItem(item, wipBubble, onStored = null) {
     if (!res.ok || !wipBubble.parentNode) return;
     const data = await res.json();
     if (data.status !== 'done' && data.status !== 'error' && data.status !== 'cancelled') return;
-    if (data.status === 'error' && !String(data.content || '').trim()) return;
     onStored?.(data);
     // Removing a finished wip bubble that sits above the viewport (e.g. another
     // bubble is still streaming below where the user is reading) shrinks the
@@ -8367,7 +8424,7 @@ async function discoverRealtimeTurn(message, { reconcile = false } = {}) {
     if (item.status === 'pending') {
       const bubble = insertPendingHistoryItem(item);
       reconnectPendingItem(item, bubble);
-    } else if (item.status !== 'error' || String(item.content || '').trim()) {
+    } else if (item.content || item.context || ['error', 'cancelled'].includes(item.status)) {
       insertCompletedHistoryItem(item, { reconcile });
       if (item.agent && !item.adhoc) refreshComposerSessionCount(item.topic || 'default', item.agent);
     }
@@ -8676,7 +8733,7 @@ async function pollPendingItem(item, wipBubble) {
       const res = await fetch(`/chat/${item.id}/status`);
       if (!res.ok) return;
       const data = await res.json();
-      if (data.status === 'done' || data.status === 'cancelled' || (data.status === 'error' && String(data.content || '').trim())) {
+      if (data.status === 'done' || data.status === 'error' || data.status === 'cancelled') {
         cancelPendingPoll(wipBubble);
         await replacePendingWithStoredItem(item, wipBubble);
       } else if (count >= MAX_POLLS) {

@@ -2321,7 +2321,13 @@ test.describe('response bubble', () => {
     await expect(page.locator('.msg-time')).toHaveCount(2);
   });
 
-  test('live recovery ignores empty interrupted error until final completion', async ({ page }) => {
+  test('an empty terminal error finalizes the live turn instead of polling toward a later status', async ({ page }) => {
+    // An `error` status is terminal (agent/stats_db.py never revises it back
+    // to `pending`/`done` after the fact) — a mock that returns `done` on a
+    // later poll is testing a status transition that can't happen for real,
+    // not a realistic recovery scenario. The status-fallback poller (used
+    // here because the SSE body closes with no events, forcing a fallback to
+    // /status polling) must stop at the first terminal status it sees.
     await page.route('**/chat', r => r.fulfill({
       status: 200,
       headers: { ...SSE_HEADERS, 'X-Squid-Msg-Id': '90' },
@@ -2334,26 +2340,21 @@ test.describe('response bubble', () => {
       if (statusCalls === 1) {
         return r.fulfill({ json: { id: 90, status: 'pending', content: 'Partial response' } });
       }
-      if (statusCalls === 2) {
-        return r.fulfill({ json: { id: 90, status: 'error', content: '' } });
-      }
-      return r.fulfill({ json: {
-        id: 90,
-        topic: 'default',
-        agent: 'claude',
-        backend: 'claude',
-        status: 'done',
-        content: 'Recovered final response',
-        adhoc: false,
-        timestamp: new Date().toISOString(),
-      }});
+      return r.fulfill({ json: { id: 90, status: 'error', content: '' } });
     });
 
     await sendMsg(page);
 
-    await expect(page.locator(RESPONSE).filter({ hasText: 'Recovered final response' })).toBeVisible({ timeout: 8_000 });
-    await expect(page.locator(MSG_ERROR).filter({ hasText: 'Response interrupted.' })).not.toBeAttached();
-    expect(statusCalls).toBeGreaterThanOrEqual(3);
+    // The pending poll (call 1) already parked 'Partial response' into `raw`,
+    // so the error branch takes parkInterruptedPartial's path (freeze the
+    // thinking bubble with whatever was received) rather than showError's —
+    // no separate response bubble is ever created.
+    const statusBubble = page.locator(THINKING + '.msg-thinking-done');
+    await expect(statusBubble).toContainText('Partial response', { timeout: 8_000 });
+    await expect(statusBubble).toContainText('Connection interrupted.');
+    await expect(page.locator(RESPONSE)).not.toBeAttached();
+    await expect(page.locator(MSG_ERROR)).not.toBeAttached();
+    expect(statusCalls).toBe(2); // stopped at the terminal error, never polled again
   });
 
   test('stream error after partial content keeps partial in thinking bubble only', async ({ page }) => {
@@ -2372,7 +2373,15 @@ test.describe('response bubble', () => {
     await expect(page.locator(MSG_ERROR)).not.toBeAttached();
   });
 
-  test('stream error with message id keeps polling until final completion', async ({ page }) => {
+  test('a stream-level error event finalizes immediately and a follow-up empty status poll does not override it', async ({ page }) => {
+    // The SSE `error` event itself is already terminal (shows 'Connection
+    // lost' right away) — it also starts the /status fallback poller as a
+    // safety net for a server-side state change the closed SSE connection
+    // can no longer report. That poller must not clobber the already-shown
+    // error with a second, less informative 'Response interrupted.' bubble
+    // just because the first /status poll happens to return an empty error
+    // too — nor should it keep polling toward a later status that,
+    // per agent/stats_db.py, can't legitimately follow a terminal one.
     await page.route('**/chat', r => r.fulfill({
       status: 200,
       headers: { ...SSE_HEADERS, 'X-Squid-Msg-Id': '92' },
@@ -2386,29 +2395,19 @@ test.describe('response bubble', () => {
     let statusCalls = 0;
     await page.route('**/chat/92/status', r => {
       statusCalls++;
-      if (statusCalls === 1) {
-        return r.fulfill({ json: { id: 92, status: 'pending', content: '' } });
-      }
-      if (statusCalls === 2) {
-        return r.fulfill({ json: { id: 92, status: 'error', content: '' } });
-      }
-      return r.fulfill({ json: {
-        id: 92,
-        topic: 'default',
-        agent: 'claude',
-        backend: 'claude',
-        status: 'done',
-        content: 'Recovered final response',
-        adhoc: false,
-        timestamp: new Date().toISOString(),
-      }});
+      return r.fulfill({ json: { id: 92, status: 'error', content: '' } });
     });
 
     await sendMsg(page);
 
-    await expect(page.locator(RESPONSE).filter({ hasText: 'Recovered final response' })).toBeVisible({ timeout: 8_000 });
-    await expect(page.locator(MSG_ERROR).filter({ hasText: 'Connection lost' })).not.toBeAttached();
-    expect(statusCalls).toBeGreaterThanOrEqual(3);
+    await expect(page.locator(MSG_ERROR).filter({ hasText: 'Connection lost' })).toBeVisible({ timeout: 8_000 });
+    await expect(page.locator(MSG_ERROR).filter({ hasText: 'Response interrupted.' })).not.toBeAttached();
+    await expect(page.locator(THINKING + '.msg-thinking-done')).toBeVisible();
+    // Exactly 2, not "at least 3": shadowInstallSseCompletion (store-only,
+    // fires once from the same error handler) and the fallback poller's own
+    // single terminal doPoll() — both one-shot, neither repeats or reaches
+    // a later mocked status.
+    expect(statusCalls).toBe(2);
   });
 
   test('polling error after partial content keeps partial in thinking bubble only', async ({ page }) => {
