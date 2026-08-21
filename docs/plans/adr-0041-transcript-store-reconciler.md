@@ -1472,6 +1472,18 @@ boundary before an appended queued message, and correct the store comment so
 tool events remain documented as structured `tools[]`, not narrative text.
 PWA cache bumped to `v20260821-017`.
 
+## 2026-08-21: Stage 3(b) prerequisite — ownership-safe composer-live ranges
+
+Composer-created live groups now carry one explicit `data-live-group-id`
+across their route marker, user prompt, prompt timestamp, and thinking bubble.
+Added `existingPendingNodeRange()` as the reconciler-facing collector: it
+returns the full flat composer range only when it reaches a prompt/route
+anchor with the same owner token, and always treats recovered `.history-item`
+wip bubbles as self-contained. This closes the range-ownership prerequisite
+without broadening pending adoption or changing render ownership yet.
+Regression tests prove an older completed timestamp is not stolen and a
+recovered wip remains a one-node range. PWA cache bumped to `v20260821-018`.
+
 ## Next steps
 
 1. **Producer 2 Stage 3 (pending-turn reconciler cutover) — not started.**

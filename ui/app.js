@@ -1815,6 +1815,36 @@ function liveGroupElements(thinking) {
   return group.reverse();
 }
 
+// Reconciler adoption needs a stricter ownership boundary than
+// liveGroupElements' visibility-oriented backward walk. Composer-live nodes
+// share an explicit token; neutral interstitial nodes are included only when
+// that walk reaches a prompt/route anchor carrying the same token. A
+// recovered history wip bubble is self-contained and must never inherit an
+// unrelated completed turn's trailing timestamp immediately before it.
+function existingPendingNodeRange(thinking) {
+  if (!thinking || !thinking.classList.contains('msg-thinking')) return null;
+  if (thinking.classList.contains('history-item')) return [thinking];
+  const owner = thinking.dataset.liveGroupId;
+  if (!owner) return [thinking];
+
+  const trailing = [];
+  let el = thinking.previousElementSibling;
+  while (el && (el.classList.contains('msg-time') || el.id === 'code-roots-prompt')) {
+    trailing.push(el);
+    el = el.previousElementSibling;
+  }
+  if (!el || el.dataset.liveGroupId !== owner) return [thinking];
+
+  const nodes = [thinking, ...trailing, el];
+  if (el.classList.contains('msg') && el.classList.contains('user')) {
+    const marker = el.previousElementSibling;
+    if (marker?.classList.contains('route-chain-marker') && marker.dataset.liveGroupId === owner) {
+      nodes.push(marker);
+    }
+  }
+  return nodes.reverse();
+}
+
 function collectLiveGroupElements() {
   const group = new Set();
   document.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)').forEach(thinking => {
@@ -4984,6 +5014,8 @@ async function sendMessage(text, opts = {}) {
     setTopicChip(topic, agent, adhoc, lookback, { route, chainTarget, chainTargetFresh, chainOperator, chainRounds, chainTargetTopic, broadcastAgents, flowOrigins, suppressTurnCount: suppressChipTurnCount });
   }
   const sendTime = new Date().toISOString();
+  sendMessage.liveGroupSequence = (sendMessage.liveGroupSequence || 0) + 1;
+  const liveGroupId = `${Date.now().toString(36)}-${sendMessage.liveGroupSequence}`;
   // A search scope can't be evaluated against a message that isn't in the DB yet, so keep
   // the live group hidden while searching. A filter scope, on the other hand, can be checked
   // client-side against this message's own topic/agent/adhoc — show it if it matches.
@@ -5006,13 +5038,17 @@ async function sendMessage(text, opts = {}) {
     chainMarker.dataset.flowRoute = flowRoute;
     if (agent) chainMarker.dataset.agent = agent;
     if (adhoc) chainMarker.dataset.adhoc = '1';
+    chainMarker.dataset.liveGroupId = liveGroupId;
     if (liveHiddenByScope) chainMarker.classList.add('live-hidden');
   }
   // Origin Broadcast: the same literal prompt goes to every target, so only
   // the first target's call renders the shared user bubble — the rest reuse
   // it via opts.suppressUserBubble instead of duplicating it per agent.
   const userBubble = opts.suppressUserBubble ? null : makeUserBubble(message, topic, agent, null, adhoc, lookback, source, broadcastAgents, displayFlowRoute);
-  if (userBubble) userBubble.dataset.ts = sendTime;
+  if (userBubble) {
+    userBubble.dataset.ts = sendTime;
+    userBubble.dataset.liveGroupId = liveGroupId;
+  }
   const userTopicTag = userBubble ? userBubble.querySelector('.topic-tag') : null;
   // A route marker is the leading annotation for its prompt group. Keep it
   // immediately before the user bubble so filtering and later completion do
@@ -5022,6 +5058,7 @@ async function sendMessage(text, opts = {}) {
   if (userBubble) {
     messages.appendChild(userBubble);
     const userTimeEl = addTimestamp(userBubble, sendTime, true);
+    if (userTimeEl) userTimeEl.dataset.liveGroupId = liveGroupId;
     if (liveHiddenByScope) {
       userBubble.classList.add('live-hidden');
       userTimeEl?.classList.add('live-hidden');
@@ -5044,6 +5081,7 @@ async function sendMessage(text, opts = {}) {
   // eventually completes. History later supplies the authoritative start.
   if (!userBubble) thinkingBubble.dataset.ts = sendTime;
   thinkingBubble.dataset.orderAt = sendTime;
+  thinkingBubble.dataset.liveGroupId = liveGroupId;
   thinkingBubble.dataset.topic = topic;
   if (flowRoute) thinkingBubble.dataset.flowRoute = flowRoute;
   if (agent) thinkingBubble.dataset.agent = agent;

@@ -112,6 +112,51 @@ test('render() adopts an already-on-screen wip bubble for a pending turn, and re
   await expect(bubbles.locator('.thinking-live')).toHaveText('');
 });
 
+test('pending range collection keeps a composer-live group together without stealing an older turn sibling', async ({ page }) => {
+  const summary = await page.evaluate(() => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const olderTimestamp = document.createElement('div');
+    olderTimestamp.className = 'msg-time history-item';
+    olderTimestamp.dataset.testMarker = 'older-timestamp';
+    const route = document.createElement('div');
+    route.className = 'route-chain-marker';
+    route.dataset.liveGroupId = 'live-1';
+    route.dataset.testMarker = 'route';
+    const user = document.createElement('div');
+    user.className = 'msg user';
+    user.dataset.liveGroupId = 'live-1';
+    user.dataset.testMarker = 'user';
+    const time = document.createElement('div');
+    time.className = 'msg-time';
+    time.dataset.liveGroupId = 'live-1';
+    time.dataset.testMarker = 'time';
+    const thinking = document.createElement('div');
+    thinking.className = 'msg assistant msg-thinking';
+    thinking.dataset.liveGroupId = 'live-1';
+    thinking.dataset.testMarker = 'thinking';
+    container.append(olderTimestamp, route, user, time, thinking);
+    return window.existingPendingNodeRange(thinking).map(node => node.dataset.testMarker);
+  });
+  expect(summary).toEqual(['route', 'user', 'time', 'thinking']);
+});
+
+test('pending range collection treats a recovered history wip as self-contained', async ({ page }) => {
+  const summary = await page.evaluate(() => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const unrelatedTimestamp = document.createElement('div');
+    unrelatedTimestamp.className = 'msg-time history-item';
+    unrelatedTimestamp.dataset.testMarker = 'unrelated';
+    const thinking = document.createElement('div');
+    thinking.className = 'msg assistant msg-thinking history-item';
+    thinking.dataset.testMarker = 'recovered';
+    container.append(unrelatedTimestamp, thinking);
+    return window.existingPendingNodeRange(thinking).map(node => node.dataset.testMarker);
+  });
+  expect(summary).toEqual(['recovered']);
+});
+
 // Safety-boundary invariant, not a feature test: a composer-live thinking
 // bubble (sendMessage's own, never insertPendingHistoryItem/makeWipBubble's)
 // never carries `.history-item` — confirmed by reading every
