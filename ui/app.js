@@ -31,16 +31,19 @@ const realtimeTransportMode = fetch('/config/realtime', { cache: 'no-store' })
   .then(config => ['auto', 'websocket', 'sse'].includes(config.transport) ? config.transport : 'sse')
   .catch(() => 'sse');
 
-// ADR-0041 Stage 4: HTTP history renders from the normalized store instead
-// of #messages directly only when explicitly opted in — resolved once,
+// ADR-0041 Stage 5: HTTP history renders from the normalized store
+// (historyRegistry) instead of #messages directly — resolved once,
 // client-side only (no server round trip needed, unlike realtimeTransportMode
-// above). Default stays the existing direct-DOM path: flipping it (tried
-// 2026-08-18) surfaced real gaps — deep-dive-button.spec.js (7 tests) and
-// reply-button.spec.js (5 tests) fail wholesale under renderer=store, plus
-// one chat.spec.js filter round-trip case, because historyRegistry.render()
-// doesn't yet reproduce every data attribute/DOM detail those features read
-// off a history turn. Fix those before retrying the flip.
-const historyRendererMode = new URLSearchParams(location.search).get('renderer') === 'store' ? 'store' : 'dom';
+// above). This was direct-DOM by default until 2026-08-20: an earlier flip
+// attempt (2026-08-18) surfaced Gap 1 (a history row with no explicit
+// `status` rendered nowhere) and Gap 2 (a live composer turn could anchor on
+// the wrong side of newer completed history); both are fixed, and a targeted
+// run of every history/ordering/composer-adjacent spec file (chat, the five
+// ADR-0041 suites, boot-logo — the actual blast radius of this flip plus a
+// later date-divider change that also touched turn ordering) came back clean.
+// `?renderer=dom` stays as a one-cycle rollback escape hatch before the
+// disabled direct-DOM branch is deleted for good.
+const historyRendererMode = new URLSearchParams(location.search).get('renderer') === 'dom' ? 'dom' : 'store';
 
 // history.scrollRestoration is set as early as possible in index.html's
 // <head> instead of here — see the comment there.
@@ -1855,18 +1858,18 @@ function anchorForLiveEdgePage(items) {
 // turn group must be inserted, given `next` (the already-placed newer
 // completed neighbor, or null for the newest group this pass). Completed
 // turns sort by completed_at, but live (still-running) turn groups hold their
-// position by *start* time among them — the direct-DOM insert paths key live
-// bubbles on data-order-at (insertPendingHistoryItem/insertCompletedHistoryItem):
-// a turn that ended before a live group started belongs above it, one that
-// ended after belongs below (history-store-renderer.spec.js's "live id newer
-// than completed ids" test proves id order and start/end-time order can
-// disagree, so id can't replace this comparison when data-order-at exists).
-// The composer-live-send thinking bubble (sendMessage) never stamps
-// data-order-at though — only the direct-DOM history-pending path does — so
-// for that bubble this can't be answered by time at all; fall back to
-// msg_id, the same submission-order proxy anchorBeforeNextLiveGroup already
-// uses for the page-load case. So this must be answered per turn, not once
-// for the whole completed set — a single block-wide anchor can't express the
+// position by *start* time among them — every live-bubble creation path
+// (composer sendMessage, the auto-resolve flow, and the direct-DOM
+// history-pending path) keys them on data-order-at: a turn that ended before
+// a live group started belongs above it, one that ended after belongs below
+// (history-store-renderer.spec.js's "live id newer than completed ids" test
+// proves id order and start/end-time order can disagree, so id can't replace
+// this comparison when data-order-at exists). data-order-at is still only
+// conditionally set for a recovered pending row (makeWipBubble, gated on
+// item.timestamp) — msg_id remains the fallback, the same submission-order
+// proxy anchorBeforeNextLiveGroup already uses for the page-load case, for
+// that one no-timestamp case. This must be answered per turn, not once for
+// the whole completed set — a single block-wide anchor can't express the
 // interleave and strands the live bubble on the wrong side of turns that
 // finished while it was running. Insert before whichever sits higher:
 // `next`, or the first node of any live group proven (by start time, or by
@@ -4384,6 +4387,7 @@ input.addEventListener('keydown', (e) => {
 const authPanel = document.getElementById('auth-panel');
 const authPanelTitle = document.getElementById('auth-panel-title');
 const authPanelTerm = document.getElementById('auth-panel-term');
+const authPanelKeypad = document.getElementById('auth-panel-keypad');
 const authPanelCancelBtn = document.getElementById('auth-panel-cancel-btn');
 const authPanelRetryBtn = document.getElementById('auth-panel-retry-btn');
 const authPanelUnlockBtn = document.getElementById('auth-panel-unlock-btn');
@@ -4414,14 +4418,23 @@ function parseAuthRequiredError(text) {
   return { harness: m[1], message: text.slice(m[0].length) };
 }
 
-function authLoginButtonHtml(harness) {
+function authActionButtonHtml(harness, errorText = '') {
+  if (harness === 'cursor' && /keychain is locked/i.test(errorText)) {
+    return '<button type="button" class="auth-login-btn" data-auth-mode="unlock">Unlock keychain</button> ';
+  }
   const label = HARNESS_LABELS[harness] || harness;
   return `<button type="button" class="auth-login-btn" data-harness="${harness}">Log in to ${label}</button> `;
 }
 
 function wireAuthLoginButtons(root, onSuccessRetry) {
   root.querySelectorAll('.auth-login-btn').forEach(btn => {
-    btn.addEventListener('click', () => openAuthPanel(btn.dataset.harness, onSuccessRetry));
+    btn.addEventListener('click', () => {
+      if (btn.dataset.authMode === 'unlock') {
+        openAuthPanel('keychain', onSuccessRetry, { mode: 'unlock' });
+        return;
+      }
+      openAuthPanel(btn.dataset.harness, onSuccessRetry);
+    });
   });
 }
 
@@ -4552,7 +4565,10 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   // Catalog commands render animated progress against the PTY width they
   // start with. Keep at least a small usable grid on very narrow phones;
   // the Agents panel scrolls horizontally when the viewport cannot fit it.
-  term.focus();
+  // Focusing xterm opens the software keyboard on phones, collapsing the
+  // viewport until only the first terminal line is visible. Mobile login
+  // pickers use the dedicated navigation keypad below the terminal instead.
+  if (!window.matchMedia('(max-width: 768px)').matches) term.focus();
 
   // Make URLs clickable — avoids macOS "open with" system modal.
   term.registerLinkProvider({
@@ -4817,6 +4833,20 @@ async function closeAuthPanel({ refreshCatalog = true } = {}) {
 }
 
 authPanelCancelBtn.addEventListener('click', () => closeAuthPanel());
+authPanelKeypad.addEventListener('click', e => {
+  const btn = e.target.closest('button[data-auth-key]');
+  if (!btn || !_authSession?.id || !_authSession.running) return;
+  const input = { up: '\x1b[A', down: '\x1b[B', enter: '\r' }[btn.dataset.authKey];
+  if (!input) return;
+  if (_authSession.transport === 'ws') {
+    realtimeV1?.authSend('auth.input', { session_id: _authSession.id, data: input });
+  } else {
+    fetch(`/auth/session/${_authSession.id}/input`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: input }),
+    }).catch(() => {});
+  }
+});
 agentsAuthPanelCancelBtn.addEventListener('click', () => closeAuthPanel());
 authPanelUnlockBtn.addEventListener('click', () => {
   // Consented, not automatic: the user must click this and then type their
@@ -4899,6 +4929,7 @@ async function sendMessage(text, opts = {}) {
   // the first target's call renders the shared user bubble — the rest reuse
   // it via opts.suppressUserBubble instead of duplicating it per agent.
   const userBubble = opts.suppressUserBubble ? null : makeUserBubble(message, topic, agent, null, adhoc, lookback, source, broadcastAgents, displayFlowRoute);
+  if (userBubble) userBubble.dataset.ts = sendTime;
   const userTopicTag = userBubble ? userBubble.querySelector('.topic-tag') : null;
   // A route marker is the leading annotation for its prompt group. Keep it
   // immediately before the user bubble so filtering and later completion do
@@ -4926,6 +4957,10 @@ async function sendMessage(text, opts = {}) {
   // first content chunk reveals a separate response bubble below.
   const thinkingBubble = document.createElement('div');
   thinkingBubble.className = 'msg assistant msg-thinking';
+  // Calendar grouping follows when the turn was submitted, not when it
+  // eventually completes. History later supplies the authoritative start.
+  if (!userBubble) thinkingBubble.dataset.ts = sendTime;
+  thinkingBubble.dataset.orderAt = sendTime;
   thinkingBubble.dataset.topic = topic;
   if (flowRoute) thinkingBubble.dataset.flowRoute = flowRoute;
   if (agent) thinkingBubble.dataset.agent = agent;
@@ -4947,6 +4982,7 @@ async function sendMessage(text, opts = {}) {
   thinkingContent.className = 'thinking-live';
   thinkingBubble.appendChild(thinkingContent);
   messages.appendChild(thinkingBubble);
+  refreshDateDividers();
   const thinkingLoader = addLoader(thinkingContent);
   let statusBuf = '';
   let raw = '';
@@ -5097,6 +5133,7 @@ async function sendMessage(text, opts = {}) {
     clearShellRunningStatus();
     killBtn.style.display = 'none';
     thinkingBubble.remove();
+    refreshDateDividers();
   }
 
   // Scrolls to reveal the new thinking bubble. Deferred a frame so its
@@ -5109,6 +5146,7 @@ async function sendMessage(text, opts = {}) {
   // ── Response bubble (not yet in DOM — appended on first content chunk) ────────
   const bubble = document.createElement('div');
   bubble.className = 'msg assistant';
+  if (!userBubble) bubble.dataset.ts = sendTime;
   if (nativeShell) bubble.classList.add('shell-result');
   bubble.dataset.topic = topic;
   if (flowRoute) bubble.dataset.flowRoute = flowRoute;
@@ -5152,6 +5190,7 @@ async function sendMessage(text, opts = {}) {
   function placeResponseBubble() {
     if (!bubble.parentNode) messages.appendChild(bubble);
     if (chainMarker && !userBubble) messages.insertBefore(chainMarker, bubble);
+    refreshDateDividers();
   }
 
   let firstDataReceived = false;
@@ -5263,7 +5302,7 @@ async function sendMessage(text, opts = {}) {
     if (!errDisplay && raw) return;
     if (!shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) return;
     placeResponseBubble();
-    contentDiv.innerHTML = (authReq ? authLoginButtonHtml(authReq.harness) : '')
+    contentDiv.innerHTML = (authReq ? authActionButtonHtml(authReq.harness, authReq.message) : '')
       + `<span class="msg-error">${escapeHtml(errDisplay) || 'Response interrupted.'}</span>`;
     if (authReq) wireAuthLoginButtons(contentDiv, () => sendMessage(text, opts));
     scrollToBottom();
@@ -6718,12 +6757,15 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
               // Real model work is happening now — render it as a normal chat
               // turn (prompt + live thinking + streamed response) instead of
               // hiding it behind a bare button spinner.
+              const autoResolveTime = new Date().toISOString();
               const userBubble = makeUserBubble('Auto-resolve merge conflict', messageTopic, null, null, true, 0, 'diff_viewer');
+              userBubble.dataset.ts = autoResolveTime;
               messages.appendChild(userBubble);
-              addTimestamp(userBubble, new Date().toISOString(), true);
+              addTimestamp(userBubble, autoResolveTime, true);
 
               thinkingBubble = document.createElement('div');
               thinkingBubble.className = 'msg assistant msg-thinking';
+              thinkingBubble.dataset.orderAt = autoResolveTime;
               thinkingBubble.dataset.topic = messageTopic;
               const thinkingHeader = document.createElement('div');
               thinkingHeader.className = 'response-header';
@@ -6737,6 +6779,7 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
               thinkingBubble.appendChild(thinkingContent);
               loader = addLoader(thinkingContent);
               messages.appendChild(thinkingBubble);
+              refreshDateDividers();
               const attachResolveMsgId = value => {
                 const resolveMsgId = parseInt(value || '', 10);
                 if (!Number.isFinite(resolveMsgId) || resolveMsgId <= 0) return;
@@ -7312,7 +7355,7 @@ function appendHistoryItem(item, container) {
   if (item.status === 'error') {
     const authReq = parseAuthRequiredError(item.content || '');
     const raw = ((authReq ? authReq.message : item.content) || '').split('\n')[0].replace(/^CLI exited \d+:\s*/, '').trim();
-    asstContent.innerHTML = (authReq ? authLoginButtonHtml(authReq.harness) : '')
+    asstContent.innerHTML = (authReq ? authActionButtonHtml(authReq.harness, authReq.message) : '')
       + `<span class="msg-error">${escapeHtml(raw) || 'Response interrupted.'}</span>`;
     // No auto-retry here (unlike the live-turn path in showError) — a
     // history row only has item.prompt as plain text, not the original
@@ -7517,7 +7560,10 @@ function makeWipBubble(item) {
   bubble.dataset.topic = item.topic || 'default';
   if (item.agent) bubble.dataset.agent = item.agent;
   if (item.adhoc != null) bubble.dataset.adhoc = item.adhoc ? 'true' : 'false';
-  if (item.timestamp) bubble.dataset.orderAt = item.timestamp;
+  if (item.timestamp) {
+    bubble.dataset.ts = item.timestamp;
+    bubble.dataset.orderAt = item.timestamp;
+  }
 
   // Recovered pending rows have no preceding user bubble after a refresh, so
   // give them the same prompt-bearing header as completed history responses.
@@ -7586,6 +7632,7 @@ function insertPendingHistoryItem(item) {
     ], key) > 0) || bottomSentinel;
   const anchorAboveViewport = !!anchor && anchor.getBoundingClientRect().top < messages.getBoundingClientRect().top;
   messages.insertBefore(bubble, anchor || null);
+  refreshDateDividers();
   if (wasAtBottom) scrollToRevealBubble(bubble);
   else if (anchorAboveViewport) messages.scrollTop += messages.scrollHeight - previousHeight;
   // This bubble is a new live group discovered outside the store/reconciler
@@ -7697,10 +7744,45 @@ const realtimeV1 = (() => {
     }
   };
 
+  // ADR-0041 Stage 2 (producer 2, WS snapshot): mirrors shadowInstallHistoryPage
+  // for the HTTP-history producer — feeds the store from every WS snapshot
+  // frame so store/DOM parity can be verified before any render depends on
+  // it. Store-only, no render change. Snapshot messages are raw
+  // chat_messages rows (agent/stats_db.py's get_realtime_snapshot), already
+  // one row per message — unlike a history item there is no denormalized
+  // turn to split apart. Only identity/ordering fields are carried, same as
+  // producer 1's Stage 2 (not enough to render from — no topic/agent/adhoc/
+  // session_id/tool context/etc.); that's Stage 4, same split
+  // historyItemToStoreRows documents.
+  const shadowInstallSnapshot = frame => {
+    if (!transcriptStore) return;
+    const rows = [];
+    for (const conversation of frame.payload?.conversations || []) {
+      for (const message of conversation.messages || []) {
+        if (message.id == null) continue;
+        rows.push({
+          msg_id: message.id,
+          role: message.role,
+          reply_to: message.reply_to ?? null,
+          content: message.content ?? '',
+          status: message.status,
+          completed_at: message.completed_at ?? null,
+          created_at: message.created_at ?? null,
+          stats: message.stats || {},
+        });
+      }
+    }
+    if (!rows.length) return;
+    const result = transcriptStore.installSnapshot({ messages: rows }, frame.event_id);
+    if (!result.ok) console.error('[transcript-store] shadow installSnapshot failed:', result.error);
+    if (!historyReconciler) transcriptStore.clearReconciled(result.dirty);
+  };
+
   const dispatchSnapshot = frame => {
     const resetCursor = frame.payload?.cursor_reset === true;
     if (Number(frame.event_id || 0) < cursor && !resetCursor) return;
     applyRealtimeProcessState(frame.payload?.processes, frame.payload?.queue);
+    shadowInstallSnapshot(frame);
     for (const conversation of frame.payload?.conversations || []) {
       for (const message of conversation.messages || []) {
         if (message.role === 'assistant') onDiscover?.(message, { reconcile: true });
@@ -8728,18 +8810,12 @@ function scrollToBottom(force = false) {
   if (force || isAtBottom()) messages.scrollTop = messages.scrollHeight;
 }
 
-// Following a new bubble to the literal bottom skips past its own content
-// when the bubble is taller than the viewport, forcing a scroll back up to
-// read it from the top. Peek just the head of the bubble into the bottom
-// slice of the viewport instead, so prior transcript context stays visible
-// above it and the user scrolls down to read the rest — same direction as
-// reading the rest of the transcript.
-const BUBBLE_PEEK_FRACTION = 0.15;
-
 function scrollToRevealBubble(bubble) {
   if (bubble.offsetHeight > messages.clientHeight) {
     const bubbleTop = bubble.getBoundingClientRect().top - messages.getBoundingClientRect().top;
-    messages.scrollTop += bubbleTop - messages.clientHeight * (1 - BUBBLE_PEEK_FRACTION);
+    // Date dividers add real height above the turn, so relying on max-scroll
+    // clamping no longer happens to land here. Align explicitly with the top.
+    messages.scrollTop += bubbleTop;
   } else {
     messages.scrollTop = messages.scrollHeight;
   }
@@ -8917,7 +8993,9 @@ function fmtDate(d) {
 
 function refreshDateDividers() {
   document.querySelectorAll('#messages .date-divider').forEach(el => el.remove());
-  const bubbles = [...document.querySelectorAll('#messages .history-item[data-ts]')];
+  // A live turn is rooted at its user bubble so the divider never splits its
+  // prompt from the response. Recovered/history turns have an assistant root.
+  const bubbles = [...document.querySelectorAll('#messages .msg[data-ts]')];
   let lastKey = null;
   for (const el of bubbles) {
     const d = new Date(el.dataset.ts);

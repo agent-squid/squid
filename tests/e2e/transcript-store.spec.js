@@ -230,3 +230,116 @@ test.describe('HTTP history producer (shadow mode)', () => {
     expect(snapshot.order.completed).not.toContain(8);
   });
 });
+
+// ── Stage 2: WS snapshot producer, shadow mode ──────────────────────────────
+// app.js now also feeds every WS 'snapshot' frame into
+// window.__transcriptStore alongside its existing direct-DOM discovery path
+// (shadowInstallSnapshot, mirroring shadowInstallHistoryPage). These tests
+// drive the live page over a mocked WebSocket so the same frame produces
+// both the DOM and the store state, and check the two stay in parity without
+// a second render.
+
+test.describe('WS snapshot producer (shadow mode)', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__webSocket = null;
+      class MockWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        constructor() {
+          this.readyState = MockWebSocket.CONNECTING;
+          window.__webSocket = this;
+          setTimeout(() => {
+            this.readyState = MockWebSocket.OPEN;
+            this.onopen?.();
+            this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+          });
+        }
+        send(data) {
+          const frame = JSON.parse(data);
+          if (frame.type === 'subscribe') {
+            setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+          }
+        }
+        receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+        close() { this.readyState = 3; this.onclose?.(); }
+      }
+      window.WebSocket = MockWebSocket;
+    });
+    await page.unroute('**/config/realtime');
+    await page.route('**/config/realtime', r => r.fulfill({ json: { transport: 'websocket' } }));
+  });
+
+  test('a WS-discovered turn renders the DOM the same way HTTP-history discovery does, and installs equivalent turns into the store', async ({ page }) => {
+    await page.route('**/chat/7/status', r => r.fulfill({ json: {
+      id: 7, role: 'assistant', reply_to: 6, topic: 'default', agent: 'claude',
+      adhoc: false, status: 'done', prompt: "what's your model?", content: 'Done 7',
+      completed_at: '2026-08-15T12:00:00Z',
+    }}));
+    await page.reload();
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'snapshot', event_id: 10, payload: { conversations: [{ messages: [
+        { id: 6, role: 'user', reply_to: null, content: "what's your model?" },
+        { id: 7, role: 'assistant', reply_to: 6, topic: 'default', agent: 'claude',
+          adhoc: false, status: 'done', content: 'Done 7', completed_at: '2026-08-15T12:00:00Z' },
+      ] }] },
+    }));
+
+    // Direct-DOM path is unaffected: the turn discovered via the WS snapshot
+    // still renders exactly once, via the existing /chat/{id}/status fetch.
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="7"]')).toHaveCount(1);
+
+    const snapshot = await page.evaluate(() => {
+      const s = window.__transcriptStore;
+      return { turn7: s.getTurn(7), prompt6: s.getMessage(6), order: s.getOrderedTurnIds() };
+    });
+    expect(snapshot.turn7.status).toBe('done');
+    expect(snapshot.turn7.promptMsgId).toBe(6);
+    expect(snapshot.prompt6).toMatchObject({ role: 'user', content: "what's your model?" });
+    expect(snapshot.order.completed).toContain(7);
+  });
+
+  test('a pending WS snapshot message installs into the store as a non-terminal turn', async ({ page }) => {
+    await page.reload();
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'snapshot', event_id: 5, payload: { conversations: [{ messages: [
+        { id: 8, role: 'assistant', reply_to: null, status: 'pending', content: '' },
+      ] }] },
+    }));
+
+    const snapshot = await page.evaluate(() => {
+      const s = window.__transcriptStore;
+      return { turn8: s.getTurn(8), order: s.getOrderedTurnIds() };
+    });
+    expect(snapshot.turn8.status).toBe('pending');
+    expect(snapshot.order.pending).toContain(8);
+    expect(snapshot.order.completed).not.toContain(8);
+  });
+
+  // The store's own event_id watermark (installSnapshot) is independent of
+  // the WS transport's replay cursor — a second snapshot frame at the same
+  // event_id passes the transport-level gate (dispatchSnapshot only drops
+  // event_id < cursor) but must still be a no-op in the store.
+  test('a second snapshot frame at the same event_id is a store no-op', async ({ page }) => {
+    await page.reload();
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'snapshot', event_id: 10, payload: { conversations: [{ messages: [
+        { id: 9, role: 'assistant', reply_to: null, status: 'done', completed_at: '2026-08-20T00:00:00Z' },
+      ] }] },
+    }));
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'snapshot', event_id: 10, payload: { conversations: [{ messages: [
+        { id: 9, role: 'assistant', reply_to: null, status: 'error' },
+      ] }] },
+    }));
+
+    const status = await page.evaluate(() => window.__transcriptStore.getMessage(9).status);
+    expect(status).toBe('done');
+  });
+});

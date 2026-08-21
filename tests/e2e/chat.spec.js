@@ -74,6 +74,29 @@ const MSG_ERROR = '.msg-error';
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
+test('live turn is included in its start-date section before history reconciliation', async ({ page }) => {
+  await mockBackend(page);
+  const chat = holdChat(page);
+  await page.goto('/');
+
+  await sendMsg(page, '#squid@claude still running');
+  await chat.intercepted;
+
+  const thinking = page.locator(THINKING);
+  const prompt = page.locator('#messages > .msg.user');
+  await expect(prompt).toHaveAttribute('data-ts', /\d{4}-\d{2}-\d{2}T/);
+  await expect(thinking).toHaveAttribute('data-order-at', /\d{4}-\d{2}-\d{2}T/);
+  await expect(page.locator('#messages > .date-divider')).toHaveCount(1);
+  expect(await page.evaluate(() => {
+    const divider = document.querySelector('#messages > .date-divider');
+    const prompt = document.querySelector('#messages > .msg.user');
+    return divider?.nextElementSibling === prompt
+      && divider.textContent === fmtDate(new Date(prompt.dataset.ts));
+  })).toBe(true);
+
+  chat.fulfill(sse(META, DONE));
+});
+
 test('websocket transport starts and completes a new chat without POST /chat', async ({ page }) => {
   await page.addInitScript(() => {
     window.__chatStartFrame = null;
@@ -1017,11 +1040,19 @@ test.describe('response bubble', () => {
     });
     await mockBackend(page);
     await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
-    // Completed messages newer than the in-flight prompt (msg 5).
+    // Completed messages newer than the in-flight prompt (msg 5). The live
+    // prompt's thinking bubble now stamps data-order-at with its real
+    // submission time (sendMessage), so these completed_at values must be
+    // genuinely later than "now" — a fixed past date would make the live
+    // prompt compare as newest regardless of msg_id, defeating the point of
+    // this fixture (an older live prompt that must still anchor above newer
+    // completed history).
+    const laterThanNow6 = new Date(Date.now() + 3_600_000).toISOString();
+    const laterThanNow7 = new Date(Date.now() + 7_200_000).toISOString();
     await page.route('**/history**', route => route.fulfill({ json: {
       items: [
-        { id: 7, role: 'assistant', topic: 'squid', agent: 'claude', status: 'done', content: 'Done 7', prompt: 'p7', timestamp: '2026-08-15T12:00:00Z' },
-        { id: 6, role: 'assistant', topic: 'squid', agent: 'claude', status: 'done', content: 'Done 6', prompt: 'p6', timestamp: '2026-08-15T11:00:00Z' },
+        { id: 7, role: 'assistant', topic: 'squid', agent: 'claude', status: 'done', content: 'Done 7', prompt: 'p7', timestamp: laterThanNow7 },
+        { id: 6, role: 'assistant', topic: 'squid', agent: 'claude', status: 'done', content: 'Done 6', prompt: 'p6', timestamp: laterThanNow6 },
       ],
       has_more: false,
     }}));
@@ -2634,6 +2665,20 @@ test.describe('response bubble', () => {
     expect(order[0]).toContain('auth-login-btn');
     await look(page);  // pause — observe: login button leads the error text
   });
+
+  test('locked Cursor keychain error shows unlock instead of login', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(META, { event: 'error', data: '[[cli-auth-required:cursor]] \u001b[33mError: Your macOS login keychain is locked.\u001b[0m' }),
+    }));
+
+    await sendMsg(page);
+    const errorBubble = page.locator(RESPONSE);
+    const authBtn = errorBubble.locator('.auth-login-btn');
+    await expect(authBtn).toHaveText('Unlock keychain');
+    await expect(authBtn).toHaveAttribute('data-auth-mode', 'unlock');
+    await expect(authBtn).not.toContainText('Log in');
+  });
 });
 
 test.describe('parallel responses', () => {
@@ -3801,6 +3846,7 @@ test.describe('recovered pending responses', () => {
 // ── CLI auth panel transport (ADR-0040 step 1) ───────────────────────────────
 
 test('websocket transport drives the auth panel over WS without POST /auth/session', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(() => {
     window.__authFrames = [];
     window.__ws = null;
@@ -3842,14 +3888,23 @@ test('websocket transport drives the auth panel over WS without POST /auth/sessi
   });
 
   await page.goto('/');
-  await page.evaluate(() => openAuthPanel('claudecode', null));
+  await page.evaluate(() => openAuthPanel('opencode', null));
 
   await page.waitForFunction(() => window.__authFrames.some(f => f.type === 'auth.start'));
   expect(httpAuthRequests).toBe(0);
   const start = await page.evaluate(() => window.__authFrames.find(f => f.type === 'auth.start'));
-  expect(start.payload).toMatchObject({ harness: 'claudecode', mode: 'login' });
+  expect(start.payload).toMatchObject({ harness: 'opencode', mode: 'login' });
   expect(typeof start.request_id).toBe('string');
   expect(start.request_id.length).toBeGreaterThan(0);
+
+  const keypad = page.locator('#auth-panel-keypad');
+  await expect(keypad).toBeVisible();
+  await expect(page.locator('#auth-panel-term .xterm-screen')).toHaveCSS('height', /[1-9]/);
+  await keypad.getByRole('button', { name: 'Up arrow' }).click();
+  await keypad.getByRole('button', { name: 'Down arrow' }).click();
+  await keypad.getByRole('button', { name: 'Enter' }).click();
+  await expect.poll(() => page.evaluate(() => window.__authFrames
+    .filter(f => f.type === 'auth.input').map(f => f.payload.data))).toEqual(['\x1b[A', '\x1b[B', '\r']);
 
   // Streamed output + done arrive over the socket; a clean exit (0) on the
   // login flow closes the panel, which in turn cancels the WS session.
