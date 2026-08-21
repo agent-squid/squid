@@ -2264,9 +2264,9 @@ const historyReconciler = (historyRendererMode === 'store' && transcriptStore
         container: messages,
         getAnchor: historyStoreAnchor,
         getPendingAnchor: historyStorePendingAnchor,
-        // Only HTTP-history rows are full denormalized render payloads. A WS
-        // snapshot's raw assistant row has no inlined prompt/scope metadata;
-        // leave it unbuilt until discovery supplies the real bubble.
+        // A pending row becomes buildable only once it carries the
+        // denormalized prompt: HTTP history has it immediately; WS snapshot
+        // raw gains it when the authoritative discovery row enriches it.
         buildPending: item => Object.prototype.hasOwnProperty.call(item, 'prompt')
           && itemMatchesFilter(item, historyFilter) ? makeWipBubble(item) : null,
         mountPending: (item, bubble) => reconnectPendingItem(item, bubble),
@@ -2409,8 +2409,9 @@ async function shadowInstallSseCompletion(msgId) {
 // row's raw into the store so a later render pass can build/adopt from it.
 // Raw-only and fill-if-missing (transcript-store.js's attachRaw): never
 // touches live content/status/run_seq, so a still-streaming turn's
-// accumulated fields can't be clobbered or double-counted, and an existing
-// raw (a WS snapshot's chat_messages row) is left untouched.
+// accumulated fields can't be clobbered or double-counted. Existing snapshot
+// raw fields stay authoritative; the discovery row only fills omitted display
+// fields such as `prompt`.
 function shadowAttachRealtimeRow(item) {
   if (!transcriptStore || item?.id == null) return;
   const result = transcriptStore.attachRaw(Number(item.id), item);

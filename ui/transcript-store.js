@@ -349,10 +349,11 @@
     // are not clobbered or double-counted (installHistoryPage would be: it
     // replaces content authoritatively while leaving lastRunSeqByAssistantId
     // untouched, so the next applyRunEvent delta would re-append text the row
-    // already contained). First writer wins: an existing raw (e.g. a WS
-    // snapshot's chat_messages row) is never overwritten by a later discovery
-    // fetch of a different shape. An unknown msg_id is a silent no-op, not an
-    // error — a flow step whose message.changed was missed (or discovered via
+    // already contained). Existing raw fields remain first-writer-wins, but a
+    // later discovery row may fill fields the snapshot shape omitted (notably
+    // the denormalized `prompt` needed to build a pending turn). An unknown
+    // msg_id is a silent no-op, not an error — a flow step whose
+    // message.changed was missed (or discovered via
     // the SSE polling fallback, which never fed the store) simply isn't
     // tracked here yet; a later snapshot or history load installs it.
     function attachRaw(msgId, raw) {
@@ -360,10 +361,14 @@
       if (raw == null) return { ok: false, error: 'attachRaw: raw required', dirty: dirtySnapshot() };
       const existing = messagesById.get(msgId);
       if (!existing) return { ok: true, dirty: dirtySnapshot(), noop: true };
-      if (existing.raw != null) return { ok: true, dirty: dirtySnapshot(), noop: true };
-      messagesById.set(msgId, { ...existing, raw });
+      const existingRaw = existing.raw;
+      const mergedRaw = existingRaw == null ? raw : { ...raw, ...existingRaw };
+      const addsField = existingRaw == null || Object.keys(raw).some(key =>
+        !Object.prototype.hasOwnProperty.call(existingRaw, key));
+      if (!addsField) return { ok: true, dirty: dirtySnapshot(), noop: true };
+      messagesById.set(msgId, { ...existing, raw: mergedRaw });
       const turn = turnsByAssistantId.get(msgId);
-      if (turn) turnsByAssistantId.set(msgId, { ...turn, raw });
+      if (turn) turnsByAssistantId.set(msgId, { ...turn, raw: mergedRaw });
       return { ok: true, dirty: dirtySnapshot() };
     }
 

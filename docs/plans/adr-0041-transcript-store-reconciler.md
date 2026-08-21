@@ -1644,6 +1644,18 @@ was not clean: unrelated reducer cases intermittently loaded without the
 `SquidTranscriptStore` script (77 passed, 4 flaky, 1 failed after retries).
 PWA cache bumped to `v20260821-027`.
 
+### 2026-08-21: Producer 2 Stage 4 — snapshot raw enrichment
+
+`attachRaw` now fills fields omitted by an existing WS snapshot raw row while
+preserving every snapshot-provided field. This gives a snapshot-discovered
+turn the denormalized `prompt` from its authoritative `/status` discovery row
+without replacing snapshot content/topic facts, touching normalized live
+content/status, advancing watermarks, or re-dirtying the turn. This closes the
+render-payload gap that previously forced pure snapshot pending rows to remain
+unbuildable. No DOM ownership changed in this slice. Targeted enrichment tests
+2/2 and registry/reconciler/renderer suites 42/42 pass. PWA cache bumped to
+`v20260821-028`.
+
 1. **Producer 2 Stage 3 (pending-turn reconciler cutover) — in progress.**
    (Separately: the completed-turn duplicate-render bug found while scoping
    this — direct-DOM bypass call sites vs. `render()`'s dirty-id
@@ -1656,9 +1668,10 @@ PWA cache bumped to `v20260821-027`.
    HTTP-history wips once, with watcher attachment deferred until after
    placement. Existing watcher-owned bubbles deliberately remain adopt-only:
    the store cannot faithfully reconstruct tool/queue ordering yet, so
-   preview patching would reintroduce two divergent writers. Pure WS rows are
-   also not built because they lack the denormalized prompt/scope payload;
-   discovery still owns those. (c) —
+   preview patching would reintroduce two divergent writers. WS snapshot raw
+   now gains its missing denormalized prompt from discovery without replacing
+   snapshot facts; switching its initial construction to the registry is the
+   next cutover slice. (c) —
    **done** — the live narrative buffer now has a
    store home (`turn.narrative` for live deltas, `turn.raw.status_raw` for
    already-fetched rows), with `chat.status` wired end-to-end on WS, and (d)

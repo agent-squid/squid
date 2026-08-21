@@ -198,18 +198,23 @@ test('attachRaw fills turn.raw without touching live content/status or re-dirtyi
   expect(result.dirty).not.toContain(70);
 });
 
-test('attachRaw is a first-writer-wins no-op when a raw payload already exists', async ({ page }) => {
+test('attachRaw fills missing snapshot raw fields without overwriting existing fields', async ({ page }) => {
   const store = await freshStore(page);
   await store.evaluate(s => s.installSnapshot({ messages: [
-    { msg_id: 71, role: 'assistant', status: 'pending', raw: { id: 71, topic: 'snapshot-topic' } },
+    { msg_id: 71, role: 'assistant', status: 'pending', content: 'live snapshot',
+      raw: { id: 71, topic: 'snapshot-topic', content: 'live snapshot' } },
   ] }, 1));
 
-  const again = await store.evaluate(s => s.attachRaw(71, { id: 71, role: 'assistant', topic: 'discovery-topic', prompt: 'hi' }));
-  expect(again.noop).toBe(true);
-  // The snapshot's own raw row wins; the discovery fetch must not replace it
-  // (a WS snapshot row has no `prompt`, so replacing it would wrongly make
-  // buildPending construct a bubble from a different shape than Stage 4 intends).
-  expect((await store.evaluate(s => s.getTurn(71))).raw.topic).toBe('snapshot-topic');
+  const again = await store.evaluate(s => s.attachRaw(71, {
+    id: 71, role: 'assistant', topic: 'discovery-topic', prompt: 'hi', content: 'stale fetch',
+  }));
+  expect(again.noop).not.toBe(true);
+  // Snapshot facts stay authoritative, while the discovery-only prompt fills
+  // the render-payload gap without changing normalized message fields.
+  expect((await store.evaluate(s => s.getTurn(71))).raw).toMatchObject({
+    topic: 'snapshot-topic', prompt: 'hi', content: 'live snapshot',
+  });
+  expect((await store.evaluate(s => s.getMessage(71))).content).toBe('live snapshot');
 });
 
 test('attachRaw on an untracked msg_id is a silent no-op, not an error', async ({ page }) => {
@@ -448,7 +453,7 @@ test.describe('WS snapshot producer (shadow mode)', () => {
   test('a WS-discovered turn renders the DOM the same way HTTP-history discovery does, and installs equivalent turns into the store', async ({ page }) => {
     await page.route('**/chat/7/status', r => r.fulfill({ json: {
       id: 7, role: 'assistant', reply_to: 6, topic: 'default', agent: 'claude',
-      adhoc: false, status: 'done', prompt: "what's your model?", content: 'Done 7',
+      adhoc: false, status: 'done', prompt: "what's your model?", content: 'stale fetched content',
       completed_at: '2026-08-15T12:00:00Z',
     }}));
     await page.reload();
@@ -497,9 +502,12 @@ test.describe('WS snapshot producer (shadow mode)', () => {
       ] }] },
     }));
 
+    await expect.poll(() => page.evaluate(() => window.__transcriptStore.getTurn(7).raw.prompt))
+      .toBe("what's your model?");
     const raw = await page.evaluate(() => window.__transcriptStore.getTurn(7).raw);
     expect(raw).toMatchObject({
       id: 7, topic: 'default', agent: 'claude', adhoc: false, content: 'Done 7',
+      prompt: "what's your model?",
     });
   });
 
