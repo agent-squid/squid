@@ -122,6 +122,13 @@
         tools: assistantMsg.tools ?? [],
         stats: assistantMsg.stats ?? {},
         narrative: assistantMsg.narrative ?? '',
+        // Live-accumulated reply text (applyRunEvent's 'text' kind patches
+        // this onto the message directly). Distinct from turn.raw?.content:
+        // raw is a static snapshot attached once at the last full-row
+        // install, so for a still-streaming turn it lags behind whatever
+        // 'text' deltas have arrived since — a pending-turn renderer needs
+        // this field, not raw's, to show live text.
+        content: assistantMsg.content ?? '',
         route: assistantMsg.route,
         promptContent: promptMsg ? promptMsg.content : undefined,
         // Full-fidelity render payload (ADR-0041 Stage 4): a producer that

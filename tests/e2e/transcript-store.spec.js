@@ -149,6 +149,23 @@ test('narrative survives a later terminal status transition instead of being cle
   expect(turn.narrative).toBe('thinking…\n');
 });
 
+// ADR-0041 Stage 3: a pending-turn renderer needs the live-accumulated reply
+// text, not turn.raw?.content — raw is a static snapshot attached once at
+// the last full-row install (Stage 4), so it lags behind 'text' deltas that
+// arrive after that install. turn.content tracks the message's own content
+// directly, the same field applyRunEvent's 'text' kind patches.
+test('turn.content tracks the live-accumulated message content, independent of a stale turn.raw', async ({ page }) => {
+  const store = await freshStore(page);
+  await store.evaluate(s => s.installHistoryPage([
+    { msg_id: 60, role: 'assistant', status: 'pending', content: 'stale snapshot text',
+      raw: { id: 60, content: 'stale snapshot text' } },
+  ]));
+  await store.evaluate(s => s.applyRunEvent(60, 0, 'text', { mode: 'replace', text: 'live streamed text' }, 1));
+  const turn = await store.evaluate(s => s.getTurn(60));
+  expect(turn.content).toBe('live streamed text');
+  expect(turn.raw.content).toBe('stale snapshot text');
+});
+
 test('event_id at or below the watermark is a no-op; run_seq at or below its own watermark is a no-op', async ({ page }) => {
   const store = await freshStore(page);
   await store.evaluate(s => s.applyRunEvent(11, 5, 'text', { delta: 'a' }, 100));

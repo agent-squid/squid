@@ -7550,16 +7550,47 @@ function appendHistoryItem(item, container) {
 // block-wide anchor can express that. Defaults to chaining each group to
 // `next` (i.e. plain end-of-container append for the newest), matching a
 // plain isolated test container's semantics.
+// Given a completed turn's assistant bubble, collects the rest of its flat
+// sibling range: at most one of a `.stats`/`.msg-time` element (mutually
+// exclusive in appendHistoryItem — stats, shell-footer, or a plain
+// timestamp), followed by any number of contiguous `.tool-block-history`
+// elements. Stops at the first sibling that doesn't match one of those,
+// which is always either the next turn's own bubble/route-marker or
+// nothing — appendHistoryItem/insertCompletedHistoryItem only ever insert
+// one turn's siblings as one contiguous run, so a bare classList check is
+// enough to find exactly this turn's range without needing every sibling to
+// carry this turn's own msg_id (tool-block-history siblings don't reliably:
+// a worktree-blocker tool block carries an *earlier* turn's msg_id instead).
+function existingCompletedNodeRange(bubble) {
+  const nodes = [bubble];
+  let next = bubble.nextElementSibling;
+  while (next && (next.classList.contains('stats') || next.classList.contains('msg-time') || next.classList.contains('tool-block-history'))) {
+    nodes.push(next);
+    next = next.nextElementSibling;
+  }
+  return nodes;
+}
+
 function createHistoryRegistry({ container, getAnchor = (assistantMsgId, next) => next ?? null } = {}) {
   if (!container) throw new Error('createHistoryRegistry: container is required');
 
   function render(turn, ctx) {
     if (!ctx.store.isTerminal(turn.status)) {
-      // Pending turns aren't this producer's cutover yet — they still render
-      // via the direct-DOM wip-bubble path (reconnectPendingItem). Succeed
-      // with an empty node set so the id clears from pendingReconcile instead
-      // of being retried forever.
-      return { nodes: [] };
+      // Pending-turn *building* isn't this producer's cutover yet — a live
+      // bubble is still built and content-updated via the direct-DOM
+      // wip-bubble path (reconnectPendingItem/makeWipBubble). But adopt
+      // whatever node that path already built as this turn's registered
+      // group (instead of an inert `{ nodes: [] }`), so groups/bucketOf
+      // correctly track pending turns — real bookkeeping identity the
+      // eventual live-to-terminal cutover (ctx.previousBucket/nextBucket)
+      // needs. Reusing the same live node in place when it's still on
+      // screen (rather than re-querying every pass, which can run many
+      // times a second while streaming) also means never touching a node
+      // reconnectPendingItem is actively mutating. reorder() still only
+      // places order.completed, so this has no visible/positional effect.
+      if (ctx.previousGroup && ctx.previousGroup.nodes.every(n => n.isConnected)) return ctx.previousGroup;
+      const existing = container.querySelector(`.msg.assistant.msg-thinking.history-item[data-msg-id="${turn.assistantMsgId}"]`);
+      return { nodes: existing ? [existing] : [] };
     }
     const item = turn.raw;
     if (!item) return null;
@@ -7569,6 +7600,45 @@ function createHistoryRegistry({ container, getAnchor = (assistantMsgId, next) =
     // to be reapplied here rather than upstream, or the store-driven path
     // would render bubbles the direct-DOM path silently never did.
     if (!item.content && !item.context) return { nodes: [] };
+
+    // The first time this id is completed-bucket-owned by this reconciler
+    // (ctx.previousBucket is 'pending' or null, never 'completed'), a node
+    // for it may already exist outside its own bookkeeping: realtime
+    // discovery (discoverRealtimeTurn), flow-step attach (attachFlowStep),
+    // and the pending->completed swap (replacePendingWithStoredItem) all
+    // render completed turns directly via insertCompletedHistoryItem,
+    // bypassing the reconciler entirely, and shadowInstallHistoryPage/shadow
+    // run-event applies dirty a turn's id unconditionally with no "is it
+    // already on screen" check of their own. Without this, the *next*
+    // unrelated reconcile() pass (e.g. any later HTTP history page that
+    // legitimately includes this now-completed turn again) would build and
+    // insert a second, duplicate bubble, since this registry has no memory
+    // of a node it never created. Adopt the existing node as this turn's
+    // group instead of rebuilding — reorder() only moves a group that's
+    // actually out of place, so an already-correctly-positioned adoptee is
+    // a no-op. Gated on previousBucket rather than `!ctx.previousGroup`:
+    // once pending turns are adopted above, a turn that just transitioned
+    // from pending has a non-null (but stale, pending-shaped) previousGroup,
+    // which would otherwise wrongly skip this adoption search on exactly the
+    // transition it matters most for. `:not(.msg-thinking)` excludes a wip
+    // bubble that might still be on screen under the same msg-id (a stale
+    // node this same transition is meant to replace, not adopt as-is).
+    if (ctx.previousBucket !== 'completed') {
+      const existing = container.querySelector(`.msg.assistant.history-item[data-msg-id="${turn.assistantMsgId}"]:not(.msg-thinking)`);
+      // The bubble is only the first of this turn's flat sibling range — see
+      // this function's own header comment: appendHistoryItem/
+      // insertCompletedHistoryItem also produce a stats/timestamp/footer
+      // sibling and any tool-block-history siblings right after it, as flat
+      // #messages children, not descendants of the bubble. Adopting only the
+      // bubble would let reorder() move it alone later, stranding those
+      // siblings at their original position and splitting the turn (caught
+      // in review before publish). None of those siblings reliably carry
+      // *this* turn's own data-msg-id (a tool-block-history sibling can
+      // carry an earlier turn's msg_id instead, for a worktree-blocker
+      // action target — see toolMsgId below), so this walks by the exact
+      // sibling shape appendHistoryItem produces instead of by identity.
+      if (existing) return { nodes: existingCompletedNodeRange(existing) };
+    }
 
     const order = ctx.store.getOrderedTurnIds().completed;
     const idx = order.indexOf(turn.assistantMsgId);
@@ -7645,6 +7715,18 @@ function insertCompletedHistoryItem(item, { reconcile = false } = {}) {
     else scrollToRevealBubble(bubble);
   }
   else if (anchorAboveViewport) messages.scrollTop += messages.scrollHeight - previousHeight;
+  // This bubble was just rendered directly, bypassing historyReconciler
+  // entirely (realtime discovery/flow-step-attach/pending->completed swap
+  // are not migrated call sites) — but shadowInstallHistoryPage or a
+  // shadow run-event apply may have already left this same id dirty in the
+  // store (they dirty unconditionally, with no "is it already on screen"
+  // check of their own). Left alone, the next unrelated reconcile() pass
+  // (any HTTP history load) would find it still dirty and render() a
+  // second, duplicate bubble for it, since the reconciler's own `groups`
+  // bookkeeping has no idea this id was ever rendered outside of it. Clear
+  // it here, the one place every direct-DOM completed-item insert funnels
+  // through, instead of chasing every call site that might have dirtied it.
+  if (item.id != null && historyReconciler) transcriptStore?.clearReconciled([item.id]);
   return bubble;
 }
 

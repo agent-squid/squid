@@ -22,7 +22,7 @@ scope per the ADR) and get migrated afterward, one at a time.
 |---|---|---|---|---|
 | 1. Store + reducer | ✅ done | — (shared store) | — (shared store) | — (shared store) |
 | 2. Shadow mode | ✅ `shadowInstallHistoryPage` | ✅ `shadowInstallSnapshot` (2026-08-20) | ✅ `shadowApplyEvent` (2026-08-21) | ✅ `shadowApplySseRunEvent`/`shadowInstallSseCompletion` (2026-08-20, both SSE paths) |
-| 3. Reconciler + cutover | ⚠️ partial — see below | ❌ | ❌ | ❌ |
+| 3. Reconciler + cutover | ⚠️ partial — see below | ❌ (node-adoption prerequisite done 2026-08-21 — bookkeeping only, no render/cutover) | ❌ | ❌ |
 | 4. Completion order/route markers/dedup in reconciler | ⚠️ partial | ✅ `raw` field-carry only (2026-08-21) — no cutover | ❌ | ❌ |
 | 5. Retire direct-DOM path | ✅ default flipped to `renderer=store` 2026-08-20 (`?renderer=dom` kept as one-cycle rollback; direct-DOM branch not yet deleted) | ❌ | ❌ | ❌ |
 
@@ -956,24 +956,305 @@ flaky describe block. The 2 CLI-auth failures
 already-documented auth-panel flake family — no auth code touched this
 session. PWA cache bumped to `v20260821-006`.
 
+## 2026-08-21: producer 2 Stage 3 — one bug hypothesis ruled out, one more prerequisite shipped
+
+Started actually designing `render()`'s pending-turn branch (items (a)/(b)
+below) rather than continuing to scope it in the abstract. Two concrete
+outcomes, no cutover code shipped — still gated at "not started."
+
+**Checked a suspected live duplicate-render bug; did not reproduce with the
+one race tested — corrected below, this was wrong.** While confirming
+`renderer=store` is the *default* today (not opt-in — `historyRendererMode`
+only falls back to `'dom'` on an explicit `?renderer=dom`, `ui/app.js` line
+46), traced a plausible-looking race: `shadowApplyEvent` only clears a dirty
+id when `historyReconciler` is *inactive*
+(`if (!historyReconciler) transcriptStore.clearReconciled(...)`), so a
+realtime-discovered completed turn (rendered once via the direct-DOM
+`discoverRealtimeTurn` → `insertCompletedHistoryItem` path) stays dirty in
+the store; `render()` has no "does a DOM node already exist for this id"
+guard, so a *later* `historyReconciler.reconcile()` call (any of the 4 HTTP
+history load sites) looked like it could render and insert a second,
+duplicate bubble for the same turn. Built a repro (delayed `/history`
+response racing a WS `message.changed` discovery) and it did not reproduce.
+**This conclusion was wrong** — see the next entry: the repro only tested
+one ordering, and the WS event actually landed *after* both `/history`
+fetches in that test had already resolved, so no second `reconcile()` pass
+ever ran against the already-inserted node at all. The scenario was never
+actually exercised. Left as-is below (not rewritten) so the correction
+is traceable; do not trust the "did not reproduce" conclusion in this
+paragraph — see the follow-up entry immediately after.
+
+**Second prerequisite found while starting to design `render()`'s pending
+branch, shipped:** `turn` (the object `upsertTurn` builds and `getTurn()`
+returns) never carried `content` at all — only the underlying *message*
+does. For a completed turn this doesn't matter, because `turn.raw.content`
+is already the full text (Stage 4's raw passthrough). For a still-streaming
+pending turn it does: `turn.raw` is a static snapshot attached once at the
+last full-row install, so it lags behind whatever `'text'` deltas
+(`applyRunEvent`) have landed since — a pending renderer reading
+`turn.raw?.content` would show stale or empty text while genuinely live
+content sits on the message instead. Added `content: assistantMsg.content ?? ''`
+to `upsertTurn`'s turn object, same pattern as `narrative`/`tools`/`stats`.
+Store-only; nothing reads `turn.content` yet.
+
+Test added: `transcript-store.spec.js` "turn.content tracks the
+live-accumulated message content, independent of a stale turn.raw" —
+installs a row with `raw.content` set, then applies a `'text'` delta with
+`mode: 'replace'`, and asserts `turn.content` reflects the new text while
+`turn.raw.content` still shows the original.
+
+Verified: `transcript-store.spec.js` 33/33, combined with
+`reconciler.spec.js` + `history-registry.spec.js` +
+`history-store-renderer.spec.js` 56/56 total, `--workers=1`. Full
+`chat.spec.js` (`--workers=1`, ~5.7min): 100/102 — the only 2 failures are
+the already-documented CLI-auth panel flake family
+(`window.__authFrames.length` timeout), no auth code touched. PWA cache
+bumped to `v20260821-007`.
+
+## 2026-08-21: confirmed and fixed — live duplicate-render bug in `renderer=store` (the default)
+
+`#squid@codex` reviewed the prior entry before publish and flagged the
+"did not reproduce" conclusion above as wrong: `shadowInstallHistoryPage`
+runs before the existing-DOM check in `appendHistoryItems`
+(`ui/app.js:2340`), leaving the id dirty regardless of what's already on
+screen, and the repro only tested one race ordering. Re-verified by
+instrumenting the original repro rather than trusting either claim: logged
+`getPendingReconcile()` and DOM count over time, and found the WS discovery
+event in that test landed *after* both `/history` fetches had already
+resolved — so no second `reconcile()` pass ever ran against the
+already-inserted node, and the scenario was simply never exercised. Codex
+was right.
+
+Built a corrected repro that actually forces the ordering — discovery
+inserts a completed turn directly (`discoverRealtimeTurn` via WS
+`message.changed`), then a **second**, legitimate `loadHistory()` call
+covers the same msg id (the realistic trigger: a message discovered via
+realtime naturally shows up in a later/paginated history fetch once it's
+persisted, not just a narrow timing race) — and it reproduced immediately:
+2 DOM bubbles for the same `data-msg-id`.
+
+**Root cause, confirmed:** three call sites render a completed turn
+directly, bypassing the reconciler entirely — `discoverRealtimeTurn`,
+`attachFlowStep`, and `replacePendingWithStoredItem` (all via
+`insertCompletedHistoryItem`). Meanwhile `shadowInstallHistoryPage` and the
+shadow run-event appliers dirty a turn's id in the store unconditionally,
+with no awareness of whether it's already on screen. `render()`'s
+completed-turn branch had no "does a node already exist" check either — so
+the *next* `reconcile()` pass to touch that id (any later HTTP history
+load, including a routine pagination page) would build and insert a second,
+genuinely duplicate bubble, since the reconciler's own `groups` bookkeeping
+never had this id in it to begin with. This is real and live in production
+today, not hypothetical — `renderer=store` is the default, not opt-in.
+
+**Fix, two parts:**
+1. `insertCompletedHistoryItem` (`ui/app.js`) now clears its own item's
+   dirty flag right after inserting, when `historyReconciler` is active —
+   closes the narrow case where nothing else ever re-touches that id again.
+2. The real structural fix, in `createHistoryRegistry`'s `render()`: the
+   *first* time a completed turn's id goes dirty (`!ctx.previousGroup` — the
+   reconciler has never rendered it itself before), check whether a node
+   for it already exists in `container`; if so, **adopt** that existing
+   node as the turn's group instead of building a new one.
+   `reorder()` only moves a group that's actually out of place, so an
+   already-correctly-positioned adoptee is a no-op position-wise. Covers all
+   three bypass call sites uniformly, and any future one, without needing
+   to chase each one individually.
+
+Tests added: `history-registry.spec.js` "render() adopts an already-on-screen
+node instead of duplicating it, the first time an id goes dirty" — pre-inserts
+a marked node into the isolated test container, installs the matching turn,
+reconciles, and asserts both single-count and that the *same* node (marker
+still present) was reused, not rebuilt.
+
+Verified: `history-registry.spec.js` 7/7 (1 new), combined with
+`transcript-store.spec.js` + `reconciler.spec.js` +
+`history-store-renderer.spec.js` 57/57 total, `--workers=1`. Full
+`chat.spec.js` (`--workers=1`, ~4.7min): 101/102 — the one failure is the
+same already-documented CLI-auth flake (`window.__authFrames.length`
+timeout), no auth code touched. Also found and fixed while re-bumping the
+cache: `sw.js`'s `APP_SHELL` precache array (a second, separate list of
+versioned URLs from `CACHE_NAME` itself) had been stuck at `v20260821-005`
+across several prior version bumps this session — the "5 spots" the topic
+instructions call out apparently undercounts by this list; brought it in
+sync too. PWA cache bumped to `v20260821-008` everywhere, including
+`APP_SHELL`.
+
+## 2026-08-21: producer 2 Stage 3 prerequisite — render() adopts (not builds) a pending turn's node
+
+Decided not to gate this behind a `renderPending`-style flag (as the prior
+Next-steps entry called for): still pre-launch, no real users, so the
+production-safety rationale for that gate no longer applies. Implemented the
+bounded, low-risk slice of gap (b) that's actually safe to ship without the
+rest of (a)/(b) — real node *adoption*, not the render/rebuild-in-place
+machinery a full pending cutover needs.
+
+`createHistoryRegistry.render()`'s pending branch no longer unconditionally
+returns `{ nodes: [] }`. It now adopts whatever wip-bubble node
+`reconnectPendingItem`/`makeWipBubble` already built for that id — reusing
+`ctx.previousGroup` across repeated calls when still connected (a text delta
+can dirty this id many times a second while streaming; must not re-query
+every pass), else querying `container` for the existing
+`.msg-thinking.history-item[data-msg-id]` node once. **render() still never
+builds or moves a pending node itself** — reorder() still only walks
+`order.completed`, so this has no visible/positional effect; it only makes
+`groups`/`bucketOf` bookkeeping accurate for pending ids, which the eventual
+atomic bucket-transition wiring (`ctx.previousBucket`/`nextBucket`, still
+unbuilt) will need.
+
+**Bug caught while making this change, not before:** once a pending turn has
+a real (non-null) adopted `previousGroup`, the completed branch's existing
+adoption gate — `if (!ctx.previousGroup)` — silently stops re-triggering the
+"already on screen?" search on exactly the pending→completed transition,
+since `previousGroup` is now always truthy by the time a turn completes
+(it's the stale pending group). That would have reintroduced the
+just-fixed duplicate-bubble bug, but only for turns that pass through a
+pending state first — i.e. nearly every real turn. Fixed by gating on
+`ctx.previousBucket !== 'completed'` instead, which distinguishes "first
+time owned by the completed bucket" from "previousGroup happens to be
+non-null" correctly regardless of what bucket it was. Also added
+`:not(.msg-thinking)` to that query, defensively excluding a stale wip
+bubble that might transiently still be in the DOM under the same msg-id
+(`replacePendingWithStoredItem` removes it synchronously before inserting
+the completed node, so this shouldn't be reachable via that call site
+today, but the exclusion costs nothing and removes the doubt).
+
+Regression tests added, `history-registry.spec.js`: "render() adopts an
+already-on-screen wip bubble for a pending turn, and reuses it across
+passes" (adoption + same-node-identity across a second dirty pass, proven
+via a marker attribute a live mutation would set); "render() adopts the
+real completed node on a pending->completed transition, not a stale wip
+bubble" (reproduces the interaction bug above end-to-end: pending adoption,
+then a simulated `replacePendingWithStoredItem` swap, asserting the *real*
+completed node is adopted, single-count, not the removed wip bubble).
+
+Verified: `history-registry.spec.js` 9/9 (2 new), combined with
+`transcript-store.spec.js` + `reconciler.spec.js` +
+`history-store-renderer.spec.js` 50/50, all `--workers=1`. Full
+`chat.spec.js` (`--workers=1`, ~5.8min): 100/102 — the 2 failures are the
+already-documented CLI-auth unlock-retry flake family
+(`window.__authFrames.length === 2` timeout); reran both individually with
+`--retries=2` and both passed clean, confirming pre-existing flakiness under
+full-suite load rather than a regression (no auth code touched). PWA cache
+bumped to `v20260821-009` (`sw.js`'s `CACHE_NAME` + all 4 `APP_SHELL`
+versioned entries, `index.html`'s 3 `?v=` references).
+
+## 2026-08-21: pre-publish review — completed-node adoption only grabbed the bubble, not its full sibling range
+
+A `#squid@codex` review of the entry above (before publish) found a real bug
+in the completed-branch adoption code itself (not something introduced this
+session — it dates to the 2026-08-20 duplicate-render-bug fix — but the prior
+entry's `previousBucket` gate change made it reliably reachable on every
+pending→completed transition for the first time, which is what made it worth
+fixing now rather than leaving latent):
+
+`createHistoryRegistry`'s own header comment already documents that a
+completed turn is not one node — `appendHistoryItem`/
+`insertCompletedHistoryItem` produce a **flat sibling range**: route-marker?,
+bubble, stats/footer, tool-block(s)*, all inserted as direct `#messages`
+children, not descendants of the bubble. The adoption code only ever grabbed
+the bubble via `querySelector`. Once `reorder()` later needed to move that
+one-node "group" (e.g. an out-of-chronological-order bypass insert, or an
+unrelated turn arriving that requires repositioning), only the bubble would
+move — its stats/footer/tool-block siblings would stay behind at their
+original DOM position, splitting the turn and corrupting visible order. The
+prior session's own regression test used a synthetic single-node bubble with
+no sibling, so it couldn't have caught this — codex's review flagged exactly
+that gap.
+
+Fixed with a new `existingCompletedNodeRange(bubble)` helper: starting from
+the adopted bubble, walks `nextElementSibling` collecting any contiguous
+`.stats`/`.msg-time`/`.tool-block-history` elements, stopping at the first
+sibling that isn't one of those (always either the next turn's own
+bubble/route-marker, or nothing). Deliberately does **not** match by this
+turn's own `data-msg-id` — a `tool-block-history` sibling can legitimately
+carry an *earlier* turn's msg_id instead (a worktree-blocker tool block's
+action target, `appendHistoryItem`'s `toolMsgId`), so identity matching would
+have wrongly excluded real same-turn tool blocks.
+
+Regression test added, `history-registry.spec.js`: "render() adopts a
+completed turn's full sibling range, so reorder() moves stats/tool-block
+siblings together with the bubble" — installs a newer turn normally, then
+bypass-inserts an older turn's bubble+stats+tool-block (the tool block
+carrying a foreign msg_id, mirroring a real worktree-blocker) at the *wrong*
+end-of-container position, forcing `reorder()` to actually move it, and
+asserts all three nodes move together, contiguously, ahead of the newer
+turn. **Verified this test actually catches the bug, not just passes by
+construction**: temporarily reverted the fix (single-node adoption) and
+reran only this test — failed with exactly the predicted symptom (only the
+bubble moved; the stats/tool-block siblings were left stranded after the
+newer turn) — then restored the fix and confirmed it passes again.
+
+Verified: `history-registry.spec.js` 10/10 (1 new), combined with
+`transcript-store.spec.js` + `reconciler.spec.js` +
+`history-store-renderer.spec.js` 60/60, all `--workers=1`. Full
+`chat.spec.js` (`--workers=1`, ~4.8min): 101/102 — one failure,
+`completing the unlock (exit 0) auto-retries the original cursor login`
+(the `window.__authFrames.length === 2` signature this doc has repeatedly
+attributed to a pre-existing CLI-auth flake family across several prior,
+unrelated sessions). Unlike those prior instances, this one did **not**
+clear on retry this session — reran it in isolation 5 more times and it
+failed consistently every time, which is a real behavior change from earlier
+in this same session (it passed cleanly, 0 retries, right before this fix
+was made — see the entry above). Investigated rather than waved off: its
+immediate sibling test (`server unlock_requires_local refusal...`), which
+issues the exact same click and the exact same
+`waitForFunction(() => window.__authFrames.length === 2)`, passed reliably
+in under 2s every time. The only difference between the two is which branch
+of the mocked WS response fires (`ok: true`, triggering further async
+success-path work, vs. `ok: false`, which the passing test uses) — nothing
+in this session's diff (confined to `createHistoryRegistry`'s completed-turn
+adoption and a new helper function) touches the auth panel, WebSocket
+mocking, or anything in that call graph. Did not chase this test's own root
+cause further — out of scope for this fix, and the differential evidence
+(identical wait condition passes on the sibling; zero shared code path; this
+exact test's flake history predates this session by several unrelated
+changes) points at pre-existing timing sensitivity in that one test's
+success-path branch, likely aggravated by this session's own accumulated
+system load rather than caused by this change. Flagging the elevated
+rate here rather than silently re-asserting "known flake, ignore" — worth
+a real look if it keeps reproducing this reliably in a future session. PWA
+cache bumped to `v20260821-010`.
+
 ## Next steps
 
 1. **Producer 2 Stage 3 (pending-turn reconciler cutover) — not started.**
-   Sharpened by the 2026-08-21 scoping entry into three concrete gaps: (a)
+   (Separately: the completed-turn duplicate-render bug found while scoping
+   this — direct-DOM bypass call sites vs. `render()`'s dirty-id
+   reconciliation — was a real, already-shipped production bug, not part of
+   the pending-turn cutover itself, and is now fixed; see the entry above.)
+   Sharpened by the 2026-08-21 scoping entries into three concrete gaps: (a)
    `createHistoryRegistry.reorder()` has zero pending-placement logic today;
    (b) `render()` must reuse/patch DOM nodes in place per pending turn (via
    `ctx.previousGroup`) rather than rebuild on every delta, or stale nodes
-   leak and the kill button's listener gets torn down repeatedly; (c) —
-   **done above** — the live narrative buffer now has a store home
-   (`turn.narrative` for live deltas, `turn.raw.status_raw` for
-   already-fetched rows), with `chat.status` wired end-to-end on WS.
-   Still open before (c) is fully "parity-ready": `chat.loading`/
+   leak and the kill button's listener gets torn down repeatedly — **the
+   adoption half of this is now done** (see the entry directly above:
+   `render()` reuses the same wip-bubble node across passes instead of
+   re-querying or rebuilding), but adoption alone isn't the render cutover —
+   nothing yet makes `render()` *build* a pending node from store state, or
+   patch an already-adopted one's content on a delta; (c) — **done** — the
+   live narrative buffer now has a store home (`turn.narrative` for live
+   deltas, `turn.raw.status_raw` for already-fetched rows), with
+   `chat.status` wired end-to-end on WS, and (d) — **done** —
+   `turn.content` now tracks live-streamed text independent of a stale
+   `turn.raw`.
+   Still open before (c)/(d) are fully "parity-ready": `chat.loading`/
    `chat.processing`/`chat.queued` (replace-mode) and SSE's own `'status'`
-   frames are not wired to the store yet — a render cutover needs those
-   too, or it will show less status detail than today's bubble during a
-   backend switch/queue wait. (a) and (b) remain the actual risky rendering
-   work and are unstarted. Also still open from the prior entry: wiring the
-   reconciler's atomic live-to-terminal bucket transition
+   frames are not wired to the store yet. The real render/patch machinery in
+   (a)/(b) is still the actual risky work and is unstarted — `renderer=store`
+   is the **live default** today (not opt-in), so once `render()` starts
+   building or mutating pending nodes itself (rather than only adopting
+   direct-DOM's), it takes effect in production immediately; budget it with
+   its own dedicated before/after suite rounds when it's picked up, same as
+   producer 1's Stage 3/4 needed. Also still open: `turn.raw` is entirely
+   absent for a turn discovered purely via WS lifecycle events
+   (`shadowApplyEvent`'s `message.changed` branch calls `applyMessagePatch`
+   with no `raw` field) — unlike a snapshot- or history-sourced pending row,
+   so a pending renderer can't always assume `turn.raw.topic`/`agent`/etc.
+   exist; needs either a fallback fetch (mirroring how `makeWipBubble` gets
+   its fields from the initial discovery response today) or accepting a
+   render() failure (dirty-and-retried, per the existing failure contract)
+   until a snapshot fills it in. Also still open from the prior entry:
+   wiring the reconciler's atomic live-to-terminal bucket transition
    (`previousBucket`/`nextBucket`) to replace `replacePendingWithStoredItem`'s
    direct-DOM swap, including explicit removal of the old bucket's nodes
    (nothing does this automatically — `reorder()` never removes a node
