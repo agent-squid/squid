@@ -73,13 +73,8 @@
       return { succeeded, failed };
     }
 
-    // Processes exactly the dirty ids present at call time; ids that become
-    // dirty from a concurrent action during this pass are left for the next
-    // reconcile() call rather than folded in, so a cursor ack gated on this
-    // call's result reflects only what it actually reconciled.
-    function reconcile() {
-      const dirty = store.getPendingReconcile();
-      const { succeeded, failed } = reconcileIds(dirty);
+    function finishReconcile(ids) {
+      const { succeeded, failed } = reconcileIds(ids);
       if (succeeded.length) {
         // A failed render leaves that id's previous group stale while the
         // store's ordering has already advanced — exclude it so the registry
@@ -90,6 +85,25 @@
         store.clearReconciled(succeeded);
       }
       return { ok: failed.length === 0, reconciledIds: succeeded, failedIds: failed };
+    }
+
+    // Processes exactly the dirty ids present at call time; ids that become
+    // dirty from a concurrent action during this pass are left for the next
+    // reconcile() call rather than folded in, so a cursor ack gated on this
+    // call's result reflects only what it actually reconciled.
+    function reconcile() {
+      const dirty = store.getPendingReconcile();
+      return finishReconcile(dirty);
+    }
+
+    // A still-direct producer may finish constructing exactly one DOM group
+    // while other snapshot rows are dirty but have not passed their own
+    // visibility/discovery checks yet. Adopt only the requested dirty ids;
+    // never let that local handoff drain and render unrelated store work.
+    function reconcileDirtyIds(assistantMsgIds) {
+      const requested = new Set((assistantMsgIds || []).map(Number));
+      const dirty = store.getPendingReconcile().filter(id => requested.has(Number(id)));
+      return finishReconcile(dirty);
     }
 
     // Cursor persistence belongs to the producer adapter, not the
@@ -158,6 +172,7 @@
 
     return {
       reconcile,
+      reconcileDirtyIds,
       reconcileAndAck,
       reposition,
       forget,

@@ -8615,7 +8615,7 @@ async function discoverRealtimeTurn(message, { reconcile = false } = {}) {
       // The transport watcher still owns this bubble's content and teardown,
       // but the reconciler must register the already-mounted node so its
       // eventual terminal transition can replace it atomically.
-      historyReconciler?.reconcile();
+      historyReconciler?.reconcileDirtyIds([msgId]);
     } else if (item.content || item.context
         || item.source === 'shell' || String(item.prompt || '').trimStart().startsWith('!')
         || ['error', 'cancelled'].includes(item.status)) {

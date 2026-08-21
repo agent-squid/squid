@@ -80,6 +80,25 @@ test('reconcile renders every dirty turn once and clears them from pendingReconc
   expect(pending).toEqual([]);
 });
 
+test('reconcileDirtyIds adopts only requested dirty turns and leaves unrelated snapshot work pending', async ({ page }) => {
+  const rig = await freshRig(page);
+  const result = await rig.evaluate(({ store, reconciler, calls }) => {
+    store.installSnapshot({ messages: [
+      { msg_id: 10, role: 'assistant', status: 'pending' },
+      { msg_id: 20, role: 'assistant', status: 'done', completed_at: '2026-08-21T00:00:00Z' },
+    ] }, 1);
+    const outcome = reconciler.reconcileDirtyIds([10]);
+    return {
+      outcome,
+      rendered: calls.render.map(call => call.id),
+      dirty: store.getPendingReconcile(),
+    };
+  });
+  expect(result.outcome).toMatchObject({ ok: true, reconciledIds: [10], failedIds: [] });
+  expect(result.rendered).toEqual([10]);
+  expect(result.dirty).toEqual([20]);
+});
+
 test('stable registry identity: the same assistant msg_id keeps one group across repeated updates', async ({ page }) => {
   const rig = await freshRig(page);
   await rig.evaluate(({ store }) => store.applyRunEvent(9, 0, 'text', { delta: 'a' }, 1));

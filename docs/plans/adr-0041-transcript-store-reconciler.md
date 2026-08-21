@@ -1631,6 +1631,19 @@ registry identity required for the already-wired atomic terminal transition.
 Focused store/registry/reconciler/renderer verification: 81/81. PWA cache
 bumped to `v20260821-026`.
 
+### 2026-08-21: Stage 3(b) review fix — discovery adopts only its own dirty ID
+
+The WS-discovery registration handoff now uses a targeted reconciler entry
+point. Calling the full `reconcile()` there could drain every dirty turn from
+the same snapshot, rendering unrelated rows before their own visibility and
+discovery checks. `reconcileDirtyIds([msgId])` intersects its request with the
+current dirty set, adopts only that mounted `#messages` group, and leaves all
+other snapshot work pending. The two targeted production/engine regressions
+pass 2/2. The broader 82-test ADR-0041 run passed every changed-path test but
+was not clean: unrelated reducer cases intermittently loaded without the
+`SquidTranscriptStore` script (77 passed, 4 flaky, 1 failed after retries).
+PWA cache bumped to `v20260821-027`.
+
 1. **Producer 2 Stage 3 (pending-turn reconciler cutover) — in progress.**
    (Separately: the completed-turn duplicate-render bug found while scoping
    this — direct-DOM bypass call sites vs. `render()`'s dirty-id
