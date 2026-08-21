@@ -100,6 +100,55 @@ test('sparse run-event patches never erase fields they omit', async ({ page }) =
   expect(msg2.stats.input_tokens).toBe(5);
 });
 
+// ADR-0041 Stage 3 prerequisite: the live status/thinking narrative (the CLI
+// scrollback ui/app.js's own statusBuf accumulates today) gets its own
+// applyRunEvent kind, since 'status' is already taken by the lifecycle
+// transition (payload.status). No renderer reads this yet — store-only.
+test('narrative deltas accumulate by default, matching the direct-DOM statusBuf += pattern', async ({ page }) => {
+  const store = await freshStore(page);
+  await store.evaluate(s => s.applyRunEvent(50, 0, 'narrative', { delta: 'queued — position 3\n' }, 1));
+  await store.evaluate(s => s.applyRunEvent(50, 1, 'narrative', { delta: 'reading file.js\n' }, 2));
+  const turn = await store.evaluate(s => s.getTurn(50));
+  expect(turn.narrative).toBe('queued — position 3\nreading file.js\n');
+});
+
+// chat.loading/chat.processing (statusBuf's other writers) replace the
+// buffer outright rather than appending — mirrors 'text''s own
+// payload.mode === 'replace' switch, not a second bespoke code path.
+test('a narrative delta with mode "replace" supersedes the accumulated buffer instead of appending to it', async ({ page }) => {
+  const store = await freshStore(page);
+  await store.evaluate(s => s.applyRunEvent(51, 0, 'narrative', { delta: 'reading file.js\n' }, 1));
+  await store.evaluate(s => s.applyRunEvent(51, 1, 'narrative', { mode: 'replace', text: 'switching claude → codex…\n' }, 2));
+  const turn = await store.evaluate(s => s.getTurn(51));
+  expect(turn.narrative).toBe('switching claude → codex…\n');
+});
+
+// Same dedup machinery applyRunEvent already gives 'text'/'tool'/'stats' —
+// nothing kind-specific to narrative, but worth a directed check since a
+// duplicate narrative replay double-appending would be a visible bug
+// (repeated status lines), unlike a duplicate stats patch.
+test('a replayed narrative event (same run_seq or event_id) does not double-apply', async ({ page }) => {
+  const store = await freshStore(page);
+  await store.evaluate(s => s.applyRunEvent(52, 0, 'narrative', { delta: 'a' }, 1));
+  const dup = await store.evaluate(s => s.applyRunEvent(52, 0, 'narrative', { delta: 'a' }, 1));
+  expect(dup.noop).toBe(true);
+  const turn = await store.evaluate(s => s.getTurn(52));
+  expect(turn.narrative).toBe('a');
+});
+
+// mergeSparse leaves omitted fields untouched, but this is worth asserting
+// directly for narrative: a terminal status patch never mentions it, and
+// the render cutover this unblocks needs the accumulated buffer to still be
+// there (even though nothing reads it once terminal today).
+test('narrative survives a later terminal status transition instead of being cleared', async ({ page }) => {
+  const store = await freshStore(page);
+  await store.evaluate(s => s.applyRunEvent(53, 0, 'narrative', { delta: 'thinking…\n' }, 1));
+  await store.evaluate(s => s.applyMessagePatch(53, { status: 'done', completed_at: '2026-08-21T00:00:00Z' }, 2));
+  const turn = await store.evaluate(s => s.getTurn(53));
+  expect(turn.status).toBe('done');
+  expect(turn.narrative).toBe('thinking…\n');
+});
+
 test('event_id at or below the watermark is a no-op; run_seq at or below its own watermark is a no-op', async ({ page }) => {
   const store = await freshStore(page);
   await store.evaluate(s => s.applyRunEvent(11, 5, 'text', { delta: 'a' }, 100));
@@ -399,6 +448,27 @@ test.describe('WS snapshot producer (shadow mode)', () => {
     expect(snapshot.order.completed).not.toContain(8);
   });
 
+  // ADR-0041 Stage 3 prerequisite: a recovered pending row (e.g. after a
+  // page refresh) already carries its accumulated status_raw narrative as a
+  // plain field on the row, not as a sequence of run-events — no new store
+  // code needed for this path, since Stage 4's raw passthrough already puts
+  // the whole row on turn.raw. This documents that it actually works,
+  // rather than assuming it from Stage 4's own (differently-scoped) test.
+  test('a recovered pending WS snapshot row carries its status_raw narrative on turn.raw', async ({ page }) => {
+    await page.reload();
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'snapshot', event_id: 6, payload: { conversations: [{ messages: [
+        { id: 14, role: 'assistant', reply_to: null, status: 'pending', content: '',
+          status_raw: 'reading file.js\nrunning tests…' },
+      ] }] },
+    }));
+
+    const raw = await page.evaluate(() => window.__transcriptStore.getTurn(14).raw);
+    expect(raw.status_raw).toBe('reading file.js\nrunning tests…');
+  });
+
   // The store's own event_id watermark (installSnapshot) is independent of
   // the WS transport's replay cursor — a second snapshot frame at the same
   // event_id passes the transport-level gate (dispatchSnapshot only drops
@@ -503,6 +573,30 @@ test.describe('WS lifecycle events producer (shadow mode)', () => {
 
     const content = await page.evaluate(() => window.__transcriptStore.getMessage(20).content);
     expect(content).toBe('hello world');
+  });
+
+  // ADR-0041 Stage 3 prerequisite: chat.status is the CLI's live status/
+  // thinking line, distinct from chat.text (final reply content) — feeds
+  // the store's own 'narrative' kind, appending the same way the direct-DOM
+  // path's statusBuf += text does.
+  test('chat.status run-events accumulate into the store turn narrative, separately from content', async ({ page }) => {
+    await page.reload();
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'message.changed', event_id: 1, msg_id: 21,
+      payload: { id: 21, role: 'assistant', status: 'pending', reply_to: 19 },
+    }));
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'chat.status', event_id: 2, msg_id: 21, run_seq: 4, payload: { text: 'reading file.js\n' },
+    }));
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'chat.status', event_id: 3, msg_id: 21, run_seq: 5, payload: { text: 'running tests…\n' },
+    }));
+
+    const turn = await page.evaluate(() => window.__transcriptStore.getTurn(21));
+    expect(turn.narrative).toBe('reading file.js\nrunning tests…\n');
+    expect(turn.status).toBe('pending');
   });
 
   test('a chat.tool event at or below the applied event_id watermark is a store no-op, same as the snapshot producer', async ({ page }) => {

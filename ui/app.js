@@ -7917,7 +7917,14 @@ const realtimeV1 = (() => {
   // onto applyRunEvent's existing 'text'/'tool'/'stats' kinds; every
   // run_event-sourced chat.* frame shares one server-side run_seq counter
   // per assistant message (agent/topic_queue.py's `run_seq += 1`), matching
-  // applyRunEvent's own per-msgId monotonicity check.
+  // applyRunEvent's own per-msgId monotonicity check. chat.status maps onto
+  // the 'narrative' kind (ADR-0041 Stage 3 prerequisite) the same way —
+  // unlike SSE, this transport's run_seq is sourced from the same
+  // run_events-backed pipeline as every other chat.* frame here (see
+  // agent/server.py's _realtime_envelope), so the SSE header comment's
+  // "no event-scoped seq" objection doesn't apply to it. chat.loading/
+  // chat.processing/chat.queued (statusBuf's other writers, all
+  // replace-mode rather than append) are intentionally not wired yet.
   //
   // applyRunEvent dedupes tool start/result updates by `id` or the
   // `tool_use_id` emitted by topic_queue.py, so repeated chat.tool frames for
@@ -7952,6 +7959,17 @@ const realtimeV1 = (() => {
       result = transcriptStore.applyRunEvent(
         Number(frame.msg_id), Number(frame.run_seq ?? 0), 'stats',
         frame.payload, frame.event_id,
+      );
+    } else if (frame.type === 'chat.status' && frame.msg_id != null) {
+      // The CLI's own thinking/status scrollback line, appended the same way
+      // the direct-DOM path's statusBuf += text does. chat.loading/
+      // chat.processing/chat.queued (statusBuf's other, replace-mode
+      // writers) are deliberately not wired here yet — left for the render
+      // cutover itself to scope, alongside SSE's own 'status' frames (see
+      // shadowApplySseRunEvent's header comment).
+      result = transcriptStore.applyRunEvent(
+        Number(frame.msg_id), Number(frame.run_seq ?? 0), 'narrative',
+        { delta: frame.payload?.text ?? '' }, frame.event_id,
       );
     }
     if (!result) return;

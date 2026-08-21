@@ -121,6 +121,7 @@
         completedAt: assistantMsg.completedAt ?? null,
         tools: assistantMsg.tools ?? [],
         stats: assistantMsg.stats ?? {},
+        narrative: assistantMsg.narrative ?? '',
         route: assistantMsg.route,
         promptContent: promptMsg ? promptMsg.content : undefined,
         // Full-fidelity render payload (ADR-0041 Stage 4): a producer that
@@ -302,6 +303,21 @@
         }
         case 'stats': {
           patch.stats = { ...(existing?.stats ?? {}), ...(payload ?? {}) };
+          break;
+        }
+        // The live status/thinking narrative (CLI status_raw scrollback,
+        // queue position, tool-label lines — everything ui/app.js's own
+        // statusBuf accumulates today) — distinct from the 'status' kind
+        // above, which is a lifecycle transition (payload.status), not
+        // narrative text. Mirrors 'text''s own append/replace split: most
+        // frames (chat.status, tool labels, queued position) append onto
+        // the running narrative, but a few (chat.loading, a fresh
+        // processing announcement) supersede it outright — payload.mode
+        // distinguishes the two the same way it already does for 'text'.
+        case 'narrative': {
+          const priorNarrative = existing?.narrative ?? '';
+          const delta = payload?.delta ?? '';
+          patch.narrative = payload?.mode === 'replace' ? (payload.text ?? '') : priorNarrative + delta;
           break;
         }
         default:

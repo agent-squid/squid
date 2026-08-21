@@ -813,22 +813,175 @@ family — 1 passed on retry, 1 still failed after 2 retries with the same
 attributed to that flake family, not this change (no auth code touched).
 PWA cache bumped to `v20260821-001`.
 
+## 2026-08-21: producer 2 Stage 3 deeper scoping — three concrete gaps found, no code changed
+
+Went back to actually design the pending-turn render cutover (the item below),
+reading `reconciler.js`, `createHistoryRegistry` (`ui/app.js`), and
+`transcript-store.js`'s `applyRunEvent`/`getOrderedTurnIds` line-by-line
+rather than from the prior entry's summary. Did not implement — this
+confirmed the prior entry's "genuinely large, risky" call was correct, and
+found three specific, previously-undocumented gaps a real implementation
+would have to close, not just the three bullet points already on file:
+
+1. **`createHistoryRegistry.reorder()` has no pending-placement logic at
+   all.** It only loops `order.completed` (`ui/app.js`, the `reorder`
+   closure) — a live/pending group has never been placed by this registry.
+   A render cutover needs `reorder()` extended to interleave pending groups
+   among completed ones, mirroring `insertPendingHistoryItem`'s own
+   anchor-finding (`compareCompletedTurnKeys` against `order.pending`'s
+   `createdAt`-sorted ids from `getOrderedTurnIds()`) — not a small addition,
+   since it's the same placement pass that must stay a no-op for untouched
+   groups (see `reorder`'s own existing comment on why per-node comparison
+   matters).
+2. **`render()` must reuse DOM nodes in place across repeated calls for the
+   same pending turn, not rebuild them.** `transcript-store.js`'s
+   `applyRunEvent` keeps `content` and `tools` fully accumulated (not
+   delta-only — `patch.content = priorContent + delta`), so the data to
+   redraw from is there, but a text delta can fire many times a second while
+   streaming. `reorder()`'s `insertBefore` logic only ever inserts nodes
+   present in the current `groups` map; it never removes a stale node that a
+   fresh `render()` call silently orphaned. Rebuilding fresh DOM every delta
+   (the way the completed-turn render path already does, safely, because a
+   completed row is normally rendered exactly once) would leak orphaned wip
+   bubbles on every keystroke of a streaming response, and would tear down
+   the kill button's listener each time. `ctx.previousGroup` exists
+   specifically so a pending render can detect "I have a live bubble
+   already, patch it" instead — matching what `reconnectPendingItem` already
+   does today, just moved behind `render()`.
+3. **The live "thinking" narrative buffer has nowhere to live in the store.**
+   `shadowApplySseRunEvent`'s own header comment (2026-08-20 entry) already
+   flags that CLI `status_raw`/`statusBuf` scrollback frames are deliberately
+   not fed into `applyRunEvent` — a different concept from the `'status'`
+   *kind*, which is a lifecycle transition (`payload.status`/`completed_at`),
+   not narrative text. Confirmed by reading `applyRunEvent`'s `switch`: there
+   is no case that would hold it. A store-driven pending render() is
+   therefore currently unable to reproduce part of what the direct-DOM wip
+   bubble shows today (the live status narrative, as opposed to tool
+   results, which *do* reach the store via the `'tool'` kind). Closing this
+   needs a new `applyRunEvent` kind (store-only, same low-risk shape as Stage
+   4's field-carry) before the render cutover can reach visual parity with
+   today's direct-DOM bubble — otherwise the cutover ships a visible
+   regression (less status detail while a response streams).
+
+None of this was implemented — Stage 3 is still not started. Item 3 above is
+a real, boundable, low-risk prerequisite in the same shape as Stage 4's
+field-carry (store-only, no render change) and is the natural next slice to
+actually ship; items 1 and 2 are where the genuine rendering-architecture
+risk this doc keeps flagging actually lives, and still need the same
+three-round gap-discovery treatment before touching the live default path.
+
+**`#squid@codex` review of the above, verified before folding in:** agreed
+item 3 (not the full cutover) is the right next slice, and flagged that it
+shouldn't be modeled as one generic new `applyRunEvent` kind without first
+pinning down append-vs-replace semantics per frame type — `chat.status`
+*appends* to the narrative but `chat.loading`/`chat.processing` *replace* it
+outright (a mode switch, not more text to tack on). Checked this directly
+against every `statusBuf` write site in `ui/app.js` (both the WS `onEvent`
+handler around line 8426 and the SSE consumer around line 8490): confirmed
+exactly that split — `chat.status`/`chat.tool`/`chat.queued` are `+=`
+(append), `chat.loading`/`chat.processing`/the WS-failure message are `=`
+(outright replace, including replace-with-empty on recovery). A single
+delta-only kind (mirroring `'text'`'s old `payload.delta` shape) would lose
+that distinction and mis-render on the very first `chat.loading` transition.
+Better still, this doesn't need a new bespoke function
+(`applyNarrativeEvent(...)` as suggested) — `applyRunEvent`'s existing
+`'text'` case already carries exactly this mode switch
+(`patch.content = payload?.mode === 'replace' ? (payload.text ?? '') :
+priorContent + delta`, `transcript-store.js` line ~282). A new `'narrative'`
+kind following that identical `payload.mode === 'replace'` convention is
+more consistent with the module's existing switch-based design than a
+separate function, and gets the append/replace split for free from a
+pattern already tested. Folded into Next steps item 1(c) below; no code
+changed.
+
+## 2026-08-21: producer 2 Stage 3 prerequisite (c) — narrative kind, shipped
+
+Implemented the store-only prerequisite item 1(c) below: a new `'narrative'`
+`applyRunEvent` kind, plus real (shadow-mode) wiring for one live producer.
+No rendering code touched.
+
+**`transcript-store.js`:** added `case 'narrative'` to `applyRunEvent`'s
+switch, following `'text'`'s own precedent exactly —
+`payload?.mode === 'replace' ? (payload.text ?? '') : priorNarrative + delta`
+— so append is the default and a caller opts into replace the same way
+`'text'` already does, rather than a second bespoke code path. `narrative`
+is carried onto the turn object in `upsertTurn`, defaulting to `''`, same
+policy as `tools`/`stats`.
+
+**`ui/app.js`, WS lifecycle producer (`shadowApplyEvent`):** wired
+`chat.status` → the new `'narrative'` kind, append mode, mirroring how
+`chat.text`/`chat.tool`/`chat.stats` are already wired there. Checked
+`agent/server.py`'s `_realtime_envelope` before wiring this: every WS frame
+type carries a real `run_seq` from the same `run_events`-backed pipeline
+(`event.get("run_seq")`), so the SSE header comment's "no event-scoped seq"
+objection to `chat.queued` is transport-specific to SSE and doesn't block
+`chat.status` on WS. Deliberately **not** wired this turn: `chat.loading`/
+`chat.processing`/`chat.queued` (statusBuf's other, replace-mode writers)
+and SSE's own `'status'` frames — left for whoever picks up the actual
+render cutover ((a)/(b) below), since wiring the replace-mode frames without
+a renderer to observe them adds surface with no test able to prove it
+matters yet.
+
+Tests added, `transcript-store.spec.js`: reducer-level append accumulation,
+`mode: 'replace'` supersession, replay/dedup (same run_seq/event_id no-ops,
+directed check since a duplicate here is a visible repeated status line, not
+just an inert stats field), and survival through a terminal status
+transition (mergeSparse's omit-preserves-field behavior, asserted directly
+for this field rather than assumed from the generic case). Plus a WS
+lifecycle producer test driving real `chat.status` frames over a mocked
+socket into `turn.narrative`, mirroring the existing `chat.text` test. Also
+added a WS-snapshot regression test confirming the *other* half of this
+feature already works with zero new code: a recovered pending row's
+`status_raw` field lands on `turn.raw.status_raw` for free, via Stage 4's
+existing raw-passthrough — the render cutover has two narrative sources
+(live incremental events → `turn.narrative`; at-rest snapshot/history rows →
+`turn.raw.status_raw`) and both are now proven, not just assumed.
+
+Verified: `transcript-store.spec.js` 39/39 (32 prior + 7 new), `reconciler.spec.js`
++ `history-registry.spec.js` + `history-store-renderer.spec.js` 23/23, all
+`--workers=1`. Full `chat.spec.js` (`--workers=1`, ~6min): 98/102 clean, 4
+failures — all 4 match already-documented flake families, none touch
+`shadowApplyEvent`'s existing `chat.text`/`chat.tool`/`chat.stats` branches
+(this change only adds a new, independent `else if` arm). Reran `mid-stream
+discovered turn keeps journaled text when live chunks arrive` individually
+with `--retries=2`: failed once, passed on retry — a timing race in the
+test's own `setTimeout`-staggered `MockWebSocket` (asserting an early
+snapshot-seeded state that a fast-arriving second `chat.text` frame had
+already advanced past), same family as this doc's other documented
+WS-transport flakes, and not exercising the `chat.status` branch this turn
+touched at all. `global lifecycle discovers a desktop turn and reconnect
+completion stays deduplicated` is the same previously-documented WS-transport
+flaky describe block. The 2 CLI-auth failures
+(`window.__authFrames.length === 2` timeout signature) are the
+already-documented auth-panel flake family — no auth code touched this
+session. PWA cache bumped to `v20260821-006`.
+
 ## Next steps
 
 1. **Producer 2 Stage 3 (pending-turn reconciler cutover) — not started.**
-   This is the actual risky work; Stage 4 field-carry above only removes one
-   prerequisite blocker. Needs: a live/pending-turn render function (analogous
-   to `makeWipBubble`, but reading `turn.raw` + `turn.promptContent` from the
-   store instead of a `/chat/{id}/status` fetch); wiring the reconciler's
-   already-built-but-never-exercised atomic live-to-terminal bucket transition
-   (`reconciler.js`'s `previousBucket`/`nextBucket` context) to replace
-   `replacePendingWithStoredItem`'s direct-DOM swap; and deciding how
+   Sharpened by the 2026-08-21 scoping entry into three concrete gaps: (a)
+   `createHistoryRegistry.reorder()` has zero pending-placement logic today;
+   (b) `render()` must reuse/patch DOM nodes in place per pending turn (via
+   `ctx.previousGroup`) rather than rebuild on every delta, or stale nodes
+   leak and the kill button's listener gets torn down repeatedly; (c) —
+   **done above** — the live narrative buffer now has a store home
+   (`turn.narrative` for live deltas, `turn.raw.status_raw` for
+   already-fetched rows), with `chat.status` wired end-to-end on WS.
+   Still open before (c) is fully "parity-ready": `chat.loading`/
+   `chat.processing`/`chat.queued` (replace-mode) and SSE's own `'status'`
+   frames are not wired to the store yet — a render cutover needs those
+   too, or it will show less status detail than today's bubble during a
+   backend switch/queue wait. (a) and (b) remain the actual risky rendering
+   work and are unstarted. Also still open from the prior entry: wiring the
+   reconciler's atomic live-to-terminal bucket transition
+   (`previousBucket`/`nextBucket`) to replace `replacePendingWithStoredItem`'s
+   direct-DOM swap, including explicit removal of the old bucket's nodes
+   (nothing does this automatically — `reorder()` never removes a node
+   absent from the new `groups` map); and deciding how
    `reconnectPendingItem`'s kill-button/cancel wiring and EventSource
-   reattachment survive once the wip bubble node is reconciler-owned rather
-   than a locally-held DOM reference. Budget this the same way producer 1's
-   own Stage 3/4 needed — three rounds of gap-discovery via full before/after
-   suite runs, not inspection — and do not treat Stage 4's clean field-carry
-   result above as evidence the render cutover itself will be equally cheap.
+   reattachment survive once the wip bubble node is reconciler-owned. Budget
+   this the same way producer 1's own Stage 3/4 needed — three rounds of
+   gap-discovery via full before/after suite runs, not inspection.
 2. Producers 3 and 4 need the same two-part treatment (Stage 4 field-carry
    check, then Stage 3 cutover) — not scoped yet this session.
 3. After producer 1 has run as the real default for "one cycle" with no
