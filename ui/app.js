@@ -8612,6 +8612,10 @@ async function discoverRealtimeTurn(message, { reconcile = false } = {}) {
     if (item.status === 'pending') {
       const bubble = insertPendingHistoryItem(item);
       reconnectPendingItem(item, bubble);
+      // The transport watcher still owns this bubble's content and teardown,
+      // but the reconciler must register the already-mounted node so its
+      // eventual terminal transition can replace it atomically.
+      historyReconciler?.reconcile();
     } else if (item.content || item.context
         || item.source === 'shell' || String(item.prompt || '').trimStart().startsWith('!')
         || ['error', 'cancelled'].includes(item.status)) {

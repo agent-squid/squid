@@ -1621,7 +1621,17 @@ Verified: registry/renderer/reconciler suites 41/41 and the full real
 recovered-pending chat block 19/19. PWA cache bumped to
 `v20260821-025`.
 
-1. **Producer 2 Stage 3 (pending-turn reconciler cutover) — not started.**
+### 2026-08-21: Stage 3(b) — realtime-discovered pending registration
+
+WS-discovered pending bubbles now reconcile immediately after their transport
+watcher mounts. The registry adopts the existing
+`#messages` child without mutating its preview, so watcher content and
+teardown remain single-writer-owned while the pending group gains the stable
+registry identity required for the already-wired atomic terminal transition.
+Focused store/registry/reconciler/renderer verification: 81/81. PWA cache
+bumped to `v20260821-026`.
+
+1. **Producer 2 Stage 3 (pending-turn reconciler cutover) — in progress.**
    (Separately: the completed-turn duplicate-render bug found while scoping
    this — direct-DOM bypass call sites vs. `render()`'s dirty-id
    reconciliation — was a real, already-shipped production bug, not part of

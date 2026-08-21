@@ -660,6 +660,25 @@ test.describe('WS lifecycle events producer (shadow mode)', () => {
     expect(await page.evaluate(() => window.__transcriptStore.getMessage(15).content)).toBeUndefined();
   });
 
+  test('renderer=store registers a WS-discovered pending bubble after its watcher mounts', async ({ page }) => {
+    await page.route('**/chat/16/status', r => r.fulfill({ json: {
+      id: 16, role: 'assistant', reply_to: 15, topic: 'default', agent: 'claude',
+      adhoc: false, status: 'pending', prompt: 'adopt me', content: '',
+    }}));
+    await page.goto('/?renderer=store');
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'message.changed', event_id: 1, msg_id: 16,
+      payload: { id: 16, role: 'assistant', status: 'pending', reply_to: 15 },
+    }));
+
+    await expect(page.locator('.msg.assistant.msg-thinking.history-item[data-msg-id="16"]'))
+      .toHaveCount(1);
+    await expect.poll(() => page.evaluate(() => window.__transcriptStore.getPendingReconcile()))
+      .toEqual([]);
+  });
+
   test('chat.text run-events accumulate into the store message content in run_seq order', async ({ page }) => {
     await page.reload();
     await page.waitForFunction(() => window.__webSocket?.readyState === 1);
