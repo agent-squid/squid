@@ -2313,15 +2313,12 @@ function shadowInstallHistoryPage(items, boundary) {
 // each SSE frame's `id:` field (agent/server.py's sse_chunk/sse_event), and
 // read back here via the browser's own event.lastEventId.
 //
-// 'status' frames (the CLI's raw status_raw thinking buffer, accumulated
-// separately as statusBuf by both SSE consumers) are deliberately not fed
-// here — a different concept from applyRunEvent's 'status' kind
-// (payload.status/completed_at, a lifecycle transition), matching producer
-// 3's WS chat.status omission for the same reason. 'queued' has no single
-// event-scoped seq on this transport (stream_response generates it from a
-// live position poll, not from a stored run_event) and isn't a message
-// fact either, so it's skipped too, same as WS's queue.changed.
-function shadowApplySseRunEvent(msgId, kind, event) {
+// Narrative frames use applyRunEvent's distinct 'narrative' kind, not its
+// lifecycle 'status' kind. Callers provide the already-normalized append or
+// replace payload because status is plain text while loading/processing are
+// JSON transport frames. `queued` is still skipped: it has no event-scoped
+// seq on SSE (stream_response synthesizes it from a live position poll).
+function shadowApplySseRunEvent(msgId, kind, event, normalizedPayload) {
   if (!transcriptStore) return;
   // Both callers' "no id seen" sentinel must map to NaN here, not just '':
   // a native EventSource's lastEventId defaults to '', but the hand-rolled
@@ -2330,7 +2327,9 @@ function shadowApplySseRunEvent(msgId, kind, event) {
   // and apply unprotected (caught in #squid@codex review before publish).
   const runSeq = (event.lastEventId == null || event.lastEventId === '') ? NaN : Number(event.lastEventId);
   let payload;
-  if (kind === 'text') {
+  if (normalizedPayload !== undefined) {
+    payload = normalizedPayload;
+  } else if (kind === 'text') {
     payload = { delta: event.data ?? '' };
   } else {
     try { payload = JSON.parse(event.data); } catch { return; }
@@ -5887,6 +5886,7 @@ async function sendMessage(text, opts = {}) {
     // applyRunEvent per line would drop every line after the first (same
     // run_seq, so the second call's run_seq <= what the first just set).
     let textBuf = '';
+    let narrativeBuf = '';
 
     while (true) {
       const { done, value } = await reader.read();
@@ -5992,6 +5992,9 @@ async function sendMessage(text, opts = {}) {
               shellWaitingQueued = false;
               setThinkingText(`#${info.topic || topic} · processing…`);
               startShellRunningStatus();
+              shadowApplySseRunEvent(msgId, 'narrative', { lastEventId: dataId }, {
+                mode: 'replace', text: `#${info.topic || topic} · processing…\n`,
+              });
             } catch {}
             pollProcs();
             eventName = null;
@@ -6003,6 +6006,10 @@ async function sendMessage(text, opts = {}) {
               setThinkingText(info.from
                 ? `#${topic} · switching ${info.from} → ${info.to}…`
                 : `#${topic} · loading ${info.to}…`);
+              shadowApplySseRunEvent(msgId, 'narrative', { lastEventId: dataId }, {
+                mode: 'replace',
+                text: (info.from ? `switching ${info.from} → ${info.to}…` : `loading ${info.to}…`) + '\n',
+              });
             } catch {}
             eventName = null;
 
@@ -6055,6 +6062,7 @@ async function sendMessage(text, opts = {}) {
             // within one SSE event represent newlines in the source text.
             if (dataLineCount > 1) statusBuf += '\n';
             statusBuf += data;
+            narrativeBuf += (dataLineCount > 1 ? '\n' : '') + data;
             updateThinkingPreview();
             // no eventName reset — allow multi-line accumulation
 
@@ -6146,6 +6154,10 @@ async function sendMessage(text, opts = {}) {
           if (textBuf) {
             shadowApplySseRunEvent(msgId, 'text', { data: textBuf, lastEventId: dataId });
             textBuf = '';
+          }
+          if (narrativeBuf) {
+            shadowApplySseRunEvent(msgId, 'narrative', { lastEventId: dataId }, { delta: narrativeBuf });
+            narrativeBuf = '';
           }
           eventName = null;
           dataLineCount = 0;
@@ -8083,9 +8095,8 @@ const realtimeV1 = (() => {
   // unlike SSE, this transport's run_seq is sourced from the same
   // run_events-backed pipeline as every other chat.* frame here (see
   // agent/server.py's _realtime_envelope), so the SSE header comment's
-  // "no event-scoped seq" objection doesn't apply to it. chat.loading/
-  // chat.processing/chat.queued (statusBuf's other writers, all
-  // replace-mode rather than append) are intentionally not wired yet.
+  // "no event-scoped seq" objection doesn't apply to it.
+  // chat.loading/chat.processing replace the narrative; chat.queued appends.
   //
   // applyRunEvent dedupes tool start/result updates by `id` or the
   // `tool_use_id` emitted by topic_queue.py, so repeated chat.tool frames for
@@ -8123,14 +8134,31 @@ const realtimeV1 = (() => {
       );
     } else if (frame.type === 'chat.status' && frame.msg_id != null) {
       // The CLI's own thinking/status scrollback line, appended the same way
-      // the direct-DOM path's statusBuf += text does. chat.loading/
-      // chat.processing/chat.queued (statusBuf's other, replace-mode
-      // writers) are deliberately not wired here yet — left for the render
-      // cutover itself to scope, alongside SSE's own 'status' frames (see
-      // shadowApplySseRunEvent's header comment).
+      // the direct-DOM path's statusBuf += text does.
       result = transcriptStore.applyRunEvent(
         Number(frame.msg_id), Number(frame.run_seq ?? 0), 'narrative',
         { delta: frame.payload?.text ?? '' }, frame.event_id,
+      );
+    } else if (frame.type === 'chat.loading' && frame.msg_id != null) {
+      const text = frame.payload?.from
+        ? `switching ${frame.payload.from} → ${frame.payload.to}…\n`
+        : `loading ${frame.payload?.to}…\n`;
+      result = transcriptStore.applyRunEvent(
+        Number(frame.msg_id), Number(frame.run_seq ?? 0), 'narrative',
+        { mode: 'replace', text }, frame.event_id,
+      );
+    } else if (frame.type === 'chat.processing' && frame.msg_id != null) {
+      const topic = frame.payload?.topic || frame.scope?.topic || '';
+      result = transcriptStore.applyRunEvent(
+        Number(frame.msg_id), Number(frame.run_seq ?? 0), 'narrative',
+        { mode: 'replace', text: `#${topic} · processing…\n` }, frame.event_id,
+      );
+    } else if (frame.type === 'chat.queued' && frame.msg_id != null) {
+      const priorNarrative = transcriptStore.getTurn(Number(frame.msg_id))?.narrative ?? '';
+      const separator = priorNarrative && !priorNarrative.endsWith('\n') ? '\n' : '';
+      result = transcriptStore.applyRunEvent(
+        Number(frame.msg_id), Number(frame.run_seq ?? 0), 'narrative',
+        { delta: `${separator}#${frame.payload?.topic} · queued — position ${frame.payload?.position}\n` }, frame.event_id,
       );
     }
     if (!result) return;
@@ -8671,7 +8699,7 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
     // multi-data-line parsing — don't add another one between chunks.
     statusBuf += event.data;
     updatePreview();
-    // Not fed to the store — see shadowApplySseRunEvent's header comment.
+    shadowApplySseRunEvent(item.id, 'narrative', event, { delta: event.data });
   });
   es.addEventListener('tool', event => {
     try {
@@ -8697,6 +8725,9 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
         ? `switching ${info.from} → ${info.to}…`
         : `loading ${info.to}…`) + '\n';
       updatePreview();
+      shadowApplySseRunEvent(item.id, 'narrative', event, {
+        mode: 'replace', text: statusBuf,
+      });
     } catch {}
   });
   es.addEventListener('processing', event => {
@@ -8704,6 +8735,9 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
       const info = JSON.parse(event.data);
       statusBuf = `#${info.topic || item.topic} · processing…\n`;
       updatePreview();
+      shadowApplySseRunEvent(item.id, 'narrative', event, {
+        mode: 'replace', text: statusBuf,
+      });
     } catch {}
   });
   es.addEventListener('queued', event => {

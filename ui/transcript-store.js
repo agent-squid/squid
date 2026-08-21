@@ -312,12 +312,12 @@
           patch.stats = { ...(existing?.stats ?? {}), ...(payload ?? {}) };
           break;
         }
-        // The live status/thinking narrative (CLI status_raw scrollback,
-        // queue position, tool-label lines — everything ui/app.js's own
-        // statusBuf accumulates today) — distinct from the 'status' kind
+        // The live status/thinking narrative (CLI status_raw scrollback and
+        // queue position). Tool frames remain structured in tools[] rather
+        // than being flattened into this field. Distinct from the 'status' kind
         // above, which is a lifecycle transition (payload.status), not
         // narrative text. Mirrors 'text''s own append/replace split: most
-        // frames (chat.status, tool labels, queued position) append onto
+        // frames (chat.status and queued position) append onto
         // the running narrative, but a few (chat.loading, a fresh
         // processing announcement) supersede it outright — payload.mode
         // distinguishes the two the same way it already does for 'text'.

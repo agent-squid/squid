@@ -616,6 +616,24 @@ test.describe('WS lifecycle events producer (shadow mode)', () => {
     expect(turn.status).toBe('pending');
   });
 
+  test('WS processing falls back to scope topic and queued appends with a line separator', async ({ page }) => {
+    await page.reload();
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+
+    const frames = [
+      { v: 1, type: 'message.changed', event_id: 1, msg_id: 22, payload: { id: 22, role: 'assistant', status: 'pending' } },
+      { v: 1, type: 'chat.status', event_id: 2, msg_id: 22, run_seq: 1, payload: { text: 'old status\n' } },
+      { v: 1, type: 'chat.loading', event_id: 3, msg_id: 22, run_seq: 2, payload: { from: 'claude', to: 'codex' } },
+      { v: 1, type: 'chat.processing', event_id: 4, msg_id: 22, run_seq: 3, scope: { topic: 'squid' }, payload: {} },
+      { v: 1, type: 'chat.status', event_id: 5, msg_id: 22, run_seq: 4, payload: { text: 'running tests' } },
+      { v: 1, type: 'chat.queued', event_id: 6, msg_id: 22, run_seq: 5, payload: { topic: 'squid', position: 2 } },
+    ];
+    await page.evaluate(items => items.forEach(frame => window.__webSocket.receive(frame)), frames);
+
+    const narrative = await page.evaluate(() => window.__transcriptStore.getTurn(22).narrative);
+    expect(narrative).toBe('#squid · processing…\nrunning tests\n#squid · queued — position 2\n');
+  });
+
   test('a chat.tool event at or below the applied event_id watermark is a store no-op, same as the snapshot producer', async ({ page }) => {
     await page.reload();
     await page.waitForFunction(() => window.__webSocket?.readyState === 1);
@@ -673,6 +691,28 @@ test.describe('WS lifecycle events producer (shadow mode)', () => {
 // in ui/app.js).
 
 test.describe('SSE producer (shadow mode)', () => {
+  test('status appends and loading/processing replace the narrative on the primary SSE stream', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200,
+      headers: {
+        'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
+        'X-Squid-Msg-Id': '49',
+      },
+      body:
+        'event: meta\ndata: {"agent":"claude","backend":"claude","msg_id":49,"adhoc":false}\n\n' +
+        'id: 1\nevent: status\ndata: old\ndata: status\n\n' +
+        'id: 2\nevent: loading\ndata: {"from":"claude","to":"codex"}\n\n' +
+        'id: 3\nevent: processing\ndata: {"topic":"squid"}\n\n' +
+        'id: 4\nevent: status\ndata: running tests\n\n',
+    }));
+
+    await page.fill('#input', 'hi');
+    await page.keyboard.press('Enter');
+
+    await expect.poll(() => page.evaluate(() => window.__transcriptStore.getTurn(49)?.narrative))
+      .toBe('#squid · processing…\nrunning tests');
+  });
+
   test('a fresh POST /chat SSE stream renders the DOM as before and feeds text/tool/stats deltas into the store by their real run_events.seq', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200,

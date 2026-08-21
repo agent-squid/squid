@@ -1455,6 +1455,23 @@ content; and empty native-shell success renders. Focused
 `reconciler.spec.js`: 35/35, `--workers=1`. PWA cache bumped to
 `v20260821-015`.
 
+## 2026-08-21: pending-render parity prerequisite — remaining narrative producers wired
+
+Wired the existing store `narrative` field to the remaining live status
+frames without changing rendering ownership. WS `chat.loading` and
+`chat.processing` replace the narrative, while `chat.queued` appends, matching
+their direct-DOM `statusBuf` behavior. Both SSE consumers now feed sequenced
+`status` frames into the narrative and feed `loading`/`processing` as
+replacements; synthesized SSE queue-position frames remain excluded because
+they have no stored `run_seq`. The hand-rolled POST parser buffers a complete
+multi-line status event before applying it once, preserving both newlines and
+run-sequence deduplication. Regression coverage exercises the WS mode changes
+and primary SSE append/replace sequence. Follow-up review parity fixes make
+WS processing fall back to the envelope's `scope.topic`, preserve a line
+boundary before an appended queued message, and correct the store comment so
+tool events remain documented as structured `tools[]`, not narrative text.
+PWA cache bumped to `v20260821-017`.
+
 ## Next steps
 
 1. **Producer 2 Stage 3 (pending-turn reconciler cutover) — not started.**
@@ -1493,9 +1510,8 @@ content; and empty native-shell success renders. Focused
    already-fetched rows), with `chat.status` wired end-to-end on WS, and (d)
    — **done** — `turn.content` now tracks live-streamed text independent of
    a stale `turn.raw`.
-   Still open before (c)/(d) are fully "parity-ready": `chat.loading`/
-   `chat.processing`/`chat.queued` (replace-mode) and SSE's own `'status'`
-   frames are not wired to the store yet. `render()` actually building or
+   The remaining WS narrative frames and SSE's sequenced narrative frames are
+   now wired (see the entry above). `render()` actually building or
    patching pending nodes (the remainder of (b)) is still the actual risky
    work and is unstarted — `renderer=store` is the **live default** today
    (not opt-in), so once `render()` starts building or mutating pending
