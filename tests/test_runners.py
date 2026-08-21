@@ -2034,7 +2034,7 @@ def test_opencode_does_not_double_prefix_provider_qualified_model():
 
     async def collect():
         return [chunk async for chunk in run_opencode(
-            "fresh", cwd="/tmp", model="opencode/deepseek-v4-flash-free",
+            "fresh", cwd="/tmp", model="opencode/big-pickle",
             backend_settings={"provider": "opencode"},
         )]
 
@@ -2044,7 +2044,7 @@ def test_opencode_does_not_double_prefix_provider_qualified_model():
         asyncio.run(collect())
 
     assert "-m" in captured[0]
-    assert captured[0][captured[0].index("-m") + 1] == "opencode/deepseek-v4-flash-free"
+    assert captured[0][captured[0].index("-m") + 1] == "opencode/big-pickle"
 
 
 def test_native_claude_removes_inherited_anthropic_auth_environment():

@@ -17,12 +17,21 @@ from .resolve import agent_ref_for_storage, split_agent_ref
 # Fresh-install seed models, keyed by harness — only where the harness's CLI
 # default isn't the model we want new users to land on. Pi's own CLI default
 # (nvidia/nemotron-3-ultra-550b-a55b) works, but deepseek-ai/deepseek-v4-pro
-# is the strongest free model NVIDIA NIM currently hosts.
+# is the strongest free model NVIDIA NIM currently hosts. OpenCode's CLI
+# default is not stable enough for a durable seed, so pin its current free
+# default explicitly too.
 _SEED_DEFAULT_MODEL_BY_HARNESS: dict[str, str] = {
+    "opencode": "opencode/big-pickle",
     "pi": "deepseek-ai/deepseek-v4-pro",
 }
 _SEED_DEFAULT_PROVIDER_BY_HARNESS: dict[str, str] = {
+    "opencode": "opencode",
     "pi": "nvidia",
+}
+_RETIRED_OPENCODE_MODELS: dict[str, str] = {
+    "big-pickle": "opencode/big-pickle",
+    "deepseek-v4-flash-free": "opencode/big-pickle",
+    "opencode/deepseek-v4-flash-free": "opencode/big-pickle",
 }
 
 # Reviewer-persona agents, one per harness — cwd points at the shared
@@ -1057,6 +1066,28 @@ def init_db() -> None:
         if "home_mode" not in agent_columns:
             conn.execute("ALTER TABLE agents ADD COLUMN home_mode TEXT NOT NULL DEFAULT 'user_home'")
         has_legacy_backend = "backend" in agent_columns
+        # Older installs seeded these two OpenCode agents before provider/model
+        # defaults were attached. Fill only missing fields on the known seed
+        # names; custom agents and seed rows moved to another provider retain
+        # their intentional CLI-default behavior.
+        conn.execute(
+            """UPDATE agents
+               SET provider = 'opencode', model = 'opencode/big-pickle'
+               WHERE harness = 'opencode'
+                 AND name IN ('opencode', 'operev')
+                 AND (provider IS NULL OR provider = '' OR provider = 'opencode')
+                 AND (model IS NULL OR model = '')"""
+        )
+        # Repair existing agents pinned to retired OpenCode-hosted models.
+        # Match the full harness/provider/model identity so user-selected
+        # models on other providers remain untouched. This is intentionally
+        # idempotent and runs before INSERT OR IGNORE seeds fresh agents.
+        for retired_model, replacement_model in _RETIRED_OPENCODE_MODELS.items():
+            conn.execute(
+                """UPDATE agents SET model = ?
+                   WHERE harness = 'opencode' AND provider = 'opencode' AND model = ?""",
+                (replacement_model, retired_model),
+            )
         # Seed one default agent per installed harness (INSERT OR IGNORE — never overwrites user edits)
         for harness in sorted(SUPPORTED_HARNESSES):
             if harness != "claudecode" and is_installed(harness):

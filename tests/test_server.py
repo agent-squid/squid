@@ -1819,7 +1819,7 @@ def test_agent_save_supports_legacy_backend_not_null_schema(tmp_path, monkeypatc
         "oc",
         "opencode",
         "opencode",
-        "opencode/deepseek-v4-flash-free",
+        "opencode/big-pickle",
         None,
     )
 
@@ -1828,7 +1828,7 @@ def test_agent_save_supports_legacy_backend_not_null_schema(tmp_path, monkeypatc
     assert saved["backend"] == "opencode:opencode"
     assert saved["harness"] == "opencode"
     assert saved["provider"] == "opencode"
-    assert saved["model"] == "opencode/deepseek-v4-flash-free"
+    assert saved["model"] == "opencode/big-pickle"
 
 
 def test_yaml_config_can_be_read_validated_and_atomically_updated(tmp_path):

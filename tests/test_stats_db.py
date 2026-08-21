@@ -37,6 +37,42 @@ def test_init_db_seeds_claude_agent_without_claudecode_or_haiku_names(tmp_path, 
     ]
 
 
+def test_init_db_migrates_only_retired_opencode_provider_models(tmp_path, monkeypatch):
+    db_path = tmp_path / "squid.db"
+    monkeypatch.setattr(stats_db, "_DB_PATH", db_path)
+    monkeypatch.setattr(stats_db, "SUPPORTED_HARNESSES", frozenset({"opencode"}))
+    monkeypatch.setattr(stats_db, "is_installed", lambda harness: harness == "opencode")
+    stats_db.init_db()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE agents SET model = 'deepseek-v4-flash-free' WHERE name = 'opencode'"
+        )
+        conn.execute(
+            "INSERT INTO agents (name, harness, provider, model) VALUES (?, ?, ?, ?)",
+            ("custom-zen", "opencode", "opencode", "opencode/deepseek-v4-flash-free"),
+        )
+        conn.execute(
+            "UPDATE agents SET provider = NULL, model = NULL WHERE name = 'operev'"
+        )
+        conn.execute(
+            "INSERT INTO agents (name, harness, provider, model) VALUES (?, ?, ?, ?)",
+            ("custom-other", "opencode", "openrouter", "opencode/deepseek-v4-flash-free"),
+        )
+
+    stats_db.init_db()
+
+    with sqlite3.connect(db_path) as conn:
+        rows = {name: (provider, model) for name, provider, model in conn.execute(
+            "SELECT name, provider, model FROM agents"
+        )}
+
+    assert rows["opencode"] == ("opencode", "opencode/big-pickle")
+    assert rows["custom-zen"] == ("opencode", "opencode/big-pickle")
+    assert rows["operev"] == ("opencode", "opencode/big-pickle")
+    assert rows["custom-other"] == ("openrouter", "opencode/deepseek-v4-flash-free")
+
+
 def test_chat_messages_source_defaults_and_can_mark_system(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
@@ -712,12 +748,15 @@ def test_init_db_seeds_five_default_agents_when_all_harnesses_are_installed(tmp_
     stats_db.init_db()
 
     with sqlite3.connect(tmp_path / "squid.db") as conn:
-        rows = conn.execute("SELECT name FROM agents ORDER BY name").fetchall()
+        rows = conn.execute("SELECT name, provider, model FROM agents ORDER BY name").fetchall()
 
     assert [row[0] for row in rows] == [
         "clarev", "claude", "codex", "codrev", "currev",
         "cursor", "opencode", "operev", "pi", "pirev",
     ]
+    seeded = {name: (provider, model) for name, provider, model in rows}
+    assert seeded["opencode"] == ("opencode", "opencode/big-pickle")
+    assert seeded["operev"] == ("opencode", "opencode/big-pickle")
 
 
 def test_init_db_seeds_review_agents_gated_per_harness_with_role_cwd(tmp_path, monkeypatch):

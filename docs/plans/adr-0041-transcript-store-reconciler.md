@@ -23,7 +23,7 @@ scope per the ADR) and get migrated afterward, one at a time.
 | 1. Store + reducer | ✅ done | — (shared store) | — (shared store) | — (shared store) |
 | 2. Shadow mode | ✅ `shadowInstallHistoryPage` | ✅ `shadowInstallSnapshot` (2026-08-20) | ✅ `shadowApplyEvent` (2026-08-21) | ✅ `shadowApplySseRunEvent`/`shadowInstallSseCompletion` (2026-08-20, both SSE paths) |
 | 3. Reconciler + cutover | ⚠️ partial — see below | ❌ | ❌ | ❌ |
-| 4. Completion order/route markers/dedup in reconciler | ⚠️ partial | ❌ | ❌ | ❌ |
+| 4. Completion order/route markers/dedup in reconciler | ⚠️ partial | ✅ `raw` field-carry only (2026-08-21) — no cutover | ❌ | ❌ |
 | 5. Retire direct-DOM path | ✅ default flipped to `renderer=store` 2026-08-20 (`?renderer=dom` kept as one-cycle rollback; direct-DOM branch not yet deleted) | ❌ | ❌ | ❌ |
 
 Files: `ui/transcript-store.js`, `ui/reconciler.js`, wiring in `ui/app.js`
@@ -755,21 +755,83 @@ reviewed test-by-test rather than full-suite this round (see above) given
 the two new intermittent
 failures were run down individually. PWA cache bumped to `v20260820-015`.
 
+## 2026-08-21: producer 2 Stage 4, field-carry only (no cutover yet)
+
+Scoped Stage 3 (pending-turn reconciler cutover) for producer 2 before
+touching any rendering code, per the Next steps note below about budgeting
+this properly. Found the cutover itself is a substantial, genuinely risky
+change — not attempted this session — but a real, boundable, low-risk
+prerequisite came out of the scoping and was implemented and verified here:
+Stage 4 field-carry.
+
+**Checked whether producer 2 has producer 4's own kind of blocker (a real
+backend gap). It does not.** `agent/stats_db.py`'s `get_realtime_snapshot`
+already does `dict(row)` on every `chat_messages` row (`SELECT *`), so every
+field a renderer would need — `topic`/`agent`/`adhoc`/`backend`/etc. — is
+already on the wire in every snapshot frame. `shadowInstallSnapshot`
+(`ui/app.js`) was just discarding it: Stage 2 only mapped
+identity/ordering fields onto the store row (by design, matching producer
+1's own Stage 2 scope), never carrying the rest through.
+
+Fixed the discard: `shadowInstallSnapshot` now sets `raw: message` on every
+row, mirroring `historyItemToStoreRows`'s `raw: item` passthrough for
+producer 1. `turn.raw` only ever reads the assistant message's own `raw`
+(`upsertTurn`, `transcript-store.js`), so attaching it on user rows too is
+harmless, not just inert — kept for symmetry rather than special-cased away.
+Store-only, no render change, same shadow-mode posture as everything else at
+this stage.
+
+One real difference from producer 1 to flag for whoever does the actual
+Stage 3 render: a snapshot message is a raw `chat_messages` row, not a
+denormalized history item — it has no `prompt` field the way a `/history`/
+`/status` row does. A pending-turn renderer built on `turn.raw` for this
+producer will need the prompt text from the store's own
+`turn.promptContent` (already tracked via `assistantByReplyTo`/`upsertTurn`)
+rather than expecting `item.prompt` to be present on `raw` the way
+`createHistoryRegistry.render()` currently expects for producer 1.
+
+Test added: `transcript-store.spec.js` "a WS snapshot message carries its
+full row on turn.raw, not just identity/ordering fields" (WS snapshot
+producer shadow-mode block, asserts `getTurn(7).raw` matches the full frame
+row's `topic`/`agent`/`adhoc`/`content`, not just what Stage 2 mapped).
+
+Verified: `transcript-store.spec.js` 27/27, `reconciler.spec.js` +
+`history-registry.spec.js` + `history-store-renderer.spec.js` 23/23 (all
+`--workers=1`). Full `chat.spec.js` (`--workers=1`, ~7min): 97/102 clean, 5
+failures — reran those 5 individually with `--retries=2`: the 3 WS-transport
+ones (`mid-stream discovered claude-style turn keeps journaled status text`,
+`global lifecycle discovers a desktop turn and reconnect completion stays
+deduplicated`, `pageshow reconnects stale pending event watcher`) all passed
+clean in isolation, matching this doc's own prior findings that this
+describe block is flaky under full-suite load and unrelated to any code this
+session touched (`shadowInstallSnapshot`, not the lifecycle-events path).
+The 2 CLI-auth ones (`completing the unlock (exit 0) auto-retries the
+original cursor login`, `server unlock_requires_local refusal is surfaced
+without a password prompt`) are the already-documented auth-panel flake
+family — 1 passed on retry, 1 still failed after 2 retries with the same
+`window.__authFrames.length === 2` timeout signature this doc has already
+attributed to that flake family, not this change (no auth code touched).
+PWA cache bumped to `v20260821-001`.
+
 ## Next steps
 
-1. Stage 3/4 (reconciler cutover; completion order/route markers/dedup) for
-   producers 2, 3, and now 4 — actually rendering pending/live turns from the
-   store instead of direct-DOM. This is the risky part: producer 1's own
-   Stage 3/4 took three rounds of gap-discovery (Gaps 1–3 above) found only
-   by running the full suite, not by inspection. Do not attempt this as a
-   quick pass — budget it the same way, with a real before/after full-suite
-   comparison per gap found. Producer 4 adds its own new wrinkle beyond
-   producers 2/3: rendering a *pending* SSE turn from the store means
-   deciding what happens to `stats` (and anything else `historyItemToStoreRows`
-   doesn't carry) between the live-delta phase and the eventual authoritative
-   install — Stage 2 could afford to let completion silently reset it, but a
-   renderer reading directly from the store during that window cannot.
-2. After producer 1 has run as the real default for "one cycle" with no
+1. **Producer 2 Stage 3 (pending-turn reconciler cutover) — not started.**
+   This is the actual risky work; Stage 4 field-carry above only removes one
+   prerequisite blocker. Needs: a live/pending-turn render function (analogous
+   to `makeWipBubble`, but reading `turn.raw` + `turn.promptContent` from the
+   store instead of a `/chat/{id}/status` fetch); wiring the reconciler's
+   already-built-but-never-exercised atomic live-to-terminal bucket transition
+   (`reconciler.js`'s `previousBucket`/`nextBucket` context) to replace
+   `replacePendingWithStoredItem`'s direct-DOM swap; and deciding how
+   `reconnectPendingItem`'s kill-button/cancel wiring and EventSource
+   reattachment survive once the wip bubble node is reconciler-owned rather
+   than a locally-held DOM reference. Budget this the same way producer 1's
+   own Stage 3/4 needed — three rounds of gap-discovery via full before/after
+   suite runs, not inspection — and do not treat Stage 4's clean field-carry
+   result above as evidence the render cutover itself will be equally cheap.
+2. Producers 3 and 4 need the same two-part treatment (Stage 4 field-carry
+   check, then Stage 3 cutover) — not scoped yet this session.
+3. After producer 1 has run as the real default for "one cycle" with no
    rollback needed, delete the disabled direct-DOM history-rendering branch
    and the `?renderer=dom` escape hatch. Not yet — the flip landed
    2026-08-20.

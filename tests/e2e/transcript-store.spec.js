@@ -353,6 +353,33 @@ test.describe('WS snapshot producer (shadow mode)', () => {
     expect(snapshot.order.completed).toContain(7);
   });
 
+  // Stage 4: a snapshot message is already a raw chat_messages row, so the
+  // store should be able to render from turn.raw the same way producer 1's
+  // historyItemToStoreRows lets historyRegistry render straight from its own
+  // raw history item — not just track identity/ordering.
+  test('a WS snapshot message carries its full row on turn.raw, not just identity/ordering fields', async ({ page }) => {
+    await page.route('**/chat/7/status', r => r.fulfill({ json: {
+      id: 7, role: 'assistant', reply_to: 6, topic: 'default', agent: 'claude',
+      adhoc: false, status: 'done', prompt: "what's your model?", content: 'Done 7',
+      completed_at: '2026-08-15T12:00:00Z',
+    }}));
+    await page.reload();
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'snapshot', event_id: 10, payload: { conversations: [{ messages: [
+        { id: 6, role: 'user', reply_to: null, content: "what's your model?" },
+        { id: 7, role: 'assistant', reply_to: 6, topic: 'default', agent: 'claude',
+          adhoc: false, status: 'done', content: 'Done 7', completed_at: '2026-08-15T12:00:00Z' },
+      ] }] },
+    }));
+
+    const raw = await page.evaluate(() => window.__transcriptStore.getTurn(7).raw);
+    expect(raw).toMatchObject({
+      id: 7, topic: 'default', agent: 'claude', adhoc: false, content: 'Done 7',
+    });
+  });
+
   test('a pending WS snapshot message installs into the store as a non-terminal turn', async ({ page }) => {
     await page.reload();
     await page.waitForFunction(() => window.__webSocket?.readyState === 1);

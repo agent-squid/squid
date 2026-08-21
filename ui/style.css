@@ -4471,6 +4471,10 @@ button {
 .send-icon { display: none; }
 
 @media (max-width: 768px) {
+  /* OpenCode's login picker needs three more rows than the desktop-sized
+     terminal box exposes once the mobile keypad is present. */
+  #auth-panel-term { height: calc(320px - 1rem + 48px); }
+
   #auth-panel-keypad {
     display: flex;
     gap: 0.5rem;

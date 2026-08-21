@@ -166,8 +166,8 @@ PI_PATH        = find_cli(PI_CLI)
 AGY_PATH       = find_cli(AGY_CLI)
 OLLAMA_PATH    = find_cli(OLLAMA_CLI)
 
-# OpenCode free provider — no API key required
-OPENCODE_DEFAULT_MODEL = "opencode/deepseek-v4-flash-free"
+# OpenCode free provider
+OPENCODE_DEFAULT_MODEL = "opencode/big-pickle"
 
 # Per-user tmp dir for context sync — avoids cross-user permission conflicts
 SQUID_HOME = f"/tmp/{os.getlogin()}/squid"

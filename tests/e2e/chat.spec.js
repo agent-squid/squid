@@ -3901,11 +3901,12 @@ test('websocket transport drives the auth panel over WS without POST /auth/sessi
   const keypad = page.locator('#auth-panel-keypad');
   await expect(keypad).toBeVisible();
   await expect(page.locator('#auth-panel-term .xterm-screen')).toHaveCSS('height', /[1-9]/);
+  await keypad.getByRole('button', { name: 'Escape' }).click();
   await keypad.getByRole('button', { name: 'Up arrow' }).click();
   await keypad.getByRole('button', { name: 'Down arrow' }).click();
   await keypad.getByRole('button', { name: 'Enter' }).click();
   await expect.poll(() => page.evaluate(() => window.__authFrames
-    .filter(f => f.type === 'auth.input').map(f => f.payload.data))).toEqual(['\x1b[A', '\x1b[B', '\r']);
+    .filter(f => f.type === 'auth.input').map(f => f.payload.data))).toEqual(['\x1b', '\x1b[A', '\x1b[B', '\r']);
 
   // Streamed output + done arrive over the socket; a clean exit (0) on the
   // login flow closes the panel, which in turn cancels the WS session.

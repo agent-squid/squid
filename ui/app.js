@@ -166,7 +166,7 @@ const HARNESS_MODEL_HINTS = Object.freeze({
   claudecode: 'e.g. claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7',
   codex:      'e.g. o4-mini, o3',
   cursor:     'model (optional)',
-  opencode:   'e.g. opencode/deepseek-v4-flash-free, anthropic/claude-sonnet-4-6',
+  opencode:   'e.g. opencode/big-pickle, anthropic/claude-sonnet-4-6',
 });
 
 const AGENT_THEME_COLORS = Object.freeze({
@@ -4897,7 +4897,7 @@ authPanelCancelBtn.addEventListener('click', () => closeAuthPanel());
 authPanelKeypad.addEventListener('click', e => {
   const btn = e.target.closest('button[data-auth-key]');
   if (!btn || !_authSession?.id || !_authSession.running) return;
-  const input = { up: '\x1b[A', down: '\x1b[B', enter: '\r' }[btn.dataset.authKey];
+  const input = { escape: '\x1b', up: '\x1b[A', down: '\x1b[B', enter: '\r' }[btn.dataset.authKey];
   if (!input) return;
   if (_authSession.transport === 'ws') {
     realtimeV1?.authSend('auth.input', { session_id: _authSession.id, data: input });
@@ -7864,6 +7864,15 @@ const realtimeV1 = (() => {
           completed_at: message.completed_at ?? null,
           created_at: message.created_at ?? null,
           stats: message.stats || {},
+          // Stage 4 (ADR-0041): a snapshot message is already a raw
+          // chat_messages row (agent/stats_db.py's get_realtime_snapshot does
+          // `dict(row)`), so — unlike producer 1, which has to reassemble a
+          // denormalized history item — there's nothing to build here beyond
+          // carrying it through as-is. Same "raw passthrough, not a
+          // field-by-field reconstruction" policy as historyItemToStoreRows;
+          // turn.raw only ever reads the assistant row's own raw, so setting
+          // it here on a user row is harmless, not just inert.
+          raw: message,
         });
       }
     }
