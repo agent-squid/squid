@@ -1511,6 +1511,28 @@ PWA cache bumped to `v20260821-020`.
 
 ## Next steps
 
+### 2026-08-21: Stage 3(b) — adopted pending preview patching
+
+The registry now patches an adopted pending bubble's `.thinking-live`
+preview from the normalized turn's `narrative` and live `content`, while
+reusing the existing bubble and leaving its kill button, listener, and
+composer-owned sibling range intact. Empty store previews remain a no-op so
+the reconciler does not replace an existing loader/waiting state. Pending
+bubble construction and watcher attachment remain direct-DOM-owned; enabling
+store-built recovered pending bubbles is the next cutover slice.
+
+### Stage 3(b) preview-patching review fix — adopt-only restored
+
+Rolled the preview patch back before publish. The transport watcher still has
+the only faithful ordered preview: tool labels remain structured in the
+store's `tools[]` rather than `narrative`, and SSE queue-position text is not
+store-backed because that synthesized frame has no `run_seq`. Writing
+`narrative + content` into `.thinking-live` could therefore erase tool/queue
+lines and destroy the watcher's loader/waiting children. Pending adoption is
+again placement-only; preview mutation stays deferred until a store-built
+pending bubble has explicit single-writer ownership and watcher attachment.
+PWA cache bumped to `v20260821-022`.
+
 1. **Producer 2 Stage 3 (pending-turn reconciler cutover) — not started.**
    (Separately: the completed-turn duplicate-render bug found while scoping
    this — direct-DOM bypass call sites vs. `render()`'s dirty-id
