@@ -8839,6 +8839,22 @@ async function discoverRealtimeTurn(message, { reconcile = false } = {}) {
     if (messages.querySelector(`[data-msg-id="${msgId}"]`) || !shouldShowNewResponse(item)) return;
     shadowAttachRealtimeRow(item);
     if (item.status === 'pending') {
+      // Snapshot discovery is the first realtime producer to hand initial
+      // pending construction to the registry. shadowInstallSnapshot already
+      // dirtied this id, and attachRaw above enriched its raw row with the
+      // denormalized /status fields makeWipBubble needs. Reconcile only this
+      // id so unrelated snapshot rows still pass their own visibility checks.
+      // If the targeted handoff cannot build/mount the group, retain the
+      // established direct-DOM path as the per-producer rollback fallback.
+      if (reconcile && historyReconciler) {
+        const result = historyReconciler.reconcileDirtyIds([msgId]);
+        const group = historyReconciler.getGroup(msgId);
+        if (result.ok && result.reconciledIds.includes(msgId) && group?.pendingRoot?.isConnected) {
+          if (isAtBottom()) scrollToBottom();
+          return;
+        }
+        historyReconciler.forget(msgId);
+      }
       const bubble = insertPendingHistoryItem(item);
       reconnectPendingItem(item, bubble);
       // The transport watcher still owns this bubble's content and teardown,

@@ -569,6 +569,16 @@ test.describe('WS snapshot producer (shadow mode)', () => {
   });
 
   test('a pending WS snapshot message installs into the store as a non-terminal turn', async ({ page }) => {
+    await page.route('**/chat/8/status', r => r.fulfill({ json: {
+      id: 8, role: 'assistant', reply_to: 7, topic: 'default', agent: 'claude',
+      adhoc: false, status: 'pending', prompt: 'keep working', content: '',
+      timestamp: '2026-08-20T00:00:00Z',
+    }}));
+    await page.route('**/chat/8/events**', r => r.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: '',
+    }));
     await page.reload();
     await page.waitForFunction(() => window.__webSocket?.readyState === 1);
 
@@ -585,6 +595,16 @@ test.describe('WS snapshot producer (shadow mode)', () => {
     expect(snapshot.turn8.status).toBe('pending');
     expect(snapshot.order.pending).toContain(8);
     expect(snapshot.order.completed).not.toContain(8);
+    await expect(page.locator('.msg-thinking.history-item[data-msg-id="8"]')).toHaveCount(1);
+    const registryState = await page.evaluate(() => {
+      const group = historyReconciler?.getGroup(8);
+      return {
+        registered: !!group,
+        connected: !!group?.pendingRoot?.isConnected,
+        mounted: group?.pendingNeedsMount === false,
+      };
+    });
+    expect(registryState).toEqual({ registered: true, connected: true, mounted: true });
   });
 
   // ADR-0041 Stage 3 prerequisite: a recovered pending row (e.g. after a
