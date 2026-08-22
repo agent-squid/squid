@@ -1,7 +1,7 @@
 # Plan: Normalized transcript store & reconciler (ADR-0041)
 
 Tracks progress against ADR-0041's six-step migration sequence, one producer
-at a time. Status below reflects the tree as of 2026-08-18, verified by
+at a time. Status below reflects the tree as of 2026-08-22, verified by
 reading `ui/app.js`/`ui/transcript-store.js`/`ui/reconciler.js` directly and
 by running the test suite — not by re-reading this doc later. Line numbers
 drift; anchor on function/file names.
@@ -22,8 +22,8 @@ scope per the ADR) and get migrated afterward, one at a time.
 |---|---|---|---|---|
 | 1. Store + reducer | ✅ done | — (shared store) | — (shared store) | — (shared store) |
 | 2. Shadow mode | ✅ `shadowInstallHistoryPage` | ✅ `shadowInstallSnapshot` (2026-08-20) | ✅ `shadowApplyEvent` (2026-08-21) | ✅ `shadowApplySseRunEvent`/`shadowInstallSseCompletion` (2026-08-20, both SSE paths) |
-| 3. Reconciler + cutover | ⚠️ partial — see below | ❌ (node-adoption prerequisite done 2026-08-21 — bookkeeping only, no render/cutover) | ❌ | ❌ |
-| 4. Completion order/route markers/dedup in reconciler | ⚠️ partial | ✅ `raw` field-carry only (2026-08-21) — no cutover | ❌ | ❌ |
+| 3. Reconciler + cutover | ✅ completed and recovered history rows | ✅ pending discovery builds/mounts through registry (2026-08-22) | ✅ pending discovery builds/mounts through registry (2026-08-22) | ⚠️ composer range adopted; watcher remains preview owner (2026-08-22) |
+| 4. Completion order/route markers/dedup in reconciler | ✅ completed history | ⚠️ registered pending-to-terminal handoff uses shared reconciler path | ⚠️ registered pending-to-terminal handoff uses shared reconciler path | ⚠️ registered composer handoff; direct completion fallbacks remain |
 | 5. Retire direct-DOM path | ✅ default flipped to `renderer=store` 2026-08-20 (`?renderer=dom` kept as one-cycle rollback; direct-DOM branch not yet deleted) | ❌ | ❌ | ❌ |
 
 Files: `ui/transcript-store.js`, `ui/reconciler.js`, wiring in `ui/app.js`
@@ -37,14 +37,13 @@ time, reproducing identically on an unmodified tree, so it's pre-existing
 suite-level flakiness, not tied to any one change). Read this suite one file
 at a time for a trustworthy result.
 
-### What "partial" means for producer 1
+### What producer 1 owns
 
 - Behind `?renderer=store`, `historyReconciler` (built from `createHistoryRegistry`,
   `ui/app.js` ~7388) renders **completed** history turns; `useReconciler` gates
   `appendHistoryItems` (~2248) to skip the direct-DOM branch for those rows.
-- **Pending/live rows are excluded from the reconciler's cutover on purpose**
-  (`historyRegistry.render()` no-ops on a non-terminal turn) — that's the
-  right long-term split, since pending rendering belongs to producers 2/3.
+- Recovered pending history rows are built by the registry and mounted only
+  after placement; active transport watchers remain their sole preview writer.
 - Default is `renderer=store` as of 2026-08-20 (`ui/app.js:43`). `?renderer=dom`
   stays available as the rollback mechanism the ADR's step 5 requires before
   any direct-DOM code is deleted — that deletion hasn't happened yet.
@@ -1656,7 +1655,83 @@ unbuildable. No DOM ownership changed in this slice. Targeted enrichment tests
 2/2 and registry/reconciler/renderer suites 42/42 pass. PWA cache bumped to
 `v20260821-028`.
 
-1. **Producer 2 Stage 3 (pending-turn reconciler cutover) — in progress.**
+## 2026-08-22: tracker sync after realtime pending cutovers
+
+The prior next-steps list lagged the implementation. Since the 2026-08-21
+snapshot raw-enrichment prerequisite, three cuts landed:
+
+- WS snapshot discovery now asks `reconcileDirtyIds([msgId])` to build, place,
+  and mount its pending bubble through the registry, with the direct path kept
+  only as a failed-handoff fallback.
+- WS lifecycle discovery uses that same targeted handoff.
+- A fresh composer SSE turn is seeded and immediately adopted as one owned
+  pending range when its message id arrives. Terminal completion also clears
+  the asynchronous authoritative-install re-dirty race.
+
+These cuts complete the planned *initial pending construction/registration*
+work for producers 2 and 3 and establish the same stable pending identity for
+producer 4. They do not make the transport watcher store-driven: it still owns
+live preview text, tools, queue text, cancellation, and teardown. Moving that
+preview mutation into the reconciler remains unsafe until the normalized model
+can reproduce the watcher's complete ordered presentation.
+
+## Next steps
+
+### 2026-08-22: Producer 4 reconnect terminal handoff uses one authoritative fetch
+
+The Producer 4 baseline passed 45/45 store/producer tests and 21/21 recovered-
+pending tests. The reconnect `EventSource` `done` and terminal `error`
+listeners were each starting `shadowInstallSseCompletion`, then immediately
+calling `replacePendingWithStoredItem`, which fetched and installed the same
+authoritative row again for the real atomic pending-to-terminal transition.
+Removed the redundant first install: the registered handoff now owns the one
+fetch, store transaction, and reconcile. A regression asserts exactly one
+`/status` request. The same 66 tests pass after the change. PWA cache bumped
+to `v20260822-011`.
+
+### 2026-08-22: Producer 4 primary SSE `done` uses the registered handoff
+
+The primary POST/SSE `done` handler now asks `replacePendingWithStoredItem` to
+atomically replace its registered composer range from the authoritative row.
+If persistence has not reached a terminal row or rendering fails, the existing
+immediate composer projection remains the per-turn rollback path. The first
+regression run caught a second lifecycle gap: registry removal does not call
+the composer's `removeThinking()`, so its `finally` block mistook a completed
+stream for an interruption and started another status poll. A successful
+handoff now freezes that closure explicitly. Regression coverage proves one
+status request, one completed bubble, completed registry ownership, and no
+pending root. Producer/store tests pass 45/45 and recovered-pending tests pass
+21/21. PWA cache bumped to `v20260822-012`.
+
+### 2026-08-22: pre-publish recovery hardening
+
+Review found two publish blockers in the primary/reconnect terminal cuts. The
+primary `done` handoff awaited an unbounded `/status` request before showing
+the established composer fallback; it now aborts that attempt after one second
+and renders immediately. Reconnect `done`/terminal-error listeners had already
+closed their EventSource but ignored a non-terminal/failed handoff; they now
+start the existing status poll while the wip remains connected. The poll passes
+its terminal authoritative row directly into the handoff instead of canceling
+itself and issuing a second request. Regressions cover a four-second primary
+status stall and a reconnect `done` frame that observes `pending` before the
+terminal row. Producer/store tests pass 46/46 and recovered-pending tests pass
+21/21; one unrelated WS Flow attachment test passed on retry in the final
+re-run. PWA cache bumped to `v20260822-013`.
+
+1. **Producer 4 terminal-error parity.** Move the safely persisted primary
+   POST/SSE terminal-error case through the registered handoff while retaining
+   interrupted/partial-response behavior as its explicit fallback. Do not move
+   watcher-owned preview mutation yet.
+2. **Retire fallbacks only after parity.** Remove per-producer direct pending/
+   completion fallbacks once their failure-path tests pass with the registry as
+   sole owner. Then remove producer 1's `?renderer=dom` escape hatch and dead
+   history branch after the rollback window.
+3. **Post-ADR transport owners.** Flow and CLI-auth remain explicitly out of
+   this four-producer sequence and migrate afterward.
+
+### Superseded 2026-08-21 next-step detail
+
+1. **Producer 2 Stage 3 (pending-turn reconciler cutover) — completed 2026-08-22.**
    (Separately: the completed-turn duplicate-render bug found while scoping
    this — direct-DOM bypass call sites vs. `render()`'s dirty-id
    reconciliation — was a real, already-shipped production bug, not part of

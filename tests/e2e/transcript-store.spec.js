@@ -983,24 +983,36 @@ test.describe('SSE producer (shadow mode)', () => {
         'id: 7\nevent: stats\ndata: {"session_id":"sid-1","input_tokens":3,"output_tokens":2}\n\n' +
         'id: 8\nevent: done\ndata: \n\n',
     }));
-    await page.route('**/chat/50/status', r => r.fulfill({ json: {
+    let statusCalls = 0;
+    await page.route('**/chat/50/status', r => {
+      statusCalls++;
+      return r.fulfill({ json: {
       // agent/stats_db.py's get_message (backing this real endpoint) always
       // attaches a stats object via _attach_turn_stats, not an empty one.
       id: 50, role: 'assistant', status: 'done', content: 'Hello world',
       stats: { session_id: 'sid-1', input_tokens: 3, output_tokens: 2 },
       completed_at: '2026-08-21T00:00:00Z',
-    }}));
+      }});
+    });
 
     await page.fill('#input', 'hi');
     await page.keyboard.press('Enter');
 
-    // Direct-DOM path is unaffected: it renders from the stream's own
-    // accumulated raw text, never from the shadow completion's /status fetch.
-    await expect(page.locator('.msg.assistant:not(.msg-thinking)')).toContainText('Hello world');
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="50"]')).toHaveCount(1);
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="50"]')).toContainText('Hello world');
+    const completedOwnership = await page.evaluate(() => {
+      const group = historyReconciler?.getGroup(50);
+      return {
+        registered: !!group,
+        hasPendingRoot: !!group?.pendingRoot,
+        ownsCompletedBubble: group?.nodes?.some(node => node.matches?.('.msg.assistant.history-item[data-msg-id="50"]')) ?? false,
+      };
+    });
+    expect(completedOwnership).toEqual({ registered: true, hasPendingRoot: false, ownsCompletedBubble: true });
+    expect(statusCalls).toBe(1);
 
-    // The completion install is its own async fetch (not awaited by the
-    // direct-DOM 'done' branch), so wait for it to land before asserting on
-    // fields it alone is responsible for (status/completedAt).
+    // The registered terminal handoff installs the authoritative row before
+    // returning, so status/order and DOM ownership change atomically.
     await expect.poll(() => page.evaluate(() => window.__transcriptStore.getTurn(50)?.status)).toBe('done');
     await expect.poll(() => page.evaluate(() => window.__transcriptStore.getPendingReconcile()))
       .toEqual([]);
@@ -1017,6 +1029,30 @@ test.describe('SSE producer (shadow mode)', () => {
     expect(snapshot.message.tools[0]).toMatchObject({ tool_use_id: 't1', name: 'Bash' });
     expect(snapshot.message.stats).toMatchObject({ session_id: 'sid-1', input_tokens: 3 });
     expect(snapshot.turn.completedAt).toBe('2026-08-21T00:00:00Z');
+  });
+
+  test('a stalled primary SSE completion fetch falls back to the immediate composer projection', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200,
+      headers: {
+        'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
+        'X-Squid-Msg-Id': '52',
+      },
+      body: 'id: 1\ndata: Visible without status\n\nid: 2\nevent: done\ndata: \n\n',
+    }));
+    await page.route('**/chat/52/status', async r => {
+      await new Promise(resolve => setTimeout(resolve, 4000));
+      await r.fulfill({ json: { id: 52, status: 'done', content: 'Visible without status' } }).catch(() => {});
+    });
+
+    await page.fill('#input', 'hi');
+    await page.keyboard.press('Enter');
+
+    // The registered handoff is capped at one second; UI completion must not
+    // wait for this deliberately stalled authoritative request.
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="52"]'))
+      .toContainText('Visible without status', { timeout: 2500 });
+    await expect(page.locator('.msg-thinking[data-msg-id="52"]')).toHaveCount(0);
   });
 
   test('a multi-line text delta on the primary POST /chat path is not truncated in the store (sse_chunk can split one delta across several data: lines sharing one id:)', async ({ page }) => {
@@ -1098,14 +1134,21 @@ test.describe('SSE producer (shadow mode)', () => {
         'id: 6\ndata: text\n\n' +
         'id: 7\nevent: done\ndata: \n\n',
     }));
-    await page.route('**/chat/70/status', r => r.fulfill({ json: {
-      // reply_to must match the history row's (69) — get_message's real row
-      // always carries it, and the store's identity-conflict guard would
-      // otherwise reject this completion install against the reply_to the
-      // initial pending-row install already established for msg 70.
-      id: 70, role: 'assistant', reply_to: 69, status: 'done', content: 'Reconnected text',
-      completed_at: '2026-08-21T00:05:00Z',
-    }}));
+    let statusCalls = 0;
+    await page.route('**/chat/70/status', r => {
+      statusCalls++;
+      if (statusCalls === 1) return r.fulfill({ json: {
+        id: 70, role: 'assistant', reply_to: 69, status: 'pending', content: 'Reconnected text',
+      }});
+      return r.fulfill({ json: {
+        // reply_to must match the history row's (69) — get_message's real row
+        // always carries it, and the store's identity-conflict guard would
+        // otherwise reject this completion install against the reply_to the
+        // initial pending-row install already established for msg 70.
+        id: 70, role: 'assistant', reply_to: 69, status: 'done', content: 'Reconnected text',
+        completed_at: '2026-08-21T00:05:00Z',
+      }});
+    });
 
     await page.reload();
 
@@ -1121,6 +1164,13 @@ test.describe('SSE producer (shadow mode)', () => {
     expect(snapshot.message.content).toBe('Reconnected text');
     expect(snapshot.message.tools).toHaveLength(1);
     expect(snapshot.message.tools[0]).toMatchObject({ tool_use_id: 't2', name: 'Read' });
+    // replacePendingWithStoredItem owns both the authoritative fetch and the
+    // store/reconciler terminal transition; the SSE listener must not start a
+    // competing shadowInstallSseCompletion request.
+    // The done frame arrived before persistence became terminal. Its failed
+    // handoff must resume polling, then transition on the next authoritative
+    // read instead of leaving the closed EventSource's wip stranded.
+    expect(statusCalls).toBe(2);
   });
 
   test('a duplicate/replayed SSE frame (same run_events.seq) is a no-op in the store', async ({ page }) => {

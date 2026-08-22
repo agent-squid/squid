@@ -6249,34 +6249,42 @@ async function sendMessage(text, opts = {}) {
               continue;
             }
             completionRendered = true;
-            shadowInstallSseCompletion(msgId, { clearAfterInstall: true });
-            // This composer-owned completion never routes through the
-            // reconciler (unlike insertCompletedHistoryItem/
-            // replacePendingWithStoredItem, which both do this same forget+
-            // clearReconciled pairing on their own completion). Without it,
-            // the store row this msg id was seeded with at attachMsgId time
-            // (still status 'pending') stays dirty indefinitely — even after
-            // shadowInstallSseCompletion's own fire-and-forget fetch above
-            // resolves. The helper now performs a second clear immediately
-            // after its authoritative install to close that async race; this
-            // immediate clear still removes the pending seed before the fetch
-            // returns (and covers a failed fetch). A later, unrelated
-            // reconcile() pass
-            // (any subsequent /history page — pagination, a filter change)
-            // would then render this still-dirty id from the stale 'pending'
-            // status, and since thinkingBubble is about to be removed below
-            // with no live-group-id-tagged replacement, the registry can't
-            // adopt anything and builds a brand new stray "still thinking"
-            // bubble alongside the real completed one built below.
-            if (msgId) { historyReconciler?.forget(msgId); transcriptStore?.clearReconciled([msgId]); }
+            // Producer 4 primary-SSE cutover: once attachMsgId registered the
+            // composer range, use the same authoritative pending-to-terminal
+            // handoff as recovered SSE/WS turns. If persistence has not caught
+            // up yet (or rendering fails), keep the established immediate
+            // composer projection as the rollback path for this turn.
+            const completedByReconciler = msgId
+              ? await replacePendingWithStoredItem(
+                  { id: msgId, topic, agent: resolvedAgent || agent, adhoc },
+                  thinkingBubble,
+                  null,
+                  { timeoutMs: 1000 },
+                )
+              : false;
+            if (!completedByReconciler) {
+              shadowInstallSseCompletion(msgId, { clearAfterInstall: true });
+              // The fallback projection removes the registered pending root
+              // itself, so retire its registry identity and dirty seed before
+              // any later history reconcile can resurrect a stale wip.
+              if (msgId) { historyReconciler?.forget(msgId); transcriptStore?.clearReconciled([msgId]); }
+            }
             turnStatus = 'done';
             stopStatusFallback();
             liveCtxSpan.dataset.hasTrace = (statusBuf.trim() || liveToolEvents.length) ? 'true' : 'false';
-            removeThinking();
+            if (completedByReconciler) {
+              // The reconciler removed the thinking root instead of
+              // removeThinking(); freeze the composer closure explicitly so
+              // finally{} does not misread that absence as an interrupted
+              // stream and start a redundant status poll.
+              thinkingFrozen = true;
+            } else {
+              removeThinking();
+            }
             invalidateTopicsCache();
             invalidateTopicsManageCache();
             doneTime = new Date().toISOString();
-            if (firstDataReceived) {
+            if (firstDataReceived && !completedByReconciler) {
               if (nativeShell) {
                 bubble.classList.add('shell-result');
                 setShellResultMetadata(liveCtxSpan, raw);
@@ -8241,12 +8249,19 @@ function insertPendingHistoryItem(item) {
   return bubble;
 }
 
-async function replacePendingWithStoredItem(item, wipBubble, onStored = null) {
+async function replacePendingWithStoredItem(item, wipBubble, onStored = null, { timeoutMs = 5000, statusData = null } = {}) {
+  let fetchTimeout = null;
   try {
-    const res = await fetch(`/chat/${item.id}/status`);
-    if (!res.ok || !wipBubble.parentNode) return;
-    const data = await res.json();
-    if (data.status !== 'done' && data.status !== 'error' && data.status !== 'cancelled') return;
+    let data = statusData;
+    if (!data) {
+      const fetchController = new AbortController();
+      fetchTimeout = setTimeout(() => fetchController.abort(), timeoutMs);
+      const res = await fetch(`/chat/${item.id}/status`, { signal: fetchController.signal });
+      if (!res.ok) return false;
+      data = await res.json();
+    }
+    if (!wipBubble.parentNode) return false;
+    if (data.status !== 'done' && data.status !== 'error' && data.status !== 'cancelled') return false;
     onStored?.(data);
     const registeredPending = historyReconciler?.getGroup(item.id);
     if (registeredPending?.pendingRoot === wipBubble && shouldShowNewResponse(data)) {
@@ -8281,7 +8296,7 @@ async function replacePendingWithStoredItem(item, wipBubble, onStored = null) {
         updatePinCount();
         if (pinPanel.classList.contains('open')) renderPinPanel();
         refreshAllRevertButtons();
-        return;
+        return true;
       }
       // A failed render for this id stays dirty by contract. Fall through to
       // the direct-DOM recovery path, which forgets that stale identity and
@@ -8300,7 +8315,7 @@ async function replacePendingWithStoredItem(item, wipBubble, onStored = null) {
     // reconcile/reorder pass can put it back.
     historyReconciler?.forget(item.id);
     if (wipAboveViewport) messages.scrollTop -= wipRect.height;
-    if (!shouldShowNewResponse(data)) return;
+    if (!shouldShowNewResponse(data)) return true;
     // Feed the fetched terminal row to the store too — the registered path
     // above already does this via shadowInstallHistoryPage before
     // reconciling. Without it this turn keeps its pending-seed
@@ -8320,7 +8335,9 @@ async function replacePendingWithStoredItem(item, wipBubble, onStored = null) {
     if (pinPanel.classList.contains('open')) renderPinPanel();
     refreshAllRevertButtons();
     if (isAtBottom()) scrollToBottom();
-  } catch {}
+    return true;
+  } catch { return false; }
+  finally { if (fetchTimeout) clearTimeout(fetchTimeout); }
 }
 
 const _flowRunWatchers = new Set();
@@ -9174,8 +9191,16 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
     closed = true;
     es.close();
     pendingPollTimers.delete(wipBubble);
-    shadowInstallSseCompletion(item.id);
-    await replacePendingWithStoredItem(item, wipBubble, onStored);
+    // replacePendingWithStoredItem fetches the authoritative row once, feeds
+    // it through shadowInstallHistoryPage, and performs the registered
+    // pending-to-terminal reconcile. Starting shadowInstallSseCompletion here
+    // duplicated that request and could race a second terminal install against
+    // the atomic handoff.
+    const completed = await replacePendingWithStoredItem(item, wipBubble, onStored);
+    // A done frame can win the race with the persisted terminal row. The
+    // EventSource is already closed, so retain a live recovery owner until
+    // /status catches up instead of stranding the pending bubble forever.
+    if (!completed && wipBubble.isConnected) pollPendingItem(item, wipBubble);
   });
   es.addEventListener('error', async event => {
     if (closed) return;
@@ -9185,8 +9210,8 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
     if (event.data) {
       if (live) live.innerHTML = `<span class="msg-error">${event.data}</span>`;
       updateThinkingHeightButton(wipBubble);
-      shadowInstallSseCompletion(item.id);
-      await replacePendingWithStoredItem(item, wipBubble, onStored);
+      const completed = await replacePendingWithStoredItem(item, wipBubble, onStored);
+      if (!completed && wipBubble.isConnected) pollPendingItem(item, wipBubble);
       return;
     }
     pollPendingItem(item, wipBubble);
@@ -9206,9 +9231,13 @@ async function pollPendingItem(item, wipBubble) {
       const res = await fetch(`/chat/${item.id}/status`);
       if (!res.ok) return;
       const data = await res.json();
+      // An empty error can be the transient persisted state after an
+      // interrupted stream. Keep polling for the eventual stored result;
+      // finalizing it would discard the recovered response that follows.
+      if (data.status === 'error' && !data.content) return;
       if (data.status === 'done' || data.status === 'error' || data.status === 'cancelled') {
         cancelPendingPoll(wipBubble);
-        await replacePendingWithStoredItem(item, wipBubble);
+        await replacePendingWithStoredItem(item, wipBubble, null, { statusData: data });
       } else if (count >= MAX_POLLS) {
         cancelPendingPoll(wipBubble);
         const content = wipBubble.querySelector('.thinking-live');
