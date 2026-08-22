@@ -66,6 +66,35 @@ test('renderer=store: history renders completed turns in the same order as the d
   await expect(page.locator('#messages > .msg-time.history-item')).toHaveText(expectedTimes);
 });
 
+test('renderer=store: a sparse snapshot cannot erase a completed turn stats footer on the next reconcile', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/history**', route => route.fulfill({ json: {
+    items: [{
+      id: 4400, role: 'assistant', topic: 'squid', agent: 'codex',
+      content: 'complete', status: 'done', prompt: 'prompt',
+      completed_at: '2026-07-15T12:20:00Z',
+      stats: { input_tokens: 12, output_tokens: 3, duration_ms: 1000 },
+    }],
+    has_more: false,
+  }}));
+
+  await page.goto('/?renderer=store');
+  await expect(page.locator('#messages > .stats.history-item')).toContainText('↑ 12');
+
+  await page.evaluate(() => {
+    shadowInstallHistoryPage([{
+      id: 4400, role: 'assistant', topic: 'squid', agent: 'codex',
+      content: 'complete', status: 'done', prompt: 'prompt',
+      completed_at: '2026-07-15T12:20:00Z',
+      // Realtime snapshot row: deliberately no stats field.
+    }]);
+    historyReconciler.reconcile();
+  });
+
+  await expect(page.locator('#messages > .stats.history-item')).toContainText('↑ 12');
+  await expect(page.locator('#messages > .msg-time.history-item')).toHaveCount(0);
+});
+
 test('renderer=store: jump renders a bounded window, then older/newer pagination extends it in correct order', async ({ page }) => {
   await mockApp(page);
 

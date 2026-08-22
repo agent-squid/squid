@@ -5571,6 +5571,11 @@ mark.search-kw-highlight {
   padding: 0 0.4rem 0.1rem;
   align-self: flex-start;
 }
+.msg-time:not(.right) {
+  font-size: var(--text-sm);
+  color: var(--text-mid);
+  padding: 0.1rem 0.9rem 0.3rem;
+}
 .msg-time.right {
   align-self: flex-end;
   text-align: right;

@@ -650,6 +650,57 @@ test.describe('WS snapshot producer (shadow mode)', () => {
     const status = await page.evaluate(() => window.__transcriptStore.getMessage(9).status);
     expect(status).toBe('done');
   });
+
+  test('a sparse realtime snapshot cannot erase history stats when pagination next reconciles the turn', async ({ page }) => {
+    await page.unroute('**/history**');
+    await page.route('**/history**', r => r.fulfill({ json: {
+      items: [{
+        id: 42, role: 'assistant', topic: 'default', agent: 'claude', status: 'done',
+        prompt: 'hello', content: 'finished', completed_at: '2026-08-20T00:00:00Z',
+        stats: { input_tokens: 12, output_tokens: 3, duration_ms: 1000 },
+      }],
+      has_more: false,
+    }}));
+    await page.reload();
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+    await expect(page.locator('#messages > .stats.history-item')).toContainText('↑ 12');
+
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'snapshot', event_id: 5, payload: { conversations: [{ messages: [
+        { id: 42, role: 'assistant', status: 'done', content: 'finished',
+          completed_at: '2026-08-20T00:00:00Z' },
+      ] }] },
+    }));
+    await page.evaluate(() => historyReconciler.reconcile());
+
+    await expect(page.locator('#messages > .stats.history-item')).toContainText('↑ 12');
+    await expect(page.locator('#messages > .msg-time.history-item')).toHaveCount(0);
+  });
+
+  test('a stats frame arriving after terminal rendering replaces the timestamp footer live', async ({ page }) => {
+    await page.route('**/chat/41/status', r => r.fulfill({ json: {
+      id: 41, role: 'assistant', status: 'done', topic: 'default', agent: 'claude',
+      prompt: 'hello', content: 'finished', completed_at: '2026-08-20T00:00:00Z',
+    }}));
+    await page.reload();
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'message.changed', event_id: 1, msg_id: 41,
+      scope: { topic: 'default', agent: 'claude' },
+      payload: { id: 41, role: 'assistant', status: 'done', content: 'finished' },
+    }));
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="41"]')).toHaveCount(1);
+    await expect(page.locator('#messages > .stats')).toHaveCount(0);
+
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'chat.stats', event_id: 2, msg_id: 41, run_seq: 7,
+      payload: { input_tokens: 3, output_tokens: 2, duration_ms: 1000 },
+    }));
+
+    await expect(page.locator('#messages > .stats')).toContainText('↑ 3');
+    await expect(page.locator('#messages > .stats')).toContainText('↓ 2 tokens');
+  });
 });
 
 // ── Stage 2: WS lifecycle events producer, shadow mode ──────────────────────

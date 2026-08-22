@@ -1741,6 +1741,16 @@ predicate at the authoritative handoff boundary. Producer/store tests pass
 3. **Post-ADR transport owners.** Flow and CLI-auth remain explicitly out of
    this four-producer sequence and migrate afterward.
 
+### 2026-08-22: Producer 1 rollback path retired
+
+After the store renderer ran as the default through its rollback window and
+the Producer 4 parity matrix passed 104/104, HTTP history now has one renderer.
+Removed the `?renderer=dom` escape hatch and the unreachable direct pending/
+completed history branch. Prompt-only history remains its intentionally
+separate reduced projection. Missing store/reconciler assets now fail client
+initialization instead of silently restoring a second `#messages` owner. PWA
+cache bumped to `v20260822-016`.
+
 ### Superseded 2026-08-21 next-step detail
 
 1. **Producer 2 Stage 3 (pending-turn reconciler cutover) — completed 2026-08-22.**

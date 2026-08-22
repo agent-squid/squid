@@ -31,20 +31,6 @@ const realtimeTransportMode = fetch('/config/realtime', { cache: 'no-store' })
   .then(config => ['auto', 'websocket', 'sse'].includes(config.transport) ? config.transport : 'sse')
   .catch(() => 'sse');
 
-// ADR-0041 Stage 5: HTTP history renders from the normalized store
-// (historyRegistry) instead of #messages directly — resolved once,
-// client-side only (no server round trip needed, unlike realtimeTransportMode
-// above). This was direct-DOM by default until 2026-08-20: an earlier flip
-// attempt (2026-08-18) surfaced Gap 1 (a history row with no explicit
-// `status` rendered nowhere) and Gap 2 (a live composer turn could anchor on
-// the wrong side of newer completed history); both are fixed, and a targeted
-// run of every history/ordering/composer-adjacent spec file (chat, the five
-// ADR-0041 suites, boot-logo — the actual blast radius of this flip plus a
-// later date-divider change that also touched turn ordering) came back clean.
-// `?renderer=dom` stays as a one-cycle rollback escape hatch before the
-// disabled direct-DOM branch is deleted for good.
-const historyRendererMode = new URLSearchParams(location.search).get('renderer') === 'dom' ? 'dom' : 'store';
-
 // history.scrollRestoration is set as early as possible in index.html's
 // <head> instead of here — see the comment there.
 window.scrollTo(0, 0);
@@ -2268,25 +2254,22 @@ function historyUrlParams() {
   return params;
 }
 
-// ADR-0041 Stage 2: HTTP history is the first producer wired into the
-// normalized transcript store — it feeds the store alongside (renderer=dom,
-// the default) or instead of (renderer=store) the existing direct-DOM path.
-// Exposed on window so tests can assert store/DOM parity.
-// Guarded: this must never be able to break the direct-DOM path it runs
-// alongside, including if transcript-store.js itself failed to load.
+// ADR-0041: HTTP history is normalized before rendering. Exposed on window so
+// reducer/renderer tests can inspect the production store.
 const transcriptStore = window.SquidTranscriptStore?.createTranscriptStore?.() ?? null;
 window.__transcriptStore = transcriptStore;
 
-// ADR-0041 Stage 3/4: only constructed under renderer=store, and only once
-// the store above and both scripts it depends on actually loaded — a failure
-// of either must fall back to direct-DOM, not throw during page init.
+// Producer 1's rollback window is complete: HTTP history has one renderer and
+// one owner. Missing required ADR assets is now an initialization failure,
+// rather than silently reviving the removed direct-DOM implementation.
 // container is the real #messages; every appendHistoryItems call site's
 // cleanup sweep (reloadHistory/resetHistoryToLatest/jumpToMessage) must call
 // historyReconciler?.reset() before it removes reconciler-owned nodes itself
 // (see reset()'s own comment in reconciler.js for why).
-const historyReconciler = (historyRendererMode === 'store' && transcriptStore
-  && window.createHistoryRegistry && window.SquidReconciler)
-  ? window.SquidReconciler.createReconciler({
+if (!transcriptStore || !window.createHistoryRegistry || !window.SquidReconciler) {
+  throw new Error('ADR-0041 transcript renderer assets failed to load');
+}
+const historyReconciler = window.SquidReconciler.createReconciler({
       store: transcriptStore,
       registry: window.createHistoryRegistry({
         container: messages,
@@ -2299,8 +2282,7 @@ const historyReconciler = (historyRendererMode === 'store' && transcriptStore
           && itemMatchesFilter(item, historyFilter) ? makeWipBubble(item) : null,
         mountPending: (item, bubble) => reconnectPendingItem(item, bubble),
       }),
-    })
-  : null;
+    });
 
 // chat_messages.status vocabulary (agent/stats_db.py): 'pending', 'scheduled',
 // 'claimed', 'running', 'done', 'error', 'cancelled' — mirrors transcript-store.js's
@@ -2337,7 +2319,6 @@ function historyItemToStoreRows(item) {
     status,
     completed_at: completedAt,
     created_at: item.timestamp || null,
-    stats: item.stats || {},
     // Stage 2 only fed identity/ordering fields into the store — enough to
     // prove dedup/ordering parity, not enough to actually render from (no
     // topic/agent/adhoc/session_id/prompt_context/tool context/etc.). Rather
@@ -2347,6 +2328,11 @@ function historyItemToStoreRows(item) {
     // an item shape field-by-field from the store.
     raw: item,
   };
+  // Realtime snapshots intentionally omit per-turn stats. Treat omission as
+  // "not supplied", not as an authoritative empty object: otherwise the
+  // snapshot dirties a correctly rendered live footer, and the next history
+  // pagination reconcile replaces it with a timestamp-only footer.
+  if (Object.prototype.hasOwnProperty.call(item, 'stats')) assistantRow.stats = item.stats;
   // Omit reply_to entirely when this row doesn't know it: a null here is
   // "not fetched," not a fact — identityConflict would otherwise reject the
   // whole page once any earlier row (a /chat/{id}/status fetch, a
@@ -2479,7 +2465,7 @@ function appendHistoryItems(items, fragment, boundary) {
   // Prompt-only mode renders a different, reduced representation
   // (appendPromptOnlyHistoryItem) that historyRegistry doesn't build —
   // stay on direct-DOM for it regardless of the flag.
-  const useReconciler = !!historyReconciler && !promptOnlyHistory;
+  const useReconciler = !promptOnlyHistory;
   const chronologicalItems = [...items].reverse();
   for (let i = 0; i < chronologicalItems.length; i += 1) {
     const item = chronologicalItems[i];
@@ -2498,32 +2484,21 @@ function appendHistoryItems(items, fragment, boundary) {
     if (!item.content && !item.context && !nativeShell && !['pending', 'error', 'cancelled'].includes(item.status)) continue;
 
     if (item.status === 'pending') {
-      // Under renderer=store the registry constructs the recovered bubble,
-      // places it under #messages, and only then mounts its transport watcher.
-      // Composer-live bubbles already in the DOM are still adopted as-is.
-      if (useReconciler) continue;
-      // Queued/in-flight items already carry topic/agent/adhoc from the DB row, so a
-      // filter scope can be checked directly — only skip ones that don't belong to it.
-      if (!itemMatchesFilter(item, historyFilter)) continue;
-      const wipBubble = makeWipBubble(item);
-      fragment.appendChild(wipBubble);
-      reconnectPendingItem(item, wipBubble);
+      // The registry constructs the recovered bubble, places it under
+      // #messages, and only then mounts its transport watcher. Composer-live
+      // bubbles already in the DOM are adopted as-is.
       continue;
     }
 
-    // Completed items render through historyReconciler under renderer=store
-    // (see its declaration above) — it owns #messages directly via its own
+    // Completed items render through historyReconciler — it owns #messages
+    // directly via its own
     // render()/reorder(), not this function's fragment. The caller must run
     // reconcile() *after* it inserts this fragment: reorder() interleaves
     // completed turns with live turn groups by time (historyStoreAnchor), so
     // a pending wip bubble still sitting in the detached fragment would be
     // invisible to the placement pass and the completed block would settle
     // on the wrong side of it.
-    if (useReconciler) continue;
-
-    const routeMarker = historyRouteChainMarkerForItem(item, chronologicalItems[i + 1], chronologicalItems[i - 1]);
-    appendHistoryRouteChainMarker(routeMarker, item, fragment);
-    appendHistoryItem(item, fragment);
+    continue;
   }
   return useReconciler;
 }
@@ -7889,6 +7864,7 @@ function createHistoryRegistry({
       ...turn.raw,
       status: turn.status,
       content: turn.content,
+      stats: Object.keys(turn.stats || {}).length ? turn.stats : turn.raw.stats,
       completed_at: turn.completedAt ?? turn.raw.completed_at,
     };
     // Matches appendHistoryItems' own skip for a successful completed row
@@ -7940,6 +7916,7 @@ function createHistoryRegistry({
     let retainedRouteMarker = retainedPendingScaffold.find(node =>
       node.classList?.contains('route-chain-marker')
       && node.dataset.routeOwnerId === String(turn.assistantMsgId));
+    let staleCompletedNodes = [];
     // Direct completion intentionally forgets registry ownership. A later
     // Flow-step update can therefore re-adopt the response with no previous
     // pending group to supply its composer scaffold. Recover that scaffold
@@ -7973,10 +7950,18 @@ function createHistoryRegistry({
       // sibling shape appendHistoryItem produces instead of by identity.
       if (existing) {
         const nodes = existingCompletedNodeRange(existing);
-        const route = historyRouteChainMarkerForItem(item, nextItem, prevItem);
-        let marker = existing.previousElementSibling;
-        let ownsAdjacent = marker?.classList.contains('route-chain-marker')
-          && marker.dataset.routeOwnerId === String(turn.assistantMsgId);
+        const needsStatsRefresh = Object.keys(item.stats || {}).length > 0
+          && !nodes.some(node => node.classList?.contains('stats'));
+        if (needsStatsRefresh) {
+          // A direct-discovery completion can be adopted before a late stats
+          // frame. Adoption alone preserves its timestamp-only range, so let
+          // the normal builder replace that range with the stats projection.
+          staleCompletedNodes = nodes;
+        } else {
+          const route = historyRouteChainMarkerForItem(item, nextItem, prevItem);
+          let marker = existing.previousElementSibling;
+          let ownsAdjacent = marker?.classList.contains('route-chain-marker')
+            && marker.dataset.routeOwnerId === String(turn.assistantMsgId);
         // A composer-owned live group interposes its date divider, user-prompt
         // bubble and timestamp between its route-chain-marker and the assistant
         // bubble, so the owned marker is not the immediate previous sibling.
@@ -7987,24 +7972,25 @@ function createHistoryRegistry({
         // found this way is left where the composer placed it (not unshifted
         // into the group range) so reorder() can't pull it down to the bubble
         // and split off the interposed prompt/divider.
-        let hasOwnedMarker = ownsAdjacent || !!retainedRouteMarker;
-        if (!hasOwnedMarker) {
-          for (let sib = existing.previousElementSibling; sib; sib = sib.previousElementSibling) {
-            if (sib.matches?.('.msg.assistant[data-msg-id]') && sib.dataset.msgId !== String(turn.assistantMsgId)) break;
-            if (sib.classList.contains('route-chain-marker')) {
-              hasOwnedMarker = sib.dataset.routeOwnerId === String(turn.assistantMsgId);
-              break;
+          let hasOwnedMarker = ownsAdjacent || !!retainedRouteMarker;
+          if (!hasOwnedMarker) {
+            for (let sib = existing.previousElementSibling; sib; sib = sib.previousElementSibling) {
+              if (sib.matches?.('.msg.assistant[data-msg-id]') && sib.dataset.msgId !== String(turn.assistantMsgId)) break;
+              if (sib.classList.contains('route-chain-marker')) {
+                hasOwnedMarker = sib.dataset.routeOwnerId === String(turn.assistantMsgId);
+                break;
+              }
             }
           }
+          if (!hasOwnedMarker && route) {
+            const scratch = document.createDocumentFragment();
+            marker = appendHistoryRouteChainMarker(route, item, scratch);
+            container.insertBefore(scratch, existing);
+            ownsAdjacent = marker.dataset.routeOwnerId === String(turn.assistantMsgId);
+          }
+          if (ownsAdjacent) nodes.unshift(marker);
+          return { nodes: [...retainedPendingScaffold, ...nodes] };
         }
-        if (!hasOwnedMarker && route) {
-          const scratch = document.createDocumentFragment();
-          marker = appendHistoryRouteChainMarker(route, item, scratch);
-          container.insertBefore(scratch, existing);
-          ownsAdjacent = marker.dataset.routeOwnerId === String(turn.assistantMsgId);
-        }
-        if (ownsAdjacent) nodes.unshift(marker);
-        return { nodes: [...retainedPendingScaffold, ...nodes] };
       }
     }
 
@@ -8030,6 +8016,7 @@ function createHistoryRegistry({
     if (ctx.previousBucket === 'completed') {
       for (const node of ctx.previousGroup?.nodes || []) node.remove();
     }
+    for (const node of staleCompletedNodes) node.remove();
     return { nodes };
   }
 
@@ -8462,7 +8449,7 @@ const realtimeV1 = (() => {
     for (const conversation of frame.payload?.conversations || []) {
       for (const message of conversation.messages || []) {
         if (message.id == null) continue;
-        rows.push({
+        const row = {
           msg_id: message.id,
           role: message.role,
           reply_to: message.reply_to ?? null,
@@ -8470,7 +8457,6 @@ const realtimeV1 = (() => {
           status: message.status,
           completed_at: message.completed_at ?? null,
           created_at: message.created_at ?? null,
-          stats: message.stats || {},
           // Stage 4 (ADR-0041): a snapshot message is already a raw
           // chat_messages row (agent/stats_db.py's get_realtime_snapshot does
           // `dict(row)`), so — unlike producer 1, which has to reassemble a
@@ -8480,7 +8466,13 @@ const realtimeV1 = (() => {
           // turn.raw only ever reads the assistant row's own raw, so setting
           // it here on a user row is harmless, not just inert.
           raw: message,
-        });
+        };
+        // Realtime snapshot rows do not carry the run_events-backed stats
+        // attached by history endpoints. Omission must preserve any stats the
+        // live/history producers already installed; an explicit stats field
+        // remains authoritative.
+        if (Object.prototype.hasOwnProperty.call(message, 'stats')) row.stats = message.stats;
+        rows.push(row);
       }
     }
     if (!rows.length) return;
@@ -8603,6 +8595,16 @@ const realtimeV1 = (() => {
   const dispatchEvent = frame => {
     if (Number(frame.event_id || 0) <= cursor) return;
     shadowApplyEvent(frame);
+    if (frame.type === 'chat.stats' && frame.msg_id != null
+        && transcriptStore?.isTerminal(transcriptStore.getTurn(Number(frame.msg_id))?.status)) {
+      // A terminal lifecycle frame can render the completed turn before its
+      // stats delta arrives. The delta dirties the normalized turn, but no
+      // later discovery is guaranteed to reconcile it, leaving the timestamp
+      // footer in place until a full history refresh. Re-render only this
+      // already-completed group so its live stats footer matches persisted
+      // history immediately.
+      historyReconciler?.reconcileDirtyIds([Number(frame.msg_id)]);
+    }
     if (frame.type === 'process.changed') {
       applyRealtimeProcessState(frame.payload?.processes, null);
     } else if (frame.type === 'queue.changed') {
