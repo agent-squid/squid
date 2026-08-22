@@ -2980,6 +2980,74 @@ test.describe('recovered pending responses', () => {
     )).toEqual([601, 602]);
   });
 
+  test('SSE-transport Squid Flow origin turn keeps its response after a later reconcile sweep', async ({ page }) => {
+    // Reproduces a live-only bug report: "#squid@codex>@deepseek" shows the
+    // origin's thinking bubble fine, but its response never appears — only
+    // the target's (2nd) response shows up. A refresh (which re-renders
+    // purely from GET /history) shows both turns correctly, so this is a
+    // live-DOM-only regression, not a data problem.
+    //
+    // Root cause: sendMessage()'s own SSE 'done' handler (the pre-ADR-0041
+    // composer path, still in use for the default 'sse'/'auto' fallback
+    // transport) calls shadowInstallSseCompletion(msgId) — which seeds the
+    // transcript store's row for the origin's own msg id as dirty — but never
+    // calls historyReconciler.forget()/transcriptStore.clearReconciled() for
+    // that id, unlike every migrated completion path (insertCompletedHistoryItem,
+    // replacePendingWithStoredItem's atomic branch). The store's row for the
+    // origin turn is left dirty with a stale 'pending' status forever, even
+    // though the DOM already shows the real completed response. Any later
+    // full historyReconciler.reconcile() sweep (any HTTP history page load —
+    // e.g. the standard top-of-scroll pagination trigger) re-renders that
+    // stale dirty id. Because the composer's own completed response bubble
+    // was never tagged with the registry's live-group marker, the registry
+    // can't find/adopt it and instead builds a brand new "still thinking"
+    // placeholder in its place.
+    await mockBackend(page);
+    // A real conversation almost always has more history than one page —
+    // mockBackend's default has_more:false makes loadHistory() permanently
+    // exhausted after the very first (bootstrap) call, so the standard
+    // top-of-scroll pagination trigger this test simulates below could never
+    // actually fire again in that setup. Report more pages available so a
+    // later loadHistory() call (this test's stand-in for that
+    // IntersectionObserver) is a live, non-no-op reconcile sweep.
+    await page.route('**/history**', route => route.fulfill({ json: { items: [], has_more: true } }));
+    await page.route('**/chat/flow/run-701/steps**', route => route.fulfill({ json: { messages: [], complete: false } }));
+
+    let resolveChat;
+    const chatIntercepted = new Promise(resolve => { resolveChat = resolve; });
+    await page.route('**/chat', route => resolveChat(route));
+
+    await page.goto('/');
+    await sendMsg(page, '#squid@codex>@deepseek route to deepseek');
+    const chatRoute = await chatIntercepted;
+    await chatRoute.fulfill({
+      status: 200,
+      headers: { ...SSE_HEADERS, 'X-Squid-Flow-Run-Id': 'run-701' },
+      body: sse(
+        { event: 'meta', data: { agent: 'codex', backend: 'codex', msg_id: 601, adhoc: false } },
+        { data: 'Codex final answer' },
+        { event: 'stats', data: { session_id: 'sid-1', input_tokens: 5, output_tokens: 5, adhoc: false, lookback: 0 } },
+        DONE,
+      ),
+    });
+
+    await expect(page.locator(RESPONSE).filter({ hasText: 'Codex final answer' })).toBeVisible();
+    await expect(page.locator(THINKING)).toHaveCount(0);
+    await page.waitForTimeout(200);
+
+    // Simulate the standard top-of-history pagination trigger (an
+    // IntersectionObserver on #history-sentinel calls loadHistory() the same
+    // way) firing later in this same live session — no page reload.
+    await page.evaluate(() => loadHistory());
+
+    // The origin's real, already-rendered response must still be the only
+    // thing on screen for msg 601 — not a second, stray "still thinking"
+    // placeholder rebuilt from its stale store row.
+    await expect(page.locator(RESPONSE).filter({ hasText: 'Codex final answer' })).toBeVisible();
+    await expect(page.locator(THINKING)).toHaveCount(0);
+    await expect(page.locator('.msg.assistant[data-msg-id="601"]')).toHaveCount(1);
+  });
+
   test('flow snapshot rollover preserves an already-attached step and resumes live delivery', async ({ page }) => {
     await page.addInitScript(() => {
       window.__webSocket = null;
@@ -3107,6 +3175,58 @@ test.describe('recovered pending responses', () => {
     await expect(page.locator('.msg.assistant.history-item[data-msg-id="801"]'))
       .toContainText('Flow result 801');
     await expect(page.locator('.msg.assistant.history-item[data-msg-id]')).toHaveCount(1);
+  });
+
+  test('websocket retries flow-step attachment after a transient status miss', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__webSocket = null;
+      class MockWebSocket {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        constructor() {
+          this.readyState = MockWebSocket.CONNECTING;
+          window.__webSocket = this;
+          setTimeout(() => {
+            this.readyState = MockWebSocket.OPEN;
+            this.onopen?.();
+            this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+          });
+        }
+        send(data) {
+          if (JSON.parse(data).type === 'subscribe') {
+            setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+          }
+        }
+        receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+        close() { this.readyState = 3; this.onclose?.(); }
+      }
+      window.WebSocket = MockWebSocket;
+    });
+    await mockBackend(page);
+    await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+    let attempts = 0;
+    await page.route('**/chat/802/status', route => {
+      attempts++;
+      if (attempts === 1) return route.fulfill({ status: 404 });
+      return route.fulfill({ json: {
+        id: 802, role: 'assistant', topic: 'squid', agent: 'deepseek', status: 'done',
+        prompt: 'Flow handoff 802', content: 'Recovered intermediate Flow result', source: 'workflow',
+        flow_run_id: 'run-802', flow_step_id: 'step-802',
+        timestamp: '2027-01-01T00:00:00Z', completed_at: '2027-01-01T00:00:01Z',
+      }});
+    });
+
+    await page.goto('/');
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'flow.step.created', event_id: 51, msg_id: 802,
+      scope: { topic: 'squid', agent: 'deepseek' },
+      payload: { flow_run_id: 'run-802', step_id: 'step-802', assistant_msg_id: 802 },
+    }));
+
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="802"]'))
+      .toContainText('Recovered intermediate Flow result');
+    expect(attempts).toBe(2);
   });
 
   test('sse-mode flow polling renders the same completed flow step as websocket delivery', async ({ page }) => {

@@ -265,3 +265,44 @@ test('renderer=store: live bubble keeps its start-time slot — live id newer th
   );
   expect(ids).toEqual(['200', '203', '202']);
 });
+
+// Regression (#13990): in an observer tab watching a Squid Flow it did not
+// send, the origin turn is discovered as *pending* → reconciler-owned, while
+// the chain-step target is discovered already *completed* → inserted direct-DOM
+// (insertCompletedHistoryItem, which forget()s it so reorder() never touches
+// it). historyStoreAnchor used to see only reconciler `next` and live thinking
+// bubbles, so it fell through to bottomSentinel and dropped the reconciler-owned
+// origin *below* its own already-on-screen, chronologically-later target —
+// scrambling live flow order ("only the last step visible"). historyStoreAnchor
+// must interleave with direct-DOM completed bubbles too.
+test('renderer=store: a reconciler-owned flow origin lands before an already-on-screen direct-DOM target', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
+  await page.goto('/?renderer=store');
+  await page.waitForFunction(() => typeof historyReconciler !== 'undefined' && historyReconciler
+    && typeof insertCompletedHistoryItem === 'function' && typeof shadowInstallHistoryPage === 'function');
+
+  const order = await page.evaluate(() => {
+    const route = '#squid@echo>@echo1';
+    // Target (echo1) discovered already-completed → direct-DOM insert (forgotten
+    // by the reconciler), the same path discoverRealtimeTurn/attachFlowStep use.
+    insertCompletedHistoryItem({
+      id: 102, role: 'assistant', topic: 'squid', agent: 'echo1', content: 'target reply',
+      status: 'done', prompt: 'chain step', reply_to: 101, flow_route: route,
+      timestamp: '2026-07-15T12:00:07Z', completed_at: '2026-07-15T12:00:12Z',
+    });
+    // Origin (echo) becomes reconciler-owned and is placed by reorder(), which
+    // asks historyStoreAnchor where it goes relative to what's already on screen.
+    shadowInstallHistoryPage([{
+      id: 100, role: 'assistant', topic: 'squid', agent: 'echo', content: 'origin reply',
+      status: 'done', prompt: 'flow start', reply_to: 99, flow_route: route,
+      timestamp: '2026-07-15T12:00:00Z', completed_at: '2026-07-15T12:00:05Z',
+    }]);
+    historyReconciler.reconcile();
+    return [...document.querySelectorAll('#messages > .msg.assistant.history-item[data-msg-id]')]
+      .map(e => e.dataset.msgId);
+  });
+
+  // Origin (100, earlier completed_at) must precede target (102), not sink below it.
+  expect(order).toEqual(['100', '102']);
+});

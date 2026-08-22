@@ -1916,6 +1916,34 @@ function historyStoreAnchor(assistantMsgId, next) {
     : null;
   const thinkings = document.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)');
   let anchor = next ?? null;
+  // Interleave with completed bubbles the reconciler does NOT own — direct-DOM
+  // discovery inserts (discoverRealtimeTurn / attachFlowStep /
+  // replacePendingWithStoredItem, all of which forget() the id) that reorder()
+  // never repositions. `next` only chains reconciler groups to each other, so
+  // without this a reconciler-owned group (e.g. a flow origin) falls through to
+  // bottomSentinel and lands *after* a chronologically-later direct-DOM bubble
+  // (its own flow target), scrambling live flow order in an observer tab. Mirror
+  // insertCompletedHistoryItem's own anchor search: the first on-screen bubble
+  // that sorts after this turn, excluding reconciler-owned ones (handled above).
+  const key = [completedAt || '', assistantMsgId ?? 0];
+  const directCandidate = [...messages.querySelectorAll(':scope > .msg.assistant.history-item[data-msg-id]')]
+    .find(existing => !historyReconciler?.getGroup(Number(existing.dataset.msgId))
+      && compareCompletedTurnKeys([
+        existing.dataset.orderAt || existing.dataset.completedAt || existing.dataset.ts || '',
+        Number(existing.dataset.msgId) || 0,
+      ], key) > 0);
+  if (directCandidate) {
+    // A direct-DOM completed Flow can still own composer scaffolding that the
+    // registry does not track. Anchor older registry groups before that
+    // scaffold, not merely before the assistant bubble, or repositioning
+    // inserts history between the Flow marker/prompt and its response.
+    const ownerId = directCandidate.dataset.msgId;
+    const flowBoundary = [...messages.querySelectorAll(':scope > .route-chain-marker[data-route-owner-id]')]
+      .find(marker => marker.dataset.routeOwnerId === ownerId) || directCandidate;
+    if (!anchor || (flowBoundary.compareDocumentPosition(anchor) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+      anchor = flowBoundary;
+    }
+  }
   thinkings.forEach(thinking => {
     const start = thinking.dataset.orderAt || null;
     if (start) {
@@ -2302,10 +2330,9 @@ function historyItemToStoreRows(item) {
   // created_at for still-pending rows, so it is never actually null on the
   // wire — only trust it as a completion time once the status is terminal.
   const completedAt = HISTORY_TERMINAL_STATUSES.has(status) ? (item.completed_at || item.timestamp || null) : null;
-  rows.push({
+  const assistantRow = {
     msg_id: item.id,
     role: 'assistant',
-    reply_to: item.reply_to ?? null,
     content: item.content ?? '',
     status,
     completed_at: completedAt,
@@ -2319,7 +2346,14 @@ function historyItemToStoreRows(item) {
     // (Stage 4) renders straight from it via turn.raw instead of reassembling
     // an item shape field-by-field from the store.
     raw: item,
-  });
+  };
+  // Omit reply_to entirely when this row doesn't know it: a null here is
+  // "not fetched," not a fact — identityConflict would otherwise reject the
+  // whole page once any earlier row (a /chat/{id}/status fetch, a
+  // message.changed frame) recorded the real value, and mergeAuthoritative
+  // would wipe that confirmed value back to null.
+  if (item.reply_to != null) assistantRow.reply_to = item.reply_to;
+  rows.push(assistantRow);
   return rows;
 }
 
@@ -2328,7 +2362,20 @@ function shadowInstallHistoryPage(items, boundary) {
   const rows = [];
   for (const item of items) {
     if (item.id == null) continue;
-    rows.push(...historyItemToStoreRows(item));
+    const priorRaw = transcriptStore.getTurn(Number(item.id))?.raw;
+    // Sparse completion/snapshot rows must not erase composer-only display
+    // facts seeded when the live turn received its id. In particular, an
+    // empty prompt made the completed projection appear to have no user
+    // message, and a missing flow_route orphaned its route boundary.
+    const enriched = priorRaw ? { ...item } : item;
+    if (priorRaw) {
+      for (const key of ['prompt', 'prompt_source', 'flow_route', 'flow_run_id']) {
+        if ((enriched[key] == null || enriched[key] === '') && priorRaw[key] != null && priorRaw[key] !== '') {
+          enriched[key] = priorRaw[key];
+        }
+      }
+    }
+    rows.push(...historyItemToStoreRows(enriched));
   }
   if (!rows.length) return;
   const result = transcriptStore.installHistoryPage(rows, boundary);
@@ -2770,6 +2817,7 @@ async function jumpToMessage(msgId, flowRunId = null) {
   const feedbackEl = showCmdFeedback(`jump ${targetLabel}...`);
   const generation = historyGeneration;
 
+  let clearedCurrentThread = false;
   try {
     const params = historyUrlParams();
     if (flowRunId) params.set('flow_run_id', flowRunId);
@@ -2809,6 +2857,7 @@ async function jumpToMessage(msgId, flowRunId = null) {
     // see reset()'s own comment in reconciler.js.
     historyReconciler?.reset();
     document.querySelectorAll('.history-item, .boot-banner, .search-result-item, .tool-block-history, #messages > .cmd-feedback').forEach(el => el.remove());
+    clearedCurrentThread = true;
     const preserveForLive = collectLiveGroupElements();
     document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .route-chain-marker').forEach(el => {
       if (!preserveForLive.has(el)) el.remove();
@@ -2824,7 +2873,14 @@ async function jumpToMessage(msgId, flowRunId = null) {
     const jumpAnchor = (!data.has_newer && jumpItems.length) ? anchorForLiveEdgePage(jumpItems) : undefined;
     messages.insertBefore(fragment, jumpAnchor || null);
     // After the fragment insert, not before — see appendHistoryItems' comment.
-    if (useReconciler) historyReconciler.reconcile();
+    if (useReconciler) {
+      const result = historyReconciler.reconcile();
+      if (!result.ok) throw new Error(`history reconcile failed: ${result.failedIds.join(',')}`);
+    }
+    if (jumpItems.length && !jumpItems.some(item =>
+      item.id != null && messages.querySelector(`.msg[data-msg-id="${item.id}"]`))) {
+      throw new Error('history reconcile produced an empty window');
+    }
     historyOlderCursor = data.older_cursor || null;
     historyNewerCursor = data.newer_cursor || null;
     historyHasOlder = !!data.has_older;
@@ -2846,7 +2902,12 @@ async function jumpToMessage(msgId, flowRunId = null) {
     }
     updateScrollButtonVisibility();
   } catch {
-    feedbackEl.textContent = `jump ${targetLabel} — request failed`;
+    if (clearedCurrentThread) {
+      await resetHistoryToLatest();
+      showCmdFeedback(`jump ${targetLabel} — unable to render; restored latest`);
+    } else {
+      feedbackEl.textContent = `jump ${targetLabel} — request failed`;
+    }
     historyLoading = false;
   }
 }
@@ -5410,7 +5471,27 @@ async function sendMessage(text, opts = {}) {
     bubble.dataset.msgId = String(msgId);
     liveCtxSpan.dataset.msgId = String(msgId);
     thinkingBubble.dataset.msgId = String(msgId);
+    if (chainMarker) chainMarker.dataset.routeOwnerId = String(msgId);
     reconcilePendingBubble(msgId, thinkingBubble);
+    // Lifecycle frames are intentionally sparse and cannot reconstruct the
+    // composer prompt or Flow boundary. Seed the normalized pending turn from
+    // the data already used to build this live group. The existing composer
+    // path keeps owning its DOM nodes until completion; this seed supplies the
+    // display facts when the normalized completed projection takes over.
+    shadowInstallHistoryPage([{
+      id: msgId,
+      role: 'assistant',
+      topic,
+      agent: resolvedAgent || agent,
+      adhoc,
+      status: 'pending',
+      prompt: message,
+      prompt_source: source,
+      content: '',
+      flow_route: flowRoute,
+      flow_run_id: flowRunId,
+      timestamp: sendTime,
+    }]);
     killBtn.style.display = '';
     return true;
   }
@@ -5693,6 +5774,13 @@ async function sendMessage(text, opts = {}) {
           completionRendered = true;
           turnStatus = 'done';
           stopStatusFallback();
+          // See the matching forget()/clearReconciled() call (and its longer
+          // comment) in the inline SSE 'done' handler below — this fallback
+          // poll is the other path that finalizes this composer-owned bubble
+          // without ever routing through the reconciler, so it needs the same
+          // cleanup to keep this msg id's store row from being left dirty and
+          // stale for a later unrelated reconcile() pass to stumble over.
+          if (msgId) { historyReconciler?.forget(msgId); transcriptStore?.clearReconciled([msgId]); }
           doneTime = new Date().toISOString();
           const reconnectMsg = 'Connection interrupted — recovering…';
           const ssePart = statusBuf.replace(reconnectMsg, '').trim();
@@ -5742,7 +5830,7 @@ async function sendMessage(text, opts = {}) {
           addCompletionTimestamp();
           scrollToBottom();
           if (flowRunId && msgId) watchFlowRun(flowRunId, msgId, flowRoute || route);
-          if (flowRoute || route) refreshRouteTurnCounts(flowRoute || route, { force: true });
+          if (flowRoute || route) refreshRouteTurnCounts(flowRoute || route, { force: true, minAgeMs: 0 });
           controller.abort();
           finalizeQuotaTracking();
         } else if (data.status === 'error') {
@@ -6146,6 +6234,24 @@ async function sendMessage(text, opts = {}) {
             }
             completionRendered = true;
             shadowInstallSseCompletion(msgId);
+            // This composer-owned completion never routes through the
+            // reconciler (unlike insertCompletedHistoryItem/
+            // replacePendingWithStoredItem, which both do this same forget+
+            // clearReconciled pairing on their own completion). Without it,
+            // the store row this msg id was seeded with at attachMsgId time
+            // (still status 'pending') stays dirty indefinitely — even after
+            // shadowInstallSseCompletion's own fire-and-forget fetch above
+            // resolves, since that only re-marks it dirty with fresh data,
+            // never clears the flag (see shadowInstallHistoryPage's own
+            // comment: draining dirty ids is deferred to a real reconcile()
+            // pass in store-render mode). A later, unrelated reconcile() pass
+            // (any subsequent /history page — pagination, a filter change)
+            // would then render this still-dirty id from the stale 'pending'
+            // status, and since thinkingBubble is about to be removed below
+            // with no live-group-id-tagged replacement, the registry can't
+            // adopt anything and builds a brand new stray "still thinking"
+            // bubble alongside the real completed one built below.
+            if (msgId) { historyReconciler?.forget(msgId); transcriptStore?.clearReconciled([msgId]); }
             turnStatus = 'done';
             stopStatusFallback();
             liveCtxSpan.dataset.hasTrace = (statusBuf.trim() || liveToolEvents.length) ? 'true' : 'false';
@@ -6175,7 +6281,7 @@ async function sendMessage(text, opts = {}) {
             // refresh mid-chain can't strand it. Just watch for them to keep
             // rendering live while this tab stays open.
             if (flowRunId && msgId) watchFlowRun(flowRunId, msgId, flowRoute || route);
-            if (flowRoute || route) refreshRouteTurnCounts(flowRoute || route, { force: true });
+            if (flowRoute || route) refreshRouteTurnCounts(flowRoute || route, { force: true, minAgeMs: 0 });
             // Update ctx label with pin count and store IDs for popup
             if (!nativeShell) setCtxLabel(liveCtxSpan, adhoc, _contextIds.length, _includeTopicMemory, liveSessionTurnCount);
             liveCtxSpan.dataset.pinnedIds = JSON.stringify(_contextIds);
@@ -7443,8 +7549,17 @@ function historyRouteChainMarkerForItem(item, nextItem, prevItem) {
 
 function appendHistoryRouteChainMarker(route, item, container) {
   if (!route || !container) return null;
-  const marker = makeRouteChainMarker(route);
+  const parts = routeChainParts(route);
+  const turnCounts = parts && !parts.complex
+    ? _routeChainTurnCounts(
+        parts.topic, parts.origin, parts.originFresh,
+        parts.target, parts.targetFresh, parts.targetTopic,
+      )
+    : undefined;
+  const marker = makeRouteChainMarker(route, { turnCounts });
   marker.classList.add('history-item');
+  marker.dataset.flowRoute = normalizePromptHistoryRoute(route);
+  if (item.id != null) marker.dataset.routeOwnerId = String(item.id);
   marker.dataset.topic = item.topic || 'default';
   if (item.agent) marker.dataset.agent = item.agent;
   if (item.adhoc) marker.dataset.adhoc = '1';
@@ -7706,7 +7821,7 @@ function createHistoryRegistry({
         || container.querySelector(`.msg.assistant.msg-thinking[data-live-group-id][data-msg-id="${turn.assistantMsgId}"]`);
       const nodes = existing ? existingPendingNodeRange(existing) : [];
       if (existing || !turn.raw || typeof buildPending !== 'function') {
-        return { nodes, pendingRoot: existing || null };
+        return { nodes, pendingRoot: existing || null, pendingNeedsPlacement: !!existing };
       }
       const bubble = buildPending(turn.raw);
       if (!bubble) return { nodes: [], pendingRoot: null };
@@ -7715,6 +7830,7 @@ function createHistoryRegistry({
         pendingRoot: bubble,
         pendingItem: turn.raw,
         pendingNeedsMount: true,
+        pendingNeedsPlacement: true,
       };
     }
     if (!turn.raw) return null;
@@ -7759,6 +7875,40 @@ function createHistoryRegistry({
     // transition it matters most for. `:not(.msg-thinking)` excludes a wip
     // bubble that might still be on screen under the same msg-id (a stale
     // node this same transition is meant to replace, not adopt as-is).
+    const order = ctx.store.getOrderedTurnIds().completed;
+    const idx = order.indexOf(turn.assistantMsgId);
+    const nextItem = idx >= 0 && idx + 1 < order.length ? ctx.store.getTurn(order[idx + 1])?.raw : undefined;
+    const prevItem = idx > 0 ? ctx.store.getTurn(order[idx - 1])?.raw : undefined;
+    // A composer pending group owns flat scaffolding before its thinking root:
+    // route marker, user prompt, and timestamp. Once the turn completes those
+    // nodes must travel with the response as one registry group; leaving them
+    // outside lets reorder() move the response across older history while its
+    // Flow boundary stays behind. Recovered pending rows contain only the root,
+    // so this is empty for them.
+    let retainedPendingScaffold = ctx.previousBucket === 'pending'
+      ? (ctx.previousGroup?.nodes || []).filter(node =>
+          node !== ctx.previousGroup?.pendingRoot && node.isConnected)
+      : [];
+    let retainedRouteMarker = retainedPendingScaffold.find(node =>
+      node.classList?.contains('route-chain-marker')
+      && node.dataset.routeOwnerId === String(turn.assistantMsgId));
+    // Direct completion intentionally forgets registry ownership. A later
+    // Flow-step update can therefore re-adopt the response with no previous
+    // pending group to supply its composer scaffold. Recover that scaffold
+    // through the marker's durable turn owner + live-group token; unlike a
+    // backward adjacency scan this still works after an earlier reorder has
+    // already interposed unrelated history between prompt and response.
+    if (!retainedRouteMarker) {
+      retainedRouteMarker = [...container.querySelectorAll(':scope > .route-chain-marker[data-route-owner-id][data-live-group-id]')]
+        .find(node => node.dataset.routeOwnerId === String(turn.assistantMsgId)) || null;
+      const liveGroupId = retainedRouteMarker?.dataset.liveGroupId;
+      if (liveGroupId) {
+        retainedPendingScaffold = [...container.children].filter(node =>
+          node.dataset.liveGroupId === liveGroupId
+          && !node.classList.contains('msg-thinking'));
+      }
+    }
+
     if (ctx.previousBucket !== 'completed') {
       const existing = container.querySelector(`.msg.assistant.history-item[data-msg-id="${turn.assistantMsgId}"]:not(.msg-thinking)`);
       // The bubble is only the first of this turn's flat sibling range — see
@@ -7773,19 +7923,48 @@ function createHistoryRegistry({
       // carry an earlier turn's msg_id instead, for a worktree-blocker
       // action target — see toolMsgId below), so this walks by the exact
       // sibling shape appendHistoryItem produces instead of by identity.
-      if (existing) return { nodes: existingCompletedNodeRange(existing) };
+      if (existing) {
+        const nodes = existingCompletedNodeRange(existing);
+        const route = historyRouteChainMarkerForItem(item, nextItem, prevItem);
+        let marker = existing.previousElementSibling;
+        let ownsAdjacent = marker?.classList.contains('route-chain-marker')
+          && marker.dataset.routeOwnerId === String(turn.assistantMsgId);
+        // A composer-owned live group interposes its date divider, user-prompt
+        // bubble and timestamp between its route-chain-marker and the assistant
+        // bubble, so the owned marker is not the immediate previous sibling.
+        // Scan back to the previous turn's boundary for a marker this turn
+        // already owns before building one — otherwise a re-dirtied composer
+        // turn (a later step's step-poll re-installs its row) gets a duplicate
+        // divider, stranding its prompt above it (#14140). A composer marker
+        // found this way is left where the composer placed it (not unshifted
+        // into the group range) so reorder() can't pull it down to the bubble
+        // and split off the interposed prompt/divider.
+        let hasOwnedMarker = ownsAdjacent || !!retainedRouteMarker;
+        if (!hasOwnedMarker) {
+          for (let sib = existing.previousElementSibling; sib; sib = sib.previousElementSibling) {
+            if (sib.matches?.('.msg.assistant[data-msg-id]') && sib.dataset.msgId !== String(turn.assistantMsgId)) break;
+            if (sib.classList.contains('route-chain-marker')) {
+              hasOwnedMarker = sib.dataset.routeOwnerId === String(turn.assistantMsgId);
+              break;
+            }
+          }
+        }
+        if (!hasOwnedMarker && route) {
+          const scratch = document.createDocumentFragment();
+          marker = appendHistoryRouteChainMarker(route, item, scratch);
+          container.insertBefore(scratch, existing);
+          ownsAdjacent = marker.dataset.routeOwnerId === String(turn.assistantMsgId);
+        }
+        if (ownsAdjacent) nodes.unshift(marker);
+        return { nodes: [...retainedPendingScaffold, ...nodes] };
+      }
     }
-
-    const order = ctx.store.getOrderedTurnIds().completed;
-    const idx = order.indexOf(turn.assistantMsgId);
-    const nextItem = idx >= 0 && idx + 1 < order.length ? ctx.store.getTurn(order[idx + 1])?.raw : undefined;
-    const prevItem = idx > 0 ? ctx.store.getTurn(order[idx - 1])?.raw : undefined;
 
     const scratch = document.createDocumentFragment();
     const route = historyRouteChainMarkerForItem(item, nextItem, prevItem);
-    appendHistoryRouteChainMarker(route, item, scratch);
+    if (!retainedRouteMarker) appendHistoryRouteChainMarker(route, item, scratch);
     appendHistoryItem(item, scratch);
-    const nodes = [...scratch.childNodes];
+    const nodes = [...retainedPendingScaffold, ...scratch.childNodes];
     // Store-owned pending -> terminal transition: remove the wip root in this
     // reconcile pass. A recovered group contains only that root. A composer
     // group also contains its route/prompt/timestamp; those are retained just
@@ -7794,6 +7973,14 @@ function createHistoryRegistry({
       const root = ctx.previousGroup?.pendingRoot;
       if (root) root.remove();
       else for (const node of ctx.previousGroup?.nodes || []) node.remove();
+    }
+    // Completed -> completed re-render (a terminal turn re-dirtied by a later
+    // snapshot/history re-install of its row): the fresh build replaces the
+    // previous group's range outright. The adoption branch above is
+    // deliberately skipped for this bucket, so nothing else retires the old
+    // nodes — leaving them would duplicate the bubble (and its route marker).
+    if (ctx.previousBucket === 'completed') {
+      for (const node of ctx.previousGroup?.nodes || []) node.remove();
     }
     return { nodes };
   }
@@ -7812,6 +7999,25 @@ function createHistoryRegistry({
   // but the last on each pass — including ones nothing about actually
   // changed, corrupting order the next time an unrelated id goes dirty.
   function reorder(order, groups) {
+    // Every path into reorder() (finishReconcile after a dirty/discovery pass,
+    // and reposition()) moves already-rendered nodes with insertBefore. Unlike
+    // insertCompletedHistoryItem's own single-insert scroll handling, this can
+    // relocate the whole completed set at once (it re-places every group in
+    // store order), so without anchoring a reconcile firing mid-live-turn
+    // leaves scrollTop pointing at whatever content slid under it — the "scrolls
+    // to a random flow, earlier responses gone" jump. Pin the first child
+    // currently in the viewport and restore its on-screen offset afterward; if
+    // the reader was at the bottom, keep them pinned there instead.
+    const containerTop = container.getBoundingClientRect().top;
+    const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 150;
+    let anchorNode = null;
+    let anchorOffset = 0;
+    if (!atBottom) {
+      for (const child of container.children) {
+        const rect = child.getBoundingClientRect();
+        if (rect.bottom > containerTop) { anchorNode = child; anchorOffset = rect.top - containerTop; break; }
+      }
+    }
     let next = null;
     for (let i = order.completed.length - 1; i >= 0; i -= 1) {
       const group = groups.get(order.completed[i]);
@@ -7847,6 +8053,10 @@ function createHistoryRegistry({
     for (const id of order.pending) {
       const group = groups.get(id);
       if (!group || !group.nodes.length) continue;
+      // A direct producer already placed an adopted live group atomically.
+      // Only recovered rows built here need an initial placement; repeatedly
+      // moving live groups made their visible order change on unrelated turns.
+      if (!group.pendingNeedsPlacement) continue;
       const anchor = getPendingAnchor(id, group.pendingRoot ?? group.nodes[0]) ?? null;
       for (let j = group.nodes.length - 1; j >= 0; j -= 1) {
         const node = group.nodes[j];
@@ -7855,12 +8065,18 @@ function createHistoryRegistry({
           container.insertBefore(node, nextNode);
         }
       }
+      group.pendingNeedsPlacement = false;
       if (group.pendingNeedsMount && group.pendingRoot?.isConnected && typeof mountPending === 'function') {
         // Flip before invoking external watcher code so any synchronous
         // re-entry cannot attach a second watcher to the same bubble.
         group.pendingNeedsMount = false;
         mountPending(group.pendingItem, group.pendingRoot);
       }
+    }
+
+    if (atBottom) container.scrollTop = container.scrollHeight;
+    else if (anchorNode?.isConnected) {
+      container.scrollTop += (anchorNode.getBoundingClientRect().top - containerTop) - anchorOffset;
     }
   }
 
@@ -8068,6 +8284,18 @@ async function replacePendingWithStoredItem(item, wipBubble, onStored = null) {
     historyReconciler?.forget(item.id);
     if (wipAboveViewport) messages.scrollTop -= wipRect.height;
     if (!shouldShowNewResponse(data)) return;
+    // Feed the fetched terminal row to the store too — the registered path
+    // above already does this via shadowInstallHistoryPage before
+    // reconciling. Without it this turn keeps its pending-seed
+    // completedAt=null (message.changed patches carry no completed_at),
+    // which sorts before every real timestamp in getOrderedTurnIds(); the
+    // next unrelated reconcile() pass (e.g. a flow chain step's completion)
+    // then re-renders this turn and reorder() moves its adopted bubble to
+    // the oldest position, far above the live edge — the flow origin
+    // "vanishing" once the next step completes (#13956).
+    // insertCompletedHistoryItem's own forget+clearReconciled keeps this
+    // install from double-rendering.
+    shadowInstallHistoryPage([data]);
     insertCompletedHistoryItem(data);
     if (data.agent && !data.adhoc) refreshComposerSessionCount(data.topic || item.topic || 'default', data.agent);
     updateInContextMarkers();
@@ -8633,10 +8861,17 @@ async function discoverRealtimeTurn(message, { reconcile = false } = {}) {
 async function attachFlowStep(msgId) {
   if (messages.querySelector(`[data-msg-id="${msgId}"]`)) return;
   try {
-    const res = await fetch(`/chat/${msgId}/status`);
-    if (!res.ok) return;
-    const data = await res.json();
-    if (messages.querySelector(`[data-msg-id="${msgId}"]`)) return;
+    let data = null;
+    for (const delay of [0, 150, 500]) {
+      if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+      if (messages.querySelector(`[data-msg-id="${msgId}"]`)) return;
+      const res = await fetch(`/chat/${msgId}/status`);
+      if (res.ok) {
+        data = await res.json();
+        break;
+      }
+    }
+    if (!data || messages.querySelector(`[data-msg-id="${msgId}"]`)) return;
     if (!shouldShowNewResponse(data)) return;
     shadowAttachRealtimeRow(data);
     if (data.status === 'pending') {
@@ -8689,7 +8924,7 @@ function watchFlowRun(flowRunId, afterId, route = null) {
         if (data.complete) {
           clearInterval(timer);
           _flowRunWatchers.delete(flowRunId);
-          if (route) refreshRouteTurnCounts(route, { force: true });
+          if (route) refreshRouteTurnCounts(route, { force: true, minAgeMs: 0 });
           return;
         }
       }
@@ -9055,8 +9290,15 @@ function appendRouteChainTurnCount(parent, count, step) {
 }
 
 function updateRouteChainMarkerTurnCount(marker, step, count) {
-  const countSpan = marker?.querySelector(`.route-chain-turn-count[data-route-step="${step}"]`);
-  if (!countSpan || count == null || count < 0) return;
+  if (!marker || count == null || count < 0) return;
+  let countSpan = marker.querySelector(`.route-chain-turn-count[data-route-step="${step}"]`);
+  if (!countSpan) {
+    countSpan = document.createElement('span');
+    countSpan.className = 'chip-turn-count route-chain-turn-count';
+    countSpan.dataset.routeStep = step;
+    if (step === 'origin') marker.insertBefore(countSpan, marker.querySelector('.route-chain-arrow'));
+    else marker.appendChild(countSpan);
+  }
   countSpan.textContent = `·${count}t`;
   countSpan.classList.toggle('mid', count > 10 && count <= 20);
   countSpan.classList.toggle('high', count > 20);
@@ -9539,7 +9781,14 @@ function refreshDateDividers() {
       const div = document.createElement('div');
       div.className = 'date-divider history-item';
       div.textContent = fmtDate(d);
-      el.before(div);
+      // A route marker introduces the turn immediately after it. When the
+      // calendar boundary and Flow boundary coincide, keep both annotations
+      // outside the turn in semantic order: day, then Flow, then response.
+      // Preserving marker adjacency also keeps composer-owned live groups
+      // adoptable by the reconciler through pending -> completed transitions.
+      const previous = el.previousElementSibling;
+      const boundary = previous?.classList.contains('route-chain-marker') ? previous : el;
+      boundary.before(div);
       lastKey = key;
     }
   }
@@ -16198,6 +16447,18 @@ async function refreshRouteTurnCounts(route, opts = {}) {
       }
     } catch {}
   }));
+  const chain = parseRouteChain(route);
+  if (!chain || chain.complex) return;
+  const normalizedRoute = normalizePromptHistoryRoute(route);
+  const counts = _routeChainTurnCounts(
+    chain.topic, chain.origin, chain.originFresh,
+    chain.target, chain.targetFresh, chain.targetTopic,
+  );
+  document.querySelectorAll('.route-chain-marker[data-flow-route]').forEach(marker => {
+    if (normalizePromptHistoryRoute(marker.dataset.flowRoute) !== normalizedRoute) return;
+    updateRouteChainMarkerTurnCount(marker, 'origin', counts.origin);
+    updateRouteChainMarkerTurnCount(marker, 'target', counts.target);
+  });
 }
 
 function _topicMemoryState(target = null) {

@@ -56,6 +56,84 @@ test.beforeEach(async ({ page }) => {
   await page.goto('/');
 });
 
+test('rebuilt history Flow boundary keeps known per-route turn counts', async ({ page }) => {
+  await page.evaluate(() => {
+    _sessionIds['squid@codex'] = 'origin-session';
+    _sessionTurnCounts['origin-session'] = 8;
+    _sessionIds['squid@review'] = 'target-session';
+    _sessionTurnCounts['target-session'] = 18;
+    const container = document.createElement('div');
+    container.id = 'history-route-count-test';
+    document.body.appendChild(container);
+    appendHistoryRouteChainMarker('#squid@codex>@review', {
+      topic: 'squid', agent: 'codex', adhoc: false,
+    }, container);
+  });
+
+  await expect(page.locator('#history-route-count-test .route-chain-turn-count'))
+    .toHaveText(['·8t', '·18t']);
+});
+
+test('a late Flow count creates the initially-missing route span', async ({ page }) => {
+  await page.evaluate(() => {
+    const marker = makeRouteChainMarker('#squid@codex>@review');
+    marker.id = 'late-count-marker';
+    document.body.appendChild(marker);
+    updateRouteChainMarkerTurnCount(marker, 'origin', 1);
+  });
+  await expect(page.locator('#late-count-marker .route-chain-turn-count[data-route-step="origin"]'))
+    .toHaveText('·1t');
+});
+
+test('adopting a realtime-completed Flow origin restores its history boundary', async ({ page }) => {
+  const rig = await freshRig(page);
+  await rig.evaluate(({ container }) => {
+    const bubble = appendHistoryItem({
+      id: 100, reply_to: 99, prompt: 'review it', content: 'origin', status: 'done',
+      topic: 'squid', agent: 'deepseek', adhoc: false,
+      flow_route: '#squid@deepseek>@codex',
+    }, container);
+    bubble.dataset.testMarker = 'realtime-original';
+  });
+  await rig.evaluate(({ store }) => store.installHistoryPage(window.historyItemToStoreRows({
+    id: 100, reply_to: 99, prompt: 'review it', content: 'origin', status: 'done',
+    topic: 'squid', agent: 'deepseek', adhoc: false,
+    flow_route: '#squid@deepseek>@codex',
+  })));
+
+  const result = await rig.evaluate(({ reconciler }) => reconciler.reconcile());
+  expect(result.ok).toBe(true);
+  await expect(page.locator('#history-registry-test-container > .route-chain-marker'))
+    .toHaveText('#squid@deepseek>@codex');
+  await expect(page.locator('#history-registry-test-container > .msg[data-msg-id="100"]'))
+    .toHaveAttribute('data-test-marker', 'realtime-original');
+});
+
+test('completed adoption does not steal a neighboring turn Flow marker', async ({ page }) => {
+  const rig = await freshRig(page);
+  await rig.evaluate(({ container }) => {
+    const foreign = appendHistoryRouteChainMarker('#squid@codex>@review', {
+      id: 999, topic: 'squid', agent: 'codex', adhoc: false,
+    }, container);
+    foreign.dataset.testMarker = 'foreign';
+    appendHistoryItem({
+      id: 100, prompt: 'review it', content: 'origin', status: 'done',
+      topic: 'squid', agent: 'deepseek', adhoc: false,
+      flow_route: '#squid@deepseek>@codex',
+    }, container);
+  });
+  await rig.evaluate(({ store }) => store.installHistoryPage(window.historyItemToStoreRows({
+    id: 100, prompt: 'review it', content: 'origin', status: 'done',
+    topic: 'squid', agent: 'deepseek', adhoc: false,
+    flow_route: '#squid@deepseek>@codex',
+  })));
+  expect((await rig.evaluate(({ reconciler }) => reconciler.reconcile())).ok).toBe(true);
+  await expect(page.locator('#history-registry-test-container > .route-chain-marker')).toHaveCount(2);
+  await expect(page.locator('[data-test-marker="foreign"]')).toHaveAttribute('data-route-owner-id', '999');
+  await expect(page.locator('#history-registry-test-container > .route-chain-marker[data-route-owner-id="100"]'))
+    .toHaveText('#squid@deepseek>@codex');
+});
+
 test('render() does not build an unwatched pending turn from store state', async ({ page }) => {
   const rig = await freshRig(page, [
     { id: 5, reply_to: 4, prompt: 'still going', content: 'partial reply', status_raw: 'working…', status: 'pending', topic: 'squid', agent: 'codex' },
@@ -540,6 +618,72 @@ test('reorder() is a DOM no-op for already-placed groups on an unrelated update'
   });
   expect(nodeIdentityStable).toBe(true);
   expect(before.length).toBeGreaterThan(0);
+});
+
+// #13940: a reconcile firing mid-live-turn re-places the whole completed set
+// with insertBefore. Before scroll anchoring in reorder(), scrollTop stayed
+// fixed while content grew/moved above the viewport, yanking the reader to a
+// "random flow" with earlier responses scrolled off. reorder() must keep the
+// element the reader is looking at visually stationary.
+test('reorder() preserves the reader scroll anchor when a new earlier turn shifts content above the viewport', async ({ page }) => {
+  const rig = await freshRig(page, [
+    { id: 61, reply_to: 51, content: 'a', status: 'done', topic: 'squid', completed_at: '2026-08-17T00:00:02Z' },
+    { id: 62, reply_to: 52, content: 'b', status: 'done', topic: 'squid', completed_at: '2026-08-17T00:00:03Z' },
+    { id: 63, reply_to: 53, content: 'c', status: 'done', topic: 'squid', completed_at: '2026-08-17T00:00:04Z' },
+    { id: 64, reply_to: 54, content: 'd', status: 'done', topic: 'squid', completed_at: '2026-08-17T00:00:05Z' },
+    { id: 65, reply_to: 55, content: 'e', status: 'done', topic: 'squid', completed_at: '2026-08-17T00:00:06Z' },
+    { id: 66, reply_to: 56, content: 'f', status: 'done', topic: 'squid', completed_at: '2026-08-17T00:00:07Z' },
+  ]);
+  await rig.evaluate(({ container }) => {
+    container.style.height = '150px';
+    container.style.overflowY = 'auto';
+    const style = document.createElement('style');
+    style.textContent = '#history-registry-test-container > * { display: block; height: 50px; margin: 0; }';
+    document.head.appendChild(style);
+  });
+  await rig.evaluate(({ reconciler }) => reconciler.reconcile());
+
+  const drift = await rig.evaluate(({ store, reconciler, container }) => {
+    container.scrollTop = 120; // scrolled down, not at bottom
+    const anchor = () => container.querySelector('.msg.assistant.history-item[data-msg-id="64"]');
+    const before = anchor().getBoundingClientRect().top - container.getBoundingClientRect().top;
+    store.installHistoryPage(window.historyItemToStoreRows({
+      id: 50, reply_to: 40, content: 'earliest', status: 'done', topic: 'squid',
+      completed_at: '2026-08-17T00:00:01Z',
+    }));
+    reconciler.reconcile(); // inserts turn 50 above the viewport, shifting turn 64 down
+    const after = anchor().getBoundingClientRect().top - container.getBoundingClientRect().top;
+    return { before, after };
+  });
+  expect(Math.abs(drift.after - drift.before)).toBeLessThan(2);
+});
+
+test('reorder() keeps a bottom-pinned reader at the bottom when a new turn arrives', async ({ page }) => {
+  const rig = await freshRig(page, [
+    { id: 71, reply_to: 81, content: 'a', status: 'done', topic: 'squid', completed_at: '2026-08-17T00:00:01Z' },
+    { id: 72, reply_to: 82, content: 'b', status: 'done', topic: 'squid', completed_at: '2026-08-17T00:00:02Z' },
+    { id: 73, reply_to: 83, content: 'c', status: 'done', topic: 'squid', completed_at: '2026-08-17T00:00:03Z' },
+    { id: 74, reply_to: 84, content: 'd', status: 'done', topic: 'squid', completed_at: '2026-08-17T00:00:04Z' },
+  ]);
+  await rig.evaluate(({ container }) => {
+    container.style.height = '120px';
+    container.style.overflowY = 'auto';
+    const style = document.createElement('style');
+    style.textContent = '#history-registry-test-container > * { display: block; height: 50px; margin: 0; }';
+    document.head.appendChild(style);
+  });
+  await rig.evaluate(({ reconciler }) => reconciler.reconcile());
+
+  const atBottom = await rig.evaluate(({ store, reconciler, container }) => {
+    container.scrollTop = container.scrollHeight; // pinned to bottom
+    store.installHistoryPage(window.historyItemToStoreRows({
+      id: 75, reply_to: 85, content: 'newest', status: 'done', topic: 'squid',
+      completed_at: '2026-08-17T00:00:05Z',
+    }));
+    reconciler.reconcile();
+    return container.scrollHeight - container.scrollTop - container.clientHeight;
+  });
+  expect(atBottom).toBeLessThan(2);
 });
 
 // Same rig as freshRig, but wires a getPendingAnchor mirroring

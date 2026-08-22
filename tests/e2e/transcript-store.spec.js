@@ -66,6 +66,40 @@ test('a terminal status is monotonic: a duplicate or older pending patch cannot 
   expect((await store.evaluate(s => s.getMessage(7))).status).toBe('done');
 });
 
+test('a stale non-terminal patch cannot wipe a terminal message\'s real content either', async ({ page }) => {
+  // Reproduces a live bug: a Flow origin step's WS message.changed sequence
+  // was observed as done -> chat.done -> a spurious extra 'pending' -> done
+  // again (likely a side effect of dispatching the next chain step touching
+  // the same row). The old per-field guard only protected status from
+  // regressing, so that stray 'pending' patch's blank content silently
+  // overwrote the real completed content, leaving status:'done' with
+  // content:'' — which the history registry then renders as zero nodes: a
+  // fully-completed turn that is simply never shown.
+  const store = await freshStore(page);
+  await store.evaluate(s => s.applyMessagePatch(8, {
+    role: 'assistant', status: 'done', content: 'the real answer',
+  }, 1));
+  expect(await store.evaluate(s => s.getMessage(8))).toMatchObject({ status: 'done', content: 'the real answer' });
+
+  const stale = await store.evaluate(s => s.applyMessagePatch(8, {
+    role: 'assistant', status: 'pending', content: '',
+  }, 2));
+  expect(stale.ok).toBe(true);
+  expect(await store.evaluate(s => s.getMessage(8))).toMatchObject({ status: 'done', content: 'the real answer' });
+});
+
+test('installHistoryPage rejects a stale non-terminal row the same way, without wiping real content', async ({ page }) => {
+  const store = await freshStore(page);
+  await store.evaluate(s => s.installHistoryPage([
+    { msg_id: 9, role: 'assistant', status: 'done', content: 'the real answer' },
+  ]));
+  const stale = await store.evaluate(s => s.installHistoryPage([
+    { msg_id: 9, role: 'assistant', status: 'pending', content: '' },
+  ]));
+  expect(stale.ok).toBe(true);
+  expect(await store.evaluate(s => s.getMessage(9))).toMatchObject({ status: 'done', content: 'the real answer' });
+});
+
 // A run-event-sourced message (text/tool/stats deltas) has no status field at
 // all until a 'status' event or lifecycle patch reports one — that "unknown"
 // must not be misread as terminal, or isTerminal()'s monotonicity guard
@@ -320,6 +354,29 @@ test('an identity conflict (role/reply_to mismatch) fails the action before muta
   expect(result.ok).toBe(false);
   expect(await store.evaluate(s => s.getLastAppliedEventId())).toBe(0);
   expect((await store.evaluate(s => s.getMessage(40))).role).toBe('user');
+});
+
+test('a provisional null reply_to does not block a flow step\'s later real reply_to and completion', async ({ page }) => {
+  // Reproduces a live bug: a flow-chain target's own 'message.changed' created
+  // event reports reply_to: null (its synthetic handoff prompt isn't linked
+  // yet); a later message.changed carrying the real reply_to plus the actual
+  // status/content transition must not be rejected wholesale as an "identity
+  // conflict" — that silently stranded the turn at status 'pending' in the
+  // store forever, even though its DOM bubble had already completed, ready to
+  // resurface as a stray "still thinking" placeholder on any later reconcile.
+  const store = await freshStore(page);
+  const created = await store.evaluate(s => s.applyMessagePatch(60, {
+    role: 'assistant', status: 'pending', content: '', reply_to: null,
+  }, 1));
+  expect(created.ok).toBe(true);
+  const completed = await store.evaluate(s => s.applyMessagePatch(60, {
+    role: 'assistant', status: 'done', content: 'result', reply_to: 59,
+  }, 2));
+  expect(completed.ok).toBe(true);
+  const msg = await store.evaluate(s => s.getMessage(60));
+  expect(msg.status).toBe('done');
+  expect(msg.content).toBe('result');
+  expect(msg.replyTo).toBe(59);
 });
 
 test('pendingReconcile accumulates dirty assistant ids and clearReconciled removes only what is passed', async ({ page }) => {
@@ -685,6 +742,29 @@ test.describe('WS lifecycle events producer (shadow mode)', () => {
       .toHaveCount(1);
     await expect.poll(() => page.evaluate(() => window.__transcriptStore.getPendingReconcile()))
       .toEqual([]);
+  });
+
+  test('composer display facts survive a sparse terminal history row', async ({ page }) => {
+    await page.goto('/?renderer=store');
+    await page.evaluate(() => {
+      shadowInstallHistoryPage([{
+        id: 18, role: 'assistant', status: 'pending', topic: 'squid', agent: 'deepseek',
+        prompt: 'review the change', prompt_source: 'human', content: '',
+        flow_route: '#squid@deepseek>@codex', flow_run_id: 'flow-18',
+      }]);
+      shadowInstallHistoryPage([{
+        id: 18, role: 'assistant', status: 'done', topic: 'squid', agent: 'deepseek',
+        prompt: '', content: 'approved',
+      }]);
+    });
+
+    const raw = await page.evaluate(() => window.__transcriptStore.getTurn(18).raw);
+    expect(raw).toMatchObject({
+      prompt: 'review the change',
+      prompt_source: 'human',
+      flow_route: '#squid@deepseek>@codex',
+      flow_run_id: 'flow-18',
+    });
   });
 
   test('chat.text run-events accumulate into the store message content in run_seq order', async ({ page }) => {

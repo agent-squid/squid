@@ -48,7 +48,16 @@
     if (incoming.role !== undefined && existing.role !== undefined && incoming.role !== existing.role) {
       return `role mismatch for msg ${existing.msgId}: ${existing.role} -> ${incoming.role}`;
     }
-    if (incoming.replyTo !== undefined && existing.replyTo !== undefined && incoming.replyTo !== existing.replyTo) {
+    // existing.replyTo == null (not just undefined) is still "not yet known,"
+    // not a confirmed fact: a flow-chain step's own message.changed 'created'
+    // event reports reply_to: null before the server finishes linking it to
+    // its synthetic handoff prompt, and a stricter !== undefined check here
+    // would let that provisional null permanently block the real value from
+    // ever landing — silently dropping the *whole* patch (status/content
+    // included, since message.changed is WS's only channel for those) on
+    // every later update for that message, leaving the turn stuck at
+    // 'pending' in the store while its DOM bubble had already completed.
+    if (incoming.replyTo !== undefined && existing.replyTo != null && incoming.replyTo !== existing.replyTo) {
       return `reply_to mismatch for msg ${existing.msgId}: ${existing.replyTo} -> ${incoming.replyTo}`;
     }
     return null;
@@ -56,24 +65,43 @@
 
   // Authoritative merge (history pages, snapshots): every field the caller
   // declares replaces the stored value outright, except a terminal status
-  // can never be downgraded back to a non-terminal one.
+  // can never be downgraded back to a non-terminal one — and, like
+  // mergeSparse below, that guard rejects the whole row once triggered, not
+  // just its status key, so a stale non-terminal row can't wipe real content
+  // out from under an already-terminal message while merely failing to move
+  // its status backward.
   function mergeAuthoritative(existing, fields) {
+    if (existing && fields.status !== undefined && isTerminal(existing.status) && !isTerminal(fields.status)) {
+      return { ...existing };
+    }
     const merged = existing ? { ...existing } : { tools: [], stats: {} };
     for (const key of Object.keys(fields)) {
       if (fields[key] === undefined) continue;
-      if (key === 'status' && existing && isTerminal(existing.status) && !isTerminal(fields[key])) continue;
       merged[key] = fields[key];
     }
     return merged;
   }
 
   // Sparse merge (lifecycle patches, run-event deltas): omitted fields are
-  // left untouched, never cleared. Same terminal-status monotonicity rule.
+  // left untouched, never cleared. Same terminal-status monotonicity rule —
+  // but applied to the whole patch, not just the status key: a WS lifecycle
+  // producer can emit a stray out-of-order message.changed reporting a
+  // non-terminal status for an already-terminal message (observed for a Flow
+  // origin step: 'done' immediately followed by a spurious 'pending' — likely
+  // a side effect of dispatching the next chain step touching the same row).
+  // That patch's other sparse fields are equally stale; applying just its
+  // content (typically blank, since a genuinely 'pending' row has none yet)
+  // while only guarding status would silently wipe the real completed
+  // content and leave the turn status:'done'/content:'' — which the history
+  // registry then renders as zero nodes, an invisible-but-"complete" bubble.
+  // Reject the whole patch instead of merging around it.
   function mergeSparse(existing, patch) {
+    if (existing && patch.status !== undefined && isTerminal(existing.status) && !isTerminal(patch.status)) {
+      return { ...existing };
+    }
     const merged = existing ? { ...existing } : { tools: [], stats: {} };
     for (const key of Object.keys(patch)) {
       if (patch[key] === undefined) continue;
-      if (key === 'status' && existing && isTerminal(existing.status) && !isTerminal(patch[key])) continue;
       merged[key] = patch[key];
     }
     return merged;
@@ -227,6 +255,18 @@
       const existing = messagesById.get(msgId);
       const conflict = identityConflict(existing, normalized);
       if (conflict) return { ok: false, error: `applyMessagePatch: ${conflict}`, dirty: dirtySnapshot() };
+      // mergeSparse's terminal-status guard rejects a stale non-terminal patch
+      // wholesale (see its comment — the flow-origin spurious 'pending' case).
+      // Honor that rejection here too: applying the merged copy of `existing`
+      // changes no field, but putMessage's unconditional upsertTurn would still
+      // re-dirty the id — and the next reconcile() pass would then re-render an
+      // already-terminal turn for no reason (at best scroll churn, at worst a
+      // duplicate bubble while the registry's completed→completed re-render
+      // builds fresh nodes). The watermark still advances: the event was seen.
+      if (existing && normalized.status !== undefined && isTerminal(existing.status) && !isTerminal(normalized.status)) {
+        lastAppliedEventId = numericEventId;
+        return { ok: true, dirty: dirtySnapshot(), noop: true };
+      }
       const merged = mergeSparse(existing, { ...normalized, msgId });
       putMessage(merged);
       lastAppliedEventId = numericEventId;
