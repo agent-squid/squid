@@ -914,6 +914,38 @@ test.describe('WS lifecycle events producer (shadow mode)', () => {
 // in ui/app.js).
 
 test.describe('SSE producer (shadow mode)', () => {
+  test('a fresh SSE composer turn is registered as one owned pending range when its msg id arrives', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200,
+      headers: {
+        'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
+        'X-Squid-Msg-Id': '48',
+      },
+      body: 'id: 1\nevent: status\ndata: still working\n\n',
+    }));
+    await page.route('**/chat/48/status', r => r.fulfill({ json: {
+      id: 48, status: 'pending', topic: 'default', agent: 'claude', prompt: 'hi', content: '',
+    }}));
+
+    await page.fill('#input', 'hi');
+    await page.keyboard.press('Enter');
+
+    await expect(page.locator('.msg-thinking[data-msg-id="48"]')).toHaveCount(1);
+    const ownership = await page.evaluate(() => {
+      const group = historyReconciler?.getGroup(48);
+      return {
+        registered: !!group,
+        rootIsThinking: group?.pendingRoot === document.querySelector('.msg-thinking[data-msg-id="48"]'),
+        ownsPrompt: group?.nodes?.some(node => node.classList?.contains('user')) ?? false,
+        dirty: window.__transcriptStore.getPendingReconcile(),
+      };
+    });
+    // The seed itself was drained by targeted adoption. The following status
+    // frame legitimately re-dirties the registered turn; it stays pending
+    // because the transport watcher remains the sole preview writer.
+    expect(ownership).toEqual({ registered: true, rootIsThinking: true, ownsPrompt: true, dirty: [48] });
+  });
+
   test('status appends and loading/processing replace the narrative on the primary SSE stream', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200,
@@ -970,6 +1002,8 @@ test.describe('SSE producer (shadow mode)', () => {
     // direct-DOM 'done' branch), so wait for it to land before asserting on
     // fields it alone is responsible for (status/completedAt).
     await expect.poll(() => page.evaluate(() => window.__transcriptStore.getTurn(50)?.status)).toBe('done');
+    await expect.poll(() => page.evaluate(() => window.__transcriptStore.getPendingReconcile()))
+      .toEqual([]);
 
     const snapshot = await page.evaluate(() => {
       const s = window.__transcriptStore;

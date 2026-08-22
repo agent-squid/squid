@@ -2436,7 +2436,7 @@ function shadowApplySseRunEvent(msgId, kind, event, normalizedPayload) {
 // installHistoryPage, which has never required event_id (see
 // shadowInstallHistoryPage above) — the same authoritative-row path
 // producer 1 already uses.
-async function shadowInstallSseCompletion(msgId) {
+async function shadowInstallSseCompletion(msgId, { clearAfterInstall = false } = {}) {
   if (!transcriptStore) return;
   try {
     const res = await fetch(`/chat/${msgId}/status`);
@@ -2444,6 +2444,15 @@ async function shadowInstallSseCompletion(msgId) {
     const data = await res.json();
     if (data.id == null) return;
     shadowInstallHistoryPage([data]);
+    // Fresh composer completion still renders through its established direct
+    // path and forgets/clears registry ownership immediately. Its /status
+    // fetch is intentionally fire-and-forget so UI completion never waits on
+    // a second request, but that means this authoritative install can land
+    // *after* the caller's clear and re-dirty the id. Clear again in the same
+    // synchronous task as the install: no reconcile can observe the transient
+    // terminal dirty state, and later unrelated history work cannot re-render
+    // a directly completed composer turn.
+    if (clearAfterInstall) transcriptStore.clearReconciled([Number(data.id)]);
   } catch {}
 }
 
@@ -5492,6 +5501,13 @@ async function sendMessage(text, opts = {}) {
       flow_run_id: flowRunId,
       timestamp: sendTime,
     }]);
+    // ADR-0041 producer 4 prerequisite: the composer already owns and placed
+    // this live range, so the registry adopts it without touching its preview
+    // or watcher. Register immediately after the store seed instead of
+    // leaving the id dirty until an unrelated history/realtime reconcile.
+    // This gives the eventual SSE terminal handoff a stable pendingRoot while
+    // preserving the existing composer as the sole live DOM writer.
+    historyReconciler?.reconcileDirtyIds([msgId]);
     killBtn.style.display = '';
     return true;
   }
@@ -6233,7 +6249,7 @@ async function sendMessage(text, opts = {}) {
               continue;
             }
             completionRendered = true;
-            shadowInstallSseCompletion(msgId);
+            shadowInstallSseCompletion(msgId, { clearAfterInstall: true });
             // This composer-owned completion never routes through the
             // reconciler (unlike insertCompletedHistoryItem/
             // replacePendingWithStoredItem, which both do this same forget+
@@ -6241,10 +6257,11 @@ async function sendMessage(text, opts = {}) {
             // the store row this msg id was seeded with at attachMsgId time
             // (still status 'pending') stays dirty indefinitely — even after
             // shadowInstallSseCompletion's own fire-and-forget fetch above
-            // resolves, since that only re-marks it dirty with fresh data,
-            // never clears the flag (see shadowInstallHistoryPage's own
-            // comment: draining dirty ids is deferred to a real reconcile()
-            // pass in store-render mode). A later, unrelated reconcile() pass
+            // resolves. The helper now performs a second clear immediately
+            // after its authoritative install to close that async race; this
+            // immediate clear still removes the pending seed before the fetch
+            // returns (and covers a failed fetch). A later, unrelated
+            // reconcile() pass
             // (any subsequent /history page — pagination, a filter change)
             // would then render this still-dirty id from the stale 'pending'
             // status, and since thinkingBubble is about to be removed below
@@ -6291,7 +6308,7 @@ async function sendMessage(text, opts = {}) {
             eventName = null;
 
           } else if (eventName === 'error') {
-            shadowInstallSseCompletion(msgId);
+            shadowInstallSseCompletion(msgId, { clearAfterInstall: true });
             turnStatus = 'error';
             stopStatusFallback();
             const errLine = data.trim();
