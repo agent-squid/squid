@@ -12490,7 +12490,9 @@ function currentProcDuration(row, field = 'duration_s') {
 function formatRunningDuration(row) {
   const value = currentProcDuration(row);
   if (!Number.isFinite(value)) return '—';
-  return `${value.toFixed(1).replace(/\.0$/, '')}s`;
+  if (value < 60) return `${value.toFixed(1).replace(/\.0$/, '')}s`;
+  if (value < 3600) return `${(value / 60).toFixed(1)}m`;
+  return `${(value / 3600).toFixed(1)}h`;
 }
 
 function updateProcStatusDot(processes, queued) {
