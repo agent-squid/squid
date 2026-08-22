@@ -8540,7 +8540,10 @@ const realtimeV1 = (() => {
     } else if (frame.type === 'queue.changed') {
       applyRealtimeProcessState(null, frame.payload?.queue);
     } else if (frame.type === 'message.changed' && frame.payload?.role === 'assistant') {
-      onDiscover?.({ ...frame.payload, id: frame.msg_id, ...frame.scope });
+      // Producer 3 cutover: lifecycle discovery uses the same targeted
+      // pending construction handoff as snapshots. The store action above
+      // dirtied this id before discoverRealtimeTurn enriches its raw row.
+      onDiscover?.({ ...frame.payload, id: frame.msg_id, ...frame.scope }, { reconcile: true });
       if (frame.payload.status && frame.payload.status !== 'pending' && frame.scope?.agent) {
         refreshComposerSessionCount(frame.scope.topic || 'default', frame.scope.agent);
       }
@@ -8548,7 +8551,7 @@ const realtimeV1 = (() => {
       const msgId = Number(frame.payload?.assistant_msg_id ?? frame.msg_id);
       if (Number.isFinite(msgId)) attachFlowStep(msgId);
     } else if (frame.type?.startsWith('chat.') && frame.msg_id != null && !watches.has(Number(frame.msg_id))) {
-      onDiscover?.({ id: frame.msg_id, status: 'pending', ...frame.scope });
+      onDiscover?.({ id: frame.msg_id, status: 'pending', ...frame.scope }, { reconcile: true });
     }
     const watch = watches.get(Number(frame.msg_id));
     if (watch) {
@@ -8839,11 +8842,11 @@ async function discoverRealtimeTurn(message, { reconcile = false } = {}) {
     if (messages.querySelector(`[data-msg-id="${msgId}"]`) || !shouldShowNewResponse(item)) return;
     shadowAttachRealtimeRow(item);
     if (item.status === 'pending') {
-      // Snapshot discovery is the first realtime producer to hand initial
-      // pending construction to the registry. shadowInstallSnapshot already
-      // dirtied this id, and attachRaw above enriched its raw row with the
-      // denormalized /status fields makeWipBubble needs. Reconcile only this
-      // id so unrelated snapshot rows still pass their own visibility checks.
+      // Snapshot and WS-lifecycle discovery hand initial pending construction
+      // to the registry. Their store adapters already dirtied this id, and
+      // attachRaw above enriched its raw row with the denormalized /status
+      // fields makeWipBubble needs. Reconcile only this id so unrelated
+      // realtime rows still pass their own visibility checks.
       // If the targeted handoff cannot build/mount the group, retain the
       // established direct-DOM path as the per-producer rollback fallback.
       if (reconcile && historyReconciler) {

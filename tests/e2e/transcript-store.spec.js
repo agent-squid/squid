@@ -745,7 +745,7 @@ test.describe('WS lifecycle events producer (shadow mode)', () => {
     expect(await page.evaluate(() => window.__transcriptStore.getMessage(15).content)).toBeUndefined();
   });
 
-  test('renderer=store registers a WS-discovered pending bubble after its watcher mounts', async ({ page }) => {
+  test('renderer=store builds and mounts a WS-lifecycle-discovered pending bubble through the registry', async ({ page }) => {
     await page.route('**/chat/16/status', r => r.fulfill({ json: {
       id: 16, role: 'assistant', reply_to: 15, topic: 'default', agent: 'claude',
       adhoc: false, status: 'pending', prompt: 'adopt me', content: '',
@@ -762,6 +762,15 @@ test.describe('WS lifecycle events producer (shadow mode)', () => {
       .toHaveCount(1);
     await expect.poll(() => page.evaluate(() => window.__transcriptStore.getPendingReconcile()))
       .toEqual([]);
+    const registryState = await page.evaluate(() => {
+      const group = historyReconciler?.getGroup(16);
+      return {
+        registered: !!group,
+        connected: !!group?.pendingRoot?.isConnected,
+        mounted: group?.pendingNeedsMount === false,
+      };
+    });
+    expect(registryState).toEqual({ registered: true, connected: true, mounted: true });
   });
 
   test('composer display facts survive a sparse terminal history row', async ({ page }) => {
