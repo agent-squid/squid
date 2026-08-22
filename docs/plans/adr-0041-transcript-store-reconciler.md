@@ -24,7 +24,7 @@ scope per the ADR) and get migrated afterward, one at a time.
 | 2. Shadow mode | ✅ `shadowInstallHistoryPage` | ✅ `shadowInstallSnapshot` (2026-08-20) | ✅ `shadowApplyEvent` (2026-08-21) | ✅ `shadowApplySseRunEvent`/`shadowInstallSseCompletion` (2026-08-20, both SSE paths) |
 | 3. Reconciler + cutover | ✅ completed and recovered history rows | ✅ pending discovery builds/mounts through registry (2026-08-22) | ✅ pending discovery builds/mounts through registry (2026-08-22) | ⚠️ composer range adopted; watcher remains preview owner (2026-08-22) |
 | 4. Completion order/route markers/dedup in reconciler | ✅ completed history | ⚠️ registered pending-to-terminal handoff uses shared reconciler path | ⚠️ registered pending-to-terminal handoff uses shared reconciler path | ⚠️ registered composer handoff; direct completion fallbacks remain |
-| 5. Retire direct-DOM path | ✅ default flipped to `renderer=store` 2026-08-20 (`?renderer=dom` kept as one-cycle rollback; direct-DOM branch not yet deleted) | ❌ | ❌ | ❌ |
+| 5. Retire direct-DOM path | ✅ rollback path deleted 2026-08-22 | ⚠️ snapshot discovery is registry-only; pending-transition fallback remains | ❌ | ❌ |
 
 Files: `ui/transcript-store.js`, `ui/reconciler.js`, wiring in `ui/app.js`
 (search `ADR-0041`). Tests: `tests/e2e/transcript-store.spec.js`,
@@ -1750,6 +1750,56 @@ completed history branch. Prompt-only history remains its intentionally
 separate reduced projection. Missing store/reconciler assets now fail client
 initialization instead of silently restoring a second `#messages` owner. PWA
 cache bumped to `v20260822-016`.
+
+### 2026-08-22: Producer 2 pending-discovery fallback retired
+
+WS snapshot discovery now requires the targeted registry handoff. If rendering
+fails, the normalized turn remains dirty for a later snapshot retry and no
+direct pending node is inserted under `#messages`. WS lifecycle discovery
+retains its separately scoped rollback path. A regression forces the first
+reconcile to fail, proves there is no direct-DOM fallback, then proves the next
+snapshot mounts the same turn through the registry. PWA cache bumped to
+`v20260822-022`. Cursor-bearing WS frames are serialized; snapshot discovery
+must finish successfully before its cursor is persisted or acknowledged. A
+failed handoff closes the socket with the old cursor and requests a fresh
+snapshot, so later queued events cannot acknowledge past the dirty turn.
+
+### 2026-08-22: Producer 2 completed-discovery fallback retired
+
+Completed turns discovered by a WS snapshot now render through the same
+targeted registry handoff as pending turns. A failed render leaves the turn
+dirty and triggers the cursor-safe reconnect path; it never falls through to
+`insertCompletedHistoryItem`. The completed snapshot regression now proves
+the visible sibling range remains registered after rendering. PWA cache bumped
+to `v20260822-024`.
+
+### 2026-08-22: snapshot transaction and cursor-reset ACK hardening
+
+Snapshot dispatch now aborts before discovery and ACK when the normalized
+store transaction fails, including for an empty snapshot. An explicit
+`cursor_reset` installs even below the old store watermark, permits the fresh
+timeline to replace a stale terminal status, and clears the affected messages'
+old `run_seq` watermarks. Regressions prove the reset accepts a lower event and
+run sequence and that a rejected transaction closes without persisting or
+acknowledging its cursor. PWA cache bumped to `v20260822-024`.
+
+### 2026-08-22: sparse snapshots preserve enriched response-header prompts
+
+A later WS snapshot no longer replaces a turn's full render payload with its
+sparse `chat_messages` row. The adapter merges previously fetched display
+fields first and overlays every snapshot-provided field, so completed registry
+re-renders keep their prompt header while content/status remain authoritative.
+A regression applies two snapshots to the same completed turn and proves its
+prompt remains visible exactly once. PWA cache bumped to `v20260822-025`.
+
+### 2026-08-22: status-popup dequeue terminates the matching live queued row
+
+Live queued turns register their existing `(topic, queue position)` identity
+while the SSE stream is waiting. A successful dequeue from the status popup
+now invokes that turn's established cancellation renderer, aborting its stream
+and replacing the blinking queue status with `Dequeued.`. Registrations are
+removed on processing, message-id assignment, or stream exit. PWA cache bumped
+to `v20260822-026`.
 
 ### Superseded 2026-08-21 next-step detail
 

@@ -70,8 +70,8 @@
   // just its status key, so a stale non-terminal row can't wipe real content
   // out from under an already-terminal message while merely failing to move
   // its status backward.
-  function mergeAuthoritative(existing, fields) {
-    if (existing && fields.status !== undefined && isTerminal(existing.status) && !isTerminal(fields.status)) {
+  function mergeAuthoritative(existing, fields, { allowStatusRegression = false } = {}) {
+    if (!allowStatusRegression && existing && fields.status !== undefined && isTerminal(existing.status) && !isTerminal(fields.status)) {
       return { ...existing };
     }
     const merged = existing ? { ...existing } : { tools: [], stats: {} };
@@ -217,7 +217,7 @@
       return { ok: true, dirty: dirtySnapshot() };
     }
 
-    function installSnapshot(snapshot, eventId) {
+    function installSnapshot(snapshot, eventId, { resetCursor = false } = {}) {
       if (!snapshot || !Array.isArray(snapshot.messages)) {
         return { ok: false, error: 'installSnapshot: snapshot.messages must be an array', dirty: dirtySnapshot() };
       }
@@ -225,7 +225,7 @@
       if (!Number.isFinite(numericEventId)) {
         return { ok: false, error: 'installSnapshot: event_id must be numeric', dirty: dirtySnapshot() };
       }
-      if (numericEventId <= lastAppliedEventId) {
+      if (!resetCursor && numericEventId <= lastAppliedEventId) {
         // At-or-below watermark: no-op, but surface any still-outstanding
         // reconcile work so a prior render failure can be retried.
         return { ok: true, dirty: dirtySnapshot(), noop: true };
@@ -234,7 +234,10 @@
       const batchConflict = findBatchConflict(rows);
       if (batchConflict) return { ok: false, error: `installSnapshot: ${batchConflict}`, dirty: dirtySnapshot() };
       for (const row of rows) {
-        const merged = mergeAuthoritative(messagesById.get(row.msgId), row);
+        const merged = mergeAuthoritative(messagesById.get(row.msgId), row, {
+          allowStatusRegression: resetCursor,
+        });
+        if (resetCursor && row.role === 'assistant') lastRunSeqByAssistantId.delete(row.msgId);
         putMessage(merged);
       }
       view.activeWindowIds = new Set(rows.map(r => r.msgId));

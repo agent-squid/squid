@@ -57,6 +57,27 @@ test('installSnapshot below the current watermark is a no-op that still returns 
   expect(stale.dirty).toContain(5);
 });
 
+test('a cursor-reset snapshot replaces the watermark and accepts the fresh timeline status/run sequence', async ({ page }) => {
+  const store = await freshStore(page);
+  await store.evaluate(s => s.applyMessagePatch(5, {
+    role: 'assistant', status: 'done', content: 'old timeline',
+  }, 10));
+  await store.evaluate(s => s.applyRunEvent(5, 9, 'text', { delta: ' ignored tail' }, 11));
+
+  const reset = await store.evaluate(s => s.installSnapshot({ messages: [{
+    msg_id: 5, role: 'assistant', status: 'pending', content: 'fresh timeline',
+  }] }, 3, { resetCursor: true }));
+  expect(reset.ok).toBe(true);
+  expect(await store.evaluate(s => s.getLastAppliedEventId())).toBe(3);
+  expect(await store.evaluate(s => s.getMessage(5))).toMatchObject({
+    status: 'pending', content: 'fresh timeline',
+  });
+
+  const next = await store.evaluate(s => s.applyRunEvent(5, 1, 'text', { delta: ' continues' }, 4));
+  expect(next.noop).not.toBe(true);
+  expect((await store.evaluate(s => s.getMessage(5))).content).toBe('fresh timeline continues');
+});
+
 test('a terminal status is monotonic: a duplicate or older pending patch cannot reopen it', async ({ page }) => {
   const store = await freshStore(page);
   await store.evaluate(s => s.applyRunEvent(7, 0, 'status', { status: 'done' }, 1));
@@ -480,6 +501,7 @@ test.describe('WS snapshot producer (shadow mode)', () => {
   test.beforeEach(async ({ page }) => {
     await page.addInitScript(() => {
       window.__webSocket = null;
+      window.__sentWebSocketFrames = [];
       class MockWebSocket {
         static CONNECTING = 0;
         static OPEN = 1;
@@ -494,6 +516,7 @@ test.describe('WS snapshot producer (shadow mode)', () => {
         }
         send(data) {
           const frame = JSON.parse(data);
+          window.__sentWebSocketFrames.push(frame);
           if (frame.type === 'subscribe') {
             setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
           }
@@ -524,9 +547,18 @@ test.describe('WS snapshot producer (shadow mode)', () => {
       ] }] },
     }));
 
-    // Direct-DOM path is unaffected: the turn discovered via the WS snapshot
-    // still renders exactly once, via the existing /chat/{id}/status fetch.
+    // Producer 2 owns this completed discovery through the keyed registry,
+    // with no direct insertion fallback under #messages.
     await expect(page.locator('.msg.assistant.history-item[data-msg-id="7"]')).toHaveCount(1);
+    const registryGroup = await page.evaluate(() => {
+      const group = historyReconciler?.getGroup(7);
+      return {
+        registered: !!group,
+        connected: !!group?.nodes.length && group.nodes.every(node => node.isConnected),
+        pending: !!group?.pendingRoot,
+      };
+    });
+    expect(registryGroup).toEqual({ registered: true, connected: true, pending: false });
 
     const snapshot = await page.evaluate(() => {
       const s = window.__transcriptStore;
@@ -536,6 +568,18 @@ test.describe('WS snapshot producer (shadow mode)', () => {
     expect(snapshot.turn7.promptMsgId).toBe(6);
     expect(snapshot.prompt6).toMatchObject({ role: 'user', content: "what's your model?" });
     expect(snapshot.order.completed).toContain(7);
+
+    // A later sparse snapshot re-renders the completed registry group. It
+    // must not discard the denormalized prompt fetched during discovery.
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'snapshot', event_id: 11, payload: { conversations: [{ messages: [
+        { id: 7, role: 'assistant', reply_to: 6, topic: 'default', agent: 'claude',
+          adhoc: false, status: 'done', content: 'Done 7', completed_at: '2026-08-15T12:00:00Z' },
+      ] }] },
+    }));
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="7"] .history-prompt-truncated'))
+      .toHaveText("what's your model?");
+    await expect(page.locator('.msg.assistant.history-item[data-msg-id="7"]')).toHaveCount(1);
   });
 
   // Stage 4: a snapshot message is already a raw chat_messages row, so the
@@ -605,6 +649,102 @@ test.describe('WS snapshot producer (shadow mode)', () => {
       };
     });
     expect(registryState).toEqual({ registered: true, connected: true, mounted: true });
+  });
+
+  test('a failed pending snapshot reconcile stays dirty instead of using the direct-DOM fallback', async ({ page }) => {
+    await page.route('**/chat/18/status', r => r.fulfill({ json: {
+      id: 18, role: 'assistant', topic: 'default', agent: 'claude', adhoc: false,
+      status: 'pending', prompt: 'retry through registry', content: '',
+      timestamp: '2026-08-22T00:00:00Z',
+    }}));
+    await page.reload();
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+
+    await page.evaluate(() => {
+      window.__originalReconcileDirtyIds = historyReconciler.reconcileDirtyIds;
+      historyReconciler.reconcileDirtyIds = () => ({ ok: false, reconciledIds: [], failedIds: [18] });
+      window.__failedSnapshotSocket = window.__webSocket;
+      window.__webSocket.receive({
+        v: 1, type: 'snapshot', event_id: 18, payload: { conversations: [{ messages: [
+          { id: 18, role: 'assistant', status: 'pending', content: '' },
+        ] }] },
+      });
+    });
+
+    await expect(page.locator('[data-msg-id="18"]')).toHaveCount(0);
+    await expect.poll(() => page.evaluate(() =>
+      window.__transcriptStore.getPendingReconcile().includes(18))).toBe(true);
+    await expect.poll(() => page.evaluate(() => window.__failedSnapshotSocket.readyState)).toBe(3);
+    const cursorState = await page.evaluate(() => ({
+      cursor: localStorage.getItem('squid-realtime-v1-cursor'),
+      acked18: window.__sentWebSocketFrames.some(frame =>
+        frame.type === 'ack' && Number(frame.payload?.event_id) === 18),
+    }));
+    expect(cursorState).toEqual({ cursor: null, acked18: false });
+
+    await page.evaluate(() => {
+      historyReconciler.reconcileDirtyIds = window.__originalReconcileDirtyIds;
+    });
+    await page.waitForFunction(() =>
+      window.__webSocket !== window.__failedSnapshotSocket && window.__webSocket?.readyState === 1);
+    await page.evaluate(() => {
+      window.__webSocket.receive({
+        v: 1, type: 'snapshot', event_id: 19, payload: { conversations: [{ messages: [
+          { id: 18, role: 'assistant', status: 'pending', content: '' },
+        ] }] },
+      });
+    });
+    await expect(page.locator('.msg-thinking.history-item[data-msg-id="18"]')).toHaveCount(1);
+    await expect.poll(() => page.evaluate(() => ({
+      cursor: localStorage.getItem('squid-realtime-v1-cursor'),
+      acked19: window.__sentWebSocketFrames.some(frame =>
+        frame.type === 'ack' && Number(frame.payload?.event_id) === 19),
+    }))).toEqual({ cursor: '19', acked19: true });
+  });
+
+  test('a rejected snapshot store transaction is not persisted or acknowledged', async ({ page }) => {
+    await page.reload();
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+
+    await page.evaluate(() => {
+      window.__failedSnapshotSocket = window.__webSocket;
+      window.__originalInstallSnapshot = window.__transcriptStore.installSnapshot;
+      window.__transcriptStore.installSnapshot = () => ({
+        ok: false, error: 'forced transaction failure', dirty: [],
+      });
+      window.__webSocket.receive({
+        v: 1, type: 'snapshot', event_id: 27, payload: { conversations: [] },
+      });
+    });
+
+    await expect.poll(() => page.evaluate(() => window.__failedSnapshotSocket.readyState)).toBe(3);
+    const cursorState = await page.evaluate(() => ({
+      cursor: localStorage.getItem('squid-realtime-v1-cursor'),
+      acked27: window.__sentWebSocketFrames.some(frame =>
+        frame.type === 'ack' && Number(frame.payload?.event_id) === 27),
+    }));
+    expect(cursorState).toEqual({ cursor: null, acked27: false });
+  });
+
+  test('a cursor-reset WS snapshot moves the store and persisted cursor to its lower watermark', async ({ page }) => {
+    await page.reload();
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'snapshot', event_id: 30, payload: { conversations: [] },
+    }));
+    await expect.poll(() => page.evaluate(() =>
+      localStorage.getItem('squid-realtime-v1-cursor'))).toBe('30');
+
+    await page.evaluate(() => window.__webSocket.receive({
+      v: 1, type: 'snapshot', event_id: 5,
+      payload: { cursor_reset: true, conversations: [] },
+    }));
+    await expect.poll(() => page.evaluate(() => ({
+      storeCursor: window.__transcriptStore.getLastAppliedEventId(),
+      persistedCursor: localStorage.getItem('squid-realtime-v1-cursor'),
+      acked5: window.__sentWebSocketFrames.some(frame =>
+        frame.type === 'ack' && Number(frame.payload?.event_id) === 5),
+    }))).toEqual({ storeCursor: 5, persistedCursor: '5', acked5: true });
   });
 
   // ADR-0041 Stage 3 prerequisite: a recovered pending row (e.g. after a

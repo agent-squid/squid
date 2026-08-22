@@ -5067,6 +5067,9 @@ authPanelRetryBtn.addEventListener('click', retryAuthSession);
 agentsAuthPanelRetryBtn.addEventListener('click', retryAuthSession);
 agentsAuthPanelRestartBtn.addEventListener('click', () => { void restartServer(); });
 
+const liveQueuedTurnHandlers = new Map();
+const liveQueuedTurnKey = (topic, position) => `${topic}\0${Number(position)}`;
+
 async function sendMessage(text, opts = {}) {
   const source = opts.source === 'workflow' || opts.source === 'diff_viewer' ? opts.source : 'human';
   const updateComposerRoute = source === 'human' && opts.updateComposerRoute !== false;
@@ -5212,10 +5215,7 @@ async function sendMessage(text, opts = {}) {
           body: JSON.stringify({ command: 'deq', topic, pos: queuePosition }),
         });
         if (!response.ok) throw new Error('Unable to remove queued prompt.');
-        userAborted = true;
-        turnStatus = 'cancelled';
-        controller.abort();
-        renderCancelledThinking('Dequeued.');
+        markDequeued();
         pollProcs();
       } else if (msgId) {
         await cancelRealtimeMessage(msgId, topic, agent);
@@ -5439,6 +5439,29 @@ async function sendMessage(text, opts = {}) {
   let liveSessionTurnCount = 0;
   const liveToolEvents = [];
   const controller = new AbortController();
+  let queuedTurnHandlerKey = null;
+
+  function unregisterQueuedTurnHandler() {
+    if (!queuedTurnHandlerKey) return;
+    liveQueuedTurnHandlers.delete(queuedTurnHandlerKey);
+    queuedTurnHandlerKey = null;
+  }
+
+  function markDequeued() {
+    unregisterQueuedTurnHandler();
+    queuePosition = null;
+    userAborted = true;
+    turnStatus = 'cancelled';
+    controller.abort();
+    renderCancelledThinking('Dequeued.');
+  }
+
+  function registerQueuedTurn(position) {
+    unregisterQueuedTurnHandler();
+    queuePosition = Number(position);
+    queuedTurnHandlerKey = liveQueuedTurnKey(topic, queuePosition);
+    liveQueuedTurnHandlers.set(queuedTurnHandlerKey, markDequeued);
+  }
 
   async function finalizeQuotaTracking() {
     quotaTurn.msgId = msgId;
@@ -6105,6 +6128,7 @@ async function sendMessage(text, opts = {}) {
                 });
               }
               if (meta.msg_id) {
+                unregisterQueuedTurnHandler();
                 queuePosition = null;
                 attachMsgId(meta.msg_id);
                 if (!nativeShell) setCtxLabel(liveCtxSpan, adhoc);
@@ -6129,7 +6153,7 @@ async function sendMessage(text, opts = {}) {
           } else if (eventName === 'queued') {
             try {
               const info = JSON.parse(data);
-              queuePosition = info.position;
+              registerQueuedTurn(info.position);
               shellWaitingQueued = true;
               killBtn.style.display = '';
               setThinkingText(`#${info.topic} · queued — position ${info.position}`);
@@ -6141,6 +6165,7 @@ async function sendMessage(text, opts = {}) {
           } else if (eventName === 'processing') {
             try {
               const info = JSON.parse(data);
+              unregisterQueuedTurnHandler();
               queuePosition = null;
               shellWaitingQueued = false;
               setThinkingText(`#${info.topic || topic} · processing…`);
@@ -6382,6 +6407,10 @@ async function sendMessage(text, opts = {}) {
       }
     }
   } finally {
+    // A transport can close while the backend item is still queued, leaving
+    // the frozen queue-status row visible. Keep its dequeue registration
+    // alive so the status popup can still terminate that exact row.
+    if (queuePosition === null) unregisterQueuedTurnHandler();
     releaseProcPoll();
     if (!detachedPolling) stopStatusFallback();
     if (!thinkingFrozen) {
@@ -8382,6 +8411,7 @@ const realtimeV1 = (() => {
   let globalEnabled = false;
   let onDiscover = null;
   let onAuthFrame = null;
+  let inboundFrameChain = Promise.resolve();
   // request_id of the auth.start command for the currently-open auth panel,
   // once it has resolved ok — kept out of `commands`' normal delete-on-resolve
   // path (see the command.result handler below) so a reconnect resends the
@@ -8444,11 +8474,12 @@ const realtimeV1 = (() => {
   // session_id/tool context/etc.); that's Stage 4, same split
   // historyItemToStoreRows documents.
   const shadowInstallSnapshot = frame => {
-    if (!transcriptStore) return;
+    if (!transcriptStore) return { ok: false, error: 'transcript store unavailable', dirty: [] };
     const rows = [];
     for (const conversation of frame.payload?.conversations || []) {
       for (const message of conversation.messages || []) {
         if (message.id == null) continue;
+        const existingRaw = transcriptStore.getMessage(message.id)?.raw;
         const row = {
           msg_id: message.id,
           role: message.role,
@@ -8465,7 +8496,14 @@ const realtimeV1 = (() => {
           // field-by-field reconstruction" policy as historyItemToStoreRows;
           // turn.raw only ever reads the assistant row's own raw, so setting
           // it here on a user row is harmless, not just inert.
-          raw: message,
+          // Later snapshots are sparse compared with the denormalized
+          // /status row used to render a response header. Preserve enriched
+          // display fields such as `prompt` while keeping every field present
+          // on this snapshot authoritative. Without this merge, a routine
+          // snapshot re-render removes the prompt from completed headers.
+          raw: existingRaw && typeof existingRaw === 'object'
+            ? { ...existingRaw, ...message }
+            : message,
         };
         // Realtime snapshot rows do not carry the run_events-backed stats
         // attached by history endpoints. Omission must preserve any stats the
@@ -8475,20 +8513,28 @@ const realtimeV1 = (() => {
         rows.push(row);
       }
     }
-    if (!rows.length) return;
-    const result = transcriptStore.installSnapshot({ messages: rows }, frame.event_id);
+    const result = transcriptStore.installSnapshot(
+      { messages: rows },
+      frame.event_id,
+      { resetCursor: frame.payload?.cursor_reset === true },
+    );
     if (!result.ok) console.error('[transcript-store] shadow installSnapshot failed:', result.error);
     if (!historyReconciler) transcriptStore.clearReconciled(result.dirty);
+    return result;
   };
 
-  const dispatchSnapshot = frame => {
+  const dispatchSnapshot = async frame => {
     const resetCursor = frame.payload?.cursor_reset === true;
-    if (Number(frame.event_id || 0) < cursor && !resetCursor) return;
+    if (Number(frame.event_id || 0) < cursor && !resetCursor) return true;
+    const storeResult = shadowInstallSnapshot(frame);
+    if (!storeResult.ok) return false;
     applyRealtimeProcessState(frame.payload?.processes, frame.payload?.queue);
-    shadowInstallSnapshot(frame);
+    const discoveries = [];
     for (const conversation of frame.payload?.conversations || []) {
       for (const message of conversation.messages || []) {
-        if (message.role === 'assistant') onDiscover?.(message, { reconcile: true });
+        if (message.role === 'assistant' && onDiscover) {
+          discoveries.push(onDiscover(message, { reconcile: true, registryOnly: true }));
+        }
         const watch = watches.get(Number(message.id));
         if (watch) {
           watch.runSeq = resetCursor
@@ -8498,7 +8544,10 @@ const realtimeV1 = (() => {
         }
       }
     }
+    const discoveryResults = await Promise.all(discoveries);
+    if (discoveryResults.some(result => result === false)) return false;
     markApplied(frame, { resetCursor });
+    return true;
   };
 
   // ADR-0041 Stage 2 (producer 3, WS lifecycle events): mirrors
@@ -8683,8 +8732,21 @@ const realtimeV1 = (() => {
       else if (frame.type === 'error' && frame.request_id && commands.has(frame.request_id)) {
         rejectCommand(frame.request_id, frame.payload?.code || 'WebSocket command failed', true);
       }
-      else if (frame.type === 'snapshot') dispatchSnapshot(frame);
-      else if (frame.event_id) dispatchEvent(frame);
+      else if (frame.type === 'snapshot' || frame.event_id) {
+        inboundFrameChain = inboundFrameChain.then(async () => {
+          if (socket !== connectingSocket || connectingSocket.readyState !== WebSocket.OPEN) return;
+          const applied = frame.type === 'snapshot'
+            ? await dispatchSnapshot(frame)
+            : (dispatchEvent(frame), true);
+          if (!applied && socket === connectingSocket) {
+            // Keep the persisted cursor behind the failed render and force a
+            // fresh bounded snapshot. Queued later events must not advance an
+            // ACK over the unreconciled turn.
+            needsSnapshot = true;
+            connectingSocket.close();
+          }
+        }).catch(error => console.error('[realtime] frame dispatch failed:', error));
+      }
       else if (frame.type === 'auth.output' || frame.type === 'auth.done') {
         onAuthFrame?.(frame);
       }
@@ -8889,61 +8951,88 @@ async function cancelRealtimeMessage(msgId, topic = 'default', agent = null) {
   return true;
 }
 
-const realtimeDiscoveries = new Set();
+const realtimeDiscoveries = new Map();
 
-async function discoverRealtimeTurn(message, { reconcile = false } = {}) {
+async function discoverRealtimeTurn(message, { reconcile = false, registryOnly = false } = {}) {
   const msgId = Number(message.id);
-  if (!Number.isFinite(msgId) || messages.querySelector(`[data-msg-id="${msgId}"]`) || realtimeDiscoveries.has(msgId)) return;
-  realtimeDiscoveries.add(msgId);
-  try {
-    let item = null;
-    for (const delay of [0, 150, 500]) {
-      if (delay) await new Promise(resolve => setTimeout(resolve, delay));
-      if (messages.querySelector(`[data-msg-id="${msgId}"]`)) return;
-      try {
-        const res = await fetch(`/chat/${msgId}/status`);
-        if (res.ok) {
-          item = await res.json();
-          break;
-        }
-      } catch {}
-    }
-    if (!item) return;
-    if (messages.querySelector(`[data-msg-id="${msgId}"]`) || !shouldShowNewResponse(item)) return;
-    shadowAttachRealtimeRow(item);
-    if (item.status === 'pending') {
-      // Snapshot and WS-lifecycle discovery hand initial pending construction
-      // to the registry. Their store adapters already dirtied this id, and
-      // attachRaw above enriched its raw row with the denormalized /status
-      // fields makeWipBubble needs. Reconcile only this id so unrelated
-      // realtime rows still pass their own visibility checks.
-      // If the targeted handoff cannot build/mount the group, retain the
-      // established direct-DOM path as the per-producer rollback fallback.
-      if (reconcile && historyReconciler) {
+  if (!Number.isFinite(msgId)) return true;
+  if (realtimeDiscoveries.has(msgId)) return realtimeDiscoveries.get(msgId);
+  const discovery = (async () => {
+    try {
+      if (messages.querySelector(`[data-msg-id="${msgId}"]`)) {
+        if (!registryOnly || !historyReconciler) return true;
         const result = historyReconciler.reconcileDirtyIds([msgId]);
-        const group = historyReconciler.getGroup(msgId);
-        if (result.ok && result.reconciledIds.includes(msgId) && group?.pendingRoot?.isConnected) {
-          if (isAtBottom()) scrollToBottom();
-          return;
-        }
-        historyReconciler.forget(msgId);
+        return result.ok && !result.failedIds.includes(msgId);
       }
-      const bubble = insertPendingHistoryItem(item);
-      reconnectPendingItem(item, bubble);
-      // The transport watcher still owns this bubble's content and teardown,
-      // but the reconciler must register the already-mounted node so its
-      // eventual terminal transition can replace it atomically.
-      historyReconciler?.reconcileDirtyIds([msgId]);
-    } else if (item.content || item.context
-        || item.source === 'shell' || String(item.prompt || '').trimStart().startsWith('!')
-        || ['error', 'cancelled'].includes(item.status)) {
-      insertCompletedHistoryItem(item, { reconcile });
-      if (item.agent && !item.adhoc) refreshComposerSessionCount(item.topic || 'default', item.agent);
+      let item = null;
+      for (const delay of [0, 150, 500]) {
+        if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+        if (messages.querySelector(`[data-msg-id="${msgId}"]`)) return true;
+        try {
+          const res = await fetch(`/chat/${msgId}/status`);
+          if (res.ok) {
+            item = await res.json();
+            break;
+          }
+        } catch {}
+      }
+      if (!item) return false;
+      if (messages.querySelector(`[data-msg-id="${msgId}"]`)) return true;
+      if (!shouldShowNewResponse(item)) {
+        if (registryOnly) transcriptStore?.clearReconciled([msgId]);
+        return true;
+      }
+      shadowAttachRealtimeRow(item);
+      if (item.status === 'pending') {
+        // Snapshot and WS-lifecycle discovery hand initial pending
+        // construction to the registry. Their store adapters already dirtied
+        // this id, and attachRaw above enriched its raw row with the
+        // denormalized /status fields makeWipBubble needs. Reconcile only this
+        // id so unrelated realtime rows still pass their own visibility checks.
+        // Snapshot discovery is registry-only now that Producer 2's rollback
+        // window is complete. Lifecycle discovery retains its fallback.
+        if (reconcile && historyReconciler) {
+          const result = historyReconciler.reconcileDirtyIds([msgId]);
+          const group = historyReconciler.getGroup(msgId);
+          if (result.ok && result.reconciledIds.includes(msgId) && group?.pendingRoot?.isConnected) {
+            if (isAtBottom()) scrollToBottom();
+            return true;
+          }
+          if (registryOnly) return false;
+          historyReconciler.forget(msgId);
+        }
+        const bubble = insertPendingHistoryItem(item);
+        reconnectPendingItem(item, bubble);
+        // The transport watcher still owns this bubble's content and teardown,
+        // but the reconciler must register the already-mounted node so its
+        // eventual terminal transition can replace it atomically.
+        historyReconciler?.reconcileDirtyIds([msgId]);
+      } else if (item.content || item.context
+          || item.source === 'shell' || String(item.prompt || '').trimStart().startsWith('!')
+          || ['error', 'cancelled'].includes(item.status)) {
+        if (registryOnly && historyReconciler) {
+          const result = historyReconciler.reconcileDirtyIds([msgId]);
+          const completedRoot = historyReconciler.getGroup(msgId)?.nodes.find(node =>
+            node.matches?.('.msg.assistant.history-item:not(.msg-thinking)'));
+          if (!result.ok || !result.reconciledIds.includes(msgId) || !completedRoot?.isConnected) return false;
+          if (item.agent && !item.adhoc) refreshComposerSessionCount(item.topic || 'default', item.agent);
+          if (isAtBottom()) scrollToBottom();
+          return true;
+        }
+        insertCompletedHistoryItem(item, { reconcile });
+        if (item.agent && !item.adhoc) refreshComposerSessionCount(item.topic || 'default', item.agent);
+      }
+      if (isAtBottom()) scrollToBottom();
+      if (registryOnly) transcriptStore?.clearReconciled([msgId]);
+      return true;
+    } catch {
+      return false;
     }
-    if (isAtBottom()) scrollToBottom();
-  } catch {
-  } finally {
-    realtimeDiscoveries.delete(msgId);
+  })();
+  realtimeDiscoveries.set(msgId, discovery);
+  try { return await discovery; }
+  finally {
+    if (realtimeDiscoveries.get(msgId) === discovery) realtimeDiscoveries.delete(msgId);
   }
 }
 
@@ -12571,10 +12660,17 @@ function renderProcPopup(processes, queued) {
     btn.addEventListener('click', async e => {
       e.stopPropagation();
       btn.disabled = true; btn.textContent = '…';
-      await fetch('/cmd', {
+      const position = parseInt(btn.dataset.pos, 10);
+      const response = await fetch('/cmd', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: 'deq', topic: btn.dataset.topic, pos: parseInt(btn.dataset.pos) }),
+        body: JSON.stringify({ command: 'deq', topic: btn.dataset.topic, pos: position }),
       });
+      if (!response.ok) {
+        btn.disabled = false;
+        btn.textContent = 'Retry';
+        return;
+      }
+      liveQueuedTurnHandlers.get(liveQueuedTurnKey(btn.dataset.topic, position))?.();
       await pollProcs();
     });
   });

@@ -536,6 +536,34 @@ test('websocket transport cancels a running chat without POST /cmd', async ({ pa
   }))).toEqual({ type: 'chat.cancel', hasRequestId: true, msgId: 85 });
 });
 
+test('status popup dequeue marks the matching live queued turn as Dequeued', async ({ page }) => {
+  await mockBackend(page);
+  await page.route('**/processes', route => route.fulfill({ json: [] }));
+  await page.route('**/queue', route => route.fulfill({ json: [{
+    topic: 'squid', agent: 'claude', position: 2, prompt_preview: 'queued from popup',
+  }] }));
+  await page.route('**/cmd', async route => {
+    const body = route.request().postDataJSON();
+    expect(body).toMatchObject({ command: 'deq', topic: 'squid', pos: 2 });
+    await page.waitForTimeout(100);
+    await route.fulfill({ json: { ok: true } });
+  });
+  await page.route('**/chat', route => route.fulfill({
+    status: 200,
+    headers: SSE_HEADERS,
+    body: sse({ event: 'queued', data: { topic: 'squid', position: 2 } }),
+  }));
+
+  await page.goto('/');
+  await sendMsg(page, '#squid@claude queued from popup');
+  const thinking = page.locator(THINKING).filter({ hasText: 'queued from popup' });
+  await expect(thinking).toContainText('#squid · queued — position 2');
+  await page.locator('#proc-status').click();
+  await page.locator('#proc-status-popup .proc-deq-btn[data-topic="squid"][data-pos="2"]').click();
+  await expect(thinking).toContainText('Dequeued.');
+  await expect(thinking).toHaveClass(/msg-thinking-done/);
+});
+
 test('auto transport falls back to POST /cmd when websocket cancel is unavailable', async ({ page }) => {
   await page.addInitScript(() => {
     class FailedWebSocket {
