@@ -1139,9 +1139,9 @@ test.describe('response bubble', () => {
     await sendMsg(page, 'hi');
     await expect(page.locator('.msg.assistant.msg-thinking[data-msg-id="7"]')).toBeAttached();
 
-    // Complete msg 6 *after* msg 7 has started, so its completed response is
-    // inserted below the still-live msg 7 group and the two user bubbles end up
-    // adjacent with no assistant element between them.
+    // Complete msg 6 *after* msg 7 has started. The reconciler immediately
+    // places the completed group before the newer live group and must retain
+    // that order across a history-filter round trip.
     await page.evaluate(() => {
       window.__mockWs.receive({ v: 1, type: 'chat.text', event_id: 1, msg_id: 6, run_seq: 0, payload: { text: 'Done 6' } });
       window.__mockWs.receive({ v: 1, type: 'chat.done', event_id: 2, msg_id: 6, run_seq: 1, payload: {} });
@@ -1151,7 +1151,7 @@ test.describe('response bubble', () => {
     const preOrder = await page.locator('#messages > .msg.assistant[data-msg-id]').evaluateAll(
       nodes => nodes.map(node => Number(node.dataset.msgId)),
     );
-    expect(preOrder).toEqual([7, 6]);
+    expect(preOrder).toEqual([6, 7]);
 
     exposeHistory = true;
     await page.evaluate(() => applyHistoryFilter({ topic: 'squid', agent: null, adhoc: null, flow_route: null }));
@@ -4279,8 +4279,8 @@ test('completing the unlock (exit 0) auto-retries the original cursor login', as
   }, KEYCHAIN_LOCKED_OUTPUT);
   await page.click('#auth-panel-unlock-btn');
 
-  await page.waitForFunction(() => window.__authFrames.length === 2);
-  const unlockStart = await page.evaluate(() => window.__authFrames[1]);
+  await page.waitForFunction(() => window.__authFrames.some(frame => frame.payload?.mode === 'unlock'));
+  const unlockStart = await page.evaluate(() => window.__authFrames.find(frame => frame.payload?.mode === 'unlock'));
   expect(unlockStart.payload.mode).toBe('unlock');
   await expect(page.locator('#auth-panel-title')).toHaveText('Unlock macOS keychain');
 
@@ -4289,8 +4289,8 @@ test('completing the unlock (exit 0) auto-retries the original cursor login', as
   await page.evaluate(() => {
     window.__ws.receive({ v: 1, type: 'auth.done', payload: { session_id: 'sess-2', returncode: 0 } });
   });
-  await page.waitForFunction(() => window.__authFrames.length === 3);
-  const retryStart = await page.evaluate(() => window.__authFrames[2]);
+  await page.waitForFunction(() => window.__authFrames.filter(frame => frame.payload?.mode === 'login').length >= 2);
+  const retryStart = await page.evaluate(() => window.__authFrames.filter(frame => frame.payload?.mode === 'login').at(-1));
   expect(retryStart.payload).toMatchObject({ harness: 'cursor', mode: 'login' });
   await expect(page.locator('#auth-panel')).toHaveClass(/open/);
 });
@@ -4343,7 +4343,7 @@ test('server unlock_requires_local refusal is surfaced without a password prompt
   }, KEYCHAIN_LOCKED_OUTPUT);
   await page.click('#auth-panel-unlock-btn');
 
-  await page.waitForFunction(() => window.__authFrames.length === 2);
+  await page.waitForFunction(() => window.__authFrames.some(frame => frame.payload?.mode === 'unlock'));
   // The refusal detail goes to the terminal body; the panel title stays a
   // short, stable label instead of echoing the full message.
   await expect(page.locator('#auth-panel-title')).toHaveText('Failed to start');

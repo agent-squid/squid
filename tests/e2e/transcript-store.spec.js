@@ -1055,6 +1055,43 @@ test.describe('SSE producer (shadow mode)', () => {
     await expect(page.locator('.msg-thinking[data-msg-id="52"]')).toHaveCount(0);
   });
 
+  test('a persisted primary SSE terminal error transitions through the registered handoff', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200,
+      headers: {
+        'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no',
+        'X-Squid-Msg-Id': '53',
+      },
+      body: 'id: 1\nevent: error\ndata: Backend unavailable\n\n',
+    }));
+    let statusCalls = 0;
+    await page.route('**/chat/53/status', r => {
+      statusCalls++;
+      return r.fulfill({ json: {
+        id: 53, role: 'assistant', status: 'error', topic: 'default', agent: 'claude',
+        prompt: 'hi', content: 'Backend unavailable', completed_at: '2026-08-22T12:00:00Z',
+      }});
+    });
+
+    await page.fill('#input', 'hi');
+    await page.keyboard.press('Enter');
+
+    const completed = page.locator('.msg.assistant.history-item[data-msg-id="53"]');
+    await expect(completed).toHaveCount(1);
+    await expect(completed).toContainText('Backend unavailable');
+    await expect(page.locator('.msg-thinking[data-msg-id="53"]')).toHaveCount(0);
+    expect(statusCalls).toBe(1);
+    const ownership = await page.evaluate(() => {
+      const group = historyReconciler?.getGroup(53);
+      return {
+        registered: !!group,
+        pending: !!group?.pendingRoot,
+        completed: group?.nodes?.some(node => node.matches?.('.msg.assistant.history-item[data-msg-id="53"]')) ?? false,
+      };
+    });
+    expect(ownership).toEqual({ registered: true, pending: false, completed: true });
+  });
+
   test('a multi-line text delta on the primary POST /chat path is not truncated in the store (sse_chunk can split one delta across several data: lines sharing one id:)', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200,

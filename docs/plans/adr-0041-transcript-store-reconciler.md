@@ -1718,10 +1718,22 @@ terminal row. Producer/store tests pass 46/46 and recovered-pending tests pass
 21/21; one unrelated WS Flow attachment test passed on retry in the final
 re-run. PWA cache bumped to `v20260822-013`.
 
-1. **Producer 4 terminal-error parity.** Move the safely persisted primary
-   POST/SSE terminal-error case through the registered handoff while retaining
-   interrupted/partial-response behavior as its explicit fallback. Do not move
-   watcher-owned preview mutation yet.
+### 2026-08-22: Producer 4 persisted terminal errors use the registered handoff
+
+A primary SSE error now uses the atomic registered transition only when it has
+no streamed partial content, narrative, or tool trace and `/status` confirms a
+non-empty persisted terminal error within one second. The reconciler owns the
+completed error range and the composer closure is frozen so it cannot start a
+second recovery owner. Partial output, status-bearing failures, empty persisted
+errors, slow persistence, and failed reconciliation retain the established
+frozen-thinking/error/poll fallback unchanged. `acceptStatus` keeps that safety
+predicate at the authoritative handoff boundary. Producer/store tests pass
+47/47; all 10 response-bubble error tests pass. PWA cache bumped to
+`v20260822-014`.
+
+1. **Producer 4 final parity run.** Run the broader primary/reconnect SSE chat
+   matrix before deleting any fallback; watcher-owned preview mutation remains
+   intentionally out of this terminal cutover.
 2. **Retire fallbacks only after parity.** Remove per-producer direct pending/
    completion fallbacks once their failure-path tests pass with the registry as
    sole owner. Then remove producer 1's `?renderer=dom` escape hatch and dead

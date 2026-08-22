@@ -5973,6 +5973,7 @@ async function sendMessage(text, opts = {}) {
           content: '',
           status: 'pending',
         }, thinkingBubble, {
+          revealOnComplete: true,
           onStored: data => {
             markSessionContextDelivered(data.session_id || data.stats?.session_id || null);
             // The WebSocket completion path returns before sendMessage's SSE
@@ -6259,7 +6260,7 @@ async function sendMessage(text, opts = {}) {
                   { id: msgId, topic, agent: resolvedAgent || agent, adhoc },
                   thinkingBubble,
                   null,
-                  { timeoutMs: 1000 },
+                  { timeoutMs: 1000, revealOnComplete: true },
                 )
               : false;
             if (!completedByReconciler) {
@@ -6316,22 +6317,44 @@ async function sendMessage(text, opts = {}) {
             eventName = null;
 
           } else if (eventName === 'error') {
-            shadowInstallSseCompletion(msgId, { clearAfterInstall: true });
+            const errLine = data.trim();
+            const canReconcileStoredError = msgId && !raw && !firstDataReceived
+              && !statusBuf.trim() && !liveToolEvents.length;
+            const errorByReconciler = canReconcileStoredError
+              ? await replacePendingWithStoredItem(
+                  { id: msgId, topic, agent: resolvedAgent || agent, adhoc },
+                  thinkingBubble,
+                  null,
+                  {
+                    timeoutMs: 1000,
+                    acceptStatus: stored => stored.status === 'error' && !!String(stored.content || '').trim(),
+                  },
+                )
+              : false;
             turnStatus = 'error';
             stopStatusFallback();
-            const errLine = data.trim();
-            if (raw || firstDataReceived) {
-              parkInterruptedPartial(null, errLine || 'Connection interrupted.');
-            } else {
-              discardInterruptedStatusBubble(errLine) || freezeThinking();
-              showError(errLine);
-            }
-            if (msgId && !userAborted) {
-              detachedPolling = true;
-              startStatusFallback(msgId);
-            } else {
+            if (errorByReconciler) {
+              // The registry removed the pending root and rendered the
+              // persisted error. Prevent finally{} from treating that removal
+              // as an interrupted stream and starting another recovery owner.
+              thinkingFrozen = true;
               completedFromStatus = true;
               completionRendered = true;
+            } else {
+              shadowInstallSseCompletion(msgId, { clearAfterInstall: true });
+              if (raw || firstDataReceived) {
+                parkInterruptedPartial(null, errLine || 'Connection interrupted.');
+              } else {
+                discardInterruptedStatusBubble(errLine) || freezeThinking();
+                showError(errLine);
+              }
+              if (msgId && !userAborted) {
+                detachedPolling = true;
+                startStatusFallback(msgId);
+              } else {
+                completedFromStatus = true;
+                completionRendered = true;
+              }
             }
             eventName = null;
 
@@ -8249,7 +8272,12 @@ function insertPendingHistoryItem(item) {
   return bubble;
 }
 
-async function replacePendingWithStoredItem(item, wipBubble, onStored = null, { timeoutMs = 5000, statusData = null } = {}) {
+async function replacePendingWithStoredItem(item, wipBubble, onStored = null, {
+  timeoutMs = 5000,
+  statusData = null,
+  acceptStatus = null,
+  revealOnComplete = false,
+} = {}) {
   let fetchTimeout = null;
   try {
     let data = statusData;
@@ -8262,6 +8290,7 @@ async function replacePendingWithStoredItem(item, wipBubble, onStored = null, { 
     }
     if (!wipBubble.parentNode) return false;
     if (data.status !== 'done' && data.status !== 'error' && data.status !== 'cancelled') return false;
+    if (acceptStatus && !acceptStatus(data)) return false;
     onStored?.(data);
     const registeredPending = historyReconciler?.getGroup(item.id);
     if (registeredPending?.pendingRoot === wipBubble && shouldShowNewResponse(data)) {
@@ -8287,7 +8316,12 @@ async function replacePendingWithStoredItem(item, wipBubble, onStored = null, { 
       // decision to this id rather than the aggregate result.
       if (result.reconciledIds.includes(Number(item.id))) {
         refreshDateDividers();
-        if (wasAtBottom) scrollToBottom();
+        if (wasAtBottom || revealOnComplete) {
+          const completedBubble = historyReconciler.getGroup(item.id)?.nodes
+            .find(node => node.matches?.('.msg.assistant.history-item'));
+          if (completedBubble) scrollToRevealBubble(completedBubble);
+          else scrollToBottom();
+        }
         else if (visualAnchor?.isConnected && visualAnchorTop != null) {
           messages.scrollTop += visualAnchor.getBoundingClientRect().top - visualAnchorTop;
         }
@@ -8996,7 +9030,13 @@ function watchFlowRun(flowRunId, afterId, route = null) {
   });
 }
 
-async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStored = null, onProcessing = null, onMeta = null } = {}) {
+async function reconnectPendingItem(item, wipBubble, {
+  forceSse = false,
+  onStored = null,
+  onProcessing = null,
+  onMeta = null,
+  revealOnComplete = false,
+} = {}) {
   const transportMode = forceSse ? 'sse' : await realtimeTransportMode;
   if (!wipBubble.isConnected) return;
   const useWebSocket = transportMode !== 'sse' && !!realtimeV1;
@@ -9087,7 +9127,7 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
         if (transportMode === 'auto' && window.EventSource) {
           stop();
           pendingPollTimers.delete(wipBubble);
-          reconnectPendingItem(item, wipBubble, { forceSse: true, onStored });
+          reconnectPendingItem(item, wipBubble, { forceSse: true, onStored, revealOnComplete });
         } else {
           statusBuf = 'WebSocket connection failed; retrying…';
           updatePreview();
@@ -9109,7 +9149,7 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
       finishing = true;
       stop();
       pendingPollTimers.delete(wipBubble);
-      await replacePendingWithStoredItem(item, wipBubble, onStored);
+      await replacePendingWithStoredItem(item, wipBubble, onStored, { revealOnComplete });
     }
     pendingPollTimers.set(wipBubble, stop);
     return;
