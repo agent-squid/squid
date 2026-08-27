@@ -17,12 +17,21 @@ from .resolve import agent_ref_for_storage, split_agent_ref
 # Fresh-install seed models, keyed by harness — only where the harness's CLI
 # default isn't the model we want new users to land on. Pi's own CLI default
 # (nvidia/nemotron-3-ultra-550b-a55b) works, but deepseek-ai/deepseek-v4-pro
-# is the strongest free model NVIDIA NIM currently hosts.
+# is the strongest free model NVIDIA NIM currently hosts. OpenCode's CLI
+# default is not stable enough for a durable seed, so pin its current free
+# default explicitly too.
 _SEED_DEFAULT_MODEL_BY_HARNESS: dict[str, str] = {
+    "opencode": "opencode/big-pickle",
     "pi": "deepseek-ai/deepseek-v4-pro",
 }
 _SEED_DEFAULT_PROVIDER_BY_HARNESS: dict[str, str] = {
+    "opencode": "opencode",
     "pi": "nvidia",
+}
+_RETIRED_OPENCODE_MODELS: dict[str, str] = {
+    "big-pickle": "opencode/big-pickle",
+    "deepseek-v4-flash-free": "opencode/big-pickle",
+    "opencode/deepseek-v4-flash-free": "opencode/big-pickle",
 }
 
 # Reviewer-persona agents, one per harness — cwd points at the shared
@@ -1057,6 +1066,20 @@ def init_db() -> None:
         if "home_mode" not in agent_columns:
             conn.execute("ALTER TABLE agents ADD COLUMN home_mode TEXT NOT NULL DEFAULT 'user_home'")
         has_legacy_backend = "backend" in agent_columns
+        conn.execute(
+            """UPDATE agents
+               SET provider = 'opencode', model = 'opencode/big-pickle'
+               WHERE harness = 'opencode'
+                 AND name IN ('opencode', 'operev')
+                 AND (provider IS NULL OR provider = '' OR provider = 'opencode')
+                 AND (model IS NULL OR model = '')"""
+        )
+        for retired_model, replacement_model in _RETIRED_OPENCODE_MODELS.items():
+            conn.execute(
+                """UPDATE agents SET model = ?
+                   WHERE harness = 'opencode' AND provider = 'opencode' AND model = ?""",
+                (replacement_model, retired_model),
+            )
         # Seed one default agent per installed harness (INSERT OR IGNORE — never overwrites user edits)
         for harness in sorted(SUPPORTED_HARNESSES):
             if harness != "claudecode" and is_installed(harness):
@@ -3072,9 +3095,6 @@ def _stats_payload_metric_value(stats: dict, metric: str) -> Optional[float]:
         return value if isinstance(value, (int, float)) else None
     if metric == "tokens_out":
         return num("output_tokens")
-    if metric == "quota":
-        value = stats.get("quota_delta")
-        return value if isinstance(value, (int, float)) else None
     if metric == "duration":
         value = stats.get("duration_ms")
         return (value / 1000) if isinstance(value, (int, float)) else None
@@ -3212,6 +3232,11 @@ def _stats_add_payload_to_aggregate(
             continue
         if metric == "marked_bad":
             value = 1 if marked_bad else 0
+        elif metric == "quota":
+            # Quota deltas normally land on the persisted message after the
+            # run-event stats payload. Use the same fallback-aware lookup as
+            # the scalar aggregate instead of consulting only that payload.
+            value = _stats_payload_quota_delta(stats, quota_delta)
         else:
             value = _stats_payload_metric_value(stats, metric)
         if value is not None:

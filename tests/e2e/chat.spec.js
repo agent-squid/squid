@@ -2460,6 +2460,23 @@ test.describe('response bubble', () => {
     expect(order[0]).toContain('auth-login-btn');
     await look(page);  // pause — observe: login button leads the error text
   });
+
+  test('locked Cursor keychain error offers unlock instead of login', async ({ page }) => {
+    await page.route('**/chat', r => r.fulfill({
+      status: 200,
+      headers: SSE_HEADERS,
+      body: sse(META, {
+        event: 'error',
+        data: '[[cli-auth-required:cursor]] Error: Your macOS login keychain is locked.',
+      }),
+    }));
+
+    await sendMsg(page);
+    const authBtn = page.locator(RESPONSE).locator('.auth-login-btn');
+    await expect(authBtn).toHaveText('Unlock keychain');
+    await expect(authBtn).toHaveAttribute('data-auth-mode', 'unlock');
+    await expect(authBtn).not.toContainText('Log in');
+  });
 });
 
 test.describe('parallel responses', () => {
@@ -3627,6 +3644,7 @@ test.describe('recovered pending responses', () => {
 // ── CLI auth panel transport (ADR-0040 step 1) ───────────────────────────────
 
 test('websocket transport drives the auth panel over WS without POST /auth/session', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(() => {
     window.__authFrames = [];
     window.__ws = null;
@@ -3676,6 +3694,16 @@ test('websocket transport drives the auth panel over WS without POST /auth/sessi
   expect(start.payload).toMatchObject({ harness: 'claudecode', mode: 'login' });
   expect(typeof start.request_id).toBe('string');
   expect(start.request_id.length).toBeGreaterThan(0);
+
+  const keypad = page.locator('#auth-panel-keypad');
+  await expect(keypad).toBeVisible();
+  await keypad.getByRole('button', { name: 'Escape' }).click();
+  await keypad.getByRole('button', { name: 'Up arrow' }).click();
+  await keypad.getByRole('button', { name: 'Down arrow' }).click();
+  await keypad.getByRole('button', { name: 'Enter' }).click();
+  await expect.poll(() => page.evaluate(() => window.__authFrames
+    .filter(f => f.type === 'auth.input').map(f => f.payload.data)))
+    .toEqual(['\x1b', '\x1b[A', '\x1b[B', '\r']);
 
   // Streamed output + done arrive over the socket; a clean exit (0) on the
   // login flow closes the panel, which in turn cancels the WS session.

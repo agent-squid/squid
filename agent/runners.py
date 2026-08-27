@@ -2253,9 +2253,9 @@ async def run_pi(
             total_cache_write += int(usage.get("cacheWrite", 0) or 0)
             cost = usage.get("cost") or {}
             total_cost += float(cost.get("total", 0) or 0)
+            final_message = message
             if message.get("stopReason") != "stop":
                 continue
-            final_message = message
             content = message.get("content") or []
             text = "".join(
                 str(part.get("text", ""))
@@ -2266,6 +2266,11 @@ async def run_pi(
                 final_text_yielded = True
                 yield text
         elif t == "agent_end":
+            if event.get("willRetry"):
+                continue
+            stop_reason = final_message.get("stopReason")
+            if stop_reason in {"error", "aborted"}:
+                raise CLIError(final_message.get("errorMessage") or f"pi {stop_reason}")
             yield {
                 "_stats": {
                     "session_id": session_id,
@@ -2279,6 +2284,8 @@ async def run_pi(
                     "duration_ms": int(time.monotonic() * 1000 - start_ms),
                 }
             }
+        elif t == "auto_retry_end" and not event.get("success", False):
+            raise CLIError(event.get("finalError") or "pi error")
         elif t == "error":
             raise CLIError(event.get("message", "pi error"))
 

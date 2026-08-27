@@ -1819,7 +1819,7 @@ def test_agent_save_supports_legacy_backend_not_null_schema(tmp_path, monkeypatc
         "oc",
         "opencode",
         "opencode",
-        "opencode/deepseek-v4-flash-free",
+        "opencode/big-pickle",
         None,
     )
 
@@ -1828,7 +1828,7 @@ def test_agent_save_supports_legacy_backend_not_null_schema(tmp_path, monkeypatc
     assert saved["backend"] == "opencode:opencode"
     assert saved["harness"] == "opencode"
     assert saved["provider"] == "opencode"
-    assert saved["model"] == "opencode/deepseek-v4-flash-free"
+    assert saved["model"] == "opencode/big-pickle"
 
 
 def test_yaml_config_can_be_read_validated_and_atomically_updated(tmp_path):
@@ -1916,6 +1916,52 @@ def test_yaml_provider_update_refreshes_pi_models_config(tmp_path, monkeypatch):
         server._cfg.update(original_cfg)
         providers_mod.PROVIDERS.clear()
         providers_mod.PROVIDERS.update(original_providers)
+
+
+def test_startup_pi_models_sync_heals_stale_base_url(tmp_path, monkeypatch):
+    pi_models = tmp_path / "models.json"
+    pi_models.write_text(json.dumps({"providers": {"baseten": {
+        "baseUrl": "http://192.168.0.7:8080",
+        "api": "openai-completions",
+        "apiKey": "$SQUID_PI_BASETEN_API_KEY",
+        "models": [{"id": "deepseek-ai/DeepSeek-V4-Flash-0731", "name": "Baseten"}],
+    }}}))
+    monkeypatch.setattr("agent.resolve.PI_MODELS_FILE", str(pi_models))
+    monkeypatch.setattr(server, "list_agents", lambda: [{
+        "name": "pibt", "harness": "pi", "provider": "baseten",
+        "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+    }])
+    original_providers = dict(providers_mod.PROVIDERS)
+    providers_mod.PROVIDERS["baseten"] = providers_mod._validate_provider("baseten", {
+        "label": "Baseten",
+        "color": "#19E76E",
+        "base_url": "https://inference.baseten.co/v1",
+        "supported_apis": ["/v1/chat/completions"],
+        "auth": {"type": "api_key", "api_key": "test-key"},
+        "models": ["deepseek-ai/DeepSeek-V4-Flash-0731"],
+    })
+    try:
+        server._sync_pi_agents_models_store()
+        models = json.loads(pi_models.read_text())
+        assert models["providers"]["baseten"]["baseUrl"] == "https://inference.baseten.co/v1"
+        server._sync_pi_agents_models_store()
+        models_again = json.loads(pi_models.read_text())
+        assert models_again["providers"]["baseten"]["models"] == models["providers"]["baseten"]["models"]
+    finally:
+        providers_mod.PROVIDERS.clear()
+        providers_mod.PROVIDERS.update(original_providers)
+
+
+def test_startup_pi_models_sync_skips_non_pi_agents(tmp_path, monkeypatch):
+    pi_models = tmp_path / "models.json"
+    monkeypatch.setattr("agent.resolve.PI_MODELS_FILE", str(pi_models))
+    monkeypatch.setattr(server, "list_agents", lambda: [{
+        "name": "cc", "harness": "claudecode", "provider": "deepseek",
+    }])
+
+    server._sync_pi_agents_models_store()
+
+    assert not pi_models.exists()
 
 
 def test_api_routes_are_registered_before_static_ui():

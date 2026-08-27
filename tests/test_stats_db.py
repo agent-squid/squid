@@ -37,6 +37,38 @@ def test_init_db_seeds_claude_agent_without_claudecode_or_haiku_names(tmp_path, 
     ]
 
 
+def test_init_db_migrates_only_retired_opencode_provider_models(tmp_path, monkeypatch):
+    db_path = tmp_path / "squid.db"
+    monkeypatch.setattr(stats_db, "_DB_PATH", db_path)
+    monkeypatch.setattr(stats_db, "SUPPORTED_HARNESSES", frozenset({"opencode"}))
+    monkeypatch.setattr(stats_db, "is_installed", lambda harness: harness == "opencode")
+    stats_db.init_db()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE agents SET model = 'deepseek-v4-flash-free' WHERE name = 'opencode'")
+        conn.execute(
+            "INSERT INTO agents (name, harness, provider, model) VALUES (?, ?, ?, ?)",
+            ("custom-zen", "opencode", "opencode", "opencode/deepseek-v4-flash-free"),
+        )
+        conn.execute("UPDATE agents SET provider = NULL, model = NULL WHERE name = 'operev'")
+        conn.execute(
+            "INSERT INTO agents (name, harness, provider, model) VALUES (?, ?, ?, ?)",
+            ("custom-other", "opencode", "openrouter", "opencode/deepseek-v4-flash-free"),
+        )
+
+    stats_db.init_db()
+
+    with sqlite3.connect(db_path) as conn:
+        rows = {name: (provider, model) for name, provider, model in conn.execute(
+            "SELECT name, provider, model FROM agents"
+        )}
+
+    assert rows["opencode"] == ("opencode", "opencode/big-pickle")
+    assert rows["custom-zen"] == ("opencode", "opencode/big-pickle")
+    assert rows["operev"] == ("opencode", "opencode/big-pickle")
+    assert rows["custom-other"] == ("openrouter", "opencode/deepseek-v4-flash-free")
+
+
 def test_chat_messages_source_defaults_and_can_mark_system(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()
@@ -712,12 +744,15 @@ def test_init_db_seeds_five_default_agents_when_all_harnesses_are_installed(tmp_
     stats_db.init_db()
 
     with sqlite3.connect(tmp_path / "squid.db") as conn:
-        rows = conn.execute("SELECT name FROM agents ORDER BY name").fetchall()
+        rows = conn.execute("SELECT name, provider, model FROM agents ORDER BY name").fetchall()
 
     assert [row[0] for row in rows] == [
         "clarev", "claude", "codex", "codrev", "currev",
         "cursor", "opencode", "operev", "pi", "pirev",
     ]
+    seeded = {name: (provider, model) for name, provider, model in rows}
+    assert seeded["opencode"] == ("opencode", "opencode/big-pickle")
+    assert seeded["operev"] == ("opencode", "opencode/big-pickle")
 
 
 def test_init_db_seeds_review_agents_gated_per_harness_with_role_cwd(tmp_path, monkeypatch):
@@ -1761,6 +1796,35 @@ def test_quota_delta_preserves_negative_meter_changes(tmp_path, monkeypatch):
     assert stats_db.get_stats_by_topic(days=0)[0]["quota_delta"] == -2.5
     by_msg = {row["msg_id"]: row for row in stats_db.get_stats_by_turn(days=0)}
     assert by_msg[asst_id]["quota_delta"] == -2.5
+
+
+def test_aggregated_chart_quota_reads_message_quota_delta(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+    def make_turn(content: str, before: float, after: float) -> None:
+        uid = stats_db.insert_user_message("squid", "codex", "hello")
+        aid = stats_db.insert_assistant_message("squid", "codex", uid, adhoc=False)
+        stats_db.update_assistant_message(aid, content, "session-1", "done")
+        stats_db.insert_run_event(aid, 0, "stats", json.dumps(
+            {"input_tokens": 10, "output_tokens": 5, "cost_usd": 0.25}
+        ))
+        stats_db.update_message_quota_snapshot(aid, before, after)
+
+    make_turn("one", 40.0, 42.5)
+    make_turn("two", 42.5, 43.0)
+
+    rows = stats_db.get_aggregated_stats(
+        days=0,
+        chart_series=[
+            {"metric": "quota", "agg": "sum"},
+            {"metric": "quota", "agg": "avg"},
+        ],
+    )
+
+    assert rows[0]["quota_delta"] == 3.0
+    assert rows[0]["chart_quota_sum"] == 3.0
+    assert rows[0]["chart_quota_avg"] == 1.5
 
 
 def test_get_stats_by_turn_uses_per_turn_stats_not_stale_session_row(tmp_path, monkeypatch):

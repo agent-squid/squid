@@ -1830,6 +1830,44 @@ def test_pi_maps_tool_calls_and_waits_for_final_stats():
     assert stats["cost_usd"] == 0.30000000000000004
 
 
+@pytest.mark.parametrize(
+    ("stop_reason", "error_message", "expected"),
+    [
+        ("error", "Connection error.", "Connection error."),
+        ("aborted", None, "pi aborted"),
+    ],
+)
+def test_pi_surfaces_final_error_after_retries_without_emitting_stats(
+    stop_reason, error_message, expected,
+):
+    async def fake_stream_lines(cmd, **kwargs):
+        for will_retry in (True, True, False):
+            yield json.dumps({
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [],
+                    "stopReason": stop_reason,
+                    "errorMessage": error_message,
+                    "usage": {},
+                },
+            })
+            yield json.dumps({"type": "agent_end", "willRetry": will_retry})
+
+    chunks = []
+
+    async def collect():
+        async for chunk in run_pi("next", cwd="/tmp"):
+            chunks.append(chunk)
+
+    with patch("agent.runners.PI_PATH", "pi"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ), pytest.raises(CLIError) as exc_info:
+        asyncio.run(collect())
+    assert str(exc_info.value) == expected
+    assert chunks == []
+
+
 def test_opencode_routes_tool_call_step_text_to_status_and_stop_text_to_final():
     async def fake_stream_lines(cmd, **kwargs):
         yield json.dumps({
@@ -2034,7 +2072,7 @@ def test_opencode_does_not_double_prefix_provider_qualified_model():
 
     async def collect():
         return [chunk async for chunk in run_opencode(
-            "fresh", cwd="/tmp", model="opencode/deepseek-v4-flash-free",
+            "fresh", cwd="/tmp", model="opencode/big-pickle",
             backend_settings={"provider": "opencode"},
         )]
 
@@ -2044,7 +2082,7 @@ def test_opencode_does_not_double_prefix_provider_qualified_model():
         asyncio.run(collect())
 
     assert "-m" in captured[0]
-    assert captured[0][captured[0].index("-m") + 1] == "opencode/deepseek-v4-flash-free"
+    assert captured[0][captured[0].index("-m") + 1] == "opencode/big-pickle"
 
 
 def test_native_claude_removes_inherited_anthropic_auth_environment():

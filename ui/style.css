@@ -4308,6 +4308,7 @@ body {
 }
 #auth-panel-term .xterm,
 #agents-auth-panel-term .xterm { height: 100%; }
+#auth-panel-keypad { display: none; }
 #agents-auth-panel { width: 100%; min-width: 0; max-width: 100%; margin: 0.4rem 0 0.7rem; }
 #agents-auth-panel-term {
   height: 170px;
@@ -4462,6 +4463,24 @@ button {
 .send-icon { display: none; }
 
 @media (max-width: 768px) {
+  #auth-panel-term { height: calc(320px - 1rem + 48px); }
+  #auth-panel-keypad {
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.5rem 0.7rem;
+    border-top: 1px solid var(--surface-2);
+  }
+  #auth-panel-keypad button {
+    min-height: 40px;
+    padding: 0 1rem;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--surface-2);
+    color: var(--text);
+    font: 600 var(--text-body) ui-monospace, monospace;
+  }
+  #auth-panel-keypad button:last-child { margin-left: auto; }
+
   body {
     font-size: 16px;
   }

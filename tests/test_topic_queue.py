@@ -1429,6 +1429,28 @@ def test_drain_topic_scopes_to_requesting_topic_in_shared_provider_lane():
     assert remaining[0]["topic"] == "topicB"
 
 
+def test_drain_topic_can_target_exact_queued_message_id():
+    async def run():
+        dispatcher = TopicDispatcher()
+        worker = TopicWorker("topicA")
+        dispatcher._workers["provider:shared"] = worker
+        for msg_id in (11, 12, 13):
+            worker.q.put_nowait(QueueItem(
+                seq=msg_id, topic="topicA", agent="agent", prompt=f"p{msg_id}",
+                context_history=[], backend="pi", model=None, msg_id=msg_id,
+            ))
+
+        drained = dispatcher.drain_topic("topicA", msg_id=12)
+        return drained, [item["msg_id"] for item in worker.queue_items()]
+
+    with patch("agent.stats_db.mark_assistant_cancelled") as cancelled:
+        drained, remaining = asyncio.run(run())
+
+    assert drained == 1
+    assert remaining == [11, 13]
+    cancelled.assert_called_once_with(12, "Cancelled before start")
+
+
 def test_sync_local_model_emits_loading_event_and_unloads_on_switch():
     async def run():
         worker = TopicWorker("work")

@@ -152,7 +152,7 @@ const HARNESS_MODEL_HINTS = Object.freeze({
   claudecode: 'e.g. claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7',
   codex:      'e.g. o4-mini, o3',
   cursor:     'model (optional)',
-  opencode:   'e.g. opencode/deepseek-v4-flash-free, anthropic/claude-sonnet-4-6',
+  opencode:   'e.g. opencode/big-pickle, anthropic/claude-sonnet-4-6',
 });
 
 const AGENT_THEME_COLORS = Object.freeze({
@@ -4200,6 +4200,7 @@ input.addEventListener('keydown', (e) => {
 const authPanel = document.getElementById('auth-panel');
 const authPanelTitle = document.getElementById('auth-panel-title');
 const authPanelTerm = document.getElementById('auth-panel-term');
+const authPanelKeypad = document.getElementById('auth-panel-keypad');
 const authPanelCancelBtn = document.getElementById('auth-panel-cancel-btn');
 const authPanelRetryBtn = document.getElementById('auth-panel-retry-btn');
 const authPanelUnlockBtn = document.getElementById('auth-panel-unlock-btn');
@@ -4230,14 +4231,23 @@ function parseAuthRequiredError(text) {
   return { harness: m[1], message: text.slice(m[0].length) };
 }
 
-function authLoginButtonHtml(harness) {
+function authActionButtonHtml(harness, errorText = '') {
+  if (harness === 'cursor' && /keychain is locked/i.test(errorText)) {
+    return '<button type="button" class="auth-login-btn" data-auth-mode="unlock">Unlock keychain</button> ';
+  }
   const label = HARNESS_LABELS[harness] || harness;
   return `<button type="button" class="auth-login-btn" data-harness="${harness}">Log in to ${label}</button> `;
 }
 
 function wireAuthLoginButtons(root, onSuccessRetry) {
   root.querySelectorAll('.auth-login-btn').forEach(btn => {
-    btn.addEventListener('click', () => openAuthPanel(btn.dataset.harness, onSuccessRetry));
+    btn.addEventListener('click', () => {
+      if (btn.dataset.authMode === 'unlock') {
+        openAuthPanel('keychain', onSuccessRetry, { mode: 'unlock' });
+        return;
+      }
+      openAuthPanel(btn.dataset.harness, onSuccessRetry);
+    });
   });
 }
 
@@ -4633,6 +4643,20 @@ async function closeAuthPanel({ refreshCatalog = true } = {}) {
 }
 
 authPanelCancelBtn.addEventListener('click', () => closeAuthPanel());
+authPanelKeypad.addEventListener('click', e => {
+  const btn = e.target.closest('button[data-auth-key]');
+  if (!btn || !_authSession?.id || !_authSession.running) return;
+  const input = { escape: '\x1b', up: '\x1b[A', down: '\x1b[B', enter: '\r' }[btn.dataset.authKey];
+  if (!input) return;
+  if (_authSession.transport === 'ws') {
+    realtimeV1?.authSend('auth.input', { session_id: _authSession.id, data: input });
+  } else {
+    fetch(`/auth/session/${_authSession.id}/input`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: input }),
+    }).catch(() => {});
+  }
+});
 agentsAuthPanelCancelBtn.addEventListener('click', () => closeAuthPanel());
 authPanelUnlockBtn.addEventListener('click', () => {
   // Consented, not automatic: the user must click this and then type their
@@ -5125,7 +5149,7 @@ async function sendMessage(text, opts = {}) {
     if (!errDisplay && raw) return;
     if (!shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) return;
     placeResponseBubble();
-    contentDiv.innerHTML = (authReq ? authLoginButtonHtml(authReq.harness) : '')
+    contentDiv.innerHTML = (authReq ? authActionButtonHtml(authReq.harness, authReq.message) : '')
       + `<span class="msg-error">${escapeHtml(errDisplay) || 'Response interrupted.'}</span>`;
     if (authReq) wireAuthLoginButtons(contentDiv, () => sendMessage(text, opts));
     scrollToBottom();
@@ -7161,7 +7185,7 @@ function appendHistoryItem(item, container) {
   if (item.status === 'error') {
     const authReq = parseAuthRequiredError(item.content || '');
     const raw = ((authReq ? authReq.message : item.content) || '').split('\n')[0].replace(/^CLI exited \d+:\s*/, '').trim();
-    asstContent.innerHTML = (authReq ? authLoginButtonHtml(authReq.harness) : '')
+    asstContent.innerHTML = (authReq ? authActionButtonHtml(authReq.harness, authReq.message) : '')
       + `<span class="msg-error">${escapeHtml(raw) || 'Response interrupted.'}</span>`;
     // No auto-retry here (unlike the live-turn path in showError) — a
     // history row only has item.prompt as plain text, not the original
