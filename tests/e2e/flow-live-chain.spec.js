@@ -1,5 +1,5 @@
 /**
- * Regression test for #13956: renderer=store live flow chain loses the origin
+ * Regression test for #13956: reconciled live flow chain loses the origin
  * turn. `#tst@echo>@echo1 hi` — the origin's thinking bubble shows and
  * completes, then the server-dispatched chain step runs; once the step
  * completes, the origin's bubble must still sit at the live edge, directly
@@ -64,7 +64,7 @@ const STEP_ROW_DONE = {
   status: 'done', content: 'hi', completed_at: LATEST,
 };
 
-test('live flow chain keeps the origin turn at the live edge (renderer=store)', async ({ page }) => {
+test('reconciler keeps the live flow origin turn at the live edge', async ({ page }) => {
   await page.addInitScript(() => {
     window.__webSocket = null;
     class MockWebSocket {
@@ -189,15 +189,14 @@ test('live flow chain keeps the origin turn at the live edge (renderer=store)', 
     nodes => nodes.map(n => n.textContent.trim()),
   );
   expect(senderDividers.length).toBe(2);
-  const flowGroupIsContiguous = await page.evaluate(() => {
+  const flowPromptPrecedesResponse = await page.evaluate(() => {
     const marker = document.querySelector('.route-chain-marker[data-flow-route]');
-    const user = document.querySelector('.msg.user');
+    const user = document.querySelector('.msg.user[data-turn-owner-id="100"]');
     const origin = document.querySelector('.msg.assistant.history-item[data-msg-id="100"]');
     if (!marker || !user || !origin) return false;
     return marker.previousElementSibling?.classList.contains('date-divider')
-      && marker.nextElementSibling === user
-      && user.nextElementSibling?.classList.contains('msg-time')
-      && user.nextElementSibling.nextElementSibling === origin;
+      && !!(marker.compareDocumentPosition(user) & Node.DOCUMENT_POSITION_FOLLOWING)
+      && !!(user.compareDocumentPosition(origin) & Node.DOCUMENT_POSITION_FOLLOWING);
   });
-  expect(flowGroupIsContiguous).toBe(true);
+  expect(flowPromptPrecedesResponse).toBe(true);
 });

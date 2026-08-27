@@ -332,6 +332,29 @@ def _public_agent_map() -> dict:
 _check_deps()
 sync_now()
 
+def _sync_pi_agents_models_store() -> None:
+    """Re-sync ~/.pi/agent/models.json for every pi agent.
+
+    pi reads custom-provider base URLs only from that file — never from env
+    vars — so it must track providers.*.base_url even when no agent row
+    changed. Synced at every server startup (including /restart's in-place
+    re-exec, which would otherwise keep serving a pre-edit baseUrl after a
+    squid.yaml edited directly on disk) and after every config write.
+    """
+    for agent in list_agents():
+        harness = agent.get("harness", "")
+        if harness != "pi":
+            continue
+        provider_id = agent.get("provider")
+        if not provider_id:
+            continue
+        try:
+            resolved = resolve_agent(harness, provider_id)
+            resolved.sync_pi_provider(agent.get("model"))
+        except (ValueError, OSError) as exc:
+            log.warning("pi models.json sync failed for provider %s: %s", provider_id, exc)
+
+
 async def _recover_orphaned_pending_on_startup():
     orphaned = mark_orphaned_pending(before_created_at=BOOT_TIME)
     if orphaned:
@@ -362,6 +385,10 @@ async def _lifespan(_app: FastAPI):
     # server restart, so a reconnecting client cannot retain pre-restart rows.
     _publish_process_changed(list_active_procs())
     _publish_queue_changed(dispatcher.all_queued_items())
+    # Heal pi's models.json before first dispatch: a squid.yaml edited on
+    # disk while the server was down (or between /restarts) must reach the
+    # file pi actually reads its base URLs from.
+    await asyncio.to_thread(_sync_pi_agents_models_store)
     await _recover_orphaned_pending_on_startup()
     await _resume_stalled_flows_on_startup()
     from .flow import maintain_durable_flows
@@ -1473,8 +1500,11 @@ async def run_cmd(req: CmdRequest):
         )
         return JSONResponse({"ok": True, **result})
     if req.command == "deq":
-        drained = dispatcher.drain_topic(topic, req.pos)
-        log.info("cmd deq topic=%s pos=%s drained=%s", topic, req.pos, drained)
+        drained = dispatcher.drain_topic(topic, req.pos, msg_id=req.msg_id)
+        log.info(
+            "cmd deq topic=%s pos=%s msg_id=%s drained=%s",
+            topic, req.pos, req.msg_id, drained,
+        )
         return JSONResponse({"ok": True, "drained": drained})
     if req.command == "list":
         return JSONResponse({"ok": True, "topics": get_topics_summary()})
@@ -2249,18 +2279,7 @@ async def update_config_yaml(req: ConfigRequest, request: Request):
 
     # Re-sync pi models.json for every pi agent — a provider's base_url
     # may have changed in this config update even if no agent was touched.
-    for agent in list_agents():
-        harness = agent.get("harness", "")
-        if harness != "pi":
-            continue
-        provider_id = agent.get("provider")
-        if not provider_id:
-            continue
-        try:
-            resolved = resolve_agent(harness, provider_id)
-            resolved.sync_pi_provider(agent.get("model"))
-        except (ValueError, OSError):
-            pass
+    await asyncio.to_thread(_sync_pi_agents_models_store)
 
     return JSONResponse({
         "ok": True,

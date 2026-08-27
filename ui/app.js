@@ -1839,6 +1839,18 @@ function collectLiveGroupElements() {
   document.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)').forEach(thinking => {
     liveGroupElements(thinking).forEach(el => group.add(el));
   });
+  // A completed live turn no longer has a thinking root, but its prompt and
+  // timestamp remain the submission-position breadcrumb required by
+  // ADR-0011. Preserve every sibling carrying that explicit composer token
+  // across a real history reset; history-only completed rows never create
+  // this standalone scaffold.
+  document.querySelectorAll('#messages > .msg.user[data-turn-owner-id][data-live-group-id]').forEach(prompt => {
+    const owner = prompt.dataset.liveGroupId;
+    for (const node of messages.children) {
+      if (node.dataset.liveGroupId === owner
+        && !node.matches('.msg.assistant.history-item:not(.msg-thinking)')) group.add(node);
+    }
+  });
   return group;
 }
 
@@ -1897,11 +1909,24 @@ function anchorForLiveEdgePage(items) {
 // it always qualifies. With no candidate the turn belongs below every live
 // group: before bottomSentinel, else at the end of #messages.
 function historyStoreAnchor(assistantMsgId, next) {
-  const completedAt = assistantMsgId != null
-    ? (transcriptStore?.getTurn(assistantMsgId)?.completedAt ?? null)
+  const turn = assistantMsgId != null
+    ? transcriptStore?.getTurn(assistantMsgId)
     : null;
+  const completedAt = turn?.completedAt ?? null;
   const thinkings = document.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)');
   let anchor = next ?? null;
+  // The boot banner is the boundary between the history present when this
+  // page opened and responses completed afterward. A later reconcile or
+  // older-page merge must not move store-loaded history across that boundary.
+  // Prefer it over a newer anchor when it occurs first in the transcript;
+  // live rows deliberately remain below it.
+  const bootBoundary = turn?.raw?.source === 'history'
+    ? messages.querySelector(':scope > .boot-banner')
+    : null;
+  if (bootBoundary && (!anchor
+    || (bootBoundary.compareDocumentPosition(anchor) & Node.DOCUMENT_POSITION_FOLLOWING))) {
+    anchor = bootBoundary;
+  }
   // Interleave with completed bubbles the reconciler does NOT own — direct-DOM
   // discovery inserts (discoverRealtimeTurn / attachFlowStep /
   // replacePendingWithStoredItem, all of which forget() the id) that reorder()
@@ -1942,30 +1967,48 @@ function historyStoreAnchor(assistantMsgId, next) {
     if (!first) return;
     if (!anchor || (first.compareDocumentPosition(anchor) & Node.DOCUMENT_POSITION_FOLLOWING)) anchor = first;
   });
+  // ADR-0011: a plain turn's prompt is a live-only breadcrumb that outlives its
+  // thinking bubble (render() removes only the pending root on completion). The
+  // live-group walk above misses it once the bubble is gone, so a response that
+  // finished before its own prompt was submitted (client/server clock skew) is
+  // anchored past the orphaned prompt and lands below it. Treat the orphaned
+  // prompt as a live-group remnant and let this turn's completed response sort
+  // against it. Flow origins are excluded: their prompt travels with the group
+  // (it is already one of this turn's nodes), so anchoring before it would be
+  // circular.
+  const isFlow = !!(turn?.raw?.flow_route) || (assistantMsgId != null && !!messages.querySelector(
+    `:scope > .route-chain-marker[data-route-owner-id="${assistantMsgId}"]`,
+  ));
+  if (!isFlow && completedAt && assistantMsgId != null) {
+    const ownPrompt = messages.querySelector(
+      `:scope > .msg.user[data-turn-owner-id="${assistantMsgId}"][data-live-group-id]`,
+    );
+    const promptTime = ownPrompt?.dataset.orderAt || ownPrompt?.dataset.ts || '';
+    if (promptTime && completedAt.localeCompare(promptTime) < 0) {
+      if (!anchor || (ownPrompt.compareDocumentPosition(anchor) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+        anchor = ownPrompt;
+      }
+    }
+  }
   if (anchor) return anchor;
   return bottomSentinel || null;
 }
 
 // getPendingAnchor for createHistoryRegistry (ADR-0041 Stage 3 prerequisite):
 // where one pending (live) turn's own group belongs, mirroring
-// insertPendingHistoryItem's own anchor search exactly — same selector (every
-// `.msg.assistant.history-item[data-msg-id]` bubble, completed *or* pending;
-// a wip bubble carries those same three classes, so this naturally orders a
-// pending group against other pending groups too, not just completed ones,
-// without needing a separate comparison path), same key shape, same
+// insertPendingHistoryItem's own anchor search exactly — same key shape, same
 // `compareCompletedTurnKeys` — just re-run every reconcile() pass instead of
 // once at insertion time. Reads the pending group's own sort key off its
 // already-rendered root node (`rootNode.dataset`), the same way
 // historyStoreAnchor above reads a live bubble's `data-order-at` — not from
 // the store — so this has no dependency on `store` being threaded through
-// the reconciler.js render/reorder contract.
+// the reconciler.js render/reorder contract. anchorAfterTurnKey joins the
+// completed-bubble scan with the live-group walk, so a pending group also
+// orders against composer live turns (which lack `.history-item`), not just
+// completed and recovered-wip bubbles.
 function historyStorePendingAnchor(assistantMsgId, rootNode) {
   const key = [rootNode?.dataset.orderAt || rootNode?.dataset.ts || '', Number(rootNode?.dataset.msgId) || 0];
-  return [...messages.querySelectorAll(':scope > .msg.assistant.history-item[data-msg-id]')]
-    .find(existing => compareCompletedTurnKeys([
-      existing.dataset.orderAt || existing.dataset.completedAt || existing.dataset.ts || '',
-      Number(existing.dataset.msgId) || 0,
-    ], key) > 0) || bottomSentinel || null;
+  return anchorAfterTurnKey(key, assistantMsgId) || bottomSentinel || null;
 }
 
 function setLiveGroupHidden(hidden) {
@@ -2000,7 +2043,7 @@ function reloadHistory(filter = {}) {
   // Must run before the raw DOM sweep below removes reconciler-owned nodes —
   // see reset()'s own comment in reconciler.js.
   historyReconciler?.reset();
-  document.querySelectorAll('.history-item, .boot-banner, .tool-block-history, #messages > .cmd-feedback').forEach(el => el.remove());
+  document.querySelectorAll('.history-item, .boot-banner:not(.client-session-boundary), .tool-block-history, #messages > .cmd-feedback').forEach(el => el.remove());
   // Remove live (non-history) messages too — completed ones are in the DB and will reload
   const preserveForLive = collectLiveGroupElements();
   document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .route-chain-marker').forEach(el => {
@@ -2009,6 +2052,13 @@ function reloadHistory(filter = {}) {
   setLiveGroupHidden(hasHistoryFilterScope() || hasResponseOnlyFilter());
   _updateFilterBadge();
   initHistoryScroll();
+  // A filter reset must deterministically rebuild the store-backed view.
+  // Relying only on the new sentinel's IntersectionObserver callback leaves
+  // rapid filter -> clear round-trips with a reset reconciler and no first
+  // page when the superseded observer notification is the one delivered.
+  // loadHistory's loading/generation guards make a concurrent observer call
+  // harmless.
+  loadHistory();
 }
 
 function _updateFilterBadge() {
@@ -2278,8 +2328,11 @@ const historyReconciler = window.SquidReconciler.createReconciler({
         // A pending row becomes buildable only once it carries the
         // denormalized prompt: HTTP history has it immediately; WS snapshot
         // raw gains it when the authoritative discovery row enriches it.
-        buildPending: item => Object.prototype.hasOwnProperty.call(item, 'prompt')
-          && itemMatchesFilter(item, historyFilter) ? makeWipBubble(item) : null,
+        buildPending: item => {
+          if (!Object.prototype.hasOwnProperty.call(item, 'prompt') || !itemMatchesFilter(item, historyFilter)) return null;
+          const bubble = makeWipBubble(item);
+          return { bubble, promptBubble: bubble.__promptBubble };
+        },
         mountPending: (item, bubble) => reconnectPendingItem(item, bubble),
       }),
     });
@@ -2343,7 +2396,7 @@ function historyItemToStoreRows(item) {
   return rows;
 }
 
-function shadowInstallHistoryPage(items, boundary) {
+function shadowInstallHistoryPage(items, boundary, { source = null } = {}) {
   if (!transcriptStore) return;
   const rows = [];
   for (const item of items) {
@@ -2353,7 +2406,21 @@ function shadowInstallHistoryPage(items, boundary) {
     // facts seeded when the live turn received its id. In particular, an
     // empty prompt made the completed projection appear to have no user
     // message, and a missing flow_route orphaned its route boundary.
-    const enriched = priorRaw ? { ...item } : item;
+    const enriched = { ...item };
+    // Source is a rendering fact, so keep it on the opaque raw row consumed
+    // by createHistoryRegistry, not only on the normalized message envelope.
+    // Once a turn was seen live, a later history page must not reclassify it
+    // and discard its live-only prompt scaffold.
+    // A non-terminal row is part of the current live view even when the
+    // browser first discovers it while rebuilding HTTP history after a
+    // refresh. Classifying that row as historical makes its pending prompt
+    // scaffold disposable at the terminal transition. Once classified live,
+    // later terminal/history rows preserve that fact via priorRaw.
+    const activeTurn = !HISTORY_TERMINAL_STATUSES.has(item.status ?? 'done');
+    const effectiveSource = priorRaw?.source === 'live' || activeTurn
+      ? 'live'
+      : (source || item.source || priorRaw?.source || null);
+    if (effectiveSource) enriched.source = effectiveSource;
     if (priorRaw) {
       for (const key of ['prompt', 'prompt_source', 'flow_route', 'flow_run_id']) {
         if ((enriched[key] == null || enriched[key] === '') && priorRaw[key] != null && priorRaw[key] !== '') {
@@ -2364,12 +2431,11 @@ function shadowInstallHistoryPage(items, boundary) {
     rows.push(...historyItemToStoreRows(enriched));
   }
   if (!rows.length) return;
-  const result = transcriptStore.installHistoryPage(rows, boundary);
+  const result = transcriptStore.installHistoryPage(rows, boundary, { source });
   if (!result.ok) console.error('[transcript-store] shadow installHistoryPage failed:', result.error);
-  // In dom-renderer mode (the default) nothing ever calls historyReconciler
-  // .reconcile() to drain the store's dirty set — it's shadow-mode-only, kept
-  // for cross-check parity, never rendered from — so it would otherwise grow
-  // unbounded with every page load for the life of the tab.
+  // The reconciler is required for the normal transcript. Keep this guard for
+  // initialization-failure safety even though startup now rejects missing
+  // reconciler assets above.
   if (!historyReconciler) transcriptStore.clearReconciled(result.dirty);
 }
 
@@ -2429,7 +2495,7 @@ async function shadowInstallSseCompletion(msgId, { clearAfterInstall = false } =
     if (!res.ok) return;
     const data = await res.json();
     if (data.id == null) return;
-    shadowInstallHistoryPage([data]);
+    shadowInstallHistoryPage([data], undefined, { source: 'live' });
     // Fresh composer completion still renders through its established direct
     // path and forgets/clears registry ownership immediately. Its /status
     // fetch is intentionally fire-and-forget so UI completion never waits on
@@ -2460,8 +2526,8 @@ function shadowAttachRealtimeRow(item) {
   if (!result.ok) console.error('[transcript-store] shadow attachRaw failed:', result.error);
 }
 
-function appendHistoryItems(items, fragment, boundary) {
-  shadowInstallHistoryPage(items, boundary);
+function appendHistoryItems(items, fragment, boundary, { source = 'history' } = {}) {
+  shadowInstallHistoryPage(items, boundary, { source });
   // Prompt-only mode renders a different, reduced representation
   // (appendPromptOnlyHistoryItem) that historyRegistry doesn't build —
   // stay on direct-DOM for it regardless of the flag.
@@ -2693,7 +2759,7 @@ async function resetHistoryToLatest() {
   // Must run before the raw DOM sweep below removes reconciler-owned nodes —
   // see reset()'s own comment in reconciler.js.
   historyReconciler?.reset();
-  document.querySelectorAll('.history-item, .boot-banner, .search-result-item, .tool-block-history, #messages > .cmd-feedback').forEach(el => el.remove());
+  document.querySelectorAll('.history-item, .boot-banner:not(.client-session-boundary), .search-result-item, .tool-block-history, #messages > .cmd-feedback').forEach(el => el.remove());
   const preserveForLive = collectLiveGroupElements();
   document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .route-chain-marker').forEach(el => {
     if (!preserveForLive.has(el)) el.remove();
@@ -2727,11 +2793,27 @@ async function resetHistoryToLatest() {
   }
 
   messages.scrollTop = messages.scrollHeight;
+  // A tall newest response must open at its top so it can be read downward.
+  // The old direct-DOM renderer did this during insertion; the store renderer
+  // inserts in reconcile(), so restore the same behavior after placement.
+  const newestCompleted = items.find(item => item.status !== 'pending');
+  const newestBubble = newestCompleted?.id == null ? null : messages.querySelector(
+    `:scope > .msg.assistant.history-item[data-msg-id="${newestCompleted.id}"]:not(.msg-thinking)`,
+  );
   _updateFilterBadge();
   updateInContextMarkers();
   refreshAllRevertButtons();
   evaluateAdvisory();
   refreshDateDividers();
+  if (newestBubble) {
+    // Date dividers and markdown/header layout must settle before measuring;
+    // otherwise the newly inserted divider shifts the bubble back down after
+    // it was aligned.
+    await new Promise(resolve => requestAnimationFrame(() => {
+      scrollToRevealBubble(newestBubble);
+      resolve();
+    }));
+  }
   updateScrollButtonVisibility();
 }
 
@@ -2840,7 +2922,7 @@ async function jumpToMessage(msgId, flowRunId = null) {
     // Must run before the raw DOM sweep below removes reconciler-owned nodes —
     // see reset()'s own comment in reconciler.js.
     historyReconciler?.reset();
-    document.querySelectorAll('.history-item, .boot-banner, .search-result-item, .tool-block-history, #messages > .cmd-feedback').forEach(el => el.remove());
+    document.querySelectorAll('.history-item, .boot-banner:not(.client-session-boundary), .search-result-item, .tool-block-history, #messages > .cmd-feedback').forEach(el => el.remove());
     clearedCurrentThread = true;
     const preserveForLive = collectLiveGroupElements();
     document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .route-chain-marker').forEach(el => {
@@ -3065,7 +3147,7 @@ function startSearch(rawArgs) {
   // render through the reconciler, but this still wipes whatever
   // loadHistory/loadHistoryWindow rendered before search started.
   historyReconciler?.reset();
-  document.querySelectorAll('.history-item, .boot-banner, .search-result-item, .tool-block-history').forEach(el => el.remove());
+  document.querySelectorAll('.history-item, .boot-banner:not(.client-session-boundary), .search-result-item, .tool-block-history').forEach(el => el.remove());
   const preserveForLive = collectLiveGroupElements();
   document.querySelectorAll('#messages > .msg:not(.msg-thinking), #messages > .msg-thinking-done, #messages > .msg-time, #messages > .stats, #messages > .cmd-feedback').forEach(el => {
     if (!preserveForLive.has(el)) el.remove();
@@ -5069,6 +5151,27 @@ agentsAuthPanelRestartBtn.addEventListener('click', () => { void restartServer()
 
 const liveQueuedTurnHandlers = new Map();
 const liveQueuedTurnKey = (topic, position) => `${topic}\0${Number(position)}`;
+const liveQueuedMsgKey = msgId => `msg\0${Number(msgId)}`;
+const liveRunningTurnHandlers = new Map();
+
+function removeCachedQueuedTurn(topic, position, msgId = null) {
+  const numericPosition = Number(position);
+  const numericMsgId = Number(msgId);
+  cachedQueueRows = cachedQueueRows.filter(row =>
+    Number.isFinite(numericMsgId) && numericMsgId > 0
+      ? Number(row.msg_id) !== numericMsgId
+      : row.topic !== topic || Number(row.position) !== numericPosition);
+  updateProcStatusDot(cachedProcRows, cachedQueueRows);
+  if (procStatusPopup.classList.contains('open')) renderProcPopup(cachedProcRows, cachedQueueRows);
+}
+
+async function markLiveMessageCancelled(msgId) {
+  const id = Number(msgId);
+  await liveRunningTurnHandlers.get(id)?.();
+  cachedProcRows = cachedProcRows.filter(row => Number(row.msg_id) !== id);
+  updateProcStatusDot(cachedProcRows, cachedQueueRows);
+  if (procStatusPopup.classList.contains('open')) renderProcPopup(cachedProcRows, cachedQueueRows);
+}
 
 async function sendMessage(text, opts = {}) {
   const source = opts.source === 'workflow' || opts.source === 'diff_viewer' ? opts.source : 'human';
@@ -5219,13 +5322,7 @@ async function sendMessage(text, opts = {}) {
         pollProcs();
       } else if (msgId) {
         await cancelRealtimeMessage(msgId, topic, agent);
-        userAborted = true;
-        turnStatus = 'cancelled';
-        controller.abort();
-        renderCancelledThinking('Cancelled.');
-        if (!adhoc && !suppressChipTurnCount) {
-          await refreshComposerSessionCount(topic, resolvedAgent || agent);
-        }
+        await markLiveMessageCancelled(msgId);
       }
     } catch (error) {
       killBtn.disabled = false;
@@ -5350,6 +5447,12 @@ async function sendMessage(text, opts = {}) {
   // ── Response bubble (not yet in DOM — appended on first content chunk) ────────
   const bubble = document.createElement('div');
   bubble.className = 'msg assistant';
+  // Keep the ownership token on the terminal composer projection too. The
+  // SSE fallback deliberately retires the registry's pending group before a
+  // later history pass adopts this bubble, so normal (non-Flow) turns need a
+  // durable way to rediscover their user prompt and timestamp without relying
+  // on a route marker.
+  bubble.dataset.liveGroupId = liveGroupId;
   if (!userBubble) bubble.dataset.ts = sendTime;
   if (nativeShell) bubble.classList.add('shell-result');
   bubble.dataset.topic = topic;
@@ -5444,16 +5547,24 @@ async function sendMessage(text, opts = {}) {
   function unregisterQueuedTurnHandler() {
     if (!queuedTurnHandlerKey) return;
     liveQueuedTurnHandlers.delete(queuedTurnHandlerKey);
+    if (msgId) liveQueuedTurnHandlers.delete(liveQueuedMsgKey(msgId));
     queuedTurnHandlerKey = null;
   }
 
   function markDequeued() {
+    const cancelledPosition = queuePosition;
     unregisterQueuedTurnHandler();
     queuePosition = null;
     userAborted = true;
     turnStatus = 'cancelled';
     controller.abort();
     renderCancelledThinking('Dequeued.');
+    // A dequeued turn never ran and has no live trace to preserve, so settle
+    // its frozen bubble as a completed history item: it then reads (and is
+    // queryable) like any other terminal turn rather than a still-live status
+    // row, and keeps its composer prompt scaffold visible.
+    thinkingBubble.classList.add('history-item');
+    removeCachedQueuedTurn(topic, cancelledPosition, msgId);
   }
 
   function registerQueuedTurn(position) {
@@ -5461,6 +5572,7 @@ async function sendMessage(text, opts = {}) {
     queuePosition = Number(position);
     queuedTurnHandlerKey = liveQueuedTurnKey(topic, queuePosition);
     liveQueuedTurnHandlers.set(queuedTurnHandlerKey, markDequeued);
+    if (msgId) liveQueuedTurnHandlers.set(liveQueuedMsgKey(msgId), markDequeued);
   }
 
   async function finalizeQuotaTracking() {
@@ -5475,9 +5587,21 @@ async function sendMessage(text, opts = {}) {
     const parsed = parseInt(id, 10);
     if (!Number.isFinite(parsed) || parsed <= 0) return false;
     msgId = parsed;
+    if (queuePosition !== null) liveQueuedTurnHandlers.set(liveQueuedMsgKey(msgId), markDequeued);
+    liveRunningTurnHandlers.set(msgId, async () => {
+      liveRunningTurnHandlers.delete(msgId);
+      userAborted = true;
+      turnStatus = 'cancelled';
+      controller.abort();
+      renderCancelledThinking('Cancelled.');
+      if (!adhoc && !suppressChipTurnCount) {
+        await refreshComposerSessionCount(topic, resolvedAgent || agent);
+      }
+    });
     bubble.dataset.msgId = String(msgId);
     liveCtxSpan.dataset.msgId = String(msgId);
     thinkingBubble.dataset.msgId = String(msgId);
+    if (userBubble) userBubble.dataset.turnOwnerId = String(msgId);
     if (chainMarker) chainMarker.dataset.routeOwnerId = String(msgId);
     reconcilePendingBubble(msgId, thinkingBubble);
     // Lifecycle frames are intentionally sparse and cannot reconstruct the
@@ -5498,7 +5622,7 @@ async function sendMessage(text, opts = {}) {
       flow_route: flowRoute,
       flow_run_id: flowRunId,
       timestamp: sendTime,
-    }]);
+    }], undefined, { source: 'live' });
     // ADR-0041 producer 4 prerequisite: the composer already owns and placed
     // this live range, so the registry adopts it without touching its preview
     // or watcher. Register immediately after the store seed instead of
@@ -5765,6 +5889,7 @@ async function sendMessage(text, opts = {}) {
     const timeoutFallback = () => {
       completedFromStatus = true;
       stopStatusFallback();
+      liveRunningTurnHandlers.delete(Number(id));
       if (raw || firstDataReceived) {
         parkInterruptedPartial(raw, 'Recovery timed out.');
       } else {
@@ -5788,6 +5913,7 @@ async function sendMessage(text, opts = {}) {
           completionRendered = true;
           turnStatus = 'done';
           stopStatusFallback();
+          liveRunningTurnHandlers.delete(Number(id));
           // See the matching forget()/clearReconciled() call (and its longer
           // comment) in the inline SSE 'done' handler below — this fallback
           // poll is the other path that finalizes this composer-owned bubble
@@ -5802,7 +5928,7 @@ async function sendMessage(text, opts = {}) {
             statusBuf = data.status_raw;
           }
           removeThinking();
-          if (!showStoredResponse(data.content || '')) {
+          if (!showStoredResponse(data.content || raw || '')) {
             controller.abort();
             finalizeQuotaTracking();
             return;
@@ -5851,6 +5977,7 @@ async function sendMessage(text, opts = {}) {
           completedFromStatus = true;
           turnStatus = 'error';
           stopStatusFallback();
+          liveRunningTurnHandlers.delete(Number(id));
           if (raw || firstDataReceived) {
             parkInterruptedPartial(data.content || raw);
           } else {
@@ -5863,6 +5990,7 @@ async function sendMessage(text, opts = {}) {
           completedFromStatus = true;
           turnStatus = 'cancelled';
           stopStatusFallback();
+          liveRunningTurnHandlers.delete(Number(id));
           renderCancelledThinking(cancelledTurnLabel(data.content));
           if (!adhoc && !suppressChipTurnCount) {
             await refreshComposerSessionCount(topic, resolvedAgent || agent);
@@ -6255,14 +6383,30 @@ async function sendMessage(text, opts = {}) {
             // handoff as recovered SSE/WS turns. If persistence has not caught
             // up yet (or rendering fails), keep the established immediate
             // composer projection as the rollback path for this turn.
-            const completedByReconciler = msgId
+            let completedByReconciler = msgId
               ? await replacePendingWithStoredItem(
                   { id: msgId, topic, agent: resolvedAgent || agent, adhoc },
                   thinkingBubble,
                   null,
-                  { timeoutMs: 1000, revealOnComplete: true },
+                  { timeoutMs: 1000, revealOnComplete: true, fallbackContent: raw },
                 )
               : false;
+            // The done frame can precede the terminal database update. With
+            // no streamed response text, removing the wip here leaves nothing
+            // to render. Keep it mounted and hand ownership to the status
+            // poller; that path replaces it once the authoritative row is
+            // actually terminal.
+            if (!completedByReconciler && !firstDataReceived && msgId) {
+              completionRendered = false;
+              detachedPolling = true;
+              if (!statusBuf.includes('Finalizing response…')) {
+                statusBuf += (statusBuf ? '\n' : '') + 'Finalizing response…';
+                updateThinkingPreview();
+              }
+              startStatusFallback(msgId);
+              eventName = null;
+              continue;
+            }
             if (!completedByReconciler) {
               shadowInstallSseCompletion(msgId, { clearAfterInstall: true });
               // The fallback projection removes the registered pending root
@@ -6411,6 +6555,7 @@ async function sendMessage(text, opts = {}) {
     // the frozen queue-status row visible. Keep its dequeue registration
     // alive so the status popup can still terminate that exact row.
     if (queuePosition === null) unregisterQueuedTurnHandler();
+    if (!detachedPolling && msgId) liveRunningTurnHandlers.delete(msgId);
     releaseProcPoll();
     if (!detachedPolling) stopStatusFallback();
     if (!thinkingFrozen) {
@@ -7851,6 +7996,31 @@ function existingCompletedNodeRange(bubble) {
   return nodes;
 }
 
+// Completed turns use the same standalone prompt shape as composer-live
+// turns. Building it as part of the registry group makes history reloads,
+// filter changes, and observer tabs converge on the same transcript instead
+// of collapsing the prompt into the assistant header.
+function appendCompletedPromptScaffold(item, target) {
+  if (!target || !String(item.prompt || '').trim()) return [];
+  const prompt = makeUserBubble(
+    String(item.prompt),
+    item.topic || 'default',
+    item.agent || null,
+    item.backend || null,
+    !!item.adhoc,
+    item.stats?.lookback ?? 0,
+    item.prompt_source || 'human',
+    null,
+    item.flow_route || null,
+  );
+  prompt.classList.add('history-item');
+  if (item.timestamp) prompt.dataset.ts = item.timestamp;
+  target.appendChild(prompt);
+  const timestamp = addTimestamp(prompt, item.timestamp, true);
+  if (timestamp) timestamp.classList.add('history-item', 'user-prompt-time');
+  return timestamp ? [prompt, timestamp] : [prompt];
+}
+
 function createHistoryRegistry({
   container,
   getAnchor = (assistantMsgId, next) => next ?? null,
@@ -7875,12 +8045,27 @@ function createHistoryRegistry({
       if (existing || !turn.raw || typeof buildPending !== 'function') {
         return { nodes, pendingRoot: existing || null, pendingNeedsPlacement: !!existing };
       }
-      const bubble = buildPending(turn.raw);
-      if (!bubble) return { nodes: [], pendingRoot: null };
+      // The header renders its user prompt from raw.prompt (the denormalized
+      // field HTTP history and the /status discovery fetch carry). A turn
+      // discovered only through sparse producers (WS snapshot/lifecycle) can
+      // have a raw without it while the store still knows the linked user
+      // message's text (turn.promptContent) — fall back to that so the live
+      // bubble never renders a prompt-less header that only a refresh fills in.
+      const rawForBuild = turn.raw.prompt == null && turn.promptContent != null
+        ? { ...turn.raw, prompt: turn.promptContent }
+        : turn.raw;
+      const result = buildPending(rawForBuild);
+      if (!result) return { nodes: [], pendingRoot: null };
+      // Tests and small registries may return the pending root directly;
+      // production returns { bubble, promptBubble } so it can also place the
+      // standalone live breadcrumb.
+      const bubble = result.bubble || result;
+      const promptBubble = result.promptBubble || null;
+      const builtNodes = promptBubble ? [promptBubble, bubble] : [bubble];
       return {
-        nodes: [bubble],
+        nodes: builtNodes,
         pendingRoot: bubble,
-        pendingItem: turn.raw,
+        pendingItem: rawForBuild,
         pendingNeedsMount: true,
         pendingNeedsPlacement: true,
       };
@@ -7896,13 +8081,22 @@ function createHistoryRegistry({
       stats: Object.keys(turn.stats || {}).length ? turn.stats : turn.raw.stats,
       completed_at: turn.completedAt ?? turn.raw.completed_at,
     };
+    // ADR-0011: Mark turn source to distinguish live (in-session) from history (loaded from store).
+    // Live turns (pending → completed in this session) keep `source: 'live'` to render standalone prompts.
+    // History turns (loaded via /history endpoint) have `source: 'history'` and render prompts only in headers.
+    if (!item.source) item.source = 'live';
+    // Same denormalized-prompt fallback as the pending branch above: a turn
+    // whose raw never gained the denormalized prompt still renders the linked
+    // user message's text the store knows, instead of a blank header that only
+    // a full history refresh would fill.
+    if (item.prompt == null && turn.promptContent != null) item.prompt = turn.promptContent;
     // Matches appendHistoryItems' own skip for a successful completed row
     // with nothing to show (no reply text, no tool trace). Error/cancelled
     // rows still have a synthesized terminal label in appendHistoryItem.
     // shadowInstallHistoryPage
     // installs every row into the store unconditionally, so this filter has
     // to be reapplied here rather than upstream, or the store-driven path
-    // would render bubbles the direct-DOM path silently never did.
+    // would render bubbles the legacy completed-item projection skipped.
     const nativeShell = item.source === 'shell' || String(item.prompt || '').trimStart().startsWith('!');
     if (!item.content && !item.context && !nativeShell && !['error', 'cancelled'].includes(item.status)) return { nodes: [] };
 
@@ -7941,25 +8135,48 @@ function createHistoryRegistry({
     let retainedPendingScaffold = ctx.previousBucket === 'pending'
       ? (ctx.previousGroup?.nodes || []).filter(node =>
           node !== ctx.previousGroup?.pendingRoot && node.isConnected)
-      : [];
+      : ctx.previousBucket === 'completed'
+        ? (ctx.previousGroup?.anchoredNodes || []).filter(node => node.isConnected)
+        : [];
     let retainedRouteMarker = retainedPendingScaffold.find(node =>
       node.classList?.contains('route-chain-marker')
       && node.dataset.routeOwnerId === String(turn.assistantMsgId));
     let staleCompletedNodes = [];
     // Direct completion intentionally forgets registry ownership. A later
-    // Flow-step update can therefore re-adopt the response with no previous
-    // pending group to supply its composer scaffold. Recover that scaffold
-    // through the marker's durable turn owner + live-group token; unlike a
-    // backward adjacency scan this still works after an earlier reorder has
-    // already interposed unrelated history between prompt and response.
+    // history or Flow-step update can therefore re-adopt the response with no
+    // previous pending group to supply its composer scaffold. Recover that
+    // scaffold through either the route marker or the completed composer
+    // bubble's live-group token; unlike a backward adjacency scan this still
+    // works after an earlier reorder has interposed unrelated history.
     if (!retainedRouteMarker) {
       retainedRouteMarker = [...container.querySelectorAll(':scope > .route-chain-marker[data-route-owner-id][data-live-group-id]')]
         .find(node => node.dataset.routeOwnerId === String(turn.assistantMsgId)) || null;
-      const liveGroupId = retainedRouteMarker?.dataset.liveGroupId;
+      const completedComposerBubble = container.querySelector(
+        `:scope > .msg.assistant.history-item[data-msg-id="${turn.assistantMsgId}"][data-live-group-id]:not(.msg-thinking)`,
+      );
+      const liveGroupId = retainedRouteMarker?.dataset.liveGroupId
+        || completedComposerBubble?.dataset.liveGroupId;
+      if (liveGroupId) {
+        retainedPendingScaffold = [...container.children].filter(node =>
+          node.dataset.liveGroupId === liveGroupId
+          && node !== completedComposerBubble
+          && !node.classList.contains('msg-thinking'));
+        retainedRouteMarker = retainedPendingScaffold.find(node =>
+          node.classList?.contains('route-chain-marker')
+          && node.dataset.routeOwnerId === String(turn.assistantMsgId)) || null;
+      }
+    }
+    if (!retainedPendingScaffold.length) {
+      const retainedUserPrompt = container.querySelector(
+        `:scope > .msg.user[data-turn-owner-id="${turn.assistantMsgId}"][data-live-group-id]`,
+      );
+      const liveGroupId = retainedUserPrompt?.dataset.liveGroupId;
       if (liveGroupId) {
         retainedPendingScaffold = [...container.children].filter(node =>
           node.dataset.liveGroupId === liveGroupId
           && !node.classList.contains('msg-thinking'));
+        retainedRouteMarker = retainedPendingScaffold.find(node =>
+          node.classList?.contains('route-chain-marker')) || null;
       }
     }
 
@@ -8018,7 +8235,17 @@ function createHistoryRegistry({
             ownsAdjacent = marker.dataset.routeOwnerId === String(turn.assistantMsgId);
           }
           if (ownsAdjacent) nodes.unshift(marker);
-          return { nodes: [...retainedPendingScaffold, ...nodes] };
+          // ADR-0011: only a flow origin's prompt travels with its completed
+          // group (it is the chain's leading boundary). A plain turn's prompt
+          // is a live-only breadcrumb anchored at its submission position.
+          if (!retainedPendingScaffold.length && route) {
+            const promptScratch = document.createDocumentFragment();
+            retainedPendingScaffold = appendCompletedPromptScaffold(item, promptScratch);
+            container.insertBefore(promptScratch, nodes[0] || existing);
+          }
+          const anchoredNodes = item.flow_route ? [] : retainedPendingScaffold;
+          const placementNodes = item.flow_route ? [...retainedPendingScaffold, ...nodes] : nodes;
+          return { nodes: [...retainedPendingScaffold, ...nodes], placementNodes, anchoredNodes };
         }
       }
     }
@@ -8026,12 +8253,25 @@ function createHistoryRegistry({
     const scratch = document.createDocumentFragment();
     const route = historyRouteChainMarkerForItem(item, nextItem, prevItem);
     if (!retainedRouteMarker) appendHistoryRouteChainMarker(route, item, scratch);
+    // ADR-0011: a plain turn's standalone prompt is live-only and anchored at
+    // its submission position — never built here for a history row (the
+    // response header already carries the prompt). Only a flow origin builds a
+    // prompt scaffold, as the chain's leading boundary.
+    if (!retainedPendingScaffold.length && route) {
+      appendCompletedPromptScaffold(item, scratch);
+    }
     appendHistoryItem(item, scratch);
-    const nodes = [...retainedPendingScaffold, ...scratch.childNodes];
+    const renderedNodes = [...scratch.childNodes];
+    const anchoredNodes = item.flow_route ? [] : retainedPendingScaffold;
+    const placementNodes = item.flow_route
+      ? [...retainedPendingScaffold, ...renderedNodes]
+      : renderedNodes;
+    const nodes = [...retainedPendingScaffold, ...renderedNodes];
     // Store-owned pending -> terminal transition: remove the wip root in this
     // reconcile pass. A recovered group contains only that root. A composer
-    // group also contains its route/prompt/timestamp; those are retained just
-    // like the existing direct-DOM completion path retains them.
+    // group also contains its route/prompt/timestamp; for a plain turn those
+    // stay anchored at their submission position (untracked), so they are not
+    // part of this group's nodes and only the wip root is removed here.
     if (ctx.previousBucket === 'pending') {
       const root = ctx.previousGroup?.pendingRoot;
       if (root) root.remove();
@@ -8043,10 +8283,10 @@ function createHistoryRegistry({
     // deliberately skipped for this bucket, so nothing else retires the old
     // nodes — leaving them would duplicate the bubble (and its route marker).
     if (ctx.previousBucket === 'completed') {
-      for (const node of ctx.previousGroup?.nodes || []) node.remove();
+      for (const node of ctx.previousGroup?.placementNodes || ctx.previousGroup?.nodes || []) node.remove();
     }
     for (const node of staleCompletedNodes) node.remove();
-    return { nodes };
+    return { nodes, placementNodes, anchoredNodes };
   }
 
   // Re-places every up-to-date completed group each pass (not just this
@@ -8087,8 +8327,9 @@ function createHistoryRegistry({
       const group = groups.get(order.completed[i]);
       if (!group || !group.nodes.length) continue;
       next = getAnchor(order.completed[i], next);
-      for (let j = group.nodes.length - 1; j >= 0; j -= 1) {
-        const node = group.nodes[j];
+      const placementNodes = group.placementNodes || group.nodes;
+      for (let j = placementNodes.length - 1; j >= 0; j -= 1) {
+        const node = placementNodes[j];
         if (node.parentNode !== container || node.nextSibling !== next) {
           container.insertBefore(node, next);
         }
@@ -8157,17 +8398,94 @@ function compareCompletedTurnKeys(left, right) {
   return timeOrder || left[1] - right[1];
 }
 
+// Shared "topmost on-screen turn that sorts after `key`" lookup, used by both
+// the direct-DOM completed insert and pending-group placement. A composer's
+// live thinking bubble is `.msg-thinking` WITHOUT `.history-item` (only the
+// recovered wip bubble in makeWipBubble carries it), so a `.history-item`
+// selector alone misses live turns — join the completed-bubble scan with a
+// live-group walk (same boundary as historyStoreAnchor) and pick whichever
+// candidate is higher in the document. `excludeId` skips the turn being
+// inserted, whose own wip bubble can still be connected at insert time.
+function anchorAfterTurnKey(key, excludeId = null, { scanOrphanedPrompt = false } = {}) {
+  const existingKey = el => [
+    el.dataset.orderAt || el.dataset.completedAt || el.dataset.ts || '',
+    Number(el.dataset.msgId) || 0,
+  ];
+  const after = el => {
+    if (excludeId != null && Number(el.dataset.msgId) === Number(excludeId)) return false;
+    return compareCompletedTurnKeys(existingKey(el), key) > 0;
+  };
+  const completed = [...messages.querySelectorAll(':scope > .msg.assistant.history-item[data-msg-id]')]
+    .find(after) || null;
+  let live = null;
+  for (const thinking of messages.querySelectorAll('#messages > .msg-thinking:not(.msg-thinking-done)')) {
+    if (!after(thinking)) continue;
+    const first = liveGroupElements(thinking)[0];
+    if (!first) continue;
+    live = first;
+    break;
+  }
+  // A plain turn's composer prompt is a standalone breadcrumb that outlives its
+  // thinking bubble (render() removes only the pending root), so once the
+  // bubble is gone the live-group walk above misses it. Scan the orphaned
+  // composer prompts too, so a response that finished before its own prompt was
+  // submitted (client/server clock skew) anchors above the prompt instead of
+  // below it. Flow prompts are the chain's leading boundary and travel with
+  // their group via the pendingNodes re-insertion, so they are excluded here.
+  if (scanOrphanedPrompt && excludeId != null) {
+    const ownPrompt = messages.querySelector(
+      `:scope > .msg.user[data-turn-owner-id="${excludeId}"][data-live-group-id]`,
+    );
+    if (ownPrompt && after(ownPrompt)
+      && (!live || (ownPrompt.compareDocumentPosition(live) & Node.DOCUMENT_POSITION_FOLLOWING))) {
+      live = ownPrompt;
+    }
+  }
+  if (completed && live) {
+    return (live.compareDocumentPosition(completed) & Node.DOCUMENT_POSITION_FOLLOWING)
+      ? live : completed;
+  }
+  return completed || live;
+}
+
 function insertCompletedHistoryItem(item, { reconcile = false } = {}) {
+  // Realtime discovery and a pending watch can observe the same terminal row
+  // concurrently. The reconciler may already have installed the authoritative
+  // completed group by the time the direct completion fallback arrives; keep
+  // that group instead of creating a second assistant bubble for the msg id.
+  const existingCompleted = item.id == null ? null : messages.querySelector(
+    `:scope > .msg.assistant.history-item[data-msg-id="${item.id}"]:not(.msg-thinking)`,
+  );
+  if (existingCompleted) {
+    const ownedGroup = historyReconciler?.getGroup(Number(item.id));
+    if (ownedGroup?.nodes.includes(existingCompleted)) return existingCompleted;
+    // A prior direct fallback may carry sparse ordering/content. Replace its
+    // complete flat range with this authoritative row instead of preserving
+    // stale placement or appending a duplicate.
+    const priorPromptTime = existingCompleted.previousElementSibling?.classList.contains('user-prompt-time')
+      ? existingCompleted.previousElementSibling : null;
+    const priorPrompt = priorPromptTime?.previousElementSibling?.matches('.msg.user.history-item')
+      ? priorPromptTime.previousElementSibling : null;
+    for (const node of existingCompletedNodeRange(existingCompleted)) node.remove();
+    priorPromptTime?.remove();
+    priorPrompt?.remove();
+  }
   const wasAtBottom = isAtBottom();
   const previousHeight = messages.scrollHeight;
   const fragment = document.createDocumentFragment();
+  const hasComposerPrompt = item.id != null && messages.querySelector(
+    `:scope > .msg.user[data-turn-owner-id="${item.id}"]`,
+  );
+  // ADR-0011: only show standalone prompts for:
+  // 1. Flow origins (route chain leading boundary)
+  // 2. Live turns (completed in this session) — prompt is breadcrumb at submission position
+  // History turns (loaded from /history) show prompts only in response headers.
+  const route = historyRouteChainMarkerForItem(item);
+  const isLive = item.source === 'live';
+  if (!hasComposerPrompt && (route || isLive)) appendCompletedPromptScaffold(item, fragment);
   const bubble = appendHistoryItem(item, fragment);
   const key = completedTurnKey(item);
-  const anchor = [...messages.querySelectorAll(':scope > .msg.assistant.history-item[data-msg-id]')]
-    .find(existing => compareCompletedTurnKeys([
-      existing.dataset.orderAt || existing.dataset.completedAt || existing.dataset.ts || '',
-      Number(existing.dataset.msgId) || 0,
-    ], key) > 0) || bottomSentinel;
+  const anchor = anchorAfterTurnKey(key, item.id, { scanOrphanedPrompt: !route }) || bottomSentinel;
   const anchorAboveViewport = !!anchor && anchor.getBoundingClientRect().top < messages.getBoundingClientRect().top;
   messages.insertBefore(fragment, anchor || null);
   // Snapshot rows reconcile the bounded HTTP history already on screen. They
@@ -8209,8 +8527,18 @@ function makeWipBubble(item) {
     bubble.dataset.orderAt = item.timestamp;
   }
 
-  // Recovered pending rows have no preceding user bubble after a refresh, so
-  // give them the same prompt-bearing header as completed history responses.
+  // ADR-0011: recovered pending turns are still in-flight, so they should
+  // also have a standalone prompt breadcrumb like live turns do.
+  const liveGroupId = `${Date.now().toString(36)}-recovered-${item.id}`;
+  bubble.dataset.liveGroupId = liveGroupId;
+  const promptBubble = makeUserBubble(item.prompt || '', item.topic, item.agent, item.backend, item.adhoc, item.stats?.lookback ?? 0);
+  promptBubble.dataset.liveGroupId = liveGroupId;
+  promptBubble.dataset.turnOwnerId = String(item.id);
+  if (item.timestamp) {
+    promptBubble.dataset.orderAt = item.timestamp;
+    promptBubble.dataset.ts = item.timestamp;
+  }
+
   const header = document.createElement('div');
   header.className = 'response-header';
   const headerText = document.createElement('span');
@@ -8225,7 +8553,7 @@ function makeWipBubble(item) {
     backend: item.backend || null,
   }));
   headerText.appendChild(document.createTextNode('  '));
-  const { promptToggle, promptFullDiv } = makeHistoryPromptToggle(item.prompt);
+  const { promptToggle, promptFullDiv } = makeHistoryPromptToggle(item.prompt || '');
   headerText.appendChild(promptToggle);
   header.appendChild(headerText);
   bubble.appendChild(header);
@@ -8249,6 +8577,8 @@ function makeWipBubble(item) {
   });
   bubble.appendChild(killBtn);
   addThinkingHeightButton(bubble);
+
+  bubble.__promptBubble = promptBubble;
   return bubble;
 }
 
@@ -8268,6 +8598,7 @@ function insertPendingHistoryItem(item) {
   const wasAtBottom = isAtBottom();
   const previousHeight = messages.scrollHeight;
   const bubble = makeWipBubble(item);
+  const promptBubble = bubble.__promptBubble;
   const key = [String(item.timestamp || ''), Number(item.id) || 0];
   const anchor = [...messages.querySelectorAll(':scope > .msg.assistant.history-item[data-msg-id]')]
     .find(existing => compareCompletedTurnKeys([
@@ -8275,7 +8606,9 @@ function insertPendingHistoryItem(item) {
       Number(existing.dataset.msgId) || 0,
     ], key) > 0) || bottomSentinel;
   const anchorAboveViewport = !!anchor && anchor.getBoundingClientRect().top < messages.getBoundingClientRect().top;
-  messages.insertBefore(bubble, anchor || null);
+  const realAnchor = anchor || null;
+  messages.insertBefore(bubble, realAnchor);
+  if (promptBubble) messages.insertBefore(promptBubble, bubble);
   refreshDateDividers();
   if (wasAtBottom) scrollToRevealBubble(bubble);
   else if (anchorAboveViewport) messages.scrollTop += messages.scrollHeight - previousHeight;
@@ -8293,6 +8626,7 @@ async function replacePendingWithStoredItem(item, wipBubble, onStored = null, {
   statusData = null,
   acceptStatus = null,
   revealOnComplete = false,
+  fallbackContent = '',
 } = {}) {
   let fetchTimeout = null;
   try {
@@ -8304,12 +8638,63 @@ async function replacePendingWithStoredItem(item, wipBubble, onStored = null, {
       if (!res.ok) return false;
       data = await res.json();
     }
-    if (!wipBubble.parentNode) return false;
     if (data.status !== 'done' && data.status !== 'error' && data.status !== 'cancelled') return false;
     if (acceptStatus && !acceptStatus(data)) return false;
+    // Persistence can expose terminal status before final content. Preserve
+    // an answer already received from the live transport during that window.
+    if (!data.content && fallbackContent) data = { ...data, content: fallbackContent };
     onStored?.(data);
     const registeredPending = historyReconciler?.getGroup(item.id);
-    if (registeredPending?.pendingRoot === wipBubble && shouldShowNewResponse(data)) {
+    const pendingNodes = registeredPending?.pendingRoot === wipBubble
+      ? [...registeredPending.nodes]
+      : (existingPendingNodeRange(wipBubble) || [wipBubble]);
+
+    // A terminal row is authoritative even when registry adoption/rendering
+    // loses a race. Never retire the visible wip until a connected completed
+    // bubble exists; otherwise a status/tool-only stream disappears on done
+    // because the composer has no locally buffered response text to render.
+    const renderAuthoritativeFallback = () => {
+      if (!shouldShowNewResponse(data)) {
+        for (const node of pendingNodes) node.remove();
+        historyReconciler?.forget(item.id);
+        transcriptStore?.clearReconciled([Number(item.id)]);
+        refreshDateDividers();
+        return true;
+      }
+      const wasAtBottom = isAtBottom();
+      historyReconciler?.forget(item.id);
+      transcriptStore?.clearReconciled([Number(item.id)]);
+      const completedBubble = insertCompletedHistoryItem(data);
+      if (!completedBubble?.isConnected) return false;
+      for (const node of pendingNodes) {
+        if (node === wipBubble) continue;
+        if (!node.isConnected) messages.insertBefore(node, completedBubble);
+      }
+      wipBubble.remove();
+      refreshDateDividers();
+      if (wasAtBottom || revealOnComplete) scrollToRevealBubble(completedBubble);
+      if (data.agent && !data.adhoc) refreshComposerSessionCount(data.topic || item.topic || 'default', data.agent);
+      updateInContextMarkers();
+      updatePinCount();
+      if (pinPanel.classList.contains('open')) renderPinPanel();
+      refreshAllRevertButtons();
+      return true;
+    };
+
+    if (registeredPending?.pendingRoot === wipBubble) {
+      const visibleOnCompletion = shouldShowNewResponse(data);
+      if (!visibleOnCompletion) {
+        // A terminal turn outside the active scope is successfully handled,
+        // not a failed handoff. Persist its terminal store state, remove the
+        // entire registered pending range from #messages, and release its
+        // registry ownership so callers do not restart polling forever.
+        shadowInstallHistoryPage([data], undefined, { source: 'live' });
+        for (const node of registeredPending.nodes) node.remove();
+        historyReconciler.forget(item.id);
+        transcriptStore?.clearReconciled([item.id]);
+        refreshDateDividers();
+        return true;
+      }
       const wasAtBottom = isAtBottom();
       const viewportTop = messages.getBoundingClientRect().top;
       // Preserve a stable, non-transitioning sibling's viewport position.
@@ -8317,6 +8702,7 @@ async function replacePendingWithStoredItem(item, wipBubble, onStored = null, {
       // root and the newly ordered completed range land on opposite sides of
       // the viewport.
       const oldNodes = new Set(registeredPending.nodes);
+      const pendingScaffold = registeredPending.nodes.filter(node => node !== wipBubble);
       const visualAnchor = [...messages.children].find(node =>
         !oldNodes.has(node) && node.getBoundingClientRect().bottom > viewportTop);
       const visualAnchorTop = visualAnchor?.getBoundingClientRect().top ?? null;
@@ -8325,16 +8711,46 @@ async function replacePendingWithStoredItem(item, wipBubble, onStored = null, {
       // previousBucket=pending and replaces the registered root with the
       // completed range in this same synchronous reconcile pass. The watcher
       // has already stopped/closed before every caller reaches this function.
-      shadowInstallHistoryPage([data]);
+      shadowInstallHistoryPage([data], undefined, { source: 'live' });
       const result = historyReconciler.reconcile();
       // `ok` covers every dirty id in this pass. An unrelated render may fail
       // while this turn still transitions successfully, so key the fallback
       // decision to this id rather than the aggregate result.
       if (result.reconciledIds.includes(Number(item.id))) {
+        let completedBubble = historyReconciler.getGroup(item.id)?.nodes
+          .find(node => node.matches?.('.msg.assistant.history-item:not(.msg-thinking)'));
+        if (visibleOnCompletion && !completedBubble?.isConnected) {
+          // A successful reconcile result is not sufficient if another DOM
+          // owner removed its newly-built range before this handoff observed
+          // it. The pending root is already gone at that point, so returning
+          // false leaves reconnect/poll recovery with no connected node to
+          // watch and the whole live turn appears to vanish until refresh.
+          // Recover immediately from the same authoritative status row.
+          historyReconciler.forget(item.id);
+          transcriptStore?.clearReconciled([Number(item.id)]);
+          completedBubble = insertCompletedHistoryItem(data);
+          if (!completedBubble?.isConnected) return false;
+          // The same competing DOM owner that removed the completed range can
+          // also remove the composer-owned prompt/timestamp siblings. Restore
+          // the complete live turn, in its original order, rather than leaving
+          // only the recovered assistant bubble visible.
+          for (const node of pendingScaffold) {
+            if (!node.isConnected) messages.insertBefore(node, completedBubble);
+          }
+        }
+        // A successful response reconcile does not prove that the separately
+        // anchored composer scaffold survived. The completed group deliberately
+        // does not placement-own a plain turn's prompt, so another cleanup pass
+        // can remove that prompt while leaving the new response connected. Keep
+        // the live invariant independently: every scaffold node captured before
+        // the pending -> terminal swap remains connected afterward.
+        if (completedBubble?.isConnected) {
+          for (const node of pendingScaffold) {
+            if (!node.isConnected) messages.insertBefore(node, completedBubble);
+          }
+        }
         refreshDateDividers();
-        if (wasAtBottom || revealOnComplete) {
-          const completedBubble = historyReconciler.getGroup(item.id)?.nodes
-            .find(node => node.matches?.('.msg.assistant.history-item'));
+        if (visibleOnCompletion && (wasAtBottom || revealOnComplete)) {
           if (completedBubble) scrollToRevealBubble(completedBubble);
           else scrollToBottom();
         }
@@ -8348,44 +8764,9 @@ async function replacePendingWithStoredItem(item, wipBubble, onStored = null, {
         refreshAllRevertButtons();
         return true;
       }
-      // A failed render for this id stays dirty by contract. Fall through to
-      // the direct-DOM recovery path, which forgets that stale identity and
-      // clears the dirty id in insertCompletedHistoryItem.
+      return renderAuthoritativeFallback();
     }
-    // Removing a finished wip bubble that sits above the viewport (e.g. another
-    // bubble is still streaming below where the user is reading) shrinks the
-    // content above without moving scrollTop, which visually yanks the view
-    // upward. Compensate before insertCompletedHistoryItem does its own
-    // (unrelated) compensation for the new item it inserts.
-    const wipRect = wipBubble.getBoundingClientRect();
-    const wipAboveViewport = wipRect.bottom <= messages.getBoundingClientRect().top;
-    wipBubble.remove();
-    // This direct-DOM completion path removed a group the reconciler may
-    // previously have adopted. Forget its detached node before any unrelated
-    // reconcile/reorder pass can put it back.
-    historyReconciler?.forget(item.id);
-    if (wipAboveViewport) messages.scrollTop -= wipRect.height;
-    if (!shouldShowNewResponse(data)) return true;
-    // Feed the fetched terminal row to the store too — the registered path
-    // above already does this via shadowInstallHistoryPage before
-    // reconciling. Without it this turn keeps its pending-seed
-    // completedAt=null (message.changed patches carry no completed_at),
-    // which sorts before every real timestamp in getOrderedTurnIds(); the
-    // next unrelated reconcile() pass (e.g. a flow chain step's completion)
-    // then re-renders this turn and reorder() moves its adopted bubble to
-    // the oldest position, far above the live edge — the flow origin
-    // "vanishing" once the next step completes (#13956).
-    // insertCompletedHistoryItem's own forget+clearReconciled keeps this
-    // install from double-rendering.
-    shadowInstallHistoryPage([data]);
-    insertCompletedHistoryItem(data);
-    if (data.agent && !data.adhoc) refreshComposerSessionCount(data.topic || item.topic || 'default', data.agent);
-    updateInContextMarkers();
-    updatePinCount();
-    if (pinPanel.classList.contains('open')) renderPinPanel();
-    refreshAllRevertButtons();
-    if (isAtBottom()) scrollToBottom();
-    return true;
+    return renderAuthoritativeFallback();
   } catch { return false; }
   finally { if (fetchTimeout) clearTimeout(fetchTimeout); }
 }
@@ -8609,7 +8990,7 @@ const realtimeV1 = (() => {
       );
     } else if (frame.type === 'chat.status' && frame.msg_id != null) {
       // The CLI's own thinking/status scrollback line, appended the same way
-      // the direct-DOM path's statusBuf += text does.
+      // the live transport's statusBuf += text does.
       result = transcriptStore.applyRunEvent(
         Number(frame.msg_id), Number(frame.run_seq ?? 0), 'narrative',
         { delta: frame.payload?.text ?? '' }, frame.event_id,
@@ -8641,8 +9022,8 @@ const realtimeV1 = (() => {
     if (!historyReconciler) transcriptStore.clearReconciled(result.dirty);
   };
 
-  const dispatchEvent = frame => {
-    if (Number(frame.event_id || 0) <= cursor) return;
+  const dispatchEvent = async frame => {
+    if (Number(frame.event_id || 0) <= cursor) return true;
     shadowApplyEvent(frame);
     if (frame.type === 'chat.stats' && frame.msg_id != null
         && transcriptStore?.isTerminal(transcriptStore.getTurn(Number(frame.msg_id))?.status)) {
@@ -8662,7 +9043,11 @@ const realtimeV1 = (() => {
       // Producer 3 cutover: lifecycle discovery uses the same targeted
       // pending construction handoff as snapshots. The store action above
       // dirtied this id before discoverRealtimeTurn enriches its raw row.
-      onDiscover?.({ ...frame.payload, id: frame.msg_id, ...frame.scope }, { reconcile: true });
+      const discovered = await onDiscover?.(
+        { ...frame.payload, id: frame.msg_id, ...frame.scope },
+        { reconcile: true, registryOnly: true },
+      );
+      if (discovered === false) return false;
       if (frame.payload.status && frame.payload.status !== 'pending' && frame.scope?.agent) {
         refreshComposerSessionCount(frame.scope.topic || 'default', frame.scope.agent);
       }
@@ -8670,7 +9055,14 @@ const realtimeV1 = (() => {
       const msgId = Number(frame.payload?.assistant_msg_id ?? frame.msg_id);
       if (Number.isFinite(msgId)) attachFlowStep(msgId);
     } else if (frame.type?.startsWith('chat.') && frame.msg_id != null && !watches.has(Number(frame.msg_id))) {
-      onDiscover?.({ id: frame.msg_id, status: 'pending', ...frame.scope }, { reconcile: true });
+      // Run-event frames can precede their denormalized /status row. Feed the
+      // normalized deltas immediately and let discovery retry independently;
+      // unlike message.changed, these sparse frames cannot render a turn by
+      // themselves and therefore must not hold the global event cursor.
+      onDiscover?.(
+        { id: frame.msg_id, status: 'pending', ...frame.scope },
+        { reconcile: true, registryOnly: true },
+      );
     }
     const watch = watches.get(Number(frame.msg_id));
     if (watch) {
@@ -8682,6 +9074,7 @@ const realtimeV1 = (() => {
       }
     }
     markApplied(frame);
+    return true;
   };
 
   const connect = () => {
@@ -8737,7 +9130,7 @@ const realtimeV1 = (() => {
           if (socket !== connectingSocket || connectingSocket.readyState !== WebSocket.OPEN) return;
           const applied = frame.type === 'snapshot'
             ? await dispatchSnapshot(frame)
-            : (dispatchEvent(frame), true);
+            : await dispatchEvent(frame);
           if (!applied && socket === connectingSocket) {
             // Keep the persisted cursor behind the failed render and force a
             // fresh bounded snapshot. Queued later events must not advance an
@@ -8983,6 +9376,16 @@ async function discoverRealtimeTurn(message, { reconcile = false, registryOnly =
         return true;
       }
       shadowAttachRealtimeRow(item);
+      // Sparse snapshot/lifecycle rows intentionally carry only wire facts.
+      // Once discovery observes a terminal authoritative /status row, install
+      // its completed content/timestamp as message facts before asking the
+      // registry to render; attachRaw alone enriches display metadata but
+      // cannot replace the sparse message content.
+      const normalizedContent = transcriptStore?.getMessage(msgId)?.content;
+      if ((!normalizedContent && normalizedContent !== 0)
+          && (item.status === 'done' || item.status === 'error' || item.status === 'cancelled')) {
+        shadowInstallHistoryPage([item], undefined, { source: 'live' });
+      }
       if (item.status === 'pending') {
         // Snapshot and WS-lifecycle discovery hand initial pending
         // construction to the registry. Their store adapters already dirtied
@@ -9240,7 +9643,13 @@ async function reconnectPendingItem(item, wipBubble, {
       finishing = true;
       stop();
       pendingPollTimers.delete(wipBubble);
-      await replacePendingWithStoredItem(item, wipBubble, onStored, { revealOnComplete });
+      const completed = await replacePendingWithStoredItem(
+        item, wipBubble, onStored, { revealOnComplete },
+      );
+      // The watcher has already stopped. If the registry transition failed,
+      // keep an authoritative recovery owner alive instead of stranding this
+      // recent turn as an indefinitely pending (or apparently missing) row.
+      if (!completed && wipBubble.isConnected) pollPendingItem(item, wipBubble);
     }
     pendingPollTimers.set(wipBubble, stop);
     return;
@@ -9276,7 +9685,7 @@ async function reconnectPendingItem(item, wipBubble, {
     // path (there was no listener for it before ADR-0041 producer 4 — the
     // stats display comes from replacePendingWithStoredItem's post-done
     // fetch instead), so this listener exists purely to feed the shadow
-    // store, matching shadow mode's "store-only, no render change" rule
+    // store without independently mutating the reconciler-owned DOM
     // with an empty behavior change for direct-DOM.
     shadowApplySseRunEvent(item.id, 'stats', event);
   });
@@ -9368,7 +9777,13 @@ async function pollPendingItem(item, wipBubble) {
       if (data.status === 'error' && !data.content) return;
       if (data.status === 'done' || data.status === 'error' || data.status === 'cancelled') {
         cancelPendingPoll(wipBubble);
-        await replacePendingWithStoredItem(item, wipBubble, null, { statusData: data });
+        const completed = await replacePendingWithStoredItem(
+          item, wipBubble, null, { statusData: data },
+        );
+        // A transient render/adoption failure leaves the normalized turn
+        // dirty. Retry on the normal polling cadence; never abandon the live
+        // row and never create a second direct-DOM completion owner.
+        if (!completed && wipBubble.isConnected) pollPendingItem(item, wipBubble);
       } else if (count >= MAX_POLLS) {
         cancelPendingPoll(wipBubble);
         const content = wipBubble.querySelector('.thinking-live');
@@ -12596,7 +13011,7 @@ function renderProcPopup(processes, queued) {
         <tr>
           <td>#${r.topic || '—'}@${r.agent || '—'}</td>
           <td class="proc-queue-preview">${r.prompt_preview || '—'}</td>
-          <td><button class="proc-deq-btn" data-topic="${r.topic || ''}" data-pos="${r.position}">✕</button></td>
+          <td><button class="proc-deq-btn" data-msgid="${r.msg_id || ''}" data-topic="${r.topic || ''}" data-pos="${r.position}">✕</button></td>
         </tr>`).join('');
       body += `<div class="proc-section-label">Queued</div>
         <table><thead><tr><th>Route</th><th>Prompt</th><th></th></tr></thead>
@@ -12624,9 +13039,9 @@ function renderProcPopup(processes, queued) {
       btn.disabled = true; btn.textContent = '…';
       try {
         if (btn.dataset.msgid) {
-          await cancelRealtimeMessage(
-            parseInt(btn.dataset.msgid), btn.dataset.topic, btn.dataset.agent,
-          );
+          const msgId = parseInt(btn.dataset.msgid);
+          await cancelRealtimeMessage(msgId, btn.dataset.topic, btn.dataset.agent);
+          await markLiveMessageCancelled(msgId);
         } else {
           const b = { command: 'stop', topic: btn.dataset.topic, agent: btn.dataset.agent };
           const response = await fetch('/cmd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
@@ -12665,14 +13080,26 @@ function renderProcPopup(processes, queued) {
       const position = parseInt(btn.dataset.pos, 10);
       const response = await fetch('/cmd', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: 'deq', topic: btn.dataset.topic, pos: position }),
+        body: JSON.stringify({
+          command: 'deq',
+          topic: btn.dataset.topic,
+          pos: position,
+          msg_id: Number.isFinite(parseInt(btn.dataset.msgid, 10))
+            ? parseInt(btn.dataset.msgid, 10)
+            : null,
+        }),
       });
       if (!response.ok) {
         btn.disabled = false;
         btn.textContent = 'Retry';
         return;
       }
-      liveQueuedTurnHandlers.get(liveQueuedTurnKey(btn.dataset.topic, position))?.();
+      const msgId = parseInt(btn.dataset.msgid, 10);
+      const handler = Number.isFinite(msgId)
+        ? liveQueuedTurnHandlers.get(liveQueuedMsgKey(msgId))
+        : null;
+      (handler || liveQueuedTurnHandlers.get(liveQueuedTurnKey(btn.dataset.topic, position)))?.();
+      removeCachedQueuedTurn(btn.dataset.topic, position, msgId);
       await pollProcs();
     });
   });
@@ -15515,9 +15942,11 @@ async function showBootBanner() {
     const bubbleText = pickBootMessage(insights, values);
 
     const el = document.createElement('div');
-    el.className = 'boot-banner';
+    el.className = 'boot-banner client-session-boundary';
+    el.dataset.transcriptBoundary = 'history-above-live-below';
     el.innerHTML = bootLogoHtml(bubbleText) +
       `<div class="boot-meta">AgentSquid${bootTime ? `  ·  started ${bootTime}` : ''}</div>` +
+      `<div class="client-session-boundary-label">history above · live this page session below</div>` +
       (!navigator.onLine ? `<div class="boot-offline">no internet — LLM calls will fail</div>` : '');
     await appendBootBannerAtBottom(el);
 
@@ -15563,8 +15992,10 @@ async function showBootBanner() {
         ? 'squid server is not running'
         : 'server unreachable — check Tailscale';
     const el = document.createElement('div');
-    el.className = 'boot-banner';
+    el.className = 'boot-banner client-session-boundary';
+    el.dataset.transcriptBoundary = 'history-above-live-below';
     el.innerHTML = bootLogoHtml(BOOT_FALLBACK_TEXT) +
+      `<div class="client-session-boundary-label">history above · live this page session below</div>` +
       `<div class="boot-offline">${msg}</div>`;
     await appendBootBannerAtBottom(el);
   }
@@ -16309,7 +16740,29 @@ function escapeHtml(s) {
 function getPinnedItems() {
   try { return (JSON.parse(localStorage.getItem('pinnedItems') || '[]')).sort((a, b) => a.id - b.id); } catch { return []; }
 }
-function setPinnedItems(items) { localStorage.setItem('pinnedItems', JSON.stringify(items)); }
+function refreshPinnedContextUi() {
+  const pinnedIds = new Set(getPinnedItems().map(item => Number(item.id)));
+  document.querySelectorAll('.msg-pin-btn[data-msg-id]').forEach(btn => {
+    btn.classList.toggle('pinned', pinnedIds.has(Number(btn.dataset.msgId)));
+  });
+  document.querySelectorAll('.msg.assistant[data-msg-id]').forEach(bubble => {
+    bubble.classList.toggle('pinned-sel', pinnedIds.has(Number(bubble.dataset.msgId)));
+  });
+  updateInContextMarkers();
+  updatePinCount();
+  if (pinPanel.classList.contains('open')) renderPinPanel();
+}
+function setPinnedItems(items) {
+  localStorage.setItem('pinnedItems', JSON.stringify(items));
+  refreshPinnedContextUi();
+}
+
+// localStorage mutations in another Squid tab do not fire in the tab that
+// performed the write, but they do fire here. Keep the open cart and its
+// badge/bubble selections convergent across desktop/mobile or duplicate tabs.
+window.addEventListener('storage', event => {
+  if (event.key === 'pinnedItems') refreshPinnedContextUi();
+});
 
 function getAttachedFiles() {
   try { return JSON.parse(localStorage.getItem('attachedFiles') || '[]'); } catch { return []; }

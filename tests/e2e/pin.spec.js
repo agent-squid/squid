@@ -97,6 +97,22 @@ test('pin button on bubble adds item to pin panel', async ({ page }) => {
   await expect(bubble).not.toHaveClass(/pinned-sel/);
 });
 
+test('open pin panel updates from the centralized pinned-items setter', async ({ page }) => {
+  await mockBackend(page);
+  await page.goto('/');
+  await page.click('#pin-btn');
+  await expect(page.locator('#pin-panel.open')).toBeVisible();
+  await expect(page.locator('.pin-item')).toHaveCount(0);
+
+  await page.evaluate(() => setPinnedItems([{
+    id: 91, topic: 'squid', agent: 'claude', content: 'Added while cart is open',
+  }]));
+
+  await expect(page.locator('.pin-item')).toHaveCount(1);
+  await expect(page.locator('.pin-item-preview')).toContainText('Added while cart is open');
+  await expect(page.locator('#pin-count')).toHaveText('1');
+});
+
 test('escape closes pin panel and returns focus to composer', async ({ page }) => {
   await mockBackend(page, { topic: 'squid', agent: 'claude' });
   await page.goto('/');

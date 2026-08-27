@@ -1918,6 +1918,61 @@ def test_yaml_provider_update_refreshes_pi_models_config(tmp_path, monkeypatch):
         providers_mod.PROVIDERS.update(original_providers)
 
 
+def test_startup_pi_models_sync_heals_stale_base_url(tmp_path, monkeypatch):
+    """A squid.yaml base_url edited on disk (no agent row touched) must reach
+    pi's models.json at startup — /restart re-execs the server, and pi only
+    reads custom-provider base URLs from that file, never from env vars."""
+    pi_models = tmp_path / "models.json"
+    stale = {
+        "providers": {
+            "baseten": {
+                "baseUrl": "http://192.168.0.7:8080",
+                "api": "openai-completions",
+                "apiKey": "$SQUID_PI_BASETEN_API_KEY",
+                "models": [{"id": "deepseek-ai/DeepSeek-V4-Flash-0731", "name": "Baseten"}],
+            }
+        }
+    }
+    pi_models.write_text(json.dumps(stale))
+    monkeypatch.setattr("agent.resolve.PI_MODELS_FILE", str(pi_models))
+    monkeypatch.setattr(server, "list_agents", lambda: [{
+        "name": "pibt", "harness": "pi", "provider": "baseten",
+        "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+    }])
+    original_providers = dict(providers_mod.PROVIDERS)
+    providers_mod.PROVIDERS["baseten"] = providers_mod._validate_provider("baseten", {
+        "label": "Baseten",
+        "color": "#19E76E",
+        "base_url": "https://inference.baseten.co/v1",
+        "supported_apis": ["/v1/chat/completions"],
+        "auth": {"type": "api_key", "api_key": "test-key"},
+        "models": ["deepseek-ai/DeepSeek-V4-Flash-0731"],
+    })
+    try:
+        server._sync_pi_agents_models_store()
+        models = json.loads(pi_models.read_text())
+        assert models["providers"]["baseten"]["baseUrl"] == "https://inference.baseten.co/v1"
+        # Idempotent: a second sync must not grow the model list.
+        server._sync_pi_agents_models_store()
+        models_again = json.loads(pi_models.read_text())
+        assert models_again["providers"]["baseten"]["models"] == models["providers"]["baseten"]["models"]
+    finally:
+        providers_mod.PROVIDERS.clear()
+        providers_mod.PROVIDERS.update(original_providers)
+
+
+def test_startup_pi_models_sync_skips_non_pi_agents(tmp_path, monkeypatch):
+    pi_models = tmp_path / "models.json"
+    monkeypatch.setattr("agent.resolve.PI_MODELS_FILE", str(pi_models))
+    monkeypatch.setattr(server, "list_agents", lambda: [{
+        "name": "cc", "harness": "claudecode", "provider": "deepseek",
+    }])
+
+    server._sync_pi_agents_models_store()
+
+    assert not pi_models.exists()
+
+
 def test_api_routes_are_registered_before_static_ui():
     client = TestClient(server.app)
 

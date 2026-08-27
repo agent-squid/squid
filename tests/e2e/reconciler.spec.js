@@ -1,8 +1,8 @@
 /**
  * ADR-0041 idempotent reconciler — engine invariant tests.
  * The reconciler (reconciler.js) is fully tested here against a store +
- * injected registry. HTTP history now renders through it via
- * createHistoryRegistry under ?renderer=store (see history-store-renderer.spec.js
+ * injected registry. HTTP history renders through createHistoryRegistry
+ * unconditionally (see history-store-renderer.spec.js
  * for that production wiring); these tests still exercise window.SquidReconciler
  * directly, mirroring how transcript-store.spec.js exercises
  * window.SquidTranscriptStore, to cover the engine's invariants in isolation.

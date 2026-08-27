@@ -96,7 +96,7 @@ test('history renders completed turns in the same order as live completion', asy
     fmtTime('2026-07-15T12:10:28Z'),
     fmtTime('2026-07-15T12:15:25Z'),
   ]);
-  await expect(page.locator('#messages > .msg-time.history-item')).toHaveText(expectedTimes);
+  await expect(page.locator('#messages > .msg-time.history-item:not(.user-prompt-time)')).toHaveText(expectedTimes);
 });
 
 test('jump renders a bounded message window and pages older and newer from its edges', async ({ page }) => {

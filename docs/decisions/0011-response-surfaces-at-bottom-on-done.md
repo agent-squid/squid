@@ -1,128 +1,101 @@
 ---
 status: accepted
 date: 2026-05-26
-updated: 2026-08-14
+updated: 2026-08-23
 ---
 # ADR-0011: Completed Response Bubbles Surface at the Bottom of the Chat
 
-## Context and Problem Statement
+## Core Behavior
 
-With parallel adhoc (`!`) execution (ADR-0010) the user can fire multiple queries and
-continue chatting while they run. A response that takes minutes to complete ends up deep
-in scroll history by the time it finishes. The user has no natural way to notice it without
-manually scrolling up.
+**Responses complete at the bottom, not at their submission position.** User prompts stay anchored where they were submitted. When a response finishes (on `done`), it appears at the bottom of the chat as the latest item, regardless of when the prompt was sent. This surfaces async/parallel completions where the user is looking — no hunting required.
 
-## Considered Options
+During streaming, a live plain-text preview scrolls inside the thinking bubble, so progress is visible. Markdown rendering happens once, at completion, and the full response bubble is inserted at the bottom in one atomic handoff.
 
-**A. Keep response in place; no notification**
-Works for synchronous use. Fails for async: the user must manually hunt for the finished
-response.
+Prompts, thinking bubbles, and responses placement:
 
-**B. Keep response in place; show a "ready" chip at the bottom**
-A dismissible notification (`↑ Response from #topic@agent ready`) scrolls to the response.
-Preserves positional pairing of prompt and response.
+| Element | During streaming | At completion |
+|---------|------------------|----------------|
+| **User prompt** | Appears at submission position | Stays anchored (never moves) |
+| **Thinking bubble** | Live plain-text preview at prompt site | Frozen (if has narrative) or removed |
+| **Response** | Withheld from DOM | Inserted at bottom in completion order |
 
-**C. Move the completed response bubble to the bottom on `done`**
-The response bubble is withheld from the DOM entirely during streaming. When the server
-signals `done`, the bubble is appended to `#messages` with fully rendered markdown,
-surfacing it as the newest item at the bottom. The response header (`#topic@agent  prompt…`)
-makes it self-contained without positional proximity to the user bubble.
+## Live vs. History Turns
 
-During streaming, content is shown as a live plain-text preview inside the thinking bubble
-(a scrollable `max-height` area), giving the user progress visibility without a jumping
-bubble. The thinking bubble collapses to a toggle on `done` if status/tool events were
-present, or is removed entirely if not.
+“Live” and “history” describe how this browser page first observed a turn. They
+do not describe the backend endpoint that most recently supplied fields for the
+turn, whether the turn is currently pending, or which device submitted it.
 
-## Decision Outcome
+A **client session** is the lifetime of one loaded page. An actual reload starts
+a new client session. Backgrounding, sleep, temporary network loss, WebSocket
+reconnect, and returning to the same retained page do not start a new client
+session by themselves.
 
-**Option C** — bubble deferred to `done`.
+A **live turn** is first observed after that page loaded, through local composer
+submission or realtime delivery. This includes a turn submitted from another
+device and delivered to this page while it remains open. Its standalone user
+prompt is a session-local breadcrumb: it appears at submission/discovery
+position and remains visible after the response completes. Later status or
+history data may enrich and reconcile the turn, but must not downgrade it to a
+history turn during that client session.
 
-The response bubble (`const bubble`) is created immediately on send but not inserted into
-the DOM until `done`. All content chunks are accumulated in `raw` and shown as a live
-preview in the thinking bubble via `updateThinkingPreview()`. At `done`:
+A **history turn** is first observed from persisted transcript loading. Its
+prompt appears only in the response header, not as a standalone user bubble. A
+completed history turn renders as the self-contained unit
+`[header with prompt][response][stats][tools]`.
 
-1. `freezeThinking()` — collapses or removes the thinking bubble
-2. `contentDiv.innerHTML = marked.parse(raw)` — renders final markdown
-3. `messages.appendChild(bubble)` + `messages.appendChild(statsEl)` — surfaces at bottom
-4. `scrollToBottom()` — scrolls only if user is already near the bottom
+Pending rows discovered by the initial history page are currently treated as
+**recovered live turns**: the renderer creates a standalone prompt and resumes
+watching them. This is a deliberate exception to the simple “anything returned
+by `/history` is history” rule because the page is observing the remainder of
+their lifecycle. If the desired product rule is instead “only turns first seen
+after bootstrap may have standalone prompts,” this recovery behavior must be
+changed in the renderer; documentation alone does not make that semantic true.
 
-Error and reconnect paths (`showError`, `showStoredResponse`) explicitly append the bubble
-to the DOM before populating content.
+### When history is pulled
 
-## Consequences
+The client fetches persisted transcript pages in these situations:
 
-- Good: async responses always surface where the user is looking — no jumping
-- Good: parallel responses complete in completion order at the bottom, never mid-stream
-- Good: thinking bubble provides live progress for long-running queries without a displaced bubble
-- Good: no new UI component needed
-- Neutral: the frozen thinking bubble remains as a positional breadcrumb at the prompt site
-- Bad: breaks traditional prompt-response visual pairing; response always moves to bottom
-- Bad: full markdown rendering deferred to `done` — no incremental markdown during streaming
+- initial page bootstrap and scroll-up pagination;
+- changing or clearing a history filter;
+- leaving a bounded search/jump window and resetting to the latest page;
+- opening and paging a bounded history window around a message.
 
-## Update 2026-08-14: land on the new bubble's top, not past it, when it's taller than the viewport
+Merely returning from background, sleep, or a network interruption does not
+reload transcript history. The retained page resumes realtime transport,
+process polling, and pending-turn recovery. Realtime replay, snapshots, and
+per-message status recovery fill gaps without resetting the client-session
+boundary.
 
-Surfacing a bubble at the bottom (step 3 above) still leaves a problem for a response taller
-than the viewport: `scrollToBottom()` (step 4) jumps straight to `messages.scrollHeight`, i.e.
-past the whole bubble, landing on its tail rather than its head. The user has to scroll back up
-to read it from the start — unnatural, since reading the rest of the transcript already scrolls
-downward. The original (pre-ADR-0040-migration) behavior avoided this by accident: a
-non-`force`d `scrollToBottom()` only moves `scrollTop` if already within 150px of the bottom, and
-a tall bubble's insertion pushes that gap well past 150px, so historically the call was silently
-a no-op — combined with the thinking bubble's own live-preview auto-scroll (`updateThinkingPreview`
-→ `scrollToBottom()`) already having tracked the viewport to the thinking bubble's bottom edge
-(exactly where the frozen thinking bubble hands off to the response bubble), the net effect was
-"land on the new bubble's head." Commit `b4026ce` ("Harden realtime replay and stabilize chat
-scrolling") changed the WebSocket-delivered-item path (`insertCompletedHistoryItem`,
-`insertPendingHistoryItem`) from that conditional call to `scrollToBottom(true)` — an
-unconditional jump to `messages.scrollHeight` — to fix a different, real bug (the conditional
-left the view "stuck" inconsistently in some cases), but it traded away the head-first reading
-behavior as a side effect for any tall response delivered through that path.
+Consequently, in a multi-device example:
 
-Two follow-up attempts:
+- Mobile opening the thread in a newly loaded page sees persisted completed
+  turns as history. Turns it observes afterward are live on mobile.
+- A desktop page that remained loaded can observe mobile's later turns through
+  realtime delivery; those turns are live on that desktop page too, even though
+  desktop did not submit them.
+- If desktop's page is actually reloaded or discarded and recreated, turns
+  already persisted at that new bootstrap are history. Hibernate alone does
+  not guarantee this; it depends on whether the browser retained the page.
 
-1. **Clamp long responses to a ~10-line CSS preview with a "Show more" expand.** Rejected — this
-   was a misreading of the request. The ask was to keep scrolling to the response's head so the
-   user reads down through it like the rest of the transcript, not to collapse/truncate it behind
-   a click.
-2. **Compute a scroll offset to land on the bubble's top** (`scrollToRevealBubble`, added to
-   `insertCompletedHistoryItem`/`insertPendingHistoryItem` only): `messages.scrollTop +=
-   bubble.getBoundingClientRect().top - messages.getBoundingClientRect().top` when the bubble is
-   taller than `messages.clientHeight`, else the old literal-bottom behavior (short bubbles land
-   the same place either way). This is the shipped fix, but applied only to the WebSocket
-   realtime-item path initially, it didn't cover the primary SSE send-flow completion paths
-   (`showStoredResponse`, the inline SSE `done` handler) — both still called plain
-   `scrollToBottom()`.
+## Decision Rationale
 
-**Root cause of the "worked, then broke" report was a second, unrelated bug**, found while
-writing the regression test: `sendMessage()` schedules two one-shot
-`requestAnimationFrame(() => messages.scrollTop = messages.scrollHeight)` calls — one when the
-thinking bubble first appears, one when the first content chunk arrives (`revealResponseBubble`)
-— meant to follow the *thinking* bubble into view. If the whole turn (including `done`) completes
-before the browser's next paint (fast/cached backends, or a mocked instant response in tests),
-these stale callbacks fire *after* `scrollToRevealBubble` has already positioned the view on the
-new bubble's top, and silently stomp it back to the literal bottom. Fixed by guarding both with
-`if (!thinkingFrozen)` — `thinkingFrozen` is set by the time `done` finishes processing, so a
-callback that fires late becomes a no-op instead of overriding the more-informed positioning.
-This race is timing-dependent per browser event-loop/paint scheduling, which is consistent with
-the original report reading as "worked on Chrome, broke on Safari, then broke again after
-restart" — it was never a single stable behavior to begin with.
+- **Good:** Async responses surface without scrolling or scanning; parallel completions appear in completion order at bottom, naturally readable.
+- **Good:** Live preview (thinking bubble) shows progress for long-running queries without a displaced response bubble.
+- **Good:** Single markdown render per turn, at completion, avoids flickering.
+- **Tradeoff:** No traditional prompt-response visual pairing in real time; user must glance at thinking bubble to see the pending prompt. History view recovers this by embedding the prompt in the response header.
 
-`scrollToRevealBubble` is now applied at every site that surfaces a *newly completed* response
-bubble while the user was at the bottom: `showStoredResponse`, the inline SSE `done` handler,
-`insertCompletedHistoryItem`, and `insertPendingHistoryItem`. It is not applied to
-`appendHistoryItem`'s plain history-pagination path (scrolling up into old history should not
-itself trigger a re-jump) or to the disconnected-tab polling fallback in `pollMessageStatus`
-(that bubble is already visible and growing in place, not newly surfacing).
+## Scrolling Behavior
 
-Consequences:
-- Good: matches the original, currently-expected reading UX — new content is read top-down,
-  same direction as the rest of the transcript
-- Good: the stale-rAF fix removes a real, reproducible race independent of this scroll-target
-  question — it could have caused other inconsistent-scroll symptoms too
-- Neutral: `scrollToRevealBubble` still reads `getBoundingClientRect()`/`offsetHeight`
-  immediately after DOM insertion, the pattern suspected (but not confirmed) as the original
-  Safari-specific failure; only the stale-rAF race was confirmed and fixed here
-- Bad: this repo's Playwright e2e suite (`tests/e2e/playwright.config.js`) has no WebKit
-  project, and running it ad hoc via `--browser=webkit` fails on unrelated pre-existing
-  route-mocking issues (confirmed against an untouched existing test, not this change) — so
-  Safari itself still cannot be re-verified end-to-end from this environment
+When a completion surfaces at the bottom:
+- If the user is at the bottom (within ~150px), the view scrolls to reveal the new response's top (not past it), so the user reads downward through it.
+- If the user is scrolled up in history, the view anchor is preserved — no forced jump.
+- Tall responses (taller than viewport) land on their top, not their tail, for natural top-down reading.
+
+## Tests
+
+See `tests/e2e/chat.spec.js` for validation:
+- **`does not appear in DOM before done`** — Response withheld until `done` frame, thinking bubble shows live preview.
+- **`appears at bottom of #messages on done`** — Response inserted at bottom, after stats.
+- **`response taller than the viewport scrolls to reveal its top`** — Tall responses scroll to top (not tail) for natural reading.
+- **`filter round-trip keeps a completed response and its live prompt in order`** — Prompts submitted in the current live session remain anchored through store-driven history reconciliation.
+- **`filter round-trip keeps the newest live prompt at the bottom when history includes it as pending`** — Reconciliation preserves all current-session prompt breadcrumbs and keeps the pending turn newest.

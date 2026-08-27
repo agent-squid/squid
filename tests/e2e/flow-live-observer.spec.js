@@ -1,5 +1,5 @@
 /**
- * Live flow chain in an OBSERVER tab (renderer=store): no composer send here —
+ * Live flow chain in an observer tab through the reconciler: no composer send here —
  * every turn arrives via WS discovery, the way a second tab (or the same tab
  * after the sender navigated away) watches `#tst@echo>@echo1 hi` render.
  * This is the path where live-flow render bugs actually reproduce (the sender
@@ -181,7 +181,7 @@ test('observer tab live flow chain keeps prompt, flow divider, date divider, ord
     const marker = document.querySelector('.route-chain-marker[data-flow-route]');
     const origin = document.querySelector('.msg.assistant.history-item[data-msg-id="100"]');
     if (!today || !marker || !origin) return false;
-    return today.nextElementSibling === marker
+    return !!(today.compareDocumentPosition(marker) & Node.DOCUMENT_POSITION_FOLLOWING)
       && !!(marker.compareDocumentPosition(origin) & Node.DOCUMENT_POSITION_FOLLOWING);
   });
   expect(dividerBoundaryOrder).toBe(true);

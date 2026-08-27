@@ -112,6 +112,72 @@ test('narrow load settles at the bottom of the boot banner', async ({ page }) =>
   expect(await page.evaluate(() => history.scrollRestoration)).toBe('manual');
 });
 
+test('boot banner exposes the client-session history/live boundary', async ({ page }) => {
+  await mockBoot(page, 1);
+  await page.goto('/');
+  const boundary = page.locator('.client-session-boundary');
+  await expect(boundary).toHaveAttribute('data-transcript-boundary', 'history-above-live-below');
+  await expect(boundary.locator('.client-session-boundary-label'))
+    .toHaveText('history above · live this page session below');
+});
+
+test('client-session boundary survives transcript reloads', async ({ page }) => {
+  await mockBoot(page, 1);
+  await page.goto('/');
+  const boundary = page.locator('.client-session-boundary');
+  await expect(boundary).toHaveCount(1);
+
+  await page.evaluate(() => reloadHistory({ topic: 'squid' }));
+  await expect(boundary).toHaveCount(1);
+
+  await page.evaluate(() => resetHistoryToLatest());
+  await expect(boundary).toHaveCount(1);
+  await expect(boundary).toHaveAttribute('data-transcript-boundary', 'history-above-live-below');
+});
+
+test('boot banner stays before a live prompt when cancellation reconciles it', async ({ page }) => {
+  await mockBoot(page, 0);
+  await page.goto('/');
+  await expect(page.locator('.boot-banner')).toBeVisible();
+
+  const order = await page.evaluate(() => {
+    const pending = {
+      id: 901, role: 'assistant', topic: 'default', agent: 'claude', adhoc: false,
+      status: 'pending', content: '', prompt: 'cancel me', timestamp: new Date().toISOString(),
+    };
+    const owner = 'boot-boundary-test';
+    const user = document.createElement('div');
+    user.className = 'msg user';
+    user.dataset.liveGroupId = owner;
+    user.textContent = 'cancel me';
+    const thinking = document.createElement('div');
+    thinking.className = 'msg assistant msg-thinking';
+    thinking.dataset.liveGroupId = owner;
+    thinking.dataset.msgId = '901';
+    thinking.dataset.orderAt = pending.timestamp;
+    document.getElementById('messages').append(user, thinking);
+
+    shadowInstallHistoryPage([pending]);
+    historyReconciler.reconcileDirtyIds([901]);
+    const before = !!(document.querySelector('.boot-banner').compareDocumentPosition(user)
+      & Node.DOCUMENT_POSITION_FOLLOWING);
+
+    shadowInstallHistoryPage([{
+      ...pending, status: 'cancelled', content: 'Cancelled before start',
+      completed_at: new Date().toISOString(),
+    }]);
+    historyReconciler.reconcileDirtyIds([901]);
+    const completed = document.querySelector('.msg.assistant.history-item[data-msg-id="901"]:not(.msg-thinking)');
+    const after = !!(document.querySelector('.boot-banner').compareDocumentPosition(completed)
+      & Node.DOCUMENT_POSITION_FOLLOWING);
+    return { before, after, label: completed?.innerText || '' };
+  });
+
+  expect(order.before).toBe(true);
+  expect(order.after).toBe(true);
+  expect(order.label).toContain('Dequeued.');
+});
+
 // Enough items, each long enough to wrap several lines, to guarantee
 // #messages actually overflows a 700px-tall mobile viewport — otherwise
 // scrollTop assignments below are indistinguishable no-ops (scrollHeight <=

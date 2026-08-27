@@ -482,7 +482,7 @@ test('message bookmark and bad-response buttons post marker-only payloads', asyn
   expect(annotationBody).toEqual({ msg_id: 10, kind: 'bad_response', payload: {} });
 });
 
-test('history renders only assistant bubbles — no user bubbles', async ({ page }) => {
+test('reconciled history renders the prompt in the response header, not as a standalone user bubble', async ({ page }) => {
   await mockBackend(page);
 
   // Server returns only assistant rows — prompt snippet comes from the reply_to join
@@ -498,7 +498,9 @@ test('history renders only assistant bubbles — no user bubbles', async ({ page
   await page.goto('/');
   await page.waitForTimeout(400);
 
-  // Only the assistant bubble should be in the DOM
+  // ADR-0011: the standalone user bubble is a live-only breadcrumb anchored at
+  // its submission position. History view renders the joined prompt only in the
+  // response header, never as a standalone `.msg.user` bubble.
   await expect(page.locator('.msg.assistant.history-item')).toHaveCount(1);
   await expect(page.locator('.msg.user.history-item')).toHaveCount(0);
 

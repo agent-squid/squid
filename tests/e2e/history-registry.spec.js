@@ -3,10 +3,9 @@
  *
  * Exercises the real registry (not a fake, unlike reconciler.spec.js) against
  * a real transcript store and an isolated container, proving it renders the
- * same DOM appendHistoryItem/appendHistoryRouteChainMarker produce for the
- * direct-DOM path — the "shadow-equivalence" ADR-0041 requires before a
- * producer can cut over. It's wired into #messages in production under
- * ?renderer=store (see the comment above createHistoryRegistry in app.js and
+ * same DOM appendHistoryItem/appendHistoryRouteChainMarker primitives used by
+ * production. It's wired into #messages unconditionally (see the comment
+ * above createHistoryRegistry in app.js and
  * history-store-renderer.spec.js for that wiring); these tests keep exercising
  * the registry against an isolated container to cover its contract directly.
  */
@@ -430,6 +429,92 @@ test('composer pending->completed replacement removes only thinking and preserve
   await expect(page.locator('#history-registry-test-container .msg-thinking[data-msg-id="96"]')).toHaveCount(0);
 });
 
+test('re-adopting a completed non-Flow composer turn owns its anchored prompt scaffold without moving it', async ({ page }) => {
+  const rig = await freshRig(page);
+  await rig.evaluate(({ container }) => {
+    for (const [tag, cls] of [['user', 'msg user'], ['time', 'msg-time']]) {
+      const node = document.createElement('div');
+      node.className = cls;
+      node.dataset.liveGroupId = 'live-97';
+      node.dataset.testMarker = tag;
+      container.appendChild(node);
+    }
+    const response = document.createElement('div');
+    response.className = 'msg assistant history-item';
+    response.dataset.msgId = '97';
+    response.dataset.liveGroupId = 'live-97';
+    response.dataset.testMarker = 'response';
+    container.appendChild(response);
+  });
+  await rig.evaluate(({ store, reconciler }) => {
+    store.installHistoryPage(window.historyItemToStoreRows({
+      id: 97, reply_to: 96, prompt: 'keep this prompt', content: 'finished', status: 'done',
+      topic: 'squid', agent: 'codex', completed_at: '2026-08-21T00:00:00Z',
+    }));
+    reconciler.reconcile();
+  });
+  const summary = await rig.evaluate(({ container, reconciler }) => ({
+    dom: [...container.children].map(node => node.dataset.testMarker || null).filter(Boolean),
+    group: reconciler.getGroup(97).nodes.map(node => node.dataset.testMarker || null).filter(Boolean),
+  }));
+  // ADR-0011: the reconciler owns the complete live scaffold, while its
+  // placementNodes keep the prompt anchored at submission position.
+  expect(summary).toEqual({
+    dom: ['user', 'time', 'response'],
+    group: ['user', 'time', 'response'],
+  });
+});
+
+test('interleaved completion anchors prompts at submission order and orders responses by completion', async ({ page }) => {
+  const rig = await freshRig(page);
+  // Three composer turns submitted A, B, C — each prompt + timestamp scaffold
+  // already in the DOM at its submission position, keyed by the live group it
+  // belongs to and the assistant turn it owns.
+  await rig.evaluate(({ container }) => {
+    for (const [id, text] of [[6, 'prompt A'], [7, 'prompt B'], [8, 'prompt C']]) {
+      const prompt = document.createElement('div');
+      prompt.className = 'msg user';
+      prompt.dataset.liveGroupId = `live-${id}`;
+      prompt.dataset.turnOwnerId = String(id);
+      prompt.dataset.testMarker = text;
+      prompt.textContent = text;
+      container.appendChild(prompt);
+      const time = document.createElement('div');
+      time.className = 'msg-time';
+      time.dataset.liveGroupId = `live-${id}`;
+      time.dataset.testMarker = `time-${id}`;
+      container.appendChild(time);
+    }
+  });
+  // Complete out of submission order: B (7) first, then C (8), then A (6).
+  // Rows are installed in /history's newest-first shape (DESC completed_at).
+  await rig.evaluate(({ store }) => {
+    const rows = [];
+    for (const item of [
+      { id: 6, prompt: 'prompt A', content: 'resp A', status: 'done', topic: 'squid', agent: 'claude', completed_at: '2026-07-15T12:00:03Z' },
+      { id: 8, prompt: 'prompt C', content: 'resp C', status: 'done', topic: 'squid', agent: 'claude', completed_at: '2026-07-15T12:00:02Z' },
+      { id: 7, prompt: 'prompt B', content: 'resp B', status: 'done', topic: 'squid', agent: 'claude', completed_at: '2026-07-15T12:00:01Z' },
+    ]) {
+      rows.push(...window.historyItemToStoreRows(item));
+    }
+    store.installHistoryPage(rows);
+  });
+  await rig.evaluate(({ reconciler }) => reconciler.reconcile());
+
+  // ADR-0011: prompts stay anchored at their submission positions (A, B, C),
+  // while completed responses reorder to the bottom in completion order
+  // (B, C, A). The scaffold is excluded from each completed group, so
+  // reorder() leaves it in place and only relocates the response bubbles.
+  const markers = await rig.evaluate(({ container }) =>
+    [...container.children].map(node => node.dataset.testMarker || node.dataset.msgId || null).filter(Boolean));
+  expect(markers).toEqual([
+    'prompt A', 'time-6',
+    'prompt B', 'time-7',
+    'prompt C', 'time-8',
+    '7', '8', '6',
+  ]);
+});
+
 test('terminal render uses live turn content instead of a stale raw snapshot', async ({ page }) => {
   const rig = await freshRig(page, [{
     id: 92, reply_to: 89, prompt: 'work', content: '', status: 'pending', topic: 'squid', agent: 'codex',
@@ -831,7 +916,7 @@ test('reorder() places multiple pending groups in creation order using only getP
   expect(ids).toEqual(['10', '20']);
 });
 
-test('route markers render the same way as the direct-DOM path for a matching handoff', async ({ page }) => {
+test('route markers use the production marker primitive for a matching handoff', async ({ page }) => {
   const rig = await freshRig(page, [
     {
       id: 50, reply_to: 49, content: 'origin reply', status: 'done',

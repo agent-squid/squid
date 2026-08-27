@@ -1,14 +1,8 @@
 /**
- * ADR-0041 Stage 4 — real production wiring of createHistoryRegistry into
- * #messages via ?renderer=store (see the historyReconciler declaration and
- * appendHistoryItems in ui/app.js). Unlike history-registry.spec.js (which
- * exercises the registry against an isolated container), these tests drive
- * the actual app the same way history-pagination.spec.js does for the
- * direct-DOM path — same mock setup, same scenarios, same assertions —
- * to prove store-driven rendering is behaviorally equivalent for the two
- * riskiest cases: multi-page chronological ordering, and a jump (which
- * exercises historyReconciler.reset() + the raw DOM sweep in jumpToMessage,
- * immediately followed by pagination that extends the reconciler-owned set).
+ * Production wiring of createHistoryRegistry into #messages. Unlike
+ * history-registry.spec.js (which exercises an isolated registry), these
+ * tests drive the reconciler through the app's real history, pagination,
+ * filtering, and live-turn entry points.
  */
 const { test, expect } = require('@playwright/test');
 
@@ -27,7 +21,7 @@ async function mockApp(page) {
   await page.route('**/stats?**', r => r.fulfill({ json: [] }));
 }
 
-test('renderer=store: history renders completed turns in the same order as the direct-DOM path', async ({ page }) => {
+test('reconciler renders completed turns in completion order', async ({ page }) => {
   await mockApp(page);
 
   await page.route('**/history**', route => route.fulfill({
@@ -52,7 +46,7 @@ test('renderer=store: history renders completed turns in the same order as the d
     },
   }));
 
-  await page.goto('/?renderer=store');
+  await page.goto('/');
 
   const ids = await page.locator('#messages > .msg.assistant.history-item').evaluateAll(
     rows => rows.map(row => row.dataset.msgId)
@@ -63,10 +57,10 @@ test('renderer=store: history renders completed turns in the same order as the d
     fmtTime('2026-07-15T12:10:28Z'),
     fmtTime('2026-07-15T12:15:25Z'),
   ]);
-  await expect(page.locator('#messages > .msg-time.history-item')).toHaveText(expectedTimes);
+  await expect(page.locator('#messages > .msg-time.history-item:not(.user-prompt-time)')).toHaveText(expectedTimes);
 });
 
-test('renderer=store: a sparse snapshot cannot erase a completed turn stats footer on the next reconcile', async ({ page }) => {
+test('a sparse snapshot cannot erase a completed turn stats footer on the next reconcile', async ({ page }) => {
   await mockApp(page);
   await page.route('**/history**', route => route.fulfill({ json: {
     items: [{
@@ -78,7 +72,7 @@ test('renderer=store: a sparse snapshot cannot erase a completed turn stats foot
     has_more: false,
   }}));
 
-  await page.goto('/?renderer=store');
+  await page.goto('/');
   await expect(page.locator('#messages > .stats.history-item')).toContainText('↑ 12');
 
   await page.evaluate(() => {
@@ -92,10 +86,10 @@ test('renderer=store: a sparse snapshot cannot erase a completed turn stats foot
   });
 
   await expect(page.locator('#messages > .stats.history-item')).toContainText('↑ 12');
-  await expect(page.locator('#messages > .msg-time.history-item')).toHaveCount(0);
+  await expect(page.locator('#messages > .msg-time.history-item:not(.user-prompt-time)')).toHaveCount(0);
 });
 
-test('renderer=store: jump renders a bounded window, then older/newer pagination extends it in correct order', async ({ page }) => {
+test('jump renders a bounded window, then reconciler pagination extends it in correct order', async ({ page }) => {
   await mockApp(page);
 
   await page.route('**/history**', route => {
@@ -141,7 +135,7 @@ test('renderer=store: jump renders a bounded window, then older/newer pagination
     return route.fulfill({ json: { items: [], has_more: false } });
   });
 
-  await page.goto('/?renderer=store');
+  await page.goto('/');
   await page.fill('#input', '/jump 100');
   await page.keyboard.press('Enter');
 
@@ -162,12 +156,10 @@ test('renderer=store: jump renders a bounded window, then older/newer pagination
 
 // ADR-0041 Gap 1: a history row with no explicit `status` field (some
 // fixtures/older server rows omit it, e.g. deep-dive-button.spec.js) must
-// still render as a completed turn, matching the old direct-DOM path's
-// leniency — its completed-item branch ran for anything that wasn't
-// explicitly 'pending'. Before the fix, historyItemToStoreRows only set
+// still render as a completed turn. Before the fix, historyItemToStoreRows only set
 // completed_at for an explicit terminal status and isTerminal only
 // recognized an explicit terminal status, so the row rendered nowhere.
-test('renderer=store: a history row with no status field still renders as completed', async ({ page }) => {
+test('a history row with no status field still renders as completed', async ({ page }) => {
   await mockApp(page);
 
   await page.route('**/history**', route => route.fulfill({
@@ -181,12 +173,12 @@ test('renderer=store: a history row with no status field still renders as comple
     },
   }));
 
-  await page.goto('/?renderer=store');
+  await page.goto('/');
   await expect(page.locator('.msg[data-msg-id="1"]')).toBeVisible();
   await expect(page.locator('.msg[data-msg-id="1"]')).toContainText('response with no status field');
 });
 
-test('renderer=store: an empty error row renders the terminal fallback', async ({ page }) => {
+test('an empty error row renders the terminal fallback', async ({ page }) => {
   await mockApp(page);
 
   await page.route('**/history**', route => route.fulfill({
@@ -200,13 +192,13 @@ test('renderer=store: an empty error row renders the terminal fallback', async (
     },
   }));
 
-  await page.goto('/?renderer=store');
+  await page.goto('/');
   const response = page.locator('.msg.assistant.history-item[data-msg-id="2"]');
   await expect(response).toBeVisible();
   await expect(response.locator('.msg-error')).toHaveText('Response interrupted.');
 });
 
-test('renderer=store: a topic filter change (reloadHistory) does not resurrect turns the previous scope rendered', async ({ page }) => {
+test('a topic filter change does not resurrect turns from the previous reconciler scope', async ({ page }) => {
   await mockApp(page);
 
   // Keyed off the request's own topic param, not call order — app.js's boot
@@ -225,7 +217,7 @@ test('renderer=store: a topic filter change (reloadHistory) does not resurrect t
     ], has_more: false } });
   });
 
-  await page.goto('/?renderer=store');
+  await page.goto('/');
   await expect(page.locator('.msg[data-msg-id="1"]')).toBeVisible();
 
   await page.evaluate(() => reloadHistory({ topic: 'other' }));
@@ -249,7 +241,7 @@ test('renderer=store: a topic filter change (reloadHistory) does not resurrect t
 // live bubble on the wrong side whenever id order and start-vs-end-time order
 // disagree. Both directions are covered below: live id below the completed
 // ids (long-running turn submitted before them) and above (submitted after).
-test('renderer=store: live bubble keeps its start-time slot — live id older than completed ids', async ({ page }) => {
+test('reconciler keeps a live bubble in its start-time slot when its id is older', async ({ page }) => {
   await mockApp(page);
 
   await page.route('**/history**', route => route.fulfill({
@@ -263,7 +255,7 @@ test('renderer=store: live bubble keeps its start-time slot — live id older th
     },
   }));
 
-  await page.goto('/?renderer=store');
+  await page.goto('/');
   await expect(page.locator('.msg[data-msg-id="101"]')).toBeVisible();
 
   const ids = await page.locator('#messages > .msg.assistant.history-item').evaluateAll(
@@ -272,7 +264,7 @@ test('renderer=store: live bubble keeps its start-time slot — live id older th
   expect(ids).toEqual(['100', '101', '102']);
 });
 
-test('renderer=store: live bubble keeps its start-time slot — live id newer than completed ids', async ({ page }) => {
+test('reconciler keeps a live bubble in its start-time slot when its id is newer', async ({ page }) => {
   await mockApp(page);
 
   await page.route('**/history**', route => route.fulfill({
@@ -286,7 +278,7 @@ test('renderer=store: live bubble keeps its start-time slot — live id newer th
     },
   }));
 
-  await page.goto('/?renderer=store');
+  await page.goto('/');
   await expect(page.locator('.msg[data-msg-id="203"]')).toBeVisible();
 
   const ids = await page.locator('#messages > .msg.assistant.history-item').evaluateAll(
@@ -304,10 +296,10 @@ test('renderer=store: live bubble keeps its start-time slot — live id newer th
 // origin *below* its own already-on-screen, chronologically-later target —
 // scrambling live flow order ("only the last step visible"). historyStoreAnchor
 // must interleave with direct-DOM completed bubbles too.
-test('renderer=store: a reconciler-owned flow origin lands before an already-on-screen direct-DOM target', async ({ page }) => {
+test('a reconciler-owned flow origin lands before an already-on-screen completion fallback', async ({ page }) => {
   await mockApp(page);
   await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
-  await page.goto('/?renderer=store');
+  await page.goto('/');
   await page.waitForFunction(() => typeof historyReconciler !== 'undefined' && historyReconciler
     && typeof insertCompletedHistoryItem === 'function' && typeof shadowInstallHistoryPage === 'function');
 
@@ -334,4 +326,239 @@ test('renderer=store: a reconciler-owned flow origin lands before an already-on-
 
   // Origin (100, earlier completed_at) must precede target (102), not sink below it.
   expect(order).toEqual(['100', '102']);
+});
+
+// Regression: the live header renders its user prompt from raw.prompt (the
+// denormalized field HTTP history and the /status discovery fetch carry). A
+// turn discovered only through sparse producers (WS snapshot/lifecycle) has a
+// raw without it, while the store still knows the linked user message's text
+// (turn.promptContent). The registry used to read raw.prompt alone, so such a
+// turn rendered a prompt-less header live and only showed the prompt after a
+// full history refresh reattached raw.prompt ("prompt disappears in live
+// view"). render() must fall back to turn.promptContent.
+test('a pending turn whose raw lacks the denormalized prompt still renders the linked user prompt', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
+  await page.goto('/');
+  await page.waitForFunction(() => typeof historyReconciler !== 'undefined' && historyReconciler
+    && !!window.__transcriptStore);
+
+  await page.evaluate(() => {
+    const store = window.__transcriptStore;
+    // User message discovered via a lifecycle patch → gives the store its
+    // promptContent, without any denormalized row.
+    store.applyMessagePatch(600, { role: 'user', content: 'observed question' }, 10);
+    // Assistant turn linked to it, still pending.
+    store.applyMessagePatch(601, { role: 'assistant', status: 'pending', content: '', reply_to: 600 }, 20);
+    // Sparse discovery raw (WS snapshot / status-less): identity + display
+    // fields but NO prompt.
+    store.attachRaw(601, { id: 601, topic: 'squid', agent: 'claude', adhoc: false, status: 'pending', timestamp: '2026-07-15T12:00:00Z' });
+    historyReconciler.reconcileDirtyIds([601]);
+  });
+
+  await expect(
+    page.locator('#messages > .msg.assistant.msg-thinking[data-msg-id="601"] .history-prompt-truncated')
+  ).toContainText('observed question');
+});
+
+test('a completed turn whose raw lacks the denormalized prompt still renders the linked user prompt', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
+  await page.goto('/');
+  await page.waitForFunction(() => typeof historyReconciler !== 'undefined' && historyReconciler
+    && !!window.__transcriptStore);
+
+  await page.evaluate(() => {
+    const store = window.__transcriptStore;
+    store.applyMessagePatch(700, { role: 'user', content: 'observed done question' }, 10);
+    store.applyMessagePatch(701, {
+      role: 'assistant', status: 'done', content: 'the answer', reply_to: 700,
+      completed_at: '2026-07-15T12:00:05Z',
+    }, 20);
+    store.attachRaw(701, { id: 701, topic: 'squid', agent: 'claude', adhoc: false, status: 'done' });
+    historyReconciler.reconcileDirtyIds([701]);
+  });
+
+  await expect(
+    page.locator('#messages > .msg.assistant.history-item[data-msg-id="701"]:not(.msg-thinking) .history-prompt-truncated')
+  ).toContainText('observed done question');
+});
+
+test('store renderer keeps the complete live scaffold owned after terminal reconciliation', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
+  await page.goto('/');
+
+  const state = await page.evaluate(() => {
+    const pending = {
+      id: 801, role: 'assistant', reply_to: 800, topic: 'squid', agent: 'claude',
+      status: 'pending', content: '', prompt: 'keep this live prompt',
+      timestamp: '2026-08-27T12:00:00Z',
+    };
+    shadowInstallHistoryPage([pending], undefined, { source: 'live' });
+    historyReconciler.reconcileDirtyIds([801]);
+
+    const pendingGroup = historyReconciler.getGroup(801);
+    const prompt = document.querySelector('#messages > .msg.user[data-turn-owner-id="801"]');
+    shadowInstallHistoryPage([{
+      ...pending,
+      status: 'done',
+      content: 'final response',
+      completed_at: '2026-08-27T12:01:00Z',
+    }], undefined, { source: 'live' });
+    historyReconciler.reconcileDirtyIds([801]);
+
+    // Exercise a later store render as well. A prompt that merely happens to
+    // remain in the DOM, but was dropped from the registry's owned range, is
+    // vulnerable to the next reset/reorder race.
+    window.__transcriptStore.applyMessagePatch(801, {
+      stats: { input_tokens: 10, output_tokens: 2, duration_ms: 1000 },
+    }, 20);
+    historyReconciler.reconcileDirtyIds([801]);
+
+    const completedGroup = historyReconciler.getGroup(801);
+    return {
+      pendingOwnedPrompt: pendingGroup.nodes.includes(prompt),
+      promptConnected: !!prompt?.isConnected,
+      completedOwnedPrompt: completedGroup.nodes.includes(prompt),
+      responseConnected: completedGroup.nodes.some(node =>
+        node.matches?.('.msg.assistant.history-item[data-msg-id="801"]:not(.msg-thinking)')),
+    };
+  });
+
+  expect(state).toEqual({
+    pendingOwnedPrompt: true,
+    promptConnected: true,
+    completedOwnedPrompt: true,
+    responseConnected: true,
+  });
+});
+
+test('store renderer keeps a cancelled live prompt owned and visible', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
+  await page.goto('/');
+
+  const state = await page.evaluate(() => {
+    const pending = {
+      id: 802, role: 'assistant', reply_to: 799, topic: 'squid', agent: 'claude',
+      status: 'pending', content: '', prompt: 'do not remove cancelled prompt',
+      timestamp: '2026-08-27T12:02:00Z',
+    };
+    shadowInstallHistoryPage([pending], undefined, { source: 'live' });
+    historyReconciler.reconcileDirtyIds([802]);
+    const prompt = document.querySelector('#messages > .msg.user[data-turn-owner-id="802"]');
+
+    shadowInstallHistoryPage([{
+      ...pending,
+      status: 'cancelled',
+      content: '',
+      completed_at: '2026-08-27T12:03:00Z',
+    }], undefined, { source: 'live' });
+    historyReconciler.reconcileDirtyIds([802]);
+
+    // Re-dirty the cancelled turn to catch a prompt that survived only as an
+    // unowned DOM orphan during the first terminal render.
+    window.__transcriptStore.attachRaw(802, {
+      ...pending,
+      status: 'cancelled',
+      content: '',
+      completed_at: '2026-08-27T12:03:00Z',
+    });
+    historyReconciler.reconcileDirtyIds([802]);
+
+    const group = historyReconciler.getGroup(802);
+    return {
+      promptConnected: !!prompt?.isConnected,
+      promptText: prompt?.textContent || '',
+      promptOwned: group.nodes.includes(prompt),
+      cancelledResponseConnected: group.nodes.some(node =>
+        node.matches?.('.msg.assistant.history-item[data-msg-id="802"]:not(.msg-thinking)')),
+    };
+  });
+
+  expect(state).toEqual({
+    promptConnected: true,
+    promptText: expect.stringContaining('do not remove cancelled prompt'),
+    promptOwned: true,
+    cancelledResponseConnected: true,
+  });
+});
+
+test('store reconciliation leaves the boot boundary between history and new responses', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/history**', r => r.fulfill({ json: {
+    items: [{
+      id: 810, role: 'assistant', reply_to: 809, topic: 'squid', agent: 'claude',
+      status: 'done', prompt: 'before boot', content: 'historical response',
+      timestamp: '2026-08-27T10:00:00Z', completed_at: '2026-08-27T10:01:00Z',
+    }],
+    has_more: false,
+  }}));
+  await page.goto('/');
+  await expect(page.locator('#messages > .boot-banner')).toBeVisible();
+
+  const order = await page.evaluate(() => {
+    const pending = {
+      id: 812, role: 'assistant', reply_to: 811, topic: 'squid', agent: 'claude',
+      status: 'pending', prompt: 'after boot', content: '',
+      timestamp: '2026-08-27T12:00:00Z',
+    };
+    shadowInstallHistoryPage([pending], undefined, { source: 'live' });
+    historyReconciler.reconcileDirtyIds([812]);
+    shadowInstallHistoryPage([{
+      ...pending, status: 'done', content: 'new response',
+      completed_at: '2026-08-27T12:01:00Z',
+    }], undefined, { source: 'live' });
+    historyReconciler.reconcileDirtyIds([812]);
+
+    return [...document.querySelectorAll('#messages > *')]
+      .filter(node => node.matches('.boot-banner, .msg.assistant[data-msg-id]'))
+      .map(node => node.classList.contains('boot-banner') ? 'boot' : node.dataset.msgId);
+  });
+
+  expect(order).toEqual(['810', 'boot', '812']);
+});
+
+test('store pagination and live completion share one stable response order', async ({ page }) => {
+  await mockApp(page);
+  await page.route('**/history**', r => r.fulfill({ json: { items: [], has_more: false } }));
+  await page.goto('/');
+  await expect(page.locator('#messages > .boot-banner')).toBeVisible();
+
+  const order = await page.evaluate(() => {
+    const latest = {
+      id: 822, role: 'assistant', reply_to: 821, topic: 'squid', agent: 'claude',
+      status: 'done', prompt: 'latest history', content: 'latest response',
+      timestamp: '2026-08-27T11:00:00Z', completed_at: '2026-08-27T11:01:00Z',
+    };
+    const pending = {
+      id: 824, role: 'assistant', reply_to: 823, topic: 'squid', agent: 'claude',
+      status: 'pending', prompt: 'live prompt', content: '',
+      timestamp: '2026-08-27T12:00:00Z',
+    };
+    shadowInstallHistoryPage([latest], { kind: 'offset', offset: 0, hasMore: true }, { source: 'history' });
+    shadowInstallHistoryPage([pending], undefined, { source: 'live' });
+    historyReconciler.reconcile();
+
+    // Install the next (older) page after the live turn already exists.
+    shadowInstallHistoryPage([{
+      id: 820, role: 'assistant', reply_to: 819, topic: 'squid', agent: 'claude',
+      status: 'done', prompt: 'older history', content: 'older response',
+      timestamp: '2026-08-27T10:00:00Z', completed_at: '2026-08-27T10:01:00Z',
+    }], { kind: 'offset', offset: 1, hasMore: false }, { source: 'history' });
+    historyReconciler.reconcile();
+
+    shadowInstallHistoryPage([{
+      ...pending, status: 'done', content: 'live final response',
+      completed_at: '2026-08-27T12:01:00Z',
+    }], undefined, { source: 'live' });
+    historyReconciler.reconcile();
+
+    return [...document.querySelectorAll('#messages > *')]
+      .filter(node => node.matches('.boot-banner, .msg.assistant[data-msg-id]'))
+      .map(node => node.classList.contains('boot-banner') ? 'boot' : node.dataset.msgId);
+  });
+
+  expect(order).toEqual(['820', '822', 'boot', '824']);
 });

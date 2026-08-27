@@ -1,7 +1,8 @@
 ---
-status: proposed
+status: accepted
 date: 2026-08-13
 updated: 2026-08-20
+implemented: 2026-08-22
 ---
 # ADR-0041: Normalized client transcript store and reconciler
 

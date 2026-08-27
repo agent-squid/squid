@@ -253,8 +253,14 @@ class TopicWorker:
             self._on_queue_changed()
         return item.seq
 
-    def drain(self, pos: Optional[int] = None, topic: Optional[str] = None) -> int:
+    def drain(
+        self,
+        pos: Optional[int] = None,
+        topic: Optional[str] = None,
+        msg_id: Optional[int] = None,
+    ) -> int:
         """Remove pending items from the queue (not the currently-running one).
+        msg_id=N  → remove that exact queued message
         pos=None  → drain all
         pos=N>0   → remove Nth item (1-based, from front)
         pos=N<0   → remove Nth item from end (-1=last, -2=second-to-last, …)
@@ -284,6 +290,18 @@ class TopicWorker:
             return topic is None or item.topic == topic
 
         real = [i for i in pending if i is not None]
+
+        if msg_id is not None:
+            removed = 0
+            for item in real:
+                if _in_scope(item) and item.msg_id == msg_id:
+                    _cancel(item)
+                    removed += 1
+                else:
+                    self.q.put_nowait(item)
+            if removed and self._on_queue_changed:
+                self._on_queue_changed()
+            return removed
 
         if pos is None:
             removed = 0
@@ -1024,9 +1042,17 @@ class TopicDispatcher:
         drained = sum(w.drain(topic=topic) for w in self._workers_for_topic(topic))
         return {"killed": killed, "drained": drained}
 
-    def drain_topic(self, topic: str, pos: Optional[int] = None) -> int:
+    def drain_topic(
+        self,
+        topic: str,
+        pos: Optional[int] = None,
+        msg_id: Optional[int] = None,
+    ) -> int:
         """Drain pending items for topic across all agent lanes."""
-        return sum(w.drain(pos, topic=topic) for w in self._workers_for_topic(topic))
+        return sum(
+            w.drain(pos, topic=topic, msg_id=msg_id)
+            for w in self._workers_for_topic(topic)
+        )
 
     def all_queued_items(self) -> list[dict]:
         """Return pending (not yet running) items across all topic workers."""

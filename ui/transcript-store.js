@@ -203,13 +203,17 @@
       return null;
     }
 
-    function installHistoryPage(page, boundary) {
+    function installHistoryPage(page, boundary, { source = null } = {}) {
       if (!Array.isArray(page)) return { ok: false, error: 'installHistoryPage: page must be an array', dirty: dirtySnapshot() };
       const rows = page.map(normalizeRow);
       const batchConflict = findBatchConflict(rows);
       if (batchConflict) return { ok: false, error: `installHistoryPage: ${batchConflict}`, dirty: dirtySnapshot() };
       for (const row of rows) {
-        const merged = mergeAuthoritative(messagesById.get(row.msgId), row);
+        // ADR-0011: Mark turn source to distinguish live (in-session) from history (loaded from store).
+        // Only set source if explicitly provided and row doesn't already have one.
+        const rowWithSource = { ...row };
+        if (source && !rowWithSource.source) rowWithSource.source = source;
+        const merged = mergeAuthoritative(messagesById.get(row.msgId), rowWithSource);
         putMessage(merged);
         view.loadedMessageIds.add(row.msgId);
       }

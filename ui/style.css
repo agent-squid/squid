@@ -1313,6 +1313,13 @@ body {
   user-select: none;
   pointer-events: none;
 }
+.client-session-boundary-label {
+  margin-top: 0.45rem;
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
 .boot-art {
   display: inline-block;
   font-family: 'JetBrains Mono', ui-monospace, monospace;
@@ -5566,8 +5573,8 @@ mark.search-kw-highlight {
 
 /* per-message timestamps */
 .msg-time {
-  font-size: 0.72rem;
-  color: #484858;
+  font-size: var(--text-sm);
+  color: var(--text-mid);
   padding: 0 0.4rem 0.1rem;
   align-self: flex-start;
 }

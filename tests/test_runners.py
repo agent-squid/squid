@@ -1830,6 +1830,44 @@ def test_pi_maps_tool_calls_and_waits_for_final_stats():
     assert stats["cost_usd"] == 0.30000000000000004
 
 
+@pytest.mark.parametrize(
+    ("stop_reason", "error_message", "expected"),
+    [
+        ("error", "Connection error.", "Connection error."),
+        ("aborted", None, "pi aborted"),
+    ],
+)
+def test_pi_surfaces_final_error_after_retries_without_emitting_stats(
+    stop_reason, error_message, expected,
+):
+    async def fake_stream_lines(cmd, **kwargs):
+        for will_retry in (True, True, False):
+            yield json.dumps({
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [],
+                    "stopReason": stop_reason,
+                    "errorMessage": error_message,
+                    "usage": {},
+                },
+            })
+            yield json.dumps({"type": "agent_end", "willRetry": will_retry})
+
+    chunks = []
+
+    async def collect():
+        async for chunk in run_pi("next", cwd="/tmp"):
+            chunks.append(chunk)
+
+    with patch("agent.runners.PI_PATH", "pi"), patch(
+        "agent.runners._stream_lines", fake_stream_lines
+    ), pytest.raises(CLIError) as exc_info:
+        asyncio.run(collect())
+    assert str(exc_info.value) == expected
+    assert chunks == []
+
+
 def test_opencode_routes_tool_call_step_text_to_status_and_stop_text_to_final():
     async def fake_stream_lines(cmd, **kwargs):
         yield json.dumps({

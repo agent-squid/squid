@@ -410,14 +410,14 @@ test('pendingReconcile accumulates dirty assistant ids and clearReconciled remov
   expect(await store.evaluate(s => s.getPendingReconcile())).toEqual([51]);
 });
 
-// ── Stage 2: HTTP history producer, shadow mode ─────────────────────────────
+// ── HTTP history producer → reconciler store ────────────────────────────────
 // app.js now feeds real /history pages into window.__transcriptStore
 // alongside its existing direct-DOM render. These tests drive the live page
 // (not a fresh detached store) so the same fetched page produces both the
 // DOM and the store state, and check the two stay in parity without a
 // second render.
 
-test.describe('HTTP history producer (shadow mode)', () => {
+test.describe('HTTP history producer (reconciler store)', () => {
   test('a history page renders the DOM as before and installs equivalent turns into the store', async ({ page }) => {
     await page.unroute('**/history**');
     await page.route('**/history**', r => r.fulfill({ json: {
@@ -489,7 +489,7 @@ test.describe('HTTP history producer (shadow mode)', () => {
   });
 });
 
-// ── Stage 2: WS snapshot producer, shadow mode ──────────────────────────────
+// ── WS snapshot producer → reconciler store ─────────────────────────────────
 // app.js now also feeds every WS 'snapshot' frame into
 // window.__transcriptStore alongside its existing direct-DOM discovery path
 // (shadowInstallSnapshot, mirroring shadowInstallHistoryPage). These tests
@@ -497,7 +497,7 @@ test.describe('HTTP history producer (shadow mode)', () => {
 // both the DOM and the store state, and check the two stay in parity without
 // a second render.
 
-test.describe('WS snapshot producer (shadow mode)', () => {
+test.describe('WS snapshot producer (reconciler store)', () => {
   test.beforeEach(async ({ page }) => {
     await page.addInitScript(() => {
       window.__webSocket = null;
@@ -843,7 +843,7 @@ test.describe('WS snapshot producer (shadow mode)', () => {
   });
 });
 
-// ── Stage 2: WS lifecycle events producer, shadow mode ──────────────────────
+// ── WS lifecycle events producer → reconciler store ─────────────────────────
 // app.js now also feeds message.changed/chat.text/chat.tool/chat.stats
 // lifecycle frames into window.__transcriptStore alongside their existing
 // direct-DOM handling (shadowApplyEvent, mirroring shadowInstallSnapshot).
@@ -851,7 +851,7 @@ test.describe('WS snapshot producer (shadow mode)', () => {
 // produces both the DOM and the store state, and check the two stay in
 // parity without a second render.
 
-test.describe('WS lifecycle events producer (shadow mode)', () => {
+test.describe('WS lifecycle events producer (reconciler store)', () => {
   test.beforeEach(async ({ page }) => {
     await page.addInitScript(() => {
       window.__webSocket = null;
@@ -896,10 +896,10 @@ test.describe('WS lifecycle events producer (shadow mode)', () => {
       payload: { id: 12, role: 'assistant', status: 'done', content: 'frame content', reply_to: 11 },
     }));
 
-    // Direct-DOM path is unaffected: discovery still renders from its own
-    // /chat/{id}/status fetch, not from the frame's own content field.
+    // The registry projection is canonical, so the authoritative lifecycle
+    // patch wins over the stale content returned by the discovery fetch.
     await expect(page.locator('.msg.assistant.history-item[data-msg-id="12"]'))
-      .toContainText('fetched content');
+      .toContainText('frame content');
 
     const message = await page.evaluate(() => window.__transcriptStore.getMessage(12));
     // The store, in contrast, is fed straight from the frame's own payload.
@@ -936,12 +936,12 @@ test.describe('WS lifecycle events producer (shadow mode)', () => {
     expect(await page.evaluate(() => window.__transcriptStore.getMessage(15).content)).toBeUndefined();
   });
 
-  test('renderer=store builds and mounts a WS-lifecycle-discovered pending bubble through the registry', async ({ page }) => {
+  test('reconciler builds and mounts a WS-lifecycle-discovered pending bubble through the registry', async ({ page }) => {
     await page.route('**/chat/16/status', r => r.fulfill({ json: {
       id: 16, role: 'assistant', reply_to: 15, topic: 'default', agent: 'claude',
       adhoc: false, status: 'pending', prompt: 'adopt me', content: '',
     }}));
-    await page.goto('/?renderer=store');
+    await page.goto('/');
     await page.waitForFunction(() => window.__webSocket?.readyState === 1);
 
     await page.evaluate(() => window.__webSocket.receive({
@@ -964,8 +964,39 @@ test.describe('WS lifecycle events producer (shadow mode)', () => {
     expect(registryState).toEqual({ registered: true, connected: true, mounted: true });
   });
 
+  test('a failed WS-lifecycle reconcile stays dirty without a direct-DOM fallback or cursor ACK', async ({ page }) => {
+    await page.route('**/chat/17/status', r => r.fulfill({ json: {
+      id: 17, role: 'assistant', reply_to: 16, topic: 'default', agent: 'claude',
+      adhoc: false, status: 'pending', prompt: 'lifecycle retry', content: '',
+    }}));
+    await page.reload();
+    await page.waitForFunction(() => window.__webSocket?.readyState === 1);
+
+    await page.evaluate(() => {
+      window.__originalReconcileDirtyIds = historyReconciler.reconcileDirtyIds;
+      historyReconciler.reconcileDirtyIds = () => ({ ok: false, reconciledIds: [], failedIds: [17] });
+      window.__failedLifecycleSocket = window.__webSocket;
+      window.__webSocket.receive({
+        v: 1, type: 'message.changed', event_id: 17, msg_id: 17,
+        scope: { topic: 'default', agent: 'claude' },
+        payload: { id: 17, role: 'assistant', status: 'pending', reply_to: 16 },
+      });
+    });
+
+    await expect(page.locator('[data-msg-id="17"]')).toHaveCount(0);
+    await expect.poll(() => page.evaluate(() =>
+      window.__transcriptStore.getPendingReconcile().includes(17))).toBe(true);
+    await expect.poll(() => page.evaluate(() => window.__failedLifecycleSocket.readyState)).toBe(3);
+    expect(await page.evaluate(() => ({
+      cursor: localStorage.getItem('squid-realtime-v1-cursor'),
+      acked: (window.__sentWebSocketFrames || []).some(frame =>
+        frame.type === 'ack' && Number(frame.payload?.event_id) === 17),
+    }))).toEqual({ cursor: null, acked: false });
+
+  });
+
   test('composer display facts survive a sparse terminal history row', async ({ page }) => {
-    await page.goto('/?renderer=store');
+    await page.goto('/');
     await page.evaluate(() => {
       shadowInstallHistoryPage([{
         id: 18, role: 'assistant', status: 'pending', topic: 'squid', agent: 'deepseek',
@@ -988,6 +1019,9 @@ test.describe('WS lifecycle events producer (shadow mode)', () => {
   });
 
   test('chat.text run-events accumulate into the store message content in run_seq order', async ({ page }) => {
+    await page.route('**/chat/20/status', r => r.fulfill({ json: {
+      id: 20, role: 'assistant', topic: 'default', agent: 'claude', status: 'pending', prompt: 'stream', content: '',
+    }}));
     await page.reload();
     await page.waitForFunction(() => window.__webSocket?.readyState === 1);
 
@@ -1002,8 +1036,8 @@ test.describe('WS lifecycle events producer (shadow mode)', () => {
       v: 1, type: 'chat.text', event_id: 3, msg_id: 20, run_seq: 5, payload: { text: 'world' },
     }));
 
-    const content = await page.evaluate(() => window.__transcriptStore.getMessage(20).content);
-    expect(content).toBe('hello world');
+    await expect.poll(() => page.evaluate(() =>
+      window.__transcriptStore.getMessage(20).content)).toBe('hello world');
   });
 
   // ADR-0041 Stage 3 prerequisite: chat.status is the CLI's live status/
@@ -1011,6 +1045,9 @@ test.describe('WS lifecycle events producer (shadow mode)', () => {
   // the store's own 'narrative' kind, appending the same way the direct-DOM
   // path's statusBuf += text does.
   test('chat.status run-events accumulate into the store turn narrative, separately from content', async ({ page }) => {
+    await page.route('**/chat/21/status', r => r.fulfill({ json: {
+      id: 21, role: 'assistant', topic: 'default', agent: 'claude', status: 'pending', prompt: 'status', content: '',
+    }}));
     await page.reload();
     await page.waitForFunction(() => window.__webSocket?.readyState === 1);
 
@@ -1025,12 +1062,17 @@ test.describe('WS lifecycle events producer (shadow mode)', () => {
       v: 1, type: 'chat.status', event_id: 3, msg_id: 21, run_seq: 5, payload: { text: 'running tests…\n' },
     }));
 
+    await expect.poll(() => page.evaluate(() =>
+      window.__transcriptStore.getTurn(21).narrative)).toBe('reading file.js\nrunning tests…\n');
     const turn = await page.evaluate(() => window.__transcriptStore.getTurn(21));
     expect(turn.narrative).toBe('reading file.js\nrunning tests…\n');
     expect(turn.status).toBe('pending');
   });
 
   test('WS processing falls back to scope topic and queued appends with a line separator', async ({ page }) => {
+    await page.route('**/chat/22/status', r => r.fulfill({ json: {
+      id: 22, role: 'assistant', topic: 'squid', agent: 'claude', status: 'pending', prompt: 'queue', content: '',
+    }}));
     await page.reload();
     await page.waitForFunction(() => window.__webSocket?.readyState === 1);
 
@@ -1044,8 +1086,9 @@ test.describe('WS lifecycle events producer (shadow mode)', () => {
     ];
     await page.evaluate(items => items.forEach(frame => window.__webSocket.receive(frame)), frames);
 
-    const narrative = await page.evaluate(() => window.__transcriptStore.getTurn(22).narrative);
-    expect(narrative).toBe('#squid · processing…\nrunning tests\n#squid · queued — position 2\n');
+    await expect.poll(() => page.evaluate(() =>
+      window.__transcriptStore.getTurn(22).narrative))
+      .toBe('#squid · processing…\nrunning tests\n#squid · queued — position 2\n');
   });
 
   test('a chat.tool event at or below the applied event_id watermark is a store no-op, same as the snapshot producer', async ({ page }) => {
@@ -1066,6 +1109,9 @@ test.describe('WS lifecycle events producer (shadow mode)', () => {
   });
 
   test('two real chat.tool updates for the same tool_use_id merge into one entry, not two', async ({ page }) => {
+    await page.route('**/chat/40/status', r => r.fulfill({ json: {
+      id: 40, role: 'assistant', topic: 'default', agent: 'claude', status: 'pending', prompt: 'tools', content: '',
+    }}));
     await page.reload();
     await page.waitForFunction(() => window.__webSocket?.readyState === 1);
 
@@ -1084,13 +1130,15 @@ test.describe('WS lifecycle events producer (shadow mode)', () => {
       payload: { name: 'Read', tool_use_id: 'toolu_1', file: 'app.js', result: 'ok' },
     }));
 
+    await expect.poll(() => page.evaluate(() =>
+      window.__transcriptStore.getMessage(40).tools.length)).toBe(1);
     const tools = await page.evaluate(() => window.__transcriptStore.getMessage(40).tools);
     expect(tools).toHaveLength(1);
     expect(tools[0]).toMatchObject({ tool_use_id: 'toolu_1', result: 'ok' });
   });
 });
 
-// ── Stage 2: SSE producer, shadow mode ──────────────────────────────────────
+// ── SSE producer → reconciler store ─────────────────────────────────────────
 // app.js now also feeds SSE-transport frames into window.__transcriptStore
 // alongside their existing direct-DOM handling — both the primary POST
 // /chat streaming response (sendMessage's own hand-rolled parser) and the
@@ -1104,7 +1152,7 @@ test.describe('WS lifecycle events producer (shadow mode)', () => {
 // applying a sequenced patch (see shadowInstallSseCompletion's own comment
 // in ui/app.js).
 
-test.describe('SSE producer (shadow mode)', () => {
+test.describe('SSE producer (reconciler store)', () => {
   test('a fresh SSE composer turn is registered as one owned pending range when its msg id arrives', async ({ page }) => {
     await page.route('**/chat', r => r.fulfill({
       status: 200,
