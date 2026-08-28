@@ -127,23 +127,41 @@ Squid is most useful when your local machine can keep working while you are away
 
 Tailscale is a good fit for this. Its Personal plan is free for non-commercial personal use, and it creates a private WireGuard-based network across your own devices. Your phone, tablet, laptop, Mac mini, and workstation can talk inside the tailnet without opening a public port.
 
-Squid always binds to `127.0.0.1`, it never exposes itself directly on the network. Starting squid automatically configures Tailscale's HTTPS proxy if Tailscale is installed:
+Squid always binds to `127.0.0.1`, it never exposes itself directly on the network. Starting squid automatically configures two `tailscale serve` rules if Tailscale is installed, and prints both URLs to the console:
 
 ```bash
 agentsquid start   # run in the background and configure tailscale serve
 agentsquid         # run in the foreground for debugging
 ```
 
-Type `/remote` in the chat to get a QR code with the full HTTPS URL —
+```text
+agentsquid is up -> http://127.0.0.1:8000
+  https://<machine-name>.<tailnet>.ts.net/
+  http://<tailscale-ip>:8000/
+```
+
+Two different URLs work, for two different reasons:
+
+- **`https://<machine-name>.<tailnet>.ts.net/`** — the default HTTPS port
+  (443), so no port in the URL. This needs [MagicDNS](https://tailscale.com/kb/1081/magicdns)
+  enabled on your tailnet to resolve; squid checks this at startup and warns
+  in the printed URL if MagicDNS looks disabled. The full domain is required
+  here — the short hostname alone (`https://<machine-name>/`) won't work
+  because Tailscale's TLS cert is scoped to `*.ts.net` and browsers enforce
+  an exact match.
+- **`http://<tailscale-ip>:<port>/`** — plain HTTP against squid's own port,
+  reachable by IP even without MagicDNS. This one has to be HTTP rather than
+  HTTPS: Tailscale's cert only covers the `*.ts.net` domain, not the IP, so
+  `https://<tailscale-ip>:<port>/` would fail TLS validation. The traffic is
+  still WireGuard-encrypted at the tailnet layer either way — this isn't
+  sending anything in the clear over the internet.
+
+Type `/remote` in the chat to get a QR code with the HTTPS domain URL —
 point your phone camera at it to open squid in one tap:
 
 ```text
 https://<machine-name>.<tailnet>.ts.net/
 ```
-
-The full domain is required — the short hostname alone (`https://<machine-name>/`)
-won't work because Tailscale's TLS cert is scoped to `*.ts.net` and browsers
-enforce an exact match.
 
 ### Reaching other local services over the tailnet too
 

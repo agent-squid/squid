@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-06-01
-updated: 2026-08-27
+updated: 2026-08-28
 ---
 # ADR-0016: Security Model — Network Isolation
 
@@ -31,11 +31,39 @@ address is not in `127.0.0.0/8`:
 
 Public IPs, LAN IPs, Tailscale IPs, and `0.0.0.0` are all rejected. Squid
 never binds directly to a network interface. Remote access is handled
-exclusively by `tailscale serve`, which proxies HTTPS traffic from the
-Tailscale network to `127.0.0.1:<port>`.
+exclusively by `tailscale serve`, which proxies traffic from the Tailscale
+network to `127.0.0.1:<port>` via two rules — see "Two serve rules" below.
 
 This means only processes on the local machine can reach squid directly.
 Tailscale's own device-level authentication handles who can reach the tailnet.
+
+### Two serve rules: https by domain, http by IP (2026-08-28)
+
+`_configure_tailscale_serve` in `agent/server.py` (mirrored by `bin/start.sh`
+for source checkouts) configures two `tailscale serve` rules, not one,
+because a single rule can't cover both access patterns:
+
+```bash
+tailscale serve --bg 127.0.0.1:<port>              # https, default port 443
+tailscale serve --bg --http=<port> 127.0.0.1:<port> # http, squid's own port
+```
+
+- `https://<machine-name>.<tailnet>.ts.net/` (443, no port in the URL) is the
+  short form, but only resolves if MagicDNS is enabled on the tailnet.
+- `http://<tailscale-ip>:<port>/` works by IP regardless of MagicDNS. It has
+  to be HTTP, not HTTPS: Tailscale's cert is issued for the `*.ts.net`
+  domain, not the IP, so `https://<tailscale-ip>:<port>/` fails TLS
+  validation. Plain HTTP has no cert to validate, and the connection is
+  already encrypted by Tailscale's own WireGuard layer regardless — this
+  isn't sending anything in the clear over the internet.
+
+`_tailscale_serve_status` (read-only — no `tailscale serve` mutation) checks
+`tailscale status --json`'s `CurrentTailnet.MagicDNSEnabled` field and
+`tailscale serve status --json`'s `Web`/`TCP` entries, so squid can tell
+which of the two rules is actually live and whether the domain URL will
+resolve. Both `agentsquid start`/`agentsquid status` and the foreground
+`agentsquid` CLI print both URLs at startup, flagging the domain one if
+MagicDNS looks off.
 
 ### Tailscale + MagicDNS setup
 
@@ -46,13 +74,15 @@ public DNS.
 1. In Tailscale admin, rename the machine (e.g. `agent-squid`).
 2. Keep `server.host: "127.0.0.1"` — squid always binds to loopback.
 3. Start squid (`agentsquid`, or `bin/start.sh` from a source checkout) — it
-   auto-configures `tailscale serve` as the HTTPS proxy.
+   auto-configures both `tailscale serve` rules above and prints both URLs.
 
 **Phone/tablet access:**
 - Connect the device to the same Tailscale network.
 - Type `/remote` in the chat on the host machine to get a QR code.
 - Scan it to open squid in one tap.
 - MagicDNS resolves the hostname automatically — no port-forwarding needed.
+  If MagicDNS is off for this tailnet, use the `http://<tailscale-ip>:<port>/`
+  URL printed at startup instead.
 
 ### Exposing other local services alongside squid (2026-08-27)
 

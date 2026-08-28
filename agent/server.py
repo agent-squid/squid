@@ -4526,51 +4526,108 @@ if UI_DIR.exists():
     app.mount("/", StaticFiles(directory=UI_DIR, html=True), name="ui")
 
 
+def _tailscale_serve_status(port: int) -> Optional[dict]:
+    """Read-only snapshot of Tailscale/`tailscale serve` state for `port`.
+    Returns None if the `tailscale` binary isn't available or a status call
+    fails. Never mutates anything — safe to call just for reporting.
+    """
+    if not shutil.which("tailscale"):
+        return None
+    try:
+        status_raw = subprocess.run(
+            ["tailscale", "status", "--json"], capture_output=True, text=True, timeout=5,
+        )
+        serve_raw = subprocess.run(
+            ["tailscale", "serve", "status", "--json"], capture_output=True, text=True, timeout=5,
+        )
+        if status_raw.returncode != 0 or serve_raw.returncode != 0:
+            return None
+        status = json.loads(status_raw.stdout)
+        web = json.loads(serve_raw.stdout).get("Web", {})
+    except Exception:
+        return None
+
+    target = f"http://127.0.0.1:{port}"
+
+    def _ready(tcp_port) -> bool:
+        return any(
+            host_port.endswith(f":{tcp_port}")
+            and entry.get("Handlers", {}).get("/", {}).get("Proxy") == target
+            for host_port, entry in web.items()
+        )
+
+    return {
+        "https_ready": _ready(443),
+        "http_ready": _ready(port),
+        "dns_name": status.get("Self", {}).get("DNSName", "").rstrip("."),
+        "magic_dns": bool(status.get("CurrentTailnet", {}).get("MagicDNSEnabled")),
+        "tailscale_ip": next(iter(status.get("TailscaleIPs", [])), ""),
+    }
+
+
 def _configure_tailscale_serve(port: int) -> None:
     """Best-effort, never fatal — mirrors bin/start.sh's tailscale section so
     a pipx-installed `agentsquid` gets the same one-time persistent
     `tailscale serve` config a source checkout's bin/start.sh already set up.
     Tailscale remembers this across reboots; safe to check/re-run every start.
 
-    Publishes at the tailnet's default HTTPS port (443), giving the shortest
-    possible URL (no port in it). `tailscale serve` supports multiple
-    concurrent rules at different ports on the same node, so exposing another
-    local service on this machine (e.g. Ollama or an oMLX server) doesn't
-    require touching this rule — add an independent one for it instead:
+    Publishes two rules, since either one can be the one that actually works
+    depending on tailnet settings:
+      - https://<dns-name>/            default HTTPS (443), shortest URL, but
+                                        needs MagicDNS enabled to resolve.
+      - http://<tailscale-ip>:<port>/  works even with MagicDNS off, since
+                                        it's plain HTTP against the IP
+                                        directly. `https://<ip>:<port>/`
+                                        would fail TLS validation instead —
+                                        Tailscale's cert only covers the DNS
+                                        name, not the IP — so this rule uses
+                                        HTTP rather than HTTPS. The traffic is
+                                        still WireGuard-encrypted at the
+                                        tailnet layer either way.
+
+    `tailscale serve` supports multiple concurrent rules at different ports
+    on the same node, so exposing another local service on this machine
+    (e.g. Ollama or an oMLX server) doesn't require touching either rule —
+    add an independent one for it instead:
         tailscale serve --bg --https=<their-port> 127.0.0.1:<their-port>
-    That coexists with squid's 443 rule with no conflict, since it's a
-    different tailnet-side port proxying to a different local port.
     """
-    import shutil
-    if not shutil.which("tailscale"):
+    info = _tailscale_serve_status(port)
+    if info is None:
         return
     try:
-        status = subprocess.run(
-            ["tailscale", "serve", "status"], capture_output=True, text=True, timeout=5,
-        )
-        already = status.returncode == 0 and f"127.0.0.1:{port}" in status.stdout
-        if not already:
-            configured = subprocess.run(
+        if not info["https_ready"]:
+            if not subprocess.run(
                 ["tailscale", "serve", "--bg", f"127.0.0.1:{port}"],
                 capture_output=True, timeout=5,
-            ).returncode == 0
-            if not configured:
+            ).returncode == 0:
                 log.warning(
-                    "tailscale serve failed — squid will run locally only (127.0.0.1:%s). "
-                    "To enable remote access later, run: tailscale serve --bg 127.0.0.1:%s",
+                    "tailscale serve (https) failed — squid will run locally only "
+                    "(127.0.0.1:%s). To enable later, run: tailscale serve --bg 127.0.0.1:%s",
                     port, port,
                 )
-                return
-        dns = ""
-        info = subprocess.run(
-            ["tailscale", "status", "--json"], capture_output=True, text=True, timeout=5,
-        )
-        if info.returncode == 0:
-            dns = json.loads(info.stdout).get("Self", {}).get("DNSName", "").rstrip(".")
-        log.info(
-            "tailscale serve: %s → https://%s/",
-            "already configured" if already else "configured", dns or "<machine-name>",
-        )
+        if not info["http_ready"]:
+            if not subprocess.run(
+                ["tailscale", "serve", "--bg", f"--http={port}", f"127.0.0.1:{port}"],
+                capture_output=True, timeout=5,
+            ).returncode == 0:
+                log.warning(
+                    "tailscale serve --http=%s failed — IP:port access won't work. "
+                    "To enable later, run: tailscale serve --bg --http=%s 127.0.0.1:%s",
+                    port, port, port,
+                )
+
+        dns = info["dns_name"] or "<machine-name>"
+        if info["magic_dns"]:
+            log.info("tailscale serve: https://%s/", dns)
+        else:
+            log.info(
+                "tailscale serve: https://%s/ (MagicDNS is off for this tailnet — "
+                "this name may not resolve; enable it in the admin console, or use "
+                "the IP URL below)",
+                dns,
+            )
+        if info["tailscale_ip"]:
+            log.info("tailscale serve: http://%s:%s/", info["tailscale_ip"], port)
     except Exception as e:
         log.warning("tailscale serve check failed: %s", e)
 
@@ -4713,16 +4770,34 @@ def _print_lifecycle_usage() -> None:
     )
 
 
+def _print_tailscale_access(port: int) -> None:
+    """Print whatever tailnet URLs are currently configured for `port`, if
+    any. Read-only — reports what _configure_tailscale_serve already set up
+    in the running server process; does not itself change any config.
+    """
+    info = _tailscale_serve_status(port)
+    if not info:
+        return
+    if info["https_ready"]:
+        dns = info["dns_name"] or "<machine-name>"
+        suffix = "" if info["magic_dns"] else "  (MagicDNS is off — may not resolve)"
+        print(f"  https://{dns}/{suffix}", flush=True)
+    if info["http_ready"] and info["tailscale_ip"]:
+        print(f"  http://{info['tailscale_ip']}:{port}/", flush=True)
+
+
 def _lifecycle_status(host: str, port: int) -> int:
     pid_file, _boot_log = _lifecycle_paths()
     pid = _read_lifecycle_pid(pid_file)
     if pid and _pid_running(pid):
         print(f"agentsquid is running (PID {pid}) -> http://{host}:{port}")
+        _print_tailscale_access(port)
         return 0
     if pid_file.exists():
         pid_file.unlink(missing_ok=True)
     if _health_ok(host, port):
         print(f"agentsquid is running at http://{host}:{port} (no PID file)")
+        _print_tailscale_access(port)
         return 0
     print("agentsquid is not running")
     return 1
@@ -4733,11 +4808,13 @@ def _lifecycle_start(host: str, port: int) -> int:
     pid = _read_lifecycle_pid(pid_file)
     if pid and _pid_running(pid):
         print(f"agentsquid is already running (PID {pid}) -> http://{host}:{port}")
+        _print_tailscale_access(port)
         return 0
     if pid_file.exists():
         pid_file.unlink(missing_ok=True)
     if _health_ok(host, port):
         print(f"agentsquid is already running at http://{host}:{port} (no PID file)")
+        _print_tailscale_access(port)
         return 0
 
     with boot_log.open("w", encoding="utf-8") as log_file:
@@ -4757,6 +4834,7 @@ def _lifecycle_start(host: str, port: int) -> int:
         if _health_ok(host, port):
             print("")
             print(f"agentsquid is up -> http://{host}:{port}")
+            _print_tailscale_access(port)
             return 0
         if proc.poll() is not None:
             pid_file.unlink(missing_ok=True)
@@ -4917,6 +4995,7 @@ def main():
     # printing this same confirmation; a bare `agentsquid` invocation has no
     # equivalent, so it has to speak for itself here instead.
     print(f"squid is up → http://{host}:{port}  (running in the foreground — Ctrl+C to stop)", flush=True)
+    _print_tailscale_access(port)
     uvicorn.run(
         "agent.server:app",
         host=host,
