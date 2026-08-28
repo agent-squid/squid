@@ -630,6 +630,7 @@ class ClaudeGauge:
                     f"https://claude.ai/api/organizations/{org_id}/usage",
                     headers={"Cookie": f"sessionKey={session_key}"},
                     timeout=15,
+                    allow_redirects=False,
                 )
         except Exception as exc:
             raise BenchmarkError(f"Claude gauge request failed: {exc}") from exc

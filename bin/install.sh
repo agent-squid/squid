@@ -112,18 +112,22 @@ fi
 echo ""
 
 PYTHON=""
-for candidate in python3.13 python3.12 python3.11 python3.10 python3.9 python3 python; do
-  if need_version "$candidate" 3 9 "--version"; then
+for candidate in python3.13 python3.12 python3.11 python3.10 python3 python; do
+  if need_version "$candidate" 3 10 "--version"; then
     PYTHON=$candidate
     break
   fi
 done
 
 if [[ -z "$PYTHON" ]]; then
-  fail "Python >= 3.9 not found — brew install python@3.13"
+  fail "Python >= 3.10 not found — brew install python@3.13"
   mark_error
 else
   VENV_DIR="$SQUID_DIR/.venv"
+  if [[ -x "$VENV_DIR/bin/python" ]] && ! need_version "$VENV_DIR/bin/python" 3 10 "--version"; then
+    warn "existing virtualenv uses Python < 3.10 — recreating it with $PYTHON"
+    rm -rf "$VENV_DIR"
+  fi
   [[ -x "$VENV_DIR/bin/python" ]] || run_quiet "create Python virtualenv" "$PYTHON" -m venv "$VENV_DIR"
   if ! "$VENV_DIR/bin/python" -m pip --version >/dev/null 2>&1; then
     run_quiet "bootstrap pip" "$VENV_DIR/bin/python" -m ensurepip --upgrade

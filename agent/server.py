@@ -3015,6 +3015,7 @@ async def quota_claude():
                 f"https://claude.ai/api/organizations/{org_id}/usage",
                 headers={"Cookie": f"sessionKey={session_key}"},
                 impersonate="chrome",
+                allow_redirects=False,
             )
         if r.status_code != 200:
             return JSONResponse({"error": f"claude.ai returned {r.status_code}"}, status_code=502)
@@ -3051,6 +3052,7 @@ async def quota_codex():
                 "https://chatgpt.com/backend-api/wham/usage",
                 headers={**common_headers, "Authorization": authorization},
                 impersonate="chrome",
+                allow_redirects=False,
             )
         if r.status_code != 200:
             if r.status_code == 401:

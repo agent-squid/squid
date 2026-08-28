@@ -1712,6 +1712,40 @@ def test_codex_quota_normalizes_weekly_primary_window(monkeypatch):
     assert body["reset_at"] == body["seven_day"]["reset_at"]
 
 
+def test_claude_quota_disables_redirects(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"five_hour": {"utilization": 12}}
+
+    class FakeAsyncSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, **kwargs):
+            captured["url"] = url
+            captured.update(kwargs)
+            return FakeResponse()
+
+    fake_requests = types.SimpleNamespace(AsyncSession=FakeAsyncSession)
+    monkeypatch.setitem(sys.modules, "curl_cffi", types.SimpleNamespace(requests=fake_requests))
+    monkeypatch.setitem(sys.modules, "curl_cffi.requests", fake_requests)
+    monkeypatch.setattr(creds, "get_org_id", lambda: "org_123")
+    monkeypatch.setattr(creds, "get_session_key", lambda: "session_123")
+
+    response = asyncio.run(server.quota_claude())
+
+    assert response.status_code == 200
+    assert captured["url"] == "https://claude.ai/api/organizations/org_123/usage"
+    assert captured["allow_redirects"] is False
+
+
 def test_codex_quota_prefers_cli_auth_and_account_header(monkeypatch):
     captured = {}
 
@@ -1728,10 +1762,11 @@ def test_codex_quota_prefers_cli_auth_and_account_header(monkeypatch):
         async def __aexit__(self, *args):
             return False
 
-        async def get(self, url, headers=None, impersonate=None):
+        async def get(self, url, headers=None, impersonate=None, allow_redirects=None):
             captured["url"] = url
             captured["headers"] = headers or {}
             captured["impersonate"] = impersonate
+            captured["allow_redirects"] = allow_redirects
             return FakeResponse()
 
     fake_requests = types.SimpleNamespace(AsyncSession=FakeAsyncSession)
@@ -1753,6 +1788,7 @@ def test_codex_quota_prefers_cli_auth_and_account_header(monkeypatch):
     assert captured["headers"]["ChatGPT-Account-ID"] == "acct_123"
     assert captured["headers"]["OpenAI-Beta"] == "codex-1"
     assert captured["headers"]["originator"] == "Codex Desktop"
+    assert captured["allow_redirects"] is False
 
 
 class _FakeHttpResponse:
