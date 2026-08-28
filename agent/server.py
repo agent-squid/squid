@@ -4618,6 +4618,17 @@ def _configure_tailscale_serve(port: int) -> None:
                     port, port,
                 )
         if not info["ip_ready"]:
+            # A pre-upgrade squid may have left a --http=<port> rule on this
+            # exact port (the bug this --tcp switch fixes). `tailscale serve
+            # --tcp` on a port already serving --http fails outright rather
+            # than replacing it ("cannot serve TCP; already serving web on
+            # <port>"), so clear it first. Best-effort: errors (e.g. no such
+            # rule exists) are expected and ignored — only the --tcp add
+            # below is actually load-bearing.
+            subprocess.run(
+                ["tailscale", "serve", f"--http={port}", "off"],
+                capture_output=True, timeout=5,
+            )
             if not subprocess.run(
                 ["tailscale", "serve", "--bg", f"--tcp={port}", f"tcp://127.0.0.1:{port}"],
                 capture_output=True, timeout=5,

@@ -150,6 +150,10 @@ if [[ $ERRORS -gt 0 ]]; then
 else
   USER_CONFIG="$HOME/.squid/squid.yaml"
   PORT=$("$VENV_DIR/bin/python3" -c "import yaml; print(yaml.safe_load(open('$USER_CONFIG'))['server']['port'])" 2>/dev/null || echo "8000")
+  # Configure tailscale serve now (not just on first start) so the URLs are
+  # visible immediately after install, same block bin/start.sh runs on every
+  # start — see that file for why the rules exist and how they're checked.
+  source "$SQUID_DIR/bin/tailscale-serve.sh"
   echo -e "  ${BOLD}Start:${RESET}  bin/start.sh"
   echo -e "  ${BOLD}Open:${RESET}   http://127.0.0.1:${PORT}"
   echo ""
