@@ -5,12 +5,16 @@ import logging
 import os
 import sqlite3
 import threading
+from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from agent import auth_sessions, server, stats_db
+from agent import providers as providers_mod
+from agent.providers import Provider
 
 
 CLIENT_ID = "testclient0000000000000001"
@@ -774,6 +778,172 @@ def test_create_session_unlock_mode_raises_on_non_darwin(monkeypatch):
         assert False, "expected AuthSessionError"
     except auth_sessions.AuthSessionError:
         pass
+
+
+def test_ollama_native_base_strips_v1_suffix():
+    assert providers_mod._ollama_native_base("http://localhost:11434/v1") == "http://localhost:11434"
+    assert providers_mod._ollama_native_base("http://gpu1.internal:11434/v1/") == "http://gpu1.internal:11434"
+    assert providers_mod._ollama_native_base(None) == "http://localhost:11434"
+
+
+class _FakeOllamaResponse:
+    def __init__(self, lines=None, error=None):
+        self._lines = lines or []
+        self._error = error
+
+    def raise_for_status(self):
+        if self._error:
+            raise self._error
+
+    async def aiter_lines(self):
+        for line in self._lines:
+            yield line
+
+
+class _FakeStreamCtx:
+    def __init__(self, response):
+        self._response = response
+
+    async def __aenter__(self):
+        return self._response
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeOllamaClient:
+    """Stands in for httpx.AsyncClient so pull/remove tests never hit a
+    real Ollama daemon. `calls` records (method, url, json) for assertions;
+    `pull_lines`/`error` control what the session sees."""
+
+    def __init__(self, calls, pull_lines=None, error=None):
+        self.calls = calls
+        self.pull_lines = pull_lines or []
+        self.error = error
+
+    def __call__(self, *a, **k):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def stream(self, method, url, json=None):
+        self.calls.append((method, url, json))
+        return _FakeStreamCtx(_FakeOllamaResponse(lines=self.pull_lines, error=self.error))
+
+    async def request(self, method, url, json=None):
+        self.calls.append((method, url, json))
+        return _FakeOllamaResponse(error=self.error)
+
+
+def _fake_ollama_provider(monkeypatch):
+    provider = Provider(id="ollama", auth_type="none", base_url="http://localhost:11434/v1")
+    monkeypatch.setitem(providers_mod.PROVIDERS, "ollama", provider)
+    return provider
+
+
+async def _run_and_await(target_id, mode, model):
+    session = await auth_sessions.create_session(target_id, 80, 24, mode=mode, model=model)
+    await session.api_task
+    return session
+
+
+def test_create_session_pull_streams_ollama_api_progress(monkeypatch):
+    _fake_ollama_provider(monkeypatch)
+    calls = []
+    fake_client = _FakeOllamaClient(calls, pull_lines=[
+        json.dumps({"status": "pulling manifest"}),
+        json.dumps({"status": "downloading", "completed": 50, "total": 100}),
+        json.dumps({"status": "success"}),
+    ])
+    monkeypatch.setattr(httpx, "AsyncClient", fake_client)
+    monkeypatch.setattr(auth_sessions, "_expire_session", AsyncMock())
+
+    session = None
+    try:
+        session = asyncio.run(_run_and_await("ollama", "pull", "llama3.2:3b"))
+        assert calls == [("POST", "http://localhost:11434/api/pull",
+                           {"name": "llama3.2:3b", "stream": True})]
+        assert session.state == "exited"
+        assert session.returncode == 0
+        output = bytes(session.buffer).decode()
+        assert "pulling manifest" in output
+        assert "downloading 50/100" in output
+        assert "success" in output
+    finally:
+        if session:
+            auth_sessions._sessions.pop(session.id, None)
+
+
+def test_create_session_pull_reports_api_error(monkeypatch):
+    _fake_ollama_provider(monkeypatch)
+    calls = []
+    # raise_for_status() fires before aiter_lines() is ever consumed.
+    not_found = httpx.HTTPStatusError(
+        "404", request=httpx.Request("POST", "http://x"), response=httpx.Response(404))
+    fake_client = _FakeOllamaClient(calls, error=not_found)
+    monkeypatch.setattr(httpx, "AsyncClient", fake_client)
+    monkeypatch.setattr(auth_sessions, "_expire_session", AsyncMock())
+
+    session = None
+    try:
+        session = asyncio.run(_run_and_await("ollama", "pull", "nonexistent:1b"))
+        assert session.state == "exited"
+        assert session.returncode == 1
+        assert b"Ollama API error" in bytes(session.buffer)
+    finally:
+        if session:
+            auth_sessions._sessions.pop(session.id, None)
+
+
+def test_create_session_remove_rejects_uninstalled_model(monkeypatch):
+    _fake_ollama_provider(monkeypatch)
+    monkeypatch.setattr(providers_mod, "_installed_ollama_models", lambda base_url=None: {"qwen3:8b"})
+
+    async def run():
+        await auth_sessions.create_session("ollama", 80, 24, mode="remove", model="qwen3:8b-not-installed")
+
+    try:
+        asyncio.run(run())
+        assert False, "expected AuthSessionError"
+    except auth_sessions.AuthSessionError as exc:
+        assert "not an installed ollama model" in str(exc)
+
+
+def test_create_session_remove_calls_delete_api(monkeypatch):
+    _fake_ollama_provider(monkeypatch)
+    monkeypatch.setattr(providers_mod, "_installed_ollama_models", lambda base_url=None: {"qwen3:8b"})
+    calls = []
+    fake_client = _FakeOllamaClient(calls)
+    monkeypatch.setattr(httpx, "AsyncClient", fake_client)
+    monkeypatch.setattr(auth_sessions, "_expire_session", AsyncMock())
+
+    session = None
+    try:
+        session = asyncio.run(_run_and_await("ollama", "remove", "qwen3:8b"))
+        assert calls == [("DELETE", "http://localhost:11434/api/delete", {"name": "qwen3:8b"})]
+        assert session.state == "exited"
+        assert session.returncode == 0
+        assert b"removed qwen3:8b" in bytes(session.buffer)
+    finally:
+        if session:
+            auth_sessions._sessions.pop(session.id, None)
+
+
+def test_create_session_pull_unknown_provider_raises(monkeypatch):
+    monkeypatch.delitem(providers_mod.PROVIDERS, "ollama", raising=False)
+
+    async def run():
+        await auth_sessions.create_session("ollama", 80, 24, mode="pull", model="llama3.2:3b")
+
+    try:
+        asyncio.run(run())
+        assert False, "expected AuthSessionError"
+    except auth_sessions.AuthSessionError as exc:
+        assert "Unknown Ollama provider" in str(exc)
 
 
 def test_resize_touches_idle_timer():

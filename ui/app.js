@@ -4310,6 +4310,7 @@ function _setCatalogOperationBusy(busy) {
 async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   const mode = opts.mode || 'login';
   const model = opts.model || null;
+  const isApiOperation = mode === 'pull' || mode === 'remove';
   // "unlock" (the macOS keychain-unlock remediation) reuses the plain login
   // panel — it's triggered from inside an in-progress cursor login and should
   // replace that same panel's content, not the separate Agents catalog panel
@@ -4526,7 +4527,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
     if (data && data.ok === true) {
       // The PTY execs its allowlisted argv directly, without a shell prompt to
       // echo it. Show the exact server-derived command before replay/live output.
-      term.write(`$ ${data.command}\r\n\r\n`);
+      if (!isApiOperation) term.write(`$ ${data.command}\r\n\r\n`);
       _authSession = { id: data.session_id, harness, mode, model, panel, panelTitle, panelTerm,
         panelRetryBtn, anchor, term, fitAddon, handleResize, onSuccessRetry, running: true, transport: 'ws' };
       term.onData(input => {
@@ -4593,7 +4594,7 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
     return;
   }
 
-  term.write(`$ ${data.command}\r\n\r\n`);
+  if (!isApiOperation) term.write(`$ ${data.command}\r\n\r\n`);
   const es = new EventSource(`/auth/session/${data.id}/events`);
   _authSession = { id: data.id, harness, mode, model, panel, panelTitle, panelTerm,
     panelRetryBtn, anchor, es, term, fitAddon, handleResize, onSuccessRetry, running: true, transport: 'sse' };

@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
+import json
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -67,29 +68,23 @@ _PROVIDER_INSTALL: dict[str, str] = {
 }
 
 
-def _installed_ollama_models() -> Optional[set[str]]:
-    """Model names currently pulled into the local ollama daemon (`ollama
-    list`'s NAME column), or None if the CLI isn't on PATH or the call
-    fails/times out. Distinguishes "pulled" from merely "in the curated
-    models: suggestion list" so the UI can grey out whichever of pull/remove
-    doesn't apply to a given model — public_dict() below only calls this
-    when the ollama binary itself is already known installed."""
-    if not OLLAMA_PATH:
-        return None
+def _ollama_native_base(base_url: Optional[str]) -> str:
+    base = (base_url or "http://localhost:11434/v1").rstrip("/")
+    return base[:-3] if base.endswith("/v1") else base
+
+
+def _installed_ollama_models(base_url: Optional[str] = None) -> Optional[set[str]]:
+    """Model names returned by Ollama's API, local or remote."""
     try:
-        result = subprocess.run(
-            [OLLAMA_PATH, "list"], capture_output=True, text=True, timeout=3,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if result.returncode != 0:
+        with urllib.request.urlopen(f"{_ollama_native_base(base_url)}/api/tags", timeout=3) as response:
+            payload = json.load(response)
+    except (OSError, ValueError):
         return None
     names: set[str] = set()
-    for line in result.stdout.splitlines()[1:]:  # skip "NAME ID SIZE MODIFIED" header
-        line = line.strip()
-        if not line:
+    for item in payload.get("models", []):
+        name = item.get("name") or item.get("model")
+        if not isinstance(name, str) or not name:
             continue
-        name = line.split()[0]
         names.add(name)
         # ollama always tags an untagged pull as :latest in `ollama list`,
         # but a curated models: entry may omit the tag (e.g.
@@ -181,25 +176,21 @@ class Provider:
         }
         if self.id in _PROVIDER_INSTALL:
             result["install_cmd"] = _PROVIDER_INSTALL[self.id]
-            installed = bool(_PROVIDER_BINARY_PATH.get(self.id))
+            pulled = _installed_ollama_models(self.base_url)
+            installed = pulled is not None
             result["installed"] = installed
             if installed:
-                pulled = _installed_ollama_models()
-                if pulled is not None:
-                    result["pulled_models"] = sorted(pulled)
-                    # `models:` remains a useful curated ordering, but local
-                    # Ollama installs are the source of truth. Include models
-                    # pulled outside Squid as well. Suppress the untagged
-                    # matching aliases added by _installed_ollama_models(),
-                    # then hide Ollama's implicit :latest tag in the UI.
-                    canonical = (
-                        model for model in pulled if f"{model}:latest" not in pulled
-                    )
-                    discovered = sorted(
-                        model[:-len(":latest")] if model.endswith(":latest") else model
-                        for model in canonical
-                    )
-                    result["models"] = list(dict.fromkeys((*models, *discovered)))
+                result["pulled_models"] = sorted(pulled)
+                # `models:` remains a useful curated ordering, but the
+                # configured Ollama host is the source of truth. Include
+                # models pulled outside Squid as well and hide Ollama's
+                # implicit :latest tag in the UI.
+                canonical = (model for model in pulled if f"{model}:latest" not in pulled)
+                discovered = sorted(
+                    model[:-len(":latest")] if model.endswith(":latest") else model
+                    for model in canonical
+                )
+                result["models"] = list(dict.fromkeys((*models, *discovered)))
         return result
 
 

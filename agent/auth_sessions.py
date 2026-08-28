@@ -9,10 +9,9 @@ input, and input bytes sent to a session are forwarded only to that fixed
 process.
 
 Also covers "install" sessions (harness install one-liners and the `ollama`
-provider's install one-liner, ADR-0037's amendment on 2026-08-09) and
-`ollama pull`/`ollama rm` model-management sessions. Pull accepts a validated
-Ollama model name as one argv element (never shell input); remove remains
-restricted to models reported by the local Ollama installation.
+provider's install one-liner, ADR-0037's amendment on 2026-08-09) and Ollama
+model management through its HTTP API. Pull accepts a validated model name;
+remove remains restricted to models reported by the configured Ollama host.
 
 Also covers an "unlock" session (macOS-only): a fixed `security
 unlock-keychain` command run interactively in a PTY so a locked login
@@ -32,6 +31,7 @@ import asyncio
 import fcntl
 import os
 import pty
+import json
 import re
 import shlex
 import signal
@@ -149,25 +149,6 @@ def _unlock_argv() -> list[str]:
     return ["security", "unlock-keychain"]
 
 
-def _model_argv(action: str, model: str) -> list[str]:
-    """Build a fixed-shape Ollama command without invoking a shell.
-
-    Pull permits a validated registry model name; remove is deliberately
-    limited to models reported by ``ollama list`` so free text cannot delete
-    arbitrary local data.
-    """
-    if not OLLAMA_PATH:
-        raise AuthSessionError("ollama CLI not found in PATH")
-    if len(model) > 200 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9][A-Za-z0-9._-]*)?", model):
-        raise AuthSessionError(f"{model!r} is not a valid ollama model name")
-    if action == "rm":
-        from .providers import _installed_ollama_models
-        installed = _installed_ollama_models()
-        if installed is None or model not in installed:
-            raise AuthSessionError(f"{model!r} is not an installed ollama model")
-    return [OLLAMA_PATH, action, model]
-
-
 class AuthSession:
     def __init__(self, session_id: str, harness_id: str, pid: int, master_fd: int, display_command: str):
         self.id = session_id
@@ -183,6 +164,7 @@ class AuthSession:
         self.listeners: list[asyncio.Queue] = []
         self.reader_task: Optional[asyncio.Task] = None
         self.idle_task: Optional[asyncio.Task] = None
+        self.api_task: Optional[asyncio.Task] = None
         self._closed = asyncio.Event()
 
     def touch(self) -> None:
@@ -250,12 +232,47 @@ def _spawn_pty(argv: list[str], env: dict, cols: int, rows: int) -> tuple[int, i
     return pid, master_fd
 
 
+async def _run_ollama_api(session: AuthSession, provider, action: str, model: str) -> None:
+    """Stream an Ollama model-management API operation into the existing session UI."""
+    import httpx
+    from .providers import _ollama_native_base
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:
+            if action == "pull":
+                async with client.stream("POST", f"{_ollama_native_base(provider.base_url)}/api/pull",
+                                         json={"name": model, "stream": True}) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if line:
+                            data = json.loads(line)
+                            status = data.get("status", line)
+                            completed, total = data.get("completed"), data.get("total")
+                            suffix = f" {completed}/{total}" if completed is not None and total else ""
+                            session.broadcast(f"{status}{suffix}\r\n".encode())
+            else:
+                response = await client.request("DELETE", f"{_ollama_native_base(provider.base_url)}/api/delete",
+                                                json={"name": model})
+                response.raise_for_status()
+                session.broadcast(f"removed {model}\r\n".encode())
+    except asyncio.CancelledError:
+        session.mark_exited(-1)
+        return
+    except Exception as exc:
+        session.broadcast(f"Ollama API error: {exc}\r\n".encode())
+        session.mark_exited(1)
+    else:
+        session.mark_exited(0)
+    expiry_task = asyncio.create_task(_expire_session(session.id))
+    _expiry_tasks.add(expiry_task)
+    expiry_task.add_done_callback(_expiry_tasks.discard)
+
+
 async def create_session(
     target_id: str, cols: int, rows: int, mode: str = "login", model: Optional[str] = None,
 ) -> AuthSession:
     """`target_id` is a harness id for mode="login"/"install", or "ollama"
     for mode="install"/"pull"/"remove". `model` is required for pull/remove
-    and is validated by _model_argv. mode="unlock" ignores `target_id` for
+    and is validated before the API request. mode="unlock" ignores `target_id` for
     argv purposes (fixed `security unlock-keychain` command) — it is still
     used as the session's registry/prompt label. Raises AuthSessionError /
     NoLoginCommand."""
@@ -268,8 +285,21 @@ async def create_session(
     elif mode in ("pull", "remove"):
         if not model:
             raise AuthSessionError(f"mode={mode!r} requires a model")
-        argv = _model_argv("pull" if mode == "pull" else "rm", model)
-        env = os.environ.copy()
+        if len(model) > 200 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9][A-Za-z0-9._-]*)?", model):
+            raise AuthSessionError(f"{model!r} is not a valid ollama model name")
+        from .providers import PROVIDERS, _installed_ollama_models
+        provider = PROVIDERS.get(target_id)
+        if not provider:
+            raise AuthSessionError(f"Unknown Ollama provider {target_id!r}")
+        if mode == "remove":
+            installed = await asyncio.to_thread(_installed_ollama_models, provider.base_url)
+            if installed is None or model not in installed:
+                raise AuthSessionError(f"{model!r} is not an installed ollama model")
+        session_id = uuid.uuid4().hex
+        session = AuthSession(session_id, target_id, 0, -1, f"Ollama API {mode} {model}")
+        _sessions[session_id] = session
+        session.api_task = asyncio.create_task(_run_ollama_api(session, provider, mode, model))
+        return session
     elif mode == "unlock":
         argv = _unlock_argv()
         env = os.environ.copy()
@@ -412,6 +442,8 @@ def write_input(session: AuthSession, data: bytes) -> None:
     if session.state != "running":
         raise AuthSessionError("session is not running")
     session.touch()
+    if session.api_task:
+        return
     try:
         os.write(session.master_fd, data)
     except OSError as exc:
@@ -425,6 +457,8 @@ def resize(session: AuthSession, cols: int, rows: int) -> None:
     # dragging a window or rotating a device sends only resizes, never input,
     # so without this the idle reaper could kill a live session mid-use.
     session.touch()
+    if session.api_task:
+        return
     winsize = struct.pack("HHHH", rows, cols, 0, 0)
     fcntl.ioctl(session.master_fd, termios.TIOCSWINSZ, winsize)
 
@@ -434,6 +468,11 @@ async def cancel_session(session_id: str) -> bool:
     if not session:
         return False
     if session.state == "running":
+        if session.api_task:
+            session.api_task.cancel()
+            await asyncio.gather(session.api_task, return_exceptions=True)
+            _sessions.pop(session_id, None)
+            return True
         _signal_process_group(session.pid, signal.SIGTERM)
         try:
             await asyncio.wait_for(session._closed.wait(), timeout=3)

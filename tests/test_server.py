@@ -1564,7 +1564,7 @@ def test_ollama_public_models_deduplicate_implicit_latest(monkeypatch):
     monkeypatch.setattr(
         providers_mod,
         "_installed_ollama_models",
-        lambda: {"qwen3.5-optimized", "qwen3.5-optimized:latest", "qwen3:8b"},
+        lambda base_url=None: {"qwen3.5-optimized", "qwen3.5-optimized:latest", "qwen3:8b"},
     )
     provider = Provider(
         id="ollama", auth_type="none", models=("qwen3.5-optimized",),

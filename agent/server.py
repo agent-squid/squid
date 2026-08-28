@@ -721,8 +721,9 @@ def _auth_session_validation_error(
         if not _keychain_unlock_allowed(headers, direct_host):
             return "unlock_requires_local"
     elif mode in ("pull", "remove"):
-        if harness != "ollama":
-            return f"mode={mode!r} is only supported for ollama"
+        from .providers import PROVIDERS
+        if harness not in PROVIDERS or harness != "ollama":
+            return f"mode={mode!r} is only supported for the ollama provider"
         if not model:
             return "model is required"
     else:
