@@ -1,6 +1,7 @@
 ---
 status: proposed
 date: 2026-08-15
+updated: 2026-08-28
 ---
 # ADR-0043: Local Model Providers Beyond Ollama — Reuse the Provider Pattern, Don't Build a Model-Management UI
 
@@ -146,3 +147,15 @@ one."
   since vllm-mlx/oMLX (MLX) and vllm (safetensors, with only experimental
   single-file GGUF support) don't share weight formats with the GGUF pair in
   any general way.
+
+## Implementation note (2026-08-28)
+
+`omlx` is the first of the five presets actually added to
+`config/squid.yaml.example`, commented out like the other opt-in providers
+(`deepseek`, `kimi`, `fireworks`, `baseten`); `vllm`, `vllm-mlx`,
+`llama.cpp`, and `lmstudio` remain undone, and the `local:` placeholder
+entry has not yet been folded into a `vllm-mlx` preset. Status stays
+`proposed` until the rest lands. See also ADR-0037's 2026-08-28 amendment,
+which drops Ollama's install-time `default_provider` auto-promotion for the
+same reason this ADR treats every local backend as an equally-weighted,
+opt-in provider preset — no backend gets special ordering over another.

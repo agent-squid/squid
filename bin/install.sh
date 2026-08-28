@@ -102,10 +102,8 @@ fi
 # Ollama is optional and not itself a coding-agent harness (it's a local
 # model provider Pi/OpenCode can point at, see ADR-0037) — its absence never
 # counts toward AGENTS_FOUND or fails the install.
-OLLAMA_FOUND=0
 if command -v ollama &>/dev/null; then
   ok "ollama $(ollama --version 2>/dev/null || echo '')"
-  OLLAMA_FOUND=1
 else
   warn "ollama not found — curl -fsSL https://ollama.com/install.sh | sh"
 fi
@@ -134,13 +132,7 @@ else
   run_quiet "install squid package" "$VENV_DIR/bin/python" -m pip install --quiet "$SQUID_DIR"
   mkdir -p "$SQUID_HOME/logs" "$SQUID_HOME/context"
   if [[ ! -f "$SQUID_HOME/squid.yaml" && -f "$SQUID_DIR/config/squid.yaml.example" ]]; then
-    SED_EXPR='s|/tmp/squid|/tmp/'"$(whoami)"'/squid|g'
-    if [[ $OLLAMA_FOUND -eq 1 ]]; then
-      # ollama is installed — point pi/opencode at it instead of the hosted
-      # nvidia fallback (see the harnesses: comment in squid.yaml.example).
-      SED_EXPR="$SED_EXPR"';s|default_provider: nvidia|default_provider: ollama|g'
-    fi
-    sed "$SED_EXPR" "$SQUID_DIR/config/squid.yaml.example" > "$SQUID_HOME/squid.yaml"
+    sed 's|/tmp/squid|/tmp/'"$(whoami)"'/squid|g' "$SQUID_DIR/config/squid.yaml.example" > "$SQUID_HOME/squid.yaml"
     ok "created ~/.squid/squid.yaml"
   fi
   if [[ -d "$SQUID_DIR/context" && -z "$(ls -A "$SQUID_HOME/context" 2>/dev/null)" ]]; then

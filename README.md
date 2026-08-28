@@ -149,12 +149,17 @@ Two different URLs work, for two different reasons:
   here — the short hostname alone (`https://<machine-name>/`) won't work
   because Tailscale's TLS cert is scoped to `*.ts.net` and browsers enforce
   an exact match.
-- **`http://<tailscale-ip>:<port>/`** — plain HTTP against squid's own port,
-  reachable by IP even without MagicDNS. This one has to be HTTP rather than
-  HTTPS: Tailscale's cert only covers the `*.ts.net` domain, not the IP, so
-  `https://<tailscale-ip>:<port>/` would fail TLS validation. The traffic is
-  still WireGuard-encrypted at the tailnet layer either way — this isn't
-  sending anything in the clear over the internet.
+- **`http://<tailscale-ip>:<port>/`** — reachable by IP even without
+  MagicDNS. Under the hood this is a `tailscale serve --tcp=<port>` raw TCP
+  forward, not `--http`: `tailscale serve --http` routes by Host header even
+  for plain HTTP, so hitting the IP directly (`Host: <ip>:<port>`) matches no
+  rule and gets Tailscale's own 404 before squid ever sees the request.
+  `--tcp` forwards at the TCP layer with no Host matching, so it works by IP.
+  `https://<tailscale-ip>:<port>/` still won't work — Tailscale's cert only
+  covers the `*.ts.net` domain, not the IP, so TLS validation fails
+  regardless of which rule serves it. The traffic is still
+  WireGuard-encrypted at the tailnet layer either way — this isn't sending
+  anything in the clear over the internet.
 
 Type `/remote` in the chat to get a QR code with the HTTPS domain URL —
 point your phone camera at it to open squid in one tap:

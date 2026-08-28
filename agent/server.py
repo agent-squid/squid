@@ -4543,22 +4543,28 @@ def _tailscale_serve_status(port: int) -> Optional[dict]:
         if status_raw.returncode != 0 or serve_raw.returncode != 0:
             return None
         status = json.loads(status_raw.stdout)
-        web = json.loads(serve_raw.stdout).get("Web", {})
+        serve_cfg = json.loads(serve_raw.stdout)
+        web = serve_cfg.get("Web", {})
+        tcp = serve_cfg.get("TCP", {})
     except Exception:
         return None
 
-    target = f"http://127.0.0.1:{port}"
-
-    def _ready(tcp_port) -> bool:
-        return any(
-            host_port.endswith(f":{tcp_port}")
-            and entry.get("Handlers", {}).get("/", {}).get("Proxy") == target
-            for host_port, entry in web.items()
-        )
+    https_ready = any(
+        host_port.endswith(":443")
+        and entry.get("Handlers", {}).get("/", {}).get("Proxy") == f"http://127.0.0.1:{port}"
+        for host_port, entry in web.items()
+    )
+    # Deliberately a --tcp forward, not --http: `tailscale serve --http`
+    # routes by Host header (like name-based virtual hosting) even for plain
+    # HTTP, so a client hitting the raw Tailscale IP sends `Host: <ip>:<port>`,
+    # which matches no rule — tailscaled's own mux 404s before squid ever
+    # sees the request. `--tcp` is a raw L4 forward with no Host matching, so
+    # it works by IP.
+    ip_ready = tcp.get(str(port), {}).get("TCPForward") == f"127.0.0.1:{port}"
 
     return {
-        "https_ready": _ready(443),
-        "http_ready": _ready(port),
+        "https_ready": https_ready,
+        "ip_ready": ip_ready,
         "dns_name": status.get("Self", {}).get("DNSName", "").rstrip("."),
         "magic_dns": bool(status.get("CurrentTailnet", {}).get("MagicDNSEnabled")),
         "tailscale_ip": next(iter(status.get("TailscaleIPs", [])), ""),
@@ -4575,14 +4581,20 @@ def _configure_tailscale_serve(port: int) -> None:
     depending on tailnet settings:
       - https://<dns-name>/            default HTTPS (443), shortest URL, but
                                         needs MagicDNS enabled to resolve.
-      - http://<tailscale-ip>:<port>/  works even with MagicDNS off, since
-                                        it's plain HTTP against the IP
-                                        directly. `https://<ip>:<port>/`
-                                        would fail TLS validation instead —
-                                        Tailscale's cert only covers the DNS
-                                        name, not the IP — so this rule uses
-                                        HTTP rather than HTTPS. The traffic is
-                                        still WireGuard-encrypted at the
+      - http://<tailscale-ip>:<port>/  works even with MagicDNS off. This is
+                                        a raw `--tcp` forward, not `--http`:
+                                        `tailscale serve --http` routes by
+                                        Host header even for plain HTTP, so a
+                                        client hitting the IP directly (Host:
+                                        <ip>:<port>) matches no rule and gets
+                                        tailscaled's own 404 before squid ever
+                                        sees the request. `--tcp` is an L4
+                                        forward with no Host matching, so it
+                                        works by IP. `https://<ip>:<port>/`
+                                        still wouldn't work over this or any
+                                        rule — Tailscale's cert only covers
+                                        the DNS name, not the IP. The traffic
+                                        is still WireGuard-encrypted at the
                                         tailnet layer either way.
 
     `tailscale serve` supports multiple concurrent rules at different ports
@@ -4605,14 +4617,14 @@ def _configure_tailscale_serve(port: int) -> None:
                     "(127.0.0.1:%s). To enable later, run: tailscale serve --bg 127.0.0.1:%s",
                     port, port,
                 )
-        if not info["http_ready"]:
+        if not info["ip_ready"]:
             if not subprocess.run(
-                ["tailscale", "serve", "--bg", f"--http={port}", f"127.0.0.1:{port}"],
+                ["tailscale", "serve", "--bg", f"--tcp={port}", f"tcp://127.0.0.1:{port}"],
                 capture_output=True, timeout=5,
             ).returncode == 0:
                 log.warning(
-                    "tailscale serve --http=%s failed — IP:port access won't work. "
-                    "To enable later, run: tailscale serve --bg --http=%s 127.0.0.1:%s",
+                    "tailscale serve --tcp=%s failed — IP:port access won't work. "
+                    "To enable later, run: tailscale serve --bg --tcp=%s tcp://127.0.0.1:%s",
                     port, port, port,
                 )
 
@@ -4782,7 +4794,7 @@ def _print_tailscale_access(port: int) -> None:
         dns = info["dns_name"] or "<machine-name>"
         suffix = "" if info["magic_dns"] else "  (MagicDNS is off — may not resolve)"
         print(f"  https://{dns}/{suffix}", flush=True)
-    if info["http_ready"] and info["tailscale_ip"]:
+    if info["ip_ready"] and info["tailscale_ip"]:
         print(f"  http://{info['tailscale_ip']}:{port}/", flush=True)
 
 

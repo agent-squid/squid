@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-08-07
-updated: 2026-08-09
+updated: 2026-08-28
 ---
 # ADR-0037: Local Models via Ollama — Provider-Scoped Queueing and Active Load/Unload Switching
 
@@ -330,6 +330,30 @@ generic spinner. `GET /api/ps` remains separate: it reports models currently
 resident in memory for queue handoff, while `ollama list` reports models on
 disk for catalog and model-management state.
 
+## Amendment (2026-08-28): dropped the install-time default-provider promotion
+
+The previous amendment's `bin/install.sh` behavior — rewriting pi/opencode's
+`default_provider: nvidia` to `default_provider: ollama` in a fresh
+`~/.squid/squid.yaml` when the `ollama` binary was detected at install time —
+is removed. Ollama is now a regular provider, exactly like the `omlx` preset
+added around the same time (ADR-0043): present in `config/squid.yaml.example`,
+fully functional, but never auto-selected. A user who wants pi/opencode
+talking to a local Ollama daemon by default sets `default_provider: ollama`
+in `~/.squid/squid.yaml` themselves, or points a specific named agent at it
+per-agent — the same way any other non-default provider is opted into today.
+
+Reasoning: singling out one local backend for install-time promotion doesn't
+generalize as more local-model providers (oMLX, LM Studio, vllm, ...; see
+ADR-0043) get their own `config/squid.yaml.example` presets — there's no
+principled reason Ollama's binary being present should flip a default while
+oMLX's or LM Studio's presence doesn't. Explicit opt-in is simpler to reason
+about and consistent across all local-model presets, at the cost of the
+"already-there local model gets used automatically" convenience the original
+amendment aimed for. `bin/install.sh`'s `OLLAMA_FOUND` detection is kept only
+as install-time informational output (`ok "ollama x.y.z"` / a `warn` with the
+install one-liner if missing), matching how the four coding-agent CLIs above
+it are already reported.
+
 ## Consequences
 
 - No new harness or runner is required to get a local checkpoint running
@@ -398,16 +422,15 @@ disk for catalog and model-management state.
   pull/remove via a button is in scope — see "Amendment" above), any new
   tool-use loop beyond what Pi (or another harness) already provides, and
   model-comparison/eval/stats-diffing across checkpoints.
-- Amendment (2026-08-09): `bin/install.sh` now points pi/opencode's
-  `default_provider` at `ollama` for a fresh install when the `ollama`
-  binary is detected (never for an existing `~/.squid/squid.yaml`), and the
-  settings catalogs gained Install/Pull/Remove buttons reusing ADR-0035's
-  login PTY mechanism. Pull accepts an explicitly entered, validated registry
-  model name; remove is restricted to models reported by `ollama list`.
-  Configured `models:` remain ordered UI suggestions, augmented with locally
-  discovered models and normalized to hide the implicit `:latest` tag — see
-  "Amendment: default provider at install, user-initiated pull/remove" above
-  for the full reasoning.
+- Amendment (2026-08-09): the settings catalogs gained Install/Pull/Remove
+  buttons reusing ADR-0035's login PTY mechanism. Pull accepts an explicitly
+  entered, validated registry model name; remove is restricted to models
+  reported by `ollama list`. Configured `models:` remain ordered UI
+  suggestions, augmented with locally discovered models and normalized to
+  hide the implicit `:latest` tag — see "Amendment: default provider at
+  install, user-initiated pull/remove" above for the full reasoning. The
+  install-time `default_provider` promotion this same amendment introduced
+  was later dropped — see "Amendment (2026-08-28)" above.
 - Implemented: `auth.type: none`, the `parallel` field and its queueing/
   load-visibility/active-unload behavior, adhoc inclusion in the
   provider-scoped lane, and Path A's placeholder-apiKey handling for pi are

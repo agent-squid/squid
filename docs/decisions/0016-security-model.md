@@ -37,33 +37,43 @@ network to `127.0.0.1:<port>` via two rules — see "Two serve rules" below.
 This means only processes on the local machine can reach squid directly.
 Tailscale's own device-level authentication handles who can reach the tailnet.
 
-### Two serve rules: https by domain, http by IP (2026-08-28)
+### Two serve rules: https by domain, raw TCP by IP (2026-08-28)
 
 `_configure_tailscale_serve` in `agent/server.py` (mirrored by `bin/start.sh`
 for source checkouts) configures two `tailscale serve` rules, not one,
 because a single rule can't cover both access patterns:
 
 ```bash
-tailscale serve --bg 127.0.0.1:<port>              # https, default port 443
-tailscale serve --bg --http=<port> 127.0.0.1:<port> # http, squid's own port
+tailscale serve --bg 127.0.0.1:<port>                        # https, default port 443
+tailscale serve --bg --tcp=<port> tcp://127.0.0.1:<port>     # raw tcp, squid's own port
 ```
 
 - `https://<machine-name>.<tailnet>.ts.net/` (443, no port in the URL) is the
   short form, but only resolves if MagicDNS is enabled on the tailnet.
-- `http://<tailscale-ip>:<port>/` works by IP regardless of MagicDNS. It has
-  to be HTTP, not HTTPS: Tailscale's cert is issued for the `*.ts.net`
-  domain, not the IP, so `https://<tailscale-ip>:<port>/` fails TLS
-  validation. Plain HTTP has no cert to validate, and the connection is
-  already encrypted by Tailscale's own WireGuard layer regardless — this
-  isn't sending anything in the clear over the internet.
+- `http://<tailscale-ip>:<port>/` works by IP regardless of MagicDNS. This
+  rule must be `--tcp`, not `--http`: `tailscale serve --http` routes by Host
+  header even for plain HTTP (name-based virtual hosting), so a client
+  hitting the IP directly sends `Host: <ip>:<port>`, which matches no
+  configured rule — tailscaled's own mux returns a bare `404 page not found`
+  before the request ever reaches squid. This was caught live: an earlier
+  same-day version of this rule used `--http=<port>`, which looked correct
+  in testing (`curl` from the same host still resolved the Host header
+  correctly) but 404'd for real phone/browser clients connecting by raw IP.
+  `--tcp` is a raw L4 forward with no Host matching, so it works
+  unconditionally by IP. `https://<tailscale-ip>:<port>/` still won't work
+  over either rule — Tailscale's cert is issued for the `*.ts.net` domain,
+  not the IP, so TLS validation fails regardless of what's listening
+  underneath. The connection is already WireGuard-encrypted by Tailscale
+  itself regardless of the rule type — this isn't sending anything in the
+  clear over the internet.
 
 `_tailscale_serve_status` (read-only — no `tailscale serve` mutation) checks
 `tailscale status --json`'s `CurrentTailnet.MagicDNSEnabled` field and
-`tailscale serve status --json`'s `Web`/`TCP` entries, so squid can tell
-which of the two rules is actually live and whether the domain URL will
-resolve. Both `agentsquid start`/`agentsquid status` and the foreground
-`agentsquid` CLI print both URLs at startup, flagging the domain one if
-MagicDNS looks off.
+`tailscale serve status --json`'s `Web` (for the 443 https rule) and `TCP`
+(for the tcp-forward rule) entries, so squid can tell which of the two rules
+is actually live and whether the domain URL will resolve. Both `agentsquid
+start`/`agentsquid status` and the foreground `agentsquid` CLI print both
+URLs at startup, flagging the domain one if MagicDNS looks off.
 
 ### Tailscale + MagicDNS setup
 

@@ -102,12 +102,11 @@ harnesses:
     default_provider: cursor
     supported_apis: [/native/cursor]
 
-  # default_provider: nvidia below is what a fresh install gets when the
-  # `ollama` binary isn't found. bin/install.sh checks for it and, when
-  # present, rewrites these two lines to `default_provider: ollama` in the
-  # copy it writes to ~/.squid/squid.yaml — this file on disk always shows
-  # the no-binary fallback. See the `ollama` provider entry below and
-  # docs/decisions/0037-ollama-local-model-harness-and-queueing.md.
+  # default_provider: nvidia is NVIDIA's free NIM tier — the zero-setup
+  # default for a fresh install. A local daemon like ollama or omlx (see the
+  # provider entries below) is just another provider option: point a named
+  # agent at it explicitly in the UI rather than it being auto-selected here,
+  # even if the binary happens to be installed.
   opencode:
     protocol:
       type: oneshot-cli
@@ -284,27 +283,16 @@ providers:
   #     title: no reset
   #   models: [qwen2.5-coder-7b-4bit]
 
-  # Ollama (ADR-0037): a local daemon, not a hosted API — no credential to
-  # supply, hence auth.type: none rather than api_key. Shipped uncommented
-  # (unlike the `local` example above) because it's always safe to have
-  # configured: nothing resolves to it unless a named agent is explicitly
-  # pointed at it, or bin/install.sh detected the `ollama` binary and set it
-  # as pi/opencode's default_provider (see the harnesses: section above).
-  # `parallel: false` is what actually makes every agent resolving to this
-  # provider (regardless of harness) share one serial queue lane and get
-  # active load/unload on model switch, instead of the parallel-across-agents
-  # behavior every other provider gets by default — see
-  # docs/decisions/0037-ollama-local-model-harness-and-queueing.md. This is
-  # independent of auth.type: a beefier multi-GPU box that can actually
-  # serve concurrent requests can set `parallel: true` instead. Running more
-  # than one local box? Give each its own provider entry (distinct name,
-  # distinct base_url, e.g. ollama-gpu1/ollama-gpu2) to get independent
-  # queues per physical resource.
-  # /v1/chat/completions makes this compatible with pi/opencode talking to
-  # Ollama as a custom provider — no ollama-specific harness needed; either
-  # harness's own tool-use loop runs as normal against the local checkpoint.
-  # models: gemma4:12b (first entry = agent-form default), gemma4:e4b,
-  # qwen3.5:9b, and the laptop-sized qwen3.5:4b.
+  # Local Ollama daemon (ADR-0037) — no credential, hence auth.type: none.
+  # A regular provider like any other: nothing resolves to it unless a named
+  # agent is explicitly pointed at it (harness: pi or opencode, provider:
+  # ollama, model: one of the entries below). parallel: false puts every
+  # agent on this provider into one shared, actively-managed queue lane
+  # instead of running in parallel like every other provider above — set
+  # parallel: true instead if this box can actually serve concurrent local
+  # requests (multi-GPU, OLLAMA_NUM_PARALLEL, ...). Running more than one
+  # local box? Give each its own provider entry (distinct name, distinct
+  # base_url, e.g. ollama-gpu1/ollama-gpu2) for independent queues.
   ollama:
     label: Ollama
     color: "#000000"
@@ -312,9 +300,33 @@ providers:
     supported_apis: [/v1/chat/completions]
     auth:
       type: none
-    parallel: false  # set true instead if this box can serve concurrent local requests (multi-GPU, OLLAMA_NUM_PARALLEL, ...)
+    parallel: false
     gauge:
       type: static
       text: Local
       title: no reset
     models: [gemma4:12b, gemma4:e4b, qwen3.5:9b, qwen3.5:4b]
+
+  # oMLX (ADR-0043, github.com/jundot/omlx): a local MLX inference daemon
+  # with continuous batching and its own admin UI, reached the same way as
+  # any other provider — no special ordering or default-provider promotion.
+  # Point base_url at wherever it's actually listening (localhost if it's
+  # this machine, a Tailscale IP if it's another box on your tailnet — see
+  # "Reaching other local services too" in README.md). API_TIMEOUT_MS is
+  # raised well past the default because local inference can be slow to
+  # first token, especially on a cold model load.
+  # omlx:
+  #   label: oMLX
+  #   color: "#615CED"
+  #   base_url: "http://127.0.0.1:8080"
+  #   supported_apis: [/v1/messages]
+  #   auth:
+  #     type: api_key
+  #     api_key: {env: OMLX_API_KEY}
+  #   env:
+  #     API_TIMEOUT_MS: "3000000"
+  #   gauge:
+  #     type: static
+  #     text: Local
+  #     title: no reset
+  #   models: [qwen3-coder-30b-a3b-8bit]
