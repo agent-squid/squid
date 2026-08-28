@@ -8974,6 +8974,15 @@ function quotaConfigFor(backend) {
   return QUOTA_CONFIG[gaugeTypeFor(backend)] || null;
 }
 
+function markGaugeAuthenticated(gaugeType) {
+  for (const info of Object.values(_providerMetadata)) {
+    if (info?.gauge?.type === gaugeType) info.gauge_authed = true;
+  }
+  if (procStatusPopup?.classList.contains('open')) {
+    renderProcPopup(cachedProcRows, cachedQueueRows);
+  }
+}
+
 async function ensureQuotaMetadata() {
   if (Object.keys(_providerMetadata).length) return;
   try {
@@ -9588,6 +9597,7 @@ function initCreds() {
       const data = await res.json();
       if (res.ok) {
         autoStatus.textContent = `saved ✓ (org: ${(data.claude_org_id || '').slice(0, 8)}…)`;
+        markGaugeAuthenticated('claude');
         fetchQuota();
       } else {
         isError = true;
@@ -9616,6 +9626,7 @@ function initCreds() {
       if (res.ok) {
         status.textContent = 'saved ✓';
         keyInput.value = '';
+        markGaugeAuthenticated('claude');
         fetchQuota();
       } else {
         status.textContent = 'failed';

@@ -52,6 +52,32 @@ test('credential popups describe their auth source', async ({ page }) => {
   await expect(page.locator('#codex-creds-auto')).toHaveCount(0);
 });
 
+test('auto-detected Claude credentials reveal the status gauge without a refresh', async ({ page }) => {
+  await mockShell(page);
+  await page.route('**/health', route => route.fulfill({
+    json: {
+      status: 'ok',
+      harnesses: [{ id: 'claudecode', installed: true, default_provider: 'anthropic', compatible_providers: ['anthropic'] }],
+      providers: { anthropic: { label: 'Claude', gauge: { type: 'claude' }, gauge_authed: false } },
+    },
+  }));
+  await page.route('**/config/creds/auto', route => route.fulfill({
+    json: { ok: true, claude_org_id: 'org-12345678' },
+  }));
+  await page.route('**/quota/provider/*', route => route.fulfill({
+    json: { status: 'ok', raw: 42, used_percent: 42 },
+  }));
+
+  await page.goto('/');
+  await page.locator('#quota-display').click();
+  await page.locator('#creds-auto').click();
+  await page.getByRole('button', { name: 'Status' }).click();
+
+  const claudeRow = page.locator('#proc-status-popup .quota-status-row').filter({ hasText: 'Claude' });
+  await expect(claudeRow).toHaveCount(1);
+  await expect(claudeRow).toContainText('42%');
+});
+
 test('topbar quota gauge is chat-only while status keeps quota available', async ({ page }) => {
   await mockShell(page);
   await page.route('**/quota/provider/*', route => route.fulfill({
