@@ -6378,7 +6378,8 @@ function markVisibleWorktreeResolved(msgId, sourceRepo, message) {
   const toggleLabel = terminalLabel === 'Resolved' ? 'Conflict Resolved' : terminalLabel;
   const selector = `.tool-block[data-worktree-msg-id="${CSS.escape(String(msgId))}"]`;
   document.querySelectorAll(selector).forEach(block => {
-    if (sourceRepo && block.dataset.worktreeRepo !== sourceRepo) return;
+    if (sourceRepo && _normalizeRealtimeRepo(block.dataset.worktreeRepo) !== _normalizeRealtimeRepo(sourceRepo)) return;
+    block.dataset.worktreeStatus = terminalLabel.toLowerCase();
     const notice = block.querySelector('.gitdiff-sync-notice');
     if (notice) notice.textContent = message;
     const actions = block.querySelector('.gitdiff-sync-actions');
@@ -6393,6 +6394,53 @@ function markVisibleWorktreeResolved(msgId, sourceRepo, message) {
       toggle.textContent = toggle.textContent.replace(/ · (conflict|promotion_failed|pending|active)\b/, ` · ${toggleLabel}`);
     }
   });
+}
+
+const realtimeWorktreeStates = new Map();
+
+function _normalizeRealtimeRepo(repo) {
+  const value = String(repo || '');
+  return value.length > 1 ? value.replace(/\/+$/, '') : value;
+}
+
+function _realtimeWorktreeKey(msgId, repo) {
+  return `${msgId}\0${_normalizeRealtimeRepo(repo)}`;
+}
+
+function applyRealtimeWorktreeChange(frame) {
+  const msgId = Number(frame.msg_id);
+  const repo = frame.payload?.repo || '';
+  const status = frame.payload?.status;
+  if (!Number.isFinite(msgId) || !status) return;
+  realtimeWorktreeStates.set(_realtimeWorktreeKey(msgId, repo), status);
+  while (realtimeWorktreeStates.size > 1000) {
+    realtimeWorktreeStates.delete(realtimeWorktreeStates.keys().next().value);
+  }
+  const messagesByStatus = {
+    synced: 'Worktree synced. Future turns for this topic can start normally.',
+    resolved: 'Worktree resolved and synced. Future turns for this topic can start normally.',
+    discarded: `Discarded — this turn's changes were never applied to the main checkout.`,
+  };
+  if (messagesByStatus[status]) {
+    markVisibleWorktreeResolved(msgId, repo, messagesByStatus[status]);
+    refreshAllRevertButtons({ force: true });
+  } else if (frame.payload?.auto_resolve_finished) {
+    const selector = `.tool-block[data-worktree-msg-id="${CSS.escape(String(msgId))}"]`;
+    document.querySelectorAll(selector).forEach(block => {
+      if (repo && _normalizeRealtimeRepo(block.dataset.worktreeRepo) !== _normalizeRealtimeRepo(repo)) return;
+      const button = [...block.querySelectorAll('.gitdiff-resolve-worktree-btn')]
+        .find(candidate => candidate.textContent === 'Resolving...');
+      if (button) {
+        button.disabled = false;
+        button.textContent = 'Auto-Resolve';
+        if (frame.payload?.error) button.title = frame.payload.error;
+      }
+      const notice = block.querySelector('.gitdiff-sync-notice');
+      if (notice) notice.textContent = frame.payload?.error
+        ? `Auto-resolve failed: ${frame.payload.error}`
+        : 'Auto-resolve finished with unresolved conflicts. Review the files and retry.';
+    });
+  }
 }
 
 // Revert is "undo what I just saw," not time travel — past this window other
@@ -6460,19 +6508,20 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
     const count = tool.file_count ?? (tool.files || []).length;
     const additions = tool.additions ?? 0;
     const deletions = tool.deletions ?? 0;
-    const worktreeStatus = tool.worktree_repo ? tool.worktree_status : null;
+    const sourceRepo = _gitDiffSourceRepo(tool);
+    const worktreeStatus = tool.worktree_repo
+      ? realtimeWorktreeStates.get(_realtimeWorktreeKey(msgId, sourceRepo)) || tool.worktree_status
+      : null;
     const worktreeBlocked = !!worktreeStatus && worktreeStatus !== 'synced';
+    if (worktreeStatus) block.dataset.worktreeStatus = worktreeStatus;
     const statusLabel = worktreeStatus === 'resolved' ? 'Conflict Resolved' : worktreeStatus;
     const statusSuffix = worktreeBlocked ? ` · ${statusLabel}` : '';
     toggle.textContent = `Changed files: ${count} file${count !== 1 ? 's' : ''}, +${additions} -${deletions}${statusSuffix}`;
 
-    const sourceRepo = _gitDiffSourceRepo(tool);
-    // Only conflict/promotion_failed/discarded turns have nothing (or an
-    // ambiguous result) to revert — a resolved turn's changes did land, same
-    // as a plain synced one, so revert stays available for it.
-    const revertBlocked = !!worktreeStatus && worktreeStatus !== 'synced' && worktreeStatus !== 'resolved';
-    const revertEligible = msgId && sourceRepo && _withinRevertWindow(timestamp) && !revertBlocked;
-    if (revertEligible) {
+    // Track eligibility even while sync is blocked so a later realtime
+    // resolved event can populate revert controls without rebuilding the block.
+    const revertTrackable = msgId && sourceRepo && _withinRevertWindow(timestamp);
+    if (revertTrackable) {
       block.dataset.msgId = String(msgId);
       block.dataset.repo = sourceRepo;
       const revertBar = document.createElement('div');
@@ -6616,6 +6665,57 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
               }
             };
             try {
+              const transportMode = await realtimeTransportMode;
+              if (transportMode !== 'sse' && realtimeV1) {
+                try {
+                  const result = await realtimeV1.autoResolveWorktree(msgId, messageTopic, sourceRepo);
+                  if (!result.ok) {
+                    const error = new Error(result.detail || result.error || 'Auto-resolve failed');
+                    error.realtimeCommandResult = true;
+                    throw error;
+                  }
+                  if (result.already_resolved) {
+                    markVisibleWorktreeResolved(msgId, sourceRepo,
+                      'Worktree was already resolved. Future turns for this topic can start normally.');
+                    return;
+                  }
+                  const resolveMsgId = Number(result.msg_id);
+                  const userBubble = makeUserBubble(
+                    'Auto-resolve merge conflict', messageTopic, null, null, true, 0, 'diff_viewer',
+                  );
+                  const existingBubble = messages.querySelector(`[data-msg-id="${resolveMsgId}"]`);
+                  if (existingBubble) messages.insertBefore(userBubble, existingBubble);
+                  else messages.appendChild(userBubble);
+                  addTimestamp(userBubble, new Date().toISOString(), true);
+                  // Global discovery can publish and attach this assistant turn
+                  // before command.result reaches the initiating tab. Its own
+                  // reconnectPendingItem already owns an existing pending bubble;
+                  // a completed bubble needs no watch at all.
+                  if (existingBubble) {
+                    if (existingBubble.classList.contains('msg-thinking')) thinkingBubble = existingBubble;
+                    return;
+                  }
+                  const pendingItem = {
+                    id: resolveMsgId,
+                    topic: messageTopic,
+                    agent: result.agent || null,
+                    provider: result.provider || null,
+                    backend: result.provider || null,
+                    adhoc: true,
+                    prompt: 'Auto-resolve merge conflict',
+                    source: 'diff_viewer',
+                    status: 'pending',
+                    timestamp: new Date().toISOString(),
+                  };
+                  thinkingBubble = insertPendingHistoryItem(pendingItem);
+                  reconnectPendingItem(pendingItem, thinkingBubble);
+                  return;
+                } catch (error) {
+                  if (transportMode === 'websocket' || error?.realtimeCommandResult) throw error;
+                }
+              } else if (transportMode === 'websocket') {
+                throw new Error('WebSocket transport is unavailable in this browser.');
+              }
               const res = await fetch(`/chat/${msgId}/worktree/auto-resolve`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -6820,7 +6920,7 @@ function makeToolBlock(tool, msgId, timestamp, messageTopic = null) {
 
       const row = document.createElement('div');
       row.className = 'gitdiff-file-row';
-      if (revertEligible) row.dataset.file = file.path;
+      if (revertTrackable) row.dataset.file = file.path;
 
       const fileToggle = document.createElement('button');
       fileToggle.className = 'gitdiff-file-toggle';
@@ -6968,6 +7068,8 @@ async function fetchRevertEligibility(block) {
   // refreshAllRevertButtons() call in the same tick sees it as claimed and
   // skips it, instead of firing a duplicate request for the same block.
   block.dataset.revertChecked = '1';
+  const worktreeStatus = block.dataset.worktreeStatus;
+  if (worktreeStatus && worktreeStatus !== 'synced' && worktreeStatus !== 'resolved') return;
 
   let eligibility;
   try {
@@ -7540,6 +7642,10 @@ const realtimeV1 = (() => {
       if (frame.payload.status && frame.payload.status !== 'pending' && frame.scope?.agent) {
         refreshComposerSessionCount(frame.scope.topic || 'default', frame.scope.agent);
       }
+    } else if (frame.type === 'worktree.changed') {
+      applyRealtimeWorktreeChange(frame);
+    } else if (frame.type === 'diff.reverted') {
+      refreshAllRevertButtons({ force: true });
     } else if (frame.type === 'flow.step.created') {
       const msgId = Number(frame.payload?.assistant_msg_id ?? frame.msg_id);
       if (Number.isFinite(msgId)) attachFlowStep(msgId);
@@ -7723,6 +7829,16 @@ const realtimeV1 = (() => {
         topic,
         agent: agent || null,
         timeoutMessage: 'WebSocket cancellation timed out after submission.',
+      });
+    },
+    autoResolveWorktree(msgId, topic, repo, agent = null) {
+      return sendCommand({
+        type: 'worktree.auto_resolve',
+        payload: { msg_id: Number(msgId), topic, repo },
+        topic,
+        agent,
+        freshScope: true,
+        timeoutMessage: 'WebSocket auto-resolve command timed out after submission.',
       });
     },
     startAuth(payload, onFrame) {

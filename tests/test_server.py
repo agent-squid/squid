@@ -422,6 +422,85 @@ def test_retry_worktree_resolution_is_idempotent_when_already_gone(tmp_path, mon
     assert res.json() == {"ok": True, "already_resolved": True}
 
 
+def test_websocket_auto_resolve_starts_existing_stream_in_background(monkeypatch):
+    drained = []
+
+    async def stream():
+        yield b"event: done\n\n"
+        drained.append(True)
+
+    async def fake_auto_resolve(msg_id, req):
+        assert msg_id == 42
+        assert req.topic == "squid"
+        assert req.repo == "/repo"
+        return server.StreamingResponse(stream(), headers={
+            "X-Squid-Msg-Id": "84", "X-Squid-Agent": "claude", "X-Squid-Provider": "anthropic",
+        })
+
+    monkeypatch.setattr(server, "auto_resolve_worktree_conflict", fake_auto_resolve)
+
+    async def run():
+        result = await server._realtime_worktree_auto_resolve({
+            "msg_id": 42, "topic": "squid", "repo": "/repo",
+        })
+        await asyncio.sleep(0)
+        assert drained == [True]
+        return result
+
+    assert asyncio.run(run()) == {
+        "ok": True, "msg_id": 84, "worktree_msg_id": 42,
+        "agent": "claude", "provider": "anthropic",
+    }
+
+
+def test_websocket_auto_resolve_preserves_terminal_failure_detail(monkeypatch):
+    published = []
+
+    async def failed_stream():
+        yield "event: done\ndata: \n\n"
+        yield 'event: resolve_result\ndata: {"error":"resolved patch did not apply","conflicts":["ui/app.js"]}\n\n'
+
+    async def worktree_record(*_args):
+        return {"status": "conflict"}, True
+
+    monkeypatch.setattr(server, "_validate_repo_path", lambda _repo: Path("/repo"))
+    monkeypatch.setattr(server, "_worktree_record_or_existing_paths", worktree_record)
+    monkeypatch.setattr(server, "get_message", lambda _msg_id: {"agent": "claude"})
+    monkeypatch.setattr(server, "insert_realtime_event", lambda *args, **kwargs: published.append(args))
+
+    asyncio.run(server._drain_auto_resolve_response(
+        server.StreamingResponse(failed_stream()),
+        worktree_msg_id=42, topic="squid", repo="/repo",
+    ))
+
+    assert published == [(
+        "worktree.changed", "squid", "claude",
+        {"repo": "/repo", "status": "conflict", "auto_resolve_finished": True,
+         "error": "resolved patch did not apply", "conflicts": ["ui/app.js"]},
+        42,
+    )]
+
+
+def test_cancelled_websocket_auto_resolve_does_not_publish_finished(monkeypatch):
+    published = []
+
+    async def cancelled_stream():
+        yield b"event: status\ndata: resolving\n\n"
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(server, "insert_realtime_event", lambda *args, **kwargs: published.append(args))
+
+    async def run():
+        response = server.StreamingResponse(cancelled_stream())
+        with pytest.raises(asyncio.CancelledError):
+            await server._drain_auto_resolve_response(
+                response, worktree_msg_id=42, topic="squid", repo="/repo",
+            )
+
+    asyncio.run(run())
+    assert published == []
+
+
 def test_history_marks_missing_worktree_conflict_as_synced(tmp_path, monkeypatch):
     monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
     stats_db.init_db()

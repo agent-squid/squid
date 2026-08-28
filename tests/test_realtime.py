@@ -96,6 +96,45 @@ def test_process_and_queue_changes_are_replayable_global_state(tmp_path, monkeyp
     assert stats_db.get_realtime_events(0, [{"topic": "squid", "agent": "codex"}]) == []
 
 
+def test_worktree_state_and_reverts_are_replayable_across_clients(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    user_id = stats_db.insert_user_message("squid", "codex", "change files")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    stats_db.save_worktree("squid", str(msg_id), "/repo", "/repo-wt", "turn-branch")
+    cursor = stats_db.get_realtime_cursor()
+
+    stats_db.mark_worktree_status("squid", str(msg_id), "/repo", "resolved")
+    stats_db.record_git_diff_revert(msg_id, "/repo", ["ui/app.js", "ui/style.css"])
+
+    events = stats_db.get_realtime_events(cursor, [{"topic": "squid", "agent": "codex"}])
+    assert [(event["event_type"], event["msg_id"], event["payload"]) for event in events] == [
+        ("worktree.changed", msg_id, {"repo": "/repo", "status": "resolved"}),
+        ("diff.reverted", msg_id, {
+            "repo": "/repo", "files": ["ui/app.js", "ui/style.css"],
+        }),
+    ]
+
+    cursor = stats_db.get_realtime_cursor()
+    stats_db.mark_worktree_status("squid", str(msg_id), "/repo", "resolved")
+    stats_db.record_git_diff_revert(msg_id, "/repo", ["ui/app.js", "ui/style.css"])
+    assert stats_db.get_realtime_events(cursor, [{"lifecycle": "global"}]) == []
+
+
+def test_clean_worktree_deletion_publishes_synced_state(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    user_id = stats_db.insert_user_message("squid", "codex", "change files")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    stats_db.save_worktree("squid", str(msg_id), "/repo", "/repo-wt", "turn-branch")
+    cursor = stats_db.get_realtime_cursor()
+
+    stats_db.delete_worktree("squid", str(msg_id), "/repo")
+
+    events = stats_db.get_realtime_events(cursor, [{"lifecycle": "global"}])
+    assert [(event["event_type"], event["msg_id"], event["payload"]) for event in events] == [
+        ("worktree.changed", msg_id, {"repo": "/repo", "status": "synced"}),
+    ]
+
+
 def test_process_and_queue_publication_failure_does_not_escape(monkeypatch, caplog):
     def fail_publish(*_args, **_kwargs):
         raise sqlite3.OperationalError("database busy")

@@ -143,6 +143,122 @@ test('websocket transport starts and completes a new chat without POST /chat', a
   }))).toEqual({ type: 'chat.start', hasRequestId: true, message: 'hello over ws' });
 });
 
+test('websocket auto-resolve and worktree events converge the rendered diff', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__autoResolveFrame = null;
+    window.__activeRealtimeSocket = null;
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        window.__activeRealtimeSocket = this;
+        this.readyState = MockWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+        } else if (frame.type === 'worktree.auto_resolve') {
+          window.__autoResolveFrame = frame;
+          // Force global discovery to win the race with command.result.
+          this.receive({ v: 1, type: 'message.changed', event_id: 1, msg_id: 91,
+            scope: { topic: 'default', agent: 'claude' },
+            payload: { role: 'assistant', status: 'pending' } });
+        }
+      }
+      finishAutoResolveCommand() {
+        const frame = window.__autoResolveFrame;
+        this.receive({ v: 1, type: 'command.result', request_id: frame.request_id,
+          payload: { ok: true, msg_id: 91, worktree_msg_id: 1,
+            agent: 'claude', provider: 'anthropic' } });
+      }
+      completeAutoResolve() {
+        this.receive({ v: 1, type: 'chat.text', event_id: 2, msg_id: 91, run_seq: 0,
+          payload: { text: 'Resolved over WebSocket' } });
+        this.receive({ v: 1, type: 'chat.done', event_id: 3, msg_id: 91, run_seq: 1, payload: {} });
+        this.receive({ v: 1, type: 'worktree.changed', event_id: 4, msg_id: 1,
+          payload: { repo: '/tmp/repo/', status: 'resolved' } });
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = MockWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+  await page.route('**/history**', route => route.fulfill({ json: {
+    items: [{
+      id: 1, topic: 'default', agent: 'claude', backend: 'claude', status: 'done',
+      prompt: 'change app', content: 'Original response', timestamp: new Date().toISOString(), adhoc: false,
+      context: JSON.stringify([{
+        name: 'GitDiff', repo: '/tmp/repo', worktree_repo: '/tmp/worktree', worktree_status: 'conflict',
+        worktree_conflicts: ['ui/app.js'], integration_worktree_path: '/tmp/integration',
+        file_count: 1, additions: 1, deletions: 0, files: [{ status: 'M', path: 'ui/app.js' }],
+        diff: 'diff --git a/ui/app.js b/ui/app.js\n@@ -1 +1 @@\n+changed',
+      }]),
+    }],
+    has_more: false,
+  }}));
+  let revertStatus = 'revertable';
+  await page.route('**/chat/1/diff-revert-status**', route => route.fulfill({
+    json: { 'ui/app.js': revertStatus },
+  }));
+  let resolveStatus = 'pending';
+  await page.route('**/chat/91/status', route => route.fulfill({ json: {
+    id: 91, role: 'assistant', topic: 'default', agent: 'claude', backend: 'claude', adhoc: true,
+    source: 'diff_viewer', status: resolveStatus, prompt: 'Auto-resolve merge conflict',
+    content: resolveStatus === 'done' ? 'Resolved over WebSocket' : '',
+    completed_at: resolveStatus === 'done' ? new Date().toISOString() : null,
+  }}));
+  let autoResolveHttpRequests = 0;
+  await page.route('**/chat/1/worktree/auto-resolve', route => {
+    autoResolveHttpRequests++;
+    route.abort();
+  });
+
+  await page.goto('/');
+  const block = page.locator('.tool-block-history').first();
+  await block.getByRole('button', { name: 'Auto-Resolve' }).click({ noWaitAfter: true });
+  // message.changed discovers the pending assistant before command.result.
+  await expect(page.locator(`${THINKING}[data-msg-id="91"]`)).toHaveAttribute('data-agent', 'claude');
+  await page.evaluate(() => window.__activeRealtimeSocket.finishAutoResolveCommand());
+  const resolveUser = page.locator('.msg.user').filter({ hasText: 'Auto-resolve merge conflict' });
+  await expect(resolveUser).toHaveCount(1);
+  expect(await resolveUser.evaluate(el => {
+    const messageSiblings = [...el.parentElement.children].filter(child => child.classList.contains('msg'));
+    return messageSiblings[messageSiblings.indexOf(el) + 1]?.dataset.msgId;
+  })).toBe('91');
+  await expect(page.locator(`[data-msg-id="91"]`)).toHaveCount(1);
+  resolveStatus = 'done';
+  await page.evaluate(() => window.__activeRealtimeSocket.completeAutoResolve());
+  await expect(page.locator(RESPONSE).filter({ hasText: 'Resolved over WebSocket' })).toBeVisible();
+  await expect(block.locator('.tool-toggle')).toContainText('Conflict Resolved');
+  await expect(block.getByRole('button', { name: 'revert' })).toBeVisible();
+  expect(autoResolveHttpRequests).toBe(0);
+  expect(await page.evaluate(() => ({
+    type: window.__autoResolveFrame?.type,
+    payload: window.__autoResolveFrame?.payload,
+    hasRequestId: !!window.__autoResolveFrame?.request_id,
+  }))).toEqual({
+    type: 'worktree.auto_resolve',
+    payload: { msg_id: 1, topic: 'default', repo: '/tmp/repo' },
+    hasRequestId: true,
+  });
+
+  revertStatus = 'reverted';
+  await page.evaluate(() => window.__activeRealtimeSocket.receive({
+    v: 1, type: 'diff.reverted', event_id: 5, msg_id: 1,
+    payload: { repo: '/tmp/repo', files: ['ui/app.js'] },
+  }));
+  await expect(block.locator('.gitdiff-file-row')).toHaveClass(/gitdiff-file-row--reverted/);
+  await expect(block.getByRole('button', { name: 'revert' })).toHaveCount(0);
+});
+
 test('websocket tall response scrolls to reveal its top even if the reveal rAF fires late', async ({ page }) => {
   // sendMessage() schedules a one-shot requestAnimationFrame right when the
   // thinking bubble is created, to follow *it* into view. It's guarded by
@@ -1791,6 +1907,45 @@ test.describe('response bubble', () => {
     await expect(resolved).toContainText('Resolved exactly once');
     await expect(resolved).not.toContainText('{"topic":"default"}');
     await expect(page.locator(`${THINKING}[data-msg-id="91"]`)).not.toBeAttached();
+  });
+
+  test('realtime worktree and revert changes converge an existing GitDiff block', async ({ page }) => {
+    let revertStatus = { 'ui/app.js': 'revertable' };
+    await page.route('**/chat/1/diff-revert-status**', route => route.fulfill({ json: revertStatus }));
+    await page.route('**/chat', route => route.fulfill({
+      status: 200, headers: SSE_HEADERS,
+      body: sse(
+        META,
+        { event: 'tool', data: {
+          name: 'GitDiff', repo: '/tmp/repo', worktree_repo: '/tmp/worktree', worktree_status: 'pending',
+          file_count: 1, additions: 1, deletions: 0, files: [{ status: 'M', path: 'ui/app.js' }],
+          diff: 'diff --git a/ui/app.js b/ui/app.js\n@@ -1 +1 @@\n+changed',
+        } },
+        { event: 'tool', data: {
+          name: 'WorktreeSync', status: 'conflict', repo: '/tmp/repo', worktree_repo: '/tmp/worktree',
+          integration_worktree_path: '/tmp/integration', conflicts: ['ui/app.js'],
+        } },
+        { data: 'Original response' }, DONE,
+      ),
+    }));
+
+    await sendMsg(page);
+    const block = page.locator('.tool-block-history').first();
+    await expect(block.getByRole('button', { name: 'Auto-Resolve' })).toBeVisible();
+
+    // A trailing slash in an event's canonical repo must still match the
+    // rendered tool's source repo and update the existing DOM in place.
+    await page.evaluate(() => applyRealtimeWorktreeChange({
+      msg_id: 1, payload: { repo: '/tmp/repo/', status: 'resolved' },
+    }));
+    await expect(block.locator('.tool-toggle')).toContainText('Conflict Resolved');
+    await expect(block.getByRole('button', { name: 'Auto-Resolve' })).toHaveCount(0);
+    await expect(block.getByRole('button', { name: 'revert' })).toBeVisible();
+
+    revertStatus = { 'ui/app.js': 'reverted' };
+    await page.evaluate(() => refreshAllRevertButtons({ force: true }));
+    await expect(block.locator('.gitdiff-file-row')).toHaveClass(/gitdiff-file-row--reverted/);
+    await expect(block.getByRole('button', { name: 'revert' })).toHaveCount(0);
   });
 
   test('blocked worktree response renders controls for original turn', async ({ page }) => {

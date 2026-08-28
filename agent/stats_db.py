@@ -4523,10 +4523,21 @@ def get_stats_filter_options() -> dict:
 
 def record_git_diff_revert(msg_id: int, repo: str, file_paths: list[str]) -> None:
     with _connect() as conn:
-        conn.executemany(
-            "INSERT OR IGNORE INTO git_diff_reverts (msg_id, repo, file_path) VALUES (?, ?, ?)",
-            [(msg_id, repo, fp) for fp in file_paths],
-        )
+        inserted = []
+        for file_path in file_paths:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO git_diff_reverts (msg_id, repo, file_path) VALUES (?, ?, ?)",
+                (msg_id, repo, file_path),
+            )
+            if cur.rowcount:
+                inserted.append(file_path)
+        row = conn.execute(
+            "SELECT topic, agent FROM chat_messages WHERE id=? AND role='assistant'", (msg_id,),
+        ).fetchone()
+        if row and inserted:
+            _insert_realtime_event(conn, "diff.reverted", row["topic"], row["agent"], msg_id, None, {
+                "repo": repo, "files": inserted,
+            })
 
 
 def get_diff_revert_eligibility(msg_id: int, repo: str) -> dict[str, str]:
@@ -5163,6 +5174,11 @@ def remove_message_annotation(msg_id: int, kind: str) -> None:
 # Worktrees
 # ---------------------------------------------------------------------------
 
+# Legacy schema note: worktrees.agent is the per-turn worktree key and current
+# callers store str(msg_id) there. Python APIs retain the old parameter name to
+# avoid a broad migration, but realtime publication deliberately treats it as
+# a message key and resolves the actual agent from chat_messages.
+
 def save_worktree(
     topic: str,
     agent: str,
@@ -5191,22 +5207,26 @@ def mark_worktree_synced(topic: str, agent: str, repo_root: str) -> None:
     yet — actual removal is a later best-effort sweep (see worktree.cleanup_worktrees),
     so a background process the turn spawned isn't left without its working directory."""
     with _connect() as conn:
-        conn.execute(
+        cur = conn.execute(
             """UPDATE worktrees SET status='synced',
                  last_used_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-               WHERE topic=? AND agent=? AND repo_root=?""",
+               WHERE topic=? AND agent=? AND repo_root=? AND status<>'synced'""",
             (topic, agent, repo_root),
         )
+        if cur.rowcount:
+            _insert_worktree_changed_event(conn, topic, agent, repo_root, "synced")
 
 
 def mark_worktree_status(topic: str, agent: str, repo_root: str, status: str) -> None:
     with _connect() as conn:
-        conn.execute(
+        cur = conn.execute(
             """UPDATE worktrees SET status=?,
                  last_used_at=strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-               WHERE topic=? AND agent=? AND repo_root=?""",
-            (status, topic, agent, repo_root),
+               WHERE topic=? AND agent=? AND repo_root=? AND status<>?""",
+            (status, topic, agent, repo_root, status),
         )
+        if cur.rowcount:
+            _insert_worktree_changed_event(conn, topic, agent, repo_root, status)
 
 
 def get_worktrees(topic: str, agent: str) -> list[dict]:
@@ -5219,13 +5239,43 @@ def get_worktrees(topic: str, agent: str) -> list[dict]:
 
 def delete_worktree(topic: str, agent: str, repo_root: str) -> None:
     with _connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM worktrees WHERE topic=? AND agent=? AND repo_root=?",
+            (topic, agent, repo_root),
+        ).fetchone()
         conn.execute(
             "DELETE FROM worktrees WHERE topic=? AND agent=? AND repo_root=?",
             (topic, agent, repo_root),
         )
+        if row:
+            _insert_worktree_changed_event(conn, topic, agent, repo_root, "synced")
+
+
+def _insert_worktree_changed_event(
+    conn: sqlite3.Connection, topic: str, worktree_key: str, repo_root: str, status: str,
+) -> None:
+    """Publish worktree state in the same transaction as its registry write."""
+    try:
+        msg_id = int(worktree_key)
+    except (TypeError, ValueError):
+        logging.getLogger("squid").warning(
+            "worktree realtime event skipped for non-message key topic=%s key=%r repo=%s",
+            topic, worktree_key, repo_root,
+        )
+        return
+    row = conn.execute(
+        "SELECT agent FROM chat_messages WHERE id=? AND role='assistant'", (msg_id,),
+    ).fetchone()
+    if not row:
+        return
+    _insert_realtime_event(conn, "worktree.changed", topic, row["agent"], msg_id, None, {
+        "repo": repo_root, "status": status,
+    })
 
 
 def delete_all_worktrees(topic: str, agent: str) -> None:
+    # Bulk deletion accompanies removal/reset of the owning UI scope, so there
+    # is no surviving transcript to converge with per-turn worktree events.
     with _connect() as conn:
         conn.execute("DELETE FROM worktrees WHERE topic=? AND agent=?", (topic, agent))
 
@@ -5239,5 +5289,6 @@ def get_all_worktrees_for_topic(topic: str) -> list[dict]:
 
 
 def delete_all_topic_worktrees(topic: str) -> None:
+    # See delete_all_worktrees: topic deletion removes the subscribed scope.
     with _connect() as conn:
         conn.execute("DELETE FROM worktrees WHERE topic=?", (topic,))

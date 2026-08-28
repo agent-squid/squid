@@ -2722,8 +2722,84 @@ async def auto_resolve_worktree_conflict(msg_id: int, req: WorktreeDiscardReques
             "X-Accel-Buffering": "no",
             "Cache-Control": "no-cache",
             "X-Squid-Msg-Id": str(prepared["asst_msg_id"]),
+            "X-Squid-Agent": prepared["agent"] or "",
+            "X-Squid-Provider": prepared["provider"] or "",
         },
     )
+
+
+async def _drain_auto_resolve_response(
+    response: StreamingResponse, *, worktree_msg_id: int, topic: str, repo: str,
+) -> None:
+    """Run the existing auto-resolve stream to completion for a WS command."""
+    event_buffer = ""
+    resolve_result = None
+    async for chunk in response.body_iterator:
+        event_buffer += chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else chunk
+        records = event_buffer.split("\n\n")
+        event_buffer = records.pop()
+        for record in records:
+            lines = record.splitlines()
+            event_name = next((line[6:].strip() for line in lines if line.startswith("event:")), "")
+            if event_name != "resolve_result":
+                continue
+            data = "\n".join(
+                line[5:].lstrip(" ") for line in lines if line.startswith("data:")
+            )
+            try:
+                resolve_result = json.loads(data)
+            except (TypeError, ValueError):
+                resolve_result = {"error": "invalid auto-resolve result"}
+    # Only normal iterator exhaustion reaches this point. Cancellation and
+    # unexpected stream errors propagate without claiming the attempt finished.
+    repo_root = _validate_repo_path(repo)
+    if repo_root is not None:
+        rec, found = await _worktree_record_or_existing_paths(topic, str(worktree_msg_id), repo_root)
+        status = (rec or {}).get("status") if found else "synced"
+        if status not in {"synced", "resolved", "discarded"}:
+            turn = await asyncio.to_thread(get_message, worktree_msg_id)
+            outcome = resolve_result if isinstance(resolve_result, dict) else {}
+            await asyncio.to_thread(insert_realtime_event,
+                "worktree.changed", topic, (turn or {}).get("agent"),
+                {"repo": str(repo_root), "status": status or "conflict",
+                 "auto_resolve_finished": True,
+                 **({"error": outcome["error"]} if outcome.get("error") else {}),
+                 **({"conflicts": outcome["conflicts"]} if outcome.get("conflicts") else {})},
+                worktree_msg_id,
+            )
+
+
+async def _realtime_worktree_auto_resolve(payload: dict) -> dict:
+    msg_id = payload.get("msg_id")
+    topic = payload.get("topic")
+    repo = payload.get("repo")
+    if not isinstance(msg_id, int) or not isinstance(topic, str) or not isinstance(repo, str):
+        return {"ok": False, "error": "invalid_frame"}
+    try:
+        req = WorktreeDiscardRequest(topic=topic, repo=repo)
+    except Exception as exc:
+        return {"ok": False, "error": "invalid_frame", "detail": str(exc)}
+    response = await auto_resolve_worktree_conflict(msg_id, req)
+    if isinstance(response, JSONResponse):
+        body = json.loads(response.body)
+        return {
+            "ok": response.status_code < 400 and body.get("ok", False),
+            **body,
+            "status": response.status_code,
+        }
+    resolve_msg_id = int(response.headers["X-Squid-Msg-Id"])
+    resolve_agent = response.headers.get("X-Squid-Agent") or None
+    resolve_provider = response.headers.get("X-Squid-Provider") or None
+    task = asyncio.create_task(
+        _drain_auto_resolve_response(
+            response, worktree_msg_id=msg_id, topic=topic, repo=repo,
+        ),
+        name=f"squid-ws-auto-resolve-{resolve_msg_id}",
+    )
+    _realtime_chat_tasks.add(task)
+    task.add_done_callback(_realtime_chat_tasks.discard)
+    return {"ok": True, "msg_id": resolve_msg_id, "worktree_msg_id": msg_id,
+            "agent": resolve_agent, "provider": resolve_provider}
 
 
 @app.get("/chat/{msg_id}/diff-file")
@@ -3872,6 +3948,7 @@ _REALTIME_V1_REPLAY_TYPES = {
     "chat.meta", "chat.queued", "chat.status", "chat.loading", "chat.processing",
     "chat.tool", "chat.text", "chat.stats", "chat.done", "chat.error",
     "process.changed", "queue.changed", "message.changed", "flow.step.created",
+    "worktree.changed", "diff.reverted",
 }
 
 
@@ -4161,7 +4238,7 @@ async def _handle_realtime_mutation(websocket: WebSocket, frame: dict, principal
     request_id = frame.get("request_id")
     payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
     if not isinstance(request_id, str) or not request_id or message_type not in {
-        "chat.start", "chat.cancel", "auth.start",
+        "chat.start", "chat.cancel", "auth.start", "worktree.auto_resolve",
     }:
         await _realtime_send(websocket, outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_frame"}}, principal, last_acked_cursor)
         return None
@@ -4183,6 +4260,9 @@ async def _handle_realtime_mutation(websocket: WebSocket, frame: dict, principal
         result = await asyncio.to_thread(save_realtime_request, principal, request_id, message_type, fingerprint, result)
     elif message_type == "auth.start":
         result, attach = await _realtime_auth_start(payload, websocket)
+        result = await asyncio.to_thread(save_realtime_request, principal, request_id, message_type, fingerprint, result)
+    elif message_type == "worktree.auto_resolve":
+        result = await _realtime_worktree_auto_resolve(payload)
         result = await asyncio.to_thread(save_realtime_request, principal, request_id, message_type, fingerprint, result)
     else:  # chat.cancel
         msg_id = payload.get("msg_id")
