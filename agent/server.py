@@ -652,9 +652,11 @@ def _origin_candidates(request: Request) -> set[str]:
     return candidates
 
 
-def _keychain_unlock_allowed(headers, direct_host: Optional[str]) -> bool:
-    """Loopback gate for the macOS keychain-unlock auth-session mode (see
-    docs/plans/cursor-keychain-unlock-remediation.md).
+def _request_is_loopback(headers, direct_host: Optional[str]) -> bool:
+    """True only for a browser talking directly to 127.0.0.1/localhost —
+    false for every proxied path, including `tailscale serve` to this same
+    machine (its IP or MagicDNS name both work now, see ADR-0037's tailscale
+    fixes) as well as a genuinely remote tailnet client.
 
     `direct_host` (the raw TCP peer) is unreliable as *proof of remoteness*
     on its own: `tailscale serve` reverse-proxies to this server over
@@ -672,8 +674,6 @@ def _keychain_unlock_allowed(headers, direct_host: Optional[str]) -> bool:
     otherwise), hence remote, regardless of its value. A direct local browser
     talking to 127.0.0.1 never sets these.
     """
-    if ALLOW_REMOTE_KEYCHAIN_UNLOCK:
-        return True
     # Any of the common proxy/forwarding markers makes a request remote: the
     # proxy-standard X-Forwarded-For and RFC 7239 Forwarded, the de-facto
     # X-Real-IP, and Tailscale-User-Login (set by `tailscale serve` when it
@@ -692,6 +692,14 @@ def _keychain_unlock_allowed(headers, direct_host: Optional[str]) -> bool:
         return ipaddress.ip_address(direct_host).is_loopback
     except ValueError:
         return False
+
+
+def _keychain_unlock_allowed(headers, direct_host: Optional[str]) -> bool:
+    """Loopback gate for the macOS keychain-unlock auth-session mode (see
+    docs/plans/cursor-keychain-unlock-remediation.md)."""
+    if ALLOW_REMOTE_KEYCHAIN_UNLOCK:
+        return True
+    return _request_is_loopback(headers, direct_host)
 
 
 def _auth_session_validation_error(
@@ -2963,7 +2971,16 @@ async def save_creds(req: CredsRequest):
 
 
 @app.post("/config/creds/auto")
-async def auto_detect_creds():
+async def auto_detect_creds(request: Request):
+    direct_host = request.client.host if request.client else None
+    if not _request_is_loopback(request.headers, direct_host):
+        port = _cfg.get("server", {}).get("port", 8000)
+        return JSONResponse({
+            # The why already lives in the static .creds-auto-desc hint next to
+            # the button — keep this one short and actionable, not a repeat.
+            "error": "Not a direct connection — open:",
+            "local_url": f"http://127.0.0.1:{port}/",
+        }, status_code=403)
     try:
         found = await asyncio.to_thread(creds.read_chrome_claude_creds)
     except RuntimeError as e:

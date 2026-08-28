@@ -9573,14 +9573,16 @@ function initCreds() {
   const autoBtn    = document.getElementById('creds-auto');
   const autoStatus = document.getElementById('creds-auto-status');
 
-  if (location.hostname !== '127.0.0.1' && location.hostname !== 'localhost') {
-    autoBtn.style.display = 'none';
-    autoStatus.style.display = 'none';
-  }
-
+  // Whether this actually works isn't something the client can infer from
+  // location.hostname anymore — Tailscale (IP or MagicDNS name) reaches this
+  // same machine too, so a hostname guess would wrongly hide the button for
+  // a local user on that path. The server knows the real connection type
+  // (see _request_is_loopback in agent/server.py), so always show the
+  // button and surface its verdict inline instead.
   autoBtn.addEventListener('click', async () => {
     autoBtn.disabled = true;
     autoStatus.textContent = 'detecting…';
+    let isError = false;
     try {
       const res = await fetch('/config/creds/auto', { method: 'POST' });
       const data = await res.json();
@@ -9588,11 +9590,17 @@ function initCreds() {
         autoStatus.textContent = `saved ✓ (org: ${(data.claude_org_id || '').slice(0, 8)}…)`;
         fetchQuota();
       } else {
-        autoStatus.textContent = data.error || 'failed';
+        isError = true;
+        // data.local_url is set when the server rejected this as non-loopback
+        // (Tailscale IP/MagicDNS or another proxy) — link straight to the
+        // one URL that will actually work instead of just naming it.
+        autoStatus.innerHTML = data.local_url
+          ? `${escapeHtml(data.error || 'failed')} <a class="creds-auto-link" href="${escapeHtml(data.local_url)}">${escapeHtml(data.local_url)}</a>`
+          : escapeHtml(data.error || 'failed');
       }
-    } catch { autoStatus.textContent = 'error'; }
+    } catch { isError = true; autoStatus.textContent = 'error'; }
     autoBtn.disabled = false;
-    setTimeout(() => { autoStatus.textContent = ''; }, 5000);
+    setTimeout(() => { autoStatus.innerHTML = ''; }, isError ? 12000 : 5000);
   });
 
   saveBtn.addEventListener('click', async () => {

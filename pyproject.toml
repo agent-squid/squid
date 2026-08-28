@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentsquid"
-version = "0.1.5rc7"
+version = "0.1.5rc8"
 description = "Locally running chat agent with access to Claude Code, Codex, and bash"
 readme = "README.md"
 license = "MIT"

@@ -604,7 +604,7 @@ body {
 .creds-bookmarklet:hover { border-color: var(--accent); color: var(--accent); }
 .creds-help-hint {
   font-size: var(--text-2xs);
-  color: #3a3a52;
+  color: var(--text-mid);
   line-height: 1.35;
 }
 .creds-auto-row {
@@ -630,7 +630,7 @@ body {
 }
 .creds-auto-desc {
   font-size: var(--text-2xs);
-  color: #4a4a62;
+  color: var(--text-mid);
   line-height: 1.4;
   white-space: normal;
 }
@@ -650,10 +650,12 @@ body {
 .creds-auto-btn:disabled { opacity: 0.5; cursor: default; }
 .creds-auto-status {
   font-size: var(--text-2xs);
-  color: #556;
+  color: var(--text-mid);
   min-height: 0.9em;
   display: block;
 }
+.creds-auto-link, .creds-auto-link:visited { color: var(--accent-light); text-decoration: none; }
+.creds-auto-link:hover { text-decoration: underline; }
 .creds-divider {
   height: 1px;
   background: var(--surface-3);

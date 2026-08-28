@@ -28,7 +28,7 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,100..700,0..1,0" />
   <link rel="stylesheet" href="/vendor/atom-one-dark.min.css" />
   <link rel="stylesheet" href="/vendor/xterm.css" />
-  <link rel="stylesheet" href="style.css?v=20260828-001" />
+  <link rel="stylesheet" href="style.css?v=20260828-003" />
   <script src="/vendor/highlight.min.js"></script>
   <script src="/vendor/marked.min.js"></script>
   <script src="/vendor/qrcode.min.js"></script>
@@ -214,7 +214,7 @@
         <div class="creds-auto-row">
           <div class="creds-auto-text">
             <span class="creds-auto-label">Auto-detect from browser</span>
-            <span class="creds-auto-desc">Runs on this Squid server machine only; remote phone/tablet browsers cannot share their cookies.</span>
+            <span class="creds-auto-desc">Reads this machine's Chrome cookies directly — only works over a direct connection to 127.0.0.1/localhost, not through Tailscale or another proxy.</span>
           </div>
           <button id="creds-auto" type="button" class="creds-auto-btn">Detect</button>
         </div>
@@ -812,6 +812,6 @@
   <div id="app-tooltip"></div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <script src="flow-lang.js?v=20260721-003"></script>
-  <script src="app.js?v=20260828-001"></script>
+  <script src="app.js?v=20260828-003"></script>
 </body>
 </html>
