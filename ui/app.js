@@ -9218,7 +9218,7 @@ function initQuota() {
         <circle id="${cfg.sevenDayArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('anthropic')}"
                 stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
                 transform="rotate(-90 9 9)"/>
-        <text id="${cfg.sevenDayLabelId}" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
+        <text id="${cfg.sevenDayLabelId}" class="quota-pie-text" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
       </svg>
       <span id="${cfg.sevenDaySuffixId}" class="quota-7d-suffix">7D</span>
     </span>
@@ -9228,7 +9228,7 @@ function initQuota() {
         <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('anthropic')}"
                 stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
                 transform="rotate(-90 9 9)"/>
-        <text id="${cfg.fiveHourPctId}" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
+        <text id="${cfg.fiveHourPctId}" class="quota-pie-text" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
       </svg>
       <span id="${cfg.labelId}"></span>
     </span>`;
@@ -9277,7 +9277,7 @@ function initCodexQuota() {
         <circle id="${cfg.sevenDayArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('codex')}"
                 stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
                 transform="rotate(-90 9 9)"/>
-        <text id="${cfg.sevenDayLabelId}" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
+        <text id="${cfg.sevenDayLabelId}" class="quota-pie-text" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
       </svg>
       <span id="${cfg.sevenDaySuffixId}" class="quota-7d-suffix">7D</span>
     </span>
@@ -9287,7 +9287,7 @@ function initCodexQuota() {
         <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('codex')}"
                 stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
                 transform="rotate(-90 9 9)"/>
-        <text id="${cfg.fiveHourPctId}" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
+        <text id="${cfg.fiveHourPctId}" class="quota-pie-text" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
       </svg>
       <span id="${cfg.labelId}"></span>
     </span>`;
@@ -9312,7 +9312,7 @@ function initBalanceQuota(gaugeType) {
         <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor(gaugeType)}"
                 stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
                 transform="rotate(-90 9 9)"/>
-        <text id="${cfg.fiveHourPctId}" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff"></text>
+        <text id="${cfg.fiveHourPctId}" class="quota-pie-text" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff"></text>
       </svg>
       <span id="${cfg.labelId}">—</span>
     </span>`;
@@ -9466,7 +9466,7 @@ function initCursorQuota() {
         <circle id="${cfg.pieArcId}" cx="9" cy="9" r="6" fill="none" stroke="${agentThemeColor('cursor')}"
                 stroke-width="4" stroke-dasharray="0 ${cfg.pieC}" stroke-linecap="round"
                 transform="rotate(-90 9 9)"/>
-        <text id="${cfg.fiveHourPctId}" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
+        <text id="${cfg.fiveHourPctId}" class="quota-pie-text" x="9" y="9" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#fff">—</text>
       </svg>
       <span id="${cfg.labelId}"></span>
     </span>`;
@@ -14922,7 +14922,29 @@ function escapeHtml(s) {
 function getPinnedItems() {
   try { return (JSON.parse(localStorage.getItem('pinnedItems') || '[]')).sort((a, b) => a.id - b.id); } catch { return []; }
 }
-function setPinnedItems(items) { localStorage.setItem('pinnedItems', JSON.stringify(items)); }
+function refreshPinnedContextUi() {
+  const pinnedIds = new Set(getPinnedItems().map(item => Number(item.id)));
+  document.querySelectorAll('.msg-pin-btn[data-msg-id]').forEach(btn => {
+    btn.classList.toggle('pinned', pinnedIds.has(Number(btn.dataset.msgId)));
+  });
+  document.querySelectorAll('.msg.assistant[data-msg-id]').forEach(bubble => {
+    bubble.classList.toggle('pinned-sel', pinnedIds.has(Number(bubble.dataset.msgId)));
+  });
+  updateInContextMarkers();
+  updatePinCount();
+  if (pinPanel.classList.contains('open')) renderPinPanel();
+}
+function setPinnedItems(items) {
+  localStorage.setItem('pinnedItems', JSON.stringify(items));
+  refreshPinnedContextUi();
+}
+
+// localStorage mutations in another Squid tab do not fire in the tab that
+// performed the write, but they do fire here. Keep the open cart and its
+// badge/bubble selections convergent across desktop/mobile or duplicate tabs.
+window.addEventListener('storage', event => {
+  if (event.key === 'pinnedItems') refreshPinnedContextUi();
+});
 
 function getAttachedFiles() {
   try { return JSON.parse(localStorage.getItem('attachedFiles') || '[]'); } catch { return []; }
