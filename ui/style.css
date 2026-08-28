@@ -1507,10 +1507,6 @@ body {
 }
 #harnesses-catalog .bcat-row:first-child,
 #providers-catalog .bcat-row:first-child { border-top: 1px solid var(--border-faint); }
-#providers-catalog .bcat-row-ollama {
-  margin-bottom: 0.4rem;
-  border-bottom-color: var(--border);
-}
 .bcat-name {
   display: flex;
   align-items: center;

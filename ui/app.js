@@ -12653,11 +12653,9 @@ function renderProvidersCatalog() {
   if (!el) return;
   if (el.contains(agentsAuthPanel)) return;
 
-  const providerIds = Object.keys(_providerMetadata).sort((a, b) => {
-    if (a === 'ollama') return -1;
-    if (b === 'ollama') return 1;
-    return (_providerMetadata[a].label || a).localeCompare(_providerMetadata[b].label || b);
-  });
+  const providerIds = Object.keys(_providerMetadata).sort((a, b) =>
+    (_providerMetadata[a].label || a).localeCompare(_providerMetadata[b].label || b)
+  );
   if (!providerIds.length) {
     el.innerHTML = '<div class="empty">No providers configured.</div>';
     return;
@@ -12682,9 +12680,9 @@ function renderProvidersCatalog() {
       : (GAUGE_CATALOG[gauge.type] || 'no gauge configured');
     const modelCount = (info.models || []).length;
     const models = `frequently used models: <a class="bcat-link bcat-yaml-link" href="#">${modelCount}</a> · freeform selection`;
-    const modelLibrary = id === 'ollama'
-      ? ' · <a class="bcat-link" href="https://ollama.com/library" target="_blank" rel="noopener noreferrer">model library</a>'
-      : '';
+    const extraLinks = (info.links || [])
+      .map(l => ` · <a class="bcat-link" href="${escapeHtml(l.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(l.label)}</a>`)
+      .join('');
 
     // Binary-backed providers (ollama today, see agent/providers.py's
     // _PROVIDER_INSTALL) carry install_cmd/installed on top of the usual
@@ -12721,11 +12719,11 @@ function renderProvidersCatalog() {
       </div>`;
     }
 
-    return `<div class="bcat-row${id === 'ollama' ? ' bcat-row-ollama' : ''}">
+    return `<div class="bcat-row">
       <div class="bcat-name"><span class="bcat-dot" style="background:${escapeHtml(color)}"></span>${escapeHtml(label)}</div>
       <div class="bcat-coding">
         <span class="${statusClass}">${statusMark} ${escapeHtml(authText)}</span>
-        <span class="bcat-hint">${models}${modelLibrary}</span>
+        <span class="bcat-hint">${models}${extraLinks}</span>
         ${localHtml}
       </div>
       <div class="bcat-gauge"><span class="bcat-hint">${escapeHtml(gaugeText)}</span></div>

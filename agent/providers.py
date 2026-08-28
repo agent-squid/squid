@@ -120,6 +120,7 @@ class Provider:
     env: dict[str, Any] = field(default_factory=dict)
     settings: dict[str, Any] = field(default_factory=dict)
     args: tuple[str, ...] = ()
+    links: tuple[dict[str, str], ...] = ()
 
     def missing_secrets(self) -> list[str]:
         if self.auth_type != "api_key":
@@ -161,6 +162,17 @@ class Provider:
                 result[name] = str(value)
         return result
 
+    def _resolved_link_url(self, url: str) -> str:
+        # Absolute URLs (e.g. Ollama's public model library) are used as-is;
+        # anything else is a path resolved against this provider's own
+        # base_url (e.g. oMLX's "/admin" web UI), so one entry works across
+        # installs with different hosts/ports.
+        if url.startswith(("http://", "https://")):
+            return url
+        if not self.base_url:
+            return url
+        return self.base_url.rstrip("/") + "/" + url.lstrip("/")
+
     def public_dict(self) -> dict[str, Any]:
         models = list(self.models)
         result = {
@@ -173,6 +185,10 @@ class Provider:
             "gauge": self.gauge.public_dict(),
             "models": models,
             "supported_apis": sorted(self.supported_apis),
+            "links": [
+                {"label": link["label"], "url": self._resolved_link_url(link["url"])}
+                for link in self.links
+            ],
         }
         if self.id in _PROVIDER_INSTALL:
             result["install_cmd"] = _PROVIDER_INSTALL[self.id]
@@ -239,6 +255,25 @@ def _validate_gauge(provider_id: str, raw: Any) -> Gauge:
     return Gauge(gauge_type, text, title)
 
 
+def _validate_links(provider_id: str, raw: Any) -> tuple[dict[str, str], ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError(f"Provider {provider_id!r} links must be a list")
+    links: list[dict[str, str]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise ValueError(f"Provider {provider_id!r} links entries must be mappings")
+        label = entry.get("label")
+        url = entry.get("url")
+        if not isinstance(label, str) or not label.strip():
+            raise ValueError(f"Provider {provider_id!r} link label must be a non-empty string")
+        if not isinstance(url, str) or not url.strip():
+            raise ValueError(f"Provider {provider_id!r} link url must be a non-empty string")
+        links.append({"label": label.strip(), "url": url.strip()})
+    return tuple(links)
+
+
 def _validate_provider(provider_id: str, raw: Any) -> Provider:
     if not _ID_RE.fullmatch(provider_id):
         raise ValueError(f"Invalid provider id {provider_id!r}")
@@ -297,9 +332,10 @@ def _validate_provider(provider_id: str, raw: Any) -> Provider:
 
     supported_apis = _validate_supported_apis(provider_id, raw.get("supported_apis"))
     gauge = _validate_gauge(provider_id, raw.get("gauge"))
+    links = _validate_links(provider_id, raw.get("links"))
 
     return Provider(provider_id, label, color.upper(), base_url, auth_type, api_key, parallel,
-                    gauge, tuple(models), supported_apis, env, settings, tuple(args))
+                    gauge, tuple(models), supported_apis, env, settings, tuple(args), links)
 
 
 def _configured_providers() -> dict[str, Any]:

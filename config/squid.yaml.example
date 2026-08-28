@@ -293,19 +293,21 @@ providers:
   # requests (multi-GPU, OLLAMA_NUM_PARALLEL, ...). Running more than one
   # local box? Give each its own provider entry (distinct name, distinct
   # base_url, e.g. ollama-gpu1/ollama-gpu2) for independent queues.
-  ollama:
-    label: Ollama
-    color: "#000000"
-    base_url: "http://localhost:11434/v1"
-    supported_apis: [/v1/chat/completions]
-    auth:
-      type: none
-    parallel: false
-    gauge:
-      type: static
-      text: Local
-      title: no reset
-    models: [gemma4:12b, gemma4:e4b, qwen3.5:9b, qwen3.5:4b]
+  # ollama:
+  #   label: Ollama
+  #   color: "#FFFFFF"
+  #   base_url: "http://localhost:11434/v1"
+  #   supported_apis: [/v1/chat/completions]
+  #   auth:
+  #     type: none
+  #   parallel: false
+  #   gauge:
+  #     type: static
+  #     text: Local
+  #     title: no reset
+  #   models: [gemma4:12b, gemma4:e4b, qwen3.5:9b, qwen3.5:4b]
+  #   links:
+  #     - {label: model library, url: "https://ollama.com/library"}
 
   # oMLX (ADR-0043, github.com/jundot/omlx): a local MLX inference daemon
   # with continuous batching and its own admin UI, reached the same way as
@@ -330,3 +332,5 @@ providers:
   #     text: Local
   #     title: no reset
   #   models: [qwen3-coder-30b-a3b-8bit]
+  #   links:
+  #     - {label: admin, url: /admin}
