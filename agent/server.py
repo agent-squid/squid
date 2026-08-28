@@ -4531,6 +4531,15 @@ def _configure_tailscale_serve(port: int) -> None:
     a pipx-installed `agentsquid` gets the same one-time persistent
     `tailscale serve` config a source checkout's bin/start.sh already set up.
     Tailscale remembers this across reboots; safe to check/re-run every start.
+
+    Publishes at the tailnet's default HTTPS port (443), giving the shortest
+    possible URL (no port in it). `tailscale serve` supports multiple
+    concurrent rules at different ports on the same node, so exposing another
+    local service on this machine (e.g. Ollama or an oMLX server) doesn't
+    require touching this rule — add an independent one for it instead:
+        tailscale serve --bg --https=<their-port> 127.0.0.1:<their-port>
+    That coexists with squid's 443 rule with no conflict, since it's a
+    different tailnet-side port proxying to a different local port.
     """
     import shutil
     if not shutil.which("tailscale"):
@@ -4870,7 +4879,7 @@ def main():
             f"ERROR: server.host {host!r} is not a loopback address.\n"
             "squid must bind to 127.0.0.1 (or another 127.x.x.x address).\n"
             "For remote access via Tailscale, use:\n"
-            f"  tailscale serve --bg --http={port} 127.0.0.1:{port}"
+            f"  tailscale serve --bg 127.0.0.1:{port}"
         )
 
     # Probe the port before handing off to uvicorn. uvicorn's ASGI lifespan

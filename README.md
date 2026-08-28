@@ -134,16 +134,51 @@ agentsquid start   # run in the background and configure tailscale serve
 agentsquid         # run in the foreground for debugging
 ```
 
-Type `/remote` in the chat to get a QR code with the full HTTPS URL and your
-token already included — point your phone camera at it to open squid in one tap:
+Type `/remote` in the chat to get a QR code with the full HTTPS URL —
+point your phone camera at it to open squid in one tap:
 
 ```text
-https://<machine-name>.<tailnet>.ts.net/?token=<your-token>
+https://<machine-name>.<tailnet>.ts.net/
 ```
 
 The full domain is required — the short hostname alone (`https://<machine-name>/`)
 won't work because Tailscale's TLS cert is scoped to `*.ts.net` and browsers
 enforce an exact match.
+
+### Reaching other local services over the tailnet too
+
+If this machine also runs other local servers — an [Ollama](https://ollama.com)
+or oMLX instance for local model inference, for example — you can give each
+of them the same one-tap, no-VPN-on-the-client remote access squid gets,
+from your phone or any other device on the tailnet, without setting up
+anything beyond Tailscale itself. `tailscale serve` supports multiple
+concurrent rules at different ports on the same node, so this doesn't touch
+or compete with squid's own rule at 443 — each service gets its own port.
+
+**Example — Ollama**, which listens on `11434` by default:
+
+```bash
+ollama serve                                            # already running as a background service after install, usually
+tailscale serve --bg --https=11434 127.0.0.1:11434
+```
+
+Now `https://<machine-name>.<tailnet>.ts.net:11434/` reaches Ollama's API
+from any device on the tailnet, same as squid's URL reaches squid.
+
+The pattern is the same for any other local server — substitute whatever
+port it actually listens on:
+
+```bash
+tailscale serve --bg --https=<their-port> 127.0.0.1:<their-port>
+```
+
+```text
+https://<machine-name>.<tailnet>.ts.net:<their-port>/
+```
+
+Useful for hitting a local model server from your phone or another machine
+on the tailnet without exposing it to the public internet or opening a
+router port.
 
 ## How Squid Is Different
 

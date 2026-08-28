@@ -41,6 +41,13 @@ PORT=$("$VENV/bin/python3" -c \
 # ── tailscale serve ──────────────────────────────────────────────────────────
 # Expose squid on the Tailscale network via HTTPS. This is a one-time persistent
 # config — Tailscale remembers it across reboots.
+#
+# Publishes at the tailnet's default HTTPS port (443) for the shortest
+# possible URL. `tailscale serve` supports multiple concurrent rules at
+# different ports on the same node, so other local services on this machine
+# (e.g. oMLX or Ollama on their own ports) can be exposed the same way,
+# independently of this rule:
+#   tailscale serve --bg --https=<their-port> 127.0.0.1:<their-port>
 if command -v tailscale &>/dev/null; then
   if tailscale serve status 2>/dev/null | grep -q "127.0.0.1:${PORT}"; then
     echo "tailscale serve: already configured → https://$(tailscale status --json 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("Self",{}).get("DNSName","<machine-name>").rstrip("."))' 2>/dev/null || echo '<machine-name>')/"

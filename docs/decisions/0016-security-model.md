@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-06-01
-updated: 2026-07-16
+updated: 2026-08-27
 ---
 # ADR-0016: Security Model — Network Isolation
 
@@ -53,6 +53,32 @@ public DNS.
 - Type `/remote` in the chat on the host machine to get a QR code.
 - Scan it to open squid in one tap.
 - MagicDNS resolves the hostname automatically — no port-forwarding needed.
+
+### Exposing other local services alongside squid (2026-08-27)
+
+`squid` publishes at the tailnet's default HTTPS port (443) — `_configure_tailscale_serve`
+in `agent/server.py`, mirrored by `bin/start.sh`, runs
+`tailscale serve --bg 127.0.0.1:<port>` — giving the shortest possible URL,
+`https://<machine-name>.<tailnet>.ts.net/`, with no port to remember.
+
+`tailscale serve` supports multiple concurrent rules at different ports on
+the same node, so other local services on this machine — e.g. an Ollama or
+oMLX server running on its own port — can be exposed the same way, without
+touching or competing with squid's rule. Example, Ollama on its default
+port `11434`:
+
+```bash
+tailscale serve --bg --https=11434 127.0.0.1:11434
+```
+
+Reachable at `https://<machine-name>.<tailnet>.ts.net:11434/`, independently
+of squid's 443 rule — same one-tap, no-VPN-on-the-client remote access squid
+itself gets, from any device already on the tailnet. Substitute whatever
+port the other service actually listens on:
+
+```bash
+tailscale serve --bg --https=<their-port> 127.0.0.1:<their-port>
+```
 
 ### `~/.squid/squid.yaml` configuration
 
