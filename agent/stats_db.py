@@ -5027,7 +5027,7 @@ def insert_run_event(msg_id: int, seq: int, event_type: str, payload: Optional[s
             message = conn.execute("SELECT topic, agent FROM chat_messages WHERE id=?", (msg_id,)).fetchone()
             if message:
                 event_payload = payload
-                if event_type in {"queued", "loading", "processing", "tool", "stats", "diag"} and payload:
+                if event_type in {"queued", "loading", "processing", "tool", "stats", "diag", "meta"} and payload:
                     try:
                         event_payload = json.loads(payload)
                     except json.JSONDecodeError:

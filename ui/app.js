@@ -4684,6 +4684,15 @@ authPanelRetryBtn.addEventListener('click', retryAuthSession);
 agentsAuthPanelRetryBtn.addEventListener('click', retryAuthSession);
 agentsAuthPanelRestartBtn.addEventListener('click', () => { void restartServer(); });
 
+// Lets a dequeue triggered from the status popup (which only knows a queued
+// row's msg_id, not the sendMessage() closure that's waiting on it) reach
+// back into that closure and clear its local "queued…" UI — keyed by msg_id
+// rather than (topic, position) since a turn's msg_id is already attached
+// (via the 'meta' event, which always precedes 'queued' on the wire) by the
+// time it's registered here, and position drifts if an earlier queued item
+// completes between the popup rendering and the click landing.
+const liveQueuedTurnHandlers = new Map();
+
 async function sendMessage(text, opts = {}) {
   const source = opts.source === 'workflow' || opts.source === 'diff_viewer' ? opts.source : 'human';
   const updateComposerRoute = source === 'human' && opts.updateComposerRoute !== false;
@@ -4812,13 +4821,12 @@ async function sendMessage(text, opts = {}) {
         const response = await fetch('/cmd', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ command: 'deq', topic, pos: queuePosition }),
+          body: JSON.stringify(msgId
+            ? { command: 'deq', topic, msg_id: msgId }
+            : { command: 'deq', topic, pos: queuePosition }),
         });
         if (!response.ok) throw new Error('Unable to remove queued prompt.');
-        userAborted = true;
-        turnStatus = 'cancelled';
-        controller.abort();
-        renderCancelledThinking('Dequeued.');
+        markDequeued();
         pollProcs();
       } else if (msgId) {
         await cancelRealtimeMessage(msgId, topic, agent);
@@ -5021,6 +5029,19 @@ async function sendMessage(text, opts = {}) {
   const liveToolEvents = [];
   const controller = new AbortController();
   let quotaFinalized = false;
+
+  function unregisterQueuedTurnHandler() {
+    if (msgId != null) liveQueuedTurnHandlers.delete(msgId);
+  }
+
+  function markDequeued() {
+    unregisterQueuedTurnHandler();
+    queuePosition = null;
+    userAborted = true;
+    turnStatus = 'cancelled';
+    controller.abort();
+    renderCancelledThinking('Dequeued.');
+  }
 
   async function finalizeQuotaTracking() {
     if (quotaFinalized) return;
@@ -5706,6 +5727,7 @@ async function sendMessage(text, opts = {}) {
             try {
               const info = JSON.parse(data);
               queuePosition = info.position;
+              if (msgId != null) liveQueuedTurnHandlers.set(msgId, markDequeued);
               shellWaitingQueued = true;
               killBtn.style.display = '';
               setThinkingText(`#${info.topic} · queued — position ${info.position}`);
@@ -5717,6 +5739,7 @@ async function sendMessage(text, opts = {}) {
           } else if (eventName === 'processing') {
             try {
               const info = JSON.parse(data);
+              unregisterQueuedTurnHandler();
               queuePosition = null;
               shellWaitingQueued = false;
               setThinkingText(`#${info.topic || topic} · processing…`);
@@ -5879,6 +5902,10 @@ async function sendMessage(text, opts = {}) {
       }
     }
   } finally {
+    // A transport can close while the backend item is still queued, leaving
+    // the frozen queue-status row visible. Keep its dequeue registration
+    // alive so the status popup can still terminate that exact row.
+    if (queuePosition === null) unregisterQueuedTurnHandler();
     releaseProcPoll();
     if (!detachedPolling) stopStatusFallback();
     if (!thinkingFrozen) {
@@ -11180,7 +11207,7 @@ function renderProcPopup(processes, queued) {
         <tr>
           <td>#${r.topic || '—'}@${r.agent || '—'}</td>
           <td class="proc-queue-preview">${r.prompt_preview || '—'}</td>
-          <td><button class="proc-deq-btn" data-topic="${r.topic || ''}" data-pos="${r.position}">✕</button></td>
+          <td><button class="proc-deq-btn" data-topic="${r.topic || ''}" data-pos="${r.position}" data-msgid="${r.msg_id || ''}">✕</button></td>
         </tr>`).join('');
       body += `<div class="proc-section-label">Queued</div>
         <table><thead><tr><th>Route</th><th>Prompt</th><th></th></tr></thead>
@@ -11246,10 +11273,19 @@ function renderProcPopup(processes, queued) {
     btn.addEventListener('click', async e => {
       e.stopPropagation();
       btn.disabled = true; btn.textContent = '…';
-      await fetch('/cmd', {
+      const msgIdNum = btn.dataset.msgid ? parseInt(btn.dataset.msgid, 10) : null;
+      const response = await fetch('/cmd', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: 'deq', topic: btn.dataset.topic, pos: parseInt(btn.dataset.pos) }),
+        body: JSON.stringify(msgIdNum
+          ? { command: 'deq', topic: btn.dataset.topic, msg_id: msgIdNum }
+          : { command: 'deq', topic: btn.dataset.topic, pos: parseInt(btn.dataset.pos, 10) }),
       });
+      if (!response.ok) {
+        btn.disabled = false;
+        btn.textContent = 'Retry';
+        return;
+      }
+      if (msgIdNum != null) liveQueuedTurnHandlers.get(msgIdNum)?.();
       await pollProcs();
     });
   });
