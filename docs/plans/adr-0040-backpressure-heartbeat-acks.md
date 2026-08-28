@@ -51,10 +51,12 @@ is out of scope.
   drop any still-queued frame of the same type. Everything else
   (`chat.*`, `flow.step.created`, `message.changed`, `snapshot`, `subscribed`,
   `command.result`, `auth.*`, `pong`, `error`, `hello`) is non-coalescible.
-  `message.changed` is NOT coalesced: the client's reconciler tolerates
-  duplicates but status transitions feed `refreshComposerSessionCount`, and
-  the protocol doc only authorizes discarding state-like updates during
-  rollover, not live delivery. Keep the coalescing set minimal.
+  `message.changed` is NOT coalesced: the client's `msg_id`-keyed discovery
+  dedup (`discoverRealtimeTurn`'s DOM check plus the `realtimeDiscoveries`
+  set) tolerates duplicates but status transitions feed
+  `refreshComposerSessionCount`, and the protocol doc only authorizes
+  discarding state-like updates during rollover, not live delivery. Keep the
+  coalescing set minimal.
 - **Overflow closes with `slow_consumer`.** When the queue is full and the
   incoming frame is non-coalescible: best-effort direct send of
   `{"v":1,"type":"error","payload":{"code":"slow_consumer","resumable":true}}`

@@ -1,9 +1,24 @@
 ---
-status: proposed
+status: superseded
 date: 2026-08-13
-updated: 2026-08-13
+superseded: 2026-08-27
+updated: 2026-08-27
 ---
 # ADR-0041: Normalized client transcript store and reconciler
+
+**Superseded 2026-08-27.** This ADR was implemented on `main` (2026-08-18
+through 2026-08-27, ~24 commits) and then abandoned: see the
+[2026-08-27 reconciler abandonment postmortem](../postmortems/2026-08-27-reconciler-abandoned.md).
+The store/reconciler architecture did not collapse the timing-combination bug
+class it targeted — it produced a comparable volume of new bugs, several of
+which were narrower and harder to diagnose than the direct-DOM bugs it
+replaced, while adding a normalized-store layer, a serial reconciler, and
+~100 dedicated regression tests to maintain. The rebuilt client
+(`dom-ws-rebuild`) keeps ADR-0040's WebSocket transport and reverts the
+client-side rendering to per-call-site direct-DOM discipline, the approach
+this ADR's Context section describes as the status quo it was meant to
+replace. The rest of this document is retained as a historical record of the
+proposal and is not an accurate description of current `ui/app.js`.
 
 ## Context
 

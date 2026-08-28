@@ -286,10 +286,14 @@ window synchronized.
 SSE, WebSocket events, snapshots, and HTTP history pages feed one normalized
 turn model. Transport code must not maintain a separate visual representation
 or directly reset transcript navigation. The client maintains application
-state independently from DOM state. The concrete client-side store and
-idempotent reconciler that implement these invariants as one architecture,
-rather than per-call-site discipline, are specified in
-[ADR-0041](0041-normalized-client-transcript-store-and-reconciler.md).
+state independently from DOM state. [ADR-0041](0041-normalized-client-transcript-store-and-reconciler.md)
+proposed a single normalized store and idempotent reconciler to enforce these
+invariants as one architecture instead of per-call-site discipline; it was
+implemented, then superseded (see that ADR and the
+[2026-08-27 reconciler abandonment postmortem](../postmortems/2026-08-27-reconciler-abandoned.md))
+after it added more bugs than it removed. The invariants below remain
+required; they are upheld by discipline at each call site in `ui/app.js`,
+not by a dedicated store/reconciler layer.
 
 - messages are keyed by globally unique `msg_id`;
 - the user prompt and assistant response form one turn group through
