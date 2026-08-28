@@ -4378,7 +4378,10 @@ async function openAuthPanel(harness, onSuccessRetry, opts = {}) {
   // Catalog commands render animated progress against the PTY width they
   // start with. Keep at least a small usable grid on very narrow phones;
   // the Agents panel scrolls horizontally when the viewport cannot fit it.
-  term.focus();
+  // Focusing xterm opens the software keyboard on phones, collapsing the
+  // viewport until only the first terminal line is visible. Mobile login
+  // pickers use the dedicated navigation keypad below the terminal instead.
+  if (!window.matchMedia('(max-width: 768px)').matches) term.focus();
 
   // Make URLs clickable — avoids macOS "open with" system modal.
   term.registerLinkProvider({
@@ -5011,7 +5014,7 @@ async function sendMessage(text, opts = {}) {
   // fetchQuotaForBackend's own call already ensured quota metadata is
   // loaded) so finalizeQuotaTracking's terminal-failure fallback only ever
   // fires for a backend that genuinely has a meter to report on.
-  const quotaBackendHasConfig = !nativeShell && !!quotaBackend
+  let quotaBackendHasConfig = !nativeShell && !!quotaBackend
     && !!quotaConfigFor(quotaStatusProviderKey(quotaBackend));
   if (!nativeShell) quotaTrackStart(quotaBackend);
   let lastSessionId = null;
@@ -5663,10 +5666,24 @@ async function sendMessage(text, opts = {}) {
               }
               resolvedAgent = meta.agent || null;
               const metaRuntime = runtimeRef(meta.harness || '', meta.provider || null);
-              if (meta.provider) {
-                quotaBackend = meta.provider;
-                if (quotaBeforeSnapshot?.backend && quotaBeforeSnapshot.backend !== quotaBackend) {
-                  quotaBeforeSnapshot = null;
+              // Correct the send-time provider guess once the resolved provider
+              // arrives. Must move activeCount tracking and recompute
+              // quotaBackendHasConfig too, not just the backend field: leaving
+              // activeCount on the guessed backend can leak +1 there forever
+              // (stalling _stopQuotaPoll), and a stale hasConfig would let
+              // finalizeQuotaTracking's terminal-failure fallback fabricate a
+              // 0,0 delta against a resolved backend that has no meter at all.
+              if (meta.provider && meta.provider !== quotaBackend) {
+                if (nativeShell) {
+                  quotaBackend = meta.provider;
+                } else {
+                  quotaTrackEnd(quotaBackend);
+                  quotaBackend = meta.provider;
+                  quotaBackendHasConfig = !!quotaConfigFor(quotaStatusProviderKey(quotaBackend));
+                  if (quotaBeforeSnapshot?.backend && quotaBeforeSnapshot.backend !== quotaBackend) {
+                    quotaBeforeSnapshot = null;
+                  }
+                  quotaTrackStart(quotaBackend);
                 }
               }
               const resolvedAdhoc = adhoc; // server echoes back what we sent; use closure as reliable source

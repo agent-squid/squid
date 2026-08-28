@@ -5563,8 +5563,8 @@ mark.search-kw-highlight {
 
 /* per-message timestamps */
 .msg-time {
-  font-size: 0.72rem;
-  color: #484858;
+  font-size: var(--text-sm);
+  color: var(--text-mid);
   padding: 0 0.4rem 0.1rem;
   align-self: flex-start;
 }
