@@ -7416,6 +7416,7 @@ async function replacePendingWithStoredItem(item, wipBubble, onStored = null) {
     const data = await res.json();
     if (data.status !== 'done' && data.status !== 'error' && data.status !== 'cancelled') return;
     if (data.status === 'error' && !String(data.content || '').trim()) return;
+    untrackQuotaForTurn(item.id);
     onStored?.(data);
     // Removing a finished wip bubble that sits above the viewport (e.g. another
     // bubble is still streaming below where the user is reading) shrinks the
@@ -7924,6 +7925,7 @@ function watchFlowRun(flowRunId, afterId, route = null) {
 }
 
 async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStored = null, onProcessing = null } = {}) {
+  if (item.source !== 'shell') trackQuotaForPendingTurn(item.id, item.topic, item.agent);
   const transportMode = forceSse ? 'sse' : await realtimeTransportMode;
   if (!wipBubble.isConnected) return;
   const useWebSocket = transportMode !== 'sse' && !!realtimeV1;
@@ -8105,6 +8107,7 @@ async function pollPendingItem(item, wipBubble) {
   const timer = setInterval(async () => {
     if (!wipBubble.isConnected) {
       cancelPendingPoll(wipBubble);
+      untrackQuotaForTurn(item.id);
       return;
     }
     count++;
@@ -8117,6 +8120,7 @@ async function pollPendingItem(item, wipBubble) {
         await replacePendingWithStoredItem(item, wipBubble);
       } else if (count >= MAX_POLLS) {
         cancelPendingPoll(wipBubble);
+        untrackQuotaForTurn(item.id);
         const content = wipBubble.querySelector('.thinking-live');
         if (content) content.innerHTML += '<br><span class="msg-error">Timed out.</span>';
         updateThinkingHeightButton(wipBubble);
@@ -8894,6 +8898,37 @@ function quotaTrackEnd(backend) {
   if (!quotaState[backend]) return;
   quotaState[backend].activeCount = Math.max(0, quotaState[backend].activeCount - 1);
   _stopQuotaPoll();
+}
+
+// sendMessage() tracks quota for turns this tab submitted via its own local
+// closure. A turn discovered through reconnectPendingItem — another tab's or
+// device's turn found via WS/history-page/flow-step discovery, or this
+// turn's own bubble recovering after a page reload — has no such closure, so
+// without this the quota gauge only ever polls for the submitting tab.
+// Keyed by msg_id (not by call site) so every reconnectPendingItem caller,
+// including sendMessage's own, can call this unconditionally: idempotent
+// start/end means a turn already tracked elsewhere (or already finished
+// while the provider lookup was in flight) is a safe no-op, not a double
+// count or a leak.
+const quotaTrackedMsgIds = new Map();
+
+async function trackQuotaForPendingTurn(msgId, topic, agent) {
+  const id = Number(msgId);
+  if (!Number.isFinite(id) || id <= 0 || quotaTrackedMsgIds.has(id)) return;
+  quotaTrackedMsgIds.set(id, null); // reserve so a concurrent call can't double-resolve
+  const backend = await resolveQuotaProvider(topic, agent);
+  if (!quotaTrackedMsgIds.has(id)) return; // untracked (turn finished) while resolving
+  if (!backend) { quotaTrackedMsgIds.delete(id); return; }
+  quotaTrackedMsgIds.set(id, backend);
+  quotaTrackStart(backend);
+}
+
+function untrackQuotaForTurn(msgId) {
+  const id = Number(msgId);
+  if (!quotaTrackedMsgIds.has(id)) return;
+  const backend = quotaTrackedMsgIds.get(id);
+  quotaTrackedMsgIds.delete(id);
+  if (backend) quotaTrackEnd(backend);
 }
 
 function setQuotaSnapshot(backend, snapshot) {
