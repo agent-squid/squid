@@ -362,6 +362,52 @@ test('kill button appears on thinking bubble and sends stop_msg with msg_id', as
   await page.evaluate(() => window._testSseWriter?.close().catch(() => {}));
 });
 
+test('kill button cancel updates the chip turn count from the server-recorded turn', async ({ page }) => {
+  // A cancelled turn that reached a session id still earns a session_turn_index
+  // server-side (mark_assistant_cancelled) — the client must pick that up via
+  // /chat/{id}/status after cancelling and reflect it on the chip, the same
+  // way a clean completion does.
+  await mockBackend(page);
+
+  await page.route('**/cmd', r => r.fulfill({ json: { ok: true, killed: 1 } }));
+  await page.route('**/chat/42/status', r => r.fulfill({ json: {
+    status: 'cancelled', content: 'Cancelled', agent: 'claude',
+    session_id: 'sess-1', session_turn_count: 1,
+  } }));
+
+  await page.goto('/');
+
+  await page.evaluate(() => {
+    const orig = window.fetch;
+    window.fetch = async (url, opts) => {
+      if (url !== '/chat') return orig(url, opts);
+      const { readable, writable } = new TransformStream();
+      const writer = writable.getWriter();
+      const enc = new TextEncoder();
+      writer.write(enc.encode(
+        'event: meta\ndata: {"agent":"claude","backend":"claude","msg_id":42,"adhoc":false}\n\n'
+      ));
+      window._testSseWriter = writer; // kept open — freezeThinking never runs
+      return new Response(readable, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+      });
+    };
+  });
+
+  await page.fill('#input', '#squid@claude hello');
+  await page.keyboard.press('Enter');
+
+  const killBtn = page.locator('.thinking-kill-btn');
+  await expect(killBtn).toBeVisible({ timeout: 5000 });
+  await killBtn.click();
+
+  await expect(page.locator('.msg-thinking .msg-error')).toHaveText('Cancelled.');
+  await expect(page.locator('#topic-chip .chip-turn-count')).toHaveText('·1t');
+
+  await page.evaluate(() => window._testSseWriter?.close().catch(() => {}));
+});
+
 test('queued prompt kill leaves dequeued label', async ({ page }) => {
   await mockBackend(page);
 

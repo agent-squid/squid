@@ -4838,6 +4838,26 @@ async function sendMessage(text, opts = {}) {
         turnStatus = 'cancelled';
         controller.abort();
         renderCancelledThinking('Cancelled.');
+        // A cancelled turn that reached a session id still earns a turn
+        // index server-side (mark_assistant_cancelled) — reflect that in
+        // the chip/route-chain turn counts, same as a clean completion.
+        if (!adhoc) {
+          try {
+            const statusRes = await fetch(`/chat/${msgId}/status`);
+            if (statusRes.ok) {
+              const data = await statusRes.json();
+              if (data.session_turn_count != null) {
+                resolvedAgent = data.agent || resolvedAgent;
+                liveSessionTurnCount = parseInt(data.session_turn_count, 10) || liveSessionTurnCount;
+                const cancelledSessionId = data.session_id || lastSessionId;
+                if (cancelledSessionId) _sessionIds[`${topic}@${resolvedAgent || '_'}`] = cancelledSessionId;
+                if (!suppressChipTurnCount) _updateChipTurnCount(topic, resolvedAgent || null, cancelledSessionId || null, liveSessionTurnCount);
+                if (chainMarker) updateRouteChainMarkerTurnCount(chainMarker, 'origin', liveSessionTurnCount);
+                if (flowRoute || route) refreshRouteTurnCounts(flowRoute || route, { force: true });
+              }
+            }
+          } catch {}
+        }
       }
     } catch (error) {
       killBtn.disabled = false;
@@ -5476,6 +5496,15 @@ async function sendMessage(text, opts = {}) {
           turnStatus = 'cancelled';
           stopStatusFallback();
           renderCancelledThinking(cancelledTurnLabel(data.content));
+          if (data.session_turn_count != null) {
+            liveSessionTurnCount = parseInt(data.session_turn_count, 10) || liveSessionTurnCount;
+            resolvedAgent = data.agent || resolvedAgent;
+            const cancelledSessionId = data.session_id || lastSessionId;
+            if (cancelledSessionId && !adhoc) _sessionIds[`${topic}@${resolvedAgent || '_'}`] = cancelledSessionId;
+            if (!adhoc && !suppressChipTurnCount) _updateChipTurnCount(topic, resolvedAgent || null, cancelledSessionId || null, liveSessionTurnCount);
+            if (chainMarker && !adhoc) updateRouteChainMarkerTurnCount(chainMarker, 'origin', liveSessionTurnCount);
+            if (flowRoute || route) refreshRouteTurnCounts(flowRoute || route, { force: true });
+          }
           controller.abort();
           finalizeQuotaTracking();
         } else if (data.status === 'pending') {
