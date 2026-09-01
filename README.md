@@ -218,7 +218,7 @@ That difference matters:
 - **Process ownership:** Squid can show live processes, kill the exact running job, drain queued jobs, and recover after disconnects.
 - **Topic and agent lanes:** `#topic@agent` is closer to a named terminal workspace than a chat room. You can easily filter it to look like a chat room.
 - **Progress while work happens:** the thought bubble surfaces status, queued state, tool activity, and partial output before the final answer lands.
-- **UI plus command control:** click to stop a specific run, or type commands like `/stop`, `/stopall`, `/clear`, `/compact`, and `/filter`.
+- **UI plus command control:** click to stop a specific run, or type commands like `/stop`, `/stopall`, `/clear`, and `/filter`.
 - **Analytics attached to real work:** token usage is tied to each prompt and can be rolled up by topic, agent, or time.
 - **Built-in context experiments:** compare a native resumed session against an adhoc turn with only selected recent context.
 - **Local machine as the backend:** your Mac mini or workstation stays the execution environment, so the agent has the same filesystem, shell, credentials, and installed tools it would have in a terminal.
@@ -237,7 +237,7 @@ Use the agent directly when one terminal is enough. Use Squid when you want seve
 ```text
 Browser / phone / tablet
         |
-        | HTTP + SSE
+        | WebSocket (/ws/v1, versioned protocol) + HTTP
         v
 FastAPI Squid server
         |
@@ -253,6 +253,8 @@ FastAPI Squid server
 ```
 
 The CLI owns the real conversation context. Squid stores history, stats, topics, active session IDs, cwd locks, and UI state needed to make the workflow manageable. Session turns use native resume. Adhoc turns build an explicit limited-context prompt, which makes the two modes easy to compare.
+
+Live updates (streamed responses, queue/process state, multi-device sync) run over one versioned WebSocket protocol by default. Bounded HTTP requests still handle static assets, auth, history/search, and config. The older SSE transport is still available (`realtime.transport: sse` in `squid.yaml`, or `auto` to let the client fall back) and shares the same underlying event producers, but it's a legacy path being phased out as WebSocket reaches full parity.
 
 ## Good Fit
 
