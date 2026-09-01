@@ -62,6 +62,17 @@ without embedding unsettled security choices in code.
    hibernation behavior, WebSocket constraints, and rate-limiting availability
    before relying on them operationally.
 
+**Audit archive deployment:** use private Backblaze B2 buckets with default
+SSE-B2 encryption and Object Lock enabled. Pre-production uses
+`shore-audit-test` (`fc55027ee2ac52e1ae0f051c`) with one-day Governance
+retention. Production uses `shore-audit-prod`
+(`0c55d2aee29c52e1ae0f051c`); enable default 400-day Compliance retention and
+post-retention lifecycle deletion only after exporter verification, but before
+admitting external users. Use separate bucket-scoped keys, never production
+credentials in tests, and never commit key IDs or secrets. The production
+writer is write-only and has no read, delete, retention-management, legal-hold,
+governance-bypass, or bucket-management capability.
+
 **Acceptance:** the protocol and state machines have test vectors, including
 pairing and offline recovery verifier vectors; the threat model has no unowned
 critical mitigation; ADR-0039 is updated and accepted.

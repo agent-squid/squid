@@ -30,15 +30,29 @@ authorization decision, result class, host time, and prior host-event hash.
 Neither stores command text, response text, secrets, cookies, authorization
 headers, internal addresses, precise location, or full headers.
 
-Production export targets a dedicated AWS account S3 bucket with Object Lock in
-Compliance mode, versioning, default 400-day retention, and lifecycle deletion
-after 400 days. Shore's credential can only create objects with retention and
-cannot read, overwrite, shorten retention, or delete. The Security Audit Custodian has
-read/export access; compliance-mode deletion is unavailable even to that role.
+Production export targets the private, SSE-B2-encrypted Backblaze B2 bucket
+`shore-audit-prod` (bucket ID `0c55d2aee29c52e1ae0f051c`) in an account
+separate from Cloudflare. Object Lock must be enabled at bucket creation. Before
+external users are admitted, default retention must be set to Compliance mode
+for 400 days and lifecycle deletion configured for versions after their lock
+expires. Shore uses a bucket-scoped write-only application key with no read,
+delete, bucket-management, legal-hold, or governance-bypass capability; key
+material is never committed. Object names are unique and contain no user data.
+The Security Audit Custodian has separate read/export access; compliance-mode
+retention cannot be shortened or bypassed even by that role.
 Daily signed manifests anchor both chain heads, counts, and gaps. Export lag
 over five minutes pages Security; local queues are bounded but security actions
 fail closed if their audit record cannot be durably queued. Quarterly restore,
 fork, deletion, insertion, and correlation drills are required.
+
+Development and pre-production verification use the private, SSE-B2-encrypted
+bucket `shore-audit-test` (bucket ID `fc55027ee2ac52e1ae0f051c`) with Object
+Lock enabled and default Governance retention of one day. Its bucket-scoped key
+and data are isolated from production, and Shore is not granted governance
+bypass. Tests must cover retention, expiry, lifecycle deletion, manifest
+verification, restore, and rejection of overwrite/deletion attempts. The two
+buckets share the B2 account's free storage allowance; usage alerts are set
+before the allowance is exhausted. Test storage is never an audit authority.
 
 Raw IP is restricted to the audit archive and retained 30 days, after which a
 daily cryptographic-erasure job destroys its field-encryption key while the
