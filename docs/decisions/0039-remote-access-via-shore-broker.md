@@ -1,7 +1,7 @@
 ---
 status: proposed
 date: 2026-08-11
-updated: 2026-08-11
+updated: 2026-09-01
 ---
 # ADR-0039: Remote access via a Cloudflare Workers + Durable Objects broker (agentsquid.ai/@username)
 
@@ -112,13 +112,22 @@ giving users the shorter, single-domain URL.
   path) and the owning Durable Object holds that connection, using WebSocket
   hibernation so an idle connection costs near-zero compute.
 - **Request flow**: a request to `agentsquid.ai/@<username>` hits the
-  Worker, which resolves the immutable account ID through the identity index,
-  addresses that user's Durable Object, forwards the
-  request down the held WebSocket to the user's local AgentSquid instance,
-  and relays the response back.
+  Worker, which obtains the immutable account ID from the validated session,
+  confirms that its username binding matches the route, addresses that user's
+  Durable Object, forwards the request down the held WebSocket to the user's
+  local AgentSquid instance, and relays the response back. Unauthenticated
+  login/recovery lookup may consult the identity index before a session exists.
+- **Username resolution must not invoke the identity-index Durable Object on
+  every dashboard request.** After authentication, a signed session carries
+  the immutable account ID and current username; the Worker validates that
+  binding and addresses the account object directly. The identity index is
+  used for signup, login lookup, rename, and recovery, not as a per-request
+  forwarding hop. Otherwise ordinary HTTP traffic would consume at least two
+  Durable Object requests per operation and roughly halve the capacity
+  forecasts below.
 - Runs entirely on Cloudflare's free tier at expected early-stage volume
   (Workers Free: ~100K requests/day; Durable Objects on Workers Free:
-  ~1M requests/month, ~400K GB-seconds/month). No paid Cloudflare plan
+  ~100K requests/day and ~13K GB-seconds/day). No paid Cloudflare plan
   required to launch.
 - **Status/health updates are pushed over the WebSocket, not polled via
   HTTP.** The Workers Free request quota (~100K/day) is consumed by every
@@ -141,6 +150,116 @@ giving users the shorter, single-domain URL.
   design scales with connections, commands, and emitted state changes, not
   with polling frequency or total registered user count — idle accounts
   contribute negligible volume.
+
+### Traffic accounting and capacity forecast
+
+The WebSocket migration removes repeated polling for live state; it does not
+remove HTTP traffic. Files, topics, agents, stats, history, configuration,
+uploads, diffs, and other bounded request/response operations remain HTTP by
+design under ADR-0040. A remote HTTP operation that reaches Shore normally
+consumes one inbound Worker request and one request to the account Durable
+Object. Storage work inside the object is metered separately.
+
+The initial Worker WebSocket upgrade counts as a request. Messages routed
+through the Worker do not count as additional Worker requests. For Durable
+Objects, establishing the connection counts as a request, outgoing WebSocket
+messages are not charged as requests, and incoming WebSocket messages receive
+a 20:1 request-billing ratio. These rules are pricing assumptions, not protocol
+guarantees, and must be revalidated before launch and periodically afterward.
+
+Static client assets must be served outside the `agentsquid.ai/@*` Worker route
+through GitHub Pages or another static-assets path that does not invoke the
+Worker. Worker cache hits still count as Worker requests. Remote data and
+authenticated API responses must not be placed in shared public caches.
+
+As of 2026-09-01, the relevant published allowances are:
+
+| Resource | Free | Workers Paid standard |
+| --- | --- | --- |
+| Worker requests | 100,000/day; further invocations fail at the limit | 10M/month included, then $0.30/M |
+| Durable Object requests | 100,000/day; operations fail at the limit | 1M/month included, then $0.15/M |
+| Durable Object duration | 13,000 GB-s/day | 400,000 GB-s/month included, then usage pricing |
+
+Workers Paid has a $5/month minimum. Paying does not create a fixed DAU cap:
+usage continues with overage billing. The request prices are relatively small;
+Durable Object duration can dominate cost if sockets do not hibernate or event
+handlers remain active. Shore therefore requires the Durable Objects WebSocket
+Hibernation API and must measure duration from the first deployment.
+
+DAU forecasts use HTTP requests per active remote user per day. They assume
+one account-object invocation per HTTP request, 30 days/month, static assets do
+not invoke the Worker, and exclude abuse, storage operations, WebSocket
+upgrades/messages, and operational headroom:
+
+| Usage profile | HTTP requests/DAU/day | Free theoretical DAU | Free planning target (50% headroom) | DAU within paid 1M included DO requests/month |
+| --- | ---: | ---: | ---: | ---: |
+| Light | 50 | 2,000 | 1,000 | 666 |
+| Normal | 150 | 666 | 330 | 222 |
+| Heavy | 500 | 200 | 100 | 66 |
+
+The paid included Durable Object allowance is lower than a full month of the
+free daily allowance, but paid overages continue rather than failing at a daily
+hard stop. At the normal 150-request assumption, approximate request-only cost
+is:
+
+| Sustained DAU | HTTP requests/month | Approximate monthly Worker + DO request cost |
+| --- | ---: | ---: |
+| 1,000 | 4.5M | $5.53 |
+| 2,000 | 9M | $6.20 |
+| 5,000 | 22.5M | $11.98 |
+| 10,000 | 45M | $22.10 |
+
+These figures include the $5 minimum but exclude duration, storage, email,
+audit export, observability, taxes, and other services. They are planning
+estimates, not a capacity commitment. Launch planning is 100–300 remote DAU on
+Free, followed by a 500–1,000 DAU paid pilot. Forecasts must be replaced with
+observed requests per DAU and duration per event after the first 100 active
+users. Registered and idle accounts are not a useful capacity measure.
+
+### Monitoring, quota protection, and degradation
+
+Cloudflare's Workers and Durable Objects analytics are necessary but not
+sufficient. Shore must export per-route Worker invocations, Durable Object
+requests/duration/storage operations, WebSocket connections/messages and
+reconnects, HTTP requests per page load and DAU, per-account/device usage,
+rate-limit rejections, error rates, and projected quota-exhaustion time. The
+Cloudflare dashboard and GraphQL Analytics API feed alerts; paid-plan budget
+alerts are supplementary and are not treated as a real-time circuit breaker.
+
+Apply both global and per-account/device/IP limits before an account Durable
+Object is invoked. Use daily quota thresholds with tested operational actions:
+
+- **50%:** informational alert and inspect route/request distribution.
+- **70%:** operator warning; suppress optional refresh and prefetch work.
+- **85%:** tighten abusive-client limits and disable expensive nonessential
+  remote views while preserving security controls.
+- **95%:** preserve login, pairing, revocation, existing WebSockets, and minimal
+  read-only status; reject expensive operations with an explicit retry/fallback
+  response.
+- **100% or platform rejection:** show a clear Shore-unavailable state. Never
+  silently retry in a way that amplifies traffic.
+
+Authentication, pairing, revocation, and an emergency kill switch receive
+reserved operational capacity. Degradation must never bypass authentication,
+encryption, capability checks, replay protection, or audit. Paid deployments
+also use spend thresholds and a maximum-cost kill switch, because paid request
+limits do not stop traffic automatically.
+
+### Direct-access fallback
+
+Local access remains the guaranteed baseline. Tailscale is a documented,
+supported direct-access fallback for users willing to install it on both the
+host and phone. It is not an automatic transparent failover: Shore must not
+redirect users into a different trust/network model without explicit setup and
+consent. The remote-access settings page should report Shore availability,
+explain how to configure Tailscale before an incident, and retain the existing
+direct/Tailscale URL independently of Shore.
+
+Legitimate growth should normally move Shore to Workers Paid rather than force
+users onto Tailscale; request overages are inexpensive compared with the user
+friction. Tailscale provides resilience, operator independence, and an option
+for users who prefer direct WireGuard-based access. It also remains available
+during a Shore quota event or broker outage once the user has configured it.
 
 ### User registration
 
@@ -300,10 +419,10 @@ as v1 requirements, not later hardening:
 - AgentSquid must implement WebSocket reconnect/backoff logic against
   Durable Object hibernation and Worker restarts; this is new client-side
   complexity that a plain Cloudflare Tunnel setup would not require.
-- At very large scale, Workers/Durable Objects free-tier limits (~1M
-  requests/month, ~400K GB-seconds/month) will eventually require the
-  Workers Paid plan ($5/month minimum) — a much later and cheaper ceiling
-  than the per-seat or per-DNS-record alternatives above.
+- Workers/Durable Objects free-tier hard daily limits require monitoring and
+  graceful degradation; legitimate production growth will require Workers
+  Paid ($5/month minimum plus usage). Request overages are inexpensive, but
+  non-hibernating Durable Object duration can become the dominant cost.
 - Ties the core remote-access feature to Cloudflare's platform. Mitigation:
   keep the AgentSquid ↔ Worker protocol a plain WebSocket/JSON contract, so
   the broker could be reimplemented against another provider (or
@@ -317,3 +436,9 @@ as v1 requirements, not later hardening:
 - Cloudflare Durable Objects on Workers Free plan, WebSocket hibernation,
   SQLite storage backend (GA)
 - Cloudflare Workers Routes (path-scoped routing on an existing zone)
+- Cloudflare Workers pricing: https://developers.cloudflare.com/workers/platform/pricing/
+- Cloudflare Durable Objects pricing: https://developers.cloudflare.com/durable-objects/platform/pricing/
+- Cloudflare Pages Functions/static asset pricing:
+  https://developers.cloudflare.com/pages/functions/pricing/
+- Cloudflare GraphQL Analytics API:
+  https://developers.cloudflare.com/analytics/graphql-api/

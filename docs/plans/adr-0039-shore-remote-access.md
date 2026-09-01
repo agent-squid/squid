@@ -176,6 +176,10 @@ remote mutations.
 2. Add abuse controls, CSP, immutable/versioned client assets,
    reproducible-build hashes, dependency scanning, secret rotation, alerts,
    metrics, runbooks, backups, migration/rollback procedures, and kill switches.
+   Implement ADR-0039's per-route/per-account traffic accounting, quota
+   projections, 50/70/85/95-percent degradation thresholds, reserved security
+   capacity, paid-plan spend ceiling, and explicit Shore-unavailable response.
+   Document and test the opt-in local/Tailscale fallback before launch.
 3. Perform independent cryptographic/application security review and remediate
    all critical/high findings.
 4. Roll out in stages: internal opaque relay, paired read-only access,
