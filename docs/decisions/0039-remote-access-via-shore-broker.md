@@ -106,8 +106,17 @@ giving users the shorter, single-domain URL.
   account IDs and current usernames, and serializes uniqueness checks,
   signup, recovery, and username changes. Per-user objects remain the source
   of truth for account and device state.
-- **No `cloudflared` binary and no Cloudflare Tunnel resource.** Each
-  AgentSquid instance opens an outbound WebSocket directly to the Worker
+- **Exactly one current host per account.** Shore is a free service and does
+  not provide multi-host routing. The first installation receives an immutable
+  random `host_id`, its own key pair, and device/capability state inside the
+  account object; `agentsquid.ai/@<username>` always addresses that host. The
+  account object rejects registration of a second current host. Reinstallation
+  with the existing private key is a reconnect, while a lost-key replacement
+  must follow the recovery rules below, revoke the old host, and create a new
+  immutable `host_id`. Revoked host identities remain in audit history and do
+  not count as current hosts.
+- **No `cloudflared` binary and no Cloudflare Tunnel resource.** The account's
+  current AgentSquid installation opens an outbound WebSocket to the Worker
   (`wss://agentsquid.ai/@<username>/register`, or an equivalent registration
   path) and the owning Durable Object holds that connection, using WebSocket
   hibernation so an idle connection costs near-zero compute.
@@ -284,12 +293,42 @@ not by Cloudflare Access:
 
 1. **Device registration (host machine → broker)**: on `agentsquid login`,
    the CLI generates a local keypair; the private key never leaves the
-   machine. The public key is registered to the account at login time, and
-   the local AgentSquid process signs its WebSocket registration to the
-   Durable Object rather than presenting a static bearer token — closer to
-   SSH key auth than password auth. This prevents another party from
-   squatting an active registration for someone else's username even if a
-   single bearer secret were to leak.
+   machine. Initial host registration requires the same account authentication
+   and second factor as a remote browser session. The public key is registered
+   under a new immutable `host_id`, and the local AgentSquid process signs a
+   nonce-bound challenge on every WebSocket registration rather than presenting
+   a static bearer token — closer to SSH key auth than password auth. A
+   reconnect for an existing `host_id` must prove possession of the same key.
+   A different key cannot overwrite that identity, register alongside it, or
+   silently displace its connection; it must complete the replacement/recovery
+   rules below. Every connection, including a same-key reconnect, completes a
+   fresh nonce-bound proof before it can become current. If no prior socket is
+   open, or the prior socket is closed or heartbeat-expired, the connection is
+   a normal reconnect: it becomes current and creates an audit record without a
+   user alert. If the prior socket is still healthy, the new proven connection
+   wins and the older socket is terminated, but the displacement is treated as
+   a potential private-key compromise rather than a routine reconnect. Shore
+   immediately creates a correlated high-severity audit event and notifies all
+   active browser sessions and registered notification channels with time and
+   privacy-safe source metadata: connection time, coarse country/region,
+   network ASN/provider, known-versus-new-network status, an account-scoped
+   opaque network fingerprint, and host client version. Browser and out-of-band
+   notifications never contain the host's raw public IP, precise location,
+   internal addresses, or full request headers; the raw source IP remains only
+   in the access-controlled audit record under its retention policy.
+
+   The notification exposes a prominent revoke-host action, but executing it
+   requires a fresh passkey/TOTP step-up or one completed within the previous
+   five minutes. Revocation atomically terminates the host connection and all
+   browser sessions, pairings, and capabilities for that host, remains available
+   during quota degradation, and creates its own audit/security notification.
+   Repeated displacement alerts within a ten-minute incident window may be
+   batched, but never dropped: the first alert is immediate, the batch reports
+   event count, first/last time, and distinct opaque network fingerprints, and
+   every individual event remains in the audit log. A displacement after the
+   window starts a new immediate alert. Displacement alone does not
+   automatically revoke the host because legitimate process/network overlap is
+   possible.
 
 2. **End-user session (phone/browser → broker)**: visiting
    `agentsquid.ai/@<username>` requires a login (same account system as
@@ -301,12 +340,58 @@ not by Cloudflare Access:
 
 3. **Phone-to-host pairing**: browser login authenticates the account but
    does not authorize commands by itself. A new phone generates a non-
-   extractable signing/encryption keypair and must be approved on the host
-   through a locally displayed one-time pairing code that commits to both
-   device public-key fingerprints. The host persists the approved phone key;
-   the phone pins the host key. Key changes require a new local pairing or an
-   explicit recovery flow that revokes prior device keys. The broker cannot
-   add or replace either key.
+   extractable signing/encryption keypair and must be approved on the physical
+   host. The host displays a QR code backed by at least 128 bits of randomness,
+   plus a human-readable representation with equivalent entropy. The ceremony
+   uses a reviewed password-authenticated key-exchange or equivalent
+   out-of-band protocol so the broker never receives the pairing secret and a
+   captured transcript cannot be used for offline guessing. It binds the
+   account ID, immutable host ID, browser-device ID, protocol version, ceremony
+   nonce, and both public-key fingerprints. The secret expires after five
+   minutes, is single-use, permits at most five failed attempts, and is limited
+   per account, host, browser session/device, and source IP; exhaustion requires
+   the host to begin a new ceremony. The host persists the approved phone key,
+   and the phone pins the host key. Key changes require a new local pairing.
+   The broker cannot add or replace either key.
+
+### Host-key continuity and recovery
+
+Account recovery and cryptographic device recovery are deliberately separate.
+Recovering the email account or username can restore account administration,
+but cannot authorize commands, approve a browser device, export a host private
+key, replace an existing host key in place, or impersonate the old host.
+
+- A normal host-key change requires proof from the existing host key and local
+  confirmation on that host. It is recorded as a new key epoch; paired browsers
+  receive a blocking key-change warning and must pair again.
+- Loss of a host private key creates a new immutable host identity and trust
+  root. It never updates the old host record to point at a replacement key.
+  The lost identity is revoked but retained in audit history, all sessions and
+  browser-device approvals for it are revoked, and every browser must pair with
+  the replacement host locally.
+- Recovery that revokes a lost host requires a user-held offline recovery
+  secret. When the existing host is still available, ordinary locally confirmed
+  key rotation is used instead of recovery. If neither path is available,
+  account administration may be restored through a delayed, strongly
+  authenticated recovery process with repeated out-of-band notifications, but
+  the replacement host still begins as a visibly new trust root and cannot
+  inherit old device approvals or capabilities.
+- Recovery secrets are generated client-side, shown once, stored only as a
+  verifier by the service, rate-limited, rotatable, and invalidated after use.
+  The exact verifier and recovery protocol require security review and test
+  vectors before ADR acceptance.
+- Existing sessions and registered notification channels are notified when
+  host registration, key change, revocation, or recovery begins and completes.
+  Destructive recovery without a trusted approval path has a seven-day
+  cooling-off period, with notifications at initiation and again at least 24
+  hours before completion; security notifications include a cancellation path.
+- A healthy same-key connection displacement is also actively notified under
+  the registration rules above. A stale-socket reconnect is audit-only. Socket
+  health is determined from broker-observed close/heartbeat state, not from a
+  client-provided claim.
+- Support staff and administrators cannot waive these rules, mint device trust,
+  suppress the key-change warning, shorten the cooling-off period, or make a
+  replacement host cryptographically continuous with the lost host.
 
 ## Security
 
@@ -355,6 +440,19 @@ as v1 requirements, not later hardening:
   Sessions are only issuable through the user's own login flow or their
   registered device key — a capability to mint sessions on demand is a
   backdoor by construction, independent of payload encryption.
+- **Host identity is append-only and key continuity is explicit.** A public-key
+  mismatch never falls back to account authentication, last-connection-wins,
+  or trust on first use. Browser clients pin `(account_id, host_id, key_epoch,
+  host_public_key)` and fail closed on any mismatch. Initial registration,
+  key-epoch changes, host replacement, revocation, and recovery are signed when
+  the existing trusted key is available and always enter the tamper-evident
+  audit log.
+- **Pairing endpoints are hostile-input surfaces.** Pairing creation, exchange,
+  approval, and cancellation receive stricter rate limits than ordinary
+  dashboard traffic. Responses are indistinguishable for unknown/expired/used
+  secrets where practical, attempts are audit logged without storing the
+  secret, and neither quota degradation nor support tooling may weaken expiry,
+  entropy, attempt, or local-presence requirements.
 - **Rate limiting on the `/@*` route.** Usernames are public and guessable
   by design; without per-IP rate limiting and lockout on failed logins,
   `/@username` is brute-forceable. Use Cloudflare's WAF/rate-limiting rules

@@ -15,8 +15,14 @@ second command, event, replay, or snapshot model.
 - The broker never receives keys that can decrypt or forge command payloads.
 - Account login alone never authorizes a device to issue host commands.
 - Host and browser device keys are generated and retained locally.
+- Host identities are immutable and append-only; a different key cannot replace
+  or displace an existing host identity through account login.
+- Each account has exactly one current host; a second host is rejected unless
+  the current identity is revoked through the defined replacement flow.
 - Pairing establishes trust through a host-displayed code that commits to both
   device-key fingerprints; broker-provided trust-on-first-use is insufficient.
+- Account recovery cannot recover cryptographic trust or inherit old pairings
+  and capabilities; replacement hosts are visibly new trust roots.
 - Every command is signed, encrypted, capability-checked, replay-protected,
   expiry-checked, and correlated with tamper-evident audit records.
 - Remote access is disabled by default. Arbitrary shell capability is separate,
@@ -35,8 +41,9 @@ without embedding unsettled security choices in code.
    key formats, sequence and request-ID rules, expiry/skew policy, and error
    behavior in a versioned Shore protocol document. The ciphertext payload is
    an ADR-0040 v1 frame.
-2. Define host registration, browser session, pairing, recovery, revocation,
-   username rename, and account deletion state machines.
+2. Define single-host registration/routing, browser session, pairing, key
+   epochs, host replacement, recovery, revocation, username rename, and account
+   deletion state machines.
 3. Define the initial capability allowlist and the exact ADR-0040 commands and
    scopes available to each capability. Default-deny unknown and future types.
 4. Define audit retention/export, append-only destination, credential ownership,
@@ -48,8 +55,9 @@ without embedding unsettled security choices in code.
    hibernation behavior, WebSocket constraints, and rate-limiting availability
    before relying on them operationally.
 
-**Acceptance:** the protocol and state machines have test vectors; the threat
-model has no unowned critical mitigation; ADR-0039 is updated and accepted.
+**Acceptance:** the protocol and state machines have test vectors, including
+pairing and offline recovery verifier vectors; the threat model has no unowned
+critical mitigation; ADR-0039 is updated and accepted.
 
 ## Milestone 1 — Broker skeleton and opaque relay
 
@@ -64,14 +72,28 @@ remote execution.
    traffic untouched.
 3. Add the identity-index object and immutable-account-ID keyed account object,
    including normalized username uniqueness and rename transactions.
-4. Add authenticated host and browser WebSocket attachment, hibernation-safe
-   attachment metadata, bounded queues, connection replacement rules, and
-   deterministic offline/overload errors.
+4. Add authenticated host and browser WebSocket attachment, one-current-host
+   enforcement, immutable host IDs, hibernation-safe attachment metadata,
+   bounded queues, broker-observed socket health, same-key reconnect/displacement
+   rules, and deterministic offline/overload errors. A different key must never
+   replace an existing host connection or identity outside the replacement
+   flow. A healthy same-key displacement must terminate the older socket,
+   create a high-severity correlated audit event, notify the user with the ADR's
+   privacy-safe metadata (never raw IP/precise location/full headers), and expose
+   step-up-protected atomic host revocation; stale reconnects are audit-only.
+   The first alert is immediate. Later alerts in the incident window are batched
+   and delivered with counts/times/distinct opaque network fingerprints, never
+   dropped, while every event remains individually auditable.
 5. Relay only opaque test frames with size, rate, origin, and lifetime limits.
    Do not expose a command-capable production route yet.
 
 **Acceptance:** local integration tests cover routing isolation, concurrent
-username claims, reconnect/replacement, hibernation restore, host offline,
+username claims, rejection of a second current host, same-key reconnect,
+healthy same-key displacement/older-socket termination, stale-socket quiet
+reconnect, first-alert delivery, lossless repeated-alert batching, notification
+metadata redaction, five-minute step-up freshness, atomic revocation and its
+availability during quota degradation, different-key displacement rejection,
+replacement only after revocation, hibernation restore, host offline,
 backpressure, malformed frames, and broker inability to inspect test payloads.
 
 ## Milestone 2 — Account authentication and signed host registration
@@ -83,17 +105,24 @@ key without treating either as command authorization.
 
 1. Implement email magic-link signup/login with short-lived, rotating sessions,
    CSRF protection, secure cookie settings, rate limits, and mandatory second
-   factor before remote-access session issuance.
+   factor before remote-access session or initial host registration issuance.
 2. Add CLI account login and local host-key generation/storage with explicit
    permissions and no private-key export.
-3. Register the host public key and require nonce-bound signed challenges on
-   each host WebSocket connection. Reject stale, replayed, or mismatched
-   registrations.
-4. Add account, session, and host-device listing and revocation surfaces.
+3. Register each host public key under an immutable host ID and require
+   nonce-bound signed challenges on each host WebSocket connection. Reject
+   stale, replayed, mismatched, or in-place key-replacement registrations.
+4. Add account, session, current/revoked-host, key-epoch, and browser-device
+   listing and revocation surfaces.
+5. Implement the ADR recovery split: account recovery restores administration,
+   while host loss creates a new trust root, revokes the old host's sessions,
+   pairings, and capabilities, and never inherits its identity or trust.
 
 **Acceptance:** tests cover token replay/expiry, session rotation/revocation,
-login and registration throttling, host impersonation, key replacement, and
-restart/reconnect. Passing this milestone still does not permit commands.
+login and registration throttling, second-factor enforcement, host
+impersonation, mismatch/displacement rejection, same-key reconnect, recovery
+notifications/seven-day cooling-off/cancellation, lost-host replacement, and
+proof that old pairings/capabilities are not inherited. Passing this milestone
+still does not permit commands.
 
 ## Milestone 3 — End-to-end channel and local pairing
 
@@ -105,9 +134,12 @@ between a paired browser device and the host.
 1. Implement the specified crypto envelope on host and browser using audited
    platform cryptography, canonical bytes, and published cross-language test
    vectors.
-2. Generate a non-extractable browser key and perform the local pairing
-   ceremony. The displayed code must bind account, host, browser, protocol
-   version, and both public-key fingerprints.
+2. Generate a non-extractable browser key and perform the reviewed local pairing
+   protocol. Its QR/human representation has at least 128 bits of entropy,
+   expires after five minutes, is single-use, allows at most five failures, is
+   rate-limited at every relevant identity layer, resists offline guessing, and
+   binds account, immutable host, browser device, protocol version, nonce, and
+   both public-key fingerprints.
 3. Persist approved device keys and replay state on the host. Pin the host key
    in the browser. Require local approval for key changes; recovery revokes old
    device trust.
@@ -116,8 +148,10 @@ between a paired browser device and the host.
 
 **Acceptance:** interoperability and negative tests cover tampering, wrong keys,
 replay across connections, reordered/duplicate IDs, clock skew, key
-substitution, pairing races, revocation, recovery, and broker frame injection.
-An independent security review has no unresolved critical or high findings.
+substitution, pairing expiry/reuse/attempt exhaustion/races/rate limits/offline
+guessing, host-key epoch changes, revocation, recovery, and broker frame
+injection. An independent security review has no unresolved critical or high
+findings.
 
 ## Milestone 4 — Capability-scoped ADR-0040 relay
 
@@ -157,11 +191,20 @@ attributable without storing command plaintext.
 3. Export both streams to append-only storage under separate credentials that
    neither a remote session nor the host runtime can erase.
 4. Add user-visible session/device/capability history and security notifications
-   for pairing, key changes, recovery, revocation, and privileged grants.
+   for pairing, key changes, healthy same-key host displacement, recovery,
+   revocation, and privileged grants. Displacement notifications include an
+   immediate-access revoke-host action protected by recent step-up and correlate
+   to the broker audit event. Raw IP and precise location remain restricted to
+   the audit system and are never copied into browser/out-of-band notifications.
 
 **Acceptance:** tests detect deletion, insertion, mutation, fork, missing
-correlation, and forged host events; retention and redaction tests show command
-text and secrets are absent by default.
+correlation, and forged host events; a healthy same-key displacement produces
+both the correlated audit record and first user notification while stale
+reconnect does not alert; batching preserves and later surfaces every repeated
+event; revocation is step-up protected and atomically invalidates the host
+connection, browser sessions, pairings, and capabilities; retention and
+redaction tests show command text, secrets, raw IP, precise location, and full
+headers are absent from user notifications by default.
 
 ## Milestone 6 — Production hardening and staged rollout
 
