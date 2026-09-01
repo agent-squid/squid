@@ -32,6 +32,13 @@ second command, event, replay, or snapshot model.
 
 ## Milestone 0 — Resolve specifications and operational ownership
 
+**Status:** Complete (2026-09-01). The accepted contract is
+[`shore-protocol-v1.md`](../shore-protocol-v1.md), its
+[`test vectors`](../shore-protocol-v1-vectors.json),
+[`shore-state-machines.md`](../shore-state-machines.md), and
+[`shore-security-operations.md`](../shore-security-operations.md). ADR-0039 is
+accepted. Later milestones must not weaken these gates.
+
 **Objective:** turn the proposed ADR into an accepted, implementable contract
 without embedding unsettled security choices in code.
 

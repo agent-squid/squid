@@ -11455,6 +11455,11 @@ function renderProcPopup(processes, queued) {
           await cancelRealtimeMessage(
             parseInt(btn.dataset.msgid), btn.dataset.topic, btn.dataset.agent,
           );
+          // This stop button can cancel a turn that has no live "thinking"
+          // bubble watching it on screen (e.g. a background/idle session), so
+          // nothing else refreshes its turn count — do it here too, same as
+          // the in-bubble kill button and status-poll cancelled branch.
+          if (btn.dataset.agent) refreshComposerSessionCount(btn.dataset.topic || 'default', btn.dataset.agent);
         } else {
           const b = { command: 'stop', topic: btn.dataset.topic, agent: btn.dataset.agent };
           const response = await fetch('/cmd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });

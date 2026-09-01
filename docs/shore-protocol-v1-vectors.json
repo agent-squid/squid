@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "encoding": "base64url-unpadded",
+  "envelope": {
+    "host_x25519_private_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "host_x25519_public": "j0DFrbaPJWJK5bIU6nZ6bslNgp09e14a0bpvPiE4KF8",
+    "browser_x25519_private_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "browser_x25519_public": "NYBy1jZYgNGu6jKa35EhODhR7SGijjt16WXQ0s0WYlQ",
+    "browser_ed25519_seed_hex": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "browser_ed25519_public": "JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0",
+    "shared_secret": "lmOqHal-hIqRSkNtBBY9-7iRePEH8bW3ftOFQgM4KFQ",
+    "hkdf_salt": "HjbP9iIwlkTAnJTE6Cy2J0GvyNUbmt3ei5wzIvb5bf0",
+    "aes_key": "ASlkKZPci9aNSOI44n66LGkp2MBfEolQ8ff518pCGJQ",
+    "aad_jcs": "{\"account_id\":\"018f1f25-3f6b-7d75-a4d1-62d771381b20\",\"device_id\":\"018f1f25-8614-7e41-8c5c-fc0b6eefad62\",\"direction\":\"browser_to_host\",\"expires_at\":\"2026-09-01T12:00:30.000Z\",\"host_id\":\"018f1f24-e9ec-7f12-b20a-67fc03679f32\",\"issued_at\":\"2026-09-01T12:00:00.000Z\",\"key_epoch\":1,\"nonce\":\"AAECAwQFBgcICQoL\",\"request_id\":\"018f1f25-c930-76f0-86e7-cb06d94e6a30\",\"seq\":\"1\",\"v\":1}",
+    "plaintext_jcs": "{\"payload\":{\"client_id\":\"phone-01\",\"cursor\":17,\"global\":true,\"resources\":[]},\"request_id\":null,\"scope\":null,\"type\":\"subscribe\",\"v\":1}",
+    "ciphertext_and_tag": "MYotC_PZyt9kQxo561WfgbZgItPaMlCUsVL0ZY4GVM8yv6aJWEMeBy_b7tjJcYwCRw8On1y5sKrC-9uudFBw4UZf7E00kIiQ9W4z22eus6HQn72Qbv-XT-TcCqc2i_A6kfqCsj-q7vsiL-anrm01-x4mh8rzmfBdVh-wSNTfU0-QvmZN882wuMwah4MTGQt-9-s-Xuk",
+    "signature": "2t-zkGxVZQFenSTaI_ejfxq8pkjb_XPYEVuh_Z-e-8850n7ngG3Dv1aoJSv3WNmsrXd7-wwqfVnA0QEbOz0MCw"
+  },
+  "pairing": {
+    "pairing_secret_hex": "000102030405060708090a0b0c0d0e0f",
+    "ceremony_nonce_hex": "101112131415161718191a1b1c1d1e1f",
+    "binding_jcs": "{\"account_id\":\"018f1f25-3f6b-7d75-a4d1-62d771381b20\",\"browser_enc_fingerprint\":\"sha256:browser-enc-example\",\"browser_sign_fingerprint\":\"sha256:browser-sign-example\",\"ceremony_nonce\":\"EBESExQVFhcYGRobHB0eHw\",\"device_id\":\"018f1f25-8614-7e41-8c5c-fc0b6eefad62\",\"host_enc_fingerprint\":\"sha256:host-enc-example\",\"host_id\":\"018f1f24-e9ec-7f12-b20a-67fc03679f32\",\"host_sign_fingerprint\":\"sha256:host-sign-example\",\"v\":1}",
+    "pair_key": "K_gOfQ_W6miVW6yJR7xgXRhLutQDYtqpCDnZ054s_0I",
+    "browser_finished": "59YQurwrHAsFeHN0EKaaiNbG8I-NfPbCK80-O55jRw0"
+  },
+  "recovery": {
+    "account_id": "018f1f25-3f6b-7d75-a4d1-62d771381b20",
+    "secret": "oKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr8",
+    "verifier": "kej708QkRgf4xpOFhmTubnLb7kAMnLaHEyxL9q8g_24"
+  },
+  "state_machine_vectors": [
+    {"name": "first_host", "before": {"current_host": null}, "event": "register_valid_new_host", "after": {"candidate": "current", "key_epoch": 1}},
+    {"name": "second_host_rejected", "before": {"current_host": "host-a"}, "event": "register_host_b", "after": {"current_host": "host-a", "result": "different_host_rejected"}},
+    {"name": "healthy_same_key_displacement", "before": {"socket_a": "healthy"}, "event": "socket_b_same_key_proven", "after": {"socket_a": "closed", "socket_b": "current_socket", "audit": "high", "notification": "immediate"}},
+    {"name": "stale_same_key_reconnect", "before": {"socket_a": "heartbeat_expired"}, "event": "socket_b_same_key_proven", "after": {"socket_a": "stale", "socket_b": "current_socket", "audit": "normal", "notification": null}},
+    {"name": "pairing_race", "before": {"ceremony": "unused"}, "events": ["valid_finish_a", "valid_finish_b"], "after": {"success_count": 1, "ceremony": "used", "loser": "generic_failure"}},
+    {"name": "pairing_exhaustion", "before": {"ceremony": "unused", "failures": 4}, "event": "invalid_finish", "after": {"ceremony": "exhausted", "failures": 5}},
+    {"name": "atomic_host_revoke", "before": {"host": "current", "browser_sessions": 2, "pairings": 2, "grants": 1}, "event": "fresh_step_up_revoke", "after": {"host": "revoked", "current_host": null, "browser_sessions": 0, "pairings": 0, "grants": 0, "socket": "closed"}},
+    {"name": "recovery_cooling_off", "before": {"recovery": "idle", "trusted_host_approval": false}, "event": "valid_recovery_verifier", "after": {"recovery": "cooling_off", "earliest_completion_days": 7, "notification": "immediate"}},
+    {"name": "recovery_replacement", "before": {"old_host": "current", "recovery": "cooling_off", "elapsed_days": 7}, "event": "complete_recovery", "after": {"old_host": "revoked", "current_host": null, "inherited_pairings": 0, "inherited_grants": 0}},
+    {"name": "rename_crash_before_commit", "before": {"old_route": "authoritative", "new_route": "reserved"}, "event": "constructor_restart", "after": {"transaction": "complete_or_rollback", "authoritative_route_count": 1}},
+    {"name": "account_delete_cancel", "before": {"account": "deletion_pending", "elapsed_days": 3}, "event": "valid_cancel", "after": {"account": "active"}},
+    {"name": "revocation_race_with_command", "before": {"generation": 8}, "events": ["command_reads_generation_8", "revoke_commits_generation_9", "command_authorize"], "after": {"dispatch_count": 0, "result": "revoked"}}
+  ],
+  "negative_mutations": [
+    {"name": "signature_bit_flip", "expect": "shore_bad_signature"},
+    {"name": "aad_device_id_change", "expect": "shore_identity_mismatch"},
+    {"name": "ciphertext_bit_flip", "expect": "shore_bad_signature"},
+    {"name": "duplicate_seq", "expect": "shore_replay"},
+    {"name": "duplicate_request_id_new_seq", "expect": "shore_replay"},
+    {"name": "expires_at_plus_61_seconds", "expect": "shore_expired"},
+    {"name": "unknown_outer_field", "expect": "shore_invalid_frame"},
+    {"name": "plaintext_chat_start", "expect": "shore_capability_denied"},
+    {"name": "plaintext_auth_start", "expect": "shore_unsupported_type"},
+    {"name": "unknown_subscription_scope", "expect": "shore_unauthorized_scope"}
+  ]
+}

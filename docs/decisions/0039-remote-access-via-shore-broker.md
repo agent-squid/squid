@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-08-11
 updated: 2026-09-01
 ---
@@ -72,7 +72,7 @@ not a typical web-app login.
 ## Decision
 
 Build the remote-access broker as a single Cloudflare Worker, backed by one
-Durable Object per registered username, reachable at
+Durable Object per immutable account ID, reachable at
 `agentsquid.ai/@<username>`.
 
 Implementation sequencing, acceptance gates, and verification are maintained
@@ -84,6 +84,18 @@ The broker carries the versioned real-time application protocol defined by
 ADR-0040. Implement and validate that protocol locally before making the broker
 its remote transport; Shore must not define a second set of chat, lifecycle,
 reconnect, or replay semantics.
+
+The accepted implementation contract is split into these normative documents:
+
+- [Shore protocol v1](../shore-protocol-v1.md), including algorithms,
+  serialization, envelope validation, capability registry, pairing, recovery
+  verifier, and [test vectors](../shore-protocol-v1-vectors.json);
+- [Shore identity and lifecycle state machines](../shore-state-machines.md);
+- [Shore security, privacy, operations, threat model, and Cloudflare
+  revalidation](../shore-security-operations.md).
+
+Changes to those contracts require an ADR amendment and new vectors; an
+implementation must not silently choose different security semantics.
 
 ### Coexisting with the existing GitHub-Pages-hosted site
 
@@ -378,8 +390,8 @@ key, replace an existing host key in place, or impersonate the old host.
   inherit old device approvals or capabilities.
 - Recovery secrets are generated client-side, shown once, stored only as a
   verifier by the service, rate-limited, rotatable, and invalidated after use.
-  The exact verifier and recovery protocol require security review and test
-  vectors before ADR acceptance.
+  The verifier and recovery protocol are specified in the accepted Shore v1
+  protocol and state-machine documents and covered by normative test vectors.
 - Existing sessions and registered notification channels are notified when
   host registration, key change, revocation, or recovery begins and completes.
   Destructive recovery without a trusted approval path has a seven-day
@@ -455,8 +467,9 @@ as v1 requirements, not later hardening:
   entropy, attempt, or local-presence requirements.
 - **Rate limiting on the `/@*` route.** Usernames are public and guessable
   by design; without per-IP rate limiting and lockout on failed logins,
-  `/@username` is brute-forceable. Use Cloudflare's WAF/rate-limiting rules
-  (available on the free plan) scoped to this route.
+  `/@username` is brute-forceable. The Free WAF's one coarse IP/path rule is
+  only an outer guard; Worker/account-object logic enforces the required
+  account, device, session, pairing, and reserved-capacity limits.
 - **Scoped execution privilege.** SSH inherits the OS's user/permission
   model for free; a custom command-execution API does not unless it is
   deliberately built in. AgentSquid should run as a dedicated, low-privilege
@@ -527,6 +540,10 @@ as v1 requirements, not later hardening:
   self-hosted) without changing the client-side design.
 
 ## References
+
+- Shore protocol v1: ../shore-protocol-v1.md
+- Shore state machines: ../shore-state-machines.md
+- Shore security and operations contract: ../shore-security-operations.md
 
 - Cloudflare DNS record limits per zone (Free: 200 for zones created on/after
   2024-09-01, 1,000 for older zones; Pro/Business/Enterprise: 3,500)
