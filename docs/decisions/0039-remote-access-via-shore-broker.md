@@ -75,6 +75,11 @@ Build the remote-access broker as a single Cloudflare Worker, backed by one
 Durable Object per registered username, reachable at
 `agentsquid.ai/@<username>`.
 
+Implementation sequencing, acceptance gates, and verification are maintained
+in the [ADR-0039 Shore implementation plan](../plans/adr-0039-shore-remote-access.md).
+This ADR remains the authority for architecture and security decisions; the
+plan must not weaken or silently replace them.
+
 The broker carries the versioned real-time application protocol defined by
 ADR-0040. Implement and validate that protocol locally before making the broker
 its remote transport; Shore must not define a second set of chat, lifecycle,
