@@ -336,8 +336,9 @@ not by Cloudflare Access:
    during quota degradation, and creates its own audit/security notification.
    Repeated displacement alerts within a ten-minute incident window may be
    batched, but never dropped: the first alert is immediate, the batch reports
-   event count, first/last time, and distinct opaque network fingerprints, and
-   every individual event remains in the audit log. A displacement after the
+   event count, first/last time, an exact distinct-fingerprint count, and a
+   bounded sample of opaque network fingerprints; every individual event and
+   its fingerprint remain in the audit log. A displacement after the
    window starts a new immediate alert. Displacement alone does not
    automatically revoke the host because legitimate process/network overlap is
    possible.

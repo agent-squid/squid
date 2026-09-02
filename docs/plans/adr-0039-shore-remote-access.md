@@ -100,8 +100,9 @@ remote execution.
    privacy-safe metadata (never raw IP/precise location/full headers), and expose
    step-up-protected atomic host revocation; stale reconnects are audit-only.
    The first alert is immediate. Later alerts in the incident window are batched
-   and delivered with counts/times/distinct opaque network fingerprints, never
-   dropped, while every event remains individually auditable.
+   and delivered with counts/times, an exact distinct-fingerprint count, and a
+   bounded sample of opaque network fingerprints, never dropped, while every
+   event and its fingerprint remain individually auditable.
 5. Relay only opaque test frames with size, rate, origin, and lifetime limits.
    Do not expose a command-capable production route yet.
 
@@ -112,7 +113,11 @@ reconnect, first-alert delivery, lossless repeated-alert batching, notification
 metadata redaction, five-minute step-up freshness, atomic revocation and its
 availability during quota degradation, different-key displacement rejection,
 replacement only after revocation, hibernation restore, host offline,
-backpressure, malformed frames, and broker inability to inspect test payloads.
+backpressure, malformed frames, and byte-for-byte opaque relay behavior without
+payload decoding. Milestone 1 does not provide cryptographic confidentiality
+from the broker: test frames remain inspectable in principle until Milestone 3
+implements end-to-end encryption, and no command-capable route may be enabled
+before that gate passes.
 
 ## Milestone 2 — Account authentication and signed host registration
 
