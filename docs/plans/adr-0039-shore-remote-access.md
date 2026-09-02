@@ -1,5 +1,8 @@
 # Plan: ADR-0039 Shore remote access
 
+**Status:** In progress (2026-09-02). Milestones 0–2 are complete; Milestone 3
+is next. No production command-capable route is enabled.
+
 This is the implementation plan for
 [ADR-0039](../decisions/0039-remote-access-via-shore-broker.md). The ADR owns
 the architectural and security decisions; this document owns sequencing,
@@ -79,6 +82,10 @@ critical mitigation; ADR-0039 is updated and accepted.
 
 ## Milestone 1 — Broker skeleton and opaque relay
 
+**Status:** Complete (2026-09-02). The broker skeleton, identity index,
+single-host lifecycle, opaque relay, and acceptance coverage are implemented.
+No production command-capable route is enabled.
+
 **Objective:** establish deployable Worker/Durable Object boundaries without
 remote execution.
 
@@ -121,6 +128,10 @@ before that gate passes.
 
 ## Milestone 2 — Account authentication and signed host registration
 
+**Status:** Complete (2026-09-02). Account authentication, second-factor
+enforcement, signed host registration, device revocation, and recovery flows
+are implemented with acceptance coverage.
+
 **Objective:** authenticate accounts and prove host possession of its private
 key without treating either as command authorization.
 
@@ -148,6 +159,8 @@ proof that old pairings/capabilities are not inherited. Passing this milestone
 still does not permit commands.
 
 ## Milestone 3 — End-to-end channel and local pairing
+
+**Status:** Not started; next milestone.
 
 **Objective:** establish broker-blind, mutually authenticated communication
 between a paired browser device and the host.
@@ -178,6 +191,8 @@ findings.
 
 ## Milestone 4 — Capability-scoped ADR-0040 relay
 
+**Status:** Not started; depends on Milestone 3.
+
 **Objective:** expose a minimal safe subset of the existing real-time protocol.
 
 **Actions:**
@@ -201,6 +216,8 @@ tests prove every non-allowlisted command/scope fails closed without side
 effects.
 
 ## Milestone 5 — Correlated tamper-evident audit
+
+**Status:** Not started; depends on Milestone 4.
 
 **Objective:** make account, pairing, capability, and command activity
 attributable without storing command plaintext.
@@ -230,6 +247,8 @@ redaction tests show command text, secrets, raw IP, precise location, and full
 headers are absent from user notifications by default.
 
 ## Milestone 6 — Production hardening and staged rollout
+
+**Status:** Not started; depends on Milestone 5.
 
 **Objective:** prove the system fails closed and is operable before enabling
 remote mutations.
