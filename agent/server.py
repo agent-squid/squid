@@ -1557,16 +1557,18 @@ async def run_cmd(req: CmdRequest):
         if not get_agent(agent):
             return JSONResponse({"ok": False, "error": f"agent not found: {agent}"}, status_code=400)
         killed = kill_procs_by_topic(topic, agent=agent, adhoc=False)
-        conflicts = {}
         if WORKTREE_ISOLATION_ENABLED:
             from .worktree import cleanup_worktrees
-            conflicts = await cleanup_worktrees(topic)
+
+            async def _sweep() -> None:
+                try:
+                    await cleanup_worktrees(topic)
+                except Exception:
+                    log.exception("worktree cleanup failed for topic=%s", topic)
+            asyncio.create_task(_sweep(), name=f"squid-worktree-sweep-{topic}")
         clear_topic_session(topic, agent)
         log.info("cmd %s topic=%s agent=%s killed=%s", req.command, topic, agent, killed)
-        result: dict = {"ok": True, "agent": agent}
-        if conflicts:
-            result["worktree_conflicts"] = conflicts
-        return JSONResponse(result)
+        return JSONResponse({"ok": True, "agent": agent})
 
     if req.command == "journal":
         week_key, week_start, week_end = _current_week()
@@ -4973,6 +4975,9 @@ def main():
     host = _cfg["server"]["host"]
     port = _cfg["server"]["port"]
     args = [arg for arg in sys.argv[1:] if arg != "--fg"]
+    if args and args[0] == "login":
+        from .shore import login
+        sys.exit(login(args[1:]))
     lifecycle_commands = {"start", "stop", "restart", "status"}
     if args and args[0] in {"-h", "--help"}:
         _print_lifecycle_usage()

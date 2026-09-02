@@ -19,6 +19,7 @@ dependencies = [
     "pyyaml>=6.0",
     "curl-cffi>=0.15.0",
     "browser-cookie3>=0.19.0",
+    "cryptography>=43.0.0",
 ]
 classifiers = [
     "Environment :: Console",
