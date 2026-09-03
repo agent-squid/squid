@@ -1,12 +1,19 @@
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 
 from agent.shore_crypto import (
     DeviceTrustStore, PairingCoordinator, ReplayStore, ShoreProtocolError,
-    canonical, derive_pair_key, open_envelope, pairing_finished, seal_envelope,
+    b64url, canonical, derive_envelope_key, derive_pair_key, open_envelope,
+    pairing_finished, seal_envelope, unb64url,
+)
+
+VECTORS = json.loads(
+    (Path(__file__).resolve().parents[1] / "docs" / "shore-protocol-v1-vectors.json").read_text()
 )
 
 
@@ -193,3 +200,78 @@ def test_persistence_failure_does_not_strand_used_ceremony(tmp_path, monkeypatch
     with pytest.raises(ShoreProtocolError, match="pairing_failed"):
         pairing.finish(DEVICE_ID, proof, now=101)
     pairing.begin(DEVICE_ID, raw(browser_signing.public_key()), raw(browser_agreement.public_key()), now=102)
+
+
+def test_reproduces_normative_shore_v1_envelope_vector():
+    # shore-protocol-v1.md is the cross-language wire contract: an
+    # implementation MUST reproduce these exact bytes, not merely round-trip
+    # with itself. Only test/shore.test.ts pinned these before this test.
+    env = VECTORS["envelope"]
+    host_agreement = x25519.X25519PrivateKey.from_private_bytes(bytes.fromhex(env["host_x25519_private_hex"]))
+    browser_agreement = x25519.X25519PrivateKey.from_private_bytes(bytes.fromhex(env["browser_x25519_private_hex"]))
+    browser_signing = ed25519.Ed25519PrivateKey.from_private_bytes(bytes.fromhex(env["browser_ed25519_seed_hex"]))
+
+    key = derive_envelope_key(browser_agreement, host_agreement.public_key(), ACCOUNT_ID, HOST_ID, 1, "browser_to_host")
+    assert b64url(key) == env["aes_key"]
+
+    envelope = seal_envelope(
+        {"payload": {"client_id": "phone-01", "cursor": 17, "global": True, "resources": []},
+         "request_id": None, "scope": None, "type": "subscribe", "v": 1},
+        account_id=ACCOUNT_ID, host_id=HOST_ID, device_id=DEVICE_ID, key_epoch=1,
+        direction="browser_to_host", seq=1, request_id=REQUEST_ID,
+        issued_at="2026-09-01T12:00:00.000Z", expires_at="2026-09-01T12:00:30.000Z",
+        sender_signing=browser_signing, sender_agreement=browser_agreement,
+        receiver_agreement=host_agreement.public_key(), nonce=unb64url("AAECAwQFBgcICQoL"),
+    )
+    assert envelope["ciphertext"] == env["ciphertext_and_tag"]
+    assert envelope["signature"] == env["signature"]
+
+
+def test_reproduces_normative_shore_v1_pairing_vector():
+    pairing = VECTORS["pairing"]
+    secret, nonce = bytes.fromhex(pairing["pairing_secret_hex"]), bytes.fromhex(pairing["ceremony_nonce_hex"])
+    binding = pairing["binding_jcs"].encode()
+    key = derive_pair_key(secret, nonce, binding)
+    assert b64url(key) == pairing["pair_key"]
+    assert b64url(pairing_finished(key, "browser", binding)) == pairing["browser_finished"]
+
+
+def test_reproduces_normative_shore_v1_recovery_verifier_vector():
+    import hashlib
+    recovery = VECTORS["recovery"]
+    secret = unb64url(recovery["secret"])
+    assert len(secret) == 32
+    prefix = f"shore-recovery-v1\0{recovery['account_id']}".encode()
+    assert b64url(hashlib.sha256(prefix + secret).digest()) == recovery["verifier"]
+
+
+def test_concurrent_pairing_finish_resolves_to_exactly_one_success(tmp_path):
+    # state_machine_vectors["pairing_race"]: two concurrent valid finish()
+    # calls on the same ceremony must yield success_count=1 and the loser
+    # gets the same generic failure as an expired/unknown ceremony.
+    trust = DeviceTrustStore(tmp_path / "trust.db")
+    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    pairing = PairingCoordinator(trust, account_id=ACCOUNT_ID, host_id=HOST_ID,
+        host_signing_key=host_signing.public_key(), host_agreement_key=host_agreement.public_key(), key_epoch=1)
+    browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    raw = lambda key: key.public_bytes_raw()
+    offer = pairing.begin(DEVICE_ID, raw(browser_signing.public_key()), raw(browser_agreement.public_key()), now=100)
+    binding = canonical(offer["binding"])
+    key = derive_pair_key(unb64url(offer["secret"]), unb64url(offer["binding"]["ceremony_nonce"]), binding)
+    proof = pairing_finished(key, "browser", binding)
+
+    def attempt(_index):
+        try:
+            return ("ok", pairing.finish(DEVICE_ID, proof, now=101))
+        except ShoreProtocolError as exc:
+            return ("failed", exc.code)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(attempt, range(8)))
+
+    successes = [result for result in results if result[0] == "ok"]
+    failures = [result for result in results if result[0] == "failed"]
+    assert len(successes) == 1
+    assert len(failures) == 7
+    assert all(code == "pairing_failed" for _, code in failures)
+    assert trust.get(DEVICE_ID) is not None
