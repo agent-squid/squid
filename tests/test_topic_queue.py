@@ -914,6 +914,35 @@ def test_queued_turn_does_not_start_after_pending_row_was_cancelled():
     assert not runner_called
 
 
+def test_adhoc_turn_does_not_start_when_cancelled_during_preparation():
+    runner_called = False
+
+    async def fake_runner(_prompt, **kwargs):
+        nonlocal runner_called
+        runner_called = True
+        yield "unexpected"
+
+    async def run():
+        worker = TopicWorker("work")
+        item = QueueItem(
+            seq=1, topic="work", agent="codex", prompt="cancelled",
+            context_history=[], backend="codex", cwd=None, source_cwd=None,
+            configured_cwd=None, adhoc=True, msg_id=801,
+        )
+        with patch("agent.config.WORKTREE_ISOLATION_ENABLED", False), \
+             patch("agent.runners.runner_for_agent", return_value=fake_runner), \
+             patch("agent.stats_db.get_message", side_effect=[{"status": "pending"}, {"status": "cancelled"}]), \
+             patch("agent.stats_db.get_worktrees", return_value=[]), \
+             patch("agent.git_changes.prepare_trackers", return_value=[]):
+            await worker._process(item)
+        return await item.out_q.get(), await item.out_q.get()
+
+    error, sentinel = asyncio.run(run())
+    assert error == {"_error": "Cancelled before start"}
+    assert sentinel is None
+    assert not runner_called
+
+
 def test_queued_turn_clears_session_with_stale_runtime_fingerprint():
     captured = {}
 

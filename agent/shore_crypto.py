@@ -9,6 +9,7 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 UUID7 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+MAX_UINT64 = (1 << 64) - 1
 OUTER_FIELDS = {"v", "account_id", "host_id", "device_id", "key_epoch", "direction", "seq", "request_id", "issued_at", "expires_at", "nonce", "ciphertext", "signature"}
 DIRECTIONS = {"browser_to_host", "host_to_browser"}
 
@@ -87,30 +89,49 @@ def _millis(value: str) -> int:
 
 
 class ReplayStore:
-    """Crash-safe replay state stored with mode 0600."""
+    """Transactional replay state stored in a private SQLite database."""
 
     def __init__(self, path: Path):
         self.path = path
 
     def accept(self, scope: str, seq: int, request_id: str, now_ms: int) -> bool:
-        state = {"scopes": {}, "requests": {}}
-        if self.path.exists():
-            state = json.loads(self.path.read_text())
-        requests = {key: expiry for key, expiry in state["requests"].items() if expiry > now_ms}
-        if seq <= state["scopes"].get(scope, 0) or request_id in requests:
-            return False
-        state["scopes"][scope] = seq
-        requests[request_id] = now_ms + 7 * 24 * 60 * 60_000
-        state["requests"] = requests
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        temp = self.path.with_name(self.path.name + ".tmp")
-        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
-            os.write(fd, canonical(state)); os.fsync(fd)
-        finally:
+            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(self.path.parent, 0o700)
+            fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
             os.close(fd)
-        os.replace(temp, self.path); os.chmod(self.path, 0o600)
-        return True
+            os.chmod(self.path, 0o600)
+            with sqlite3.connect(self.path, timeout=5, isolation_level=None) as connection:
+                connection.execute("PRAGMA synchronous = FULL")
+                connection.execute("CREATE TABLE IF NOT EXISTS replay_scopes (scope TEXT PRIMARY KEY, sequence TEXT NOT NULL)")
+                connection.execute("CREATE TABLE IF NOT EXISTS replay_requests (request_id TEXT PRIMARY KEY, expires_at INTEGER NOT NULL)")
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    connection.execute("DELETE FROM replay_requests WHERE expires_at <= ?", (now_ms,))
+                    row = connection.execute("SELECT sequence FROM replay_scopes WHERE scope = ?", (scope,)).fetchone()
+                    duplicate_id = connection.execute(
+                        "SELECT 1 FROM replay_requests WHERE request_id = ?", (request_id,)
+                    ).fetchone()
+                    if (row is not None and seq <= int(row[0])) or duplicate_id is not None:
+                        connection.execute("ROLLBACK")
+                        return False
+                    connection.execute(
+                        "INSERT INTO replay_scopes(scope, sequence) VALUES (?, ?) "
+                        "ON CONFLICT(scope) DO UPDATE SET sequence = excluded.sequence",
+                        (scope, str(seq)),
+                    )
+                    connection.execute(
+                        "INSERT INTO replay_requests(request_id, expires_at) VALUES (?, ?)",
+                        (request_id, now_ms + 7 * 24 * 60 * 60_000),
+                    )
+                    connection.execute("COMMIT")
+                    return True
+                except Exception:
+                    if connection.in_transaction:
+                        connection.execute("ROLLBACK")
+                    raise
+        except (OSError, sqlite3.Error) as exc:
+            raise ShoreProtocolError("shore_replay") from exc
 
 
 def open_envelope(envelope: dict[str, Any], *, expected: dict[str, Any],
@@ -119,18 +140,34 @@ def open_envelope(envelope: dict[str, Any], *, expected: dict[str, Any],
                   sender_agreement: x25519.X25519PublicKey, replay: ReplayStore,
                   now_ms: int | None = None, validate_frame: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
     now_ms = int(time.time() * 1000) if now_ms is None else now_ms
-    if set(envelope) != OUTER_FIELDS or len(canonical(envelope)) > 384 * 1024:
+    if not isinstance(envelope, dict) or set(envelope) != OUTER_FIELDS:
+        raise ShoreProtocolError("shore_invalid_frame")
+    try:
+        encoded_envelope = canonical(envelope)
+    except (TypeError, ValueError, RecursionError):
+        raise ShoreProtocolError("shore_invalid_frame")
+    if len(encoded_envelope) > 384 * 1024:
+        raise ShoreProtocolError("shore_invalid_frame")
+    if envelope.get("v") != 1:
+        raise ShoreProtocolError("shore_invalid_frame")
+    try:
+        seq = int(envelope["seq"])
+        if (str(seq) != envelope["seq"] or seq < 1 or seq > MAX_UINT64
+                or not UUID7.fullmatch(envelope["account_id"])
+                or not UUID7.fullmatch(envelope["host_id"])
+                or not UUID7.fullmatch(envelope["device_id"])
+                or not UUID7.fullmatch(envelope["request_id"])
+                or not isinstance(envelope["key_epoch"], int) or isinstance(envelope["key_epoch"], bool)
+                or envelope["key_epoch"] < 1 or envelope["direction"] not in DIRECTIONS):
+            raise ValueError
+        nonce, signature, ciphertext = (unb64url(envelope["nonce"]), unb64url(envelope["signature"]),
+                                        unb64url(envelope["ciphertext"]))
+        if len(nonce) != 12 or len(signature) != 64 or len(ciphertext) < 16: raise ValueError
+    except (KeyError, TypeError, ValueError):
         raise ShoreProtocolError("shore_invalid_frame")
     for name in ("account_id", "host_id", "device_id", "key_epoch", "direction"):
         if envelope.get(name) != expected.get(name):
             raise ShoreProtocolError("shore_key_epoch_mismatch" if name == "key_epoch" else "shore_identity_mismatch")
-    try:
-        seq = int(envelope["seq"])
-        if str(seq) != envelope["seq"] or seq < 1 or not UUID7.fullmatch(envelope["request_id"]): raise ValueError
-        nonce, signature = unb64url(envelope["nonce"]), unb64url(envelope["signature"])
-        if len(nonce) != 12 or len(signature) != 64: raise ValueError
-    except (KeyError, TypeError, ValueError):
-        raise ShoreProtocolError("shore_invalid_frame")
     signed = {key: value for key, value in envelope.items() if key != "signature"}
     try: sender_signing.verify(signature, canonical(signed))
     except Exception: raise ShoreProtocolError("shore_bad_signature")
@@ -138,13 +175,17 @@ def open_envelope(envelope: dict[str, Any], *, expected: dict[str, Any],
     except (TypeError, ValueError): raise ShoreProtocolError("shore_invalid_frame")
     if issued > now_ms + 30_000: raise ShoreProtocolError("shore_clock_skew")
     if expires <= issued or expires - issued > 60_000 or expires <= now_ms - 30_000: raise ShoreProtocolError("shore_expired")
-    scope = ":".join(str(envelope[k]) for k in ("account_id", "host_id", "key_epoch", "device_id", "direction"))
-    if not replay.accept(scope, seq, envelope["request_id"], now_ms): raise ShoreProtocolError("shore_replay")
     aad = {key: value for key, value in envelope.items() if key not in {"ciphertext", "signature"}}
     key = derive_envelope_key(receiver_agreement, sender_agreement, envelope["account_id"], envelope["host_id"], envelope["key_epoch"], envelope["direction"])
     try:
-        plaintext = AESGCM(key).decrypt(nonce, unb64url(envelope["ciphertext"]), canonical(aad))
+        plaintext = AESGCM(key).decrypt(nonce, ciphertext, canonical(aad))
         if len(plaintext) > 256 * 1024: raise ValueError
+    except Exception: raise ShoreProtocolError("shore_decrypt_failed")
+    # Authentication must succeed before untrusted traffic can consume durable
+    # replay state; replay must succeed before ADR-0040 bytes are decoded.
+    scope = ":".join(str(envelope[k]) for k in ("account_id", "host_id", "key_epoch", "device_id", "direction"))
+    if not replay.accept(scope, seq, envelope["request_id"], now_ms): raise ShoreProtocolError("shore_replay")
+    try:
         frame = json.loads(plaintext)
         if canonical(frame) != plaintext or not isinstance(frame, dict): raise ValueError
     except Exception: raise ShoreProtocolError("shore_decrypt_failed")

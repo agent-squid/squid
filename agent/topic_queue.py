@@ -448,6 +448,7 @@ class TopicWorker:
             save_stats,
             set_topic_session,
             clear_topic_session,
+            get_message,
             get_worktrees,
         )
         from .git_changes import prepare_trackers
@@ -583,6 +584,17 @@ class TopicWorker:
         if prefix_blocks:
             effective_prompt = "\n\n".join(prefix_blocks + [item.prompt])
 
+        # A stop can arrive while worktree/session preparation is still in
+        # progress, before the CLI process exists in the process registry.
+        # Honour the durable message status at the last boundary before spawn
+        # so that a successfully cancelled turn cannot start afterward.
+        if item.msg_id is not None:
+            message_row = await asyncio.to_thread(get_message, item.msg_id)
+            if message_row and message_row.get("status") != "pending":
+                await item.out_q.put({"_error": "Cancelled before start"})
+                await item.out_q.put(None)
+                return
+
         git_trackers = await asyncio.to_thread(
             prepare_trackers,
             tracking_roots,
@@ -699,6 +711,17 @@ class TopicWorker:
             await _emit_text(response_remapper.flush())
 
         try:
+            # prepare_trackers may perform filesystem and git work after the
+            # earlier cancellation check. Recheck at the final async boundary
+            # before asking the runner to create its process.
+            if item.msg_id is not None:
+                message_row = await asyncio.to_thread(get_message, item.msg_id)
+                if message_row and message_row.get("status") != "pending":
+                    for tracker in git_trackers:
+                        await asyncio.to_thread(tracker.cleanup)
+                    await item.out_q.put({"_error": "Cancelled before start"})
+                    await item.out_q.put(None)
+                    return
             try:
                 await _stream(effective_prompt, **kwargs)
             except CLIError as exc:

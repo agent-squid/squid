@@ -1,7 +1,10 @@
 # Plan: ADR-0039 Shore remote access
 
-**Status:** In progress (2026-09-02). Milestones 0–2 are complete; Milestone 3
-is in progress. No production command-capable route is enabled.
+**Status:** In progress (2026-09-02). Milestones 0–2 are complete. Milestone 3
+Action 1 is complete; the Action 4 validation core is implemented but cannot be
+enforced on production ingress until Actions 2–3 add pairing and persisted
+device trust. Milestone 4 has not started. No production command-capable route
+is enabled.
 
 This is the implementation plan for
 [ADR-0039](../decisions/0039-remote-access-via-shore-broker.md). The ADR owns
@@ -160,9 +163,10 @@ still does not permit commands.
 
 ## Milestone 3 — End-to-end channel and local pairing
 
-**Status:** In progress (2026-09-02). The protocol cryptography core and
-published-vector coverage are implemented. Pairing ceremony persistence,
-approval, replay state, and relay enforcement remain.
+**Status:** In progress (2026-09-02). Action 1 and the standalone Action 4
+validation core are implemented. Actions 2–3 (pairing, approval, and persisted
+device trust) remain; Action 4 is complete only after that receiver is wired
+into production Shore ingress and its acceptance coverage passes.
 
 **Objective:** establish broker-blind, mutually authenticated communication
 between a paired browser device and the host.
