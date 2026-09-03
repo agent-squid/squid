@@ -164,11 +164,15 @@ still does not permit commands.
 
 ## Milestone 3 — End-to-end channel and local pairing
 
-**Status:** In progress (2026-09-02). Action 1, the local pairing ceremony and
+**Status:** In progress (2026-09-03). Action 1, the local pairing ceremony and
 durable host-owned device trust core, and the standalone Action 4 validation
-core are implemented. Browser/host transport integration, identity-layer rate
-limits, production Shore ingress wiring, full negative acceptance coverage,
-and the independent security review remain.
+core are implemented. The pairing wire format has received an owner review,
+and both the host (Python) and browser (TypeScript) sides now implement the
+amended bootstrap-key three-packet ceremony against shared, cross-language
+vectors — but the milestone security gate remains open. Wiring those
+reference implementations into the real WebSocket transport between browser,
+broker, and host, identity-layer rate limits, production Shore ingress
+wiring, and full negative acceptance coverage remain.
 
 **Objective:** establish broker-blind, mutually authenticated communication
 between a paired browser device and the host.

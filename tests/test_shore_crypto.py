@@ -5,10 +5,11 @@ from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from agent.shore_crypto import (
     DeviceTrustStore, PairingCoordinator, ReplayStore, ShoreProtocolError,
-    b64url, canonical, derive_envelope_key, derive_pair_key, open_envelope,
+    b64url, canonical, crockford32_decode, crockford32_encode, derive_envelope_key, derive_pair_bootstrap_key, derive_pair_key, open_envelope,
     pairing_finished, seal_envelope, unb64url,
 )
 
@@ -100,106 +101,97 @@ def test_replay_storage_failure_is_a_stable_protocol_error(tmp_path, monkeypatch
         ReplayStore(tmp_path / "replay.db").accept("device-direction", 1, REQUEST_ID, 1_788_278_400_000)
 
 
-def test_local_pairing_persists_keys_only_after_finished_proof(tmp_path):
+CEREMONY_ID = "018f1f25-c930-76f0-86e7-cb06d94e6a32"
+
+
+def _pairing_fixture(tmp_path, *, tamper_host=False):
     trust = DeviceTrustStore(tmp_path / "trust.db")
     host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
-    pairing = PairingCoordinator(trust, account_id=ACCOUNT_ID, host_id=HOST_ID,
+    coordinator = PairingCoordinator(trust, account_id=ACCOUNT_ID, host_id=HOST_ID,
         host_signing_key=host_signing.public_key(), host_agreement_key=host_agreement.public_key(), key_epoch=1)
-    signing_key, agreement_key = bytes(range(32)), bytes(range(32, 64))
-    offer = pairing.begin(DEVICE_ID, signing_key, agreement_key, now=100)
-    binding = canonical(offer["binding"])
+    browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    offer = coordinator.begin(ceremony_id=CEREMONY_ID, now=100)
+    binding = {"v": 1, "account_id": ACCOUNT_ID, "host_id": HOST_ID, "device_id": DEVICE_ID,
+        "ceremony_nonce": offer["offer"]["ceremony_nonce"],
+        "host_sign_fingerprint": offer["offer"]["host_sign_fingerprint"],
+        "host_enc_fingerprint": offer["offer"]["host_enc_fingerprint"],
+        "browser_sign_fingerprint": "", "browser_enc_fingerprint": ""}
+    from agent.shore_crypto import fingerprint
+    binding["browser_sign_fingerprint"] = fingerprint(browser_signing.public_key())
+    binding["browser_enc_fingerprint"] = fingerprint(browser_agreement.public_key())
+    if tamper_host: binding["host_sign_fingerprint"] = "sha256:" + b64url(bytes(32))
+    binding_bytes = canonical(binding)
+    assert len(offer["code"]) == 26
+    secret, ceremony_nonce = crockford32_decode(offer["code"]), unb64url(offer["offer"]["ceremony_nonce"])
+    pair_key = derive_pair_key(secret, ceremony_nonce, binding_bytes)
+    plaintext = {"v": 1, "binding": binding,
+        "browser_keys": {"signing": b64url(browser_signing.public_key().public_bytes_raw()),
+                         "agreement": b64url(browser_agreement.public_key().public_bytes_raw())},
+        "finished": b64url(pairing_finished(pair_key, "browser", binding_bytes))}
+    nonce = bytes(range(12))
+    packet = {"v": 1, "ceremony_id": CEREMONY_ID, "direction": "browser_to_host", "nonce": b64url(nonce)}
+    packet["ciphertext"] = b64url(AESGCM(derive_pair_bootstrap_key(secret, ceremony_nonce)).encrypt(nonce, canonical(plaintext), canonical(packet)))
+    return trust, coordinator, packet, pair_key, binding_bytes
+
+
+def _confirmation(pair_key, binding, nonce=bytes(range(24, 36))):
+    packet = {"v": 1, "ceremony_id": CEREMONY_ID, "direction": "browser_to_host", "nonce": b64url(nonce)}
+    plaintext = {"v": 1, "binding": json.loads(binding),
+                 "finished": b64url(pairing_finished(pair_key, "browser-confirmed", binding))}
+    packet["ciphertext"] = b64url(AESGCM(pair_key).encrypt(nonce, canonical(plaintext), canonical(packet)))
+    return packet
+
+
+def test_host_starts_blind_and_learns_browser_identity_from_packet(tmp_path):
+    trust, coordinator, packet, pair_key, binding = _pairing_fixture(tmp_path)
     assert trust.get(DEVICE_ID) is None
-    import base64
-    decode = lambda value: base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-    key = derive_pair_key(decode(offer["secret"]), decode(offer["binding"]["ceremony_nonce"]), binding)
-    host_proof = pairing.finish(DEVICE_ID, pairing_finished(key, "browser", binding), now=101)
-    assert host_proof == pairing_finished(key, "host", binding)
-    assert trust.get(DEVICE_ID).signing_key == signing_key
-    assert trust.get(DEVICE_ID).agreement_key == agreement_key
+    response = coordinator.accept_browser_packet(packet, now=101, response_nonce=bytes(range(12, 24)))
+    assert response["direction"] == "host_to_browser"
+    plaintext = AESGCM(pair_key).decrypt(unb64url(response["nonce"]), unb64url(response["ciphertext"]), canonical({k: v for k, v in response.items() if k != "ciphertext"}))
+    assert unb64url(json.loads(plaintext)["finished"]) == pairing_finished(pair_key, "host", binding)
+    assert trust.get(DEVICE_ID) is None
+    coordinator.accept_browser_confirmation(_confirmation(pair_key, binding), now=102)
+    assert trust.get(DEVICE_ID) is not None
 
 
-def test_pairing_is_single_use_failure_bounded_and_cannot_replace_keys(tmp_path):
-    trust = DeviceTrustStore(tmp_path / "trust.db")
-    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
-    make_pairing = lambda: PairingCoordinator(trust, account_id=ACCOUNT_ID, host_id=HOST_ID,
-        host_signing_key=host_signing.public_key(), host_agreement_key=host_agreement.public_key(), key_epoch=1)
-    pairing = make_pairing()
-    offer = pairing.begin(DEVICE_ID, b"s" * 32, b"a" * 32, now=100)
-    binding = canonical(offer["binding"])
+def test_pairing_rejects_tampered_offer_binding_and_is_failure_bounded(tmp_path):
+    trust, coordinator, packet, _, _ = _pairing_fixture(tmp_path, tamper_host=True)
     for _ in range(5):
         with pytest.raises(ShoreProtocolError, match="pairing_failed"):
-            pairing.finish(DEVICE_ID, b"wrong", now=101)
-    with pytest.raises(ShoreProtocolError, match="pairing_failed"):
-        pairing.finish(DEVICE_ID, b"wrong", now=101)
-    assert trust.get(DEVICE_ID) is None
-
-    pairing = make_pairing()
-    offer = pairing.begin(DEVICE_ID, b"s" * 32, b"a" * 32, now=100)
-    binding = canonical(offer["binding"])
-    import base64
-    decode = lambda value: base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-    key = derive_pair_key(decode(offer["secret"]), decode(offer["binding"]["ceremony_nonce"]), binding)
-    pairing.finish(DEVICE_ID, pairing_finished(key, "browser", binding), now=101)
-    with pytest.raises(ShoreProtocolError, match="pairing_failed"):
-        trust.approve(DEVICE_ID, b"x" * 32, b"a" * 32, 1)
-    assert trust.revoke(DEVICE_ID)
+            coordinator.accept_browser_packet(packet, now=101)
+    assert CEREMONY_ID not in coordinator._ceremonies
     assert trust.get(DEVICE_ID) is None
 
 
 def test_expired_pairing_never_creates_trust(tmp_path):
-    trust = DeviceTrustStore(tmp_path / "trust.db")
-    pairing = PairingCoordinator(trust, account_id=ACCOUNT_ID, host_id=HOST_ID,
-        host_signing_key=ed25519.Ed25519PrivateKey.generate().public_key(),
-        host_agreement_key=x25519.X25519PrivateKey.generate().public_key(), key_epoch=1)
-    pairing.begin(DEVICE_ID, b"s" * 32, b"a" * 32, now=100)
+    trust, coordinator, packet, _, _ = _pairing_fixture(tmp_path)
     with pytest.raises(ShoreProtocolError, match="pairing_failed"):
-        pairing.finish(DEVICE_ID, b"anything", now=400)
+        coordinator.accept_browser_packet(packet, now=400)
     assert trust.get(DEVICE_ID) is None
 
 
-def test_abandoned_expired_pairing_can_be_replaced_without_restart(tmp_path):
-    trust = DeviceTrustStore(tmp_path / "trust.db")
-    pairing = PairingCoordinator(trust, account_id=ACCOUNT_ID, host_id=HOST_ID,
-        host_signing_key=ed25519.Ed25519PrivateKey.generate().public_key(),
-        host_agreement_key=x25519.X25519PrivateKey.generate().public_key(), key_epoch=1)
-    first = pairing.begin(DEVICE_ID, b"s" * 32, b"a" * 32, now=100)
-    abandoned = pairing._ceremonies[DEVICE_ID][0]
-    with pytest.raises(ShoreProtocolError, match="pairing_failed"):
-        pairing.begin(DEVICE_ID, b"s" * 32, b"a" * 32, now=399.999)
-    second = pairing.begin(DEVICE_ID, b"s" * 32, b"a" * 32, now=400)
-    assert first["secret"] != second["secret"]
-    assert bytes(abandoned.secret) == bytes(16)
-    assert pairing._ceremonies[DEVICE_ID][0].expires_at == 700
-
-
-def test_expiry_callback_erases_abandoned_secret_without_device_return(tmp_path):
-    pairing = PairingCoordinator(DeviceTrustStore(tmp_path / "trust.db"),
-        account_id=ACCOUNT_ID, host_id=HOST_ID,
-        host_signing_key=ed25519.Ed25519PrivateKey.generate().public_key(),
-        host_agreement_key=x25519.X25519PrivateKey.generate().public_key(), key_epoch=1)
-    pairing.begin(DEVICE_ID, b"s" * 32, b"a" * 32, now=100)
-    ceremony = pairing._ceremonies[DEVICE_ID][0]
-    pairing._expire(DEVICE_ID, ceremony)
+def test_expiry_callback_erases_abandoned_secret(tmp_path):
+    _, coordinator, _, _, _ = _pairing_fixture(tmp_path)
+    ceremony = coordinator._ceremonies[CEREMONY_ID]
+    coordinator._expire(CEREMONY_ID, ceremony)
     assert bytes(ceremony.secret) == bytes(16)
-    assert DEVICE_ID not in pairing._ceremonies
+    assert CEREMONY_ID not in coordinator._ceremonies
 
 
-def test_persistence_failure_does_not_strand_used_ceremony(tmp_path, monkeypatch):
-    trust = DeviceTrustStore(tmp_path / "trust.db")
-    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
-    pairing = PairingCoordinator(trust, account_id=ACCOUNT_ID, host_id=HOST_ID,
-        host_signing_key=host_signing.public_key(), host_agreement_key=host_agreement.public_key(), key_epoch=1)
-    browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
-    raw = lambda key: key.public_bytes_raw()
-    offer = pairing.begin(DEVICE_ID, raw(browser_signing.public_key()), raw(browser_agreement.public_key()), now=100)
-    binding = canonical(offer["binding"])
-    import base64
-    decode = lambda value: base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-    proof = pairing_finished(derive_pair_key(decode(offer["secret"]), decode(offer["binding"]["ceremony_nonce"]), binding), "browser", binding)
+def test_persistence_failure_consumes_ceremony_but_allows_new_one(tmp_path, monkeypatch):
+    trust, coordinator, packet, pair_key, binding = _pairing_fixture(tmp_path)
+    coordinator.accept_browser_packet(packet, now=101, response_nonce=bytes(range(12, 24)))
     monkeypatch.setattr(trust, "approve", lambda *args: (_ for _ in ()).throw(ShoreProtocolError("pairing_failed")))
     with pytest.raises(ShoreProtocolError, match="pairing_failed"):
-        pairing.finish(DEVICE_ID, proof, now=101)
-    pairing.begin(DEVICE_ID, raw(browser_signing.public_key()), raw(browser_agreement.public_key()), now=102)
+        coordinator.accept_browser_confirmation(_confirmation(pair_key, binding), now=102)
+
+
+def test_paired_device_keys_cannot_be_replaced(tmp_path):
+    trust, coordinator, packet, pair_key, binding = _pairing_fixture(tmp_path)
+    coordinator.accept_browser_packet(packet, now=101, response_nonce=bytes(range(12, 24)))
+    coordinator.accept_browser_confirmation(_confirmation(pair_key, binding), now=102)
+    with pytest.raises(ShoreProtocolError, match="pairing_failed"):
+        trust.approve(DEVICE_ID, b"x" * 32, b"a" * 32, 1)
 
 
 def test_reproduces_normative_shore_v1_envelope_vector():
@@ -231,9 +223,42 @@ def test_reproduces_normative_shore_v1_pairing_vector():
     pairing = VECTORS["pairing"]
     secret, nonce = bytes.fromhex(pairing["pairing_secret_hex"]), bytes.fromhex(pairing["ceremony_nonce_hex"])
     binding = pairing["binding_jcs"].encode()
+    assert b64url(derive_pair_bootstrap_key(secret, nonce)) == pairing["bootstrap_key"]
     key = derive_pair_key(secret, nonce, binding)
     assert b64url(key) == pairing["pair_key"]
     assert b64url(pairing_finished(key, "browser", binding)) == pairing["browser_finished"]
+    assert b64url(pairing_finished(key, "host", binding)) == pairing["host_finished"]
+    for role, packet_key in (("browser", derive_pair_bootstrap_key(secret, nonce)), ("host", key)):
+        plaintext = canonical(pairing[f"{role}_plaintext"])
+        aad = pairing[f"{role}_aad_jcs"].encode()
+        assert canonical(json.loads(aad)) == aad
+        packet_nonce = unb64url(pairing[f"{role}_packet_nonce"])
+        assert b64url(AESGCM(packet_key).encrypt(packet_nonce, plaintext, aad)) == pairing[f"{role}_ciphertext_and_tag"]
+    assert b64url(pairing_finished(key, "browser-confirmed", binding)) == pairing["browser_confirmation_finished"]
+    confirmation_plaintext = canonical(pairing["browser_confirmation_plaintext"])
+    confirmation_aad = pairing["browser_confirmation_aad_jcs"].encode()
+    assert b64url(AESGCM(key).encrypt(unb64url(pairing["browser_confirmation_nonce"]), confirmation_plaintext,
+                                      confirmation_aad)) == pairing["browser_confirmation_ciphertext_and_tag"]
+
+
+def test_pairing_rejects_reused_nonce_and_noncanonical_base64url(tmp_path):
+    trust, coordinator, packet, _, _ = _pairing_fixture(tmp_path)
+    corrupt = dict(packet)
+    corrupt["ciphertext"] = ("A" if corrupt["ciphertext"][0] != "A" else "B") + corrupt["ciphertext"][1:]
+    with pytest.raises(ShoreProtocolError, match="pairing_failed"):
+        coordinator.accept_browser_packet(corrupt, now=101)
+    with pytest.raises(ShoreProtocolError, match="pairing_failed"):
+        coordinator.accept_browser_packet(packet, now=101)
+    assert trust.get(DEVICE_ID) is None
+    canonical_key = b64url(bytes(32))
+    with pytest.raises(ValueError, match="non-canonical"):
+        unb64url(canonical_key[:-1] + "B")
+
+
+def test_crockford_pairing_code_is_case_insensitive(tmp_path):
+    _, coordinator, _, _, _ = _pairing_fixture(tmp_path)
+    ceremony = coordinator._ceremonies[CEREMONY_ID]
+    assert crockford32_decode(crockford32_encode(bytes(ceremony.secret)).lower()) == bytes(ceremony.secret)
 
 
 def test_reproduces_normative_shore_v1_recovery_verifier_vector():
@@ -249,20 +274,13 @@ def test_concurrent_pairing_finish_resolves_to_exactly_one_success(tmp_path):
     # state_machine_vectors["pairing_race"]: two concurrent valid finish()
     # calls on the same ceremony must yield success_count=1 and the loser
     # gets the same generic failure as an expired/unknown ceremony.
-    trust = DeviceTrustStore(tmp_path / "trust.db")
-    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
-    pairing = PairingCoordinator(trust, account_id=ACCOUNT_ID, host_id=HOST_ID,
-        host_signing_key=host_signing.public_key(), host_agreement_key=host_agreement.public_key(), key_epoch=1)
-    browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
-    raw = lambda key: key.public_bytes_raw()
-    offer = pairing.begin(DEVICE_ID, raw(browser_signing.public_key()), raw(browser_agreement.public_key()), now=100)
-    binding = canonical(offer["binding"])
-    key = derive_pair_key(unb64url(offer["secret"]), unb64url(offer["binding"]["ceremony_nonce"]), binding)
-    proof = pairing_finished(key, "browser", binding)
+    trust, pairing, packet, pair_key, binding = _pairing_fixture(tmp_path)
+    pairing.accept_browser_packet(packet, now=101, response_nonce=bytes(range(12, 24)))
+    confirmation = _confirmation(pair_key, binding)
 
     def attempt(_index):
         try:
-            return ("ok", pairing.finish(DEVICE_ID, proof, now=101))
+            return ("ok", pairing.accept_browser_confirmation(confirmation, now=102))
         except ShoreProtocolError as exc:
             return ("failed", exc.code)
 

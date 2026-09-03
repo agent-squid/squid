@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-08-11
-updated: 2026-09-01
+updated: 2026-09-03
 ---
 # ADR-0039: Remote access via a Cloudflare Workers + Durable Objects broker (agentsquid.ai/@username)
 
@@ -96,6 +96,12 @@ The accepted implementation contract is split into these normative documents:
 
 Changes to those contracts require an ADR amendment and new vectors; an
 implementation must not silently choose different security semantics.
+
+The 2026-09-03 amendment resolves pairing bootstrapping: the browser's initial
+closed-schema packet is encrypted under the protocol-defined bootstrap HKDF
+key, while the mutually verified host response uses the binding-derived pair
+key. This preserves broker blindness without requiring either side to know the
+encrypted browser-key fingerprints before decrypting them.
 
 ### Coexisting with the existing GitHub-Pages-hosted site
 

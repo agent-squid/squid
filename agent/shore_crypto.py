@@ -12,7 +12,7 @@ import secrets
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -25,6 +25,7 @@ UUID7 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 MAX_UINT64 = (1 << 64) - 1
 OUTER_FIELDS = {"v", "account_id", "host_id", "device_id", "key_epoch", "direction", "seq", "request_id", "issued_at", "expires_at", "nonce", "ciphertext", "signature"}
 DIRECTIONS = {"browser_to_host", "host_to_browser"}
+CROCKFORD32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
 
 class ShoreProtocolError(ValueError):
@@ -42,7 +43,28 @@ def b64url(value: bytes) -> str:
 def unb64url(value: str) -> bytes:
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]*", value):
         raise ValueError("invalid base64url")
-    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    if b64url(decoded) != value: raise ValueError("non-canonical base64url")
+    return decoded
+
+
+def crockford32_encode(value: bytes) -> str:
+    if len(value) != 16: raise ValueError("pairing secret must be 128 bits")
+    number = int.from_bytes(value, "big")
+    return "".join(CROCKFORD32[(number >> shift) & 31] for shift in range(125, -1, -5))
+
+
+def crockford32_decode(value: str) -> bytes:
+    if not isinstance(value, str): raise ValueError("invalid pairing code")
+    value = value.upper()
+    if len(value) != 26 or value[0] not in CROCKFORD32[:8]:
+        raise ValueError("invalid pairing code")
+    try:
+        number = 0
+        for character in value.upper(): number = number * 32 + CROCKFORD32.index(character)
+        return number.to_bytes(16, "big")
+    except (ValueError, OverflowError) as exc:
+        raise ValueError("invalid pairing code") from exc
 
 
 def canonical(value: Any) -> bytes:
@@ -206,8 +228,14 @@ def derive_pair_key(secret: bytes, ceremony_nonce: bytes, binding: bytes) -> byt
                 info=b"shore-pair-v1\0" + binding).derive(secret)
 
 
+def derive_pair_bootstrap_key(secret: bytes, ceremony_nonce: bytes) -> bytes:
+    if len(secret) != 16 or len(ceremony_nonce) != 16: raise ValueError("pairing material must be 128 bits")
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=ceremony_nonce,
+                info=b"shore-pair-bootstrap-v1\0").derive(secret)
+
+
 def pairing_finished(key: bytes, role: str, binding: bytes) -> bytes:
-    if role not in {"browser", "host"}: raise ValueError("invalid pairing role")
+    if role not in {"browser", "host", "browser-confirmed"}: raise ValueError("invalid pairing role")
     return hmac.new(key, role.encode() + b"-finished\0" + binding, hashlib.sha256).digest()
 
 
@@ -218,6 +246,8 @@ class PairingCeremony:
     expires_at: float
     failures: int = 0
     used: bool = False
+    packet_nonces: set[bytes] = field(default_factory=set)
+    pending: tuple[bytes, bytes, bytes, bytes] | None = None
 
     @classmethod
     def create(cls, now: float | None = None) -> "PairingCeremony":
@@ -324,73 +354,123 @@ class PairingCoordinator:
         self.host_signing_key = host_signing_key
         self.host_agreement_key = host_agreement_key
         self.key_epoch = key_epoch
-        self._ceremonies: dict[str, tuple[PairingCeremony, bytes, bytes, bytes, int]] = {}
+        self._ceremonies: dict[str, PairingCeremony] = {}
         self._expiry_timers: dict[str, threading.Timer] = {}
         self._lock = threading.Lock()
 
-    def _expire(self, device_id: str, ceremony: PairingCeremony) -> None:
+    def _expire(self, ceremony_id: str, ceremony: PairingCeremony) -> None:
         with self._lock:
-            current = self._ceremonies.get(device_id)
-            if current and current[0] is ceremony:
+            current = self._ceremonies.get(ceremony_id)
+            if current is ceremony:
                 ceremony.erase()
-                self._ceremonies.pop(device_id, None)
-                self._expiry_timers.pop(device_id, None)
+                self._ceremonies.pop(ceremony_id, None)
+                self._expiry_timers.pop(ceremony_id, None)
 
-    def _cancel_expiry(self, device_id: str) -> None:
-        timer = self._expiry_timers.pop(device_id, None)
+    def _cancel_expiry(self, ceremony_id: str) -> None:
+        timer = self._expiry_timers.pop(ceremony_id, None)
         if timer: timer.cancel()
 
-    def begin(self, device_id: str, browser_signing_key: bytes,
-              browser_agreement_key: bytes, now: float | None = None) -> dict[str, Any]:
-        if not UUID7.fullmatch(device_id) or len(browser_signing_key) != 32 or len(browser_agreement_key) != 32:
-            raise ShoreProtocolError("pairing_failed")
-        try:
-            browser_signing = ed25519.Ed25519PublicKey.from_public_bytes(browser_signing_key)
-            browser_agreement = x25519.X25519PublicKey.from_public_bytes(browser_agreement_key)
-        except ValueError as exc:
-            raise ShoreProtocolError("pairing_failed") from exc
+    def begin(self, *, ceremony_id: str, now: float | None = None) -> dict[str, Any]:
+        if not UUID7.fullmatch(ceremony_id): raise ShoreProtocolError("pairing_failed")
         checked_at = time.time() if now is None else now
         ceremony = PairingCeremony.create(checked_at)
-        binding_values = {
-            "v": 1, "account_id": self.account_id, "host_id": self.host_id,
-            "device_id": device_id, "ceremony_nonce": b64url(ceremony.nonce),
+        offer = {
+            "v": 1, "ceremony_id": ceremony_id, "ceremony_nonce": b64url(ceremony.nonce),
+            "account_id": self.account_id, "host_id": self.host_id,
             "host_sign_fingerprint": fingerprint(self.host_signing_key),
             "host_enc_fingerprint": fingerprint(self.host_agreement_key),
-            "browser_sign_fingerprint": fingerprint(browser_signing),
-            "browser_enc_fingerprint": fingerprint(browser_agreement),
         }
-        binding = pairing_binding(**binding_values)
         with self._lock:
-            existing = self._ceremonies.get(device_id)
-            if existing and existing[0].expires_at > checked_at:
-                ceremony.erase()
-                raise ShoreProtocolError("pairing_failed")
-            if existing:
-                existing[0].erase()
-                self._cancel_expiry(device_id)
-            self._ceremonies[device_id] = (ceremony, binding, browser_signing_key, browser_agreement_key, self.key_epoch)
+            if ceremony_id in self._ceremonies:
+                ceremony.erase(); raise ShoreProtocolError("pairing_failed")
+            self._ceremonies[ceremony_id] = ceremony
             if now is None:
-                timer = threading.Timer(max(0, ceremony.expires_at - time.time()), self._expire, (device_id, ceremony))
+                timer = threading.Timer(max(0, ceremony.expires_at - time.time()), self._expire, (ceremony_id, ceremony))
                 timer.daemon = True
-                self._expiry_timers[device_id] = timer
+                self._expiry_timers[ceremony_id] = timer
                 timer.start()
-        return {"secret": b64url(bytes(ceremony.secret)), "binding": binding_values, "expires_at": ceremony.expires_at}
+        return {"code": crockford32_encode(bytes(ceremony.secret)), "offer": offer, "expires_at": ceremony.expires_at}
 
-    def finish(self, device_id: str, browser_proof: bytes, now: float | None = None) -> bytes:
+    def accept_browser_packet(self, packet: dict[str, Any], *, now: float | None = None,
+                              response_nonce: bytes | None = None) -> dict[str, Any]:
+        ceremony_id = packet.get("ceremony_id") if isinstance(packet, dict) else None
         with self._lock:
-            record = self._ceremonies.get(device_id)
-            if not record: raise ShoreProtocolError("pairing_failed")
-            ceremony, binding, signing_key, agreement_key, key_epoch = record
-            key = derive_pair_key(bytes(ceremony.secret), ceremony.nonce, binding)
+            ceremony = self._ceremonies.get(ceremony_id)
+            if not ceremony: raise ShoreProtocolError("pairing_failed")
             try:
-                ceremony.finish(browser_proof, pairing_finished(key, "browser", binding), now)
-            except ShoreProtocolError:
+                if set(packet) != {"v", "ceremony_id", "direction", "nonce", "ciphertext"} or packet["v"] != 1 or packet["direction"] != "browser_to_host": raise ValueError
+                nonce, ciphertext = unb64url(packet["nonce"]), unb64url(packet["ciphertext"])
+                if len(nonce) != 12 or len(ciphertext) < 16 or nonce in ceremony.packet_nonces or ceremony.pending is not None: raise ValueError
+                ceremony.packet_nonces.add(nonce)
+                aad = {key: value for key, value in packet.items() if key != "ciphertext"}
+                raw = AESGCM(derive_pair_bootstrap_key(bytes(ceremony.secret), ceremony.nonce)).decrypt(nonce, ciphertext, canonical(aad))
+                plaintext = json.loads(raw)
+                if canonical(plaintext) != raw or set(plaintext) != {"v", "binding", "browser_keys", "finished"} or plaintext["v"] != 1: raise ValueError
+                keys = plaintext["browser_keys"]
+                if not isinstance(keys, dict) or set(keys) != {"signing", "agreement"}: raise ValueError
+                signing_key, agreement_key = unb64url(keys["signing"]), unb64url(keys["agreement"])
+                browser_signing = ed25519.Ed25519PublicKey.from_public_bytes(signing_key)
+                browser_agreement = x25519.X25519PublicKey.from_public_bytes(agreement_key)
+                supplied = plaintext["binding"]
+                expected = {"v": 1, "account_id": self.account_id, "host_id": self.host_id,
+                    "device_id": supplied.get("device_id"), "ceremony_nonce": b64url(ceremony.nonce),
+                    "host_sign_fingerprint": fingerprint(self.host_signing_key),
+                    "host_enc_fingerprint": fingerprint(self.host_agreement_key),
+                    "browser_sign_fingerprint": fingerprint(browser_signing),
+                    "browser_enc_fingerprint": fingerprint(browser_agreement)}
+                if supplied != expected or not UUID7.fullmatch(expected["device_id"]): raise ValueError
+                binding = pairing_binding(**expected)
+                key = derive_pair_key(bytes(ceremony.secret), ceremony.nonce, binding)
+                proof = unb64url(plaintext["finished"])
+                checked_at = time.time() if now is None else now
+                if ceremony.used or checked_at >= ceremony.expires_at or ceremony.failures >= 5: raise ValueError
+                if not hmac.compare_digest(proof, pairing_finished(key, "browser", binding)): raise ValueError
+            except Exception:
+                if not ceremony.used:
+                    ceremony.failures += 1
                 checked_at = time.time() if now is None else now
                 if ceremony.failures >= 5 or checked_at >= ceremony.expires_at:
-                    self._ceremonies.pop(device_id, None)
-                    self._cancel_expiry(device_id)
-                raise
-            self._ceremonies.pop(device_id, None)
-            self._cancel_expiry(device_id)
-            self.trust.approve(device_id, signing_key, agreement_key, key_epoch)
-            return pairing_finished(key, "host", binding)
+                    ceremony.erase(); self._ceremonies.pop(ceremony_id, None); self._cancel_expiry(ceremony_id)
+                raise ShoreProtocolError("pairing_failed")
+            response_nonce = response_nonce or secrets.token_bytes(12)
+            if len(response_nonce) != 12 or response_nonce in ceremony.packet_nonces: raise ShoreProtocolError("pairing_failed")
+            ceremony.packet_nonces.add(response_nonce)
+            host_keys = {"signing": b64url(self.host_signing_key.public_bytes_raw()), "agreement": b64url(self.host_agreement_key.public_bytes_raw())}
+            response = {"v": 1, "ceremony_id": ceremony_id, "direction": "host_to_browser", "nonce": b64url(response_nonce)}
+            host_plaintext = {"v": 1, "binding": expected, "host_keys": host_keys,
+                              "finished": b64url(pairing_finished(key, "host", binding))}
+            response["ciphertext"] = b64url(AESGCM(key).encrypt(response_nonce, canonical(host_plaintext), canonical(response)))
+            ceremony.pending = (binding, signing_key, agreement_key, key)
+            ceremony.erase()
+            return response
+
+    def accept_browser_confirmation(self, packet: dict[str, Any], *, now: float | None = None) -> TrustedDevice:
+        ceremony_id = packet.get("ceremony_id") if isinstance(packet, dict) else None
+        with self._lock:
+            ceremony = self._ceremonies.get(ceremony_id)
+            if not ceremony or ceremony.pending is None: raise ShoreProtocolError("pairing_failed")
+            binding, signing_key, agreement_key, key = ceremony.pending
+            try:
+                if set(packet) != {"v", "ceremony_id", "direction", "nonce", "ciphertext"} or packet["v"] != 1 or packet["direction"] != "browser_to_host": raise ValueError
+                nonce, ciphertext = unb64url(packet["nonce"]), unb64url(packet["ciphertext"])
+                if len(nonce) != 12 or len(ciphertext) < 16 or nonce in ceremony.packet_nonces: raise ValueError
+                ceremony.packet_nonces.add(nonce)
+                aad = {name: value for name, value in packet.items() if name != "ciphertext"}
+                raw = AESGCM(key).decrypt(nonce, ciphertext, canonical(aad))
+                plaintext = json.loads(raw)
+                if canonical(plaintext) != raw or set(plaintext) != {"v", "binding", "finished"} or plaintext["v"] != 1: raise ValueError
+                if canonical(plaintext["binding"]) != binding: raise ValueError
+                proof = unb64url(plaintext["finished"])
+                checked_at = time.time() if now is None else now
+                if checked_at >= ceremony.expires_at or not hmac.compare_digest(proof, pairing_finished(key, "browser-confirmed", binding)): raise ValueError
+            except Exception:
+                ceremony.failures += 1
+                checked_at = time.time() if now is None else now
+                if ceremony.failures >= 5 or checked_at >= ceremony.expires_at:
+                    ceremony.erase(); self._ceremonies.pop(ceremony_id, None); self._cancel_expiry(ceremony_id)
+                raise ShoreProtocolError("pairing_failed")
+            device_id = json.loads(binding)["device_id"]
+            trusted = self.trust.approve(device_id, signing_key, agreement_key, self.key_epoch)
+            ceremony.used = True
+            self._ceremonies.pop(ceremony_id, None); self._cancel_expiry(ceremony_id)
+            return trusted
