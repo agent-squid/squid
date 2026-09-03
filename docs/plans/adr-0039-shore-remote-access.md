@@ -1,7 +1,7 @@
 # Plan: ADR-0039 Shore remote access
 
 **Status:** In progress (2026-09-02). Milestones 0–2 are complete; Milestone 3
-is next. No production command-capable route is enabled.
+is in progress. No production command-capable route is enabled.
 
 This is the implementation plan for
 [ADR-0039](../decisions/0039-remote-access-via-shore-broker.md). The ADR owns
@@ -160,7 +160,9 @@ still does not permit commands.
 
 ## Milestone 3 — End-to-end channel and local pairing
 
-**Status:** Not started; next milestone.
+**Status:** In progress (2026-09-02). The protocol cryptography core and
+published-vector coverage are implemented. Pairing ceremony persistence,
+approval, replay state, and relay enforcement remain.
 
 **Objective:** establish broker-blind, mutually authenticated communication
 between a paired browser device and the host.
