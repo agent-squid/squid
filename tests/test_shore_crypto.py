@@ -4,7 +4,10 @@ from datetime import datetime, timezone
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 
-from agent.shore_crypto import ReplayStore, ShoreProtocolError, canonical, open_envelope, seal_envelope
+from agent.shore_crypto import (
+    DeviceTrustStore, PairingCoordinator, ReplayStore, ShoreProtocolError,
+    canonical, derive_pair_key, open_envelope, pairing_finished, seal_envelope,
+)
 
 
 ACCOUNT_ID = "018f1f25-3f6b-7d75-a4d1-62d771381b20"
@@ -88,3 +91,105 @@ def test_replay_storage_failure_is_a_stable_protocol_error(tmp_path, monkeypatch
     monkeypatch.setattr("agent.shore_crypto.sqlite3.connect", unavailable)
     with pytest.raises(ShoreProtocolError, match="shore_replay"):
         ReplayStore(tmp_path / "replay.db").accept("device-direction", 1, REQUEST_ID, 1_788_278_400_000)
+
+
+def test_local_pairing_persists_keys_only_after_finished_proof(tmp_path):
+    trust = DeviceTrustStore(tmp_path / "trust.db")
+    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    pairing = PairingCoordinator(trust, account_id=ACCOUNT_ID, host_id=HOST_ID,
+        host_signing_key=host_signing.public_key(), host_agreement_key=host_agreement.public_key(), key_epoch=1)
+    signing_key, agreement_key = bytes(range(32)), bytes(range(32, 64))
+    offer = pairing.begin(DEVICE_ID, signing_key, agreement_key, now=100)
+    binding = canonical(offer["binding"])
+    assert trust.get(DEVICE_ID) is None
+    import base64
+    decode = lambda value: base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    key = derive_pair_key(decode(offer["secret"]), decode(offer["binding"]["ceremony_nonce"]), binding)
+    host_proof = pairing.finish(DEVICE_ID, pairing_finished(key, "browser", binding), now=101)
+    assert host_proof == pairing_finished(key, "host", binding)
+    assert trust.get(DEVICE_ID).signing_key == signing_key
+    assert trust.get(DEVICE_ID).agreement_key == agreement_key
+
+
+def test_pairing_is_single_use_failure_bounded_and_cannot_replace_keys(tmp_path):
+    trust = DeviceTrustStore(tmp_path / "trust.db")
+    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    make_pairing = lambda: PairingCoordinator(trust, account_id=ACCOUNT_ID, host_id=HOST_ID,
+        host_signing_key=host_signing.public_key(), host_agreement_key=host_agreement.public_key(), key_epoch=1)
+    pairing = make_pairing()
+    offer = pairing.begin(DEVICE_ID, b"s" * 32, b"a" * 32, now=100)
+    binding = canonical(offer["binding"])
+    for _ in range(5):
+        with pytest.raises(ShoreProtocolError, match="pairing_failed"):
+            pairing.finish(DEVICE_ID, b"wrong", now=101)
+    with pytest.raises(ShoreProtocolError, match="pairing_failed"):
+        pairing.finish(DEVICE_ID, b"wrong", now=101)
+    assert trust.get(DEVICE_ID) is None
+
+    pairing = make_pairing()
+    offer = pairing.begin(DEVICE_ID, b"s" * 32, b"a" * 32, now=100)
+    binding = canonical(offer["binding"])
+    import base64
+    decode = lambda value: base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    key = derive_pair_key(decode(offer["secret"]), decode(offer["binding"]["ceremony_nonce"]), binding)
+    pairing.finish(DEVICE_ID, pairing_finished(key, "browser", binding), now=101)
+    with pytest.raises(ShoreProtocolError, match="pairing_failed"):
+        trust.approve(DEVICE_ID, b"x" * 32, b"a" * 32, 1)
+    assert trust.revoke(DEVICE_ID)
+    assert trust.get(DEVICE_ID) is None
+
+
+def test_expired_pairing_never_creates_trust(tmp_path):
+    trust = DeviceTrustStore(tmp_path / "trust.db")
+    pairing = PairingCoordinator(trust, account_id=ACCOUNT_ID, host_id=HOST_ID,
+        host_signing_key=ed25519.Ed25519PrivateKey.generate().public_key(),
+        host_agreement_key=x25519.X25519PrivateKey.generate().public_key(), key_epoch=1)
+    pairing.begin(DEVICE_ID, b"s" * 32, b"a" * 32, now=100)
+    with pytest.raises(ShoreProtocolError, match="pairing_failed"):
+        pairing.finish(DEVICE_ID, b"anything", now=400)
+    assert trust.get(DEVICE_ID) is None
+
+
+def test_abandoned_expired_pairing_can_be_replaced_without_restart(tmp_path):
+    trust = DeviceTrustStore(tmp_path / "trust.db")
+    pairing = PairingCoordinator(trust, account_id=ACCOUNT_ID, host_id=HOST_ID,
+        host_signing_key=ed25519.Ed25519PrivateKey.generate().public_key(),
+        host_agreement_key=x25519.X25519PrivateKey.generate().public_key(), key_epoch=1)
+    first = pairing.begin(DEVICE_ID, b"s" * 32, b"a" * 32, now=100)
+    abandoned = pairing._ceremonies[DEVICE_ID][0]
+    with pytest.raises(ShoreProtocolError, match="pairing_failed"):
+        pairing.begin(DEVICE_ID, b"s" * 32, b"a" * 32, now=399.999)
+    second = pairing.begin(DEVICE_ID, b"s" * 32, b"a" * 32, now=400)
+    assert first["secret"] != second["secret"]
+    assert bytes(abandoned.secret) == bytes(16)
+    assert pairing._ceremonies[DEVICE_ID][0].expires_at == 700
+
+
+def test_expiry_callback_erases_abandoned_secret_without_device_return(tmp_path):
+    pairing = PairingCoordinator(DeviceTrustStore(tmp_path / "trust.db"),
+        account_id=ACCOUNT_ID, host_id=HOST_ID,
+        host_signing_key=ed25519.Ed25519PrivateKey.generate().public_key(),
+        host_agreement_key=x25519.X25519PrivateKey.generate().public_key(), key_epoch=1)
+    pairing.begin(DEVICE_ID, b"s" * 32, b"a" * 32, now=100)
+    ceremony = pairing._ceremonies[DEVICE_ID][0]
+    pairing._expire(DEVICE_ID, ceremony)
+    assert bytes(ceremony.secret) == bytes(16)
+    assert DEVICE_ID not in pairing._ceremonies
+
+
+def test_persistence_failure_does_not_strand_used_ceremony(tmp_path, monkeypatch):
+    trust = DeviceTrustStore(tmp_path / "trust.db")
+    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    pairing = PairingCoordinator(trust, account_id=ACCOUNT_ID, host_id=HOST_ID,
+        host_signing_key=host_signing.public_key(), host_agreement_key=host_agreement.public_key(), key_epoch=1)
+    browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    raw = lambda key: key.public_bytes_raw()
+    offer = pairing.begin(DEVICE_ID, raw(browser_signing.public_key()), raw(browser_agreement.public_key()), now=100)
+    binding = canonical(offer["binding"])
+    import base64
+    decode = lambda value: base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    proof = pairing_finished(derive_pair_key(decode(offer["secret"]), decode(offer["binding"]["ceremony_nonce"]), binding), "browser", binding)
+    monkeypatch.setattr(trust, "approve", lambda *args: (_ for _ in ()).throw(ShoreProtocolError("pairing_failed")))
+    with pytest.raises(ShoreProtocolError, match="pairing_failed"):
+        pairing.finish(DEVICE_ID, proof, now=101)
+    pairing.begin(DEVICE_ID, raw(browser_signing.public_key()), raw(browser_agreement.public_key()), now=102)

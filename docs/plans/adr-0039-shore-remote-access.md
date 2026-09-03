@@ -1,10 +1,11 @@
 # Plan: ADR-0039 Shore remote access
 
 **Status:** In progress (2026-09-02). Milestones 0–2 are complete. Milestone 3
-Action 1 is complete; the Action 4 validation core is implemented but cannot be
-enforced on production ingress until Actions 2–3 add pairing and persisted
-device trust. Milestone 4 has not started. No production command-capable route
-is enabled.
+Action 1, the local pairing and persisted device-trust cores, and the Action 4
+validation core are implemented. Production browser/host integration, ingress
+wiring, remaining acceptance coverage, and independent security review remain.
+Milestone 4 has not started. No production command-capable route is enabled.
+Milestone 5 is blocked until Milestones 3 and 4 pass their acceptance gates.
 
 This is the implementation plan for
 [ADR-0039](../decisions/0039-remote-access-via-shore-broker.md). The ADR owns
@@ -163,10 +164,11 @@ still does not permit commands.
 
 ## Milestone 3 — End-to-end channel and local pairing
 
-**Status:** In progress (2026-09-02). Action 1 and the standalone Action 4
-validation core are implemented. Actions 2–3 (pairing, approval, and persisted
-device trust) remain; Action 4 is complete only after that receiver is wired
-into production Shore ingress and its acceptance coverage passes.
+**Status:** In progress (2026-09-02). Action 1, the local pairing ceremony and
+durable host-owned device trust core, and the standalone Action 4 validation
+core are implemented. Browser/host transport integration, identity-layer rate
+limits, production Shore ingress wiring, full negative acceptance coverage,
+and the independent security review remain.
 
 **Objective:** establish broker-blind, mutually authenticated communication
 between a paired browser device and the host.
@@ -223,7 +225,9 @@ effects.
 
 ## Milestone 5 — Correlated tamper-evident audit
 
-**Status:** Not started; depends on Milestone 4.
+**Status:** Blocked (2026-09-02). Milestone 3 remains incomplete and Milestone
+4 has not started; both preceding acceptance gates must pass before this work
+begins.
 
 **Objective:** make account, pairing, capability, and command activity
 attributable without storing command plaintext.

@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -234,3 +235,162 @@ class PairingCeremony:
 
     def erase(self) -> None:
         for index in range(len(self.secret)): self.secret[index] = 0
+
+
+@dataclass(frozen=True)
+class TrustedDevice:
+    device_id: str
+    signing_key: bytes
+    agreement_key: bytes
+    key_epoch: int
+
+
+class DeviceTrustStore:
+    """Host-owned durable browser trust. Only public key material is stored."""
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    def _connect(self) -> sqlite3.Connection:
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(self.path.parent, 0o700)
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        os.close(fd)
+        os.chmod(self.path, 0o600)
+        connection = sqlite3.connect(self.path, timeout=5, isolation_level=None)
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("""CREATE TABLE IF NOT EXISTS shore_devices (
+            device_id TEXT PRIMARY KEY, signing_key BLOB NOT NULL,
+            agreement_key BLOB NOT NULL, key_epoch INTEGER NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('paired','revoked')),
+            approved_at INTEGER NOT NULL, revoked_at INTEGER)""")
+        return connection
+
+    def approve(self, device_id: str, signing_key: bytes, agreement_key: bytes,
+                key_epoch: int, now_ms: int | None = None) -> TrustedDevice:
+        if not UUID7.fullmatch(device_id) or len(signing_key) != 32 or len(agreement_key) != 32 or key_epoch < 1:
+            raise ShoreProtocolError("pairing_failed")
+        now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                existing = connection.execute(
+                    "SELECT signing_key, agreement_key, key_epoch, status FROM shore_devices WHERE device_id=?", (device_id,)
+                ).fetchone()
+                if existing and (existing[3] == "revoked" or existing[:3] != (signing_key, agreement_key, key_epoch)):
+                    connection.rollback(); raise ShoreProtocolError("pairing_failed")
+                connection.execute("""INSERT INTO shore_devices
+                    (device_id, signing_key, agreement_key, key_epoch, status, approved_at)
+                    VALUES (?, ?, ?, ?, 'paired', ?)
+                    ON CONFLICT(device_id) DO NOTHING""",
+                    (device_id, signing_key, agreement_key, key_epoch, now_ms))
+                connection.commit()
+        except ShoreProtocolError:
+            raise
+        except (OSError, sqlite3.Error) as exc:
+            raise ShoreProtocolError("pairing_failed") from exc
+        return TrustedDevice(device_id, signing_key, agreement_key, key_epoch)
+
+    def get(self, device_id: str) -> TrustedDevice | None:
+        try:
+            with self._connect() as connection:
+                row = connection.execute("""SELECT signing_key, agreement_key, key_epoch
+                    FROM shore_devices WHERE device_id=? AND status='paired'""", (device_id,)).fetchone()
+        except (OSError, sqlite3.Error) as exc:
+            raise ShoreProtocolError("shore_untrusted_device") from exc
+        return TrustedDevice(device_id, row[0], row[1], row[2]) if row else None
+
+    def revoke(self, device_id: str, now_ms: int | None = None) -> bool:
+        now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute("UPDATE shore_devices SET status='revoked', revoked_at=? WHERE device_id=? AND status='paired'", (now_ms, device_id))
+                return cursor.rowcount == 1
+        except (OSError, sqlite3.Error) as exc:
+            raise ShoreProtocolError("shore_untrusted_device") from exc
+
+
+class PairingCoordinator:
+    """Single-process local ceremony; broker input is never a trust decision."""
+
+    def __init__(self, trust: DeviceTrustStore, *, account_id: str, host_id: str,
+                 host_signing_key: ed25519.Ed25519PublicKey,
+                 host_agreement_key: x25519.X25519PublicKey, key_epoch: int):
+        if not UUID7.fullmatch(account_id) or not UUID7.fullmatch(host_id) or key_epoch < 1:
+            raise ValueError("invalid Shore host identity")
+        self.trust = trust
+        self.account_id = account_id
+        self.host_id = host_id
+        self.host_signing_key = host_signing_key
+        self.host_agreement_key = host_agreement_key
+        self.key_epoch = key_epoch
+        self._ceremonies: dict[str, tuple[PairingCeremony, bytes, bytes, bytes, int]] = {}
+        self._expiry_timers: dict[str, threading.Timer] = {}
+        self._lock = threading.Lock()
+
+    def _expire(self, device_id: str, ceremony: PairingCeremony) -> None:
+        with self._lock:
+            current = self._ceremonies.get(device_id)
+            if current and current[0] is ceremony:
+                ceremony.erase()
+                self._ceremonies.pop(device_id, None)
+                self._expiry_timers.pop(device_id, None)
+
+    def _cancel_expiry(self, device_id: str) -> None:
+        timer = self._expiry_timers.pop(device_id, None)
+        if timer: timer.cancel()
+
+    def begin(self, device_id: str, browser_signing_key: bytes,
+              browser_agreement_key: bytes, now: float | None = None) -> dict[str, Any]:
+        if not UUID7.fullmatch(device_id) or len(browser_signing_key) != 32 or len(browser_agreement_key) != 32:
+            raise ShoreProtocolError("pairing_failed")
+        try:
+            browser_signing = ed25519.Ed25519PublicKey.from_public_bytes(browser_signing_key)
+            browser_agreement = x25519.X25519PublicKey.from_public_bytes(browser_agreement_key)
+        except ValueError as exc:
+            raise ShoreProtocolError("pairing_failed") from exc
+        checked_at = time.time() if now is None else now
+        ceremony = PairingCeremony.create(checked_at)
+        binding_values = {
+            "v": 1, "account_id": self.account_id, "host_id": self.host_id,
+            "device_id": device_id, "ceremony_nonce": b64url(ceremony.nonce),
+            "host_sign_fingerprint": fingerprint(self.host_signing_key),
+            "host_enc_fingerprint": fingerprint(self.host_agreement_key),
+            "browser_sign_fingerprint": fingerprint(browser_signing),
+            "browser_enc_fingerprint": fingerprint(browser_agreement),
+        }
+        binding = pairing_binding(**binding_values)
+        with self._lock:
+            existing = self._ceremonies.get(device_id)
+            if existing and existing[0].expires_at > checked_at:
+                ceremony.erase()
+                raise ShoreProtocolError("pairing_failed")
+            if existing:
+                existing[0].erase()
+                self._cancel_expiry(device_id)
+            self._ceremonies[device_id] = (ceremony, binding, browser_signing_key, browser_agreement_key, self.key_epoch)
+            if now is None:
+                timer = threading.Timer(max(0, ceremony.expires_at - time.time()), self._expire, (device_id, ceremony))
+                timer.daemon = True
+                self._expiry_timers[device_id] = timer
+                timer.start()
+        return {"secret": b64url(bytes(ceremony.secret)), "binding": binding_values, "expires_at": ceremony.expires_at}
+
+    def finish(self, device_id: str, browser_proof: bytes, now: float | None = None) -> bytes:
+        with self._lock:
+            record = self._ceremonies.get(device_id)
+            if not record: raise ShoreProtocolError("pairing_failed")
+            ceremony, binding, signing_key, agreement_key, key_epoch = record
+            key = derive_pair_key(bytes(ceremony.secret), ceremony.nonce, binding)
+            try:
+                ceremony.finish(browser_proof, pairing_finished(key, "browser", binding), now)
+            except ShoreProtocolError:
+                checked_at = time.time() if now is None else now
+                if ceremony.failures >= 5 or checked_at >= ceremony.expires_at:
+                    self._ceremonies.pop(device_id, None)
+                    self._cancel_expiry(device_id)
+                raise
+            self._ceremonies.pop(device_id, None)
+            self._cancel_expiry(device_id)
+            self.trust.approve(device_id, signing_key, agreement_key, key_epoch)
+            return pairing_finished(key, "host", binding)
