@@ -343,6 +343,14 @@ class DeviceTrustStore:
 class PairingCoordinator:
     """Single-process local ceremony; broker input is never a trust decision."""
 
+    # A 128-bit secret makes guessing infeasible regardless of rate; these
+    # bound resource exhaustion from unbounded ceremony creation and close
+    # the bypass where a per-ceremony 5-attempt cap (PairingCeremony.finish)
+    # is reset for free by simply starting a new ceremony.
+    _BEGIN_WINDOW_SECONDS = 300.0
+    _MAX_BEGINS_PER_WINDOW = 10
+    _MAX_FAILURES_PER_WINDOW = 20
+
     def __init__(self, trust: DeviceTrustStore, *, account_id: str, host_id: str,
                  host_signing_key: ed25519.Ed25519PublicKey,
                  host_agreement_key: x25519.X25519PublicKey, key_epoch: int):
@@ -357,6 +365,27 @@ class PairingCoordinator:
         self._ceremonies: dict[str, PairingCeremony] = {}
         self._expiry_timers: dict[str, threading.Timer] = {}
         self._lock = threading.Lock()
+        self._begin_history: list[float] = []
+        self._failure_history: list[float] = []
+
+    def _prune(self, history: list[float], now: float) -> None:
+        cutoff = now - self._BEGIN_WINDOW_SECONDS
+        while history and history[0] <= cutoff:
+            history.pop(0)
+
+    def _record_failure(self, now: float) -> None:
+        self._prune(self._failure_history, now)
+        self._failure_history.append(now)
+
+    def _begin_rate_limited(self, now: float) -> bool:
+        self._prune(self._begin_history, now)
+        self._prune(self._failure_history, now)
+        return (len(self._begin_history) >= self._MAX_BEGINS_PER_WINDOW
+                or len(self._failure_history) >= self._MAX_FAILURES_PER_WINDOW)
+
+    def _failure_rate_limited(self, now: float) -> bool:
+        self._prune(self._failure_history, now)
+        return len(self._failure_history) >= self._MAX_FAILURES_PER_WINDOW
 
     def _expire(self, ceremony_id: str, ceremony: PairingCeremony) -> None:
         with self._lock:
@@ -381,8 +410,11 @@ class PairingCoordinator:
             "host_enc_fingerprint": fingerprint(self.host_agreement_key),
         }
         with self._lock:
+            if self._begin_rate_limited(checked_at):
+                ceremony.erase(); raise ShoreProtocolError("pairing_rate_limited")
             if ceremony_id in self._ceremonies:
                 ceremony.erase(); raise ShoreProtocolError("pairing_failed")
+            self._begin_history.append(checked_at)
             self._ceremonies[ceremony_id] = ceremony
             if now is None:
                 timer = threading.Timer(max(0, ceremony.expires_at - time.time()), self._expire, (ceremony_id, ceremony))
@@ -394,7 +426,9 @@ class PairingCoordinator:
     def accept_browser_packet(self, packet: dict[str, Any], *, now: float | None = None,
                               response_nonce: bytes | None = None) -> dict[str, Any]:
         ceremony_id = packet.get("ceremony_id") if isinstance(packet, dict) else None
+        checked_at = time.time() if now is None else now
         with self._lock:
+            if self._failure_rate_limited(checked_at): raise ShoreProtocolError("pairing_rate_limited")
             ceremony = self._ceremonies.get(ceremony_id)
             if not ceremony: raise ShoreProtocolError("pairing_failed")
             try:
@@ -422,13 +456,12 @@ class PairingCoordinator:
                 binding = pairing_binding(**expected)
                 key = derive_pair_key(bytes(ceremony.secret), ceremony.nonce, binding)
                 proof = unb64url(plaintext["finished"])
-                checked_at = time.time() if now is None else now
                 if ceremony.used or checked_at >= ceremony.expires_at or ceremony.failures >= 5: raise ValueError
                 if not hmac.compare_digest(proof, pairing_finished(key, "browser", binding)): raise ValueError
             except Exception:
                 if not ceremony.used:
                     ceremony.failures += 1
-                checked_at = time.time() if now is None else now
+                    self._record_failure(checked_at)
                 if ceremony.failures >= 5 or checked_at >= ceremony.expires_at:
                     ceremony.erase(); self._ceremonies.pop(ceremony_id, None); self._cancel_expiry(ceremony_id)
                 raise ShoreProtocolError("pairing_failed")
@@ -446,7 +479,9 @@ class PairingCoordinator:
 
     def accept_browser_confirmation(self, packet: dict[str, Any], *, now: float | None = None) -> TrustedDevice:
         ceremony_id = packet.get("ceremony_id") if isinstance(packet, dict) else None
+        checked_at = time.time() if now is None else now
         with self._lock:
+            if self._failure_rate_limited(checked_at): raise ShoreProtocolError("pairing_rate_limited")
             ceremony = self._ceremonies.get(ceremony_id)
             if not ceremony or ceremony.pending is None: raise ShoreProtocolError("pairing_failed")
             binding, signing_key, agreement_key, key = ceremony.pending
@@ -461,11 +496,10 @@ class PairingCoordinator:
                 if canonical(plaintext) != raw or set(plaintext) != {"v", "binding", "finished"} or plaintext["v"] != 1: raise ValueError
                 if canonical(plaintext["binding"]) != binding: raise ValueError
                 proof = unb64url(plaintext["finished"])
-                checked_at = time.time() if now is None else now
                 if checked_at >= ceremony.expires_at or not hmac.compare_digest(proof, pairing_finished(key, "browser-confirmed", binding)): raise ValueError
             except Exception:
                 ceremony.failures += 1
-                checked_at = time.time() if now is None else now
+                self._record_failure(checked_at)
                 if ceremony.failures >= 5 or checked_at >= ceremony.expires_at:
                     ceremony.erase(); self._ceremonies.pop(ceremony_id, None); self._cancel_expiry(ceremony_id)
                 raise ShoreProtocolError("pairing_failed")

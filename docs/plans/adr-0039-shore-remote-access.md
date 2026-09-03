@@ -5,9 +5,11 @@ Action 1, the local pairing and persisted device-trust cores, and the Action 4
 validation core are implemented on both the host (Python) and browser
 (TypeScript) sides, backed by shared cross-language test vectors; see its
 status note for what a model-assisted review round found and fixed along the
-way. Production browser/host transport integration, ingress wiring, identity-
-layer rate limits, remaining acceptance coverage, and independent (human)
-security review remain before the milestone gate passes. Milestone 4 has not
+way. The host-side pairing coordinator now rate-limits itself locally.
+Production browser/host transport integration (no browser client exists
+yet), ingress wiring, broker-side identity-layer rate limits, remaining
+acceptance coverage, and independent (human) security review remain before
+the milestone gate passes. Milestone 4 has not
 started. No production command-capable route is enabled. Milestone 5 is
 blocked until Milestones 3 and 4 pass their acceptance gates.
 
@@ -210,14 +212,26 @@ browser-side reference implementation was added to `shore/src/crypto.ts`
 (previously absent entirely, leaving only one side of the handshake
 implemented); and the browser side was found to skip the spec's "compare the
 offer's account and host IDs against the authenticated route" check, since
-fixed. None of this is exploitable in production today because nothing calls
-these modules outside tests yet. Still open before the milestone gate can
-pass: wiring both reference implementations into the real WebSocket transport
-between browser, broker, and host; identity-layer rate limits; production
-Shore ingress wiring; full negative acceptance coverage; and an independent,
-qualified human security review — the review rounds so far were model-
-assisted, not the human review this milestone's acceptance criterion
-requires.
+fixed. The host-side `PairingCoordinator` now also rate-limits itself
+(`agent/shore_crypto.py`): a sliding 5-minute window caps both ceremony
+creation and aggregate failed attempts across ceremonies, closing a gap
+where the existing per-ceremony 5-attempt lockout could be reset for free by
+just starting a new ceremony. 12 negative-acceptance tests were added
+covering signature/key substitution, key-epoch mismatch, clock skew,
+expiry, replay and reordering at the envelope layer, pairing-confirmation
+reuse after completion, device-trust revocation, and the two new rate
+limits (`tests/test_shore_crypto.py`); host suite is 32/32, broker suite
+unaffected at 71/71. None of this is exploitable in production today because
+nothing calls these modules outside tests yet. Still open before the
+milestone gate can pass: wiring both reference implementations into the real
+WebSocket transport between browser, broker, and host — no browser client
+exists yet, so this also means building one; broker-side identity-layer rate
+limits once pairing is actually relayed through the broker (today's limits
+are host-local only); production Shore ingress wiring; negative coverage for
+broker frame injection and live host-key epoch rotation, which need the
+transport wiring to be meaningful; and an independent, qualified human
+security review — the review rounds so far were model-assisted, not the
+human review this milestone's acceptance criterion requires.
 
 **Objective:** establish broker-blind, mutually authenticated communication
 between a paired browser device and the host.

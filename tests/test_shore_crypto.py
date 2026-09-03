@@ -101,6 +101,80 @@ def test_replay_storage_failure_is_a_stable_protocol_error(tmp_path, monkeypatch
         ReplayStore(tmp_path / "replay.db").accept("device-direction", 1, REQUEST_ID, 1_788_278_400_000)
 
 
+def test_open_envelope_rejects_wrong_signing_key(tmp_path):
+    envelope, arguments, _ = _fixture(tmp_path)
+    arguments["sender_signing"] = ed25519.Ed25519PrivateKey.generate().public_key()
+    with pytest.raises(ShoreProtocolError, match="shore_bad_signature"):
+        open_envelope(envelope, **arguments)
+
+
+def test_open_envelope_rejects_substituted_receiver_key(tmp_path):
+    envelope, arguments, _ = _fixture(tmp_path)
+    arguments["receiver_agreement"] = x25519.X25519PrivateKey.generate()
+    with pytest.raises(ShoreProtocolError, match="shore_decrypt_failed"):
+        open_envelope(envelope, **arguments)
+
+
+def test_open_envelope_rejects_key_epoch_mismatch(tmp_path):
+    envelope, arguments, _ = _fixture(tmp_path)
+    arguments["expected"] = {**arguments["expected"], "key_epoch": 2}
+    with pytest.raises(ShoreProtocolError, match="shore_key_epoch_mismatch"):
+        open_envelope(envelope, **arguments)
+
+
+def _resign(envelope, signing):
+    unsigned = {key: value for key, value in envelope.items() if key != "signature"}
+    envelope["signature"] = b64url(signing.sign(canonical(unsigned)))
+    return envelope
+
+
+def test_open_envelope_rejects_future_issued_at_as_clock_skew(tmp_path):
+    envelope, arguments, signing = _fixture(tmp_path)
+    skewed = datetime.fromtimestamp((arguments["now_ms"] + 60_000) / 1000, timezone.utc)
+    envelope["issued_at"] = skewed.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    _resign(envelope, signing)
+    with pytest.raises(ShoreProtocolError, match="shore_clock_skew"):
+        open_envelope(envelope, **arguments)
+
+
+def test_open_envelope_rejects_expired_frame(tmp_path):
+    envelope, arguments, signing = _fixture(tmp_path)
+    expired = datetime.fromtimestamp((arguments["now_ms"] - 60_000) / 1000, timezone.utc)
+    envelope["expires_at"] = expired.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    _resign(envelope, signing)
+    with pytest.raises(ShoreProtocolError, match="shore_expired"):
+        open_envelope(envelope, **arguments)
+
+
+def test_open_envelope_rejects_replay_of_same_request(tmp_path):
+    envelope, arguments, _ = _fixture(tmp_path)
+    assert open_envelope(envelope, **arguments)["type"] == "ping"
+    with pytest.raises(ShoreProtocolError, match="shore_replay"):
+        open_envelope(envelope, **arguments)
+
+
+def test_open_envelope_rejects_reordered_lower_sequence(tmp_path):
+    # seq/request_id are bound into the AEAD's AAD, so a genuine reorder
+    # attack must be a freshly, validly sealed envelope with an old sequence
+    # number (e.g. a captured-and-replayed prior message), not a field-swap
+    # on an already-accepted one.
+    envelope, arguments, signing = _fixture(tmp_path)
+    sender_agreement = x25519.X25519PrivateKey.generate()
+    assert open_envelope(envelope, **arguments)["type"] == "ping"
+    later = seal_envelope(
+        {"payload": {}, "request_id": None, "scope": None, "type": "ping", "v": 1},
+        account_id=ACCOUNT_ID, host_id=HOST_ID, device_id=DEVICE_ID, key_epoch=1,
+        direction="browser_to_host", seq=1, request_id="018f1f25-c930-76f0-86e7-cb06d94e6a31",
+        issued_at="2026-09-01T12:00:00.000Z", expires_at="2026-09-01T12:00:29.000Z",
+        sender_signing=signing, sender_agreement=sender_agreement,
+        receiver_agreement=arguments["receiver_agreement"].public_key(),
+    )
+    later_now_ms = int(datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc).timestamp() * 1000)
+    later_arguments = {**arguments, "sender_agreement": sender_agreement.public_key(), "now_ms": later_now_ms}
+    with pytest.raises(ShoreProtocolError, match="shore_replay"):
+        open_envelope(later, **later_arguments)
+
+
 CEREMONY_ID = "018f1f25-c930-76f0-86e7-cb06d94e6a32"
 
 
@@ -293,3 +367,105 @@ def test_concurrent_pairing_finish_resolves_to_exactly_one_success(tmp_path):
     assert len(failures) == 7
     assert all(code == "pairing_failed" for _, code in failures)
     assert trust.get(DEVICE_ID) is not None
+
+
+def test_completed_pairing_confirmation_cannot_be_replayed(tmp_path):
+    trust, coordinator, packet, pair_key, binding = _pairing_fixture(tmp_path)
+    coordinator.accept_browser_packet(packet, now=101, response_nonce=bytes(range(12, 24)))
+    confirmation = _confirmation(pair_key, binding)
+    coordinator.accept_browser_confirmation(confirmation, now=102)
+    with pytest.raises(ShoreProtocolError, match="pairing_failed"):
+        coordinator.accept_browser_confirmation(confirmation, now=103)
+
+
+def test_revoked_device_trust_is_not_returned(tmp_path):
+    trust, coordinator, packet, pair_key, binding = _pairing_fixture(tmp_path)
+    coordinator.accept_browser_packet(packet, now=101, response_nonce=bytes(range(12, 24)))
+    coordinator.accept_browser_confirmation(_confirmation(pair_key, binding), now=102)
+    assert trust.get(DEVICE_ID) is not None
+    assert trust.revoke(DEVICE_ID) is True
+    assert trust.get(DEVICE_ID) is None
+    assert trust.revoke(DEVICE_ID) is False
+
+
+def _uuid7ish(index: int) -> str:
+    return f"018f1f25-c930-76f0-86e7-{index:012x}"
+
+
+def _new_coordinator(tmp_path):
+    trust = DeviceTrustStore(tmp_path / "trust.db")
+    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    return PairingCoordinator(trust, account_id=ACCOUNT_ID, host_id=HOST_ID,
+        host_signing_key=host_signing.public_key(), host_agreement_key=host_agreement.public_key(), key_epoch=1)
+
+
+def _garbage_packet(ceremony_id: str, index: int) -> dict:
+    nonce = bytes([index % 256]) * 12
+    return {"v": 1, "ceremony_id": ceremony_id, "direction": "browser_to_host",
+            "nonce": b64url(nonce), "ciphertext": b64url(bytes(32))}
+
+
+def test_pairing_begin_is_rate_limited_after_max_ceremonies(tmp_path):
+    # An attacker (or a runaway client) starting unbounded ceremonies is a
+    # resource-exhaustion vector even though the 128-bit secret itself makes
+    # guessing infeasible; this is the "rate-limited at every relevant
+    # identity layer" requirement for the host-side pairing coordinator.
+    coordinator = _new_coordinator(tmp_path)
+    limit = coordinator._MAX_BEGINS_PER_WINDOW
+    for index in range(limit):
+        coordinator.begin(ceremony_id=_uuid7ish(index), now=100)
+    with pytest.raises(ShoreProtocolError, match="pairing_rate_limited"):
+        coordinator.begin(ceremony_id=_uuid7ish(limit), now=100)
+    # The window is a sliding one: once it elapses, begin() works again.
+    revived = coordinator.begin(ceremony_id=_uuid7ish(limit), now=100 + coordinator._BEGIN_WINDOW_SECONDS + 1)
+    assert revived["offer"]["ceremony_id"] == _uuid7ish(limit)
+
+
+def test_pairing_begin_limit_does_not_block_open_ceremony(tmp_path):
+    trust, coordinator, packet, pair_key, binding = _pairing_fixture(tmp_path)
+    for index in range(coordinator._MAX_BEGINS_PER_WINDOW - 1):
+        coordinator.begin(ceremony_id=_uuid7ish(index), now=100)
+
+    coordinator.accept_browser_packet(packet, now=101, response_nonce=bytes(range(12, 24)))
+    coordinator.accept_browser_confirmation(_confirmation(pair_key, binding), now=102)
+    assert trust.get(DEVICE_ID) is not None
+
+
+def test_pairing_begin_is_rate_limited_after_aggregate_failures_across_ceremonies(tmp_path):
+    # Each ceremony independently tolerates 5 failed attempts before it
+    # erases itself, but nothing stops an attacker from resetting that
+    # budget for free by starting a new ceremony each time; the aggregate
+    # failure lockout closes that bypass.
+    coordinator = _new_coordinator(tmp_path)
+    assert coordinator._MAX_FAILURES_PER_WINDOW < coordinator._MAX_BEGINS_PER_WINDOW * 5
+    ceremonies = coordinator._MAX_FAILURES_PER_WINDOW // 4
+    assert ceremonies < coordinator._MAX_BEGINS_PER_WINDOW
+    for ceremony_index in range(ceremonies):
+        ceremony_id = _uuid7ish(ceremony_index)
+        coordinator.begin(ceremony_id=ceremony_id, now=100)
+        for attempt in range(4):
+            with pytest.raises(ShoreProtocolError, match="pairing_failed"):
+                coordinator.accept_browser_packet(_garbage_packet(ceremony_id, attempt), now=100)
+    with pytest.raises(ShoreProtocolError, match="pairing_rate_limited"):
+        coordinator.begin(ceremony_id=_uuid7ish(ceremonies), now=100)
+
+
+def test_pairing_accept_is_rate_limited_once_aggregate_failure_budget_is_exhausted(tmp_path):
+    # Regression test: the aggregate lockout must also be enforced inside
+    # accept_browser_packet/accept_browser_confirmation, not only in begin().
+    # Otherwise an attacker holding several already-open ceremonies (each
+    # with its own untouched 5-attempt budget) can keep guessing without
+    # ever calling begin() again, burning attempts past the aggregate cap.
+    coordinator = _new_coordinator(tmp_path)
+    ceremonies = coordinator._MAX_FAILURES_PER_WINDOW // 4
+    still_open = _uuid7ish(0)
+    for ceremony_index in range(ceremonies):
+        ceremony_id = _uuid7ish(ceremony_index)
+        coordinator.begin(ceremony_id=ceremony_id, now=100)
+        for attempt in range(4):
+            with pytest.raises(ShoreProtocolError, match="pairing_failed"):
+                coordinator.accept_browser_packet(_garbage_packet(ceremony_id, attempt), now=100)
+    # still_open has used only 4 of its own 5-attempt budget and needs no new
+    # begin(); the aggregate 20-failure cap must still block it.
+    with pytest.raises(ShoreProtocolError, match="pairing_rate_limited"):
+        coordinator.accept_browser_packet(_garbage_packet(still_open, 99), now=100)

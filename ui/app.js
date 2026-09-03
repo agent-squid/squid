@@ -8141,7 +8141,9 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
           onProcessing?.();
         }
         else if (frame.type === 'chat.queued') statusBuf += (statusBuf && !statusBuf.endsWith('\n') ? '\n' : '') + `#${frame.payload.topic} · queued — position ${frame.payload.position}\n`;
-        if (frame.type === 'chat.done' || frame.type === 'chat.error' || frame.type === 'message.changed' && frame.payload.status !== 'pending') finish();
+        if (frame.type === 'chat.done') finish();
+        else if (frame.type === 'chat.error' && String(frame.payload?.text || '').trim()) finish();
+        else if (frame.type === 'message.changed' && frame.payload.status !== 'pending') finish();
         else updatePreview();
       },
       onUnavailable() {
