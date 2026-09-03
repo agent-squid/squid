@@ -5,9 +5,11 @@ Action 1, the local pairing and persisted device-trust cores, and the Action 4
 validation core are implemented on both the host (Python) and browser
 (TypeScript) sides, backed by shared cross-language test vectors; see its
 status note for what a model-assisted review round found and fixed along the
-way. The host-side pairing coordinator now rate-limits itself locally.
+way. The host-side pairing coordinator now rate-limits itself locally, and the
+broker account object enforces pairing packet and ceremony-churn limits across
+account, browser-device, and source-fingerprint identities.
 Production browser/host transport integration (no browser client exists
-yet), ingress wiring, broker-side identity-layer rate limits, remaining
+yet), ingress wiring, remaining
 acceptance coverage, and independent (human) security review remain before
 the milestone gate passes. Milestone 4 has not
 started. No production command-capable route is enabled. Milestone 5 is
@@ -138,10 +140,11 @@ before that gate passes.
 
 ## Milestone 2 — Account authentication and signed host registration
 
-**Status:** Complete (2026-09-03). Account authentication, second-factor
-enforcement, signed host registration, device revocation, and recovery flows
-are implemented with acceptance coverage. Account deletion (Action 6, added
-2026-09-03) closes a gap found in review: `shore-state-machines.md`'s
+**Status:** Complete (2026-09-03). Account authentication,
+second-factor enforcement, signed host registration, device revocation, and
+recovery flows are implemented with acceptance coverage. Account deletion
+(Action 6, added 2026-09-03) closes a gap found in review:
+`shore-state-machines.md`'s
 account-deletion state machine was normative from Milestone 0 but had no
 implementation, route, or assigned action item. It is now implemented as
 `startDeletion`/`cancelDeletion`/`completeDeletion` in `src/index.ts`,
@@ -155,6 +158,22 @@ retained as legally/security-required); and calls a new `IdentityIndex`
 permanently blocks the username from being claimed or renamed into again
 (unlike a rename's 30-day, eventually-reusable tombstone), consistent with
 ADR-0039's "deleted IDs ... are never reused."
+
+A final pre-publish review found and closed a browser-session socket
+invalidation gap. Hibernation-safe browser attachment metadata now retains the
+authenticating session ID; every frame revalidates that durable session before
+rate-limit mutation or relay; and logout, administrative revocation, step-up
+rotation, and refresh rotation immediately close matching sockets. Tests cover
+explicit revocation and refresh rotation. The same remediation migrated the
+older signup, login/registration, and attachment-failure source-IP rate keys
+from reversible unsalted SHA-256 to the keyed HMAC network fingerprint already
+used by pairing and displacement alerts.
+Session-changing routes and browser/device attachment now share the attachment
+critical section, and the session is revalidated inside that section before a
+socket is accepted. This closes the final rotation-versus-attachment race. The
+frame path also checks account generation before any durable pairing-rate
+mutation, so queued frames from revoked connections cannot consume current
+pairing capacity.
 
 **Objective:** authenticate accounts and prove host possession of its private
 key without treating either as command authorization.
@@ -216,18 +235,58 @@ fixed. The host-side `PairingCoordinator` now also rate-limits itself
 (`agent/shore_crypto.py`): a sliding 5-minute window caps both ceremony
 creation and aggregate failed attempts across ceremonies, closing a gap
 where the existing per-ceremony 5-attempt lockout could be reset for free by
-just starting a new ceremony. 12 negative-acceptance tests were added
-covering signature/key substitution, key-epoch mismatch, clock skew,
-expiry, replay and reordering at the envelope layer, pairing-confirmation
-reuse after completion, device-trust revocation, and the two new rate
-limits (`tests/test_shore_crypto.py`); host suite is 32/32, broker suite
-unaffected at 71/71. None of this is exploitable in production today because
+just starting a new ceremony. The broker now recognizes only the public outer
+schema of browser-to-host pairing packets and, without inspecting ciphertext,
+atomically caps packets per ceremony and distinct ceremonies per five-minute
+window across the account, browser-device, and source-fingerprint identity
+layers (`shore/src/index.ts`). Pairing rate records expire through the existing
+alarm cleanup, and source fingerprints use keyed HMAC rather than reversible
+plain hashes. A pre-publish review of this broker code found and fixed two
+bugs before either side of the diff was published: the churn check re-fetched
+the same storage keys twice per identity per packet (once to check, once to
+update) for no reason, and — more seriously — the per-ceremony dedupe marker
+that keeps a single ceremony from counting twice toward the churn budget was
+itself scoped to the rate window, so a ceremony whose packets straddled a
+five-minute window boundary got counted as a fresh "ceremony start" in each
+window it touched, inflating the churn counter against ordinary slow
+ceremonies. Both are fixed and covered by a regression test that drives the
+rate limiter directly with controlled timestamps either side of a window
+boundary (confirmed to fail against the pre-fix code: it reported 6 counted
+starts instead of the correct 3). The final review also closed the browser
+session socket-invalidation and older reversible source-IP rate-key gaps
+described in Milestone 2. A subsequent review round of that same
+source-IP-rate-key migration found three more issues, all fixed before
+publish: the new `IdentityIndex` signup-rate fingerprint re-imported its HMAC
+key on every request instead of caching it like `Account.networkFingerprint`
+does (now fixed the same way); the pairing-packet detector required an exact
+5-key/field match, so a packet with one extra or mismatched field still
+targeting a real ceremony_id was invisible to the per-ceremony/churn counters
+and relayed unthrottled (loosened to key off a valid `ceremony_id` alone,
+since the host — not the broker — is responsible for wire-format validity);
+and the per-ceremony rate records' expiry was window-aligned rather than
+anchored to arrival time, so a ceremony whose first packet landed near a
+window boundary could have its dedupe marker swept by the alarm cleanup
+before the ceremony's own 5-minute lifetime ended, reintroducing the same
+double-counting bug window-boundary straddling had just fixed. All three are
+covered by regression tests confirmed to fail pre-fix (the schema-evasion
+test times out waiting for a rate-limit close; the TTL test asserts the
+dedupe marker outlives one full ceremony lifetime from arrival, which failed
+by design against the window-aligned expiry). 15 negative-acceptance tests
+cover signature/key substitution, key-epoch mismatch, clock skew, expiry,
+replay and reordering at the envelope layer, pairing-confirmation reuse after
+completion, device-trust revocation, and the two new rate limits
+(`tests/test_shore_crypto.py`), plus broker per-ceremony, churn,
+window-boundary, packet-schema, and TTL behavior, persistence/privacy
+behavior, session revocation, refresh rotation, attachment races, and revoked
+generation ordering (`shore/test/shore.test.ts`); host suite is 32/32 and
+broker suite is 82/82, `tsc --noEmit` clean. None of
+this is exploitable in production today because
 nothing calls these modules outside tests yet. Still open before the
 milestone gate can pass: wiring both reference implementations into the real
 WebSocket transport between browser, broker, and host — no browser client
-exists yet, so this also means building one; broker-side identity-layer rate
-limits once pairing is actually relayed through the broker (today's limits
-are host-local only); production Shore ingress wiring; negative coverage for
+exists yet, so this also means building one; broker rate-limit integration
+with the eventual pairing offer/transport lifecycle; production Shore ingress
+wiring; negative coverage for
 broker frame injection and live host-key epoch rotation, which need the
 transport wiring to be meaningful; and an independent, qualified human
 security review — the review rounds so far were model-assisted, not the
