@@ -1,11 +1,15 @@
 # Plan: ADR-0039 Shore remote access
 
-**Status:** In progress (2026-09-02). Milestones 0–2 are complete. Milestone 3
+**Status:** In progress (2026-09-03). Milestones 0–2 are complete. Milestone 3
 Action 1, the local pairing and persisted device-trust cores, and the Action 4
-validation core are implemented. Production browser/host integration, ingress
-wiring, remaining acceptance coverage, and independent security review remain.
-Milestone 4 has not started. No production command-capable route is enabled.
-Milestone 5 is blocked until Milestones 3 and 4 pass their acceptance gates.
+validation core are implemented on both the host (Python) and browser
+(TypeScript) sides, backed by shared cross-language test vectors; see its
+status note for what a model-assisted review round found and fixed along the
+way. Production browser/host transport integration, ingress wiring, identity-
+layer rate limits, remaining acceptance coverage, and independent (human)
+security review remain before the milestone gate passes. Milestone 4 has not
+started. No production command-capable route is enabled. Milestone 5 is
+blocked until Milestones 3 and 4 pass their acceptance gates.
 
 This is the implementation plan for
 [ADR-0039](../decisions/0039-remote-access-via-shore-broker.md). The ADR owns
@@ -132,9 +136,23 @@ before that gate passes.
 
 ## Milestone 2 — Account authentication and signed host registration
 
-**Status:** Complete (2026-09-02). Account authentication, second-factor
+**Status:** Complete (2026-09-03). Account authentication, second-factor
 enforcement, signed host registration, device revocation, and recovery flows
-are implemented with acceptance coverage.
+are implemented with acceptance coverage. Account deletion (Action 6, added
+2026-09-03) closes a gap found in review: `shore-state-machines.md`'s
+account-deletion state machine was normative from Milestone 0 but had no
+implementation, route, or assigned action item. It is now implemented as
+`startDeletion`/`cancelDeletion`/`completeDeletion` in `src/index.ts`,
+mirroring the existing recovery flow's fresh-second-factor, seven-day
+cooling-off, 24-hour pre-completion warning, and cancellation-token design:
+completion revokes the current host, all sessions, and all devices; bumps the
+generation counter; cryptographically erases `account-email`, `totp-secret`,
+and the recovery verifier (audit/notification records are deliberately
+retained as legally/security-required); and calls a new `IdentityIndex`
+`/tombstone` route that releases the username and email from resolution and
+permanently blocks the username from being claimed or renamed into again
+(unlike a rename's 30-day, eventually-reusable tombstone), consistent with
+ADR-0039's "deleted IDs ... are never reused."
 
 **Objective:** authenticate accounts and prove host possession of its private
 key without treating either as command authorization.
@@ -154,25 +172,52 @@ key without treating either as command authorization.
 5. Implement the ADR recovery split: account recovery restores administration,
    while host loss creates a new trust root, revokes the old host's sessions,
    pairings, and capabilities, and never inherits its identity or trust.
+6. Implement the account-deletion state machine from `shore-state-machines.md`:
+   a fresh-second-factor-gated seven-day cooling-off period, cancellable by
+   session or notification cancel token, that on completion revokes the
+   current host/sessions/devices, cryptographically erases personal fields,
+   and permanently tombstones the account and username so neither is ever
+   reused.
 
 **Acceptance:** tests cover token replay/expiry, session rotation/revocation,
 login and registration throttling, second-factor enforcement, host
 impersonation, mismatch/displacement rejection, same-key reconnect, recovery
-notifications/seven-day cooling-off/cancellation, lost-host replacement, and
-proof that old pairings/capabilities are not inherited. Passing this milestone
-still does not permit commands.
+notifications/seven-day cooling-off/cancellation, lost-host replacement, proof
+that old pairings/capabilities are not inherited, account-deletion
+fresh-second-factor enforcement, idempotent start/cancellation, alarm-driven
+completion (host/session/device revocation, personal-field erasure, and
+permanent username tombstoning verified against the identity index), and the
+24-hour pre-completion warning. Passing this milestone still does not permit
+commands.
 
 ## Milestone 3 — End-to-end channel and local pairing
 
-**Status:** In progress (2026-09-03). Action 1, the local pairing ceremony and
-durable host-owned device trust core, and the standalone Action 4 validation
-core are implemented. The pairing wire format has received an owner review,
-and both the host (Python) and browser (TypeScript) sides now implement the
-amended bootstrap-key three-packet ceremony against shared, cross-language
-vectors — but the milestone security gate remains open. Wiring those
-reference implementations into the real WebSocket transport between browser,
-broker, and host, identity-layer rate limits, production Shore ingress
-wiring, and full negative acceptance coverage remain.
+**Status:** In progress (2026-09-03). Action 1 (envelope) and Action 4
+(validation core) are implemented and independently reproduce
+`shore-protocol-v1-vectors.json` byte-for-byte on both the host
+(`agent/shore_crypto.py`) and browser/broker (`shore/src/crypto.ts`) sides.
+Action 2 (pairing) and the durable device-trust core in Action 3 are also
+implemented on both sides, after a model-assisted review round found and the
+team fixed, in order: the original pairing design could not fit the 128-bit
+secret and 128-bit nonce into one 130-bit human code and required the browser
+to know unverified host fingerprints before it could decrypt anything
+(circular); the protocol was amended to a bootstrap-key three-packet
+ceremony (`docs/decisions/0039-remote-access-via-shore-broker.md`'s
+2026-09-03 amendment) with real (not placeholder) fingerprint vectors; the
+host-side `PairingCoordinator` was rewritten to start blind and learn the
+browser's identity only from its first encrypted packet; a matching
+browser-side reference implementation was added to `shore/src/crypto.ts`
+(previously absent entirely, leaving only one side of the handshake
+implemented); and the browser side was found to skip the spec's "compare the
+offer's account and host IDs against the authenticated route" check, since
+fixed. None of this is exploitable in production today because nothing calls
+these modules outside tests yet. Still open before the milestone gate can
+pass: wiring both reference implementations into the real WebSocket transport
+between browser, broker, and host; identity-layer rate limits; production
+Shore ingress wiring; full negative acceptance coverage; and an independent,
+qualified human security review — the review rounds so far were model-
+assisted, not the human review this milestone's acceptance criterion
+requires.
 
 **Objective:** establish broker-blind, mutually authenticated communication
 between a paired browser device and the host.
