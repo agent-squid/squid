@@ -103,6 +103,12 @@ key, while the mutually verified host response uses the binding-derived pair
 key. This preserves broker blindness without requiring either side to know the
 encrypted browser-key fingerprints before decrypting them.
 
+This construction is not a password-authenticated key exchange (PAKE). Its
+resistance to offline guessing depends on retaining the pairing secret's full
+128 bits of entropy. The QR and 26-character Crockford Base32 forms encode that
+same secret; implementations must not shorten it for usability without an ADR
+amendment adopting a reviewed PAKE and new test vectors.
+
 The 2026-09-03 transport amendment defines a zero-length, host-only binary
 lease heartbeat. The broker consumes this transport control without relaying
 it, applies ordinary socket rate limits and revocation checks, and accepts no
