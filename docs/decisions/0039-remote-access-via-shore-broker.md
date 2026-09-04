@@ -248,12 +248,28 @@ sequenceDiagram
     Host->>Broker: encrypted event over the host's WebSocket, only when state changes
     Broker-->>Browser: pushed over the browser's own held WebSocket
     Note right of Broker: No browser-initiated request at all,<br/>this is what keeps desktop and phone in sync without a manual refresh.
+
+    Note over Browser,Host: C. Send a prompt / command (ADR-0040 relay — NOT YET ENABLED, Milestone 4)
+    Browser->>Broker: encrypted ADR-0040 message over the browser's own WebSocket
+    Broker->>Host: forwarded over the host's WebSocket
+    Host->>Host: capability check, then dispatch to the same ADR-0040 handlers /ws/v1 uses
+    loop streamed reply
+        Host->>Broker: encrypted output chunk over the host's WebSocket
+        Broker-->>Browser: pushed over the browser's own WebSocket
+    end
+    Note right of Broker: Same shape as leg B once dispatched (host-initiated pushes),<br/>but browser-initiated and multi-message. Today every ADR-0040<br/>message type except shore.probe is rejected before dispatch.
 ```
 
-The two legs are independent: A is always browser-initiated and HTTP-shaped;
-B is always host-initiated and push-only. A busy dashboard with no state
-changes produces only A traffic; a long-running job with no one watching the
-dashboard produces only B traffic (to any browser socket currently held open).
+The two legs enabled today are independent: A is always browser-initiated and
+HTTP-shaped; B is always host-initiated and push-only. A busy dashboard with no
+state changes produces only A traffic; a long-running job with no one watching
+the dashboard produces only B traffic (to any browser socket currently held
+open). Leg C — the actual "send a prompt" flow, and arguably the whole point of
+Shore — is architecturally a hybrid: browser-initiated like A, but WebSocket-
+based with a streamed multi-message reply like B. It is deliberately not live:
+Milestone 3's dispatcher rejects every message type except a harmless
+`shore.probe`, so ADR-0040 commands (including prompts) stay disabled until
+Milestone 4 adds capability-scoped relay on top of this channel.
 
 ### Traffic accounting and capacity forecast
 
