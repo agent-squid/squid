@@ -197,9 +197,12 @@ sequenceDiagram
     participant Broker as Broker (Worker + DO)
     participant Browser as Browser/phone
 
-    Note over Host,Broker: 1. Device registration
-    Host->>Broker: WebSocket connect + signed nonce challenge (host keypair)
-    Broker-->>Host: registration ack (host_id, key_epoch)
+    Note over Host,Broker: 1. Device registration and attachment
+    Host->>Broker: HTTPS registration (host_id + public keys)
+    Broker-->>Host: registration response (account_id, username, host_id, key_epoch, public keys)
+    Host->>Broker: request fresh connection challenge
+    Broker-->>Host: nonce-bound challenge
+    Host->>Broker: WebSocket connect + signed connection proof
     Note right of Broker: Broker holds only the host public key.
 
     Note over Browser,Broker: 2. End-user session
@@ -212,23 +215,26 @@ sequenceDiagram
     Broker->>Host: relayed opaque packet
     Host->>Broker: encrypted binding response (opaque to broker)
     Broker->>Browser: relayed opaque response
+    Browser->>Broker: encrypted binding confirmation (opaque to broker)
+    Broker->>Host: relayed opaque confirmation
     Note over Host,Browser: Both sides derive/pin the pair key locally,<br/>broker never sees key material.
 
-    Note over Host,Browser: 4. Encrypted command relay
+    Note over Host,Browser: 4. Implemented encrypted transport probe (commands disabled)
     Browser->>Broker: signed+encrypted envelope (opaque ciphertext)
     Broker->>Host: relayed ciphertext (routed by username only)
-    Host->>Host: validate expiry/sequence/request-id/signature, then decrypt
+    Host->>Host: validate expiry/sequence/request-id/signature, decrypt,<br/>and accept only shore.probe
     Host->>Broker: signed+encrypted response
     Broker->>Browser: relayed ciphertext
     Browser->>Browser: decrypt + verify
 ```
 
-### Steady-state operation (post-pairing)
+### Target steady-state operation (post-pairing)
 
-Setup (above) happens once per host/browser pair. Day-to-day traffic after
-that falls into two independent shapes, both still carrying an opaque
-encrypted envelope as payload — the broker only ever sees ciphertext, routed
-by username or by which held connection it arrived on:
+Setup (above) happens once per host/browser pair. The target day-to-day design
+has the three traffic shapes below, all carrying opaque encrypted envelopes —
+the broker only ever sees ciphertext, routed by username or by which held
+connection it arrived on. These are architectural target flows, not a claim
+that their application handlers are enabled in the current milestone.
 
 ```mermaid
 sequenceDiagram
@@ -236,7 +242,7 @@ sequenceDiagram
     participant Broker as Broker (Worker + DO)
     participant Browser as Browser/phone
 
-    Note over Browser,Host: A. Bounded request/response (files, topics, stats, config, ...)
+    Note over Browser,Host: A. TARGET: Bounded request/response (files, topics, stats, config, ...)
     Browser->>Broker: HTTPS request (encrypted envelope), session-authenticated
     Broker->>Host: forwarded over the host's already-open WebSocket
     Host->>Host: validate envelope, decrypt, execute
@@ -244,12 +250,12 @@ sequenceDiagram
     Broker-->>Browser: HTTPS response
     Note right of Broker: 1 Worker request + 1 Durable Object request per operation.<br/>No polling: this leg only runs when the browser asks for something.
 
-    Note over Browser,Host: B. Push on state change (status, job output, ...)
+    Note over Browser,Host: B. TARGET: Push on state change (status, job output, ...)
     Host->>Broker: encrypted event over the host's WebSocket, only when state changes
     Broker-->>Browser: pushed over the browser's own held WebSocket
     Note right of Broker: No browser-initiated request at all,<br/>this is what keeps desktop and phone in sync without a manual refresh.
 
-    Note over Browser,Host: C. Send a prompt / command (ADR-0040 relay — NOT YET ENABLED, Milestone 4)
+    Note over Browser,Host: C. TARGET: Send a prompt / command (NOT YET ENABLED, Milestone 4)
     Browser->>Broker: encrypted ADR-0040 message over the browser's own WebSocket
     Broker->>Host: forwarded over the host's WebSocket
     Host->>Host: capability check, then dispatch to the same ADR-0040 handlers /ws/v1 uses
@@ -257,28 +263,27 @@ sequenceDiagram
         Host->>Broker: encrypted output chunk over the host's WebSocket
         Broker-->>Browser: pushed over the browser's own WebSocket
     end
-    Note right of Broker: Same shape as leg B once dispatched (host-initiated pushes),<br/>but browser-initiated and multi-message. Today every ADR-0040<br/>message type except shore.probe is rejected before dispatch.
+    Note right of Broker: Same shape as leg B once dispatched (host-initiated pushes),<br/>but browser-initiated and multi-message.
 ```
 
-The two legs enabled today are independent: A is always browser-initiated and
-HTTP-shaped; B is always host-initiated and push-only. A busy dashboard with no
-state changes produces only A traffic; a long-running job with no one watching
-the dashboard produces only B traffic (to any browser socket currently held
-open). Leg C — the actual "send a prompt" flow, and arguably the whole point of
-Shore — is architecturally a hybrid: browser-initiated like A, but WebSocket-
-based with a streamed multi-message reply like B. It is deliberately not live:
-Milestone 3's dispatcher rejects every message type except a harmless
-`shore.probe`, so ADR-0040 commands (including prompts) stay disabled until
-Milestone 4 adds capability-scoped relay on top of this channel.
+None of A, B, or C is application-enabled remotely today. The implemented
+Milestone 3 slice exercises C's encrypted WebSocket request/response transport
+with only a harmless `shore.probe`; the dispatcher rejects every other message
+type. A will be browser-initiated and HTTP-shaped. B will be host-initiated and
+push-only. C — the actual "send a prompt" flow — is architecturally a hybrid:
+browser-initiated like A, but WebSocket-based with a streamed multi-message
+reply like B. Milestone 4 adds capability-scoped ADR-0040 dispatch and enables
+operations incrementally after authorization and transport-parity tests exist.
 
 ### Traffic accounting and capacity forecast
 
-The WebSocket migration removes repeated polling for live state; it does not
-remove HTTP traffic. Files, topics, agents, stats, history, configuration,
-uploads, diffs, and other bounded request/response operations remain HTTP by
-design under ADR-0040. A remote HTTP operation that reaches Shore normally
-consumes one inbound Worker request and one request to the account Durable
-Object. Storage work inside the object is metered separately.
+In the target design, the WebSocket migration removes repeated polling for live
+state; it does not remove HTTP traffic. Files, topics, agents, stats, history,
+configuration, uploads, diffs, and other bounded request/response operations
+remain HTTP under ADR-0040. Once implemented remotely, an HTTP operation that
+reaches Shore normally consumes one inbound Worker request and one request to
+the account Durable Object. Storage work inside the object is metered
+separately.
 
 The initial Worker WebSocket upgrade counts as a request. Messages routed
 through the Worker do not count as additional Worker requests. For Durable
