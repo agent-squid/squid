@@ -8,10 +8,12 @@ status note for what a model-assisted review round found and fixed along the
 way. The host-side pairing coordinator now rate-limits itself locally, and the
 broker account object enforces pairing packet and ceremony-churn limits across
 account, browser-device, and source-fingerprint identities.
-Production browser transport integration (no browser client exists yet), remaining
-acceptance coverage, and independent (human) security review remain before
-the milestone gate passes. Milestone 4 has not
-started. No production command-capable route is enabled. Milestone 5 is
+The browser transport client, non-extractable device identity, pinned host trust,
+and durable replay/sequence state are implemented. Cross-process browser/host
+pairing and encrypted-probe interoperability now run in CI. Remaining live
+key-rotation acceptance coverage, production deployment wiring, and an
+independent (human) security review remain before the milestone gate passes.
+Milestone 4 has not started. No production command-capable route is enabled. Milestone 5 is
 blocked until Milestones 3 and 4 pass their acceptance gates.
 
 This is the implementation plan for
@@ -350,10 +352,22 @@ metadata replacement crash-durable by syncing the containing directory and enfor
 mode 0700 on that identity directory at every write. A thirteenth review tightened
 registration-response binding from raw key coordinates to the complete expected
 Ed25519 and X25519 public JWKs, rejecting altered curve labels or extra key metadata.
-The focused host suites pass 83/83, the broker suite passes 85/85, and
-`tsc --noEmit` remains clean. Still open before the milestone
-gate can pass: the browser application and its non-extractable key/trust persistence; full cross-process integration,
-broker-injection, and live host-key epoch-rotation coverage; production
+The browser application is now implemented in `shore/browser`: it resolves
+immutable route metadata through the authenticated security surface, connects
+with the same-origin session cookie, generates and persists non-extractable
+Ed25519/X25519 device keys in IndexedDB, pins host trust without silently
+accepting key changes, persists replay and outbound-sequence state, and performs
+the pairing and encrypted probe flows. A cross-process integration test now
+drives that TypeScript client against the real Python `ShoreChannel`, completing
+pairing and an encrypted probe without replacing either implementation with a
+test double; Shore CI checks out both repositories and runs this required gate.
+The browser has 35 passing unit tests plus this passing cross-process test, and its
+`tsc --noEmit` check is clean. Explicit host-side broker-injection coverage now
+proves malformed plaintext and a cryptographically well-formed envelope from an
+untrusted device both fail before application dispatch. The focused host suites
+pass 84/84, the broker suite passes 85/85, and `tsc --noEmit` remains clean.
+Still open before the milestone gate can pass: live host-key epoch-rotation
+coverage; production
 deployment wiring; and an independent, qualified human security review. The
 review rounds so far were model-assisted, not the required human review.
 

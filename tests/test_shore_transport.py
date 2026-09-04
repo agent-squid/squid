@@ -115,6 +115,29 @@ def test_live_channel_pairs_persists_trust_and_round_trips_only_probe(tmp_path):
         restarted.handle(canonical(request(2)), now_ms=NOW)
 
 
+def test_broker_injected_frames_fail_before_application_dispatch(tmp_path):
+    host_signing = ed25519.Ed25519PrivateKey.generate()
+    host_agreement = x25519.X25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=host_agreement)
+
+    with pytest.raises(ShoreProtocolError, match="shore_invalid_frame"):
+        channel.handle(b"broker-controlled plaintext", now_ms=NOW)
+
+    untrusted_signing = ed25519.Ed25519PrivateKey.generate()
+    untrusted_agreement = x25519.X25519PrivateKey.generate()
+    injected = seal_envelope({"v": 1, "type": "shore.probe", "payload": {"nonce": "injected"}},
+        account_id=ACCOUNT, host_id=HOST,
+        device_id="018f1f25-8614-7e41-8c5c-fc0b6eefad63", key_epoch=1,
+        direction="browser_to_host", seq=1,
+        request_id="018f1f25-c930-76f0-86e7-000000000098",
+        issued_at=timestamp(NOW), expires_at=timestamp(NOW + 30_000),
+        sender_signing=untrusted_signing, sender_agreement=untrusted_agreement,
+        receiver_agreement=host_agreement.public_key())
+    with pytest.raises(ShoreProtocolError, match="shore_untrusted_device"):
+        channel.handle(canonical(injected), now_ms=NOW)
+
+
 def test_host_key_epoch_change_does_not_inherit_old_device_trust(tmp_path):
     old_host_signing, old_host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
     browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
