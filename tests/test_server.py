@@ -66,6 +66,21 @@ def test_validate_config_content_defaults_realtime_transport_to_auto(tmp_path):
     assert server.realtime_transport(parsed) == "auto"
 
 
+def test_validate_config_content_accepts_absolute_shore_identity_dir(tmp_path):
+    content = _config_yaml(tmp_path).replace(
+        "agent:\n", f'shore:\n  identity_dir: "{tmp_path / "shore"}"\nagent:\n',
+    )
+    parsed = server._validate_config_content(content)
+    assert server.shore_identity_dir(parsed) == tmp_path / "shore"
+
+
+@pytest.mark.parametrize("shore", ["[]", "false", "{identity_dir: ''}", "{identity_dir: relative/path}"])
+def test_validate_config_content_rejects_invalid_shore_config(tmp_path, shore):
+    content = _config_yaml(tmp_path).replace("agent:\n", f"shore: {shore}\nagent:\n")
+    with pytest.raises(ValueError, match="shore"):
+        server._validate_config_content(content)
+
+
 @pytest.mark.parametrize("realtime", ["websocket", "{transport: invalid}"])
 def test_validate_config_content_rejects_invalid_realtime_config(tmp_path, realtime):
     content = _config_yaml(tmp_path).replace("agent:\n", f"realtime: {realtime}\nagent:\n")

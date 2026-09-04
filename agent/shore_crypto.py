@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -16,6 +17,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
@@ -24,9 +26,36 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 UUID7 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 MAX_UINT64 = (1 << 64) - 1
+MAX_SAFE_INTEGER = (1 << 53) - 1
 OUTER_FIELDS = {"v", "account_id", "host_id", "device_id", "key_epoch", "direction", "seq", "request_id", "issued_at", "expires_at", "nonce", "ciphertext", "signature"}
 DIRECTIONS = {"browser_to_host", "host_to_browser"}
 CROCKFORD32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+
+def valid_key_epoch(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= MAX_SAFE_INTEGER
+
+
+def valid_broker_url(value: object) -> bool:
+    if not isinstance(value, str) or any(char.isspace() for char in value):
+        return False
+    try:
+        parsed = urlsplit(value)
+        parsed.port  # accessing port performs validation that urlsplit itself defers
+    except ValueError:
+        return False
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if not parsed.netloc or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        return False
+    if parsed.scheme == "http":
+        try:
+            loopback = parsed.hostname == "localhost" or ipaddress.ip_address(parsed.hostname).is_loopback
+        except ValueError:
+            loopback = False
+        if not loopback:
+            return False
+    return True
 
 
 class ShoreProtocolError(ValueError):
@@ -99,12 +128,30 @@ def seal_envelope(frame: dict[str, Any], *, account_id: str, host_id: str, devic
                   expires_at: str, sender_signing: ed25519.Ed25519PrivateKey,
                   sender_agreement: x25519.X25519PrivateKey,
                   receiver_agreement: x25519.X25519PublicKey, nonce: bytes | None = None) -> dict[str, Any]:
-    nonce = nonce or secrets.token_bytes(12)
+    if (not UUID7.fullmatch(account_id) or not UUID7.fullmatch(host_id)
+            or not UUID7.fullmatch(device_id) or not UUID7.fullmatch(request_id)
+            or not valid_key_epoch(key_epoch)
+            or not isinstance(seq, int) or isinstance(seq, bool) or seq < 1 or seq > MAX_UINT64
+            or direction not in DIRECTIONS):
+        raise ShoreProtocolError("shore_invalid_frame")
+    try:
+        issued = _millis(issued_at)
+        expires = _millis(expires_at)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ShoreProtocolError("shore_invalid_frame") from exc
+    if expires <= issued or expires - issued > 60_000:
+        raise ShoreProtocolError("shore_invalid_frame")
+    nonce = secrets.token_bytes(12) if nonce is None else nonce
+    if not isinstance(nonce, bytes) or len(nonce) != 12:
+        raise ShoreProtocolError("shore_invalid_frame")
     aad = {"v": 1, "account_id": account_id, "host_id": host_id, "device_id": device_id,
            "key_epoch": key_epoch, "direction": direction, "seq": str(seq), "request_id": request_id,
            "issued_at": issued_at, "expires_at": expires_at, "nonce": b64url(nonce)}
-    plaintext = canonical(frame)
-    if len(plaintext) > 256 * 1024 or direction not in DIRECTIONS:
+    try:
+        plaintext = canonical(frame)
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ShoreProtocolError("shore_invalid_frame") from exc
+    if len(plaintext) > 256 * 1024:
         raise ShoreProtocolError("shore_invalid_frame")
     key = derive_envelope_key(sender_agreement, receiver_agreement, account_id, host_id, key_epoch, direction)
     envelope = {**aad, "ciphertext": b64url(AESGCM(key).encrypt(nonce, plaintext, canonical(aad)))}
@@ -124,14 +171,21 @@ class ReplayStore:
 
     def __init__(self, path: Path):
         self.path = path
+        self._provisioned = False
+
+    def _provision(self) -> None:
+        if self._provisioned:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.path.parent, 0o700)
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        os.close(fd)
+        os.chmod(self.path, 0o600)
+        self._provisioned = True
 
     def accept(self, scope: str, seq: int, request_id: str, now_ms: int) -> bool:
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            os.chmod(self.path.parent, 0o700)
-            fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
-            os.close(fd)
-            os.chmod(self.path, 0o600)
+            self._provision()
             with sqlite3.connect(self.path, timeout=5, isolation_level=None) as connection:
                 connection.execute("PRAGMA synchronous = FULL")
                 connection.execute("CREATE TABLE IF NOT EXISTS replay_scopes (scope TEXT PRIMARY KEY, sequence TEXT NOT NULL)")
@@ -188,8 +242,8 @@ def open_envelope(envelope: dict[str, Any], *, expected: dict[str, Any],
                 or not UUID7.fullmatch(envelope["host_id"])
                 or not UUID7.fullmatch(envelope["device_id"])
                 or not UUID7.fullmatch(envelope["request_id"])
-                or not isinstance(envelope["key_epoch"], int) or isinstance(envelope["key_epoch"], bool)
-                or envelope["key_epoch"] < 1 or envelope["direction"] not in DIRECTIONS):
+                or not valid_key_epoch(envelope["key_epoch"])
+                or envelope["direction"] not in DIRECTIONS):
             raise ValueError
         nonce, signature, ciphertext = (unb64url(envelope["nonce"]), unb64url(envelope["signature"]),
                                         unb64url(envelope["ciphertext"]))
@@ -288,13 +342,20 @@ class DeviceTrustStore:
 
     def __init__(self, path: Path):
         self.path = path
+        self._provisioned = False
 
-    def _connect(self) -> sqlite3.Connection:
+    def _provision(self) -> None:
+        if self._provisioned:
+            return
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.path.parent, 0o700)
         fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
         os.close(fd)
         os.chmod(self.path, 0o600)
+        self._provisioned = True
+
+    def _connect(self) -> sqlite3.Connection:
+        self._provision()
         connection = sqlite3.connect(self.path, timeout=5, isolation_level=None)
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("""CREATE TABLE IF NOT EXISTS shore_devices (
@@ -306,7 +367,8 @@ class DeviceTrustStore:
 
     def approve(self, device_id: str, signing_key: bytes, agreement_key: bytes,
                 key_epoch: int, now_ms: int | None = None) -> TrustedDevice:
-        if not UUID7.fullmatch(device_id) or len(signing_key) != 32 or len(agreement_key) != 32 or key_epoch < 1:
+        if (not UUID7.fullmatch(device_id) or len(signing_key) != 32 or len(agreement_key) != 32
+                or not valid_key_epoch(key_epoch)):
             raise ShoreProtocolError("pairing_failed")
         now_ms = int(time.time() * 1000) if now_ms is None else now_ms
         try:
@@ -371,7 +433,8 @@ class PairingCoordinator:
     def __init__(self, trust: DeviceTrustStore, *, account_id: str, host_id: str,
                  host_signing_key: ed25519.Ed25519PublicKey,
                  host_agreement_key: x25519.X25519PublicKey, key_epoch: int):
-        if not UUID7.fullmatch(account_id) or not UUID7.fullmatch(host_id) or key_epoch < 1:
+        if (not UUID7.fullmatch(account_id) or not UUID7.fullmatch(host_id)
+                or not valid_key_epoch(key_epoch)):
             raise ValueError("invalid Shore host identity")
         self.trust = trust
         self.account_id = account_id
@@ -494,7 +557,7 @@ class PairingCoordinator:
                 if ceremony.failures >= 5 or checked_at >= ceremony.expires_at:
                     ceremony.erase(); self._ceremonies.pop(ceremony_id, None); self._cancel_expiry(ceremony_id)
                 raise ShoreProtocolError("pairing_failed")
-            response_nonce = response_nonce or secrets.token_bytes(12)
+            response_nonce = secrets.token_bytes(12) if response_nonce is None else response_nonce
             if len(response_nonce) != 12 or response_nonce in ceremony.packet_nonces: raise ShoreProtocolError("pairing_failed")
             ceremony.packet_nonces.add(response_nonce)
             host_keys = {"signing": b64url(self.host_signing_key.public_bytes_raw()), "agreement": b64url(self.host_agreement_key.public_bytes_raw())}

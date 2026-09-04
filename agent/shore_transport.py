@@ -21,10 +21,28 @@ from urllib.parse import quote, urlsplit, urlunsplit
 import httpx
 from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 
+from .shore import _load_or_new_identity, _load_runtime_config
 from .shore_crypto import (
     DeviceTrustStore, PairingCoordinator, ReplayStore, ShoreProtocolError,
-    TrustedDevice, canonical, open_envelope, seal_envelope, uuid7,
+    TrustedDevice, b64url, canonical, open_envelope, seal_envelope, uuid7,
+    valid_broker_url,
 )
+
+
+def configured_host_connection(identity_dir: Path) -> "ShoreHostConnection | None":
+    """Build the daemon relay connection from a completed Shore login."""
+    config = _load_runtime_config(identity_dir)
+    if config is None:
+        return None
+    host_id, signing, agreement = _load_or_new_identity(identity_dir)
+    channel = ShoreChannel(
+        identity_dir, account_id=config.account_id, host_id=host_id,
+        host_signing=signing, host_agreement=agreement, key_epoch=config.key_epoch,
+    )
+    return ShoreHostConnection(
+        channel, broker=config.broker, username=config.username,
+        host_id=host_id, signing_key=signing,
+    )
 
 
 class ShoreChannel:
@@ -46,6 +64,7 @@ class ShoreChannel:
             host_signing_key=host_signing.public_key(),
             host_agreement_key=host_agreement.public_key(), key_epoch=key_epoch,
         )
+        self._outbound_provisioned = False
 
     def begin_pairing(self, ceremony_id: str) -> dict[str, Any]:
         return self.pairing.begin(ceremony_id=ceremony_id)
@@ -107,20 +126,25 @@ class ShoreChannel:
             raise ShoreProtocolError("shore_invalid_frame")
 
     def _next_sequence(self, device: TrustedDevice) -> int:
-        self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(self.state_dir, 0o700)
         path = self.state_dir / "outbound.sqlite3"
-        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-        os.close(fd)
-        os.chmod(path, 0o600)
-        with sqlite3.connect(path, isolation_level=None) as connection:
-            connection.execute("CREATE TABLE IF NOT EXISTS sequences (scope TEXT PRIMARY KEY, value INTEGER NOT NULL)")
-            connection.execute("BEGIN IMMEDIATE")
-            scope = f"{device.device_id}:{self.key_epoch}:host_to_browser"
-            row = connection.execute("SELECT value FROM sequences WHERE scope=?", (scope,)).fetchone()
-            value = (row[0] if row else 0) + 1
-            connection.execute("INSERT INTO sequences(scope,value) VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET value=excluded.value", (scope, value))
-            connection.execute("COMMIT")
+        try:
+            if not self._outbound_provisioned:
+                self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                os.chmod(self.state_dir, 0o700)
+                fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+                os.close(fd)
+                os.chmod(path, 0o600)
+                self._outbound_provisioned = True
+            with sqlite3.connect(path, isolation_level=None) as connection:
+                connection.execute("CREATE TABLE IF NOT EXISTS sequences (scope TEXT PRIMARY KEY, value INTEGER NOT NULL)")
+                connection.execute("BEGIN IMMEDIATE")
+                scope = f"{device.device_id}:{self.key_epoch}:host_to_browser"
+                row = connection.execute("SELECT value FROM sequences WHERE scope=?", (scope,)).fetchone()
+                value = (row[0] if row else 0) + 1
+                connection.execute("INSERT INTO sequences(scope,value) VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET value=excluded.value", (scope, value))
+                connection.execute("COMMIT")
+        except (OSError, sqlite3.Error) as exc:
+            raise ShoreProtocolError("shore_sequence_store_failed") from exc
         return value
 
     @staticmethod
@@ -135,9 +159,9 @@ class ShoreHostConnection:
                  host_id: str, signing_key: ed25519.Ed25519PrivateKey,
                  heartbeat_seconds: float = 30.0, base_backoff: float = 1.0,
                  max_backoff: float = 30.0, stable_seconds: float = 60.0):
+        if not valid_broker_url(broker):
+            raise ValueError("broker must use HTTPS, or HTTP on an explicit loopback host")
         parsed = urlsplit(broker)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError("broker must be an absolute HTTP(S) URL")
         self.channel = channel
         self.host_id = host_id
         self.signing_key = signing_key
@@ -175,9 +199,7 @@ class ShoreHostConnection:
                 code = exc.rcvd.code if exc.rcvd is not None else None
                 if code in {1008, 1009}:
                     return
-                if connected_at is not None and time.monotonic() - connected_at >= self.stable_seconds:
-                    delay = self.base_backoff
-                delay = await self._backoff(stop, delay)
+                delay = await self._backoff(stop, self._reset_if_stable(connected_at, delay))
             except InvalidStatus as exc:
                 status = exc.response.status_code
                 if self._terminal_http_status(status):
@@ -188,13 +210,17 @@ class ShoreHostConnection:
                     return
                 delay = await self._backoff(stop, delay)
             except (OSError, httpx.HTTPError, ShoreProtocolError, WebSocketException):
-                if connected_at is not None and time.monotonic() - connected_at >= self.stable_seconds:
-                    delay = self.base_backoff
-                delay = await self._backoff(stop, delay)
+                delay = await self._backoff(stop, self._reset_if_stable(connected_at, delay))
 
     @staticmethod
     def _terminal_http_status(status: int) -> bool:
         return 400 <= status < 500 and status not in {408, 425, 429}
+
+    def _reset_if_stable(self, connected_at: float | None, delay: float) -> float:
+        """A connection that stayed up past stable_seconds earns a fresh backoff budget."""
+        if connected_at is not None and time.monotonic() - connected_at >= self.stable_seconds:
+            return self.base_backoff
+        return delay
 
     async def _backoff(self, stop: asyncio.Event, delay: float) -> float:
         if stop.is_set():
@@ -203,7 +229,10 @@ class ShoreHostConnection:
             await asyncio.wait_for(stop.wait(), timeout=delay + random.uniform(0, delay * 0.2))
         except asyncio.TimeoutError:
             pass
-        return min(self.max_backoff, max(self.base_backoff, delay * 2))
+        # `delay or 0.001` keeps growth working even when base_backoff is 0
+        # (only used by tests, for a fast first retry); production always
+        # starts from the 1.0s default, where this is a no-op.
+        return min(self.max_backoff, max(self.base_backoff, (delay or 0.001) * 2))
 
     async def _connection_headers(self) -> dict[str, str]:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -217,7 +246,6 @@ class ShoreHostConnection:
             raise ShoreProtocolError("shore_invalid_host_challenge")
         proof = canonical({"challenge_id": challenge["id"], "host_id": self.host_id,
                            "nonce": challenge["nonce"], "purpose": "websocket", "v": 1})
-        from .shore_crypto import b64url
         return {"x-shore-role": "host", "x-shore-host-id": self.host_id,
                 "x-shore-challenge-id": challenge["id"],
                 "x-shore-signature": b64url(self.signing_key.sign(proof))}
@@ -241,7 +269,7 @@ class ShoreHostConnection:
                     await socket.close(code=1003, reason="binary_frames_only")
                     return
                 try:
-                    response = self.channel.handle(message)
+                    response = await asyncio.to_thread(self.channel.handle, message)
                 except ShoreProtocolError:
                     # A malformed or injected peer frame must not tear down the
                     # authenticated host transport or produce an oracle response.
@@ -251,5 +279,9 @@ class ShoreHostConnection:
                     last_sent = time.monotonic()
         finally:
             receive.cancel()
-            with suppress(asyncio.CancelledError):
+            # The shielded receive task may have already finished with its own
+            # exception (e.g. ConnectionClosed) right as this scope was
+            # cancelled from outside; suppress it broadly so that unrelated
+            # exception doesn't shadow the CancelledError already propagating.
+            with suppress(Exception, asyncio.CancelledError):
                 await receive

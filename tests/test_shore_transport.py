@@ -13,13 +13,44 @@ from agent.shore_crypto import (
     derive_pair_bootstrap_key, derive_pair_key, fingerprint, open_envelope,
     pairing_finished, seal_envelope, unb64url,
 )
-from agent.shore_transport import ShoreChannel, ShoreHostConnection
+from agent.shore_transport import ShoreChannel, ShoreHostConnection, configured_host_connection
+from agent.shore import ShoreRuntimeConfig, _new_identity, _write_runtime_config
 
 ACCOUNT = "018f1f25-3f6b-7d75-a4d1-62d771381b20"
 HOST = "018f1f24-e9ec-7f12-b20a-67fc03679f32"
 DEVICE = "018f1f25-8614-7e41-8c5c-fc0b6eefad62"
 CEREMONY = "018f1f25-c930-76f0-86e7-cb06d94e6a32"
 NOW = int(datetime(2026, 9, 3, 12, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def test_configured_host_connection_loads_persisted_login(tmp_path):
+    identity = tmp_path / "shore"
+    host_id, _, _ = _new_identity(identity)
+    _write_runtime_config(identity, ShoreRuntimeConfig(
+        "https://broker.example", "alice", ACCOUNT, 3,
+    ))
+    connection = configured_host_connection(identity)
+    assert connection is not None
+    assert connection.host_id == host_id
+    assert connection.channel.account_id == ACCOUNT
+    assert connection.channel.key_epoch == 3
+    assert connection.relay_url == "wss://broker.example/@alice/relay"
+
+
+def test_configured_host_connection_is_disabled_before_login(tmp_path):
+    assert configured_host_connection(tmp_path / "shore") is None
+
+
+def test_host_connection_allows_plaintext_only_for_loopback(tmp_path):
+    host_signing = ed25519.Ed25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=x25519.X25519PrivateKey.generate())
+    local = ShoreHostConnection(channel, broker="http://127.0.0.1:8787", username="alice",
+        host_id=HOST, signing_key=host_signing)
+    assert local.relay_url == "ws://127.0.0.1:8787/@alice/relay"
+    with pytest.raises(ValueError, match="HTTPS"):
+        ShoreHostConnection(channel, broker="http://broker.example", username="alice",
+            host_id=HOST, signing_key=host_signing)
 
 
 def timestamp(value):

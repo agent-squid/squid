@@ -38,7 +38,7 @@ import time
 import urllib.parse
 import urllib.request
 from collections import OrderedDict
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
@@ -58,7 +58,7 @@ from .config import (
     REALTIME_TRANSPORT, UPDATES_INSTALL_ON_RESTART, ALLOW_REMOTE_KEYCHAIN_UNLOCK,
     REALTIME_OUTBOUND_QUEUE_LIMIT, REALTIME_MAX_FRAME_BYTES, REALTIME_HEARTBEAT_SECONDS,
     _USER_CONFIG, _cfg,
-    config_revision, config_text, realtime_transport, write_config_text,
+    config_revision, config_text, realtime_transport, shore_identity_dir, write_config_text,
 )
 from .harnesses import SUPPORTED_HARNESSES, _validate_harness_config, list_harnesses
 from .providers import Provider, _validate_provider, get_provider, public_providers, reload_providers, require_provider
@@ -385,17 +385,51 @@ async def _lifespan(_app: FastAPI):
     durable_maintenance = asyncio.create_task(
         maintain_durable_flows(), name="squid-flow-durable-maintenance",
     )
+    shore_stop = asyncio.Event()
+    shore_connection = None
+    shore_task = None
+    try:
+        from .shore_transport import configured_host_connection
+        shore_connection = await asyncio.to_thread(configured_host_connection, shore_identity_dir(_cfg))
+    except (OSError, TypeError, ValueError, RuntimeError) as exc:
+        log.error("Shore host connection disabled: %s", exc)
+    if shore_connection is not None:
+        shore_task = asyncio.create_task(
+            shore_connection.run(shore_stop), name="squid-shore-host-connection",
+        )
+        def _log_shore_failure(task: asyncio.Task) -> None:
+            if task.cancelled():
+                return
+            failure = task.exception()
+            if failure is not None:
+                log.error("Shore host connection stopped with an error: %s", failure)
+            elif not shore_stop.is_set():
+                log.error("Shore host connection stopped and requires daemon restart or login")
+        shore_task.add_done_callback(_log_shore_failure)
     try:
         yield
     finally:
-        durable_maintenance.cancel()
-        try:
-            await durable_maintenance
-        except asyncio.CancelledError:
-            pass
+        if shore_task is not None:
+            shore_stop.set()
+        await _cancel_background_task(shore_task)
+        await _cancel_background_task(durable_maintenance)
         set_process_change_listener(None)
         dispatcher.set_queue_change_listener(None)
         _realtime_notifier.stop()
+
+
+async def _cancel_background_task(task: "asyncio.Task | None") -> None:
+    """Cancel a lifespan-owned background task and wait for it to unwind.
+
+    Swallows any exception the task raises while unwinding, not just
+    CancelledError: shutdown must not let one task's failure block the
+    remaining cleanup steps that run after it in _lifespan's finally block.
+    """
+    if task is None:
+        return
+    task.cancel()
+    with suppress(Exception, asyncio.CancelledError):
+        await task
 
 
 app = FastAPI(title="Squid", version=SQUID_VERSION, lifespan=_lifespan)
@@ -626,6 +660,7 @@ def _validate_config_content(content: str) -> dict:
             raise ValueError("agent.shell_timeout must be a positive integer")
 
     realtime_transport(parsed)
+    shore_identity_dir(parsed)
 
     _validate_harness_config(parsed.get("harnesses"))
 
@@ -4469,7 +4504,7 @@ async def realtime_v1(websocket: WebSocket):
                     scopes = []
                     cursor = await asyncio.to_thread(get_realtime_cursor)
                     await _realtime_send(websocket, outbound, {"v": 1, "type": "unsubscribed", "payload": {}}, principal, last_acked_cursor)
-                elif message_type in {"chat.start", "chat.cancel", "auth.start"}:
+                elif message_type in {"chat.start", "chat.cancel", "auth.start", "worktree.auto_resolve"}:
                     if not principal:
                         await _realtime_send(websocket, outbound, {"v": 1, "type": "error", "payload": {"code": "client_identity_required"}}, principal, last_acked_cursor)
                     else:

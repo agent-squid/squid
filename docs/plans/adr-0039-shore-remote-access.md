@@ -8,8 +8,7 @@ status note for what a model-assisted review round found and fixed along the
 way. The host-side pairing coordinator now rate-limits itself locally, and the
 broker account object enforces pairing packet and ceremony-churn limits across
 account, browser-device, and source-fingerprint identities.
-Production browser/host transport integration (no browser client exists
-yet), daemon/ingress wiring, remaining
+Production browser transport integration (no browser client exists yet), remaining
 acceptance coverage, and independent (human) security review remain before
 the milestone gate passes. Milestone 4 has not
 started. No production command-capable route is enabled. Milestone 5 is
@@ -310,10 +309,50 @@ WebSocket upgrade failures terminal while preserving retry for 408, 425, 429,
 and server failures; permanent 4xx failures from the preceding challenge HTTP
 request follow the same policy. Final review also distinguished routine socket
 lifetime and heartbeat expiry (retryable 1001 with a fresh challenge) from
-terminal policy/oversize closures. The focused host suites pass 61/61, the broker suite
-passes 85/85, and `tsc --noEmit` remains clean. Still open before the milestone
-gate can pass: wiring that connection into the daemon from persisted account
-configuration; the browser application and its non-extractable key/trust persistence; full cross-process integration,
+terminal policy/oversize closures. The daemon now starts and cleanly stops that
+host connection after an explicit successful login, loading atomically persisted,
+mode-0600 public routing metadata and the existing protected host identity from
+the configurable Shore identity directory. Registration responses supply the
+immutable account ID, normalized username, and host key epoch needed to reconstruct
+the channel; absent or invalid persisted configuration fails closed and leaves Shore
+disabled. A final review added strict broker-metadata validation before persistence
+and prevented malformed `shore.identity_dir` configuration from aborting daemon
+startup. The pre-publish review also restored the existing account-activation ID
+source after catching an unintended adjacent edit, made the registration metadata's
+account ID derive from the Durable Object identity rather than a forwarding header,
+and made daemon shutdown prompt while surfacing unexpected connection-task failures.
+The second pre-publish review normalized malformed persisted broker types into the
+fail-closed configuration path and bound administrative login responses back to the
+explicitly requested immutable account ID. A third review made Shore identity-path
+validation shared by startup and the config editor, rejecting falsy non-mappings,
+empty paths, and cwd-relative paths; it also made normal premature connection-task
+termination visible instead of silent. A fourth review hardened broker URL parsing
+against deferred invalid-port/IPv6 errors and whitespace, aligned persisted usernames
+with the broker's reserved-name rules, and added regression coverage for those cases.
+A fifth review centralized those invariants at the persistence boundary itself, so
+future callers cannot bypass validation by invoking the atomic writer directly.
+A sixth review moved canonical username and UUIDv7 validation ahead of identity
+creation and network access, preventing CLI route-identifier injection when a
+session bearer is supplied. A seventh review restricted plaintext broker URLs to
+explicit loopback development endpoints, preventing account/session credentials and
+host attachment traffic from crossing a network without TLS. An eighth review aligned
+Python key-epoch validation with TypeScript's safe-integer ceiling at envelope,
+pairing, trust-storage, and persisted-configuration boundaries, preventing divergent
+cross-language canonical values. A ninth review bound successful registration
+responses back to the locally proved host ID and both public keys before persisting
+connection state, rejecting stale or misrouted success responses. A tenth review
+made Python envelope sealing validate canonical UUIDs, safe sequence/epoch ranges,
+timestamps, nonce length, and serializable plaintext before cryptographic work,
+with stable fail-closed errors. An eleventh review made sealing enforce the protocol's
+strictly-positive, at-most-60-second validity interval, preventing locally generated
+frames that every conforming peer must reject. A twelfth review made connection
+metadata replacement crash-durable by syncing the containing directory and enforces
+mode 0700 on that identity directory at every write. A thirteenth review tightened
+registration-response binding from raw key coordinates to the complete expected
+Ed25519 and X25519 public JWKs, rejecting altered curve labels or extra key metadata.
+The focused host suites pass 83/83, the broker suite passes 85/85, and
+`tsc --noEmit` remains clean. Still open before the milestone
+gate can pass: the browser application and its non-extractable key/trust persistence; full cross-process integration,
 broker-injection, and live host-key epoch-rotation coverage; production
 deployment wiring; and an independent, qualified human security review. The
 review rounds so far were model-assisted, not the required human review.

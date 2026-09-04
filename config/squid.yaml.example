@@ -32,6 +32,12 @@ realtime:
   # Server-initiated ping interval in seconds (2 missed = dead-peer close).
   #heartbeat_seconds: 20
 
+# A successful `agentsquid login --username ...` writes public connection
+# metadata beside the private host identity. The daemon discovers it here;
+# no Shore connection is started until that explicit login has completed.
+shore:
+  identity_dir: "~/.squid/shore"
+
 updates:
   # What to do when a newer AgentSquid release is available and the user restarts.
   # ask: prompt in the restart modal; always: run `pipx upgrade agentsquid`;

@@ -66,7 +66,33 @@ def test_authenticated_decryption_precedes_replay_commit(tmp_path):
     assert open_envelope(envelope, **arguments)["type"] == "ping"
 
 
-@pytest.mark.parametrize("field,value", [("v", 2), ("seq", str(1 << 64)), ("key_epoch", True)])
+@pytest.mark.parametrize("override", [
+    {"account_id": "not-a-uuid"}, {"request_id": "not-a-uuid"},
+    {"seq": True}, {"seq": 1 << 64}, {"key_epoch": 1 << 53},
+    {"issued_at": "not-a-time"}, {"nonce": b""},
+    {"expires_at": "2026-09-01T12:00:00.000Z"},
+    {"expires_at": "2026-09-01T12:01:01.000Z"},
+])
+def test_seal_envelope_rejects_noncanonical_headers(tmp_path, override):
+    envelope, arguments, signing = _fixture(tmp_path)
+    values = {
+        "account_id": envelope["account_id"], "host_id": envelope["host_id"],
+        "device_id": envelope["device_id"], "key_epoch": envelope["key_epoch"],
+        "direction": envelope["direction"], "seq": int(envelope["seq"]),
+        "request_id": envelope["request_id"], "issued_at": envelope["issued_at"],
+        "expires_at": envelope["expires_at"], "nonce": unb64url(envelope["nonce"]),
+        "sender_signing": signing,
+        "sender_agreement": x25519.X25519PrivateKey.generate(),
+        "receiver_agreement": arguments["receiver_agreement"].public_key(),
+    }
+    values.update(override)
+    with pytest.raises(ShoreProtocolError, match="shore_invalid_frame"):
+        seal_envelope({"v": 1, "type": "ping"}, **values)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("v", 2), ("seq", str(1 << 64)), ("key_epoch", True), ("key_epoch", 1 << 53),
+])
 def test_rejects_invalid_protocol_header_before_dispatch(tmp_path, field, value):
     envelope, arguments, _ = _fixture(tmp_path)
     envelope[field] = value

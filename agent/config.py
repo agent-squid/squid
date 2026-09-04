@@ -32,10 +32,15 @@ def _load_config() -> dict:
     return yaml.safe_load(_USER_CONFIG.read_text())
 
 
+def _config_section(config: dict, name: str) -> dict:
+    section = config.get(name, {})
+    if not isinstance(section, dict):
+        raise ValueError(f"{name} must be a mapping")
+    return section
+
+
 def realtime_transport(config: dict) -> str:
-    realtime = config.get("realtime", {})
-    if not isinstance(realtime, dict):
-        raise ValueError("realtime must be a mapping")
+    realtime = _config_section(config, "realtime")
     transport = realtime.get("transport", "auto")
     if transport not in {"auto", "websocket", "sse"}:
         raise ValueError("realtime.transport must be one of: auto, websocket, sse")
@@ -43,9 +48,7 @@ def realtime_transport(config: dict) -> str:
 
 
 def _realtime_int(config: dict, key: str, default: int) -> int:
-    realtime = config.get("realtime", {})
-    if not isinstance(realtime, dict):
-        raise ValueError("realtime must be a mapping")
+    realtime = _config_section(config, "realtime")
     value = realtime.get(key, default)
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"realtime.{key} must be a positive integer")
@@ -62,6 +65,17 @@ def realtime_max_frame_bytes(config: dict) -> int:
 
 def realtime_heartbeat_seconds(config: dict) -> int:
     return _realtime_int(config, "heartbeat_seconds", 20)
+
+
+def shore_identity_dir(config: dict) -> Path:
+    shore = _config_section(config, "shore")
+    value = shore.get("identity_dir", "~/.squid/shore")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("shore.identity_dir must be a non-empty path")
+    path = Path(os.path.expanduser(value))
+    if not path.is_absolute():
+        raise ValueError("shore.identity_dir must resolve to an absolute path")
+    return path
 
 
 def config_text() -> str:
@@ -89,6 +103,11 @@ def write_config_text(content: str, expected_revision: Optional[str] = None) -> 
             os.fsync(handle.fileno())
         os.chmod(tmp_name, mode)
         os.replace(tmp_name, _USER_CONFIG)
+        directory_fd = os.open(_USER_CONFIG.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         if os.path.exists(tmp_name):
             os.unlink(tmp_name)

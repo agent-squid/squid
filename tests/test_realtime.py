@@ -212,6 +212,41 @@ def test_websocket_subscribe_snapshot_live_event_and_idempotent_cancel(tmp_path,
         assert first["payload"]["cancelled"] is True
 
 
+def test_websocket_dispatches_worktree_auto_resolve_command(tmp_path, monkeypatch):
+    # Regression test: the top-level frame dispatch must route
+    # "worktree.auto_resolve" to _handle_realtime_mutation like the other
+    # mutation types, or it silently falls through to the catch-all
+    # "unsupported_type" error — which carries no request_id, so the client
+    # never matches it to the pending command and just times out.
+    _fresh_db(tmp_path, monkeypatch)
+
+    async def fake_auto_resolve(payload):
+        assert payload == {"msg_id": 42, "topic": "squid", "repo": "/repo"}
+        return {"ok": True, "msg_id": 84, "worktree_msg_id": 42, "agent": "claude", "provider": "anthropic"}
+
+    monkeypatch.setattr(server, "_realtime_worktree_auto_resolve", fake_auto_resolve)
+
+    with TestClient(server.app).websocket_connect("/ws/v1") as ws:
+        ws.receive_json()
+        ws.send_json({
+            "v": 1, "type": "subscribe",
+            "payload": {"client_id": CLIENT_ID, "scopes": [{"topic": "squid", "agent": "claude"}]},
+        })
+        assert ws.receive_json()["type"] == "subscribed"
+        ws.receive_json()  # snapshot
+
+        ws.send_json({
+            "v": 1, "type": "worktree.auto_resolve", "request_id": "auto-resolve-1",
+            "payload": {"msg_id": 42, "topic": "squid", "repo": "/repo"},
+        })
+        result = ws.receive_json()
+        while result["type"] != "command.result":
+            result = ws.receive_json()
+        assert result["request_id"] == "auto-resolve-1"
+        assert result["payload"]["ok"] is True
+        assert result["payload"]["msg_id"] == 84
+
+
 def test_websocket_rejects_protocol_version_skew(tmp_path, monkeypatch):
     _fresh_db(tmp_path, monkeypatch)
     with TestClient(server.app).websocket_connect("/ws/v1") as ws:

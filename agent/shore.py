@@ -7,17 +7,103 @@ import base64
 import getpass
 import json
 import os
+import re
 import stat
 import sys
+import tempfile
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit
 
 import httpx
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 
-from .shore_crypto import uuid7
+from .shore_crypto import UUID7, uuid7, valid_broker_url, valid_key_epoch
+
+_valid_broker_url = valid_broker_url
+
+
+@dataclass(frozen=True)
+class ShoreRuntimeConfig:
+    broker: str
+    username: str
+    account_id: str
+    key_epoch: int
+
+
+def _valid_uuid7(value: object) -> bool:
+    return isinstance(value, str) and bool(UUID7.fullmatch(value))
+
+
+def _valid_username(value: object) -> bool:
+    return bool(
+        isinstance(value, str) and re.fullmatch(r"[a-z0-9]{3,32}", value)
+        and value not in {"admin", "api", "internal", "www"}
+    )
+
+
+def _runtime_config_path(directory: Path) -> Path:
+    return directory / "connection.json"
+
+
+def _validate_runtime_config(config: ShoreRuntimeConfig, message: str) -> None:
+    if (not _valid_broker_url(config.broker)
+            or not _valid_username(config.username)
+            or not _valid_uuid7(config.account_id)
+            or not valid_key_epoch(config.key_epoch)):
+        raise RuntimeError(message)
+
+
+def _check_private_file_permissions(path: Path, message: str) -> None:
+    if stat.S_IMODE(path.stat().st_mode) & 0o077:
+        raise RuntimeError(f"{message} {path}")
+
+
+def _write_runtime_config(directory: Path, config: ShoreRuntimeConfig) -> None:
+    """Atomically persist only public routing metadata beside the host keys."""
+    _validate_runtime_config(config, "refusing to persist invalid Shore connection configuration")
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    payload = json.dumps({
+        "account_id": config.account_id, "broker": config.broker,
+        "key_epoch": config.key_epoch, "username": config.username,
+    }, separators=(",", ":"), sort_keys=True) + "\n"
+    fd, name = tempfile.mkstemp(prefix=".connection.", dir=directory)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, _runtime_config_path(directory))
+        directory_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def _load_runtime_config(directory: Path) -> ShoreRuntimeConfig | None:
+    path = _runtime_config_path(directory)
+    if not path.exists():
+        return None
+    if not path.is_file():
+        raise RuntimeError(f"unsafe permissions on Shore connection configuration {path}")
+    _check_private_file_permissions(path, "unsafe permissions on Shore connection configuration")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        config = ShoreRuntimeConfig(
+            broker=value["broker"], username=value["username"],
+            account_id=value["account_id"], key_epoch=value["key_epoch"],
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"invalid Shore connection configuration at {path}") from exc
+    _validate_runtime_config(config, f"invalid Shore connection configuration at {path}")
+    return config
 
 
 def _b64url(value: bytes) -> str:
@@ -54,8 +140,7 @@ def _load_or_new_identity(directory: Path) -> tuple[str, ed25519.Ed25519PrivateK
     if any(not path.is_file() for path in required):
         raise RuntimeError(f"incomplete Shore host identity at {directory}; refusing to replace it")
     for path in required:
-        if stat.S_IMODE(path.stat().st_mode) & 0o077:
-            raise RuntimeError(f"unsafe permissions on Shore identity file {path}")
+        _check_private_file_permissions(path, "unsafe permissions on Shore identity file")
     signing = serialization.load_pem_private_key(required[1].read_bytes(), password=None)
     agreement = serialization.load_pem_private_key(required[2].read_bytes(), password=None)
     if not isinstance(signing, ed25519.Ed25519PrivateKey) or not isinstance(agreement, x25519.X25519PrivateKey):
@@ -97,8 +182,13 @@ def login(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     if args.account_id and not args.session_token:
         parser.error("--account-id requires --session-token or AGENTSQUID_SESSION_TOKEN")
-    broker = urlsplit(args.broker)
-    if broker.scheme not in {"http", "https"} or not broker.netloc or broker.username or broker.password or broker.query or broker.fragment:
+    if args.username:
+        args.username = args.username.lower()
+        if not _valid_username(args.username):
+            parser.error("--username must be a non-reserved 3-32 character lowercase name")
+    if args.account_id and not _valid_uuid7(args.account_id):
+        parser.error("--account-id must be a canonical UUIDv7")
+    if not _valid_broker_url(args.broker):
         parser.error("--broker must be an absolute HTTP(S) URL without embedded credentials")
 
     try:
@@ -143,7 +233,22 @@ def login(argv: list[str]) -> int:
                 "signature": _b64url(signing.sign(proof)),
             })
             response.raise_for_status()
-    except (OSError, ValueError, RuntimeError, KeyError, httpx.HTTPError) as exc:
+            registered = response.json()
+            runtime = ShoreRuntimeConfig(
+                broker=args.broker.rstrip("/"), username=registered["username"],
+                account_id=registered["accountId"], key_epoch=registered["keyEpoch"],
+            )
+            _validate_runtime_config(runtime, "broker returned inconsistent host registration metadata")
+            expected_signing = {"kty": "OKP", "crv": "Ed25519", "x": signing_x}
+            expected_agreement = {"kty": "OKP", "crv": "X25519", "x": agreement_x}
+            if (registered.get("id") != host_id
+                    or registered.get("signingKey") != expected_signing
+                    or registered.get("agreementKey") != expected_agreement
+                    or (args.username and runtime.username != args.username)
+                    or (args.account_id and runtime.account_id != args.account_id)):
+                raise RuntimeError("broker returned inconsistent host registration metadata")
+            _write_runtime_config(args.identity_dir, runtime)
+    except (OSError, TypeError, ValueError, RuntimeError, KeyError, httpx.HTTPError) as exc:
         # Keep any generated identity: silently generating another key on retry
         # would turn a transient failure into replacement.
         print(f"ERROR: Shore login failed: {exc}", file=sys.stderr)
