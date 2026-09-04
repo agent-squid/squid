@@ -184,6 +184,45 @@ giving users the shorter, single-domain URL.
   with polling frequency or total registered user count — idle accounts
   contribute negligible volume.
 
+### System and protocol flow
+
+The broker relays ciphertext it cannot read. It authenticates the account
+session and the host connection, but the pair key used for command/response
+encryption is established directly between host and browser during pairing
+and never crosses the broker in a decryptable form.
+
+```mermaid
+sequenceDiagram
+    participant Host as Host (AgentSquid)
+    participant Broker as Broker (Worker + DO)
+    participant Browser as Browser/phone
+
+    Note over Host,Broker: 1. Device registration
+    Host->>Broker: WebSocket connect + signed nonce challenge (host keypair)
+    Broker-->>Host: registration ack (host_id, key_epoch)
+    Note right of Broker: Broker holds only the host public key.
+
+    Note over Browser,Broker: 2. End-user session
+    Browser->>Broker: email login + second factor
+    Broker-->>Browser: short-lived session (account_id, username)
+
+    Note over Host,Browser: 3. Local pairing (broker-blind)
+    Host->>Browser: QR / human code (bootstrap secret, out-of-band)
+    Browser->>Broker: encrypted bootstrap packet (opaque to broker)
+    Broker->>Host: relayed opaque packet
+    Host->>Broker: encrypted binding response (opaque to broker)
+    Broker->>Browser: relayed opaque response
+    Note over Host,Browser: Both sides derive/pin the pair key locally;<br/>broker never sees key material.
+
+    Note over Host,Browser: 4. Encrypted command relay
+    Browser->>Broker: signed+encrypted envelope (opaque ciphertext)
+    Broker->>Host: relayed ciphertext (routed by username only)
+    Host->>Host: validate expiry/sequence/request-id/signature, then decrypt
+    Host->>Broker: signed+encrypted response
+    Broker->>Browser: relayed ciphertext
+    Browser->>Browser: decrypt + verify
+```
+
 ### Traffic accounting and capacity forecast
 
 The WebSocket migration removes repeated polling for live state; it does not

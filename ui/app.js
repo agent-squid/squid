@@ -8070,6 +8070,11 @@ function watchFlowRun(flowRunId, afterId, route = null) {
   });
 }
 
+function isChatStatusTerminal(data) {
+  return data.status === 'done' || data.status === 'cancelled'
+    || (data.status === 'error' && String(data.content || '').trim());
+}
+
 async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStored = null, onProcessing = null } = {}) {
   if (item.source !== 'shell') trackQuotaForPendingTurn(item.id, item.topic, item.agent);
   const transportMode = forceSse ? 'sse' : await realtimeTransportMode;
@@ -8120,15 +8125,59 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
   if (useWebSocket) {
     let stop = () => {};
     let finishing = false;
+    let stopped = false;
     let unavailableHandled = false;
-    stop = realtimeV1.watch(item, {
+    // Push frames (chat.tool/chat.status/chat.done/...) are fire-and-forget —
+    // no ack/retry like commands get. If the one frame announcing completion
+    // is dropped mid-transit (same transient hiccup that can also drop a
+    // command ack), this bubble would otherwise wait forever even though the
+    // turn already finished server-side. Reconcile against stored status if
+    // nothing has arrived in a while; any real frame resets the streak, so an
+    // actively-updating turn never hits the network for it.
+    const IDLE_MS = 20000;
+    const MAX_IDLE_CHECKS = 96; // ~32 min of continuous silence, matching pollPendingItem's cap
+    let idleTimer = null;
+    let idleChecks = 0;
+    function armIdleWatchdog() {
+      clearTimeout(idleTimer);
+      if (idleChecks >= MAX_IDLE_CHECKS) return;
+      idleTimer = setTimeout(checkIdleFallback, IDLE_MS);
+    }
+    // Called on every real frame — a live turn resets the streak instead of
+    // just postponing the next check, so intermittent gaps (e.g. a multi-step
+    // tool-calling turn with ~20s between updates) can't burn through
+    // MAX_IDLE_CHECKS and disable the fallback while the turn is still healthy.
+    function noteActivity() {
+      idleChecks = 0;
+      armIdleWatchdog();
+    }
+    async function checkIdleFallback() {
+      if (finishing || stopped) return;
+      idleChecks++;
+      try {
+        const res = await fetch(`/chat/${item.id}/status`);
+        if (stopped || finishing) return;
+        if (res.ok) {
+          const data = await res.json();
+          if (stopped || finishing) return;
+          if (isChatStatusTerminal(data)) {
+            finish();
+            return;
+          }
+        }
+      } catch {}
+      if (!stopped && !finishing) armIdleWatchdog();
+    }
+    const stopWatch = realtimeV1.watch(item, {
       onSnapshot(message) {
+        noteActivity();
         raw = message.content || '';
         waitingForUpdates = !raw && !statusBuf;
         updatePreview();
         if (message.status !== 'pending') finish();
       },
       onEvent(frame) {
+        noteActivity();
         const text = frame.payload?.text || '';
         if (frame.type === 'chat.text') raw += text;
         else if (frame.type === 'chat.status') statusBuf += text;
@@ -8169,9 +8218,12 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
         }
       },
     });
+    stop = () => { stopped = true; clearTimeout(idleTimer); stopWatch(); };
+    armIdleWatchdog();
     async function finish() {
       if (finishing) return;
       finishing = true;
+      clearTimeout(idleTimer);
       stop();
       pendingPollTimers.delete(wipBubble);
       await replacePendingWithStoredItem(item, wipBubble, onStored);
@@ -8181,28 +8233,77 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
   }
 
   const es = new EventSource(`/chat/${item.id}/events`);
+  // Same fire-and-forget risk as the WebSocket branch above: an SSE 'done'
+  // event dropped mid-transit would otherwise leave this bubble spinning
+  // forever even though the turn finished server-side. Idle watchdog mirrors
+  // the WS one — any real event resets the streak, so a healthy stream never
+  // hits the network for it.
+  const IDLE_MS = 20000;
+  const MAX_IDLE_CHECKS = 96; // ~32 min of continuous silence, matching pollPendingItem's cap
+  let idleTimer = null;
+  let idleChecks = 0;
+  function armIdleWatchdog() {
+    clearTimeout(idleTimer);
+    if (idleChecks >= MAX_IDLE_CHECKS) return;
+    idleTimer = setTimeout(checkIdleFallback, IDLE_MS);
+  }
+  function noteActivity() {
+    idleChecks = 0;
+    armIdleWatchdog();
+  }
+  async function finishSse() {
+    if (closed) return;
+    closed = true;
+    clearTimeout(idleTimer);
+    es.close();
+    pendingPollTimers.delete(wipBubble);
+    await replacePendingWithStoredItem(item, wipBubble, onStored);
+  }
+  async function checkIdleFallback() {
+    if (closed) return;
+    idleChecks++;
+    try {
+      const res = await fetch(`/chat/${item.id}/status`);
+      if (closed) return;
+      if (res.ok) {
+        const data = await res.json();
+        if (closed) return;
+        if (isChatStatusTerminal(data)) {
+          await finishSse();
+          return;
+        }
+      }
+    } catch {}
+    if (!closed) armIdleWatchdog();
+  }
   pendingPollTimers.set(wipBubble, () => {
     closed = true;
+    clearTimeout(idleTimer);
     es.close();
   });
+  armIdleWatchdog();
 
   es.onmessage = event => {
+    noteActivity();
     raw += event.data;
     updatePreview();
   };
   es.addEventListener('status', event => {
+    noteActivity();
     // event.data already has real embedded newlines rejoined by SSE
     // multi-data-line parsing — don't add another one between chunks.
     statusBuf += event.data;
     updatePreview();
   });
   es.addEventListener('tool', event => {
+    noteActivity();
     try {
       statusBuf += (statusBuf && !statusBuf.endsWith('\n') ? '\n' : '') + toolLabel(JSON.parse(event.data)) + '\n';
       updatePreview();
     } catch {}
   });
   es.addEventListener('loading', event => {
+    noteActivity();
     // ADR-0037: local-model (e.g. Ollama) active load/unload visibility.
     try {
       const info = JSON.parse(event.data);
@@ -8213,6 +8314,7 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
     } catch {}
   });
   es.addEventListener('processing', event => {
+    noteActivity();
     try {
       const info = JSON.parse(event.data);
       statusBuf = `#${info.topic || item.topic} · processing…\n`;
@@ -8220,6 +8322,7 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
     } catch {}
   });
   es.addEventListener('queued', event => {
+    noteActivity();
     // ADR-0037: provider-scoped FIFO lane — replayed so a flow-dispatched
     // sibling turn (no live client) still shows it's waiting, not loading.
     try {
@@ -8228,15 +8331,11 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
       updatePreview();
     } catch {}
   });
-  es.addEventListener('done', async () => {
-    closed = true;
-    es.close();
-    pendingPollTimers.delete(wipBubble);
-    await replacePendingWithStoredItem(item, wipBubble, onStored);
-  });
+  es.addEventListener('done', finishSse);
   es.addEventListener('error', async event => {
     if (closed) return;
     closed = true;
+    clearTimeout(idleTimer);
     es.close();
     pendingPollTimers.delete(wipBubble);
     if (event.data) {
@@ -8263,7 +8362,7 @@ async function pollPendingItem(item, wipBubble) {
       const res = await fetch(`/chat/${item.id}/status`);
       if (!res.ok) return;
       const data = await res.json();
-      if (data.status === 'done' || data.status === 'cancelled' || (data.status === 'error' && String(data.content || '').trim())) {
+      if (isChatStatusTerminal(data)) {
         cancelPendingPoll(wipBubble);
         await replacePendingWithStoredItem(item, wipBubble);
       } else if (count >= MAX_POLLS) {
