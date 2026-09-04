@@ -223,6 +223,38 @@ sequenceDiagram
     Browser->>Browser: decrypt + verify
 ```
 
+### Steady-state operation (post-pairing)
+
+Setup (above) happens once per host/browser pair. Day-to-day traffic after
+that falls into two independent shapes, both still carrying an opaque
+encrypted envelope as payload — the broker only ever sees ciphertext, routed
+by username or by which held connection it arrived on:
+
+```mermaid
+sequenceDiagram
+    participant Host as Host (AgentSquid)
+    participant Broker as Broker (Worker + DO)
+    participant Browser as Browser/phone
+
+    Note over Browser,Host: A. Bounded request/response (files, topics, stats, config, ...)
+    Browser->>Broker: HTTPS request (encrypted envelope), session-authenticated
+    Broker->>Host: forwarded over the host's already-open WebSocket
+    Host->>Host: validate envelope, decrypt, execute
+    Host->>Broker: encrypted response over the same host WebSocket
+    Broker-->>Browser: HTTPS response
+    Note right of Broker: 1 Worker request + 1 Durable Object request per operation.<br/>No polling: this leg only runs when the browser asks for something.
+
+    Note over Browser,Host: B. Push on state change (status, job output, ...)
+    Host->>Broker: encrypted event over the host's WebSocket, only when state changes
+    Broker-->>Browser: pushed over the browser's own held WebSocket
+    Note right of Broker: No browser-initiated request at all,<br/>this is what keeps desktop and phone in sync without a manual refresh.
+```
+
+The two legs are independent: A is always browser-initiated and HTTP-shaped;
+B is always host-initiated and push-only. A busy dashboard with no state
+changes produces only A traffic; a long-running job with no one watching the
+dashboard produces only B traffic (to any browser socket currently held open).
+
 ### Traffic accounting and capacity forecast
 
 The WebSocket migration removes repeated polling for live state; it does not
