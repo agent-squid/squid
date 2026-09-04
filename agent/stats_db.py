@@ -2303,7 +2303,8 @@ def mark_orphaned_pending(before_created_at: Optional[str] = None) -> int:
             else:
                 conn.execute(
                     """UPDATE chat_messages
-                       SET content='', status='error',
+                       SET content='Interrupted — the squid server restarted before this turn finished.',
+                           status='error',
                            completed_at=COALESCE(completed_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
                        WHERE id=?""",
                     (row["id"],),

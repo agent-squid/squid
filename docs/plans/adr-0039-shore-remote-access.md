@@ -9,7 +9,7 @@ way. The host-side pairing coordinator now rate-limits itself locally, and the
 broker account object enforces pairing packet and ceremony-churn limits across
 account, browser-device, and source-fingerprint identities.
 Production browser/host transport integration (no browser client exists
-yet), ingress wiring, remaining
+yet), daemon/ingress wiring, remaining
 acceptance coverage, and independent (human) security review remain before
 the milestone gate passes. Milestone 4 has not
 started. No production command-capable route is enabled. Milestone 5 is
@@ -290,8 +290,30 @@ rejected, so ADR-0040 commands remain disabled. Tests cover the real Durable
 Object WebSocket path, pairing through the runtime dispatcher, trust/replay/
 outbound-sequence persistence over dispatcher reconstruction, and rejection of
 command-shaped input. Still open before the milestone gate can pass: the
-persistent host WebSocket connection/reconnect loop; the browser application
-and its non-extractable key/trust persistence; full cross-process integration,
+host WebSocket connection core now obtains a fresh broker challenge, signs the
+canonical connection proof, dispatches binary frames through `ShoreChannel`,
+sends broker-consumed lease heartbeats, and reconnects with bounded exponential
+backoff (`ShoreHostConnection` in `agent/shore_transport.py`). The broker now
+consumes zero-length binary lease heartbeats without forwarding them to browser
+devices, closing the idle-host expiry gap, and has an integration regression
+test for that behavior. Pre-publish review then restricted those heartbeats to
+host sockets, put them inside the ordinary per-minute frame budget, normalized
+malformed successful challenge responses into retryable protocol failures, and
+added direct coverage for fresh challenges across retries, bounded backoff, and
+clean stop. A second pre-publish review amended the normative protocol and ADR
+to define the host-only empty-byte heartbeat, made 1008/1009 closes terminal as
+the protocol requires, and preserved exponential backoff across short-lived
+post-handshake failures while resetting it only after a stable connection. The
+next review made the heartbeat deadline independent of inbound traffic so
+malformed frames cannot suppress the host lease, and made non-transient 4xx
+WebSocket upgrade failures terminal while preserving retry for 408, 425, 429,
+and server failures; permanent 4xx failures from the preceding challenge HTTP
+request follow the same policy. Final review also distinguished routine socket
+lifetime and heartbeat expiry (retryable 1001 with a fresh challenge) from
+terminal policy/oversize closures. The focused host suites pass 61/61, the broker suite
+passes 85/85, and `tsc --noEmit` remains clean. Still open before the milestone
+gate can pass: wiring that connection into the daemon from persisted account
+configuration; the browser application and its non-extractable key/trust persistence; full cross-process integration,
 broker-injection, and live host-key epoch-rotation coverage; production
 deployment wiring; and an independent, qualified human security review. The
 review rounds so far were model-assisted, not the required human review.

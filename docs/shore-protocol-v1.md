@@ -27,7 +27,17 @@ second application protocol.
 
 ## Encrypted outer envelope
 
-The WebSocket frame is a JSON object with exactly these fields:
+After authenticating a host WebSocket, the host sends a zero-length binary
+transport lease heartbeat whenever it has sent no other frame for 30 seconds.
+The broker consumes this frame, refreshes only that host socket's observed
+heartbeat deadline, and MUST NOT relay it. A browser sending a zero-length
+frame is closed with 1003. Lease heartbeats count toward the ordinary
+per-socket frame-rate limit and undergo lifetime, session, and generation
+checks before refreshing the deadline. This empty byte string is the complete
+wire vector for the transport control; it contains no application data and
+does not create a second application protocol.
+
+Every non-heartbeat WebSocket frame is a JSON object with exactly these fields:
 
 ```json
 {
@@ -94,7 +104,8 @@ Stable pre-dispatch errors are `shore_invalid_frame`, `shore_identity_mismatch`,
 `shore_capability_denied`. Error detail never distinguishes an unknown key from
 a bad signature to an untrusted peer. Authentication failures close with 1008;
 oversize closes with 1009; overload closes with 1013. No automatic retry occurs
-for 1008 or 1009.
+for 1008 or 1009. Routine authenticated socket-lifetime or heartbeat expiry
+closes with 1001 and obtains a fresh challenge before reconnecting.
 
 ## Initial capability registry
 

@@ -431,7 +431,7 @@ def test_worker_does_not_persist_status_as_response_when_no_final_text():
         return update_message.call_args
 
     update_call = asyncio.run(run())
-    assert update_call.args[1] == ""
+    assert update_call.args[1] == "Agent returned no output."
     assert update_call.args[3] == "error"
 
 

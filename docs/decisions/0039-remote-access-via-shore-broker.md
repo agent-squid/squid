@@ -103,6 +103,12 @@ key, while the mutually verified host response uses the binding-derived pair
 key. This preserves broker blindness without requiring either side to know the
 encrypted browser-key fingerprints before decrypting them.
 
+The 2026-09-03 transport amendment defines a zero-length, host-only binary
+lease heartbeat. The broker consumes this transport control without relaying
+it, applies ordinary socket rate limits and revocation checks, and accepts no
+browser-originated equivalent. All non-heartbeat payload frames remain opaque
+encrypted Shore envelopes.
+
 ### Coexisting with the existing GitHub-Pages-hosted site
 
 `agentsquid.ai` already serves the project's marketing/docs site via GitHub

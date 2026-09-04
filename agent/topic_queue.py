@@ -847,7 +847,7 @@ class TopicWorker:
 
             content = raw
             context_json = json.dumps(tool_events) if tool_events else None
-            update_assistant_message(item.msg_id, content, session_id,
+            update_assistant_message(item.msg_id, content or "Agent returned no output.", session_id,
                                      "done" if content else "error", context=context_json,
                                      status_raw=status_raw, only_if_pending=True)
             insert_run_event(item.msg_id, run_seq, "done", None)

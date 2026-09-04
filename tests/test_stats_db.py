@@ -1702,7 +1702,7 @@ def test_mark_orphaned_pending_recovers_only_completed_run_text(tmp_path, monkey
     assert content_row["completed_at"] is not None
     empty_row = stats_db.get_message(empty_asst_id)
     assert empty_row["status"] == "error"
-    assert empty_row["content"] == ""
+    assert empty_row["content"] == "Interrupted — the squid server restarted before this turn finished."
     assert empty_row["completed_at"] is not None
 
 

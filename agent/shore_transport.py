@@ -6,14 +6,19 @@ Milestone-3 transport slice used to prove the authenticated encrypted channel.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import random
 import sqlite3
 import time
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlsplit, urlunsplit
 
+import httpx
 from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 
 from .shore_crypto import (
@@ -121,3 +126,130 @@ class ShoreChannel:
     @staticmethod
     def _timestamp(value: int) -> str:
         return datetime.fromtimestamp(value / 1000, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+class ShoreHostConnection:
+    """Maintains the authenticated host relay socket until explicitly stopped."""
+
+    def __init__(self, channel: ShoreChannel, *, broker: str, username: str,
+                 host_id: str, signing_key: ed25519.Ed25519PrivateKey,
+                 heartbeat_seconds: float = 30.0, base_backoff: float = 1.0,
+                 max_backoff: float = 30.0, stable_seconds: float = 60.0):
+        parsed = urlsplit(broker)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("broker must be an absolute HTTP(S) URL")
+        self.channel = channel
+        self.host_id = host_id
+        self.signing_key = signing_key
+        self.heartbeat_seconds = heartbeat_seconds
+        self.base_backoff = base_backoff
+        self.max_backoff = max_backoff
+        self.stable_seconds = stable_seconds
+        base_path = parsed.path.rstrip("/")
+        account_path = f"{base_path}/@{quote(username, safe='')}"
+        self.challenge_url = urlunsplit((parsed.scheme, parsed.netloc, account_path + "/host/connect-challenge", "", ""))
+        ws_scheme = "wss" if parsed.scheme == "https" else "ws"
+        self.relay_url = urlunsplit((ws_scheme, parsed.netloc, account_path + "/relay", "", ""))
+
+    async def run(self, stop: asyncio.Event) -> None:
+        """Reconnect with bounded exponential backoff; return only when stopped."""
+        from websockets.asyncio.client import connect
+        from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
+        delay = self.base_backoff
+        while not stop.is_set():
+            connected_at: float | None = None
+            try:
+                headers = await self._connection_headers()
+                async with connect(
+                    self.relay_url, additional_headers=headers,
+                    open_timeout=15, close_timeout=5, ping_interval=20,
+                ) as socket:
+                    connected_at = time.monotonic()
+                    await self._serve(socket, stop)
+                if stop.is_set():
+                    break
+                raise ShoreProtocolError("shore_connection_closed")
+            except asyncio.CancelledError:
+                raise
+            except ConnectionClosed as exc:
+                code = exc.rcvd.code if exc.rcvd is not None else None
+                if code in {1008, 1009}:
+                    return
+                if connected_at is not None and time.monotonic() - connected_at >= self.stable_seconds:
+                    delay = self.base_backoff
+                delay = await self._backoff(stop, delay)
+            except InvalidStatus as exc:
+                status = exc.response.status_code
+                if self._terminal_http_status(status):
+                    return
+                delay = await self._backoff(stop, delay)
+            except httpx.HTTPStatusError as exc:
+                if self._terminal_http_status(exc.response.status_code):
+                    return
+                delay = await self._backoff(stop, delay)
+            except (OSError, httpx.HTTPError, ShoreProtocolError, WebSocketException):
+                if connected_at is not None and time.monotonic() - connected_at >= self.stable_seconds:
+                    delay = self.base_backoff
+                delay = await self._backoff(stop, delay)
+
+    @staticmethod
+    def _terminal_http_status(status: int) -> bool:
+        return 400 <= status < 500 and status not in {408, 425, 429}
+
+    async def _backoff(self, stop: asyncio.Event, delay: float) -> float:
+        if stop.is_set():
+            return delay
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=delay + random.uniform(0, delay * 0.2))
+        except asyncio.TimeoutError:
+            pass
+        return min(self.max_backoff, max(self.base_backoff, delay * 2))
+
+    async def _connection_headers(self) -> dict[str, str]:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(self.challenge_url, json={"hostId": self.host_id})
+            response.raise_for_status()
+            try:
+                challenge = response.json()
+            except ValueError as exc:
+                raise ShoreProtocolError("shore_invalid_host_challenge") from exc
+        if not isinstance(challenge, dict) or not all(isinstance(challenge.get(key), str) for key in ("id", "nonce")):
+            raise ShoreProtocolError("shore_invalid_host_challenge")
+        proof = canonical({"challenge_id": challenge["id"], "host_id": self.host_id,
+                           "nonce": challenge["nonce"], "purpose": "websocket", "v": 1})
+        from .shore_crypto import b64url
+        return {"x-shore-role": "host", "x-shore-host-id": self.host_id,
+                "x-shore-challenge-id": challenge["id"],
+                "x-shore-signature": b64url(self.signing_key.sign(proof))}
+
+    async def _serve(self, socket: Any, stop: asyncio.Event) -> None:
+        last_sent = time.monotonic()
+        receive = asyncio.create_task(socket.recv())
+        try:
+            while not stop.is_set():
+                remaining = max(0.0, self.heartbeat_seconds - (time.monotonic() - last_sent))
+                try:
+                    message = await asyncio.wait_for(asyncio.shield(receive), timeout=remaining)
+                except asyncio.TimeoutError:
+                    # This deadline tracks host sends, independently of inbound
+                    # traffic, so malformed peer frames cannot suppress leases.
+                    await socket.send(b"")
+                    last_sent = time.monotonic()
+                    continue
+                receive = asyncio.create_task(socket.recv())
+                if not isinstance(message, bytes):
+                    await socket.close(code=1003, reason="binary_frames_only")
+                    return
+                try:
+                    response = self.channel.handle(message)
+                except ShoreProtocolError:
+                    # A malformed or injected peer frame must not tear down the
+                    # authenticated host transport or produce an oracle response.
+                    continue
+                if response is not None:
+                    await socket.send(response)
+                    last_sent = time.monotonic()
+        finally:
+            receive.cancel()
+            with suppress(asyncio.CancelledError):
+                await receive
