@@ -10,9 +10,9 @@ broker account object enforces pairing packet and ceremony-churn limits across
 account, browser-device, and source-fingerprint identities.
 The browser transport client, non-extractable device identity, pinned host trust,
 and durable replay/sequence state are implemented. Cross-process browser/host
-pairing and encrypted-probe interoperability now run in CI. Remaining live
-key-rotation acceptance coverage, production deployment wiring, and an
-independent (human) security review remain before the milestone gate passes.
+pairing, encrypted-probe interoperability, and live host-key epoch rotation now
+run in CI. Production deployment wiring and an independent (human) security
+review remain before the milestone gate passes.
 Milestone 4 has not started. No production command-capable route is enabled. Milestone 5 is
 blocked until Milestones 3 and 4 pass their acceptance gates.
 
@@ -361,14 +361,17 @@ the pairing and encrypted probe flows. A cross-process integration test now
 drives that TypeScript client against the real Python `ShoreChannel`, completing
 pairing and an encrypted probe without replacing either implementation with a
 test double; Shore CI checks out both repositories and runs this required gate.
-The browser has 35 passing unit tests plus this passing cross-process test, and its
+The same scenario rotates the live Python channel to new host keys and epoch,
+proves the old browser trust fails closed, proves replacement is rejected without
+explicit approval, re-pairs through a new ceremony with a named local-approval
+option, and completes an encrypted probe under the new epoch. The browser has
+36 passing unit tests plus this passing cross-process test, and its
 `tsc --noEmit` check is clean. Explicit host-side broker-injection coverage now
 proves malformed plaintext and a cryptographically well-formed envelope from an
 untrusted device both fail before application dispatch. The focused host suites
 pass 84/84, the broker suite passes 85/85, and `tsc --noEmit` remains clean.
-Still open before the milestone gate can pass: live host-key epoch-rotation
-coverage; production
-deployment wiring; and an independent, qualified human security review. The
+Still open before the milestone gate can pass: production deployment wiring and
+an independent, qualified human security review. The
 review rounds so far were model-assisted, not the required human review.
 
 **Objective:** establish broker-blind, mutually authenticated communication

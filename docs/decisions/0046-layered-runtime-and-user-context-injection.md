@@ -198,6 +198,62 @@ hashes. Exact rendered text may also be retained where replay or debugging
 requires it. Eligibility alone is not an audit record; the record reflects the
 blocks actually delivered.
 
+### Connector classes and layer eligibility
+
+Not every harness executes the same way. `cli` connectors (`claudecode`,
+`codex`, `cursor`, `opencode`, `pi`) wrap a real CLI subprocess and receive the
+full layer stack by default. A second connector class, `bare` (ADR-0048),
+calls a provider directly with no CLI subprocess and no tool schema. Its
+default eligibility is layers 1 (runtime) and 5 (user request) only — layers
+2–4 (global user context, topic memory, request context) are opt-in per agent
+config, not because the layers don't apply to it, but because a `bare`
+connector's whole value proposition is a small, predictable, low-token
+request, and silently ballooning it with everything a `cli` connector would
+receive defeats that. The test-only `echo` stub (gated behind
+`SQUID_TEST_HARNESS`) is treated as `bare`-class for eligibility purposes —
+layer 5 only, always — even though it makes no network call at all; its
+purpose is exercising dispatch topology (fan-out/fan-in, race timing), not
+context assembly, so the other layers would only add noise to what it echoes
+back.
+
+Connector class is a property of the harness, not a per-turn toggle: an agent
+configured on a `bare` harness cannot accidentally receive layers 2–4 by
+having them present in a broadcast or chain step; eligibility is decided at
+harness-resolution time, before block selection runs.
+
+### Audit surfacing without snapshot storage
+
+Turn details must let a user see what was actually sent (Decision Drivers:
+"deterministic, auditable, and testable") without duplicating layer content
+into every referencing turn. The mechanism is a live link per block, not a
+stored rendered copy, following the pattern already shipped for topic memory
+(a `mem` flag plus content-hash revision, linking to current memory content)
+and pinned request context (linking to the source message row):
+
+- **User-owned layers** (global user context, topic memory) — the turn
+  record stores whether the block was sent and the content hash at send time.
+  The UI links to the *current* content; if the current hash no longer
+  matches, it shows "changed since this turn" rather than attempting to
+  reconstruct history. Neither layer keeps versioned snapshots.
+- **Request-context layer** (pins, attachments, lookback) — already
+  reconstructible from stored message ids and paths; the link resolves those
+  live, no duplication.
+- **Runtime layer** — the wording is a Squid-owned template (static per
+  build), but `{{variable}}` values (worktree path, backing repo path) are
+  different on every turn by design and cannot be treated as a static file.
+  The turn record stores `{template_id, variables, template_revision}`
+  (small; variables are typically already persisted per-message, e.g. `cwd`).
+  The UI link opens a viewer that re-renders `template_id` with the stored
+  `variables` on demand, and flags "template wording has changed since this
+  turn" if `template_revision` no longer matches the template currently
+  shipped with Squid. No rendered runtime text is ever persisted.
+
+This keeps the audit trail's storage cost close to zero regardless of how
+often a turn is revisited, at the cost of exact historical wording becoming
+unavailable once a user-owned layer is edited or a runtime template ships a
+new revision — acceptable because the audit goal is "what was sent and is it
+still current," not permanent replay.
+
 ## Consequences
 
 - Good: users can inspect Squid-added instructions without being able to
@@ -226,3 +282,5 @@ blocks actually delivered.
   keeping runtime diff tracking independent from memory injection.
 - ADR-0022 defines the supported execution protocols.
 - ADR-0025 defines per-turn worktree isolation.
+- ADR-0048 defines the `bare` connector class this document's connector-class
+  layer eligibility model applies to.
