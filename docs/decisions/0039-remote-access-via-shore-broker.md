@@ -212,7 +212,7 @@ sequenceDiagram
     Broker->>Host: relayed opaque packet
     Host->>Broker: encrypted binding response (opaque to broker)
     Broker->>Browser: relayed opaque response
-    Note over Host,Browser: Both sides derive/pin the pair key locally;<br/>broker never sees key material.
+    Note over Host,Browser: Both sides derive/pin the pair key locally,<br/>broker never sees key material.
 
     Note over Host,Browser: 4. Encrypted command relay
     Browser->>Broker: signed+encrypted envelope (opaque ciphertext)
