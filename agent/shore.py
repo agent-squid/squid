@@ -7,10 +7,8 @@ import base64
 import getpass
 import json
 import os
-import secrets
 import stat
 import sys
-import time
 import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -19,14 +17,11 @@ import httpx
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 
+from .shore_crypto import uuid7
+
 
 def _b64url(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
-
-
-def _uuid7() -> str:
-    value = (int(time.time() * 1000) << 80) | (0x7 << 76) | (secrets.randbits(12) << 64) | (0b10 << 62) | secrets.randbits(62)
-    return str(uuid.UUID(int=value))
 
 
 def _write_private(path: Path, value: bytes) -> None:
@@ -47,7 +42,7 @@ def _new_identity(directory: Path) -> tuple[str, ed25519.Ed25519PrivateKey, x255
     agreement = x25519.X25519PrivateKey.generate()
     _write_private(directory / "signing.pem", signing.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
     _write_private(directory / "agreement.pem", agreement.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
-    host_id = _uuid7()
+    host_id = uuid7()
     _write_private(directory / "host-id", (host_id + "\n").encode())
     return host_id, signing, agreement
 

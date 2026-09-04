@@ -279,18 +279,22 @@ completion, device-trust revocation, and the two new rate limits
 window-boundary, packet-schema, and TTL behavior, persistence/privacy
 behavior, session revocation, refresh rotation, attachment races, and revoked
 generation ordering (`shore/test/shore.test.ts`); host suite is 32/32 and
-broker suite is 82/82, `tsc --noEmit` clean. None of
-this is exploitable in production today because
-nothing calls these modules outside tests yet. Still open before the
-milestone gate can pass: wiring both reference implementations into the real
-WebSocket transport between browser, broker, and host — no browser client
-exists yet, so this also means building one; broker rate-limit integration
-with the eventual pairing offer/transport lifecycle; production Shore ingress
-wiring; negative coverage for
-broker frame injection and live host-key epoch rotation, which need the
-transport wiring to be meaningful; and an independent, qualified human
-security review — the review rounds so far were model-assisted, not the
-human review this milestone's acceptance criterion requires.
+broker suite is 82/82, `tsc --noEmit` clean. The first runtime transport slice
+is also present: Shore exposes `/relay` through the existing signed-host and
+remote-browser-session attachment checks while explicitly rejecting the legacy
+test bootstrap bearer, and continues to relay its binary bytes opaquely. On the
+host, `agent/shore_transport.py` joins the pairing coordinator and durable
+trust/replay stores to a fail-closed dispatcher. Its only post-pairing plaintext
+operation is a harmless `shore.probe` round trip; all other message types are
+rejected, so ADR-0040 commands remain disabled. Tests cover the real Durable
+Object WebSocket path, pairing through the runtime dispatcher, trust/replay/
+outbound-sequence persistence over dispatcher reconstruction, and rejection of
+command-shaped input. Still open before the milestone gate can pass: the
+persistent host WebSocket connection/reconnect loop; the browser application
+and its non-extractable key/trust persistence; full cross-process integration,
+broker-injection, and live host-key epoch-rotation coverage; production
+deployment wiring; and an independent, qualified human security review. The
+review rounds so far were model-assisted, not the required human review.
 
 **Objective:** establish broker-blind, mutually authenticated communication
 between a paired browser device and the host.

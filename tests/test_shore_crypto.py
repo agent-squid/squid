@@ -1,4 +1,6 @@
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -228,6 +230,52 @@ def test_host_starts_blind_and_learns_browser_identity_from_packet(tmp_path):
     assert trust.get(DEVICE_ID) is not None
 
 
+def test_transport_pairing_phase_selection_is_atomic_under_overlapping_frames(tmp_path, monkeypatch):
+    trust, coordinator, packet, pair_key, binding = _pairing_fixture(tmp_path)
+    confirmation = _confirmation(pair_key, binding)
+    original_accept = coordinator.accept_browser_packet
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    raced_into_first_phase = threading.Event()
+    calls_lock = threading.Lock()
+    calls = 0
+
+    def paused_accept(value, *, now=None, response_nonce=None):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            call = calls
+        if call == 1:
+            first_entered.set()
+            assert release_first.wait(2)
+        else:
+            # Before the atomic phase-dispatch fix, the confirmation could
+            # select the first-packet path while the first frame was paused.
+            raced_into_first_phase.set()
+        return original_accept(value, now=now, response_nonce=response_nonce)
+
+    monkeypatch.setattr(coordinator, "accept_browser_packet", paused_accept)
+
+    def send_confirmation():
+        second_started.set()
+        return coordinator.accept_packet(confirmation, now=102)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(coordinator.accept_packet, packet, now=101)
+        assert first_entered.wait(2)
+        second = pool.submit(send_confirmation)
+        assert second_started.wait(2)
+        assert not raced_into_first_phase.wait(0.2)
+        release_first.set()
+        assert first.result(timeout=2)["direction"] == "host_to_browser"
+        assert second.result(timeout=2) is None
+
+    assert calls == 1
+    assert coordinator._failure_history == []
+    assert trust.get(DEVICE_ID) is not None
+
+
 def test_pairing_rejects_tampered_offer_binding_and_is_failure_bounded(tmp_path):
     trust, coordinator, packet, _, _ = _pairing_fixture(tmp_path, tamper_host=True)
     for _ in range(5):
@@ -266,6 +314,17 @@ def test_paired_device_keys_cannot_be_replaced(tmp_path):
     coordinator.accept_browser_confirmation(_confirmation(pair_key, binding), now=102)
     with pytest.raises(ShoreProtocolError, match="pairing_failed"):
         trust.approve(DEVICE_ID, b"x" * 32, b"a" * 32, 1)
+
+
+def test_completed_repairing_advances_same_device_keys_to_new_epoch(tmp_path):
+    trust = DeviceTrustStore(tmp_path / "trust.db")
+    signing, agreement = b"s" * 32, b"a" * 32
+    trust.approve(DEVICE_ID, signing, agreement, 1, now_ms=100)
+    advanced = trust.approve(DEVICE_ID, signing, agreement, 2, now_ms=200)
+    assert advanced.key_epoch == 2
+    assert trust.get(DEVICE_ID).key_epoch == 2
+    with pytest.raises(ShoreProtocolError, match="pairing_failed"):
+        trust.approve(DEVICE_ID, signing, agreement, 1, now_ms=300)
 
 
 def test_reproduces_normative_shore_v1_envelope_vector():

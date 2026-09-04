@@ -12,6 +12,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -34,6 +35,13 @@ class ShoreProtocolError(ValueError):
     def __init__(self, code: str):
         super().__init__(code)
         self.code = code
+
+
+def uuid7(now_ms: int | None = None) -> str:
+    """Generate the canonical UUIDv7 form used by all Shore host code."""
+    timestamp = int(time.time() * 1000) if now_ms is None else now_ms
+    value = (timestamp << 80) | (0x7 << 76) | (secrets.randbits(12) << 64) | (0b10 << 62) | secrets.randbits(62)
+    return str(uuid.UUID(int=value))
 
 
 def b64url(value: bytes) -> str:
@@ -307,13 +315,22 @@ class DeviceTrustStore:
                 existing = connection.execute(
                     "SELECT signing_key, agreement_key, key_epoch, status FROM shore_devices WHERE device_id=?", (device_id,)
                 ).fetchone()
-                if existing and (existing[3] == "revoked" or existing[:3] != (signing_key, agreement_key, key_epoch)):
-                    connection.rollback(); raise ShoreProtocolError("pairing_failed")
-                connection.execute("""INSERT INTO shore_devices
-                    (device_id, signing_key, agreement_key, key_epoch, status, approved_at)
-                    VALUES (?, ?, ?, ?, 'paired', ?)
-                    ON CONFLICT(device_id) DO NOTHING""",
-                    (device_id, signing_key, agreement_key, key_epoch, now_ms))
+                if existing:
+                    existing_signing, existing_agreement, existing_epoch, status = existing
+                    # A completed local pairing may advance the same device
+                    # keys into a newer host-key epoch. It may never revive a
+                    # revoked device, move backwards, or replace device keys.
+                    if (status == "revoked" or existing_signing != signing_key
+                            or existing_agreement != agreement_key or existing_epoch > key_epoch):
+                        connection.rollback(); raise ShoreProtocolError("pairing_failed")
+                    if existing_epoch < key_epoch:
+                        connection.execute("UPDATE shore_devices SET key_epoch=?, approved_at=? WHERE device_id=?",
+                                           (key_epoch, now_ms, device_id))
+                else:
+                    connection.execute("""INSERT INTO shore_devices
+                        (device_id, signing_key, agreement_key, key_epoch, status, approved_at)
+                        VALUES (?, ?, ?, ?, 'paired', ?)""",
+                        (device_id, signing_key, agreement_key, key_epoch, now_ms))
                 connection.commit()
         except ShoreProtocolError:
             raise
@@ -364,7 +381,9 @@ class PairingCoordinator:
         self.key_epoch = key_epoch
         self._ceremonies: dict[str, PairingCeremony] = {}
         self._expiry_timers: dict[str, threading.Timer] = {}
-        self._lock = threading.Lock()
+        # accept_packet holds this lock while selecting and executing the
+        # ceremony phase; the phase-specific methods re-enter it.
+        self._lock = threading.RLock()
         self._begin_history: list[float] = []
         self._failure_history: list[float] = []
 
@@ -422,6 +441,16 @@ class PairingCoordinator:
                 self._expiry_timers[ceremony_id] = timer
                 timer.start()
         return {"code": crockford32_encode(bytes(ceremony.secret)), "offer": offer, "expires_at": ceremony.expires_at}
+
+    def accept_packet(self, packet: dict[str, Any], *, now: float | None = None) -> dict[str, Any] | None:
+        """Atomically select and execute the current pairing protocol phase."""
+        ceremony_id = packet.get("ceremony_id") if isinstance(packet, dict) else None
+        with self._lock:
+            ceremony = self._ceremonies.get(ceremony_id)
+            if ceremony and ceremony.pending is not None:
+                self.accept_browser_confirmation(packet, now=now)
+                return None
+            return self.accept_browser_packet(packet, now=now)
 
     def accept_browser_packet(self, packet: dict[str, Any], *, now: float | None = None,
                               response_nonce: bytes | None = None) -> dict[str, Any]:
