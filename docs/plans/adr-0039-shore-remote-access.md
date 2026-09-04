@@ -1,6 +1,6 @@
 # Plan: ADR-0039 Shore remote access
 
-**Status:** In progress (2026-09-03). Milestones 0–2 are complete. Milestone 3
+**Status:** In progress (2026-09-04). Milestones 0–2 are complete. Milestone 3
 Action 1, the local pairing and persisted device-trust cores, and the Action 4
 validation core are implemented on both the host (Python) and browser
 (TypeScript) sides, backed by shared cross-language test vectors; see its
@@ -11,8 +11,18 @@ account, browser-device, and source-fingerprint identities.
 The browser transport client, non-extractable device identity, pinned host trust,
 and durable replay/sequence state are implemented. Cross-process browser/host
 pairing, encrypted-probe interoperability, and live host-key epoch rotation now
-run in CI. Production deployment wiring and an independent (human) security
-review remain before the milestone gate passes.
+run in CI. Pre-production deployment wiring is complete: a manually triggered,
+environment-protected workflow deploys an isolated `workers.dev` Worker only
+after type checking, tests, a high-severity dependency audit, and strict
+runtime-secret validation, with credentials held as environment secrets. The
+runtime secret is uploaded atomically with the reviewed deployment through a
+mode-restricted, cleanup-trapped temporary file and declared required in
+Wrangler. Version preview URLs are disabled, and browser
+attachment fails closed because the isolated hostname cannot satisfy Shore's
+same-site cookie requirement; it is a broker/host integration target only.
+The production route and deploy remain deliberately absent until an independent
+(human) security review passes; that review remains before the milestone gate
+can pass.
 Milestone 4 has not started. No production command-capable route is enabled. Milestone 5 is
 blocked until Milestones 3 and 4 pass their acceptance gates.
 
@@ -214,7 +224,7 @@ commands.
 
 ## Milestone 3 — End-to-end channel and local pairing
 
-**Status:** In progress (2026-09-03). Action 1 (envelope) and Action 4
+**Status:** In progress (2026-09-04). Action 1 (envelope) and Action 4
 (validation core) are implemented and independently reproduce
 `shore-protocol-v1-vectors.json` byte-for-byte on both the host
 (`agent/shore_crypto.py`) and browser/broker (`shore/src/crypto.ts`) sides.
@@ -370,8 +380,25 @@ option, and completes an encrypted probe under the new epoch. The browser has
 proves malformed plaintext and a cryptographically well-formed envelope from an
 untrusted device both fail before application dispatch. The focused host suites
 pass 84/84, the broker suite passes 85/85, and `tsc --noEmit` remains clean.
-Still open before the milestone gate can pass: production deployment wiring and
-an independent, qualified human security review. The
+The next deployment slice is complete: Shore has a manual, serialized
+pre-production deployment workflow protected by the `shore-preproduction`
+GitHub environment, separate Cloudflare credentials, test/typecheck gates, and
+an isolated `workers.dev` hostname and Durable Objects. The workflow refuses to
+deploy without a 256-bit hexadecimal `ATTACH_TOKEN`, preventing an absent or
+weak fingerprint-HMAC key. The secret is uploaded atomically by the gated deploy
+rather than through `wrangler secret put`, which would itself publish an
+ungated Worker version. A high-severity dependency audit also gates deployment,
+and version preview URLs
+are disabled so superseded versions are not left reachable.
+Browser attachment is explicitly disabled there because the cross-site hostname
+cannot carry Shore's `SameSite=Strict` session cookie; browser acceptance remains
+on the reviewed same-site production route. The default Wrangler
+configuration now fails closed with no production custom route and
+`workers_dev` disabled, correcting the prior contradiction where the
+`agentsquid.ai/@*` route was configured while the README said not to deploy it.
+Still open before the milestone gate can pass: an independent, qualified human
+security review, followed by explicitly enabling the production route and
+production deployment under its approval gate. The
 review rounds so far were model-assisted, not the required human review.
 
 **Objective:** establish broker-blind, mutually authenticated communication
