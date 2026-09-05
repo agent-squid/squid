@@ -279,6 +279,12 @@ is over budget" — never handed to any model to reason about.
   usage data to learn from.
 - **Confirmed-but-uncorrected `@auto` turns feeding the training index.**
   Noted above as a possible loosening of the strict "explicit-only" policy.
+- **Which topic a message belongs to, not just which agent.** This ADR
+  assumes the topic is already known. Resolving *that* — including a
+  topic-less entry point and confidence-tiered switch hints, since a wrong
+  topic guess is far more expensive than a wrong agent guess — is ADR-0049,
+  which composes on top of this ADR's within-topic resolution rather than
+  extending it.
 
 ## Consequences
 

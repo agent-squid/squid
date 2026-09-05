@@ -1,10 +1,11 @@
 # Plan: ADR-0039 Shore remote access
 
-**Status:** In progress (2026-09-04). Milestones 0–2 are complete. Milestone 3
+**Status:** In progress (2026-09-04). Milestones 0–3 are complete. Milestone 3's
 Action 1, the local pairing and persisted device-trust cores, and the Action 4
 validation core are implemented on both the host (Python) and browser
 (TypeScript) sides, backed by shared cross-language test vectors; see its
-status note for what a model-assisted review round found and fixed along the
+status note for what review rounds, including the independent human security
+review that closed its gate, found and fixed along the
 way. The host-side pairing coordinator now rate-limits itself locally, and the
 broker account object enforces pairing packet and ceremony-churn limits across
 account, browser-device, and source-fingerprint identities.
@@ -20,11 +21,21 @@ mode-restricted, cleanup-trapped temporary file and declared required in
 Wrangler. Version preview URLs are disabled, and browser
 attachment fails closed because the isolated hostname cannot satisfy Shore's
 same-site cookie requirement; it is a broker/host integration target only.
-The production route and deploy remain deliberately absent until an independent
-(human) security review passes; that review remains before the milestone gate
-can pass.
-Milestone 4 has not started. No production command-capable route is enabled. Milestone 5 is
-blocked until Milestones 3 and 4 pass their acceptance gates.
+An independent, qualified human security review passed on 2026-09-04 with no
+unresolved critical or high findings, closing Milestone 3's gate. Under that
+approval, the production `agentsquid.ai/@*` route is now declared in
+`shore/wrangler.jsonc` and a manually triggered, environment-protected
+`deploy-production.yml` workflow exists alongside the pre-production one. No
+production deployment has run yet: the `shore-prod` GitHub environment now
+has its `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and `FINGERPRINT_KEY`
+secrets configured, but no required-reviewer protection rule (an accepted
+interim exception recorded in `docs/shore-security-operations.md` pending a
+second contributor). Triggering the workflow remains a separate, explicit
+step.
+Milestone 4 has not started, so the production route stays opaque-relay only;
+no command-capable dispatch is enabled. Milestone 5 remains blocked until
+Milestone 4 passes its acceptance gate, and external users must not be
+admitted in production until Milestone 5's audit export is also verified.
 
 This is the implementation plan for
 [ADR-0039](../decisions/0039-remote-access-via-shore-broker.md). The ADR owns
@@ -224,7 +235,7 @@ commands.
 
 ## Milestone 3 — End-to-end channel and local pairing
 
-**Status:** In progress (2026-09-04). Action 1 (envelope) and Action 4
+**Status:** Complete (2026-09-04). Action 1 (envelope) and Action 4
 (validation core) are implemented and independently reproduce
 `shore-protocol-v1-vectors.json` byte-for-byte on both the host
 (`agent/shore_crypto.py`) and browser/broker (`shore/src/crypto.ts`) sides.
@@ -386,7 +397,7 @@ proves malformed plaintext and a cryptographically well-formed envelope from an
 untrusted device both fail before application dispatch. The focused host suites
 pass 84/84, the broker suite passes 85/85, and `tsc --noEmit` remains clean.
 The next deployment slice is complete: Shore has a manual, serialized
-pre-production deployment workflow protected by the `shore-preproduction`
+pre-production deployment workflow protected by the `shore-dev`
 GitHub environment, separate Cloudflare credentials, test/typecheck gates, and
 an isolated `workers.dev` hostname and Durable Objects. The workflow refuses to
 deploy without a 256-bit hexadecimal `FINGERPRINT_KEY`, preventing an absent or
@@ -401,10 +412,17 @@ on the reviewed same-site production route. The default Wrangler
 configuration now fails closed with no production custom route and
 `workers_dev` disabled, correcting the prior contradiction where the
 `agentsquid.ai/@*` route was configured while the README said not to deploy it.
-Still open before the milestone gate can pass: an independent, qualified human
-security review, followed by explicitly enabling the production route and
-production deployment under its approval gate. The
-review rounds so far were model-assisted, not the required human review.
+The independent, qualified human security review required for this
+milestone's acceptance gate was completed on 2026-09-04 with no unresolved
+critical or high findings. Under that approval, the production
+`agentsquid.ai/@*` route is now declared in `shore/wrangler.jsonc` and a
+manually triggered `deploy-production.yml` workflow, gated by the
+`shore-prod` GitHub environment, has been added. That environment's
+`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and `FINGERPRINT_KEY` secrets
+are configured, though it has no required-reviewer protection rule yet (an
+accepted interim exception recorded in `docs/shore-security-operations.md`
+pending a second contributor). No production deployment has been run;
+triggering the workflow is a separate, explicit step outside this review.
 
 **Objective:** establish broker-blind, mutually authenticated communication
 between a paired browser device and the host.

@@ -22,6 +22,19 @@ duties and escalation paths remain explicit. The Security Audit Custodian must
 remain separate from Shore runtime administration, and every stated two-person
 control still requires two distinct people.
 
+## Accepted interim exceptions
+
+**2026-09-05 — Solo operator; Shore Service Owner's two-person deploy control
+not met.** Shore has one active contributor, so the two-person deploy/recovery
+control in the Ownership table is not currently satisfied: the `shore-prod`
+GitHub environment (`shore/.github/workflows/deploy-production.yml`) has no
+required-reviewer protection rule, and production deploys/recoveries are
+single-operator actions. This is recorded as a temporary, explicit exception
+given the current low user count, not a waiver of the control itself. Close it
+by adding a second named reviewer/approver and enabling required reviewers on
+the `shore-prod` GitHub environment as soon as a new contributor joins; revisit
+this entry at that time.
+
 Broker and host events use the same request/transition ID and hash commitment.
 The broker chain contains prior hash, event ID, account/host/device/session IDs,
 coarse source metadata, restricted raw source IP, receipt time, ciphertext hash,
