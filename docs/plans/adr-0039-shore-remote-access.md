@@ -477,6 +477,232 @@ direct `/ws/v1` and Shore and produce equivalent normalized state. Authorization
 tests prove every non-allowlisted command/scope fails closed without side
 effects.
 
+### Implementation plan
+
+Key findings that shape this plan: the capability list is already normative,
+not something to design — `docs/shore-protocol-v1.md` §"Initial capability
+registry" defines exactly one capability today, `dashboard.read.v1`
+(browser-to-host types `subscribe`, `unsubscribe`, `ack`, `ping`, `pong`;
+scope limited to the global lifecycle feed and Flow-step resources already
+visible locally; no command or HTTP mutation). Nothing implements this
+registry yet. There is also no existing capability/permission model to reuse:
+`_authorize_realtime_scopes` (`agent/server.py:4048`) is documented as
+authorizing "phase-one scopes for the fully trusted local Squid session" and
+must not be reused verbatim for a remote, narrower-trust caller. The
+`/ws/v1` handler (`realtime_v1`, `agent/server.py:4338`) is not currently
+factored for reuse, but its underlying data-layer primitives already are:
+`_realtime_snapshot`, `get_realtime_replay`, `_realtime_envelope`,
+`get_realtime_cursor` operate on `scopes: list[dict]` and DB state with no
+`WebSocket` reference. `ShoreChannel.handle` (`agent/shore_transport.py:72`)
+is synchronous, stateless per call, and models only `shore.probe`'s
+request/response shape — it cannot yet host a subscription that pushes
+unsolicited events, and one host socket must multiplex per-device state for
+every paired browser, not just one connection's worth. The browser client
+(`shore/browser/src/client.ts`) similarly has only a single-slot
+request/response primitive (`exchange()`) with no support for concurrent or
+unsolicited traffic. No existing device-scoped, time-limited, revocable grant
+flow exists yet for the later shell capability; the closest analogues are
+`DeviceTrustStore.revoke()` (`agent/shore_crypto.py:412`) and ADR-0038's
+scoped-terminal execution semantics.
+
+**4.1 — Extract a transport-neutral ADR-0040 subscription core.** Pull the
+subscribe/unsubscribe/ack/ping/pong/snapshot/replay/rollover logic out of
+`realtime_v1` into pure functions operating on a small
+`RealtimeConnectionState` (scopes, cursor, last-acked cursor, generation,
+principal) plus an injected `authorize_scopes` callback, returning
+`(new_state, outbound_frames)` with no `WebSocket` calls inside. `realtime_v1`
+keeps its receive/backpressure/heartbeat loop and calls into the extracted
+core; behavior for direct/Tailscale clients must be provably unchanged
+against the existing `tests/test_realtime.py` suite. Deliberately do not move
+`_handle_realtime_mutation`, `_realtime_chat_start`, `_realtime_auth_start`,
+or the `_handle_auth_*` functions into the shared core — Shore's dispatcher
+must be structurally unable to reach them in this milestone. Import the
+shared core lazily from `agent/shore_transport.py`, mirroring the existing
+lazy-import pattern used to avoid a `server.py`/`shore_transport.py` cycle
+(`agent/server.py:392`). Add a narrow unit test exercising the extracted core
+directly (given a state + a `subscribe` frame + an authorizer, assert
+snapshot vs. replay vs. rollover selection) so Shore's own tests don't need a
+live WebSocket. The central risk here is ending up with two independently
+evolving realtime engines instead of one shared implementation — that would
+defeat Action 1 entirely.
+
+**4.2 — Define the Shore capability registry as an enforced data structure.**
+Add `agent/shore_capabilities.py` encoding the registry from
+`docs/shore-protocol-v1.md` as data: a `ShoreCapability` dataclass (name,
+allowed protocol versions, allowed browser-to-host types, per-type strict
+closed-field payload schemas, a scope-authorizer callback) and a
+`SHORE_CAPABILITIES` registry seeded with `dashboard.read.v1`. Add a
+`capabilities` column to the `shore_devices` table
+(`agent/shore_crypto.py:361`, `DeviceTrustStore._connect`), defaulting newly
+paired devices to `["dashboard.read.v1"]`, so a future `shell.exec.v1` grant
+is an additive, explicit change rather than a retrofit. Write
+`_authorize_dashboard_read_scope` as a stricter, Shore-specific sibling of
+`_authorize_realtime_scopes` — per the registry text, it should accept only
+`{"lifecycle": "global"}` and reject topic/agent-scoped subscription requests
+outright (confirm this reading — see open questions). Dispatch order, per
+`docs/shore-protocol-v1.md`'s stated validation sequence: envelope
+crypto/replay (already implemented) → closed-schema check on the plaintext
+frame, rejecting unknown top-level fields and unsupported `v` before even
+inspecting `type` → capability/type lookup against the device's granted
+capabilities (`shore_capability_denied` if absent) → strict per-type payload
+schema (deliberately stricter than direct `/ws/v1`, which tolerates unknown
+optional fields — Shore must not inherit that leniency) → only then call into
+the 4.1 shared core. Structure the lookup as an allowlist intersection, never
+a denylist, so a future ADR-0040 message type does not become reachable
+through Shore without an explicit new registry entry. Tests must prove every
+non-listed type, every non-global scope, every unsupported version, and every
+frame with an extra field is rejected with no observable side effect (assert
+via spy that the 4.1 shared core was never invoked).
+
+**4.3 — Host-side Shore adapter: per-device sessions and a push-capable
+transport loop.** Give `ShoreChannel` a `dict[device_id, RealtimeConnectionState]`,
+created on first authorized `subscribe` from a device and cleared on
+`unsubscribe`, revocation, or key-epoch change (mirroring the existing
+epoch-scoped trust invalidation in `_handle_envelope`,
+`agent/shore_transport.py:95`). Make `ShoreChannel.handle` async so it can
+dispatch into the 4.1 core's asyncio-touching internals, and update its one
+caller in `ShoreHostConnection._serve` (`agent/shore_transport.py:277`)
+accordingly — benchmark before dropping the current `asyncio.to_thread` wrap,
+since the crypto open/seal calls are CPU-bound even if currently cheap (open
+question 4 below). Add a `notify_task` in `ShoreHostConnection._serve`,
+alongside the existing receive/heartbeat-timeout tasks, that wakes on the
+realtime notifier's generation change, computes each subscribed device's
+replay/rollover via the 4.1 core, seals a `host_to_browser` envelope per
+device, and sends it — this is new logic; there is no existing precedent for
+host-initiated Shore traffic beyond the transport lease heartbeat. Because one
+physical socket serves N logical device sessions, the host cannot force-close
+a single misbehaving device's socket; a slow or offline device should instead
+get an application-level `slow_consumer` error frame and have its local
+subscription cleared until it resubscribes, and a device that misses two
+`ping`/`pong` intervals should be treated as no-longer-live locally rather
+than the base protocol's WS-close semantics. **These per-device
+overflow/heartbeat behaviors are new protocol surface not described in
+`docs/shore-protocol-v1.md` and need a protocol-doc amendment and sign-off
+before coding**, following the amendment path already used during Milestone 3
+(see open questions). Required tests: a subscribed device receives a
+proactively pushed event with no further inbound frame; two concurrently
+subscribed devices get independently correct, non-interleaved cursors;
+overflow on one device doesn't affect another; revocation and key-epoch
+rotation clear only the affected state; a host-socket reconnect drops
+in-memory per-device state and a fresh browser `subscribe` with its last
+cursor resumes correctly with no gap or duplicate (reusing
+`tests/test_realtime.py`'s reconnect/replay assertions through the Shore
+path).
+
+**4.4 — Identity plumbing.** `principal` in ADR-0040 is already just an
+opaque idempotency/authorization key (`local:{client_id}` today,
+`agent/server.py:4478`); construct `principal = f"shore:{device_id}"` inside
+`ShoreChannel` (device_id is a UUIDv7, globally unique per paired device) so
+it's namespace-isolated from local principals. No mutation types are in
+`dashboard.read.v1` yet, so no idempotency-store writes happen in this
+milestone, but wiring the correct shape now avoids a second refactor when
+mutations are added. `_authorize_dashboard_read_scope` (4.2) is passed into
+the shared 4.1 core as an injected parameter — no shared handler code should
+special-case Shore inline, since that's what would let the two transports
+silently diverge over time.
+
+**4.5 — Browser client: from single-shot request/response to a duplex
+dashboard session.** Do not extend `exchange()` (`shore/browser/src/client.ts`,
+single-slot `this.pending`) — it's fundamentally one-shot. Add a
+`subscribe()`-shaped API (new `shore/browser/src/dashboard-session.ts`) that
+seals a `subscribe` envelope and then treats every subsequent inbound
+envelope as either a reply to a still-pending request or an unsolicited push
+routed to a callback; auto-reply to inbound `ping` with `pong`; send `ack` on
+an interval; react to `slow_consumer` by dropping local state and
+resubscribing from the last applied cursor (reuse the existing direct-path
+browser reconnect logic in `ui/app.js` rather than inventing a second
+algorithm); add jittered exponential backoff for the browser's own socket to
+the broker, analogous to `ShoreHostConnection.run`
+(`agent/shore_transport.py:183`). The most important new test is extending
+`shore/browser/test/cross-process.test.ts` (which drives a real Python host
+fixture against the real TypeScript client) with a subscribe → snapshot →
+live-published-event scenario, proving cross-language interoperability of the
+new push path end-to-end through real encryption, not just the pre-existing
+probe path — check whether `shore/browser/test/fixtures/shore_host_process.py`
+already supports a "publish an event now" command before assuming it does.
+Confirm with product/design whether a minimal dashboard UI is in scope for
+this milestone or deferred (open question 3) — it materially changes this
+step's scope.
+
+**4.6 — Preserve request IDs/idempotency/cursors/acks/replay/heartbeat/backpressure
+across Shore's own reconnect layers.** Host-side reconnect (host↔broker)
+drops in-memory per-device state by design (4.3); devices detect this via
+their own heartbeat/close handling and resubscribe. Browser-side reconnect
+must persist the last-applied cursor client-side and resend it on the next
+`subscribe`, addressed by the stable per-device identity already in
+IndexedDB. No idempotency de-duplication is needed yet since no mutations are
+enabled, but note the boundary explicitly so the next milestone doesn't have
+to rediscover it. Confirm the existing durable `ReplayStore` sequence
+counters (per `account_id`/`host_id`/`key_epoch`/`device_id`/`direction`)
+don't race or duplicate against 4.3's new, more frequent
+`host_to_browser` dashboard pushes. Write a test that starves a device of
+`subscribe` across several published events and confirms the next
+`subscribe` produces a complete, correct snapshot or replay — the highest-
+likelihood reviewer finding here is silent event loss during that gap.
+
+**4.7 — Transport-parity test harness.** New `tests/test_shore_realtime_parity.py`:
+run one fixed scenario (subscribe → snapshot → N published events across the
+replayable types → ack) through both a direct `/ws/v1` test client and
+`ShoreChannel` in-process, normalize away transport-only fields, and assert
+equivalence of snapshot content, event ordering, and — critically — *which*
+catch-up mode (replay vs. snapshot) was chosen on both sides, not just the
+final payload. Add a negative-parity case documenting that Shore's stricter
+denial behavior (4.2) is an intentional divergence, not a bug. Wire this into
+CI as a required gate, matching how Milestone 3 made the cross-process
+pairing/probe test required.
+
+**4.8 — Authorization/negative test suite.** Exhaustively enumerate: every
+ADR-0040 type not in `dashboard.read.v1` (`chat.start`, `chat.cancel`,
+`auth.start`, `auth.input`, `auth.resize`, `auth.cancel`,
+`worktree.auto_resolve`, browser-sent `hello`, a synthetic future type) is
+rejected pre-dispatch with no call into the shared core or any DB mutation;
+every non-global scope shape is rejected; unsupported/missing protocol
+version is rejected before capability lookup; extra/unknown fields are
+rejected; a revoked-or-wrong-epoch device combined with an otherwise-valid
+capability still fails at the identity check first (proving check ordering).
+Confirm denial reasons don't leak more than `docs/shore-protocol-v1.md`
+already allows (it states error detail never distinguishes an unknown key
+from a bad signature) and that denied frames still count against the
+existing per-socket frame-rate limit in `shore/src/index.ts` so flooding
+denials can't become a side channel or a rate-limit bypass.
+
+**4.9 — Documentation.** Update this plan doc's Milestone 4 status and the
+ADR-0039 mermaid diagram's "not yet enabled" annotations as each slice lands,
+following the narration style used for Milestones 1–3. Amend
+`docs/shore-protocol-v1.md` for the 4.3 overflow/heartbeat design once
+resolved. Do not mark this milestone's acceptance gate complete until 4.7/4.8
+pass and an independent security review finds no unresolved critical/high
+findings, matching the project's established pattern.
+
+**Explicitly out of scope for this milestone:** all mutation types remain
+disabled (each future one is a separately named, individually reviewed
+capability per Action 4); arbitrary shell (`shell.exec.v1`) is fully deferred,
+with `DeviceTrustStore`'s atomic approve/revoke pattern, a fail-closed-by-
+default local enablement gate, and ADR-0038's scoped-terminal execution
+semantics identified as the templates to reuse when it's designed, plus a new
+expiry/immediate-revocation surface — none of this should be built now.
+
+**Open questions requiring a decision before implementation starts:**
+
+1. Per-device overflow/heartbeat semantics (4.3): the base protocol describes
+   WS-level closes, which don't map onto one socket multiplexing many device
+   sessions. This plan proposes an application-level `slow_consumer`/ping-
+   timeout equivalent — needs a protocol-doc amendment and sign-off, per
+   ADR-0039's own rule that contract changes require an amendment and new
+   test vectors.
+2. Scope granularity for `dashboard.read.v1`: is the registry's "global
+   lifecycle feed" reading correctly limited to `{"lifecycle": "global"}`
+   only, denying topic/agent-scoped remote subscriptions that direct local
+   access allows? Confirm before finalizing `_authorize_dashboard_read_scope`.
+3. Is a minimal read-only dashboard UI in scope for this milestone, or is it
+   transport/authorization-only with UI deferred to a later milestone?
+4. Confirm removing `ShoreChannel.handle`'s `asyncio.to_thread` offload (4.3)
+   doesn't reintroduce event-loop blocking from the CPU-bound crypto calls —
+   benchmark, don't assume.
+5. Idempotency-key scoping across a device's key-epoch bump (same device_id,
+   new epoch) versus revoke-then-repair-as-new-device (new device_id) needs a
+   decision before the mutation-enabling milestone, not during it.
+
 ## Milestone 5 — Correlated tamper-evident audit
 
 **Status:** Blocked (2026-09-02). Milestone 3 remains incomplete and Milestone
