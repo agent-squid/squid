@@ -23,7 +23,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 
 from .shore import _load_or_new_identity, _load_runtime_config
 from .shore_crypto import (
-    DeviceTrustStore, PairingCoordinator, ReplayStore, ShoreProtocolError,
+    MAX_KEY_INVOCATIONS, DeviceTrustStore, PairingCoordinator, ReplayStore, ShoreProtocolError,
     TrustedDevice, b64url, canonical, open_envelope, seal_envelope, uuid7,
     valid_broker_url,
 )
@@ -141,8 +141,13 @@ class ShoreChannel:
                 scope = f"{device.device_id}:{self.key_epoch}:host_to_browser"
                 row = connection.execute("SELECT value FROM sequences WHERE scope=?", (scope,)).fetchone()
                 value = (row[0] if row else 0) + 1
+                if value > MAX_KEY_INVOCATIONS:
+                    connection.execute("ROLLBACK")
+                    raise ShoreProtocolError("shore_sequence_exhausted")
                 connection.execute("INSERT INTO sequences(scope,value) VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET value=excluded.value", (scope, value))
                 connection.execute("COMMIT")
+        except ShoreProtocolError:
+            raise
         except (OSError, sqlite3.Error) as exc:
             raise ShoreProtocolError("shore_sequence_store_failed") from exc
         return value
@@ -173,7 +178,7 @@ class ShoreHostConnection:
         account_path = f"{base_path}/@{quote(username, safe='')}"
         self.challenge_url = urlunsplit((parsed.scheme, parsed.netloc, account_path + "/host/connect-challenge", "", ""))
         ws_scheme = "wss" if parsed.scheme == "https" else "ws"
-        self.relay_url = urlunsplit((ws_scheme, parsed.netloc, account_path + "/relay", "", ""))
+        self.relay_url = urlunsplit((ws_scheme, parsed.netloc, account_path + "/relay", f"account_id={channel.account_id}", ""))
 
     async def run(self, stop: asyncio.Event) -> None:
         """Reconnect with bounded exponential backoff; return only when stopped."""

@@ -292,8 +292,13 @@ behavior, session revocation, refresh rotation, attachment races, and revoked
 generation ordering (`shore/test/shore.test.ts`); host suite is 32/32 and
 broker suite is 82/82, `tsc --noEmit` clean. The first runtime transport slice
 is also present: Shore exposes `/relay` through the existing signed-host and
-remote-browser-session attachment checks while explicitly rejecting the legacy
-test bootstrap bearer, and continues to relay its binary bytes opaquely. On the
+remote-browser-session attachment checks. Relay upgrades now carry the immutable
+account ID learned during authenticated discovery and route directly to that
+account object, which rechecks its durable current username; this removes the
+global `IdentityIndex` from the live socket path and prevents arbitrary username
+traffic from serializing all relay connections. The public `/test-relay` route
+and its bootstrap bearer compatibility surface have been removed, while the
+broker continues to relay binary bytes opaquely. On the
 host, `agent/shore_transport.py` joins the pairing coordinator and durable
 trust/replay stores to a fail-closed dispatcher. Its only post-pairing plaintext
 operation is a harmless `shore.probe` round trip; all other message types are
@@ -384,7 +389,7 @@ The next deployment slice is complete: Shore has a manual, serialized
 pre-production deployment workflow protected by the `shore-preproduction`
 GitHub environment, separate Cloudflare credentials, test/typecheck gates, and
 an isolated `workers.dev` hostname and Durable Objects. The workflow refuses to
-deploy without a 256-bit hexadecimal `ATTACH_TOKEN`, preventing an absent or
+deploy without a 256-bit hexadecimal `FINGERPRINT_KEY`, preventing an absent or
 weak fingerprint-HMAC key. The secret is uploaded atomically by the gated deploy
 rather than through `wrangler secret put`, which would itself publish an
 ungated Worker version. A high-severity dependency audit also gates deployment,

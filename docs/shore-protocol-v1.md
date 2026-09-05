@@ -25,6 +25,16 @@ second application protocol.
 - A host and browser each have separate signing and agreement keypairs. Crypto
   agility requires a new Shore version; receivers never negotiate down.
 
+## Relay routing
+
+After authenticated route discovery, both clients connect to
+`/@<username>/relay?account_id=<immutable-account-id>`. The Worker routes this
+upgrade directly to the named account object; it MUST NOT resolve the username
+through a global object on the socket path. The account object MUST compare the
+route username with its own current durable identity before authentication and
+MUST fail closed on a mismatch. The former `/test-relay` bootstrap path is not
+part of Shore v1 and MUST return 404 at the public Worker boundary.
+
 ## Encrypted outer envelope
 
 After authenticating a host WebSocket, the host sends a zero-length binary
@@ -79,6 +89,11 @@ the sender key, increment the epoch through local re-pairing, and alert.
 
 Sequence state is per `(account_id, host_id, key_epoch, device_id, direction)`.
 It starts at 1, increases strictly, and is durably committed before dispatch.
+A sender MUST NOT use a sequence above 2^32 under one derived key. Before the
+next invocation it MUST rotate the device keys and advance `key_epoch`; a
+receiver MUST reject a larger sequence as `shore_invalid_frame`. This caps the
+random 96-bit AES-GCM nonce construction at 2^32 invocations per key, in
+addition to treating any detected nonce reuse as fatal.
 Receivers persist the greatest accepted sequence and a seven-day set of
 request IDs atomically with the authorization decision. A gap is allowed; a
 duplicate or lower sequence is not. Every command has a UUIDv7 request ID.

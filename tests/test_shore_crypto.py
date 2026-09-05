@@ -68,7 +68,7 @@ def test_authenticated_decryption_precedes_replay_commit(tmp_path):
 
 @pytest.mark.parametrize("override", [
     {"account_id": "not-a-uuid"}, {"request_id": "not-a-uuid"},
-    {"seq": True}, {"seq": 1 << 64}, {"key_epoch": 1 << 53},
+    {"seq": True}, {"seq": (1 << 32) + 1}, {"key_epoch": 1 << 53},
     {"issued_at": "not-a-time"}, {"nonce": b""},
     {"expires_at": "2026-09-01T12:00:00.000Z"},
     {"expires_at": "2026-09-01T12:01:01.000Z"},
@@ -91,7 +91,7 @@ def test_seal_envelope_rejects_noncanonical_headers(tmp_path, override):
 
 
 @pytest.mark.parametrize("field,value", [
-    ("v", 2), ("seq", str(1 << 64)), ("key_epoch", True), ("key_epoch", 1 << 53),
+    ("v", 2), ("seq", str((1 << 32) + 1)), ("key_epoch", True), ("key_epoch", 1 << 53),
 ])
 def test_rejects_invalid_protocol_header_before_dispatch(tmp_path, field, value):
     envelope, arguments, _ = _fixture(tmp_path)

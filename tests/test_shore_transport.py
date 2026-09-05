@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 import stat
 from datetime import datetime, timezone
 
@@ -34,7 +35,7 @@ def test_configured_host_connection_loads_persisted_login(tmp_path):
     assert connection.host_id == host_id
     assert connection.channel.account_id == ACCOUNT
     assert connection.channel.key_epoch == 3
-    assert connection.relay_url == "wss://broker.example/@alice/relay"
+    assert connection.relay_url == f"wss://broker.example/@alice/relay?account_id={ACCOUNT}"
 
 
 def test_configured_host_connection_is_disabled_before_login(tmp_path):
@@ -47,7 +48,7 @@ def test_host_connection_allows_plaintext_only_for_loopback(tmp_path):
         host_signing=host_signing, host_agreement=x25519.X25519PrivateKey.generate())
     local = ShoreHostConnection(channel, broker="http://127.0.0.1:8787", username="alice",
         host_id=HOST, signing_key=host_signing)
-    assert local.relay_url == "ws://127.0.0.1:8787/@alice/relay"
+    assert local.relay_url == f"ws://127.0.0.1:8787/@alice/relay?account_id={ACCOUNT}"
     with pytest.raises(ValueError, match="HTTPS"):
         ShoreHostConnection(channel, broker="http://broker.example", username="alice",
             host_id=HOST, signing_key=host_signing)
@@ -113,6 +114,13 @@ def test_live_channel_pairs_persists_trust_and_round_trips_only_probe(tmp_path):
         restarted.handle(canonical(request(3, "subscribe")), now_ms=NOW)
     with pytest.raises(ShoreProtocolError, match="shore_replay"):
         restarted.handle(canonical(request(2)), now_ms=NOW)
+
+    with sqlite3.connect(tmp_path / "outbound.sqlite3") as connection:
+        connection.execute("UPDATE sequences SET value=?", (1 << 32,))
+    with pytest.raises(ShoreProtocolError, match="shore_sequence_exhausted"):
+        restarted.handle(canonical(request(4)), now_ms=NOW)
+    with sqlite3.connect(tmp_path / "outbound.sqlite3") as connection:
+        assert connection.execute("SELECT value FROM sequences").fetchone()[0] == 1 << 32
 
 
 def test_broker_injected_frames_fail_before_application_dispatch(tmp_path):

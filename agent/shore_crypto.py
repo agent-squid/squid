@@ -25,7 +25,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 UUID7 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
-MAX_UINT64 = (1 << 64) - 1
+MAX_KEY_INVOCATIONS = 1 << 32
 MAX_SAFE_INTEGER = (1 << 53) - 1
 OUTER_FIELDS = {"v", "account_id", "host_id", "device_id", "key_epoch", "direction", "seq", "request_id", "issued_at", "expires_at", "nonce", "ciphertext", "signature"}
 DIRECTIONS = {"browser_to_host", "host_to_browser"}
@@ -131,7 +131,7 @@ def seal_envelope(frame: dict[str, Any], *, account_id: str, host_id: str, devic
     if (not UUID7.fullmatch(account_id) or not UUID7.fullmatch(host_id)
             or not UUID7.fullmatch(device_id) or not UUID7.fullmatch(request_id)
             or not valid_key_epoch(key_epoch)
-            or not isinstance(seq, int) or isinstance(seq, bool) or seq < 1 or seq > MAX_UINT64
+            or not isinstance(seq, int) or isinstance(seq, bool) or seq < 1 or seq > MAX_KEY_INVOCATIONS
             or direction not in DIRECTIONS):
         raise ShoreProtocolError("shore_invalid_frame")
     try:
@@ -237,7 +237,7 @@ def open_envelope(envelope: dict[str, Any], *, expected: dict[str, Any],
         raise ShoreProtocolError("shore_invalid_frame")
     try:
         seq = int(envelope["seq"])
-        if (str(seq) != envelope["seq"] or seq < 1 or seq > MAX_UINT64
+        if (str(seq) != envelope["seq"] or seq < 1 or seq > MAX_KEY_INVOCATIONS
                 or not UUID7.fullmatch(envelope["account_id"])
                 or not UUID7.fullmatch(envelope["host_id"])
                 or not UUID7.fullmatch(envelope["device_id"])
