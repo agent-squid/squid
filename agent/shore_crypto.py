@@ -329,12 +329,34 @@ class PairingCeremony:
         for index in range(len(self.secret)): self.secret[index] = 0
 
 
+def _default_capabilities() -> tuple[str, ...]:
+    # Lazy import: shore_capabilities imports ShoreProtocolError from this
+    # module, mirroring the existing lazy-import pattern that avoids a
+    # server.py/shore_transport.py cycle (agent/server.py:392).
+    from .shore_capabilities import DEFAULT_CAPABILITIES
+    return DEFAULT_CAPABILITIES
+
+
+def _parse_capabilities(raw: str) -> tuple[str, ...]:
+    """Every public method here otherwise only raises ShoreProtocolError; a
+    corrupted column (disk damage, a hand-edited DB) must not break that by
+    leaking a raw json.JSONDecodeError/ValueError instead."""
+    try:
+        value = json.loads(raw)
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise ValueError("capabilities column must be a JSON array of strings")
+    except (TypeError, ValueError) as exc:
+        raise ShoreProtocolError("shore_untrusted_device") from exc
+    return tuple(value)
+
+
 @dataclass(frozen=True)
 class TrustedDevice:
     device_id: str
     signing_key: bytes
     agreement_key: bytes
     key_epoch: int
+    capabilities: tuple[str, ...] = field(default_factory=_default_capabilities)
 
 
 class DeviceTrustStore:
@@ -343,6 +365,7 @@ class DeviceTrustStore:
     def __init__(self, path: Path):
         self.path = path
         self._provisioned = False
+        self._capabilities_migrated = False
 
     def _provision(self) -> None:
         if self._provisioned:
@@ -363,6 +386,31 @@ class DeviceTrustStore:
             agreement_key BLOB NOT NULL, key_epoch INTEGER NOT NULL,
             status TEXT NOT NULL CHECK(status IN ('paired','revoked')),
             approved_at INTEGER NOT NULL, revoked_at INTEGER)""")
+        if not self._capabilities_migrated:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(shore_devices)")}
+            if "capabilities" not in columns:
+                # A future shell.exec.v1 grant is additive, so every device
+                # paired before that capability existed must default to
+                # read-only. SQLite DDL can't take bound parameters, so this
+                # constant is inlined (json.dumps of a fixed tuple, never
+                # user input).
+                # SQL string-literal escaping (doubling embedded quotes), not
+                # just a formatting nicety: DDL can't take bound parameters,
+                # so this is the only thing standing between a future
+                # capability name containing a quote and a broken/corrupted
+                # DEFAULT clause.
+                default_capabilities = json.dumps(list(_default_capabilities())).replace("'", "''")
+                try:
+                    connection.execute(
+                        f"ALTER TABLE shore_devices ADD COLUMN capabilities TEXT NOT NULL DEFAULT '{default_capabilities}'"
+                    )
+                except sqlite3.OperationalError as exc:
+                    # Another DeviceTrustStore instance (or thread) racing the
+                    # same first-ever connection to this file may have already
+                    # added the column; that's success, not failure.
+                    if "duplicate column name" not in str(exc):
+                        raise
+            self._capabilities_migrated = True
         return connection
 
     def approve(self, device_id: str, signing_key: bytes, agreement_key: bytes,
@@ -371,43 +419,51 @@ class DeviceTrustStore:
                 or not valid_key_epoch(key_epoch)):
             raise ShoreProtocolError("pairing_failed")
         now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+        capabilities = _default_capabilities()
         try:
             with self._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 existing = connection.execute(
-                    "SELECT signing_key, agreement_key, key_epoch, status FROM shore_devices WHERE device_id=?", (device_id,)
+                    "SELECT signing_key, agreement_key, key_epoch, status, capabilities FROM shore_devices WHERE device_id=?", (device_id,)
                 ).fetchone()
                 if existing:
-                    existing_signing, existing_agreement, existing_epoch, status = existing
+                    existing_signing, existing_agreement, existing_epoch, status, existing_capabilities = existing
                     # A completed local pairing may advance the same device
                     # keys into a newer host-key epoch. It may never revive a
                     # revoked device, move backwards, or replace device keys.
                     if (status == "revoked" or existing_signing != signing_key
                             or existing_agreement != agreement_key or existing_epoch > key_epoch):
                         connection.rollback(); raise ShoreProtocolError("pairing_failed")
+                    # Re-pairing into a newer epoch never changes an existing
+                    # device's granted capabilities.
+                    capabilities = _parse_capabilities(existing_capabilities)
                     if existing_epoch < key_epoch:
                         connection.execute("UPDATE shore_devices SET key_epoch=?, approved_at=? WHERE device_id=?",
                                            (key_epoch, now_ms, device_id))
                 else:
+                    # Written explicitly rather than left to the capabilities
+                    # column's SQL DEFAULT, which is fixed at migration time
+                    # and would go stale the moment DEFAULT_CAPABILITIES ever
+                    # changes on an already-migrated database.
                     connection.execute("""INSERT INTO shore_devices
-                        (device_id, signing_key, agreement_key, key_epoch, status, approved_at)
-                        VALUES (?, ?, ?, ?, 'paired', ?)""",
-                        (device_id, signing_key, agreement_key, key_epoch, now_ms))
+                        (device_id, signing_key, agreement_key, key_epoch, status, approved_at, capabilities)
+                        VALUES (?, ?, ?, ?, 'paired', ?, ?)""",
+                        (device_id, signing_key, agreement_key, key_epoch, now_ms, json.dumps(list(capabilities))))
                 connection.commit()
         except ShoreProtocolError:
             raise
         except (OSError, sqlite3.Error) as exc:
             raise ShoreProtocolError("pairing_failed") from exc
-        return TrustedDevice(device_id, signing_key, agreement_key, key_epoch)
+        return TrustedDevice(device_id, signing_key, agreement_key, key_epoch, capabilities)
 
     def get(self, device_id: str) -> TrustedDevice | None:
         try:
             with self._connect() as connection:
-                row = connection.execute("""SELECT signing_key, agreement_key, key_epoch
+                row = connection.execute("""SELECT signing_key, agreement_key, key_epoch, capabilities
                     FROM shore_devices WHERE device_id=? AND status='paired'""", (device_id,)).fetchone()
         except (OSError, sqlite3.Error) as exc:
             raise ShoreProtocolError("shore_untrusted_device") from exc
-        return TrustedDevice(device_id, row[0], row[1], row[2]) if row else None
+        return TrustedDevice(device_id, row[0], row[1], row[2], _parse_capabilities(row[3])) if row else None
 
     def revoke(self, device_id: str, now_ms: int | None = None) -> bool:
         now_ms = int(time.time() * 1000) if now_ms is None else now_ms

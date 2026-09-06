@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import ThreadPoolExecutor
@@ -351,6 +352,118 @@ def test_completed_repairing_advances_same_device_keys_to_new_epoch(tmp_path):
     assert trust.get(DEVICE_ID).key_epoch == 2
     with pytest.raises(ShoreProtocolError, match="pairing_failed"):
         trust.approve(DEVICE_ID, signing, agreement, 1, now_ms=300)
+
+
+def test_newly_paired_device_defaults_to_dashboard_read_only(tmp_path):
+    from agent.shore_capabilities import DEFAULT_CAPABILITIES
+    trust = DeviceTrustStore(tmp_path / "trust.db")
+    approved = trust.approve(DEVICE_ID, b"s" * 32, b"a" * 32, 1, now_ms=100)
+    assert approved.capabilities == DEFAULT_CAPABILITIES
+    assert trust.get(DEVICE_ID).capabilities == DEFAULT_CAPABILITIES
+
+
+@pytest.mark.parametrize("corrupted", ["not-json", "42", '["ok", 7]', "null"])
+def test_corrupted_capabilities_column_raises_stable_protocol_error(tmp_path, corrupted):
+    # Every other DeviceTrustStore method only ever raises ShoreProtocolError;
+    # a damaged column (disk corruption, hand-edited DB) must not break that
+    # contract by leaking a raw json.JSONDecodeError/ValueError instead.
+    trust = DeviceTrustStore(tmp_path / "trust.db")
+    trust.approve(DEVICE_ID, b"s" * 32, b"a" * 32, 1, now_ms=100)
+    with sqlite3.connect(tmp_path / "trust.db") as connection:
+        connection.execute("UPDATE shore_devices SET capabilities=? WHERE device_id=?", (corrupted, DEVICE_ID))
+    with pytest.raises(ShoreProtocolError, match="shore_untrusted_device"):
+        trust.get(DEVICE_ID)
+    with pytest.raises(ShoreProtocolError, match="shore_untrusted_device"):
+        trust.approve(DEVICE_ID, b"s" * 32, b"a" * 32, 2, now_ms=200)
+
+
+def test_approve_writes_the_live_default_not_a_stale_column_default(tmp_path, monkeypatch):
+    import agent.shore_crypto as shore_crypto
+    trust = DeviceTrustStore(tmp_path / "trust.db")
+    # Migrate the capabilities column now, under today's default, then change
+    # the default -- as if a later release shipped a new DEFAULT_CAPABILITIES
+    # against an already-migrated database. The column's own SQL DEFAULT is
+    # now stale; only the live value must be written for new devices.
+    trust.get(DEVICE_ID)
+    monkeypatch.setattr(shore_crypto, "_default_capabilities",
+                         lambda: ("dashboard.read.v1", "shell.exec.v1"))
+    approved = trust.approve(DEVICE_ID, b"s" * 32, b"a" * 32, 1, now_ms=100)
+    assert approved.capabilities == ("dashboard.read.v1", "shell.exec.v1")
+    assert trust.get(DEVICE_ID).capabilities == ("dashboard.read.v1", "shell.exec.v1")
+
+
+def test_repairing_into_a_new_epoch_preserves_existing_capabilities(tmp_path):
+    trust = DeviceTrustStore(tmp_path / "trust.db")
+    signing, agreement = b"s" * 32, b"a" * 32
+    trust.approve(DEVICE_ID, signing, agreement, 1, now_ms=100)
+    with sqlite3.connect(tmp_path / "trust.db") as connection:
+        connection.execute("UPDATE shore_devices SET capabilities=? WHERE device_id=?",
+                            (json.dumps(["dashboard.read.v1", "shell.exec.v1"]), DEVICE_ID))
+    advanced = trust.approve(DEVICE_ID, signing, agreement, 2, now_ms=200)
+    assert advanced.capabilities == ("dashboard.read.v1", "shell.exec.v1")
+    assert trust.get(DEVICE_ID).capabilities == ("dashboard.read.v1", "shell.exec.v1")
+
+
+def test_devices_table_missing_capabilities_column_is_migrated_on_connect(tmp_path):
+    from agent.shore_capabilities import DEFAULT_CAPABILITIES
+    path = tmp_path / "trust.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute("""CREATE TABLE shore_devices (
+            device_id TEXT PRIMARY KEY, signing_key BLOB NOT NULL,
+            agreement_key BLOB NOT NULL, key_epoch INTEGER NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('paired','revoked')),
+            approved_at INTEGER NOT NULL, revoked_at INTEGER)""")
+        connection.execute("""INSERT INTO shore_devices
+            (device_id, signing_key, agreement_key, key_epoch, status, approved_at)
+            VALUES (?, ?, ?, ?, 'paired', ?)""", (DEVICE_ID, b"s" * 32, b"a" * 32, 1, 100))
+    trust = DeviceTrustStore(path)
+    assert trust.get(DEVICE_ID).capabilities == DEFAULT_CAPABILITIES
+
+
+def test_duplicate_column_race_during_migration_does_not_fail_pairing(tmp_path, monkeypatch):
+    # A second DeviceTrustStore instance (or thread) can race the very first
+    # migration of a pre-4.2 database: both read PRAGMA table_info before
+    # either has added the column, then both attempt to add it. The loser's
+    # ALTER TABLE collides with a column that's already really there and
+    # must not surface sqlite3's "duplicate column name" as a pairing
+    # failure. Reproduced deterministically by pre-adding the column for
+    # real, then forcing this store's own PRAGMA read to under-report it.
+    path = tmp_path / "trust.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute("""CREATE TABLE shore_devices (
+            device_id TEXT PRIMARY KEY, signing_key BLOB NOT NULL,
+            agreement_key BLOB NOT NULL, key_epoch INTEGER NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('paired','revoked')),
+            approved_at INTEGER NOT NULL, revoked_at INTEGER)""")
+        connection.execute("ALTER TABLE shore_devices ADD COLUMN capabilities TEXT NOT NULL DEFAULT '[]'")
+    trust = DeviceTrustStore(path)
+
+    class StalePragmaConnection:
+        """Wraps a real sqlite3.Connection; sqlite3.Connection itself is an
+        immutable C type and can't be monkeypatched directly."""
+
+        def __init__(self, real):
+            self._real = real
+
+        def execute(self, sql, parameters=()):
+            if sql.strip().startswith("PRAGMA table_info"):
+                return self._real.execute("SELECT 1 WHERE 0")
+            return self._real.execute(sql, parameters)
+
+        def __enter__(self):
+            self._real.__enter__()
+            return self
+
+        def __exit__(self, *exc_info):
+            return self._real.__exit__(*exc_info)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(sqlite3, "connect", lambda *a, **k: StalePragmaConnection(real_connect(*a, **k)))
+    trust.approve(DEVICE_ID, b"s" * 32, b"a" * 32, 1, now_ms=100)
+    assert trust.get(DEVICE_ID) is not None
 
 
 def test_reproduces_normative_shore_v1_envelope_vector():

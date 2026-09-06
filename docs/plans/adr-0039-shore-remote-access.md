@@ -453,7 +453,11 @@ findings.
 
 ## Milestone 4 — Capability-scoped ADR-0040 relay
 
-**Status:** Not started; depends on Milestone 3.
+**Status:** In progress. 4.1 (transport-neutral subscription core) and 4.2
+(capability registry) are landed; 4.0 and 4.3–4.9 have not started. No
+production dispatch path exists yet — 4.1/4.2 are shared/foundational units
+with no caller until 4.3/4.4 wire them into `ShoreChannel`, so the production
+route stays opaque-relay only until this milestone's acceptance gate passes.
 
 **Objective:** expose a minimal safe subset of the existing real-time protocol.
 
@@ -491,7 +495,7 @@ effects.
   (`agent/server.py:4048`) authorizes "phase-one scopes for the fully trusted
   local Squid session" and must not be reused verbatim for a narrower-trust
   remote caller.
-- `/ws/v1` (`realtime_v1`, `agent/server.py:4338`) isn't factored for reuse,
+- `/ws/v1` (`realtime_v1`, `agent/server.py:4365`) isn't factored for reuse,
   but its data-layer primitives already are: `_realtime_snapshot`,
   `get_realtime_replay`, `_realtime_envelope`, `get_realtime_cursor` all
   operate on `scopes: list[dict]` and DB state with no `WebSocket` reference.
@@ -558,34 +562,253 @@ an incomplete one.
 
 #### 4.1 — Extract a transport-neutral ADR-0040 subscription core
 
-- **Objective:** make `/ws/v1`'s subscribe/replay/snapshot logic callable
-  from something other than a `WebSocket`, with zero behavior change for
-  direct/Tailscale clients.
-- **Files:** `agent/server.py` (extract from `realtime_v1`); new module for
-  the shared core.
-- **Actions:**
-  - Pull subscribe/unsubscribe/ack/ping/pong/snapshot/replay/rollover into
-    pure functions over a small `RealtimeConnectionState` (scopes, cursor,
-    last-acked cursor, generation, principal) plus an injected
-    `authorize_scopes` callback, returning `(new_state, outbound_frames)` —
-    no `WebSocket` calls inside.
-  - `realtime_v1` keeps its receive/backpressure/heartbeat loop and calls
-    into the extracted core.
-  - Do **not** move `_handle_realtime_mutation`, `_realtime_chat_start`,
-    `_realtime_auth_start`, or `_handle_auth_*` into the shared core — Shore's
-    dispatcher must be structurally unable to reach them this milestone.
+**Status:** Landed, narrower than originally sketched. Reading the real
+`realtime_v1` implementation before designing showed the
+`RealtimeConnectionState`/injected-`authorize_scopes` abstraction below was
+more machinery than the code needed yet — there was no second caller to prove
+its shape against. Instead, the replay/rollover/snapshot decision was already
+duplicated **verbatim** in two places inside `realtime_v1` (the initial
+subscribe-with-cursor path and the end-of-loop steady-state drain), differing
+only in the starting cursor. That duplication is now a single function,
+`_realtime_catchup(outbound, from_cursor, scopes, principal,
+last_acked_cursor) -> int` (`agent/server.py`, right after
+`_realtime_snapshot`), and both call sites in `realtime_v1` now just call it
+and assign the returned cursor. This is the exact reusable unit Shore's
+per-device push loop (4.3) needs — "given a starting cursor and scopes,
+decide replay vs. snapshot vs. rollover, send the result, return the new
+cursor" — without speculative state-object/callback-injection machinery.
+`_handle_realtime_mutation`, `_realtime_chat_start`, `_realtime_auth_start`,
+and `_handle_auth_*` were left untouched, as planned — Shore's dispatcher
+still can't reach them. `tests/test_realtime.py` (54 tests) passes unchanged,
+confirming no behavior drift for direct/Tailscale clients; the full
+`test_shore_*` suite also passes. No narrow standalone unit test of
+`_realtime_catchup` was added separately, since the existing suite already
+exercises both call paths (subscribe-with-cursor and steady-state drain)
+through the public WebSocket surface.
+
+A pre-publish review caught two issues in the first version of this slice: (1)
+`_realtime_catchup` still took an unused `websocket: WebSocket` parameter,
+forwarded only to `_realtime_send` (which never read it either) — that
+directly contradicted the claim above that Shore's per-device push loop,
+which has no ASGI `WebSocket` at all, could reuse this unit as-is; fixed by
+dropping the parameter from both `_realtime_send` and `_realtime_catchup` and
+updating all ~32 call sites (mechanical — the parameter was dead code, not
+behavior). (2) this doc's own cross-references to `agent/server.py:4338` and
+`:4478` (for `realtime_v1` and the `local:{client_id}` principal assignment)
+had gone stale in the same edit that inserted `_realtime_catchup` above them;
+corrected to their current lines (`4365`, `4505`). Full suite re-verified
+after both fixes: `tests/test_realtime.py` 54/54, full `test_shore_*` suite,
+and `test_server.py` all pass (one pre-existing, unrelated flake on this dev
+machine: `test_lifecycle_start_backgrounds_server` picks up a real `tailscale`
+binary on `PATH`).
+
+- **Objective:** make `/ws/v1`'s replay/snapshot decision callable as a unit
+  Shore can reuse, with zero behavior change for direct/Tailscale clients.
+- **Files:** `agent/server.py` (new `_realtime_catchup`, replacing the two
+  duplicated blocks in `realtime_v1`).
+- **Deferred, not abandoned:** the broader `RealtimeConnectionState`/injected-
+  authorizer wrapper described below is still the likely shape once 4.3
+  actually builds Shore's per-device push loop and needs to hold per-device
+  scopes/cursor/generation outside of `realtime_v1`'s local variables — revisit
+  then, informed by what 4.3 actually needs, rather than guessing now:
+  - Pull subscribe/unsubscribe/ack/ping/pong into pure functions over a small
+    per-device state object plus an injected `authorize_scopes` callback,
+    returning `(new_state, outbound_frames)` — no `WebSocket` calls inside.
   - Import the shared core lazily from `agent/shore_transport.py`, mirroring
     the existing lazy-import pattern that avoids a `server.py`/
     `shore_transport.py` cycle (`agent/server.py:392`).
-- **Tests:** existing `tests/test_realtime.py` must pass unchanged (proves no
-  behavior drift); add a narrow unit test hitting the extracted core directly
-  (state + `subscribe` frame + authorizer → correct snapshot/replay/rollover
-  choice) so Shore's tests don't need a live WebSocket.
+- **Tests:** existing `tests/test_realtime.py` passes unchanged (54/54).
 - **Risks:** the central risk is ending up with two independently evolving
-  realtime engines instead of one shared implementation — that defeats
-  Action 1 entirely.
+  realtime engines instead of one shared implementation — `_realtime_catchup`
+  being the single, only implementation of the replay decision (not a copy)
+  is what keeps that from happening.
 
 #### 4.2 — Define the Shore capability registry as an enforced data structure
+
+**Status:** Landed. New `agent/shore_capabilities.py` encodes the registry as
+data exactly as sketched: a frozen `ShoreCapability` dataclass (`name`,
+`versions`, `types`, per-type `payload_schemas` of closed field allowlists, an
+optional `authorize_scope` callback) and a `SHORE_CAPABILITIES` map seeded
+with `dashboard.read.v1` (`subscribe`, `unsubscribe`, `ack`, `ping`, `pong`).
+`authorize_capability_frame(capability_names, frame)` is the single pure
+function implementing the full fail-closed order below; it takes no
+`WebSocket`/session state and isn't wired into `ShoreChannel` yet — that
+dispatch integration is 4.3/4.4, which can now inject it as a
+`validate_frame`-shaped callback alongside `open_envelope` (mirroring
+`_validate_probe`, `agent/shore_transport.py:120`). `agent/shore_crypto.py`'s
+`shore_devices` table gained a `capabilities` column (migrated in
+`DeviceTrustStore._connect` for any pre-existing local dev database, guarded
+by a one-time-per-instance flag alongside the existing `_provisioned` cache to
+avoid re-running `PRAGMA table_info` on every connection); `TrustedDevice`
+gained a matching `capabilities` field. `DeviceTrustStore.approve()` defaults
+a newly-paired device to `DEFAULT_CAPABILITIES = ("dashboard.read.v1",)` and
+now preserves an existing device's already-granted capabilities across a
+same-device epoch bump (re-pairing never resets or upgrades what a device is
+allowed to do). `tests/test_shore_capabilities.py` (38 cases) covers every
+non-listed real ADR-0040 type, every server-only/unknown type, every
+non-global scope shape, every unsupported/missing/non-integer protocol
+version, every frame or payload with an extra field, and a device holding no
+granted capabilities — each rejected with the specific stable error code from
+`docs/shore-protocol-v1.md` and no mutation of `frame`/`payload` on the
+rejected path. `tests/test_shore_crypto.py` gained three cases for the new
+column: default-on-pairing, preserved-across-epoch-bump, and migration of a
+hand-built pre-4.2 `shore_devices` table missing the column. Full
+`test_shore_*`, `test_realtime.py`, and `test_server.py` suites re-verified
+(one pre-existing, unrelated flake carried over from 4.1's note, plus one
+pre-existing unrelated failure in `test_stats_db.py` confirmed present before
+this change with `git stash`).
+
+A pre-publish review caught two real bugs and one drift risk in the first
+version of this slice. (1) `DeviceTrustStore.approve()`'s `INSERT` for a
+newly-paired device omitted the `capabilities` column, relying on the
+column's SQL `DEFAULT` — fixed at `ALTER TABLE` time to whatever
+`DEFAULT_CAPABILITIES` was *then*. If a later release ever changes
+`DEFAULT_CAPABILITIES` on an already-migrated host database, a brand-new
+device would get a `TrustedDevice` return value reporting the new set while
+the row actually written (and every subsequent `get()`) silently kept the
+stale one; fixed by writing the live default explicitly in the `INSERT`.
+Covered by `test_approve_writes_the_live_default_not_a_stale_column_default`,
+which reproduces the drift by migrating first and changing the default
+after. (2) The one-time-per-instance migration guard (`_capabilities_migrated`)
+had no protection against a second `DeviceTrustStore` instance racing the
+very first migration of a pre-4.2 database — both could see the column
+missing and both attempt to add it, and the loser's `sqlite3.OperationalError:
+duplicate column name` would surface through `approve()`'s existing
+`except (OSError, sqlite3.Error)` as a spurious `pairing_failed`. Fixed by
+treating that specific error as already-migrated rather than a failure.
+Covered by `test_duplicate_column_race_during_migration_does_not_fail_pairing`,
+which forces the race deterministically (real column added out-of-band,
+this store's own `PRAGMA table_info` read patched to under-report it) since
+`sqlite3.Connection` is an immutable C type and can't be monkeypatched
+directly — `sqlite3.connect` itself is patched instead, to return a thin
+wrapper. (3) `ADR0040_BROWSER_TO_HOST_TYPES` hand-mirrors the message types
+`realtime_v1` dispatches on in `agent/server.py` with no shared source
+tying the two together, so a type added to one without the other silently
+misclassifies; not fixed (doing so cleanly means either importing
+`server.py`'s dispatch surface into this low-level module or waiting for
+4.8's negative-test suite to catch drift for real — a comment now documents
+the coupling and points at 4.8).
+
+A second pre-publish review pass caught two more real issues, both fixed,
+plus one already-acknowledged deferral it re-flagged. (1) `DeviceTrustStore.
+get()`/`approve()` deserialized the `capabilities` column with a bare
+`json.loads(...)` outside any exception guard, so a corrupted column (disk
+damage, a hand-edited DB) would leak a raw `json.JSONDecodeError`/
+`ValueError` instead of this class's otherwise-universal `ShoreProtocolError`
+— and `ShoreChannel._serve` (`agent/shore_transport.py:276`) only catches
+`ShoreProtocolError` around `channel.handle()`, so an uncaught decode error
+would tear down the entire authenticated host transport for every device on
+that connection, the exact failure mode the surrounding code is designed to
+prevent. Fixed with a new `_parse_capabilities()` helper used by both call
+sites, raising `shore_untrusted_device`; covered by
+`test_corrupted_capabilities_column_raises_stable_protocol_error`
+(malformed JSON, a non-list, a list with a non-string element, and `null`).
+(2) The migrated-in `DEFAULT` clause interpolated a JSON string directly into
+the `ALTER TABLE` DDL without escaping; harmless today since
+`DEFAULT_CAPABILITIES` has no quote characters, but the very next capability
+name containing one would corrupt or break the DDL, since SQLite DDL can't
+take bound parameters. Fixed by doubling embedded single quotes (the
+standard SQL string-literal escape) before interpolating. (3) The reviewer
+re-raised `ADR0040_BROWSER_TO_HOST_TYPES`'s hand-mirrored-with-no-shared-
+source status from the first pass; still deferred to 4.8 as noted above, not
+a new finding.
+
+The same pass separately flagged that `_handle_auth_input`, `_handle_auth_
+resize`, and `_handle_auth_cancel` (`agent/server.py`) still carried an
+unused `websocket: WebSocket` parameter after 4.1's stated cleanup dropped it
+from `_realtime_send`/`_realtime_catchup` and "updated all ~32 call sites" —
+these three were missed. Not part of this milestone's scope, but a one-line-
+per-function, mechanical completion of already-landed 4.1 work being
+published in the same diff, so fixed here rather than left inconsistent:
+parameter dropped from all three signatures and their three call sites in
+`realtime_v1`. `tests/test_realtime.py`'s existing `auth.input`/`auth.resize`/
+`auth.cancel` coverage (9 cases) passes unchanged, confirming no behavior
+change.
+
+Full `test_shore_*`, `test_realtime.py` (including all `auth.*` cases), and
+`test_server.py` re-verified after all of the above (one pre-existing,
+unrelated flake carried over from the first pass's note — same
+`test_lifecycle_start_backgrounds_server`/real-`tailscale`-on-`PATH` cause).
+
+A third pre-publish review (a multi-angle pass across 7 independent finder
+agents) surfaced one genuine doc/implementation contract mismatch and two
+latent fail-open gaps in the registry framework itself, plus re-raised the
+same `ADR0040_BROWSER_TO_HOST_TYPES` deferral a third time (still deferred,
+no new information). (1) `docs/shore-protocol-v1.md` — the actual normative
+cross-language wire contract, not this plan doc — still stated
+`dashboard.read.v1`'s authorized scopes as "global lifecycle feed; explicit
+Flow-step resources already visible to the local dashboard principal," while
+`_authorize_dashboard_read_scope` (confirmed above, Open question 2) only
+ever authorizes the exact global scope. A separately-implemented Shore
+client reading that table as the wire contract could reasonably expect a
+Flow-step-scoped `subscribe` to work; fixed by updating the table row and
+adding a sentence noting the narrower grant is deliberate, with widening it
+a future protocol-doc amendment rather than an implementation detail. (2)
+`ShoreCapability.types` and `.payload_schemas` are two independently
+declared collections with nothing checking they name the same message
+types; a future capability listing a type in one but not the other would
+raise a bare `KeyError` out of `authorize_capability_frame` instead of this
+module's `ShoreProtocolError` contract — the same failure class as the
+second pass's `json.loads` finding, just in a different spot, dormant only
+because there's exactly one capability registered today and it happens to
+keep the two in sync by hand. Fixed with a `ShoreCapability.__post_init__`
+that raises `ValueError` at construction time (i.e. at import time for the
+real registry, immediately for any test-constructed capability) if the two
+don't match exactly. (3) The scope-authorization step was gated on a literal
+`message_type == "subscribe"` string and skipped entirely — not denied,
+skipped — whenever `capability.authorize_scope` was `None`; a future
+capability that lists a scoped type but forgets to wire an authorizer would
+silently forward the device's requested scopes into the returned frame
+unauthorized, exactly the fail-*open* behavior the module's stated
+"fail-closed by construction" design goal exists to prevent. Fixed by
+driving the check off the schema itself (any type whose payload schema
+declares a `scopes` field, not a hardcoded type name) and raising
+`shore_capability_denied` when such a type has no authorizer, instead of
+silently passing the check. Both (2) and (3) are dormant today — one
+capability, one scoped type, both correctly configured — so neither changes
+current behavior; they only change what happens when 4.3/4.4 adds a second
+capability incorrectly. Covered by
+`test_capability_construction_rejects_types_payload_schemas_mismatch` and
+`test_a_scoped_type_with_no_authorizer_fails_closed` (the latter
+monkeypatches a deliberately-misconfigured capability into the registry,
+since the real one can't be reconfigured to reproduce the gap); both
+verified to fail without their respective fixes before being accepted.
+
+Full `test_shore_capabilities.py`/`test_shore_crypto.py`/`test_shore_
+transport.py`/`test_shore.py`/`test_realtime.py` re-verified (201 tests via
+`-k "shore or realtime or capabilit"`), all passing.
+
+**Design decisions made while implementing:**
+
+- **Open question 2 resolved: confirmed.** `_authorize_dashboard_read_scope`
+  accepts only a non-empty list where every entry equals exactly
+  `{"lifecycle": "global"}`; any topic/agent-scoped entry, mixed list, or
+  empty list is rejected. This is now settled, not just the strict reading
+  called out in the original plan below — 4.3/4.4 can rely on it.
+- **`client_id` dropped from `subscribe`'s payload schema: confirmed.** Direct
+  `/ws/v1` requires it to derive `principal = f"local:{client_id}"`; Shore's
+  4.4 plan instead derives `principal = f"shore:{device_id}"` from the
+  already-authenticated envelope, so a Shore `subscribe` payload only needs
+  `scopes` (optional, defaults to `[]`) and `cursor` (optional). 4.4 should
+  build identity plumbing against this.
+- **New module dependency direction:** `shore_capabilities.py` imports
+  `ShoreProtocolError` from `shore_crypto.py`; `shore_crypto.py` needs
+  `shore_capabilities.DEFAULT_CAPABILITIES` for `TrustedDevice`'s field
+  default, which would cycle at module-import time. Resolved with a lazy
+  import inside a `_default_capabilities()` factory function (only called at
+  construction time, after both modules have finished loading), mirroring the
+  existing lazy-import pattern noted in 4.1 for the `server.py`/
+  `shore_transport.py` cycle.
+- **`shore_unsupported_type` vs. `shore_capability_denied` are two distinct
+  checks**, not one as the bullet list below might read in isolation: a
+  message type outside the full known ADR-0040 browser-to-host type universe
+  (`ADR0040_BROWSER_TO_HOST_TYPES`, e.g. a browser sending `hello`, or any
+  synthetic future type) gets `shore_unsupported_type`; a real ADR-0040 type
+  just not present in any of the device's granted capabilities (e.g.
+  `chat.start`) gets `shore_capability_denied`. Both fail closed with no
+  side effect either way; only the error code differs.
+
+**Original plan (for reference):**
 
 - **Objective:** make "deny unlisted fields, commands, scopes, and protocol
   versions before dispatch" fail-closed by construction.
@@ -662,7 +885,7 @@ an incomplete one.
 - **Files:** `agent/shore_transport.py`, the 4.1 shared core.
 - **Actions:**
   - `principal` is already just an opaque idempotency/authorization key
-    (`local:{client_id}` today, `agent/server.py:4478`); construct
+    (`local:{client_id}` today, `agent/server.py:4505`); construct
     `principal = f"shore:{device_id}"` inside `ShoreChannel` (device_id is a
     UUIDv7, globally unique per device), namespace-isolated from local
     principals.

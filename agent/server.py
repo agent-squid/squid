@@ -3966,7 +3966,6 @@ async def _realtime_terminate(
 
 
 async def _realtime_send(
-    websocket: WebSocket,
     outbound: _RealtimeOutbound,
     frame: dict,
     principal: Optional[str],
@@ -4075,6 +4074,34 @@ async def _realtime_snapshot(scopes: list[dict]) -> dict:
     snapshot["processes"] = [item for item in list_active_procs() if item.get("topic") in topics]
     snapshot["queue"] = [item for item in dispatcher.all_queued_items() if item.get("topic") in topics]
     return snapshot
+
+
+async def _realtime_catchup(
+    outbound: _RealtimeOutbound, from_cursor: int, scopes: list[dict],
+    principal: Optional[str], last_acked_cursor: int,
+) -> int:
+    """Replay-or-snapshot catch-up from `from_cursor` for `scopes`; returns the new cursor.
+
+    Shared by the initial subscribe-with-cursor path and realtime_v1's
+    steady-state per-iteration drain, which otherwise duplicate this decision
+    verbatim except for the starting cursor. Takes no `WebSocket` — only an
+    outbound sink — so ADR-0039 Shore's per-device push loop (Milestone 4)
+    can call this directly from its own encrypted-channel context.
+    """
+    window, events = await asyncio.to_thread(
+        get_realtime_replay, from_cursor, scopes, _REALTIME_REPLAY_LIMIT + 1,
+    )
+    rollover = _realtime_replay_rollover_reason(from_cursor, window, events)
+    if rollover:
+        snapshot = await _realtime_snapshot(scopes)
+        snapshot["cursor_reset"] = rollover == "future_cursor"
+        cursor = snapshot["cursor"]
+        await _realtime_send(outbound, {"v": 1, "type": "snapshot", "event_id": cursor, "payload": snapshot}, principal, last_acked_cursor)
+        return cursor
+    for event in events:
+        await _realtime_send(outbound, _realtime_envelope(event), principal, last_acked_cursor)
+        await asyncio.sleep(0)
+    return window["current"]
 
 
 async def _run_realtime_chat(prepared: dict) -> None:
@@ -4221,7 +4248,7 @@ async def _realtime_auth_start(payload: dict, websocket: WebSocket) -> tuple[dic
     return result, (session.id, attach_listener(session))
 
 
-async def _handle_auth_input(websocket: WebSocket, frame: dict, outbound: _RealtimeOutbound, principal: Optional[str], last_acked_cursor: int) -> None:
+async def _handle_auth_input(frame: dict, outbound: _RealtimeOutbound, principal: Optional[str], last_acked_cursor: int) -> None:
     from .auth_sessions import AuthSessionError, get_session, write_input
 
     request_id = frame.get("request_id")
@@ -4229,21 +4256,21 @@ async def _handle_auth_input(websocket: WebSocket, frame: dict, outbound: _Realt
     session_id = payload.get("session_id")
     data = payload.get("data")
     if not isinstance(request_id, str) or not request_id or not isinstance(session_id, str) or not isinstance(data, str):
-        await _realtime_send(websocket, outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_frame"}}, principal, last_acked_cursor)
+        await _realtime_send(outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_frame"}}, principal, last_acked_cursor)
         return
     session = get_session(session_id)
     if not session:
-        await _realtime_send(websocket, outbound, {"v": 1, "type": "command.result", "request_id": request_id, "payload": {"ok": False, "error": "unknown_session"}}, principal, last_acked_cursor)
+        await _realtime_send(outbound, {"v": 1, "type": "command.result", "request_id": request_id, "payload": {"ok": False, "error": "unknown_session"}}, principal, last_acked_cursor)
         return
     try:
         write_input(session, data.encode())
     except AuthSessionError as exc:
-        await _realtime_send(websocket, outbound, {"v": 1, "type": "command.result", "request_id": request_id, "payload": {"ok": False, "error": str(exc)}}, principal, last_acked_cursor)
+        await _realtime_send(outbound, {"v": 1, "type": "command.result", "request_id": request_id, "payload": {"ok": False, "error": str(exc)}}, principal, last_acked_cursor)
         return
-    await _realtime_send(websocket, outbound, {"v": 1, "type": "command.result", "request_id": request_id, "payload": {"ok": True}}, principal, last_acked_cursor)
+    await _realtime_send(outbound, {"v": 1, "type": "command.result", "request_id": request_id, "payload": {"ok": True}}, principal, last_acked_cursor)
 
 
-async def _handle_auth_resize(websocket: WebSocket, frame: dict, outbound: _RealtimeOutbound, principal: Optional[str], last_acked_cursor: int) -> None:
+async def _handle_auth_resize(frame: dict, outbound: _RealtimeOutbound, principal: Optional[str], last_acked_cursor: int) -> None:
     from .auth_sessions import get_session, resize
 
     request_id = frame.get("request_id")
@@ -4254,17 +4281,17 @@ async def _handle_auth_resize(websocket: WebSocket, frame: dict, outbound: _Real
     if (not isinstance(request_id, str) or not request_id or not isinstance(session_id, str)
             or not isinstance(cols, int) or not isinstance(rows, int)
             or not (20 <= cols <= 500) or not (5 <= rows <= 200)):
-        await _realtime_send(websocket, outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_frame"}}, principal, last_acked_cursor)
+        await _realtime_send(outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_frame"}}, principal, last_acked_cursor)
         return
     session = get_session(session_id)
     if not session:
-        await _realtime_send(websocket, outbound, {"v": 1, "type": "command.result", "request_id": request_id, "payload": {"ok": False, "error": "unknown_session"}}, principal, last_acked_cursor)
+        await _realtime_send(outbound, {"v": 1, "type": "command.result", "request_id": request_id, "payload": {"ok": False, "error": "unknown_session"}}, principal, last_acked_cursor)
         return
     resize(session, cols, rows)
-    await _realtime_send(websocket, outbound, {"v": 1, "type": "command.result", "request_id": request_id, "payload": {"ok": True}}, principal, last_acked_cursor)
+    await _realtime_send(outbound, {"v": 1, "type": "command.result", "request_id": request_id, "payload": {"ok": True}}, principal, last_acked_cursor)
 
 
-async def _handle_auth_cancel(websocket: WebSocket, frame: dict, outbound: _RealtimeOutbound, principal: Optional[str], last_acked_cursor: int) -> None:
+async def _handle_auth_cancel(frame: dict, outbound: _RealtimeOutbound, principal: Optional[str], last_acked_cursor: int) -> None:
     """Fire-and-forget, like _handle_auth_input/_handle_auth_resize — not
     routed through _handle_realtime_mutation's idempotent-mutation path.
 
@@ -4283,10 +4310,10 @@ async def _handle_auth_cancel(websocket: WebSocket, frame: dict, outbound: _Real
     payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
     session_id = payload.get("session_id")
     if not isinstance(request_id, str) or not request_id or not isinstance(session_id, str) or not session_id:
-        await _realtime_send(websocket, outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_frame"}}, principal, last_acked_cursor)
+        await _realtime_send(outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_frame"}}, principal, last_acked_cursor)
         return
     cancelled = await cancel_session(session_id)
-    await _realtime_send(websocket, outbound, {"v": 1, "type": "command.result", "request_id": request_id,
+    await _realtime_send(outbound, {"v": 1, "type": "command.result", "request_id": request_id,
                                 "payload": {"ok": True, "cancelled": cancelled, "session_id": session_id}}, principal, last_acked_cursor)
 
 
@@ -4297,14 +4324,14 @@ async def _handle_realtime_mutation(websocket: WebSocket, frame: dict, principal
     if not isinstance(request_id, str) or not request_id or message_type not in {
         "chat.start", "chat.cancel", "auth.start", "worktree.auto_resolve",
     }:
-        await _realtime_send(websocket, outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_frame"}}, principal, last_acked_cursor)
+        await _realtime_send(outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_frame"}}, principal, last_acked_cursor)
         return None
     fingerprint = _realtime_request_fingerprint(message_type, payload)
     previous = await asyncio.to_thread(get_realtime_request, principal, request_id)
     attach: Optional[tuple[str, asyncio.Queue]] = None
     if previous:
         if previous["request_type"] != message_type or previous["request_hash"] != fingerprint:
-            await _realtime_send(websocket, outbound, {"v": 1, "type": "error", "request_id": request_id, "payload": {"code": "request_id_conflict"}}, principal, last_acked_cursor)
+            await _realtime_send(outbound, {"v": 1, "type": "error", "request_id": request_id, "payload": {"code": "request_id_conflict"}}, principal, last_acked_cursor)
             return None
         result = previous["result"]
         if message_type == "auth.start" and result.get("ok") and result.get("session_id"):
@@ -4330,7 +4357,7 @@ async def _handle_realtime_mutation(websocket: WebSocket, frame: dict, principal
             killed = await asyncio.to_thread(kill_proc_by_msg_id, msg_id)
             result = {"ok": True, "cancelled": changed, "killed": killed, "msg_id": msg_id}
         result = await asyncio.to_thread(save_realtime_request, principal, request_id, message_type, fingerprint, result)
-    await _realtime_send(websocket, outbound, {"v": 1, "type": "command.result", "request_id": request_id, "payload": result}, principal, last_acked_cursor)
+    await _realtime_send(outbound, {"v": 1, "type": "command.result", "request_id": request_id, "payload": result}, principal, last_acked_cursor)
     return attach
 
 
@@ -4408,7 +4435,7 @@ async def realtime_v1(websocket: WebSocket):
                 if loop.time() - last_inbound > _REALTIME_HEARTBEAT_SECONDS * _REALTIME_HEARTBEAT_MISS_LIMIT:
                     await _realtime_terminate(websocket, sender_task, 1001, reason="heartbeat timeout")
                     return
-                await _realtime_send(websocket, outbound, {"v": 1, "type": "ping", "payload": {}}, principal, last_acked_cursor)
+                await _realtime_send(outbound, {"v": 1, "type": "ping", "payload": {}}, principal, last_acked_cursor)
                 next_ping_at = loop.time() + _REALTIME_HEARTBEAT_SECONDS
             if output_task is not None and output_task in done:
                 chunk = output_task.result()
@@ -4425,12 +4452,12 @@ async def realtime_v1(websocket: WebSocket):
                     _detach_auth_listener(auth_session_id, auth_output_q)
                     auth_output_q = None
                     auth_session_id = None
-                    await _realtime_send(websocket, outbound, {
+                    await _realtime_send(outbound, {
                         "v": 1, "type": "auth.done",
                         "payload": {"session_id": session_id, "returncode": returncode},
                     }, principal, last_acked_cursor)
                 else:
-                    await _realtime_send(websocket, outbound, {
+                    await _realtime_send(outbound, {
                         "v": 1, "type": "auth.output",
                         "payload": {
                             "session_id": auth_session_id,
@@ -4438,7 +4465,7 @@ async def realtime_v1(websocket: WebSocket):
                         },
                     }, principal, last_acked_cursor)
             if binary_frame:
-                await _realtime_send(websocket, outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_frame"}}, principal, last_acked_cursor)
+                await _realtime_send(outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_frame"}}, principal, last_acked_cursor)
                 continue
             if frame_raw is not None:
                 if len(frame_raw.encode("utf-8")) > _REALTIME_MAX_FRAME_BYTES:
@@ -4449,28 +4476,28 @@ async def realtime_v1(websocket: WebSocket):
                 try:
                     frame = json.loads(frame_raw)
                 except ValueError:
-                    await _realtime_send(websocket, outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_frame"}}, principal, last_acked_cursor)
+                    await _realtime_send(outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_frame"}}, principal, last_acked_cursor)
                     continue
                 if not isinstance(frame, dict):
-                    await _realtime_send(websocket, outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_frame"}}, principal, last_acked_cursor)
+                    await _realtime_send(outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_frame"}}, principal, last_acked_cursor)
                     continue
             else:
                 frame = None
             if frame is not None:
                 if frame.get("v") not in _REALTIME_SUPPORTED_VERSIONS:
-                    await _realtime_send(websocket, outbound, {"v": 1, "type": "error", "payload": {"code": "unsupported_version", "supported_versions": list(_REALTIME_SUPPORTED_VERSIONS)}}, principal, last_acked_cursor)
+                    await _realtime_send(outbound, {"v": 1, "type": "error", "payload": {"code": "unsupported_version", "supported_versions": list(_REALTIME_SUPPORTED_VERSIONS)}}, principal, last_acked_cursor)
                     continue
                 message_type = frame.get("type")
                 if message_type == "subscribe":
                     subscribe_payload = frame.get("payload", {})
                     client_id = subscribe_payload.get("client_id")
                     if not isinstance(client_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", client_id):
-                        await _realtime_send(websocket, outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_client_id"}}, principal, last_acked_cursor)
+                        await _realtime_send(outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_client_id"}}, principal, last_acked_cursor)
                         continue
                     requested = subscribe_payload.get("scopes", [])
                     authorized_scopes = _authorize_realtime_scopes(requested)
                     if authorized_scopes is None:
-                        await _realtime_send(websocket, outbound, {
+                        await _realtime_send(outbound, {
                             "v": 1, "type": "error",
                             "payload": {"code": "unauthorized_scope"},
                         }, principal, last_acked_cursor)
@@ -4478,35 +4505,22 @@ async def realtime_v1(websocket: WebSocket):
                     principal = f"local:{client_id}"
                     scopes = authorized_scopes
                     requested_cursor = subscribe_payload.get("cursor")
-                    await _realtime_send(websocket, outbound, {"v": 1, "type": "subscribed", "payload": {"scopes": scopes}}, principal, last_acked_cursor)
+                    await _realtime_send(outbound, {"v": 1, "type": "subscribed", "payload": {"scopes": scopes}}, principal, last_acked_cursor)
                     if not isinstance(requested_cursor, int) or requested_cursor < 0:
                         snapshot = await _realtime_snapshot(scopes)
                         snapshot["cursor_reset"] = True
                         cursor = snapshot["cursor"]
-                        await _realtime_send(websocket, outbound, {"v": 1, "type": "snapshot", "event_id": cursor, "payload": snapshot}, principal, last_acked_cursor)
+                        await _realtime_send(outbound, {"v": 1, "type": "snapshot", "event_id": cursor, "payload": snapshot}, principal, last_acked_cursor)
                     else:
-                        window, replay = await asyncio.to_thread(
-                            get_realtime_replay, requested_cursor, scopes, _REALTIME_REPLAY_LIMIT + 1,
-                        )
-                        rollover = _realtime_replay_rollover_reason(requested_cursor, window, replay)
-                        if rollover:
-                            snapshot = await _realtime_snapshot(scopes)
-                            snapshot["cursor_reset"] = rollover == "future_cursor"
-                            cursor = snapshot["cursor"]
-                            await _realtime_send(websocket, outbound, {"v": 1, "type": "snapshot", "event_id": cursor, "payload": snapshot}, principal, last_acked_cursor)
-                        else:
-                            for event in replay:
-                                await _realtime_send(websocket, outbound, _realtime_envelope(event), principal, last_acked_cursor)
-                                await asyncio.sleep(0)
-                            cursor = window["current"]
+                        cursor = await _realtime_catchup(outbound, requested_cursor, scopes, principal, last_acked_cursor)
                     generation = _realtime_notifier.generation
                 elif message_type == "unsubscribe":
                     scopes = []
                     cursor = await asyncio.to_thread(get_realtime_cursor)
-                    await _realtime_send(websocket, outbound, {"v": 1, "type": "unsubscribed", "payload": {}}, principal, last_acked_cursor)
+                    await _realtime_send(outbound, {"v": 1, "type": "unsubscribed", "payload": {}}, principal, last_acked_cursor)
                 elif message_type in {"chat.start", "chat.cancel", "auth.start", "worktree.auto_resolve"}:
                     if not principal:
-                        await _realtime_send(websocket, outbound, {"v": 1, "type": "error", "payload": {"code": "client_identity_required"}}, principal, last_acked_cursor)
+                        await _realtime_send(outbound, {"v": 1, "type": "error", "payload": {"code": "client_identity_required"}}, principal, last_acked_cursor)
                     else:
                         attach = await _handle_realtime_mutation(websocket, frame, principal, outbound, last_acked_cursor)
                         if attach is not None:
@@ -4514,20 +4528,20 @@ async def realtime_v1(websocket: WebSocket):
                             auth_session_id, auth_output_q = attach
                 elif message_type in {"auth.input", "auth.resize", "auth.cancel"}:
                     if not principal:
-                        await _realtime_send(websocket, outbound, {"v": 1, "type": "error", "payload": {"code": "client_identity_required"}}, principal, last_acked_cursor)
+                        await _realtime_send(outbound, {"v": 1, "type": "error", "payload": {"code": "client_identity_required"}}, principal, last_acked_cursor)
                     elif message_type == "auth.input":
-                        await _handle_auth_input(websocket, frame, outbound, principal, last_acked_cursor)
+                        await _handle_auth_input(frame, outbound, principal, last_acked_cursor)
                     elif message_type == "auth.resize":
-                        await _handle_auth_resize(websocket, frame, outbound, principal, last_acked_cursor)
+                        await _handle_auth_resize(frame, outbound, principal, last_acked_cursor)
                     else:
-                        await _handle_auth_cancel(websocket, frame, outbound, principal, last_acked_cursor)
+                        await _handle_auth_cancel(frame, outbound, principal, last_acked_cursor)
                 elif message_type == "ping":
-                    await _realtime_send(websocket, outbound, {"v": 1, "type": "pong", "payload": {}}, principal, last_acked_cursor)
+                    await _realtime_send(outbound, {"v": 1, "type": "pong", "payload": {}}, principal, last_acked_cursor)
                 elif message_type == "ack":
                     ack_payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
                     acked = ack_payload.get("event_id")
                     if not isinstance(acked, int) or acked < 0:
-                        await _realtime_send(websocket, outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_frame"}}, principal, last_acked_cursor)
+                        await _realtime_send(outbound, {"v": 1, "type": "error", "payload": {"code": "invalid_frame"}}, principal, last_acked_cursor)
                         continue
                     if acked > cursor:
                         log.debug("Realtime ack %s ahead of server cursor %s — clamped", acked, cursor)
@@ -4536,22 +4550,9 @@ async def realtime_v1(websocket: WebSocket):
                 elif message_type == "pong":
                     pass
                 else:
-                    await _realtime_send(websocket, outbound, {"v": 1, "type": "error", "payload": {"code": "unsupported_type"}}, principal, last_acked_cursor)
+                    await _realtime_send(outbound, {"v": 1, "type": "error", "payload": {"code": "unsupported_type"}}, principal, last_acked_cursor)
             if scopes:
-                window, events = await asyncio.to_thread(
-                    get_realtime_replay, cursor, scopes, _REALTIME_REPLAY_LIMIT + 1,
-                )
-                rollover = _realtime_replay_rollover_reason(cursor, window, events)
-                if rollover:
-                    snapshot = await _realtime_snapshot(scopes)
-                    snapshot["cursor_reset"] = rollover == "future_cursor"
-                    cursor = snapshot["cursor"]
-                    await _realtime_send(websocket, outbound, {"v": 1, "type": "snapshot", "event_id": cursor, "payload": snapshot}, principal, last_acked_cursor)
-                else:
-                    for event in events:
-                        await _realtime_send(websocket, outbound, _realtime_envelope(event), principal, last_acked_cursor)
-                        await asyncio.sleep(0)
-                    cursor = window["current"]
+                cursor = await _realtime_catchup(outbound, cursor, scopes, principal, last_acked_cursor)
     except WebSocketDisconnect:
         pass
     except _RealtimeSlowConsumer:

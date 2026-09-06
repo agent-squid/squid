@@ -130,7 +130,7 @@ to an account session.
 
 | Capability | Browser-to-host ADR-0040 types | Authorized scopes | Notes |
 | --- | --- | --- | --- |
-| `dashboard.read.v1` | `subscribe`, `unsubscribe`, `ack`, `ping`, `pong` | global lifecycle feed; explicit Flow-step resources already visible to the local dashboard principal | Initial and only production capability. Allows receipt of the v1 snapshot and replayable events listed in ADR-0040. No command or HTTP mutation. |
+| `dashboard.read.v1` | `subscribe`, `unsubscribe`, `ack`, `ping`, `pong` | global lifecycle feed only (exactly `{"lifecycle": "global"}`); topic/agent-scoped requests, though the local dashboard principal may make them, are denied | Initial and only production capability. Allows receipt of the v1 snapshot and replayable events listed in ADR-0040. No command or HTTP mutation. Narrower scope than the local session gets is deliberate, not a gap: widening it to topic/agent scopes is a future protocol-doc amendment, not an implementation detail. |
 
 `chat.start`, `chat.cancel`, every `auth.*` type, arbitrary HTTP/RPC forwarding,
 filesystem access, terminal access, and types introduced after ADR-0040 v1 are
