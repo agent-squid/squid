@@ -42,7 +42,7 @@ from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
-from typing import AsyncGenerator, Literal, Optional, Union
+from typing import Any, AsyncGenerator, Literal, Optional, Union
 
 import yaml
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -180,12 +180,17 @@ def _publish_queue_changed(queue: list[dict]) -> None:
 
 dispatcher = TopicDispatcher()
 
+# Set by _lifespan; None whenever Shore login hasn't been completed on this
+# host or the connection failed to start. Read by the local-only /shore/*
+# pairing/device endpoints below — never by anything reachable remotely.
+_shore_connection: Any = None
+
 # Discard the legacy cached OAuth access token if this process inherited one
 # from an older Squid restart.
 os.environ.pop("SQUID_NATIVE_CLAUDE_TOKEN", None)
 
 _SQUID_CHAT_COMMANDS = frozenset({
-    "clear", "deq", "f", "filter", "help", "remote", "restart",
+    "clear", "deq", "f", "filter", "help", "pair", "remote", "restart",
     "s", "search", "status", "stop", "stopall",
 })
 
@@ -385,6 +390,7 @@ async def _lifespan(_app: FastAPI):
     durable_maintenance = asyncio.create_task(
         maintain_durable_flows(), name="squid-flow-durable-maintenance",
     )
+    global _shore_connection
     shore_stop = asyncio.Event()
     shore_connection = None
     shore_task = None
@@ -393,6 +399,7 @@ async def _lifespan(_app: FastAPI):
         shore_connection = await asyncio.to_thread(configured_host_connection, shore_identity_dir(_cfg))
     except (OSError, TypeError, ValueError, RuntimeError) as exc:
         log.error("Shore host connection disabled: %s", exc)
+    _shore_connection = shore_connection
     if shore_connection is not None:
         shore_task = asyncio.create_task(
             shore_connection.run(shore_stop), name="squid-shore-host-connection",
@@ -409,6 +416,7 @@ async def _lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        _shore_connection = None
         if shore_task is not None:
             shore_stop.set()
         await _cancel_background_task(shore_task)
@@ -530,6 +538,10 @@ class CredsRequest(BaseModel):
 
 class CodexCredsRequest(BaseModel):
     token: str = Field(..., min_length=1)
+
+
+class ShoreRevokeDeviceRequest(BaseModel):
+    device_id: str = Field(..., min_length=1)
 
 
 class QuotaDeltaRequest(BaseModel):
@@ -3036,6 +3048,81 @@ async def save_codex_creds(req: CodexCredsRequest):
     creds.save_codex(req.token.strip())
     return JSONResponse({"ok": True})
 
+
+def _shore_pair_fragment(offer: dict, code: str) -> str:
+    """Encodes the ceremony offer + secret for the pair link's URL fragment
+    (never the query string or path) so a browser-to-broker request for the
+    page itself can't leak either value into server logs."""
+    payload = json.dumps({"v": 1, "offer": offer, "code": code}, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+
+@app.post("/shore/pairing/begin")
+async def shore_pairing_begin(request: Request):
+    direct_host = request.client.host if request.client else None
+    if not _request_is_loopback(request.headers, direct_host):
+        return JSONResponse({"error": "loopback_required"}, status_code=403)
+    if _shore_connection is None:
+        return JSONResponse({"error": "shore_not_configured"}, status_code=400)
+    from .shore import _load_runtime_config
+    from .shore_crypto import ShoreProtocolError, uuid7
+    config = await asyncio.to_thread(_load_runtime_config, shore_identity_dir(_cfg))
+    if config is None:
+        return JSONResponse({"error": "shore_not_configured"}, status_code=400)
+    ceremony_id = uuid7()
+    try:
+        result = await asyncio.to_thread(_shore_connection.channel.begin_pairing, ceremony_id)
+    except ShoreProtocolError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    pair_url = f"{config.broker.rstrip('/')}/@{config.username}/pair#{_shore_pair_fragment(result['offer'], result['code'])}"
+    return JSONResponse({
+        "ceremony_id": ceremony_id, "code": result["code"], "expires_at": result["expires_at"],
+        "pair_url": pair_url,
+    })
+
+
+@app.get("/shore/pairing/status")
+async def shore_pairing_status(request: Request, ceremony_id: str):
+    direct_host = request.client.host if request.client else None
+    if not _request_is_loopback(request.headers, direct_host):
+        return JSONResponse({"error": "loopback_required"}, status_code=403)
+    if _shore_connection is None:
+        return JSONResponse({"error": "shore_not_configured"}, status_code=400)
+    status = await asyncio.to_thread(_shore_connection.channel.pairing_status, ceremony_id)
+    return JSONResponse(status)
+
+
+@app.get("/shore/devices")
+async def shore_list_devices(request: Request):
+    direct_host = request.client.host if request.client else None
+    if not _request_is_loopback(request.headers, direct_host):
+        return JSONResponse({"error": "loopback_required"}, status_code=403)
+    if _shore_connection is None:
+        return JSONResponse({"error": "shore_not_configured"}, status_code=400)
+    from .shore_crypto import ShoreProtocolError
+    try:
+        devices = await asyncio.to_thread(_shore_connection.channel.list_devices)
+    except ShoreProtocolError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse({"devices": [
+        {"device_id": device.device_id, "key_epoch": device.key_epoch, "capabilities": list(device.capabilities)}
+        for device in devices
+    ]})
+
+
+@app.post("/shore/devices/revoke")
+async def shore_revoke_device(request: Request, req: ShoreRevokeDeviceRequest):
+    direct_host = request.client.host if request.client else None
+    if not _request_is_loopback(request.headers, direct_host):
+        return JSONResponse({"error": "loopback_required"}, status_code=403)
+    if _shore_connection is None:
+        return JSONResponse({"error": "shore_not_configured"}, status_code=400)
+    from .shore_crypto import ShoreProtocolError
+    try:
+        revoked = await asyncio.to_thread(_shore_connection.channel.revoke_device, req.device_id)
+    except ShoreProtocolError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse({"ok": revoked})
 
 
 @app.get("/quota")

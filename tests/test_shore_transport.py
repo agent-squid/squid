@@ -484,3 +484,23 @@ async def test_terminal_challenge_http_status_is_not_retried(monkeypatch, tmp_pa
     monkeypatch.setattr(connection, "_connection_headers", headers)
     await connection.run(asyncio.Event())
     assert attempts == 1
+
+
+def test_channel_wraps_pairing_status_list_devices_and_revoke(tmp_path):
+    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST, host_signing=host_signing, host_agreement=host_agreement)
+
+    assert channel.pairing_status(CEREMONY) == {"status": "unknown"}
+    assert channel.list_devices() == []
+
+    pair(channel, browser_signing, browser_agreement)
+
+    assert channel.pairing_status(CEREMONY) == {"status": "paired", "device_id": DEVICE}
+    devices = channel.list_devices()
+    assert [device.device_id for device in devices] == [DEVICE]
+    assert devices[0].capabilities == ("dashboard.read.v1",)
+
+    assert channel.revoke_device(DEVICE) is True
+    assert channel.list_devices() == []
+    assert channel.revoke_device(DEVICE) is False

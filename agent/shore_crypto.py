@@ -14,6 +14,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -474,6 +475,18 @@ class DeviceTrustStore:
         except (OSError, sqlite3.Error) as exc:
             raise ShoreProtocolError("shore_untrusted_device") from exc
 
+    def list_paired(self) -> list[TrustedDevice]:
+        """Enumerates currently-trusted devices for a local approval UI. Never
+        returns revoked devices; only public key material is exposed."""
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    "SELECT device_id, signing_key, agreement_key, key_epoch, capabilities FROM shore_devices WHERE status='paired'"
+                ).fetchall()
+        except (OSError, sqlite3.Error) as exc:
+            raise ShoreProtocolError("shore_untrusted_device") from exc
+        return [TrustedDevice(row[0], row[1], row[2], row[3], _parse_capabilities(row[4])) for row in rows]
+
 
 class PairingCoordinator:
     """Single-process local ceremony; broker input is never a trust decision."""
@@ -485,6 +498,13 @@ class PairingCoordinator:
     _BEGIN_WINDOW_SECONDS = 300.0
     _MAX_BEGINS_PER_WINDOW = 10
     _MAX_FAILURES_PER_WINDOW = 20
+    # Terminal-outcome memory for a local approval UI's status poll, kept
+    # well past a ceremony's own 5-minute window so a dashboard tab doesn't
+    # race the ceremony's removal from _ceremonies. Bounded so an indefinitely
+    # running host can't accumulate unbounded memory from repeated pairing
+    # attempts.
+    _MAX_OUTCOMES = 200
+    _OUTCOME_TTL_SECONDS = 3600.0
 
     def __init__(self, trust: DeviceTrustStore, *, account_id: str, host_id: str,
                  host_signing_key: ed25519.Ed25519PublicKey,
@@ -505,6 +525,35 @@ class PairingCoordinator:
         self._lock = threading.RLock()
         self._begin_history: list[float] = []
         self._failure_history: list[float] = []
+        self._outcomes: OrderedDict[str, dict[str, Any]] = OrderedDict()
+
+    def _record_outcome(self, ceremony_id: str, status: str, *, device_id: str | None = None, now: float) -> None:
+        with self._lock:
+            self._outcomes.pop(ceremony_id, None)
+            self._outcomes[ceremony_id] = {"status": status, "device_id": device_id, "recorded_at": now}
+            cutoff = now - self._OUTCOME_TTL_SECONDS
+            while self._outcomes and next(iter(self._outcomes.values()))["recorded_at"] <= cutoff:
+                self._outcomes.popitem(last=False)
+            while len(self._outcomes) > self._MAX_OUTCOMES:
+                self._outcomes.popitem(last=False)
+
+    def status(self, ceremony_id: str, *, now: float | None = None) -> dict[str, Any]:
+        """Local-only status query for a pairing UI to poll; never touches
+        the wire protocol. Returns {"status": "pending"|"paired"|"failed"|
+        "expired"|"unknown"[, "device_id": ...]}."""
+        if not UUID7.fullmatch(ceremony_id):
+            return {"status": "unknown"}
+        checked_at = time.time() if now is None else now
+        with self._lock:
+            if ceremony_id in self._ceremonies:
+                return {"status": "pending"}
+            outcome = self._outcomes.get(ceremony_id)
+        if outcome is None or checked_at - outcome["recorded_at"] > self._OUTCOME_TTL_SECONDS:
+            return {"status": "unknown"}
+        result: dict[str, Any] = {"status": outcome["status"]}
+        if outcome["device_id"] is not None:
+            result["device_id"] = outcome["device_id"]
+        return result
 
     def _prune(self, history: list[float], now: float) -> None:
         cutoff = now - self._BEGIN_WINDOW_SECONDS
@@ -532,6 +581,7 @@ class PairingCoordinator:
                 ceremony.erase()
                 self._ceremonies.pop(ceremony_id, None)
                 self._expiry_timers.pop(ceremony_id, None)
+                self._record_outcome(ceremony_id, "expired", now=time.time())
 
     def _cancel_expiry(self, ceremony_id: str) -> None:
         timer = self._expiry_timers.pop(ceremony_id, None)
@@ -612,6 +662,7 @@ class PairingCoordinator:
                     self._record_failure(checked_at)
                 if ceremony.failures >= 5 or checked_at >= ceremony.expires_at:
                     ceremony.erase(); self._ceremonies.pop(ceremony_id, None); self._cancel_expiry(ceremony_id)
+                    self._record_outcome(ceremony_id, "expired" if checked_at >= ceremony.expires_at else "failed", now=checked_at)
                 raise ShoreProtocolError("pairing_failed")
             response_nonce = secrets.token_bytes(12) if response_nonce is None else response_nonce
             if len(response_nonce) != 12 or response_nonce in ceremony.packet_nonces: raise ShoreProtocolError("pairing_failed")
@@ -650,9 +701,11 @@ class PairingCoordinator:
                 self._record_failure(checked_at)
                 if ceremony.failures >= 5 or checked_at >= ceremony.expires_at:
                     ceremony.erase(); self._ceremonies.pop(ceremony_id, None); self._cancel_expiry(ceremony_id)
+                    self._record_outcome(ceremony_id, "expired" if checked_at >= ceremony.expires_at else "failed", now=checked_at)
                 raise ShoreProtocolError("pairing_failed")
             device_id = json.loads(binding)["device_id"]
             trusted = self.trust.approve(device_id, signing_key, agreement_key, self.key_epoch)
             ceremony.used = True
             self._ceremonies.pop(ceremony_id, None); self._cancel_expiry(ceremony_id)
+            self._record_outcome(ceremony_id, "paired", device_id=device_id, now=checked_at)
             return trusted

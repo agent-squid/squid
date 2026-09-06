@@ -749,6 +749,155 @@ async function openRemoteQR() {
   }
 }
 
+async function _shoreFetchDevices() {
+  try {
+    const res = await fetch('/shore/devices');
+    const data = await res.json();
+    return data.devices || [];
+  } catch { return []; }
+}
+
+function _shoreRenderDeviceList(container) {
+  container.innerHTML = '<div class="shore-devices-loading">Loading devices…</div>';
+  _shoreFetchDevices().then(devices => {
+    container.innerHTML = '';
+    if (!devices.length) {
+      container.innerHTML = '<div class="shore-devices-empty">No paired devices yet.</div>';
+      return;
+    }
+    devices.forEach(device => {
+      const row = document.createElement('div');
+      row.className = 'shore-device-row';
+      const label = document.createElement('span');
+      label.className = 'shore-device-label';
+      label.textContent = `${device.device_id.slice(0, 8)}… · epoch ${device.key_epoch} · ${device.capabilities.join(', ') || 'no capabilities'}`;
+      const revokeBtn = document.createElement('button');
+      revokeBtn.type = 'button';
+      revokeBtn.className = 'btn-ghost shore-device-revoke';
+      revokeBtn.textContent = 'Revoke';
+      revokeBtn.addEventListener('click', () => {
+        if (revokeBtn.dataset.confirming !== '1') {
+          revokeBtn.dataset.confirming = '1';
+          revokeBtn.textContent = 'Confirm?';
+          setTimeout(() => {
+            if (revokeBtn.dataset.confirming === '1') {
+              revokeBtn.dataset.confirming = '0';
+              revokeBtn.textContent = 'Revoke';
+            }
+          }, 3000);
+          return;
+        }
+        revokeBtn.disabled = true;
+        fetch('/shore/devices/revoke', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ device_id: device.device_id }),
+        }).finally(() => _shoreRenderDeviceList(container));
+      });
+      row.appendChild(label);
+      row.appendChild(revokeBtn);
+      container.appendChild(row);
+    });
+  });
+}
+
+async function openShorePairModal() {
+  if (document.getElementById('shore-pair-modal')) return;
+
+  const modal = document.createElement('div');
+  modal.id = 'shore-pair-modal';
+
+  const box = document.createElement('div');
+  box.id = 'shore-pair-modal-box';
+
+  const title = document.createElement('div');
+  title.id = 'shore-pair-modal-title';
+  title.textContent = 'Shore Pairing';
+
+  let pollTimer = null;
+  const onEsc = e => { if (e.key === 'Escape') close(); };
+  const close = () => {
+    if (pollTimer) clearInterval(pollTimer);
+    document.removeEventListener('keydown', onEsc);
+    modal.remove();
+  };
+
+  const closeBtn = document.createElement('button');
+  closeBtn.id = 'shore-pair-modal-close';
+  closeBtn.innerHTML = '<span class="close-desktop">Esc</span><span class="close-mobile">✕</span>';
+  closeBtn.addEventListener('click', close);
+  modal.addEventListener('click', e => { if (e.target === modal) close(); });
+  document.addEventListener('keydown', onEsc);
+
+  box.appendChild(closeBtn);
+  box.appendChild(title);
+
+  const pairSection = document.createElement('div');
+  pairSection.id = 'shore-pair-section';
+  const startBtn = document.createElement('button');
+  startBtn.type = 'button';
+  startBtn.className = 'btn-ghost';
+  startBtn.textContent = 'Start Pairing';
+  pairSection.appendChild(startBtn);
+  box.appendChild(pairSection);
+
+  const devicesTitle = document.createElement('div');
+  devicesTitle.className = 'shore-devices-title';
+  devicesTitle.textContent = 'Trusted devices';
+  box.appendChild(devicesTitle);
+  const devicesList = document.createElement('div');
+  devicesList.id = 'shore-devices-list';
+  box.appendChild(devicesList);
+
+  startBtn.addEventListener('click', async () => {
+    startBtn.disabled = true;
+    let body;
+    try {
+      const res = await fetch('/shore/pairing/begin', { method: 'POST' });
+      body = await res.json();
+      if (!res.ok) throw new Error(body.error || 'shore_pairing_failed');
+    } catch (err) {
+      pairSection.innerHTML = `<div class="shore-pair-error">${err.message === 'shore_not_configured'
+        ? "Shore isn't set up on this host yet — run `agentsquid login` in a terminal first."
+        : 'Could not start pairing.'}</div>`;
+      return;
+    }
+    pairSection.innerHTML = '';
+    const qrDiv = document.createElement('div');
+    qrDiv.id = 'shore-pair-qr';
+    const codeEl = document.createElement('div');
+    codeEl.id = 'shore-pair-code';
+    codeEl.textContent = body.code;
+    const urlEl = document.createElement('div');
+    urlEl.id = 'shore-pair-url';
+    urlEl.textContent = body.pair_url;
+    const statusEl = document.createElement('div');
+    statusEl.id = 'shore-pair-status';
+    statusEl.textContent = 'Waiting for the other device…';
+    pairSection.appendChild(qrDiv);
+    pairSection.appendChild(codeEl);
+    pairSection.appendChild(urlEl);
+    pairSection.appendChild(statusEl);
+    new QRCode(qrDiv, { text: body.pair_url, width: 220, height: 220,
+                         colorDark: '#0f0f13', colorLight: '#f5f0e8' });
+    pollTimer = setInterval(async () => {
+      let statusBody;
+      try {
+        const res = await fetch(`/shore/pairing/status?ceremony_id=${encodeURIComponent(body.ceremony_id)}`);
+        statusBody = await res.json();
+      } catch { return; }
+      if (statusBody.status === 'pending') return;
+      clearInterval(pollTimer); pollTimer = null;
+      const labels = { paired: 'Paired ✓', failed: 'Pairing failed', expired: 'Pairing code expired', unknown: 'Pairing failed' };
+      statusEl.textContent = labels[statusBody.status] || statusBody.status;
+      if (statusBody.status === 'paired') _shoreRenderDeviceList(devicesList);
+    }, 2000);
+  });
+
+  modal.appendChild(box);
+  document.body.appendChild(modal);
+  _shoreRenderDeviceList(devicesList);
+}
+
 function openHelp() {
   helpPanel.classList.add('open');
   helpBtn.classList.add('active');
@@ -3204,6 +3353,7 @@ const SQUID_COMMANDS = [
   { name: 'status',       desc: 'show active processes panel',                        args: false },
   { name: 'help',         desc: 'show help panel',                                    args: false },
   { name: 'remote',       desc: 'show QR code for mobile / tablet access',            args: false },
+  { name: 'pair',         desc: 'pair a browser for Shore remote access (QR code)',   args: false },
 ];
 
 function parseCommand(message) {
@@ -3221,6 +3371,7 @@ function parseCommand(message) {
   if (/^status$/i.test(t))       return { command: 'status' };
   if (/^help$/i.test(t))         return { command: 'help' };
   if (/^remote$/i.test(t))       return { command: 'remote' };
+  if (/^pair$/i.test(t))         return { command: 'pair' };
   const mf = t.match(/^(?:f|filter)(?:\s+([\s\S]*))?$/i);
   if (mf) {
     const args = (mf[1] || '').trim();
@@ -3252,6 +3403,10 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0, opt
   }
   if (cmd.command === 'remote') {
     openRemoteQR();
+    return;
+  }
+  if (cmd.command === 'pair') {
+    openShorePairModal();
     return;
   }
   if (cmd.command === 'login') {

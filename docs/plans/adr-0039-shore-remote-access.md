@@ -453,11 +453,13 @@ findings.
 
 ## Milestone 4 — Capability-scoped ADR-0040 relay
 
-**Status:** In progress. 4.1 (transport-neutral subscription core) and 4.2
-(capability registry) are landed; 4.0 and 4.3–4.9 have not started. No
-production dispatch path exists yet — 4.1/4.2 are shared/foundational units
-with no caller until 4.3/4.4 wire them into `ShoreChannel`, so the production
-route stays opaque-relay only until this milestone's acceptance gate passes.
+**Status:** In progress. 4.0 (pairing and approval UI), 4.1 (transport-neutral
+subscription core), and 4.2 (capability registry) are landed; 4.3–4.9 have not
+started. No production dispatch path exists yet — 4.0's UI drives the same
+pairing ceremony `tests/test_shore_crypto.py` already exercised, and
+4.1/4.2 are shared/foundational units with no caller until 4.3/4.4 wire them
+into `ShoreChannel`, so the production route stays opaque-relay only until
+this milestone's acceptance gate passes.
 
 **Objective:** expose a minimal safe subset of the existing real-time protocol.
 
@@ -509,56 +511,170 @@ effects.
 - No device-scoped, time-limited, revocable grant flow exists for the later
   shell capability; closest analogues: `DeviceTrustStore.revoke()`
   (`agent/shore_crypto.py:412`), ADR-0038's scoped-terminal execution.
-- No UI exists anywhere for pairing itself: `ShoreChannel.begin_pairing()`
-  (`agent/shore_transport.py:69`) and the approval path
-  (`PairingCoordinator.accept_browser_packet`/`accept_browser_confirmation`,
-  `agent/shore_crypto.py:422`) are only ever called from
-  `tests/test_shore_crypto.py` — no CLI subcommand or dashboard panel starts a
-  ceremony, shows its code, or approves a confirmation. `shore/browser` is a
-  headless library with no HTML. `shore/wrangler.jsonc` has no Workers Static
-  Assets/Sites binding, so the Worker can't serve a page today regardless.
+- ~~No UI exists anywhere for pairing itself~~ — resolved by 4.0 below. At the
+  time 4.1/4.2 landed, `ShoreChannel.begin_pairing()` and the approval path
+  (`PairingCoordinator.accept_browser_packet`/`accept_browser_confirmation`)
+  were only ever called from `tests/test_shore_crypto.py`; `shore/browser` was
+  a headless library with no HTML; `shore/wrangler.jsonc` had no Workers
+  Static Assets binding.
 
 #### 4.0 — Pairing and approval UI (prerequisite for the rest of Milestone 4)
 
-Pairing is a two-device ceremony; both sides currently have zero UI, not just
-an incomplete one.
+**Status:** Landed. Both sides of the ceremony now have real UI, and
+`ShoreChannel.begin_pairing`/`PairingCoordinator.accept_browser_packet`/
+`accept_browser_confirmation` have a caller outside the test suite for the
+first time.
 
-- **Objective:** make pairing and device approval something a human can
-  actually do, on both the host and the remote browser.
-- **Files:** `ui/index.html`, `ui/app.js` (host panel); new page/bundle under
-  `shore/browser` or a new static route on `shore-prod` (remote surface);
-  `shore/wrangler.jsonc` (hosting decision).
-- **Actions:**
-  - Host-side local-approval panel in squid's dashboard, following the
-    existing popup pattern (`codex-creds-popup`/`quota-creds-popup`):
-    - New local-only endpoint wrapping `ShoreChannel.begin_pairing(ceremony_id)`;
-      display the returned crockford32 pairing code with a live ceremony-status
-      indicator.
-    - Surface the "local approval" step for a browser's confirmation and for
-      host-key-change acceptance (Milestone 3 Action 3) — nothing outside
-      tests calls into this today.
-    - List trusted devices from `DeviceTrustStore`, wire a revoke control to
-      `DeviceTrustStore.revoke()`.
-  - Remote browser-side page: enter the pairing code, generate/persist device
-    keys via `shore/browser/src/device-keys.ts`, drive `ShoreBrowserClient`'s
-    pairing flow, and (once the rest of the milestone lands) view the
-    read-only dashboard. Must be reachable without the local network, which
-    the Worker can't do yet (no static-assets binding).
-  - **Hosting decision needed:** add a Workers Static Assets binding to
-    `shore-prod` so e.g. `agentsquid.ai/@<user>/pair` serves the page from the
-    same origin already holding the `SameSite=Strict` session cookie
-    (recommended), vs. hosting on the separate `agentsquid.ai` marketing site
-    and pulling in `@agentsquid/shore-browser` as a bundle from there.
-- **Tests:** end-to-end (Playwright or equivalent) driving the full ceremony
-  through both new UI surfaces against a real host process — extends the
-  existing cross-process pairing test from "the protocol works" to "a human
-  can complete this."
-- **Risks:** largest pure-UI lift in the plan, no existing design to anchor
-  to (no mockups, no prior Shore-facing UI in either repo). Treat as its own
-  reviewed slice, not bundled with 4.1–4.9 — a reviewer will check the
-  pairing code can't leak via logs/screenshots/autofill/history, and that
-  approval can't be tricked into accepting an unintended device (clickjacking,
-  stale-ceremony reuse, confused-device display).
+**Host side** (`agent/shore_crypto.py`, `agent/shore_transport.py`,
+`agent/server.py`, `ui/index.html`, `ui/app.js`):
+
+- `DeviceTrustStore.list_paired()` enumerates currently-trusted devices (new;
+  no such enumeration existed — `get()` only looked up one device at a time).
+- `PairingCoordinator` gained bounded, TTL'd ceremony-outcome memory
+  (`_record_outcome`/`status()`, 200 entries / 1 hour) so a local UI can poll
+  "pending / paired / failed / expired" for a ceremony after it leaves the
+  live `_ceremonies` dict — outcomes are recorded at all three terminal
+  transitions (confirmed, failure-exhausted, expired-via-timer).
+- `ShoreChannel` exposes `pairing_status`, `list_devices`, `revoke_device` as
+  thin wrappers, mirroring the existing `begin_pairing` shape.
+- `agent/server.py` gained a module-level `_shore_connection` (set/cleared by
+  `_lifespan`, previously a function-local the rest of the module couldn't
+  reach) and four loopback-gated endpoints reusing the existing
+  `_request_is_loopback` gate from `/config/creds/auto`: `POST
+  /shore/pairing/begin`, `GET /shore/pairing/status`, `GET /shore/devices`,
+  `POST /shore/devices/revoke`. `begin` returns the ceremony's crockford32
+  code, offer, expiry, and a `pair_url` with the offer+code JSON-encoded into
+  the URL **fragment** (never the query string or path) so the ceremony
+  secret never reaches server access logs for the pairing page itself.
+- Dashboard UI is a new `/pair` chat command (`ui/app.js`, mirroring the
+  existing `/remote` Tailscale-QR command's exact modal pattern —
+  hand-built DOM, not a system dialog, per this repo's modal convention) that
+  renders the pairing QR (reusing the already-vendored `qrcode.min.js`, the
+  same library `/remote` uses) and code, polls `/shore/pairing/status` every
+  2s until terminal, and lists/revokes trusted devices with a
+  click-again-to-confirm revoke button (no `window.confirm`). Added `pair` to
+  `agent/server.py`'s `_SQUID_CHAT_COMMANDS`, matching `remote`'s existing
+  entry. PWA cache version bumped in all 5 spots (`ui/sw.js` ×3,
+  `ui/index.html` ×2).
+
+**Remote browser side** (new `shore/pairing-app/` package):
+
+- A separate, self-contained npm package (own `package.json`/lockfile/
+  tsconfig), not folded into `shore/browser` (which stays a headless,
+  build-free library) or the squid repo — encapsulation was an explicit
+  choice so the pairing UI's build tooling doesn't leak into either.
+- `src/app.ts` decodes the URL fragment (or accepts a pasted link/fragment as
+  the manual-entry fallback for QR-less pairing), shows the offer's host key
+  fingerprints for confirmation, then drives the already-existing
+  `ShoreBrowserClient.pair()`/`loadAuthenticatedShoreRoute` from
+  `shore/browser/src/client.ts` unchanged — 4.0 added no new browser crypto,
+  only UI around what Milestone 3 already built. Handles
+  `host_trust_conflict` with a second, explicit "approve host key change"
+  step rather than silently retrying with `approveHostKeyChange: true`.
+- Bundled with `esbuild` (new devDependency, scoped to this package only)
+  into a single `dist/pair-app.js`, since static assets are served as-is with
+  no processing pipeline and `shore/browser`'s sources have no `.js`
+  extensions for browser-native multi-file ESM loading.
+- **Hosting decision: resolved and landed.** `shore/wrangler.jsonc` gained a
+  Workers Static Assets binding (`ASSETS`, directory
+  `./pairing-app/dist`) rather than hosting on the separate `agentsquid.ai`
+  marketing site. `src/index.ts`'s `parseShoreRoute` now accepts `/pair` and
+  `/pair-app.js` as recognized subpaths (sibling-of-username paths, not
+  nested under `/pair/`, so the HTML's plain relative `<script
+  src="pair-app.js">` resolves correctly without a `<base>` tag or absolute
+  URL — nesting would have required either an extra route just for the
+  trailing slash or embedding the JS inline).
+- **Quota finding revised.** The earlier plan text asserted static-asset
+  requests are free and Worker-invoking (billable) requests are the only
+  ones that count — true in general, but landing this exposed a routing bug
+  that changes the practical answer for this specific page: Cloudflare's
+  default assets-first routing (`run_worker_first: false`) does its own
+  clean-URL canonicalization *inside* `env.ASSETS.fetch()`, and calling that
+  binding with the literal `/pair.html` path made it 307-redirect to `/pair`
+  — an absolute-path `Location` scoped to the internal lookup, not the real
+  `/@<username>/pair` the browser is on, so the redirect silently stripped
+  the username and 404'd. Fixed by requesting the already-clean `/pair`/
+  `/pair-app.js` paths directly (no `.html` suffix) *and* setting
+  `assets.run_worker_first: true`, since without it the platform's own
+  assets-first matcher intercepts non-extensioned paths before the Worker
+  ever runs, independent of the redirect bug (confirmed by reproducing 404s
+  that vanished only when a query string was present, before either fix was
+  in place). Net effect: `/pair` and `/pair-app.js` now invoke the Worker
+  like any other route on `shore-prod`, not free static-asset serving as
+  originally planned — accepted, since pairing is a rare, one-time-per-device
+  action, not page-view traffic, so the billing difference is negligible in
+  practice even though the earlier "quota isn't a concern" framing was too
+  broad as stated.
+- CI (`ci.yml`, `deploy-production.yml`, `deploy-preproduction.yml`) gained
+  `pairing-app` as a third package alongside the root Worker and `browser`:
+  `npm ci`/`typecheck`/`test`/`audit`, plus `npm run build` before any
+  `wrangler deploy`/`--dry-run`, since the assets directory must exist at
+  deploy time.
+
+**Tests:** `tests/test_shore_crypto.py` gained `list_paired()` coverage
+(returns only currently-paired devices, wraps DB failure in
+`ShoreProtocolError`) and `PairingCoordinator.status()` coverage (unknown →
+pending → paired/failed/expired transitions, the background-timer expiry
+path, and TTL eviction of a terminal outcome). `tests/test_shore_transport.py`
+gained a `ShoreChannel.pairing_status`/`list_devices`/`revoke_device`
+round-trip through a real completed ceremony. `tests/test_server.py` gained
+loopback-gating, not-configured, and success-path coverage for all four new
+`/shore/*` endpoints (mocking `_shore_connection`, not a real `ShoreChannel`)
+plus a `pair_url` assertion that the ceremony code never appears before the
+URL's `#`. `test/shore.test.ts` gained `parseShoreRoute`/`SELF.fetch`
+coverage for `/pair` and `/pair-app.js` (200 + expected content, GET-only
+enforced, 405 otherwise). `pairing-app` gained its own `vitest` suite (13
+cases) for `decodePayload`/`extractFragment`/`parseUsername` — these were
+pulled out of `app.ts` into a dependency-free `pairing-link.ts` specifically
+so they're testable without a DOM. Full suites re-verified: `pytest -k "shore
+or realtime"` 215/215; shore repo `npm test` 91/91; `browser` repo `npm test`
+37/37 (1 cross-process test skipped, as before, needing a real squid
+process); `pairing-app` `npm test` 13/13, `typecheck` and `build` both clean.
+**Not done:** the Playwright/equivalent end-to-end ceremony test originally
+scoped here (driving both UI surfaces against a real host process) — the
+above proves the pieces work in isolation, not that a human can complete the
+flow through the actual rendered pages. Also not done: the *dashboard view*
+itself (open question 3 in this milestone's Open Questions) remains out of
+scope, deferred to 4.5 as planned.
+
+A pre-publish review caught four real issues, all fixed. (1) This section
+originally claimed `test_shore_crypto.py`/`test_shore_transport.py` "cover
+the new ... additions" when the diff being described hadn't touched
+`tests/` at all — the only verification had been ad hoc, unpersisted
+`TestClient` scripts run by hand during implementation. Fixed by writing the
+real tests summarized above, which is what makes the claim in this section
+true now rather than aspirational. (2) `GET /shore/devices` returned `200
+{"devices": []}` when Shore isn't configured, while the other three new
+endpoints return `400 {"error": "shore_not_configured"}` for the identical
+condition — a monitoring check or future API consumer could misread the
+200 as "configured, zero devices" instead of "not configured at all."
+Fixed by making all four endpoints respond identically; `ui/app.js`'s
+`_shoreFetchDevices()` already tolerated either shape (`data.devices || []`
+regardless of status), so no frontend change was needed. (3)
+`openShorePairModal`'s `Escape`-key listener was only detached when the
+modal closed via `Escape` itself — closing via the `×` button or a backdrop
+click left it permanently attached to `document` (the same pattern
+pre-existing in `openRemoteQR`, not fixed here since it's out of this
+diff's scope). Fixed by routing all three close paths through one `close()`
+that always detaches the listener. (4) CI/deploy workflows built
+`pairing-app` (creating `pairing-app/dist`) *after* the root package's own
+`npm test` step, but `vitest.config.ts` loads `wrangler.jsonc` directly,
+whose `assets.directory` points at that same `dist` — reproduced concretely
+by deleting `dist` and rerunning `npm test` from a clean state, which failed
+the new `/pair` asset test with 404 instead of 200. Fixed by reordering all
+three workflow files so `pairing-app` is built before the root suite runs.
+A related, self-caught issue during the fix: adding `pairing-app/test/` to
+the repo made the shore-root `npm test` silently pick up and rerun those 13
+cases too (`vitest.config.ts` excluded `browser/**` but not `pairing-app/**`)
+— fixed by excluding it there as well, so each package's tests run exactly
+once, under its own config.
+
+**Risks carried forward, not yet addressed:** no independent security review
+of the pairing page has happened (pairing-code-leak-via-logs/autofill/
+history, clickjacking, confused-device display) — the fragment-based URL and
+explicit host-key-change confirmation step were built with those risks in
+mind, but that's not a substitute for the review this plan originally called
+for as its own slice.
 
 #### 4.1 — Extract a transport-neutral ADR-0040 subscription core
 

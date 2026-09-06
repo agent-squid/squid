@@ -69,6 +69,15 @@ class ShoreChannel:
     def begin_pairing(self, ceremony_id: str) -> dict[str, Any]:
         return self.pairing.begin(ceremony_id=ceremony_id)
 
+    def pairing_status(self, ceremony_id: str) -> dict[str, Any]:
+        return self.pairing.status(ceremony_id)
+
+    def list_devices(self) -> list[TrustedDevice]:
+        return self.trust.list_paired()
+
+    def revoke_device(self, device_id: str) -> bool:
+        return self.trust.revoke(device_id)
+
     def handle(self, payload: bytes, *, now_ms: int | None = None) -> bytes | None:
         """Handle one binary relay frame; malformed input always fails closed."""
         try:

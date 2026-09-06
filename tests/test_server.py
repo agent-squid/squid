@@ -2591,3 +2591,82 @@ def test_session_log_endpoint_includes_squid_turn_boundaries(tmp_path, monkeypat
     body = res.json()
     assert [t["msg_id"] for t in body["turns"]] == [m1, m2]
     assert [t["turn_index"] for t in body["turns"]] == [1, 2]
+
+
+def _loopback_client():
+    return TestClient(server.app, client=("127.0.0.1", 12345))
+
+
+def test_shore_endpoints_require_loopback(monkeypatch):
+    monkeypatch.setattr(server, "_shore_connection", SimpleNamespace(channel=None))
+    client = TestClient(server.app)  # default TestClient host is not loopback
+    assert client.get("/shore/devices").status_code == 403
+    assert client.post("/shore/pairing/begin").status_code == 403
+    assert client.get("/shore/pairing/status", params={"ceremony_id": "x"}).status_code == 403
+    assert client.post("/shore/devices/revoke", json={"device_id": "x"}).status_code == 403
+
+
+def test_shore_endpoints_report_not_configured_when_shore_is_unset(monkeypatch):
+    monkeypatch.setattr(server, "_shore_connection", None)
+    client = _loopback_client()
+    assert client.get("/shore/devices").status_code == 400
+    assert client.post("/shore/pairing/begin").status_code == 400
+    assert client.get("/shore/pairing/status", params={"ceremony_id": "x"}).status_code == 400
+    assert client.post("/shore/devices/revoke", json={"device_id": "x"}).status_code == 400
+
+
+def test_shore_pairing_begin_and_status_round_trip(monkeypatch):
+    channel = SimpleNamespace(
+        begin_pairing=lambda ceremony_id: {"code": "ABCDEF", "offer": {"ceremony_id": ceremony_id}, "expires_at": 123.0},
+        pairing_status=lambda ceremony_id: {"status": "pending"},
+    )
+    monkeypatch.setattr(server, "_shore_connection", SimpleNamespace(channel=channel))
+    monkeypatch.setattr(
+        "agent.shore._load_runtime_config",
+        lambda *_args, **_kwargs: SimpleNamespace(broker="https://agentsquid.ai", username="alice"),
+    )
+    client = _loopback_client()
+
+    begin = client.post("/shore/pairing/begin")
+    assert begin.status_code == 200
+    body = begin.json()
+    assert body["code"] == "ABCDEF"
+    assert body["pair_url"].startswith("https://agentsquid.ai/@alice/pair#")
+    # The ceremony secret and offer must never appear in the URL's query or
+    # path — only after the fragment marker, which a server never sees.
+    assert "ABCDEF" not in body["pair_url"].split("#", 1)[0]
+
+    status = client.get("/shore/pairing/status", params={"ceremony_id": body["ceremony_id"]})
+    assert status.status_code == 200
+    assert status.json() == {"status": "pending"}
+
+
+def test_shore_pairing_begin_surfaces_protocol_errors(monkeypatch):
+    from agent.shore_crypto import ShoreProtocolError
+
+    def raise_rate_limited(_ceremony_id):
+        raise ShoreProtocolError("pairing_rate_limited")
+
+    channel = SimpleNamespace(begin_pairing=raise_rate_limited)
+    monkeypatch.setattr(server, "_shore_connection", SimpleNamespace(channel=channel))
+    monkeypatch.setattr(
+        "agent.shore._load_runtime_config",
+        lambda *_args, **_kwargs: SimpleNamespace(broker="https://agentsquid.ai", username="alice"),
+    )
+    res = _loopback_client().post("/shore/pairing/begin")
+    assert res.status_code == 409
+    assert res.json() == {"error": "pairing_rate_limited"}
+
+
+def test_shore_devices_list_and_revoke(monkeypatch):
+    device = SimpleNamespace(device_id="018f1f25-8614-7e41-8c5c-fc0b6eefad62", key_epoch=1, capabilities=("dashboard.read.v1",))
+    channel = SimpleNamespace(list_devices=lambda: [device], revoke_device=lambda device_id: device_id == device.device_id)
+    monkeypatch.setattr(server, "_shore_connection", SimpleNamespace(channel=channel))
+    client = _loopback_client()
+
+    listed = client.get("/shore/devices")
+    assert listed.status_code == 200
+    assert listed.json() == {"devices": [{"device_id": device.device_id, "key_epoch": 1, "capabilities": ["dashboard.read.v1"]}]}
+
+    assert client.post("/shore/devices/revoke", json={"device_id": device.device_id}).json() == {"ok": True}
+    assert client.post("/shore/devices/revoke", json={"device_id": "unknown"}).json() == {"ok": False}

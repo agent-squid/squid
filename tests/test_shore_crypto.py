@@ -667,3 +667,72 @@ def test_pairing_accept_is_rate_limited_once_aggregate_failure_budget_is_exhaust
     # begin(); the aggregate 20-failure cap must still block it.
     with pytest.raises(ShoreProtocolError, match="pairing_rate_limited"):
         coordinator.accept_browser_packet(_garbage_packet(still_open, 99), now=100)
+
+
+def test_list_paired_returns_only_currently_paired_devices(tmp_path):
+    trust = DeviceTrustStore(tmp_path / "trust.db")
+    assert trust.list_paired() == []
+    other_device = "018f1f25-8614-7e41-8c5c-fc0b6eefad63"
+    trust.approve(DEVICE_ID, b"s" * 32, b"a" * 32, 1, now_ms=100)
+    trust.approve(other_device, b"t" * 32, b"b" * 32, 1, now_ms=100)
+    trust.revoke(other_device, now_ms=200)
+    paired = trust.list_paired()
+    assert [device.device_id for device in paired] == [DEVICE_ID]
+    assert paired[0].signing_key == b"s" * 32
+    assert paired[0].agreement_key == b"a" * 32
+    assert paired[0].key_epoch == 1
+    assert paired[0].capabilities == ("dashboard.read.v1",)
+
+
+def test_list_paired_wraps_db_failure_in_stable_protocol_error(tmp_path, monkeypatch):
+    trust = DeviceTrustStore(tmp_path / "trust.db")
+    trust.approve(DEVICE_ID, b"s" * 32, b"a" * 32, 1, now_ms=100)
+    monkeypatch.setattr(trust, "_connect", lambda: (_ for _ in ()).throw(sqlite3.OperationalError("boom")))
+    with pytest.raises(ShoreProtocolError, match="shore_untrusted_device"):
+        trust.list_paired()
+
+
+def test_pairing_status_reports_unknown_for_an_unrecognized_ceremony(tmp_path):
+    coordinator = _new_coordinator(tmp_path)
+    assert coordinator.status(CEREMONY_ID) == {"status": "unknown"}
+    assert coordinator.status("not-a-uuid") == {"status": "unknown"}
+
+
+def test_pairing_status_transitions_through_pending_to_paired(tmp_path):
+    trust, coordinator, packet, pair_key, binding = _pairing_fixture(tmp_path)
+    assert coordinator.status(CEREMONY_ID, now=100) == {"status": "pending"}
+    coordinator.accept_browser_packet(packet, now=101, response_nonce=bytes(range(12, 24)))
+    assert coordinator.status(CEREMONY_ID, now=101) == {"status": "pending"}
+    coordinator.accept_browser_confirmation(_confirmation(pair_key, binding), now=102)
+    assert coordinator.status(CEREMONY_ID, now=102) == {"status": "paired", "device_id": DEVICE_ID}
+
+
+def test_pairing_status_reports_failed_after_attempts_exhausted(tmp_path):
+    trust, coordinator, packet, _, _ = _pairing_fixture(tmp_path, tamper_host=True)
+    for _ in range(5):
+        with pytest.raises(ShoreProtocolError, match="pairing_failed"):
+            coordinator.accept_browser_packet(packet, now=101)
+    assert coordinator.status(CEREMONY_ID, now=101) == {"status": "failed"}
+
+
+def test_pairing_status_reports_expired_after_timeout(tmp_path):
+    trust, coordinator, packet, _, _ = _pairing_fixture(tmp_path)
+    with pytest.raises(ShoreProtocolError, match="pairing_failed"):
+        coordinator.accept_browser_packet(packet, now=400)
+    assert coordinator.status(CEREMONY_ID, now=400) == {"status": "expired"}
+
+
+def test_pairing_status_reports_expired_via_the_background_timer(tmp_path):
+    _, coordinator, _, _, _ = _pairing_fixture(tmp_path)
+    ceremony = coordinator._ceremonies[CEREMONY_ID]
+    coordinator._expire(CEREMONY_ID, ceremony)
+    assert coordinator.status(CEREMONY_ID) == {"status": "expired"}
+
+
+def test_pairing_status_forgets_outcomes_past_their_ttl(tmp_path):
+    trust, coordinator, packet, pair_key, binding = _pairing_fixture(tmp_path)
+    coordinator.accept_browser_packet(packet, now=101, response_nonce=bytes(range(12, 24)))
+    coordinator.accept_browser_confirmation(_confirmation(pair_key, binding), now=102)
+    assert coordinator.status(CEREMONY_ID, now=102) == {"status": "paired", "device_id": DEVICE_ID}
+    stale = 102 + coordinator._OUTCOME_TTL_SECONDS + 1
+    assert coordinator.status(CEREMONY_ID, now=stale) == {"status": "unknown"}
