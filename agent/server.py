@@ -592,6 +592,7 @@ class CmdRequest(BaseModel):
     pos: Optional[int] = None
     msg_id: Optional[int] = None
     upgrade: Optional[bool] = None
+    source: Optional[str] = Field(default=None, max_length=64, pattern=r"^[a-z0-9_]+$")
 
 
 def _is_running_from_pipx_agentsquid() -> bool:
@@ -1516,19 +1517,20 @@ async def run_cmd(req: CmdRequest):
         if req.msg_id:
             mark_assistant_cancelled(req.msg_id, "Cancelled")
         killed = kill_proc_by_msg_id(req.msg_id) if req.msg_id else 0
-        log.info("cmd stop_msg topic=%s msg_id=%s killed=%s", req.topic, req.msg_id, killed)
+        log.info("cmd stop_msg topic=%s msg_id=%s source=%s killed=%s", req.topic, req.msg_id, req.source or "unspecified", killed)
         return JSONResponse({"ok": True, "killed": killed})
     if req.command == "stop":
         killed = dispatcher.stop_topic(topic, agent=req.agent, adhoc=req.adhoc)
-        log.info("cmd stop topic=%s agent=%s adhoc=%s killed=%s", topic, req.agent, req.adhoc, killed)
+        log.info("cmd stop topic=%s agent=%s adhoc=%s source=%s killed=%s", topic, req.agent, req.adhoc, req.source or "unspecified", killed)
         return JSONResponse({"ok": True, "killed": killed})
     if req.command == "stopall":
         result = dispatcher.stopall_topic(topic, agent=req.agent, adhoc=req.adhoc)
         log.info(
-            "cmd stopall topic=%s agent=%s adhoc=%s killed=%s drained=%s",
+            "cmd stopall topic=%s agent=%s adhoc=%s source=%s killed=%s drained=%s",
             topic,
             req.agent,
             req.adhoc,
+            req.source or "unspecified",
             result.get("killed"),
             result.get("drained"),
         )
@@ -1536,8 +1538,8 @@ async def run_cmd(req: CmdRequest):
     if req.command == "deq":
         drained = dispatcher.drain_topic(topic, req.pos, msg_id=req.msg_id)
         log.info(
-            "cmd deq topic=%s pos=%s msg_id=%s drained=%s",
-            topic, req.pos, req.msg_id, drained,
+            "cmd deq topic=%s pos=%s msg_id=%s source=%s drained=%s",
+            topic, req.pos, req.msg_id, req.source or "unspecified", drained,
         )
         return JSONResponse({"ok": True, "drained": drained})
     if req.command == "list":
@@ -4437,12 +4439,18 @@ async def _handle_realtime_mutation(websocket: WebSocket, frame: dict, principal
         result = await asyncio.to_thread(save_realtime_request, principal, request_id, message_type, fingerprint, result)
     else:  # chat.cancel
         msg_id = payload.get("msg_id")
+        raw_source = payload.get("source")
+        source = raw_source if isinstance(raw_source, str) and re.fullmatch(r"[a-z0-9_]{1,64}", raw_source) else "unspecified"
         if not isinstance(msg_id, int):
             result = {"ok": False, "error": "invalid_frame"}
         else:
             changed = await asyncio.to_thread(mark_assistant_cancelled, msg_id, "Cancelled")
             killed = await asyncio.to_thread(kill_proc_by_msg_id, msg_id)
-            result = {"ok": True, "cancelled": changed, "killed": killed, "msg_id": msg_id}
+            result = {"ok": True, "cancelled": changed, "killed": killed, "msg_id": msg_id, "source": source}
+            log.info(
+                "realtime chat.cancel msg_id=%s source=%s principal=%s cancelled=%s killed=%s",
+                msg_id, source, principal, changed, killed,
+            )
         result = await asyncio.to_thread(save_realtime_request, principal, request_id, message_type, fingerprint, result)
     await _realtime_send(outbound, {"v": 1, "type": "command.result", "request_id": request_id, "payload": result}, principal, last_acked_cursor)
     return attach

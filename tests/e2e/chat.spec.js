@@ -441,7 +441,8 @@ test('websocket transport cancels a running chat without POST /cmd', async ({ pa
     type: window.__chatCancelFrame?.type,
     hasRequestId: !!window.__chatCancelFrame?.request_id,
     msgId: window.__chatCancelFrame?.payload?.msg_id,
-  }))).toEqual({ type: 'chat.cancel', hasRequestId: true, msgId: 85 });
+    source: window.__chatCancelFrame?.payload?.source,
+  }))).toEqual({ type: 'chat.cancel', hasRequestId: true, msgId: 85, source: 'live_bubble_stop' });
 });
 
 test('auto transport falls back to POST /cmd when websocket cancel is unavailable', async ({ page }) => {
@@ -467,7 +468,7 @@ test('auto transport falls back to POST /cmd when websocket cancel is unavailabl
 
   await page.goto('/');
   expect(await page.evaluate(() => cancelRealtimeMessage(86, 'squid', 'codex'))).toBe(true);
-  expect(cmdBody).toEqual({ command: 'stop_msg', topic: 'squid', msg_id: 86 });
+  expect(cmdBody).toEqual({ command: 'stop_msg', topic: 'squid', msg_id: 86, source: 'unspecified' });
 });
 
 test('auto transport falls back to POST /cmd when websocket cancel times out after send', async ({ page }) => {
@@ -505,7 +506,7 @@ test('auto transport falls back to POST /cmd when websocket cancel times out aft
 
   await page.goto('/');
   expect(await page.evaluate(() => cancelRealtimeMessage(88, 'squid', 'codex'))).toBe(true);
-  expect(cmdBody).toEqual({ command: 'stop_msg', topic: 'squid', msg_id: 88 });
+  expect(cmdBody).toEqual({ command: 'stop_msg', topic: 'squid', msg_id: 88, source: 'unspecified' });
 });
 
 test('failed websocket cancel keeps the running chat retryable and shows the error', async ({ page }) => {

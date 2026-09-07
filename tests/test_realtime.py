@@ -199,7 +199,7 @@ def test_websocket_subscribe_snapshot_live_event_and_idempotent_cancel(tmp_path,
         assert event["type"] == "chat.text"
         assert event["payload"] == {"text": "live"}
 
-        cancel = {"v": 1, "type": "chat.cancel", "request_id": "cancel-1", "payload": {"msg_id": msg_id}}
+        cancel = {"v": 1, "type": "chat.cancel", "request_id": "cancel-1", "payload": {"msg_id": msg_id, "source": "live_bubble_stop"}}
         ws.send_json(cancel)
         first = ws.receive_json()
         while first["type"] != "command.result":
@@ -210,6 +210,7 @@ def test_websocket_subscribe_snapshot_live_event_and_idempotent_cancel(tmp_path,
             second = ws.receive_json()
         assert first["payload"] == second["payload"]
         assert first["payload"]["cancelled"] is True
+        assert first["payload"]["source"] == "live_bubble_stop"
 
 
 def test_websocket_dispatches_worktree_auto_resolve_command(tmp_path, monkeypatch):

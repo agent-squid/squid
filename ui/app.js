@@ -3521,7 +3521,7 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0, opt
   const feedbackEl = showCmdFeedback(`${label}…`);
 
   try {
-    const body = { command: cmd.command, topic };
+    const body = { command: cmd.command, topic, source: `slash_${cmd.command}` };
     if (agent && (cmd.command === 'stop' || cmd.command === 'stopall')) body.agent = agent;
     if (cmd.command === 'stop' || cmd.command === 'stopall') body.adhoc = adhoc || null;
     if (cmd.pos != null) body.pos = cmd.pos;
@@ -4981,14 +4981,14 @@ async function sendMessage(text, opts = {}) {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(msgId
-            ? { command: 'deq', topic, msg_id: msgId }
-            : { command: 'deq', topic, pos: queuePosition }),
+            ? { command: 'deq', topic, msg_id: msgId, source: 'live_bubble_dequeue' }
+            : { command: 'deq', topic, pos: queuePosition, source: 'live_bubble_dequeue' }),
         });
         if (!response.ok) throw new Error('Unable to remove queued prompt.');
         markDequeued();
         pollProcs();
       } else if (msgId) {
-        await cancelRealtimeMessage(msgId, topic, agent);
+        await cancelRealtimeMessage(msgId, topic, agent, 'live_bubble_stop');
         userAborted = true;
         turnStatus = 'cancelled';
         controller.abort();
@@ -7656,7 +7656,7 @@ function makeWipBubble(item) {
     killBtn.disabled = true;
     clearCancellationError(bubble);
     try {
-      await cancelRealtimeMessage(item.id, item.topic, item.agent);
+      await cancelRealtimeMessage(item.id, item.topic, item.agent, 'history_bubble_stop');
     } catch (error) {
       killBtn.disabled = false;
       showCancellationError(bubble, error);
@@ -8007,10 +8007,10 @@ const realtimeV1 = (() => {
         timeoutMessage: 'WebSocket command timed out after submission.',
       });
     },
-    cancel(msgId, topic, agent) {
+    cancel(msgId, topic, agent, source = 'unspecified') {
       return sendCommand({
         type: 'chat.cancel',
-        payload: { msg_id: msgId },
+        payload: { msg_id: msgId, source },
         topic,
         agent: agent || null,
         timeoutMessage: 'WebSocket cancellation timed out after submission.',
@@ -8086,11 +8086,11 @@ const realtimeV1 = (() => {
   };
 })();
 
-async function cancelRealtimeMessage(msgId, topic = 'default', agent = null) {
+async function cancelRealtimeMessage(msgId, topic = 'default', agent = null, source = 'unspecified') {
   const transportMode = await realtimeTransportMode;
   if (transportMode !== 'sse' && realtimeV1) {
     try {
-      const result = await realtimeV1.cancel(Number(msgId), topic || 'default', agent);
+      const result = await realtimeV1.cancel(Number(msgId), topic || 'default', agent, source);
       if (!result.ok) {
         const error = new Error(result.error || 'Unable to cancel response.');
         error.realtimeCommandResult = true;
@@ -8107,7 +8107,7 @@ async function cancelRealtimeMessage(msgId, topic = 'default', agent = null) {
   const response = await fetch('/cmd', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ command: 'stop_msg', topic, msg_id: Number(msgId) }),
+    body: JSON.stringify({ command: 'stop_msg', topic, msg_id: Number(msgId), source }),
   });
   if (!response.ok) throw new Error('Unable to cancel response.');
   return true;
@@ -11709,7 +11709,7 @@ function renderProcPopup(processes, queued) {
       try {
         if (btn.dataset.msgid) {
           await cancelRealtimeMessage(
-            parseInt(btn.dataset.msgid), btn.dataset.topic, btn.dataset.agent,
+            parseInt(btn.dataset.msgid), btn.dataset.topic, btn.dataset.agent, 'status_popup_stop',
           );
           // This stop button can cancel a turn that has no live "thinking"
           // bubble watching it on screen (e.g. a background/idle session), so
@@ -11717,7 +11717,7 @@ function renderProcPopup(processes, queued) {
           // the in-bubble kill button and status-poll cancelled branch.
           if (btn.dataset.agent) refreshComposerSessionCount(btn.dataset.topic || 'default', btn.dataset.agent);
         } else {
-          const b = { command: 'stop', topic: btn.dataset.topic, agent: btn.dataset.agent };
+          const b = { command: 'stop', topic: btn.dataset.topic, agent: btn.dataset.agent, source: 'status_popup_stop' };
           const response = await fetch('/cmd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
           if (!response.ok) throw new Error('Unable to stop process.');
         }
@@ -11755,8 +11755,8 @@ function renderProcPopup(processes, queued) {
       const response = await fetch('/cmd', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(msgIdNum
-          ? { command: 'deq', topic: btn.dataset.topic, msg_id: msgIdNum }
-          : { command: 'deq', topic: btn.dataset.topic, pos: parseInt(btn.dataset.pos, 10) }),
+          ? { command: 'deq', topic: btn.dataset.topic, msg_id: msgIdNum, source: 'status_popup_dequeue' }
+          : { command: 'deq', topic: btn.dataset.topic, pos: parseInt(btn.dataset.pos, 10), source: 'status_popup_dequeue' }),
       });
       if (!response.ok) {
         btn.disabled = false;

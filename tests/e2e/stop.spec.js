@@ -356,6 +356,7 @@ test('kill button appears on thinking bubble and sends stop_msg with msg_id', as
 
   expect(cmdBody?.command).toBe('stop_msg');
   expect(cmdBody?.msg_id).toBe(42);
+  expect(cmdBody?.source).toBe('live_bubble_stop');
   await expect(page.locator('.msg-thinking .msg-error')).toHaveText('Cancelled.');
 
   // Close the held stream so the page can clean up
@@ -443,7 +444,7 @@ test('queued prompt kill leaves dequeued label', async ({ page }) => {
   await expect(killBtn).toBeVisible({ timeout: 5000 });
   await killBtn.click();
 
-  expect(cmdBody).toMatchObject({ command: 'deq', topic: 'squid', pos: 1 });
+  expect(cmdBody).toMatchObject({ command: 'deq', topic: 'squid', pos: 1, source: 'live_bubble_dequeue' });
   await expect(page.locator('.msg-thinking')).toContainText('Dequeued.');
 
   await page.evaluate(() => window._testSseWriter?.close().catch(() => {}));
