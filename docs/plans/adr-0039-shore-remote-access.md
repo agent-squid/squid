@@ -456,20 +456,28 @@ findings.
 **Status:** In progress. 4.0 (pairing and approval UI), 4.1 (transport-neutral
 subscription core), 4.2 (capability registry), and 4.3 (host-side adapter,
 including 4.4's identity plumbing) are landed. 4.5 (browser duplex client) is
-landed for its orchestration/crypto code and unit tests, but explicitly not
-for the one cross-process interop scenario its own plan called the most
-important test — see 4.5's own write-up for exactly what that gap is and what
-closing it needs. 4.6–4.9 have not started. A capability-gated
-`dashboard.read.v1` dispatch path now exists end to end
-(`subscribe`/`unsubscribe`/`ack`/`ping`/`pong`, snapshot/replay catch-up, and
-proactive push) with a browser client now capable of driving it, but the two
-have never been proven against each other over the real encrypted wire
-protocol — only against a duck-typed fake on the browser side and Python's
-own test suite on the host side. This remains unreachable from a real device
-pairing until that interop gap closes and 4.7's
-transport-parity harness verifies both sides agree. The production route
-therefore stays opaque-relay-plus-probe-only in practice until then, even
-though the host-side dispatch code itself is live.
+now landed in full: its orchestration/crypto code and unit tests were already
+in place, and the cross-process interop scenario its own plan called the most
+important test — subscribe → snapshot → live host-pushed event, proven over
+the real encrypted wire protocol rather than a duck-typed fake or either
+side's own test suite in isolation — now runs in `test/cross-process.test.ts`
+and passes. 4.6 (reconnect/idempotency/sequence durability) is also now
+landed — it corrected a stale assumption in its own plan text (host↔broker
+reconnect does not drop in-memory session state, contrary to what this
+section originally said) and added the dormancy/backlog-replay and
+sequence-durability coverage its acceptance criteria called for. 4.7
+(transport-parity harness), 4.8, and 4.9 have not started. A capability-gated
+`dashboard.read.v1` dispatch path exists end to
+end (`subscribe`/`unsubscribe`/`ack`/`ping`/`pong`, snapshot/replay catch-up,
+and proactive push); the browser client and host dispatch have now been
+proven against each other for the read-only, single-device, single-push case
+that gap called out, but 4.7's transport-parity harness (identical scenarios
+over direct `/ws/v1` and Shore producing equivalent normalized state) and
+4.8's exhaustive negative-authorization suite have not run, so the milestone's
+own acceptance gate is not yet satisfied. The production route therefore
+stays opaque-relay-plus-probe-only in practice until those close, even though
+the host-side dispatch code itself is live and now interop-proven for the one
+scenario exercised.
 
 **Objective:** expose a minimal safe subset of the existing real-time protocol.
 
@@ -1091,9 +1099,9 @@ re-verified after (1) and (2): `tests/test_shore_transport.py` 30/30,
 
 #### 4.5 — Browser client: from single-shot request/response to a duplex dashboard session
 
-**Status:** Landed for the orchestration logic and the wire-crypto plumbing;
-**not landed for the one test this section itself called "the most important
-new test."** Before any of this work started, this slice's own prerequisite
+**Status:** Landed in full, including the one test this section itself
+called "the most important new test" (see below). Before any of this work
+started, this slice's own prerequisite
 check ("check whether `shore_host_process.py` already supports a 'publish an
 event now' command before assuming it does") turned up a real regression:
 4.3 made `ShoreChannel.handle` async and list-returning, and
@@ -1220,29 +1228,54 @@ re-verified after (1)-(3): `npx tsc --noEmit` clean, `browser` suite 52/53 (4
 new `client.test.ts` cases, 1 pre-existing cross-process skip),
 `test/cross-process.test.ts` 1/1, shore-root `npm test` 91/91.
 
-**Not done — this is the acceptance-relevant gap, not a footnote:** the
-subscribe → snapshot → live-published-event cross-process scenario this
-section itself called out as the most important new test. It cannot be
-added as a small extension the way the original plan implied, because
-`shore_host_process.py`'s wire protocol with the JS harness is strictly one
-stdout line per one stdin line (`nextLine()` in `cross-process.test.ts` reads
-exactly one line per `send()`), and a spontaneous host-initiated push (the
-whole point of 4.3) arrives with no corresponding inbound line to pair it
-with. Making this real needs, concretely: (1) the fixture to hold open a
-real `ShoreHostConnection` and call its actual `_push_sweep` (reusing
-production code, not reimplementing the push logic in the fixture) against a
-`stats_db` this fixture also owns, driven by a new `{"command": "publish",
-...}` stdin message; (2) `_push_sweep`'s sends to go to a fake socket that
-writes a distinctly-tagged line (e.g. `{"push": ...}`) rather than reusing
-the plain `{"frame": ...}` response shape; (3) the JS side to stop treating
-`lines` as a sequence of one-shot `nextLine()` calls and instead run a
-persistent dispatcher that routes `push`-tagged lines straight to
-`socket.onmessage()` on arrival while still resolving the next pending
-`nextLine()` for ordinary responses. None of this is started. Until it lands,
-the dashboard duplex path is real and unit-tested in isolation but has never
-been proven against the actual encrypted wire protocol end to end — treat it
-as unverified for that specific claim, independent of how solid the
-orchestration-logic coverage above is.
+**Closed: the subscribe → snapshot → live-published-event cross-process
+scenario this section itself called out as the most important new test.**
+It could not be added as a small extension the way the original plan
+implied, because `shore_host_process.py`'s wire protocol with the JS harness
+was strictly one stdout line per one stdin line (the old `nextLine()` in
+`cross-process.test.ts` read exactly one line per `send()`), and a
+spontaneous host-initiated push (the whole point of 4.3) arrives with no
+corresponding inbound line to pair it with. Landed concretely as: (1) the
+fixture now holds open a real `ShoreHostConnection` and calls its actual
+`_push_sweep` (reusing production code, not reimplementing the push logic in
+the fixture) against a `stats_db` it owns (`stats_db._DB_PATH` pointed at the
+fixture's own state dir), driven by a new `{"command": "publish", "text":
+...}` stdin message that inserts one `run_events` row and sweeps; (2)
+`_push_sweep`'s sends go to a `_PushSocket` that writes a distinctly-tagged
+`{"push": ...}` line, while ordinary `channel.handle()` responses now emit
+one `{"frame": ...}` line *per returned frame* (previously only
+`responses[0]` was relayed, silently dropping `subscribe`'s second
+`snapshot` frame — fixed as part of this slice, not a pre-existing correct
+behavior); (3) `cross-process.test.ts` replaced the one-shot `nextLine()`
+model with a persistent `HostLineDispatcher`: out-of-band control commands
+(the initial pairing offer, `rotate`, `begin_approved_pairing`) still get
+exactly one reply each via `nextControlLine()`, while every
+`{"frame"/"push"/"error": ...}` line is routed straight to the fake socket's
+`onmessage()`/`onerror()` on arrival regardless of what triggered it — this
+one mechanism handles both multi-frame command responses and truly
+unsolicited pushes with no special-casing between them. The existing
+scenario was extended (not duplicated into a second `it()`, to avoid two
+tests sharing one process-wide fake IndexedDB with divergent host keys) to
+close the paired epoch-2 client, open a fresh one, drive a real
+`ShoreDashboardSession` against it, await its `onSnapshot` callback
+(`cursorReset === true`), issue `{"command": "publish", "text":
+"cross-process-live"}`, and await `onEvent` delivering
+`{type: "chat.text", payload: {text: "cross-process-live"}}` — the exact
+`chat.text`/`{text: ...}` shape `stats_db.insert_run_event` produces for a
+`"text"`-kind event, matching the existing Python-side push-sweep test's own
+assertion. Verified: `browser`'s `tsc --noEmit` clean; full `browser` suite
+53/53 with `SHORE_REQUIRE_CROSS_PROCESS=1`/`SQUID_SOURCE_ROOT` set (52/53,
+1 skip, without); shore-root `npm test` 91/91 (after `pairing-app`'s own
+one-time `npm run build`, the pre-existing fresh-checkout requirement noted
+above); `pytest -k "shore or realtime"` 202 passed, including
+`test_push_sweep_*`/`test_subscribe_dispatches_*` unchanged (17 unrelated
+failures in this sandbox are a missing `websockets` pip package, needed only
+by `ShoreHostConnection.run()`'s reconnect loop, which this fixture never
+calls — no production code was touched by this slice, fixture- and
+test-only). What this still doesn't prove, left to 4.7: multiple concurrent
+devices, reconnect/resubscribe resuming from a persisted cursor, or that
+Shore's behavior is *equivalent* to direct `/ws/v1`'s (only that it works in
+isolation).
 
 - **Open dependency, still unresolved:** confirm with product whether a
   minimal dashboard UI is in scope for this milestone or deferred (open
@@ -1251,24 +1284,68 @@ orchestration-logic coverage above is.
 
 #### 4.6 — Preserve IDs/idempotency/cursors/acks/replay/heartbeat/backpressure across Shore's own reconnects
 
-- **Objective:** verify Shore's own reconnect/backoff layer doesn't lose or
-  duplicate ADR-0040 state.
-- **Actions:**
-  - Host-side reconnect (host↔broker) drops in-memory per-device state by
-    design (4.3); devices detect this via heartbeat/close handling and
-    resubscribe.
-  - Browser-side reconnect must persist the last-applied cursor client-side
-    and resend it on the next `subscribe`, addressed by the stable per-device
-    identity already in IndexedDB.
-  - No idempotency de-duplication needed yet (no mutations enabled) — note
-    the boundary explicitly so the next milestone doesn't rediscover it.
-  - Confirm the existing durable `ReplayStore` sequence counters (per
-    account/host/key-epoch/device/direction) don't race or duplicate against
-    4.3's new, more frequent `host_to_browser` pushes.
-- **Tests:** starve a device of `subscribe` across several published events
-  and confirm the next `subscribe` produces a complete, correct snapshot or
-  replay — the highest-likelihood reviewer finding here is silent event loss
-  during that gap.
+**Status:** Landed.
+
+**The plan's own first action bullet was wrong and is corrected here, not
+carried forward.** It assumed "Host-side reconnect (host↔broker) drops
+in-memory per-device state by design (4.3); devices detect this via
+heartbeat/close handling and resubscribe" — mirroring how the direct `/ws/v1`
+path's connection-scoped state works. That doesn't match what 4.3 actually
+built: `ShoreHostConnection.__init__` receives one `ShoreChannel` and stores
+it in `self.channel`; `run()`'s reconnect loop only ever constructs a new
+`socket` per attempt and calls `self._serve(socket, stop)` again on the same
+`self.channel` — so `channel.sessions` (each device's scopes, cursor, and
+last-acked cursor) is untouched by a host↔broker reconnect. This was already
+flagged as an unresolved open item in 4.3's own write-up above ("a reconnect
+that keeps the same `ShoreChannel` instance currently does *not* drop
+in-memory session state the way 4.6 assumes it will"). Resolved by keeping
+the actual (better) behavior — no forced resubscribe/snapshot churn on a
+transient host-side network blip, since any events published during the gap
+are delivered as an ordinary replay by the first `_push_sweep` on the new
+socket, the same as any other catch-up — and correcting this section's own
+stated design to match, rather than changing working code to fit a stale
+assumption. Proven directly by
+`test_session_state_survives_host_broker_reconnect`
+(`tests/test_shore_transport.py`): subscribes a device, sweeps an idle
+socket (nothing to send), publishes two events with no sweep running (the
+"host offline" gap), then sweeps a second, distinct fake socket standing in
+for the post-reconnect connection — both events arrive on the second socket,
+in order, with no frame ever sent on the first, and the device never
+resends `subscribe`.
+
+The other three action bullets held up as originally stated: browser-side
+reconnect cursor persistence was already built in 4.5
+(`shore/browser/src/trust-store.ts`'s `dashboard_cursor` IndexedDB store,
+read/written by `ShoreDashboardSession`); idempotency de-duplication is still
+correctly out of scope (no mutation types exist yet); and the durable
+outbound sequence counter's race/duplicate safety is now proven through the
+push path specifically (previously only exercised through the single-frame
+probe/dispatch path in `test_live_channel_pairs_persists_trust_and_probe_round_trips`)
+by `test_push_sweep_backlog_sequence_numbers_are_strictly_increasing_and_durable`:
+a single `_push_sweep` call sealing five backlog frames back to back for one
+device issues five strictly consecutive sequence numbers, and a `ShoreChannel`
+rebuilt against the same `state_dir` (simulating a daemon restart) continues
+from exactly where the durable `outbound.sqlite3` counter left off.
+
+This section's own named acceptance test — starve a device of `subscribe`
+across several published events and confirm the next `subscribe` produces a
+complete, correct replay, since silent event loss during that gap was called
+the highest-likelihood reviewer finding — is
+`test_resubscribe_after_dormancy_replays_full_backlog_no_loss`: a fresh
+subscribe snapshot's cursor is captured, three events publish with the
+device dormant, and a resubscribe carrying that cursor (exactly what
+`ShoreDashboardSession.attempt()` sends on its own reconnect) replays all
+three, in order, as individually addressable `chat.text` events rather than
+silently starting from a later point.
+
+**Tests:** the three tests above, plus the full existing `test_shore_*` suite
+unaffected. Verified: `pytest -k "shore or realtime"` 221/222 (33/33 in
+`test_shore_transport.py`; the one unrelated failure,
+`test_realtime.py::test_resize_touches_idle_timer`, is a pre-existing
+test-ordering/event-loop-policy flake — it passes in isolation and this
+slice touched no file outside `tests/test_shore_transport.py`). No
+production code changed; this was a test-only slice plus the doc correction
+above.
 
 #### 4.7 — Transport-parity test harness
 

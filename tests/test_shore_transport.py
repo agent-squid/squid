@@ -725,3 +725,170 @@ async def test_push_sweep_evicts_on_ping_timeout(tmp_path, monkeypatch):
 
     await connection._push_sweep(Socket())
     assert DEVICE not in channel.sessions
+
+
+@pytest.mark.asyncio
+async def test_session_state_survives_host_broker_reconnect(tmp_path, monkeypatch):
+    """Milestone 4.6: a host<->broker socket reconnect must not force a
+    resubscribe. `ShoreHostConnection.run()` constructs `ShoreChannel` once
+    and reuses it across every reconnect attempt -- only the `socket` local
+    is replaced each iteration -- so `channel.sessions` (a device's scopes,
+    cursor, and last-acked cursor) is untouched by a reconnect. This closes
+    4.3's own flagged gap: its plan text had assumed reconnect drops session
+    state "by design" (mirroring the direct /ws/v1 path's per-connection
+    state), which doesn't match this constructor's actual lifetime. Proven
+    directly by driving `_push_sweep` against two distinct fake sockets
+    standing in for two separate `run()` connection attempts, with events
+    published in the gap between them (as if the host were offline).
+    """
+    _fresh_stats_db(tmp_path, monkeypatch)
+    user_id = stats_db.insert_user_message("squid", "codex", "hello")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+
+    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=host_agreement)
+    await pair(channel, browser_signing, browser_agreement)
+    replay = ReplayStore(tmp_path / "browser-replay.db")
+
+    request = browser_frame(browser_signing, browser_agreement, host_agreement.public_key(), 1,
+                             "subscribe", {"scopes": [{"lifecycle": "global"}], "cursor": 0})
+    await channel.handle(canonical(request), now_ms=NOW)
+    cursor_before = channel.sessions[DEVICE].cursor
+
+    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+        host_id=HOST, signing_key=host_signing)
+
+    class Socket:
+        def __init__(self): self.sent = []
+        async def send(self, value): self.sent.append(value)
+
+    first_socket = Socket()
+    assert await connection._push_sweep(first_socket) == 0
+    assert DEVICE in channel.sessions
+
+    # The host<->broker socket now drops and reconnects. Two events publish
+    # while nothing is sweeping -- the same as the host being briefly offline.
+    stats_db.insert_run_event(msg_id, 1, "text", "live-1")
+    stats_db.insert_run_event(msg_id, 2, "text", "live-2")
+
+    second_socket = Socket()
+    sent_count = await connection._push_sweep(second_socket)
+    assert sent_count == 2
+    replayed = [
+        open_response(frame, host_signing.public_key(), browser_agreement, host_agreement.public_key(), replay, now_ms=None)
+        for frame in second_socket.sent
+    ]
+    assert [event["payload"]["text"] for event in replayed] == ["live-1", "live-2"]
+    assert channel.sessions[DEVICE].cursor > cursor_before
+    # Delivered on the reconnected socket without the device ever resending
+    # `subscribe` -- proving continuity, not a forced resubscribe.
+    assert first_socket.sent == []
+
+
+@pytest.mark.asyncio
+async def test_resubscribe_after_dormancy_replays_full_backlog_no_loss(tmp_path, monkeypatch):
+    """Milestone 4.6's own named acceptance test: starve a device of
+    `subscribe` across several published events, then confirm the next
+    `subscribe` -- as `ShoreDashboardSession.attempt()` sends on a
+    browser-side reconnect, carrying its persisted cursor -- produces a
+    complete, correctly-ordered replay rather than silently losing events
+    from the gap.
+    """
+    _fresh_stats_db(tmp_path, monkeypatch)
+    user_id = stats_db.insert_user_message("squid", "codex", "hello")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+
+    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=host_agreement)
+    await pair(channel, browser_signing, browser_agreement)
+    replay = ReplayStore(tmp_path / "browser-replay.db")
+
+    # No `cursor` field: the fresh-subscribe snapshot path, not a cursor=0
+    # catchup request (0 is itself a valid catchup starting point -- "replay
+    # everything since the beginning" -- so it takes the other branch).
+    first_subscribe = browser_frame(browser_signing, browser_agreement, host_agreement.public_key(), 1,
+                                     "subscribe", {"scopes": [{"lifecycle": "global"}]})
+    responses = await channel.handle(canonical(first_subscribe), now_ms=NOW)
+    snapshot = open_response(responses[1], host_signing.public_key(), browser_agreement, host_agreement.public_key(), replay)
+    last_acked_cursor = snapshot["payload"]["cursor"]
+
+    # The device goes dormant (browser navigates away / loses connectivity)
+    # without ever unsubscribing -- three events publish with nobody polling.
+    for index, text in enumerate(("live-1", "live-2", "live-3"), start=1):
+        stats_db.insert_run_event(msg_id, index, "text", text)
+
+    # Browser reconnects and resubscribes from its persisted cursor, exactly
+    # as ShoreDashboardSession.attempt() does after a reconnect.
+    resubscribe = browser_frame(browser_signing, browser_agreement, host_agreement.public_key(), 2,
+                                 "subscribe", {"scopes": [{"lifecycle": "global"}], "cursor": last_acked_cursor})
+    responses = await channel.handle(canonical(resubscribe), now_ms=NOW)
+    subscribed = open_response(responses[0], host_signing.public_key(), browser_agreement, host_agreement.public_key(), replay)
+    assert subscribed == {"v": 1, "type": "subscribed", "payload": {"scopes": [{"lifecycle": "global"}]}}
+    replayed = [
+        open_response(frame, host_signing.public_key(), browser_agreement, host_agreement.public_key(), replay)
+        for frame in responses[1:]
+    ]
+    assert [event["payload"]["text"] for event in replayed] == ["live-1", "live-2", "live-3"]
+    assert all(event["type"] == "chat.text" for event in replayed)
+
+
+@pytest.mark.asyncio
+async def test_push_sweep_backlog_sequence_numbers_are_strictly_increasing_and_durable(tmp_path, monkeypatch):
+    """Milestone 4.6's other named concern: the durable per-device outbound
+    sequence counter (`ShoreChannel._next_sequence`, `outbound.sqlite3`) must
+    not race or duplicate now that a single `_push_sweep` call can seal many
+    `host_to_browser` frames back to back for one device, and must survive a
+    `ShoreChannel` rebuild (e.g. a daemon restart) the same way the probe
+    path already proves in
+    test_live_channel_pairs_persists_trust_and_probe_round_trips -- this is
+    the same durability guarantee, exercised through the push path instead.
+    """
+    _fresh_stats_db(tmp_path, monkeypatch)
+    user_id = stats_db.insert_user_message("squid", "codex", "hello")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+
+    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=host_agreement)
+    await pair(channel, browser_signing, browser_agreement)
+
+    # Fresh-snapshot subscribe (no `cursor`): the subscribe dispatch itself
+    # only seals one "subscribed" + one "snapshot" frame regardless of how
+    # many events already exist, keeping this test's own baseline small and
+    # independent of the fixture's pre-existing message.changed events.
+    request = browser_frame(browser_signing, browser_agreement, host_agreement.public_key(), 1,
+                             "subscribe", {"scopes": [{"lifecycle": "global"}]})
+    await channel.handle(canonical(request), now_ms=NOW)
+    # Read the durable counter directly rather than via _next_sequence(),
+    # which -- unlike every real call site -- would itself consume a real
+    # sequence number just to report one, leaving a gap no envelope was ever
+    # sealed for.
+    with sqlite3.connect(tmp_path / "outbound.sqlite3") as raw:
+        row = raw.execute("SELECT value FROM sequences WHERE scope=?", (f"{DEVICE}:1:host_to_browser",)).fetchone()
+    sequence_before = row[0] if row else 0
+
+    for index, text in enumerate(("live-1", "live-2", "live-3", "live-4", "live-5"), start=1):
+        stats_db.insert_run_event(msg_id, index, "text", text)
+
+    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+        host_id=HOST, signing_key=host_signing)
+
+    class Socket:
+        def __init__(self): self.sent = []
+        async def send(self, value): self.sent.append(value)
+
+    socket = Socket()
+    assert await connection._push_sweep(socket) == 5
+    sequences = [int(json.loads(frame)["seq"]) for frame in socket.sent]
+    assert sequences == list(range(sequence_before + 1, sequence_before + 6))
+
+    # A rebuilt ShoreChannel against the same state_dir (e.g. daemon restart)
+    # must continue the durable sequence, not reset or collide with it.
+    restarted = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=host_agreement)
+    assert restarted._next_sequence(channel.trust.get(DEVICE)) == sequences[-1] + 1
