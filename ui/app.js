@@ -5303,6 +5303,19 @@ async function sendMessage(text, opts = {}) {
     return true;
   }
 
+  function adoptCompletedBubbleRenderedElsewhere() {
+    if (!msgId) return false;
+    const existing = [...messages.querySelectorAll(`.msg.assistant.history-item[data-msg-id="${msgId}"]`)]
+      .find(candidate => candidate !== bubble && !candidate.classList.contains('msg-thinking'));
+    if (!existing) return false;
+    completedFromStatus = true;
+    completionRendered = true;
+    stopStatusFallback();
+    removeThinking();
+    bubble.remove();
+    return true;
+  }
+
   async function recoverMsgIdFromProcesses() {
     if (msgId) return true;
     try {
@@ -5577,6 +5590,7 @@ async function sendMessage(text, opts = {}) {
         const data = await statusRes.json();
         if (data.status === 'done') {
           if (completionRendered || completedFromStatus) return;
+          if (adoptCompletedBubbleRenderedElsewhere()) return;
           completedFromStatus = true;
           completionRendered = true;
           turnStatus = 'done';
@@ -5728,7 +5742,28 @@ async function sendMessage(text, opts = {}) {
     const transportMode = await realtimeTransportMode;
     if (transportMode !== 'sse' && realtimeV1) {
       try {
-        const result = await realtimeV1.start(chatPayload);
+        const result = await realtimeV1.start(chatPayload, lateResult => {
+          // The chat.start command timed out client-side (see the
+          // "everSent" branch of rejectCommand) but actually reached the
+          // server, and this is its delayed, authoritative reply arriving
+          // after we already rendered a timeout error below. Attach the
+          // real msg_id so the already-shown bubble is recognized as this
+          // turn — reconcilePendingBubble (inside attachMsgId) also cleans
+          // up a duplicate "pending" bubble if realtime discovery already
+          // spawned one for this msg_id in the meantime — then recover the
+          // real content the same way an interrupted stream does.
+          if (msgId || completedFromStatus || completionRendered) return;
+          if (lateResult?.ok && lateResult.msg_id) {
+            // Discovery may have received and fully rendered the authoritative
+            // turn before this delayed acknowledgement. In that ordering, keep
+            // the discovered final bubble and discard this closure's stale
+            // timeout UI instead of polling and rendering a second response.
+            attachMsgId(lateResult.msg_id);
+            if (adoptCompletedBubbleRenderedElsewhere()) return;
+            detachedPolling = true;
+            startStatusFallback(msgId);
+          }
+        });
         if (!result.ok) {
           if (result.msg_id) attachMsgId(result.msg_id);
           if (result.status === 409 && Array.isArray(result.worktrees) && result.worktrees.length) {
@@ -7756,15 +7791,32 @@ const realtimeV1 = (() => {
   const watches = new Map();
   const commands = new Map();
   const commandTimeoutMs = 5000;
+  // Server-side chat preparation includes isolated worktree setup and can
+  // legitimately outlast the ordinary command acknowledgement timeout by
+  // minutes. Keep the idempotent request correlation long enough to receive
+  // that authoritative result while still bounding abandoned entries.
+  const lateResultGraceMs = 5 * 60 * 1000;
 
   const rejectCommand = (requestId, message, authoritative = false, timedOut = false) => {
     const command = commands.get(requestId);
     if (!command) return;
-    commands.delete(requestId);
     clearTimeout(command.timeout);
     const error = new Error(message);
     if (authoritative) error.realtimeCommandResult = true;
     if (timedOut) error.realtimeCommandTimedOut = true;
+    // A command that reached the server (everSent) before timing out client-side
+    // may still complete — its late command.result carries the real msg_id. Keep
+    // the entry around briefly so that frame reaches onLateResult instead of
+    // being silently dropped, which used to leave the turn unrecognized and let
+    // realtime discovery spawn a second "pending" bubble for the same turn once
+    // its events arrived. Bounded so a server that never answers doesn't leak
+    // this into the subscribed scopes forever.
+    if (timedOut && command.everSent && command.onLateResult) {
+      command.timedOut = true;
+      command.timeout = setTimeout(() => commands.delete(requestId), lateResultGraceMs);
+    } else {
+      commands.delete(requestId);
+    }
     command.reject(error);
   };
 
@@ -7880,6 +7932,15 @@ const realtimeV1 = (() => {
       else if (frame.type === 'command.result' && commands.has(frame.request_id)) {
         const command = commands.get(frame.request_id);
         clearTimeout(command.timeout);
+        if (command.timedOut) {
+          // Late arrival for a command whose own timeout already rejected the
+          // caller's promise — that promise is settled and further resolve()
+          // calls on it are no-ops, so hand the payload to the side-channel
+          // the caller registered instead.
+          commands.delete(frame.request_id);
+          command.onLateResult?.(frame.payload || {});
+          return;
+        }
         // A successful auth.start is kept (not deleted) so a future reconnect
         // resends this same request_id — see activeAuthRequestId above. Every
         // other command (and a failed auth.start, which spawned nothing to
@@ -7931,7 +7992,7 @@ const realtimeV1 = (() => {
     };
   };
 
-  const sendCommand = ({ type, payload, topic, agent = null, freshScope = false, timeoutMessage, unscoped = false }) => {
+  const sendCommand = ({ type, payload, topic, agent = null, freshScope = false, timeoutMessage, unscoped = false, onLateResult = null }) => {
     const requestId = window.crypto?.randomUUID?.()
       || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
     const promise = new Promise((resolve, reject) => {
@@ -7943,6 +8004,8 @@ const realtimeV1 = (() => {
         sent: false,
         everSent: false,
         resolved: false,
+        timedOut: false,
+        onLateResult,
         resolve,
         reject,
         timeout: null,
@@ -7997,7 +8060,7 @@ const realtimeV1 = (() => {
         needsSnapshot = false;
       }
     },
-    start(payload) {
+    start(payload, onLateResult) {
       return sendCommand({
         type: 'chat.start',
         payload,
@@ -8005,6 +8068,7 @@ const realtimeV1 = (() => {
         agent: payload.agent || null,
         freshScope: true,
         timeoutMessage: 'WebSocket command timed out after submission.',
+        onLateResult,
       });
     },
     cancel(msgId, topic, agent, source = 'unspecified') {

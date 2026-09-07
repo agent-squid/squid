@@ -712,6 +712,58 @@ test('auto transport does not resubmit a command that times out after send', asy
   expect(httpChatRequests).toBe(0);
 });
 
+test('late websocket start result replaces timeout error and reconciles discovered duplicate', async ({ page }) => {
+  test.setTimeout(15_000);
+  await page.addInitScript(() => {
+    class LateResultWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        this.readyState = LateResultWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = LateResultWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+        } else if (frame.type === 'chat.start') {
+          setTimeout(() => this.receive({
+            v: 1, type: 'message.changed', event_id: 1, msg_id: 89,
+            scope: { topic: 'squid', agent: 'claude' },
+            payload: { id: 89, role: 'assistant', status: 'pending', content: '' },
+          }), 5100);
+          setTimeout(() => this.receive({
+            v: 1, type: 'command.result', request_id: frame.request_id,
+            payload: { ok: true, msg_id: 89, flow_run_id: null },
+          }), 5300);
+        }
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = LateResultWebSocket;
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+  await page.route('**/chat/89/status', route => route.fulfill({ json: {
+    id: 89, topic: 'squid', status: 'done', content: 'Recovered authoritative response', agent: 'claude',
+    session_id: 'late-session', session_turn_count: 1, completed_at: new Date().toISOString(),
+  } }));
+
+  await page.goto('/');
+  await sendMsg(page, 'late authoritative result');
+
+  await expect(page.locator(MSG_ERROR)).toContainText('timed out after submission', { timeout: 7000 });
+  await page.waitForTimeout(500); // let the deliberately later command.result reconcile the UI
+  await expect(page.locator(RESPONSE)).toContainText('Recovered authoritative response', { timeout: 7000 });
+  await expect(page.locator(THINKING)).toHaveCount(0);
+  await expect(page.locator(RESPONSE)).toHaveCount(1);
+});
+
 test('auto transport does not resubmit a rejected websocket command over HTTP', async ({ page }) => {
   await page.addInitScript(() => {
     class MockWebSocket {
