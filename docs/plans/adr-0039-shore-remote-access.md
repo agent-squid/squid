@@ -32,10 +32,16 @@ secrets configured, but no required-reviewer protection rule (an accepted
 interim exception recorded in `docs/shore-security-operations.md` pending a
 second contributor). Triggering the workflow remains a separate, explicit
 step.
-Milestone 4 has not started, so the production route stays opaque-relay only;
-no command-capable dispatch is enabled. Milestone 5 remains blocked until
-Milestone 4 passes its acceptance gate, and external users must not be
-admitted in production until Milestone 5's audit export is also verified.
+Milestone 4's implementation and documentation (4.0–4.9) are now complete —
+capability-scoped `dashboard.read.v1` dispatch (read-only: subscribe/
+unsubscribe/ack/ping/pong, snapshot/replay catch-up, proactive push) is built,
+transport-parity- and negative-authorization-tested — but its acceptance gate
+stays open pending an independent security review (see its own status note),
+so the production route stays opaque-relay-plus-probe only in practice; no
+mutating, command-capable dispatch is enabled or planned by this milestone.
+Milestone 5 remains blocked until Milestone 4 passes its acceptance gate, and
+external users must not be admitted in production until Milestone 5's audit
+export is also verified.
 
 This is the implementation plan for
 [ADR-0039](../decisions/0039-remote-access-via-shore-broker.md). The ADR owns
@@ -453,7 +459,9 @@ findings.
 
 ## Milestone 4 — Capability-scoped ADR-0040 relay
 
-**Status:** In progress. 4.0 (pairing and approval UI), 4.1 (transport-neutral
+**Status:** Implementation and documentation complete (4.0–4.9); acceptance
+gate blocked only on the independent security review below. 4.0 (pairing and
+approval UI), 4.1 (transport-neutral
 subscription core), 4.2 (capability registry), and 4.3 (host-side adapter,
 including 4.4's identity plumbing) are landed. 4.5 (browser duplex client) is
 now landed in full: its orchestration/crypto code and unit tests were already
@@ -466,18 +474,38 @@ landed — it corrected a stale assumption in its own plan text (host↔broker
 reconnect does not drop in-memory session state, contrary to what this
 section originally said) and added the dormancy/backlog-replay and
 sequence-durability coverage its acceptance criteria called for. 4.7
-(transport-parity harness), 4.8, and 4.9 have not started. A capability-gated
-`dashboard.read.v1` dispatch path exists end to
+(transport-parity harness) is also now landed: `tests/test_shore_realtime_parity.py`
+drives one fixed subscribe → snapshot → live-events → ack scenario through
+both a direct `/ws/v1` `TestClient` and a `ShoreChannel` in-process against
+the same shared `stats_db`, and proves byte-identical frames, matching
+catch-up-mode selection (fresh-snapshot and replay-gap-rollover-to-snapshot
+cases), and a documented negative-parity case (Shore's capability registry
+denies `chat.cancel` pre-dispatch with no side effect, while the identical
+command reaches real dispatch over `/ws/v1` — the intentional narrower
+surface from 4.2, not a bug). 4.8 (authorization/negative test suite) is also
+now landed: `tests/test_shore_authorization_negative.py` adds identity-vs-
+capability check ordering (a revoked or wrong-epoch device fails closed even
+for an otherwise fully-granted command) and a static, exhaustive proof that
+every `ShoreProtocolError` call site across the Shore host stack passes only
+a closed string literal, never per-request dynamic detail; the broker
+frame-rate-limit bullet needed no new test, since `shore/src/index.ts`
+already counts every relayed frame before any content inspection is even
+possible (relayed content is E2E ciphertext). 4.9 (documentation) is also
+landed: this plan doc and the ADR-0039 mermaid diagrams now narrate 4.0–4.8
+as built, and the 4.3 overflow/heartbeat protocol-doc amendment turned out to
+already be done (it landed in 4.3 itself, before that section's code was
+written). A capability-gated `dashboard.read.v1` dispatch path exists end to
 end (`subscribe`/`unsubscribe`/`ack`/`ping`/`pong`, snapshot/replay catch-up,
 and proactive push); the browser client and host dispatch have now been
 proven against each other for the read-only, single-device, single-push case
-that gap called out, but 4.7's transport-parity harness (identical scenarios
-over direct `/ws/v1` and Shore producing equivalent normalized state) and
-4.8's exhaustive negative-authorization suite have not run, so the milestone's
-own acceptance gate is not yet satisfied. The production route therefore
-stays opaque-relay-plus-probe-only in practice until those close, even though
-the host-side dispatch code itself is live and now interop-proven for the one
-scenario exercised.
+that gap called out, and both 4.7's transport-parity harness and 4.8's
+negative-authorization suite now pass — but per 4.9, the milestone's
+acceptance gate isn't marked complete until those tests pass *and* an
+independent security review finds no unresolved critical/high findings, and
+that review hasn't run yet. The production route therefore stays
+opaque-relay-plus-probe-only in practice until that closes, even though the
+host-side dispatch code itself is live and now interop- and parity-proven for
+the scenarios exercised.
 
 **Objective:** expose a minimal safe subset of the existing real-time protocol.
 
@@ -1349,6 +1377,24 @@ above.
 
 #### 4.7 — Transport-parity test harness
 
+**Status:** Landed. `tests/test_shore_realtime_parity.py` pairs one Shore
+device and opens one direct `/ws/v1` connection against the *same* shared
+`stats_db` (not two independently seeded databases compared after the fact —
+one event log, two transports, as in production), then asserts: (1) a fresh
+subscribe on both sides produces byte-identical `subscribed`/`snapshot`
+frames with `cursor_reset: true`; (2) the same two published events
+(`chat.text`, `message.changed`) arrive as identical frames on both, and
+`ack` is fire-and-forget on both with no reply; (3) a pruned/incontinuous
+cursor forces the `replay_gap` rollover reason on both sides identically,
+proving the *mode* (replay vs. snapshot), not just the final payload, is
+shared; and (4) the required negative-parity case — `chat.cancel` denied by
+Shore's capability registry pre-dispatch (`shore_capability_denied`, no
+`_dispatch_adr0040` call, no DB mutation) while the identical command reaches
+real dispatch and mutates state over `/ws/v1` — documenting 4.2's narrower
+grant as intentional. No CI wiring needed: this repo has no pytest CI job at
+all yet, so the file just runs wherever `pytest` already runs, same as every
+other `tests/test_shore_*.py` file.
+
 - **Objective:** satisfy "identical scenarios over `/ws/v1` and Shore produce
   equivalent normalized state."
 - **Files:** new `tests/test_shore_realtime_parity.py`.
@@ -1363,6 +1409,31 @@ above.
   how Milestone 3 made the cross-process pairing/probe test required.
 
 #### 4.8 — Authorization/negative test suite
+
+**Status:** Landed. `tests/test_shore_capabilities.py` already exhaustively
+covered `authorize_capability_frame`'s own contract (every real ADR-0040
+type outside `dashboard.read.v1`, every non-global scope shape, version
+ordering, extra/unknown fields at both frame and payload level) before this
+milestone started. New `tests/test_shore_authorization_negative.py` fills
+what that unit-level module can't see on its own: a revoked device and a
+wrong-key-epoch device each fail `ShoreChannel`'s identity check
+(`shore_untrusted_device`) even when sending an otherwise fully-granted
+`subscribe`, proving the identity check runs before capability authorization
+rather than merely existing; and a static AST scan of every
+`raise ShoreProtocolError(...)` call site across
+`agent/shore_capabilities.py`, `agent/shore_transport.py`, and
+`agent/shore_crypto.py` proves each passes a closed string literal (a bare
+code, or a ternary between two fixed codes) and never dynamic per-request
+detail — a structural guarantee, not a few example assertions, backed by a
+concrete pair showing an identity-layer and a capability-layer denial are
+equally opaque. The remaining bullet — denied frames still counting against
+`shore/src/index.ts`'s per-socket frame-rate limit — needed no new test:
+`webSocketMessage` increments `meta.rateCount` for every non-empty binary
+frame before any role- or content-based branching, since relayed content is
+E2E ciphertext the broker can't decrypt, so there is no code path where a
+frame's eventual host-side authorization outcome could exempt it from that
+counter; `test/shore.test.ts`'s existing `rate_limited` coverage already
+exercises that same unconditional counter.
 
 - **Objective:** satisfy "every non-allowlisted command/scope fails closed
   without side effects."
@@ -1384,6 +1455,24 @@ above.
     can't become a side channel or rate-limit bypass.
 
 #### 4.9 — Documentation
+
+**Status:** Landed, except the gate itself. This plan doc's Milestone 4
+status (below) and its 4.7/4.8 subsections narrate each slice as it landed,
+matching Milestones 1–3's style. `docs/decisions/0039-remote-access-via-
+shore-broker.md`'s system-flow mermaid diagram now reflects reality: step 4
+of the "System and protocol flow" diagram reads "probe + read-only
+dashboard.read.v1 (mutations still disabled)" instead of "probe" only, and
+leg B of the "Target steady-state operation" diagram is relabeled
+"IMPLEMENTED (read-only, Milestone 4)" — leg C stays "NOT YET ENABLED" since
+`dashboard.read.v1` grants no mutation type, and leg A stays "NOT YET
+ENABLED" since it's unbuilt and unscheduled. The 4.3 overflow/heartbeat
+amendment to `docs/shore-protocol-v1.md` (its "Per-device push liveness and
+backpressure" section) was already done in 4.3 itself, before that section's
+code was written, per open question 1's resolution note above — nothing left
+to amend there. What's *not* landed, and can't be by documentation alone: the
+acceptance gate itself, which per this section's own instruction stays open
+until an independent security review also finds no unresolved critical/high
+findings — that review hasn't run.
 
 - Update this plan doc's Milestone 4 status and the ADR-0039 mermaid
   diagram's "not yet enabled" annotations as each slice lands, following the
@@ -1445,9 +1534,10 @@ expiry/immediate-revocation surface. None of this should be built now.
 
 ## Milestone 5 — Correlated tamper-evident audit
 
-**Status:** Blocked (2026-09-02). Milestone 3 remains incomplete and Milestone
-4 has not started; both preceding acceptance gates must pass before this work
-begins.
+**Status:** Blocked. Milestone 3 is complete. Milestone 4's implementation
+and documentation (4.0–4.9) are complete, but its acceptance gate is still
+open pending an independent security review (see Milestone 4's status); that
+gate must pass before this work begins.
 
 **Objective:** make account, pairing, capability, and command activity
 attributable without storing command plaintext.

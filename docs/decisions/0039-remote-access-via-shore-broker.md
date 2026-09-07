@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-08-11
-updated: 2026-09-03
+updated: 2026-09-07
 ---
 # ADR-0039: Remote access via a Cloudflare Workers + Durable Objects broker (agentsquid.ai/@username)
 
@@ -225,10 +225,10 @@ sequenceDiagram
     Broker->>Host: relayed opaque confirmation
     Note over Host,Browser: Both sides derive/pin the pair key locally,<br/>broker never sees key material.
 
-    Note over Host,Browser: 4. Implemented encrypted transport probe (commands disabled)
+    Note over Host,Browser: 4. Implemented encrypted transport: probe + read-only dashboard.read.v1 (mutations still disabled)
     Browser->>Broker: signed+encrypted envelope (opaque ciphertext)
     Broker->>Host: relayed ciphertext (routed by username only)
-    Host->>Host: validate expiry/sequence/request-id/signature, decrypt,<br/>and accept only shore.probe
+    Host->>Host: validate expiry/sequence/request-id/signature, decrypt,<br/>then accept shore.probe or a dashboard.read.v1 command<br/>(subscribe/unsubscribe/ack/ping/pong); every other ADR-0040<br/>type is denied pre-dispatch by the capability registry
     Host->>Broker: signed+encrypted response
     Broker->>Browser: relayed ciphertext
     Browser->>Browser: decrypt + verify
@@ -239,8 +239,9 @@ sequenceDiagram
 Setup (above) happens once per host/browser pair. The target day-to-day design
 has the three traffic shapes below, all carrying opaque encrypted envelopes —
 the broker only ever sees ciphertext, routed by username or by which held
-connection it arrived on. These are architectural target flows, not a claim
-that their application handlers are enabled in the current milestone.
+connection it arrived on. These are architectural target flows; each leg's
+own note below says whether its application handlers are enabled in the
+current milestone.
 
 ```mermaid
 sequenceDiagram
@@ -248,7 +249,7 @@ sequenceDiagram
     participant Broker as Broker (Worker + DO)
     participant Browser as Browser/phone
 
-    Note over Browser,Host: A. TARGET: Bounded request/response (files, topics, stats, config, ...)
+    Note over Browser,Host: A. TARGET (NOT YET ENABLED, unscheduled): Bounded request/response (files, topics, stats, config, ...)
     Browser->>Broker: HTTPS request (encrypted envelope), session-authenticated
     Broker->>Host: forwarded over the host's already-open WebSocket
     Host->>Host: validate envelope, decrypt, execute
@@ -256,7 +257,7 @@ sequenceDiagram
     Broker-->>Browser: HTTPS response
     Note right of Broker: 1 Worker request + 1 Durable Object request per operation.<br/>No polling: this leg only runs when the browser asks for something.
 
-    Note over Browser,Host: B. TARGET: Push on state change (status, job output, ...)
+    Note over Browser,Host: B. IMPLEMENTED (read-only, Milestone 4): Push on state change (status, job output, ...)
     Host->>Broker: encrypted event over the host's WebSocket, only when state changes
     Broker-->>Browser: pushed over the browser's own held WebSocket
     Note right of Broker: No browser-initiated request at all,<br/>this is what keeps desktop and phone in sync without a manual refresh.
@@ -272,14 +273,25 @@ sequenceDiagram
     Note right of Broker: Same shape as leg B once dispatched (host-initiated pushes),<br/>but browser-initiated and multi-message.
 ```
 
-None of A, B, or C is application-enabled remotely today. The implemented
-Milestone 3 slice exercises C's encrypted WebSocket request/response transport
-with only a harmless `shore.probe`; the dispatcher rejects every other message
-type. A will be browser-initiated and HTTP-shaped. B will be host-initiated and
-push-only. C — the actual "send a prompt" flow — is architecturally a hybrid:
-browser-initiated like A, but WebSocket-based with a streamed multi-message
-reply like B. Milestone 4 adds capability-scoped ADR-0040 dispatch and enables
-operations incrementally after authorization and transport-parity tests exist.
+A is not implemented: bounded HTTP request/response for files, topics, stats,
+config, and similar resources remains future work, still HTTP-shaped as
+described above. C — the actual "send a prompt"/mutating-command flow — also
+remains fully disabled: `dashboard.read.v1`, the only capability any device
+is granted today, contains no mutation type at all, so `chat.start`,
+`chat.cancel`, `auth.*`, `worktree.auto_resolve`, and any future command are
+all denied pre-dispatch by the capability registry before they ever reach the
+shared ADR-0040 handlers. B, read-only state push, is now implemented — not
+as a separate HTTP or connection leg, but over the same host WebSocket
+diagram 1's step 4 already opened: a device that subscribes (a WebSocket-
+native hybrid of A's bounded fetch, for the initial snapshot, and B's
+ongoing push) receives chat/message/process/queue/flow state changes exactly
+as they land, scoped read-only. This is Milestone 4.0–4.8
+(docs/plans/adr-0039-shore-remote-access.md), landed and proven — a
+direct-vs-Shore transport-parity harness and an exhaustive
+authorization/negative-test suite both pass — but the milestone's own
+acceptance gate, and with it enabling any of this on the deployed production
+route, isn't complete until an independent security review also finds no
+unresolved critical/high findings.
 
 ### Traffic accounting and capacity forecast
 
