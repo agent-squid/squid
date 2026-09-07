@@ -2,6 +2,7 @@ import asyncio
 import json
 import sqlite3
 import stat
+import time as time_module
 from datetime import datetime, timezone
 
 import httpx
@@ -76,6 +77,26 @@ def browser_frame(browser_signing, browser_agreement, host_agreement_public, seq
         direction="browser_to_host", seq=sequence,
         request_id=f"018f1f25-c930-76f0-86e7-{device_suffix}{sequence:08x}",
         issued_at=timestamp(NOW), expires_at=timestamp(NOW + 30_000),
+        sender_signing=browser_signing, sender_agreement=browser_agreement,
+        receiver_agreement=host_agreement_public)
+
+
+def live_browser_frame(browser_signing, browser_agreement, host_agreement_public, sequence, kind, payload, device_id=DEVICE):
+    """Like `browser_frame`, but stamped with the real wall clock.
+
+    `ShoreHostConnection._serve` calls `channel.handle(message)` with no
+    `now_ms`, so `open_envelope` validates expiry against real time, not the
+    fixed historical `NOW` the rest of this file pins for direct
+    `channel.handle(..., now_ms=NOW)` calls -- a frame built with `NOW` would
+    look expired by the time a `_serve`-driven test actually runs.
+    """
+    now_ms = int(time_module.time() * 1000)
+    device_suffix = device_id.replace("-", "")[-4:]
+    return seal_envelope({"v": 1, "type": kind, "payload": payload},
+        account_id=ACCOUNT, host_id=HOST, device_id=device_id, key_epoch=1,
+        direction="browser_to_host", seq=sequence,
+        request_id=f"018f1f25-c930-76f0-86e7-{device_suffix}{sequence:08x}",
+        issued_at=timestamp(now_ms), expires_at=timestamp(now_ms + 30_000),
         sender_signing=browser_signing, sender_agreement=browser_agreement,
         receiver_agreement=host_agreement_public)
 
@@ -599,6 +620,67 @@ async def test_subscribe_dispatches_through_capability_registry_into_shared_real
 
 
 @pytest.mark.asyncio
+async def test_serve_survives_unexpected_dispatch_error_and_keeps_serving(tmp_path, monkeypatch):
+    """Security review finding: `_dispatch_adr0040` calls into agent.server's
+    reused local realtime core (`_realtime_snapshot`/`_realtime_catchup`),
+    which was written for the fully-trusted local session and isn't
+    guaranteed to fail closed with `ShoreProtocolError` for every
+    internal-state edge. A raw exception from that core for one authorized
+    frame must not tear down `_serve`'s multiplexed relay loop for every
+    other paired device -- it must be dropped like a malformed peer frame,
+    proven here by a later frame still getting served afterward.
+    """
+    _fresh_stats_db(tmp_path, monkeypatch)
+
+    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=host_agreement)
+    await pair(channel, browser_signing, browser_agreement)
+    replay = ReplayStore(tmp_path / "browser-replay.db")
+
+    async def boom(_scopes):
+        raise RuntimeError("unexpected core failure")
+    monkeypatch.setattr(server_mod, "_realtime_snapshot", boom)
+
+    # No cursor -> _dispatch_adr0040's subscribe branch calls the now-broken
+    # _realtime_snapshot; a plain ping does not, so it must still succeed
+    # afterward if the loop survived. _serve validates envelopes against real
+    # time (it calls channel.handle with no now_ms), so these must be
+    # stamped live, not with the fixed historical NOW other tests use.
+    subscribe = live_browser_frame(browser_signing, browser_agreement, host_agreement.public_key(), 1,
+                                    "subscribe", {"scopes": [{"lifecycle": "global"}]})
+    ping = live_browser_frame(browser_signing, browser_agreement, host_agreement.public_key(), 2, "ping", {})
+    inbound = [canonical(subscribe), canonical(ping)]
+
+    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+        host_id=HOST, signing_key=host_signing, heartbeat_seconds=100)
+    stop = asyncio.Event()
+
+    class Socket:
+        def __init__(self): self.sent = []
+        async def recv(self):
+            await asyncio.sleep(0.001)
+            if inbound:
+                return inbound.pop(0)
+            stop.set()
+            return b"malformed"
+        async def send(self, value):
+            self.sent.append(value)
+
+    socket = Socket()
+    await connection._serve(socket, stop)
+
+    # The subscribe frame's snapshot call raised, so it produced no response
+    # at all -- but the loop must not have died: the ping that followed it
+    # still got a real pong reply.
+    assert len(socket.sent) == 1
+    pong = open_response(socket.sent[0], host_signing.public_key(), browser_agreement, host_agreement.public_key(),
+                          replay, now_ms=None)
+    assert pong == {"v": 1, "type": "pong", "payload": {}}
+
+
+@pytest.mark.asyncio
 async def test_push_sweep_delivers_new_event_with_no_inbound_frame(tmp_path, monkeypatch):
     _fresh_stats_db(tmp_path, monkeypatch)
     user_id = stats_db.insert_user_message("squid", "codex", "hello")
@@ -691,6 +773,65 @@ async def test_push_sweep_overflow_sends_slow_consumer_and_isolates_other_device
     # that DEVICE's overflow produced no frame at all for DEVICE2, positive
     # or negative, and left its session in place.
     assert by_device[DEVICE2] == []
+
+
+@pytest.mark.asyncio
+async def test_push_sweep_survives_unexpected_error_and_isolates_other_devices(tmp_path, monkeypatch):
+    """Security review finding: `_push_sweep` calls the same reused local
+    realtime core as `_dispatch_adr0040` (`_realtime_catchup`), which can
+    raise a plain exception outside the already-handled `_RealtimeSlowConsumer`
+    case. One device's unexpected failure must not abort the sweep for every
+    other subscribed device sharing the same host socket.
+    """
+    _fresh_stats_db(tmp_path, monkeypatch)
+    user_id = stats_db.insert_user_message("squid", "codex", "hello")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+
+    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    browser2_signing, browser2_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=host_agreement)
+    await pair(channel, browser_signing, browser_agreement)
+    await pair(channel, browser2_signing, browser2_agreement, device_id=DEVICE2, ceremony_id=CEREMONY2)
+    replay = ReplayStore(tmp_path / "browser-replay.db")
+
+    for signing, agreement, device_id in ((browser_signing, browser_agreement, DEVICE),
+                                           (browser2_signing, browser2_agreement, DEVICE2)):
+        request = browser_frame(signing, agreement, host_agreement.public_key(), 1,
+                                 "subscribe", {"scopes": [{"lifecycle": "global"}], "cursor": 0}, device_id=device_id)
+        await channel.handle(canonical(request), now_ms=NOW)
+
+    stats_db.insert_run_event(msg_id, 0, "text", "live")
+
+    real_catchup = server_mod._realtime_catchup
+
+    async def flaky_catchup(outbound, from_cursor, scopes, principal, last_acked_cursor):
+        if principal == f"shore:{DEVICE}":
+            raise RuntimeError("unexpected core failure")
+        return await real_catchup(outbound, from_cursor, scopes, principal, last_acked_cursor)
+    monkeypatch.setattr(server_mod, "_realtime_catchup", flaky_catchup)
+
+    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+        host_id=HOST, signing_key=host_signing)
+
+    class Socket:
+        def __init__(self): self.sent = []
+        async def send(self, value): self.sent.append(value)
+
+    socket = Socket()
+    sent_count = await connection._push_sweep(socket)
+
+    # DEVICE's session doesn't survive an unexpected core error (the same
+    # fail-safe posture as overflow/ping-timeout eviction), but the sweep
+    # itself must not abort -- DEVICE2 still gets its live event.
+    assert DEVICE not in channel.sessions
+    assert DEVICE2 in channel.sessions
+    assert sent_count == 1
+    pushed = open_response(socket.sent[0], host_signing.public_key(), browser2_agreement,
+                            host_agreement.public_key(), replay, device_id=DEVICE2, now_ms=None)
+    assert pushed["type"] == "chat.text"
+    assert pushed["payload"] == {"text": "live"}
 
 
 @pytest.mark.asyncio

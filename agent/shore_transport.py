@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import random
 import sqlite3
@@ -37,6 +38,8 @@ from .shore_crypto import (
     TrustedDevice, b64url, canonical, open_envelope, seal_envelope, uuid7,
     valid_broker_url,
 )
+
+log = logging.getLogger(__name__)
 
 # Per-device push sweep granularity: how often ShoreHostConnection._serve
 # checks subscribed devices for new events to push, pings due, and
@@ -497,6 +500,20 @@ class ShoreHostConnection:
                     # A malformed or injected peer frame must not tear down the
                     # authenticated host transport or produce an oracle response.
                     continue
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # An authorized frame can still reach into the reused local
+                    # realtime core (agent/server.py's _realtime_snapshot/
+                    # _realtime_catchup via _dispatch_adr0040), which was
+                    # written for the fully-trusted local session and isn't
+                    # guaranteed to fail closed with ShoreProtocolError for
+                    # every internal-state edge. One frame from one device
+                    # must not tear down the multiplexed relay for every other
+                    # paired device -- drop it and keep serving, the same as a
+                    # malformed peer frame.
+                    log.exception("shore: unexpected error handling relay frame")
+                    continue
                 for response in responses:
                     await socket.send(response)
                     last_sent = time.monotonic()
@@ -555,6 +572,15 @@ class ShoreHostConnection:
                 )
                 await socket.send(sealed)
                 sent += 1
+                self.channel._drop_session(device_id)
+                continue
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Same reused-realtime-core residual as the inbound path in
+                # _serve above: one device's catch-up must not abort the
+                # sweep for every other subscribed device.
+                log.exception("shore: unexpected error in push sweep for device %s", device_id)
                 self.channel._drop_session(device_id)
                 continue
             while len(outbound):
