@@ -1514,11 +1514,20 @@ async def run_cmd(req: CmdRequest):
         return topic
 
     if req.command == "stop_msg":
+        drained = 0
         if req.msg_id:
             mark_assistant_cancelled(req.msg_id, "Cancelled")
+            # A message still sitting in the topic queue (never started) has no
+            # registered process for kill_proc_by_msg_id to find, so it would
+            # otherwise linger in /queue and keep the status dot blinking after
+            # the chat bubble already shows "Cancelled."
+            drained = dispatcher.drain_topic(topic, msg_id=req.msg_id)
         killed = kill_proc_by_msg_id(req.msg_id) if req.msg_id else 0
-        log.info("cmd stop_msg topic=%s msg_id=%s source=%s killed=%s", req.topic, req.msg_id, req.source or "unspecified", killed)
-        return JSONResponse({"ok": True, "killed": killed})
+        log.info(
+            "cmd stop_msg topic=%s msg_id=%s source=%s killed=%s drained=%s",
+            req.topic, req.msg_id, req.source or "unspecified", killed, drained,
+        )
+        return JSONResponse({"ok": True, "killed": killed, "drained": drained})
     if req.command == "stop":
         killed = dispatcher.stop_topic(topic, agent=req.agent, adhoc=req.adhoc)
         log.info("cmd stop topic=%s agent=%s adhoc=%s source=%s killed=%s", topic, req.agent, req.adhoc, req.source or "unspecified", killed)
