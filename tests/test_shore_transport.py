@@ -16,11 +16,15 @@ from agent.shore_crypto import (
 )
 from agent.shore_transport import ShoreChannel, ShoreHostConnection, configured_host_connection
 from agent.shore import ShoreRuntimeConfig, _new_identity, _write_runtime_config
+from agent import server as server_mod
+from agent import stats_db
 
 ACCOUNT = "018f1f25-3f6b-7d75-a4d1-62d771381b20"
 HOST = "018f1f24-e9ec-7f12-b20a-67fc03679f32"
 DEVICE = "018f1f25-8614-7e41-8c5c-fc0b6eefad62"
+DEVICE2 = "018f1f25-8614-7e41-8c5c-fc0b6eefad64"
 CEREMONY = "018f1f25-c930-76f0-86e7-cb06d94e6a32"
+CEREMONY2 = "018f1f25-c930-76f0-86e7-cb06d94e6a34"
 NOW = int(datetime(2026, 9, 3, 12, tzinfo=timezone.utc).timestamp() * 1000)
 
 
@@ -58,10 +62,43 @@ def timestamp(value):
     return datetime.fromtimestamp(value / 1000, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def pair(channel, browser_signing, browser_agreement):
-    started = channel.begin_pairing(CEREMONY)
+def browser_frame(browser_signing, browser_agreement, host_agreement_public, sequence, kind, payload, device_id=DEVICE):
+    """Seal one browser_to_host ADR-0040 frame for the fixed ACCOUNT/HOST.
+
+    request_id is globally unique (ReplayStore's dedup table has no device
+    column), so it's derived from both device_id and sequence -- reusing the
+    plain sequence alone would collide across two devices sharing a sequence
+    number in the same test.
+    """
+    device_suffix = device_id.replace("-", "")[-4:]
+    return seal_envelope({"v": 1, "type": kind, "payload": payload},
+        account_id=ACCOUNT, host_id=HOST, device_id=device_id, key_epoch=1,
+        direction="browser_to_host", seq=sequence,
+        request_id=f"018f1f25-c930-76f0-86e7-{device_suffix}{sequence:08x}",
+        issued_at=timestamp(NOW), expires_at=timestamp(NOW + 30_000),
+        sender_signing=browser_signing, sender_agreement=browser_agreement,
+        receiver_agreement=host_agreement_public)
+
+
+def open_response(response_bytes, host_signing_public, browser_agreement, host_agreement_public, replay, device_id=DEVICE, now_ms=NOW):
+    """Decrypt one host_to_browser envelope for the fixed ACCOUNT/HOST.
+
+    `now_ms=None` for envelopes sealed by ShoreHostConnection._push_sweep,
+    which stamps its own frames with the real wall clock (there's no pinned
+    `now_ms` on that path, unlike channel.handle's), not the fixed NOW used
+    to pin inbound-triggered responses in these tests.
+    """
+    return open_envelope(json.loads(response_bytes),
+        expected={"account_id": ACCOUNT, "host_id": HOST, "device_id": device_id,
+                  "key_epoch": 1, "direction": "host_to_browser"},
+        sender_signing=host_signing_public, receiver_agreement=browser_agreement,
+        sender_agreement=host_agreement_public, replay=replay, now_ms=now_ms)
+
+
+async def pair(channel, browser_signing, browser_agreement, device_id=DEVICE, ceremony_id=CEREMONY):
+    started = channel.begin_pairing(ceremony_id)
     offer = started["offer"]
-    binding = {"v": 1, "account_id": ACCOUNT, "host_id": HOST, "device_id": DEVICE,
+    binding = {"v": 1, "account_id": ACCOUNT, "host_id": HOST, "device_id": device_id,
         "ceremony_nonce": offer["ceremony_nonce"],
         "host_sign_fingerprint": offer["host_sign_fingerprint"],
         "host_enc_fingerprint": offer["host_enc_fingerprint"],
@@ -74,23 +111,25 @@ def pair(channel, browser_signing, browser_agreement):
         "browser_keys": {"signing": b64url(browser_signing.public_key().public_bytes_raw()),
                          "agreement": b64url(browser_agreement.public_key().public_bytes_raw())},
         "finished": b64url(pairing_finished(key, "browser", binding_bytes))}
-    packet = {"v": 1, "ceremony_id": CEREMONY, "direction": "browser_to_host", "nonce": b64url(bytes(12))}
+    packet = {"v": 1, "ceremony_id": ceremony_id, "direction": "browser_to_host", "nonce": b64url(bytes(12))}
     packet["ciphertext"] = b64url(AESGCM(derive_pair_bootstrap_key(secret, nonce)).encrypt(bytes(12), canonical(plaintext), canonical(packet)))
-    assert json.loads(channel.handle(canonical(packet)))["direction"] == "host_to_browser"
-    confirmation = {"v": 1, "ceremony_id": CEREMONY, "direction": "browser_to_host", "nonce": b64url(bytes(range(12, 24)))}
+    responses = await channel.handle(canonical(packet))
+    assert json.loads(responses[0])["direction"] == "host_to_browser"
+    confirmation = {"v": 1, "ceremony_id": ceremony_id, "direction": "browser_to_host", "nonce": b64url(bytes(range(12, 24)))}
     confirmed = {"v": 1, "binding": binding, "finished": b64url(pairing_finished(key, "browser-confirmed", binding_bytes))}
     confirmation["ciphertext"] = b64url(AESGCM(key).encrypt(bytes(range(12, 24)), canonical(confirmed), canonical(confirmation)))
-    assert channel.handle(canonical(confirmation)) is None
+    assert await channel.handle(canonical(confirmation)) == []
 
 
-def test_live_channel_pairs_persists_trust_and_round_trips_only_probe(tmp_path):
+@pytest.mark.asyncio
+async def test_live_channel_pairs_persists_trust_and_probe_round_trips(tmp_path):
     host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
     browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
     channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST, host_signing=host_signing, host_agreement=host_agreement)
-    pair(channel, browser_signing, browser_agreement)
+    await pair(channel, browser_signing, browser_agreement)
 
-    def request(sequence, kind="shore.probe"):
-        return seal_envelope({"v": 1, "type": kind, "payload": {"nonce": "round-trip"}},
+    def request(sequence, kind="shore.probe", payload=None):
+        return seal_envelope({"v": 1, "type": kind, "payload": payload if payload is not None else {"nonce": "round-trip"}},
             account_id=ACCOUNT, host_id=HOST, device_id=DEVICE, key_epoch=1,
             direction="browser_to_host", seq=sequence,
             request_id=f"018f1f25-c930-76f0-86e7-{sequence:012x}",
@@ -98,7 +137,8 @@ def test_live_channel_pairs_persists_trust_and_round_trips_only_probe(tmp_path):
             sender_signing=browser_signing, sender_agreement=browser_agreement,
             receiver_agreement=host_agreement.public_key())
 
-    response = json.loads(channel.handle(canonical(request(1)), now_ms=NOW))
+    responses = await channel.handle(canonical(request(1)), now_ms=NOW)
+    response = json.loads(responses[0])
     assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o700
     assert stat.S_IMODE((tmp_path / "outbound.sqlite3").stat().st_mode) == 0o600
     opened = open_envelope(response,
@@ -109,28 +149,36 @@ def test_live_channel_pairs_persists_trust_and_round_trips_only_probe(tmp_path):
     assert opened == {"v": 1, "type": "shore.probe.result", "payload": {"nonce": "round-trip"}}
 
     restarted = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST, host_signing=host_signing, host_agreement=host_agreement)
-    assert json.loads(restarted.handle(canonical(request(2)), now_ms=NOW))["seq"] == "2"
-    with pytest.raises(ShoreProtocolError, match="shore_unsupported_frame"):
-        restarted.handle(canonical(request(3, "subscribe")), now_ms=NOW)
+    second = await restarted.handle(canonical(request(2)), now_ms=NOW)
+    assert json.loads(second[0])["seq"] == "2"
+    # A real ADR-0040 type this device isn't granted (the default capability
+    # is dashboard.read.v1 only) fails closed with the capability-registry's
+    # own error, not the retired Milestone-3 "only probe" framing.
+    with pytest.raises(ShoreProtocolError, match="shore_capability_denied"):
+        await restarted.handle(canonical(request(3, "chat.start", payload={})), now_ms=NOW)
+    # A type that isn't real ADR-0040 at all fails closed distinctly.
+    with pytest.raises(ShoreProtocolError, match="shore_unsupported_type"):
+        await restarted.handle(canonical(request(4, "not-a-real-type", payload={})), now_ms=NOW)
     with pytest.raises(ShoreProtocolError, match="shore_replay"):
-        restarted.handle(canonical(request(2)), now_ms=NOW)
+        await restarted.handle(canonical(request(2)), now_ms=NOW)
 
     with sqlite3.connect(tmp_path / "outbound.sqlite3") as connection:
         connection.execute("UPDATE sequences SET value=?", (1 << 32,))
     with pytest.raises(ShoreProtocolError, match="shore_sequence_exhausted"):
-        restarted.handle(canonical(request(4)), now_ms=NOW)
+        await restarted.handle(canonical(request(5)), now_ms=NOW)
     with sqlite3.connect(tmp_path / "outbound.sqlite3") as connection:
         assert connection.execute("SELECT value FROM sequences").fetchone()[0] == 1 << 32
 
 
-def test_broker_injected_frames_fail_before_application_dispatch(tmp_path):
+@pytest.mark.asyncio
+async def test_broker_injected_frames_fail_before_application_dispatch(tmp_path):
     host_signing = ed25519.Ed25519PrivateKey.generate()
     host_agreement = x25519.X25519PrivateKey.generate()
     channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
         host_signing=host_signing, host_agreement=host_agreement)
 
     with pytest.raises(ShoreProtocolError, match="shore_invalid_frame"):
-        channel.handle(b"broker-controlled plaintext", now_ms=NOW)
+        await channel.handle(b"broker-controlled plaintext", now_ms=NOW)
 
     untrusted_signing = ed25519.Ed25519PrivateKey.generate()
     untrusted_agreement = x25519.X25519PrivateKey.generate()
@@ -143,15 +191,16 @@ def test_broker_injected_frames_fail_before_application_dispatch(tmp_path):
         sender_signing=untrusted_signing, sender_agreement=untrusted_agreement,
         receiver_agreement=host_agreement.public_key())
     with pytest.raises(ShoreProtocolError, match="shore_untrusted_device"):
-        channel.handle(canonical(injected), now_ms=NOW)
+        await channel.handle(canonical(injected), now_ms=NOW)
 
 
-def test_host_key_epoch_change_does_not_inherit_old_device_trust(tmp_path):
+@pytest.mark.asyncio
+async def test_host_key_epoch_change_does_not_inherit_old_device_trust(tmp_path):
     old_host_signing, old_host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
     browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
     old_channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
         host_signing=old_host_signing, host_agreement=old_host_agreement, key_epoch=1)
-    pair(old_channel, browser_signing, browser_agreement)
+    await pair(old_channel, browser_signing, browser_agreement)
 
     new_host_signing, new_host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
     rotated = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
@@ -164,7 +213,7 @@ def test_host_key_epoch_change_does_not_inherit_old_device_trust(tmp_path):
         sender_signing=browser_signing, sender_agreement=browser_agreement,
         receiver_agreement=new_host_agreement.public_key())
     with pytest.raises(ShoreProtocolError, match="shore_untrusted_device"):
-        rotated.handle(canonical(envelope), now_ms=NOW)
+        await rotated.handle(canonical(envelope), now_ms=NOW)
 
 
 @pytest.mark.asyncio
@@ -173,7 +222,12 @@ async def test_host_connection_signs_challenge_heartbeats_and_dispatches(monkeyp
     channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
         host_signing=host_signing, host_agreement=host_agreement)
     handled = []
-    channel.handle = lambda payload: handled.append(payload) or b"response"
+
+    async def fake_handle(payload, **_kwargs):
+        handled.append(payload)
+        return [b"response"]
+
+    channel.handle = fake_handle
 
     class Response:
         def raise_for_status(self): pass
@@ -486,7 +540,8 @@ async def test_terminal_challenge_http_status_is_not_retried(monkeypatch, tmp_pa
     assert attempts == 1
 
 
-def test_channel_wraps_pairing_status_list_devices_and_revoke(tmp_path):
+@pytest.mark.asyncio
+async def test_channel_wraps_pairing_status_list_devices_and_revoke(tmp_path):
     host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
     browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
     channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST, host_signing=host_signing, host_agreement=host_agreement)
@@ -494,7 +549,7 @@ def test_channel_wraps_pairing_status_list_devices_and_revoke(tmp_path):
     assert channel.pairing_status(CEREMONY) == {"status": "unknown"}
     assert channel.list_devices() == []
 
-    pair(channel, browser_signing, browser_agreement)
+    await pair(channel, browser_signing, browser_agreement)
 
     assert channel.pairing_status(CEREMONY) == {"status": "paired", "device_id": DEVICE}
     devices = channel.list_devices()
@@ -504,3 +559,169 @@ def test_channel_wraps_pairing_status_list_devices_and_revoke(tmp_path):
     assert channel.revoke_device(DEVICE) is True
     assert channel.list_devices() == []
     assert channel.revoke_device(DEVICE) is False
+
+
+def _fresh_stats_db(tmp_path, monkeypatch):
+    monkeypatch.setattr(stats_db, "_DB_PATH", tmp_path / "squid.db")
+    stats_db.init_db()
+
+
+@pytest.mark.asyncio
+async def test_subscribe_dispatches_through_capability_registry_into_shared_realtime_core(tmp_path, monkeypatch):
+    _fresh_stats_db(tmp_path, monkeypatch)
+    user_id = stats_db.insert_user_message("squid", "codex", "hello")
+    stats_db.insert_assistant_message("squid", "codex", user_id)
+
+    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=host_agreement)
+    await pair(channel, browser_signing, browser_agreement)
+    replay = ReplayStore(tmp_path / "browser-replay.db")
+
+    request = browser_frame(browser_signing, browser_agreement, host_agreement.public_key(), 1,
+                             "subscribe", {"scopes": [{"lifecycle": "global"}]})
+    responses = await channel.handle(canonical(request), now_ms=NOW)
+    assert len(responses) == 2
+    subscribed = open_response(responses[0], host_signing.public_key(), browser_agreement, host_agreement.public_key(), replay)
+    assert subscribed == {"v": 1, "type": "subscribed", "payload": {"scopes": [{"lifecycle": "global"}]}}
+    snapshot = open_response(responses[1], host_signing.public_key(), browser_agreement, host_agreement.public_key(), replay)
+    assert snapshot["type"] == "snapshot"
+    assert snapshot["payload"]["cursor_reset"] is True
+    assert channel.sessions[DEVICE].scopes == [{"lifecycle": "global"}]
+
+    # A real ADR-0040 type this device isn't granted still fails closed,
+    # proving the capability registry -- not a hardcoded type check -- gates
+    # dispatch now that probe is no longer the only supported frame.
+    denied = browser_frame(browser_signing, browser_agreement, host_agreement.public_key(), 2, "chat.start", {})
+    with pytest.raises(ShoreProtocolError, match="shore_capability_denied"):
+        await channel.handle(canonical(denied), now_ms=NOW)
+
+
+@pytest.mark.asyncio
+async def test_push_sweep_delivers_new_event_with_no_inbound_frame(tmp_path, monkeypatch):
+    _fresh_stats_db(tmp_path, monkeypatch)
+    user_id = stats_db.insert_user_message("squid", "codex", "hello")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+
+    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=host_agreement)
+    await pair(channel, browser_signing, browser_agreement)
+    replay = ReplayStore(tmp_path / "browser-replay.db")
+
+    request = browser_frame(browser_signing, browser_agreement, host_agreement.public_key(), 1,
+                             "subscribe", {"scopes": [{"lifecycle": "global"}], "cursor": 0})
+    await channel.handle(canonical(request), now_ms=NOW)
+    cursor_before = channel.sessions[DEVICE].cursor
+
+    stats_db.insert_run_event(msg_id, 0, "text", "live")
+
+    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+        host_id=HOST, signing_key=host_signing)
+
+    class Socket:
+        def __init__(self): self.sent = []
+        async def send(self, value): self.sent.append(value)
+
+    socket = Socket()
+    sent_count = await connection._push_sweep(socket)
+    assert sent_count == 1
+    pushed = open_response(socket.sent[0], host_signing.public_key(), browser_agreement, host_agreement.public_key(), replay, now_ms=None)
+    assert pushed["type"] == "chat.text"
+    assert pushed["payload"] == {"text": "live"}
+    assert channel.sessions[DEVICE].cursor > cursor_before
+
+
+@pytest.mark.asyncio
+async def test_push_sweep_overflow_sends_slow_consumer_and_isolates_other_devices(tmp_path, monkeypatch):
+    _fresh_stats_db(tmp_path, monkeypatch)
+    user_id = stats_db.insert_user_message("squid", "codex", "hello")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+
+    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    browser2_signing, browser2_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=host_agreement)
+    await pair(channel, browser_signing, browser_agreement)
+    await pair(channel, browser2_signing, browser2_agreement, device_id=DEVICE2, ceremony_id=CEREMONY2)
+    replay = ReplayStore(tmp_path / "browser-replay.db")
+
+    for signing, agreement, device_id in ((browser_signing, browser_agreement, DEVICE),
+                                           (browser2_signing, browser2_agreement, DEVICE2)):
+        request = browser_frame(signing, agreement, host_agreement.public_key(), 1,
+                                 "subscribe", {"scopes": [{"lifecycle": "global"}], "cursor": 0}, device_id=device_id)
+        await channel.handle(canonical(request), now_ms=NOW)
+
+    # Three non-coalescible events overflow a queue limited to one slot.
+    # Both devices share the same global scope and would otherwise both see
+    # the same backlog and both overflow -- to prove isolation (one device's
+    # overflow doesn't touch another's session), fast-forward DEVICE2 past
+    # the backlog first, as if it had already caught up via an earlier sweep.
+    monkeypatch.setattr(server_mod, "_REALTIME_OUTBOUND_QUEUE_LIMIT", 1)
+    for index in range(3):
+        stats_db.insert_run_event(msg_id, index, "text", f"live-{index}")
+    channel.sessions[DEVICE2].cursor = stats_db.get_realtime_cursor()
+
+    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+        host_id=HOST, signing_key=host_signing)
+
+    class Socket:
+        def __init__(self): self.sent = []
+        async def send(self, value): self.sent.append(value)
+
+    socket = Socket()
+    await connection._push_sweep(socket)
+
+    assert DEVICE not in channel.sessions
+    assert DEVICE2 in channel.sessions
+
+    by_device = {DEVICE: [], DEVICE2: []}
+    for frame in socket.sent:
+        by_device[json.loads(frame)["device_id"]].append(frame)
+
+    error = open_response(by_device[DEVICE][0], host_signing.public_key(), browser_agreement,
+                           host_agreement.public_key(), replay, device_id=DEVICE, now_ms=None)
+    assert error == {"v": 1, "type": "error", "payload": {"code": "slow_consumer", "resumable": True}}
+
+    # DEVICE2 was fast-forwarded past the backlog, so it has nothing new to
+    # catch up on and no ping was due yet -- the isolation being proven is
+    # that DEVICE's overflow produced no frame at all for DEVICE2, positive
+    # or negative, and left its session in place.
+    assert by_device[DEVICE2] == []
+
+
+@pytest.mark.asyncio
+async def test_push_sweep_evicts_on_ping_timeout(tmp_path, monkeypatch):
+    _fresh_stats_db(tmp_path, monkeypatch)
+    stats_db.insert_user_message("squid", "codex", "hello")
+
+    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=host_agreement)
+    await pair(channel, browser_signing, browser_agreement)
+
+    request = browser_frame(browser_signing, browser_agreement, host_agreement.public_key(), 1,
+                             "subscribe", {"scopes": [{"lifecycle": "global"}], "cursor": 0})
+    await channel.handle(canonical(request), now_ms=NOW)
+    assert DEVICE in channel.sessions
+
+    # No frame of any kind (ack/pong/command) for two full heartbeat
+    # intervals is treated as no-longer-live and evicted locally -- the
+    # per-device equivalent of the direct path's heartbeat-timeout close.
+    # last_inbound_at is a time.monotonic() value (seconds), so this pushes
+    # it comfortably past the 40s (2 x 20s) timeout.
+    channel.sessions[DEVICE].last_inbound_at -= 100
+
+    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+        host_id=HOST, signing_key=host_signing)
+
+    class Socket:
+        def __init__(self): self.sent = []
+        async def send(self, value): self.sent.append(value)
+
+    await connection._push_sweep(Socket())
+    assert DEVICE not in channel.sessions

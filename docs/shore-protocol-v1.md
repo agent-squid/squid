@@ -146,6 +146,50 @@ enumerated by ADR-0040 v1, filtered to the authorized subscription. Because the
 initial capability sends no domain command, `command.result` can only report a
 connection operation. `auth.output` and `auth.done` are always denied remotely.
 
+## Per-device push liveness and backpressure
+
+Any capability granting `subscribe` (currently only `dashboard.read.v1`) is
+push-capable: once a device subscribes, the host proactively seals and sends
+it `host_to_browser` envelopes as ADR-0040 events publish, with no further
+inbound frame required. One host↔broker WebSocket multiplexes every paired
+device's session, so the transport-level close codes defined above (1008,
+1009, 1013, 1001) apply to that shared socket as a whole and MUST NOT be used
+to signal one device's overflow or unresponsiveness — closing it would drop
+every other device's session too.
+
+Per-device liveness and backpressure are therefore application-level,
+layered on top of ADR-0040's own `ping`/`pong`/`slow_consumer` semantics
+(`realtime-protocol-v1.md`), not a replacement for them:
+
+- **Overflow.** The host holds one bounded outbound queue per subscribed
+  device, sized and coalesced identically to the direct `/ws/v1` path
+  (`process.changed`/`queue.changed` replace their own prior queued instance;
+  other event types do not coalesce). When a non-coalescible event overflows
+  one device's queue, the host seals and sends that device a `host_to_browser`
+  envelope carrying `{"v":1,"type":"error","payload":{"code":"slow_consumer","resumable":true}}`,
+  then clears that device's subscription state locally. No WebSocket close
+  occurs and no other device's session is affected.
+- **Ping/pong liveness.** While a device holds an active subscription, the
+  host sends it a sealed `ping` envelope every 20 seconds of otherwise-silent
+  traffic to that device, identical to `heartbeat_seconds` on the direct path.
+  A device that has sent no frame of any type (`ack`, `pong`, or a command)
+  within two consecutive intervals (40 seconds) is treated as no-longer-live:
+  the host clears its subscription state locally, the same as an overflow.
+  This mirrors the direct path's miss limit exactly; only the enforcement
+  action differs (local state clear instead of a WebSocket close, since the
+  shared socket cannot be closed for one device).
+- **Recovery.** Both cases leave the device's paired trust, capability grant,
+  and key epoch untouched — only the in-memory subscription is cleared. The
+  device recovers by sending a fresh `subscribe` with its own last-applied
+  cursor; the host's normal replay/snapshot/rollover decision
+  (`realtime-protocol-v1.md`) resumes it with no gap or duplicate, identical
+  to how a direct client resumes after its own `slow_consumer` close.
+- **Scope.** These per-device behaviors apply only to already-subscribed
+  devices under a push-capable capability. They do not relax the pre-dispatch
+  validation order or the per-socket frame-rate limit above: a slow or
+  unresponsive device still counts every frame it sends toward that limit,
+  and a cleared subscription is not a capability or trust change.
+
 ## Pairing
 
 Pairing is an out-of-band high-entropy ceremony, not trust on first use. The

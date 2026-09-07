@@ -454,12 +454,22 @@ findings.
 ## Milestone 4 — Capability-scoped ADR-0040 relay
 
 **Status:** In progress. 4.0 (pairing and approval UI), 4.1 (transport-neutral
-subscription core), and 4.2 (capability registry) are landed; 4.3–4.9 have not
-started. No production dispatch path exists yet — 4.0's UI drives the same
-pairing ceremony `tests/test_shore_crypto.py` already exercised, and
-4.1/4.2 are shared/foundational units with no caller until 4.3/4.4 wire them
-into `ShoreChannel`, so the production route stays opaque-relay only until
-this milestone's acceptance gate passes.
+subscription core), 4.2 (capability registry), and 4.3 (host-side adapter,
+including 4.4's identity plumbing) are landed. 4.5 (browser duplex client) is
+landed for its orchestration/crypto code and unit tests, but explicitly not
+for the one cross-process interop scenario its own plan called the most
+important test — see 4.5's own write-up for exactly what that gap is and what
+closing it needs. 4.6–4.9 have not started. A capability-gated
+`dashboard.read.v1` dispatch path now exists end to end
+(`subscribe`/`unsubscribe`/`ack`/`ping`/`pong`, snapshot/replay catch-up, and
+proactive push) with a browser client now capable of driving it, but the two
+have never been proven against each other over the real encrypted wire
+protocol — only against a duck-typed fake on the browser side and Python's
+own test suite on the host side. This remains unreachable from a real device
+pairing until that interop gap closes and 4.7's
+transport-parity harness verifies both sides agree. The production route
+therefore stays opaque-relay-plus-probe-only in practice until then, even
+though the host-side dispatch code itself is live.
 
 **Objective:** expose a minimal safe subset of the existing real-time protocol.
 
@@ -959,89 +969,285 @@ transport.py`/`test_shore.py`/`test_realtime.py` re-verified (201 tests via
 
 #### 4.3 — Host-side Shore adapter: per-device sessions and a push-capable transport loop
 
-- **Objective:** implement Actions 1 and 3 given one host socket must
-  multiplex many paired devices.
-- **Files:** `agent/shore_transport.py` (`ShoreChannel`, `ShoreHostConnection`).
-- **Actions:**
-  - Give `ShoreChannel` a `dict[device_id, RealtimeConnectionState]`, created
-    on first authorized `subscribe`, cleared on `unsubscribe`, revocation, or
-    key-epoch change (mirrors existing epoch-scoped trust invalidation in
-    `_handle_envelope`, `agent/shore_transport.py:95`).
-  - Make `ShoreChannel.handle` async so it can dispatch into the 4.1 core's
-    asyncio-touching internals; update its one caller in
-    `ShoreHostConnection._serve` (`agent/shore_transport.py:277`) — benchmark
-    before dropping the current `asyncio.to_thread` wrap, since the crypto
-    open/seal calls are CPU-bound even if currently cheap (open question 4).
-  - Add a `notify_task` in `ShoreHostConnection._serve`, alongside the
-    existing receive/heartbeat-timeout tasks, that wakes on the realtime
-    notifier's generation change, computes each subscribed device's
-    replay/rollover via the 4.1 core, and pushes a sealed `host_to_browser`
-    envelope per device. New logic — no existing precedent for host-initiated
-    Shore traffic beyond the transport lease heartbeat.
-  - Since the host can't force-close one device's socket (it's shared), a
-    slow/offline device gets an application-level `slow_consumer` error frame
-    and has its local subscription cleared until it resubscribes; a device
-    missing two `ping`/`pong` intervals is treated as no-longer-live locally,
-    rather than the base protocol's WS-close semantics.
-  - **These per-device overflow/heartbeat behaviors are new protocol surface
-    not described in `docs/shore-protocol-v1.md` and need a protocol-doc
-    amendment and sign-off before coding** (open question 1).
-- **Tests:** a subscribed device receives a proactively pushed event with no
-  further inbound frame; two concurrent device sessions get independently
-  correct, non-interleaved cursors; overflow on one device doesn't affect
-  another; revocation/key-epoch rotation clears only the affected state; a
-  host-socket reconnect drops in-memory per-device state and a fresh
-  `subscribe` with the last cursor resumes with no gap or duplicate (reusing
-  `tests/test_realtime.py`'s reconnect/replay assertions through the Shore
-  path).
+**Status:** Landed, together with 4.4's identity plumbing (there was no
+natural seam to land them separately once real dispatch existed). Open
+question 1 is resolved: `docs/shore-protocol-v1.md` gained a "Per-device push
+liveness and backpressure" section defining the application-level
+`slow_consumer`/ping-timeout equivalent this slice needed, amended before
+this code was written, per ADR-0039's own contract-change rule.
 
-#### 4.4 — Identity plumbing
+`ShoreChannel` gained `sessions: dict[device_id, _DeviceSession]` (scopes,
+cursor, last-acked cursor, last-ping/last-inbound monotonic timestamps),
+cleared on `unsubscribe`, `revoke_device`, key-epoch mismatch, overflow, or
+ping-timeout — not the sketched `RealtimeConnectionState` (that type was never
+built; 4.1 deliberately deferred it, see 4.1's own note), so this uses a
+small module-local dataclass instead. `ShoreChannel.handle` is now `async def`
+and returns `list[bytes]` rather than one `bytes | None`, since a `subscribe`
+can produce `subscribed` plus a snapshot or several replayed events; its one
+caller, `ShoreHostConnection._serve`, is updated to send each. The
+`shore.probe`/`shore.probe.result` echo the real browser client
+(`shore/browser/src/client.ts`) still sends is checked first and stays
+byte-for-byte unchanged — it was Milestone-3 scaffolding for the channel
+itself, but the real client also uses it as a connectivity probe today, so it
+could not simply be retired the way this section originally implied. Every
+other decrypted frame goes through `authorize_capability_frame` (4.2), then a
+new `_dispatch_adr0040` implements `subscribe`/`unsubscribe`/`ack`/`ping`/
+`pong` against the 4.1 shared core (`_realtime_catchup`/`_realtime_snapshot`),
+constructing `principal = f"shore:{device_id}"` inline (4.4's only real
+action, folded in here).
 
-- **Objective:** get Shore's caller identity into the shared 4.1 core safely.
-- **Files:** `agent/shore_transport.py`, the 4.1 shared core.
-- **Actions:**
-  - `principal` is already just an opaque idempotency/authorization key
-    (`local:{client_id}` today, `agent/server.py:4505`); construct
-    `principal = f"shore:{device_id}"` inside `ShoreChannel` (device_id is a
-    UUIDv7, globally unique per device), namespace-isolated from local
-    principals.
-  - No mutation types are in `dashboard.read.v1` yet, so no idempotency-store
-    writes happen this milestone — wire the shape now to avoid a second
-    refactor when mutations are added.
-  - Pass `_authorize_dashboard_read_scope` (4.2) into the shared 4.1 core as
-    an injected parameter; no shared handler code should special-case Shore
-    inline, or the two transports can silently diverge over time.
-- **Tests:** idempotency key isolation between `local:x` and `shore:y`
-  principals sharing a coincidental `request_id`.
+**Open question 4 (`asyncio.to_thread` removal): resolved conservatively, not
+benchmarked.** Rather than assume the CPU-bound crypto (`open_envelope`,
+`seal_envelope`/`_seal`, `PairingCoordinator.accept_packet`) is safe to run
+directly on the event loop now that `handle` is async, each of those specific
+calls is individually wrapped in `asyncio.to_thread` — the same offload
+`handle` as a whole used to get, just scoped tighter so the surrounding async
+orchestration (which must run on the loop to await the 4.1 core) isn't
+dragged into a thread with it. This is a deliberately unproven-safe default,
+not a benchmarked one; revisit if push/dispatch load ever makes the
+per-frame thread-pool round trip itself the bottleneck.
+
+`ShoreHostConnection._serve` gained a `notify_task` (waits on
+`agent.server._realtime_notifier`, lazily imported to avoid the
+`server.py`/`shore_transport.py` cycle, mirroring the existing pattern at
+`agent/server.py:392`) and a periodic `_push_sweep` (every 5s, independent of
+the notifier and of the 30s broker transport-lease heartbeat) rather than one
+task per subscribed device — a device count-scaling concern the original
+per-device-task sketch didn't address. `_push_sweep` iterates
+`ShoreChannel.sessions`, and per device: evicts on key-epoch mismatch or
+>40s since last inbound frame (any type); otherwise runs the 4.1 core's
+catchup through a fresh `_RealtimeOutbound`, sending a `slow_consumer` error
+and clearing the session on overflow, or sending due replayed/live events and
+a ping every 20s. One device's overflow, eviction, or send never touches
+another's session or aborts the sweep for the rest. `last_sent` (which gates
+the 30s lease heartbeat) only advances on an actual send, not a no-op sweep —
+an early draft of this got that backwards, which would have let a busy
+sweep loop silently starve the required lease heartbeat; caught before
+landing, not after.
+
+**Tests:** `tests/test_shore_transport.py`'s existing pairing/probe/
+epoch/revocation coverage is updated for the `async`/`list[bytes]` signature
+(probe's negative case, previously "anything but `shore.probe` fails
+`shore_unsupported_frame`", now demonstrates the registry's own
+`shore_capability_denied`/`shore_unsupported_type` split instead, since
+`subscribe` etc. are legitimately dispatchable now). New coverage: a real
+`subscribe` dispatches through the capability registry into the shared core
+and returns decryptable `subscribed`+`snapshot` frames; a subsequently
+disallowed type still fails closed; `_push_sweep` delivers a newly published
+event to a subscribed device with no further inbound frame (the core 4.3
+acceptance criterion) and advances its cursor; overflow on one device sends
+it `slow_consumer` and clears only its session while a second, caught-up
+device on the same host socket is completely unaffected; ping-timeout evicts
+a stale session. Not covered by a new test, and worth flagging rather than
+implying otherwise: concurrent non-interleaved cursors under real parallel
+load (the sweep processes devices sequentially in-process, so this is
+believed but not load-tested), and a full host-socket-reconnect-then-resume
+scenario through `ShoreHostConnection.run` end to end (the reconnect drops
+`ShoreChannel.sessions` by construction — a fresh object per connection isn't
+actually true; `sessions` lives on `ShoreChannel`, not per-connection, so a
+reconnect that keeps the same `ShoreChannel` instance currently does *not*
+drop in-memory session state the way 4.6 assumes it will — flagging this as a
+real open item for 4.6 to resolve, not silently papering over it).
+
+Full suite re-verified: `tests/test_shore_transport.py` 30/30,
+`test_shore_*`/`test_realtime.py` 219/219 (`-k "shore or realtime"`, stable
+test order), full `tests/` 735/735 aside from two pre-existing failures
+already documented as unrelated machine-specific flakes in 4.1/4.2's own
+notes above (`test_lifecycle_start_backgrounds_server`'s real-`tailscale`-on-
+`PATH` dependency; `test_stats_db.py`'s pre-existing shadow-mode failure).
+
+A pre-publish review caught two real bugs and one carried-forward efficiency
+concern, before any of this had been reviewed at all (this whole slice landed
+across several sessions without a review pass in between — a process gap
+worth naming, not just the bugs it let through). (1) `ShoreHostConnection.
+_serve` reassigned `notify_task` to a fresh task, then checked whether that
+*new* task was in `done` on the very next line — always false, since `done`
+was computed against the old task. This silently made the "push immediately
+on realtime notification" path dead code; Shore pushes only ever happened on
+the unrelated 5s periodic sweep, not the responsive path the design intended.
+Fixed by capturing `notified = notify_task in done` before reassigning.
+(2) `revoke_device` mutates `ShoreChannel.sessions` (a plain dict) but runs on
+a worker thread (`agent/server.py`'s revoke endpoint calls it via
+`asyncio.to_thread`), racing the event-loop thread's own dict access in
+`_dispatch_adr0040`/`_push_sweep` — a session could be resurrected by a
+same-device `subscribe` landing in the gap, contradicting this method's own
+"must drop immediately" comment. Fixed with a `threading.Lock` guarding all
+dict-level access (not per-session-field mutation, which never crosses
+threads) through four new `_session_snapshot`/`_get_session`/
+`_get_or_create_session`/`_drop_session` helpers, so the lock can't be
+bypassed by a future direct `self.sessions[...]` access. (3) `_seal`
+(`_next_sequence`) opens a fresh SQLite connection and re-runs `CREATE TABLE
+IF NOT EXISTS` per sealed frame — pre-existing since Milestone 3's probe path,
+but now called far more often (every pushed event, every 20s ping, per
+device) than before. Not fixed here: a real fix means either a persistent
+per-instance connection (which `asyncio.to_thread`'s multi-worker-thread
+execution makes unsafe without its own locking, since sqlite3 connections
+aren't safe to share across threads by default) or a dedicated writer task —
+either is its own reviewed slice, not something to bolt on while responding
+to an unrelated review pass on security-critical sequence-integrity code.
+Deferred, tracked here explicitly rather than dropped. Full suite
+re-verified after (1) and (2): `tests/test_shore_transport.py` 30/30,
+`-k "shore or realtime"` 219/219.
 
 #### 4.5 — Browser client: from single-shot request/response to a duplex dashboard session
 
-- **Objective:** give the browser something that can consume
-  `dashboard.read.v1` end to end.
-- **Files:** `shore/browser/src/client.ts`; new
-  `shore/browser/src/dashboard-session.ts`.
-- **Actions:**
-  - Don't extend `exchange()` (single-slot `this.pending`) — it's
-    fundamentally one-shot. Add a `subscribe()`-shaped API that seals a
-    `subscribe` envelope and treats every subsequent inbound envelope as
-    either a reply to a still-pending request or an unsolicited push routed
-    to a callback.
-  - Auto-reply to inbound `ping` with `pong`; send `ack` on an interval.
-  - On `slow_consumer`, drop local state and resubscribe from the last
-    applied cursor (reuse the existing direct-path reconnect logic in
-    `ui/app.js` rather than a second algorithm).
-  - Add jittered exponential backoff for the browser's own socket to the
-    broker, analogous to `ShoreHostConnection.run` (`agent/shore_transport.py:183`).
-- **Tests:** the most important new test extends
-  `shore/browser/test/cross-process.test.ts` (real Python host fixture vs.
-  real TypeScript client) with a subscribe → snapshot → live-published-event
-  scenario, proving cross-language interoperability of the new push path
-  through real encryption — check whether
-  `shore/browser/test/fixtures/shore_host_process.py` already supports a
-  "publish an event now" command before assuming it does.
-- **Open dependency:** confirm with product whether a minimal dashboard UI is
-  in scope for this milestone or deferred (open question 3) — materially
-  changes this step's scope.
+**Status:** Landed for the orchestration logic and the wire-crypto plumbing;
+**not landed for the one test this section itself called "the most important
+new test."** Before any of this work started, this slice's own prerequisite
+check ("check whether `shore_host_process.py` already supports a 'publish an
+event now' command before assuming it does") turned up a real regression:
+4.3 made `ShoreChannel.handle` async and list-returning, and
+`shore_host_process.py` still called it synchronously and treated the result
+as a single `bytes | None` — the existing cross-process pairing/probe/rotation
+test was silently broken (nobody had run the `shore` repo's own test suite
+after 4.3 landed). Fixed first, independent of 4.5: `main()` is now `async def`
+run via `asyncio.run`, and `channel.handle`'s result is treated as a list
+(only its first entry is relayed, matching every existing scenario that never
+produces more than one). `test/cross-process.test.ts` passes again.
+
+**What landed:** `shore/browser/src/client.ts` gained `listenDashboard`/
+`unlistenDashboard` (duplex inbound routing, mutually exclusive with the
+`pending` single-slot `exchange()` used by `probe`/`pair`), `sendDashboard`
+(seals and sends one `subscribe`/`unsubscribe`/`ack`/`ping`/`pong` frame,
+fire-and-forget), and `openHostEnvelope` (the decrypt+replay-check half of
+what `probe()` used to do inline, now reusable). `probe()` itself was
+refactored to use the same new `resolveTrustedPeer`/`sealBrowserFrame` helpers
+instead of duplicating that logic, with no behavior change (existing
+`probe()`/`pair()` tests and the cross-process test pass unchanged). New
+`shore/browser/src/dashboard-session.ts` adds `ShoreDashboardSession`, which
+owns the connection lifecycle once started: subscribes on connect (resuming
+from a persisted cursor or fresh), auto-replies to `ping`, sends `ack` on an
+interval, drops the saved cursor and resubscribes fresh on the protocol's
+`slow_consumer` error (per the per-device liveness section landed earlier
+this milestone), and reconnects with jittered exponential backoff —
+`baseBackoffMs`/`maxBackoffMs` are constructor-configurable the same way
+`ShoreHostConnection.__init__` exposes `base_backoff`/`max_backoff`, so tests
+don't need fake timers. `shore/browser/src/trust-store.ts` gained a
+`dashboard_cursor` IndexedDB store (`getDashboardCursor`/`setDashboardCursor`/
+`clearDashboardCursor`, DB version bumped 2→3), mirroring `ui/app.js`'s own
+localStorage cursor persistence for the direct path.
+
+**Deviation from the sketch above, similar in spirit to 4.1's:** the
+duplex/crypto plumbing (`listenDashboard`, `sendDashboard`, `openHostEnvelope`)
+lives on `ShoreBrowserClient` itself, not in `dashboard-session.ts` — that
+file only holds `ShoreDashboardSession`'s orchestration (scopes, cursor,
+backoff, ack timing). `client.ts`'s `socket`/`send`/`receive` are private to
+that class; the crypto plumbing needs them the same way `probe()` already
+did, so splitting it into a separate file would have meant either exposing
+that private surface or duplicating it. `probe()`'s "reply to a still-pending
+request" framing in the sketch above also doesn't apply as written:
+`dashboard.read.v1` traffic is never request/response-paired the way
+`exchange()` is (a `subscribe` can produce zero, one, or many inbound
+envelopes with no fixed count) — `listenDashboard` instead routes every
+inbound envelope unconditionally to the session, which itself decides what
+each decrypted frame means.
+
+**Tests:** `test/trust-store.test.ts` gained cursor persistence coverage
+(unset → set → cleared, rejects negative/non-finite values, treats a
+corrupted stored value as unset rather than throwing). New
+`test/dashboard-session.test.ts` (8 cases) covers `ShoreDashboardSession`'s
+own state machine — fresh vs. resumed subscribe, `onAvailable`/`onEvent`/
+`onSnapshot` dispatch and cursor persistence, `ping`→`pong`, `slow_consumer`
+recovery, reconnect-with-backoff, and `stop()`'s generation guard against a
+frame already in flight when it's called — against a duck-typed fake
+`ShoreBrowserClient` (this repo's own established pattern, e.g. the fake
+`WebSocket` in `cross-process.test.ts`), not a fake host. That boundary is
+deliberate, not a shortcut: this repo's own convention proves wire-crypto
+correctness only through real Python-host interop
+(`test/cross-process.test.ts`), never a hand-rolled TS-simulated host, since a
+matching bug on both sides of a self-written fake would pass and prove
+nothing — see the undone item below. `npx tsc --noEmit` clean; full `browser`
+suite 48/49 (1 pre-existing cross-process skip when the env vars aren't set,
+same as before); `test/cross-process.test.ts` 1/1 with them set; shore-root
+`npm test` 91/91 (after `pairing-app`'s own one-time `npm run build`, needed
+in any fresh checkout per 4.0's own note about build/test ordering — not a
+regression).
+
+A pre-publish review caught two real bugs, one real gap, and one carried-
+forward efficiency concern — this was the first review pass on 4.5, same
+process gap already named in 4.3's notes above. (1) `ShoreDashboardSession.
+attempt()` only re-checked `stopped`/`generation` once, right after `client.
+connect()` resolved, not again after the second await (`getDashboardCursor()`).
+A `start()` immediately followed by `stop()` (e.g. mount/unmount, or a
+StrictMode double-invoke) landing in that window let the resumed `attempt()`
+call `listenDashboard`/`sendDashboard` against an already-closed client and
+leak a `setInterval` that `stop()` had no further chance to clear, since it
+had already run. Fixed by re-checking immediately before touching the client.
+(2) `onEnvelope` cast the decrypted plaintext straight to an object and read
+`.type` with no guard, unlike `probe()`'s explicit shape check for the
+equivalent case — `openEnvelope`'s own canonical-JSON check accepts a literal
+`null` (or any JSON scalar) as valid plaintext, so a host push decrypting to
+`null` threw inside a fire-and-forget async callback with no `.catch`,
+producing an unhandled rejection instead of the intended "drop and keep the
+session alive." Fixed with an explicit `typeof opened !== "object"` guard.
+Same pass separately caught the snapshot branch computing `Number(event_id ??
+cursor ?? 0)` with no finiteness check, unlike the plain-event branch's
+`typeof === "number"` guard — a non-numeric value would poison
+`lastAppliedCursor` with `NaN` permanently (it only ever grows via
+`Math.max`), which `sealEnvelope` then rejects on every subsequent `ack`,
+silently disabling acking for the rest of the session. Fixed by gating
+`markApplied` on `Number.isFinite(cursor)`. (3) `client.ts`'s new dashboard
+surface (`listenDashboard`, `sendDashboard`, `openHostEnvelope`, the
+`dashboardListener` branch in `receive()`) had zero coverage against the real
+class — `dashboard-session.test.ts` only ever drives a duck-typed fake, and
+the cross-process fixture doesn't exercise subscribe/push at all. Fixed with
+four new `client.test.ts` cases that pin a real, freshly generated host
+keypair via `pinHostTrust` and use `sealEnvelope`/`openEnvelope` directly to
+play the host's role for real — genuine `ShoreEnvelope` bytes exercising
+`client.ts`'s own routing/decrypt code, not a simulated host implementation
+(that distinction matters: this still isn't a substitute for real
+cross-process interop, which is the undone item below, only for "does
+`client.ts`'s own plumbing work against authentic envelopes"). The same pass
+also surfaced, while fixing this, that `exchange()` had no guard symmetric to
+`listenDashboard`'s: a `probe()`/`pair()` call made while a dashboard listener
+was active would still set `pending` and send, but `receive()` checks
+`dashboardListener` first and would misroute the reply there, hanging the
+`exchange()` promise until its 30s timeout instead of failing closed
+immediately — fixed by rejecting with `shore_dashboard_active` up front in
+`exchange()` too, covered by one of the four new cases. (4) Not fixed:
+`resolveTrustedPeer()` re-reads identity/trust from IndexedDB and re-imports
+both host public keys via WebCrypto on every single `sealBrowserFrame`/
+`openHostEnvelope` call, including a signing-key import that
+`sealBrowserFrame` never uses — under a high-frequency push stream this is
+real, repeated, redundant IDB/crypto work per message. Deferred rather than
+patched here: caching resolved keys safely needs explicit invalidation on a
+host-key-change/rotation mid-session, and getting that wrong would mean using
+a stale host key silently — exactly the kind of mistake this repo's own
+"require local approval for key changes" design goal exists to prevent.
+Belongs in its own reviewed slice, not bolted on while responding to an
+unrelated review pass on security-critical crypto code. Full suite
+re-verified after (1)-(3): `npx tsc --noEmit` clean, `browser` suite 52/53 (4
+new `client.test.ts` cases, 1 pre-existing cross-process skip),
+`test/cross-process.test.ts` 1/1, shore-root `npm test` 91/91.
+
+**Not done — this is the acceptance-relevant gap, not a footnote:** the
+subscribe → snapshot → live-published-event cross-process scenario this
+section itself called out as the most important new test. It cannot be
+added as a small extension the way the original plan implied, because
+`shore_host_process.py`'s wire protocol with the JS harness is strictly one
+stdout line per one stdin line (`nextLine()` in `cross-process.test.ts` reads
+exactly one line per `send()`), and a spontaneous host-initiated push (the
+whole point of 4.3) arrives with no corresponding inbound line to pair it
+with. Making this real needs, concretely: (1) the fixture to hold open a
+real `ShoreHostConnection` and call its actual `_push_sweep` (reusing
+production code, not reimplementing the push logic in the fixture) against a
+`stats_db` this fixture also owns, driven by a new `{"command": "publish",
+...}` stdin message; (2) `_push_sweep`'s sends to go to a fake socket that
+writes a distinctly-tagged line (e.g. `{"push": ...}`) rather than reusing
+the plain `{"frame": ...}` response shape; (3) the JS side to stop treating
+`lines` as a sequence of one-shot `nextLine()` calls and instead run a
+persistent dispatcher that routes `push`-tagged lines straight to
+`socket.onmessage()` on arrival while still resolving the next pending
+`nextLine()` for ordinary responses. None of this is started. Until it lands,
+the dashboard duplex path is real and unit-tested in isolation but has never
+been proven against the actual encrypted wire protocol end to end — treat it
+as unverified for that specific claim, independent of how solid the
+orchestration-logic coverage above is.
+
+- **Open dependency, still unresolved:** confirm with product whether a
+  minimal dashboard UI is in scope for this milestone or deferred (open
+  question 3 above resolved this as a follow-on after 4.5, not bundled into
+  4.0 — but no UI exists yet either way, and none was built in this slice).
 
 #### 4.6 — Preserve IDs/idempotency/cursors/acks/replay/heartbeat/backpressure across Shore's own reconnects
 
@@ -1120,29 +1326,45 @@ expiry/immediate-revocation surface. None of this should be built now.
 
 **Open questions requiring a decision before implementation starts:**
 
-1. **Per-device overflow/heartbeat semantics (4.3):** the base protocol
-   describes WS-level closes, which don't map onto one socket multiplexing
-   many device sessions. This plan proposes an application-level
-   `slow_consumer`/ping-timeout equivalent — needs a protocol-doc amendment
-   and sign-off, per ADR-0039's own rule that contract changes require an
-   amendment and new test vectors.
-2. **Scope granularity for `dashboard.read.v1`:** is the registry's "global
-   lifecycle feed" reading correctly limited to `{"lifecycle": "global"}`
-   only, denying topic/agent-scoped remote subscriptions that direct local
-   access allows? Confirm before finalizing `_authorize_dashboard_read_scope`.
-3. **Dashboard view scope — resolved partially:** pairing/approval UI is now
-   explicit scope (4.0), since neither pairing initiation, local approval,
-   nor a remote pairing surface exist today. Still open: whether the
-   *dashboard view* itself (rendering pushed events once 4.1–4.3 land) ships
-   in this milestone's UI work or as a thin follow-on once 4.0's pairing page
-   exists — building both together gives an actual end-to-end demo, but
-   confirm scope/timeline with product first.
-4. **`asyncio.to_thread` removal (4.3):** confirm dropping
-   `ShoreChannel.handle`'s thread offload doesn't reintroduce event-loop
-   blocking from the CPU-bound crypto calls — benchmark, don't assume.
+1. **Resolved (2026-09-06).** Per-device overflow/heartbeat semantics (4.3):
+   the base protocol describes WS-level closes, which don't map onto one
+   socket multiplexing many device sessions. `docs/shore-protocol-v1.md`
+   gained a "Per-device push liveness and backpressure" section defining an
+   application-level `slow_consumer`/ping-timeout equivalent — amended before
+   4.3's code was written, per ADR-0039's own rule that contract changes
+   require an amendment (this one reuses the base protocol's existing test
+   vectors' values, 20s/2 missed intervals, rather than introducing new ones,
+   since only the enforcement mechanism differs, not the timing).
+2. **Still open, not re-litigated here.** Scope granularity for
+   `dashboard.read.v1`: is the registry's "global lifecycle feed" reading
+   correctly limited to `{"lifecycle": "global"}` only, denying topic/agent-
+   scoped remote subscriptions that direct local access allows? Note this is
+   marked "confirmed" in 4.2's own write-up above (`_authorize_dashboard_
+   read_scope`'s behavior is settled and 4.3 was built against it) — this
+   list entry is stale and should read resolved, not open; left visible here
+   rather than silently deleted so the inconsistency doesn't reappear
+   unnoticed in a future edit.
+3. **Resolved (2026-09-06): ships as a follow-on, not bundled into 4.0.**
+   Dashboard view scope: pairing/approval UI is 4.0's explicit scope; the
+   *dashboard view* itself (rendering pushed events now that 4.1–4.3 exist)
+   is deferred to 4.5 as a separate slice once the browser client is
+   subscribe-capable, rather than folded into 4.0's pairing UI. This is a
+   scope call, not a technical one — flag if product timeline actually needs
+   the combined end-to-end demo sooner than 4.5's place in this sequence.
+4. **Resolved conservatively (2026-09-06), not benchmarked.**
+   `asyncio.to_thread` removal (4.3): `ShoreChannel.handle` is now `async def`
+   so it can call into the 4.1 shared core, but each CPU-bound crypto call
+   inside it (`open_envelope`, `_seal`/`seal_envelope`,
+   `PairingCoordinator.accept_packet`) is individually still wrapped in
+   `asyncio.to_thread`, rather than assuming the now-inlined dispatch logic
+   around them is cheap enough to share the loop safely. No benchmark was
+   run; this default should be revisited under real push/dispatch load
+   before being treated as validated.
 5. **Idempotency-key scoping across epoch bumps:** same device_id with a new
    key-epoch vs. revoke-then-repair-as-new-device (new device_id) needs a
-   decision before the mutation-enabling milestone, not during it.
+   decision before the mutation-enabling milestone, not during it — still
+   correctly deferred, since `dashboard.read.v1` has no mutation types and
+   thus no idempotency-store writes yet (4.4).
 
 ## Milestone 5 — Correlated tamper-evident audit
 
