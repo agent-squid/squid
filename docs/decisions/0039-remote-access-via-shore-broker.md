@@ -294,6 +294,78 @@ found no unresolved critical/high findings. Actually enabling this on the
 deployed production route is still a separate, explicit deployment step, not
 automatic from the gate closing.
 
+### Audit export and verification flow
+
+The two diagrams above cover the live command/control path, where the broker
+only ever sees ciphertext. This is the separate, metadata-only flow that
+lets a full broker storage compromise still be caught after the fact (see
+"Correlated, tamper-evident audit logging" under Security below, and
+`docs/shore-security-operations.md`): every write side uses a bucket-scoped,
+write-only B2 key with no read/delete/retention-management/legal-hold/
+governance-bypass capability, so no runtime that can write to the archive can
+also read, alter, or delete it.
+
+```mermaid
+flowchart TB
+    subgraph HostMachine["Host machine (agent/)"]
+        HostChain["Local sqlite audit_chain<br/>Ed25519-signed per event, own device key<br/>(shore_audit.py)"]
+        HostWriter["B2AuditWriter<br/>env: SQUID_SHORE_AUDIT_B2_KEY_ID / _APPLICATION_KEY<br/>capability: writeFiles only"]
+        HostChain --> HostWriter
+    end
+
+    subgraph Broker["Cloudflare Worker + DO (shore/src/index.ts)"]
+        BrokerChain["DO storage, audit: prefix<br/>hash-chained relay_frame_outcome /<br/>account-session-pairing events"]
+        BrokerWriter["createAuditArchiveRequest<br/>env: SHORE_AUDIT_B2_KEY_ID / _APPLICATION_KEY<br/>capability: writeFiles only"]
+        BrokerChain --> BrokerWriter
+    end
+
+    subgraph Bucket["B2 bucket: shore-audit-prod / shore-audit-dev"]
+        BrokerObjs["broker/accounts/{accountId}/events/*.json"]
+        HostObjs["host/events/*.json"]
+        ManifestObjs["manifests/*.json (signed daily manifest)"]
+    end
+
+    HostWriter -->|"PUT create-only"| HostObjs
+    BrokerWriter -->|"PUT create-only"| BrokerObjs
+
+    subgraph Collector["Daily manifest collector (STILL OPEN, not yet built)"]
+        Reader["B2 reader (not yet built)<br/>env (placeholder): SHORE_AUDIT_MANIFEST_READ_B2_KEY_ID / _APPLICATION_KEY<br/>capability: readFiles + listFiles, no prefix restriction"]
+        Verify["verify_broker_chain + verify_chain<br/>checks hash chain + host signatures<br/>against each host's pinned public key"]
+        Correlate["build_daily_manifest:<br/>requestId set-diff -&gt;<br/>missingHostRequestIds / missingBrokerRequestIds"]
+        Sign["sign with separate Ed25519<br/>manifest-authority key<br/>(distinct from host/broker signing keys)"]
+        Writer2["B2 writer (not yet built)<br/>env (placeholder): SHORE_AUDIT_MANIFEST_WRITE_B2_KEY_ID / _APPLICATION_KEY<br/>capability: writeFiles only, prefix-scoped to manifests/"]
+        Reader --> Verify --> Correlate --> Sign --> Writer2
+    end
+
+    BrokerObjs -->|"GET / List"| Reader
+    HostObjs -->|"GET / List"| Reader
+    Writer2 -->|"PUT create-only"| ManifestObjs
+
+    subgraph Custodian["Security Audit Custodian (separate role)"]
+        CustodianKey["Own read/export credential<br/>quarterly restore/fork/deletion/<br/>insertion/correlation drills<br/>never used by host, broker, or collector"]
+    end
+    Bucket -.-> CustodianKey
+
+    Correlate -->|"gap found"| Incident["Incident severity table<br/>(docs/shore-security-operations.md)<br/>SEV-1: forged authorization / audit loss<br/>-&gt; preserve evidence, kill switch, notify<br/>NOTE: currently discovered when the daily<br/>manifest is reviewed, not auto-paged<br/>(unlike the 5-min export-lag page)"]
+```
+
+Open items this diagram makes explicit, all tracked in Milestone 5 Action 3 of
+`docs/plans/adr-0039-shore-remote-access.md`:
+
+- The collector box (reader, verifier, correlator, signer, manifest writer)
+  is not implemented — only the pure verify/build functions exist today.
+  Nothing currently reads B2 or produces a manifest.
+- The collector's read and write keys must be two separate application keys
+  (B2 scopes a prefix restriction per key, not per capability within a key),
+  provisioned outside both the host's and broker's secrets.
+- `host/events/*.json` has no per-host segmentation in the object name today
+  (unlike `broker/accounts/{accountId}/events/...`), so the shared host
+  write key can't forge a validly-signed event for a different host, but it
+  can currently write unattributed objects anywhere under `host/`.
+- A correlation gap is only surfaced when the daily manifest is built and
+  read by a person; there is no automatic real-time page for it today, only
+  for export lag exceeding five minutes.
+
 ### Traffic accounting and capacity forecast
 
 In the target design, the WebSocket migration removes repeated polling for live
