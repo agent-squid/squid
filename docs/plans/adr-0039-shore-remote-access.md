@@ -1572,8 +1572,11 @@ bucket remain open. 5.5 separately lands host-authenticated, live read access
 to the broker's own audit chain for a single account -- groundwork for
 Action 4, not the 5.4 collector. Action 4 (user-visible history/notifications)
 has its backend already in place (broker notification delivery, step-up-
-protected host revoke) and now, with 5.6, a browser client that can actually
-receive a notification; no history/notification UI exists yet.
+protected host revoke), 5.6 lands a browser client that can actually receive a
+live notification, and 5.7 lands a first, read-only security-history page
+(host/alerts/notifications/devices/sessions) at `/@<username>/security`, also
+exposing displacement alerts through `/auth/security` for the first time. The
+revoke-host action and live in-page notification updates remain open.
 
 **Objective:** make account, pairing, capability, and command activity
 attributable without storing command plaintext.
@@ -1968,6 +1971,73 @@ headers are absent from user notifications by default.
   calls for has nothing to attach to yet. That page is comparable in scope to
   Milestone 4's `pairing-app` slice and is the next piece of Action 4, not
   done here.
+
+**5.7 — Read-only security-history page (Action 4, second slice)**
+
+- **Key finding, blocking assumption corrected:** `pairing-app/src/app.ts`
+  already assumes a browser session exists before it does anything
+  (`confirmPairing` just shows "Log in to agentsquid.ai... first" on a 401)
+  -- there is genuinely no login/signup web page anywhere in this repo, and
+  none is planned here: building one would duplicate or conflict with
+  whatever the actual product site (a separate repo, outside this session's
+  code roots) is responsible for. This page follows that same established
+  precedent -- it assumes a session cookie already exists and shows the same
+  kind of message if not, rather than attempting to build login itself.
+- **Second finding:** `securityState()` (the DO method behind `/auth/
+  security`) never returned `alert-incident:` records at all. Milestone 1's
+  own acceptance criteria call healthy same-key host displacement a
+  high-severity, user-notified event, but `healthy_same_key_displacement`
+  never calls `notificationEntry`/`deliverSecurityNotification` (only
+  `magic_link`/`recovery`/`deletion`/`host_revoked`-type events do) --
+  displacement evidence lived only in `alert-incident:` storage with no read
+  route at all before this. Fixed by adding an `alerts` array to
+  `securityState()`'s response containing incident timing and counts while
+  deliberately omitting its internal keyed-fingerprint samples. Covered by a
+  new test proving a real displacement
+  produces an alert visible through the authenticated `/internal/security`
+  surface (not just the test-only `/internal/state` route the existing
+  displacement tests already checked).
+- Added `pairing-app/src/security.html` + `security.ts`: fetches `/@<username>/
+  auth/security` with the same-origin session cookie (mirroring
+  `loadAuthenticatedShoreRoute`'s fetch options, but returning the full state
+  rather than the narrow `ShoreRoute` that function deliberately discards it
+  down to) and renders host status, security alerts, notifications, paired
+  browser devices, and active sessions as plain read-only lists. Pure
+  formatting logic (`notificationLabel`, `formatRelativeTime`, `parseUsername`)
+  lives in a dependency-free `security-link.ts`, mirroring `pairing-link.ts`'s
+  existing split so it's testable without a DOM.
+- `pairing-app/src/app.ts` renamed to `pair.ts` (mechanical; nothing outside
+  the build config referenced its path) so `build.mjs`'s now-two-entry-point
+  esbuild config can derive both output names (`pair-app.js`,
+  `security-app.js`) from `entryNames: "[name]-app"` instead of one hardcoded
+  `outfile`.
+- `shore/src/index.ts`'s `parseShoreRoute` and static-asset serving branch
+  extended to recognize `/security` and `/security-app.js` as siblings of
+  `/pair`/`/pair-app.js`, same reasoning as 4.0 (assets binding, not a
+  Durable Object; same-origin session scope). Both static UIs are served with
+  a restrictive CSP, frame denial, MIME-sniffing protection, no-referrer, and
+  no-store response headers.
+- **Not done:** the revoke-host action Action 4 calls for (the backend
+  -- step-up-protected `/auth/revoke` -- already exists; this page only
+  reads, it has no TOTP step-up form or mutation button yet, following
+  Milestone 4 Action 4's own "read-only first, mutations after" precedent).
+  Also not done: live updates via `onSecurityNotification` while the page is
+  open (this slice fetches once on load; wiring a live encrypted `/relay`
+  connection into a plain history page is a separate, heavier decision than
+  this slice needed to make). No independent security review of this page has
+  happened (same caveat 4.0 recorded for the pairing page: pairing-code/
+  session-detail-in-logs). Clickjacking is mitigated on both static pages by
+  CSP `frame-ancestors 'none'` plus `X-Frame-Options: DENY`.
+- Tests: `test/shore.test.ts` gained `parseShoreRoute`/static-serving coverage
+  for `/security`/`/security-app.js` (mirroring `/pair`'s) and the
+  `securityState` alerts-exposure test above; `pairing-app`'s new
+  `security-link.test.ts` (11 cases) covers username parsing, notification
+  labeling (including an unmapped-type fallback so a future type isn't hidden),
+  and relative-time formatting (including negative/clock-skew and rounding
+  edges). Full suites re-verified: shore worker 110/110 (was 108/108 before
+  this slice), `tsc --noEmit` clean; `pairing-app` 24/24 (was 13/13), `tsc
+  --noEmit` clean and `npm run build` produces both `pair-app.js` and
+  `security-app.js`.
 
 ## Milestone 6 — Production hardening and staged rollout
 
