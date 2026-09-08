@@ -1565,9 +1565,13 @@ can now correlate broker and host events because 5.3 records every valid
 opaque relayed envelope before forwarding, including its public request,
 host, device, and session identifiers, direction, ciphertext commitment, and
 forwarding outcome. The signed manifest core is landed in 5.4; its operational
-collector and live archive verification against the real
-`shore-audit-dev` bucket remains open. Action 4 (user-visible
-history/notifications) is not started.
+collector (an independent process with its own B2 read credentials, per
+`docs/shore-security-operations.md` -- not code in the host or broker
+runtime) and live archive verification against the real `shore-audit-dev`
+bucket remain open. 5.5 separately lands host-authenticated, live read access
+to the broker's own audit chain for a single account -- groundwork for
+Action 4, not the 5.4 collector. Action 4 (user-visible
+history/notifications) is otherwise not started.
 
 **Objective:** make account, pairing, capability, and command activity
 attributable without storing command plaintext.
@@ -1887,7 +1891,39 @@ headers are absent from user notifications by default.
   systematic false correlation gaps.
 - Still open: an operational collector with read access to both B2 prefixes
   and write-only access to the manifest prefix, plus live Object Lock and
-  retention verification against `shore-audit-dev`.
+  retention verification against `shore-audit-dev`. Per
+  `docs/shore-security-operations.md`'s role table ("runtime has append-only
+  write credentials only"; "Security Audit Custodian has separate read/export
+  access"), this collector must be a process independent of both the host and
+  broker runtime, holding its own B2 read credentials -- not code added to
+  `agent/` or `shore/src/index.ts`, which must never gain B2 read access.
+
+**5.5 — Host-authenticated read access to the broker's own live audit chain (landed; not the 5.4 collector)**
+
+- Added `shore/src/index.ts`'s `GET /@<username>/host/audit-events` (paginated,
+  `?cursor=`) and its prerequisite `POST /@<username>/host/audit-challenge`,
+  gated by the same single-use, signed proof-of-possession the host already
+  performs to attach its WebSocket (`verifySocketProof`, generalized to
+  `verifyHostProof(request, host, purpose)` and reused with a new
+  `"audit_read"` `HostChallenge` purpose so a challenge issued for one use
+  can't authenticate the other). Returns this account's own `Audit` events
+  plus the current chain tip; scoped to the requesting host's own account,
+  never another's.
+- This does **not** implement 5.4's still-open collector above: that
+  collector reads already-exported B2 archives under separate custodian
+  credentials, independent of both runtimes, per
+  `docs/shore-security-operations.md`. This instead gives the *host* live,
+  authenticated read access to the broker's version of its own account's
+  chain -- useful groundwork for Milestone 5's Action 4 (user-visible
+  session/device/capability history, not started) rather than for Action 3's
+  archive-based collector. Recorded here so it isn't mistaken for closing that
+  gap.
+- Tests (`shore/test/shore.test.ts`, "Milestone 5 host audit-events
+  endpoint"): a full round trip returning events and a matching tip, rejection
+  with no proof, rejection of a proof signed against a `"websocket"`-purpose
+  challenge, and single-use enforcement (a second request with the same
+  challenge fails). Typecheck is clean; 107 applicable tests pass, with the
+  known environment-dependent static pairing-assets test excluded.
 
 ## Milestone 6 — Production hardening and staged rollout
 
