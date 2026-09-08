@@ -183,6 +183,22 @@ class ShoreChannel:
 
         return await self._handle_envelope(value, now_ms=now_ms)
 
+    async def _record_audit_best_effort(
+        self, *, request_id: str, device_id: str, message_type: str, frame: dict[str, Any],
+        decision: str, outcome: str, now_ms: int, context: str,
+    ) -> None:
+        try:
+            await asyncio.to_thread(
+                self.audit.record, request_id=request_id, device_id=device_id,
+                message_type=message_type, frame=frame, decision=decision,
+                outcome=outcome, now_ms=now_ms,
+            )
+        except Exception:
+            log.warning(
+                "shore: best-effort audit record failed (%s) request_id=%s device_id=%s",
+                context, request_id, device_id, exc_info=True,
+            )
+
     async def _handle_envelope(self, envelope: dict[str, Any], *, now_ms: int | None) -> list[bytes]:
         device_id = envelope.get("device_id")
         trusted = self.trust.get(device_id) if isinstance(device_id, str) else None
@@ -223,14 +239,13 @@ class ShoreChannel:
         try:
             authorized = authorize_capability_frame(trusted.capabilities, frame)
         except ShoreProtocolError as exc:
-            with suppress(Exception):
-                # Already being denied; a failure recording that doesn't need
-                # to escalate the way a granted command's does below.
-                await asyncio.to_thread(
-                    self.audit.record, request_id=request_id, device_id=trusted.device_id,
-                    message_type=message_type, frame=frame, decision="denied",
-                    outcome=f"denied:{exc.code}", now_ms=now_ms,
-                )
+            # Already being denied; a failure recording that doesn't need
+            # to escalate the way a granted command's does below.
+            await self._record_audit_best_effort(
+                request_id=request_id, device_id=trusted.device_id,
+                message_type=message_type, frame=frame, decision="denied",
+                outcome=f"denied:{exc.code}", now_ms=now_ms, context="capability denial",
+            )
             raise
 
         # Durably record the authorization *before* dispatch runs any side
@@ -253,15 +268,14 @@ class ShoreChannel:
         try:
             responses = await self._dispatch_adr0040(trusted, authorized, now_ms=now_ms)
         except Exception:
-            with suppress(Exception):
-                # Dispatch already failed; best-effort so this can't mask the
-                # original error, but the chain shouldn't be left silent
-                # about what happened to an authorization it already recorded.
-                await asyncio.to_thread(
-                    self.audit.record, request_id=request_id, device_id=trusted.device_id,
-                    message_type=message_type, frame=frame, decision="granted",
-                    outcome="error:dispatch_failed", now_ms=now_ms,
-                )
+            # Dispatch already failed; best-effort so this can't mask the
+            # original error, but the chain shouldn't be left silent
+            # about what happened to an authorization it already recorded.
+            await self._record_audit_best_effort(
+                request_id=request_id, device_id=trusted.device_id,
+                message_type=message_type, frame=frame, decision="granted",
+                outcome="error:dispatch_failed", now_ms=now_ms, context="dispatch failure",
+            )
             raise
 
         outcome = "ok"
@@ -270,16 +284,16 @@ class ShoreChannel:
                 code = response.get("payload", {}).get("code") if isinstance(response.get("payload"), dict) else None
                 outcome = f"error:{code}" if isinstance(code, str) else "error"
                 break
-        with suppress(Exception):
-            # The authorization is already durably recorded above; a failure
-            # to also record the completion outcome doesn't need to fail
-            # closed the same way, since the command already ran and
-            # verify_chain's tip check still proves the "pending" record
-            # wasn't silently the last word.
-            await asyncio.to_thread(
-                self.audit.record, request_id=request_id, device_id=trusted.device_id,
-                message_type=message_type, frame=frame, decision="granted", outcome=outcome, now_ms=now_ms,
-            )
+        # The authorization is already durably recorded above; a failure
+        # to also record the completion outcome doesn't need to fail
+        # closed the same way, since the command already ran and
+        # verify_chain's tip check still proves the "pending" record
+        # wasn't silently the last word.
+        await self._record_audit_best_effort(
+            request_id=request_id, device_id=trusted.device_id,
+            message_type=message_type, frame=frame, decision="granted",
+            outcome=outcome, now_ms=now_ms, context="outcome",
+        )
         sealed = []
         for response in responses:
             sealed.append(await asyncio.to_thread(self._seal, trusted, response, now_ms))

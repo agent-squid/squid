@@ -398,15 +398,18 @@ async def _lifespan(_app: FastAPI):
     shore_audit_writer = None
     try:
         from .shore_transport import configured_host_connection
-        from .shore_audit_export import B2AuditConfig, B2AuditWriter
         shore_connection = await asyncio.to_thread(configured_host_connection, shore_identity_dir(_cfg))
-        audit_config = B2AuditConfig.from_env()
-        if audit_config is not None:
-            shore_audit_writer = B2AuditWriter(audit_config)
     except (OSError, TypeError, ValueError, RuntimeError) as exc:
         log.error("Shore host connection disabled: %s", exc)
     _shore_connection = shore_connection
     if shore_connection is not None:
+        try:
+            from .shore_audit_export import B2AuditConfig, B2AuditWriter
+            audit_config = B2AuditConfig.from_env()
+            if audit_config is not None:
+                shore_audit_writer = B2AuditWriter(audit_config)
+        except (OSError, TypeError, ValueError, RuntimeError) as exc:
+            log.error("Shore audit export disabled: %s", exc)
         shore_task = asyncio.create_task(
             shore_connection.run(shore_stop), name="squid-shore-host-connection",
         )
