@@ -1570,8 +1570,10 @@ collector (an independent process with its own B2 read credentials, per
 runtime) and live archive verification against the real `shore-audit-dev`
 bucket remain open. 5.5 separately lands host-authenticated, live read access
 to the broker's own audit chain for a single account -- groundwork for
-Action 4, not the 5.4 collector. Action 4 (user-visible
-history/notifications) is otherwise not started.
+Action 4, not the 5.4 collector. Action 4 (user-visible history/notifications)
+has its backend already in place (broker notification delivery, step-up-
+protected host revoke) and now, with 5.6, a browser client that can actually
+receive a notification; no history/notification UI exists yet.
 
 **Objective:** make account, pairing, capability, and command activity
 attributable without storing command plaintext.
@@ -1924,6 +1926,48 @@ headers are absent from user notifications by default.
   challenge, and single-use enforcement (a second request with the same
   challenge fails). Typecheck is clean; 107 applicable tests pass, with the
   known environment-dependent static pairing-assets test excluded.
+
+**5.6 — Browser client recognizes broker security notifications (Action 4, first slice)**
+
+- **Key finding:** the backend half of Action 4 already exists and was never
+  reachable. The broker already builds and delivers `SecurityNotification`
+  events (`deliverSecurityNotification` in `shore/src/index.ts`) for recovery,
+  deletion, host revocation, and scheduled warnings, and `/@<username>/auth/
+  revoke` already implements the step-up-protected immediate host-revoke
+  action Action 4's text calls for. But `shore/browser/src/client.ts` had no
+  code path for receiving them at all: the broker sends a notification as a
+  plaintext WebSocket **text** frame (`ws.send(JSON.stringify(...))`, no
+  binary framing), while every encrypted envelope is relayed as a **binary**
+  frame (`socket.binaryType = "arraybuffer"`). `receive()` never checked
+  which kind it had gotten -- in dashboard mode a notification would fail
+  `decodeFrame`'s binary-only parsing and be silently dropped; outside
+  dashboard mode (e.g. mid-`probe()`/`pair()`) it would incorrectly reject
+  that pending exchange with a misleading `shore_invalid_frame`, since
+  `receive()` unconditionally tried to treat the string as an encrypted
+  reply.
+- Fixed by checking `typeof data === "string"` first, before either the
+  dashboard-listener or pending-exchange branch: a text frame is parsed and
+  validated as `{type: "security_notification", notification: {id, type,
+  at}}` and delivered to a new `onSecurityNotification(listener)` registration
+  (independent of, and unaffected by, `listenDashboard`/`probe()`/`pair()`
+  state); anything else on a text frame is dropped rather than corrupting
+  either mode.
+- Tests (`shore/browser/test/client.test.ts`, "security notifications"): a
+  real notification reaches the listener; malformed/unrelated text frames are
+  dropped without throwing; a notification during an active dashboard session
+  reaches the listener without being misrouted into the envelope stream; a
+  notification arriving mid-`probe()` reaches the listener without rejecting
+  the still-pending exchange (this last case is the one that would have
+  failed against the pre-fix code with `shore_invalid_frame`). Full browser
+  suite (excluding the cross-process test, which needs a real host process):
+  56/56 (was 52/52 before this slice), `tsc --noEmit` clean.
+- Still open: this only makes notifications *receivable*. No UI renders them,
+  no page exists for session/device/capability history at all (`shore/browser`
+  remains a headless, build-free library; only `pair.html` exists as a real
+  page, from Milestone 4's pairing-app), and the revoke-host button Action 4
+  calls for has nothing to attach to yet. That page is comparable in scope to
+  Milestone 4's `pairing-app` slice and is the next piece of Action 4, not
+  done here.
 
 ## Milestone 6 — Production hardening and staged rollout
 
