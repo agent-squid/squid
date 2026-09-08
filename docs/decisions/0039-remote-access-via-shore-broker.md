@@ -228,7 +228,7 @@ sequenceDiagram
     Note over Host,Browser: 4. Implemented encrypted transport: probe + read-only dashboard.read.v1 (mutations still disabled)
     Browser->>Broker: signed+encrypted envelope (opaque ciphertext)
     Broker->>Host: relayed ciphertext (routed by username only)
-    Host->>Host: validate expiry/sequence/request-id/signature, decrypt,<br/>then accept shore.probe or a dashboard.read.v1 command<br/>(subscribe/unsubscribe/ack/ping/pong); every other ADR-0040<br/>type is denied pre-dispatch by the capability registry
+    Host->>Host: validate expiry/sequence/request-id/signature, decrypt,<br/>then accept shore.probe or a dashboard.read.v1 command<br/>(subscribe/unsubscribe/ack/ping/pong) - every other ADR-0040<br/>type is denied pre-dispatch by the capability registry
     Host->>Broker: signed+encrypted response
     Broker->>Browser: relayed ciphertext
     Browser->>Browser: decrypt + verify
