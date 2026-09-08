@@ -231,6 +231,13 @@ class ShoreChannel:
         # since it isn't an ADR-0040 type at all.
         if frame.get("type") == "shore.probe":
             self._validate_probe(frame)
+            try:
+                await asyncio.to_thread(
+                    self.audit.record, request_id=envelope["request_id"], device_id=trusted.device_id,
+                    message_type="shore.probe", frame=frame, decision="protocol", outcome="ok", now_ms=now_ms,
+                )
+            except Exception as exc:
+                raise ShoreProtocolError("shore_audit_unavailable") from exc
             response = {"v": 1, "type": "shore.probe.result", "payload": frame["payload"]}
             return [await asyncio.to_thread(self._seal, trusted, response, now_ms)]
 

@@ -1555,10 +1555,19 @@ locally Ed25519-signed, hash-chained event for every ADR-0040 frame the host
 dispatches (granted or capability-denied), correlated to the broker's chain
 by the shared envelope `request_id`. Action 1's scope turned out to need a
 correction discovered while implementing 5.1 — see 5.1's write-up below.
-Action 3's host-side durable batching foundation is landed as 5.2a; the B2
-transport, broker stream, cross-stream daily manifest, and live archive
-verification remain open. Action 4 (user-visible history/notifications) is
-not started.
+Action 3's host-side durable batching foundation and B2 transport are landed
+as 5.2a/5.2b; the broker's own B2 export (5.2c, `shore/src/index.ts`'s
+`Account.exportAuditBatch`/`auditExportLagMs`) is also now landed, uploading
+each account's chain to `broker/accounts/<accountId>/events/...` with the same
+create-only, cursor-gated design as the host writer, plus the same five-minute
+export-lag alert on sustained failure. The cross-stream daily manifest
+can now correlate broker and host events because 5.3 records every valid
+opaque relayed envelope before forwarding, including its public request,
+host, device, and session identifiers, direction, ciphertext commitment, and
+forwarding outcome. The signed manifest core is landed in 5.4; its operational
+collector and live archive verification against the real
+`shore-audit-dev` bucket remains open. Action 4 (user-visible
+history/notifications) is not started.
 
 **Objective:** make account, pairing, capability, and command activity
 attributable without storing command plaintext.
@@ -1596,9 +1605,9 @@ headers are absent from user notifications by default.
   `Account.audit()`/`auditEntry()` in `shore/src/index.ts`) needed no new
   infrastructure decision and is a direct prerequisite for everything else in
   this milestone. Extending that log to cover every relayed *command* frame
-  is a separate, real cost decision (a storage write per relayed frame) that
-  should be confirmed before implementing, not assumed — deferred to a later
-  sub-step.
+  is a separate, real cost decision (a storage write per relayed frame), now
+  explicitly accepted and landed in 5.3 so manifests can detect missing
+  broker/host correlations.
 - Action 3's export target is not an open decision — it was already fixed by
   Milestone 0's accepted spec (`docs/shore-security-operations.md`, echoed in
   this doc's own Milestone 0 section): private, SSE-B2-encrypted, Object-Lock
@@ -1615,10 +1624,9 @@ headers are absent from user notifications by default.
   authorization decision, result class, host time, prior host-event hash) and
   the explicit exclusion list (no command/response text, secrets, cookies,
   auth headers, internal addresses, precise location, full headers). 5.0's
-  `Audit` type does not yet carry all of those fields (no first-class
-  deviceId/sessionId/source-metadata/outcome) — closing that gap is
-  still-open Action 1 work (see 5.1's finding below on why it's deferred,
-  not just unstarted), not something this sub-step needed.
+  `Audit` type now carries the correlation-critical request, host, device,
+  session, direction, ciphertext-commitment, and outcome fields. Coarse source
+  metadata and restricted raw-IP archival remain separate privacy work.
 - Durable Object storage transactions are the right place to chain events:
   reading the prior chain tip and writing the new one inside the same
   `storage.transaction()` callback that already writes each audit record
@@ -1770,12 +1778,12 @@ headers are absent from user notifications by default.
   `mark_exported()` acknowledgement after an uploader succeeds. Failed or
   interrupted uploads leave the same rows pending; acknowledgements are
   checked against the local chain and cannot move the cursor backward.
-- This sub-step deliberately does not claim Action 3 complete: the next slice
-  must add the least-privilege B2 create-only transport and retry/lag loop,
-  followed by the broker exporter and the daily manifest correlating both
-  chain heads. Live retention and overwrite/deletion rejection require the
-  externally provisioned `shore-audit-dev` bucket and cannot be simulated as
-  production verification by repository-only tests.
+- This sub-step deliberately does not claim Action 3 complete: 5.2b/5.2c
+  since added the least-privilege B2 create-only transport and retry/lag loop
+  on both host and broker; the daily manifest correlating both chain heads and
+  live retention/overwrite/deletion-rejection verification against the
+  externally provisioned `shore-audit-dev` bucket remain open (the latter
+  cannot be simulated as production verification by repository-only tests).
 
 **5.2b — Host B2 transport and retry loop (landed; Action 3 remains in progress)**
 
@@ -1797,6 +1805,89 @@ headers are absent from user notifications by default.
   another immutable version after an ambiguous success. Bucket Object Lock and
   a credential lacking delete/retention-management capability provide the
   append-only boundary; live test-bucket verification remains required.
+
+**5.2c — Broker B2 export and lag alert (landed; Action 3 remains in progress)**
+
+- `shore/src/index.ts`'s `Account.exportAuditBatch()` uploads each account's
+  hash-chained events to `broker/accounts/<accountId>/events/<fromSeq>-
+  <throughSeq>-<headHash>.json` via the existing `createAuditArchiveRequest`
+  Signature V4 `PutObject` builder, mirroring the host writer's create-only,
+  cursor-gated design: the `audit-export-cursor` storage key only advances
+  after a successful upload, and a sequence-gap or chain-break against the
+  local log throws rather than exporting a torn batch. `auditEntry()` schedules
+  the DO alarm about a second after any new event when B2 is configured, so
+  new activity drains promptly instead of waiting for an unrelated timer.
+- Closed a completeness gap versus the host writer while reviewing this: the
+  broker's `alarm()` caught export failures with a flat `console.error` and
+  retried every five seconds forever, with no way to distinguish "still
+  within normal retry" from the five-minute export-lag paging threshold
+  Milestone 0's accepted spec requires (`docs/shore-security-operations.md`)
+  and which the host side already implements
+  (`agent/shore_audit_export.py`'s `MAX_EXPORT_LAG_MS`). Added
+  `auditExportLagMs()` (age of the oldest un-exported event) and had `alarm()`
+  log a distinct "exceeds five minutes" message once that threshold is
+  crossed, so a stuck exporter pages instead of scrolling past in ordinary
+  retry logs.
+- This landed with no direct test coverage of `exportAuditBatch`/the alarm
+  integration at all — only the pure `createAuditArchiveRequest` builder had a
+  test. Added three: a successful upload that advances the cursor to the
+  chain tip and asserts the uploaded manifest's shape, a failed upload that
+  leaves the cursor untouched so a retry resends the same batch, and an
+  `alarm()` case proving the five-minute escalation fires only once the
+  oldest pending event is actually that stale, not on the first retry
+  (`test/shore.test.ts`, "Milestone 5 tamper-evident audit" describe block).
+  These patch `env`/`globalThis.fetch` on the already-constructed DO instance
+  rather than the file-wide miniflare bindings, since the latter would make
+  every other test's `runDurableObjectAlarm` call attempt a real network
+  fetch (almost all of them generate audit events). Full suite verified:
+  102/102 (was 98/98 before these tests existed; the file's one other
+  known-environmental failure, the static pairing page 404 when
+  `pairing-app/dist` hasn't been built locally, is unaffected and matches
+  4.0's documented CI build-order requirement), `tsc --noEmit` clean.
+- Still open: the operational daily-manifest collector and live retention/
+  overwrite/deletion-rejection verification against the real
+  `shore-audit-dev` bucket.
+
+**5.3 — Broker per-envelope correlation records (landed)**
+
+- The broker records each valid ordinary encrypted envelope before forwarding
+  it. The chained event contains only public routing metadata (`requestId`,
+  host/device/session IDs, and direction), a SHA-256 ciphertext commitment,
+  and a pre-forward `pending` outcome. A second best-effort event records the
+  actual `forwarded`, `peer_offline`, `backpressure`, or `send_failed` result;
+  command and response plaintext remain opaque.
+- Audit persistence is fail-closed: if the broker cannot append the event, it
+  drops that frame without forwarding it. The WebSocket remains open so one
+  transient storage failure does not disconnect every multiplexed device or
+  amplify load through reconnect/resnapshot churn, matching the host-side
+  frame-local failure boundary. Transport heartbeats and pairing packets remain
+  outside this path.
+- Relay coverage verifies targeted forwarding, actual backpressure outcomes,
+  and the redacted correlation record. TypeScript typecheck and 103 applicable
+  tests pass; the single
+  excluded static-assets test requires the documented pairing-app build step.
+
+**5.4 — Signed cross-stream manifest core (landed; collector remains open)**
+
+- `agent/shore_audit_manifest.py` verifies the broker hash chain and host
+  signed chain against independently supplied tips, correlates broker request
+  IDs whose outcome confirms `forwarded` with host decisions/outcomes, surfaces
+  missing IDs on either side, and signs the daily heads/counts/gap report with
+  a separate Ed25519 manifest authority. Offline, backpressured, and failed-send
+  frames are correctly excluded because they never reached the host.
+- Manifest verification rejects content mutation, while construction refuses
+  a broken broker chain or forged host event. Each manifest commits to the
+  prior signed manifest and refuses a broker or host head that regresses, so a
+  valid historical prefix cannot be substituted for the latest anchored
+  history. Creating or verifying the first manifest requires an explicit
+  genesis declaration; every later manifest requires its prior signed
+  manifest, preventing an omitted predecessor from silently resetting the
+  manifest chain. The host now also records
+  `shore.probe`, fail-closed, so valid broker inbound envelopes do not create
+  systematic false correlation gaps.
+- Still open: an operational collector with read access to both B2 prefixes
+  and write-only access to the manifest prefix, plus live Object Lock and
+  retention verification against `shore-audit-dev`.
 
 ## Milestone 6 — Production hardening and staged rollout
 
