@@ -32,6 +32,7 @@ import httpx
 from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 
 from .shore import _load_or_new_identity, _load_runtime_config
+from .shore_audit import ShoreAuditLog
 from .shore_capabilities import authorize_capability_frame
 from .shore_crypto import (
     MAX_KEY_INVOCATIONS, DeviceTrustStore, PairingCoordinator, ReplayStore, ShoreProtocolError,
@@ -98,6 +99,7 @@ class ShoreChannel:
         self.key_epoch = key_epoch
         self.trust = DeviceTrustStore(state_dir / "devices.sqlite3")
         self.replay = ReplayStore(state_dir / "replay.sqlite3")
+        self.audit = ShoreAuditLog(state_dir / "audit.sqlite3", host_id=host_id, key_epoch=key_epoch, host_signing=host_signing)
         self.pairing = PairingCoordinator(
             self.trust, account_id=account_id, host_id=host_id,
             host_signing_key=host_signing.public_key(),
@@ -216,8 +218,68 @@ class ShoreChannel:
             response = {"v": 1, "type": "shore.probe.result", "payload": frame["payload"]}
             return [await asyncio.to_thread(self._seal, trusted, response, now_ms)]
 
-        frame = authorize_capability_frame(trusted.capabilities, frame)
-        responses = await self._dispatch_adr0040(trusted, frame, now_ms=now_ms)
+        request_id = envelope["request_id"]
+        message_type = frame.get("type") if isinstance(frame.get("type"), str) else "unknown"
+        try:
+            authorized = authorize_capability_frame(trusted.capabilities, frame)
+        except ShoreProtocolError as exc:
+            with suppress(Exception):
+                # Already being denied; a failure recording that doesn't need
+                # to escalate the way a granted command's does below.
+                await asyncio.to_thread(
+                    self.audit.record, request_id=request_id, device_id=trusted.device_id,
+                    message_type=message_type, frame=frame, decision="denied",
+                    outcome=f"denied:{exc.code}", now_ms=now_ms,
+                )
+            raise
+
+        # Durably record the authorization *before* dispatch runs any side
+        # effect (e.g. creating/mutating a subscription session), and fail
+        # closed -- never dispatch -- if that can't be recorded. Recording
+        # only ever appends a new chained event, so the follow-up outcome
+        # record below is a second, separately verifiable event correlated
+        # by the same request_id, not an in-place rewrite of this one.
+        try:
+            await asyncio.to_thread(
+                self.audit.record, request_id=request_id, device_id=trusted.device_id,
+                message_type=message_type, frame=frame, decision="granted", outcome="pending", now_ms=now_ms,
+            )
+        except Exception as exc:
+            # shore-security-operations.md: "security actions fail closed if
+            # their audit record cannot be durably queued" -- a command that
+            # can't be attributed is never dispatched.
+            raise ShoreProtocolError("shore_audit_unavailable") from exc
+
+        try:
+            responses = await self._dispatch_adr0040(trusted, authorized, now_ms=now_ms)
+        except Exception:
+            with suppress(Exception):
+                # Dispatch already failed; best-effort so this can't mask the
+                # original error, but the chain shouldn't be left silent
+                # about what happened to an authorization it already recorded.
+                await asyncio.to_thread(
+                    self.audit.record, request_id=request_id, device_id=trusted.device_id,
+                    message_type=message_type, frame=frame, decision="granted",
+                    outcome="error:dispatch_failed", now_ms=now_ms,
+                )
+            raise
+
+        outcome = "ok"
+        for response in responses:
+            if response.get("type") == "error":
+                code = response.get("payload", {}).get("code") if isinstance(response.get("payload"), dict) else None
+                outcome = f"error:{code}" if isinstance(code, str) else "error"
+                break
+        with suppress(Exception):
+            # The authorization is already durably recorded above; a failure
+            # to also record the completion outcome doesn't need to fail
+            # closed the same way, since the command already ran and
+            # verify_chain's tip check still proves the "pending" record
+            # wasn't silently the last word.
+            await asyncio.to_thread(
+                self.audit.record, request_id=request_id, device_id=trusted.device_id,
+                message_type=message_type, frame=frame, decision="granted", outcome=outcome, now_ms=now_ms,
+            )
         sealed = []
         for response in responses:
             sealed.append(await asyncio.to_thread(self._seal, trusted, response, now_ms))

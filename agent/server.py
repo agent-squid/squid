@@ -394,9 +394,15 @@ async def _lifespan(_app: FastAPI):
     shore_stop = asyncio.Event()
     shore_connection = None
     shore_task = None
+    shore_export_task = None
+    shore_audit_writer = None
     try:
         from .shore_transport import configured_host_connection
+        from .shore_audit_export import B2AuditConfig, B2AuditWriter
         shore_connection = await asyncio.to_thread(configured_host_connection, shore_identity_dir(_cfg))
+        audit_config = B2AuditConfig.from_env()
+        if audit_config is not None:
+            shore_audit_writer = B2AuditWriter(audit_config)
     except (OSError, TypeError, ValueError, RuntimeError) as exc:
         log.error("Shore host connection disabled: %s", exc)
     _shore_connection = shore_connection
@@ -413,6 +419,12 @@ async def _lifespan(_app: FastAPI):
             elif not shore_stop.is_set():
                 log.error("Shore host connection stopped and requires daemon restart or login")
         shore_task.add_done_callback(_log_shore_failure)
+        if shore_audit_writer is not None:
+            from .shore_audit_export import run_export_loop
+            shore_export_task = asyncio.create_task(
+                run_export_loop(shore_connection.channel.audit, shore_audit_writer, shore_stop),
+                name="squid-shore-audit-export",
+            )
     try:
         yield
     finally:
@@ -420,6 +432,7 @@ async def _lifespan(_app: FastAPI):
         if shore_task is not None:
             shore_stop.set()
         await _cancel_background_task(shore_task)
+        await _cancel_background_task(shore_export_task)
         await _cancel_background_task(durable_maintenance)
         set_process_change_listener(None)
         dispatcher.set_queue_change_listener(None)
@@ -4454,11 +4467,20 @@ async def _handle_realtime_mutation(websocket: WebSocket, frame: dict, principal
             result = {"ok": False, "error": "invalid_frame"}
         else:
             changed = await asyncio.to_thread(mark_assistant_cancelled, msg_id, "Cancelled")
+            # A message still sitting in the topic queue (never started) has no
+            # registered process for kill_proc_by_msg_id to find, so without this
+            # it lingers in /queue and keeps the status dot blinking after the
+            # chat bubble already shows "Cancelled." (mirrors the HTTP /cmd
+            # stop_msg handler — this frame carries no topic, so look it up.)
+            drained = 0
+            msg_row = await asyncio.to_thread(get_message, msg_id)
+            if msg_row and msg_row.get("topic"):
+                drained = dispatcher.drain_topic(msg_row["topic"], msg_id=msg_id)
             killed = await asyncio.to_thread(kill_proc_by_msg_id, msg_id)
-            result = {"ok": True, "cancelled": changed, "killed": killed, "msg_id": msg_id, "source": source}
+            result = {"ok": True, "cancelled": changed, "killed": killed, "drained": drained, "msg_id": msg_id, "source": source}
             log.info(
-                "realtime chat.cancel msg_id=%s source=%s principal=%s cancelled=%s killed=%s",
-                msg_id, source, principal, changed, killed,
+                "realtime chat.cancel msg_id=%s source=%s principal=%s cancelled=%s killed=%s drained=%s",
+                msg_id, source, principal, changed, killed, drained,
             )
         result = await asyncio.to_thread(save_realtime_request, principal, request_id, message_type, fingerprint, result)
     await _realtime_send(outbound, {"v": 1, "type": "command.result", "request_id": request_id, "payload": result}, principal, last_acked_cursor)

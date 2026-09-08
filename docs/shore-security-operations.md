@@ -59,7 +59,7 @@ fail closed if their audit record cannot be durably queued. Quarterly restore,
 fork, deletion, insertion, and correlation drills are required.
 
 Development and pre-production verification use the private, SSE-B2-encrypted
-bucket `shore-audit-test` (bucket ID `fc55027ee2ac52e1ae0f051c`) with Object
+bucket `shore-audit-dev` (bucket ID `3cc542ee223c72f1ae0f051c`) with Object
 Lock enabled and default Governance retention of one day. Its bucket-scoped key
 and data are isolated from production, and Shore is not granted governance
 bypass. Tests must cover retention, expiry, lifecycle deletion, manifest

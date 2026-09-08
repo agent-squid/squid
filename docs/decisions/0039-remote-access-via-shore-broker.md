@@ -285,13 +285,14 @@ as a separate HTTP or connection leg, but over the same host WebSocket
 diagram 1's step 4 already opened: a device that subscribes (a WebSocket-
 native hybrid of A's bounded fetch, for the initial snapshot, and B's
 ongoing push) receives chat/message/process/queue/flow state changes exactly
-as they land, scoped read-only. This is Milestone 4.0–4.8
+as they land, scoped read-only. This is Milestone 4.0–4.9
 (docs/plans/adr-0039-shore-remote-access.md), landed and proven — a
 direct-vs-Shore transport-parity harness and an exhaustive
-authorization/negative-test suite both pass — but the milestone's own
-acceptance gate, and with it enabling any of this on the deployed production
-route, isn't complete until an independent security review also finds no
-unresolved critical/high findings.
+authorization/negative-test suite both pass — and the milestone's own
+acceptance gate closed on 2026-09-07, when an independent security review
+found no unresolved critical/high findings. Actually enabling this on the
+deployed production route is still a separate, explicit deployment step, not
+automatic from the gate closing.
 
 ### Traffic accounting and capacity forecast
 

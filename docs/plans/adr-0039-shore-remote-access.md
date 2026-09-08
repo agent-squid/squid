@@ -32,16 +32,18 @@ secrets configured, but no required-reviewer protection rule (an accepted
 interim exception recorded in `docs/shore-security-operations.md` pending a
 second contributor). Triggering the workflow remains a separate, explicit
 step.
-Milestone 4's implementation and documentation (4.0–4.9) are now complete —
+Milestone 4's implementation and documentation (4.0–4.9) are complete —
 capability-scoped `dashboard.read.v1` dispatch (read-only: subscribe/
 unsubscribe/ack/ping/pong, snapshot/replay catch-up, proactive push) is built,
-transport-parity- and negative-authorization-tested — but its acceptance gate
-stays open pending an independent security review (see its own status note),
-so the production route stays opaque-relay-plus-probe only in practice; no
-mutating, command-capable dispatch is enabled or planned by this milestone.
-Milestone 5 remains blocked until Milestone 4 passes its acceptance gate, and
-external users must not be admitted in production until Milestone 5's audit
-export is also verified.
+transport-parity- and negative-authorization-tested — and its acceptance gate
+is now closed: an independent security review passed on 2026-09-07 with no
+unresolved critical or high findings (see its own status note). No mutating,
+command-capable dispatch is enabled or planned by this milestone; actually
+serving read-only dashboard traffic on the production route (rather than
+opaque-relay-plus-probe only) is still a separate, explicit deployment step.
+Milestone 5 is unblocked now that Milestone 4's acceptance gate has passed,
+and external users must not be admitted in production until Milestone 5's
+audit export is also verified.
 
 This is the implementation plan for
 [ADR-0039](../decisions/0039-remote-access-via-shore-broker.md). The ADR owns
@@ -107,7 +109,7 @@ without embedding unsettled security choices in code.
 
 **Audit archive deployment:** use private Backblaze B2 buckets with default
 SSE-B2 encryption and Object Lock enabled. Pre-production uses
-`shore-audit-test` (`fc55027ee2ac52e1ae0f051c`) with one-day Governance
+`shore-audit-dev` (`3cc542ee223c72f1ae0f051c`) with one-day Governance
 retention. Production uses `shore-audit-prod`
 (`0c55d2aee29c52e1ae0f051c`); enable default 400-day Compliance retention and
 post-retention lifecycle deletion only after exporter verification, but before
@@ -459,8 +461,10 @@ findings.
 
 ## Milestone 4 — Capability-scoped ADR-0040 relay
 
-**Status:** Implementation and documentation complete (4.0–4.9); acceptance
-gate blocked only on the independent security review below. 4.0 (pairing and
+**Status:** Complete (2026-09-07). Implementation and documentation (4.0–4.9)
+were done first; the milestone's acceptance gate then required an independent
+security review, which passed on 2026-09-07 with no unresolved critical or
+high findings, closing the gate. 4.0 (pairing and
 approval UI), 4.1 (transport-neutral
 subscription core), 4.2 (capability registry), and 4.3 (host-side adapter,
 including 4.4's identity plumbing) are landed. 4.5 (browser duplex client) is
@@ -499,13 +503,14 @@ end (`subscribe`/`unsubscribe`/`ack`/`ping`/`pong`, snapshot/replay catch-up,
 and proactive push); the browser client and host dispatch have now been
 proven against each other for the read-only, single-device, single-push case
 that gap called out, and both 4.7's transport-parity harness and 4.8's
-negative-authorization suite now pass — but per 4.9, the milestone's
-acceptance gate isn't marked complete until those tests pass *and* an
-independent security review finds no unresolved critical/high findings, and
-that review hasn't run yet. The production route therefore stays
-opaque-relay-plus-probe-only in practice until that closes, even though the
-host-side dispatch code itself is live and now interop- and parity-proven for
-the scenarios exercised.
+negative-authorization suite pass. Per 4.9's own rule, the milestone's
+acceptance gate required those tests to pass *and* an independent security
+review to find no unresolved critical/high findings before it could be
+marked complete — that review ran and passed on 2026-09-07, so the gate is
+now closed. Enabling the production route to actually serve
+opaque-relay-plus-probe-plus-read-only-dashboard traffic (rather than
+opaque-relay-plus-probe only) is a separate, explicit deployment step outside
+this milestone, not automatic from the gate closing.
 
 **Objective:** expose a minimal safe subset of the existing real-time protocol.
 
@@ -1456,7 +1461,7 @@ exercises that same unconditional counter.
 
 #### 4.9 — Documentation
 
-**Status:** Landed, except the gate itself. This plan doc's Milestone 4
+**Status:** Landed, including the gate. This plan doc's Milestone 4
 status (below) and its 4.7/4.8 subsections narrate each slice as it landed,
 matching Milestones 1–3's style. `docs/decisions/0039-remote-access-via-
 shore-broker.md`'s system-flow mermaid diagram now reflects reality: step 4
@@ -1469,10 +1474,10 @@ ENABLED" since it's unbuilt and unscheduled. The 4.3 overflow/heartbeat
 amendment to `docs/shore-protocol-v1.md` (its "Per-device push liveness and
 backpressure" section) was already done in 4.3 itself, before that section's
 code was written, per open question 1's resolution note above — nothing left
-to amend there. What's *not* landed, and can't be by documentation alone: the
-acceptance gate itself, which per this section's own instruction stays open
-until an independent security review also finds no unresolved critical/high
-findings — that review hasn't run.
+to amend there. The acceptance gate itself, which per this section's own
+instruction stayed open until an independent security review also found no
+unresolved critical/high findings, is now closed: that review ran and passed
+on 2026-09-07.
 
 - Update this plan doc's Milestone 4 status and the ADR-0039 mermaid
   diagram's "not yet enabled" annotations as each slice lands, following the
@@ -1481,6 +1486,7 @@ findings — that review hasn't run.
   once resolved.
 - Don't mark the acceptance gate complete until 4.7/4.8 pass and an
   independent security review finds no unresolved critical/high findings.
+  (Done: both passed, review closed 2026-09-07.)
 
 **Explicitly out of scope for this milestone:** all mutation types stay
 disabled (each future one is a separately named, individually reviewed
@@ -1501,15 +1507,14 @@ expiry/immediate-revocation surface. None of this should be built now.
    require an amendment (this one reuses the base protocol's existing test
    vectors' values, 20s/2 missed intervals, rather than introducing new ones,
    since only the enforcement mechanism differs, not the timing).
-2. **Still open, not re-litigated here.** Scope granularity for
-   `dashboard.read.v1`: is the registry's "global lifecycle feed" reading
-   correctly limited to `{"lifecycle": "global"}` only, denying topic/agent-
-   scoped remote subscriptions that direct local access allows? Note this is
-   marked "confirmed" in 4.2's own write-up above (`_authorize_dashboard_
-   read_scope`'s behavior is settled and 4.3 was built against it) — this
-   list entry is stale and should read resolved, not open; left visible here
-   rather than silently deleted so the inconsistency doesn't reappear
-   unnoticed in a future edit.
+2. **Resolved.** Scope granularity for `dashboard.read.v1`: the registry's
+   "global lifecycle feed" reading is confirmed correctly limited to
+   `{"lifecycle": "global"}` only, denying topic/agent-scoped remote
+   subscriptions that direct local access allows — settled in 4.2's own
+   write-up above (`_authorize_dashboard_read_scope`'s behavior is fixed and
+   4.3 was built against it). This entry previously read "still open" after
+   already being resolved elsewhere in this doc; corrected here rather than
+   left inconsistent.
 3. **Resolved (2026-09-06): ships as a follow-on, not bundled into 4.0.**
    Dashboard view scope: pairing/approval UI is 4.0's explicit scope; the
    *dashboard view* itself (rendering pushed events now that 4.1–4.3 exist)
@@ -1534,10 +1539,26 @@ expiry/immediate-revocation surface. None of this should be built now.
 
 ## Milestone 5 — Correlated tamper-evident audit
 
-**Status:** Blocked. Milestone 3 is complete. Milestone 4's implementation
-and documentation (4.0–4.9) are complete, but its acceptance gate is still
-open pending an independent security review (see Milestone 4's status); that
-gate must pass before this work begins.
+**Status:** In progress. Milestones 3 and 4 are both complete, including
+Milestone 4's acceptance gate, which closed on 2026-09-07 (see Milestone 4's
+status), unblocking this work. 5.0 (broker-side hash-chained audit log) is
+landed: every existing account-lifecycle audit event (magic links, sessions,
+second-factor, recovery, deletion, host registration/revocation,
+displacement) is chained via a monotonic per-account `seq` plus a
+`prevHash`/`hash` pair recomputed from each event's own canonicalized
+content, with the running chain tip held in its own storage key so a
+rewritten final event can't silently re-anchor itself; it also migrates any
+pre-chain legacy audit records the first time a new event is logged, so no
+account is left with corrupted history. 5.1 (host-side signed audit log,
+Action 2) is also landed: `agent/shore_audit.py`'s `ShoreAuditLog` records a
+locally Ed25519-signed, hash-chained event for every ADR-0040 frame the host
+dispatches (granted or capability-denied), correlated to the broker's chain
+by the shared envelope `request_id`. Action 1's scope turned out to need a
+correction discovered while implementing 5.1 — see 5.1's write-up below.
+Action 3's host-side durable batching foundation is landed as 5.2a; the B2
+transport, broker stream, cross-stream daily manifest, and live archive
+verification remain open. Action 4 (user-visible history/notifications) is
+not started.
 
 **Objective:** make account, pairing, capability, and command activity
 attributable without storing command plaintext.
@@ -1565,6 +1586,217 @@ event; revocation is step-up protected and atomically invalidates the host
 connection, browser sessions, pairings, and capabilities; retention and
 redaction tests show command text, secrets, raw IP, precise location, and full
 headers are absent from user notifications by default.
+
+### Implementation plan
+
+**Key findings**
+
+- Action 1's scope splits cleanly in two: chaining the *existing* broker audit
+  log (account/session/pairing/host lifecycle events, already recorded via
+  `Account.audit()`/`auditEntry()` in `shore/src/index.ts`) needed no new
+  infrastructure decision and is a direct prerequisite for everything else in
+  this milestone. Extending that log to cover every relayed *command* frame
+  is a separate, real cost decision (a storage write per relayed frame) that
+  should be confirmed before implementing, not assumed — deferred to a later
+  sub-step.
+- Action 3's export target is not an open decision — it was already fixed by
+  Milestone 0's accepted spec (`docs/shore-security-operations.md`, echoed in
+  this doc's own Milestone 0 section): private, SSE-B2-encrypted, Object-Lock
+  Backblaze B2 buckets in an account separate from Cloudflare
+  (`shore-audit-prod` / `shore-audit-dev`), a write-only bucket-scoped
+  application key with no read/delete/retention-management/legal-hold/
+  governance-bypass capability, 400-day Compliance retention in production
+  (enabled before external users are admitted) and 1-day Governance retention
+  in test, daily signed manifests anchoring both chain heads, and a 5-minute
+  export-lag paging threshold. That doc also fixes the per-event field
+  schema for both chains (broker: prior hash, event ID, account/host/device/
+  session IDs, coarse source metadata, restricted raw IP, receipt time,
+  ciphertext hash, outcome; host: signed request ID, plaintext command hash,
+  authorization decision, result class, host time, prior host-event hash) and
+  the explicit exclusion list (no command/response text, secrets, cookies,
+  auth headers, internal addresses, precise location, full headers). 5.0's
+  `Audit` type does not yet carry all of those fields (no first-class
+  deviceId/sessionId/source-metadata/outcome) — closing that gap is
+  still-open Action 1 work (see 5.1's finding below on why it's deferred,
+  not just unstarted), not something this sub-step needed.
+- Durable Object storage transactions are the right place to chain events:
+  reading the prior chain tip and writing the new one inside the same
+  `storage.transaction()` callback that already writes each audit record
+  keeps the chain atomic under the runtime's optimistic-concurrency retries,
+  with no separate locking needed.
+
+**5.0 — Hash-chain the broker's existing audit log (landed)**
+
+- `Audit` gained `seq`, `prevHash`, and `hash`; `auditEntry()` now reads the
+  `audit-chain-tip` key inside the caller's transaction, computes
+  `hash = sha256(jcs({seq, prevHash, ...event fields}))`, and writes the new
+  tip alongside the event so both land atomically. All ~20 existing call
+  sites were updated to pass the active transaction.
+- Added `verifyAuditChain()` (exported from `shore/src/index.ts`), which
+  replays a full event list and recomputes each hash, flagging
+  `sequence_gap` (deletion), `sequence_fork` (a duplicated/out-of-order seq,
+  including two internally-consistent divergent branches), `hash_mismatch`
+  (content mutated without a matching hash), and `chain_break` (a
+  prevHash/tip that no longer lines up, including an insertion that can't
+  chain from the true prior hash, or a rewritten tip event whose separately-
+  stored tip pointer was left stale). Exposed at `GET /internal/audit/verify`
+  (DO-internal only, not on the public `/@username/...` route surface, like
+  `/internal/state`).
+- `shore/test/shore.test.ts`'s new "Milestone 5 tamper-evident audit" suite
+  proves detection of all four tamper classes above by mutating DO storage
+  directly, plus a clean-chain case. This is intentionally a same-storage
+  self-consistency check: an attacker or bug with direct storage write access
+  who correctly recomputes an entire alternate history from genesis is not
+  detectable by hash-chaining alone — that residual gap is exactly what
+  Action 3's export under separate credentials, and Action 2's independent
+  host-signed record, are for. "Missing correlation" and "forged host
+  events" from this milestone's acceptance criteria are cross-checks against
+  Action 2's host-side log, which doesn't exist yet.
+- An independent review (codex) caught two issues in the first pass, both now
+  fixed and covered by tests: (1) accounts with pre-chain `audit:<timestamp>:...`
+  history from before this landed would have corrupted `verifyAuditChain`'s
+  replay and `/internal/state`'s key-sort ordering the moment a new event was
+  logged, since `auditEntry()` started a fresh chain at seq 1 and ignored the
+  older unchained records under the same `audit:` prefix — fixed with
+  `migrateLegacyAuditChain()`, which rewrites any pre-chain records in place
+  (oldest first, by their existing chronologically-sortable keys) into the new
+  scheme the first time `auditEntry()` finds no `audit-chain-tip`, so every
+  account converges on one uniform chained log with no ops-run migration step;
+  (2) `auditEntry()`'s `data` parameter was `Partial<Audit>` spread before the
+  trusted fields, so a future caller could have overridden `id`/`type`/`at`/
+  `seq`/`prevHash` or injected a `hash` — narrowed to
+  `Pick<Audit, "connectionId" | "correlationId">` and spread first so the
+  trusted fields set afterward always win.
+
+**5.1 — Host-side signed audit log, and a correction to Action 1's scope (landed)**
+
+- **Key finding that changed Action 1's plan:** the broker cannot tell ADR-0040
+  message types apart at all. `shore/src/index.ts`'s `webSocketMessage` never
+  decrypts a relayed frame — `type`/`payload` live inside the AEAD ciphertext,
+  opaque to the broker by design (E2E, per this doc's non-negotiable
+  invariants). So "audit only subscribe/unsubscribe, skip ping/pong" — the
+  scope floated before this sub-step — isn't implementable at the broker: it
+  is structurally blind to which relayed frame is which. The broker's only
+  per-frame options are "audit every relayed frame identically" (the real
+  cost question from before, now confirmed to mean literally every frame,
+  heartbeats included, not just a rare subset) or "don't add per-frame
+  broker auditing yet." Given `dashboard.read.v1` has no mutating commands
+  at all today (Milestone 4: `subscribe`/`unsubscribe`/`ack`/`ping`/`pong`
+  only), the per-frame broker cost/value tradeoff stays deferred rather than
+  decided by default — Action 1's connection-level events (`socket_attached`,
+  displacement, stale reconnect, already in 5.0) remain the broker's audit
+  coverage for now. The host, by contrast, decrypts every frame and already
+  runs a fail-closed capability check on each one (`agent/shore_capabilities.py`'s
+  `authorize_capability_frame`) — so Action 2 (the host chain) had real,
+  current content to audit today, unlike a broker-side per-frame log, and
+  became the higher-value next step.
+- Added `agent/shore_audit.py`'s `ShoreAuditLog`: a local SQLite-backed chain
+  mirroring 5.0's design (monotonic `seq`, `prevHash`/`hash` over each
+  event's own canonicalized content, computed inside the same `BEGIN
+  IMMEDIATE` transaction that reads the prior tip) plus an Ed25519 signature
+  over each event from the host's own pinned identity key — a guarantee the
+  broker's chain doesn't have, since only the host holds that private key.
+  Records: `requestId` (correlates to the broker's chain), `deviceId`,
+  `hostId`, `messageType` (the closed ADR-0040 type tag, not payload
+  content), `commandHash` (a commitment to the full decrypted frame, never
+  the frame itself), `decision` (granted/denied), `outcome`, and `at`.
+  `verify_chain()` replays the log and flags `sequence_gap`, `sequence_fork`,
+  `hash_mismatch`, `chain_break` (as in 5.0) plus `bad_signature`. Because
+  `seq` is the SQLite primary key, a literal duplicate-seq fork can't even be
+  written through the store's own `record()` path (stronger than 5.0's
+  KV-backed chain) — `tests/test_shore_audit.py`'s fork test exercises
+  `verify_chain()` directly with a hand-built pair of events for that reason,
+  documented inline.
+- Wired into `agent/shore_transport.py`'s `ShoreChannel._handle_envelope`:
+  every ADR-0040 frame (not `shore.probe`, which predates capability
+  dispatch and isn't a real command) is audited, after
+  `authorize_capability_frame` either returns or raises. A capability denial
+  records `decision="denied"` best-effort (the command is already failing,
+  so a queuing failure there doesn't need to escalate further) and re-raises
+  the original error unchanged.
+- Not done here: actually cross-checking the two chains against each other
+  (matching a broker `request_id` to a host `request_id`) — that requires
+  Action 3's export pipeline to get both chains into one place to compare,
+  so "missing correlation" and "forged host events" from this milestone's
+  acceptance criteria are still open until Action 3 exists.
+- An independent review (codex) caught three issues in the first pass, all
+  now fixed and covered by tests: (1) High — "fail closed" was checked
+  *after* `_dispatch_adr0040` already ran, so a subscription/session
+  mutation could take effect before an audit-durability failure raised
+  `shore_audit_unavailable`, and an unexpected (non-`ShoreProtocolError`)
+  dispatch exception produced no audit record at all — fixed by recording a
+  `decision="granted", outcome="pending"` event *before* dispatch runs (fail
+  closed here blocks dispatch entirely, since `record()` only ever appends,
+  never rewrites), then a second, separately verifiable `outcome` event
+  after dispatch succeeds or raises (best-effort on that second write, since
+  the command already ran and the durable "pending" record already proves
+  what was authorized). (2) High — `verify_chain()` only checked linkage
+  between the rows it was handed, so deleting the last row, or every row,
+  of an otherwise-consistent chain verified as clean — fixed by adding a
+  separately-signed single-row `audit_tip` checkpoint, updated atomically
+  with every `record()`, that `verify()` checks the replayed chain's actual
+  final event against; `tests/test_shore_audit.py` adds final-event and
+  whole-table deletion tests, both now caught as `chain_break`. (3) Medium —
+  events carried no key epoch or signer identity, and `verify()` took one
+  fixed key for the whole chain, so a host key rotation reusing the same
+  `audit.sqlite3` (a new `ShoreChannel` with a new `host_signing` key but
+  the same `state_dir`) would sign new events onto the old chain in a way
+  neither the old nor the new key alone could verify — fixed by recording
+  `keyEpoch` per event and per tip, and changing `verify_chain()`/`verify()`
+  to take a `keys: Mapping[epoch, PublicKey]` pinned-key history instead of
+  one key, failing closed as `unknown_key_epoch` for any event whose epoch
+  isn't pinned rather than silently skipping or misattributing it. Note this
+  reuses the existing ADR-0040 `key_epoch` concept rather than inventing a
+  parallel one — the protocol as implemented today never actually increments
+  it for a live host (only a full host replacement gets a new `host_id`), so
+  this is currently latent correctness, not something reachable through the
+  deployed registration flow yet; it's still real because nothing in
+  `ShoreAuditLog` itself enforced that constraint, and the fix costs little.
+  Verified: the full Shore suite (181 tests, up from 177) and the full
+  Python suite (759 passing) both green; the two failures elsewhere
+  (`test_lifecycle_start_backgrounds_server`,
+  `test_init_db_marks_pre_activation_flow_runs_as_shadow`) are confirmed
+  pre-existing on the unmodified backing repo, unrelated to Shore.
+
+**5.2a — Host export batches (landed; Action 3 remains in progress)**
+
+- `ShoreAuditLog.pending_export()` emits bounded canonical-JSON batches with
+  the complete signed host events plus a separately signed manifest anchoring
+  the range, prior/head hashes, event count, payload hash, host/key epoch, and
+  final event time. Object names derive only from sequence coordinates and the
+  head commitment, contain no user data, and both name and body are stable
+  across retries for safe create-only uploads.
+- The SQLite `audit_export_state` cursor advances only through the explicit
+  `mark_exported()` acknowledgement after an uploader succeeds. Failed or
+  interrupted uploads leave the same rows pending; acknowledgements are
+  checked against the local chain and cannot move the cursor backward.
+- This sub-step deliberately does not claim Action 3 complete: the next slice
+  must add the least-privilege B2 create-only transport and retry/lag loop,
+  followed by the broker exporter and the daily manifest correlating both
+  chain heads. Live retention and overwrite/deletion rejection require the
+  externally provisioned `shore-audit-dev` bucket and cannot be simulated as
+  production verification by repository-only tests.
+
+**5.2b — Host B2 transport and retry loop (landed; Action 3 remains in progress)**
+
+- Added a dependency-free AWS Signature V4 `PutObject` client for Backblaze's
+  HTTPS S3-compatible endpoint. It signs the payload and all relevant headers,
+  explicitly requests SSE-B2 (`AES256`), performs no list/read/delete or bucket
+  operation, and obtains its endpoint, bucket, region, key ID, and application
+  key exclusively from `SQUID_SHORE_AUDIT_B2_*` environment variables.
+- The daemon starts the exporter only when all archive variables are present.
+  It drains deterministic batches in order, acknowledges each only after a
+  successful upload, retries transient failures without advancing the cursor,
+  and logs an error once the oldest pending event exceeds the specified
+  five-minute lag threshold. Shutdown cancels and awaits the exporter with the
+  other lifespan-owned tasks.
+- Backblaze documents HTTPS path-style S3 endpoints, Signature V4, `PutObject`,
+  SSE-B2, and bucket-default Object Lock retention. Its documented `PutObject`
+  headers do not include `If-None-Match`, so the writer does not pretend B2
+  offers AWS conditional-create semantics: retry-stable names/bodies may create
+  another immutable version after an ambiguous success. Bucket Object Lock and
+  a credential lacking delete/retention-management capability provide the
+  append-only boundary; live test-bucket verification remains required.
 
 ## Milestone 6 — Production hardening and staged rollout
 
