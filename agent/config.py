@@ -188,8 +188,10 @@ OLLAMA_PATH    = find_cli(OLLAMA_CLI)
 # OpenCode free provider
 OPENCODE_DEFAULT_MODEL = "opencode/big-pickle"
 
-# Per-user tmp dir for context sync — avoids cross-user permission conflicts
-SQUID_HOME = f"/tmp/{os.getlogin()}/squid"
+# Per-user tmp dir for context sync — avoids cross-user permission conflicts.
+# getlogin() requires a controlling terminal and fails in CI/service processes.
+_CURRENT_USER = getpass.getuser()
+SQUID_HOME = f"/tmp/{_CURRENT_USER}/squid"
 
 # Per-user, per-agent tmp dir for sandboxed-$HOME agents (see ADR-0036).
 # Deliberately a sibling of SQUID_HOME, not nested inside it -- context_sync's
@@ -203,14 +205,14 @@ SQUID_HOME = f"/tmp/{os.getlogin()}/squid"
 # prevent. Each agent gets its own subfolder (SQUID_HOMES/<agent>) so
 # Blank Home agents don't share plugins/skills/settings/history with
 # each other, only the sibling-of-SQUID_HOME root is shared as a concept.
-SQUID_HOMES = f"/tmp/{os.getlogin()}/squid-homes"
+SQUID_HOMES = f"/tmp/{_CURRENT_USER}/squid-homes"
 
 # Per-user tmp dir for native `!` shell command spool files (ADR-0038) — full
 # stdout/stderr past the in-chat display cap. Sibling of SQUID_HOME for the
 # same reason SQUID_HOMES is: SQUID_HOME is emptied by context_sync's
 # `rsync --delete` whenever ~/.squid/context/ changes, and would silently
 # delete spool files sitting inside it.
-NATIVE_SHELL_SPOOL_DIR = f"/tmp/{os.getlogin()}/squid-shell-logs"
+NATIVE_SHELL_SPOOL_DIR = f"/tmp/{_CURRENT_USER}/squid-shell-logs"
 
 # Per-turn Git worktree isolation (see ADR-0025). On by default; set
 # `worktree.enabled: false` in squid.yaml to use direct working-tree writes.
