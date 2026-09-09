@@ -77,6 +77,23 @@ def _opencode_npm_package(apis: frozenset[str]) -> str:
     return "@ai-sdk/openai-compatible"
 
 
+def _codex_base_url(base_url: str, apis: frozenset[str]) -> str:
+    """Return the base before the Responses endpoint Codex appends.
+
+    Provider URLs are server roots because other harnesses append the full
+    API path (for example ``/v1/messages``). Codex appends ``/responses``
+    instead, so preserve the parent path declared by ``/v1/responses``.
+    """
+    responses_api = next((api for api in apis if api.endswith("/responses")), None)
+    if not responses_api:
+        return base_url
+    api_base = responses_api.rsplit("/", 1)[0]
+    stripped = base_url.rstrip("/")
+    if not api_base or stripped.endswith(api_base):
+        return stripped
+    return stripped + api_base
+
+
 def _load_pi_models_file() -> dict[str, Any]:
     if not os.path.exists(PI_MODELS_FILE):
         return {}
@@ -382,7 +399,10 @@ class ResolvedAgent:
         providers = dict(result.get("model_providers") or {})
         entry = dict(providers.get(provider_key) or {})
         entry.setdefault("name", self.provider.id)
-        entry.setdefault("base_url", self.provider.base_url)
+        entry.setdefault(
+            "base_url",
+            _codex_base_url(self.provider.base_url, self.provider.supported_apis),
+        )
         entry.setdefault("wire_api", "responses")
         if self.provider.api_key is not None:
             entry.setdefault("env_key", "SQUID_BACKEND_API_KEY")
