@@ -4949,6 +4949,21 @@ async function sendMessage(text, opts = {}) {
   const { promptToggle: thinkingPromptToggle, promptFullDiv: thinkingPromptFullDiv } = makeHistoryPromptToggle(message);
   thinkingHeaderText.appendChild(thinkingPromptToggle);
   thinkingHeader.appendChild(thinkingHeaderText);
+  // Keep one context control for the whole turn. It starts on the visible
+  // thinking header, then moves to the response header when that bubble lands.
+  const liveCtxSpan = document.createElement('span');
+  liveCtxSpan.className = 'user-ctx';
+  if (nativeShell) {
+    liveCtxSpan.textContent = 'ctx: shell';
+    liveCtxSpan.dataset.shell = 'true';
+    liveCtxSpan.dataset.hasTrace = 'false';
+  } else {
+    setCtxLabel(liveCtxSpan, adhoc);
+  }
+  liveCtxSpan.dataset.topic = topic;
+  if (flowRunId) liveCtxSpan.dataset.flowRunId = flowRunId;
+  liveCtxSpan.addEventListener('click', e => { e.stopPropagation(); showCtxPopup(liveCtxSpan); });
+  thinkingHeader.appendChild(liveCtxSpan);
   thinkingBubble.appendChild(thinkingHeader);
   thinkingBubble.appendChild(thinkingPromptFullDiv);
   const thinkingContent = document.createElement('div');
@@ -5150,19 +5165,6 @@ async function sendMessage(text, opts = {}) {
   const { promptToggle: responsePromptToggle, promptFullDiv: responsePromptFullDiv } = makeHistoryPromptToggle(message);
   headerText.appendChild(responsePromptToggle);
   responseHeader.appendChild(headerText);
-  const liveCtxSpan = document.createElement('span');
-  liveCtxSpan.className = 'user-ctx';
-  if (nativeShell) {
-    liveCtxSpan.textContent = 'ctx: shell';
-    liveCtxSpan.dataset.shell = 'true';
-    liveCtxSpan.dataset.hasTrace = 'false';
-  } else {
-    setCtxLabel(liveCtxSpan, adhoc);
-  }
-  liveCtxSpan.dataset.topic = topic;
-  if (flowRunId) liveCtxSpan.dataset.flowRunId = flowRunId;
-  liveCtxSpan.addEventListener('click', e => { e.stopPropagation(); showCtxPopup(liveCtxSpan); });
-  responseHeader.appendChild(liveCtxSpan);
   bubble.appendChild(responseHeader);
   bubble.appendChild(responsePromptFullDiv);
   const contentDiv = document.createElement('div');
@@ -5177,6 +5179,7 @@ async function sendMessage(text, opts = {}) {
   // broadcast head has no user bubble, so its marker follows that head's
   // response placement instead.
   function placeResponseBubble() {
+    responseHeader.appendChild(liveCtxSpan);
     if (!bubble.parentNode) messages.appendChild(bubble);
     if (chainMarker && !userBubble) messages.insertBefore(chainMarker, bubble);
   }
@@ -5728,6 +5731,16 @@ async function sendMessage(text, opts = {}) {
   const _contextIds = [...new Set([..._lookbackIds, ..._pinnedIds, ..._extraPinnedIds])];
   await pruneMissingAttachedFiles();
   const _attachedFiles = _attachedFilesState({ topic, agent: _effectiveAgent, adhoc }).selected;
+  if (!nativeShell) {
+    const activeSessionId = !adhoc ? (_sessionIds[`${topic}@${_effectiveAgent || '_'}`] || null) : null;
+    const activeSessionTurns = activeSessionId ? (_sessionTurnCounts[activeSessionId] || 0) : 0;
+    setCtxLabel(liveCtxSpan, adhoc, _contextIds.length, _includeTopicMemory, activeSessionTurns);
+    liveCtxSpan.dataset.pinnedIds = JSON.stringify(_contextIds);
+    liveCtxSpan.dataset.mem = _includeTopicMemory ? 'true' : 'false';
+    if (_effectiveAgent) liveCtxSpan.dataset.agent = _effectiveAgent;
+    if (activeSessionId) liveCtxSpan.dataset.sessionId = activeSessionId;
+    if (activeSessionTurns) liveCtxSpan.dataset.sessionTurnCount = String(activeSessionTurns);
+  }
   const chatPayload = {
     message, topic, agent, lookback, adhoc, source,
     ...(flowRoute ? { flow_route: flowRoute, ...(flowRunId ? { flow_run_id: flowRunId } : {}) } : {}),

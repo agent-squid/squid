@@ -836,6 +836,26 @@ test.describe('response bubble', () => {
     await look(page);  // pause — observe: response bubble now at bottom
   });
 
+  test('context indicator is available while thinking and moves to the response', async ({ page }) => {
+    const { intercepted, fulfill } = holdChat(page);
+
+    await sendMsg(page);
+    await intercepted;
+
+    const thinkingCtx = page.locator(`${THINKING} .response-header .user-ctx`);
+    await expect(thinkingCtx).toBeVisible();
+    await expect(thinkingCtx).toHaveText(/^ctx:/);
+    await thinkingCtx.click();
+    await expect(page.locator('#ctx-popup')).toBeVisible();
+    await thinkingCtx.click();
+
+    await fulfill(sse(META, { data: 'Hello!' }, STATS, DONE));
+
+    await expect(page.locator(THINKING)).not.toBeAttached();
+    await expect(page.locator(`${RESPONSE} .response-header .user-ctx`)).toBeVisible();
+    await expect(page.locator(`${RESPONSE} .response-header .user-ctx`)).toHaveCount(1);
+  });
+
   test('thinking bubble height can be doubled', async ({ page }) => {
     const { intercepted } = holdChat(page);
 
