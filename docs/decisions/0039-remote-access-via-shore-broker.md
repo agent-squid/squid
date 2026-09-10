@@ -333,7 +333,7 @@ flowchart TB
         Verify["verify_broker_chain + verify_chain<br/>checks hash chain + host signatures<br/>against each host's pinned public key"]
         Correlate["build_daily_manifest:<br/>requestId set-diff -&gt;<br/>missingHostRequestIds / missingBrokerRequestIds"]
         Sign["sign with separate Ed25519<br/>manifest-authority key<br/>(distinct from host/broker signing keys)"]
-        Writer2["B2 writer (not yet built)<br/>env (placeholder): SHORE_AUDIT_MANIFEST_WRITE_B2_KEY_ID / _APPLICATION_KEY<br/>capability: writeFiles only, prefix-scoped to manifests/"]
+        Writer2["B2 writer (not yet built)<br/>env (placeholder): SHORE_AUDIT_MANIFEST_WRITE_B2_KEY_ID / _APPLICATION_KEY<br/>env (placeholder): SHORE_AUDIT_MANIFEST_PREFIX (manifests/)<br/>capability: writeFiles only, prefix-scoped to manifests/"]
         Reader --> Verify --> Correlate --> Sign --> Writer2
     end
 
@@ -348,6 +348,16 @@ flowchart TB
 
     Correlate -->|"gap found"| Incident["Incident severity table<br/>(docs/shore-security-operations.md)<br/>SEV-1: forged authorization / audit loss<br/>-&gt; preserve evidence, kill switch, notify<br/>NOTE: currently discovered when the daily<br/>manifest is reviewed, not auto-paged<br/>(unlike the 5-min export-lag page)"]
 ```
+
+Environment variables used by this flow:
+
+| Env var | Used by | Capability | Status |
+| --- | --- | --- | --- |
+| `SQUID_SHORE_AUDIT_B2_KEY_ID` / `_APPLICATION_KEY` | Host (`agent/`, `B2AuditWriter`) | writeFiles only, own audit chain → `host/events/*.json` | live |
+| `SHORE_AUDIT_B2_KEY_ID` / `_APPLICATION_KEY` | Broker (`shore/src/index.ts`, `createAuditArchiveRequest`) | writeFiles only, own audit chain → `broker/accounts/{accountId}/events/*.json` | live |
+| `SHORE_AUDIT_MANIFEST_READ_B2_KEY_ID` / `_APPLICATION_KEY` | Daily manifest collector | readFiles + listFiles, no prefix restriction (reads both `broker/` and `host/`) | placeholder, collector not yet built |
+| `SHORE_AUDIT_MANIFEST_WRITE_B2_KEY_ID` / `_APPLICATION_KEY` | Daily manifest collector | writeFiles only, prefix-scoped to `manifests/` | placeholder, collector not yet built |
+| `SHORE_AUDIT_MANIFEST_PREFIX` | Daily manifest collector | non-secret config value (`manifests/`) | placeholder, collector not yet built |
 
 Open items this diagram makes explicit, all tracked in Milestone 5 Action 3 of
 `docs/plans/adr-0039-shore-remote-access.md`:
