@@ -33,7 +33,10 @@ single-operator actions. This is recorded as a temporary, explicit exception
 given the current low user count, not a waiver of the control itself. Close it
 by adding a second named reviewer/approver and enabling required reviewers on
 the `shore-prod` GitHub environment as soon as a new contributor joins; revisit
-this entry at that time.
+this entry at that time. As of ADR-0039 Milestone 5.8, both deployment jobs are
+explicitly disabled and both GitHub environments contain no secrets or
+variables, so the exception cannot currently be exercised. Re-enabling
+production deployment still requires closing or explicitly reaccepting it.
 
 Broker and host events use the same request/transition ID and hash commitment.
 The broker chain contains prior hash, event ID, account/host/device/session IDs,

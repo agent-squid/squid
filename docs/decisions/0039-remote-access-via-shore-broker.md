@@ -330,7 +330,7 @@ Environment variables used by this flow:
 
 | Env var | Used by | Capability | Status |
 | --- | --- | --- | --- |
-| `SHORE_AUDIT_B2_KEY_ID` / `_APPLICATION_KEY` | Shore only | writeFiles only, relay chain and opaque host-signed batches | live for relay chain; host-batch ingestion pending |
+| `SHORE_AUDIT_B2_KEY_ID` / `_APPLICATION_KEY` | Shore only | writeFiles only, relay chain and opaque host-signed batches | exporter implemented; credentials cleared pending replacement gate and host-batch ingestion |
 | Relay audit signing key | Shore only | signs live receipts/checkpoints; public key pinned by hosts | pending |
 
 The receipt is a versioned sibling of, not a mutation to, the sender-signed E2E
@@ -341,7 +341,7 @@ traffic only; recovery requires an explicit user-authorized reset or re-pairing.
 
 This supersedes host-side B2 export, the daily manifest collector, its B2
 reader/writer credentials, and the separate manifest-signing authority. Those
-components must be removed rather than deployed.
+components were removed in Milestone 5.8 and must not be reintroduced.
 
 This design intentionally does not claim independent proof against complete
 Shore compromise. Shore can omit or fork both receipts and archive writes for a

@@ -394,8 +394,6 @@ async def _lifespan(_app: FastAPI):
     shore_stop = asyncio.Event()
     shore_connection = None
     shore_task = None
-    shore_export_task = None
-    shore_audit_writer = None
     try:
         from .shore_transport import configured_host_connection
         shore_connection = await asyncio.to_thread(configured_host_connection, shore_identity_dir(_cfg))
@@ -403,13 +401,6 @@ async def _lifespan(_app: FastAPI):
         log.error("Shore host connection disabled: %s", exc)
     _shore_connection = shore_connection
     if shore_connection is not None:
-        try:
-            from .shore_audit_export import B2AuditConfig, B2AuditWriter
-            audit_config = B2AuditConfig.from_env()
-            if audit_config is not None:
-                shore_audit_writer = B2AuditWriter(audit_config)
-        except (OSError, TypeError, ValueError, RuntimeError) as exc:
-            log.error("Shore audit export disabled: %s", exc)
         shore_task = asyncio.create_task(
             shore_connection.run(shore_stop), name="squid-shore-host-connection",
         )
@@ -422,12 +413,6 @@ async def _lifespan(_app: FastAPI):
             elif not shore_stop.is_set():
                 log.error("Shore host connection stopped and requires daemon restart or login")
         shore_task.add_done_callback(_log_shore_failure)
-        if shore_audit_writer is not None:
-            from .shore_audit_export import run_export_loop
-            shore_export_task = asyncio.create_task(
-                run_export_loop(shore_connection.channel.audit, shore_audit_writer, shore_stop),
-                name="squid-shore-audit-export",
-            )
     try:
         yield
     finally:
@@ -435,7 +420,6 @@ async def _lifespan(_app: FastAPI):
         if shore_task is not None:
             shore_stop.set()
         await _cancel_background_task(shore_task)
-        await _cancel_background_task(shore_export_task)
         await _cancel_background_task(durable_maintenance)
         set_process_change_listener(None)
         dispatcher.set_queue_change_listener(None)

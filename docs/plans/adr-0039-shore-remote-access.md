@@ -12,13 +12,12 @@ account, browser-device, and source-fingerprint identities.
 The browser transport client, non-extractable device identity, pinned host trust,
 and durable replay/sequence state are implemented. Cross-process browser/host
 pairing, encrypted-probe interoperability, and live host-key epoch rotation now
-run in CI. Pre-production deployment wiring is complete: a manually triggered,
-environment-protected workflow deploys an isolated `workers.dev` Worker only
-after type checking, tests, a high-severity dependency audit, and strict
-runtime-secret validation, with credentials held as environment secrets. The
-runtime secret is uploaded atomically with the reviewed deployment through a
-mode-restricted, cleanup-trapped temporary file and declared required in
-Wrangler. Version preview URLs are disabled, and browser
+run in CI. Pre-production deployment wiring passed its Milestone 3 gate with a
+manually triggered, environment-protected workflow, an isolated `workers.dev`
+Worker, test and audit gates, and atomic runtime-secret upload. Milestone 5.8
+later cleared its GitHub environment and explicitly disabled the job pending
+the replacement audit credential gate. Version preview URLs remain disabled,
+and browser
 attachment fails closed because the isolated hostname cannot satisfy Shore's
 same-site cookie requirement; it is a broker/host integration target only.
 An independent, qualified human security review passed on 2026-09-04 with no
@@ -26,12 +25,11 @@ unresolved critical or high findings, closing Milestone 3's gate. Under that
 approval, the production `agentsquid.ai/@*` route is now declared in
 `shore/wrangler.jsonc` and a manually triggered, environment-protected
 `deploy-production.yml` workflow exists alongside the pre-production one. No
-production deployment has run yet: the `shore-prod` GitHub environment now
-has its `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and `FINGERPRINT_KEY`
-secrets configured, but no required-reviewer protection rule (an accepted
-interim exception recorded in `docs/shore-security-operations.md` pending a
-second contributor). Triggering the workflow remains a separate, explicit
-step.
+production deployment has run. Milestone 5.8 subsequently cleared both GitHub
+deployment environments and explicitly disabled both deployment jobs while the
+replacement audit design is built. Fresh credentials and the applicable
+deployment gates must be restored together; neither workflow can currently
+deploy.
 Milestone 4's implementation and documentation (4.0–4.9) are complete —
 capability-scoped `dashboard.read.v1` dispatch (read-only: subscribe/
 unsubscribe/ack/ping/pong, snapshot/replay catch-up, proactive push) is built,
@@ -42,8 +40,8 @@ command-capable dispatch is enabled or planned by this milestone; actually
 serving read-only dashboard traffic on the production route (rather than
 opaque-relay-plus-probe only) is still a separate, explicit deployment step.
 Milestone 5 is unblocked now that Milestone 4's acceptance gate has passed,
-and external users must not be admitted in production until Milestone 5's
-audit export is also verified.
+and external users must not be admitted in production until Milestone 5 is
+complete and its replacement audit path is verified.
 
 This is the implementation plan for
 [ADR-0039](../decisions/0039-remote-access-via-shore-broker.md). The ADR owns
@@ -405,12 +403,12 @@ option, and completes an encrypted probe under the new epoch. The browser has
 proves malformed plaintext and a cryptographically well-formed envelope from an
 untrusted device both fail before application dispatch. The focused host suites
 pass 84/84, the broker suite passes 85/85, and `tsc --noEmit` remains clean.
-The next deployment slice is complete: Shore has a manual, serialized
+The deployment slice originally completed with a manual, serialized
 pre-production deployment workflow protected by the `shore-dev`
 GitHub environment, separate Cloudflare credentials, test/typecheck gates, and
-an isolated `workers.dev` hostname and Durable Objects. The workflow refuses to
+an isolated `workers.dev` hostname and Durable Objects. The workflow refused to
 deploy without a 256-bit hexadecimal `FINGERPRINT_KEY`, preventing an absent or
-weak fingerprint-HMAC key. The secret is uploaded atomically by the gated deploy
+weak fingerprint-HMAC key. The secret was uploaded atomically by the gated deploy
 rather than through `wrangler secret put`, which would itself publish an
 ungated Worker version. A high-severity dependency audit also gates deployment,
 and version preview URLs
@@ -426,12 +424,15 @@ milestone's acceptance gate was completed on 2026-09-04 with no unresolved
 critical or high findings. Under that approval, the production
 `agentsquid.ai/@*` route is now declared in `shore/wrangler.jsonc` and a
 manually triggered `deploy-production.yml` workflow, gated by the
-`shore-prod` GitHub environment, has been added. That environment's
+`shore-prod` GitHub environment, was added. At gate closure that environment's
 `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and `FINGERPRINT_KEY` secrets
-are configured, though it has no required-reviewer protection rule yet (an
+were configured, though it had no required-reviewer protection rule (an
 accepted interim exception recorded in `docs/shore-security-operations.md`
 pending a second contributor). No production deployment has been run;
-triggering the workflow is a separate, explicit step outside this review.
+triggering the workflow was a separate, explicit step outside this review.
+Milestone 5.8 later removed every secret and variable from both GitHub
+environments and disabled both deployment jobs. This historical deployment
+slice is therefore not currently deployable.
 
 **Objective:** establish broker-blind, mutually authenticated communication
 between a paired browser device and the host.
@@ -1792,17 +1793,17 @@ Current repository state as of 2026-09-10:
 | Capability | State in code | Target action |
 | --- | --- | --- |
 | Host signed SQLite chain, atomic signed tip, deterministic batches | Landed in `agent/shore_audit.py` | Keep and reuse |
-| Direct host-to-B2 exporter and `SQUID_SHORE_AUDIT_B2_*` startup wiring | Still live in `agent/shore_audit_export.py` and `agent/server.py` | Remove after Shore ingestion is proven |
+| Direct host-to-B2 exporter and `SQUID_SHORE_AUDIT_B2_*` startup wiring | Removed in 5.8 | Do not reintroduce |
 | Broker per-account audit chain and B2 exporter | Landed in `shore/src/index.ts` | Keep; extend to host batches |
 | Authenticated broker audit challenge/events endpoint | Landed in `shore/src/index.ts` | Reuse for bounded catch-up from an already trusted tip |
-| Daily manifest builder/verifier | Landed in `agent/shore_audit_manifest.py`; no operational collector exists | Retire and remove after replacement tests land |
+| Daily manifest builder/verifier | Removed in 5.8; no operational collector existed | Do not reintroduce |
 | Dedicated per-host receipt chain and relay signing key | Not implemented | Build |
 | Outer relay frame and receipt verification/persistence | Not implemented | Build in Shore and host transport |
 | Host-batch WebSocket ingestion and signed archive acknowledgement | Not implemented | Build |
 | Continuity-loss recovery/reinstall UX | Not implemented | Build before enforcing fail-closed behavior |
 
-- Host B2 configuration and direct host-to-B2 transport are superseded and must
-  be removed. `SQUID_SHORE_AUDIT_B2_*` is not part of the supported host
+- Host B2 configuration and direct host-to-B2 transport were removed in 5.8.
+  `SQUID_SHORE_AUDIT_B2_*` is not part of the supported host
   configuration.
 - Reuse the deterministic, host-signed batches from 5.2a, but send them as a
   bounded protocol control message over the authenticated host WebSocket.
@@ -1815,9 +1816,8 @@ Current repository state as of 2026-09-10:
 - Missing, invalid, regressed, or conflicting receipts close the Shore channel
   and block remote dispatch until explicit user-authorized recovery or
   re-pairing. Local/direct access is outside this gate.
-- Remove the daily collector, manifest read/write credentials, and separate
-  manifest authority. The landed manifest implementation may be deleted after
-  receipt/checkpoint coverage replaces its useful tests.
+- The daily collector, manifest implementation, GitHub credentials, and
+  separate manifest authority were removed in 5.8.
 - This detects operational faults and observable equivocation in real time but
   does not independently prove honesty after complete Shore compromise. An
   independent witness is a separate higher-assurance option.
@@ -2070,9 +2070,10 @@ Current repository state as of 2026-09-10:
   --noEmit` clean and `npm run build` produces both `pair-app.js` and
   `security-app.js`.
 
-**5.8 — Remove the unreleased legacy audit design and credentials (open; next)**
+**5.8 — Remove the unreleased legacy audit design and credentials (in progress:
+repository and GitHub cleanup landed; provider revocation pending)**
 
-- This is the next implementation slice. Shore has not been released, no
+- Shore has not been released, no
   production deployment has run, and no production audit history or supported
   host configuration depends on the direct-to-B2 or daily-manifest designs.
   Delete them before implementing their replacements.
@@ -2094,6 +2095,15 @@ Current repository state as of 2026-09-10:
   does not remove that target architecture; it ensures the replacement starts
   with newly issued, narrowly scoped credentials instead of inheriting the
   unreleased deployment's secret set.
+- Landed by removing `agent/shore_audit_export.py`,
+  `agent/shore_audit_manifest.py`, their tests, and the host startup wiring.
+  Shore's workflows and Wrangler required-secret declarations no longer carry
+  B2 inputs, and both deployment jobs fail closed through an explicit disabled
+  condition until the replacement credential gate lands. All secrets and
+  variables were removed from both GitHub deployment
+  environments. Provider-side revocation remains open because this machine has
+  neither Cloudflare nor Backblaze account authentication, and GitHub does not
+  expose stored secret values or key IDs after creation.
 - Acceptance: repository search finds no host B2 or manifest runtime path; host
   audit/batch tests still pass; Shore type checks and tests pass; both obsolete
   Cloudflare and B2 keys are confirmed revoked provider-side; and both GitHub
