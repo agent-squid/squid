@@ -2109,7 +2109,7 @@ repository and GitHub cleanup landed; provider revocation pending)**
   Cloudflare and B2 keys are confirmed revoked provider-side; and both GitHub
   environments contain no Shore secrets or variables.
 
-**5.9 — Receipt protocol and relay chain (open)**
+**5.9 — Receipt protocol and relay chain (in progress; protocol core landed)**
 
 - Define canonical receipt vectors and a dedicated monotonic chain per immutable
   `host_id`. Cover ordinary encrypted envelopes in both directions and exclude
@@ -2120,6 +2120,14 @@ repository and GitHub cleanup landed; provider revocation pending)**
 - Return the receipt beside inbound E2E envelopes and as an acknowledgement for
   host-originated envelopes. Retrying the same request ID and envelope must
   return the same receipt rather than allocate a second entry.
+- Landed first: the exact receipt schema, hashing/signing inputs, genesis,
+  idempotency/conflict semantics, rotation/recovery requirements, normative
+  domain-separated Ed25519 vectors, cross-language vector verification, and Shore
+  receipt and old-key rotation signing/verification cores with closed-schema,
+  mutation, nonconsecutive-epoch, and wrong-key tests. Still open:
+  Durable Object allocation/idempotency storage,
+  pre-forward audit transaction integration, wire wrappers/acknowledgements,
+  and deployment-time signing-key provisioning.
 
 **5.10 — Host verification and remote-only fail-closed gate (open)**
 

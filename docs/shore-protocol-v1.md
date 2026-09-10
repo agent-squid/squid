@@ -122,6 +122,69 @@ oversize closes with 1009; overload closes with 1013. No automatic retry occurs
 for 1008 or 1009. Routine authenticated socket-lifetime or heartbeat expiry
 closes with 1001 and obtains a fresh challenge before reconnecting.
 
+## Signed relay receipts
+
+Ordinary encrypted envelopes, but not pairing packets or zero-length lease
+heartbeats, participate in a dedicated monotonic receipt chain for their
+immutable `host_id`. Receipt fields have exactly this schema:
+
+```json
+{
+  "v": 1,
+  "type": "relay_receipt",
+  "host_id": "uuidv7",
+  "request_id": "uuidv7",
+  "direction": "browser_to_host",
+  "disposition": "accepted",
+  "receipt_epoch": 1,
+  "seq": "1",
+  "prev_hash": "base64url-sha256",
+  "envelope_hash": "sha256:base64url-sha256",
+  "receipt_hash": "base64url-sha256",
+  "signature": "base64url-ed25519"
+}
+```
+
+`type` is the signature-domain separator `relay_receipt`. `direction` is
+`browser_to_host` or `host_to_browser`; `disposition` is
+`accepted` in v1. `receipt_epoch` is a positive integer for the Shore receipt
+signing key and is independent of the host envelope's `key_epoch`. `seq` is a
+canonical positive decimal string with no leading zeroes. The genesis
+`prev_hash` is 43 ASCII zeroes. `envelope_hash` is SHA-256 over the exact
+received envelope bytes, not decoded JSON or ciphertext alone, prefixed by
+`sha256:`. `receipt_hash` is unprefixed base64url SHA-256 over JCS of the exact
+ten-field object excluding `receipt_hash` and `signature`. `signature` is
+Ed25519 over JCS of those ten fields plus `receipt_hash`.
+
+For a given `(host_id, request_id)`, retrying byte-identical envelope bytes
+returns the original receipt without advancing the chain. Reusing that tuple
+with different bytes or the opposite direction is a conflict and fails closed.
+Receipt sequence/tip,
+the idempotency record, and the pre-forward broker audit event are one Durable
+Object transaction. A browser-to-host envelope is delivered to the host beside
+its receipt; a host-to-browser envelope receives a receipt acknowledgement at
+the host. Pairing traffic retains its existing raw packet format.
+
+Shore publishes and AgentSquid pins the receipt key for each epoch. A normal
+rotation statement has exactly `v`, `type`, `from_epoch`, `to_epoch`,
+`new_public_key`, and `signature`; `v` is `1`, `type` is
+`relay_receipt_key_rotation`, `to_epoch` is exactly `from_epoch + 1`, and
+`new_public_key` is a canonical unpadded base64url 32-byte Ed25519 public key.
+`signature` is the old key's Ed25519 signature over JCS of the other five
+fields. Rotation does not reset a host's receipt sequence: its first receipt
+under the new epoch extends the prior receipt hash and uses the next sequence.
+AgentSquid accepts the transition only when both the installed release pins the
+new key and the statement verifies under its pinned old key.
+
+If the old key is unavailable, no continuity claim is possible. Remote traffic
+remains disabled until a local user explicitly authorizes receipt-chain
+recovery for that host. Recovery records the abandoned epoch/tip when known,
+starts sequence `1` with the genesis previous hash under a newly pinned epoch,
+and creates a high-severity broker and local audit event; it never emits or
+accepts a forged rotation statement. Implementations must not adopt a
+broker-presented current key or tip without either the old-key rotation proof
+or that explicit local recovery.
+
 ## Initial capability registry
 
 Unknown capability names, versions, message types, fields, and scopes are

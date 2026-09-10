@@ -16,6 +16,20 @@
     "ciphertext_and_tag": "MYotC_PZyt9kQxo561WfgbZgItPaMlCUsVL0ZY4GVM8yv6aJWEMeBy_b7tjJcYwCRw8On1y5sKrC-9uudFBw4UZf7E00kIiQ9W4z22eus6HQn72Qbv-XT-TcCqc2i_A6kfqCsj-q7vsiL-anrm01-x4mh8rzmfBdVh-wSNTfU0-QvmZN882wuMwah4MTGQt-9-s-Xuk",
     "signature": "2t-zkGxVZQFenSTaI_ejfxq8pkjb_XPYEVuh_Z-e-8850n7ngG3Dv1aoJSv3WNmsrXd7-wwqfVnA0QEbOz0MCw"
   },
+  "receipt": {
+    "shore_ed25519_seed_hex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+    "shore_ed25519_public": "zRSzf5VulTGU_3-3Oz2B3MVh1hp1OAlLfD4aZD7l86o",
+    "envelope_jcs": "{\"account_id\":\"018f1f25-3f6b-7d75-a4d1-62d771381b20\",\"ciphertext\":\"MYotC_PZyt9kQxo561WfgbZgItPaMlCUsVL0ZY4GVM8yv6aJWEMeBy_b7tjJcYwCRw8On1y5sKrC-9uudFBw4UZf7E00kIiQ9W4z22eus6HQn72Qbv-XT-TcCqc2i_A6kfqCsj-q7vsiL-anrm01-x4mh8rzmfBdVh-wSNTfU0-QvmZN882wuMwah4MTGQt-9-s-Xuk\",\"device_id\":\"018f1f25-8614-7e41-8c5c-fc0b6eefad62\",\"direction\":\"browser_to_host\",\"expires_at\":\"2026-09-01T12:00:30.000Z\",\"host_id\":\"018f1f24-e9ec-7f12-b20a-67fc03679f32\",\"issued_at\":\"2026-09-01T12:00:00.000Z\",\"key_epoch\":1,\"nonce\":\"AAECAwQFBgcICQoL\",\"request_id\":\"018f1f25-c930-76f0-86e7-cb06d94e6a30\",\"seq\":\"1\",\"signature\":\"2t-zkGxVZQFenSTaI_ejfxq8pkjb_XPYEVuh_Z-e-8850n7ngG3Dv1aoJSv3WNmsrXd7-wwqfVnA0QEbOz0MCw\",\"v\":1}",
+    "fields": {"v":1,"type":"relay_receipt","host_id":"018f1f24-e9ec-7f12-b20a-67fc03679f32","request_id":"018f1f25-c930-76f0-86e7-cb06d94e6a30","direction":"browser_to_host","disposition":"accepted","receipt_epoch":1,"seq":"1","prev_hash":"0000000000000000000000000000000000000000000","envelope_hash":"sha256:m9_6sDLnmMKxhj5q3DsUvQl11TqEfPOAJBWdUmvaRvQ"},
+    "receipt_hash": "pcSGmpPYhzIslAe4zHyJQaRxSzppeTkRBTTWvkoxVNM",
+    "signature": "JztsB4OrzBWJTEjdpn9J8D6mdrV5WY-rXx_mNECvSoqPs1j_c5DftbaskKbRSsRLXs4wZhJd-BK5dwWn5gV6CA",
+    "next": {
+      "envelope_jcs": "{\"account_id\":\"018f1f25-3f6b-7d75-a4d1-62d771381b20\",\"ciphertext\":\"yhAJ3ylWEXyMXCVwyotMYmmQYibXso-g2Z7n_p1jnZG1a3UGZRaKMqvsgbr8oPp6Pp0BPaHC1d5IXXCl5B7zmnSMt7QKs7_6ezJ3z1zv_A47\",\"device_id\":\"018f1f25-8614-7e41-8c5c-fc0b6eefad62\",\"direction\":\"host_to_browser\",\"expires_at\":\"2026-09-01T12:00:31.000Z\",\"host_id\":\"018f1f24-e9ec-7f12-b20a-67fc03679f32\",\"issued_at\":\"2026-09-01T12:00:01.000Z\",\"key_epoch\":1,\"nonce\":\"DA0ODxAREhMUFRYX\",\"request_id\":\"018f1f25-c930-76f0-86e7-cb06d94e6a31\",\"seq\":\"1\",\"signature\":\"mlD6rhtpcUwiVgK_2cqr880WMN_ROse3_MUri3sstq6zF9NhCqVKLs0EcICRKGJR3Cq9yzif47IFG9mlrYx2Ag\",\"v\":1}",
+      "fields": {"v":1,"type":"relay_receipt","host_id":"018f1f24-e9ec-7f12-b20a-67fc03679f32","request_id":"018f1f25-c930-76f0-86e7-cb06d94e6a31","direction":"host_to_browser","disposition":"accepted","receipt_epoch":1,"seq":"2","prev_hash":"pcSGmpPYhzIslAe4zHyJQaRxSzppeTkRBTTWvkoxVNM","envelope_hash":"sha256:n26SfnIQAyLUCpksM5oaLNiL8Lo9wa0cv1luMIvtU5I"},
+      "receipt_hash": "jR02ps682K51jfZsYBmXA1OtCLLX2dQPKMGMMh_Kw4c",
+      "signature": "9inzeAFUxG8MPVP9DU43op2yl5rSFnQWw1QyaW2bCZ66PwcL-zMVDj2mCco5y4iKCYGofX8LVxDimUZK57gPAA"
+    }
+  },
   "pairing": {
     "pairing_secret_hex": "000102030405060708090a0b0c0d0e0f",
     "ceremony_nonce_hex": "101112131415161718191a1b1c1d1e1f",
