@@ -258,11 +258,11 @@ sequence", noting SSE remains until the separate parity/removal decision.
 
 **Acceptance:** ADR status reflects step 1 complete; remaining steps
 (backpressure/framing, delivery acks + prior-version support, SSE removal,
-ADR-0039 Shore relay) still listed as pending.
+ADR-0039 Shore Relay) still listed as pending.
 
 ---
 
 ## Out of scope
 
 Backpressure/framing, delivery acknowledgements + prior-protocol-version
-support, SSE removal, and ADR-0039 Shore relay — later ADR-0040 steps.
+support, SSE removal, and ADR-0039 Shore Relay — later ADR-0040 steps.

@@ -46,7 +46,7 @@ session** unlocks the keychain for the server's own session, and the next
   (`127.0.0.1`/`::1`) by default, with an explicit config opt-in
   (`auth.allow_remote_keychain_unlock`, default `false`) for users who accept
   typing their Mac keychain password from another tailnet device. Hard-block it
-  over any future ADR-0039 Shore relay principal regardless of that flag.
+  over any future ADR-0039 Shore Relay principal regardless of that flag.
 - **macOS-only.** Unlock mode is valid only when `sys.platform == "darwin"`.
 
 ---

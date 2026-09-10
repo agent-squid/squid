@@ -17,7 +17,7 @@ Squid's live features currently use several transport patterns:
 - Process, queue, and message status are refreshed with HTTP requests.
 
 These work locally, but do not provide one bidirectional channel for immediate
-multi-device updates. ADR-0039's Shore broker needs a host connection and a
+multi-device updates. ADR-0039's Shore Relay needs a host connection and a
 browser connection that can remain open, carry commands and streamed output,
 and resume after ordinary mobile network changes. Defining a separate broker
 protocol while retaining unrelated local SSE behavior would create two live
@@ -33,7 +33,8 @@ state and retry ambiguity without improving those operations.
 
 Introduce one versioned, transport-independent real-time application protocol,
 carried over a single WebSocket endpoint (`/ws/v1`) for direct local and
-Tailscale access. ADR-0039's Shore path will relay the same logical protocol
+Tailscale access. ADR-0039's Shore Relay path will carry the same logical
+protocol
 between browser and host, with its additional authentication and end-to-end
 encryption requirements.
 
@@ -116,7 +117,7 @@ fallback and through the explicit `sse` migration mode.
 | Backpressure and frame limits | Implemented | A per-connection bounded outbound queue is drained by a dedicated sender task; `process.changed`/`queue.changed` coalesce in place, non-coalescible overflow closes `slow_consumer` (1013), and inbound frames are size-checked (`frame_too_large`, 1009). Limits are configurable via `realtime.outbound_queue_limit`/`realtime.max_frame_bytes`. |
 | Heartbeat and acknowledgements | Implemented | The server initiates `ping` every `realtime.heartbeat_seconds` and closes dead peers after two missed intervals (1001); inbound `ack` cursors are recorded and clamped as advisory bookkeeping while resumption stays cursor-driven. |
 | Protocol compatibility | Implemented (v1 only) | The supported-version set is centralized (`unsupported_version` echoes it); adding a future v2 is an additive one-line change plus a handler fork rather than a rewrite. |
-| Shore relay | Not implemented | ADR-0039's broker transport, pairing, encryption, capabilities, and audit work remain future work. |
+| Shore Relay | Not implemented | ADR-0039's relay transport, pairing, encryption, capabilities, and audit work remain future work. |
 
 ### Remaining implementation sequence
 
@@ -140,7 +141,7 @@ The Flow milestone is closed. Server-side tests cover restart, cancellation,
 The remaining ADR-0040 work is, in order:
 
 1. Make a separate compatibility decision before removing SSE.
-2. Implement ADR-0039's Shore relay over the proven protocol.
+2. Implement ADR-0039's Shore Relay over the proven protocol.
 
 SSE endpoints therefore remain required for migration fallback, CLI
 authentication, and the live families not yet moved to WebSocket. WebSocket is
@@ -416,7 +417,7 @@ The application message semantics are identical, while the security wrappers
 differ by path.
 
 ADR-0039 is an architectural consumer of this protocol. This ADR should be
-implemented before the Shore broker so the broker does not become the place
+implemented before Shore Relay so the relay does not become the place
 where Squid's application behavior is first defined. This does not require
 converting every HTTP endpoint before Shore work begins.
 

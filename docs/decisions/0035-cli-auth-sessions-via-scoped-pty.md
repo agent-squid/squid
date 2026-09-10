@@ -197,7 +197,7 @@ passes. An explicit opt-in,
 user accept typing their Mac keychain password from another tailnet device
 if they choose to — it bypasses the whole check, not just the header logic.
 This opt-in is independent of, and should remain more restrictive than,
-whatever principal model a future ADR-0039 Shore relay connection uses — a
+whatever principal model a future ADR-0039 Shore Relay connection uses — a
 Shore-relayed request is never treated as loopback by this gate, regardless
 of the opt-in flag.
 

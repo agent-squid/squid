@@ -3,7 +3,7 @@ status: accepted
 date: 2026-08-11
 updated: 2026-09-07
 ---
-# ADR-0039: Remote access via a Cloudflare Workers + Durable Objects broker (agentsquid.ai/@username)
+# ADR-0039: Remote access via Shore Relay on Cloudflare Workers + Durable Objects (agentsquid.ai/@username)
 
 ## Context
 
