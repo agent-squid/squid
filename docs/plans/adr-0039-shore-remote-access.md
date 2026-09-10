@@ -1566,8 +1566,11 @@ can correlate broker and host events because 5.3 records every valid
 opaque relayed envelope before forwarding, including its public request,
 host, device, and session identifiers, direction, ciphertext commitment, and
 forwarding outcome. The signed manifest core landed in 5.4, but the target
-architecture now retires both it and the unbuilt collector. Host B2 credentials
-and direct host-to-B2 export are also retired; signed host batches instead flow
+architecture now retires both it and the unbuilt collector. Because Shore has
+not been released and there is no production audit history to migrate, 5.8
+removes these superseded paths and their obsolete credentials before replacement
+work begins. Host B2 credentials and direct host-to-B2 export are retired;
+signed host batches instead flow
 over the authenticated Shore channel and Shore alone writes B2. Live signed
 relay receipts replace daily comparison and fail closed for remote access only.
 5.5 separately lands host-authenticated, live read access
@@ -2067,7 +2070,36 @@ Current repository state as of 2026-09-10:
   --noEmit` clean and `npm run build` produces both `pair-app.js` and
   `security-app.js`.
 
-**5.8 — Receipt protocol and relay chain (open)**
+**5.8 — Remove the unreleased legacy audit design and credentials (open; next)**
+
+- This is the next implementation slice. Shore has not been released, no
+  production deployment has run, and no production audit history or supported
+  host configuration depends on the direct-to-B2 or daily-manifest designs.
+  Delete them before implementing their replacements.
+- Remove the direct host-to-B2 exporter, its server startup/configuration
+  wiring, and its tests. Preserve the signed host audit log and deterministic
+  batching from 5.1/5.2a; those are inputs to Shore ingestion.
+- Remove the daily manifest builder/verifier and its tests. No collector was
+  deployed, so there is no collector state to migrate.
+- Remove every currently configured Shore secret and variable from both GitHub
+  deployment environments. Revoke/delete the corresponding Cloudflare API
+  tokens and Backblaze application keys at their providers; deleting a GitHub
+  secret alone is not revocation. Remove the B2 inputs from the deployment
+  workflows during this cleanup. Provision fresh, least-privilege deployment,
+  fingerprint, audit-signing, and Shore-only archive credentials only when the
+  replacement design reaches its applicable deployment gate.
+- Keep the broker-side B2 exporter and archive configuration: the replacement
+  design still requires Shore alone to write both broker and verified
+  host-signed streams to append-only storage. Removing the current credentials
+  does not remove that target architecture; it ensures the replacement starts
+  with newly issued, narrowly scoped credentials instead of inheriting the
+  unreleased deployment's secret set.
+- Acceptance: repository search finds no host B2 or manifest runtime path; host
+  audit/batch tests still pass; Shore type checks and tests pass; both obsolete
+  Cloudflare and B2 keys are confirmed revoked provider-side; and both GitHub
+  environments contain no Shore secrets or variables.
+
+**5.9 — Receipt protocol and relay chain (open)**
 
 - Define canonical receipt vectors and a dedicated monotonic chain per immutable
   `host_id`. Cover ordinary encrypted envelopes in both directions and exclude
@@ -2079,7 +2111,7 @@ Current repository state as of 2026-09-10:
   host-originated envelopes. Retrying the same request ID and envelope must
   return the same receipt rather than allocate a second entry.
 
-**5.9 — Host verification and remote-only fail-closed gate (open)**
+**5.10 — Host verification and remote-only fail-closed gate (open)**
 
 - Verify signature, envelope commitment, host/epoch, sequence, and previous tip
   before application dispatch. Persist the receipt tip and pending host audit
@@ -2092,7 +2124,7 @@ Current repository state as of 2026-09-10:
   remote dispatch only. Surface `audit continuity unavailable` separately from
   `confirmed receipt conflict`; do not label either as proof of compromise.
 
-**5.10 — Shore ingestion of host-signed batches (open)**
+**5.11 — Shore ingestion of host-signed batches (open)**
 
 - Add a bounded host control message carrying 5.2a's stable signed batch. Verify
   the pinned host key, key epoch, batch payload, and extension from the last
@@ -2101,7 +2133,7 @@ Current repository state as of 2026-09-10:
   only after that acknowledgement verifies. Preserve retry-stable bodies and
   request IDs across disconnects and ambiguous acknowledgements.
 
-**5.11 — Recovery, migration, and cleanup (open)**
+**5.12 — Recovery, migration, and enforcement (open)**
 
 - Treat missing/rolled-back host SQLite as lost continuity. Local/direct access
   stays available; Shore access requires a locally authorized recovery or
@@ -2111,8 +2143,9 @@ Current repository state as of 2026-09-10:
   extends lost history. Test crash boundaries, retries, concurrent devices,
   restored backups, Shore rollback, key rotation, and reinstall.
 - Roll out receipt verification in observe-only mode first. After migration and
-  recovery work is proven, enforce the gate, remove host B2 code/settings/tests,
-  then remove daily-manifest code/tests and unprovision collector credentials.
+  recovery work is proven, enforce the gate. The superseded host-B2 and
+  daily-manifest paths and credentials were already removed in 5.8; do not
+  reintroduce either as a fallback.
 
 ## Milestone 6 — Production hardening and staged rollout
 
