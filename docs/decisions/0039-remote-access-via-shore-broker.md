@@ -311,14 +311,14 @@ sequenceDiagram
     participant H as AgentSquid host
     participant B as Object-locked B2
     D->>R: signed E2E envelope
-    R->>R: append relay event; advance relay tip
+    R->>R: append relay event and advance relay tip
     R->>H: outer frame {envelope, signed relay receipt}
     H->>H: verify signature, continuity, envelope commitment
     alt receipt invalid, missing, regressed, or conflicting
-        H--xR: close remote channel; require explicit recovery
+        H--xR: close remote channel and require explicit recovery
         Note over H: local/direct access remains available
     else receipt valid
-        H->>H: authorize/execute; append signed host events
+        H->>H: authorize, execute, and append signed host events
         H->>R: signed host checkpoint/batch
         R->>R: verify pinned host key and chain continuity
         R->>B: archive relay chain and opaque host batch
