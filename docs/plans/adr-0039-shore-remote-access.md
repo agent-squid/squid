@@ -113,9 +113,10 @@ SSE-B2 encryption and Object Lock enabled. Pre-production uses
 retention. Production uses `shore-audit-prod`
 (`0c55d2aee29c52e1ae0f051c`); enable default 400-day Compliance retention and
 post-retention lifecycle deletion only after exporter verification, but before
-admitting external users. Use separate bucket-scoped keys, never production
-credentials in tests, and never commit key IDs or secrets. The production
-writer is write-only and has no read, delete, retention-management, legal-hold,
+admitting external users. B2 credentials exist only in Shore-managed
+infrastructure, never on AgentSquid hosts. Use separate bucket-scoped keys for
+production and test, and never commit key IDs or secrets. The production writer
+is write-only and has no read, delete, retention-management, legal-hold,
 governance-bypass, or bucket-management capability.
 
 **Acceptance:** the protocol and state machines have test vectors, including
@@ -1555,20 +1556,21 @@ locally Ed25519-signed, hash-chained event for every ADR-0040 frame the host
 dispatches (granted or capability-denied), correlated to the broker's chain
 by the shared envelope `request_id`. Action 1's scope turned out to need a
 correction discovered while implementing 5.1 — see 5.1's write-up below.
-Action 3's host-side durable batching foundation and B2 transport are landed
+Action 3's host-side durable batching foundation and former B2 transport landed
 as 5.2a/5.2b; the broker's own B2 export (5.2c, `shore/src/index.ts`'s
 `Account.exportAuditBatch`/`auditExportLagMs`) is also now landed, uploading
 each account's chain to `broker/accounts/<accountId>/events/...` with the same
 create-only, cursor-gated design as the host writer, plus the same five-minute
-export-lag alert on sustained failure. The cross-stream daily manifest
-can now correlate broker and host events because 5.3 records every valid
+export-lag alert on sustained failure. The former cross-stream daily manifest
+can correlate broker and host events because 5.3 records every valid
 opaque relayed envelope before forwarding, including its public request,
 host, device, and session identifiers, direction, ciphertext commitment, and
-forwarding outcome. The signed manifest core is landed in 5.4; its operational
-collector (an independent process with its own B2 read credentials, per
-`docs/shore-security-operations.md` -- not code in the host or broker
-runtime) and live archive verification against the real `shore-audit-dev`
-bucket remain open. 5.5 separately lands host-authenticated, live read access
+forwarding outcome. The signed manifest core landed in 5.4, but the target
+architecture now retires both it and the unbuilt collector. Host B2 credentials
+and direct host-to-B2 export are also retired; signed host batches instead flow
+over the authenticated Shore channel and Shore alone writes B2. Live signed
+relay receipts replace daily comparison and fail closed for remote access only.
+5.5 separately lands host-authenticated, live read access
 to the broker's own audit chain for a single account -- groundwork for
 Action 4, not the 5.4 collector. Action 4 (user-visible history/notifications)
 has its backend already in place (broker notification delivery, step-up-
@@ -1587,8 +1589,10 @@ attributable without storing command plaintext.
    request ID, and ciphertext/command commitment as a hash-chained event.
 2. Host records a signed event with the same request ID, command hash,
    authorization decision, outcome, and host time.
-3. Export both streams to append-only storage under separate credentials that
-   neither a remote session nor the host runtime can erase.
+3. Send host-signed batches over the authenticated Shore channel; Shore verifies
+   them and exports both streams to append-only storage using Shore-only
+   credentials. Add signed per-frame relay receipts so the host detects chain
+   gaps, regression, or conflict before dispatch.
 4. Add user-visible session/device/capability history and security notifications
    for pairing, key changes, healthy same-key host displacement, recovery,
    revocation, and privileged grants. Displacement notifications include an
@@ -1596,8 +1600,10 @@ attributable without storing command plaintext.
    to the broker audit event. Raw IP and precise location remain restricted to
    the audit system and are never copied into browser/out-of-band notifications.
 
-**Acceptance:** tests detect deletion, insertion, mutation, fork, missing
-correlation, and forged host events; a healthy same-key displacement produces
+**Acceptance:** tests detect deletion, insertion, mutation, receipt-chain gaps,
+regression/conflict, missing correlation, and forged host events; receipt
+failure disables Shore remote dispatch without affecting local/direct access;
+no AgentSquid host configuration contains B2 credentials; a healthy same-key displacement produces
 both the correlated audit record and first user notification while stale
 reconnect does not alert; batching preserves and later surfaces every repeated
 event; revocation is step-up protected and atomically invalidates the host
@@ -1615,9 +1621,9 @@ headers are absent from user notifications by default.
   infrastructure decision and is a direct prerequisite for everything else in
   this milestone. Extending that log to cover every relayed *command* frame
   is a separate, real cost decision (a storage write per relayed frame), now
-  explicitly accepted and landed in 5.3 so manifests can detect missing
+  explicitly accepted and landed in 5.3 so receipts/checkpoints can detect missing
   broker/host correlations.
-- Action 3's export target is not an open decision — it was already fixed by
+- Action 3's archive target is not an open decision — it remains
   Milestone 0's accepted spec (`docs/shore-security-operations.md`, echoed in
   this doc's own Milestone 0 section): private, SSE-B2-encrypted, Object-Lock
   Backblaze B2 buckets in an account separate from Cloudflare
@@ -1625,8 +1631,9 @@ headers are absent from user notifications by default.
   application key with no read/delete/retention-management/legal-hold/
   governance-bypass capability, 400-day Compliance retention in production
   (enabled before external users are admitted) and 1-day Governance retention
-  in test, daily signed manifests anchoring both chain heads, and a 5-minute
-  export-lag paging threshold. That doc also fixes the per-event field
+  in test and a 5-minute export-lag paging threshold. B2 credentials now live
+  only in Shore; live signed receipts and host checkpoints replace daily
+  manifests. That doc also fixes the per-event field
   schema for both chains (broker: prior hash, event ID, account/host/device/
   session IDs, coarse source metadata, restricted raw IP, receipt time,
   ciphertext hash, outcome; host: signed request ID, plaintext command hash,
@@ -1665,8 +1672,8 @@ headers are absent from user notifications by default.
   self-consistency check: an attacker or bug with direct storage write access
   who correctly recomputes an entire alternate history from genesis is not
   detectable by hash-chaining alone — that residual gap is exactly what
-  Action 3's export under separate credentials, and Action 2's independent
-  host-signed record, are for. "Missing correlation" and "forged host
+  Action 3's Shore-only archive and Action 2's independent host-signed record
+  are for. "Missing correlation" and "forged host
   events" from this milestone's acceptance criteria are cross-checks against
   Action 2's host-side log, which doesn't exist yet.
 - An independent review (codex) caught two issues in the first pass, both now
@@ -1775,7 +1782,30 @@ headers are absent from user notifications by default.
   `test_init_db_marks_pre_activation_flow_runs_as_shadow`) are confirmed
   pre-existing on the unmodified backing repo, unrelated to Shore.
 
-**5.2a — Host export batches (landed; Action 3 remains in progress)**
+**Architecture update — live receipts and Shore-only archival (accepted; implementation pending)**
+
+- Host B2 configuration and direct host-to-B2 transport are superseded and must
+  be removed. `SQUID_SHORE_AUDIT_B2_*` is not part of the supported host
+  configuration.
+- Reuse the deterministic, host-signed batches from 5.2a, but send them as a
+  bounded protocol control message over the authenticated host WebSocket.
+  Shore verifies the pinned host key and chain continuity before archiving the
+  opaque batch under an account/host-specific prefix with its own B2 key.
+- Wrap each relayed application envelope in a versioned outer frame containing
+  a Shore-signed receipt: envelope commitment/request ID, disposition, prior
+  relay tip, and new relay tip. The receipt does not modify the E2E envelope.
+  Hosts pin the relay audit public key and persist the highest verified tip.
+- Missing, invalid, regressed, or conflicting receipts close the Shore channel
+  and block remote dispatch until explicit user-authorized recovery or
+  re-pairing. Local/direct access is outside this gate.
+- Remove the daily collector, manifest read/write credentials, and separate
+  manifest authority. The landed manifest implementation may be deleted after
+  receipt/checkpoint coverage replaces its useful tests.
+- This detects operational faults and observable equivocation in real time but
+  does not independently prove honesty after complete Shore compromise. An
+  independent witness is a separate higher-assurance option.
+
+**5.2a — Host export batches (landed; transport target revised above)**
 
 - `ShoreAuditLog.pending_export()` emits bounded canonical-JSON batches with
   the complete signed host events plus a separately signed manifest anchoring
@@ -1787,14 +1817,10 @@ headers are absent from user notifications by default.
   `mark_exported()` acknowledgement after an uploader succeeds. Failed or
   interrupted uploads leave the same rows pending; acknowledgements are
   checked against the local chain and cannot move the cursor backward.
-- This sub-step deliberately does not claim Action 3 complete: 5.2b/5.2c
-  since added the least-privilege B2 create-only transport and retry/lag loop
-  on both host and broker; the daily manifest correlating both chain heads and
-  live retention/overwrite/deletion-rejection verification against the
-  externally provisioned `shore-audit-dev` bucket remain open (the latter
-  cannot be simulated as production verification by repository-only tests).
+- This batching format remains useful, but its transport target is now Shore's
+  authenticated host channel. Direct host-to-B2 delivery is superseded.
 
-**5.2b — Host B2 transport and retry loop (landed; Action 3 remains in progress)**
+**5.2b — Host B2 transport and retry loop (landed, now superseded for removal)**
 
 - Added a dependency-free AWS Signature V4 `PutObject` client for Backblaze's
   HTTPS S3-compatible endpoint. It signs the payload and all relevant headers,
@@ -1853,9 +1879,8 @@ headers are absent from user notifications by default.
   known-environmental failure, the static pairing page 404 when
   `pairing-app/dist` hasn't been built locally, is unaffected and matches
   4.0's documented CI build-order requirement), `tsc --noEmit` clean.
-- Still open: the operational daily-manifest collector and live retention/
-  overwrite/deletion-rejection verification against the real
-  `shore-audit-dev` bucket.
+- Still open: live retention/overwrite/deletion-rejection verification against
+  the real `shore-audit-dev` bucket and ingestion of host-signed batches.
 
 **5.3 — Broker per-envelope correlation records (landed)**
 
@@ -1876,7 +1901,7 @@ headers are absent from user notifications by default.
   tests pass; the single
   excluded static-assets test requires the documented pairing-app build step.
 
-**5.4 — Signed cross-stream manifest core (landed; collector remains open)**
+**5.4 — Signed cross-stream manifest core (landed, now retired)**
 
 - `agent/shore_audit_manifest.py` verifies the broker hash chain and host
   signed chain against independently supplied tips, correlates broker request
@@ -1894,16 +1919,11 @@ headers are absent from user notifications by default.
   manifest chain. The host now also records
   `shore.probe`, fail-closed, so valid broker inbound envelopes do not create
   systematic false correlation gaps.
-- Still open: an operational collector with read access to both B2 prefixes
-  and write-only access to the manifest prefix, plus live Object Lock and
-  retention verification against `shore-audit-dev`. Per
-  `docs/shore-security-operations.md`'s role table ("runtime has append-only
-  write credentials only"; "Security Audit Custodian has separate read/export
-  access"), this collector must be a process independent of both the host and
-  broker runtime, holding its own B2 read credentials -- not code added to
-  `agent/` or `shore/src/index.ts`, which must never gain B2 read access.
+- The operational collector is cancelled. Do not provision its B2 credentials
+  or manifest authority. Live receipts and Shore-side ingestion of host-signed
+  batches replace this design as specified in the architecture update above.
 
-**5.5 — Host-authenticated read access to the broker's own live audit chain (landed; not the 5.4 collector)**
+**5.5 — Host-authenticated read access to the broker's own live audit chain (landed)**
 
 - Added `shore/src/index.ts`'s `GET /@<username>/host/audit-events` (paginated,
   `?cursor=`) and its prerequisite `POST /@<username>/host/audit-challenge`,
@@ -1914,15 +1934,9 @@ headers are absent from user notifications by default.
   can't authenticate the other). Returns this account's own `Audit` events
   plus the current chain tip; scoped to the requesting host's own account,
   never another's.
-- This does **not** implement 5.4's still-open collector above: that
-  collector reads already-exported B2 archives under separate custodian
-  credentials, independent of both runtimes, per
-  `docs/shore-security-operations.md`. This instead gives the *host* live,
-  authenticated read access to the broker's version of its own account's
-  chain -- useful groundwork for Milestone 5's Action 4 (user-visible
-  session/device/capability history, not started) rather than for Action 3's
-  archive-based collector. Recorded here so it isn't mistaken for closing that
-  gap.
+- This gives the host live, authenticated read access to the broker's version
+  of its own account chain. It is useful groundwork for live receipt recovery
+  and user-visible history, but is not itself the signed receipt protocol.
 - Tests (`shore/test/shore.test.ts`, "Milestone 5 host audit-events
   endpoint"): a full round trip returning events and a matching tip, rejection
   with no proof, rejection of a proof signed against a `"websocket"`-purpose

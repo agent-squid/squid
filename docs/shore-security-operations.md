@@ -50,20 +50,25 @@ external users are admitted, default retention must be set to Compliance mode
 for 400 days and lifecycle deletion configured for versions after their lock
 expires. Shore uses a bucket-scoped write-only application key with no read,
 delete, bucket-management, legal-hold, or governance-bypass capability; key
-material is never committed. Object names are unique and contain no user data.
+material is never committed or distributed to AgentSquid hosts. Hosts send
+signed audit batches over their authenticated Shore connection; Shore verifies
+the pinned host key and archives the opaque batch alongside its own chain.
+Object names are unique and contain no user data.
 The Security Audit Custodian has separate read/export access; compliance-mode
 retention cannot be shortened or bypassed even by that role.
-Daily signed manifests anchor both chain heads, counts, and gaps. Export lag
-over five minutes pages Security; local queues are bounded but security actions
-fail closed if their audit record cannot be durably queued. Quarterly restore,
-fork, deletion, insertion, and correlation drills are required.
+Signed relay receipts provide live chain continuity and correlation. An invalid,
+missing, regressed, or conflicting receipt disables Shore remote traffic for
+that host; local/direct access remains available. Export lag over five minutes
+pages Security; local queues are bounded but security actions fail closed if
+their audit record cannot be durably queued. Quarterly restore, fork, deletion,
+insertion, receipt-continuity, and correlation drills are required.
 
 Development and pre-production verification use the private, SSE-B2-encrypted
 bucket `shore-audit-dev` (bucket ID `3cc542ee223c72f1ae0f051c`) with Object
 Lock enabled and default Governance retention of one day. Its bucket-scoped key
 and data are isolated from production, and Shore is not granted governance
-bypass. Tests must cover retention, expiry, lifecycle deletion, manifest
-verification, restore, and rejection of overwrite/deletion attempts. The two
+bypass. Tests must cover retention, expiry, lifecycle deletion, receipt and
+checkpoint verification, restore, and rejection of overwrite/deletion attempts. The two
 buckets share the B2 account's free storage allowance; usage alerts are set
 before the allowance is exhausted. Test storage is never an audit authority.
 
@@ -91,7 +96,7 @@ IP, other users, internal identifiers unnecessary to them, or secret material.
 | Host private-key theft / healthy displacement | Immediate high-severity audit/alert, privacy-safe batching, five-minute step-up atomic revoke | Security Owner | Legitimate reconnect ambiguity prevents automatic revoke. |
 | Pairing brute force/race | 128-bit random secret, five-minute/single-use/five-attempt bounds, layered rate limits, atomic consume | Protocol Owner | No memorable low-entropy fallback. |
 | Quota exhaustion / abuse | Per-route/account/device/IP application limits, reserved security capacity, degradation thresholds, paid spend ceiling | Shore Service Owner | Free WAF alone is insufficient; explicit unavailable response and opt-in Tailscale fallback. |
-| Audit tamper or credential compromise | Separate compliance-locked archive, chained signed manifests, least-privilege append credential, drills | Security Audit Custodian | Archive provider/account compromise is accepted third-party risk. |
+| Audit tamper or credential compromise | Compliance-locked archive, signed relay receipts, host-signed checkpoints, Shore-only least-privilege append credential, drills | Security Audit Custodian | Full Shore compromise can omit or fork receipts and archive writes; higher assurance requires an independent witness. |
 
 There is no unowned critical mitigation: interim ownership is stated wherever a
 future specialist role is named. Any critical/high security-review finding,

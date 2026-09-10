@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-08-11
-updated: 2026-09-07
+updated: 2026-09-10
 ---
 # ADR-0039: Remote access via Shore Relay on Cloudflare Workers + Durable Objects (agentsquid.ai/@username)
 
@@ -294,87 +294,61 @@ found no unresolved critical/high findings. Actually enabling this on the
 deployed production route is still a separate, explicit deployment step, not
 automatic from the gate closing.
 
-### Audit export and verification flow
+### Audit receipt, verification, and archive flow
 
-The two diagrams above cover the live command/control path, where the broker
-only ever sees ciphertext. This is the separate, metadata-only flow that
-lets a full broker storage compromise still be caught after the fact (see
-"Correlated, tamper-evident audit logging" under Security below, and
-`docs/shore-security-operations.md`): every write side uses a bucket-scoped,
-write-only B2 key with no read/delete/retention-management/legal-hold/
-governance-bypass capability, so no runtime that can write to the archive can
-also read, alter, or delete it.
+The two diagrams above cover the live command/control path, where Shore only
+sees ciphertext. Audit continuity is checked on that path rather than by a
+daily cross-stream collector. AgentSquid hosts never receive B2 credentials:
+they retain their signed local chain and send signed, bounded audit batches and
+checkpoints over the authenticated Shore connection. Shore verifies the host
+signature and archives those opaque records with its server-side B2 credential.
+The same credential archives Shore's own chain.
 
 ```mermaid
-flowchart TB
-    subgraph HostMachine["Host machine (agent/)"]
-        HostChain["Local sqlite audit_chain<br/>Ed25519-signed per event, own device key<br/>(shore_audit.py)"]
-        HostWriter["B2AuditWriter<br/>env: SQUID_SHORE_AUDIT_B2_KEY_ID / _APPLICATION_KEY<br/>capability: writeFiles only"]
-        HostChain --> HostWriter
+sequenceDiagram
+    participant D as Paired device
+    participant R as Shore relay
+    participant H as AgentSquid host
+    participant B as Object-locked B2
+    D->>R: signed E2E envelope
+    R->>R: append relay event; advance relay tip
+    R->>H: outer frame {envelope, signed relay receipt}
+    H->>H: verify signature, continuity, envelope commitment
+    alt receipt invalid, missing, regressed, or conflicting
+        H--xR: close remote channel; require explicit recovery
+        Note over H: local/direct access remains available
+    else receipt valid
+        H->>H: authorize/execute; append signed host events
+        H->>R: signed host checkpoint/batch
+        R->>R: verify pinned host key and chain continuity
+        R->>B: archive relay chain and opaque host batch
+        R->>H: signed archive acknowledgement
     end
-
-    subgraph Broker["Cloudflare Worker + DO (shore/src/index.ts)"]
-        BrokerChain["DO storage, audit: prefix<br/>hash-chained relay_frame_outcome /<br/>account-session-pairing events"]
-        BrokerWriter["createAuditArchiveRequest<br/>env: SHORE_AUDIT_B2_KEY_ID / _APPLICATION_KEY<br/>capability: writeFiles only"]
-        BrokerChain --> BrokerWriter
-    end
-
-    subgraph Bucket["B2 bucket: shore-audit-prod / shore-audit-dev"]
-        BrokerObjs["broker/accounts/{accountId}/events/*.json"]
-        HostObjs["host/events/*.json"]
-        ManifestObjs["manifests/*.json (signed daily manifest)"]
-    end
-
-    HostWriter -->|"PUT create-only"| HostObjs
-    BrokerWriter -->|"PUT create-only"| BrokerObjs
-
-    subgraph Collector["Daily manifest collector (STILL OPEN, not yet built)"]
-        Reader["B2 reader (not yet built)<br/>env (placeholder): SHORE_AUDIT_MANIFEST_READ_B2_KEY_ID / _APPLICATION_KEY<br/>capability: readFiles + listFiles, no prefix restriction"]
-        Verify["verify_broker_chain + verify_chain<br/>checks hash chain + host signatures<br/>against each host's pinned public key"]
-        Correlate["build_daily_manifest:<br/>requestId set-diff -&gt;<br/>missingHostRequestIds / missingBrokerRequestIds"]
-        Sign["sign with separate Ed25519<br/>manifest-authority key<br/>(distinct from host/broker signing keys)"]
-        Writer2["B2 writer (not yet built)<br/>env (placeholder): SHORE_AUDIT_MANIFEST_WRITE_B2_KEY_ID / _APPLICATION_KEY<br/>env (placeholder): SHORE_AUDIT_MANIFEST_PREFIX (manifests/)<br/>capability: writeFiles only, prefix-scoped to manifests/"]
-        Reader --> Verify --> Correlate --> Sign --> Writer2
-    end
-
-    BrokerObjs -->|"GET / List"| Reader
-    HostObjs -->|"GET / List"| Reader
-    Writer2 -->|"PUT create-only"| ManifestObjs
-
-    subgraph Custodian["Security Audit Custodian (separate role)"]
-        CustodianKey["Own read/export credential<br/>quarterly restore/fork/deletion/<br/>insertion/correlation drills<br/>never used by host, broker, or collector"]
-    end
-    Bucket -.-> CustodianKey
-
-    Correlate -->|"gap found"| Incident["Incident severity table<br/>(docs/shore-security-operations.md)<br/>SEV-1: forged authorization / audit loss<br/>-&gt; preserve evidence, kill switch, notify<br/>NOTE: currently discovered when the daily<br/>manifest is reviewed, not auto-paged<br/>(unlike the 5-min export-lag page)"]
 ```
 
 Environment variables used by this flow:
 
 | Env var | Used by | Capability | Status |
 | --- | --- | --- | --- |
-| `SQUID_SHORE_AUDIT_B2_KEY_ID` / `_APPLICATION_KEY` | Host (`agent/`, `B2AuditWriter`) | writeFiles only, own audit chain → `host/events/*.json` | live |
-| `SHORE_AUDIT_B2_KEY_ID` / `_APPLICATION_KEY` | Broker (`shore/src/index.ts`, `createAuditArchiveRequest`) | writeFiles only, own audit chain → `broker/accounts/{accountId}/events/*.json` | live |
-| `SHORE_AUDIT_MANIFEST_READ_B2_KEY_ID` / `_APPLICATION_KEY` | Daily manifest collector | readFiles + listFiles, no prefix restriction (reads both `broker/` and `host/`) | placeholder, collector not yet built |
-| `SHORE_AUDIT_MANIFEST_WRITE_B2_KEY_ID` / `_APPLICATION_KEY` | Daily manifest collector | writeFiles only, prefix-scoped to `manifests/` | placeholder, collector not yet built |
-| `SHORE_AUDIT_MANIFEST_PREFIX` | Daily manifest collector | non-secret config value (`manifests/`) | placeholder, collector not yet built |
+| `SHORE_AUDIT_B2_KEY_ID` / `_APPLICATION_KEY` | Shore only | writeFiles only, relay chain and opaque host-signed batches | live for relay chain; host-batch ingestion pending |
+| Relay audit signing key | Shore only | signs live receipts/checkpoints; public key pinned by hosts | pending |
 
-Open items this diagram makes explicit, all tracked in Milestone 5 Action 3 of
-`docs/plans/adr-0039-shore-remote-access.md`:
+The receipt is a versioned sibling of, not a mutation to, the sender-signed E2E
+envelope. It contains the envelope commitment/request ID, prior and new relay
+tips, disposition, and a signature from a relay audit key pinned by the host.
+The host persists its highest verified receipt. Failure closes Shore remote
+traffic only; recovery requires an explicit user-authorized reset or re-pairing.
 
-- The collector box (reader, verifier, correlator, signer, manifest writer)
-  is not implemented — only the pure verify/build functions exist today.
-  Nothing currently reads B2 or produces a manifest.
-- The collector's read and write keys must be two separate application keys
-  (B2 scopes a prefix restriction per key, not per capability within a key),
-  provisioned outside both the host's and broker's secrets.
-- `host/events/*.json` has no per-host segmentation in the object name today
-  (unlike `broker/accounts/{accountId}/events/...`), so the shared host
-  write key can't forge a validly-signed event for a different host, but it
-  can currently write unattributed objects anywhere under `host/`.
-- A correlation gap is only surfaced when the daily manifest is built and
-  read by a person; there is no automatic real-time page for it today, only
-  for export lag exceeding five minutes.
+This supersedes host-side B2 export, the daily manifest collector, its B2
+reader/writer credentials, and the separate manifest-signing authority. Those
+components must be removed rather than deployed.
+
+This design intentionally does not claim independent proof against complete
+Shore compromise. Shore can omit or fork both receipts and archive writes for a
+victim. Receipts provide immediate continuity evidence against faults and
+detectable equivocation; Object Lock provides retention after upload. A higher-
+assurance deployment needs an independent witness or external anchor, but never
+B2 credentials distributed to AgentSquid hosts.
 
 ### Traffic accounting and capacity forecast
 
@@ -688,10 +662,13 @@ as v1 requirements, not later hardening:
   and executing it, the host appends a signed event containing the same
   request ID, command hash, outcome, and host timestamp. The broker cannot
   read the command, while the correlated records still attribute its hash
-  to the observed source. Records are hash-chained and exported to append-
-  only storage under separate credentials that neither a remote session nor
-  the host process can delete. Raw command text is excluded by default to
-  avoid creating a second store of secrets.
+  to the observed source. Shore attaches a signed chain receipt outside the
+  E2E envelope; the host verifies and persists it before dispatch. The host
+  sends signed audit batches through the authenticated Shore channel, and
+  Shore archives both streams using Shore-only append credentials. No
+  AgentSquid host holds a B2 key. Receipt failure disables remote access while
+  local/direct access remains available. Raw command text is excluded by
+  default to avoid creating a second store of secrets.
 - **If real admin access to a user's account is ever needed** (e.g.
   support), it should require deliberate, logged, ideally user-notified
   action, not silent default reach — an append-only audit log the admin
