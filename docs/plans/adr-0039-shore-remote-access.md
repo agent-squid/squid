@@ -1784,6 +1784,20 @@ headers are absent from user notifications by default.
 
 **Architecture update — live receipts and Shore-only archival (accepted; implementation pending)**
 
+Current repository state as of 2026-09-10:
+
+| Capability | State in code | Target action |
+| --- | --- | --- |
+| Host signed SQLite chain, atomic signed tip, deterministic batches | Landed in `agent/shore_audit.py` | Keep and reuse |
+| Direct host-to-B2 exporter and `SQUID_SHORE_AUDIT_B2_*` startup wiring | Still live in `agent/shore_audit_export.py` and `agent/server.py` | Remove after Shore ingestion is proven |
+| Broker per-account audit chain and B2 exporter | Landed in `shore/src/index.ts` | Keep; extend to host batches |
+| Authenticated broker audit challenge/events endpoint | Landed in `shore/src/index.ts` | Reuse for bounded catch-up from an already trusted tip |
+| Daily manifest builder/verifier | Landed in `agent/shore_audit_manifest.py`; no operational collector exists | Retire and remove after replacement tests land |
+| Dedicated per-host receipt chain and relay signing key | Not implemented | Build |
+| Outer relay frame and receipt verification/persistence | Not implemented | Build in Shore and host transport |
+| Host-batch WebSocket ingestion and signed archive acknowledgement | Not implemented | Build |
+| Continuity-loss recovery/reinstall UX | Not implemented | Build before enforcing fail-closed behavior |
+
 - Host B2 configuration and direct host-to-B2 transport are superseded and must
   be removed. `SQUID_SHORE_AUDIT_B2_*` is not part of the supported host
   configuration.
@@ -2052,6 +2066,53 @@ headers are absent from user notifications by default.
   this slice), `tsc --noEmit` clean; `pairing-app` 24/24 (was 13/13), `tsc
   --noEmit` clean and `npm run build` produces both `pair-app.js` and
   `security-app.js`.
+
+**5.8 — Receipt protocol and relay chain (open)**
+
+- Define canonical receipt vectors and a dedicated monotonic chain per immutable
+  `host_id`. Cover ordinary encrypted envelopes in both directions and exclude
+  pairing packets and lease heartbeats. Allocate sequence/tip and the existing
+  pre-forward audit record atomically in the account Durable Object.
+- Add a Shore audit-signing key and pin its public key in AgentSquid releases.
+  Define old-key-signed rotation and explicit recovery for loss of the old key.
+- Return the receipt beside inbound E2E envelopes and as an acknowledgement for
+  host-originated envelopes. Retrying the same request ID and envelope must
+  return the same receipt rather than allocate a second entry.
+
+**5.9 — Host verification and remote-only fail-closed gate (open)**
+
+- Verify signature, envelope commitment, host/epoch, sequence, and previous tip
+  before application dispatch. Persist the receipt tip and pending host audit
+  decision in one SQLite transaction; repeated identical receipts are
+  idempotent.
+- Support bounded catch-up only when signed receipts extend the locally trusted
+  tip. Buffer/reject out-of-order delivery deterministically. Never adopt a
+  current Shore tip when the local checkpoint is absent.
+- On invalid, missing, regressed, or conflicting evidence, close Shore and block
+  remote dispatch only. Surface `audit continuity unavailable` separately from
+  `confirmed receipt conflict`; do not label either as proof of compromise.
+
+**5.10 — Shore ingestion of host-signed batches (open)**
+
+- Add a bounded host control message carrying 5.2a's stable signed batch. Verify
+  the pinned host key, key epoch, batch payload, and extension from the last
+  accepted host tip before storing or archiving it under an account/host prefix.
+- Return a Shore-signed archive acknowledgement. Advance the host export cursor
+  only after that acknowledgement verifies. Preserve retry-stable bodies and
+  request IDs across disconnects and ambiguous acknowledgements.
+
+**5.11 — Recovery, migration, and cleanup (open)**
+
+- Treat missing/rolled-back host SQLite as lost continuity. Local/direct access
+  stays available; Shore access requires a locally authorized recovery or
+  re-pairing ceremony. A reinstall creates a new `host_id`; reuse of old keys
+  without the checkpoint does not bypass recovery.
+- Record old and new epochs/tips when known without pretending the new genesis
+  extends lost history. Test crash boundaries, retries, concurrent devices,
+  restored backups, Shore rollback, key rotation, and reinstall.
+- Roll out receipt verification in observe-only mode first. After migration and
+  recovery work is proven, enforce the gate, remove host B2 code/settings/tests,
+  then remove daily-manifest code/tests and unprovision collector credentials.
 
 ## Milestone 6 — Production hardening and staged rollout
 

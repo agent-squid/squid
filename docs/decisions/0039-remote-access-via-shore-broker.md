@@ -350,6 +350,60 @@ detectable equivocation; Object Lock provides retention after upload. A higher-
 assurance deployment needs an independent witness or external anchor, but never
 B2 credentials distributed to AgentSquid hosts.
 
+Receipts do not replace the existing endpoint and identity controls. A stolen
+Shore account session alone still lacks the paired device private key required
+to create a valid command envelope. Compromise of a paired browser/device, the
+host, or Shore-served client JavaScript is more consequential because it occurs
+at an encryption endpoint and may use unlocked keys or plaintext. The receipt
+chain detects relay-history discontinuity; it does not make a compromised
+endpoint trustworthy or prevent denial of service.
+
+#### Receipt-chain scope and processing rules
+
+- Use a dedicated receipt chain per immutable `host_id`, separate from the
+  account lifecycle audit chain. It covers every ordinary encrypted envelope
+  accepted for relay in either direction; pairing packets and transport
+  heartbeats remain outside it. This avoids apparent gaps caused by unrelated
+  account events while the Durable Object transaction still serializes receipt
+  sequence allocation.
+- A receipt commits to the exact envelope bytes, request ID, direction,
+  disposition, receipt-chain epoch and sequence, previous receipt hash, and new
+  receipt hash. Shore signs the complete canonical receipt. The host receives a
+  receipt with inbound frames and an acknowledgement receipt for outbound
+  frames. A sender may retry the identical envelope/receipt pair by request ID;
+  it must not allocate a second chain entry.
+- The host verifies the relay signature, envelope commitment, expected epoch,
+  and link from its persisted tip before dispatch. Persisting the new tip and
+  the pending host audit decision must be one local transaction. Ordered
+  retransmission is idempotent. A genuine gap may be filled only with a bounded,
+  authenticated sequence of signed receipts extending the already trusted tip.
+- The relay audit public key is pinned in the installed AgentSquid release.
+  Rotation requires a transition signed by the prior key and a release carrying
+  the new pin. Loss of the old key uses the explicit recovery path; neither TLS
+  nor account login silently establishes a replacement audit key.
+
+#### Lost local state, reinstall, and recovery
+
+Loss or rollback of the host audit SQLite database also loses the trusted relay
+tip. This is reported as **audit continuity unavailable**, not proof of an
+attack. Shore remote dispatch remains disabled while loopback/direct access
+continues. The host must not adopt Shore's currently reported tip as trusted.
+
+A normal reinstall creates a new `host_id`, revokes the prior host through the
+existing recovery ceremony, and starts explicit new host-audit and receipt-chain
+epochs. Shore retains the signed transition between identities. Reusing an old
+host private key without its local audit state is still a continuity-loss case
+and requires locally authorized recovery or re-pairing. Recovery records the
+abandoned tip/epoch when known and the new genesis; it never rewrites or claims
+continuity with the lost chain.
+
+Operational faults are more likely than deliberate victim-specific relay
+equivocation, especially during initial deployment. Crash boundaries, retries,
+concurrent devices, signing-key rotation, deployment rollback, and restored host
+backups therefore require explicit tests. User-facing language must distinguish
+an unknown/lost checkpoint from a cryptographically confirmed conflict and must
+not claim that either alone proves compromise.
+
 ### Traffic accounting and capacity forecast
 
 In the target design, the WebSocket migration removes repeated polling for live

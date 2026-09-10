@@ -63,6 +63,14 @@ pages Security; local queues are bounded but security actions fail closed if
 their audit record cannot be durably queued. Quarterly restore, fork, deletion,
 insertion, receipt-continuity, and correlation drills are required.
 
+Loss, rollback, or corruption of the host audit SQLite database is an unknown
+checkpoint, not by itself proof of compromise. Remote dispatch remains disabled
+until locally authorized recovery or re-pairing; local/direct access remains
+available. A reinstall creates a new host identity and explicit chain genesis.
+Reusing an old private key without its checkpoint does not silently restore
+continuity. Alerts distinguish lost state from a verified signature, hash, or
+chain conflict.
+
 Development and pre-production verification use the private, SSE-B2-encrypted
 bucket `shore-audit-dev` (bucket ID `3cc542ee223c72f1ae0f051c`) with Object
 Lock enabled and default Governance retention of one day. Its bucket-scoped key
