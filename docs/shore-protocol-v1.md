@@ -165,6 +165,17 @@ Object transaction. A browser-to-host envelope is delivered to the host beside
 its receipt; a host-to-browser envelope receives a receipt acknowledgement at
 the host. Pairing traffic retains its existing raw packet format.
 
+Both receipt wire messages are canonical-JSON binary WebSocket frames with
+closed schemas. Browser-to-host delivery is exactly
+`{"v":1,"type":"relay_delivery","envelope":"base64url-exact-envelope-bytes","receipt":{...}}`.
+The host-to-browser acknowledgement returned to the host is exactly
+`{"v":1,"type":"relay_receipt_ack","receipt":{...}}`; the browser continues
+to receive the original encrypted envelope bytes. Base64url is canonical and
+unpadded. A receipt-enabled broker never forwards a browser-to-host ordinary
+envelope to the host outside `relay_delivery` and never accepts either wrapper
+from a client as an ordinary envelope. Pairing packets and zero-length lease
+heartbeats are never wrapped.
+
 Shore publishes and AgentSquid pins the receipt key for each epoch. A normal
 rotation statement has exactly `v`, `type`, `from_epoch`, `to_epoch`,
 `new_public_key`, and `signature`; `v` is `1`, `type` is

@@ -2139,9 +2139,23 @@ allocation cores landed)**
   chain. Tests cover allocation/signature validity, atomic audit
   linkage and rollback, stable retries, both conflict forms, corrupt stored
   records, and host scoping.
-  Still open: wire wrappers/acknowledgements, deployment-time signing-key
-  provisioning, and invoking the allocator from the live relay path once that
-  key is available.
+  The wire slice is also landed behind receipt-key configuration: exact browser
+  envelope bytes are base64url-preserved in a canonical `relay_delivery`
+  wrapper beside their receipt; host-originated envelopes retain their browser
+  wire format and receive a canonical `relay_receipt_ack` on the host socket.
+  Receipt acknowledgements use the same bounded socket queue as relayed
+  payloads; if an acknowledgement is backpressured or cannot be queued, Shore
+  records that outcome, closes the host socket, and does not forward the
+  corresponding envelope so a reconnect can retry the stable receipt safely.
+  The live relay invokes the allocator only when a complete, internally
+  consistent signing-key epoch and pinned public-key history are configured;
+  absent configuration preserves the pre-enforcement transport, while partial
+  or mismatched configuration drops ordinary remote frames closed. Key
+  coordinates must be canonical unpadded 32-byte base64url, and malformed JWK
+  imports map to the same deterministic configuration failure. Pairing
+  packets and lease heartbeats remain unchanged. Still open: deployment-time
+  signing-key provisioning and host-side receipt verification/persistence
+  (5.10), which must land before receipt mode is enabled outside tests.
 
 **5.10 — Host verification and remote-only fail-closed gate (open)**
 
