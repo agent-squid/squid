@@ -920,6 +920,7 @@ body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
   touch-action: pan-y;
@@ -1056,7 +1057,7 @@ body {
   padding: 0;
 }
 .ctx-popup-jump-btn:hover { color: var(--accent); text-decoration: underline; }
-.msg.assistant { background: var(--surface-2); align-self: flex-start; line-height: 1.6; }
+.msg.assistant { background: var(--surface-2); align-self: flex-start; line-height: 1.6; overflow-wrap: anywhere; }
 .msg.assistant.shell-result { min-width: 0; }
 .msg.assistant.shell-result .response-header { font-family: system-ui, sans-serif; white-space: normal; }
 .msg.assistant.shell-result .shell-output {
