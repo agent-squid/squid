@@ -2109,7 +2109,8 @@ repository and GitHub cleanup landed; provider revocation pending)**
   Cloudflare and B2 keys are confirmed revoked provider-side; and both GitHub
   environments contain no Shore secrets or variables.
 
-**5.9 — Receipt protocol and relay chain (in progress; protocol core landed)**
+**5.9 — Receipt protocol and relay chain (in progress; protocol and durable
+allocation cores landed)**
 
 - Define canonical receipt vectors and a dedicated monotonic chain per immutable
   `host_id`. Cover ordinary encrypted envelopes in both directions and exclude
@@ -2124,10 +2125,23 @@ repository and GitHub cleanup landed; provider revocation pending)**
   idempotency/conflict semantics, rotation/recovery requirements, normative
   domain-separated Ed25519 vectors, cross-language vector verification, and Shore
   receipt and old-key rotation signing/verification cores with closed-schema,
-  mutation, nonconsecutive-epoch, and wrong-key tests. Still open:
-  Durable Object allocation/idempotency storage,
-  pre-forward audit transaction integration, wire wrappers/acknowledgements,
-  and deployment-time signing-key provisioning.
+  mutation, nonconsecutive-epoch, and wrong-key tests. The Durable Object now
+  also has host-scoped monotonic receipt allocation: receipt tip, stable
+  `(host_id, request_id)` idempotency record, and the pre-forward broker audit
+  event commit in one storage transaction. Byte-identical retries return the
+  stored signed receipt without advancing either chain; changed bytes or an
+  opposite direction fail with `shore_receipt_conflict`; separate immutable
+  hosts retain independent chains. A retry also revalidates its stored
+  receipt's closed schema, key fields, canonical encodings, hash, and signature
+  against the pinned key for its recorded epoch before returning it, failing
+  closed on corrupt durable state. New receipts are likewise verified before
+  commit so a signing/public-key configuration mismatch cannot poison the
+  chain. Tests cover allocation/signature validity, atomic audit
+  linkage and rollback, stable retries, both conflict forms, corrupt stored
+  records, and host scoping.
+  Still open: wire wrappers/acknowledgements, deployment-time signing-key
+  provisioning, and invoking the allocator from the live relay path once that
+  key is available.
 
 **5.10 — Host verification and remote-only fail-closed gate (open)**
 
