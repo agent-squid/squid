@@ -25,6 +25,7 @@ from typing import Any, Mapping
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from .shore_crypto import b64url, canonical, unb64url, uuid7
+from .shore_receipt import RECEIPT_GENESIS_HASH, ReceiptVerificationError, VerifiedRelayReceipt
 
 GENESIS_HASH = "sha256:" + "0" * 43
 
@@ -149,19 +150,102 @@ class ShoreAuditLog:
             "CREATE TABLE IF NOT EXISTS audit_export_state (id INTEGER PRIMARY KEY CHECK (id = 1), "
             "seq INTEGER NOT NULL, hash TEXT NOT NULL)"
         )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS relay_receipts ("
+            "seq INTEGER PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, receipt_hash TEXT NOT NULL UNIQUE, "
+            "prev_hash TEXT NOT NULL, receipt_epoch INTEGER NOT NULL, direction TEXT NOT NULL, "
+            "envelope_hash TEXT NOT NULL, receipt_json BLOB NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS relay_receipt_tip (id INTEGER PRIMARY KEY CHECK (id = 1), "
+            "seq INTEGER NOT NULL, hash TEXT NOT NULL, receipt_epoch INTEGER NOT NULL)"
+        )
         return connection
 
     def _sign_tip(self, seq: int, hash_: str) -> str:
         return b64url(self.host_signing.sign(canonical({"seq": seq, "hash": hash_, "keyEpoch": self.key_epoch})))
 
+    @staticmethod
+    def _stage_receipt(connection: sqlite3.Connection, relay_receipt: VerifiedRelayReceipt) -> bool:
+        receipt = relay_receipt.receipt
+        existing = connection.execute(
+            "SELECT receipt_hash, envelope_hash, direction FROM relay_receipts WHERE request_id = ?",
+            (receipt["request_id"],),
+        ).fetchone()
+        if existing is not None:
+            if existing == (receipt["receipt_hash"], receipt["envelope_hash"], receipt["direction"]):
+                return False
+            raise ReceiptVerificationError("shore_receipt_conflict")
+        tip = connection.execute("SELECT seq, hash FROM relay_receipt_tip WHERE id = 1").fetchone()
+        if tip is None:
+            if connection.execute("SELECT 1 FROM relay_receipts LIMIT 1").fetchone() is not None:
+                raise ReceiptVerificationError("shore_audit_continuity_unavailable")
+        else:
+            stored_tip = connection.execute(
+                "SELECT receipt_hash FROM relay_receipts WHERE seq = ?", (tip[0],),
+            ).fetchone()
+            if stored_tip != (tip[1],):
+                raise ReceiptVerificationError("shore_audit_continuity_unavailable")
+        expected_seq = (tip[0] if tip else 0) + 1
+        expected_hash = tip[1] if tip else RECEIPT_GENESIS_HASH
+        if relay_receipt.seq != expected_seq or receipt["prev_hash"] != expected_hash:
+            code = (
+                "shore_receipt_conflict" if relay_receipt.seq <= expected_seq
+                else "shore_audit_continuity_unavailable"
+            )
+            raise ReceiptVerificationError(code)
+        connection.execute(
+            "INSERT INTO relay_receipts(seq, request_id, receipt_hash, prev_hash, receipt_epoch, "
+            "direction, envelope_hash, receipt_json) VALUES (?,?,?,?,?,?,?,?)",
+            (relay_receipt.seq, receipt["request_id"], receipt["receipt_hash"], receipt["prev_hash"],
+             receipt["receipt_epoch"], receipt["direction"], receipt["envelope_hash"], canonical(receipt)),
+        )
+        connection.execute(
+            "INSERT INTO relay_receipt_tip(id, seq, hash, receipt_epoch) VALUES (1,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET seq=excluded.seq, hash=excluded.hash, "
+            "receipt_epoch=excluded.receipt_epoch",
+            (relay_receipt.seq, receipt["receipt_hash"], receipt["receipt_epoch"]),
+        )
+        return True
+
+    def accept_receipt(self, relay_receipt: VerifiedRelayReceipt) -> bool:
+        """Persist a verified outbound acknowledgement without application dispatch."""
+        with self._connect() as connection:
+            connection.execute("PRAGMA synchronous = FULL")
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                inserted = self._stage_receipt(connection, relay_receipt)
+                connection.execute("COMMIT")
+                return inserted
+            except Exception:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+
+    def has_receipt(self, receipt: dict[str, Any]) -> bool:
+        """Return whether this exact canonical receipt is already durable."""
+        request_id = receipt.get("request_id") if isinstance(receipt, dict) else None
+        if not isinstance(request_id, str):
+            return False
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT receipt_json FROM relay_receipts WHERE request_id = ?", (request_id,),
+            ).fetchone()
+        return row is not None and bytes(row[0]) == canonical(receipt)
+
     def record(self, *, request_id: str, device_id: str, message_type: str, frame: dict[str, Any],
-               decision: str, outcome: str, now_ms: int | None = None) -> dict[str, Any]:
+               decision: str, outcome: str, now_ms: int | None = None,
+               relay_receipt: VerifiedRelayReceipt | None = None) -> dict[str, Any] | None:
         now_ms = int(time.time() * 1000) if now_ms is None else now_ms
         command_hash = _sha256_commitment(frame)
         with self._connect() as connection:
             connection.execute("PRAGMA synchronous = FULL")
             connection.execute("BEGIN IMMEDIATE")
             try:
+                if relay_receipt is not None:
+                    if not self._stage_receipt(connection, relay_receipt):
+                        connection.execute("ROLLBACK")
+                        return None
                 row = connection.execute("SELECT seq, hash FROM audit_chain ORDER BY seq DESC LIMIT 1").fetchone()
                 seq = (row[0] if row else 0) + 1
                 prev_hash = row[1] if row else GENESIS_HASH

@@ -709,7 +709,73 @@ test('auto transport does not resubmit a command that times out after send', asy
   await sendMsg(page, 'do not duplicate after timeout');
 
   await expect(page.locator(MSG_ERROR)).toContainText('timed out after submission', { timeout: 10_000 });
+  await expect(page.locator(THINKING)).toHaveCount(0);
+  await expect(page.locator(RESPONSE)).toHaveCount(1);
   expect(httpChatRequests).toBe(0);
+});
+
+test('process row appearing after the timeout error does not revive a duplicate recovering bubble', async ({ page }) => {
+  test.setTimeout(15_000);
+  await page.addInitScript(() => {
+    class StalledResultWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      constructor() {
+        this.readyState = StalledResultWebSocket.CONNECTING;
+        setTimeout(() => {
+          this.readyState = StalledResultWebSocket.OPEN;
+          this.onopen?.();
+          this.receive({ v: 1, type: 'hello', payload: { cursor: 0 } });
+        });
+      }
+      send(data) {
+        const frame = JSON.parse(data);
+        if (frame.type === 'subscribe') {
+          setTimeout(() => this.receive({ v: 1, type: 'subscribed', payload: {} }));
+        }
+        // chat.start never gets a command.result — client-side 5s timeout fires.
+      }
+      receive(frame) { this.onmessage?.({ data: JSON.stringify(frame) }); }
+      close() { this.readyState = 3; this.onclose?.(); }
+    }
+    window.WebSocket = StalledResultWebSocket;
+  });
+  // Simulates the real race deterministically: the server hasn't registered
+  // the process row yet when the catch block's own recoverMsgIdFromProcesses()
+  // checks (still no .msg-error in the DOM at that point), but it has by the
+  // time the finally block would redundantly check again a moment later
+  // (.msg-error is in the DOM by then, since showError() runs synchronously
+  // before finally's own check). A background procPoll (started at
+  // sendMessage's top, every 3s) also hits /processes; it gets the same
+  // "not yet" answer since it fires before any error is shown too.
+  await page.addInitScript(() => {
+    const realFetch = window.fetch.bind(window);
+    window.fetch = (url, opts) => {
+      if (url === '/processes') {
+        const hasError = !!document.querySelector('.msg-error');
+        const rows = hasError
+          ? [{ topic: 'default', agent: 'claude', adhoc: true, msg_id: 989, state: 'running' }]
+          : [];
+        return Promise.resolve(new Response(JSON.stringify(rows), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        }));
+      }
+      return realFetch(url, opts);
+    };
+  });
+  await mockBackend(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'auto' } }));
+  await page.route('**/chat', route => route.abort());
+
+  await page.goto('/');
+  await sendMsg(page, 'race between timeout error and late process row');
+
+  await expect(page.locator(MSG_ERROR)).toContainText('timed out after submission', { timeout: 10_000 });
+  // Give the (buggy, pre-fix) finally-block retry a chance to fire and revive
+  // thinkingBubble into a second "Connection interrupted — recovering…" card.
+  await page.waitForTimeout(1000);
+  await expect(page.locator(THINKING)).toHaveCount(0);
+  await expect(page.locator(RESPONSE)).toHaveCount(1);
 });
 
 test('late websocket start result replaces timeout error and reconciles discovered duplicate', async ({ page }) => {

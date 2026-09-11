@@ -6148,6 +6148,17 @@ async function sendMessage(text, opts = {}) {
         updateThinkingPreview();
         startStatusFallback(msgId);
       } else {
+        // Freeze/remove the still-live thinkingBubble before showError places its
+        // own separate bubble — otherwise finally's `if (!thinkingFrozen)` block
+        // below sees an unfrozen bubble and independently retries
+        // recoverMsgIdFromProcesses(), and if the process row has since appeared
+        // server-side, revives thinkingBubble into a second "Connection
+        // interrupted — recovering…" bubble alongside the error already shown.
+        // Leave completedFromStatus/completionRendered untouched: a WS
+        // chat.start timeout still has a live onLateResult side-channel (see
+        // realtimeV1.start above) that must still be able to reconcile this
+        // bubble if the server's delayed, authoritative result arrives after.
+        discardInterruptedStatusBubble(err?.message) || freezeThinking();
         showError(err?.message || 'Unable to start response stream.');
       }
     }

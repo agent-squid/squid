@@ -36,9 +36,10 @@ from .shore_audit import ShoreAuditLog
 from .shore_capabilities import authorize_capability_frame
 from .shore_crypto import (
     MAX_KEY_INVOCATIONS, DeviceTrustStore, PairingCoordinator, ReplayStore, ShoreProtocolError,
-    TrustedDevice, b64url, canonical, open_envelope, seal_envelope, uuid7,
+    TrustedDevice, b64url, canonical, open_envelope, seal_envelope, unb64url, uuid7,
     valid_broker_url,
 )
+from .shore_receipt import ReceiptVerificationError, VerifiedRelayReceipt, verify_relay_receipt
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ log = logging.getLogger(__name__)
 # (imported lazily from agent.server so there is one source of truth) --
 # this is only how often the sweep itself runs, not a protocol value.
 _PUSH_SWEEP_SECONDS = 5.0
+_MAX_PENDING_RECEIPTS = 256
 
 
 @dataclass
@@ -155,7 +157,8 @@ class ShoreChannel:
         self._drop_session(device_id)
         return self.trust.revoke(device_id)
 
-    async def handle(self, payload: bytes, *, now_ms: int | None = None) -> list[bytes]:
+    async def handle(self, payload: bytes, *, now_ms: int | None = None,
+                     relay_receipt: VerifiedRelayReceipt | None = None) -> list[bytes]:
         """Handle one binary relay frame; malformed input always fails closed.
 
         Returns zero or more sealed `host_to_browser` envelopes to send, in
@@ -169,6 +172,9 @@ class ShoreChannel:
         except Exception as exc:
             raise ShoreProtocolError("shore_invalid_frame") from exc
 
+        if relay_receipt is not None and value.get("request_id") != relay_receipt.receipt["request_id"]:
+            raise ReceiptVerificationError("shore_receipt_conflict")
+
         if set(value) == {"v", "ceremony_id", "direction", "nonce", "ciphertext"}:
             if value.get("direction") != "browser_to_host":
                 raise ShoreProtocolError("pairing_failed")
@@ -181,7 +187,7 @@ class ShoreChannel:
             )
             return [] if response is None else [canonical(response)]
 
-        return await self._handle_envelope(value, now_ms=now_ms)
+        return await self._handle_envelope(value, now_ms=now_ms, relay_receipt=relay_receipt)
 
     async def _record_audit_best_effort(
         self, *, request_id: str, device_id: str, message_type: str, frame: dict[str, Any],
@@ -199,7 +205,8 @@ class ShoreChannel:
                 context, request_id, device_id, exc_info=True,
             )
 
-    async def _handle_envelope(self, envelope: dict[str, Any], *, now_ms: int | None) -> list[bytes]:
+    async def _handle_envelope(self, envelope: dict[str, Any], *, now_ms: int | None,
+                               relay_receipt: VerifiedRelayReceipt | None = None) -> list[bytes]:
         device_id = envelope.get("device_id")
         trusted = self.trust.get(device_id) if isinstance(device_id, str) else None
         # Device approval is scoped to the host-key epoch in which pairing
@@ -232,10 +239,15 @@ class ShoreChannel:
         if frame.get("type") == "shore.probe":
             self._validate_probe(frame)
             try:
-                await asyncio.to_thread(
+                recorded = await asyncio.to_thread(
                     self.audit.record, request_id=envelope["request_id"], device_id=trusted.device_id,
                     message_type="shore.probe", frame=frame, decision="protocol", outcome="ok", now_ms=now_ms,
+                    relay_receipt=relay_receipt,
                 )
+                if recorded is None:
+                    return []
+            except ReceiptVerificationError:
+                raise
             except Exception as exc:
                 raise ShoreProtocolError("shore_audit_unavailable") from exc
             response = {"v": 1, "type": "shore.probe.result", "payload": frame["payload"]}
@@ -246,13 +258,29 @@ class ShoreChannel:
         try:
             authorized = authorize_capability_frame(trusted.capabilities, frame)
         except ShoreProtocolError as exc:
-            # Already being denied; a failure recording that doesn't need
-            # to escalate the way a granted command's does below.
-            await self._record_audit_best_effort(
-                request_id=request_id, device_id=trusted.device_id,
-                message_type=message_type, frame=frame, decision="denied",
-                outcome=f"denied:{exc.code}", now_ms=now_ms, context="capability denial",
-            )
+            if relay_receipt is not None:
+                # The receipt chain covers denied ordinary envelopes too. Its
+                # tip and the denial must advance atomically or the next valid
+                # receipt would appear to be a gap.
+                try:
+                    await asyncio.to_thread(
+                        self.audit.record, request_id=request_id, device_id=trusted.device_id,
+                        message_type=message_type, frame=frame, decision="denied",
+                        outcome=f"denied:{exc.code}", now_ms=now_ms,
+                        relay_receipt=relay_receipt,
+                    )
+                except ReceiptVerificationError:
+                    raise
+                except Exception as audit_exc:
+                    raise ShoreProtocolError("shore_audit_unavailable") from audit_exc
+            else:
+                # Legacy/observe-only transport keeps the established
+                # best-effort behavior until receipt enforcement is enabled.
+                await self._record_audit_best_effort(
+                    request_id=request_id, device_id=trusted.device_id,
+                    message_type=message_type, frame=frame, decision="denied",
+                    outcome=f"denied:{exc.code}", now_ms=now_ms, context="capability denial",
+                )
             raise
 
         # Durably record the authorization *before* dispatch runs any side
@@ -262,10 +290,15 @@ class ShoreChannel:
         # record below is a second, separately verifiable event correlated
         # by the same request_id, not an in-place rewrite of this one.
         try:
-            await asyncio.to_thread(
+            recorded = await asyncio.to_thread(
                 self.audit.record, request_id=request_id, device_id=trusted.device_id,
                 message_type=message_type, frame=frame, decision="granted", outcome="pending", now_ms=now_ms,
+                relay_receipt=relay_receipt,
             )
+            if recorded is None:
+                return []
+        except ReceiptVerificationError:
+            raise
         except Exception as exc:
             # shore-security-operations.md: "security actions fail closed if
             # their audit record cannot be durably queued" -- a command that
@@ -452,11 +485,33 @@ class ShoreHostConnection:
         self.base_backoff = base_backoff
         self.max_backoff = max_backoff
         self.stable_seconds = stable_seconds
+        self.receipt_keys = self._load_receipt_keys()
+        self._pending_receipt_envelopes: dict[str, bytes] = {}
         base_path = parsed.path.rstrip("/")
         account_path = f"{base_path}/@{quote(username, safe='')}"
         self.challenge_url = urlunsplit((parsed.scheme, parsed.netloc, account_path + "/host/connect-challenge", "", ""))
         ws_scheme = "wss" if parsed.scheme == "https" else "ws"
         self.relay_url = urlunsplit((ws_scheme, parsed.netloc, account_path + "/relay", f"account_id={channel.account_id}", ""))
+
+    @staticmethod
+    def _load_receipt_keys() -> dict[int, ed25519.Ed25519PublicKey]:
+        encoded = os.environ.get("SHORE_RECEIPT_PUBLIC_KEYS")
+        if encoded is None:
+            return {}
+        try:
+            values = json.loads(encoded)
+            if not isinstance(values, dict) or not values:
+                raise ValueError
+            keys = {}
+            for epoch, value in values.items():
+                if not isinstance(epoch, str) or not epoch.isascii() or not epoch.isdigit() or epoch.startswith("0"):
+                    raise ValueError
+                if not isinstance(value, str) or b64url(unb64url(value)) != value:
+                    raise ValueError
+                keys[int(epoch)] = ed25519.Ed25519PublicKey.from_public_bytes(unb64url(value))
+            return keys
+        except Exception as exc:
+            raise ValueError("invalid SHORE_RECEIPT_PUBLIC_KEYS") from exc
 
     async def run(self, stop: asyncio.Event) -> None:
         """Reconnect with bounded exponential backoff; return only when stopped."""
@@ -536,6 +591,9 @@ class ShoreHostConnection:
     async def _serve(self, socket: Any, stop: asyncio.Event) -> None:
         from .server import _realtime_notifier
 
+        # Acknowledgements belong to one authenticated socket. A reconnect
+        # cannot legitimately acknowledge bytes sent on its predecessor.
+        self._pending_receipt_envelopes.clear()
         last_sent = time.monotonic()
         receive = asyncio.create_task(socket.recv())
         generation = _realtime_notifier.generation
@@ -577,11 +635,92 @@ class ShoreHostConnection:
                 if not isinstance(message, bytes):
                     await socket.close(code=1003, reason="binary_frames_only")
                     return
+                if message == b"":
+                    # Broker lease heartbeat; receipts cover ordinary
+                    # encrypted envelopes only.
+                    continue
                 try:
-                    responses = await self.channel.handle(message)
+                    relay_receipt = None
+                    envelope = message
+                    if self.receipt_keys:
+                        try:
+                            wrapper = json.loads(message)
+                            if canonical(wrapper) != message or wrapper.get("v") != 1:
+                                raise ValueError
+                            if set(wrapper) == {"v", "ceremony_id", "direction", "nonce", "ciphertext"}:
+                                # Pairing packets retain their raw wire format
+                                # and are validated by ShoreChannel.handle.
+                                try:
+                                    responses = await self.channel.handle(message)
+                                except ShoreProtocolError:
+                                    continue
+                                except asyncio.CancelledError:
+                                    raise
+                                except Exception:
+                                    log.exception("shore: unexpected error handling pairing frame")
+                                    continue
+                                for response in responses:
+                                    await socket.send(response)
+                                    last_sent = time.monotonic()
+                                continue
+                            if wrapper.get("type") == "relay_receipt_ack" and set(wrapper) == {"v", "type", "receipt"}:
+                                receipt_value = wrapper["receipt"]
+                                request_id = receipt_value.get("request_id") if isinstance(receipt_value, dict) else None
+                                pending = self._pending_receipt_envelopes.get(request_id) if isinstance(request_id, str) else None
+                                if pending is None:
+                                    try:
+                                        if await asyncio.to_thread(self.channel.audit.has_receipt, receipt_value):
+                                            # Stable acknowledgement retry: it
+                                            # was verified before the durable
+                                            # copy was accepted, so it is a
+                                            # no-op and must not regress tip.
+                                            continue
+                                    except Exception as exc:
+                                        raise ReceiptVerificationError("shore_audit_continuity_unavailable") from exc
+                                    raise ReceiptVerificationError("shore_audit_continuity_unavailable")
+                                acknowledgement = verify_relay_receipt(
+                                    receipt_value, pending, host_id=self.host_id,
+                                    direction="host_to_browser", keys=self.receipt_keys,
+                                )
+                                try:
+                                    await asyncio.to_thread(self.channel.audit.accept_receipt, acknowledgement)
+                                except ReceiptVerificationError:
+                                    raise
+                                except Exception as exc:
+                                    raise ReceiptVerificationError("shore_audit_continuity_unavailable") from exc
+                                self._pending_receipt_envelopes.pop(request_id, None)
+                                continue
+                            if set(wrapper) != {"v", "type", "envelope", "receipt"} or wrapper.get("type") != "relay_delivery":
+                                raise ValueError
+                            envelope = unb64url(wrapper["envelope"])
+                        except Exception as exc:
+                            if isinstance(exc, ReceiptVerificationError):
+                                raise
+                            raise ReceiptVerificationError("shore_audit_continuity_unavailable") from exc
+                        relay_receipt = verify_relay_receipt(
+                            wrapper["receipt"], envelope, host_id=self.host_id,
+                            direction="browser_to_host", keys=self.receipt_keys,
+                        )
+                    responses = await self.channel.handle(envelope, relay_receipt=relay_receipt)
+                except ReceiptVerificationError as exc:
+                    await socket.close(code=1008, reason=exc.code)
+                    return
                 except ShoreProtocolError:
                     # A malformed or injected peer frame must not tear down the
                     # authenticated host transport or produce an oracle response.
+                    # Once a relay receipt has been authenticated, however,
+                    # failing before its atomic audit transaction would strand
+                    # the local tip behind Shore's next sequence forever.
+                    if relay_receipt is not None:
+                        try:
+                            persisted = await asyncio.to_thread(
+                                self.channel.audit.has_receipt, relay_receipt.receipt,
+                            )
+                        except Exception:
+                            persisted = False
+                        if not persisted:
+                            await socket.close(code=1008, reason="shore_audit_continuity_unavailable")
+                            return
                     continue
                 except asyncio.CancelledError:
                     raise
@@ -598,7 +737,7 @@ class ShoreHostConnection:
                     log.exception("shore: unexpected error handling relay frame")
                     continue
                 for response in responses:
-                    await socket.send(response)
+                    await self._send_application(socket, response)
                     last_sent = time.monotonic()
         finally:
             receive.cancel()
@@ -653,7 +792,7 @@ class ShoreHostConnection:
                     self.channel._seal, trusted,
                     {"v": 1, "type": "error", "payload": {"code": "slow_consumer", "resumable": True}}, now_ms,
                 )
-                await socket.send(sealed)
+                await self._send_application(socket, sealed)
                 sent += 1
                 self.channel._drop_session(device_id)
                 continue
@@ -669,14 +808,30 @@ class ShoreHostConnection:
             while len(outbound):
                 frame = await outbound.get()
                 sealed = await asyncio.to_thread(self.channel._seal, trusted, frame, now_ms)
-                await socket.send(sealed)
+                await self._send_application(socket, sealed)
                 sent += 1
 
             if now - session.last_ping_at >= _REALTIME_HEARTBEAT_SECONDS:
                 sealed = await asyncio.to_thread(
                     self.channel._seal, trusted, {"v": 1, "type": "ping", "payload": {}}, now_ms,
                 )
-                await socket.send(sealed)
+                await self._send_application(socket, sealed)
                 sent += 1
                 session.last_ping_at = now
         return sent
+
+    async def _send_application(self, socket: Any, envelope: bytes) -> None:
+        if self.receipt_keys:
+            try:
+                request_id = json.loads(envelope)["request_id"]
+                if not isinstance(request_id, str):
+                    raise ValueError
+            except Exception as exc:
+                raise ShoreProtocolError("shore_invalid_outbound_envelope") from exc
+            existing = self._pending_receipt_envelopes.get(request_id)
+            if existing is not None and existing != envelope:
+                raise ShoreProtocolError("shore_receipt_conflict")
+            if existing is None and len(self._pending_receipt_envelopes) >= _MAX_PENDING_RECEIPTS:
+                raise ShoreProtocolError("shore_receipt_backpressure")
+            self._pending_receipt_envelopes[request_id] = envelope
+        await socket.send(envelope)

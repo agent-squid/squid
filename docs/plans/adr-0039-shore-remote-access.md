@@ -2157,7 +2157,7 @@ allocation cores landed)**
   signing-key provisioning and host-side receipt verification/persistence
   (5.10), which must land before receipt mode is enabled outside tests.
 
-**5.10 — Host verification and remote-only fail-closed gate (open)**
+**5.10 — Host verification and remote-only fail-closed gate (landed)**
 
 - Verify signature, envelope commitment, host/epoch, sequence, and previous tip
   before application dispatch. Persist the receipt tip and pending host audit
@@ -2169,6 +2169,19 @@ allocation cores landed)**
 - On invalid, missing, regressed, or conflicting evidence, close Shore and block
   remote dispatch only. Surface `audit continuity unavailable` separately from
   `confirmed receipt conflict`; do not label either as proof of compromise.
+
+Implemented in `agent/shore_receipt.py`, `agent/shore_audit.py`, and
+`agent/shore_transport.py`: configured hosts unwrap only canonical receipt wire
+frames, verify the pinned epoch key, exact envelope commitment, host/direction,
+content hash, signature, sequence, and prior tip before dispatch. The inbound
+tip and pending/denied host audit event share one `BEGIN IMMEDIATE` transaction;
+identical retries do not dispatch twice. Outbound acknowledgements verify
+against the exact sent bytes and advance the same chain. Missing wrappers,
+unknown epochs, gaps, and absent local genesis close only the Shore socket as
+`shore_audit_continuity_unavailable` (including a non-genesis sequence when no
+local checkpoint exists); signed mutations, regressions, and forks
+close it as `shore_receipt_conflict`. Direct/local transport is unchanged, and
+receipt enforcement remains configuration-gated for the 5.12 rollout ceremony.
 
 **5.11 — Shore ingestion of host-signed batches (open)**
 

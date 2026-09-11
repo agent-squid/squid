@@ -486,6 +486,74 @@ async def test_inbound_invalid_frames_cannot_suppress_host_heartbeat(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_receipt_mode_preserves_pairing_packets_and_broker_heartbeats(tmp_path):
+    host_signing = ed25519.Ed25519PrivateKey.generate()
+    channel = ShoreChannel(
+        tmp_path, account_id=ACCOUNT, host_id=HOST, host_signing=host_signing,
+        host_agreement=x25519.X25519PrivateKey.generate(),
+    )
+    connection = ShoreHostConnection(
+        channel, broker="https://broker.example", username="alice",
+        host_id=HOST, signing_key=host_signing,
+    )
+    connection.receipt_keys = {1: ed25519.Ed25519PrivateKey.generate().public_key()}
+    pairing_packet = canonical({
+        "v": 1, "ceremony_id": CEREMONY, "direction": "browser_to_host",
+        "nonce": "nonce", "ciphertext": "ciphertext",
+    })
+    handled = []
+
+    async def handle(payload, **_kwargs):
+        handled.append(payload)
+        return [b"pairing-response"]
+
+    channel.handle = handle
+
+    class Socket:
+        def __init__(self): self.receives = 0; self.sent = []
+        async def recv(self):
+            self.receives += 1
+            if self.receives == 1: return b""
+            if self.receives == 2: return pairing_packet
+            raise asyncio.CancelledError
+        async def send(self, value): self.sent.append(value)
+
+    socket = Socket()
+    with pytest.raises(asyncio.CancelledError):
+        await connection._serve(socket, asyncio.Event())
+    assert handled == [pairing_packet]
+    assert socket.sent == [b"pairing-response"]
+    assert connection._pending_receipt_envelopes == {}
+
+
+@pytest.mark.asyncio
+async def test_receipt_mode_closes_on_unwrapped_ordinary_frame(tmp_path):
+    host_signing = ed25519.Ed25519PrivateKey.generate()
+    channel = ShoreChannel(
+        tmp_path, account_id=ACCOUNT, host_id=HOST, host_signing=host_signing,
+        host_agreement=x25519.X25519PrivateKey.generate(),
+    )
+    connection = ShoreHostConnection(
+        channel, broker="https://broker.example", username="alice",
+        host_id=HOST, signing_key=host_signing,
+    )
+    connection.receipt_keys = {1: ed25519.Ed25519PrivateKey.generate().public_key()}
+
+    class Socket:
+        def __init__(self): self.closed = None; self.receives = 0
+        async def recv(self):
+            self.receives += 1
+            if self.receives == 1: return b"ordinary-envelope"
+            await asyncio.Future()
+        async def send(self, _value): pass
+        async def close(self, **kwargs): self.closed = kwargs
+
+    socket = Socket()
+    await connection._serve(socket, asyncio.Event())
+    assert socket.closed == {"code": 1008, "reason": "shore_audit_continuity_unavailable"}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 409, 413, 422, 426])
 async def test_terminal_upgrade_statuses_are_not_retried(monkeypatch, tmp_path, status):
     from websockets.datastructures import Headers
