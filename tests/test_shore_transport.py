@@ -16,6 +16,9 @@ from agent.shore_crypto import (
     pairing_finished, seal_envelope, unb64url,
 )
 from agent.shore_transport import ShoreChannel, ShoreHostConnection, configured_host_connection
+from agent import shore_transport as shore_transport_mod
+from agent import shore_receipt as shore_receipt_mod
+from agent.shore_receipt import ReceiptVerificationError
 from agent.shore import ShoreRuntimeConfig, _new_identity, _write_runtime_config
 from agent import server as server_mod
 from agent import stats_db
@@ -27,6 +30,12 @@ DEVICE2 = "018f1f25-8614-7e41-8c5c-fc0b6eefad64"
 CEREMONY = "018f1f25-c930-76f0-86e7-cb06d94e6a32"
 CEREMONY2 = "018f1f25-c930-76f0-86e7-cb06d94e6a34"
 NOW = int(datetime(2026, 9, 3, 12, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_release_receipt_pins(monkeypatch):
+    """Keep transport tests independent of the keys shipped by a release."""
+    monkeypatch.setattr(shore_transport_mod, "PINNED_SHORE_RECEIPT_PUBLIC_KEYS_BY_ORIGIN", {})
 
 
 def test_configured_host_connection_loads_persisted_login(tmp_path):
@@ -57,6 +66,121 @@ def test_host_connection_allows_plaintext_only_for_loopback(tmp_path):
     with pytest.raises(ValueError, match="HTTPS"):
         ShoreHostConnection(channel, broker="http://broker.example", username="alice",
             host_id=HOST, signing_key=host_signing)
+
+
+def test_non_loopback_broker_ignores_environment_receipt_trust_root(tmp_path, monkeypatch):
+    injected = ed25519.Ed25519PrivateKey.generate().public_key().public_bytes_raw()
+    monkeypatch.setenv("SHORE_RECEIPT_PUBLIC_KEYS", json.dumps({"1": b64url(injected)}))
+    host_signing = ed25519.Ed25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=x25519.X25519PrivateKey.generate())
+    production = ShoreHostConnection(channel, broker="https://agentsquid.ai", username="alice",
+        host_id=HOST, signing_key=host_signing)
+    development = ShoreHostConnection(channel, broker="http://127.0.0.1:8787", username="alice",
+        host_id=HOST, signing_key=host_signing)
+    assert production.receipt_keys == {}
+    assert set(development.receipt_keys) == {1}
+
+
+def test_release_contains_independent_dev_and_production_receipt_pins(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        shore_transport_mod, "PINNED_SHORE_RECEIPT_PUBLIC_KEYS_BY_ORIGIN",
+        shore_receipt_mod.PINNED_SHORE_RECEIPT_PUBLIC_KEYS_BY_ORIGIN,
+    )
+    host_signing = ed25519.Ed25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=x25519.X25519PrivateKey.generate())
+    development = ShoreHostConnection(channel, broker="https://dev.agentsquid.ai",
+        username="alice", host_id=HOST, signing_key=host_signing)
+    production = ShoreHostConnection(channel, broker="https://agentsquid.ai",
+        username="alice", host_id=HOST, signing_key=host_signing)
+
+    assert set(development.receipt_keys) == {1}
+    assert set(production.receipt_keys) == {1}
+    assert development.receipt_keys[1].public_bytes_raw() != production.receipt_keys[1].public_bytes_raw()
+
+
+def test_release_receipt_keys_are_scoped_to_canonical_broker_origin(tmp_path, monkeypatch):
+    dev = ed25519.Ed25519PrivateKey.generate().public_key().public_bytes_raw()
+    prod = ed25519.Ed25519PrivateKey.generate().public_key().public_bytes_raw()
+    monkeypatch.setattr(shore_transport_mod, "PINNED_SHORE_RECEIPT_PUBLIC_KEYS_BY_ORIGIN", {
+        "https://preprod.agentsquid.ai": {1: b64url(dev)},
+        "https://agentsquid.ai": {2: b64url(prod)},
+    })
+    host_signing = ed25519.Ed25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=x25519.X25519PrivateKey.generate())
+
+    development = ShoreHostConnection(channel,
+        broker="https://PREPROD.agentsquid.ai:443/base", username="alice",
+        host_id=HOST, signing_key=host_signing)
+    production = ShoreHostConnection(channel, broker="https://agentsquid.ai", username="alice",
+        host_id=HOST, signing_key=host_signing)
+    assert development.receipt_keys[1].public_bytes_raw() == dev
+    assert set(development.receipt_keys) == {1}
+    assert production.receipt_keys[2].public_bytes_raw() == prod
+    assert set(production.receipt_keys) == {2}
+    with pytest.raises(ValueError, match="release-pinned Shore receipt keys"):
+        ShoreHostConnection(channel, broker="https://other.example", username="alice",
+            host_id=HOST, signing_key=host_signing)
+
+
+@pytest.mark.asyncio
+async def test_host_audit_batch_cursor_advances_only_after_verified_ack(tmp_path):
+    host_signing = ed25519.Ed25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=x25519.X25519PrivateKey.generate())
+    channel.audit.record(request_id=CEREMONY, device_id=DEVICE, message_type="ping",
+        frame={"v": 1, "type": "ping", "payload": {}}, decision="granted", outcome="ok", now_ms=NOW)
+    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+        host_id=HOST, signing_key=host_signing)
+    shore_signing = ed25519.Ed25519PrivateKey.generate()
+    connection.receipt_keys = {1: shore_signing.public_key()}
+
+    class Socket:
+        def __init__(self): self.sent = []
+        async def send(self, value): self.sent.append(value)
+
+    socket = Socket()
+    assert await connection._send_audit_batch(socket)
+    wrapper = json.loads(socket.sent[0])
+    assert set(wrapper) == {"v", "type", "body"} and wrapper["type"] == "host_audit_batch"
+    batch = connection._pending_audit_batch
+    document = json.loads(batch.body)
+    fields = {"v": 1, "type": "host_audit_batch_ack", "hostId": HOST,
+        "throughSeq": batch.through_seq, "headHash": batch.through_hash,
+        "payloadHash": document["manifest"]["payloadHash"], "receiptEpoch": 1}
+    ack = {**fields, "signature": b64url(shore_signing.sign(canonical(fields)))}
+    await connection._accept_audit_batch_ack(ack)
+    assert connection._pending_audit_batch is None
+    assert channel.audit.pending_export() is None
+
+
+@pytest.mark.asyncio
+async def test_host_audit_batch_rejects_forged_ack_without_advancing_cursor(tmp_path):
+    host_signing = ed25519.Ed25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=x25519.X25519PrivateKey.generate())
+    channel.audit.record(request_id=CEREMONY, device_id=DEVICE, message_type="ping",
+        frame={"v": 1, "type": "ping", "payload": {}}, decision="granted", outcome="ok", now_ms=NOW)
+    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+        host_id=HOST, signing_key=host_signing)
+    trusted = ed25519.Ed25519PrivateKey.generate()
+    connection.receipt_keys = {1: trusted.public_key()}
+
+    class Socket:
+        async def send(self, _value): pass
+
+    await connection._send_audit_batch(Socket())
+    batch = connection._pending_audit_batch
+    manifest = json.loads(batch.body)["manifest"]
+    fields = {"v": 1, "type": "host_audit_batch_ack", "hostId": HOST,
+        "throughSeq": batch.through_seq, "headHash": batch.through_hash,
+        "payloadHash": manifest["payloadHash"], "receiptEpoch": 1}
+    forged = {**fields, "signature": b64url(ed25519.Ed25519PrivateKey.generate().sign(canonical(fields)))}
+    with pytest.raises(ReceiptVerificationError, match="shore_audit_continuity_unavailable"):
+        await connection._accept_audit_batch_ack(forged)
+    assert channel.audit.pending_export() == batch
 
 
 def timestamp(value):

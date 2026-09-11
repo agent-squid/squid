@@ -13,13 +13,12 @@ The browser transport client, non-extractable device identity, pinned host trust
 and durable replay/sequence state are implemented. Cross-process browser/host
 pairing, encrypted-probe interoperability, and live host-key epoch rotation now
 run in CI. Pre-production deployment wiring passed its Milestone 3 gate with a
-manually triggered, environment-protected workflow, an isolated `workers.dev`
+manually triggered, environment-protected workflow, an isolated preproduction
 Worker, test and audit gates, and atomic runtime-secret upload. Milestone 5.8
 later cleared its GitHub environment and explicitly disabled the job pending
-the replacement audit credential gate. Version preview URLs remain disabled,
-and browser
-attachment fails closed because the isolated hostname cannot satisfy Shore's
-same-site cookie requirement; it is a broker/host integration target only.
+the replacement audit credential gate. Replacement credentials and the
+`dev.agentsquid.ai` route are now provisioned; version preview URLs remain
+disabled and the job stays disabled until the Milestone 5 live acceptance run.
 An independent, qualified human security review passed on 2026-09-04 with no
 unresolved critical or high findings, closing Milestone 3's gate. Under that
 approval, the production `agentsquid.ai/@*` route is now declared in
@@ -27,9 +26,9 @@ approval, the production `agentsquid.ai/@*` route is now declared in
 `deploy-production.yml` workflow exists alongside the pre-production one. No
 production deployment has run. Milestone 5.8 subsequently cleared both GitHub
 deployment environments and explicitly disabled both deployment jobs while the
-replacement audit design is built. Fresh credentials and the applicable
-deployment gates must be restored together; neither workflow can currently
-deploy.
+replacement audit design was built. Fresh least-privilege credentials have now
+been restored, but neither workflow can deploy until its explicit disabled
+condition is removed after review.
 Milestone 4's implementation and documentation (4.0–4.9) are complete —
 capability-scoped `dashboard.read.v1` dispatch (read-only: subscribe/
 unsubscribe/ack/ping/pong, snapshot/replay catch-up, proactive push) is built,
@@ -39,9 +38,9 @@ unresolved critical or high findings (see its own status note). No mutating,
 command-capable dispatch is enabled or planned by this milestone; actually
 serving read-only dashboard traffic on the production route (rather than
 opaque-relay-plus-probe only) is still a separate, explicit deployment step.
-Milestone 5 is unblocked now that Milestone 4's acceptance gate has passed,
-and external users must not be admitted in production until Milestone 5 is
-complete and its replacement audit path is verified.
+Milestone 5's implementation is complete; its preproduction rollout and live
+archive acceptance gate remain before closure. External users must not be
+admitted in production until that replacement audit path is verified.
 
 This is the implementation plan for
 [ADR-0039](../decisions/0039-remote-access-via-shore-broker.md). The ADR owns
@@ -1541,7 +1540,7 @@ expiry/immediate-revocation surface. None of this should be built now.
 
 ## Milestone 5 — Correlated tamper-evident audit
 
-**Status:** In progress. Milestones 3 and 4 are both complete, including
+**Status:** Implementation complete; preproduction acceptance pending. Milestones 3 and 4 are both complete, including
 Milestone 4's acceptance gate, which closed on 2026-09-07 (see Milestone 4's
 status), unblocking this work. 5.0 (broker-side hash-chained audit log) is
 landed: every existing account-lifecycle audit event (magic links, sessions,
@@ -1579,10 +1578,13 @@ to the broker's own audit chain for a single account -- groundwork for
 Action 4, not the 5.4 collector. Action 4 (user-visible history/notifications)
 has its backend already in place (broker notification delivery, step-up-
 protected host revoke), 5.6 lands a browser client that can actually receive a
-live notification, and 5.7 lands a first, read-only security-history page
+live notification, and 5.7 lands a security-history page
 (host/alerts/notifications/devices/sessions) at `/@<username>/security`, also
 exposing displacement alerts through `/auth/security` for the first time. The
-revoke-host action and live in-page notification updates remain open.
+step-up-protected revoke-host action is now wired into that page. Healthy
+same-key displacement atomically creates a correlated audit record, alert, and
+durable notification, and the page receives live notification control frames
+over its authenticated browser socket and refreshes with bounded reconnect.
 
 **Objective:** make account, pairing, capability, and command activity
 attributable without storing command plaintext.
@@ -2048,14 +2050,13 @@ Current repository state as of 2026-09-10:
   Durable Object; same-origin session scope). Both static UIs are served with
   a restrictive CSP, frame denial, MIME-sniffing protection, no-referrer, and
   no-store response headers.
-- **Not done:** the revoke-host action Action 4 calls for (the backend
-  -- step-up-protected `/auth/revoke` -- already exists; this page only
-  reads, it has no TOTP step-up form or mutation button yet, following
-  Milestone 4 Action 4's own "read-only first, mutations after" precedent).
-  Also not done: live updates via `onSecurityNotification` while the page is
-  open (this slice fetches once on load; wiring a live encrypted `/relay`
-  connection into a plain history page is a separate, heavier decision than
-  this slice needed to make). No independent security review of this page has
+- The revoke-host action now uses an inline, click-again confirmation and TOTP
+  step-up, obtains a fresh same-origin CSRF token without exposing the HttpOnly
+  session token, and calls the existing atomic `/auth/revoke` path. No system
+  modal is used. Live updates use the existing authenticated native-browser
+  relay: plaintext security-notification control frames trigger a no-store
+  refresh, binary E2E application frames are ignored, and reconnect uses
+  bounded exponential backoff. No independent security review of this page has
   happened (same caveat 4.0 recorded for the pairing page: pairing-code/
   session-detail-in-logs). Clickjacking is mitigated on both static pages by
   CSP `frame-ancestors 'none'` plus `X-Frame-Options: DENY`.
@@ -2070,8 +2071,8 @@ Current repository state as of 2026-09-10:
   --noEmit` clean and `npm run build` produces both `pair-app.js` and
   `security-app.js`.
 
-**5.8 — Remove the unreleased legacy audit design and credentials (in progress:
-repository and GitHub cleanup landed; provider revocation pending)**
+**5.8 — Remove the unreleased legacy audit design and credentials (complete
+2026-09-11)**
 
 - Shore has not been released, no
   production deployment has run, and no production audit history or supported
@@ -2100,10 +2101,10 @@ repository and GitHub cleanup landed; provider revocation pending)**
   Shore's workflows and Wrangler required-secret declarations no longer carry
   B2 inputs, and both deployment jobs fail closed through an explicit disabled
   condition until the replacement credential gate lands. All secrets and
-  variables were removed from both GitHub deployment
-  environments. Provider-side revocation remains open because this machine has
-  neither Cloudflare nor Backblaze account authentication, and GitHub does not
-  expose stored secret values or key IDs after creation.
+  variables were removed from both GitHub deployment environments. On
+  2026-09-11, the operator confirmed that the corresponding obsolete
+  Cloudflare API tokens and Backblaze application keys had also been deleted
+  at their providers, closing the final 5.8 gate.
 - Acceptance: repository search finds no host B2 or manifest runtime path; host
   audit/batch tests still pass; Shore type checks and tests pass; both obsolete
   Cloudflare and B2 keys are confirmed revoked provider-side; and both GitHub
@@ -2153,9 +2154,25 @@ allocation cores landed)**
   or mismatched configuration drops ordinary remote frames closed. Key
   coordinates must be canonical unpadded 32-byte base64url, and malformed JWK
   imports map to the same deterministic configuration failure. Pairing
-  packets and lease heartbeats remain unchanged. Still open: deployment-time
-  signing-key provisioning and host-side receipt verification/persistence
-  (5.10), which must land before receipt mode is enabled outside tests.
+  packets and lease heartbeats remain unchanged. Host-side verification and
+  persistence landed in 5.10. The disabled deployment workflows now require
+  and cryptographically validate the replacement receipt and Shore-only B2
+  credential set before atomically uploading it. A publish-gate review on
+  2026-09-11 corrected a trust-root flaw: non-loopback AgentSquid connections
+  no longer accept receipt public keys from the process environment; only keys
+  pinned in a reviewed AgentSquid release are trusted. Those release pins are
+  scoped by canonical broker origin, keeping preproduction and production
+  trust roots independent; after any release pins are populated, unknown
+  non-loopback origins fail configuration closed. Loopback development may
+  still use the environment override. Independent epoch-1 Ed25519 keys are now
+  provisioned in the `shore-dev` and `shore-prod` GitHub environments and their
+  public coordinates are release-pinned for `https://dev.agentsquid.ai` and
+  `https://agentsquid.ai`, respectively. Independent write-only B2 keys are
+  scoped to the existing `shore-audit-dev` and `shore-audit-prod` buckets;
+  provider inspection verified private access, SSE-B2, Object Lock compliance
+  retention of one and 400 days, and `writeFiles` as the keys' sole capability.
+  The preproduction DNS/Worker route is provisioned. Both deployment jobs
+  remain explicitly disabled pending the live 5.12 acceptance ceremony.
 
 **5.10 — Host verification and remote-only fail-closed gate (landed)**
 
@@ -2183,7 +2200,8 @@ local checkpoint exists); signed mutations, regressions, and forks
 close it as `shore_receipt_conflict`. Direct/local transport is unchanged, and
 receipt enforcement remains configuration-gated for the 5.12 rollout ceremony.
 
-**5.11 — Shore ingestion of host-signed batches (open)**
+**5.11 — Shore ingestion of host-signed batches (landed; provider archive
+verification remains part of the Milestone 5 gate)**
 
 - Add a bounded host control message carrying 5.2a's stable signed batch. Verify
   the pinned host key, key epoch, batch payload, and extension from the last
@@ -2191,8 +2209,25 @@ receipt enforcement remains configuration-gated for the 5.12 rollout ceremony.
 - Return a Shore-signed archive acknowledgement. Advance the host export cursor
   only after that acknowledgement verifies. Preserve retry-stable bodies and
   request IDs across disconnects and ambiguous acknowledgements.
+- Implemented with canonical bounded `host_audit_batch` frames, closed-schema
+  event and manifest validation, host signature/epoch/chain verification,
+  durable per-host tips and retry records, account/host-scoped B2 objects, and
+  Shore-signed acknowledgements. The host sends retry-stable 25-event batches
+  and advances SQLite only after verifying the acknowledgement against its
+  pinned Shore receipt keys. Review tightened canonical base64url/signature
+  checks, rejected unexpected event fields, required the registered host epoch,
+  and added acknowledgement backpressure handling. Live provider retention and
+  overwrite/deletion rejection are still an external acceptance-gate check.
+  The publish-gate review also made archival mandatory before acknowledgement:
+  missing or failed B2 configuration now leaves the host cursor untouched, and
+  the replacement deployment contract requires the complete Shore-only B2
+  configuration rather than permitting finite Durable Object retention alone.
+  Before archival, every distinct host event request ID must also resolve to
+  the durable broker receipt allocated for that immutable host, so a signed
+  batch cannot invent broker correlation records.
 
-**5.12 — Recovery, migration, and enforcement (open)**
+**5.12 — Recovery, migration, and enforcement (implementation complete;
+preproduction rollout pending)**
 
 - Treat missing/rolled-back host SQLite as lost continuity. Local/direct access
   stays available; Shore access requires a locally authorized recovery or
@@ -2205,6 +2240,20 @@ receipt enforcement remains configuration-gated for the 5.12 rollout ceremony.
   recovery work is proven, enforce the gate. The superseded host-B2 and
   daily-manifest paths and credentials were already removed in 5.8; do not
   reintroduce either as a fallback.
+
+The release pin activates enforcement only for the two named non-loopback
+origins; loopback remains the observe/compatibility path used by local tests,
+and any other remote origin fails configuration closed. Receipt persistence
+rejects a non-genesis Shore tip when the local checkpoint is absent, rejects a
+forward jump after a coherent older SQLite backup is restored, and retains the
+per-receipt epoch history across a signing-key rotation. Reinstall continues to
+create a new host identity and therefore a new broker chain rather than
+silently adopting an old host's tip. Focused tests cover these cases together
+with crash rollback, stable retries, reconnects, concurrent-device behavior,
+unknown epochs, and direct/local-path availability. Remaining acceptance work
+is operational: deploy preproduction, exercise real B2 upload/retry and
+retention/delete rejection, and complete the final security review before
+enabling the production job.
 
 ## Milestone 6 — Production hardening and staged rollout
 

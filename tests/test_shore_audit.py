@@ -8,6 +8,10 @@ from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 from agent.shore_audit import GENESIS_HASH, ShoreAuditLog, verify_chain
 from agent.shore_capabilities import ShoreProtocolError
 from agent.shore_crypto import b64url, canonical, unb64url
+from agent.shore_receipt import (
+    RECEIPT_GENESIS_HASH, ReceiptVerificationError, envelope_commitment,
+    verify_relay_receipt,
+)
 from agent.shore_transport import ShoreChannel
 
 from .test_shore_transport import ACCOUNT, DEVICE, HOST, NOW, browser_frame, pair
@@ -24,6 +28,25 @@ def _log(tmp_path, signing=None, key_epoch=KEY_EPOCH):
 
 def _keys(signing, epoch=KEY_EPOCH):
     return {epoch: signing.public_key()}
+
+
+def _receipt(signing, *, seq, prev_hash, request_id, epoch=1):
+    envelope = f"envelope-{seq}".encode()
+    fields = {
+        "v": 1, "type": "relay_receipt", "host_id": HOST_ID,
+        "request_id": request_id, "direction": "browser_to_host",
+        "disposition": "accepted", "receipt_epoch": epoch, "seq": str(seq),
+        "prev_hash": prev_hash, "envelope_hash": envelope_commitment(envelope),
+    }
+    receipt_hash = b64url(hashlib.sha256(canonical(fields)).digest())
+    receipt = {
+        **fields, "receipt_hash": receipt_hash,
+        "signature": b64url(signing.sign(canonical({**fields, "receipt_hash": receipt_hash}))),
+    }
+    return verify_relay_receipt(
+        receipt, envelope, host_id=HOST_ID, direction="browser_to_host",
+        keys={epoch: signing.public_key()},
+    )
 
 
 def test_records_chain_recomputably_and_verifies_clean(tmp_path):
@@ -78,6 +101,77 @@ def test_export_cursor_rejects_a_stale_or_mismatched_ack(tmp_path):
     log.mark_exported(second)
     with pytest.raises(ValueError, match="backwards"):
         log.mark_exported(first)
+
+
+def test_fresh_or_missing_receipt_checkpoint_rejects_a_non_genesis_shore_tip(tmp_path):
+    log, _ = _log(tmp_path)
+    shore_signing = ed25519.Ed25519PrivateKey.generate()
+    first = _receipt(
+        shore_signing, seq=1, prev_hash=RECEIPT_GENESIS_HASH,
+        request_id=REQUEST_ID,
+    )
+    second = _receipt(
+        shore_signing, seq=2, prev_hash=first.receipt["receipt_hash"],
+        request_id="018f1f25-c930-76f0-86e7-0000000000a2",
+    )
+
+    with pytest.raises(ReceiptVerificationError, match="shore_audit_continuity_unavailable"):
+        log.accept_receipt(second)
+
+
+def test_restored_receipt_database_cannot_silently_adopt_the_current_shore_tip(tmp_path):
+    log, _ = _log(tmp_path)
+    shore_signing = ed25519.Ed25519PrivateKey.generate()
+    first = _receipt(
+        shore_signing, seq=1, prev_hash=RECEIPT_GENESIS_HASH,
+        request_id=REQUEST_ID,
+    )
+    second = _receipt(
+        shore_signing, seq=2, prev_hash=first.receipt["receipt_hash"],
+        request_id="018f1f25-c930-76f0-86e7-0000000000a2",
+    )
+    third = _receipt(
+        shore_signing, seq=3, prev_hash=second.receipt["receipt_hash"],
+        request_id="018f1f25-c930-76f0-86e7-0000000000a3",
+    )
+    assert log.accept_receipt(first) and log.accept_receipt(second)
+
+    # Model restoring a coherent older backup: both its receipt row and tip
+    # stop at sequence 1 while Shore's durable chain has already reached 2.
+    with sqlite3.connect(log.path) as connection:
+        connection.execute("DELETE FROM relay_receipts WHERE seq > 1")
+        connection.execute(
+            "UPDATE relay_receipt_tip SET seq = 1, hash = ?, receipt_epoch = 1 WHERE id = 1",
+            (first.receipt["receipt_hash"],),
+        )
+
+    with pytest.raises(ReceiptVerificationError, match="shore_audit_continuity_unavailable"):
+        log.accept_receipt(third)
+
+
+def test_receipt_key_rotation_preserves_old_and_new_epoch_evidence(tmp_path):
+    log, _ = _log(tmp_path)
+    old_signing = ed25519.Ed25519PrivateKey.generate()
+    new_signing = ed25519.Ed25519PrivateKey.generate()
+    first = _receipt(
+        old_signing, seq=1, prev_hash=RECEIPT_GENESIS_HASH,
+        request_id=REQUEST_ID, epoch=1,
+    )
+    second = _receipt(
+        new_signing, seq=2, prev_hash=first.receipt["receipt_hash"],
+        request_id="018f1f25-c930-76f0-86e7-0000000000a2", epoch=2,
+    )
+    assert log.accept_receipt(first) and log.accept_receipt(second)
+
+    with sqlite3.connect(log.path) as connection:
+        epochs = connection.execute(
+            "SELECT seq, receipt_epoch FROM relay_receipts ORDER BY seq"
+        ).fetchall()
+        tip = connection.execute(
+            "SELECT seq, hash, receipt_epoch FROM relay_receipt_tip WHERE id = 1"
+        ).fetchone()
+    assert epochs == [(1, 1), (2, 2)]
+    assert tip == (2, second.receipt["receipt_hash"], 2)
 
 
 def test_detects_deletion_of_a_middle_event_as_a_sequence_gap(tmp_path):

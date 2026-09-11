@@ -32,14 +32,17 @@ import httpx
 from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 
 from .shore import _load_or_new_identity, _load_runtime_config
-from .shore_audit import ShoreAuditLog
+from .shore_audit import AuditExportBatch, ShoreAuditLog
 from .shore_capabilities import authorize_capability_frame
 from .shore_crypto import (
     MAX_KEY_INVOCATIONS, DeviceTrustStore, PairingCoordinator, ReplayStore, ShoreProtocolError,
     TrustedDevice, b64url, canonical, open_envelope, seal_envelope, unb64url, uuid7,
     valid_broker_url,
 )
-from .shore_receipt import ReceiptVerificationError, VerifiedRelayReceipt, verify_relay_receipt
+from .shore_receipt import (
+    PINNED_SHORE_RECEIPT_PUBLIC_KEYS_BY_ORIGIN, ReceiptVerificationError, VerifiedRelayReceipt,
+    verify_relay_receipt,
+)
 
 log = logging.getLogger(__name__)
 
@@ -485,8 +488,11 @@ class ShoreHostConnection:
         self.base_backoff = base_backoff
         self.max_backoff = max_backoff
         self.stable_seconds = stable_seconds
-        self.receipt_keys = self._load_receipt_keys()
+        self.receipt_keys = self._load_receipt_keys(
+            self._broker_origin(parsed), parsed.hostname,
+        )
         self._pending_receipt_envelopes: dict[str, bytes] = {}
+        self._pending_audit_batch: AuditExportBatch | None = None
         base_path = parsed.path.rstrip("/")
         account_path = f"{base_path}/@{quote(username, safe='')}"
         self.challenge_url = urlunsplit((parsed.scheme, parsed.netloc, account_path + "/host/connect-challenge", "", ""))
@@ -494,14 +500,33 @@ class ShoreHostConnection:
         self.relay_url = urlunsplit((ws_scheme, parsed.netloc, account_path + "/relay", f"account_id={channel.account_id}", ""))
 
     @staticmethod
-    def _load_receipt_keys() -> dict[int, ed25519.Ed25519PublicKey]:
-        encoded = os.environ.get("SHORE_RECEIPT_PUBLIC_KEYS")
-        if encoded is None:
-            return {}
+    def _broker_origin(parsed: Any) -> str:
+        hostname = parsed.hostname.lower()
+        host = f"[{hostname}]" if ":" in hostname else hostname
+        default_port = 443 if parsed.scheme == "https" else 80
+        authority = host if parsed.port in {None, default_port} else f"{host}:{parsed.port}"
+        return f"{parsed.scheme}://{authority}"
+
+    @staticmethod
+    def _load_receipt_keys(
+        origin: str, hostname: str | None,
+    ) -> dict[int, ed25519.Ed25519PublicKey]:
+        loopback = hostname in {"127.0.0.1", "::1", "localhost"}
+        encoded = os.environ.get("SHORE_RECEIPT_PUBLIC_KEYS") if loopback else None
         try:
-            values = json.loads(encoded)
-            if not isinstance(values, dict) or not values:
+            if encoded is not None:
+                values = json.loads(encoded)
+            elif loopback or not PINNED_SHORE_RECEIPT_PUBLIC_KEYS_BY_ORIGIN:
+                values = {}
+            else:
+                pinned = PINNED_SHORE_RECEIPT_PUBLIC_KEYS_BY_ORIGIN.get(origin)
+                if pinned is None:
+                    raise ValueError
+                values = {str(epoch): value for epoch, value in pinned.items()}
+            if not isinstance(values, dict):
                 raise ValueError
+            if not values:
+                return {}
             keys = {}
             for epoch, value in values.items():
                 if not isinstance(epoch, str) or not epoch.isascii() or not epoch.isdigit() or epoch.startswith("0"):
@@ -511,7 +536,8 @@ class ShoreHostConnection:
                 keys[int(epoch)] = ed25519.Ed25519PublicKey.from_public_bytes(unb64url(value))
             return keys
         except Exception as exc:
-            raise ValueError("invalid SHORE_RECEIPT_PUBLIC_KEYS") from exc
+            source = "SHORE_RECEIPT_PUBLIC_KEYS" if loopback else "release-pinned Shore receipt keys"
+            raise ValueError(f"invalid {source}") from exc
 
     async def run(self, stop: asyncio.Event) -> None:
         """Reconnect with bounded exponential backoff; return only when stopped."""
@@ -600,6 +626,8 @@ class ShoreHostConnection:
         notify_task = asyncio.create_task(_realtime_notifier.wait(generation))
         next_sweep_at = time.monotonic() + _PUSH_SWEEP_SECONDS
         try:
+            if self.receipt_keys and await self._send_audit_batch(socket):
+                last_sent = time.monotonic()
             while not stop.is_set():
                 now = time.monotonic()
                 remaining = max(0.0, self.heartbeat_seconds - (now - last_sent))
@@ -647,6 +675,11 @@ class ShoreHostConnection:
                             wrapper = json.loads(message)
                             if canonical(wrapper) != message or wrapper.get("v") != 1:
                                 raise ValueError
+                            if wrapper.get("type") == "host_audit_batch_ack":
+                                await self._accept_audit_batch_ack(wrapper)
+                                if await self._send_audit_batch(socket):
+                                    last_sent = time.monotonic()
+                                continue
                             if set(wrapper) == {"v", "ceremony_id", "direction", "nonce", "ciphertext"}:
                                 # Pairing packets retain their raw wire format
                                 # and are validated by ShoreChannel.handle.
@@ -750,6 +783,48 @@ class ShoreHostConnection:
                 await receive
             with suppress(Exception, asyncio.CancelledError):
                 await notify_task
+
+    async def _send_audit_batch(self, socket: Any) -> bool:
+        batch = await asyncio.to_thread(self.channel.audit.pending_export, limit=25)
+        self._pending_audit_batch = batch
+        if batch is None:
+            return False
+        await socket.send(canonical({"v": 1, "type": "host_audit_batch", "body": b64url(batch.body)}))
+        return True
+
+    async def _accept_audit_batch_ack(self, acknowledgement: dict[str, Any]) -> None:
+        batch = self._pending_audit_batch
+        keys = {"v", "type", "hostId", "throughSeq", "headHash", "payloadHash", "receiptEpoch", "signature"}
+        if batch is None or set(acknowledgement) != keys:
+            raise ReceiptVerificationError("shore_audit_continuity_unavailable")
+        signature = acknowledgement.get("signature")
+        epoch = acknowledgement.get("receiptEpoch")
+        try:
+            document = json.loads(batch.body)
+            manifest = document["manifest"]
+            if (acknowledgement.get("v") != 1
+                    or acknowledgement.get("type") != "host_audit_batch_ack"
+                    or acknowledgement.get("hostId") != self.host_id
+                    or acknowledgement.get("throughSeq") != batch.through_seq
+                    or acknowledgement.get("headHash") != batch.through_hash
+                    or acknowledgement.get("payloadHash") != manifest["payloadHash"]
+                    or isinstance(epoch, bool) or not isinstance(epoch, int)
+                    or not isinstance(signature, str)):
+                raise ValueError
+            key = self.receipt_keys.get(epoch)
+            if key is None:
+                raise ValueError
+            unsigned = {name: acknowledgement[name] for name in acknowledgement if name != "signature"}
+            encoded_signature = unb64url(signature)
+            if len(encoded_signature) != 64 or b64url(encoded_signature) != signature:
+                raise ValueError
+            key.verify(encoded_signature, canonical(unsigned))
+            await asyncio.to_thread(self.channel.audit.mark_exported, batch)
+            self._pending_audit_batch = None
+        except ReceiptVerificationError:
+            raise
+        except Exception as exc:
+            raise ReceiptVerificationError("shore_audit_continuity_unavailable") from exc
 
     async def _push_sweep(self, socket: Any) -> int:
         """Push new events, due pings, and timeout evictions to every subscribed device.

@@ -13,6 +13,18 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from .shore_crypto import b64url, canonical, unb64url
 
 RECEIPT_GENESIS_HASH = "0" * 43
+# Populated only through a reviewed AgentSquid release. Pins are scoped to the
+# canonical broker origin so a key trusted for one Shore deployment cannot
+# authenticate receipts from another. Production trust must never be replaced
+# by a process environment variable.
+PINNED_SHORE_RECEIPT_PUBLIC_KEYS_BY_ORIGIN: dict[str, dict[int, str]] = {
+    "https://dev.agentsquid.ai": {
+        1: "5WDAgjhhkEFSXkAH7AhTHEfG4JTfFmFI4Oy67-KCsp0",
+    },
+    "https://agentsquid.ai": {
+        1: "bOn_OQ8iLdAAKCC1B3NiSdaGJjkoC6_-rmpc2x5ZVYo",
+    },
+}
 _FIELDS = {
     "v", "type", "host_id", "request_id", "direction", "disposition",
     "receipt_epoch", "seq", "prev_hash", "envelope_hash",
