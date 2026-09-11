@@ -1,4 +1,4 @@
-"""Broker-blind Shore v1 envelopes and local pairing state."""
+"""Relay-blind Shore v1 envelopes and local pairing state."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def valid_key_epoch(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= MAX_SAFE_INTEGER
 
 
-def valid_broker_url(value: object) -> bool:
+def valid_relay_url(value: object) -> bool:
     if not isinstance(value, str) or any(char.isspace() for char in value):
         return False
     try:
@@ -489,7 +489,7 @@ class DeviceTrustStore:
 
 
 class PairingCoordinator:
-    """Single-process local ceremony; broker input is never a trust decision."""
+    """Single-process local ceremony; relay input is never a trust decision."""
 
     # A 128-bit secret makes guessing infeasible regardless of rate; these
     # bound resource exhaustion from unbounded ceremony creation and close

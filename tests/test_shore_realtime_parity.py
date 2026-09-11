@@ -57,7 +57,7 @@ def _shore_setup(tmp_path):
         host_signing=host_signing, host_agreement=host_agreement)
     asyncio.run(pair(channel, browser_signing, browser_agreement))
     replay = ReplayStore(tmp_path / "shore-state" / "browser-replay.db")
-    connection = ShoreHostConnection(channel, broker="http://127.0.0.1:8787", username="alice",
+    connection = ShoreHostConnection(channel, relay="http://127.0.0.1:8787", username="alice",
         host_id=HOST, signing_key=host_signing)
     seq = {"n": 0}
 

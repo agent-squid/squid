@@ -19,7 +19,7 @@ Squid's live features currently use several transport patterns:
 These work locally, but do not provide one bidirectional channel for immediate
 multi-device updates. ADR-0039's Shore Relay needs a host connection and a
 browser connection that can remain open, carry commands and streamed output,
-and resume after ordinary mobile network changes. Defining a separate broker
+and resume after ordinary mobile network changes. Defining a separate relay
 protocol while retaining unrelated local SSE behavior would create two live
 application protocols and two sets of lifecycle semantics.
 
@@ -412,7 +412,7 @@ moved to WebSocket.
 ### Relationship to Tailscale and Shore
 
 Tailscale Serve and Shore may operate simultaneously. Tailscale clients reach
-the local `/ws/v1` endpoint through the tailnet; Shore clients use the broker.
+the local `/ws/v1` endpoint through the tailnet; Shore clients use the relay.
 The application message semantics are identical, while the security wrappers
 differ by path.
 

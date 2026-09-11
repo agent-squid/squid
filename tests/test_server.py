@@ -2623,7 +2623,7 @@ def test_shore_pairing_begin_and_status_round_trip(monkeypatch):
     monkeypatch.setattr(server, "_shore_connection", SimpleNamespace(channel=channel))
     monkeypatch.setattr(
         "agent.shore._load_runtime_config",
-        lambda *_args, **_kwargs: SimpleNamespace(broker="https://agentsquid.ai", username="alice"),
+        lambda *_args, **_kwargs: SimpleNamespace(relay="https://agentsquid.ai", username="alice"),
     )
     client = _loopback_client()
 
@@ -2651,7 +2651,7 @@ def test_shore_pairing_begin_surfaces_protocol_errors(monkeypatch):
     monkeypatch.setattr(server, "_shore_connection", SimpleNamespace(channel=channel))
     monkeypatch.setattr(
         "agent.shore._load_runtime_config",
-        lambda *_args, **_kwargs: SimpleNamespace(broker="https://agentsquid.ai", username="alice"),
+        lambda *_args, **_kwargs: SimpleNamespace(relay="https://agentsquid.ai", username="alice"),
     )
     res = _loopback_client().post("/shore/pairing/begin")
     assert res.status_code == 409

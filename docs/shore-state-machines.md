@@ -56,9 +56,9 @@ public keys.
   It never inherits the prior ID, epoch, pairing, sequence state, or capability.
 
 Each connection is `challenged`, `proven`, `current_socket`, `stale`, or
-`closed`. Every socket proves a fresh broker nonce. A different key fails. With
+`closed`. Every socket proves a fresh relay nonce. A different key fails. With
 no healthy current socket, the proven same-key socket becomes current and emits
-an audit-only reconnect. If the old socket is broker-observed healthy, the new
+an audit-only reconnect. If the old socket is relay-observed healthy, the new
 same-key socket wins atomically, the older socket closes, and Shore emits a
 correlated high-severity event and immediate privacy-safe alert. Further events
 in ten minutes remain individually audited and are losslessly batched in user
@@ -77,7 +77,7 @@ Browser sessions are `login_pending`, `account_authenticated`,
 `account_authenticated`. A passkey or TOTP promotes it to
 `remote_authenticated`; sessions rotate on promotion and refresh, are short
 lived, and bind CSRF state and secure same-site cookies. Session state is only
-broker/account authorization and never device trust.
+relay/account authorization and never device trust.
 
 Browser devices are `unpaired`, `pairing_pending`, `paired`, or `revoked`.
 Only the ceremony in `shore-protocol-v1.md` transitions an unpaired device to

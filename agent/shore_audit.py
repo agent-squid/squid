@@ -1,11 +1,11 @@
 """Local, signed, tamper-evident log of the host's ADR-0040 dispatch outcomes.
 
-Mirrors the broker's hash chain (shore/src/index.ts's `Audit`/`auditEntry`)
+Mirrors the relay's hash chain (shore/src/index.ts's `Audit`/`auditEntry`)
 but each record is additionally Ed25519-signed by the host's own identity
 key, so an attacker with only the local audit database can't produce a chain
 that verifies against the host's already-pinned public key. Correlates to the
-broker's chain via the shared `request_id` from the ADR-0040 envelope, per
-docs/shore-security-operations.md's "Broker and host events use the same
+relay's chain via the shared `request_id` from the ADR-0040 envelope, per
+docs/shore-security-operations.md's "Relay and host events use the same
 request/transition ID and hash commitment."
 
 Only ever stores a hash of the plaintext command, never the command or

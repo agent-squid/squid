@@ -19,14 +19,14 @@ import httpx
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 
-from .shore_crypto import UUID7, uuid7, valid_broker_url, valid_key_epoch
+from .shore_crypto import UUID7, uuid7, valid_relay_url, valid_key_epoch
 
-_valid_broker_url = valid_broker_url
+_valid_relay_url = valid_relay_url
 
 
 @dataclass(frozen=True)
 class ShoreRuntimeConfig:
-    broker: str
+    relay: str
     username: str
     account_id: str
     key_epoch: int
@@ -48,7 +48,7 @@ def _runtime_config_path(directory: Path) -> Path:
 
 
 def _validate_runtime_config(config: ShoreRuntimeConfig, message: str) -> None:
-    if (not _valid_broker_url(config.broker)
+    if (not _valid_relay_url(config.relay)
             or not _valid_username(config.username)
             or not _valid_uuid7(config.account_id)
             or not valid_key_epoch(config.key_epoch)):
@@ -66,7 +66,7 @@ def _write_runtime_config(directory: Path, config: ShoreRuntimeConfig) -> None:
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(directory, 0o700)
     payload = json.dumps({
-        "account_id": config.account_id, "broker": config.broker,
+        "account_id": config.account_id, "relay": config.relay,
         "key_epoch": config.key_epoch, "username": config.username,
     }, separators=(",", ":"), sort_keys=True) + "\n"
     fd, name = tempfile.mkstemp(prefix=".connection.", dir=directory)
@@ -97,7 +97,7 @@ def _load_runtime_config(directory: Path) -> ShoreRuntimeConfig | None:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
         config = ShoreRuntimeConfig(
-            broker=value["broker"], username=value["username"],
+            relay=value["relay"], username=value["username"],
             account_id=value["account_id"], key_epoch=value["key_epoch"],
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -158,7 +158,7 @@ def _load_or_new_identity(directory: Path) -> tuple[str, ed25519.Ed25519PrivateK
 def _registration_proof(host_id: str, challenge: dict, signing_x: str, agreement_x: str) -> bytes:
     required = {"id", "nonce"}
     if not required.issubset(challenge) or not all(isinstance(challenge[key], str) for key in required):
-        raise RuntimeError("broker returned an invalid host challenge")
+        raise RuntimeError("relay returned an invalid host challenge")
     # All keys and values in this closed object are restricted ASCII. This is
     # therefore byte-for-byte RFC 8785 JCS while avoiding a second JSON model.
     return json.dumps(
@@ -179,7 +179,7 @@ def _response_error(response: httpx.Response) -> str | None:
 
 def login(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="agentsquid login", description="Register this machine as the account's Shore host")
-    parser.add_argument("--broker", default="https://agentsquid.ai")
+    parser.add_argument("--relay", default="https://agentsquid.ai")
     account = parser.add_mutually_exclusive_group(required=True)
     account.add_argument("--username", help="AgentSquid username (recommended)")
     account.add_argument("--account-id", help="immutable account ID for administrative use")
@@ -197,15 +197,15 @@ def login(argv: list[str]) -> int:
             parser.error("--username must be a non-reserved 3-32 character lowercase name")
     if args.account_id and not _valid_uuid7(args.account_id):
         parser.error("--account-id must be a canonical UUIDv7")
-    if not _valid_broker_url(args.broker):
-        parser.error("--broker must be an absolute HTTP(S) URL without embedded credentials")
+    if not _valid_relay_url(args.relay):
+        parser.error("--relay must be an absolute HTTP(S) URL without embedded credentials")
 
     try:
         host_id, signing, agreement = _load_or_new_identity(args.identity_dir)
         endpoint = (
-            f"{args.broker.rstrip('/')}/@{args.username}"
+            f"{args.relay.rstrip('/')}/@{args.username}"
             if args.username
-            else f"{args.broker.rstrip('/')}/internal/accounts/{args.account_id}"
+            else f"{args.relay.rstrip('/')}/internal/accounts/{args.account_id}"
         )
         with httpx.Client(timeout=15.0) as client:
             if args.session_token:
@@ -227,12 +227,12 @@ def login(argv: list[str]) -> int:
                 consume = consume_response.json()
                 csrf = consume.get("csrfToken")
                 if not isinstance(csrf, str):
-                    raise RuntimeError("broker returned an invalid login response")
+                    raise RuntimeError("relay returned an invalid login response")
                 enroll_response = client.post(endpoint + "/auth/totp/enroll", headers={"x-shore-csrf": csrf})
                 if enroll_response.status_code == 201:
                     secret = enroll_response.json().get("secret")
                     if not isinstance(secret, str):
-                        raise RuntimeError("broker returned an invalid TOTP enrollment response")
+                        raise RuntimeError("relay returned an invalid TOTP enrollment response")
                     print(f"Add this key to an authenticator app (1Password, Google Authenticator, ...): {secret}", file=sys.stderr)
                 elif enroll_response.status_code != 409:
                     enroll_response.raise_for_status()
@@ -242,7 +242,7 @@ def login(argv: list[str]) -> int:
                 stepped = step_response.json()
                 csrf = stepped.get("csrfToken")
                 if not isinstance(csrf, str):
-                    raise RuntimeError("broker returned an invalid second-factor response")
+                    raise RuntimeError("relay returned an invalid second-factor response")
                 headers = {"x-shore-csrf": csrf, "content-type": "application/json"}
             challenge_response = client.post(endpoint + "/host/challenge", headers=headers, json={"hostId": host_id})
             challenge_response.raise_for_status()
@@ -259,10 +259,10 @@ def login(argv: list[str]) -> int:
             response.raise_for_status()
             registered = response.json()
             runtime = ShoreRuntimeConfig(
-                broker=args.broker.rstrip("/"), username=registered["username"],
+                relay=args.relay.rstrip("/"), username=registered["username"],
                 account_id=registered["accountId"], key_epoch=registered["keyEpoch"],
             )
-            _validate_runtime_config(runtime, "broker returned inconsistent host registration metadata")
+            _validate_runtime_config(runtime, "relay returned inconsistent host registration metadata")
             expected_signing = {"kty": "OKP", "crv": "Ed25519", "x": signing_x}
             expected_agreement = {"kty": "OKP", "crv": "X25519", "x": agreement_x}
             if (registered.get("id") != host_id
@@ -270,7 +270,7 @@ def login(argv: list[str]) -> int:
                     or registered.get("agreementKey") != expected_agreement
                     or (args.username and runtime.username != args.username)
                     or (args.account_id and runtime.account_id != args.account_id)):
-                raise RuntimeError("broker returned inconsistent host registration metadata")
+                raise RuntimeError("relay returned inconsistent host registration metadata")
             _write_runtime_config(args.identity_dir, runtime)
     except (OSError, TypeError, ValueError, RuntimeError, KeyError, httpx.HTTPError) as exc:
         # Keep any generated identity: silently generating another key on retry

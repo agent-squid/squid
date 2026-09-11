@@ -20,7 +20,7 @@ second application protocol.
   `sha256:` plus unpadded base64url SHA-256 of the raw 32-byte public key.
 - Public keys are transported as JWK (`OKP`, `crv` `Ed25519` or `X25519`, `x`)
   and stored as their validated raw 32 bytes. Private keys are non-exportable
-  platform keys where supported and never enter broker storage, logs, URLs, or
+  platform keys where supported and never enter relay storage, logs, URLs, or
   recovery material.
 - A host and browser each have separate signing and agreement keypairs. Crypto
   agility requires a new Shore version; receivers never negotiate down.
@@ -39,7 +39,7 @@ part of Shore v1 and MUST return 404 at the public Worker boundary.
 
 After authenticating a host WebSocket, the host sends a zero-length binary
 transport lease heartbeat whenever it has sent no other frame for 30 seconds.
-The broker consumes this frame, refreshes only that host socket's observed
+The relay consumes this frame, refreshes only that host socket's observed
 heartbeat deadline, and MUST NOT relay it. A browser sending a zero-length
 frame is closed with 1003. Lease heartbeats count toward the ordinary
 per-socket frame-rate limit and undergo lifetime, session, and generation
@@ -110,7 +110,7 @@ no dispatch.
 Validation order is: frame/encoding limits; closed schema; route/session
 binding; pinned identity and epoch; signature; time window; sequence/request
 replay; key derivation and AEAD; ADR-0040 closed allowlist; capability; dispatch.
-The host performs all steps even if the broker claims it already did.
+The host performs all steps even if the relay claims it already did.
 
 Stable pre-dispatch errors are `shore_invalid_frame`, `shore_identity_mismatch`,
 `shore_key_epoch_mismatch`, `shore_bad_signature`, `shore_expired`,
@@ -160,7 +160,7 @@ For a given `(host_id, request_id)`, retrying byte-identical envelope bytes
 returns the original receipt without advancing the chain. Reusing that tuple
 with different bytes or the opposite direction is a conflict and fails closed.
 Receipt sequence/tip,
-the idempotency record, and the pre-forward broker audit event are one Durable
+the idempotency record, and the pre-forward relay audit event are one Durable
 Object transaction. A browser-to-host envelope is delivered to the host beside
 its receipt; a host-to-browser envelope receives a receipt acknowledgement at
 the host. Pairing traffic retains its existing raw packet format.
@@ -171,7 +171,7 @@ closed schemas. Browser-to-host delivery is exactly
 The host-to-browser acknowledgement returned to the host is exactly
 `{"v":1,"type":"relay_receipt_ack","receipt":{...}}`; the browser continues
 to receive the original encrypted envelope bytes. Base64url is canonical and
-unpadded. A receipt-enabled broker never forwards a browser-to-host ordinary
+unpadded. A receipt-enabled relay never forwards a browser-to-host ordinary
 envelope to the host outside `relay_delivery` and never accepts either wrapper
 from a client as an ordinary envelope. Pairing packets and zero-length lease
 heartbeats are never wrapped.
@@ -191,9 +191,9 @@ If the old key is unavailable, no continuity claim is possible. Remote traffic
 remains disabled until a local user explicitly authorizes receipt-chain
 recovery for that host. Recovery records the abandoned epoch/tip when known,
 starts sequence `1` with the genesis previous hash under a newly pinned epoch,
-and creates a high-severity broker and local audit event; it never emits or
+and creates a high-severity relay and local audit event; it never emits or
 accepts a forged rotation statement. Implementations must not adopt a
-broker-presented current key or tip without either the old-key rotation proof
+relay-presented current key or tip without either the old-key rotation proof
 or that explicit local recovery.
 
 ## Initial capability registry
@@ -225,7 +225,7 @@ connection operation. `auth.output` and `auth.done` are always denied remotely.
 Any capability granting `subscribe` (currently only `dashboard.read.v1`) is
 push-capable: once a device subscribes, the host proactively seals and sends
 it `host_to_browser` envelopes as ADR-0040 events publish, with no further
-inbound frame required. One host↔broker WebSocket multiplexes every paired
+inbound frame required. One host↔relay WebSocket multiplexes every paired
 device's session, so the transport-level close codes defined above (1008,
 1009, 1013, 1001) apply to that shared socket as a whole and MUST NOT be used
 to signal one device's overflow or unresponsiveness — closing it would drop
@@ -273,7 +273,7 @@ displayed locally as a 26-character Crockford-base32 code (130 encoded bits;
 the leading two bits are zero). The QR encodes that code plus a public pairing
 offer containing exactly `v`, `ceremony_id`, `ceremony_nonce`, `account_id`,
 `host_id`, `host_sign_fingerprint`, and `host_enc_fingerprint`. For manual
-entry the browser obtains the same public offer from the broker and the user
+entry the browser obtains the same public offer from the relay and the user
 enters only the 26-character secret. Thus the code carries all 128 secret bits;
 it does not purport to encode the independent nonce. Altering the public offer
 causes the host binding comparison or finished verification to fail.
@@ -324,7 +324,7 @@ fingerprints match the received keys. The host response uses a different random 
 `finished`; `host_keys` has the same closed schema and `finished` is
 `finished(host)`. The browser verifies that the returned host keys hash to the
 fingerprints in the binding and public offer, verifies the host finished value,
-and pins both host keys. The broker sees the public offer plus the outer
+and pins both host keys. The relay sees the public offer plus the outer
 ceremony ID, direction, packet nonce, ciphertext length, and timing, but never
 the secret.
 
@@ -340,7 +340,7 @@ side's `finished` value before the host atomically stores approval. The secret
 is uniformly random rather than memorable, so a captured transcript has at
 least 128 bits of offline work. It is erased after success, expiry, cancellation,
 or five failures. Creation and attempts are limited per account, host, session,
-device, opaque network fingerprint, and broker source IP. Concurrent success is
+device, opaque network fingerprint, and relay source IP. Concurrent success is
 resolved by an atomic unused-to-used transition; losers receive the same generic
 failure as expired ceremonies.
 

@@ -3062,7 +3062,7 @@ async def save_codex_creds(req: CodexCredsRequest):
 
 def _shore_pair_fragment(offer: dict, code: str) -> str:
     """Encodes the ceremony offer + secret for the pair link's URL fragment
-    (never the query string or path) so a browser-to-broker request for the
+    (never the query string or path) so a browser-to-relay request for the
     page itself can't leak either value into server logs."""
     payload = json.dumps({"v": 1, "offer": offer, "code": code}, separators=(",", ":")).encode()
     return base64.urlsafe_b64encode(payload).decode().rstrip("=")
@@ -3085,7 +3085,7 @@ async def shore_pairing_begin(request: Request):
         result = await asyncio.to_thread(_shore_connection.channel.begin_pairing, ceremony_id)
     except ShoreProtocolError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
-    pair_url = f"{config.broker.rstrip('/')}/@{config.username}/pair#{_shore_pair_fragment(result['offer'], result['code'])}"
+    pair_url = f"{config.relay.rstrip('/')}/@{config.username}/pair#{_shore_pair_fragment(result['offer'], result['code'])}"
     return JSONResponse({
         "ceremony_id": ceremony_id, "code": result["code"], "expires_at": result["expires_at"],
         "pair_url": pair_url,

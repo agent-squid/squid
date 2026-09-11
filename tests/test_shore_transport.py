@@ -42,14 +42,14 @@ def test_configured_host_connection_loads_persisted_login(tmp_path):
     identity = tmp_path / "shore"
     host_id, _, _ = _new_identity(identity)
     _write_runtime_config(identity, ShoreRuntimeConfig(
-        "https://broker.example", "alice", ACCOUNT, 3,
+        "https://relay.example", "alice", ACCOUNT, 3,
     ))
     connection = configured_host_connection(identity)
     assert connection is not None
     assert connection.host_id == host_id
     assert connection.channel.account_id == ACCOUNT
     assert connection.channel.key_epoch == 3
-    assert connection.relay_url == f"wss://broker.example/@alice/relay?account_id={ACCOUNT}"
+    assert connection.relay_url == f"wss://relay.example/@alice/relay?account_id={ACCOUNT}"
 
 
 def test_configured_host_connection_is_disabled_before_login(tmp_path):
@@ -60,23 +60,23 @@ def test_host_connection_allows_plaintext_only_for_loopback(tmp_path):
     host_signing = ed25519.Ed25519PrivateKey.generate()
     channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
         host_signing=host_signing, host_agreement=x25519.X25519PrivateKey.generate())
-    local = ShoreHostConnection(channel, broker="http://127.0.0.1:8787", username="alice",
+    local = ShoreHostConnection(channel, relay="http://127.0.0.1:8787", username="alice",
         host_id=HOST, signing_key=host_signing)
     assert local.relay_url == f"ws://127.0.0.1:8787/@alice/relay?account_id={ACCOUNT}"
     with pytest.raises(ValueError, match="HTTPS"):
-        ShoreHostConnection(channel, broker="http://broker.example", username="alice",
+        ShoreHostConnection(channel, relay="http://relay.example", username="alice",
             host_id=HOST, signing_key=host_signing)
 
 
-def test_non_loopback_broker_ignores_environment_receipt_trust_root(tmp_path, monkeypatch):
+def test_non_loopback_relay_ignores_environment_receipt_trust_root(tmp_path, monkeypatch):
     injected = ed25519.Ed25519PrivateKey.generate().public_key().public_bytes_raw()
     monkeypatch.setenv("SHORE_RECEIPT_PUBLIC_KEYS", json.dumps({"1": b64url(injected)}))
     host_signing = ed25519.Ed25519PrivateKey.generate()
     channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
         host_signing=host_signing, host_agreement=x25519.X25519PrivateKey.generate())
-    production = ShoreHostConnection(channel, broker="https://agentsquid.ai", username="alice",
+    production = ShoreHostConnection(channel, relay="https://agentsquid.ai", username="alice",
         host_id=HOST, signing_key=host_signing)
-    development = ShoreHostConnection(channel, broker="http://127.0.0.1:8787", username="alice",
+    development = ShoreHostConnection(channel, relay="http://127.0.0.1:8787", username="alice",
         host_id=HOST, signing_key=host_signing)
     assert production.receipt_keys == {}
     assert set(development.receipt_keys) == {1}
@@ -90,9 +90,9 @@ def test_release_contains_independent_dev_and_production_receipt_pins(tmp_path, 
     host_signing = ed25519.Ed25519PrivateKey.generate()
     channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
         host_signing=host_signing, host_agreement=x25519.X25519PrivateKey.generate())
-    development = ShoreHostConnection(channel, broker="https://dev.agentsquid.ai",
+    development = ShoreHostConnection(channel, relay="https://dev.agentsquid.ai",
         username="alice", host_id=HOST, signing_key=host_signing)
-    production = ShoreHostConnection(channel, broker="https://agentsquid.ai",
+    production = ShoreHostConnection(channel, relay="https://agentsquid.ai",
         username="alice", host_id=HOST, signing_key=host_signing)
 
     assert set(development.receipt_keys) == {1}
@@ -100,7 +100,7 @@ def test_release_contains_independent_dev_and_production_receipt_pins(tmp_path, 
     assert development.receipt_keys[1].public_bytes_raw() != production.receipt_keys[1].public_bytes_raw()
 
 
-def test_release_receipt_keys_are_scoped_to_canonical_broker_origin(tmp_path, monkeypatch):
+def test_release_receipt_keys_are_scoped_to_canonical_relay_origin(tmp_path, monkeypatch):
     dev = ed25519.Ed25519PrivateKey.generate().public_key().public_bytes_raw()
     prod = ed25519.Ed25519PrivateKey.generate().public_key().public_bytes_raw()
     monkeypatch.setattr(shore_transport_mod, "PINNED_SHORE_RECEIPT_PUBLIC_KEYS_BY_ORIGIN", {
@@ -112,16 +112,16 @@ def test_release_receipt_keys_are_scoped_to_canonical_broker_origin(tmp_path, mo
         host_signing=host_signing, host_agreement=x25519.X25519PrivateKey.generate())
 
     development = ShoreHostConnection(channel,
-        broker="https://PREPROD.agentsquid.ai:443/base", username="alice",
+        relay="https://PREPROD.agentsquid.ai:443/base", username="alice",
         host_id=HOST, signing_key=host_signing)
-    production = ShoreHostConnection(channel, broker="https://agentsquid.ai", username="alice",
+    production = ShoreHostConnection(channel, relay="https://agentsquid.ai", username="alice",
         host_id=HOST, signing_key=host_signing)
     assert development.receipt_keys[1].public_bytes_raw() == dev
     assert set(development.receipt_keys) == {1}
     assert production.receipt_keys[2].public_bytes_raw() == prod
     assert set(production.receipt_keys) == {2}
     with pytest.raises(ValueError, match="release-pinned Shore receipt keys"):
-        ShoreHostConnection(channel, broker="https://other.example", username="alice",
+        ShoreHostConnection(channel, relay="https://other.example", username="alice",
             host_id=HOST, signing_key=host_signing)
 
 
@@ -132,7 +132,7 @@ async def test_host_audit_batch_cursor_advances_only_after_verified_ack(tmp_path
         host_signing=host_signing, host_agreement=x25519.X25519PrivateKey.generate())
     channel.audit.record(request_id=CEREMONY, device_id=DEVICE, message_type="ping",
         frame={"v": 1, "type": "ping", "payload": {}}, decision="granted", outcome="ok", now_ms=NOW)
-    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing)
     shore_signing = ed25519.Ed25519PrivateKey.generate()
     connection.receipt_keys = {1: shore_signing.public_key()}
@@ -163,7 +163,7 @@ async def test_host_audit_batch_rejects_forged_ack_without_advancing_cursor(tmp_
         host_signing=host_signing, host_agreement=x25519.X25519PrivateKey.generate())
     channel.audit.record(request_id=CEREMONY, device_id=DEVICE, message_type="ping",
         frame={"v": 1, "type": "ping", "payload": {}}, decision="granted", outcome="ok", now_ms=NOW)
-    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing)
     trusted = ed25519.Ed25519PrivateKey.generate()
     connection.receipt_keys = {1: trusted.public_key()}
@@ -320,14 +320,14 @@ async def test_live_channel_pairs_persists_trust_and_probe_round_trips(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_broker_injected_frames_fail_before_application_dispatch(tmp_path):
+async def test_relay_injected_frames_fail_before_application_dispatch(tmp_path):
     host_signing = ed25519.Ed25519PrivateKey.generate()
     host_agreement = x25519.X25519PrivateKey.generate()
     channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
         host_signing=host_signing, host_agreement=host_agreement)
 
     with pytest.raises(ShoreProtocolError, match="shore_invalid_frame"):
-        await channel.handle(b"broker-controlled plaintext", now_ms=NOW)
+        await channel.handle(b"relay-controlled plaintext", now_ms=NOW)
 
     untrusted_signing = ed25519.Ed25519PrivateKey.generate()
     untrusted_agreement = x25519.X25519PrivateKey.generate()
@@ -392,7 +392,7 @@ async def test_host_connection_signs_challenge_heartbeats_and_dispatches(monkeyp
             return Response()
 
     monkeypatch.setattr("agent.shore_transport.httpx.AsyncClient", Client)
-    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing, heartbeat_seconds=0.01)
     headers = await connection._connection_headers()
     proof = canonical({"challenge_id": CEREMONY, "host_id": HOST,
@@ -423,7 +423,7 @@ async def test_host_connection_retries_with_fresh_challenges_bounded_backoff_and
     host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
     channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
         host_signing=host_signing, host_agreement=host_agreement)
-    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing, base_backoff=1, max_backoff=3)
     challenges, attempts, delays = [], 0, []
 
@@ -481,7 +481,7 @@ async def test_malformed_successful_challenge_is_retryable_protocol_error(monkey
         async def post(self, *_args, **_kwargs): return Response()
 
     monkeypatch.setattr("agent.shore_transport.httpx.AsyncClient", Client)
-    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing)
     with pytest.raises(ShoreProtocolError, match="shore_invalid_host_challenge"):
         await connection._connection_headers()
@@ -492,7 +492,7 @@ async def test_post_handshake_failures_back_off_until_connection_is_stable(monke
     host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
     channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
         host_signing=host_signing, host_agreement=host_agreement)
-    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing, base_backoff=1, max_backoff=4,
         stable_seconds=60)
     attempts, delays = 0, []
@@ -533,7 +533,7 @@ async def test_policy_and_oversize_closes_are_not_retried(monkeypatch, tmp_path,
     host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
     channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
         host_signing=host_signing, host_agreement=host_agreement)
-    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing)
     attempts = 0
 
@@ -563,7 +563,7 @@ async def test_routine_transport_expiry_reconnects(monkeypatch, tmp_path, reason
     host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
     channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
         host_signing=host_signing, host_agreement=host_agreement)
-    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing, base_backoff=0)
     attempts = 0
 
@@ -591,7 +591,7 @@ async def test_inbound_invalid_frames_cannot_suppress_host_heartbeat(tmp_path):
     host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
     channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
         host_signing=host_signing, host_agreement=host_agreement)
-    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing, heartbeat_seconds=0.01)
     stop = asyncio.Event()
 
@@ -610,14 +610,14 @@ async def test_inbound_invalid_frames_cannot_suppress_host_heartbeat(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_receipt_mode_preserves_pairing_packets_and_broker_heartbeats(tmp_path):
+async def test_receipt_mode_preserves_pairing_packets_and_relay_heartbeats(tmp_path):
     host_signing = ed25519.Ed25519PrivateKey.generate()
     channel = ShoreChannel(
         tmp_path, account_id=ACCOUNT, host_id=HOST, host_signing=host_signing,
         host_agreement=x25519.X25519PrivateKey.generate(),
     )
     connection = ShoreHostConnection(
-        channel, broker="https://broker.example", username="alice",
+        channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing,
     )
     connection.receipt_keys = {1: ed25519.Ed25519PrivateKey.generate().public_key()}
@@ -658,7 +658,7 @@ async def test_receipt_mode_closes_on_unwrapped_ordinary_frame(tmp_path):
         host_agreement=x25519.X25519PrivateKey.generate(),
     )
     connection = ShoreHostConnection(
-        channel, broker="https://broker.example", username="alice",
+        channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing,
     )
     connection.receipt_keys = {1: ed25519.Ed25519PrivateKey.generate().public_key()}
@@ -687,7 +687,7 @@ async def test_terminal_upgrade_statuses_are_not_retried(monkeypatch, tmp_path, 
     host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
     channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
         host_signing=host_signing, host_agreement=host_agreement)
-    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing)
     attempts = 0
 
@@ -714,7 +714,7 @@ async def test_transient_upgrade_status_is_retried(monkeypatch, tmp_path):
     host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
     channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
         host_signing=host_signing, host_agreement=host_agreement)
-    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing, base_backoff=0)
     attempts = 0
 
@@ -741,7 +741,7 @@ async def test_terminal_challenge_http_status_is_not_retried(monkeypatch, tmp_pa
     host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
     channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
         host_signing=host_signing, host_agreement=host_agreement)
-    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing)
     attempts = 0
 
@@ -849,7 +849,7 @@ async def test_serve_survives_unexpected_dispatch_error_and_keeps_serving(tmp_pa
     ping = live_browser_frame(browser_signing, browser_agreement, host_agreement.public_key(), 2, "ping", {})
     inbound = [canonical(subscribe), canonical(ping)]
 
-    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing, heartbeat_seconds=100)
     stop = asyncio.Event()
 
@@ -896,7 +896,7 @@ async def test_push_sweep_delivers_new_event_with_no_inbound_frame(tmp_path, mon
 
     stats_db.insert_run_event(msg_id, 0, "text", "live")
 
-    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing)
 
     class Socket:
@@ -943,7 +943,7 @@ async def test_push_sweep_overflow_sends_slow_consumer_and_isolates_other_device
         stats_db.insert_run_event(msg_id, index, "text", f"live-{index}")
     channel.sessions[DEVICE2].cursor = stats_db.get_realtime_cursor()
 
-    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing)
 
     class Socket:
@@ -1008,7 +1008,7 @@ async def test_push_sweep_survives_unexpected_error_and_isolates_other_devices(t
         return await real_catchup(outbound, from_cursor, scopes, principal, last_acked_cursor)
     monkeypatch.setattr(server_mod, "_realtime_catchup", flaky_catchup)
 
-    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing)
 
     class Socket:
@@ -1053,7 +1053,7 @@ async def test_push_sweep_evicts_on_ping_timeout(tmp_path, monkeypatch):
     # it comfortably past the 40s (2 x 20s) timeout.
     channel.sessions[DEVICE].last_inbound_at -= 100
 
-    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing)
 
     class Socket:
@@ -1065,8 +1065,8 @@ async def test_push_sweep_evicts_on_ping_timeout(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_session_state_survives_host_broker_reconnect(tmp_path, monkeypatch):
-    """Milestone 4.6: a host<->broker socket reconnect must not force a
+async def test_session_state_survives_host_relay_reconnect(tmp_path, monkeypatch):
+    """Milestone 4.6: a host<->relay socket reconnect must not force a
     resubscribe. `ShoreHostConnection.run()` constructs `ShoreChannel` once
     and reuses it across every reconnect attempt -- only the `socket` local
     is replaced each iteration -- so `channel.sessions` (a device's scopes,
@@ -1094,7 +1094,7 @@ async def test_session_state_survives_host_broker_reconnect(tmp_path, monkeypatc
     await channel.handle(canonical(request), now_ms=NOW)
     cursor_before = channel.sessions[DEVICE].cursor
 
-    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing)
 
     class Socket:
@@ -1105,7 +1105,7 @@ async def test_session_state_survives_host_broker_reconnect(tmp_path, monkeypatc
     assert await connection._push_sweep(first_socket) == 0
     assert DEVICE in channel.sessions
 
-    # The host<->broker socket now drops and reconnects. Two events publish
+    # The host<->relay socket now drops and reconnects. Two events publish
     # while nothing is sweeping -- the same as the host being briefly offline.
     stats_db.insert_run_event(msg_id, 1, "text", "live-1")
     stats_db.insert_run_event(msg_id, 2, "text", "live-2")
@@ -1212,7 +1212,7 @@ async def test_push_sweep_backlog_sequence_numbers_are_strictly_increasing_and_d
     for index, text in enumerate(("live-1", "live-2", "live-3", "live-4", "live-5"), start=1):
         stats_db.insert_run_event(msg_id, index, "text", text)
 
-    connection = ShoreHostConnection(channel, broker="https://broker.example", username="alice",
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing)
 
     class Socket:

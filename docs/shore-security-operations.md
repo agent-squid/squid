@@ -38,8 +38,8 @@ explicitly disabled and both GitHub environments contain no secrets or
 variables, so the exception cannot currently be exercised. Re-enabling
 production deployment still requires closing or explicitly reaccepting it.
 
-Broker and host events use the same request/transition ID and hash commitment.
-The broker chain contains prior hash, event ID, account/host/device/session IDs,
+Relay and host events use the same request/transition ID and hash commitment.
+The relay chain contains prior hash, event ID, account/host/device/session IDs,
 coarse source metadata, restricted raw source IP, receipt time, ciphertext hash,
 and outcome. The host chain adds signed request ID, plaintext command hash,
 authorization decision, result class, host time, and prior host-event hash.
@@ -95,12 +95,12 @@ IP, other users, internal identifiers unnecessary to them, or secret material.
 
 | Threat | Required mitigation | Owner | Residual / gate |
 | --- | --- | --- | --- |
-| Malicious broker reads or forges commands | E2E envelope, pinned keys, local pairing, host-side replay/capability validation | Security Owner | Metadata remains visible; critical if plaintext or broker-minted trust is possible. |
+| Malicious relay reads or forges commands | E2E envelope, pinned keys, local pairing, host-side replay/capability validation | Security Owner | Metadata remains visible; critical if plaintext or relay-minted trust is possible. |
 | Stolen browser account session | Mandatory second factor, short rotation, session revocation; account login grants no pairing | Identity Owner | Attacker can view account metadata, never host state/commands without device keys. |
 | Stolen paired browser/device | Non-exportable keys, device-specific grant/revocation, short shell expiry, visible history | Security Owner | Read capability lasts until revocation/session expiry; users must be notified. |
 | Replay/reordering/injection | Signed identity, epoch, durable monotonic sequence, request-ID set, expiry and AEAD | Protocol Owner | Storage failure fails closed. |
-| Broker key substitution / TOFU | QR binding commits both devices' signing/agreement fingerprints | Protocol Owner | Local display compromise remains host compromise. |
-| Compromised host | Dedicated low-privilege OS user, local audit signing, device revocation, no archive-delete credential | Host Runtime Owner | Host can execute/lie about its own outcome; broker record preserves receipt. |
+| Relay key substitution / TOFU | QR binding commits both devices' signing/agreement fingerprints | Protocol Owner | Local display compromise remains host compromise. |
+| Compromised host | Dedicated low-privilege OS user, local audit signing, device revocation, no archive-delete credential | Host Runtime Owner | Host can execute/lie about its own outcome; relay record preserves receipt. |
 | Malicious web-client update | Immutable versioned assets, restrictive CSP, reproducible hashes, two-person signed release, staged kill switch | Release Owner | Zero-install web delivery cannot eliminate operator supply-chain trust; disclosed risk blocks claims otherwise. |
 | Durable Object restart/hibernation | Authoritative durable state, attachments treated as hints, generation checks, idempotent transitions | Shore Service Owner | Restart tests gate Milestone 1/6. |
 | Account recovery takeover | Offline verifier, fresh MFA, seven-day cooling-off, repeated alerts/cancel, new trust root | Identity Owner | Administration may recover; old cryptographic trust never does. |
@@ -116,7 +116,7 @@ revoke activates the server-side Shore kill switch. Direct loopback/Tailscale
 access remains independent.
 
 Incident severity is: SEV-1 for suspected key/signing compromise, plaintext at
-broker, forged authorization, mass account access, or audit loss; SEV-2 for
+relay, forged authorization, mass account access, or audit loss; SEV-2 for
 targeted session compromise, sustained pairing abuse, or quota exhaustion;
 SEV-3 for isolated availability defects. Security commands SEV-1, preserves
 evidence, disables the affected capability or Shore globally, begins user/legal

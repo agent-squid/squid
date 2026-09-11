@@ -52,26 +52,26 @@ not a typical web-app login.
    Using Access for every user ties our per-user cost directly to Cloudflare
    pricing rather than to our own infrastructure.
 
-5. **Self-hosted relay (frp / ngrok-style broker)** — one server we run,
+5. **Self-hosted relay (frp / ngrok-style relay)** — one server we run,
    users' AgentSquid instances dial out to it, it multiplexes by hostname or
    path. Solves the DNS-record-limit problem but makes us the operator of
    always-on relay infrastructure: an outage takes down remote access for
    every user, and we own patching, scaling, and abuse prevention for a
    public network service.
 
-6. **A dedicated `shore.agentsquid.ai` subdomain for the broker** — kept the
+6. **A dedicated `shore.agentsquid.ai` subdomain for the relay** — kept the
    Worker's routes cleanly separate from the GitHub-Pages-hosted marketing
    site on the apex domain, at the cost of a longer URL for users to type
    and remember. Rejected in favor of option 7: the same separation is
    achievable on the apex domain itself via a path-scoped Worker route, at
    no cost to security or architecture, while giving users a shorter URL.
 
-7. **Cloudflare Workers + Durable Objects broker on `agentsquid.ai`
+7. **Cloudflare Workers + Durable Objects relay on `agentsquid.ai`
    directly** (chosen) — see Decision.
 
 ## Decision
 
-Build the remote-access broker as a single Cloudflare Worker, backed by one
+Build the remote-access relay as a single Cloudflare Worker, backed by one
 Durable Object per immutable account ID, reachable at
 `agentsquid.ai/@<username>`.
 
@@ -80,8 +80,8 @@ in the [ADR-0039 Shore implementation plan](../plans/adr-0039-shore-remote-acces
 This ADR remains the authority for architecture and security decisions; the
 plan must not weaken or silently replace them.
 
-The broker carries the versioned real-time application protocol defined by
-ADR-0040. Implement and validate that protocol locally before making the broker
+The relay carries the versioned real-time application protocol defined by
+ADR-0040. Implement and validate that protocol locally before making the relay
 its remote transport; Shore must not define a second set of chat, lifecycle,
 reconnect, or replay semantics.
 
@@ -100,7 +100,7 @@ implementation must not silently choose different security semantics.
 The 2026-09-03 amendment resolves pairing bootstrapping: the browser's initial
 closed-schema packet is encrypted under the protocol-defined bootstrap HKDF
 key, while the mutually verified host response uses the binding-derived pair
-key. This preserves broker blindness without requiring either side to know the
+key. This preserves relay blindness without requiring either side to know the
 encrypted browser-key fingerprints before decrypting them.
 
 This construction is not a password-authenticated key exchange (PAKE). Its
@@ -110,7 +110,7 @@ same secret; implementations must not shorten it for usability without an ADR
 amendment adopting a reviewed PAKE and new test vectors.
 
 The 2026-09-03 transport amendment defines a zero-length, host-only binary
-lease heartbeat. The broker consumes this transport control without relaying
+lease heartbeat. The relay consumes this transport control without relaying
 it, applies ordinary socket rate limits and revocation checks, and accepts no
 browser-originated equivalent. All non-heartbeat payload frames remain opaque
 encrypted Shore envelopes.
@@ -118,7 +118,7 @@ encrypted Shore envelopes.
 ### Coexisting with the existing GitHub-Pages-hosted site
 
 `agentsquid.ai` already serves the project's marketing/docs site via GitHub
-Pages. Rather than route the broker through a separate subdomain, scope the
+Pages. Rather than route the relay through a separate subdomain, scope the
 Worker to a **path pattern**, e.g. a Cloudflare Workers Route of
 `agentsquid.ai/@*`. Only requests matching `/@username` are intercepted by
 the Worker; everything else continues to be served by GitHub Pages
@@ -128,7 +128,7 @@ giving users the shorter, single-domain URL.
 
 ### Architecture
 
-- **No new DNS record for the broker itself** — it rides on the existing
+- **No new DNS record for the relay itself** — it rides on the existing
   `agentsquid.ai` zone via a path-scoped Worker route, not a new hostname.
 - **One Durable Object per user**, addressed via `idFromName(account_id)`.
   A separate singleton
@@ -192,45 +192,45 @@ giving users the shorter, single-domain URL.
 
 ### System and protocol flow
 
-The broker relays ciphertext it cannot read. It authenticates the account
+The relay relays ciphertext it cannot read. It authenticates the account
 session and the host connection, but the pair key used for command/response
 encryption is established directly between host and browser during pairing
-and never crosses the broker in a decryptable form.
+and never crosses the relay in a decryptable form.
 
 ```mermaid
 sequenceDiagram
     participant Host as Host (AgentSquid)
-    participant Broker as Broker (Worker + DO)
+    participant Relay as Relay (Worker + DO)
     participant Browser as Browser/phone
 
-    Note over Host,Broker: 1. Device registration and attachment
-    Host->>Broker: HTTPS registration (host_id + public keys)
-    Broker-->>Host: registration response (account_id, username, host_id, key_epoch, public keys)
-    Host->>Broker: request fresh connection challenge
-    Broker-->>Host: nonce-bound challenge
-    Host->>Broker: WebSocket connect + signed connection proof
-    Note right of Broker: Broker holds only the host public key.
+    Note over Host,Relay: 1. Device registration and attachment
+    Host->>Relay: HTTPS registration (host_id + public keys)
+    Relay-->>Host: registration response (account_id, username, host_id, key_epoch, public keys)
+    Host->>Relay: request fresh connection challenge
+    Relay-->>Host: nonce-bound challenge
+    Host->>Relay: WebSocket connect + signed connection proof
+    Note right of Relay: Relay holds only the host public key.
 
-    Note over Browser,Broker: 2. End-user session
-    Browser->>Broker: email login + second factor
-    Broker-->>Browser: short-lived session (account_id, username)
+    Note over Browser,Relay: 2. End-user session
+    Browser->>Relay: email login + second factor
+    Relay-->>Browser: short-lived session (account_id, username)
 
-    Note over Host,Browser: 3. Local pairing (broker-blind)
+    Note over Host,Browser: 3. Local pairing (relay-blind)
     Host->>Browser: QR / human code (bootstrap secret, out-of-band)
-    Browser->>Broker: encrypted bootstrap packet (opaque to broker)
-    Broker->>Host: relayed opaque packet
-    Host->>Broker: encrypted binding response (opaque to broker)
-    Broker->>Browser: relayed opaque response
-    Browser->>Broker: encrypted binding confirmation (opaque to broker)
-    Broker->>Host: relayed opaque confirmation
-    Note over Host,Browser: Both sides derive/pin the pair key locally,<br/>broker never sees key material.
+    Browser->>Relay: encrypted bootstrap packet (opaque to relay)
+    Relay->>Host: relayed opaque packet
+    Host->>Relay: encrypted binding response (opaque to relay)
+    Relay->>Browser: relayed opaque response
+    Browser->>Relay: encrypted binding confirmation (opaque to relay)
+    Relay->>Host: relayed opaque confirmation
+    Note over Host,Browser: Both sides derive/pin the pair key locally,<br/>relay never sees key material.
 
     Note over Host,Browser: 4. Implemented encrypted transport: probe + read-only dashboard.read.v1 (mutations still disabled)
-    Browser->>Broker: signed+encrypted envelope (opaque ciphertext)
-    Broker->>Host: relayed ciphertext (routed by username only)
+    Browser->>Relay: signed+encrypted envelope (opaque ciphertext)
+    Relay->>Host: relayed ciphertext (routed by username only)
     Host->>Host: validate expiry/sequence/request-id/signature, decrypt,<br/>then accept shore.probe or a dashboard.read.v1 command<br/>(subscribe/unsubscribe/ack/ping/pong) - every other ADR-0040<br/>type is denied pre-dispatch by the capability registry
-    Host->>Broker: signed+encrypted response
-    Broker->>Browser: relayed ciphertext
+    Host->>Relay: signed+encrypted response
+    Relay->>Browser: relayed ciphertext
     Browser->>Browser: decrypt + verify
 ```
 
@@ -238,7 +238,7 @@ sequenceDiagram
 
 Setup (above) happens once per host/browser pair. The target day-to-day design
 has the three traffic shapes below, all carrying opaque encrypted envelopes —
-the broker only ever sees ciphertext, routed by username or by which held
+the relay only ever sees ciphertext, routed by username or by which held
 connection it arrived on. These are architectural target flows; each leg's
 own note below says whether its application handlers are enabled in the
 current milestone.
@@ -246,31 +246,31 @@ current milestone.
 ```mermaid
 sequenceDiagram
     participant Host as Host (AgentSquid)
-    participant Broker as Broker (Worker + DO)
+    participant Relay as Relay (Worker + DO)
     participant Browser as Browser/phone
 
     Note over Browser,Host: A. TARGET (NOT YET ENABLED, unscheduled): Bounded request/response (files, topics, stats, config, ...)
-    Browser->>Broker: HTTPS request (encrypted envelope), session-authenticated
-    Broker->>Host: forwarded over the host's already-open WebSocket
+    Browser->>Relay: HTTPS request (encrypted envelope), session-authenticated
+    Relay->>Host: forwarded over the host's already-open WebSocket
     Host->>Host: validate envelope, decrypt, execute
-    Host->>Broker: encrypted response over the same host WebSocket
-    Broker-->>Browser: HTTPS response
-    Note right of Broker: 1 Worker request + 1 Durable Object request per operation.<br/>No polling: this leg only runs when the browser asks for something.
+    Host->>Relay: encrypted response over the same host WebSocket
+    Relay-->>Browser: HTTPS response
+    Note right of Relay: 1 Worker request + 1 Durable Object request per operation.<br/>No polling: this leg only runs when the browser asks for something.
 
     Note over Browser,Host: B. IMPLEMENTED (read-only, Milestone 4): Push on state change (status, job output, ...)
-    Host->>Broker: encrypted event over the host's WebSocket, only when state changes
-    Broker-->>Browser: pushed over the browser's own held WebSocket
-    Note right of Broker: No browser-initiated request at all,<br/>this is what keeps desktop and phone in sync without a manual refresh.
+    Host->>Relay: encrypted event over the host's WebSocket, only when state changes
+    Relay-->>Browser: pushed over the browser's own held WebSocket
+    Note right of Relay: No browser-initiated request at all,<br/>this is what keeps desktop and phone in sync without a manual refresh.
 
     Note over Browser,Host: C. TARGET: Send a prompt / command (NOT YET ENABLED, Milestone 4)
-    Browser->>Broker: encrypted ADR-0040 message over the browser's own WebSocket
-    Broker->>Host: forwarded over the host's WebSocket
+    Browser->>Relay: encrypted ADR-0040 message over the browser's own WebSocket
+    Relay->>Host: forwarded over the host's WebSocket
     Host->>Host: capability check, then dispatch to the same ADR-0040 handlers /ws/v1 uses
     loop streamed reply
-        Host->>Broker: encrypted output chunk over the host's WebSocket
-        Broker-->>Browser: pushed over the browser's own WebSocket
+        Host->>Relay: encrypted output chunk over the host's WebSocket
+        Relay-->>Browser: pushed over the browser's own WebSocket
     end
-    Note right of Broker: Same shape as leg B once dispatched (host-initiated pushes),<br/>but browser-initiated and multi-message.
+    Note right of Relay: Same shape as leg B once dispatched (host-initiated pushes),<br/>but browser-initiated and multi-message.
 ```
 
 A is not implemented: bounded HTTP request/response for files, topics, stats,
@@ -535,7 +535,7 @@ Legitimate growth should normally move Shore to Workers Paid rather than force
 users onto Tailscale; request overages are inexpensive compared with the user
 friction. Tailscale provides resilience, operator independence, and an option
 for users who prefer direct WireGuard-based access. It also remains available
-during a Shore quota event or broker outage once the user has configured it.
+during a Shore quota event or relay outage once the user has configured it.
 
 ### User registration
 
@@ -558,7 +558,7 @@ during a Shore quota event or broker outage once the user has configured it.
 Three distinct authentication events, handled by AgentSquid/the Worker,
 not by Cloudflare Access:
 
-1. **Device registration (host machine → broker)**: on `agentsquid login`,
+1. **Device registration (host machine → relay)**: on `agentsquid login`,
    the CLI generates a local keypair; the private key never leaves the
    machine. Initial host registration requires the same account authentication
    and second factor as a remote browser session. The public key is registered
@@ -598,7 +598,7 @@ not by Cloudflare Access:
    automatically revoke the host because legitimate process/network overlap is
    possible.
 
-2. **End-user session (phone/browser → broker)**: visiting
+2. **End-user session (phone/browser → relay)**: visiting
    `agentsquid.ai/@<username>` requires a login (same account system as
    registration). Sessions are short-lived with refresh, gated behind a
    second factor (TOTP or passkey) given what a session authorizes, and
@@ -612,7 +612,7 @@ not by Cloudflare Access:
    host. The host displays a QR code backed by at least 128 bits of randomness,
    plus a human-readable representation with equivalent entropy. The ceremony
    uses a reviewed password-authenticated key-exchange or equivalent
-   out-of-band protocol so the broker never receives the pairing secret and a
+   out-of-band protocol so the relay never receives the pairing secret and a
    captured transcript cannot be used for offline guessing. It binds the
    account ID, immutable host ID, browser-device ID, protocol version, ceremony
    nonce, and both public-key fingerprints. The secret expires after five
@@ -620,7 +620,7 @@ not by Cloudflare Access:
    per account, host, browser session/device, and source IP; exhaustion requires
    the host to begin a new ceremony. The host persists the approved phone key,
    and the phone pins the host key. Key changes require a new local pairing.
-   The broker cannot add or replace either key.
+   The relay cannot add or replace either key.
 
 ### Host-key continuity and recovery
 
@@ -655,7 +655,7 @@ key, replace an existing host key in place, or impersonate the old host.
   hours before completion; security notifications include a cancellation path.
 - A healthy same-key connection displacement is also actively notified under
   the registration rules above. A stale-socket reconnect is audit-only. Socket
-  health is determined from broker-observed close/heartbeat state, not from a
+  health is determined from relay-observed close/heartbeat state, not from a
   client-provided claim.
 - Support staff and administrators cannot waive these rules, mint device trust,
   suppress the key-change warning, shorten the cooling-off period, or make a
@@ -690,11 +690,11 @@ as v1 requirements, not later hardening:
     duplicate request IDs, and non-increasing sequence numbers before
     execution. It encrypts and signs responses to the paired phone key.
   - Trust is established by the local pairing ceremony, not by a host key
-    fetched from the broker on first use. This prevents a malicious broker
+    fetched from the relay on first use. This prevents a malicious relay
     from substituting keys or injecting commands encrypted with the public
     host key.
-  - This makes passive broker access to command and response payloads
-    cryptographically impossible and prevents the broker protocol from
+  - This makes passive relay access to command and response payloads
+    cryptographically impossible and prevents the relay protocol from
     forging commands. It does not make a browser client delivered by that
     same operator immune to a malicious software update: with the zero-
     install requirement, the operator remains part of the active client
@@ -733,10 +733,10 @@ as v1 requirements, not later hardening:
   session's blast radius is bounded by that user's permissions, not by
   whatever account happened to run the installer.
 - **Correlated, tamper-evident audit logging.** Before forwarding an envelope,
-  the broker appends its request ID, authenticated account/device/session
+  the relay appends its request ID, authenticated account/device/session
   IDs, source IP, and receipt timestamp to an audit object. After validating
   and executing it, the host appends a signed event containing the same
-  request ID, command hash, outcome, and host timestamp. The broker cannot
+  request ID, command hash, outcome, and host timestamp. The relay cannot
   read the command, while the correlated records still attribute its hash
   to the observed source. Shore attaches a signed chain receipt outside the
   E2E envelope; the host verifies and persists it before dispatch. The host
@@ -770,9 +770,9 @@ as v1 requirements, not later hardening:
   $7/user/month cost past it.
 - No self-operated relay server — Cloudflare runs the Worker and Durable
   Objects; an AgentSquid-side outage doesn't take down every user's access
-  the way a single self-hosted broker would.
+  the way a single self-hosted relay would.
 - Fully buildable and operable on Cloudflare's free tier at current scale.
-- Path-scoped routing keeps the broker decoupled from the existing GitHub
+- Path-scoped routing keeps the relay decoupled from the existing GitHub
   Pages site with no shared deploy risk.
 
 ### Negative / risks
@@ -781,7 +781,7 @@ as v1 requirements, not later hardening:
   must maintain correctly — there is no vendor-provided access-control layer
   in front of it (a deliberate tradeoff against Cloudflare Access's cost
   model).
-- Without the end-to-end encryption layer described above, the broker
+- Without the end-to-end encryption layer described above, the relay
   operator (us) has a structural ability to observe traffic that SSH and
   WireGuard-based alternatives do not grant their operators — this must be
   closed before this is treated as production-ready for real remote shell
@@ -795,7 +795,7 @@ as v1 requirements, not later hardening:
   non-hibernating Durable Object duration can become the dominant cost.
 - Ties the core remote-access feature to Cloudflare's platform. Mitigation:
   keep the AgentSquid ↔ Worker protocol a plain WebSocket/JSON contract, so
-  the broker could be reimplemented against another provider (or
+  the relay could be reimplemented against another provider (or
   self-hosted) without changing the client-side design.
 
 ## References

@@ -37,7 +37,7 @@ from .shore_capabilities import authorize_capability_frame
 from .shore_crypto import (
     MAX_KEY_INVOCATIONS, DeviceTrustStore, PairingCoordinator, ReplayStore, ShoreProtocolError,
     TrustedDevice, b64url, canonical, open_envelope, seal_envelope, unb64url, uuid7,
-    valid_broker_url,
+    valid_relay_url,
 )
 from .shore_receipt import (
     PINNED_SHORE_RECEIPT_PUBLIC_KEYS_BY_ORIGIN, ReceiptVerificationError, VerifiedRelayReceipt,
@@ -48,7 +48,7 @@ log = logging.getLogger(__name__)
 
 # Per-device push sweep granularity: how often ShoreHostConnection._serve
 # checks subscribed devices for new events to push, pings due, and
-# ping-timeout eviction. Independent of the 30s broker transport lease
+# ping-timeout eviction. Independent of the 30s relay transport lease
 # heartbeat and of ADR-0040's own 20s/40s device ping/timeout constants
 # (imported lazily from agent.server so there is one source of truth) --
 # this is only how often the sweep itself runs, not a protocol value.
@@ -85,7 +85,7 @@ def configured_host_connection(identity_dir: Path) -> "ShoreHostConnection | Non
         host_signing=signing, host_agreement=agreement, key_epoch=config.key_epoch,
     )
     return ShoreHostConnection(
-        channel, broker=config.broker, username=config.username,
+        channel, relay=config.relay, username=config.username,
         host_id=host_id, signing_key=signing,
     )
 
@@ -474,13 +474,13 @@ class ShoreChannel:
 class ShoreHostConnection:
     """Maintains the authenticated host relay socket until explicitly stopped."""
 
-    def __init__(self, channel: ShoreChannel, *, broker: str, username: str,
+    def __init__(self, channel: ShoreChannel, *, relay: str, username: str,
                  host_id: str, signing_key: ed25519.Ed25519PrivateKey,
                  heartbeat_seconds: float = 30.0, base_backoff: float = 1.0,
                  max_backoff: float = 30.0, stable_seconds: float = 60.0):
-        if not valid_broker_url(broker):
-            raise ValueError("broker must use HTTPS, or HTTP on an explicit loopback host")
-        parsed = urlsplit(broker)
+        if not valid_relay_url(relay):
+            raise ValueError("relay must use HTTPS, or HTTP on an explicit loopback host")
+        parsed = urlsplit(relay)
         self.channel = channel
         self.host_id = host_id
         self.signing_key = signing_key
@@ -489,7 +489,7 @@ class ShoreHostConnection:
         self.max_backoff = max_backoff
         self.stable_seconds = stable_seconds
         self.receipt_keys = self._load_receipt_keys(
-            self._broker_origin(parsed), parsed.hostname,
+            self._relay_origin(parsed), parsed.hostname,
         )
         self._pending_receipt_envelopes: dict[str, bytes] = {}
         self._pending_audit_batch: AuditExportBatch | None = None
@@ -500,7 +500,7 @@ class ShoreHostConnection:
         self.relay_url = urlunsplit((ws_scheme, parsed.netloc, account_path + "/relay", f"account_id={channel.account_id}", ""))
 
     @staticmethod
-    def _broker_origin(parsed: Any) -> str:
+    def _relay_origin(parsed: Any) -> str:
         hostname = parsed.hostname.lower()
         host = f"[{hostname}]" if ":" in hostname else hostname
         default_port = 443 if parsed.scheme == "https" else 80
@@ -664,7 +664,7 @@ class ShoreHostConnection:
                     await socket.close(code=1003, reason="binary_frames_only")
                     return
                 if message == b"":
-                    # Broker lease heartbeat; receipts cover ordinary
+                    # Relay lease heartbeat; receipts cover ordinary
                     # encrypted envelopes only.
                     continue
                 try:

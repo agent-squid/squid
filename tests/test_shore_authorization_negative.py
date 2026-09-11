@@ -19,10 +19,10 @@ unit-level module can't see on its own:
 
 The plan's remaining 4.8 bullet -- "denied frames still count against the
 existing per-socket frame-rate limit in shore/src/index.ts" -- has no
-separate test here: the broker increments `meta.rateCount` for every
+separate test here: the relay increments `meta.rateCount` for every
 non-empty binary frame (`webSocketMessage`, shore's `src/index.ts`) before
 any role- or content-based branching, since relayed content is E2E
-ciphertext the broker can't decrypt. There is no code path where a frame's
+ciphertext the relay can't decrypt. There is no code path where a frame's
 eventual host-side authorization outcome could exempt it from that counter --
 that outcome doesn't exist yet at relay time -- so the existing
 `test/shore.test.ts` "rate_limited" coverage of that same unconditional

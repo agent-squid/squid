@@ -14,7 +14,7 @@ from .shore_crypto import b64url, canonical, unb64url
 
 RECEIPT_GENESIS_HASH = "0" * 43
 # Populated only through a reviewed AgentSquid release. Pins are scoped to the
-# canonical broker origin so a key trusted for one Shore deployment cannot
+# canonical relay origin so a key trusted for one Shore deployment cannot
 # authenticate receipts from another. Production trust must never be replaced
 # by a process environment variable.
 PINNED_SHORE_RECEIPT_PUBLIC_KEYS_BY_ORIGIN: dict[str, dict[int, str]] = {

@@ -15,7 +15,7 @@ before the production job can be enabled and Milestone 6 can begin. External
 users must not be admitted in production until that review closes.
 
 This is the implementation plan for
-[ADR-0039](../decisions/0039-remote-access-via-shore-broker.md). The ADR owns
+[ADR-0039](../decisions/0039-remote-access-via-shore-relay.md). The ADR owns
 the architectural and security decisions; this document owns sequencing,
 acceptance gates, and verification. Implement the milestones in order. Do not
 enable remote command execution until every production gate is satisfied.
@@ -26,7 +26,7 @@ second command, event, replay, or snapshot model.
 
 ## Non-negotiable invariants
 
-- The broker never receives keys that can decrypt or forge command payloads.
+- The relay never receives keys that can decrypt or forge command payloads.
 - Account login alone never authorizes a device to issue host commands.
 - Host and browser device keys are generated and retained locally.
 - Host identities are immutable and append-only; a different key cannot replace
@@ -34,7 +34,7 @@ second command, event, replay, or snapshot model.
 - Each account has exactly one current host; a second host is rejected unless
   the current identity is revoked through the defined replacement flow.
 - Pairing establishes trust through a host-displayed code that commits to both
-  device-key fingerprints; broker-provided trust-on-first-use is insufficient.
+  device-key fingerprints; relay-provided trust-on-first-use is insufficient.
 - Account recovery cannot recover cryptographic trust or inherit old pairings
   and capabilities; replacement hosts are visibly new trust roots.
 - Every command is signed, encrypted, capability-checked, replay-protected,
@@ -69,7 +69,7 @@ without embedding unsettled security choices in code.
    scopes available to each capability. Default-deny unknown and future types.
 4. Define audit retention/export, append-only destination, credential ownership,
    privacy fields, and incident-response ownership.
-5. Threat-model a malicious broker, stolen browser session, stolen device,
+5. Threat-model a malicious relay, stolen browser session, stolen device,
    replay, key substitution, compromised host, malicious client update, Durable
    Object restart, and account recovery.
 6. Revalidate current Cloudflare limits, pricing, routing, Durable Object
@@ -92,9 +92,9 @@ governance-bypass, or bucket-management capability.
 pairing and offline recovery verifier vectors; the threat model has no unowned
 critical mitigation; ADR-0039 is updated and accepted.
 
-## Milestone 1 — Broker skeleton and opaque relay
+## Milestone 1 — Relay skeleton and opaque relay
 
-**Status:** Complete (2026-09-02). The broker skeleton, identity index,
+**Status:** Complete (2026-09-02). The relay skeleton, identity index,
 single-host lifecycle, opaque relay, and acceptance coverage are implemented.
 No production command-capable route is enabled.
 
@@ -111,7 +111,7 @@ remote execution.
    including normalized username uniqueness and rename transactions.
 4. Add authenticated host and browser WebSocket attachment, one-current-host
    enforcement, immutable host IDs, hibernation-safe attachment metadata,
-   bounded queues, broker-observed socket health, same-key reconnect/displacement
+   bounded queues, relay-observed socket health, same-key reconnect/displacement
    rules, and deterministic offline/overload errors. A different key must never
    replace an existing host connection or identity outside the replacement
    flow. A healthy same-key displacement must terminate the older socket,
@@ -134,7 +134,7 @@ availability during quota degradation, different-key displacement rejection,
 replacement only after revocation, hibernation restore, host offline,
 backpressure, malformed frames, and byte-for-byte opaque relay behavior without
 payload decoding. Milestone 1 does not provide cryptographic confidentiality
-from the broker: test frames remain inspectable in principle until Milestone 3
+from the relay: test frames remain inspectable in principle until Milestone 3
 implements end-to-end encryption, and no command-capable route may be enabled
 before that gate passes.
 
@@ -216,14 +216,14 @@ commands.
 **Status:** Complete (2026-09-04). Action 1 (envelope) and Action 4
 (validation core) are implemented and independently reproduce
 `shore-protocol-v1-vectors.json` byte-for-byte on both the host
-(`agent/shore_crypto.py`) and browser/broker (`shore/src/crypto.ts`) sides.
+(`agent/shore_crypto.py`) and browser/relay (`shore/src/crypto.ts`) sides.
 Action 2 (pairing) and the durable device-trust core in Action 3 are also
 implemented on both sides, after a model-assisted review round found and the
 team fixed, in order: the original pairing design could not fit the 128-bit
 secret and 128-bit nonce into one 130-bit human code and required the browser
 to know unverified host fingerprints before it could decrypt anything
 (circular); the protocol was amended to a bootstrap-key three-packet
-ceremony (`docs/decisions/0039-remote-access-via-shore-broker.md`'s
+ceremony (`docs/decisions/0039-remote-access-via-shore-relay.md`'s
 2026-09-03 amendment) with real (not placeholder) fingerprint vectors; the
 host-side `PairingCoordinator` was rewritten to start blind and learn the
 browser's identity only from its first encrypted packet; a matching
@@ -235,13 +235,13 @@ fixed. The host-side `PairingCoordinator` now also rate-limits itself
 (`agent/shore_crypto.py`): a sliding 5-minute window caps both ceremony
 creation and aggregate failed attempts across ceremonies, closing a gap
 where the existing per-ceremony 5-attempt lockout could be reset for free by
-just starting a new ceremony. The broker now recognizes only the public outer
+just starting a new ceremony. The relay now recognizes only the public outer
 schema of browser-to-host pairing packets and, without inspecting ciphertext,
 atomically caps packets per ceremony and distinct ceremonies per five-minute
 window across the account, browser-device, and source-fingerprint identity
 layers (`shore/src/index.ts`). Pairing rate records expire through the existing
 alarm cleanup, and source fingerprints use keyed HMAC rather than reversible
-plain hashes. A pre-publish review of this broker code found and fixed two
+plain hashes. A pre-publish review of this relay code found and fixed two
 bugs before either side of the diff was published: the churn check re-fetched
 the same storage keys twice per identity per packet (once to check, once to
 update) for no reason, and — more seriously — the per-ceremony dedupe marker
@@ -262,7 +262,7 @@ does (now fixed the same way); the pairing-packet detector required an exact
 5-key/field match, so a packet with one extra or mismatched field still
 targeting a real ceremony_id was invisible to the per-ceremony/churn counters
 and relayed unthrottled (loosened to key off a valid `ceremony_id` alone,
-since the host — not the broker — is responsible for wire-format validity);
+since the host — not the relay — is responsible for wire-format validity);
 and the per-ceremony rate records' expiry was window-aligned rather than
 anchored to arrival time, so a ceremony whose first packet landed near a
 window boundary could have its dedupe marker swept by the alarm cleanup
@@ -275,11 +275,11 @@ by design against the window-aligned expiry). 15 negative-acceptance tests
 cover signature/key substitution, key-epoch mismatch, clock skew, expiry,
 replay and reordering at the envelope layer, pairing-confirmation reuse after
 completion, device-trust revocation, and the two new rate limits
-(`tests/test_shore_crypto.py`), plus broker per-ceremony, churn,
+(`tests/test_shore_crypto.py`), plus relay per-ceremony, churn,
 window-boundary, packet-schema, and TTL behavior, persistence/privacy
 behavior, session revocation, refresh rotation, attachment races, and revoked
 generation ordering (`shore/test/shore.test.ts`); host suite is 32/32 and
-broker suite is 82/82, `tsc --noEmit` clean. The first runtime transport slice
+relay suite is 82/82, `tsc --noEmit` clean. The first runtime transport slice
 is also present: Shore exposes `/relay` through the existing signed-host and
 remote-browser-session attachment checks. Relay upgrades now carry the immutable
 account ID learned during authenticated discovery and route directly to that
@@ -287,7 +287,7 @@ account object, which rechecks its durable current username; this removes the
 global `IdentityIndex` from the live socket path and prevents arbitrary username
 traffic from serializing all relay connections. The public `/test-relay` route
 and its bootstrap bearer compatibility surface have been removed, while the
-broker continues to relay binary bytes opaquely. On the
+relay continues to relay binary bytes opaquely. On the
 host, `agent/shore_transport.py` joins the pairing coordinator and durable
 trust/replay stores to a fail-closed dispatcher. Its only post-pairing plaintext
 operation is a harmless `shore.probe` round trip; all other message types are
@@ -295,10 +295,10 @@ rejected, so ADR-0040 commands remain disabled. Tests cover the real Durable
 Object WebSocket path, pairing through the runtime dispatcher, trust/replay/
 outbound-sequence persistence over dispatcher reconstruction, and rejection of
 command-shaped input. Still open before the milestone gate can pass: the
-host WebSocket connection core now obtains a fresh broker challenge, signs the
+host WebSocket connection core now obtains a fresh relay challenge, signs the
 canonical connection proof, dispatches binary frames through `ShoreChannel`,
-sends broker-consumed lease heartbeats, and reconnects with bounded exponential
-backoff (`ShoreHostConnection` in `agent/shore_transport.py`). The broker now
+sends relay-consumed lease heartbeats, and reconnects with bounded exponential
+backoff (`ShoreHostConnection` in `agent/shore_transport.py`). The relay now
 consumes zero-length binary lease heartbeats without forwarding them to browser
 devices, closing the idle-host expiry gap, and has an integration regression
 test for that behavior. Pre-publish review then restricted those heartbeats to
@@ -321,25 +321,25 @@ mode-0600 public routing metadata and the existing protected host identity from
 the configurable Shore identity directory. Registration responses supply the
 immutable account ID, normalized username, and host key epoch needed to reconstruct
 the channel; absent or invalid persisted configuration fails closed and leaves Shore
-disabled. A final review added strict broker-metadata validation before persistence
+disabled. A final review added strict relay-metadata validation before persistence
 and prevented malformed `shore.identity_dir` configuration from aborting daemon
 startup. The pre-publish review also restored the existing account-activation ID
 source after catching an unintended adjacent edit, made the registration metadata's
 account ID derive from the Durable Object identity rather than a forwarding header,
 and made daemon shutdown prompt while surfacing unexpected connection-task failures.
-The second pre-publish review normalized malformed persisted broker types into the
+The second pre-publish review normalized malformed persisted relay types into the
 fail-closed configuration path and bound administrative login responses back to the
 explicitly requested immutable account ID. A third review made Shore identity-path
 validation shared by startup and the config editor, rejecting falsy non-mappings,
 empty paths, and cwd-relative paths; it also made normal premature connection-task
-termination visible instead of silent. A fourth review hardened broker URL parsing
+termination visible instead of silent. A fourth review hardened relay URL parsing
 against deferred invalid-port/IPv6 errors and whitespace, aligned persisted usernames
-with the broker's reserved-name rules, and added regression coverage for those cases.
+with the relay's reserved-name rules, and added regression coverage for those cases.
 A fifth review centralized those invariants at the persistence boundary itself, so
 future callers cannot bypass validation by invoking the atomic writer directly.
 A sixth review moved canonical username and UUIDv7 validation ahead of identity
 creation and network access, preventing CLI route-identifier injection when a
-session bearer is supplied. A seventh review restricted plaintext broker URLs to
+session bearer is supplied. A seventh review restricted plaintext relay URLs to
 explicit loopback development endpoints, preventing account/session credentials and
 host attachment traffic from crossing a network without TLS. An eighth review aligned
 Python key-epoch validation with TypeScript's safe-integer ceiling at envelope,
@@ -370,10 +370,10 @@ proves the old browser trust fails closed, proves replacement is rejected withou
 explicit approval, re-pairs through a new ceremony with a named local-approval
 option, and completes an encrypted probe under the new epoch. The browser has
 36 passing unit tests plus this passing cross-process test, and its
-`tsc --noEmit` check is clean. Explicit host-side broker-injection coverage now
+`tsc --noEmit` check is clean. Explicit host-side relay-injection coverage now
 proves malformed plaintext and a cryptographically well-formed envelope from an
 untrusted device both fail before application dispatch. The focused host suites
-pass 84/84, the broker suite passes 85/85, and `tsc --noEmit` remains clean.
+pass 84/84, the relay suite passes 85/85, and `tsc --noEmit` remains clean.
 The deployment slice originally completed with a manual, serialized
 pre-production deployment workflow protected by the `shore-dev`
 GitHub environment, separate Cloudflare credentials, test/typecheck gates, and
@@ -409,7 +409,7 @@ it deployed cleanly to `dev.agentsquid.ai` on 2026-09-11 (Milestone 5, 5.12);
 the production job's disabled condition remains until Milestone 5's final
 security review closes.
 
-**Objective:** establish broker-blind, mutually authenticated communication
+**Objective:** establish relay-blind, mutually authenticated communication
 between a paired browser device and the host.
 
 **Actions:**
@@ -432,7 +432,7 @@ between a paired browser device and the host.
 **Acceptance:** interoperability and negative tests cover tampering, wrong keys,
 replay across connections, reordered/duplicate IDs, clock skew, key
 substitution, pairing expiry/reuse/attempt exhaustion/races/rate limits/offline
-guessing, host-key epoch changes, revocation, recovery, and broker frame
+guessing, host-key epoch changes, revocation, recovery, and relay frame
 injection. An independent security review has no unresolved critical or high
 findings.
 
@@ -451,7 +451,7 @@ important test — subscribe → snapshot → live host-pushed event, proven ove
 the real encrypted wire protocol rather than a duck-typed fake or either
 side's own test suite in isolation — now runs in `test/cross-process.test.ts`
 and passes. 4.6 (reconnect/idempotency/sequence durability) is also now
-landed — it corrected a stale assumption in its own plan text (host↔broker
+landed — it corrected a stale assumption in its own plan text (host↔relay
 reconnect does not drop in-memory session state, contrary to what this
 section originally said) and added the dormancy/backlog-replay and
 sequence-durability coverage its acceptance criteria called for. 4.7
@@ -468,7 +468,7 @@ now landed: `tests/test_shore_authorization_negative.py` adds identity-vs-
 capability check ordering (a revoked or wrong-epoch device fails closed even
 for an otherwise fully-granted command) and a static, exhaustive proof that
 every `ShoreProtocolError` call site across the Shore host stack passes only
-a closed string literal, never per-request dynamic detail; the broker
+a closed string literal, never per-request dynamic detail; the relay
 frame-rate-limit bullet needed no new test, since `shore/src/index.ts`
 already counts every relayed frame before any content inspection is even
 possible (relayed content is E2E ciphertext). 4.9 (documentation) is also
@@ -500,7 +500,7 @@ this milestone, not automatic from the gate closing.
    versions before dispatch.
 3. Preserve ADR-0040 request IDs, idempotency, event cursors, acknowledgements,
    replay/snapshot semantics, heartbeat, frame limits, and backpressure through
-   reconnects. Broker routing metadata must remain outside encrypted content.
+   reconnects. Relay routing metadata must remain outside encrypted content.
 4. Initially enable read-only dashboard/state operations. Add non-destructive
    mutations individually only after authorization and parity tests exist.
 5. Keep arbitrary shell disabled. Its separate grant flow must be local,
@@ -1029,7 +1029,7 @@ per-frame thread-pool round trip itself the bottleneck.
 `agent.server._realtime_notifier`, lazily imported to avoid the
 `server.py`/`shore_transport.py` cycle, mirroring the existing pattern at
 `agent/server.py:392`) and a periodic `_push_sweep` (every 5s, independent of
-the notifier and of the 30s broker transport-lease heartbeat) rather than one
+the notifier and of the 30s relay transport-lease heartbeat) rather than one
 task per subscribed device — a device count-scaling concern the original
 per-device-task sketch didn't address. `_push_sweep` iterates
 `ShoreChannel.sessions`, and per device: evicts on key-epoch mismatch or
@@ -1297,7 +1297,7 @@ isolation).
 **Status:** Landed.
 
 **The plan's own first action bullet was wrong and is corrected here, not
-carried forward.** It assumed "Host-side reconnect (host↔broker) drops
+carried forward.** It assumed "Host-side reconnect (host↔relay) drops
 in-memory per-device state by design (4.3); devices detect this via
 heartbeat/close handling and resubscribe" — mirroring how the direct `/ws/v1`
 path's connection-scoped state works. That doesn't match what 4.3 actually
@@ -1305,7 +1305,7 @@ built: `ShoreHostConnection.__init__` receives one `ShoreChannel` and stores
 it in `self.channel`; `run()`'s reconnect loop only ever constructs a new
 `socket` per attempt and calls `self._serve(socket, stop)` again on the same
 `self.channel` — so `channel.sessions` (each device's scopes, cursor, and
-last-acked cursor) is untouched by a host↔broker reconnect. This was already
+last-acked cursor) is untouched by a host↔relay reconnect. This was already
 flagged as an unresolved open item in 4.3's own write-up above ("a reconnect
 that keeps the same `ShoreChannel` instance currently does *not* drop
 in-memory session state the way 4.6 assumes it will"). Resolved by keeping
@@ -1315,7 +1315,7 @@ are delivered as an ordinary replay by the first `_push_sweep` on the new
 socket, the same as any other catch-up — and correcting this section's own
 stated design to match, rather than changing working code to fit a stale
 assumption. Proven directly by
-`test_session_state_survives_host_broker_reconnect`
+`test_session_state_survives_host_relay_reconnect`
 (`tests/test_shore_transport.py`): subscribes a device, sweeps an idle
 socket (nothing to send), publishes two events with no sweep running (the
 "host offline" gap), then sweeps a second, distinct fake socket standing in
@@ -1412,7 +1412,7 @@ equally opaque. The remaining bullet — denied frames still counting against
 `shore/src/index.ts`'s per-socket frame-rate limit — needed no new test:
 `webSocketMessage` increments `meta.rateCount` for every non-empty binary
 frame before any role- or content-based branching, since relayed content is
-E2E ciphertext the broker can't decrypt, so there is no code path where a
+E2E ciphertext the relay can't decrypt, so there is no code path where a
 frame's eventual host-side authorization outcome could exempt it from that
 counter; `test/shore.test.ts`'s existing `rate_limited` coverage already
 exercises that same unconditional counter.
@@ -1441,7 +1441,7 @@ exercises that same unconditional counter.
 **Status:** Landed, including the gate. This plan doc's Milestone 4
 status (below) and its 4.7/4.8 subsections narrate each slice as it landed,
 matching Milestones 1–3's style. `docs/decisions/0039-remote-access-via-
-shore-broker.md`'s system-flow mermaid diagram now reflects reality: step 4
+shore-relay.md`'s system-flow mermaid diagram now reflects reality: step 4
 of the "System and protocol flow" diagram reads "probe + read-only
 dashboard.read.v1 (mutations still disabled)" instead of "probe" only, and
 leg B of the "Target steady-state operation" diagram is relabeled
@@ -1519,7 +1519,7 @@ expiry/immediate-revocation surface. None of this should be built now.
 **Status:** Implementation complete; preproduction deployed and B2-verified
 (2026-09-11, see 5.12); final security review pending. Milestones 3 and 4 are both complete, including
 Milestone 4's acceptance gate, which closed on 2026-09-07 (see Milestone 4's
-status), unblocking this work. 5.0 (broker-side hash-chained audit log) is
+status), unblocking this work. 5.0 (relay-side hash-chained audit log) is
 landed: every existing account-lifecycle audit event (magic links, sessions,
 second-factor, recovery, deletion, host registration/revocation,
 displacement) is chained via a monotonic per-account `seq` plus a
@@ -1530,16 +1530,16 @@ pre-chain legacy audit records the first time a new event is logged, so no
 account is left with corrupted history. 5.1 (host-side signed audit log,
 Action 2) is also landed: `agent/shore_audit.py`'s `ShoreAuditLog` records a
 locally Ed25519-signed, hash-chained event for every ADR-0040 frame the host
-dispatches (granted or capability-denied), correlated to the broker's chain
+dispatches (granted or capability-denied), correlated to the relay's chain
 by the shared envelope `request_id`. Action 1's scope turned out to need a
 correction discovered while implementing 5.1 — see 5.1's write-up below.
 Action 3's host-side durable batching foundation and former B2 transport landed
-as 5.2a/5.2b; the broker's own B2 export (5.2c, `shore/src/index.ts`'s
+as 5.2a/5.2b; the relay's own B2 export (5.2c, `shore/src/index.ts`'s
 `Account.exportAuditBatch`/`auditExportLagMs`) is also now landed, uploading
-each account's chain to `broker/accounts/<accountId>/events/...` with the same
+each account's chain to `relay/accounts/<accountId>/events/...` with the same
 create-only, cursor-gated design as the host writer, plus the same five-minute
 export-lag alert on sustained failure. The former cross-stream daily manifest
-can correlate broker and host events because 5.3 records every valid
+can correlate relay and host events because 5.3 records every valid
 opaque relayed envelope before forwarding, including its public request,
 host, device, and session identifiers, direction, ciphertext commitment, and
 forwarding outcome. The signed manifest core landed in 5.4, but the target
@@ -1551,9 +1551,9 @@ signed host batches instead flow
 over the authenticated Shore channel and Shore alone writes B2. Live signed
 relay receipts replace daily comparison and fail closed for remote access only.
 5.5 separately lands host-authenticated, live read access
-to the broker's own audit chain for a single account -- groundwork for
+to the relay's own audit chain for a single account -- groundwork for
 Action 4, not the 5.4 collector. Action 4 (user-visible history/notifications)
-has its backend already in place (broker notification delivery, step-up-
+has its backend already in place (relay notification delivery, step-up-
 protected host revoke), 5.6 lands a browser client that can actually receive a
 live notification, and 5.7 lands a security-history page
 (host/alerts/notifications/devices/sessions) at `/@<username>/security`, also
@@ -1568,7 +1568,7 @@ attributable without storing command plaintext.
 
 **Actions:**
 
-1. Broker records account/device/session IDs, source metadata, receipt time,
+1. Relay records account/device/session IDs, source metadata, receipt time,
    request ID, and ciphertext/command commitment as a hash-chained event.
 2. Host records a signed event with the same request ID, command hash,
    authorization decision, outcome, and host time.
@@ -1580,7 +1580,7 @@ attributable without storing command plaintext.
    for pairing, key changes, healthy same-key host displacement, recovery,
    revocation, and privileged grants. Displacement notifications include an
    immediate-access revoke-host action protected by recent step-up and correlate
-   to the broker audit event. Raw IP and precise location remain restricted to
+   to the relay audit event. Raw IP and precise location remain restricted to
    the audit system and are never copied into browser/out-of-band notifications.
 
 **Acceptance:** tests detect deletion, insertion, mutation, receipt-chain gaps,
@@ -1598,14 +1598,14 @@ headers are absent from user notifications by default.
 
 **Key findings**
 
-- Action 1's scope splits cleanly in two: chaining the *existing* broker audit
+- Action 1's scope splits cleanly in two: chaining the *existing* relay audit
   log (account/session/pairing/host lifecycle events, already recorded via
   `Account.audit()`/`auditEntry()` in `shore/src/index.ts`) needed no new
   infrastructure decision and is a direct prerequisite for everything else in
   this milestone. Extending that log to cover every relayed *command* frame
   is a separate, real cost decision (a storage write per relayed frame), now
   explicitly accepted and landed in 5.3 so receipts/checkpoints can detect missing
-  broker/host correlations.
+  relay/host correlations.
 - Action 3's archive target is not an open decision — it remains
   Milestone 0's accepted spec (`docs/shore-security-operations.md`, echoed in
   this doc's own Milestone 0 section): private, SSE-B2-encrypted, Object-Lock
@@ -1617,7 +1617,7 @@ headers are absent from user notifications by default.
   in test and a 5-minute export-lag paging threshold. B2 credentials now live
   only in Shore; live signed receipts and host checkpoints replace daily
   manifests. That doc also fixes the per-event field
-  schema for both chains (broker: prior hash, event ID, account/host/device/
+  schema for both chains (relay: prior hash, event ID, account/host/device/
   session IDs, coarse source metadata, restricted raw IP, receipt time,
   ciphertext hash, outcome; host: signed request ID, plaintext command hash,
   authorization decision, result class, host time, prior host-event hash) and
@@ -1632,7 +1632,7 @@ headers are absent from user notifications by default.
   keeps the chain atomic under the runtime's optimistic-concurrency retries,
   with no separate locking needed.
 
-**5.0 — Hash-chain the broker's existing audit log (landed)**
+**5.0 — Hash-chain the relay's existing audit log (landed)**
 
 - `Audit` gained `seq`, `prevHash`, and `hash`; `auditEntry()` now reads the
   `audit-chain-tip` key inside the caller's transaction, computes
@@ -1677,33 +1677,33 @@ headers are absent from user notifications by default.
 
 **5.1 — Host-side signed audit log, and a correction to Action 1's scope (landed)**
 
-- **Key finding that changed Action 1's plan:** the broker cannot tell ADR-0040
+- **Key finding that changed Action 1's plan:** the relay cannot tell ADR-0040
   message types apart at all. `shore/src/index.ts`'s `webSocketMessage` never
   decrypts a relayed frame — `type`/`payload` live inside the AEAD ciphertext,
-  opaque to the broker by design (E2E, per this doc's non-negotiable
+  opaque to the relay by design (E2E, per this doc's non-negotiable
   invariants). So "audit only subscribe/unsubscribe, skip ping/pong" — the
-  scope floated before this sub-step — isn't implementable at the broker: it
-  is structurally blind to which relayed frame is which. The broker's only
+  scope floated before this sub-step — isn't implementable at the relay: it
+  is structurally blind to which relayed frame is which. The relay's only
   per-frame options are "audit every relayed frame identically" (the real
   cost question from before, now confirmed to mean literally every frame,
   heartbeats included, not just a rare subset) or "don't add per-frame
-  broker auditing yet." Given `dashboard.read.v1` has no mutating commands
+  relay auditing yet." Given `dashboard.read.v1` has no mutating commands
   at all today (Milestone 4: `subscribe`/`unsubscribe`/`ack`/`ping`/`pong`
-  only), the per-frame broker cost/value tradeoff stays deferred rather than
+  only), the per-frame relay cost/value tradeoff stays deferred rather than
   decided by default — Action 1's connection-level events (`socket_attached`,
-  displacement, stale reconnect, already in 5.0) remain the broker's audit
+  displacement, stale reconnect, already in 5.0) remain the relay's audit
   coverage for now. The host, by contrast, decrypts every frame and already
   runs a fail-closed capability check on each one (`agent/shore_capabilities.py`'s
   `authorize_capability_frame`) — so Action 2 (the host chain) had real,
-  current content to audit today, unlike a broker-side per-frame log, and
+  current content to audit today, unlike a relay-side per-frame log, and
   became the higher-value next step.
 - Added `agent/shore_audit.py`'s `ShoreAuditLog`: a local SQLite-backed chain
   mirroring 5.0's design (monotonic `seq`, `prevHash`/`hash` over each
   event's own canonicalized content, computed inside the same `BEGIN
   IMMEDIATE` transaction that reads the prior tip) plus an Ed25519 signature
   over each event from the host's own pinned identity key — a guarantee the
-  broker's chain doesn't have, since only the host holds that private key.
-  Records: `requestId` (correlates to the broker's chain), `deviceId`,
+  relay's chain doesn't have, since only the host holds that private key.
+  Records: `requestId` (correlates to the relay's chain), `deviceId`,
   `hostId`, `messageType` (the closed ADR-0040 type tag, not payload
   content), `commandHash` (a commitment to the full decrypted frame, never
   the frame itself), `decision` (granted/denied), `outcome`, and `at`.
@@ -1722,13 +1722,13 @@ headers are absent from user notifications by default.
   so a queuing failure there doesn't need to escalate further) and re-raises
   the original error unchanged.
 - Not done here: actually cross-checking the two chains against each other
-  (matching a broker `request_id` to a host `request_id`) — that requires
+  (matching a relay `request_id` to a host `request_id`) — that requires
   Action 3's export pipeline to get both chains into one place to compare,
   so "missing correlation" and "forged host events" from this milestone's
   acceptance criteria were still open at the time 5.1 landed, until Action 3's
   export pipeline existed. Now resolved by 5.11: every archived host event's
-  request ID must resolve to the durable broker receipt allocated for that
-  immutable host before archival, so a signed batch cannot invent broker
+  request ID must resolve to the durable relay receipt allocated for that
+  immutable host before archival, so a signed batch cannot invent relay
   correlation records.
 - An independent review (codex) caught three issues in the first pass, all
   now fixed and covered by tests: (1) High — "fail closed" was checked
@@ -1777,8 +1777,8 @@ Current repository state as of 2026-09-10:
 | --- | --- | --- |
 | Host signed SQLite chain, atomic signed tip, deterministic batches | Landed in `agent/shore_audit.py` | Keep and reuse |
 | Direct host-to-B2 exporter and `SQUID_SHORE_AUDIT_B2_*` startup wiring | Removed in 5.8 | Do not reintroduce |
-| Broker per-account audit chain and B2 exporter | Landed in `shore/src/index.ts` | Keep; extend to host batches |
-| Authenticated broker audit challenge/events endpoint | Landed in `shore/src/index.ts` | Reuse for bounded catch-up from an already trusted tip |
+| Relay per-account audit chain and B2 exporter | Landed in `shore/src/index.ts` | Keep; extend to host batches |
+| Authenticated relay audit challenge/events endpoint | Landed in `shore/src/index.ts` | Reuse for bounded catch-up from an already trusted tip |
 | Daily manifest builder/verifier | Removed in 5.8; no operational collector existed | Do not reintroduce |
 | Dedicated per-host receipt chain and relay signing key | Not implemented | Build |
 | Outer relay frame and receipt verification/persistence | Not implemented | Build in Shore and host transport |
@@ -1841,10 +1841,10 @@ Current repository state as of 2026-09-10:
   a credential lacking delete/retention-management capability provide the
   append-only boundary; live test-bucket verification remains required.
 
-**5.2c — Broker B2 export and lag alert (landed; Action 3 remains in progress)**
+**5.2c — Relay B2 export and lag alert (landed; Action 3 remains in progress)**
 
 - `shore/src/index.ts`'s `Account.exportAuditBatch()` uploads each account's
-  hash-chained events to `broker/accounts/<accountId>/events/<fromSeq>-
+  hash-chained events to `relay/accounts/<accountId>/events/<fromSeq>-
   <throughSeq>-<headHash>.json` via the existing `createAuditArchiveRequest`
   Signature V4 `PutObject` builder, mirroring the host writer's create-only,
   cursor-gated design: the `audit-export-cursor` storage key only advances
@@ -1853,7 +1853,7 @@ Current repository state as of 2026-09-10:
   the DO alarm about a second after any new event when B2 is configured, so
   new activity drains promptly instead of waiting for an unrelated timer.
 - Closed a completeness gap versus the host writer while reviewing this: the
-  broker's `alarm()` caught export failures with a flat `console.error` and
+  relay's `alarm()` caught export failures with a flat `console.error` and
   retried every five seconds forever, with no way to distinguish "still
   within normal retry" from the five-minute export-lag paging threshold
   Milestone 0's accepted spec requires (`docs/shore-security-operations.md`)
@@ -1882,15 +1882,15 @@ Current repository state as of 2026-09-10:
 - Still open: live retention/overwrite/deletion-rejection verification against
   the real `shore-audit-dev` bucket and ingestion of host-signed batches.
 
-**5.3 — Broker per-envelope correlation records (landed)**
+**5.3 — Relay per-envelope correlation records (landed)**
 
-- The broker records each valid ordinary encrypted envelope before forwarding
+- The relay records each valid ordinary encrypted envelope before forwarding
   it. The chained event contains only public routing metadata (`requestId`,
   host/device/session IDs, and direction), a SHA-256 ciphertext commitment,
   and a pre-forward `pending` outcome. A second best-effort event records the
   actual `forwarded`, `peer_offline`, `backpressure`, or `send_failed` result;
   command and response plaintext remain opaque.
-- Audit persistence is fail-closed: if the broker cannot append the event, it
+- Audit persistence is fail-closed: if the relay cannot append the event, it
   drops that frame without forwarding it. The WebSocket remains open so one
   transient storage failure does not disconnect every multiplexed device or
   amplify load through reconnect/resnapshot churn, matching the host-side
@@ -1903,27 +1903,27 @@ Current repository state as of 2026-09-10:
 
 **5.4 — Signed cross-stream manifest core (landed, now retired)**
 
-- `agent/shore_audit_manifest.py` verifies the broker hash chain and host
-  signed chain against independently supplied tips, correlates broker request
+- `agent/shore_audit_manifest.py` verifies the relay hash chain and host
+  signed chain against independently supplied tips, correlates relay request
   IDs whose outcome confirms `forwarded` with host decisions/outcomes, surfaces
   missing IDs on either side, and signs the daily heads/counts/gap report with
   a separate Ed25519 manifest authority. Offline, backpressured, and failed-send
   frames are correctly excluded because they never reached the host.
 - Manifest verification rejects content mutation, while construction refuses
-  a broken broker chain or forged host event. Each manifest commits to the
-  prior signed manifest and refuses a broker or host head that regresses, so a
+  a broken relay chain or forged host event. Each manifest commits to the
+  prior signed manifest and refuses a relay or host head that regresses, so a
   valid historical prefix cannot be substituted for the latest anchored
   history. Creating or verifying the first manifest requires an explicit
   genesis declaration; every later manifest requires its prior signed
   manifest, preventing an omitted predecessor from silently resetting the
   manifest chain. The host now also records
-  `shore.probe`, fail-closed, so valid broker inbound envelopes do not create
+  `shore.probe`, fail-closed, so valid relay inbound envelopes do not create
   systematic false correlation gaps.
 - The operational collector is cancelled. Do not provision its B2 credentials
   or manifest authority. Live receipts and Shore-side ingestion of host-signed
   batches replace this design as specified in the architecture update above.
 
-**5.5 — Host-authenticated read access to the broker's own live audit chain (landed)**
+**5.5 — Host-authenticated read access to the relay's own live audit chain (landed)**
 
 - Added `shore/src/index.ts`'s `GET /@<username>/host/audit-events` (paginated,
   `?cursor=`) and its prerequisite `POST /@<username>/host/audit-challenge`,
@@ -1934,7 +1934,7 @@ Current repository state as of 2026-09-10:
   can't authenticate the other). Returns this account's own `Audit` events
   plus the current chain tip; scoped to the requesting host's own account,
   never another's.
-- This gives the host live, authenticated read access to the broker's version
+- This gives the host live, authenticated read access to the relay's version
   of its own account chain. It is useful groundwork for live receipt recovery
   and user-visible history, but is not itself the signed receipt protocol.
 - Tests (`shore/test/shore.test.ts`, "Milestone 5 host audit-events
@@ -1944,15 +1944,15 @@ Current repository state as of 2026-09-10:
   challenge fails). Typecheck is clean; 107 applicable tests pass, with the
   known environment-dependent static pairing-assets test excluded.
 
-**5.6 — Browser client recognizes broker security notifications (Action 4, first slice)**
+**5.6 — Browser client recognizes relay security notifications (Action 4, first slice)**
 
 - **Key finding:** the backend half of Action 4 already exists and was never
-  reachable. The broker already builds and delivers `SecurityNotification`
+  reachable. The relay already builds and delivers `SecurityNotification`
   events (`deliverSecurityNotification` in `shore/src/index.ts`) for recovery,
   deletion, host revocation, and scheduled warnings, and `/@<username>/auth/
   revoke` already implements the step-up-protected immediate host-revoke
   action Action 4's text calls for. But `shore/browser/src/client.ts` had no
-  code path for receiving them at all: the broker sends a notification as a
+  code path for receiving them at all: the relay sends a notification as a
   plaintext WebSocket **text** frame (`ws.send(JSON.stringify(...))`, no
   binary framing), while every encrypted envelope is relayed as a **binary**
   frame (`socket.binaryType = "arraybuffer"`). `receive()` never checked
@@ -2071,8 +2071,8 @@ Current repository state as of 2026-09-10:
   workflows during this cleanup. Provision fresh, least-privilege deployment,
   fingerprint, audit-signing, and Shore-only archive credentials only when the
   replacement design reaches its applicable deployment gate.
-- Keep the broker-side B2 exporter and archive configuration: the replacement
-  design still requires Shore alone to write both broker and verified
+- Keep the relay-side B2 exporter and archive configuration: the replacement
+  design still requires Shore alone to write both relay and verified
   host-signed streams to append-only storage. Removing the current credentials
   does not remove that target architecture; it ensures the replacement starts
   with newly issued, narrowly scoped credentials instead of inheriting the
@@ -2109,7 +2109,7 @@ allocation cores landed)**
   receipt and old-key rotation signing/verification cores with closed-schema,
   mutation, nonconsecutive-epoch, and wrong-key tests. The Durable Object now
   also has host-scoped monotonic receipt allocation: receipt tip, stable
-  `(host_id, request_id)` idempotency record, and the pre-forward broker audit
+  `(host_id, request_id)` idempotency record, and the pre-forward relay audit
   event commit in one storage transaction. Byte-identical retries return the
   stored signed receipt without advancing either chain; changed bytes or an
   opposite direction fail with `shore_receipt_conflict`; separate immutable
@@ -2142,7 +2142,7 @@ allocation cores landed)**
   2026-09-11 corrected a trust-root flaw: non-loopback AgentSquid connections
   no longer accept receipt public keys from the process environment; only keys
   pinned in a reviewed AgentSquid release are trusted. Those release pins are
-  scoped by canonical broker origin, keeping preproduction and production
+  scoped by canonical relay origin, keeping preproduction and production
   trust roots independent; after any release pins are populated, unknown
   non-loopback origins fail configuration closed. Loopback development may
   still use the environment override. Independent epoch-1 Ed25519 keys are now
@@ -2206,8 +2206,8 @@ verification remains part of the Milestone 5 gate)**
   the replacement deployment contract requires the complete Shore-only B2
   configuration rather than permitting finite Durable Object retention alone.
   Before archival, every distinct host event request ID must also resolve to
-  the durable broker receipt allocated for that immutable host, so a signed
-  batch cannot invent broker correlation records.
+  the durable relay receipt allocated for that immutable host, so a signed
+  batch cannot invent relay correlation records.
 
 **5.12 — Recovery, migration, and enforcement (implementation complete;
 preproduction deployed and B2-verified; final security review pending)**
@@ -2230,7 +2230,7 @@ and any other remote origin fails configuration closed. Receipt persistence
 rejects a non-genesis Shore tip when the local checkpoint is absent, rejects a
 forward jump after a coherent older SQLite backup is restored, and retains the
 per-receipt epoch history across a signing-key rotation. Reinstall continues to
-create a new host identity and therefore a new broker chain rather than
+create a new host identity and therefore a new relay chain rather than
 silently adopting an old host's tip. Focused tests cover these cases together
 with crash rollback, stable retries, reconnects, concurrent-device behavior,
 unknown epochs, and direct/local-path availability.

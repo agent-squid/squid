@@ -56,14 +56,14 @@ def test_registration_proof_is_stable_and_validates_challenge():
 
 def test_runtime_config_is_private_and_round_trips(tmp_path):
     identity = tmp_path / "shore"
-    expected = ShoreRuntimeConfig("https://broker.example", "alice",
+    expected = ShoreRuntimeConfig("https://relay.example", "alice",
         "018f1f25-3f6b-7d75-a4d1-62d771381b20", 2)
     _write_runtime_config(identity, expected)
     assert _load_runtime_config(identity) == expected
     assert stat.S_IMODE(identity.stat().st_mode) == 0o700
     assert stat.S_IMODE((identity / "connection.json").stat().st_mode) == 0o600
 
-    replacement = ShoreRuntimeConfig("https://broker.example", "alice",
+    replacement = ShoreRuntimeConfig("https://relay.example", "alice",
         "018f1f25-3f6b-7d75-a4d1-62d771381b20", 3)
     os.chmod(identity, 0o755)
     _write_runtime_config(identity, replacement)
@@ -76,37 +76,37 @@ def test_runtime_config_writer_rejects_invalid_metadata_before_creating_files(tm
     identity = tmp_path / "shore"
     with pytest.raises(RuntimeError, match="refusing to persist invalid"):
         _write_runtime_config(identity, ShoreRuntimeConfig(
-            "https://broker.example", "admin",
+            "https://relay.example", "admin",
             "018f1f25-3f6b-7d75-a4d1-62d771381b20", 1,
         ))
     assert not identity.exists()
     with pytest.raises(RuntimeError, match="refusing to persist invalid"):
         _write_runtime_config(identity, ShoreRuntimeConfig(
-            "https://broker.example", "alice",
+            "https://relay.example", "alice",
             "018f1f25-3f6b-7d75-a4d1-62d771381b20", 1 << 53,
         ))
 
 
 def test_runtime_config_rejects_unsafe_or_invalid_metadata(tmp_path):
     identity = tmp_path / "shore"
-    _write_runtime_config(identity, ShoreRuntimeConfig("https://broker.example", "alice",
+    _write_runtime_config(identity, ShoreRuntimeConfig("https://relay.example", "alice",
         "018f1f25-3f6b-7d75-a4d1-62d771381b20", 1))
     os.chmod(identity / "connection.json", 0o644)
     with pytest.raises(RuntimeError, match="unsafe permissions"):
         _load_runtime_config(identity)
     os.chmod(identity / "connection.json", 0o600)
-    (identity / "connection.json").write_text('{"broker":"file:///tmp","username":"Alice"}')
+    (identity / "connection.json").write_text('{"relay":"file:///tmp","username":"Alice"}')
     with pytest.raises(RuntimeError, match="invalid Shore connection"):
         _load_runtime_config(identity)
     (identity / "connection.json").write_text(
         '{"account_id":"018f1f25-3f6b-7d75-a4d1-62d771381b20",'
-        '"broker":"https://example.com","key_epoch":1,"username":"admin"}'
+        '"relay":"https://example.com","key_epoch":1,"username":"admin"}'
     )
     with pytest.raises(RuntimeError, match="invalid Shore connection"):
         _load_runtime_config(identity)
     (identity / "connection.json").write_text(
         '{"account_id":"018f1f25-3f6b-7d75-a4d1-62d771381b20",'
-        '"broker":42,"key_epoch":1,"username":"alice"}'
+        '"relay":42,"key_epoch":1,"username":"alice"}'
     )
     with pytest.raises(RuntimeError, match="invalid Shore connection"):
         _load_runtime_config(identity)
@@ -172,13 +172,13 @@ def test_login_rejects_registration_response_for_different_host_keys(tmp_path, m
     assert not (tmp_path / "shore" / "connection.json").exists()
 
 
-def test_login_rejects_malformed_or_credentialed_broker_urls():
-    for broker in ("not-a-url", "https://user:secret@example.com", "ftp://example.com",
+def test_login_rejects_malformed_or_credentialed_relay_urls():
+    for relay in ("not-a-url", "https://user:secret@example.com", "ftp://example.com",
                    "https://[invalid", "https://example.com:invalid", "https://exa mple.com",
-                   "http://broker.example"):
+                   "http://relay.example"):
         with pytest.raises(SystemExit):
             login(["--account-id", "018f1f25-3f6b-7d75-a4d1-62d771381b20",
-                   "--session-token", "session", "--broker", broker])
+                   "--session-token", "session", "--relay", relay])
 
 
 @pytest.mark.parametrize("flag,value", [
@@ -211,7 +211,7 @@ def test_login_reports_network_failure_without_traceback(tmp_path, monkeypatch, 
             return False
 
         def post(self, *_args, **_kwargs):
-            raise httpx.ConnectError("broker unavailable")
+            raise httpx.ConnectError("relay unavailable")
 
     monkeypatch.setattr("agent.shore.httpx.Client", FailingClient)
     result = login([
@@ -221,7 +221,7 @@ def test_login_reports_network_failure_without_traceback(tmp_path, monkeypatch, 
     captured = capsys.readouterr()
     assert result == 1
     assert captured.out == ""
-    assert captured.err == "ERROR: Shore login failed: broker unavailable\n"
+    assert captured.err == "ERROR: Shore login failed: relay unavailable\n"
 
 
 def test_login_performs_email_and_second_factor_flow_without_session_token(tmp_path, monkeypatch, capsys):

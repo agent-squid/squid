@@ -19,7 +19,7 @@ which **topic** a message belongs to at all. Two concrete cases:
    about that work, not force the user to navigate there first.
 2. **Mid-conversation drift.** The user is sitting in topic A but the prompt
    content matches topic B's own usage pattern or subject matter (e.g. asking
-   a `shore`-broker question while the active topic is `squid`'s UI work).
+   a `shore`-relay question while the active topic is `squid`'s UI work).
    Squid could notice the mismatch instead of silently answering in the wrong
    context.
 
