@@ -5451,10 +5451,17 @@ async function sendMessage(text, opts = {}) {
   function renderCompletionTools(tools) {
     if (!shouldShowLiveResponse()) return;
     const diffTools = changeTools(tools || []);
+    // Anchor each block immediately after the previous one (starting from
+    // statsEl/bubble) instead of tail-appending to `messages` — a concurrent
+    // turn on another topic/agent can append its own bubble to `messages` in
+    // the gap before this runs, and a tail-append would land after it,
+    // stranding this turn's diffs below an unrelated later conversation.
+    let anchor = statsEl || bubble;
     for (const tool of diffTools) {
       const block = makeToolBlock(tool, msgId, null, topic);
       block.classList.add('tool-block-history');
-      messages.appendChild(block);
+      anchor.after(block);
+      anchor = block;
     }
     // force: this message's own GitDiff block is new (would get checked
     // regardless), but it can also retroactively flip earlier same-session
@@ -5621,7 +5628,12 @@ async function sendMessage(text, opts = {}) {
           const completedAt = data.completed_at || data.stats?.completed_at || doneTime;
           if (!statsEl && data.stats) statsEl = addStats(bubble, data.stats, completedAt);
           if (statsEl) {
-            messages.appendChild(statsEl);
+            // Anchor to bubble, not messages.appendChild(statsEl) — a tail-append
+            // would relocate statsEl to the end of `messages` and strand it below
+            // any turn on another topic/agent that appended its own message
+            // during this turn's polling interval (bubble was placed above by
+            // showStoredResponse(), so this is just re-affirming adjacency).
+            bubble.after(statsEl);
             addDeepDiveButton(bubble, topic, resolvedAgent, !!adhoc, statsEl, msgId, completedAt);
           }
           liveSessionTurnCount = parseInt(data.session_turn_count || '0', 10) || liveSessionTurnCount;
@@ -6083,7 +6095,16 @@ async function sendMessage(text, opts = {}) {
               if (shouldShowNewResponse({ topic, agent: resolvedAgent || agent, adhoc, flow_route: flowRoute })) {
                 const wasAtBottom = isAtBottom();
                 placeResponseBubble();
-                if (statsEl) messages.appendChild(statsEl); // stats goes between bubble and diffs, not after
+                // statsEl was created back at the 'stats' event, while bubble was
+                // still detached (bubble only joins `messages` here, at 'done') —
+                // addStats()'s own bubble.after(el) was a no-op at that time, so
+                // this is statsEl's real first insertion. Anchor it to bubble
+                // specifically, not messages.appendChild(statsEl): a concurrent
+                // turn on another topic/agent can append its own bubble to
+                // `messages` while this one is still streaming, and a tail-append
+                // would land after it, stranding this turn's stats/diffs below an
+                // unrelated later conversation.
+                if (statsEl) bubble.after(statsEl);
                 renderCompletionTools(liveToolEvents);
                 if (wasAtBottom) scrollToRevealBubble(bubble);
               }

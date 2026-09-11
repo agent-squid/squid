@@ -2804,6 +2804,58 @@ test.describe('parallel responses', () => {
     await expect(page.locator(RESPONSE)).toHaveCount(2);
     await look(page);  // pause — observe: both bubbles at bottom in completion order
   });
+
+  test('stats and diff blocks stay anchored to their own bubble when a concurrent turn finishes first', async ({ page }) => {
+    const routes = [];
+    const bothIntercepted = new Promise(resolve => {
+      page.route('**/chat', route => {
+        routes.push(route);
+        if (routes.length === 2) resolve();
+      });
+    });
+
+    await sendMsg(page, '#a hello');
+    await sendMsg(page, '#b world');
+    await bothIntercepted;
+
+    // #b finishes first and its bubble becomes the last child of #messages —
+    // the exact condition under which a tail-append would misplace #a's stats/diff.
+    await routes[1].fulfill({ status: 200, headers: SSE_HEADERS, body: sse(META, { data: 'B done first' }, DONE) });
+    await expect(page.locator(RESPONSE)).toHaveCount(1);
+
+    await routes[0].fulfill({ status: 200, headers: SSE_HEADERS, body: sse(
+      META,
+      { event: 'stats', data: { session_id: 'sid-a', input_tokens: 10, output_tokens: 5 } },
+      { event: 'tool', data: {
+        name: 'GitDiff',
+        file_count: 1,
+        additions: 1,
+        deletions: 0,
+        files: [{ status: 'M', path: 'a.py' }],
+        diff: 'diff --git a/a.py b/a.py\n@@ -0,0 +1 @@\n+new',
+      } },
+      { data: 'A done second' },
+      DONE,
+    ) });
+    await expect(page.locator(RESPONSE)).toHaveCount(2);
+    await expect(page.locator('.tool-block-history')).toHaveCount(1);
+
+    // #a's bubble, its stats footer, and its diff block must sit consecutively
+    // — not #a's bubble, then #b's whole message, then #a's stats/diff at the tail.
+    const order = await page.evaluate(() => [...document.getElementById('messages').children].map(el =>
+      el.classList.contains('tool-block-history') ? 'diff'
+        : el.classList.contains('stats') ? 'stats'
+        : el.matches('.msg.assistant') ? `bubble:${el.textContent.includes('A done second') ? 'a' : el.textContent.includes('B done first') ? 'b' : '?'}`
+        : el.tagName.toLowerCase()));
+    const aIdx = order.indexOf('bubble:a');
+    const diffIdx = order.indexOf('diff');
+    expect(aIdx).toBeGreaterThanOrEqual(0);
+    expect(diffIdx).toBeGreaterThan(aIdx);
+    // Nothing (in particular, not #b's bubble) sits between #a's bubble and
+    // its own diff block — only its own stats footer, if present.
+    expect(order.slice(aIdx + 1, diffIdx).every(x => x === 'stats')).toBe(true);
+  });
+
 });
 
 test.describe('recovered pending responses', () => {
