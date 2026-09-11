@@ -168,6 +168,15 @@ def _registration_proof(host_id: str, challenge: dict, signing_x: str, agreement
     ).encode("utf-8")
 
 
+def _response_error(response: httpx.Response) -> str | None:
+    try:
+        value = response.json()
+    except ValueError:
+        return None
+    error = value.get("error") if isinstance(value, dict) else None
+    return error if isinstance(error, str) else None
+
+
 def login(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="agentsquid login", description="Register this machine as the account's Shore host")
     parser.add_argument("--broker", default="https://agentsquid.ai")
@@ -204,7 +213,14 @@ def login(argv: list[str]) -> int:
             else:
                 email = args.email or input("Account email: ").strip()
                 magic_response = client.post(endpoint + "/auth/magic-link", json={"email": email})
-                magic_response.raise_for_status()
+                if magic_response.status_code == 404 and _response_error(magic_response) == "unknown_username":
+                    print(f"@{args.username} doesn't exist yet; creating it for {email}", file=sys.stderr)
+                    signup_response = client.post(endpoint + "/auth/signup", json={"email": email})
+                    if signup_response.status_code == 409:
+                        raise RuntimeError(f"username {args.username!r} is already taken")
+                    signup_response.raise_for_status()
+                else:
+                    magic_response.raise_for_status()
                 magic_code = args.magic_code or getpass.getpass("Sign-in code from email: ")
                 consume_response = client.post(endpoint + "/auth/consume", json={"token": magic_code})
                 consume_response.raise_for_status()
@@ -212,6 +228,14 @@ def login(argv: list[str]) -> int:
                 csrf = consume.get("csrfToken")
                 if not isinstance(csrf, str):
                     raise RuntimeError("broker returned an invalid login response")
+                enroll_response = client.post(endpoint + "/auth/totp/enroll", headers={"x-shore-csrf": csrf})
+                if enroll_response.status_code == 201:
+                    secret = enroll_response.json().get("secret")
+                    if not isinstance(secret, str):
+                        raise RuntimeError("broker returned an invalid TOTP enrollment response")
+                    print(f"Add this key to an authenticator app (1Password, Google Authenticator, ...): {secret}", file=sys.stderr)
+                elif enroll_response.status_code != 409:
+                    enroll_response.raise_for_status()
                 totp_code = args.totp_code or getpass.getpass("Authenticator code: ")
                 step_response = client.post(endpoint + "/auth/step-up", headers={"x-shore-csrf": csrf}, json={"code": totp_code})
                 step_response.raise_for_status()
