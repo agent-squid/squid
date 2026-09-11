@@ -328,10 +328,32 @@ sequenceDiagram
 
 Environment variables used by this flow:
 
-| Env var | Used by | Capability | Status |
+These are the exact names configured as GitHub Actions environment secrets in
+`shore-dev`/`shore-prod` and consumed by `deploy-preproduction.yml`/
+`deploy-production.yml` (`wrangler deploy --secrets-file`); they are not
+otherwise named elsewhere in this repo's docs, so this table is the canonical
+cross-reference for a security review against the actual deployment
+configuration.
+
+| Env var | Used by | Capability / content | Status |
 | --- | --- | --- | --- |
-| `SHORE_AUDIT_B2_KEY_ID` / `_APPLICATION_KEY` | Shore only | writeFiles only, relay chain and opaque host-signed batches | landed: independent write-only keys provisioned for `shore-audit-dev`/`shore-audit-prod`; dev deployed and live-verified (upload/retry/retention-delete-rejection) on 2026-09-11; prod key provisioned but unused pending final security review |
-| Relay audit signing key | Shore only | signs live receipts/checkpoints; public key pinned by hosts | landed: independent epoch-1 Ed25519 keys provisioned in `shore-dev`/`shore-prod`; public coordinates release-pinned for `dev.agentsquid.ai` (live) and `agentsquid.ai` (pinned, not yet serving pending final security review) |
+| `SHORE_AUDIT_B2_KEY_ID` | Shore only | B2 application key ID, bucket-scoped | landed: independent per-bucket keys provisioned for `shore-audit-dev`/`shore-audit-prod` |
+| `SHORE_AUDIT_B2_APPLICATION_KEY` | Shore only | B2 application key secret; `writeFiles` only, no read/delete/retention-management/legal-hold/governance-bypass | landed, same provisioning as above; dev key live-verified (upload/retry/retention-delete-rejection against `shore-audit-dev`) on 2026-09-11; prod key provisioned but unused pending final security review |
+| `SHORE_AUDIT_B2_ENDPOINT` | Shore only | B2 S3-compatible endpoint URL | landed |
+| `SHORE_AUDIT_B2_REGION` | Shore only | B2 region | landed |
+| `SHORE_AUDIT_B2_BUCKET` | Shore only | target bucket name (`shore-audit-dev` / `shore-audit-prod`) | landed |
+| `SHORE_AUDIT_B2_BUCKET_ID` | Shore only | target bucket ID | landed |
+| `SHORE_RECEIPT_EPOCH` | Shore only | current relay-receipt signing-key epoch number | landed: epoch 1 in both environments |
+| `SHORE_RECEIPT_SIGNING_JWK` | Shore only | private Ed25519 signing key (JWK) that signs live receipts/checkpoints | landed: independent epoch-1 keys provisioned per environment; never leaves Shore |
+| `SHORE_RECEIPT_PUBLIC_KEYS` | Shore only | public key coordinates by epoch, release-pinned in AgentSquid so hosts can verify | landed: release-pinned for `dev.agentsquid.ai` (live) and `agentsquid.ai` (pinned, not yet serving — pending final security review) |
+
+Deploy-time infrastructure credentials (`CLOUDFLARE_API_TOKEN`,
+`CLOUDFLARE_ACCOUNT_ID`, `FINGERPRINT_KEY`) are configured in the same two
+environments but are not part of this audit/receipt flow; see Milestone 3's
+status in the implementation plan for their provisioning history. The retired
+host-side `SQUID_SHORE_AUDIT_B2_*` prefix (direct host-to-B2 export, removed in
+Milestone 5.8) must not be confused with the `SHORE_AUDIT_B2_*` names above —
+the former no longer exists in any supported configuration.
 
 The receipt is a versioned sibling of, not a mutation to, the sender-signed E2E
 envelope. It contains the envelope commitment/request ID, prior and new relay
