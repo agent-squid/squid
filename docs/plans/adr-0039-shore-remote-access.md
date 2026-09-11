@@ -2091,8 +2091,7 @@ Current repository state as of 2026-09-10:
   Cloudflare and B2 keys are confirmed revoked provider-side; and both GitHub
   environments contain no Shore secrets or variables.
 
-**5.9 — Receipt protocol and relay chain (in progress; protocol and durable
-allocation cores landed)**
+**5.9 — Receipt protocol and relay chain (landed)**
 
 - Define canonical receipt vectors and a dedicated monotonic chain per immutable
   `host_id`. Cover ordinary encrypted envelopes in both directions and exclude
@@ -2254,9 +2253,17 @@ earlier drafts of this doc and `docs/shore-security-operations.md` stated
 documentation error, not an operational gap. This exercised B2's storage-layer
 guarantees directly; it did not exercise Shore's own application-level batch
 idempotency (5.2a/5.11's stable retry via `request_id`), which still requires
-a real host/browser pairing session against the live deployment and remains
-unexercised live. Remaining acceptance work: complete the final independent
-security review before enabling the production job.
+a real host/browser pairing session against the live deployment. The explicit
+operator-run verifier at `tests/manual/verify_shore_live_e2e.py` now automates
+that path: it performs the real magic-code/TOTP login, registers a disposable
+preproduction host, pairs a fresh synthetic browser, sends and decrypts a real probe, retries the
+byte-identical envelope and rejects a second dispatch, then waits for the
+Shore-signed host-batch archive acknowledgement. It is deliberately excluded
+from CI because running it creates live audit objects under one-day Compliance
+retention. The script's syntax and CLI interface are locally validated, but it
+has not yet been executed against preproduction. Remaining acceptance work: run and record that live
+verification, then complete the final independent security review before
+enabling the production job.
 
 ## Milestone 6 — Production hardening and staged rollout
 
