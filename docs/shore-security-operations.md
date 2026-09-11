@@ -76,7 +76,7 @@ chain conflict.
 
 Development and pre-production verification use the private, SSE-B2-encrypted
 bucket `shore-audit-dev` (bucket ID `3cc542ee223c72f1ae0f051c`) with Object
-Lock enabled and default Governance retention of one day. Its bucket-scoped key
+Lock enabled and default Compliance retention of one day. Its bucket-scoped key
 and data are isolated from production, and Shore is not granted governance
 bypass. Tests must cover retention, expiry, lifecycle deletion, receipt and
 checkpoint verification, restore, and rejection of overwrite/deletion attempts. The two

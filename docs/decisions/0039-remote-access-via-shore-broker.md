@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-08-11
-updated: 2026-09-10
+updated: 2026-09-11
 ---
 # ADR-0039: Remote access via Shore Relay on Cloudflare Workers + Durable Objects (agentsquid.ai/@username)
 
@@ -330,8 +330,8 @@ Environment variables used by this flow:
 
 | Env var | Used by | Capability | Status |
 | --- | --- | --- | --- |
-| `SHORE_AUDIT_B2_KEY_ID` / `_APPLICATION_KEY` | Shore only | writeFiles only, relay chain and opaque host-signed batches | exporter implemented; credentials cleared pending replacement gate and host-batch ingestion |
-| Relay audit signing key | Shore only | signs live receipts/checkpoints; public key pinned by hosts | pending |
+| `SHORE_AUDIT_B2_KEY_ID` / `_APPLICATION_KEY` | Shore only | writeFiles only, relay chain and opaque host-signed batches | landed: independent write-only keys provisioned for `shore-audit-dev`/`shore-audit-prod`; dev deployed and live-verified (upload/retry/retention-delete-rejection) on 2026-09-11; prod key provisioned but unused pending final security review |
+| Relay audit signing key | Shore only | signs live receipts/checkpoints; public key pinned by hosts | landed: independent epoch-1 Ed25519 keys provisioned in `shore-dev`/`shore-prod`; public coordinates release-pinned for `dev.agentsquid.ai` (live) and `agentsquid.ai` (pinned, not yet serving pending final security review) |
 
 The receipt is a versioned sibling of, not a mutation to, the sender-signed E2E
 envelope. It contains the envelope commitment/request ID, prior and new relay

@@ -1,46 +1,18 @@
 # Plan: ADR-0039 Shore remote access
 
-**Status:** In progress (2026-09-04). Milestones 0–3 are complete. Milestone 3's
-Action 1, the local pairing and persisted device-trust cores, and the Action 4
-validation core are implemented on both the host (Python) and browser
-(TypeScript) sides, backed by shared cross-language test vectors; see its
-status note for what review rounds, including the independent human security
-review that closed its gate, found and fixed along the
-way. The host-side pairing coordinator now rate-limits itself locally, and the
-broker account object enforces pairing packet and ceremony-churn limits across
-account, browser-device, and source-fingerprint identities.
-The browser transport client, non-extractable device identity, pinned host trust,
-and durable replay/sequence state are implemented. Cross-process browser/host
-pairing, encrypted-probe interoperability, and live host-key epoch rotation now
-run in CI. Pre-production deployment wiring passed its Milestone 3 gate with a
-manually triggered, environment-protected workflow, an isolated preproduction
-Worker, test and audit gates, and atomic runtime-secret upload. Milestone 5.8
-later cleared its GitHub environment and explicitly disabled the job pending
-the replacement audit credential gate. Replacement credentials and the
-`dev.agentsquid.ai` route are now provisioned; version preview URLs remain
-disabled and the job stays disabled until the Milestone 5 live acceptance run.
-An independent, qualified human security review passed on 2026-09-04 with no
-unresolved critical or high findings, closing Milestone 3's gate. Under that
-approval, the production `agentsquid.ai/@*` route is now declared in
-`shore/wrangler.jsonc` and a manually triggered, environment-protected
-`deploy-production.yml` workflow exists alongside the pre-production one. No
-production deployment has run. Milestone 5.8 subsequently cleared both GitHub
-deployment environments and explicitly disabled both deployment jobs while the
-replacement audit design was built. Fresh least-privilege credentials have now
-been restored, but neither workflow can deploy until its explicit disabled
-condition is removed after review.
-Milestone 4's implementation and documentation (4.0–4.9) are complete —
-capability-scoped `dashboard.read.v1` dispatch (read-only: subscribe/
-unsubscribe/ack/ping/pong, snapshot/replay catch-up, proactive push) is built,
-transport-parity- and negative-authorization-tested — and its acceptance gate
-is now closed: an independent security review passed on 2026-09-07 with no
-unresolved critical or high findings (see its own status note). No mutating,
-command-capable dispatch is enabled or planned by this milestone; actually
-serving read-only dashboard traffic on the production route (rather than
-opaque-relay-plus-probe only) is still a separate, explicit deployment step.
-Milestone 5's implementation is complete; its preproduction rollout and live
-archive acceptance gate remain before closure. External users must not be
-admitted in production until that replacement audit path is verified.
+**Status:** In progress (2026-09-11). Milestones 0–4 are complete, each closed
+by an independent security review with no unresolved critical/high findings
+(Milestone 3: 2026-09-04; Milestone 4: 2026-09-07) — see each milestone's own
+**Status** line below for what those reviews, and the review rounds before
+them, found and fixed. The production `agentsquid.ai/@*` route is declared in
+`shore/wrangler.jsonc` and a manually triggered `deploy-production.yml`
+workflow exists, gated by the `shore-prod` environment; no production
+deployment has run. Milestone 5's implementation is complete; preproduction
+deployment and live B2 upload/retry/retention-delete-rejection verification
+against `shore-audit-dev` both landed on 2026-09-11 (see Milestone 5's status
+and 5.12). Only Milestone 5's final independent security review remains
+before the production job can be enabled and Milestone 6 can begin. External
+users must not be admitted in production until that review closes.
 
 This is the implementation plan for
 [ADR-0039](../decisions/0039-remote-access-via-shore-broker.md). The ADR owns
@@ -106,7 +78,7 @@ without embedding unsettled security choices in code.
 
 **Audit archive deployment:** use private Backblaze B2 buckets with default
 SSE-B2 encryption and Object Lock enabled. Pre-production uses
-`shore-audit-dev` (`3cc542ee223c72f1ae0f051c`) with one-day Governance
+`shore-audit-dev` (`3cc542ee223c72f1ae0f051c`) with one-day Compliance
 retention. Production uses `shore-audit-prod`
 (`0c55d2aee29c52e1ae0f051c`); enable default 400-day Compliance retention and
 post-retention lifecycle deletion only after exporter verification, but before
@@ -430,8 +402,12 @@ accepted interim exception recorded in `docs/shore-security-operations.md`
 pending a second contributor). No production deployment has been run;
 triggering the workflow was a separate, explicit step outside this review.
 Milestone 5.8 later removed every secret and variable from both GitHub
-environments and disabled both deployment jobs. This historical deployment
-slice is therefore not currently deployable.
+environments and disabled both deployment jobs while the replacement audit
+design was built. Fresh least-privilege credentials have since been
+restored (5.9). The preproduction job's disabled condition was removed and
+it deployed cleanly to `dev.agentsquid.ai` on 2026-09-11 (Milestone 5, 5.12);
+the production job's disabled condition remains until Milestone 5's final
+security review closes.
 
 **Objective:** establish broker-blind, mutually authenticated communication
 between a paired browser device and the host.
@@ -1540,7 +1516,8 @@ expiry/immediate-revocation surface. None of this should be built now.
 
 ## Milestone 5 — Correlated tamper-evident audit
 
-**Status:** Implementation complete; preproduction acceptance pending. Milestones 3 and 4 are both complete, including
+**Status:** Implementation complete; preproduction deployed and B2-verified
+(2026-09-11, see 5.12); final security review pending. Milestones 3 and 4 are both complete, including
 Milestone 4's acceptance gate, which closed on 2026-09-07 (see Milestone 4's
 status), unblocking this work. 5.0 (broker-side hash-chained audit log) is
 landed: every existing account-lifecycle audit event (magic links, sessions,
@@ -1636,7 +1613,7 @@ headers are absent from user notifications by default.
   (`shore-audit-prod` / `shore-audit-dev`), a write-only bucket-scoped
   application key with no read/delete/retention-management/legal-hold/
   governance-bypass capability, 400-day Compliance retention in production
-  (enabled before external users are admitted) and 1-day Governance retention
+  (enabled before external users are admitted) and 1-day Compliance retention
   in test and a 5-minute export-lag paging threshold. B2 credentials now live
   only in Shore; live signed receipts and host checkpoints replace daily
   manifests. That doc also fixes the per-event field
@@ -1748,7 +1725,11 @@ headers are absent from user notifications by default.
   (matching a broker `request_id` to a host `request_id`) — that requires
   Action 3's export pipeline to get both chains into one place to compare,
   so "missing correlation" and "forged host events" from this milestone's
-  acceptance criteria are still open until Action 3 exists.
+  acceptance criteria were still open at the time 5.1 landed, until Action 3's
+  export pipeline existed. Now resolved by 5.11: every archived host event's
+  request ID must resolve to the durable broker receipt allocated for that
+  immutable host before archival, so a signed batch cannot invent broker
+  correlation records.
 - An independent review (codex) caught three issues in the first pass, all
   now fixed and covered by tests: (1) High — "fail closed" was checked
   *after* `_dispatch_adr0040` already ran, so a subscription/session
@@ -2171,8 +2152,10 @@ allocation cores landed)**
   scoped to the existing `shore-audit-dev` and `shore-audit-prod` buckets;
   provider inspection verified private access, SSE-B2, Object Lock compliance
   retention of one and 400 days, and `writeFiles` as the keys' sole capability.
-  The preproduction DNS/Worker route is provisioned. Both deployment jobs
-  remain explicitly disabled pending the live 5.12 acceptance ceremony.
+  The preproduction DNS/Worker route is provisioned. The preproduction
+  deployment job's disabled gate was removed and `deploy-preproduction.yml`
+  ran clean on 2026-09-11, shipping to `dev.agentsquid.ai`. The production job
+  remains explicitly disabled pending the final security review.
 
 **5.10 — Host verification and remote-only fail-closed gate (landed)**
 
@@ -2227,7 +2210,7 @@ verification remains part of the Milestone 5 gate)**
   batch cannot invent broker correlation records.
 
 **5.12 — Recovery, migration, and enforcement (implementation complete;
-preproduction rollout pending)**
+preproduction deployed and B2-verified; final security review pending)**
 
 - Treat missing/rolled-back host SQLite as lost continuity. Local/direct access
   stays available; Shore access requires a locally authorized recovery or
@@ -2250,10 +2233,30 @@ per-receipt epoch history across a signing-key rotation. Reinstall continues to
 create a new host identity and therefore a new broker chain rather than
 silently adopting an old host's tip. Focused tests cover these cases together
 with crash rollback, stable retries, reconnects, concurrent-device behavior,
-unknown epochs, and direct/local-path availability. Remaining acceptance work
-is operational: deploy preproduction, exercise real B2 upload/retry and
-retention/delete rejection, and complete the final security review before
-enabling the production job.
+unknown epochs, and direct/local-path availability.
+
+Live preproduction acceptance (2026-09-11): `deploy-preproduction.yml`'s
+disabled gate was removed and the workflow deployed cleanly to
+`dev.agentsquid.ai` (Go tests/vet, browser/pairing-app/root typecheck+test+
+audit, `wrangler deploy --env preproduction`, all green). Separately, direct
+provider-API verification against the live `shore-audit-dev` bucket, using a
+freshly created key scoped to that bucket only (`listFiles`/`readFiles`/
+`writeFiles`/`deleteFiles`/`readFileRetentions`, no `bypassGovernance`,
+1-hour expiry) confirmed: uploads succeed and are automatically placed under
+Object Lock Compliance retention (one day) with no app-side action required;
+retried identical uploads succeed without error; and `b2_delete_file_version`
+against both resulting versions was rejected with `access_denied` while the
+objects remained listed, proving deletion is refused even though the key
+itself was granted `deleteFiles`. This also caught a spec/deployment mismatch:
+`shore-audit-dev` runs Object Lock in Compliance mode, not Governance mode as
+earlier drafts of this doc and `docs/shore-security-operations.md` stated
+(now corrected) — Compliance is the strictly stronger mode, so this was a
+documentation error, not an operational gap. This exercised B2's storage-layer
+guarantees directly; it did not exercise Shore's own application-level batch
+idempotency (5.2a/5.11's stable retry via `request_id`), which still requires
+a real host/browser pairing session against the live deployment and remains
+unexercised live. Remaining acceptance work: complete the final independent
+security review before enabling the production job.
 
 ## Milestone 6 — Production hardening and staged rollout
 
