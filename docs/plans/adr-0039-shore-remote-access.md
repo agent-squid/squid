@@ -7,12 +7,13 @@ by an independent security review with no unresolved critical/high findings
 them, found and fixed. The production `agentsquid.ai/@*` route is declared in
 `shore/wrangler.jsonc` and a manually triggered `deploy-production.yml`
 workflow exists, gated by the `shore-prod` environment; no production
-deployment has run. Milestone 5's implementation is complete; preproduction
+deployment has run. Milestone 5's audit implementation is complete; preproduction
 deployment and live B2 upload/retry/retention-delete-rejection verification
 against `shore-audit-dev` both landed on 2026-09-11 (see Milestone 5's status
-and 5.12). Only Milestone 5's final independent security review remains
-before the production job can be enabled and Milestone 6 can begin. External
-users must not be admitted in production until that review closes.
+and 5.12). Milestone 5.13's operator control plane, the full live verifier,
+and the final independent security review remain before the production job can
+be enabled and Milestone 6 can begin. External users must not be admitted in
+production until those gates close.
 
 This is the implementation plan for
 [ADR-0039](../decisions/0039-remote-access-via-shore-relay.md). The ADR owns
@@ -1516,8 +1517,9 @@ expiry/immediate-revocation surface. None of this should be built now.
 
 ## Milestone 5 — Correlated tamper-evident audit
 
-**Status:** Implementation complete; preproduction deployed and B2-verified
-(2026-09-11, see 5.12); final security review pending. Milestones 3 and 4 are both complete, including
+**Status:** Audit implementation complete; preproduction deployed and
+B2-verified (2026-09-11, see 5.12). The operator control plane (5.13), full
+live verifier, and final security review are pending. Milestones 3 and 4 are both complete, including
 Milestone 4's acceptance gate, which closed on 2026-09-07 (see Milestone 4's
 status), unblocking this work. 5.0 (relay-side hash-chained audit log) is
 landed: every existing account-lifecycle audit event (magic links, sessions,
@@ -1582,6 +1584,10 @@ attributable without storing command plaintext.
    immediate-access revoke-host action protected by recent step-up and correlate
    to the relay audit event. Raw IP and precise location remain restricted to
    the audit system and are never copied into browser/out-of-band notifications.
+5. Add a separately authenticated operator control plane: a narrow admin API,
+   web console, and CLI for account lookup/listing and explicit recovery
+   operations. It must support the preproduction TOTP repair required to rerun
+   the live verifier without exposing arbitrary Durable Object mutation.
 
 **Acceptance:** tests detect deletion, insertion, mutation, receipt-chain gaps,
 regression/conflict, missing correlation, and forged host events; receipt
@@ -1592,7 +1598,10 @@ reconnect does not alert; batching preserves and later surfaces every repeated
 event; revocation is step-up protected and atomically invalidates the host
 connection, browser sessions, pairings, and capabilities; retention and
 redaction tests show command text, secrets, raw IP, precise location, and full
-headers are absent from user notifications by default.
+headers are absent from user notifications by default. Operator actions require
+independent operator authentication and authorization, are environment-bound,
+use closed-schema commands, and create immutable audit records; production
+operator mutation remains disabled until the final Milestone 5 review closes.
 
 ### Implementation plan
 
@@ -2260,10 +2269,124 @@ preproduction host, pairs a fresh synthetic browser, sends and decrypts a real p
 byte-identical envelope and rejects a second dispatch, then waits for the
 Shore-signed host-batch archive acknowledgement. It is deliberately excluded
 from CI because running it creates live audit objects under one-day Compliance
-retention. The script's syntax and CLI interface are locally validated, but it
-has not yet been executed against preproduction. Remaining acceptance work: run and record that live
-verification, then complete the final independent security review before
-enabling the production job.
+retention. A 2026-09-12 preproduction attempt completed login, first-factor
+enrollment, host registration, pairing, probe dispatch, and duplicate
+suppression, recording exactly one `shore.probe` host event, but its host export
+cursor did not advance before timeout because the Shore-signed archive
+acknowledgement did not arrive. The attempt also exposed the lack of a safe
+operator TOTP-repair path after a setup secret is lost. Remaining acceptance
+work: land 5.13, repair the disposable account, diagnose the missing archive
+acknowledgement, rerun and record the complete live verification, then complete
+the final independent security review before enabling the production job.
+
+**5.13 — Operator control plane (implemented 2026-09-12; deployment and live
+repair evidence remain required for the Milestone 5 gate)**
+
+The Shore implementation now includes the separately routed, Access-JWT-
+verified `/admin/v1` command gateway; bounded account listing and redacted
+security detail; TOTP reset, global session revocation, suspension, and
+reactivation; deterministic confirmation/schema policy; operator/account rate
+limits; idempotent execution; account-visible notifications; append-only
+operator and account audit records; a shared-API CLI; and an accessible web
+console with a persistent environment banner and themed confirmation dialog.
+Production mutation remains structurally disabled. Automated coverage verifies
+the JWT boundary, wrong-audience/expired/forged tokens, missing configuration,
+schema smuggling, production shutdown, idempotent reset, factor removal,
+generation increment, session invalidation, and console safety structure.
+The 2026-09-12 pre-publish implementation review additionally corrected the
+console/CLI UUIDv4 idempotency mismatch, replaced storage-key pagination with
+actor/environment/query-bound opaque cursors, rejected unknown account IDs,
+added cursor/rate-record expiry, and wired validated Access configuration into
+both deployment workflows.
+A second pre-publish review removed token-issuance-time fallback from operator
+step-up, requiring explicit fresh `auth_time` plus the configured MFA `amr`,
+and added fail-closed append-only denial auditing for authenticated schema,
+environment, step-up, and rate-policy rejections.
+A third pre-publish review corrected the Cloudflare CLI token header, enforced
+body limits from bytes read rather than trusting `Content-Length`, added
+operator/account-scoped read limits and denial-audit throttling, and aligned
+the default step-up AMR with Cloudflare's supported RFC 8176 `otp` value.
+A fourth pre-publish review made ambiguous retries safe in both operator
+clients, added console pagination and operation-specific effect disclosures,
+disabled unavailable mutations from server configuration/state, refreshed
+post-operation detail, and prevented the CLI from sending Access credentials
+to non-HTTPS or path-bearing base URLs.
+A fifth pre-publish review closed stale-admission races by serializing magic
+consumption and factor enrollment with operator session mutations, rechecking
+suspension inside account transactions and attachment locks, and revalidating
+the enrollment session before storing a replacement factor.
+A sixth pre-publish review corrected the console module URL so the authenticated
+page actually boots at `/admin`, restricted operator JWTs to Cloudflare Access
+application tokens, and prevented deleted account objects from being inspected
+or mutated through retained immutable identifiers.
+A seventh pre-publish review restricted Access verification to public RS256
+signing JWKs, bounded and strictly decoded JWT input, rejected private key
+material during deployment validation, and disabled CLI redirects while an
+Access token is attached.
+An eighth pre-publish review replaced predictable confirmation text with a
+two-minute opaque challenge bound to actor, environment, target, and operation;
+challenge reuse is restricted to the same idempotency key, while semantic
+idempotency deliberately excludes the replaceable challenge token so ambiguous
+retries remain safe.
+Cloudflare Access provisioning, preproduction deployment, disposable-account
+repair, the full live verifier/archive acknowledgement, and final independent
+security review remain operator gates and are not claimed complete here.
+
+Build the operator surface as a small command gateway, not a general account
+CRUD or Durable Object storage API:
+
+- Add a separately routed admin API protected before Worker dispatch by
+  Cloudflare Access. Validate the Access JWT again in the Worker against a
+  configured issuer, audience, and operator allowlist/role; never accept a
+  normal Shore user session as operator authentication. Bind credentials and
+  requests to one named environment, and fail closed when any auth setting is
+  absent. Preproduction and production use distinct applications, audiences,
+  roles, and secrets.
+- Expose closed-schema, versioned operations for bounded account list/search,
+  account security-state inspection, TOTP reset, session revocation, account
+  suspension/reactivation, and recovery status. Do not expose arbitrary key
+  names, storage reads/writes, raw session tokens, TOTP secrets, magic-link
+  tokens, private keys, precise network data, or command plaintext. Paginate
+  enumeration and apply both operator- and account-scoped rate limits.
+- Make every mutation require a target account, operation-specific parameters,
+  reason, ticket/reference, idempotency key, and a recent operator step-up.
+  High-impact operations require an explicit confirmation challenge; production
+  recovery, deletion, and trust-root changes additionally require a second
+  authorized operator. An LLM may draft a request, but a deterministic policy
+  layer validates it and a human approves consequential execution. Models never
+  receive reusable operator credentials.
+- Record append-only operator audit events for request, authenticated actor,
+  authorization decision, target, environment, reason/reference, idempotency
+  key, result, and timestamps. Correlate account-visible security events without
+  leaking operator-only metadata. TOTP reset revokes all account sessions,
+  closes authenticated sockets, removes only the enrolled factor, increments
+  the account generation, sends a security notification, and forces fresh
+  enrollment after the next magic-link login; it never returns or replaces the
+  TOTP secret itself.
+- Add an operator CLI using the same API and a web console as another untrusted
+  client of it. The console provides account list/search and detail views plus
+  operation-specific forms using the shared themed confirmation modal (never a
+  browser/system modal). It clearly and persistently labels the environment,
+  shows the exact target and effects before confirmation, and never places
+  credentials or sensitive state in browser storage or URLs.
+- Keep all mutating operations enabled only in preproduction initially. A
+  separate production configuration flag stays off until this action's tests
+  and the final independent Milestone 5 security review pass; read access must
+  also fail closed rather than silently falling back to preproduction identity
+  or authorization configuration.
+
+Acceptance coverage includes forged/expired/wrong-audience Access tokens,
+cross-environment credentials, normal-user-session attempts, role denial,
+pagination bounds, schema smuggling, rate limits, idempotent retries and
+conflicts, concurrent resets, partial-failure rollback, audit/notification
+atomicity, session and socket invalidation, secret/redaction checks, UI
+confirmation and accessibility, and proof that production mutation is disabled.
+Use the preproduction control plane to reset only the disposable `@haebin` test
+account's accidentally enrolled TOTP, enroll the replacement factor into the
+operator's authenticator, then rerun and record
+`tests/manual/verify_shore_live_e2e.py`, including the Shore-signed archive
+acknowledgement. Complete the final independent security review only after this
+evidence is recorded and all critical/high findings are resolved.
 
 ## Milestone 6 — Production hardening and staged rollout
 
