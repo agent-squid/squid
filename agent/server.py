@@ -544,6 +544,10 @@ class ShoreRevokeDeviceRequest(BaseModel):
     device_id: str = Field(..., min_length=1)
 
 
+class ShoreApprovePairingRequest(BaseModel):
+    request_id: str = Field(..., min_length=1)
+
+
 class QuotaDeltaRequest(BaseModel):
     session_id: str = Field(..., min_length=1)
     before: float
@@ -3101,6 +3105,31 @@ async def shore_pairing_status(request: Request, ceremony_id: str):
         return JSONResponse({"error": "shore_not_configured"}, status_code=400)
     status = await asyncio.to_thread(_shore_connection.channel.pairing_status, ceremony_id)
     return JSONResponse(status)
+
+
+@app.get("/shore/pairing/requests")
+async def shore_pairing_requests(request: Request):
+    direct_host = request.client.host if request.client else None
+    if not _request_is_loopback(request.headers, direct_host):
+        return JSONResponse({"error": "loopback_required"}, status_code=403)
+    if _shore_connection is None:
+        return JSONResponse({"error": "shore_not_configured"}, status_code=400)
+    return JSONResponse({"requests": _shore_connection.list_pairing_requests()})
+
+
+@app.post("/shore/pairing/requests/approve")
+async def shore_pairing_request_approve(request: Request, req: ShoreApprovePairingRequest):
+    direct_host = request.client.host if request.client else None
+    if not _request_is_loopback(request.headers, direct_host):
+        return JSONResponse({"error": "loopback_required"}, status_code=403)
+    if _shore_connection is None:
+        return JSONResponse({"error": "shore_not_configured"}, status_code=400)
+    from .shore_crypto import ShoreProtocolError
+    try:
+        await _shore_connection.approve_pairing_request(req.request_id)
+    except ShoreProtocolError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    return JSONResponse({"ok": True})
 
 
 @app.get("/shore/devices")

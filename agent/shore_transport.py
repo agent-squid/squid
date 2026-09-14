@@ -14,6 +14,7 @@ push liveness/backpressure section of docs/shore-protocol-v1.md.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -30,12 +31,15 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from .shore import _load_or_new_identity, _load_runtime_config
 from .shore_audit import AuditExportBatch, ShoreAuditLog
 from .shore_capabilities import authorize_capability_frame
 from .shore_crypto import (
-    MAX_KEY_INVOCATIONS, DeviceTrustStore, PairingCoordinator, ReplayStore, ShoreProtocolError,
+    MAX_KEY_INVOCATIONS, UUID7, DeviceTrustStore, PairingCoordinator, ReplayStore, ShoreProtocolError,
     TrustedDevice, b64url, canonical, open_envelope, seal_envelope, unb64url, uuid7,
     valid_relay_url,
 )
@@ -54,6 +58,7 @@ log = logging.getLogger(__name__)
 # this is only how often the sweep itself runs, not a protocol value.
 _PUSH_SWEEP_SECONDS = 5.0
 _MAX_PENDING_RECEIPTS = 256
+_PAIRING_REQUEST_TTL_SECONDS = 120.0
 
 
 @dataclass
@@ -124,6 +129,8 @@ class ShoreChannel:
         # _session_*  helpers below so this can't be bypassed by accident.
         self._sessions_lock = threading.Lock()
         self.sessions: dict[str, _DeviceSession] = {}
+        self._pairing_requests_lock = threading.Lock()
+        self._pairing_requests: dict[str, tuple[dict[str, Any], float]] = {}
 
     def _session_snapshot(self) -> list[tuple[str, "_DeviceSession"]]:
         with self._sessions_lock:
@@ -143,6 +150,56 @@ class ShoreChannel:
 
     def begin_pairing(self, ceremony_id: str) -> dict[str, Any]:
         return self.pairing.begin(ceremony_id=ceremony_id)
+
+    def receive_pairing_request(self, request: dict[str, Any], *, now: float | None = None) -> None:
+        """Hold a browser request until a person explicitly approves it on the host."""
+        expected = {"v", "type", "request_id", "account_id", "host_id", "device_id", "key_epoch", "browser_agreement_key"}
+        if (set(request) != expected or request.get("v") != 1 or request.get("type") != "pairing_request"
+                or request.get("account_id") != self.account_id or request.get("host_id") != self.host_id
+                or request.get("key_epoch") != self.key_epoch
+                or not all(UUID7.fullmatch(request.get(name, "")) for name in ("request_id", "device_id"))):
+            raise ShoreProtocolError("pairing_failed")
+        try:
+            x25519.X25519PublicKey.from_public_bytes(unb64url(request["browser_agreement_key"]))
+        except Exception as exc:
+            raise ShoreProtocolError("pairing_failed") from exc
+        received_at = time.time() if now is None else now
+        with self._pairing_requests_lock:
+            self._pairing_requests = {key: value for key, value in self._pairing_requests.items()
+                                      if received_at - value[1] < _PAIRING_REQUEST_TTL_SECONDS}
+            if len(self._pairing_requests) >= 20 and request["request_id"] not in self._pairing_requests:
+                raise ShoreProtocolError("pairing_rate_limited")
+            self._pairing_requests.setdefault(request["request_id"], (request, received_at))
+
+    def list_pairing_requests(self, *, now: float | None = None) -> list[dict[str, Any]]:
+        checked_at = time.time() if now is None else now
+        with self._pairing_requests_lock:
+            self._pairing_requests = {key: value for key, value in self._pairing_requests.items()
+                                      if checked_at - value[1] < _PAIRING_REQUEST_TTL_SECONDS}
+            return [{"request_id": request["request_id"], "device_id": request["device_id"],
+                     "verification_code": hashlib.sha256(canonical(request)).hexdigest()[:8].upper(),
+                     "received_at": received_at} for request, received_at in self._pairing_requests.values()]
+
+    def approve_pairing_request(self, request_id: str, *, now: float | None = None) -> bytes:
+        checked_at = time.time() if now is None else now
+        with self._pairing_requests_lock:
+            pending = self._pairing_requests.pop(request_id, None)
+        if pending is None or checked_at - pending[1] >= _PAIRING_REQUEST_TTL_SECONDS:
+            raise ShoreProtocolError("pairing_request_expired")
+        request = pending[0]
+        browser_key = x25519.X25519PublicKey.from_public_bytes(unb64url(request["browser_agreement_key"]))
+        result = self.pairing.begin(ceremony_id=uuid7())
+        context = (f"shore-pairing-request-v1\0{self.account_id}\0{self.host_id}\0"
+                   f"{request['device_id']}\0{request['request_id']}").encode()
+        # Match WebCrypto's SHA-256(context) HKDF salt.
+        derived = HKDF(algorithm=hashes.SHA256(), length=32, salt=hashlib.sha256(context).digest(), info=context).derive(
+            self.host_agreement.exchange(browser_key))
+        nonce = os.urandom(12)
+        header = {"v": 1, "type": "pairing_offer", "request_id": request["request_id"],
+                  "device_id": request["device_id"], "nonce": b64url(nonce)}
+        plaintext = canonical({"v": 1, "offer": result["offer"], "code": result["code"]})
+        unsigned = {**header, "ciphertext": b64url(AESGCM(derived).encrypt(nonce, plaintext, canonical(header)))}
+        return canonical({**unsigned, "signature": b64url(self.host_signing.sign(canonical(unsigned)))})
 
     def pairing_status(self, ceremony_id: str) -> dict[str, Any]:
         return self.pairing.status(ceremony_id)
@@ -188,7 +245,10 @@ class ShoreChannel:
             response = await asyncio.to_thread(
                 self.pairing.accept_packet, value, now=None if now_ms is None else now_ms / 1000,
             )
-            return [] if response is None else [canonical(response)]
+            if isinstance(response, TrustedDevice):
+                return [canonical({"v": 1, "type": "pairing_approved", "ceremony_id": value["ceremony_id"],
+                                   "device_id": response.device_id})]
+            return [canonical(response)]
 
         return await self._handle_envelope(value, now_ms=now_ms, relay_receipt=relay_receipt)
 
@@ -494,6 +554,7 @@ class ShoreHostConnection:
         )
         self._pending_receipt_envelopes: dict[str, bytes] = {}
         self._pending_audit_batch: AuditExportBatch | None = None
+        self._pairing_outbound: asyncio.Queue[bytes] = asyncio.Queue(maxsize=20)
         base_path = parsed.path.rstrip("/")
         account_path = f"{base_path}/@{quote(username, safe='')}"
         self.challenge_url = urlunsplit((parsed.scheme, parsed.netloc, account_path + "/host/connect-challenge", "", ""))
@@ -619,6 +680,20 @@ class ShoreHostConnection:
                 "x-shore-challenge-id": challenge["id"],
                 "x-shore-signature": b64url(self.signing_key.sign(proof))}
 
+    def list_pairing_requests(self) -> list[dict[str, Any]]:
+        return self.channel.list_pairing_requests()
+
+    async def approve_pairing_request(self, request_id: str) -> None:
+        if not self.connected.is_set():
+            raise ShoreProtocolError("shore_not_connected")
+        if self._pairing_outbound.full():
+            raise ShoreProtocolError("pairing_rate_limited")
+        response = await asyncio.to_thread(self.channel.approve_pairing_request, request_id)
+        try:
+            self._pairing_outbound.put_nowait(response)
+        except asyncio.QueueFull as exc:
+            raise ShoreProtocolError("pairing_rate_limited") from exc
+
     async def _serve(self, socket: Any, stop: asyncio.Event) -> None:
         from .server import _realtime_notifier
 
@@ -629,6 +704,7 @@ class ShoreHostConnection:
         receive = asyncio.create_task(socket.recv())
         generation = _realtime_notifier.generation
         notify_task = asyncio.create_task(_realtime_notifier.wait(generation))
+        pairing_send = asyncio.create_task(self._pairing_outbound.get())
         next_sweep_at = time.monotonic() + _PUSH_SWEEP_SECONDS
         try:
             if self.receipt_keys and await self._send_audit_batch(socket):
@@ -638,7 +714,7 @@ class ShoreHostConnection:
                 remaining = max(0.0, self.heartbeat_seconds - (now - last_sent))
                 sweep_remaining = max(0.0, next_sweep_at - now)
                 done, _pending = await asyncio.wait(
-                    {receive, notify_task}, timeout=min(remaining, sweep_remaining),
+                    {receive, notify_task, pairing_send}, timeout=min(remaining, sweep_remaining),
                     return_when=asyncio.FIRST_COMPLETED,
                 )
 
@@ -646,6 +722,11 @@ class ShoreHostConnection:
                 if notified:
                     generation = notify_task.result()
                     notify_task = asyncio.create_task(_realtime_notifier.wait(generation))
+
+                if pairing_send in done:
+                    await socket.send(pairing_send.result())
+                    last_sent = time.monotonic()
+                    pairing_send = asyncio.create_task(self._pairing_outbound.get())
 
                 if notified or time.monotonic() >= next_sweep_at:
                     # last_sent must only advance on an actual send -- an
@@ -675,6 +756,18 @@ class ShoreHostConnection:
                 try:
                     relay_receipt = None
                     envelope = message
+                    try:
+                        control = json.loads(message)
+                    except (ValueError, TypeError, json.JSONDecodeError):
+                        control = None
+                    if isinstance(control, dict) and control.get("type") == "pairing_request":
+                        try:
+                            if canonical(control) != message:
+                                raise ShoreProtocolError("pairing_failed")
+                            await asyncio.to_thread(self.channel.receive_pairing_request, control)
+                        except ShoreProtocolError:
+                            pass
+                        continue
                     if self.receipt_keys:
                         try:
                             wrapper = json.loads(message)
@@ -775,7 +868,14 @@ class ShoreHostConnection:
                     log.exception("shore: unexpected error handling relay frame")
                     continue
                 for response in responses:
-                    await self._send_application(socket, response)
+                    try:
+                        response_type = json.loads(response).get("type")
+                    except Exception:
+                        response_type = None
+                    if response_type == "pairing_approved":
+                        await socket.send(response)
+                    else:
+                        await self._send_application(socket, response)
                     last_sent = time.monotonic()
                 # The connection may have started with no pending audit data.
                 # A newly handled frame records audit events, so initiate the
@@ -787,6 +887,7 @@ class ShoreHostConnection:
         finally:
             receive.cancel()
             notify_task.cancel()
+            pairing_send.cancel()
             # Either task may have already finished with its own exception
             # (e.g. ConnectionClosed) right as this scope was cancelled from
             # outside; suppress broadly so that unrelated exception doesn't
@@ -795,6 +896,8 @@ class ShoreHostConnection:
                 await receive
             with suppress(Exception, asyncio.CancelledError):
                 await notify_task
+            with suppress(Exception, asyncio.CancelledError):
+                await pairing_send
 
     async def _send_audit_batch(self, socket: Any) -> bool:
         batch = await asyncio.to_thread(self.channel.audit.pending_export, limit=25)

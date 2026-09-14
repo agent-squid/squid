@@ -278,6 +278,29 @@ enters only the 26-character secret. Thus the code carries all 128 secret bits;
 it does not purport to encode the independent nonce. Altering the public offer
 causes the host binding comparison or finished verification to fail.
 
+An authenticated browser may alternatively request a ceremony without moving
+the code by QR or clipboard. It sends a closed-schema `pairing_request` with
+its account, host, device and key-epoch bindings, a UUIDv7 request ID, and its
+32-byte public agreement key. The host stores this request for at most two
+minutes but MUST NOT create a ceremony until a person approves that request
+from Squid's loopback-only `/pair` UI. This local approval preserves the rule
+that relay input alone is never a device-trust decision. Both screens display
+the first eight uppercase hexadecimal characters of `SHA-256(JCS(request))`;
+the user MUST compare them before approval, so relay-side request substitution
+is visible.
+
+After approval, the host creates the ordinary ceremony and encrypts its offer
+and code to the requesting browser with AES-256-GCM. Its key is derived from
+host/browser X25519 agreement using `SHA-256(context)` as HKDF salt and the
+same context as HKDF info, where `context` is
+`"shore-pairing-request-v1\0" || account_id || "\0" || host_id || "\0" ||
+device_id || "\0" || request_id`. The host signs the complete response shell
+and ciphertext with its registered Ed25519 key. The relay routes this response
+only to the socket that originated the matching request ID and consumes that
+routing authorization once; it cannot read the offer or code. The browser
+verifies the signature against authenticated host metadata before decrypting,
+then runs the unchanged three-packet ceremony below.
+
 The binding object contains exactly `v`, `account_id`, `host_id`, `device_id`,
 `ceremony_nonce`, and SHA-256 fingerprints of both signing and agreement keys
 for both devices. After scanning/entering the secret, both peers compute:
@@ -324,9 +347,9 @@ fingerprints match the received keys. The host response uses a different random 
 `finished`; `host_keys` has the same closed schema and `finished` is
 `finished(host)`. The browser verifies that the returned host keys hash to the
 fingerprints in the binding and public offer, verifies the host finished value,
-and pins both host keys. The relay sees the public offer plus the outer
+and pins both host keys. In the QR/link flow, the relay sees the public offer plus the outer
 ceremony ID, direction, packet nonce, ciphertext length, and timing, but never
-the secret.
+the secret. In the browser-request flow, the offer is also encrypted.
 
 After verifying and pinning the host keys, the browser sends a final packet
 encrypted with `pair_key`, with a new nonce and the same outer schema and

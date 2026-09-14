@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import sqlite3
 import stat
@@ -9,6 +10,8 @@ import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from agent.shore_crypto import (
     ReplayStore, ShoreProtocolError, b64url, canonical, crockford32_decode,
@@ -54,6 +57,40 @@ def test_configured_host_connection_loads_persisted_login(tmp_path):
 
 def test_configured_host_connection_is_disabled_before_login(tmp_path):
     assert configured_host_connection(tmp_path / "shore") is None
+
+
+def test_authenticated_browser_pairing_requires_local_approval_and_returns_encrypted_offer(tmp_path):
+    host_signing = ed25519.Ed25519PrivateKey.generate()
+    host_agreement = x25519.X25519PrivateKey.generate()
+    browser_agreement = x25519.X25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=host_agreement)
+    request_id = CEREMONY
+    request = {"v": 1, "type": "pairing_request", "request_id": request_id,
+        "account_id": ACCOUNT, "host_id": HOST, "device_id": DEVICE, "key_epoch": 1,
+        "browser_agreement_key": b64url(browser_agreement.public_key().public_bytes_raw())}
+
+    channel.receive_pairing_request(request, now=100)
+    channel.receive_pairing_request(request, now=110)  # replay must not extend approval lifetime
+    assert channel.list_pairing_requests(now=101) == [
+        {"request_id": request_id, "device_id": DEVICE,
+         "verification_code": hashlib.sha256(canonical(request)).hexdigest()[:8].upper(), "received_at": 100}
+    ]
+    response = json.loads(channel.approve_pairing_request(request_id, now=101))
+    assert channel.list_pairing_requests(now=101) == []
+    signature = unb64url(response.pop("signature"))
+    host_signing.public_key().verify(signature, canonical(response))
+    header = {name: response[name] for name in ("v", "type", "request_id", "device_id", "nonce")}
+    context = f"shore-pairing-request-v1\0{ACCOUNT}\0{HOST}\0{DEVICE}\0{request_id}".encode()
+    key = HKDF(algorithm=hashes.SHA256(), length=32, salt=hashlib.sha256(context).digest(), info=context).derive(
+        browser_agreement.exchange(host_agreement.public_key()))
+    plaintext = json.loads(AESGCM(key).decrypt(unb64url(response["nonce"]), unb64url(response["ciphertext"]), canonical(header)))
+    assert plaintext["v"] == 1
+    assert crockford32_decode(plaintext["code"])
+    assert plaintext["offer"]["account_id"] == ACCOUNT
+    assert plaintext["offer"]["host_id"] == HOST
+    with pytest.raises(ShoreProtocolError, match="pairing_request_expired"):
+        channel.approve_pairing_request(request_id, now=102)
 
 
 def test_host_connection_allows_plaintext_only_for_loopback(tmp_path):
@@ -263,7 +300,9 @@ async def pair(channel, browser_signing, browser_agreement, device_id=DEVICE, ce
     confirmation = {"v": 1, "ceremony_id": ceremony_id, "direction": "browser_to_host", "nonce": b64url(bytes(range(12, 24)))}
     confirmed = {"v": 1, "binding": binding, "finished": b64url(pairing_finished(key, "browser-confirmed", binding_bytes))}
     confirmation["ciphertext"] = b64url(AESGCM(key).encrypt(bytes(range(12, 24)), canonical(confirmed), canonical(confirmation)))
-    assert await channel.handle(canonical(confirmation)) == []
+    assert json.loads((await channel.handle(canonical(confirmation)))[0]) == {
+        "v": 1, "type": "pairing_approved", "ceremony_id": ceremony_id, "device_id": device_id,
+    }
 
 
 @pytest.mark.asyncio

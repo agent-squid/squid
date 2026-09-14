@@ -296,7 +296,7 @@ def test_transport_pairing_phase_selection_is_atomic_under_overlapping_frames(tm
         assert not raced_into_first_phase.wait(0.2)
         release_first.set()
         assert first.result(timeout=2)["direction"] == "host_to_browser"
-        assert second.result(timeout=2) is None
+        assert second.result(timeout=2).device_id == DEVICE_ID
 
     assert calls == 1
     assert coordinator._failure_history == []

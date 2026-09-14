@@ -814,9 +814,11 @@ async function openShorePairModal() {
   title.textContent = 'Shore Pairing';
 
   let pollTimer = null;
+  let requestPollTimer = null;
   const onEsc = e => { if (e.key === 'Escape') close(); };
   const close = () => {
     if (pollTimer) clearInterval(pollTimer);
+    if (requestPollTimer) clearInterval(requestPollTimer);
     document.removeEventListener('keydown', onEsc);
     modal.remove();
   };
@@ -838,7 +840,38 @@ async function openShorePairModal() {
   startBtn.className = 'btn-ghost';
   startBtn.textContent = 'Start Pairing';
   pairSection.appendChild(startBtn);
+  const pendingRequests = document.createElement('div');
+  pendingRequests.id = 'shore-pair-requests';
+  pairSection.appendChild(pendingRequests);
   box.appendChild(pairSection);
+
+  const refreshPairingRequests = async () => {
+    let requests;
+    try {
+      const res = await fetch('/shore/pairing/requests');
+      const body = await res.json();
+      if (!res.ok) return;
+      requests = body.requests || [];
+    } catch { return; }
+    pendingRequests.replaceChildren();
+    for (const request of requests) {
+      const approve = document.createElement('button');
+      approve.type = 'button'; approve.className = 'btn-ghost';
+      approve.textContent = `Approve browser ${request.device_id.slice(0, 8)}… · code ${request.verification_code}`;
+      approve.addEventListener('click', async () => {
+        approve.disabled = true; approve.textContent = 'Approving…';
+        try {
+          const res = await fetch('/shore/pairing/requests/approve', { method: 'POST',
+            headers: { 'content-type': 'application/json' }, body: JSON.stringify({ request_id: request.request_id }) });
+          if (!res.ok) throw new Error();
+          approve.textContent = 'Approved — waiting for confirmation';
+        } catch { approve.disabled = false; approve.textContent = 'Approval failed — try again'; }
+      });
+      pendingRequests.appendChild(approve);
+    }
+  };
+  refreshPairingRequests();
+  requestPollTimer = setInterval(refreshPairingRequests, 2000);
 
   const devicesTitle = document.createElement('div');
   devicesTitle.className = 'shore-devices-title';

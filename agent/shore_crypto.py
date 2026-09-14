@@ -611,14 +611,13 @@ class PairingCoordinator:
                 timer.start()
         return {"code": crockford32_encode(bytes(ceremony.secret)), "offer": offer, "expires_at": ceremony.expires_at}
 
-    def accept_packet(self, packet: dict[str, Any], *, now: float | None = None) -> dict[str, Any] | None:
+    def accept_packet(self, packet: dict[str, Any], *, now: float | None = None) -> dict[str, Any] | TrustedDevice:
         """Atomically select and execute the current pairing protocol phase."""
         ceremony_id = packet.get("ceremony_id") if isinstance(packet, dict) else None
         with self._lock:
             ceremony = self._ceremonies.get(ceremony_id)
             if ceremony and ceremony.pending is not None:
-                self.accept_browser_confirmation(packet, now=now)
-                return None
+                return self.accept_browser_confirmation(packet, now=now)
             return self.accept_browser_packet(packet, now=now)
 
     def accept_browser_packet(self, packet: dict[str, Any], *, now: float | None = None,

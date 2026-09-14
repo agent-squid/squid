@@ -2604,6 +2604,8 @@ def test_shore_endpoints_require_loopback(monkeypatch):
     assert client.get("/shore/devices").status_code == 403
     assert client.post("/shore/pairing/begin").status_code == 403
     assert client.get("/shore/pairing/status", params={"ceremony_id": "x"}).status_code == 403
+    assert client.get("/shore/pairing/requests").status_code == 403
+    assert client.post("/shore/pairing/requests/approve", json={"request_id": "x"}).status_code == 403
     assert client.post("/shore/devices/revoke", json={"device_id": "x"}).status_code == 403
 
 
@@ -2613,6 +2615,8 @@ def test_shore_endpoints_report_not_configured_when_shore_is_unset(monkeypatch):
     assert client.get("/shore/devices").status_code == 400
     assert client.post("/shore/pairing/begin").status_code == 400
     assert client.get("/shore/pairing/status", params={"ceremony_id": "x"}).status_code == 400
+    assert client.get("/shore/pairing/requests").status_code == 400
+    assert client.post("/shore/pairing/requests/approve", json={"request_id": "x"}).status_code == 400
     assert client.post("/shore/devices/revoke", json={"device_id": "x"}).status_code == 400
 
 
@@ -2657,6 +2661,21 @@ def test_shore_pairing_begin_surfaces_protocol_errors(monkeypatch):
     res = _loopback_client().post("/shore/pairing/begin")
     assert res.status_code == 409
     assert res.json() == {"error": "pairing_rate_limited"}
+
+
+def test_shore_pairing_request_requires_local_approval(monkeypatch):
+    approved = []
+    async def approve(request_id):
+        approved.append(request_id)
+    connection = SimpleNamespace(
+        list_pairing_requests=lambda: [{"request_id": "request-1", "device_id": "device-1", "received_at": 1}],
+        approve_pairing_request=approve,
+    )
+    monkeypatch.setattr(server, "_shore_connection", connection)
+    client = _loopback_client()
+    assert client.get("/shore/pairing/requests").json()["requests"][0]["request_id"] == "request-1"
+    assert client.post("/shore/pairing/requests/approve", json={"request_id": "request-1"}).json() == {"ok": True}
+    assert approved == ["request-1"]
 
 
 def test_shore_devices_list_and_revoke(monkeypatch):
