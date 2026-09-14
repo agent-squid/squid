@@ -244,7 +244,7 @@ class ShoreChannel:
             try:
                 recorded = await asyncio.to_thread(
                     self.audit.record, request_id=envelope["request_id"], device_id=trusted.device_id,
-                    message_type="shore.probe", frame=frame, decision="protocol", outcome="ok", now_ms=now_ms,
+                    message_type="shore.probe", frame=frame, decision="granted", outcome="ok", now_ms=now_ms,
                     relay_receipt=relay_receipt,
                 )
                 if recorded is None:
@@ -488,6 +488,7 @@ class ShoreHostConnection:
         self.base_backoff = base_backoff
         self.max_backoff = max_backoff
         self.stable_seconds = stable_seconds
+        self.connected = asyncio.Event()
         self.receipt_keys = self._load_receipt_keys(
             self._relay_origin(parsed), parsed.hostname,
         )
@@ -553,7 +554,11 @@ class ShoreHostConnection:
                     open_timeout=15, close_timeout=5, ping_interval=20,
                 ) as socket:
                     connected_at = time.monotonic()
-                    await self._serve(socket, stop)
+                    self.connected.set()
+                    try:
+                        await self._serve(socket, stop)
+                    finally:
+                        self.connected.clear()
                 if stop.is_set():
                     break
                 raise ShoreProtocolError("shore_connection_closed")
@@ -771,6 +776,13 @@ class ShoreHostConnection:
                     continue
                 for response in responses:
                     await self._send_application(socket, response)
+                    last_sent = time.monotonic()
+                # The connection may have started with no pending audit data.
+                # A newly handled frame records audit events, so initiate the
+                # first batch here instead of waiting for a reconnect or an
+                # acknowledgement to a batch that was never sent.
+                if (self.receipt_keys and self._pending_audit_batch is None
+                        and await self._send_audit_batch(socket)):
                     last_sent = time.monotonic()
         finally:
             receive.cancel()

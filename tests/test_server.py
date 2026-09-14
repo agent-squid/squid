@@ -1388,6 +1388,7 @@ def test_lifecycle_start_backgrounds_server(tmp_path):
     with patch("agent.server._lifecycle_paths", return_value=(pid_file, boot_log)), \
          patch("agent.server._read_lifecycle_pid", return_value=None), \
          patch("agent.server._health_ok", side_effect=lambda host, port: health_checks.pop(0)), \
+         patch("agent.server._print_tailscale_access"), \
          patch("agent.server.subprocess.Popen", return_value=proc) as popen, \
          patch("agent.server.time.sleep"):
         assert server._lifecycle_start("127.0.0.1", 8000) == 0

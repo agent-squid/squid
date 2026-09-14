@@ -6,7 +6,8 @@ import httpx
 
 from agent.shore import (
     ShoreRuntimeConfig, _load_or_new_identity, _load_runtime_config,
-    _new_identity, _registration_proof, _write_runtime_config, login,
+    _new_identity, _print_totp_qr, _registration_proof, _require_response,
+    _write_runtime_config, login,
 )
 
 
@@ -228,8 +229,9 @@ def test_login_performs_email_and_second_factor_flow_without_session_token(tmp_p
     calls = []
 
     class Response:
-        def __init__(self, value):
+        def __init__(self, value, status_code=200):
             self.value = value
+            self.status_code = status_code
 
         def raise_for_status(self):
             return None
@@ -253,6 +255,8 @@ def test_login_performs_email_and_second_factor_flow_without_session_token(tmp_p
                 return Response({"sent": True})
             if url.endswith("/auth/consume"):
                 return Response({"csrfToken": "csrf-one"})
+            if url.endswith("/auth/totp/enroll"):
+                return Response({}, 409)
             if url.endswith("/auth/step-up"):
                 return Response({"csrfToken": "csrf-two"})
             if url.endswith("/host/challenge"):
@@ -270,11 +274,104 @@ def test_login_performs_email_and_second_factor_flow_without_session_token(tmp_p
     ])
     assert result == 0
     assert [url.rsplit("/", 2)[-2:] for url, _ in calls] == [
-        ["auth", "magic-link"], ["auth", "consume"], ["auth", "step-up"],
+        ["auth", "magic-link"], ["auth", "consume"], ["totp", "enroll"], ["auth", "step-up"],
         ["host", "challenge"], ["host", "register"],
     ]
-    assert calls[3][1]["headers"]["x-shore-csrf"] == "csrf-two"
-    assert "authorization" not in calls[3][1]["headers"]
+    assert calls[4][1]["headers"]["x-shore-csrf"] == "csrf-two"
+    assert "authorization" not in calls[4][1]["headers"]
     assert "registered Shore host" in capsys.readouterr().out
     assert _load_runtime_config(tmp_path / "shore") == ShoreRuntimeConfig(
         "https://agentsquid.ai", "alice", "018f1f25-3f6b-7d75-a4d1-62d771381b20", 1)
+
+
+def test_login_prints_totp_enrollment_qr(tmp_path, monkeypatch, capsys):
+    calls = []
+
+    class Response:
+        def __init__(self, value, status_code=200):
+            self.value = value
+            self.status_code = status_code
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.value
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def post(self, url, **kwargs):
+            if url.endswith("/auth/magic-link"):
+                return Response({"sent": True})
+            if url.endswith("/auth/consume"):
+                return Response({"csrfToken": "csrf-one"})
+            if url.endswith("/auth/totp/enroll"):
+                return Response({"secret": "ABCDEFGHIJKLMNOP"}, 201)
+            if url.endswith("/auth/step-up"):
+                return Response({"csrfToken": "csrf-two"})
+            if url.endswith("/host/challenge"):
+                return Response({"id": "challenge", "nonce": "nonce"})
+            request = kwargs["json"]
+            return Response({"accountId": "018f1f25-3f6b-7d75-a4d1-62d771381b20",
+                "username": "alice", "keyEpoch": 1, "id": request["hostId"],
+                "signingKey": request["signingKey"], "agreementKey": request["agreementKey"]})
+
+    monkeypatch.setattr("agent.shore.httpx.Client", Client)
+    monkeypatch.setattr("agent.shore._print_totp_qr", lambda secret, username, relay: calls.append((secret, username, relay)))
+    assert login(["--username", "alice", "--email", "alice@example.com", "--magic-code", "magic",
+        "--totp-code", "123456", "--identity-dir", str(tmp_path / "shore")]) == 0
+    assert calls == [("ABCDEFGHIJKLMNOP", "alice", "https://agentsquid.ai")]
+    assert "Scan this QR code with your authenticator app:" in capsys.readouterr().err
+
+
+def test_totp_qr_distinguishes_dev_issuer(monkeypatch):
+    values = []
+
+    class QR:
+        def __init__(self, **_kwargs): pass
+        def add_data(self, value): values.append(value)
+        def print_ascii(self, **_kwargs): pass
+
+    monkeypatch.setattr("agent.shore.qrcode.QRCode", QR)
+    _print_totp_qr("SECRET", "alice", "https://dev.agentsquid.ai")
+    _print_totp_qr("SECRET", "alice", "https://agentsquid.ai")
+    assert "AgentSquid%20%28dev%29%3A%40alice" in values[0]
+    assert "issuer=AgentSquid+%28dev%29" in values[0]
+    assert "AgentSquid%3A%40alice" in values[1]
+    assert "issuer=AgentSquid&" in values[1]
+
+
+def test_response_errors_reject_redirects_and_explain_nonreusable_host():
+    with pytest.raises(RuntimeError, match="HTTP 302"):
+        _require_response(httpx.Response(302, request=httpx.Request("POST", "https://relay.example")), "login")
+    response = httpx.Response(409, json={"error": "host_id_not_reusable"},
+        request=httpx.Request("POST", "https://relay.example"))
+    with pytest.raises(RuntimeError, match="fresh identity directory"):
+        _require_response(response, "host registration")
+
+
+def test_login_explains_existing_host_conflict(tmp_path, monkeypatch, capsys):
+    class Response:
+        status_code = 409
+        def json(self): return {"error": "current_host_exists"}
+        def raise_for_status(self): raise AssertionError("expected specific conflict handling")
+
+    class Client:
+        def __init__(self, **_kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def post(self, *_args, **_kwargs): return Response()
+
+    monkeypatch.setattr("agent.shore.httpx.Client", Client)
+    result = login(["--username", "alice", "--session-token", "session",
+        "--identity-dir", str(tmp_path / "shore")])
+    assert result == 1
+    assert "already has a different registered host" in capsys.readouterr().err

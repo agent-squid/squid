@@ -14,8 +14,10 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote, urlencode, urlparse
 
 import httpx
+import qrcode
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 
@@ -177,6 +179,34 @@ def _response_error(response: httpx.Response) -> str | None:
     return error if isinstance(error, str) else None
 
 
+def _require_response(response: httpx.Response, stage: str) -> None:
+    if 200 <= getattr(response, "status_code", 200) < 300:
+        return
+    code = _response_error(response)
+    explanations = {
+        "invalid_or_expired_token": "the email sign-in code is invalid, expired, or was already used; request and enter the newest code",
+        "second_factor_invalid": "the authenticator code is invalid; wait for a fresh 6-digit code and check the device clock",
+        "second_factor_locked": "too many authenticator attempts; wait before trying again",
+        "fresh_second_factor_required": "the authenticated session is missing a recent authenticator verification",
+        "rate_limited": "too many attempts; wait before trying again",
+        "email_unavailable": "the relay could not send the sign-in email",
+        "account_suspended": "the account is suspended",
+        "host_id_not_reusable": "this revoked host identity cannot be reused; register with a fresh identity directory",
+        "host_identity_mismatch": "the registered host keys do not match this identity directory",
+    }
+    detail = explanations.get(code, code or getattr(response, "reason_phrase", "request rejected"))
+    raise RuntimeError(f"{stage} failed: {detail} (HTTP {response.status_code})")
+
+
+def _print_totp_qr(secret: str, username: str, relay: str) -> None:
+    issuer = "AgentSquid (dev)" if urlparse(relay).hostname == "dev.agentsquid.ai" else "AgentSquid"
+    label = quote(f"{issuer}:@{username}", safe="")
+    uri = f"otpauth://totp/{label}?{urlencode({'secret': secret, 'issuer': issuer, 'algorithm': 'SHA1', 'digits': 6, 'period': 30})}"
+    qr = qrcode.QRCode(border=2)
+    qr.add_data(uri)
+    qr.print_ascii(out=sys.stderr, tty=False, invert=True)
+
+
 def login(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="agentsquid login", description="Register this machine as the account's Shore host")
     parser.add_argument("--relay", default="https://agentsquid.ai")
@@ -217,13 +247,13 @@ def login(argv: list[str]) -> int:
                     print(f"@{args.username} doesn't exist yet; creating it for {email}", file=sys.stderr)
                     signup_response = client.post(endpoint + "/auth/signup", json={"email": email})
                     if signup_response.status_code == 409:
-                        raise RuntimeError(f"username {args.username!r} is already taken")
-                    signup_response.raise_for_status()
+                        raise RuntimeError("account signup is unavailable; the username or email address is already in use")
+                    _require_response(signup_response, "account signup")
                 else:
-                    magic_response.raise_for_status()
-                magic_code = args.magic_code or getpass.getpass("Sign-in code from email: ")
+                    _require_response(magic_response, "sign-in email request")
+                magic_code = args.magic_code or getpass.getpass("Sign-in code from email (input hidden): ")
                 consume_response = client.post(endpoint + "/auth/consume", json={"token": magic_code})
-                consume_response.raise_for_status()
+                _require_response(consume_response, "email sign-in code")
                 consume = consume_response.json()
                 csrf = consume.get("csrfToken")
                 if not isinstance(csrf, str):
@@ -233,19 +263,28 @@ def login(argv: list[str]) -> int:
                     secret = enroll_response.json().get("secret")
                     if not isinstance(secret, str):
                         raise RuntimeError("relay returned an invalid TOTP enrollment response")
+                    print("Scan this QR code with your authenticator app:", file=sys.stderr)
+                    _print_totp_qr(secret, args.username, args.relay)
                     print(f"Add this key to an authenticator app (1Password, Google Authenticator, ...): {secret}", file=sys.stderr)
-                elif enroll_response.status_code != 409:
-                    enroll_response.raise_for_status()
-                totp_code = args.totp_code or getpass.getpass("Authenticator code: ")
+                elif enroll_response.status_code == 409:
+                    print("Authenticator already enrolled; use its current 6-digit code (input is hidden).", file=sys.stderr)
+                else:
+                    _require_response(enroll_response, "authenticator enrollment")
+                totp_code = args.totp_code or getpass.getpass("Authenticator code (input hidden): ")
                 step_response = client.post(endpoint + "/auth/step-up", headers={"x-shore-csrf": csrf}, json={"code": totp_code})
-                step_response.raise_for_status()
+                _require_response(step_response, "authenticator verification")
                 stepped = step_response.json()
                 csrf = stepped.get("csrfToken")
                 if not isinstance(csrf, str):
                     raise RuntimeError("relay returned an invalid second-factor response")
                 headers = {"x-shore-csrf": csrf, "content-type": "application/json"}
             challenge_response = client.post(endpoint + "/host/challenge", headers=headers, json={"hostId": host_id})
-            challenge_response.raise_for_status()
+            if getattr(challenge_response, "status_code", 200) == 409 and _response_error(challenge_response) == "current_host_exists":
+                raise RuntimeError(
+                    "this account already has a different registered host; use that host's identity directory "
+                    "or revoke it before registering this one"
+                )
+            _require_response(challenge_response, "host registration challenge")
             challenge = challenge_response.json()
             signing_x = _b64url(signing.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw))
             agreement_x = _b64url(agreement.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw))
@@ -256,7 +295,7 @@ def login(argv: list[str]) -> int:
                 "agreementKey": {"kty": "OKP", "crv": "X25519", "x": agreement_x},
                 "signature": _b64url(signing.sign(proof)),
             })
-            response.raise_for_status()
+            _require_response(response, "host registration")
             registered = response.json()
             runtime = ShoreRuntimeConfig(
                 relay=args.relay.rstrip("/"), username=registered["username"],

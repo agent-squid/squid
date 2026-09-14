@@ -294,7 +294,7 @@ async def test_live_channel_pairs_persists_trust_and_probe_round_trips(tmp_path)
     assert opened == {"v": 1, "type": "shore.probe.result", "payload": {"nonce": "round-trip"}}
     probe_audit = channel.audit.events()
     assert [(event["messageType"], event["decision"], event["outcome"]) for event in probe_audit] == [
-        ("shore.probe", "protocol", "ok"),
+        ("shore.probe", "granted", "ok"),
     ]
 
     restarted = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST, host_signing=host_signing, host_agreement=host_agreement)

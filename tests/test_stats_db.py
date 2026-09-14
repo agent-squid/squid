@@ -473,7 +473,8 @@ def test_init_db_marks_pre_activation_flow_runs_as_shadow(tmp_path, monkeypatch)
         )
         conn.execute(
             """INSERT INTO flow_runs (flow_run_id, route, created_at)
-               VALUES ('legacy-shadow', '#squid@codex>@claude', '2026-08-15T10:00:00.000000Z')"""
+               VALUES ('legacy-shadow', '#squid@codex>@claude', ?)""",
+            (stats_db._utc_now_iso(),),
         )
 
     stats_db.init_db()
