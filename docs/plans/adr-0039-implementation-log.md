@@ -430,7 +430,7 @@ and a device only ever goes through this one once (until revoked).
 sequenceDiagram
     participant You as You (human)
     participant Host as Squid chat UI (host, Connect modal: "/pair" or "/remote")
-    participant Browser as Browser tab (/@user/security)
+    participant Browser as Browser tab (/@user/pair or /@user/security)
     participant Relay as Shore relay
 
     Note over You,Relay: Prerequisite for either path: host has run `agentsquid login`<br/>(or the manual live verifier) and Squid has been restarted since —<br/>otherwise GET /shore/pairing/requests returns 400 shore_not_configured.
@@ -441,11 +441,10 @@ sequenceDiagram
         Host->>Host: generate ceremony on tab open/activation<br/>(code, QR, pair_url, expires in 300s) -- no separate "Start" click
         You->>Browser: scan QR / open pair_url, or click "Copy link" and paste it
         Browser->>Browser: require agentsquid.ai login first, if not already
-        Browser->>You: show host key fingerprints
-        You->>Browser: click "Confirm pairing"
+        Browser->>Browser: validate the short-lived offer and start pairing automatically<br/>(scanning/opening the secret-bearing link is the affirmative action)
         Browser->>Relay: 3-packet ceremony (relay-blind)
         Relay->>Host: relayed opaque packets
-        Note over You,Relay: Done — generating the QR was the approval,<br/>no second local click needed.
+        Note over You,Relay: Done — no second browser or host-side approval click.<br/>A host-key conflict still requires explicit replacement approval.
     else Path B — browser-initiated ("Pair this browser", this addendum)
         You->>Browser: on /security, click "Pair this browser"
         Browser->>Relay: pairing_request (own device key, no secret)
