@@ -429,31 +429,41 @@ and a device only ever goes through this one once (until revoked).
 ```mermaid
 sequenceDiagram
     participant You as You (human)
-    participant Host as Squid chat UI (host, Connect modal: "/pair" or "/remote")
+    participant UI as Squid chat UI (Connect modal: "/pair" or "/remote")
+    participant Host as Shore host channel
     participant Browser as Browser tab (/@user/pair or /@user/security)
     participant Relay as Shore relay
 
     Note over You,Relay: Prerequisite for either path: host has run `agentsquid login`<br/>(or the manual live verifier) and Squid has been restarted since —<br/>otherwise GET /shore/pairing/requests returns 400 shore_not_configured.
 
     alt Path A — host-initiated (QR/link, Milestone 4.0, no notification gap)
-        You->>Host: type /pair or /remote
-        Host->>Host: check GET /remote + GET /shore/devices<br/>if both configured, show tab bar (Tailscale / AgentSquid.ai)
-        Host->>Host: generate ceremony on tab open/activation<br/>(code, QR, pair_url, expires in 300s) -- no separate "Start" click
+        You->>UI: type /pair or /remote
+        UI->>UI: check GET /remote + GET /shore/devices<br/>if both configured, show tab bar (Tailscale / AgentSquid.ai)
+        UI->>Host: begin ceremony on tab open/activation
+        Host-->>UI: code, QR pair_url, expiry (300s)<br/>-- no separate "Start" click
         You->>Browser: scan QR / open pair_url, or click "Copy link" and paste it
         Browser->>Browser: require agentsquid.ai login first, if not already
         Browser->>Browser: validate the short-lived offer and start pairing automatically<br/>(scanning/opening the secret-bearing link is the affirmative action)
-        Browser->>Relay: 3-packet ceremony (relay-blind)
-        Relay->>Host: relayed opaque packets
+        Browser->>Relay: encrypted bootstrap/binding request (packet 1)
+        Relay->>Host: relay opaque packet 1
+        Host->>Relay: encrypted binding response (packet 2)
+        Relay->>Browser: relay opaque packet 2
+        Browser->>Relay: encrypted binding confirmation (packet 3)
+        Relay->>Host: relay opaque packet 3
+        UI->>Host: poll pairing status
+        Host-->>UI: paired status
+        Note over Host,Relay: Relay-blind: the relay routes the three packets<br/>but cannot decrypt their pairing contents.
         Note over You,Relay: Done — no second browser or host-side approval click.<br/>A host-key conflict still requires explicit replacement approval.
     else Path B — browser-initiated ("Pair this browser", this addendum)
         You->>Browser: on /security, click "Pair this browser"
         Browser->>Relay: pairing_request (own device key, no secret)
         Relay->>Host: forwarded to the connected host only
         Note over Host: held up to 120s — NOT auto-approved
-        You->>Host: separately, type /pair or /remote to see pending requests<br/>(shown regardless of which tab is active)
-        Host-->>You: lists request + 8-char verification code
+        You->>UI: separately, type /pair or /remote to see pending requests<br/>(shown regardless of which tab is active)
+        UI-->>You: lists request + 8-char verification code
         You->>Browser: compare against the code shown there
-        You->>Host: click Approve
+        You->>UI: click Approve
+        UI->>Host: approve request
         Host->>Relay: encrypted, signed pairing_offer
         Relay->>Browser: routed by request_id only, once
         Browser->>You: show host key fingerprints (decrypted client-side)
