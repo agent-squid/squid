@@ -682,71 +682,229 @@ function initSettings() {
   });
 }
 
-async function openRemoteQR() {
-  if (document.getElementById('remote-modal')) return;
-
-  let remoteUrl = null, remoteReason = 'error';
+async function _shoreIsConfigured() {
   try {
-    const res = await fetch('/remote');
-    const data = await res.json();
-    remoteUrl = data.url || null;
-    remoteReason = data.reason || null;
-  } catch {}
+    const res = await fetch('/shore/devices');
+    return res.ok;
+  } catch { return false; }
+}
 
-  const authUrl = remoteUrl;
+/** Unified "Connect" modal for both remote-access methods: Tailscale
+ * (LAN/tailnet-scoped, needs the Tailscale app on the far end, no far-end
+ * login) and AgentSquid.ai (relay-routed, needs no app install anywhere,
+ * but needs the far end already logged into agentsquid.ai). Shows both as
+ * tabs when both are available, whichever one is available directly when
+ * only one is, and an install/login prompt when neither is. `preferredTab`
+ * ('tailscale' | 'agentsquid') only matters when both are available --
+ * it's which chat command opened this (`/remote` vs `/pair`). */
+async function openConnectModal(preferredTab) {
+  if (document.getElementById('connect-modal')) return;
+
+  const [remoteData, shoreConfigured] = await Promise.all([
+    fetch('/remote').then(res => res.json()).catch(() => ({})),
+    _shoreIsConfigured(),
+  ]);
+  const tailscaleUrl = remoteData.url || null;
+  const tailscaleReason = remoteData.reason || null;
 
   const modal = document.createElement('div');
-  modal.id = 'remote-modal';
-
+  modal.id = 'connect-modal';
   const box = document.createElement('div');
-  box.id = 'remote-modal-box';
-
+  box.id = 'connect-modal-box';
   const title = document.createElement('div');
-  title.id = 'remote-modal-title';
-  title.textContent = 'Remote Access';
+  title.id = 'connect-modal-title';
+  title.textContent = 'Connect';
 
-  const qrDiv = document.createElement('div');
-  qrDiv.id = 'remote-qr';
-
-  const urlEl = document.createElement('div');
-  urlEl.id = 'remote-url';
-
+  let pollTimer = null, requestPollTimer = null;
+  const onEsc = e => { if (e.key === 'Escape') close(); };
+  const close = () => {
+    if (pollTimer) clearInterval(pollTimer);
+    if (requestPollTimer) clearInterval(requestPollTimer);
+    document.removeEventListener('keydown', onEsc);
+    modal.remove();
+  };
   const closeBtn = document.createElement('button');
-  closeBtn.id = 'remote-modal-close';
+  closeBtn.id = 'connect-modal-close';
   closeBtn.innerHTML = '<span class="close-desktop">Esc</span><span class="close-mobile">✕</span>';
-  closeBtn.addEventListener('click', () => modal.remove());
-  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
-  document.addEventListener('keydown', function esc(e) {
-    if (e.key === 'Escape') { modal.remove(); document.removeEventListener('keydown', esc); }
-  });
+  closeBtn.addEventListener('click', close);
+  modal.addEventListener('click', e => { if (e.target === modal) close(); });
+  document.addEventListener('keydown', onEsc);
 
-  if (authUrl) {
-    urlEl.textContent = authUrl;
-    box.appendChild(closeBtn);
-    box.appendChild(title);
-    box.appendChild(qrDiv);
-    box.appendChild(urlEl);
-    modal.appendChild(box);
-    document.body.appendChild(modal);
-    // Render QR after insertion so the div has dimensions
-    new QRCode(qrDiv, { text: authUrl, width: 220, height: 220,
-                         colorDark: '#0f0f13', colorLight: '#f5f0e8' });
-  } else {
-    const reason = remoteReason;
+  box.appendChild(closeBtn);
+  box.appendChild(title);
+
+  if (!tailscaleUrl && !shoreConfigured) {
     const msgs = {
       not_installed: 'Tailscale is not installed.\nInstall from tailscale.com, then restart squid to configure remote access automatically.',
       not_running:   'Tailscale is installed but not running.\nStart the Tailscale app, then restart squid.',
       no_dns:        'Tailscale is running but has no DNS name.\nEnable MagicDNS in your Tailscale admin console (tailscale.com/kb/1081).',
       error:         'Could not reach Tailscale. Check that the Tailscale app is running.',
     };
-    urlEl.style.whiteSpace = 'pre-line';
-    urlEl.textContent = msgs[reason] || 'Tailscale unavailable — remote access requires Tailscale (tailscale.com).';
-    box.appendChild(closeBtn);
-    box.appendChild(title);
-    box.appendChild(urlEl);
+    const neither = document.createElement('div');
+    neither.id = 'connect-neither';
+    const tsOption = document.createElement('div');
+    tsOption.className = 'connect-neither-option';
+    tsOption.textContent = msgs[tailscaleReason] || 'Tailscale unavailable (tailscale.com).';
+    const asOption = document.createElement('div');
+    asOption.className = 'connect-neither-option';
+    asOption.textContent = "AgentSquid isn't set up on this host yet.\nRun `agentsquid login` in a terminal, then restart squid.";
+    neither.appendChild(tsOption);
+    neither.appendChild(asOption);
+    box.appendChild(neither);
     modal.appendChild(box);
     document.body.appendChild(modal);
+    return;
   }
+
+  const copyRow = url => {
+    const row = document.createElement('div');
+    row.className = 'connect-link-row';
+    const urlEl = document.createElement('div');
+    urlEl.className = 'connect-link-url';
+    urlEl.textContent = url;
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'btn-ghost connect-copy-btn';
+    copyBtn.textContent = 'Copy link';
+    copyBtn.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(url); copyBtn.textContent = 'Copied'; }
+      catch { copyBtn.textContent = 'Copy failed'; }
+      setTimeout(() => { copyBtn.textContent = 'Copy link'; }, 1500);
+    });
+    row.appendChild(urlEl);
+    row.appendChild(copyBtn);
+    return row;
+  };
+
+  const pendingRequests = document.createElement('div');
+  pendingRequests.id = 'shore-pair-requests';
+  const devicesTitle = document.createElement('div');
+  devicesTitle.className = 'shore-devices-title';
+  devicesTitle.textContent = 'Trusted devices';
+  const devicesList = document.createElement('div');
+  devicesList.id = 'shore-devices-list';
+
+  const tailscalePanel = document.createElement('div');
+  tailscalePanel.id = 'connect-tailscale-panel';
+  if (tailscaleUrl) {
+    const qrDiv = document.createElement('div');
+    qrDiv.className = 'connect-qr';
+    tailscalePanel.appendChild(qrDiv);
+    tailscalePanel.appendChild(copyRow(tailscaleUrl));
+    box.appendChild(tailscalePanel);
+    // Render QR after insertion so the div has dimensions.
+    new QRCode(qrDiv, { text: tailscaleUrl, width: 220, height: 220,
+                         colorDark: '#0f0f13', colorLight: '#f5f0e8' });
+  }
+
+  const agentsquidPanel = document.createElement('div');
+  agentsquidPanel.id = 'connect-agentsquid-panel';
+  let agentsquidStarted = false;
+  const startAgentSquid = async () => {
+    if (agentsquidStarted) return;
+    agentsquidStarted = true;
+    agentsquidPanel.innerHTML = '<div class="connect-loading">Generating pairing code…</div>';
+    let body;
+    try {
+      const res = await fetch('/shore/pairing/begin', { method: 'POST' });
+      body = await res.json();
+      if (!res.ok) throw new Error(body.error || 'shore_pairing_failed');
+    } catch (err) {
+      agentsquidPanel.innerHTML = `<div class="shore-pair-error">${err.message === 'shore_not_configured'
+        ? "Shore isn't set up on this host yet — run `agentsquid login` in a terminal first."
+        : 'Could not start pairing.'}</div>`;
+      return;
+    }
+    agentsquidPanel.innerHTML = '';
+    const qrDiv = document.createElement('div');
+    qrDiv.className = 'connect-qr';
+    const codeEl = document.createElement('div');
+    codeEl.id = 'shore-pair-code';
+    codeEl.textContent = body.code;
+    const statusEl = document.createElement('div');
+    statusEl.id = 'shore-pair-status';
+    statusEl.textContent = 'Waiting for the other device…';
+    agentsquidPanel.appendChild(qrDiv);
+    agentsquidPanel.appendChild(codeEl);
+    agentsquidPanel.appendChild(copyRow(body.pair_url));
+    agentsquidPanel.appendChild(statusEl);
+    new QRCode(qrDiv, { text: body.pair_url, width: 220, height: 220,
+                         colorDark: '#0f0f13', colorLight: '#f5f0e8' });
+    pollTimer = setInterval(async () => {
+      let statusBody;
+      try {
+        const res = await fetch(`/shore/pairing/status?ceremony_id=${encodeURIComponent(body.ceremony_id)}`);
+        statusBody = await res.json();
+      } catch { return; }
+      if (statusBody.status === 'pending') return;
+      clearInterval(pollTimer); pollTimer = null;
+      const labels = { paired: 'Paired ✓', failed: 'Pairing failed', expired: 'Pairing code expired', unknown: 'Pairing failed' };
+      statusEl.textContent = labels[statusBody.status] || statusBody.status;
+      if (statusBody.status === 'paired') _shoreRenderDeviceList(devicesList);
+    }, 2000);
+  };
+  if (shoreConfigured) box.appendChild(agentsquidPanel);
+
+  if (tailscaleUrl && shoreConfigured) {
+    const tabs = document.createElement('div');
+    tabs.id = 'connect-tabs';
+    const tsTab = document.createElement('button');
+    tsTab.type = 'button'; tsTab.className = 'connect-tab'; tsTab.textContent = 'Tailscale';
+    const asTab = document.createElement('button');
+    asTab.type = 'button'; asTab.className = 'connect-tab'; asTab.textContent = 'AgentSquid.ai';
+    const activate = which => {
+      tsTab.classList.toggle('active', which === 'tailscale');
+      asTab.classList.toggle('active', which === 'agentsquid');
+      tailscalePanel.style.display = which === 'tailscale' ? '' : 'none';
+      agentsquidPanel.style.display = which === 'agentsquid' ? '' : 'none';
+      if (which === 'agentsquid') startAgentSquid();
+    };
+    tsTab.addEventListener('click', () => activate('tailscale'));
+    asTab.addEventListener('click', () => activate('agentsquid'));
+    tabs.appendChild(tsTab);
+    tabs.appendChild(asTab);
+    box.insertBefore(tabs, tailscalePanel);
+    activate(preferredTab === 'agentsquid' ? 'agentsquid' : 'tailscale');
+  } else if (shoreConfigured) {
+    startAgentSquid();
+  }
+
+  if (shoreConfigured) {
+    box.appendChild(pendingRequests);
+    box.appendChild(devicesTitle);
+    box.appendChild(devicesList);
+    const refreshPairingRequests = async () => {
+      let requests;
+      try {
+        const res = await fetch('/shore/pairing/requests');
+        const reqBody = await res.json();
+        if (!res.ok) return;
+        requests = reqBody.requests || [];
+      } catch { return; }
+      pendingRequests.replaceChildren();
+      for (const request of requests) {
+        const approve = document.createElement('button');
+        approve.type = 'button'; approve.className = 'btn-ghost';
+        approve.textContent = `Approve browser ${request.device_id.slice(0, 8)}… · code ${request.verification_code}`;
+        approve.addEventListener('click', async () => {
+          approve.disabled = true; approve.textContent = 'Approving…';
+          try {
+            const res = await fetch('/shore/pairing/requests/approve', { method: 'POST',
+              headers: { 'content-type': 'application/json' }, body: JSON.stringify({ request_id: request.request_id }) });
+            if (!res.ok) throw new Error();
+            approve.textContent = 'Approved — waiting for confirmation';
+          } catch { approve.disabled = false; approve.textContent = 'Approval failed — try again'; }
+        });
+        pendingRequests.appendChild(approve);
+      }
+    };
+    refreshPairingRequests();
+    requestPollTimer = setInterval(refreshPairingRequests, 2000);
+    _shoreRenderDeviceList(devicesList);
+  }
+
+  modal.appendChild(box);
+  document.body.appendChild(modal);
 }
 
 async function _shoreFetchDevices() {
@@ -798,137 +956,6 @@ function _shoreRenderDeviceList(container) {
       container.appendChild(row);
     });
   });
-}
-
-async function openShorePairModal() {
-  if (document.getElementById('shore-pair-modal')) return;
-
-  const modal = document.createElement('div');
-  modal.id = 'shore-pair-modal';
-
-  const box = document.createElement('div');
-  box.id = 'shore-pair-modal-box';
-
-  const title = document.createElement('div');
-  title.id = 'shore-pair-modal-title';
-  title.textContent = 'Shore Pairing';
-
-  let pollTimer = null;
-  let requestPollTimer = null;
-  const onEsc = e => { if (e.key === 'Escape') close(); };
-  const close = () => {
-    if (pollTimer) clearInterval(pollTimer);
-    if (requestPollTimer) clearInterval(requestPollTimer);
-    document.removeEventListener('keydown', onEsc);
-    modal.remove();
-  };
-
-  const closeBtn = document.createElement('button');
-  closeBtn.id = 'shore-pair-modal-close';
-  closeBtn.innerHTML = '<span class="close-desktop">Esc</span><span class="close-mobile">✕</span>';
-  closeBtn.addEventListener('click', close);
-  modal.addEventListener('click', e => { if (e.target === modal) close(); });
-  document.addEventListener('keydown', onEsc);
-
-  box.appendChild(closeBtn);
-  box.appendChild(title);
-
-  const pairSection = document.createElement('div');
-  pairSection.id = 'shore-pair-section';
-  const startBtn = document.createElement('button');
-  startBtn.type = 'button';
-  startBtn.className = 'btn-ghost';
-  startBtn.textContent = 'Start Pairing';
-  pairSection.appendChild(startBtn);
-  const pendingRequests = document.createElement('div');
-  pendingRequests.id = 'shore-pair-requests';
-  pairSection.appendChild(pendingRequests);
-  box.appendChild(pairSection);
-
-  const refreshPairingRequests = async () => {
-    let requests;
-    try {
-      const res = await fetch('/shore/pairing/requests');
-      const body = await res.json();
-      if (!res.ok) return;
-      requests = body.requests || [];
-    } catch { return; }
-    pendingRequests.replaceChildren();
-    for (const request of requests) {
-      const approve = document.createElement('button');
-      approve.type = 'button'; approve.className = 'btn-ghost';
-      approve.textContent = `Approve browser ${request.device_id.slice(0, 8)}… · code ${request.verification_code}`;
-      approve.addEventListener('click', async () => {
-        approve.disabled = true; approve.textContent = 'Approving…';
-        try {
-          const res = await fetch('/shore/pairing/requests/approve', { method: 'POST',
-            headers: { 'content-type': 'application/json' }, body: JSON.stringify({ request_id: request.request_id }) });
-          if (!res.ok) throw new Error();
-          approve.textContent = 'Approved — waiting for confirmation';
-        } catch { approve.disabled = false; approve.textContent = 'Approval failed — try again'; }
-      });
-      pendingRequests.appendChild(approve);
-    }
-  };
-  refreshPairingRequests();
-  requestPollTimer = setInterval(refreshPairingRequests, 2000);
-
-  const devicesTitle = document.createElement('div');
-  devicesTitle.className = 'shore-devices-title';
-  devicesTitle.textContent = 'Trusted devices';
-  box.appendChild(devicesTitle);
-  const devicesList = document.createElement('div');
-  devicesList.id = 'shore-devices-list';
-  box.appendChild(devicesList);
-
-  startBtn.addEventListener('click', async () => {
-    startBtn.disabled = true;
-    let body;
-    try {
-      const res = await fetch('/shore/pairing/begin', { method: 'POST' });
-      body = await res.json();
-      if (!res.ok) throw new Error(body.error || 'shore_pairing_failed');
-    } catch (err) {
-      pairSection.innerHTML = `<div class="shore-pair-error">${err.message === 'shore_not_configured'
-        ? "Shore isn't set up on this host yet — run `agentsquid login` in a terminal first."
-        : 'Could not start pairing.'}</div>`;
-      return;
-    }
-    pairSection.innerHTML = '';
-    const qrDiv = document.createElement('div');
-    qrDiv.id = 'shore-pair-qr';
-    const codeEl = document.createElement('div');
-    codeEl.id = 'shore-pair-code';
-    codeEl.textContent = body.code;
-    const urlEl = document.createElement('div');
-    urlEl.id = 'shore-pair-url';
-    urlEl.textContent = body.pair_url;
-    const statusEl = document.createElement('div');
-    statusEl.id = 'shore-pair-status';
-    statusEl.textContent = 'Waiting for the other device…';
-    pairSection.appendChild(qrDiv);
-    pairSection.appendChild(codeEl);
-    pairSection.appendChild(urlEl);
-    pairSection.appendChild(statusEl);
-    new QRCode(qrDiv, { text: body.pair_url, width: 220, height: 220,
-                         colorDark: '#0f0f13', colorLight: '#f5f0e8' });
-    pollTimer = setInterval(async () => {
-      let statusBody;
-      try {
-        const res = await fetch(`/shore/pairing/status?ceremony_id=${encodeURIComponent(body.ceremony_id)}`);
-        statusBody = await res.json();
-      } catch { return; }
-      if (statusBody.status === 'pending') return;
-      clearInterval(pollTimer); pollTimer = null;
-      const labels = { paired: 'Paired ✓', failed: 'Pairing failed', expired: 'Pairing code expired', unknown: 'Pairing failed' };
-      statusEl.textContent = labels[statusBody.status] || statusBody.status;
-      if (statusBody.status === 'paired') _shoreRenderDeviceList(devicesList);
-    }, 2000);
-  });
-
-  modal.appendChild(box);
-  document.body.appendChild(modal);
-  _shoreRenderDeviceList(devicesList);
 }
 
 function openHelp() {
@@ -3435,11 +3462,11 @@ async function handleCommand(cmd, topic, agent, adhoc = false, lookback = 0, opt
     return;
   }
   if (cmd.command === 'remote') {
-    openRemoteQR();
+    openConnectModal('tailscale');
     return;
   }
   if (cmd.command === 'pair') {
-    openShorePairModal();
+    openConnectModal('agentsquid');
     return;
   }
   if (cmd.command === 'login') {

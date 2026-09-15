@@ -705,6 +705,270 @@ explicit host-key-change confirmation step were built with those risks in
 mind, but that's not a substitute for the review this plan originally called
 for as its own slice.
 
+**2026-09-14 addendum — browser-initiated pairing (no QR/host-first-initiation
+required).** Everything above requires a human to start at the host (generate
+a QR/code, then move it to the browser). A second entry point was added: an
+authenticated browser on the account's `/@username/security` page
+(`pairing-app/src/security.ts`, new "Pair this browser" button) can request a
+ceremony directly. This answers the design question raised in an earlier
+session ("why can't I select the host after I login") the way that
+discussion anticipated — except there is no host-selection step, since the
+existing "exactly one current host per account" invariant means selection is
+never ambiguous.
+
+Protocol (`docs/shore-protocol-v1.md`'s new "authenticated browser may
+alternatively request a ceremony" section): the browser sends a closed-schema
+`pairing_request` (account/host/device/key-epoch bindings, a UUIDv7 request
+ID, its 32-byte X25519 public key) over its relay socket.
+`ShoreHostConnection._serve` (`agent/shore_transport.py`) intercepts this
+control frame before it ever reaches `ShoreChannel.handle`'s envelope path
+and holds it for at most 120s (`ShoreChannel.receive_pairing_request`,
+`_PAIRING_REQUEST_TTL_SECONDS`), capped at 20 pending requests. It is **not**
+auto-approved — the existing `/pair` chat-command modal (`ui/app.js`) now
+also polls `GET /shore/pairing/requests` every 2s and lists each pending
+request with an 8-hex-character verification code
+(`sha256(JCS(request))[:4]`, uppercase) for a human to compare against the
+same code shown in the browser tab before clicking Approve, which calls
+`POST /shore/pairing/requests/approve`. This preserves the non-negotiable
+invariant that relay input alone is never a device-trust decision — the
+browser's click only creates the *request*; a person at the host still
+creates the ceremony.
+
+On approval, `ShoreChannel.approve_pairing_request` runs the same
+`PairingCoordinator.begin` as manual `/pair`, then encrypts the resulting
+offer+code to the requesting browser's public key (AES-256-GCM, HKDF-SHA256
+keyed by the host/browser X25519 ECDH secret, salted with `SHA-256(context)`
+and keyed by that same `context` as HKDF info, where `context =
+"shore-pairing-request-v1\0" || account_id || "\0" || host_id || "\0" ||
+device_id || "\0" || request_id`) and signs the response shell with the
+host's existing Ed25519 key. The relay (`src/index.ts`) routes this
+`pairing_offer` only to the socket that sent the matching `request_id`
+(never storing or inspecting the ciphertext) and consumes that routing
+authorization once. The browser (`ShoreBrowserClient.requestPairing`,
+`browser/src/client.ts`) verifies the signature against the account's
+authenticated host keys (now also returned by `/@username/auth/security`,
+alongside the existing host metadata) before decrypting, then runs the
+unchanged three-packet ceremony via the existing `pair()`.
+
+Completion signaling reuses `ShoreChannel.handle`'s existing pairing-packet
+branch: the browser's final confirmation packet now returns a
+`pairing_approved` control frame (previously `[]`) that the host sends back
+over its *own* relay connection, not to the browser. The relay's
+`webSocketMessage` handler (`meta.role === "host"` only) consumes it to flip
+that `BrowserDevice`'s status from `unpaired` to `paired` and record a
+`browser_device_paired` audit entry — gated on a `rate:pairing-seen:device:…`
+marker already having been set by an actual relayed pairing packet for that
+ceremony, so a host cannot claim an arbitrary device paired without one
+having occurred.
+
+**Tests:** `agent/shore_crypto.py`/`shore_transport.py` — new
+`test_authenticated_browser_pairing_requires_local_approval_and_returns_encrypted_offer`
+(round-trips the encryption end to end and proves TTL expiry) plus updated
+`accept_packet`/`handle` coverage for the `TrustedDevice`/`pairing_approved`
+return-type change. `agent/server.py` —
+`test_shore_pairing_request_requires_local_approval` plus loopback/
+not-configured coverage for the two new endpoints. `shore/src/index.ts` —
+`test/shore.test.ts`'s "opaque WebSocket relay" case extended to cover
+`pairing_request` → `pairing_offer` routing and replay rejection.
+`shore/browser/src/client.ts` — new unit coverage in `client.test.ts` plus,
+critically, a genuine cross-process integration test
+(`browser/test/cross-process.test.ts`, "requests pairing without a QR code,
+gets it approved, and completes the ceremony") that drives the real
+TypeScript `requestPairing()`/`pair()`/`probe()` against the real Python
+`ShoreChannel.receive_pairing_request`/`approve_pairing_request` — added
+2026-09-14 specifically because this path had no host↔browser interop
+coverage at all before then (only each side's own mocks). Driving that test
+uncovered and fixed a real fixture bug: `test/fixtures/shore_host_process.py`
+was forwarding the host's `pairing_approved` control frame straight to the
+fake browser socket, whereas production has the relay consume it instead —
+the fixture now swallows it the same way.
+
+**Not done, same gap as 4.0 above:** no Playwright/equivalent test drives
+this flow through the actual rendered `pairing-app`/`ui/app.js` pages — the
+tests above prove the protocol and wiring, not that a human can complete
+this exact click-through. No independent security review has covered this
+addition specifically (same carried-forward risk noted above, now doubled:
+two entry points into the same trust-establishing ceremony instead of one).
+
+**How to manually test today:** both paths require a host that has completed
+Shore login (`agentsquid login`, or the live verifier at
+`tests/manual/verify_shore_live_e2e.py`, against a relay — e.g.
+`dev.agentsquid.ai` for preproduction) and a Squid server restarted after
+that login so `_shore_connection` picks it up (it's read once at startup;
+`GET /shore/pairing/requests` returns `400 {"error": "shore_not_configured"}`
+until it does).
+
+*Path A (simpler; this is the one to use for a normal manual pairing test):*
+in the Squid chat UI running on the host itself — this has to be the actual
+product UI, not a conversation with a coding agent — type `/pair` (or
+`/remote`; both open the same Connect modal now, see "Intended flow" below,
+landed 2026-09-14). If Tailscale is also configured, click the
+"AgentSquid.ai" tab; if Shore is the only method set up, its QR is already
+showing — there's no separate "Start Pairing" click anymore. Scan the QR
+with a camera-equipped device, or click "Copy link" to paste `pair_url` into
+a browser on a machine without one; if that browser isn't already logged
+into `agentsquid.ai` as this account, log in and reopen the same original
+link (not via browser back/forward — the fragment is stripped from history
+on load) within its 5-minute expiry; click "Confirm pairing". Done — no
+separate host-side approval step for this path.
+
+*Path B (the browser-initiated addition covered in the addendum above):*
+(1) open `https://<relay>/@<username>/security` in the browser device to
+pair and click "Pair this browser"; (2) separately, on the host, type
+`/pair` (or `/remote`), which polls the same pending-request list
+underneath whichever tab is showing; (3) compare the 8-character
+verification code shown in both places; (4) click Approve in the Connect
+modal, then "Confirm pairing" in the browser tab.
+
+Both entry points that exist today, side by side. This diagram covers only
+pairing itself — establishing trust for a device that has none yet. See
+"Regular usage after pairing" further below for the separate, much simpler
+flow an already-paired device uses afterward; the two are not interchangeable
+and a device only ever goes through this one once (until revoked).
+
+```mermaid
+sequenceDiagram
+    participant You as You (human)
+    participant Host as Squid chat UI (host, Connect modal: "/pair" or "/remote")
+    participant Browser as Browser tab (/@user/security)
+    participant Relay as Shore relay
+
+    Note over You,Relay: Prerequisite for either path: host has run `agentsquid login`<br/>(or the manual live verifier) and Squid has been restarted since —<br/>otherwise GET /shore/pairing/requests returns 400 shore_not_configured.
+
+    alt Path A — host-initiated (QR/link; Milestone 4.0; no notification gap)
+        You->>Host: type /pair or /remote
+        Host->>Host: check GET /remote + GET /shore/devices;<br/>if both configured, show tab bar (Tailscale / AgentSquid.ai)
+        Host->>Host: generate ceremony on tab open/activation<br/>(code, QR, pair_url, expires in 300s) -- no separate "Start" click
+        You->>Browser: scan QR / open pair_url, or click "Copy link" and paste it
+        Browser->>Browser: require agentsquid.ai login first, if not already
+        Browser->>You: show host key fingerprints
+        You->>Browser: click "Confirm pairing"
+        Browser->>Relay: 3-packet ceremony (relay-blind)
+        Relay->>Host: relayed opaque packets
+        Note over You,Relay: Done — generating the QR was the approval,<br/>no second local click needed.
+    else Path B — browser-initiated ("Pair this browser"; this addendum)
+        You->>Browser: on /security, click "Pair this browser"
+        Browser->>Relay: pairing_request (own device key, no secret)
+        Relay->>Host: forwarded to the connected host only
+        Note over Host: held up to 120s; NOT auto-approved
+        You->>Host: separately, type /pair or /remote to see pending requests<br/>(shown regardless of which tab is active)
+        Host-->>You: lists request + 8-char verification code
+        You->>Browser: compare against the code shown there
+        You->>Host: click Approve
+        Host->>Relay: encrypted, signed pairing_offer
+        Relay->>Browser: routed by request_id only, once
+        Browser->>You: show host key fingerprints (decrypted client-side)
+        You->>Browser: click "Confirm pairing"
+    end
+```
+
+**Regular usage after pairing (different flow — no ceremony, no human
+approval, no codes).** Once a device is paired, using it is architecturally
+unrelated to the diagram above: no ceremony, no QR, no host-side click, no
+verification code — every message is just a signed, encrypted envelope
+exchanged through the relay using the key pair pinned during that one-time
+pairing. The two capability types actually enabled today (everything else is
+denied pre-dispatch by the capability registry per the non-negotiable
+invariants at the top of this doc):
+
+```mermaid
+sequenceDiagram
+    participant Browser as Paired browser (ShoreBrowserClient)
+    participant Relay as Shore relay
+    participant Host as Host (ShoreChannel)
+
+    Note over Browser,Host: No human interaction below -- this runs every time<br/>a paired device is simply used, not just once like pairing.
+
+    rect rgb(245, 240, 232)
+    Note over Browser,Host: shore.probe -- trivial signed+encrypted round trip
+    Browser->>Relay: sealed envelope (shore.probe, {nonce})
+    Relay->>Host: relayed ciphertext, routed by username only
+    Host->>Host: verify expiry/sequence/request-id/signature, decrypt,<br/>authorize via capability registry, dispatch
+    Host->>Relay: sealed envelope (shore.probe.result)
+    Relay->>Browser: relayed ciphertext
+    Browser->>Browser: decrypt + verify against pinned host key
+    end
+
+    rect rgb(232, 227, 216)
+    Note over Browser,Host: dashboard.read.v1 -- duplex subscription (ShoreDashboardSession),<br/>the only other enabled capability; still lacks a real consumer page (see below)
+    Browser->>Relay: sealed envelope (subscribe, {scopes, cursor})
+    Relay->>Host: relayed ciphertext
+    Host->>Relay: sealed envelope (subscribed) + snapshot
+    Relay->>Browser: relayed ciphertext
+    loop for the life of the session
+        Host-->>Relay: sealed envelope (unsolicited event push)
+        Relay-->>Browser: relayed ciphertext
+        Browser-->>Host: sealed envelope (ack), periodic
+    end
+    end
+```
+
+Today this second diagram is the entire "regular usage" surface — `shore.probe` is exercised by the cross-process test and has no product UI at all, and `dashboard.read.v1`'s wire protocol is fully implemented and tested (`ShoreDashboardSession`, `browser/src/dashboard-session.ts`) but — as noted earlier in this addendum — no page in `pairing-app/` actually opens a session against it yet. So a successfully paired device has nothing to click through for "regular usage" today; this diagram documents the protocol that a future dashboard page would drive, not a flow you can currently walk end-to-end in the product.
+
+**Intended flow — unify `/remote` and `/pair` into one connect experience
+(landed 2026-09-14).** Previously these were two unrelated chat commands
+with separate modals: `/remote` (`openRemoteQR()` in `ui/app.js`, backed by
+`GET /remote`) showed a Tailscale MagicDNS URL as a QR, or one of four
+plain-text reasons it couldn't (`not_installed`/`not_running`/`no_dns`/
+`error`) with no QR at all. `/pair` (`openShorePairModal()`) was entirely
+separate and assumed Shore was already configured, only discovering
+`shore_not_configured` reactively after clicking "Start Pairing" inside it.
+Both are now replaced by a single `openConnectModal(preferredTab)` (`ui/app.js`)
+that checks both readiness signals up front (`GET /remote`'s existing
+url-or-reason shape; a new `_shoreIsConfigured()` helper against
+`GET /shore/devices`, reusing its existing uniform
+`400 shore_not_configured` shape rather than adding a new endpoint) and
+adapts:
+
+- **Only Tailscale is set up:** shows its QR directly (unchanged from the
+  old `/remote` behavior), no tab bar.
+- **Only Shore/AgentSquid is logged in:** shows the AgentSquid QR directly,
+  generated automatically — no tab bar, and no separate "Start Pairing"
+  click anymore.
+- **Both are set up:** shows a tab bar with exactly two tabs, each its own
+  QR — "Tailscale" and "AgentSquid.ai" (confirmed 2026-09-14: not a third
+  generic "QR code" tab). `/pair` opens with the AgentSquid.ai tab active,
+  `/remote` opens with Tailscale active; either can switch to the other.
+  Tailscale's MagicDNS URL is LAN/tailnet-scoped and needs no separate login
+  on the far end but does need the Tailscale app installed there;
+  AgentSquid's is relay-routed, needs that device already logged into
+  `agentsquid.ai`, but needs **no app install at all** — this is the path
+  that reaches a phone with zero shared network membership (no Tailscale,
+  no same LAN): phone → Shore relay → host, purely over the public
+  internet, which is the ADR-0039 zero-install requirement this whole
+  feature exists for. Confirmed: yes, this two-hop relay path is exactly
+  what lets a phone that's never touched Tailscale pair. These are
+  different enough trade-offs that neither tab silently wins over the
+  other.
+- **Neither is set up:** the QR area is replaced by the choice itself — an
+  "Install Tailscale" message (tailscale.com) next to an "AgentSquid isn't
+  set up... run `agentsquid login`" message, instead of the old two
+  independent dead ends that never mentioned the other path existed.
+- **Copyable link, not just a QR, on both tabs:** a "Copy link" button
+  (`navigator.clipboard.writeText`) next to each QR's URL, so the link can
+  be pasted into a browser on a different machine instead of requiring a
+  camera to scan it — e.g. sending it to a remote desktop browser rather
+  than a phone.
+
+This folded `openRemoteQR()` and `openShorePairModal()`'s QR-generation half
+into one modal; the pending-request-approval half of `/pair` (Path B above)
+stayed a distinct, separate concern within the same modal, since it isn't a
+"show me a QR" action at all. Verified live against this machine's real
+`GET /remote` (Tailscale genuinely configured) and real Shore connection —
+screenshots confirmed tab switching, both QR renders, and the copy button.
+Covered by a new `tests/e2e/connect-modal.spec.js` (3 cases: Shore-only
+direct QR/no tabs, both-configured tab switch + copy button, neither-configured
+prompt) — the first automated coverage either modal has ever had. Writing
+that test surfaced and fixed a real flakiness source unrelated to the
+feature itself: the app's own service-worker `controllerchange` handler
+force-reloads the page mid-test unless blocked
+(`test.use({ serviceWorkers: 'block' })`), an already-documented gotcha in
+this suite (`boot-logo.spec.js`, `stats-aggregates.spec.js`). Not yet done:
+no Playwright coverage drives this through the *real* backend end-to-end
+(the new spec mocks `/remote` and `/shore/*`, same caveat as Milestone 4.0's
+original "not done" note above), and no independent security review has
+looked at the merged modal specifically.
+
 #### 4.1 — Extract a transport-neutral ADR-0040 subscription core
 
 **Status:** Landed, narrower than originally sketched. Reading the real
