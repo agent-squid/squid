@@ -835,9 +835,9 @@ sequenceDiagram
 
     Note over You,Relay: Prerequisite for either path: host has run `agentsquid login`<br/>(or the manual live verifier) and Squid has been restarted since —<br/>otherwise GET /shore/pairing/requests returns 400 shore_not_configured.
 
-    alt Path A — host-initiated (QR/link; Milestone 4.0; no notification gap)
+    alt Path A — host-initiated (QR/link, Milestone 4.0, no notification gap)
         You->>Host: type /pair or /remote
-        Host->>Host: check GET /remote + GET /shore/devices;<br/>if both configured, show tab bar (Tailscale / AgentSquid.ai)
+        Host->>Host: check GET /remote + GET /shore/devices<br/>if both configured, show tab bar (Tailscale / AgentSquid.ai)
         Host->>Host: generate ceremony on tab open/activation<br/>(code, QR, pair_url, expires in 300s) -- no separate "Start" click
         You->>Browser: scan QR / open pair_url, or click "Copy link" and paste it
         Browser->>Browser: require agentsquid.ai login first, if not already
@@ -846,11 +846,11 @@ sequenceDiagram
         Browser->>Relay: 3-packet ceremony (relay-blind)
         Relay->>Host: relayed opaque packets
         Note over You,Relay: Done — generating the QR was the approval,<br/>no second local click needed.
-    else Path B — browser-initiated ("Pair this browser"; this addendum)
+    else Path B — browser-initiated ("Pair this browser", this addendum)
         You->>Browser: on /security, click "Pair this browser"
         Browser->>Relay: pairing_request (own device key, no secret)
         Relay->>Host: forwarded to the connected host only
-        Note over Host: held up to 120s; NOT auto-approved
+        Note over Host: held up to 120s — NOT auto-approved
         You->>Host: separately, type /pair or /remote to see pending requests<br/>(shown regardless of which tab is active)
         Host-->>You: lists request + 8-char verification code
         You->>Browser: compare against the code shown there
@@ -890,7 +890,7 @@ sequenceDiagram
     end
 
     rect rgb(232, 227, 216)
-    Note over Browser,Host: dashboard.read.v1 -- duplex subscription (ShoreDashboardSession),<br/>the only other enabled capability; still lacks a real consumer page (see below)
+    Note over Browser,Host: dashboard.read.v1 duplex subscription
     Browser->>Relay: sealed envelope (subscribe, {scopes, cursor})
     Relay->>Host: relayed ciphertext
     Host->>Relay: sealed envelope (subscribed) + snapshot
