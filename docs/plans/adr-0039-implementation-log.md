@@ -305,8 +305,8 @@ explicit host-key-change confirmation step were built with those risks in
 mind, but that's not a substitute for the review this plan originally called
 for as its own slice.
 
-**2026-09-14 addendum — browser-initiated pairing (no QR/host-first-initiation
-required).** Everything above requires a human to start at the host (generate
+**2026-09-14 historical addendum — browser-initiated pairing (superseded
+2026-09-15).** Everything above requires a human to start at the host (generate
 a QR/code, then move it to the browser). A second entry point was added: an
 authenticated browser on the account's `/@username/security` page
 (`pairing-app/src/security.ts`, new "Pair this browser" button) can request a
@@ -390,7 +390,24 @@ this exact click-through. No independent security review has covered this
 addition specifically (same carried-forward risk noted above, now doubled:
 two entry points into the same trust-establishing ceremony instead of one).
 
-**How to manually test today:** both paths require a host that has completed
+**2026-09-15 simplification decision — one pairing path and one surfaced
+command.** Browser-initiated pairing (Path B) does not remove the need to
+move between browser and host: the user must request in the browser, open the
+Connect modal on the host, compare a code, approve there, and return to the
+browser. It therefore adds UI, relay state, protocol surface, rate-limit
+paths, tests, and security-review burden without providing a simpler user
+journey. Path B and its "Pair this browser" UI are removed from the intended
+product. The historical implementation record above remains to explain code
+that may exist until cleanup lands. Browser-initiated pairing should only be
+reconsidered if the host gains a native approval notification that materially
+eliminates this device dance.
+
+`/remote` is the sole documented and discoverable Connect command. `/pair`
+is retained only as a temporary compatibility alias that opens the same modal
+with AgentSquid.ai selected; it is not shown in help or autocomplete and adds
+no separate behavior. New documentation and diagrams use `/remote` only.
+
+**Target manual flow:** pairing requires a host that has completed
 Shore login (`agentsquid login`, or the live verifier at
 `tests/manual/verify_shore_live_e2e.py`, against a relay — e.g.
 `dev.agentsquid.ai` for preproduction) and a Squid server restarted after
@@ -398,30 +415,18 @@ that login so `_shore_connection` picks it up (it's read once at startup;
 `GET /shore/pairing/requests` returns `400 {"error": "shore_not_configured"}`
 until it does).
 
-*Path A (simpler; this is the one to use for a normal manual pairing test):*
-in the Squid chat UI running on the host itself — this has to be the actual
-product UI, not a conversation with a coding agent — type `/pair` (or
-`/remote`; both open the same Connect modal now, see "Intended flow" below,
-landed 2026-09-14). If Tailscale is also configured, click the
+In the Squid chat UI running on the host itself — this has to be the actual
+product UI, not a conversation with a coding agent — type `/remote`. If
+Tailscale is also configured, click the
 "AgentSquid.ai" tab; if Shore is the only method set up, its QR is already
 showing — there's no separate "Start Pairing" click anymore. Scan the QR
 with a camera-equipped device, or click "Copy link" to paste `pair_url` into
 a browser on a machine without one; if that browser isn't already logged
 into `agentsquid.ai` as this account, log in and reopen the same original
 link (not via browser back/forward — the fragment is stripped from history
-on load) within its 5-minute expiry; click "Confirm pairing". Done — no
-separate host-side approval step for this path.
-
-*Path B (the browser-initiated addition covered in the addendum above):*
-(1) open `https://<relay>/@<username>/security` in the browser device to
-pair and click "Pair this browser"; (2) separately, on the host, type
-`/pair` (or `/remote`), which polls the same pending-request list
-underneath whichever tab is showing; (3) compare the 8-character
-verification code shown in both places; (4) click Approve in the Connect
-modal, then "Confirm pairing" in the browser tab.
-
-Both entry points that exist today, side by side. This diagram covers only
-pairing itself — establishing trust for a device that has none yet. See
+on load) within its 5-minute expiry. Opening the secret-bearing link starts
+pairing automatically. This diagram covers only pairing itself — establishing
+trust for a device that has none yet. See
 "Regular usage after pairing" further below for the separate, much simpler
 flow an already-paired device uses afterward; the two are not interchangeable
 and a device only ever goes through this one once (until revoked).
@@ -429,46 +434,30 @@ and a device only ever goes through this one once (until revoked).
 ```mermaid
 sequenceDiagram
     participant You as You (human)
-    participant UI as Squid chat UI (Connect modal: "/pair" or "/remote")
+    participant UI as Squid chat UI (Connect modal: "/remote")
     participant Host as Shore host channel
-    participant Browser as Browser tab (/@user/pair or /@user/security)
+    participant Browser as Browser tab (/@user/pair)
     participant Relay as Shore relay
 
-    Note over You,Relay: Prerequisite for either path: host has run `agentsquid login`<br/>(or the manual live verifier) and Squid has been restarted since —<br/>otherwise GET /shore/pairing/requests returns 400 shore_not_configured.
+    Note over You,Relay: Prerequisite: host has run `agentsquid login`<br/>(or the manual live verifier) and Squid has been restarted since.
 
-    alt Path A — host-initiated (QR/link, Milestone 4.0, no notification gap)
-        You->>UI: type /pair or /remote
-        UI->>UI: check GET /remote + GET /shore/devices<br/>if both configured, show tab bar (Tailscale / AgentSquid.ai)
-        UI->>Host: begin ceremony on tab open/activation
-        Host-->>UI: code, QR pair_url, expiry (300s)<br/>-- no separate "Start" click
-        You->>Browser: scan QR / open pair_url, or click "Copy link" and paste it
-        Browser->>Browser: require agentsquid.ai login first, if not already
-        Browser->>Browser: validate the short-lived offer and start pairing automatically<br/>(scanning/opening the secret-bearing link is the affirmative action)
-        Browser->>Relay: encrypted bootstrap/binding request (packet 1)
-        Relay->>Host: relay opaque packet 1
-        Host->>Relay: encrypted binding response (packet 2)
-        Relay->>Browser: relay opaque packet 2
-        Browser->>Relay: encrypted binding confirmation (packet 3)
-        Relay->>Host: relay opaque packet 3
-        UI->>Host: poll pairing status
-        Host-->>UI: paired status
-        Note over Host,Relay: Relay-blind: the relay routes the three packets<br/>but cannot decrypt their pairing contents.
-        Note over You,Relay: Done — no second browser or host-side approval click.<br/>A host-key conflict still requires explicit replacement approval.
-    else Path B — browser-initiated ("Pair this browser", this addendum)
-        You->>Browser: on /security, click "Pair this browser"
-        Browser->>Relay: pairing_request (own device key, no secret)
-        Relay->>Host: forwarded to the connected host only
-        Note over Host: held up to 120s — NOT auto-approved
-        You->>UI: separately, type /pair or /remote to see pending requests<br/>(shown regardless of which tab is active)
-        UI-->>You: lists request + 8-char verification code
-        You->>Browser: compare against the code shown there
-        You->>UI: click Approve
-        UI->>Host: approve request
-        Host->>Relay: encrypted, signed pairing_offer
-        Relay->>Browser: routed by request_id only, once
-        Browser->>You: show host key fingerprints (decrypted client-side)
-        You->>Browser: click "Confirm pairing"
-    end
+    You->>UI: type /remote
+    UI->>UI: check GET /remote + GET /shore/devices<br/>if both configured, show tab bar (Tailscale / AgentSquid.ai)
+    UI->>Host: begin ceremony on AgentSquid.ai tab activation
+    Host-->>UI: code, QR pair_url, expiry (300s)<br/>-- no separate "Start" click
+    You->>Browser: scan QR / open pair_url, or click "Copy link" and paste it
+    Browser->>Browser: require agentsquid.ai login first, if not already
+    Browser->>Browser: validate the short-lived offer and start pairing automatically<br/>(scanning/opening the secret-bearing link is the affirmative action)
+    Browser->>Relay: encrypted bootstrap/binding request (packet 1)
+    Relay->>Host: relay opaque packet 1
+    Host->>Relay: encrypted binding response (packet 2)
+    Relay->>Browser: relay opaque packet 2
+    Browser->>Relay: encrypted binding confirmation (packet 3)
+    Relay->>Host: relay opaque packet 3
+    UI->>Host: poll pairing status
+    Host-->>UI: paired status
+    Note over Host,Relay: Relay-blind: the relay routes the three packets<br/>but cannot decrypt their pairing contents.
+    Note over You,Relay: Done — no second browser or host-side approval click.<br/>A host-key conflict still requires explicit replacement approval.
 ```
 
 **Regular usage after pairing (different flow — no ceremony, no human
@@ -514,8 +503,8 @@ sequenceDiagram
 
 Today this second diagram is the entire "regular usage" surface — `shore.probe` is exercised by the cross-process test and has no product UI at all, and `dashboard.read.v1`'s wire protocol is fully implemented and tested (`ShoreDashboardSession`, `browser/src/dashboard-session.ts`) but — as noted earlier in this addendum — no page in `pairing-app/` actually opens a session against it yet. So a successfully paired device has nothing to click through for "regular usage" today; this diagram documents the protocol that a future dashboard page would drive, not a flow you can currently walk end-to-end in the product.
 
-**Intended flow — unify `/remote` and `/pair` into one connect experience
-(landed 2026-09-14).** Previously these were two unrelated chat commands
+**Connect flow — one experience, with `/remote` as the sole surfaced command
+(unified 2026-09-14; simplified 2026-09-15).** Previously these were two unrelated chat commands
 with separate modals: `/remote` (`openRemoteQR()` in `ui/app.js`, backed by
 `GET /remote`) showed a Tailscale MagicDNS URL as a QR, or one of four
 plain-text reasons it couldn't (`not_installed`/`not_running`/`no_dns`/
@@ -536,8 +525,10 @@ adapts:
   click anymore.
 - **Both are set up:** shows a tab bar with exactly two tabs, each its own
   QR — "Tailscale" and "AgentSquid.ai" (confirmed 2026-09-14: not a third
-  generic "QR code" tab). `/pair` opens with the AgentSquid.ai tab active,
-  `/remote` opens with Tailscale active; either can switch to the other.
+  generic "QR code" tab). `/remote` opens the Connect modal and either tab
+  can be selected. The legacy `/pair` spelling remains only as an undiscoverable
+  compatibility alias that opens the AgentSquid.ai tab; it is not a separate
+  product path.
   Tailscale's MagicDNS URL is LAN/tailnet-scoped and needs no separate login
   on the far end but does need the Tailscale app installed there;
   AgentSquid's is relay-routed, needs that device already logged into
@@ -560,9 +551,10 @@ adapts:
   than a phone.
 
 This folded `openRemoteQR()` and `openShorePairModal()`'s QR-generation half
-into one modal; the pending-request-approval half of `/pair` (Path B above)
-stayed a distinct, separate concern within the same modal, since it isn't a
-"show me a QR" action at all. Verified live against this machine's real
+into one modal. The 2026-09-15 simplification removes the browser-initiated
+pending-request approval path from the intended product; it did not eliminate
+the host/client dance and therefore did not justify its separate UI and
+protocol surface. Verified live against this machine's real
 `GET /remote` (Tailscale genuinely configured) and real Shore connection —
 screenshots confirmed tab switching, both QR renders, and the copy button.
 Covered by a new `tests/e2e/connect-modal.spec.js` (3 cases: Shore-only
