@@ -29,6 +29,8 @@ second command, event, replay, or snapshot model.
   expiry-checked, and correlated with tamper-evident audit records.
 - Remote access is disabled by default. Arbitrary shell capability is separate,
   device-specific, locally granted, revocable, and expires within 24 hours.
+- Every published AgentSquid binary version selects one exact, immutable Shore
+  web-client release; the bootstrap never substitutes another version.
 - The existing direct local/Tailscale and SSE compatibility paths remain
   operational throughout the rollout.
 
@@ -283,9 +285,17 @@ remote mutations.
 1. Add end-to-end tests for Worker/Durable Object restarts, region changes,
    network loss, duplicate connections, cursor rollover, offline hosts, overload,
    revocation during execution, recovery, and multi-device convergence.
-2. Add abuse controls, CSP, immutable/versioned client assets,
-   reproducible-build hashes, dependency scanning, secret rotation, alerts,
-   metrics, runbooks, backups, migration/rollback procedures, and kill switches.
+2. Add abuse controls, CSP, exact-version client selection, immutable release
+   manifests and content-hashed assets, reproducible-build hashes, dependency
+   scanning, secret rotation, alerts, metrics, runbooks, backups,
+   migration/rollback procedures, and kill switches. Keep the bootstrap small
+   and version-independent. Have each host advertise
+   `required_client_version`; load only the matching release manifest and show
+   a non-command-capable update/unavailable screen when it is missing,
+   malformed, revoked, or mismatched. Publish and verify the binary, client
+   manifest, and referenced assets as one release transaction, preserving the
+   prior pair for rollback. Retain stable release manifests by default and
+   allow byte-identical assets to be shared by content hash.
    Implement ADR-0039's per-route/per-account traffic accounting, quota
    projections, 50/70/85/95-percent degradation thresholds, reserved security
    capacity, paid-plan spend ceiling, and explicit Shore-unavailable response.
@@ -297,8 +307,12 @@ remote mutations.
    Each stage has an immediate server-side disable path.
 
 **Acceptance:** production readiness review signs off security, operations,
-privacy, cost limits, recovery, and rollback. No remote mutation ships before
-the paired read-only stage is stable and its gates pass.
+privacy, cost limits, recovery, and rollback. Release tests prove that every
+supported binary resolves to its exact immutable client, mismatches and missing
+or revoked clients fail closed without opening a command-capable session,
+published manifests cannot be overwritten, reproducible hashes match, and a
+binary/client rollback restores the previous pair. No remote mutation ships
+before the paired read-only stage is stable and its gates pass.
 
 ## Definition of done
 

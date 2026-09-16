@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-08-11
-updated: 2026-09-11
+updated: 2026-09-16
 ---
 # ADR-0039: Remote access via Shore Relay on Cloudflare Workers + Durable Objects (agentsquid.ai/@username)
 
@@ -114,6 +114,41 @@ lease heartbeat. The relay consumes this transport control without relaying
 it, applies ordinary socket rate limits and revocation checks, and accepts no
 browser-originated equivalent. All non-heartbeat payload frames remain opaque
 encrypted Shore envelopes.
+
+The 2026-09-16 client-release amendment requires Shore to retain a distinct,
+immutable web client for every published AgentSquid binary version. The host
+reports its exact required client version during connection setup; the stable
+bootstrap loads only that version and fails closed with an update/unavailable
+screen if it is absent. Compatibility is not inferred from semantic-version
+ranges, protocol versions, or feature detection. This deliberately aligns web
+client changes with the binary release process and permits substantial client
+and host changes without creating an implicit cross-release compatibility
+contract.
+
+### Version-aligned web-client delivery
+
+Each AgentSquid release publishes its matching web client under an immutable
+release manifest, for example `/client/releases/0.1.5/manifest.json`. The
+manifest references content-hashed JavaScript, CSS, and other assets. Assets
+that are byte-identical across releases may share the same content-addressed
+object; the release manifest and the mapping from an AgentSquid version to that
+manifest must never be changed after publication.
+
+The bootstrap is the only version-independent browser component. It obtains
+the host-advertised `required_client_version`, validates the closed-schema
+response, and loads the exact release manifest. A missing, malformed, revoked,
+or mismatched release must not fall back to the newest client or a nearby
+version. The bootstrap may display a minimal recovery message without opening
+a command-capable session.
+
+The matching client must be built, verified, and published as one release
+transaction with the binary. A binary release must not be made available until
+its client manifest and referenced assets are available, and the release
+process must preserve the previous binary/client pair for rollback. Emergency
+revocation is an explicit signed release state, not mutation or replacement of
+an immutable manifest. Stable releases are retained by default; any future
+retention policy requires a separately documented support window and must not
+strand binaries still declared supported.
 
 ### Coexisting with the existing GitHub-Pages-hosted site
 
