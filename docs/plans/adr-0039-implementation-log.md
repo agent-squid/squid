@@ -11,7 +11,7 @@ for architecture, security invariants, sequencing, acceptance gates, and current
 
 - State: In progress; Milestones 0–4 are complete.
 - Verified: Milestones 3 and 4 passed independent review with no unresolved critical or high findings.
-- Remaining: Milestone 5 operator controls, full live verification, and final review; production access stays blocked.
+- Remaining: Milestone 5 operational provisioning, full live verification, and final review; production access stays blocked.
 
 
 ## Milestone 1 — Relay skeleton and opaque relay
@@ -503,9 +503,12 @@ sequenceDiagram
         Relay-->>Browser: relayed ciphertext
         Browser-->>Host: sealed envelope (ack), periodic
     end
-    Note over Browser,Relay: If the short-lived account session expires,<br/>the reconnect path performs paired-key challenge restoration once<br/>before returning to bounded backoff; no email/TOTP prompt is required.
     end
 ```
+
+If the short-lived account session expires, the reconnect path performs
+paired-key challenge restoration once before returning to bounded backoff; no
+email or TOTP re-entry is required.
 
 Today this second diagram is the entire "regular usage" surface. The pairing
 pages automatically exercise `shore.probe` after packet 3 and do not display
@@ -2042,6 +2045,20 @@ retries remain safe.
 Cloudflare Access provisioning, preproduction deployment, disposable-account
 repair, the full live verifier/archive acknowledgement, and final independent
 security review remain operator gates and are not claimed complete here.
+
+**5.14 — Bounded acknowledged audit hot stores (landed)**
+
+- Relay and host audit databases retain the newest 1,000 acknowledged events
+  and every event not yet covered by an immutable archive acknowledgement.
+- Relay compaction runs only after a successful B2 write and cursor update.
+  Host compaction runs only after verification of Shore's signed batch
+  acknowledgement.
+- Compacted prefixes leave durable chain-base checkpoints. The host checkpoint
+  is signed by the current host identity key; both verifiers begin the retained
+  tail at the checkpoint sequence/hash and still compare it with the independent
+  current chain tip.
+- Archive failure never deletes local evidence. This bounds normal hot-store
+  growth while preserving retry stability, append continuity, and tamper checks.
 
 Build the operator surface as a small command gateway, not a general account
 CRUD or Durable Object storage API:

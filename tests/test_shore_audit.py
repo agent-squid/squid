@@ -103,6 +103,28 @@ def test_export_cursor_rejects_a_stale_or_mismatched_ack(tmp_path):
         log.mark_exported(first)
 
 
+def test_archive_ack_compacts_old_events_and_preserves_verifiable_chain(tmp_path, monkeypatch):
+    monkeypatch.setattr("agent.shore_audit.LOCAL_ACKNOWLEDGED_EVENT_RETENTION", 1)
+    log, signing = _log(tmp_path)
+    for offset in range(3):
+        log.record(request_id=REQUEST_ID, device_id=DEVICE, message_type="ping",
+                   frame={"v": 1, "type": "ping", "payload": {"offset": offset}},
+                   decision="granted", outcome="ok", now_ms=NOW + offset)
+    batch = log.pending_export(limit=3)
+    assert batch is not None
+    log.mark_exported(batch)
+    assert [event["seq"] for event in log.events()] == [3]
+    assert log.verify(_keys(signing)).valid is True
+    with sqlite3.connect(log.path) as connection:
+        assert connection.execute("SELECT seq FROM audit_retained_base WHERE id = 1").fetchone() == (2,)
+
+    log.record(request_id=REQUEST_ID, device_id=DEVICE, message_type="ping",
+               frame={"v": 1, "type": "ping", "payload": {}},
+               decision="granted", outcome="ok", now_ms=NOW + 3)
+    assert [event["seq"] for event in log.events()] == [3, 4]
+    assert log.verify(_keys(signing)).valid is True
+
+
 def test_fresh_or_missing_receipt_checkpoint_rejects_a_non_genesis_shore_tip(tmp_path):
     log, _ = _log(tmp_path)
     shore_signing = ed25519.Ed25519PrivateKey.generate()

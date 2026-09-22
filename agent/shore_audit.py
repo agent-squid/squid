@@ -28,6 +28,7 @@ from .shore_crypto import b64url, canonical, unb64url, uuid7
 from .shore_receipt import RECEIPT_GENESIS_HASH, ReceiptVerificationError, VerifiedRelayReceipt
 
 GENESIS_HASH = "sha256:" + "0" * 43
+LOCAL_ACKNOWLEDGED_EVENT_RETENTION = 1000
 
 
 def _sha256_commitment(value: Any) -> str:
@@ -61,7 +62,7 @@ def _verify_signature(key: ed25519.Ed25519PublicKey | None, signature: str, sign
 
 def verify_chain(
     events: list[dict[str, Any]], keys: Mapping[int, ed25519.Ed25519PublicKey], *,
-    expected_tip: dict[str, Any] | None = None,
+    expected_tip: dict[str, Any] | None = None, retained_base: dict[str, Any] | None = None,
 ) -> ChainVerification:
     """Replays a host audit chain: recomputes each event's hash and signature
     and checks seq/prevHash linkage, so deletion (a seq gap), insertion/forking
@@ -78,8 +79,8 @@ def verify_chain(
     row (or every row) of an otherwise-consistent chain would verify clean,
     since linkage alone has nothing to compare the visible tail against.
     """
-    expected_seq = 1
-    expected_prev_hash = GENESIS_HASH
+    expected_seq = (retained_base["seq"] + 1) if retained_base else 1
+    expected_prev_hash = retained_base["hash"] if retained_base else GENESIS_HASH
     for event in events:
         if event["seq"] != expected_seq:
             reason = "sequence_fork" if event["seq"] < expected_seq else "sequence_gap"
@@ -149,6 +150,10 @@ class ShoreAuditLog:
         connection.execute(
             "CREATE TABLE IF NOT EXISTS audit_export_state (id INTEGER PRIMARY KEY CHECK (id = 1), "
             "seq INTEGER NOT NULL, hash TEXT NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS audit_retained_base (id INTEGER PRIMARY KEY CHECK (id = 1), "
+            "seq INTEGER NOT NULL, hash TEXT NOT NULL, key_epoch INTEGER NOT NULL, signature TEXT NOT NULL)"
         )
         connection.execute(
             "CREATE TABLE IF NOT EXISTS relay_receipts ("
@@ -349,7 +354,7 @@ class ShoreAuditLog:
         return AuditExportBatch(object_name, body, events[-1]["seq"], events[-1]["hash"])
 
     def mark_exported(self, batch: AuditExportBatch) -> None:
-        """Advance the durable cursor only if the uploaded head still exists."""
+        """Advance the cursor and compact only rows covered by the signed archive ack."""
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -368,6 +373,26 @@ class ShoreAuditLog:
                     "ON CONFLICT(id) DO UPDATE SET seq=excluded.seq, hash=excluded.hash",
                     (batch.through_seq, batch.through_hash),
                 )
+                cutoff = batch.through_seq - LOCAL_ACKNOWLEDGED_EVENT_RETENTION
+                if cutoff > 0:
+                    base = connection.execute(
+                        "SELECT seq, hash, key_epoch FROM audit_chain WHERE seq = ?", (cutoff,),
+                    ).fetchone()
+                    if base is None:
+                        raise ValueError("audit compaction checkpoint unavailable")
+                    seq, hash_, _event_key_epoch = base
+                    key_epoch = self.key_epoch
+                    signature = b64url(self.host_signing.sign(canonical({
+                        "type": "audit_retained_base", "seq": seq, "hash": hash_,
+                        "keyEpoch": key_epoch,
+                    })))
+                    connection.execute(
+                        "INSERT INTO audit_retained_base(id, seq, hash, key_epoch, signature) VALUES (1,?,?,?,?) "
+                        "ON CONFLICT(id) DO UPDATE SET seq=excluded.seq, hash=excluded.hash, "
+                        "key_epoch=excluded.key_epoch, signature=excluded.signature",
+                        (seq, hash_, key_epoch, signature),
+                    )
+                    connection.execute("DELETE FROM audit_chain WHERE seq <= ?", (cutoff,))
                 connection.execute("COMMIT")
             except Exception:
                 if connection.in_transaction:
@@ -402,4 +427,18 @@ class ShoreAuditLog:
             if not _verify_signature(key, tip["signature"], {"seq": tip["seq"], "hash": tip["hash"], "keyEpoch": tip["keyEpoch"]}):
                 return ChainVerification(False, "bad_signature", tip["seq"])
         expected_tip = {"seq": tip["seq"], "hash": tip["hash"]} if tip is not None else None
-        return verify_chain(self.events(), keys, expected_tip=expected_tip)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT seq, hash, key_epoch, signature FROM audit_retained_base WHERE id = 1"
+            ).fetchone()
+        retained_base = None
+        if row is not None:
+            seq, hash_, key_epoch, signature = row
+            key = keys.get(key_epoch)
+            signed = {"type": "audit_retained_base", "seq": seq, "hash": hash_, "keyEpoch": key_epoch}
+            if key is None:
+                return ChainVerification(False, "unknown_key_epoch", seq)
+            if not _verify_signature(key, signature, signed):
+                return ChainVerification(False, "bad_signature", seq)
+            retained_base = {"seq": seq, "hash": hash_}
+        return verify_chain(self.events(), keys, expected_tip=expected_tip, retained_base=retained_base)

@@ -40,8 +40,9 @@ production deployment still requires closing or explicitly reaccepting it.
 
 Relay and host events use the same request/transition ID and hash commitment.
 The relay chain contains prior hash, event ID, account/host/device/session IDs,
-coarse source metadata, restricted raw source IP, receipt time, ciphertext hash,
-and outcome. The host chain adds signed request ID, plaintext command hash,
+a keyed pseudonymous source fingerprint, receipt time, ciphertext hash, and
+outcome. Raw IP, precise location, and full request headers are not retained.
+The host chain adds signed request ID, plaintext command hash,
 authorization decision, result class, host time, and prior host-event hash.
 Neither stores command text, response text, secrets, cookies, authorization
 headers, internal addresses, precise location, or full headers.
@@ -66,6 +67,17 @@ pages Security; local queues are bounded but security actions fail closed if
 their audit record cannot be durably queued. Quarterly restore, fork, deletion,
 insertion, receipt-continuity, and correlation drills are required.
 
+Host `audit.sqlite3` and per-account Durable Object SQLite are bounded hot
+stores. After immutable archive confirmation, each keeps the newest 1,000
+acknowledged audit events, every event still awaiting acknowledgement, and a
+chain-base checkpoint for the compacted prefix. The host signs its checkpoint;
+the relay checkpoint is transactionally bound to its B2 export cursor. New
+events continue from the independently stored chain tip. A failed, missing, or
+invalid archive acknowledgement leaves all pending rows intact. Operators must
+alert when export lag exceeds five minutes and monitor Durable Object stored
+bytes and daily row writes before free-tier limits are approached. SQLite is
+never treated as the 400-day archive.
+
 Loss, rollback, or corruption of the host audit SQLite database is an unknown
 checkpoint, not by itself proof of compromise. Remote dispatch remains disabled
 until locally authorized recovery or re-pairing; local/direct access remains
@@ -83,13 +95,11 @@ checkpoint verification, restore, and rejection of overwrite/deletion attempts. 
 buckets share the B2 account's free storage allowance; usage alerts are set
 before the allowance is exhausted. Test storage is never an audit authority.
 
-Raw IP is restricted to the audit archive and retained 30 days, after which a
-daily cryptographic-erasure job destroys its field-encryption key while the
-account-scoped opaque network fingerprint and coarse country/region/ASN remain
-for 400 days. User security notifications contain time, coarse region/ASN,
-known/new status, opaque fingerprint, and client version only. Users can export
-their visible security history for the last 400 days; export never includes raw
-IP, other users, internal identifiers unnecessary to them, or secret material.
+The account-scoped keyed network fingerprint may remain in the 400-day audit
+archive for abuse correlation. It is not exposed through user notifications or
+security-history views. A future user-history export, if added, must exclude
+network fingerprints, other users, unnecessary internal identifiers, and
+secret material; no such export is claimed by Milestone 5.
 
 ## Threat model
 

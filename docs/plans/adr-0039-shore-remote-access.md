@@ -252,9 +252,8 @@ attributable without storing command plaintext.
    for pairing, key changes, healthy same-key host displacement, recovery,
    revocation, and privileged grants. Displacement notifications include an
    immediate-access revoke-host action protected by recent step-up and correlate
-   to the relay audit event. Raw IP and precise location remain restricted to
-   the audit system and are never copied into browser/out-of-band notifications.
-   The current design intentionally does not retain raw IP addresses.
+   to the relay audit event. Raw IP and precise location are not retained or
+   copied into browser/out-of-band notifications.
 5. Add a separately authenticated operator control plane: a narrow admin API,
    web console, and CLI for account lookup/listing and explicit recovery
    operations. It must support the preproduction TOTP repair required to rerun
@@ -273,6 +272,17 @@ headers are absent from user notifications by default. Operator actions require
 independent operator authentication and authorization, are environment-bound,
 use closed-schema commands, and create immutable audit records; production
 operator mutation remains disabled until the final Milestone 5 review closes.
+
+**Storage model:** host SQLite and each account's Durable Object SQLite are
+bounded hot stores, not the long-term archive. Shore exports deterministic
+signed/hash-chained batches to Object-Locked B2. Only after a successful B2
+write or a verified Shore-signed host-batch acknowledgement may either hot
+store compact acknowledged rows. Both retain the newest 1,000 acknowledged
+events plus all unacknowledged events and a durable chain-base checkpoint
+(`seq`, `hash`; host checkpoints are signed) so retained-tail verification and
+future appends remain continuous. Export failure never authorizes deletion.
+The archive retention policy, rather than SQLite capacity, defines long-term
+retention. Export lag over five minutes remains an operational alert.
 
 ### Implementation history
 
