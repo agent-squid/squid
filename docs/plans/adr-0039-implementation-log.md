@@ -2115,3 +2115,28 @@ operator's authenticator, then rerun and record
 `tests/manual/verify_shore_live_e2e.py`, including the Shore-signed archive
 acknowledgement. Complete the final independent security review only after this
 evidence is recorded and all critical/high findings are resolved.
+
+**2026-09-22 review addendum — security-history and notification gaps closed.**
+A review of the Action 4 acceptance criteria found the security page still
+filtered revoked browser devices and revoked/expired sessions out of its
+rendered list (only revoked hosts were shown), and that no notification fired
+when a host re-registered with a new key pair after revocation (only
+`host_revoked` fired, not anything for the replacement's arrival). Both are
+now fixed: `pairing-app/src/security.ts` renders revoked browser devices and
+revoked sessions alongside the existing revoked-host rows (naturally expired,
+never-revoked sessions are intentionally left out as routine lapses, not
+security events); `registerSignedHost` in `src/index.ts` now delivers a
+`host_key_changed` security notification when a new host record replaces a
+previously known (revoked) one, but not on an account's first-ever host
+registration, where there is nothing to compare against. Covered by
+`test/shore.test.ts`'s "completes cooled-off recovery from the Durable Object
+alarm" case and `pairing-app/test/security-link.test.ts`.
+Still open from that same review: there is no user-visible capability
+grant/change history, because capabilities are currently set exactly once at
+pairing time with no add/revoke-capability mechanism to have a history of;
+building one is a new feature, not a fix, and needs an explicit design
+decision before touching the tamper-evident audit path. `README.md`'s
+deployment-status section was also stale (it claimed both deployment jobs
+were disabled, when `deploy-preproduction.yml` had already been deploying
+successfully to `dev.agentsquid.ai` on every push to `main` since 2026-09-11)
+and has been corrected to match `wrangler.jsonc` and actual run history.
