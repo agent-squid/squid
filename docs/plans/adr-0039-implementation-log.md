@@ -2220,3 +2220,28 @@ of failure. This closes the disposable-account repair gate. Not
 independently verified by this log's author (no Cloudflare Access
 credentials available to confirm account state directly); accepted on the
 operator's report.
+
+**2026-09-22 addendum — flow-diagram audit against current implementation.**
+Cross-checked both `docs/decisions/0039-remote-access-via-shore-relay.md`
+diagrams against landed code. The pairing/probe/`dashboard.read.v1` diagram
+matches Milestone 4: every other ADR-0040 type is still denied pre-dispatch
+by the capability registry, as drawn. The audit receipt/verification/archive
+diagram matches 5.9-5.11 step for step -- the outer `{envelope, signed relay
+receipt}` frame, host-side signature/continuity/commitment verification, the
+fail-closed branch on invalid/missing/regressed/conflicting evidence with
+local/direct access staying up, and the host-batch -> pinned-key
+verification -> B2 archive -> signed-acknowledgement chain. No stale claims
+found in that file's environment-variable table or design text either; it
+still matches this session's live verification (dev key live-verified,
+prod key provisioned but unused pending final review). One simplification
+worth flagging, not a factual error: the diagram draws the host-batch/
+archive/acknowledgement step inside the same `alt` branch as a single
+envelope's dispatch, which reads as synchronous per-envelope archival. Per
+5.2a/5.11 the host actually sends bounded ~25-event batches on its own
+cadence, not one archive round-trip per envelope; a clarifying note was
+added directly under that diagram to prevent misreading. Two gates remain
+open and untouched by this pass: the live verifier has not been rerun since
+the 2026-09-12 attempt (needs an operator with the disposable account's
+email/TOTP access, since it requires a real magic-link code and is
+deliberately excluded from CI), and the final independent security review
+has not started.

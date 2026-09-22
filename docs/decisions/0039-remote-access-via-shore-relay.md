@@ -361,6 +361,13 @@ sequenceDiagram
     end
 ```
 
+The host-batch/archive/acknowledgement leg above is drawn inside the same
+envelope's `alt` block for readability; it is not a synchronous per-envelope
+round trip. Per the host export batching design (5.2a/5.11 in the
+implementation log), the host accumulates signed events and sends them as
+bounded ~25-event batches on its own cadence, independent of any single
+envelope's dispatch.
+
 Environment variables used by this flow:
 
 These are the exact names configured as GitHub Actions environment secrets in
