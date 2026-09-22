@@ -1312,7 +1312,7 @@ expiry/immediate-revocation surface. None of this should be built now.
 
 - State: Milestone implementation complete; preproduction audit storage deployed and B2-verified (2026-09-11).
 - Delivered: Relay and host audit chains, Shore-only archival, signed receipts, security history and notifications, and the operator control plane implementation.
-- Remaining operational gates: operator-plane deployment, disposable-account repair, the complete live verifier/archive acknowledgement, and final independent security review. Cloudflare Access provisioning is confirmed live (2026-09-22, see addendum below).
+- Remaining operational gates: the complete live verifier/archive acknowledgement, and final independent security review. Cloudflare Access provisioning, operator-plane preproduction deployment, and disposable-account repair are all confirmed done (2026-09-22, see addenda below).
 
 
 ### Implementation plan
@@ -2194,3 +2194,29 @@ longer passed that secret through. Fixed by removing `ADMIN_ACCESS_JWKS`
 from the script's required-variable list and its JWK-shape check. Verified
 locally with a synthetic valid config (no `ADMIN_ACCESS_JWKS` set) before
 pushing again.
+
+The rerun then failed a second, unrelated way: `ADMIN_OPERATOR_ALLOWLIST
+missing or multiline`, caused by a trailing newline in that secret's value
+from how it had just been re-pasted while widening it past its original
+single address. Re-set cleanly (operator-side, not a code change), then
+`gh run rerun` against the corrected secret succeeded end to end --
+including the `wrangler deploy` step, not just tests/typecheck/build. Live
+`GET /admin` on `dev.agentsquid.ai` re-verified 302ing to Cloudflare Access
+post-deploy. This is the first confirmed-successful preproduction deploy of
+the operator control plane's current code; `ADMIN_ACCESS_JWKS` was deleted
+from both `shore-dev` and `shore-prod` immediately afterward (confirmed
+absent via `gh secret list`), closing out the static-JWKS cleanup started
+above.
+
+**2026-09-22 addendum — disposable-account repair closed.** With the operator
+control plane confirmed deployed and reachable above, the operator ran
+`totp-reset` against the disposable `@haebin` preproduction account through
+the now-live console (`pairing-app/src/admin.ts`'s conditional `totp-reset`
+button) multiple times. Each run is idempotent by construction
+(`operator-idempotency:`/`account-operator-idempotency:` keys keyed by a
+client-supplied UUID in `src/index.ts`'s `/internal/admin/execute` and
+`/internal/admin/operate` handlers), so repeated invocations are not evidence
+of failure. This closes the disposable-account repair gate. Not
+independently verified by this log's author (no Cloudflare Access
+credentials available to confirm account state directly); accepted on the
+operator's report.
