@@ -229,14 +229,18 @@ The completed work log, test evidence, deployment notes, and remaining sub-gates
 
 ## Milestone 5 — Correlated tamper-evident audit
 
-**Status:** In progress. Audit implementation and preproduction B2 verification are complete. The operator control plane, full live verifier, and final independent security review remain. [Implementation history](./adr-0039-implementation-log.md#milestone-5--correlated-tamper-evident-audit).
+**Status:** Implementation complete. Preproduction B2 verification is complete;
+Cloudflare Access provisioning and operator-plane deployment, disposable-account
+repair, the complete live verifier/archive acknowledgement, and final independent
+security review remain operational gates. [Implementation history](./adr-0039-implementation-log.md#milestone-5--correlated-tamper-evident-audit).
 
 **Objective:** make account, pairing, capability, and command activity
 attributable without storing command plaintext.
 
 **Actions:**
 
-1. Relay records account/device/session IDs, source metadata, receipt time,
+1. Relay records account/device/session IDs, a keyed pseudonymous source
+   fingerprint, receipt time,
    request ID, and ciphertext/command commitment as a hash-chained event.
 2. Host records a signed event with the same request ID, command hash,
    authorization decision, outcome, and host time.
@@ -250,6 +254,7 @@ attributable without storing command plaintext.
    immediate-access revoke-host action protected by recent step-up and correlate
    to the relay audit event. Raw IP and precise location remain restricted to
    the audit system and are never copied into browser/out-of-band notifications.
+   The current design intentionally does not retain raw IP addresses.
 5. Add a separately authenticated operator control plane: a narrow admin API,
    web console, and CLI for account lookup/listing and explicit recovery
    operations. It must support the preproduction TOTP repair required to rerun

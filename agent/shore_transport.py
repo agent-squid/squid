@@ -247,7 +247,9 @@ class ShoreChannel:
             )
             if isinstance(response, TrustedDevice):
                 return [canonical({"v": 1, "type": "pairing_approved", "ceremony_id": value["ceremony_id"],
-                                   "device_id": response.device_id})]
+                                   "device_id": response.device_id,
+                                   "browser_signing_key": b64url(response.signing_key),
+                                   "capabilities": list(response.capabilities)})]
             return [canonical(response)]
 
         return await self._handle_envelope(value, now_ms=now_ms, relay_receipt=relay_receipt)

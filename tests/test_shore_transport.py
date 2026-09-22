@@ -302,6 +302,8 @@ async def pair(channel, browser_signing, browser_agreement, device_id=DEVICE, ce
     confirmation["ciphertext"] = b64url(AESGCM(key).encrypt(bytes(range(12, 24)), canonical(confirmed), canonical(confirmation)))
     assert json.loads((await channel.handle(canonical(confirmation)))[0]) == {
         "v": 1, "type": "pairing_approved", "ceremony_id": ceremony_id, "device_id": device_id,
+        "browser_signing_key": b64url(browser_signing.public_key().public_bytes_raw()),
+        "capabilities": ["dashboard.read.v1"],
     }
 
 

@@ -79,6 +79,20 @@ Browser sessions are `login_pending`, `account_authenticated`,
 lived, and bind CSRF state and secure same-site cookies. Session state is only
 relay/account authorization and never device trust.
 
+After the first full email-plus-TOTP login and pairing, an expired browser
+session may be restored without repeating those factors. The relay issues a
+one-minute, single-use challenge bound to the account and paired device ID;
+the browser signs the domain-separated challenge with its non-exportable
+Ed25519 device key. Successful verification creates a short-lived
+`remote_authenticated` session without `stepUpAt`. It therefore permits normal
+remote connection but cannot start or complete recovery or account deletion,
+revoke trust, replace a host, or authorize any other operation requiring a
+fresh second factor. Cancellation of an already-pending recovery or deletion
+remains available to any fully authenticated session as a protective action,
+as described below.
+Revoked/unpaired devices, unknown keys, expired challenges, and replayed
+signatures fail generically.
+
 Browser devices are `unpaired`, `pairing_pending`, `paired`, or `revoked`.
 Only the ceremony in `shore-protocol-v1.md` transitions an unpaired device to
 paired. A ceremony is `unused`, `used`, `expired`, `cancelled`, or `exhausted`;
@@ -87,6 +101,11 @@ five failures, host epoch change, host revocation, recovery, or account deletion
 prevents later success. Revocation closes the device socket, invalidates grants
 and replay state, and cannot be undone; the device must receive a new ID and
 pair again.
+
+The host's authenticated pairing approval supplies the device's public signing
+key and granted capability names. Shore persists both, emits a durable pairing
+security notification, and exposes the capability names (but not the signing
+key) in the account security view.
 
 ## Recovery
 

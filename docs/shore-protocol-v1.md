@@ -363,6 +363,39 @@ reports success only after receiving, decrypting, and verifying the matching
 `shore.probe.result`. This proves the host processed the confirmation and that
 the resulting bidirectional encrypted application channel works.
 
+After accepting the confirmation, the host's closed-schema
+`pairing_approved` control frame includes the browser's 32-byte base64url
+Ed25519 public signing key and the granted `capabilities` array along with `v`,
+`type`, `ceremony_id`, and `device_id`. The authenticated host is the authority
+for this relay record. The relay stores the public key with the paired device
+solely for subsequent proof-of-possession session restoration and stores the
+capability names for user-visible security history; it never receives a browser
+private key.
+
+### Paired-device session restoration
+
+An expired account session does not force an already-paired browser through
+email and TOTP again. The browser requests a short-lived challenge for its
+device ID. For a currently paired device, the relay returns a fresh UUIDv7
+challenge ID, 256-bit nonce, account ID, device ID, and expiry. The browser
+signs the UTF-8 bytes of
+`"shore-device-auth-v1\0" || account_id || "\0" || device_id || "\0" ||
+challenge_id || "\0" || nonce` with its non-exportable Ed25519 key.
+
+The relay accepts each challenge once, verifies expiry and the signature
+against the key recorded through `pairing_approved`, and issues a normal
+short-lived secure HttpOnly session. This session is `remote_authenticated`
+but carries no fresh-second-factor timestamp. It supports ordinary remote use;
+sensitive security mutations continue to require a new TOTP step-up. The only
+exception is cancellation of an already-pending recovery or account deletion,
+which remains deliberately available as a protective action. Challenge and
+verification endpoints are rate-limited and return generic authentication
+failure for unknown, revoked, expired, malformed, or replayed devices.
+Pairings created before the relay began recording the host-confirmed browser
+signing key cannot use this restoration path and must complete one fresh
+pairing ceremony; no key is inferred from an account cookie or supplied by an
+unauthenticated browser.
+
 Both peers verify the binding, pinned account/host identity, and the other
 side's `finished` value before the host atomically stores approval. The secret
 is uniformly random rather than memorable, so a captured transcript has at

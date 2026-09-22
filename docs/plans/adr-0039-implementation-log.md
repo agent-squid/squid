@@ -503,6 +503,7 @@ sequenceDiagram
         Relay-->>Browser: relayed ciphertext
         Browser-->>Host: sealed envelope (ack), periodic
     end
+    Note over Browser,Relay: If the short-lived account session expires,<br/>the reconnect path performs paired-key challenge restoration once<br/>before returning to bounded backoff; no email/TOTP prompt is required.
     end
 ```
 
@@ -1306,9 +1307,9 @@ expiry/immediate-revocation surface. None of this should be built now.
 
 **Status**
 
-- State: Audit implementation complete; preproduction deployed and B2-verified (2026-09-11).
-- Delivered: Relay and host audit chains, Shore-only archival, signed receipts, security history, and notifications.
-- Remaining: Operator control plane, full live verifier, and final independent security review.
+- State: Milestone implementation complete; preproduction audit storage deployed and B2-verified (2026-09-11).
+- Delivered: Relay and host audit chains, Shore-only archival, signed receipts, security history and notifications, and the operator control plane implementation.
+- Remaining operational gates: Cloudflare Access provisioning and operator-plane deployment, disposable-account repair, the complete live verifier/archive acknowledgement, and final independent security review.
 
 
 ### Implementation plan
@@ -1335,14 +1336,15 @@ expiry/immediate-revocation surface. None of this should be built now.
   only in Shore; live signed receipts and host checkpoints replace daily
   manifests. That doc also fixes the per-event field
   schema for both chains (relay: prior hash, event ID, account/host/device/
-  session IDs, coarse source metadata, restricted raw IP, receipt time,
+  session IDs, keyed pseudonymous source fingerprint, receipt time,
   ciphertext hash, outcome; host: signed request ID, plaintext command hash,
   authorization decision, result class, host time, prior host-event hash) and
   the explicit exclusion list (no command/response text, secrets, cookies,
   auth headers, internal addresses, precise location, full headers). 5.0's
   `Audit` type now carries the correlation-critical request, host, device,
-  session, direction, ciphertext-commitment, and outcome fields. Coarse source
-  metadata and restricted raw-IP archival remain separate privacy work.
+  session, direction, ciphertext-commitment, source-fingerprint, and outcome
+  fields. Raw IP is intentionally not retained; the keyed fingerprint supports
+  correlation without putting network identifiers in user-visible history.
 - Durable Object storage transactions are the right place to chain events:
   reading the prior chain tip and writing the new one inside the same
   `storage.transaction()` callback that already writes each audit record
@@ -1981,11 +1983,12 @@ retention. A 2026-09-12 preproduction attempt completed login, first-factor
 enrollment, host registration, pairing, probe dispatch, and duplicate
 suppression, recording exactly one `shore.probe` host event, but its host export
 cursor did not advance before timeout because the Shore-signed archive
-acknowledgement did not arrive. The attempt also exposed the lack of a safe
-operator TOTP-repair path after a setup secret is lost. Remaining acceptance
-work: land 5.13, repair the disposable account, diagnose the missing archive
-acknowledgement, rerun and record the complete live verification, then complete
-the final independent security review before enabling the production job.
+acknowledgement did not arrive. The attempt also exposed the need for the safe
+operator TOTP-repair path now implemented in 5.13. Remaining acceptance work:
+deploy and provision 5.13 in preproduction, repair the disposable account,
+diagnose the missing archive acknowledgement, rerun and record the complete
+live verification, then complete the final independent security review before
+enabling the production job.
 
 **5.13 — Operator control plane (implemented 2026-09-12; deployment and live
 repair evidence remain required for the Milestone 5 gate)**
