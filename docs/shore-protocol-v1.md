@@ -357,6 +357,11 @@ encrypted with `pair_key`, with a new nonce and the same outer schema and
 `finished`, where `finished` is `finished(browser-confirmed)`. The host verifies
 that confirmation before atomically storing device approval. Every packet nonce,
 including failed attempts and the host response, is unique within a ceremony.
+The browser MUST NOT report pairing success merely because it queued this final
+packet. On the same ordered WebSocket it sends an encrypted `shore.probe` and
+reports success only after receiving, decrypting, and verifying the matching
+`shore.probe.result`. This proves the host processed the confirmation and that
+the resulting bidirectional encrypted application channel works.
 
 Both peers verify the binding, pinned account/host identity, and the other
 side's `finished` value before the host atomically stores approval. The secret

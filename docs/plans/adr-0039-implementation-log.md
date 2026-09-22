@@ -421,11 +421,11 @@ Tailscale is also configured, click the
 "AgentSquid.ai" tab; if Shore is the only method set up, its QR is already
 showing — there's no separate "Start Pairing" click anymore. Scan the QR
 with a camera-equipped device, or click "Copy link" to paste `pair_url` into
-a browser on a machine without one; if that browser isn't already logged
-into `agentsquid.ai` as this account, log in and reopen the same original
-link (not via browser back/forward — the fragment is stripped from history
-on load) within its 5-minute expiry. Opening the secret-bearing link starts
-pairing automatically. This diagram covers only pairing itself — establishing
+a browser on a machine without one. If that browser isn't already logged
+into `agentsquid.ai` as this account, complete the inline login; the in-memory
+pairing payload continues automatically without reopening the secret-bearing
+link. Opening the link is the affirmative action and starts pairing without a
+second confirmation click. This diagram covers only pairing itself — establishing
 trust for a device that has none yet. See
 "Regular usage after pairing" further below for the separate, much simpler
 flow an already-paired device uses afterward; the two are not interchangeable
@@ -454,6 +454,11 @@ sequenceDiagram
     Relay->>Browser: relay opaque packet 2
     Browser->>Relay: encrypted binding confirmation (packet 3)
     Relay->>Host: relay opaque packet 3
+    Browser->>Relay: encrypted shore.probe
+    Relay->>Host: relay encrypted probe
+    Host->>Relay: encrypted shore.probe.result
+    Relay->>Browser: relay encrypted result
+    Browser->>Browser: decrypt, verify host signature, and match nonce<br/>before displaying Paired
     UI->>Host: poll pairing status
     Host-->>UI: paired status
     Note over Host,Relay: Relay-blind: the relay routes the three packets<br/>but cannot decrypt their pairing contents.
@@ -501,7 +506,15 @@ sequenceDiagram
     end
 ```
 
-Today this second diagram is the entire "regular usage" surface — `shore.probe` is exercised by the cross-process test and has no product UI at all, and `dashboard.read.v1`'s wire protocol is fully implemented and tested (`ShoreDashboardSession`, `browser/src/dashboard-session.ts`) but — as noted earlier in this addendum — no page in `pairing-app/` actually opens a session against it yet. So a successfully paired device has nothing to click through for "regular usage" today; this diagram documents the protocol that a future dashboard page would drive, not a flow you can currently walk end-to-end in the product.
+Today this second diagram is the entire "regular usage" surface. The pairing
+pages automatically exercise `shore.probe` after packet 3 and do not display
+success until its encrypted result is verified; the cross-process test covers
+the same round trip. `dashboard.read.v1`'s wire protocol is fully implemented
+and tested (`ShoreDashboardSession`, `browser/src/dashboard-session.ts`), but
+— as noted earlier in this addendum — no page in `pairing-app/` actually opens
+a session against it yet. So a successfully paired device has no dashboard to
+click through for regular usage today; the subscription portion of this
+diagram documents the protocol that a future dashboard page would drive.
 
 **Connect flow — one experience, with `/remote` as the sole surfaced command
 (unified 2026-09-14; simplified 2026-09-15).** Previously these were two unrelated chat commands
