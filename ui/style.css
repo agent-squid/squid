@@ -65,7 +65,7 @@
 #connect-modal-box {
   background: #f5f0e8; border-radius: 12px;
   padding: 1.5rem; text-align: center; position: relative;
-  max-width: 340px; width: 90%; max-height: 80vh; overflow-y: auto;
+  max-width: 400px; width: 90%; max-height: 80vh; overflow-y: auto;
 }
 #connect-modal-title {
   font-size: 1em; font-weight: 600; color: #1a1a2e;
@@ -85,11 +85,12 @@
 .connect-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 .connect-tab:hover:not(.active) { color: var(--text-mid); border-color: #333; }
 .connect-qr { display: flex; justify-content: center; margin-bottom: 0.75rem; }
-.connect-qr img, .connect-qr canvas { border-radius: 6px; }
+.connect-qr img, .connect-qr canvas { border-radius: 6px; height: auto; max-width: 100%; }
 .connect-link-row { display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.5rem; }
 .connect-link-url {
   flex: 1; min-width: 0; font-size: var(--text-xs); color: var(--text-dim);
-  word-break: break-all; background: #e8e3d8; border-radius: 4px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: #e8e3d8; border-radius: 4px;
   padding: 0.4rem 0.5rem; user-select: all; cursor: text; text-align: left;
 }
 .connect-copy-btn { flex-shrink: 0; }
@@ -104,6 +105,7 @@
   color: #1a1a2e; margin-bottom: 0.5rem; user-select: all;
 }
 #shore-pair-status { font-size: var(--text-sm); color: #1a1a2e; }
+.shore-pair-refresh { margin-top: 0.5rem; }
 .shore-pair-error { font-size: var(--text-sm); color: #7a2323; white-space: pre-line; }
 #shore-pair-requests { display: flex; flex-direction: column; gap: 0.35rem; margin: 0.75rem 0; }
 .shore-devices-title {

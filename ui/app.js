@@ -691,7 +691,7 @@ async function _shoreIsConfigured() {
 
 /** Unified "Connect" modal for both remote-access methods: Tailscale
  * (LAN/tailnet-scoped, needs the Tailscale app on the far end, no far-end
- * login) and AgentSquid.ai (relay-routed, needs no app install anywhere,
+ * login) and AgentSquid.AI (relay-routed, needs no app install anywhere,
  * but needs the far end already logged into agentsquid.ai). Shows both as
  * tabs when both are available, whichever one is available directly when
  * only one is, and an install/login prompt when neither is. `preferredTab`
@@ -715,11 +715,12 @@ async function openConnectModal(preferredTab) {
   title.id = 'connect-modal-title';
   title.textContent = 'Connect';
 
-  let pollTimer = null, requestPollTimer = null;
+  let pollTimer = null, requestPollTimer = null, countdownTimer = null;
   const onEsc = e => { if (e.key === 'Escape') close(); };
   const close = () => {
     if (pollTimer) clearInterval(pollTimer);
     if (requestPollTimer) clearInterval(requestPollTimer);
+    if (countdownTimer) clearInterval(countdownTimer);
     document.removeEventListener('keydown', onEsc);
     modal.remove();
   };
@@ -761,7 +762,7 @@ async function openConnectModal(preferredTab) {
     row.className = 'connect-link-row';
     const urlEl = document.createElement('div');
     urlEl.className = 'connect-link-url';
-    urlEl.textContent = url;
+    urlEl.textContent = url.length > 48 ? `${url.slice(0, 48)}…` : url;
     const copyBtn = document.createElement('button');
     copyBtn.type = 'button';
     copyBtn.className = 'btn-ghost connect-copy-btn';
@@ -783,6 +784,11 @@ async function openConnectModal(preferredTab) {
   devicesTitle.textContent = 'Trusted devices';
   const devicesList = document.createElement('div');
   devicesList.id = 'shore-devices-list';
+  const shoreDetails = document.createElement('div');
+  shoreDetails.id = 'connect-agentsquid-details';
+  shoreDetails.appendChild(pendingRequests);
+  shoreDetails.appendChild(devicesTitle);
+  shoreDetails.appendChild(devicesList);
 
   const tailscalePanel = document.createElement('div');
   tailscalePanel.id = 'connect-tailscale-panel';
@@ -800,9 +806,26 @@ async function openConnectModal(preferredTab) {
   const agentsquidPanel = document.createElement('div');
   agentsquidPanel.id = 'connect-agentsquid-panel';
   let agentsquidStarted = false;
+  const showExpired = statusEl => {
+    statusEl.textContent = 'Pairing code expired';
+    if (document.getElementById('shore-pair-refresh')) return;
+    const refreshBtn = document.createElement('button');
+    refreshBtn.id = 'shore-pair-refresh';
+    refreshBtn.type = 'button';
+    refreshBtn.className = 'btn-ghost shore-pair-refresh';
+    refreshBtn.textContent = 'Generate new code';
+    refreshBtn.addEventListener('click', () => {
+      agentsquidStarted = false;
+      void startAgentSquid();
+    });
+    statusEl.insertAdjacentElement('afterend', refreshBtn);
+  };
   const startAgentSquid = async () => {
     if (agentsquidStarted) return;
     agentsquidStarted = true;
+    if (pollTimer) clearInterval(pollTimer);
+    if (countdownTimer) clearInterval(countdownTimer);
+    pollTimer = null; countdownTimer = null;
     agentsquidPanel.innerHTML = '<div class="connect-loading">Generating pairing code…</div>';
     let body;
     try {
@@ -823,13 +846,31 @@ async function openConnectModal(preferredTab) {
     codeEl.textContent = body.code;
     const statusEl = document.createElement('div');
     statusEl.id = 'shore-pair-status';
-    statusEl.textContent = 'Waiting for the other device…';
     agentsquidPanel.appendChild(qrDiv);
     agentsquidPanel.appendChild(codeEl);
     agentsquidPanel.appendChild(copyRow(body.pair_url));
     agentsquidPanel.appendChild(statusEl);
-    new QRCode(qrDiv, { text: body.pair_url, width: 220, height: 220,
-                         colorDark: '#0f0f13', colorLight: '#f5f0e8' });
+    new QRCode(qrDiv, { text: body.pair_url, width: 300, height: 300,
+                         colorDark: '#0f0f13', colorLight: '#f5f0e8',
+                         correctLevel: QRCode.CorrectLevel.L });
+    const updateCountdown = () => {
+      const remaining = Math.max(0, Math.ceil((Number(body.expires_at) * 1000 - Date.now()) / 1000));
+      if (!Number.isFinite(remaining)) {
+        statusEl.textContent = 'Waiting for the other device…';
+        return;
+      }
+      if (remaining === 0) {
+        showExpired(statusEl);
+        if (countdownTimer) clearInterval(countdownTimer);
+        countdownTimer = null;
+        return;
+      }
+      const minutes = Math.floor(remaining / 60);
+      const seconds = String(remaining % 60).padStart(2, '0');
+      statusEl.textContent = `Waiting for the other device… Expires in ${minutes}:${seconds}`;
+    };
+    updateCountdown();
+    countdownTimer = setInterval(updateCountdown, 1000);
     pollTimer = setInterval(async () => {
       let statusBody;
       try {
@@ -838,8 +879,11 @@ async function openConnectModal(preferredTab) {
       } catch { return; }
       if (statusBody.status === 'pending') return;
       clearInterval(pollTimer); pollTimer = null;
-      const labels = { paired: 'Paired ✓', failed: 'Pairing failed', expired: 'Pairing code expired', unknown: 'Pairing failed' };
-      statusEl.textContent = labels[statusBody.status] || statusBody.status;
+      if (countdownTimer) clearInterval(countdownTimer);
+      countdownTimer = null;
+      const labels = { paired: 'Paired ✓', failed: 'Pairing failed', unknown: 'Pairing failed' };
+      if (statusBody.status === 'expired') showExpired(statusEl);
+      else statusEl.textContent = labels[statusBody.status] || statusBody.status;
       if (statusBody.status === 'paired') _shoreRenderDeviceList(devicesList);
     }, 2000);
   };
@@ -851,12 +895,13 @@ async function openConnectModal(preferredTab) {
     const tsTab = document.createElement('button');
     tsTab.type = 'button'; tsTab.className = 'connect-tab'; tsTab.textContent = 'Tailscale';
     const asTab = document.createElement('button');
-    asTab.type = 'button'; asTab.className = 'connect-tab'; asTab.textContent = 'AgentSquid.ai';
+    asTab.type = 'button'; asTab.className = 'connect-tab'; asTab.textContent = 'AgentSquid.AI';
     const activate = which => {
       tsTab.classList.toggle('active', which === 'tailscale');
       asTab.classList.toggle('active', which === 'agentsquid');
       tailscalePanel.style.display = which === 'tailscale' ? '' : 'none';
       agentsquidPanel.style.display = which === 'agentsquid' ? '' : 'none';
+      shoreDetails.style.display = which === 'agentsquid' ? '' : 'none';
       if (which === 'agentsquid') startAgentSquid();
     };
     tsTab.addEventListener('click', () => activate('tailscale'));
@@ -870,9 +915,7 @@ async function openConnectModal(preferredTab) {
   }
 
   if (shoreConfigured) {
-    box.appendChild(pendingRequests);
-    box.appendChild(devicesTitle);
-    box.appendChild(devicesList);
+    box.appendChild(shoreDetails);
     const refreshPairingRequests = async () => {
       let requests;
       try {
