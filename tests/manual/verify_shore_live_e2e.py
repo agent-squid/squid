@@ -156,6 +156,10 @@ async def verify(identity_dir: Path, token: str, timeout: float) -> None:
                     or fingerprint(x25519.X25519PublicKey.from_public_bytes(host_agreement)) != started["offer"]["host_enc_fingerprint"]):
                 raise RuntimeError("host keys do not match pairing offer")
             await browser.send(confirmation)
+            approved = json.loads(await asyncio.wait_for(browser.recv(), timeout))
+            if (not isinstance(approved, dict) or approved.get("type") != "pairing_approved"
+                    or approved.get("ceremony_id") != started["offer"]["ceremony_id"] or approved.get("device_id") != device_id):
+                raise RuntimeError("unexpected pairing-approval response")
             print("VERIFY: sending an encrypted probe and checking retry idempotency…", file=sys.stderr)
             request_id, now = uuid7(), datetime.now(timezone.utc)
             probe = canonical(seal_envelope({"v": 1, "type": "shore.probe", "payload": {"nonce": "live-ms5"}},
