@@ -2182,3 +2182,15 @@ proving a certs-fetch failure (503) fails authentication closed rather than
 falling back to any previously accepted key. Full suite re-verified: 136/136
 (`pairing-app` built locally first, matching the documented CI build-order
 requirement), `tsc --noEmit` clean.
+
+**Follow-up same day — a second, independent config-validation gate was
+missed on the first pass.** `scripts/validate-receipt-config.mjs` (run by
+both deploy workflows before `wrangler deploy`) separately required
+`ADMIN_ACCESS_JWKS` to be present and shaped as a valid RSA JWK set,
+unrelated to the workflow YAML edits above. The preprod deploy for the
+retiring commit failed closed with `invalid Shore receipt configuration:
+ADMIN_ACCESS_JWKS missing or multiline` once the workflow's `env:` block no
+longer passed that secret through. Fixed by removing `ADMIN_ACCESS_JWKS`
+from the script's required-variable list and its JWK-shape check. Verified
+locally with a synthetic valid config (no `ADMIN_ACCESS_JWKS` set) before
+pushing again.
