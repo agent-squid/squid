@@ -1312,7 +1312,7 @@ expiry/immediate-revocation surface. None of this should be built now.
 
 - State: Milestone implementation complete; preproduction audit storage deployed and B2-verified (2026-09-11).
 - Delivered: Relay and host audit chains, Shore-only archival, signed receipts, security history and notifications, and the operator control plane implementation.
-- Remaining operational gates: Cloudflare Access provisioning and operator-plane deployment, disposable-account repair, the complete live verifier/archive acknowledgement, and final independent security review.
+- Remaining operational gates: operator-plane deployment, disposable-account repair, the complete live verifier/archive acknowledgement, and final independent security review. Cloudflare Access provisioning is confirmed live (2026-09-22, see addendum below).
 
 
 ### Implementation plan
@@ -2042,9 +2042,11 @@ two-minute opaque challenge bound to actor, environment, target, and operation;
 challenge reuse is restricted to the same idempotency key, while semantic
 idempotency deliberately excludes the replaceable challenge token so ambiguous
 retries remain safe.
-Cloudflare Access provisioning, preproduction deployment, disposable-account
-repair, the full live verifier/archive acknowledgement, and final independent
-security review remain operator gates and are not claimed complete here.
+Preproduction deployment, disposable-account repair, the full live
+verifier/archive acknowledgement, and final independent security review
+remain operator gates and are not claimed complete here. Cloudflare Access
+provisioning, listed as a remaining gate in earlier drafts of this section,
+is confirmed live as of 2026-09-22 (see addendum below).
 
 **5.14 — Bounded acknowledged audit hot stores (landed)**
 
@@ -2140,3 +2142,43 @@ deployment-status section was also stale (it claimed both deployment jobs
 were disabled, when `deploy-preproduction.yml` had already been deploying
 successfully to `dev.agentsquid.ai` on every push to `main` since 2026-09-11)
 and has been corrected to match `wrangler.jsonc` and actual run history.
+
+**2026-09-22 addendum — Cloudflare Access provisioning confirmed live.**
+This section and 5.13 previously carried "Cloudflare Access provisioning" as
+an open operator gate. Verified today: `GET /admin` on both
+`agentsquid.ai` and `dev.agentsquid.ai` 302s to distinct
+`quiet-salad-1a0f.cloudflareaccess.com` login applications (different `aud`
+per environment, confirming two separate self-hosted Access apps as the
+README requires), and `ADMIN_ACCESS_ISSUER`/`ADMIN_ACCESS_AUDIENCE`/
+`ADMIN_ACCESS_JWKS`/`ADMIN_OPERATOR_ALLOWLIST` have been present in both the
+`shore-dev` and `shore-prod` GitHub environments since 2026-09-13. The
+operator additionally widened `ADMIN_OPERATOR_ALLOWLIST` past its original
+single address in both environments today. This gate is closed; it should
+not be re-listed as outstanding. What remains unverified is only whether the
+Cloudflare Access policy's Include rule and the Worker-side
+`ADMIN_OPERATOR_ALLOWLIST` secret list the same email set in each
+environment -- the two are configured independently and a real login
+through `/admin` is the only way to confirm they agree.
+
+**2026-09-22 addendum — `ADMIN_ACCESS_JWKS` retired as a static secret.**
+The pinned-JWKS design meant a Cloudflare-side team signing-key rotation
+would silently lock every operator out (`authenticateOperator` finds no
+matching `kid` and fails closed) until someone noticed and manually re-
+pasted a fresh copy into both GitHub environments. `src/admin.ts` now fetches
+the team's public keys live from `${ADMIN_ACCESS_ISSUER}/cdn-cgi/access/certs`
+on each verification via `fetchJwks()`, edge-cached through `cf.cacheTtl`/
+`cacheEverything` (a real Cloudflare edge cache, not per-isolate memory) so a
+rotation is picked up automatically within the cache window instead of
+requiring an operational fix. `requiredConfig` no longer checks for
+`ADMIN_ACCESS_JWKS`; the `Env` type, `wrangler.jsonc`'s required-secrets
+lists, and both deploy workflows' validation/secrets-file/env blocks had it
+removed. `ADMIN_ACCESS_JWKS` can now be deleted from both `shore-dev` and
+`shore-prod` GitHub environments -- the Worker no longer reads it, so leaving
+it in place is inert, not a fallback. `test/admin.test.ts` was reworked to
+stub the certs endpoint (`beforeEach`/`afterEach` around `globalThis.fetch`,
+keyed on a per-test `currentJwks` the new `fixture()` return value can swap
+via `setJwks`) instead of overriding a config field, and gained a new case
+proving a certs-fetch failure (503) fails authentication closed rather than
+falling back to any previously accepted key. Full suite re-verified: 136/136
+(`pairing-app` built locally first, matching the documented CI build-order
+requirement), `tsc --noEmit` clean.
