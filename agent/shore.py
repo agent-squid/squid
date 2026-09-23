@@ -25,6 +25,7 @@ from .shore_crypto import UUID7, uuid7, valid_relay_url, valid_key_epoch
 
 _valid_relay_url = valid_relay_url
 _DEFAULT_RELAY = "https://agentsquid.ai"
+_TRUSTED_RELAYS = frozenset({_DEFAULT_RELAY, "https://dev.agentsquid.ai"})
 
 
 @dataclass(frozen=True)
@@ -210,7 +211,7 @@ def _print_totp_qr(secret: str, username: str, relay: str) -> None:
 
 def _confirm_custom_relay(relay: str) -> None:
     relay = relay.rstrip("/")
-    if relay == _DEFAULT_RELAY:
+    if relay in _TRUSTED_RELAYS:
         return
     print(
         "WARNING: A custom relay receives your account login and authenticator enrollment data.\n"

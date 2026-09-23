@@ -2448,8 +2448,9 @@ In progress (2026-09-22). The first adversarial review confirmed the relay-
 blind envelope and local trust invariants, and found two actionable pairing/
 login weaknesses. The browser-request pairing SAS has been expanded from 32
 to 64 bits on both endpoints. `agentsquid login` now requires the operator to
-type the exact origin for every non-default relay before identity creation or
-network access, and no longer accepts magic-link or TOTP secrets as command-
+type the exact origin for every relay except the two exact first-party origins
+(`https://agentsquid.ai` and `https://dev.agentsquid.ai`) before identity
+creation or network access, and no longer accepts magic-link or TOTP secrets as command-
 line arguments. Tests cover the SAS width, cross-process agreement, and the
 custom-relay fail-closed path.
 

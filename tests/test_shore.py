@@ -5,7 +5,7 @@ import pytest
 import httpx
 
 from agent.shore import (
-    ShoreRuntimeConfig, _load_or_new_identity, _load_runtime_config,
+    ShoreRuntimeConfig, _confirm_custom_relay, _load_or_new_identity, _load_runtime_config,
     _new_identity, _print_totp_qr, _registration_proof, _require_response,
     _write_runtime_config, login,
 )
@@ -195,6 +195,19 @@ def test_login_requires_exact_typed_confirmation_for_custom_relay(tmp_path, monk
     assert result == 1
     assert "custom relay confirmation did not match" in capsys.readouterr().err
     assert not (tmp_path / "shore").exists()
+
+
+def test_first_party_relay_origins_do_not_require_confirmation(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _prompt: pytest.fail("must not prompt"))
+    _confirm_custom_relay("https://agentsquid.ai")
+    _confirm_custom_relay("https://agentsquid.ai/")
+    _confirm_custom_relay("https://dev.agentsquid.ai")
+
+
+def test_other_agentsquid_subdomains_still_require_confirmation(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _prompt: "")
+    with pytest.raises(RuntimeError, match="custom relay confirmation did not match"):
+        _confirm_custom_relay("https://preview.agentsquid.ai")
 
 
 @pytest.mark.parametrize("flag,value", [
