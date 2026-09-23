@@ -115,24 +115,20 @@ it, applies ordinary socket rate limits and revocation checks, and accepts no
 browser-originated equivalent. All non-heartbeat payload frames remain opaque
 encrypted Shore envelopes.
 
-The 2026-09-16 client-release amendment requires Shore to retain a distinct,
-immutable web client for every published AgentSquid binary version. The host
-reports its exact required client version during connection setup; the stable
-bootstrap loads only that version and fails closed with an update/unavailable
-screen if it is absent. Compatibility is not inferred from semantic-version
-ranges, protocol versions, or feature detection. This deliberately aligns web
-client changes with the binary release process and permits substantial client
-and host changes without creating an implicit cross-release compatibility
-contract.
+The 2026-09-23 client-release amendment requires Shore to retain every exact
+web-client release still selected by a supported host. The host reports its
+required client identifier during connection setup; the stable bootstrap loads
+only that version and fails closed if it is absent or unverifiable. Client,
+AgentSquid package, and Shore compute releases remain operationally independent.
 
-### Version-aligned web-client delivery
+### Exact web-client delivery
 
-Each AgentSquid release publishes its matching web client under an immutable
-release manifest, for example `/client/releases/0.1.5/manifest.json`. The
+Shore publishes each web client under an immutable release manifest, for
+example `/client/releases/0.1.5/manifest.json`. The
 manifest references content-hashed JavaScript, CSS, and other assets. Assets
 that are byte-identical across releases may share the same content-addressed
-object; the release manifest and the mapping from an AgentSquid version to that
-manifest must never be changed after publication.
+object; the mapping from an exact client identifier to its manifest must never
+change after publication.
 
 The bootstrap is the only version-independent browser component. It obtains
 the host-advertised `required_client_version`, validates the closed-schema
@@ -141,16 +137,14 @@ or mismatched release must not fall back to the newest client or a nearby
 version. The bootstrap may display a minimal recovery message without opening
 a command-capable session.
 
-The matching client must be built, verified, and published as one release
-transaction with the binary. A binary release must not be made available until
-its client manifest and referenced assets are available, and the release
-process must preserve the previous binary/client pair for rollback. Emergency
+The client is built, verified, and published by Shore without building or
+publishing AgentSquid and without deploying Shore compute. Before a host
+advertises a client identifier, its manifest and assets must exist. Emergency
 revocation is an explicit signed release state, not mutation or replacement of
-an immutable manifest. Stable releases are retained by default; any future
-retention policy requires a separately documented support window and must not
-strand binaries still declared supported.
+an immutable manifest. Retention must not strand a supported host that still
+selects an exact client.
 
-The cross-repository build, R2 object model, exact-version resolution, development head, bootstrap,
+The independent workflows, R2 object model, exact-version resolution, development head, bootstrap,
 credential boundaries, rollback, revocation, retention, and evidence contract
 are specified by [ADR-0050](./0050-paired-release-distribution.md). ADR-0039
 continues to own the remote-access security requirement; ADR-0050 owns the
@@ -853,7 +847,7 @@ as v1 requirements, not later hardening:
 - Shore protocol v1: ../shore-protocol-v1.md
 - Shore state machines: ../shore-state-machines.md
 - Shore security and operations contract: ../shore-security-operations.md
-- Paired AgentSquid and Shore release distribution: ./0050-paired-release-distribution.md
+- Independent Shore web-client distribution: ./0050-paired-release-distribution.md
 
 - Cloudflare DNS record limits per zone (Free: 200 for zones created on/after
   2024-09-01, 1,000 for older zones; Pro/Business/Enterprise: 3,500)

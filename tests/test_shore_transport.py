@@ -105,6 +105,16 @@ def test_host_connection_allows_plaintext_only_for_loopback(tmp_path):
             host_id=HOST, signing_key=host_signing)
 
 
+def test_host_connection_rejects_invalid_client_release_selection(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTSQUID_SHORE_CLIENT_VERSION", "latest")
+    host_signing = ed25519.Ed25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=x25519.X25519PrivateKey.generate())
+    with pytest.raises(ShoreProtocolError, match="shore_invalid_client_release_version"):
+        ShoreHostConnection(channel, relay="https://relay.example", username="alice",
+            host_id=HOST, signing_key=host_signing)
+
+
 def test_non_loopback_relay_ignores_environment_receipt_trust_root(tmp_path, monkeypatch):
     injected = ed25519.Ed25519PrivateKey.generate().public_key().public_bytes_raw()
     monkeypatch.setenv("SHORE_RECEIPT_PUBLIC_KEYS", json.dumps({"1": b64url(injected)}))
@@ -408,6 +418,7 @@ async def test_host_key_epoch_change_does_not_inherit_old_device_trust(tmp_path)
 
 @pytest.mark.asyncio
 async def test_host_connection_signs_challenge_heartbeats_and_dispatches(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENTSQUID_SHORE_CLIENT_VERSION", "2.4.0rc1")
     host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
     channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
         host_signing=host_signing, host_agreement=host_agreement)
@@ -436,6 +447,7 @@ async def test_host_connection_signs_challenge_heartbeats_and_dispatches(monkeyp
     connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing, heartbeat_seconds=0.01)
     headers = await connection._connection_headers()
+    assert headers["x-shore-required-client-version"] == "2.4.0rc1"
     proof = canonical({"challenge_id": CEREMONY, "host_id": HOST,
         "nonce": "challenge-nonce", "purpose": "websocket", "v": 1})
     from agent.shore_crypto import unb64url

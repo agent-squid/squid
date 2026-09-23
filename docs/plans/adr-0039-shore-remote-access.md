@@ -297,14 +297,14 @@ The completed work log, test evidence, deployment notes, and remaining sub-gates
 
 **Status:** In progress; Milestone 5 and 6.1 are complete. 6.2's repository
 controls are substantially implemented, but 6.2 remains open pending the
-cross-repository production release handoff, production alert-sink activation,
+independent client-release production drill, production alert-sink activation,
 and witnessed immutable-archive restore evidence. These deployment records
 must not be replaced by repository-only test results.
 
 **Objective:** prove the system fails closed and is operable before enabling
 remote mutations.
 
-The paired binary/client release architecture is defined by
+The independent web-client release architecture is defined by
 [ADR-0050](../decisions/0050-paired-release-distribution.md); mutable
 configuration and operator procedures are maintained in Shore's
 `docs/runbooks/shore-release.md`.
@@ -321,9 +321,9 @@ configuration and operator procedures are maintained in Shore's
    and version-independent. Have each host advertise
    `required_client_version`; load only the matching release manifest and show
    a non-command-capable update/unavailable screen when it is missing,
-   malformed, revoked, or mismatched. Publish and verify the binary, client
-   manifest, and referenced assets as one release transaction, preserving the
-   prior pair for rollback. Retain stable release manifests by default and
+   malformed, revoked, or mismatched. Publish and verify the client manifest
+   and referenced assets independently from AgentSquid and Shore compute,
+   preserving the prior client for rollback. Retain stable release manifests by default and
    allow byte-identical assets to be shared by content hash.
    Implement ADR-0039's per-route/per-account traffic accounting, quota
    projections, 50/70/85/95-percent degradation thresholds, reserved security
@@ -337,10 +337,10 @@ configuration and operator procedures are maintained in Shore's
 
 **Acceptance:** production readiness review signs off security, operations,
 privacy, cost limits, recovery, and rollback. Release tests prove that every
-supported binary resolves to its exact immutable client, mismatches and missing
+supported host resolves to its selected immutable client, and missing
 or revoked clients fail closed without opening a command-capable session,
 published manifests cannot be overwritten, reproducible hashes match, and a
-binary/client rollback restores the previous pair. No remote mutation ships
+client recommendation rollback restores the previous client. No remote mutation ships
 before the paired read-only stage is stable and its gates pass.
 
 ## Definition of done

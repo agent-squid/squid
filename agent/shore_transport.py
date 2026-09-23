@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import random
+import re
 import sqlite3
 import threading
 import time
@@ -50,6 +51,18 @@ from .shore_receipt import (
 )
 
 CLIENT_RELEASE_VERSION = version("agentsquid")
+_CLIENT_RELEASE_VERSION_RE = re.compile(
+    r"^[0-9]+(?:\.[0-9]+)+(?:(?:a|b|rc)[0-9]+)?(?:\.post[0-9]+)?(?:\.dev[0-9]+)?"
+    r"(?:\+[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?$"
+)
+
+
+def _client_release_version() -> str:
+    """Return the independently selected Shore web-client release."""
+    selected = os.environ.get("AGENTSQUID_SHORE_CLIENT_VERSION", CLIENT_RELEASE_VERSION)
+    if not _CLIENT_RELEASE_VERSION_RE.fullmatch(selected):
+        raise ShoreProtocolError("shore_invalid_client_release_version")
+    return selected
 
 log = logging.getLogger(__name__)
 
@@ -549,6 +562,7 @@ class ShoreHostConnection:
         self.channel = channel
         self.host_id = host_id
         self.signing_key = signing_key
+        self.client_release_version = _client_release_version()
         self.heartbeat_seconds = heartbeat_seconds
         self.base_backoff = base_backoff
         self.max_backoff = max_backoff
@@ -682,7 +696,7 @@ class ShoreHostConnection:
         proof = canonical({"challenge_id": challenge["id"], "host_id": self.host_id,
                            "nonce": challenge["nonce"], "purpose": "websocket", "v": 1})
         return {"x-shore-role": "host", "x-shore-host-id": self.host_id,
-                "x-shore-required-client-version": CLIENT_RELEASE_VERSION,
+                "x-shore-required-client-version": self.client_release_version,
                 "x-shore-challenge-id": challenge["id"],
                 "x-shore-signature": b64url(self.signing_key.sign(proof))}
 

@@ -2441,23 +2441,23 @@ Remaining slices before 6.2 is complete:
 1. Deploying the version-independent bootstrap; its source, the `/client/*`
    serving route, and exact host advertisement/browser mismatch rejection are
    complete.
-2. Running cross-repository publish/retention automation; its workflow source,
+2. Running independent Shore client publish/retention automation; its workflow source,
    immutable manifests, hashes, atomic activation, revocation rejection, and
-   paired rollback pointers are complete.
+   client recommendation rollback pointers are complete.
 3. Pre-account per-route/device/IP dimensions and quota projections; durable
    per-account traffic export and the longer host lease interval are complete.
 4. Production alert-sink wiring and a witnessed immutable-archive restore
    record; the tested local/Tailscale fallback UI is complete.
 
 These are release-environment gates, not documentation-only tasks. Completion
-requires choosing and configuring the cross-repository artifact handoff,
+requires configuring and drilling the client-release environment,
 provisioning the production alert destination and credentials, and recording a
 restore drill witnessed by the archive custodian. None can be truthfully
 asserted by an isolated source-tree change, so 6.2 remains open.
 
 **Release-design follow-up (2026-09-23):** ADR-0050 now defines the selected
-private-R2 architecture, same-domain `/client/*` route, exact cross-repository
-SHA handoff, immutable version lookup, explicit development head, bootstrap,
+private-R2 architecture, same-domain `/client/*` route, independent Shore
+source identity, immutable version lookup, explicit development head, bootstrap,
 credential boundaries, rollback, revocation, retention, and evidence model.
 Shore's `docs/runbooks/shore-release.md` inventories the workflow inputs,
 variables, secrets, ownership, procedures, and drills. This closes the design
@@ -2466,20 +2466,20 @@ evidence gates.
 
 **Release-integrity follow-up (2026-09-23):** Shore now includes a plain-Node
 release-manifest CLI and tests for deterministic SHA-256 manifests that bind one
-AgentSquid binary to its content-addressed browser assets. Verification fails on
+exact client identifier to its content-addressed browser assets. Verification fails on
 missing or changed bytes, publishing is atomic, and an existing version may only
 be republished when its canonical manifest is byte-identical. This closes the
 manifest format, local verification, and overwrite-protection portion of item 2;
-the cross-repository publish transaction, bootstrap selection, retention, and
-paired rollback remain part of that item.
+the independent publication drill, bootstrap selection, retention, and client
+rollback remain part of that item.
 
-**Hardening follow-up (2026-09-23):** the host now advertises its exact
-AgentSquid release on every authenticated connection. Shore rejects missing,
-malformed, or unsupported advertisements, persists the required version with
-the authenticated host, and the browser refuses mismatched routing metadata
-before opening a WebSocket. Release activation now verifies the immutable
-published manifest and artifact hashes and retains the prior active version as
-the rollback pair; revoked manifests fail verification. Per-account minute
+**Hardening follow-up (2026-09-23):** the host now advertises its selected exact
+client release on every authenticated connection. Shore rejects missing or
+malformed advertisements and persists the required version with the
+authenticated host. Bootstrap-loaded clients also reject routing metadata that
+changes after exact client selection. Release activation verifies immutable
+published manifests and artifact hashes and retains the prior recommendation
+for rollback; revoked manifests fail verification. Per-account minute
 traffic totals (connections, frames, bytes) are durably exported with operator
 state using alarm-batched counters with 24-hour retention, and the idle-host
 heartbeat interval increased from 30 to 40 seconds while retaining a 20-second
