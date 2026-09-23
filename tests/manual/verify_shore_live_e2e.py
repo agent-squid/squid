@@ -37,6 +37,21 @@ def timestamp(value: datetime) -> str:
     return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+async def recv_binary(browser, timeout: float) -> bytes:
+    """Wait for the next binary (protocol) frame, discarding relay-authored text
+    frames -- security notifications and control messages -- the same way the
+    real browser client's receive() routes them to a separate listener instead
+    of the pending request/response (shore/browser/src/client.ts:429-446)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        data = await asyncio.wait_for(browser.recv(), remaining)
+        if isinstance(data, bytes):
+            return data
+
+
 def authenticate(relay: str, username: str, email: str,
                  magic_code: str | None, totp_code: str | None) -> str:
     """Complete the public login flow and return the in-memory session cookie."""
@@ -151,16 +166,16 @@ async def verify(identity_dir: Path, token: str, timeout: float) -> None:
         origin = host.relay_url.replace("wss://", "https://", 1).split("/@", 1)[0]
         async with connect(url, origin=origin, additional_headers={"Cookie": f"__Host-shore_session={token}"}, open_timeout=timeout) as browser:
             await browser.send(packet)
-            confirmation, host_signing, host_agreement = finish_pair(await asyncio.wait_for(browser.recv(), timeout), key, binding)
+            confirmation, host_signing, host_agreement = finish_pair(await recv_binary(browser, timeout), key, binding)
             if (fingerprint(ed25519.Ed25519PublicKey.from_public_bytes(host_signing)) != started["offer"]["host_sign_fingerprint"]
                     or fingerprint(x25519.X25519PublicKey.from_public_bytes(host_agreement)) != started["offer"]["host_enc_fingerprint"]):
                 raise RuntimeError("host keys do not match pairing offer")
+            # The real client (browser/src/client.ts's pair()) sends the confirmation and
+            # returns without waiting for anything further: the relay intercepts the host's
+            # pairing_approved frame (shore/src/index.ts:2202-2225) and never forwards it, and
+            # any resulting browser_device_paired security notification arrives asynchronously
+            # as a text frame recv_binary below will skip.
             await browser.send(confirmation)
-            approved = json.loads(await asyncio.wait_for(browser.recv(), timeout))
-            if (not isinstance(approved, dict) or approved.get("type") != "pairing_approved"
-                    or approved.get("ceremony_id") != started["offer"]["ceremony_id"] or approved.get("device_id") != device_id):
-                raise RuntimeError(f"unexpected pairing-approval response: {approved!r} "
-                    f"(expected ceremony_id={started['offer']['ceremony_id']!r} device_id={device_id!r})")
             print("VERIFY: sending an encrypted probe and checking retry idempotency…", file=sys.stderr)
             request_id, now = uuid7(), datetime.now(timezone.utc)
             probe = canonical(seal_envelope({"v": 1, "type": "shore.probe", "payload": {"nonce": "live-ms5"}},
@@ -168,14 +183,14 @@ async def verify(identity_dir: Path, token: str, timeout: float) -> None:
                 direction="browser_to_host", seq=1, request_id=request_id, issued_at=timestamp(now), expires_at=timestamp(now + timedelta(seconds=30)),
                 sender_signing=signing, sender_agreement=agreement, receiver_agreement=x25519.X25519PublicKey.from_public_bytes(host_agreement)))
             await browser.send(probe)
-            response = await asyncio.wait_for(browser.recv(), timeout)
+            response = await recv_binary(browser, timeout)
             opened = open_envelope(json.loads(response), expected={"account_id": host.channel.account_id, "host_id": host.host_id,
                 "device_id": device_id, "key_epoch": host.channel.key_epoch, "direction": "host_to_browser"},
                 sender_signing=ed25519.Ed25519PublicKey.from_public_bytes(host_signing), receiver_agreement=agreement,
                 sender_agreement=x25519.X25519PublicKey.from_public_bytes(host_agreement), replay=ReplayStore(identity_dir / "live-verifier-replay.sqlite3"))
             if opened != {"v": 1, "type": "shore.probe.result", "payload": {"nonce": "live-ms5"}}: raise RuntimeError("unexpected probe response")
             await browser.send(probe)
-            try: duplicate = await asyncio.wait_for(browser.recv(), 2)
+            try: duplicate = await recv_binary(browser, 2)
             except asyncio.TimeoutError: duplicate = None
             if duplicate is not None: raise RuntimeError("byte-identical retry dispatched twice")
         deadline = time.monotonic() + timeout
