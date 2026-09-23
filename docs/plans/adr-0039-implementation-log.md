@@ -2438,12 +2438,12 @@ Completed first slice:
 
 Remaining slices before 6.2 is complete:
 
-1. A separately deployed version-independent bootstrap that selects the
-   verified manifest; exact host advertisement and browser mismatch rejection
-   are complete.
-2. Cross-repository publish/retention automation; immutable manifests, hashes,
-   atomic activation, revocation rejection, and paired rollback pointers are
+1. Deploying the version-independent bootstrap; its source, the `/client/*`
+   serving route, and exact host advertisement/browser mismatch rejection are
    complete.
+2. Running cross-repository publish/retention automation; its workflow source,
+   immutable manifests, hashes, atomic activation, revocation rejection, and
+   paired rollback pointers are complete.
 3. Pre-account per-route/device/IP dimensions and quota projections; durable
    per-account traffic export and the longer host lease interval are complete.
 4. Production alert-sink wiring and a witnessed immutable-archive restore
@@ -2485,6 +2485,65 @@ state using alarm-batched counters with 24-hour retention, and the idle-host
 heartbeat interval increased from 30 to 40 seconds while retaining a 20-second
 lease margin. The pairing surface now gives a tested, non-discovering local/Tailscale
 fallback instruction when Shore is unavailable.
+
+**Bootstrap and release-automation implementation follow-up (2026-09-23):**
+Shore now has source for both remaining ADR-0050 pieces from item 2, though
+neither is deployed or provisioned.
+
+- `src/client-release.ts` serves `/client/*` as a read-only, fail-closed proxy
+  in front of the (not-yet-created) private R2 bucket: exact-version manifests
+  (signature-verified against `SHORE_RELEASE_PUBLIC_KEYS` before being
+  returned), content-addressed objects, `stable.json`, revocations (presence
+  alone fails a version closed), and evidence, all with the caching semantics
+  ADR-0050 specifies. Development head is only served when
+  `SHORE_ENVIRONMENT === "preproduction"`. `wrangler.jsonc` gained the `RELEASES`
+  R2 binding, the `/client*` production route, and the public-key variable
+  (empty map today, so every manifest fails closed by default).
+- `client-bootstrap/bootstrap.js`/`.css` is the version-independent bootstrap:
+  it reads the exact required version from a `<meta>` tag the host page must
+  set (that page-side wiring is not done - see below), verifies the manifest's
+  signature and every asset's SHA-256 before loading anything, and renders a
+  static panel - never a command-capable session - on any failure, including a
+  verified revocation reason when the manifest fetch returns 410.
+- `.github/workflows/release.yml` implements the runbook's publish transaction:
+  input validation (including a PEP 440-correct check that `recommended=true`
+  is rejected for `rc`/`dev` versions), dual-repository checkout by exact SHA,
+  a reproducible-build comparison for the wheel, manifest build/sign/self-verify
+  (`scripts/sign-manifest.mjs`, new), R2 upload ordered content-before-manifest,
+  read-back verification, PyPI publish and hash verification, and an optional
+  `stable.json` advance (`scripts/update-stable-pointer.mjs`, new) gated on
+  PyPI success.
+- Fixed a real, pre-existing bug surfaced while building on top of it:
+  `release-manifest.mjs`'s version regex required a semver-style hyphen before
+  a prerelease suffix, so it rejected this project's actual PEP 440 versions
+  (`0.1.5rc9`, currently published on PyPI) - every real release candidate
+  would have failed manifest validation. Fixed there and in every new file
+  that had copied the same pattern, with regression tests.
+
+Still open, and not release-environment gates this repository alone can close:
+
+1. No build step produces the browser client bundle
+   (`client.js`/`client.css`) this pipeline and the bootstrap expect.
+   `pairing-app/` builds `pair-app.js` directly from `browser/src/client.ts`
+   and Shore serves it unversioned via the Worker's own `ASSETS` binding;
+   moving `pair.html` onto the bootstrap-loaded exact-version path is a
+   product decision, not made here. The release workflow's browser-asset step
+   is a deliberate placeholder that fails until that decision is made and the
+   build script exists.
+2. No infrastructure is provisioned: the R2 bucket, its scoped Cloudflare API
+   token, the release signing key, and PyPI trusted publishing for this
+   workflow all still need to be created, matching the readiness posture
+   `docs/runbooks/shore-release.md` already states.
+3. AgentSquid's existing tag-triggered `.github/workflows/publish.yml` would
+   race this new Shore-triggered publish once live, letting a wheel reach PyPI
+   before its paired client is verified in R2. Retiring or gating it is a
+   separate release-process decision, not made here.
+
+This closes the implementation portion of item 2 (design was already closed
+above); production evidence, the two items above, and item 2's still-open
+integration-testing sub-step (runbook step 9: bootstrap selection, login,
+pairing, multi-device convergence, revocation, receipts, audit export against
+real uploaded bytes) remain.
 
 #### 6.3 — Independent security review (action 3)
 
