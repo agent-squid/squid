@@ -1,6 +1,8 @@
 # Plan: ADR-0039 Shore remote access
 
-**Status:** In progress. Milestones 0–4 are complete. Milestone 5's audit implementation and preproduction deployment are complete; its operator-control and final-review gates remain. Milestone 6 has not started. External production users remain blocked. See the [implementation log](./adr-0039-implementation-log.md).
+**Status:** In progress. Milestones 0–5 are complete; Milestone 6 is in
+progress. External production users remain blocked pending Milestone 6. See
+the [implementation log](./adr-0039-implementation-log.md).
 
 This is the implementation plan for
 [ADR-0039](../decisions/0039-remote-access-via-shore-relay.md). The ADR owns
@@ -229,10 +231,12 @@ The completed work log, test evidence, deployment notes, and remaining sub-gates
 
 ## Milestone 5 — Correlated tamper-evident audit
 
-**Status:** Implementation complete. Preproduction B2 verification, Cloudflare
+**Status:** Complete (2026-09-22). Preproduction B2 verification, Cloudflare
 Access provisioning and operator-plane deployment, disposable-account repair,
-and the complete live verifier/archive acknowledgement are all confirmed done;
-final independent security review remains the only open operational gate.
+the complete live verifier/archive acknowledgement, and the final independent
+security review (codex) all passed with no unresolved critical, high, or
+medium findings. Production enablement of the operator control plane's
+mutating operations remains a separate deployment gate.
 [Implementation history](./adr-0039-implementation-log.md#milestone-5--correlated-tamper-evident-audit).
 
 **Objective:** make account, pairing, capability, and command activity
@@ -291,7 +295,8 @@ The completed work log, test evidence, deployment notes, and remaining sub-gates
 
 ## Milestone 6 — Production hardening and staged rollout
 
-**Status:** Not started; depends on Milestone 5.
+**Status:** In progress; Milestone 5 is complete, 6.1 is partially complete,
+and 6.2 is under implementation.
 
 **Objective:** prove the system fails closed and is operable before enabling
 remote mutations.

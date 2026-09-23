@@ -177,7 +177,7 @@ class ShoreChannel:
             self._pairing_requests = {key: value for key, value in self._pairing_requests.items()
                                       if checked_at - value[1] < _PAIRING_REQUEST_TTL_SECONDS}
             return [{"request_id": request["request_id"], "device_id": request["device_id"],
-                     "verification_code": hashlib.sha256(canonical(request)).hexdigest()[:8].upper(),
+                     "verification_code": hashlib.sha256(canonical(request)).hexdigest()[:16].upper(),
                      "received_at": received_at} for request, received_at in self._pairing_requests.values()]
 
     def approve_pairing_request(self, request_id: str, *, now: float | None = None) -> bytes:

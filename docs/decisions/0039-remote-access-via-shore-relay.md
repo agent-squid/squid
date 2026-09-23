@@ -221,9 +221,10 @@ giving users the shorter, single-domain URL.
   polling) a byproduct of the same mechanism, rather than a separate
   feature to build — closer to how a chat app keeps devices in sync than to
   a traditional request/response API. Request and message volume in this
-  design scales with connections, commands, and emitted state changes, not
-  with polling frequency or total registered user count — idle accounts
-  contribute negligible volume.
+  design scales with connections, lease heartbeats, commands, and emitted
+  state changes, not with polling frequency. Disconnected accounts contribute
+  no ongoing volume; each connected host currently emits two lease heartbeats
+  per minute and therefore has a non-zero Durable Objects quota floor.
 
 ### System and protocol flow
 
@@ -409,9 +410,10 @@ components were removed in Milestone 5.8 and must not be reintroduced.
 
 This design intentionally does not claim independent proof against complete
 Shore compromise. Shore can omit or fork both receipts and archive writes for a
-victim. Receipts provide immediate continuity evidence against faults and
-detectable equivocation; Object Lock provides retention after upload. A higher-
-assurance deployment needs an independent witness or external anchor, but never
+victim. Receipts provide immediate continuity evidence against faults and make
+equivocation detectable only when conflicting views are compared. Object Lock
+provides retention after upload. A higher-assurance deployment needs an
+independent witness or external anchor, but never
 B2 credentials distributed to AgentSquid hosts.
 
 Receipts do not replace the existing endpoint and identity controls. A stolen

@@ -182,6 +182,21 @@ def test_login_rejects_malformed_or_credentialed_relay_urls():
                    "--session-token", "session", "--relay", relay])
 
 
+def test_login_requires_exact_typed_confirmation_for_custom_relay(tmp_path, monkeypatch, capsys):
+    class Client:
+        def __init__(self, **_kwargs):
+            raise AssertionError("network client must not be constructed")
+
+    monkeypatch.setattr("agent.shore.httpx.Client", Client)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "https://relay.example.evil")
+    result = login(["--account-id", "018f1f25-3f6b-7d75-a4d1-62d771381b20",
+        "--session-token", "session", "--relay", "https://relay.example",
+        "--identity-dir", str(tmp_path / "shore")])
+    assert result == 1
+    assert "custom relay confirmation did not match" in capsys.readouterr().err
+    assert not (tmp_path / "shore").exists()
+
+
 @pytest.mark.parametrize("flag,value", [
     ("--username", "alice/../internal"), ("--username", "admin"),
     ("--account-id", "../../victim?route=host"), ("--account-id", "not-a-uuid"),
@@ -267,9 +282,10 @@ def test_login_performs_email_and_second_factor_flow_without_session_token(tmp_p
                 "signingKey": request["signingKey"], "agreementKey": request["agreementKey"]})
 
     monkeypatch.setattr("agent.shore.httpx.Client", Client)
+    codes = iter(["magic", "123456"])
+    monkeypatch.setattr("agent.shore.getpass.getpass", lambda _prompt: next(codes))
     result = login([
         "--username", "alice", "--email", "alice@example.com",
-        "--magic-code", "magic", "--totp-code", "123456",
         "--identity-dir", str(tmp_path / "shore"),
     ])
     assert result == 0
@@ -326,8 +342,10 @@ def test_login_prints_totp_enrollment_qr(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr("agent.shore.httpx.Client", Client)
     monkeypatch.setattr("agent.shore._print_totp_qr", lambda secret, username, relay: calls.append((secret, username, relay)))
-    assert login(["--username", "alice", "--email", "alice@example.com", "--magic-code", "magic",
-        "--totp-code", "123456", "--identity-dir", str(tmp_path / "shore")]) == 0
+    codes = iter(["magic", "123456"])
+    monkeypatch.setattr("agent.shore.getpass.getpass", lambda _prompt: next(codes))
+    assert login(["--username", "alice", "--email", "alice@example.com",
+        "--identity-dir", str(tmp_path / "shore")]) == 0
     assert calls == [("ABCDEFGHIJKLMNOP", "alice", "https://agentsquid.ai")]
     assert "Scan this QR code with your authenticator app:" in capsys.readouterr().err
 

@@ -9,9 +9,9 @@ for architecture, security invariants, sequencing, acceptance gates, and current
 
 **Status**
 
-- State: In progress; Milestones 0–4 are complete.
-- Verified: Milestones 3 and 4 passed independent review with no unresolved critical or high findings.
-- Remaining: Milestone 5 operational provisioning, full live verification, and final review; production access stays blocked.
+- State: In progress; Milestones 0–5 are complete.
+- Verified: Milestones 3, 4, and 5 passed independent review with no unresolved critical or high findings.
+- Remaining: Milestone 6 (production hardening and staged rollout) is in progress; production access stays blocked pending it.
 
 
 ## Milestone 1 — Relay skeleton and opaque relay
@@ -326,8 +326,8 @@ and holds it for at most 120s (`ShoreChannel.receive_pairing_request`,
 `_PAIRING_REQUEST_TTL_SECONDS`), capped at 20 pending requests. It is **not**
 auto-approved — the existing `/pair` chat-command modal (`ui/app.js`) now
 also polls `GET /shore/pairing/requests` every 2s and lists each pending
-request with an 8-hex-character verification code
-(`sha256(JCS(request))[:4]`, uppercase) for a human to compare against the
+request with a 16-hex-character (64-bit) verification code
+(`sha256(JCS(request))[:8]`, uppercase) for a human to compare against the
 same code shown in the browser tab before clicking Approve, which calls
 `POST /shore/pairing/requests/approve`. This preserves the non-negotiable
 invariant that relay input alone is never a device-trust decision — the
@@ -1310,9 +1310,9 @@ expiry/immediate-revocation surface. None of this should be built now.
 
 **Status**
 
-- State: Milestone implementation complete; preproduction audit storage deployed and B2-verified (2026-09-11).
+- State: Complete (2026-09-22). Every acceptance gate has passed; see addenda below.
 - Delivered: Relay and host audit chains, Shore-only archival, signed receipts, security history and notifications, and the operator control plane implementation.
-- Remaining operational gate: final independent security review. Cloudflare Access provisioning, operator-plane preproduction deployment, disposable-account repair, and the live verifier/archive acknowledgement are all confirmed done (2026-09-22, see addenda below).
+- Verified: Cloudflare Access provisioning, operator-plane preproduction deployment, disposable-account repair, the live verifier/archive acknowledgement, and the final independent security review (codex; no unresolved critical, high, or medium findings) are all confirmed done (2026-09-22, see addenda below). Production enablement of operator mutation is a separate deployment action.
 
 
 ### Implementation plan
@@ -2271,3 +2271,196 @@ accepted on report. Remaining gate: the final independent Milestone 5
 security review has not started -- a same-person self-review performed
 earlier the same day does not satisfy "independent" per this document's own
 usage (e.g. the codex-reviewed passes above).
+
+**2026-09-22 addendum -- Milestone 5 complete: final independent security
+review passed.** An independent review (codex), separate from the
+implementer, evaluated Milestone 5 against this log's acceptance evidence and
+returned **approved** with no critical, high, or medium findings. Evidence
+reviewed: the live verifier's successful real pairing, encrypted probe,
+duplicate-retry suppression, host audit export, and Shore-signed archive
+acknowledgement (above); the verifier-script fix correctly separating
+relay-authored text notifications from binary protocol frames; the AgentSquid
+focused suite (74 passed); the Shore suite (136 passed); TypeScript typecheck
+passing; and confirmation that production mutation remains disabled. The
+review separately noted that this plan's opening status and this log's
+overall-status section still described already-completed operational gates
+as outstanding -- non-blocking documentation drift, corrected by this same
+addendum pass. This closes Milestone 5's last open gate; production
+enablement of the operator control plane's mutating operations remains a
+separate deployment action, not implied by this review.
+
+## Milestone 6 — Production hardening and staged rollout
+
+**Status**
+
+- Outcome: In progress; 6.1 is partially complete, 6.2's first hardening
+  slice is complete, and 6.3 has produced actionable findings.
+- Scope confirmed (2026-09-22): four action groups per the plan doc — (1)
+  end-to-end tests for the listed failure/recovery scenarios, (2) abuse
+  controls, CSP, exact-version client selection, release manifests, quota
+  projections/degradation thresholds, kill switches, and operational hygiene
+  (runbooks, alerts, backups, secret rotation, dependency scanning), (3)
+  independent security review, (4) staged rollout with a per-stage
+  server-side disable path. Action 3 depends on action 2's artifacts
+  existing; action 1 has no dependency on 2-4 and can start immediately.
+
+### Implementation plan
+
+**Key findings (survey, 2026-09-22)**
+
+- Existing e2e coverage already exercises several of Milestone 6's listed
+  failure modes as by-products of Milestones 3-5: hibernation-safe
+  attachment persistence (`test/shore.test.ts:1822`), stale-heartbeat quiet
+  reconnect (`:1833`), idle-socket alarm expiry (`:1846`),
+  oversized/rate-abusive deterministic close codes (`:1866`),
+  quota-degraded atomic revocation (`:1874`), host-offline deterministic
+  error (`:1695`), sequential same-key host displacement with redacted
+  evidence (`:1702`, `:1735`, `:1743`), different-key displacement
+  rejection (`:1883`), backpressured receipt-ack outcome (`:1414`,
+  `:1562`), and export-cursor advance/no-advance on B2 upload
+  success/failure (`:1997`, `:2030`).
+- Harness (`cloudflare:test`'s `env`, `runInDurableObject`,
+  `runDurableObjectAlarm`, `SELF`, plus this file's
+  `socket`/`account`/`register`/`remoteSession` helpers) gives direct
+  read/write access to a DO's in-memory hibernation attachments and
+  persisted storage, and can fire its alarm on demand — that primitive is
+  what nearly every scenario below reuses.
+- None of the six scenarios the plan doc names as still open have any
+  coverage: Worker/DO restart mid-session, Cloudflare region change, true
+  network loss (vs. a clean WebSocket close), duplicate simultaneous
+  connections from one device, cursor rollover, and multi-device
+  convergence.
+- Action 2 is confirmed greenfield by direct grep against `src/`, `.github/`,
+  and `docs/`: zero hits for `required_client_version`,
+  release-manifest publish/verify/rollback, content-hashed/shared assets,
+  reproducible-build hashes, secret-rotation tooling, or a `runbooks/`
+  directory. `deploy-production.yml` is fully disabled (`if: ${{ false }}`)
+  since Milestone 5.8 stripped its credentials. Rate limiting and basic CSP
+  headers exist (`src/index.ts`, `src/admin.ts:330-334`); dependency
+  scanning is only `npm audit --audit-level=high` in CI, no bot. Quota
+  projections and the 50/70/85/95% degradation thresholds are specified in
+  `docs/shore-security-operations.md` but explicitly noted there as not yet
+  implemented — only raw per-route counters exist.
+
+#### 6.1 — E2E tests for the six open failure/recovery scenarios (action 1)
+
+Partially complete (2026-09-22). Coverage is grounded in what the harness can
+actually simulate rather than a literal network/process fault injector. The
+runtime eviction helper cannot drain this DO while live hibernated sockets are
+retained, so restart coverage constructs a fresh `Account` over the same
+durable state and server sockets instead:
+
+1. **Worker/DO restart mid-session** — the local Workers test runtime has no
+   "kill and recreate this DO instance" hook, but production restarts are
+   exactly what the hibernation API (`state.getWebSockets`/
+   `serializeAttachment`/`deserializeAttachment`, already exercised at
+   `:1822`) exists to survive: sockets, not JS heap state, are what's
+   disposable. Current test attaches host+browser sockets and constructs a
+   fresh `Account` over the same state to prove both live roles and serialized
+   identity metadata are reconstructed. Pending-frame replay across a literal
+   runtime eviction remains unproven because the harness eviction primitive
+   does not drain while these live sockets are retained.
+2. **Region change** — Durable Objects are single-location by design, so
+   "region change" in practice means the client's edge PoP changes
+   mid-connection, not the DO itself. Test as: an existing session
+   reconnects via `hostSocketHeaders`/`socketResponse` with a different
+   `cf-connecting-ip`. Existing coverage proves the deliberate healthy
+   same-key displacement and privacy-safe alert behavior; it is not described
+   as an ordinary reconnect.
+3. **Network loss (vs. clean close)** — every existing `closed()`-based test
+   observes a clean WebSocket close frame; real network loss never sends
+   one. Test: attach a socket, never call `.close()`, force the heartbeat
+   deadline into the past exactly as `:1846` does, and confirm the
+   alarm-driven expiry path (not a close-event-driven path) is what
+   reclaims it — i.e. prove reclamation doesn't depend on client
+   cooperation.
+4. **Duplicate simultaneous connections (same device)** — distinct from the
+   existing sequential host-key displacement tests (`:1702` et seq.), which
+   close the first connection before the second's response resolves. Test:
+   attach two browser sockets with the same device ID and assert both remain
+   in the browser peer set, matching the implemented tab fan-out semantics.
+5. **Cursor rollover** — the audit chain's `seq` (`src/index.ts:1019`) and
+   the dashboard subscribe cursor (`browser/src/dashboard-session.ts:177`,
+   a plain `Number`) are both unbounded monotonic counters with no explicit
+   rollover handling anywhere in the codebase. Test: seed
+   `audit-chain-tip`/`audit-export-cursor` at `Number.MAX_SAFE_INTEGER - 1`
+   via `runInDurableObject`'s direct storage access (the pattern `:1997`/
+   `:2030` already use to seed export-cursor state), append one more event,
+   and assert the chain-validation function (`src/index.ts:264`) either
+   continues correctly or fails closed rather than silently
+   wrapping/colliding.
+6. **Multi-device convergence** — current coverage proves two distinct device
+   sockets remain attached concurrently and relies on the separately tested
+   common fan-out path. An end-to-end assertion of exactly-once delivery and
+   application-level cursor convergence remains open.
+
+Region change and network loss intentionally reuse the existing
+reconnect-with-new-IP and alarm-driven expiry cases because those are the
+same server-side mechanisms. The new cases cover fresh-instance reconstruction
+over live hibernated sockets, simultaneous same-device attachment, safe audit-sequence
+exhaustion, and distinct-device attachment. Existing opaque-relay coverage
+proves the shared host-to-browser fan-out path used by those attached sockets.
+Literal eviction with in-flight state and application-level multi-device cursor
+convergence remain gates before 6.1 can be marked complete.
+
+#### 6.2 — Abuse controls, CSP, versioning, quota, kill switch, ops hygiene (action 2)
+
+In progress (2026-09-22).
+
+Completed first slice:
+
+- Added a deterministic runtime degradation policy for the documented
+  50/70/85/95/100-percent quota thresholds, a paid-plan spend ceiling, and a
+  manual global kill switch. At 95%, new sockets are pairing-only while
+  already-upgraded sockets remain available. At 100%, the spend ceiling, or a
+  manual hard stop, new relay upgrades fail with `shore_unavailable`; active
+  sockets close on reconstruction or their next frame. Login, recovery, and
+  revocation surfaces retain reserved capacity.
+- Added production/preproduction configuration defaults and tests covering
+  every threshold, spend exhaustion, manual activation, the relay gate, and
+  preservation of the login surface.
+- Added weekly Dependabot coverage for all three npm lockfiles, Go modules,
+  and GitHub Actions in addition to the existing high-severity `npm audit` CI
+  gates.
+- Added operational runbooks for degradation/kill-switch activation and
+  recovery, secret rotation, and backup/restore/migration rollback.
+- Confirmed the existing static client surfaces already set restrictive CSP,
+  frame denial, MIME-sniffing protection, no-referrer, no-store, and
+  same-origin-only scripts/connects.
+
+Remaining slices before 6.2 is complete:
+
+1. Exact `required_client_version` host advertisement and a small
+   version-independent bootstrap that rejects missing, malformed, revoked, or
+   mismatched manifests without opening a command-capable session.
+2. Immutable release manifests, content-hashed assets, reproducible binary and
+   client hashes, atomic publish verification, retention, and paired rollback.
+3. Pre-account per-route/account/device/IP traffic accounting, exported
+   metrics and quota projections, a longer host lease interval to reduce the
+   connected-host quota floor, plus tested 70%/85% optional-work reduction
+   once those nonessential remote views exist.
+4. Alert wiring, immutable-archive restore evidence, and a tested documented
+   opt-in local/Tailscale fallback UI before launch.
+
+#### 6.3 — Independent security review (action 3)
+
+In progress (2026-09-22). The first adversarial review confirmed the relay-
+blind envelope and local trust invariants, and found two actionable pairing/
+login weaknesses. The browser-request pairing SAS has been expanded from 32
+to 64 bits on both endpoints. `agentsquid login` now requires the operator to
+type the exact origin for every non-default relay before identity creation or
+network access, and no longer accepts magic-link or TOTP secrets as command-
+line arguments. Tests cover the SAS width, cross-process agreement, and the
+custom-relay fail-closed path.
+
+The same review clarified two residual claims: receipt equivocation requires
+comparison with an independent view, and connected hosts have a heartbeat
+quota floor. The ADR now says both explicitly. Final review remains blocked on
+6.2's reproducible release/manifests and two-person deployment control; the
+Shore-served JavaScript supply chain remains the dominant launch blocker.
+
+#### 6.4 — Staged rollout with per-stage disable (action 4)
+
+Not started. The capability substrate to stage on top of already exists
+(default-deny registry, `DeviceTrustStore.revoke()`); this sub-milestone is
+stage-gating/config work, not a rebuild of that substrate.

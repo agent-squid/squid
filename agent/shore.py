@@ -24,6 +24,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 from .shore_crypto import UUID7, uuid7, valid_relay_url, valid_key_epoch
 
 _valid_relay_url = valid_relay_url
+_DEFAULT_RELAY = "https://agentsquid.ai"
 
 
 @dataclass(frozen=True)
@@ -207,16 +208,31 @@ def _print_totp_qr(secret: str, username: str, relay: str) -> None:
     qr.print_ascii(out=sys.stderr, tty=False, invert=True)
 
 
+def _confirm_custom_relay(relay: str) -> None:
+    relay = relay.rstrip("/")
+    if relay == _DEFAULT_RELAY:
+        return
+    print(
+        "WARNING: A custom relay receives your account login and authenticator enrollment data.\n"
+        "Continue only if you operate and trust this exact relay.",
+        file=sys.stderr,
+    )
+    try:
+        confirmation = input(f"Type the full relay URL to continue ({relay}): ").strip()
+    except EOFError:
+        confirmation = ""
+    if confirmation != relay:
+        raise RuntimeError("custom relay confirmation did not match; no credentials were sent")
+
+
 def login(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="agentsquid login", description="Register this machine as the account's Shore host")
-    parser.add_argument("--relay", default="https://agentsquid.ai")
+    parser.add_argument("--relay", default=_DEFAULT_RELAY)
     account = parser.add_mutually_exclusive_group(required=True)
     account.add_argument("--username", help="AgentSquid username (recommended)")
     account.add_argument("--account-id", help="immutable account ID for administrative use")
     parser.add_argument("--session-token", default=os.environ.get("AGENTSQUID_SESSION_TOKEN"))
     parser.add_argument("--email", help="account email (prompted when omitted)")
-    parser.add_argument("--magic-code", help=argparse.SUPPRESS)
-    parser.add_argument("--totp-code", help=argparse.SUPPRESS)
     parser.add_argument("--identity-dir", type=Path, default=Path.home() / ".squid" / "shore")
     args = parser.parse_args(argv)
     if args.account_id and not args.session_token:
@@ -231,6 +247,7 @@ def login(argv: list[str]) -> int:
         parser.error("--relay must be an absolute HTTP(S) URL without embedded credentials")
 
     try:
+        _confirm_custom_relay(args.relay)
         host_id, signing, agreement = _load_or_new_identity(args.identity_dir)
         endpoint = (
             f"{args.relay.rstrip('/')}/@{args.username}"
@@ -251,7 +268,7 @@ def login(argv: list[str]) -> int:
                     _require_response(signup_response, "account signup")
                 else:
                     _require_response(magic_response, "sign-in email request")
-                magic_code = args.magic_code or getpass.getpass("Sign-in code from email (input hidden): ")
+                magic_code = getpass.getpass("Sign-in code from email (input hidden): ")
                 consume_response = client.post(endpoint + "/auth/consume", json={"token": magic_code})
                 _require_response(consume_response, "email sign-in code")
                 consume = consume_response.json()
@@ -270,7 +287,7 @@ def login(argv: list[str]) -> int:
                     print("Authenticator already enrolled; use its current 6-digit code (input is hidden).", file=sys.stderr)
                 else:
                     _require_response(enroll_response, "authenticator enrollment")
-                totp_code = args.totp_code or getpass.getpass("Authenticator code (input hidden): ")
+                totp_code = getpass.getpass("Authenticator code (input hidden): ")
                 step_response = client.post(endpoint + "/auth/step-up", headers={"x-shore-csrf": csrf}, json={"code": totp_code})
                 _require_response(step_response, "authenticator verification")
                 stepped = step_response.json()

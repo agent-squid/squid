@@ -74,7 +74,7 @@ def test_authenticated_browser_pairing_requires_local_approval_and_returns_encry
     channel.receive_pairing_request(request, now=110)  # replay must not extend approval lifetime
     assert channel.list_pairing_requests(now=101) == [
         {"request_id": request_id, "device_id": DEVICE,
-         "verification_code": hashlib.sha256(canonical(request)).hexdigest()[:8].upper(), "received_at": 100}
+         "verification_code": hashlib.sha256(canonical(request)).hexdigest()[:16].upper(), "received_at": 100}
     ]
     response = json.loads(channel.approve_pairing_request(request_id, now=101))
     assert channel.list_pairing_requests(now=101) == []
