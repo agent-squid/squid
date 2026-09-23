@@ -295,8 +295,11 @@ The completed work log, test evidence, deployment notes, and remaining sub-gates
 
 ## Milestone 6 — Production hardening and staged rollout
 
-**Status:** In progress; Milestone 5 and 6.1 are complete,
-and 6.2 is under implementation.
+**Status:** In progress; Milestone 5 and 6.1 are complete. 6.2's repository
+controls are substantially implemented, but 6.2 remains open pending the
+cross-repository production release handoff, production alert-sink activation,
+and witnessed immutable-archive restore evidence. These deployment records
+must not be replaced by repository-only test results.
 
 **Objective:** prove the system fails closed and is operable before enabling
 remote mutations.

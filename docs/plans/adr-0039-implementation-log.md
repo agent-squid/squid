@@ -2293,8 +2293,10 @@ separate deployment action, not implied by this review.
 
 **Status**
 
-- Outcome: In progress; 6.1 is complete, 6.2's first hardening
-  slice is complete, and 6.3 has produced actionable findings.
+- Outcome: In progress; 6.1 is complete. 6.2's in-repository hardening is
+  substantially complete, but 6.2 remains blocked on the production release
+  handoff, alert-sink activation, and witnessed restore evidence described
+  below. 6.3 has produced actionable findings.
 - Scope confirmed (2026-09-22): four action groups per the plan doc — (1)
   end-to-end tests for the listed failure/recovery scenarios, (2) abuse
   controls, CSP, exact-version client selection, release manifests, quota
@@ -2409,7 +2411,9 @@ this closes 6.1.
 
 #### 6.2 — Abuse controls, CSP, versioning, quota, kill switch, ops hygiene (action 2)
 
-In progress (2026-09-22).
+In progress (updated 2026-09-23). The implemented controls and their tests are
+ready, but this action is not complete until its production/operational gates
+have evidence. Do not infer production readiness from passing repository tests.
 
 Completed first slice:
 
@@ -2444,6 +2448,12 @@ Remaining slices before 6.2 is complete:
    per-account traffic export and the longer host lease interval are complete.
 4. Production alert-sink wiring and a witnessed immutable-archive restore
    record; the tested local/Tailscale fallback UI is complete.
+
+These are release-environment gates, not documentation-only tasks. Completion
+requires choosing and configuring the cross-repository artifact handoff,
+provisioning the production alert destination and credentials, and recording a
+restore drill witnessed by the archive custodian. None can be truthfully
+asserted by an isolated source-tree change, so 6.2 remains open.
 
 **Release-integrity follow-up (2026-09-23):** Shore now includes a plain-Node
 release-manifest CLI and tests for deterministic SHA-256 manifests that bind one
