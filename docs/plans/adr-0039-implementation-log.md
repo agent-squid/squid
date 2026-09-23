@@ -1312,7 +1312,7 @@ expiry/immediate-revocation surface. None of this should be built now.
 
 - State: Milestone implementation complete; preproduction audit storage deployed and B2-verified (2026-09-11).
 - Delivered: Relay and host audit chains, Shore-only archival, signed receipts, security history and notifications, and the operator control plane implementation.
-- Remaining operational gates: the complete live verifier/archive acknowledgement, and final independent security review. Cloudflare Access provisioning, operator-plane preproduction deployment, and disposable-account repair are all confirmed done (2026-09-22, see addenda below).
+- Remaining operational gate: final independent security review. Cloudflare Access provisioning, operator-plane preproduction deployment, disposable-account repair, and the live verifier/archive acknowledgement are all confirmed done (2026-09-22, see addenda below).
 
 
 ### Implementation plan
@@ -2245,3 +2245,29 @@ the 2026-09-12 attempt (needs an operator with the disposable account's
 email/TOTP access, since it requires a real magic-link code and is
 deliberately excluded from CI), and the final independent security review
 has not started.
+
+**2026-09-22 addendum — live verifier gate closed.** Rerunning
+`tests/manual/verify_shore_live_e2e.py` against the disposable `@haebin`
+account and `dev.agentsquid.ai` first failed at the pairing/probe step with
+`ShoreProtocolError('shore_invalid_frame')`. Root cause was a defect in the
+verifier script itself, not the protocol or deployment: it treated the next
+`recv()` after sending the pairing confirmation as the probe's encrypted
+reply, but the relay's `browser_device_paired` security notification
+(`shore/src/index.ts:2202-2225`, sent as a WebSocket *text* frame,
+independent of and racing with the protocol response) can arrive at exactly
+that point and was mistaken for the envelope, failing `open_envelope`'s
+field-set check. An intermediate fix (commit `3301d3b`, corrected by
+`f38a954`/`dca73d4`) wrongly assumed the browser receives a `pairing_approved`
+acknowledgement; in fact the relay intercepts and never forwards that frame.
+The final fix makes the script discard text frames the same way the real
+client's `receive()` does (`browser/src/client.ts:429-446`), only treating
+binary frames as protocol responses. Rerun the same day passed end-to-end:
+paired device `01a0cb98-497f-78b2-9e2e-9633ad78f21b`, probe request
+`01a0cb98-4a8f-75e4-907d-bf842279dcd1` confirmed idempotent on retry, and the
+Shore-signed archive acknowledgement was observed before exit. This closes
+the live-verifier/archive-acknowledgement gate. Verified directly by this
+log's author (ran the script and read its `PASS:` output), not merely
+accepted on report. Remaining gate: the final independent Milestone 5
+security review has not started -- a same-person self-review performed
+earlier the same day does not satisfy "independent" per this document's own
+usage (e.g. the codex-reviewed passes above).

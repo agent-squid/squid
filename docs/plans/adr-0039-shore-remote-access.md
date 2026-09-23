@@ -1,6 +1,6 @@
 # Plan: ADR-0039 Shore remote access
 
-**Status:** In progress. Milestones 0–4 are complete. Milestone 5's audit implementation and preproduction deployment are complete; its operator-control, live-verification, and final-review gates remain. Milestone 6 has not started. External production users remain blocked. See the [implementation log](./adr-0039-implementation-log.md).
+**Status:** In progress. Milestones 0–4 are complete. Milestone 5's audit implementation and preproduction deployment are complete; its operator-control and final-review gates remain. Milestone 6 has not started. External production users remain blocked. See the [implementation log](./adr-0039-implementation-log.md).
 
 This is the implementation plan for
 [ADR-0039](../decisions/0039-remote-access-via-shore-relay.md). The ADR owns
@@ -229,10 +229,11 @@ The completed work log, test evidence, deployment notes, and remaining sub-gates
 
 ## Milestone 5 — Correlated tamper-evident audit
 
-**Status:** Implementation complete. Preproduction B2 verification is complete;
-Cloudflare Access provisioning and operator-plane deployment, disposable-account
-repair, the complete live verifier/archive acknowledgement, and final independent
-security review remain operational gates. [Implementation history](./adr-0039-implementation-log.md#milestone-5--correlated-tamper-evident-audit).
+**Status:** Implementation complete. Preproduction B2 verification, Cloudflare
+Access provisioning and operator-plane deployment, disposable-account repair,
+and the complete live verifier/archive acknowledgement are all confirmed done;
+final independent security review remains the only open operational gate.
+[Implementation history](./adr-0039-implementation-log.md#milestone-5--correlated-tamper-evident-audit).
 
 **Objective:** make account, pairing, capability, and command activity
 attributable without storing command plaintext.
