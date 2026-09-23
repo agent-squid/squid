@@ -14,6 +14,7 @@ push liveness/backpressure section of docs/shore-protocol-v1.md.
 from __future__ import annotations
 
 import asyncio
+from importlib.metadata import version
 import hashlib
 import json
 import logging
@@ -47,6 +48,8 @@ from .shore_receipt import (
     PINNED_SHORE_RECEIPT_PUBLIC_KEYS_BY_ORIGIN, ReceiptVerificationError, VerifiedRelayReceipt,
     verify_relay_receipt,
 )
+
+CLIENT_RELEASE_VERSION = version("agentsquid")
 
 log = logging.getLogger(__name__)
 
@@ -538,7 +541,7 @@ class ShoreHostConnection:
 
     def __init__(self, channel: ShoreChannel, *, relay: str, username: str,
                  host_id: str, signing_key: ed25519.Ed25519PrivateKey,
-                 heartbeat_seconds: float = 30.0, base_backoff: float = 1.0,
+                 heartbeat_seconds: float = 40.0, base_backoff: float = 1.0,
                  max_backoff: float = 30.0, stable_seconds: float = 60.0):
         if not valid_relay_url(relay):
             raise ValueError("relay must use HTTPS, or HTTP on an explicit loopback host")
@@ -679,6 +682,7 @@ class ShoreHostConnection:
         proof = canonical({"challenge_id": challenge["id"], "host_id": self.host_id,
                            "nonce": challenge["nonce"], "purpose": "websocket", "v": 1})
         return {"x-shore-role": "host", "x-shore-host-id": self.host_id,
+                "x-shore-required-client-version": CLIENT_RELEASE_VERSION,
                 "x-shore-challenge-id": challenge["id"],
                 "x-shore-signature": b64url(self.signing_key.sign(proof))}
 

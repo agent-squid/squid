@@ -714,8 +714,8 @@ test('auto transport does not resubmit a command that times out after send', asy
   expect(httpChatRequests).toBe(0);
 });
 
-test('process row appearing after the timeout error does not revive a duplicate recovering bubble', async ({ page }) => {
-  test.setTimeout(15_000);
+test('process row appearing just after command timeout keeps the turn recovering', async ({ page }) => {
+  test.setTimeout(25_000);
   await page.addInitScript(() => {
     class StalledResultWebSocket {
       static CONNECTING = 0;
@@ -740,20 +740,14 @@ test('process row appearing after the timeout error does not revive a duplicate 
     }
     window.WebSocket = StalledResultWebSocket;
   });
-  // Simulates the real race deterministically: the server hasn't registered
-  // the process row yet when the catch block's own recoverMsgIdFromProcesses()
-  // checks (still no .msg-error in the DOM at that point), but it has by the
-  // time the finally block would redundantly check again a moment later
-  // (.msg-error is in the DOM by then, since showError() runs synchronously
-  // before finally's own check). A background procPoll (started at
-  // sendMessage's top, every 3s) also hits /processes; it gets the same
-  // "not yet" answer since it fires before any error is shown too.
+  // The accepted process becomes authoritative shortly after the client-side
+  // command timeout, as can happen while the server is restarting.
   await page.addInitScript(() => {
     const realFetch = window.fetch.bind(window);
+    const startedAt = Date.now();
     window.fetch = (url, opts) => {
       if (url === '/processes') {
-        const hasError = !!document.querySelector('.msg-error');
-        const rows = hasError
+        const rows = Date.now() - startedAt >= 5500
           ? [{ topic: 'default', agent: 'claude', adhoc: true, msg_id: 989, state: 'running' }]
           : [];
         return Promise.resolve(new Response(JSON.stringify(rows), {
@@ -770,15 +764,12 @@ test('process row appearing after the timeout error does not revive a duplicate 
   await page.goto('/');
   await sendMsg(page, 'race between timeout error and late process row');
 
-  await expect(page.locator(MSG_ERROR)).toContainText('timed out after submission', { timeout: 10_000 });
-  // Give the (buggy, pre-fix) finally-block retry a chance to fire and revive
-  // thinkingBubble into a second "Connection interrupted — recovering…" card.
-  await page.waitForTimeout(1000);
-  await expect(page.locator(THINKING)).toHaveCount(0);
-  await expect(page.locator(RESPONSE)).toHaveCount(1);
+  await expect(page.locator(THINKING)).toContainText('Connection interrupted — recovering…', { timeout: 18_000 });
+  await expect(page.locator(THINKING)).toHaveAttribute('data-msg-id', '989');
+  await expect(page.locator(MSG_ERROR)).toHaveCount(0);
 });
 
-test('late websocket start result replaces timeout error and reconciles discovered duplicate', async ({ page }) => {
+test('late websocket start result avoids a timeout error and reconciles discovered duplicate', async ({ page }) => {
   test.setTimeout(15_000);
   await page.addInitScript(() => {
     class LateResultWebSocket {
@@ -823,9 +814,8 @@ test('late websocket start result replaces timeout error and reconciles discover
   await page.goto('/');
   await sendMsg(page, 'late authoritative result');
 
-  await expect(page.locator(MSG_ERROR)).toContainText('timed out after submission', { timeout: 7000 });
-  await page.waitForTimeout(500); // let the deliberately later command.result reconcile the UI
   await expect(page.locator(RESPONSE)).toContainText('Recovered authoritative response', { timeout: 7000 });
+  await expect(page.locator(MSG_ERROR)).toHaveCount(0);
   await expect(page.locator(THINKING)).toHaveCount(0);
   await expect(page.locator(RESPONSE)).toHaveCount(1);
 });

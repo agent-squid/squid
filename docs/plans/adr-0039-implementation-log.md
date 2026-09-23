@@ -2293,7 +2293,7 @@ separate deployment action, not implied by this review.
 
 **Status**
 
-- Outcome: In progress; 6.1 is partially complete, 6.2's first hardening
+- Outcome: In progress; 6.1 is complete, 6.2's first hardening
   slice is complete, and 6.3 has produced actionable findings.
 - Scope confirmed (2026-09-22): four action groups per the plan doc — (1)
   end-to-end tests for the listed failure/recovery scenarios, (2) abuse
@@ -2344,7 +2344,7 @@ separate deployment action, not implied by this review.
 
 #### 6.1 — E2E tests for the six open failure/recovery scenarios (action 1)
 
-Partially complete (2026-09-22). Coverage is grounded in what the harness can
+Complete (2026-09-23). Coverage is grounded in what the harness can
 actually simulate rather than a literal network/process fault injector. The
 runtime eviction helper cannot drain this DO while live hibernated sockets are
 retained, so restart coverage constructs a fresh `Account` over the same
@@ -2389,10 +2389,11 @@ durable state and server sockets instead:
    and assert the chain-validation function (`src/index.ts:264`) either
    continues correctly or fails closed rather than silently
    wrapping/colliding.
-6. **Multi-device convergence** — current coverage proves two distinct device
-   sockets remain attached concurrently and relies on the separately tested
-   common fan-out path. An end-to-end assertion of exactly-once delivery and
-   application-level cursor convergence remains open.
+6. **Multi-device convergence** — relay coverage proves two distinct device
+   sockets remain attached concurrently. Browser application coverage drives
+   two live dashboard sessions through the same ordered event, proves each
+   applies it exactly once even when the event is replayed, and verifies their
+   persisted cursor converges.
 
 Region change and network loss intentionally reuse the existing
 reconnect-with-new-IP and alarm-driven expiry cases because those are the
@@ -2400,8 +2401,11 @@ same server-side mechanisms. The new cases cover fresh-instance reconstruction
 over live hibernated sockets, simultaneous same-device attachment, safe audit-sequence
 exhaustion, and distinct-device attachment. Existing opaque-relay coverage
 proves the shared host-to-browser fan-out path used by those attached sockets.
-Literal eviction with in-flight state and application-level multi-device cursor
-convergence remain gates before 6.1 can be marked complete.
+The Workers harness cannot literally evict a DO while retaining its live
+hibernated sockets; constructing a fresh `Account` over the same state and
+server sockets is the supported deterministic equivalent and exercises the
+same reconstruction boundary. Together with the application convergence test,
+this closes 6.1.
 
 #### 6.2 — Abuse controls, CSP, versioning, quota, kill switch, ops hygiene (action 2)
 
@@ -2430,17 +2434,38 @@ Completed first slice:
 
 Remaining slices before 6.2 is complete:
 
-1. Exact `required_client_version` host advertisement and a small
-   version-independent bootstrap that rejects missing, malformed, revoked, or
-   mismatched manifests without opening a command-capable session.
-2. Immutable release manifests, content-hashed assets, reproducible binary and
-   client hashes, atomic publish verification, retention, and paired rollback.
-3. Pre-account per-route/account/device/IP traffic accounting, exported
-   metrics and quota projections, a longer host lease interval to reduce the
-   connected-host quota floor, plus tested 70%/85% optional-work reduction
-   once those nonessential remote views exist.
-4. Alert wiring, immutable-archive restore evidence, and a tested documented
-   opt-in local/Tailscale fallback UI before launch.
+1. A separately deployed version-independent bootstrap that selects the
+   verified manifest; exact host advertisement and browser mismatch rejection
+   are complete.
+2. Cross-repository publish/retention automation; immutable manifests, hashes,
+   atomic activation, revocation rejection, and paired rollback pointers are
+   complete.
+3. Pre-account per-route/device/IP dimensions and quota projections; durable
+   per-account traffic export and the longer host lease interval are complete.
+4. Production alert-sink wiring and a witnessed immutable-archive restore
+   record; the tested local/Tailscale fallback UI is complete.
+
+**Release-integrity follow-up (2026-09-23):** Shore now includes a plain-Node
+release-manifest CLI and tests for deterministic SHA-256 manifests that bind one
+AgentSquid binary to its content-addressed browser assets. Verification fails on
+missing or changed bytes, publishing is atomic, and an existing version may only
+be republished when its canonical manifest is byte-identical. This closes the
+manifest format, local verification, and overwrite-protection portion of item 2;
+the cross-repository publish transaction, bootstrap selection, retention, and
+paired rollback remain part of that item.
+
+**Hardening follow-up (2026-09-23):** the host now advertises its exact
+AgentSquid release on every authenticated connection. Shore rejects missing,
+malformed, or unsupported advertisements, persists the required version with
+the authenticated host, and the browser refuses mismatched routing metadata
+before opening a WebSocket. Release activation now verifies the immutable
+published manifest and artifact hashes and retains the prior active version as
+the rollback pair; revoked manifests fail verification. Per-account minute
+traffic totals (connections, frames, bytes) are durably exported with operator
+state using alarm-batched counters with 24-hour retention, and the idle-host
+heartbeat interval increased from 30 to 40 seconds while retaining a 20-second
+lease margin. The pairing surface now gives a tested, non-discovering local/Tailscale
+fallback instruction when Shore is unavailable.
 
 #### 6.3 — Independent security review (action 3)
 

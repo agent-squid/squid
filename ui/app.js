@@ -4971,6 +4971,14 @@ async function sendMessage(text, opts = {}) {
   const topic = opts.broadcastTarget ? opts.broadcastTarget.topic : parsed.topic;
   const agent = opts.broadcastTarget ? opts.broadcastTarget.agent : parsed.agent;
   const adhoc = opts.broadcastTarget ? !!opts.broadcastTarget.fresh : parsed.adhoc;
+  // Snapshot matching work before submitting. Timeout recovery may only adopt
+  // a process that appeared after this turn began; otherwise an older running
+  // turn on the same topic/agent can be mistaken for the timed-out command.
+  const recoveryBaseline = fetch('/processes').then(async res => {
+    if (!res.ok) return null;
+    const rows = await res.json();
+    return new Set(Array.isArray(rows) ? rows.map(row => Number(row?.msg_id)).filter(Number.isFinite) : []);
+  }).catch(() => null);
   const flowRoute = route ? canonicalFlowRoute(route) : canonicalFlowRoute(opts.flowRoute);
   const chipDisplayFlowRoute = source === 'human' && topicChipEl?.classList.contains('route-chain')
     ? topicChipEl.textContent.trim()
@@ -5429,12 +5437,17 @@ async function sendMessage(text, opts = {}) {
       if (!res.ok) return false;
       const rows = await res.json();
       if (!Array.isArray(rows)) return false;
+      const baseline = await recoveryBaseline;
+      // Without a reliable pre-submission snapshot there is no safe way to
+      // distinguish this command from an older matching process.
+      if (baseline === null) return false;
       const matches = rows.filter(row => {
         if (!row || row.msg_id == null || row.state === 'idle') return false;
         if (row.topic !== topic) return false;
         if (Boolean(row.adhoc) !== Boolean(adhoc)) return false;
         const expectedAgent = resolvedAgent || agent;
         if (expectedAgent && row.agent !== expectedAgent) return false;
+        if (baseline.has(Number(row.msg_id))) return false;
         return true;
       });
       if (matches.length !== 1) return false;
@@ -5443,6 +5456,15 @@ async function sendMessage(text, opts = {}) {
     } catch {
       return false;
     }
+  }
+
+  async function waitForSubmittedTurnRecovery(timeoutMs = 2000) {
+    const deadline = Date.now() + timeoutMs;
+    while (!msgId && Date.now() < deadline) {
+      if (await recoverMsgIdFromProcesses()) return true;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    return !!msgId || recoverMsgIdFromProcesses();
   }
 
   function revealResponseBubble() {
@@ -6266,7 +6288,13 @@ async function sendMessage(text, opts = {}) {
     // arrived, don't leave sibling broadcast targets awaiting an id forever.
     if (opts.onFlowRunId && !flowRunIdEmitted) { opts.onFlowRunId(null); flowRunIdEmitted = true; }
     if (!completedFromStatus && err.name !== 'AbortError') {
-      if (msgId || await recoverMsgIdFromProcesses()) {
+      // A submitted chat.start can time out while its accepted turn is only
+      // just becoming visible after a server restart. Reconcile briefly with
+      // authoritative process state before committing a terminal error.
+      const recoveredSubmittedTurn = err.realtimeCommandTimedOut
+        ? await waitForSubmittedTurnRecovery()
+        : false;
+      if (msgId || recoveredSubmittedTurn || await recoverMsgIdFromProcesses()) {
         detachedPolling = true;
         statusBuf += (statusBuf ? '\n' : '') + 'Connection interrupted — recovering…';
         updateThinkingPreview();

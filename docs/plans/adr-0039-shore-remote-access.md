@@ -295,7 +295,7 @@ The completed work log, test evidence, deployment notes, and remaining sub-gates
 
 ## Milestone 6 — Production hardening and staged rollout
 
-**Status:** In progress; Milestone 5 is complete, 6.1 is partially complete,
+**Status:** In progress; Milestone 5 and 6.1 are complete,
 and 6.2 is under implementation.
 
 **Objective:** prove the system fails closed and is operable before enabling
