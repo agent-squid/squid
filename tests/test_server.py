@@ -2630,13 +2630,14 @@ def test_shore_pairing_begin_and_status_round_trip(monkeypatch):
         "agent.shore._load_runtime_config",
         lambda *_args, **_kwargs: SimpleNamespace(relay="https://agentsquid.ai", username="alice"),
     )
+    monkeypatch.setenv("AGENTSQUID_SHORE_CLIENT_VERSION", "2.4.0rc1")
     client = _loopback_client()
 
     begin = client.post("/shore/pairing/begin")
     assert begin.status_code == 200
     body = begin.json()
     assert body["code"] == "ABCDEF"
-    assert body["pair_url"].startswith("https://agentsquid.ai/@alice/pair#")
+    assert body["pair_url"].startswith("https://agentsquid.ai/@alice/pair?client_version=2.4.0rc1#")
     # The ceremony secret and offer must never appear in the URL's query or
     # path — only after the fragment marker, which a server never sees.
     assert "ABCDEF" not in body["pair_url"].split("#", 1)[0]
@@ -2644,6 +2645,23 @@ def test_shore_pairing_begin_and_status_round_trip(monkeypatch):
     status = client.get("/shore/pairing/status", params={"ceremony_id": body["ceremony_id"]})
     assert status.status_code == 200
     assert status.json() == {"status": "pending"}
+
+
+def test_shore_pairing_begin_rejects_invalid_client_version_before_starting_ceremony(monkeypatch):
+    started = []
+    channel = SimpleNamespace(begin_pairing=lambda ceremony_id: started.append(ceremony_id))
+    monkeypatch.setattr(server, "_shore_connection", SimpleNamespace(channel=channel))
+    monkeypatch.setattr(
+        "agent.shore._load_runtime_config",
+        lambda *_args, **_kwargs: SimpleNamespace(relay="https://agentsquid.ai", username="alice"),
+    )
+    monkeypatch.setenv("AGENTSQUID_SHORE_CLIENT_VERSION", "latest")
+
+    response = _loopback_client().post("/shore/pairing/begin")
+
+    assert response.status_code == 409
+    assert response.json() == {"error": "shore_invalid_client_release_version"}
+    assert started == []
 
 
 def test_shore_pairing_begin_surfaces_protocol_errors(monkeypatch):

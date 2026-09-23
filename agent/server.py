@@ -3081,15 +3081,24 @@ async def shore_pairing_begin(request: Request):
         return JSONResponse({"error": "shore_not_configured"}, status_code=400)
     from .shore import _load_runtime_config
     from .shore_crypto import ShoreProtocolError, uuid7
+    from .shore_transport import _client_release_version
     config = await asyncio.to_thread(_load_runtime_config, shore_identity_dir(_cfg))
     if config is None:
         return JSONResponse({"error": "shore_not_configured"}, status_code=400)
+    try:
+        client_version = _client_release_version()
+    except ShoreProtocolError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
     ceremony_id = uuid7()
     try:
         result = await asyncio.to_thread(_shore_connection.channel.begin_pairing, ceremony_id)
     except ShoreProtocolError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
-    pair_url = f"{config.relay.rstrip('/')}/@{config.username}/pair#{_shore_pair_fragment(result['offer'], result['code'])}"
+    pair_url = (
+        f"{config.relay.rstrip('/')}/@{config.username}/pair"
+        f"?client_version={urllib.parse.quote(client_version, safe='')}"
+        f"#{_shore_pair_fragment(result['offer'], result['code'])}"
+    )
     return JSONResponse({
         "ceremony_id": ceremony_id, "code": result["code"], "expires_at": result["expires_at"],
         "pair_url": pair_url,

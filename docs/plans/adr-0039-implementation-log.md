@@ -2530,29 +2530,29 @@ separate gates.
 
 Still open:
 
-1. No build step produces the browser client bundle
-   (`client.js`/`client.css`) this pipeline and the bootstrap expect.
-   `pairing-app/` builds `pair-app.js` directly from `browser/src/client.ts`
-   and Shore serves it unversioned via the Worker's own `ASSETS` binding;
-   moving `pair.html` onto the bootstrap-loaded exact-version path is a
-   product decision, not made here. The release workflow's browser-asset step
-   is a deliberate placeholder that fails until that decision is made and the
-   build script exists.
-2. The existing pairing/browser pages still need to move onto the bootstrap
-   path and emit the exact required-client `<meta>` value. Until then Shore
-   continues serving the current unversioned `pair-app.js` path.
-3. Deploy the bootstrap objects and `/client/*` serving changes, run the
+1. Deploy the bootstrap objects and `/client/*` serving changes, run the
    independent client workflow against the provisioned environment, and record
    immutable publication, retention, revocation, and recommendation-rollback
    evidence.
-4. Exercise bootstrap selection, login, pairing, multi-device convergence,
+2. Exercise bootstrap selection, login, pairing, multi-device convergence,
    reconnect/recovery, revocation, receipt continuity, and audit export against
    the real uploaded bytes.
 
+**Exact-client page migration follow-up (2026-09-23):** Shore's browser
+package now reproducibly builds the pairing application as the release
+workflow's `client.js` and copies its reviewed stylesheet as `client.css`; CI
+builds twice and compares the outputs. AgentSquid adds its validated selected
+client version to the non-secret query portion of each pairing URL while the
+ceremony offer and secret remain fragment-only. The Shore Worker validates
+that value, injects it into the bootstrap meta contract, and the pairing page
+loads only the version-independent `/client/bootstrap.js`. Missing or invalid
+versions fail before any client code loads. This closes the browser build and
+page-migration repository gaps above.
+
 This closes the implementation portion of item 2 (design was already closed
-above). Infrastructure provisioning is not an open gate. The browser build/page
-migration, deployment drill, uploaded-byte integration evidence, production
-alert sink, and witnessed archive restore remain.
+above). Infrastructure provisioning is not an open gate. The deployment drill,
+uploaded-byte integration evidence, production alert sink, pre-account traffic
+dimensions, and witnessed archive restore remain.
 
 #### 6.3 — Independent security review (action 3)
 
