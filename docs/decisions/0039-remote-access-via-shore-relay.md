@@ -150,6 +150,12 @@ an immutable manifest. Stable releases are retained by default; any future
 retention policy requires a separately documented support window and must not
 strand binaries still declared supported.
 
+The cross-repository build, R2 object model, exact-version resolution, development head, bootstrap,
+credential boundaries, rollback, revocation, retention, and evidence contract
+are specified by [ADR-0050](./0050-paired-release-distribution.md). ADR-0039
+continues to own the remote-access security requirement; ADR-0050 owns the
+release-distribution mechanism that satisfies it.
+
 ### Coexisting with the existing GitHub-Pages-hosted site
 
 `agentsquid.ai` already serves the project's marketing/docs site via GitHub
@@ -847,6 +853,7 @@ as v1 requirements, not later hardening:
 - Shore protocol v1: ../shore-protocol-v1.md
 - Shore state machines: ../shore-state-machines.md
 - Shore security and operations contract: ../shore-security-operations.md
+- Paired AgentSquid and Shore release distribution: ./0050-paired-release-distribution.md
 
 - Cloudflare DNS record limits per zone (Free: 200 for zones created on/after
   2024-09-01, 1,000 for older zones; Pro/Business/Enterprise: 3,500)

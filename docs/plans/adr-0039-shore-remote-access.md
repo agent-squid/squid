@@ -304,6 +304,11 @@ must not be replaced by repository-only test results.
 **Objective:** prove the system fails closed and is operable before enabling
 remote mutations.
 
+The paired binary/client release architecture is defined by
+[ADR-0050](../decisions/0050-paired-release-distribution.md); mutable
+configuration and operator procedures are maintained in Shore's
+`docs/runbooks/shore-release.md`.
+
 **Actions:**
 
 1. Add end-to-end tests for Worker/Durable Object restarts, region changes,

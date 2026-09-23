@@ -2455,6 +2455,15 @@ provisioning the production alert destination and credentials, and recording a
 restore drill witnessed by the archive custodian. None can be truthfully
 asserted by an isolated source-tree change, so 6.2 remains open.
 
+**Release-design follow-up (2026-09-23):** ADR-0050 now defines the selected
+private-R2 architecture, same-domain `/client/*` route, exact cross-repository
+SHA handoff, immutable version lookup, explicit development head, bootstrap,
+credential boundaries, rollback, revocation, retention, and evidence model.
+Shore's `docs/runbooks/shore-release.md` inventories the workflow inputs,
+variables, secrets, ownership, procedures, and drills. This closes the design
+decision for items 1 and 2, but not their implementation or production
+evidence gates.
+
 **Release-integrity follow-up (2026-09-23):** Shore now includes a plain-Node
 release-manifest CLI and tests for deterministic SHA-256 manifests that bind one
 AgentSquid binary to its content-addressed browser assets. Verification fails on
