@@ -2554,6 +2554,14 @@ above). Infrastructure provisioning is not an open gate. The deployment drill,
 uploaded-byte integration evidence, production alert sink, pre-account traffic
 dimensions, and witnessed archive restore remain.
 
+**Read-only client wiring follow-up (2026-09-24):** the exact-version browser
+bundle now serves both pairing and `/@<username>/client`. Successful pairing
+navigates to the AgentSquid Client, which drives the existing encrypted
+`ShoreDashboardSession` and renders connection/recovery state, active work,
+queued work, and recent ordered updates under the global read-only scope. The
+page exposes no mutation controls. Publication as a new immutable client
+version and the live dev integration drill remain deployment gates.
+
 #### 6.3 — Independent security review (action 3)
 
 In progress (2026-09-22). The first adversarial review confirmed the relay-
