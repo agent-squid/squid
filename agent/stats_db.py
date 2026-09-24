@@ -4885,6 +4885,26 @@ def _flow_scope_sql(filters: list[tuple[str, Optional[str]]], alias: str = "s") 
     return " OR ".join(clauses), params
 
 
+def _realtime_message_projection(item: dict, *, global_lifecycle: bool) -> dict:
+    """Return only fields consumed by realtime discovery/recovery clients.
+
+    Global lifecycle rows are discovery notices: clients fetch the message's
+    status endpoint on demand. Scoped rows additionally carry materialized
+    content and run_seq so an already-watched pending turn can recover without
+    another round trip. Large history-only fields such as context/status_raw
+    never belong in either snapshot shape.
+    """
+    projected = {
+        key: item.get(key)
+        for key in ("id", "topic", "agent", "role", "status")
+    }
+    if not global_lifecycle:
+        projected["content"] = item.get("content") or ""
+        if "run_seq" in item:
+            projected["run_seq"] = item["run_seq"]
+    return projected
+
+
 def get_realtime_snapshot(scopes: list[dict], message_limit: int = 20) -> dict:
     # Pending rows should normally be few, but stale rows must not turn every
     # reconnect into an unbounded query plus two follow-up queries per row.
@@ -4921,7 +4941,10 @@ def get_realtime_snapshot(scopes: list[dict], message_limit: int = 20) -> dict:
                         item["run_seq"] = int(seq_row[0])
                 conversations.append({
                     "scope": scope,
-                    "messages": sorted(by_id.values(), key=lambda row: row["id"]),
+                    "messages": [
+                        _realtime_message_projection(item, global_lifecycle=True)
+                        for item in sorted(by_id.values(), key=lambda row: row["id"])
+                    ],
                 })
                 flow_run_ids.update(item["flow_run_id"] for item in by_id.values() if item.get("flow_run_id"))
                 continue
@@ -4948,7 +4971,13 @@ def get_realtime_snapshot(scopes: list[dict], message_limit: int = 20) -> dict:
                         "SELECT COALESCE(MAX(seq), -1) FROM run_events WHERE msg_id=?", (item["id"],),
                     ).fetchone()
                     item["run_seq"] = int(seq_row[0])
-            conversations.append({"scope": scope, "messages": sorted(by_id.values(), key=lambda row: row["id"])})
+            conversations.append({
+                "scope": scope,
+                "messages": [
+                    _realtime_message_projection(item, global_lifecycle=False)
+                    for item in sorted(by_id.values(), key=lambda row: row["id"])
+                ],
+            })
             flow_run_ids.update(item["flow_run_id"] for item in by_id.values() if item.get("flow_run_id"))
 
         if global_flow_scope:

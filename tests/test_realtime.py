@@ -69,6 +69,28 @@ def test_global_lifecycle_scope_discovers_turns_across_topics(tmp_path, monkeypa
     snapshot = stats_db.get_realtime_snapshot(scope, 20)
     message_ids = {message["id"] for message in snapshot["conversations"][0]["messages"]}
     assert {first_msg, second_msg} <= message_ids
+    assert all(set(message) == {"id", "topic", "agent", "role", "status"}
+               for message in snapshot["conversations"][0]["messages"])
+
+
+def test_scoped_realtime_snapshot_omits_history_only_metadata(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    user_id = stats_db.insert_user_message("squid", "codex", "prompt")
+    msg_id = stats_db.insert_assistant_message("squid", "codex", user_id)
+    stats_db.insert_run_event(msg_id, 0, "text", "partial")
+    with sqlite3.connect(tmp_path / "squid.db") as conn:
+        conn.execute(
+            "UPDATE chat_messages SET context=?, status_raw=? WHERE id=?",
+            ('[{"name":"large tool trace"}]', "verbose status trace", msg_id),
+        )
+
+    snapshot = stats_db.get_realtime_snapshot([{"topic": "squid", "agent": "codex"}], 20)
+    message = next(item for item in snapshot["conversations"][0]["messages"] if item["id"] == msg_id)
+
+    assert message["content"] == "partial"
+    assert message["run_seq"] == 0
+    assert "context" not in message
+    assert "status_raw" not in message
 
 
 def test_global_lifecycle_snapshot_bounds_pending_rows(tmp_path, monkeypatch):

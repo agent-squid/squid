@@ -515,6 +515,20 @@ class ShoreChannel:
                             {"v": 1, "type": "error", "payload": {"code": "slow_consumer", "resumable": True}}]
                 while len(outbound):
                     responses.append(await outbound.get())
+                # Cursor replay restores ordered events, but the hosted client
+                # does not persist materialized process/queue state. When the
+                # saved cursor is already current, replay is empty and its
+                # Active/Queued panels would otherwise remain at their initial
+                # "Waiting" placeholders indefinitely. Finish every resumed
+                # subscription with one authoritative snapshot unless catchup
+                # already rolled over to a snapshot itself.
+                if not any(response.get("type") == "snapshot" for response in responses):
+                    snapshot = await _realtime_snapshot(session.scopes)
+                    session.cursor = snapshot["cursor"]
+                    responses.append({
+                        "v": 1, "type": "snapshot",
+                        "event_id": session.cursor, "payload": snapshot,
+                    })
         elif message_type == "unsubscribe":
             self._drop_session(device_id)
             responses.append({"v": 1, "type": "unsubscribed", "payload": {}})

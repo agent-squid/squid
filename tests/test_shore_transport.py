@@ -1238,8 +1238,32 @@ async def test_resubscribe_after_dormancy_replays_full_backlog_no_loss(tmp_path,
         open_response(frame, host_signing.public_key(), browser_agreement, host_agreement.public_key(), replay)
         for frame in responses[1:]
     ]
-    assert [event["payload"]["text"] for event in replayed] == ["live-1", "live-2", "live-3"]
-    assert all(event["type"] == "chat.text" for event in replayed)
+    events = [event for event in replayed if event["type"] == "chat.text"]
+    assert [event["payload"]["text"] for event in events] == ["live-1", "live-2", "live-3"]
+    assert replayed[-1]["type"] == "snapshot"
+
+
+@pytest.mark.asyncio
+async def test_resubscribe_at_current_cursor_still_returns_materialized_state(tmp_path, monkeypatch):
+    _fresh_stats_db(tmp_path, monkeypatch)
+    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=host_agreement)
+    await pair(channel, browser_signing, browser_agreement)
+    replay = ReplayStore(tmp_path / "browser-replay.db")
+
+    request = browser_frame(browser_signing, browser_agreement, host_agreement.public_key(), 1,
+                            "subscribe", {"scopes": [{"lifecycle": "global"}], "cursor": 0})
+    responses = await channel.handle(canonical(request), now_ms=NOW)
+    opened = [
+        open_response(frame, host_signing.public_key(), browser_agreement, host_agreement.public_key(), replay)
+        for frame in responses
+    ]
+
+    assert [frame["type"] for frame in opened] == ["subscribed", "snapshot"]
+    assert opened[-1]["payload"]["processes"] == []
+    assert opened[-1]["payload"]["queue"] == []
 
 
 @pytest.mark.asyncio
