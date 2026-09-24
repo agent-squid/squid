@@ -2637,7 +2637,7 @@ def test_shore_pairing_begin_and_status_round_trip(monkeypatch):
     assert begin.status_code == 200
     body = begin.json()
     assert body["code"] == "ABCDEF"
-    assert body["pair_url"].startswith("https://agentsquid.ai/@alice/pair?client_version=2.4.0rc1#")
+    assert body["pair_url"].startswith("https://agentsquid.ai/@alice/pair?v=2.4.0rc1#")
     # The ceremony secret and offer must never appear in the URL's query or
     # path — only after the fragment marker, which a server never sees.
     assert "ABCDEF" not in body["pair_url"].split("#", 1)[0]

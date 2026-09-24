@@ -3096,7 +3096,7 @@ async def shore_pairing_begin(request: Request):
         return JSONResponse({"error": str(exc)}, status_code=409)
     pair_url = (
         f"{config.relay.rstrip('/')}/@{config.username}/pair"
-        f"?client_version={urllib.parse.quote(client_version, safe='')}"
+        f"?v={urllib.parse.quote(client_version, safe='')}"
         f"#{_shore_pair_fragment(result['offer'], result['code'])}"
     )
     return JSONResponse({
