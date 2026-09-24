@@ -2562,6 +2562,17 @@ queued work, and recent ordered updates under the global read-only scope. The
 page exposes no mutation controls. Publication as a new immutable client
 version and the live dev integration drill remain deployment gates.
 
+**Package/client release coordination follow-up (2026-09-24):** Squid's
+tag-driven release now dispatches Shore's existing client publisher after PyPI
+succeeds, using the same exact version and the reviewed Shore source SHA pinned
+in `release/shore-client.json`. PEP 440 development/alpha/beta/RC releases map
+to preproduction; stable and post releases map directly to production and
+advance the recommendation. The dispatch carries no Shore signing, R2, relay,
+account, audit, Worker, or compute credentials. Shore remains the sole client
+publisher, and client publication still does not deploy Shore compute or the
+Worker. Squid requires the narrowly scoped `SHORE_RELEASE_DISPATCH_TOKEN`
+Actions secret before this coordination can run.
+
 #### 6.3 — Independent security review (action 3)
 
 In progress (2026-09-22). The first adversarial review confirmed the relay-

@@ -7,22 +7,22 @@ date: 2026-09-23
 ## Context
 
 AgentSquid remote access requires a host to select an exact browser client.
-Earlier drafts coupled that client to the AgentSquid wheel in one
-cross-repository release transaction. That unnecessarily made Shore responsible
-for building and publishing AgentSquid and confused remote-access delivery with
-Shore compute deployment.
+Earlier drafts coupled that client to the AgentSquid wheel in one publisher.
+That unnecessarily made Shore responsible for building and publishing
+AgentSquid and confused remote-access delivery with Shore compute deployment.
 
 The security requirement is narrower: the browser must load exactly the signed,
 immutable client release advertised by the authenticated host and fail closed
 if it cannot verify that release. It does not require the wheel and client to
-share a workflow, manifest, repository, or deployment.
+share a manifest, repository, publisher, or credentials.
 
 ## Decision
 
-AgentSquid packages, Shore remote-access clients, and Shore compute use
-independent release paths:
+AgentSquid packages and Shore remote-access clients use coordinated release
+paths with independent publishers; Shore compute remains separate:
 
-- Squid owns its existing tag-driven PyPI publication.
+- Squid owns its tag-driven PyPI publication and dispatches the matching client
+  release only after PyPI succeeds.
 - Shore owns browser-client builds and publication to a private R2 bucket.
 - Shore compute has separate build and deployment workflows.
 
@@ -38,11 +38,10 @@ that identifier. The stable bootstrap fetches only
 revocation state, and content hashes, and then loads its assets. Failure renders
 a static non-command-capable panel.
 
-Client identifiers use the project's accepted PEP 440 subset. They may equal an
-AgentSquid package version by release convention, but neither runtime nor CI
-infers or enforces that equality. Compatibility is an explicit product decision
-made when a host selects its required client. AgentSquid defaults to its package
-version and permits an independently published client to be selected with
+Client identifiers use the project's accepted PEP 440 subset. The coordinated
+default release uses the AgentSquid package version; compatibility is approved
+when the Squid release pins the reviewed Shore source commit. AgentSquid permits
+an exceptional independently published client to be selected with
 `AGENTSQUID_SHORE_CLIENT_VERSION`.
 
 ### Independent deployment and client resolution
@@ -52,6 +51,7 @@ flowchart LR
     subgraph Squid[AgentSquid package release]
         ST[Squid version tag] --> PB[Build and verify package]
         PB --> PYPI[Publish to PyPI]
+        PYPI -->|Dispatch version + pinned Shore SHA| SC
     end
 
     subgraph Client[Shore web-client release]
@@ -72,9 +72,10 @@ flowchart LR
     BS --> UI[Load exact browser client]
 ```
 
-The three release lanes are independent. Runtime client resolution reads the
-already-published R2 artifacts; it does not trigger package, Worker, or compute
-deployment.
+The package release coordinates the client lane, but each publisher retains its
+own repository, credentials, build, and failure boundary. Runtime resolution
+reads already-published R2 artifacts; it does not trigger package, Worker, or
+compute deployment.
 
 ## Storage and serving
 
@@ -112,9 +113,11 @@ then advance the optional recommended-client pointer. It has no PyPI identity,
 Squid checkout, Python build, or compute deployment authority.
 
 The protected Squid workflow independently builds, checks, and publishes the
-AgentSquid package to PyPI. Release ordering is operational: a required client
-must exist before a host advertises it, but failure or delay in either publisher
-does not mutate the other release surface.
+AgentSquid package to PyPI, then dispatches Shore with the same version and its
+committed Shore source pin. Prereleases target preproduction; stable and
+post-releases target production and advance the recommendation. A dispatch or
+client-publication failure marks the overall release incomplete but does not
+mutate or overwrite either immutable surface; retry is safe for identical bytes.
 
 ## Trust boundaries
 
@@ -139,16 +142,16 @@ remain available for every supported exact client.
 
 Positive:
 
-- AgentSquid, Shore client delivery, and Shore compute can ship independently.
+- AgentSquid and its required Shore client are launched together while retaining
+  separate publishers and credentials; Shore compute can ship independently.
 - The Worker no longer requires redeployment for a new client version.
 - Repository credentials and failure domains remain narrow.
 - Exact signed client selection and fail-closed behavior are preserved.
 
 Risks:
 
-- Operators must publish a client before configuring a host to advertise it.
-- Compatibility is no longer implied by equal package versions and must be
-  tested and recorded explicitly.
+- PyPI succeeds before client dispatch, so a client-workflow failure temporarily
+  leaves a published package whose remote client fails closed until retry.
 - The bootstrap and signing-key rotation remain security-critical.
 
 Operational commands, approvals, evidence, retention, and incident procedures

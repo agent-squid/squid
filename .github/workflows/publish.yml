@@ -1,4 +1,4 @@
-name: Publish to PyPI
+name: Release AgentSquid
 
 on:
   push:
@@ -37,3 +37,44 @@ jobs:
 
       - name: Publish distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-shore-client:
+    name: Publish matching Shore browser client
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout release coordination metadata
+        uses: actions/checkout@v7
+
+      - name: Dispatch the pinned Shore client release
+        env:
+          SHORE_RELEASE_DISPATCH_TOKEN: ${{ secrets.SHORE_RELEASE_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          [[ "$version" =~ ^[0-9]+(\.[0-9]+)+((a|b|rc)[0-9]+)?(\.post[0-9]+)?(\.dev[0-9]+)?(\+[A-Za-z0-9]+([.-][A-Za-z0-9]+)*)?$ ]] \
+            || { echo "::error::invalid release version: $version"; exit 1; }
+          shore_sha=$(jq -er '.shore_sha | select(test("^[0-9a-f]{40}$"))' release/shore-client.json)
+          if [[ "$version" =~ (a|b|rc)[0-9]+ || "$version" =~ \.dev[0-9]+ ]]; then
+            target=preproduction
+            recommended=false
+          else
+            target=production
+            recommended=true
+          fi
+          test -n "$SHORE_RELEASE_DISPATCH_TOKEN" \
+            || { echo "::error::SHORE_RELEASE_DISPATCH_TOKEN is not configured"; exit 1; }
+          payload=$(jq -n \
+            --arg ref main --arg version "$version" --arg target "$target" \
+            --arg shore_sha "$shore_sha" --arg recommended "$recommended" \
+            '{ref:$ref, inputs:{version:$version,target:$target,shore_sha:$shore_sha,recommended:$recommended}}')
+          curl --fail-with-body --silent --show-error \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $SHORE_RELEASE_DISPATCH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/agent-squid/shore/actions/workflows/release.yml/dispatches \
+            -d "$payload"
+          echo "Dispatched Shore client $version from $shore_sha to $target"
