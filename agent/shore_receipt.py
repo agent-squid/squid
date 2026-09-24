@@ -61,7 +61,7 @@ def _canonical_uuid7(value: Any) -> bool:
 
 
 def verify_relay_receipt(
-    receipt: Any, envelope: bytes, *, host_id: str, direction: str,
+    receipt: Any, envelope: bytes | None, *, host_id: str, direction: str,
     keys: Mapping[int, ed25519.Ed25519PublicKey],
 ) -> VerifiedRelayReceipt:
     unavailable = "shore_audit_continuity_unavailable"
@@ -103,9 +103,14 @@ def verify_relay_receipt(
     except Exception as exc:
         raise ReceiptVerificationError(unavailable) from exc
     # Only authenticated contradictory evidence is a confirmed conflict.
-    if (
-        receipt["host_id"] != host_id or receipt["direction"] != direction
-        or receipt["envelope_hash"] != envelope_commitment(envelope)
-    ):
+    # `envelope=None` means the caller has no local copy to cross-check
+    # against (e.g. reconciling a relay_receipt_ack for a send made by a
+    # since-restarted process, whose in-memory pending-envelope tracking
+    # doesn't survive the restart) -- the receipt's signature above already
+    # proves the relay itself authenticated these exact claimed fields, so
+    # skip only the one check that needs bytes we no longer have.
+    if receipt["host_id"] != host_id or receipt["direction"] != direction:
+        raise ReceiptVerificationError("shore_receipt_conflict")
+    if envelope is not None and receipt["envelope_hash"] != envelope_commitment(envelope):
         raise ReceiptVerificationError("shore_receipt_conflict")
     return VerifiedRelayReceipt(dict(receipt), seq)

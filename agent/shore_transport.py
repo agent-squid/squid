@@ -75,6 +75,10 @@ log = logging.getLogger(__name__)
 _PUSH_SWEEP_SECONDS = 5.0
 _MAX_PENDING_RECEIPTS = 256
 _PAIRING_REQUEST_TTL_SECONDS = 120.0
+# Temporary preproduction diagnostic: keep production receipt verification
+# mandatory while allowing dev.agentsquid.ai to use the original raw-envelope
+# wire format during receipt-chain fault isolation.
+_RECEIPTS_DISABLED_ORIGINS = frozenset({"https://dev.agentsquid.ai"})
 
 
 @dataclass
@@ -294,6 +298,33 @@ class ShoreChannel:
         # occurred. Merely relabeling an old device's envelope with the new
         # epoch must never carry trust across a host-key rotation.
         if not trusted or trusted.key_epoch != self.key_epoch:
+            now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+            denied_device_id = device_id if isinstance(device_id, str) else "unknown"
+            denied_request_id = envelope.get("request_id") if isinstance(envelope.get("request_id"), str) else "unknown"
+            if relay_receipt is not None:
+                # Same requirement as the capability-denial path below: the
+                # receipt chain covers untrusted/unknown-device envelopes too,
+                # or the next legitimate receipt looks like a permanent gap
+                # and wedges this host's relay connection until someone
+                # notices -- a stale/revoked device's queued envelope must
+                # not be able to do that just by never resolving to a trust
+                # record we can decrypt.
+                try:
+                    await asyncio.to_thread(
+                        self.audit.record, request_id=denied_request_id, device_id=denied_device_id,
+                        message_type="unknown", frame={"type": "untrusted_device"}, decision="denied",
+                        outcome="denied:shore_untrusted_device", now_ms=now_ms, relay_receipt=relay_receipt,
+                    )
+                except ReceiptVerificationError:
+                    raise
+                except Exception as exc:
+                    raise ShoreProtocolError("shore_audit_unavailable") from exc
+            else:
+                await self._record_audit_best_effort(
+                    request_id=denied_request_id, device_id=denied_device_id,
+                    message_type="unknown", frame={"type": "untrusted_device"}, decision="denied",
+                    outcome="denied:shore_untrusted_device", now_ms=now_ms, context="untrusted device",
+                )
             raise ShoreProtocolError("shore_untrusted_device")
         # Signature verify + AEAD decrypt are CPU-bound; offloaded (as the
         # whole of this method used to be, pre-4.3) so they can't block the
@@ -601,6 +632,8 @@ class ShoreHostConnection:
     def _load_receipt_keys(
         origin: str, hostname: str | None,
     ) -> dict[int, ed25519.Ed25519PublicKey]:
+        if origin in _RECEIPTS_DISABLED_ORIGINS:
+            return {}
         loopback = hostname in {"127.0.0.1", "::1", "localhost"}
         encoded = os.environ.get("SHORE_RECEIPT_PUBLIC_KEYS") if loopback else None
         try:
@@ -655,16 +688,22 @@ class ShoreHostConnection:
                 raise
             except ConnectionClosed as exc:
                 code = exc.rcvd.code if exc.rcvd is not None else None
+                reason = exc.rcvd.reason if exc.rcvd is not None else None
                 if code in {1008, 1009}:
+                    log.error("Shore host connection closed by relay terminally: code=%s reason=%s", code, reason)
                     return
+                log.warning("Shore host connection closed by relay: code=%s reason=%s", code, reason)
                 delay = await self._backoff(stop, self._reset_if_stable(connected_at, delay))
             except InvalidStatus as exc:
                 status = exc.response.status_code
                 if self._terminal_http_status(status):
+                    log.error("Shore host relay connect rejected terminally: status=%s", status)
                     return
+                log.warning("Shore host relay connect rejected: status=%s", status)
                 delay = await self._backoff(stop, delay)
             except httpx.HTTPStatusError as exc:
                 if self._terminal_http_status(exc.response.status_code):
+                    log.error("Shore host connect-challenge rejected terminally: status=%s", exc.response.status_code)
                     return
                 delay = await self._backoff(stop, delay)
             except (OSError, httpx.HTTPError, ShoreProtocolError, WebSocketException):
@@ -837,7 +876,32 @@ class ShoreHostConnection:
                                             continue
                                     except Exception as exc:
                                         raise ReceiptVerificationError("shore_audit_continuity_unavailable") from exc
-                                    raise ReceiptVerificationError("shore_audit_continuity_unavailable")
+                                    # `_pending_receipt_envelopes` is in-memory
+                                    # only -- a process restart drops tracking
+                                    # for anything sent by the previous
+                                    # instance, so an ack for that earlier send
+                                    # has no local envelope left to cross-check.
+                                    # Treating that as fatal would permanently
+                                    # wedge the strictly-ordered relay_receipt
+                                    # tip behind this one unrecoverable gap
+                                    # (the same failure mode as an unstaged
+                                    # untrusted-device envelope, just from the
+                                    # host_to_browser side). Verify the
+                                    # receipt's signature and continuity on
+                                    # their own -- that's still full proof the
+                                    # relay itself authenticated it -- and
+                                    # stage it so the tip advances.
+                                    try:
+                                        orphaned = verify_relay_receipt(
+                                            receipt_value, None, host_id=self.host_id,
+                                            direction="host_to_browser", keys=self.receipt_keys,
+                                        )
+                                        await asyncio.to_thread(self.channel.audit.accept_receipt, orphaned)
+                                    except ReceiptVerificationError:
+                                        raise
+                                    except Exception as exc:
+                                        raise ReceiptVerificationError("shore_audit_continuity_unavailable") from exc
+                                    continue
                                 acknowledgement = verify_relay_receipt(
                                     receipt_value, pending, host_id=self.host_id,
                                     direction="host_to_browser", keys=self.receipt_keys,
@@ -863,9 +927,10 @@ class ShoreHostConnection:
                         )
                     responses = await self.channel.handle(envelope, relay_receipt=relay_receipt)
                 except ReceiptVerificationError as exc:
+                    log.warning("shore: closing relay socket on receipt verification failure reason=%s", exc.code)
                     await socket.close(code=1008, reason=exc.code)
                     return
-                except ShoreProtocolError:
+                except ShoreProtocolError as exc:
                     # A malformed or injected peer frame must not tear down the
                     # authenticated host transport or produce an oracle response.
                     # Once a relay receipt has been authenticated, however,
@@ -879,8 +944,10 @@ class ShoreHostConnection:
                         except Exception:
                             persisted = False
                         if not persisted:
+                            log.warning("shore: closing relay socket on unpersisted protocol error reason=%s", exc)
                             await socket.close(code=1008, reason="shore_audit_continuity_unavailable")
                             return
+                    log.debug("shore: dropping frame after protocol error reason=%s", exc)
                     continue
                 except asyncio.CancelledError:
                     raise

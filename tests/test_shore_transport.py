@@ -142,9 +142,25 @@ def test_release_contains_independent_dev_and_production_receipt_pins(tmp_path, 
     production = ShoreHostConnection(channel, relay="https://agentsquid.ai",
         username="alice", host_id=HOST, signing_key=host_signing)
 
-    assert set(development.receipt_keys) == {1}
+    assert development.receipt_keys == {}
     assert set(production.receipt_keys) == {1}
-    assert development.receipt_keys[1].public_bytes_raw() != production.receipt_keys[1].public_bytes_raw()
+
+
+def test_receipt_bypass_is_scoped_to_canonical_dev_origin(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        shore_transport_mod, "PINNED_SHORE_RECEIPT_PUBLIC_KEYS_BY_ORIGIN",
+        shore_receipt_mod.PINNED_SHORE_RECEIPT_PUBLIC_KEYS_BY_ORIGIN,
+    )
+    host_signing = ed25519.Ed25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=x25519.X25519PrivateKey.generate())
+    development = ShoreHostConnection(channel, relay="https://DEV.agentsquid.ai:443/base",
+        username="alice", host_id=HOST, signing_key=host_signing)
+    production = ShoreHostConnection(channel, relay="https://agentsquid.ai",
+        username="alice", host_id=HOST, signing_key=host_signing)
+
+    assert development.receipt_keys == {}
+    assert set(production.receipt_keys) == {1}
 
 
 def test_release_receipt_keys_are_scoped_to_canonical_relay_origin(tmp_path, monkeypatch):
