@@ -319,6 +319,10 @@ class ShoreChannel:
         # since it isn't an ADR-0040 type at all.
         if frame.get("type") == "shore.probe":
             self._validate_probe(frame)
+            log.debug(
+                "shore_probe_received request_id=%s device_id=%s",
+                envelope["request_id"], trusted.device_id,
+            )
             try:
                 recorded = await asyncio.to_thread(
                     self.audit.record, request_id=envelope["request_id"], device_id=trusted.device_id,
@@ -332,7 +336,12 @@ class ShoreChannel:
             except Exception as exc:
                 raise ShoreProtocolError("shore_audit_unavailable") from exc
             response = {"v": 1, "type": "shore.probe.result", "payload": frame["payload"]}
-            return [await asyncio.to_thread(self._seal, trusted, response, now_ms)]
+            sealed = await asyncio.to_thread(self._seal, trusted, response, now_ms)
+            log.debug(
+                "shore_probe_response_created request_id=%s response_id=%s device_id=%s",
+                envelope["request_id"], json.loads(sealed)["request_id"], trusted.device_id,
+            )
+            return [sealed]
 
         request_id = envelope["request_id"]
         message_type = frame.get("type") if isinstance(frame.get("type"), str) else "unknown"
@@ -896,6 +905,15 @@ class ShoreHostConnection:
                         await socket.send(response)
                     else:
                         await self._send_application(socket, response)
+                    if response_type is None:
+                        try:
+                            response_envelope = json.loads(response)
+                            log.debug(
+                                "shore_application_response_sent response_id=%s device_id=%s",
+                                response_envelope.get("request_id"), response_envelope.get("device_id"),
+                            )
+                        except Exception:
+                            pass
                     last_sent = time.monotonic()
                 # The connection may have started with no pending audit data.
                 # A newly handled frame records audit events, so initiate the
