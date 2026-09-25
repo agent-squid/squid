@@ -2,8 +2,7 @@
 
 **Status:** In progress. Phases 1–3 implemented and tested, not yet deployed or
 re-measured (Phase 3 needs a Shore deploy plus a Squid release that sends
-`x-shore-receipt-scope`; either may ship first). Phase 3 item 9 and Phases 4–5
-pending.
+`x-shore-receipt-scope`; either may ship first). Phases 4–5 pending.
 
 Companion to [ADR-0039](../decisions/0039-remote-access-via-shore-relay.md)
 ("Traffic accounting and capacity forecast", "Receipt-chain scope and
@@ -99,12 +98,25 @@ The largest remaining cut. Needs the ADR-0039 amendment below, a
    (`Meta.inboundReceiptsOnly`), so a host that still expects outbound acks is
    not stalled during the version handoff. The new host still stages acks from
    an older Shore.
-9. Not done yet: revisit whether the pre-forward relay audit event can be folded into the
-   receipt record, taking a receipted envelope from ~5 rows to ~2–3.
+9. Receipted envelope writes cut from 7 rows to 4. The pre-forward
+   `relay_frame_received` audit event stays: it is the relay-chain record the
+   B2 export requires (`shore-security-operations.md`), and it is written in
+   the same transaction as the receipt. Two other writes go instead:
+   - No separate `relay-receipt-tip` row. The tip is the highest
+     `relay-receipt-seq` index entry (`receiptTip`). The index is backfilled
+     before the first allocation.
+   - No `relay_frame_outcome` event (2 rows, plus a compaction delete) when a
+     receipted frame is forwarded. Its acceptance is already in the pre-forward
+     event and the host chain records the receipt. Failed forwards
+     (`backpressure`, `send_failed`, `peer_offline`) are still audited.
+   Remaining per receipted frame: idempotency record, seq index, audit event,
+   audit chain tip.
 
 Verification: Shore `npm test` ("relays host envelopes without receipt or audit
 when the host scopes receipts to browser_to_host" asserts no ack and no new
-`audit:`/`relay-receipt-*` keys); Squid `tests/test_shore_*.py`.
+`audit:`/`relay-receipt-*` keys; "wraps browser deliveries…" asserts a forwarded
+receipted frame writes only `relay_frame_received`; allocation tests assert no
+tip row); Squid `tests/test_shore_*.py`.
 
 ## Phase 4 — Squid host framing and ping interval
 

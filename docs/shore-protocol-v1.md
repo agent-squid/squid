@@ -159,11 +159,13 @@ Ed25519 over JCS of those ten fields plus `receipt_hash`.
 For a given `(host_id, request_id)`, retrying byte-identical envelope bytes
 returns the original receipt without advancing the chain. Reusing that tuple
 with different bytes or the opposite direction is a conflict and fails closed.
-Receipt sequence/tip,
-the idempotency record, and the pre-forward relay audit event are one Durable
-Object transaction. A browser-to-host envelope is delivered to the host beside
-its receipt; a host-to-browser envelope receives a receipt acknowledgement at
-the host. Pairing traffic retains its existing raw packet format.
+Receipt sequence
+allocation, the idempotency record, and the pre-forward relay audit event are
+one Durable Object transaction; the tip is the highest entry of the per-host
+sequence index, not a separate record. A receipted envelope that is forwarded
+gets no separate outcome event; only failed forwards are audited. A
+browser-to-host envelope is delivered to the host beside its receipt; a
+host-to-browser envelope receives a receipt acknowledgement at the host. Pairing traffic retains its existing raw packet format.
 
 Both receipt wire messages are canonical-JSON binary WebSocket frames with
 closed schemas. Browser-to-host delivery is exactly
