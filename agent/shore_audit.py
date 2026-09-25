@@ -238,6 +238,14 @@ class ShoreAuditLog:
             ).fetchone()
         return row is not None and bytes(row[0]) == canonical(receipt)
 
+    def receipt_tip(self) -> tuple[int, str]:
+        """Return the last locally durable relay-receipt checkpoint."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT seq, hash FROM relay_receipt_tip WHERE id = 1"
+            ).fetchone()
+        return (int(row[0]), str(row[1])) if row is not None else (0, RECEIPT_GENESIS_HASH)
+
     def record(self, *, request_id: str, device_id: str, message_type: str, frame: dict[str, Any],
                decision: str, outcome: str, now_ms: int | None = None,
                relay_receipt: VerifiedRelayReceipt | None = None) -> dict[str, Any] | None:

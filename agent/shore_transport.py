@@ -606,7 +606,8 @@ class ShoreHostConnection:
     def __init__(self, channel: ShoreChannel, *, relay: str, username: str,
                  host_id: str, signing_key: ed25519.Ed25519PrivateKey,
                  heartbeat_seconds: float = 40.0, base_backoff: float = 1.0,
-                 max_backoff: float = 30.0, stable_seconds: float = 60.0):
+                 max_backoff: float = 30.0, stable_seconds: float = 60.0,
+                 receipt_sync_timeout: float = 15.0):
         if not valid_relay_url(relay):
             raise ValueError("relay must use HTTPS, or HTTP on an explicit loopback host")
         parsed = urlsplit(relay)
@@ -618,6 +619,7 @@ class ShoreHostConnection:
         self.base_backoff = base_backoff
         self.max_backoff = max_backoff
         self.stable_seconds = stable_seconds
+        self.receipt_sync_timeout = receipt_sync_timeout
         self.connected = asyncio.Event()
         self.receipt_keys = self._load_receipt_keys(
             self._relay_origin(parsed), parsed.hostname,
@@ -687,6 +689,8 @@ class ShoreHostConnection:
                     open_timeout=15, close_timeout=5, ping_interval=20,
                 ) as socket:
                     connected_at = time.monotonic()
+                    if self.receipt_keys:
+                        await self._synchronize_receipts(socket)
                     self.connected.set()
                     try:
                         await self._serve(socket, stop)
@@ -697,6 +701,12 @@ class ShoreHostConnection:
                 raise ShoreProtocolError("shore_connection_closed")
             except asyncio.CancelledError:
                 raise
+            except ReceiptVerificationError as exc:
+                # Receipt reconciliation found authenticated divergence or
+                # receipts that do not extend the local chain; reconnecting
+                # cannot repair either.
+                log.error("Shore receipt chain cannot be reconciled (%s); guided recovery required", exc)
+                return
             except ConnectionClosed as exc:
                 code = exc.rcvd.code if exc.rcvd is not None else None
                 reason = exc.rcvd.reason if exc.rcvd is not None else None
@@ -742,6 +752,57 @@ class ShoreHostConnection:
         # starts from the 1.0s default, where this is a no-op.
         return min(self.max_backoff, max(self.base_backoff, (delay or 0.001) * 2))
 
+    async def _synchronize_receipts(self, socket: Any) -> None:
+        """Catch up a valid local receipt-chain prefix before relay traffic starts.
+
+        Malformed, late, or inconsistent responses raise ShoreProtocolError so
+        the caller reconnects with backoff. Authenticated divergence and
+        receipts that fail verification raise ReceiptVerificationError, which
+        is terminal: replay never repairs a fork or rollback.
+        """
+        unavailable = ShoreProtocolError("shore_receipt_sync_unavailable")
+        for _page in range(10_000):
+            seq, hash_ = await asyncio.to_thread(self.channel.audit.receipt_tip)
+            await socket.send(canonical({
+                "v": 1, "type": "relay_receipt_sync", "seq": str(seq), "hash": hash_,
+            }))
+            try:
+                raw = await asyncio.wait_for(socket.recv(), timeout=self.receipt_sync_timeout)
+            except asyncio.TimeoutError as exc:
+                raise unavailable from exc
+            try:
+                response = json.loads(raw)
+                if not isinstance(raw, bytes) or canonical(response) != raw:
+                    raise ValueError
+                if (
+                    set(response) != {"v", "type", "status", "tip_seq", "tip_hash", "receipts", "complete"}
+                    or response.get("v") != 1 or response.get("type") != "relay_receipt_sync"
+                    or response.get("status") not in {"ok", "diverged"}
+                    or not isinstance(response.get("receipts"), list)
+                    or not isinstance(response.get("complete"), bool)
+                ):
+                    raise ValueError
+            except Exception as exc:
+                raise unavailable from exc
+            if response["status"] != "ok":
+                raise ReceiptVerificationError("shore_audit_continuity_unavailable")
+            for receipt in response["receipts"]:
+                direction = receipt.get("direction") if isinstance(receipt, dict) else None
+                if direction not in {"browser_to_host", "host_to_browser"}:
+                    raise ReceiptVerificationError("shore_audit_continuity_unavailable")
+                verified = verify_relay_receipt(
+                    receipt, None, host_id=self.host_id, direction=direction, keys=self.receipt_keys,
+                )
+                await asyncio.to_thread(self.channel.audit.accept_receipt, verified)
+            new_seq, new_hash = await asyncio.to_thread(self.channel.audit.receipt_tip)
+            if response["complete"]:
+                if response.get("tip_seq") != str(new_seq) or response.get("tip_hash") != new_hash:
+                    raise unavailable
+                return
+            if (new_seq, new_hash) == (seq, hash_):
+                raise unavailable
+        raise unavailable
+
     async def _connection_headers(self) -> dict[str, str]:
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(self.challenge_url, json={"hostId": self.host_id})
@@ -756,6 +817,7 @@ class ShoreHostConnection:
                            "nonce": challenge["nonce"], "purpose": "websocket", "v": 1})
         return {"x-shore-role": "host", "x-shore-host-id": self.host_id,
                 "x-shore-required-client-version": self.client_release_version,
+                "x-shore-receipt-sync": "1",
                 "x-shore-challenge-id": challenge["id"],
                 "x-shore-signature": b64url(self.signing_key.sign(proof))}
 

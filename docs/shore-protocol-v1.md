@@ -176,6 +176,30 @@ envelope to the host outside `relay_delivery` and never accepts either wrapper
 from a client as an ordinary envelope. Pairing packets and zero-length lease
 heartbeats are never wrapped.
 
+Hosts that advertise `x-shore-receipt-sync: 1` on their authenticated upgrade
+must synchronize before their receipt-enabled socket carries application or
+host-audit frames. The host sends its durable checkpoint as the canonical binary control frame
+`{"v":1,"type":"relay_receipt_sync","seq":"<decimal>","hash":"<base64url>"}`.
+Sequence zero must name the 43-zero genesis hash. Shore accepts only genesis or
+an exact prefix of its durable host-scoped chain and responds with the closed
+schema `v`, `type`, `status`, `tip_seq`, `tip_hash`, `receipts`, and `complete`.
+An `ok` response contains at most 100 consecutive, originally signed receipts;
+the host verifies and durably appends each one, then repeats from its new tip
+until `complete` is true. Shore does not route ordinary traffic to the host
+until that point. A checkpoint ahead of Shore or with a different hash returns
+`diverged` and fails closed: replay repairs a missed durable suffix, never a
+fork, rollback, missing retained history, or untrusted new baseline.
+
+Shore reads each page as one range over a per-host sequence index written in
+the same transaction as the receipt. A gap in that index is reported as
+`diverged`. A Shore storage failure closes the socket with `1011
+receipt_sync_unavailable`. On the host, a malformed, non-canonical, late
+(15 s), non-advancing, or tip-inconsistent response is retryable and
+reconnects with backoff; `diverged` or a receipt that fails verification or
+does not extend the local chain stops the host connection for guided
+recovery. Shore must be deployed with sync support before hosts that
+advertise the header.
+
 Shore publishes and AgentSquid pins the receipt key for each epoch. A normal
 rotation statement has exactly `v`, `type`, `from_epoch`, `to_epoch`,
 `new_public_key`, and `signature`; `v` is `1`, `type` is

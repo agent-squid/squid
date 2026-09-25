@@ -21,7 +21,7 @@ from agent.shore_crypto import (
 from agent.shore_transport import ShoreChannel, ShoreHostConnection, configured_host_connection
 from agent import shore_transport as shore_transport_mod
 from agent import shore_receipt as shore_receipt_mod
-from agent.shore_receipt import ReceiptVerificationError
+from agent.shore_receipt import RECEIPT_GENESIS_HASH, ReceiptVerificationError, envelope_commitment
 from agent.shore import ShoreRuntimeConfig, _new_identity, _write_runtime_config
 from agent import server as server_mod
 from agent import stats_db
@@ -186,6 +186,154 @@ def test_release_receipt_keys_are_scoped_to_canonical_relay_origin(tmp_path, mon
     with pytest.raises(ValueError, match="release-pinned Shore receipt keys"):
         ShoreHostConnection(channel, relay="https://other.example", username="alice",
             host_id=HOST, signing_key=host_signing)
+
+
+def _sync_receipt(key, *, seq, previous, request_id):
+    envelope = request_id.encode()
+    fields = {
+        "v": 1, "type": "relay_receipt", "host_id": HOST, "request_id": request_id,
+        "direction": "browser_to_host", "disposition": "accepted", "receipt_epoch": 1,
+        "seq": str(seq), "prev_hash": previous, "envelope_hash": envelope_commitment(envelope),
+    }
+    digest = b64url(hashlib.sha256(canonical(fields)).digest())
+    return {**fields, "receipt_hash": digest,
+        "signature": b64url(key.sign(canonical({**fields, "receipt_hash": digest})))}
+
+
+@pytest.mark.asyncio
+async def test_host_replays_missing_signed_receipts_before_starting_relay_traffic(tmp_path):
+    host_signing = ed25519.Ed25519PrivateKey.generate()
+    relay_signing = ed25519.Ed25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=x25519.X25519PrivateKey.generate())
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
+        host_id=HOST, signing_key=host_signing)
+    connection.receipt_keys = {1: relay_signing.public_key()}
+    first = _sync_receipt(relay_signing, seq=1, previous=RECEIPT_GENESIS_HASH, request_id=CEREMONY)
+    second = _sync_receipt(relay_signing, seq=2, previous=first["receipt_hash"], request_id=CEREMONY2)
+
+    class Socket:
+        def __init__(self): self.sent = []
+        async def send(self, value): self.sent.append(json.loads(value))
+        async def recv(self):
+            return canonical({"v": 1, "type": "relay_receipt_sync", "status": "ok",
+                "tip_seq": "2", "tip_hash": second["receipt_hash"], "receipts": [first, second], "complete": True})
+
+    socket = Socket()
+    await connection._synchronize_receipts(socket)
+    assert socket.sent == [{"v": 1, "type": "relay_receipt_sync", "seq": "0", "hash": RECEIPT_GENESIS_HASH}]
+    assert channel.audit.receipt_tip() == (2, second["receipt_hash"])
+
+
+@pytest.mark.asyncio
+async def test_host_rejects_divergent_receipt_sync(tmp_path):
+    host_signing = ed25519.Ed25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=x25519.X25519PrivateKey.generate())
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
+        host_id=HOST, signing_key=host_signing)
+    connection.receipt_keys = {1: ed25519.Ed25519PrivateKey.generate().public_key()}
+
+    class Socket:
+        async def send(self, _value): pass
+        async def recv(self):
+            return canonical({"v": 1, "type": "relay_receipt_sync", "status": "diverged",
+                "tip_seq": "2", "tip_hash": "A" * 43, "receipts": [], "complete": False})
+
+    with pytest.raises(ReceiptVerificationError, match="shore_audit_continuity_unavailable"):
+        await connection._synchronize_receipts(Socket())
+
+
+def _sync_connection(tmp_path, **kwargs):
+    host_signing = ed25519.Ed25519PrivateKey.generate()
+    relay_signing = ed25519.Ed25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=x25519.X25519PrivateKey.generate())
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
+        host_id=HOST, signing_key=host_signing, **kwargs)
+    connection.receipt_keys = {1: relay_signing.public_key()}
+    return connection, relay_signing
+
+
+class _SyncSocket:
+    def __init__(self, *responses):
+        self.sent, self.responses = [], list(responses)
+    async def send(self, value): self.sent.append(json.loads(value))
+    async def recv(self):
+        if not self.responses:
+            await asyncio.Event().wait()
+        return self.responses.pop(0)
+
+
+def _sync_response(*, status="ok", tip, receipts=(), complete=True):
+    return canonical({"v": 1, "type": "relay_receipt_sync", "status": status,
+        "tip_seq": str(tip[0]), "tip_hash": tip[1], "receipts": list(receipts), "complete": complete})
+
+
+@pytest.mark.asyncio
+async def test_host_receipt_sync_follows_pages_from_its_new_tip(tmp_path):
+    connection, relay_signing = _sync_connection(tmp_path)
+    first = _sync_receipt(relay_signing, seq=1, previous=RECEIPT_GENESIS_HASH, request_id=CEREMONY)
+    second = _sync_receipt(relay_signing, seq=2, previous=first["receipt_hash"], request_id=CEREMONY2)
+    tip = (2, second["receipt_hash"])
+    socket = _SyncSocket(
+        _sync_response(tip=tip, receipts=[first], complete=False),
+        _sync_response(tip=tip, receipts=[second]),
+    )
+    await connection._synchronize_receipts(socket)
+    assert [frame["seq"] for frame in socket.sent] == ["0", "1"]
+    assert socket.sent[1]["hash"] == first["receipt_hash"]
+    assert connection.channel.audit.receipt_tip() == tip
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("responses", [
+    [],  # Shore never answers
+    [b"not json"],
+    [json.dumps({"v": 1, "type": "relay_receipt_sync"}).encode()],
+    [_sync_response(tip=(0, RECEIPT_GENESIS_HASH), complete=False)],  # no progress
+    [_sync_response(tip=(1, "A" * 43))],  # claims complete at a tip the host did not reach
+])
+async def test_host_receipt_sync_retries_unusable_responses(tmp_path, responses):
+    connection, _relay_signing = _sync_connection(tmp_path, receipt_sync_timeout=0.01)
+    with pytest.raises(ShoreProtocolError, match="shore_receipt_sync_unavailable"):
+        await connection._synchronize_receipts(_SyncSocket(*responses))
+
+
+@pytest.mark.asyncio
+async def test_host_rejects_forged_sync_receipt_terminally(tmp_path):
+    connection, _relay_signing = _sync_connection(tmp_path)
+    forged = _sync_receipt(ed25519.Ed25519PrivateKey.generate(), seq=1,
+        previous=RECEIPT_GENESIS_HASH, request_id=CEREMONY)
+    socket = _SyncSocket(_sync_response(tip=(1, forged["receipt_hash"]), receipts=[forged]))
+    with pytest.raises(ReceiptVerificationError, match="shore_audit_continuity_unavailable"):
+        await connection._synchronize_receipts(socket)
+    assert connection.channel.audit.receipt_tip() == (0, RECEIPT_GENESIS_HASH)
+
+
+@pytest.mark.asyncio
+async def test_run_stops_with_error_on_divergence_and_retries_unavailable_sync(monkeypatch, tmp_path, caplog):
+    connection, _relay_signing = _sync_connection(tmp_path, base_backoff=0, receipt_sync_timeout=0.01)
+    diverged = _sync_response(status="diverged", tip=(2, "A" * 43), complete=False)
+    sockets = iter([_SyncSocket(), _SyncSocket(diverged)])
+    served = False
+
+    class Context:
+        async def __aenter__(self): return next(sockets)
+        async def __aexit__(self, *_args): pass
+
+    async def headers(): return {}
+    async def serve(_socket, _stop):
+        nonlocal served
+        served = True
+
+    monkeypatch.setattr(connection, "_connection_headers", headers)
+    monkeypatch.setattr(connection, "_serve", serve)
+    monkeypatch.setattr("websockets.asyncio.client.connect", lambda *_args, **_kwargs: Context())
+    with caplog.at_level("ERROR", logger="agent.shore_transport"):
+        await asyncio.wait_for(connection.run(asyncio.Event()), timeout=5)
+    assert not served and not connection.connected.is_set()
+    assert "guided recovery required" in caplog.text
 
 
 @pytest.mark.asyncio

@@ -2571,6 +2571,26 @@ reloading through the signature/hash-verifying bootstrap. This covers both
 disconnected clients and old clients whose relay socket survives the host
 upgrade; malformed or unauthenticated metadata cannot trigger a switch.
 
+**Receipt reconnect reconciliation follow-up (2026-09-25):** a receipt-enabled
+host now presents its durable receipt `(seq, hash)` checkpoint before relay
+traffic starts. Shore accepts only an exact chain prefix, replays missing
+Shore-signed receipts in bounded pages, and withholds application traffic until
+the host has verified and durably appended the full suffix. Equal tips proceed;
+ahead or divergent local tips fail closed for guided recovery. This removes the
+ordinary restart/upgrade failure mode where Shore committed a receipt that the
+host did not persist, without weakening rollback or fork detection. Review
+hardening: Shore pages from a transactional per-host sequence index (with a
+one-time backfill for existing chains) instead of scanning and sorting every
+retained receipt per page, and closes `1011` on storage failure; the host
+bounds each sync reply to 15 s, retries malformed or inconsistent replies with
+backoff, and stops with an explicit guided-recovery error only on
+authenticated divergence. Shore must deploy before hosts that send
+`x-shore-receipt-sync`. Focused evidence: 78 AgentSquid Shore
+transport/audit/receipt tests and all 171 Shore tests pass, including
+multi-page replay, timeout, divergence, backfill, and storage-failure cases. Live preproduction
+verification remains a deployment gate because the already-published rc9
+artifacts are immutable.
+
 **Package/client release coordination follow-up (2026-09-24):** Squid's
 tag-driven release now dispatches Shore's existing client publisher after PyPI
 succeeds, using the same exact version and the reviewed Shore source SHA pinned
