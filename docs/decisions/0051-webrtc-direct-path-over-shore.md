@@ -13,8 +13,8 @@ processes relay frames serially on one socket. Today only read-only state push
 HTTP-shaped operations are future work.
 
 Carrying the full feature set through the relay is viable (Cloudflare does not
-meter Worker/Durable Object bandwidth, so request and duration charges dominate,
-not bytes), but it has structural limits:
+meter Worker/Durable Object bandwidth, so request, duration, and per-message
+storage-write charges dominate, not bytes), but it has structural limits:
 
 - One host socket multiplexes every device and operation, so a large response
   head-of-line blocks live events for all paired devices.
@@ -168,8 +168,12 @@ clientless browser model of ADR-0039.
   shared with the relay path.
 - Bad: meaningful complexity in ICE, fallback/migration logic, and signed
   fingerprint binding, plus a new host-side WebRTC dependency.
-- Bad: does not materially reduce Shore cost. Bandwidth is already unmetered,
-  and Shore remains required for pairing, signaling, fallback, and push.
+- Mixed: bandwidth is already unmetered, and Shore remains required for
+  pairing, signaling, fallback, and push. However, the binding Shore cost is
+  Durable Object storage writes per relayed message (see ADR-0039 "Traffic
+  accounting and capacity forecast"), so every message carried directly avoids
+  them. Relay write amplification must still be fixed first because fallback
+  sessions keep using the relay.
 - Bad: a new authenticated ingress path to the host that must be held to the
   same security review bar as the relay.
 - Bad: audit continuity needs new design, since direct traffic bypasses relay

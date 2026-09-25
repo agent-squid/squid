@@ -1,7 +1,7 @@
 ---
 status: accepted
 date: 2026-08-11
-updated: 2026-09-16
+updated: 2026-09-25
 ---
 # ADR-0039: Remote access via Shore Relay on Cloudflare Workers + Durable Objects (agentsquid.ai/@username)
 
@@ -438,6 +438,16 @@ endpoint trustworthy or prevent denial of service.
   receipt with inbound frames and an acknowledgement receipt for outbound
   frames. A sender may retry the identical envelope/receipt pair by request ID;
   it must not allocate a second chain entry.
+- **Proposed amendment (2026-09-25, not yet in effect):** narrow the chain to
+  browser→host ordinary envelopes. Host→browser envelopes would carry no
+  receipt and no per-frame Shore audit event, and `relay_receipt_ack` would be
+  removed. The rule keys on the cleartext direction, not a sender-declared
+  flag, so a browser cannot opt a command out of receipting. Rationale: on
+  2026-09-25 per-envelope receipting in both directions drove about 7.5
+  Durable Object row writes per relayed message and exhausted the free-tier
+  daily write limit. The host's own audit already records what it sent. See
+  [Shore DO write budget plan](../plans/shore-do-write-budget.md), Phase 3.
+  Until accepted, the rules above remain normative.
 - The host verifies the relay signature, envelope commitment, expected epoch,
   and link from its persisted tip before dispatch. Persisting the new tip and
   the pending host audit decision must be one local transaction. Ordered
@@ -499,6 +509,7 @@ As of 2026-09-01, the relevant published allowances are:
 | Worker requests | 100,000/day; further invocations fail at the limit | 10M/month included, then $0.30/M |
 | Durable Object requests | 100,000/day; operations fail at the limit | 1M/month included, then $0.15/M |
 | Durable Object duration | 13,000 GB-s/day | 400,000 GB-s/month included, then usage pricing |
+| Durable Object SQLite rows written | 100,000/day; operations fail at the limit | 50M/month included, then usage pricing |
 
 Workers Paid has a $5/month minimum. Paying does not create a fixed DAU cap:
 usage continues with overage billing. The request prices are relatively small;
@@ -530,7 +541,15 @@ is:
 | 10,000 | 45M | $22.10 |
 
 These figures include the $5 minimum but exclude duration, storage, email,
-audit export, observability, taxes, and other services. They are planning
+audit export, observability, taxes, and other services.
+
+Storage row writes, not requests, were the first limit hit in practice. On
+2026-09-25 one dev account exceeded 100,000 rows written in a day at about
+20,000 relayed messages: every put, delete, and alarm write is billed, and each
+receipted envelope, traffic flush, heartbeat alarm, and audit export added
+writes. Relay changes must budget storage writes per relayed message, per
+heartbeat, and per idle minute alongside requests. See the
+[Shore DO write budget plan](../plans/shore-do-write-budget.md). They are planning
 estimates, not a capacity commitment. Launch planning is 100–300 remote DAU on
 Free, followed by a 500–1,000 DAU paid pilot. Forecasts must be replaced with
 observed requests per DAU and duration per event after the first 100 active
