@@ -1267,7 +1267,7 @@ async def test_push_sweep_evicts_on_ping_timeout(tmp_path, monkeypatch):
     # intervals is treated as no-longer-live and evicted locally -- the
     # per-device equivalent of the direct path's heartbeat-timeout close.
     # last_inbound_at is a time.monotonic() value (seconds), so this pushes
-    # it comfortably past the 40s (2 x 20s) timeout.
+    # it comfortably past the 90s (2 x 45s) Shore-path timeout.
     channel.sessions[DEVICE].last_inbound_at -= 100
 
     connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
@@ -1279,6 +1279,34 @@ async def test_push_sweep_evicts_on_ping_timeout(tmp_path, monkeypatch):
 
     await connection._push_sweep(Socket())
     assert DEVICE not in channel.sessions
+
+
+@pytest.mark.asyncio
+async def test_push_sweep_pings_on_shore_interval(tmp_path, monkeypatch):
+    _fresh_stats_db(tmp_path, monkeypatch)
+    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=host_agreement)
+    await pair(channel, browser_signing, browser_agreement)
+    request = browser_frame(browser_signing, browser_agreement, host_agreement.public_key(), 1,
+                             "subscribe", {"scopes": [{"lifecycle": "global"}], "cursor": 0})
+    await channel.handle(canonical(request), now_ms=NOW)
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
+        host_id=HOST, signing_key=host_signing)
+
+    class Socket:
+        def __init__(self): self.sent = []
+        async def send(self, value): self.sent.append(value)
+
+    session = channel.sessions[DEVICE]
+    # 40s of silence: past the direct path's 20s ping and 40s timeout, but
+    # neither pings nor evicts on the Shore path.
+    session.last_ping_at = session.last_inbound_at = time_module.monotonic() - 40
+    assert await connection._push_sweep(Socket()) == 0
+    assert DEVICE in channel.sessions
+    session.last_ping_at = time_module.monotonic() - 45
+    assert await connection._push_sweep(Socket()) == 1
 
 
 @pytest.mark.asyncio

@@ -69,10 +69,15 @@ log = logging.getLogger(__name__)
 # Per-device push sweep granularity: how often ShoreHostConnection._serve
 # checks subscribed devices for new events to push, pings due, and
 # ping-timeout eviction. Independent of the 30s relay transport lease
-# heartbeat and of ADR-0040's own 20s/40s device ping/timeout constants
-# (imported lazily from agent.server so there is one source of truth) --
-# this is only how often the sweep itself runs, not a protocol value.
+# heartbeat and of the device ping interval below -- this is only how often
+# the sweep itself runs, not a protocol value.
 _PUSH_SWEEP_SECONDS = 5.0
+# Device ping interval on the Shore path (docs/shore-protocol-v1.md "Per-device
+# push liveness and backpressure"). Longer than the direct path's 20s because
+# each browser pong is a receipted Shore envelope (Durable Object writes). It
+# must stay below Shore's 60s browser-socket heartbeat deadline, less one sweep
+# period and network slack: an idle tab's pong is its only frame.
+_SHORE_DEVICE_PING_SECONDS = 45.0
 _PAIRING_REQUEST_TTL_SECONDS = 120.0
 _RECEIPTS_DISABLED_ORIGINS: frozenset[str] = frozenset()
 
@@ -1100,8 +1105,7 @@ class ShoreHostConnection:
         actually sent, so the caller can tell a real send from a no-op sweep.
         """
         from .server import (
-            _REALTIME_HEARTBEAT_MISS_LIMIT, _REALTIME_HEARTBEAT_SECONDS,
-            _RealtimeSlowConsumer, _realtime_catchup,
+            _REALTIME_HEARTBEAT_MISS_LIMIT, _RealtimeSlowConsumer, _realtime_catchup,
         )
 
         now = time.monotonic()
@@ -1114,7 +1118,7 @@ class ShoreHostConnection:
             if not trusted or trusted.key_epoch != self.channel.key_epoch:
                 self.channel._drop_session(device_id)
                 continue
-            if now - session.last_inbound_at > _REALTIME_HEARTBEAT_SECONDS * _REALTIME_HEARTBEAT_MISS_LIMIT:
+            if now - session.last_inbound_at > _SHORE_DEVICE_PING_SECONDS * _REALTIME_HEARTBEAT_MISS_LIMIT:
                 self.channel._drop_session(device_id)
                 continue
 
@@ -1148,7 +1152,7 @@ class ShoreHostConnection:
                 await self._send_application(socket, sealed)
                 sent += 1
 
-            if now - session.last_ping_at >= _REALTIME_HEARTBEAT_SECONDS:
+            if now - session.last_ping_at >= _SHORE_DEVICE_PING_SECONDS:
                 sealed = await asyncio.to_thread(
                     self.channel._seal, trusted, {"v": 1, "type": "ping", "payload": {}}, now_ms,
                 )

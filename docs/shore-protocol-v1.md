@@ -278,14 +278,17 @@ layered on top of ADR-0040's own `ping`/`pong`/`slow_consumer` semantics
   then clears that device's subscription state locally. No WebSocket close
   occurs and no other device's session is affected.
 - **Ping/pong liveness.** While a device holds an active subscription, the
-  host sends it a sealed `ping` envelope every 20 seconds of otherwise-silent
-  traffic to that device, identical to `heartbeat_seconds` on the direct path.
-  A device that has sent no frame of any type (`ack`, `pong`, or a command)
-  within two consecutive intervals (40 seconds) is treated as no-longer-live:
-  the host clears its subscription state locally, the same as an overflow.
-  This mirrors the direct path's miss limit exactly; only the enforcement
-  action differs (local state clear instead of a WebSocket close, since the
-  shared socket cannot be closed for one device).
+  host sends it a sealed `ping` envelope every 45 seconds. This is longer than
+  the direct path's 20-second `heartbeat_seconds` because every `pong` is a
+  receipted browser-to-host envelope, which costs Shore Durable Object writes.
+  It must stay below Shore's 60-second browser-socket heartbeat deadline,
+  because an idle tab's `pong` is its only frame. A device that has sent no
+  frame of any type (`ack`, `pong`, or a command) within two consecutive
+  intervals (90 seconds) is treated as no-longer-live: the host clears its
+  subscription state locally, the same as an overflow. The miss limit matches
+  the direct path; only the enforcement action differs (local state clear
+  instead of a WebSocket close, since the shared socket cannot be closed for
+  one device).
 - **Recovery.** Both cases leave the device's paired trust, capability grant,
   and key epoch untouched — only the in-memory subscription is cleared. The
   device recovers by sending a fresh `subscribe` with its own last-applied

@@ -1,8 +1,9 @@
 # Plan: Shore Durable Object write budget
 
-**Status:** In progress. Phases 1–3 implemented and tested, not yet deployed or
-re-measured (Phase 3 needs a Shore deploy plus a Squid release that sends
-`x-shore-receipt-scope`; either may ship first). Phases 4–5 pending.
+**Status:** Implemented. Phases 1–3 are deployed (Shore `b89478c`, AgentSquid
+`v0.1.6rc12`). Phase 4 item 11 and Phase 5 items 12–14 are implemented. Two
+items are deferred: 10 (optional, no DO saving) and 15 (a billing decision).
+Re-measurement is pending: dev was at its 2026-09-25 quota when these shipped.
 
 Companion to [ADR-0039](../decisions/0039-remote-access-via-shore-relay.md)
 ("Traffic accounting and capacity forecast", "Receipt-chain scope and
@@ -120,29 +121,42 @@ tip row); Squid `tests/test_shore_*.py`.
 
 ## Phase 4 — Squid host framing and ping interval
 
-10. Optional: coalesce outbound dashboard events per 100–250ms window into one envelope.
-    After Phase 3 this saves bandwidth and CPU, not DO writes.
-11. Lengthen the device ping interval on the Shore path (for example 60s).
-    Pongs are browser→host and stay receipted after Phase 3, so at 20s an idle
-    open tab still costs ~0.5k writes/hr (~12k/day). Not optional if tabs stay
-    open.
+10. Deferred: coalescing outbound dashboard events per 100–250ms window into
+    one envelope. After Phase 3 this saves bandwidth and CPU, not DO writes,
+    and it would need a new batched frame type in `shore-protocol-v1.md`.
+    Revisit only if relay bandwidth or frame-rate limits become the constraint.
+11. Done: the host pings each subscribed device every 45s on the Shore path
+    (`_SHORE_DEVICE_PING_SECONDS`), not the direct path's 20s, and evicts it
+    after 90s of silence. The upper bound is Shore's 60s browser-socket
+    heartbeat deadline, because an idle tab's pong is its only frame; 60s would
+    need a Shore deadline change and Shore to deploy first. An idle open tab
+    drops from 180 to 80 receipted pongs/hr (~720 to ~320 writes/hr). Documented
+    in `shore-protocol-v1.md` "Per-device push liveness and backpressure".
 
 ## Phase 5 — Guardrails
 
-12. A Shore test budget: count storage writes per relayed frame, per heartbeat,
-    and per idle minute; fail CI on regression.
-13. Daily alert on `rowsWritten` (the GraphQL query above) at 50% of the budget,
-    per ADR-0039 "Monitoring, quota protection, and degradation".
-14. The hosted client reports Shore 5xx as a Shore failure, not "Could not
-    reach your Squid host".
-15. Optional: Workers Paid on `shore-dev` as a safety net.
+12. Done: Shore test "Durable Object write budget" instruments storage
+    (`put`/`delete`/alarm writes, including inside transactions) and asserts
+    0 writes for host lease heartbeats, exactly 4 for a receipted
+    browser→host frame, 0 for a scoped host→browser frame, and 0 while idle.
+    It runs in CI with `npm test`.
+13. Done: the Shore workflow `do-write-budget.yml` runs every 2 hours and on
+    demand. It executes `scripts/check-do-writes.mjs`, which sums today's UTC
+    `rowsWritten` and fails the run (GitHub notifies) at 50% of 100k. It needs
+    `CLOUDFLARE_ANALYTICS_API_TOKEN` (Account Analytics:Read) and
+    `CLOUDFLARE_ACCOUNT_ID` in the `shore-dev` environment. It can also run
+    locally with any token that has that scope.
+14. Done: `loadAuthenticatedShoreRoute` reports a 5xx from `/auth/security` as
+    `shore_service_unavailable`, and the hosted client says the relay is having
+    a problem and the host is not at fault.
+15. Deferred: Workers Paid on `shore-dev` as a safety net (billing decision).
 
 ## Expected effect
 
 | | 2026-09-25 | After 1–2 | After 1–3 |
 | --- | --- | --- | --- |
 | Idle, no tab | ~250/hr | ~0–60/hr (socket alarm) | same |
-| Idle tab open | ~6.7k/hr | ~1.3k/hr (20s ping/pong) | ~0.5k/hr; ~0.15k/hr with item 11 |
+| Idle tab open | ~6.7k/hr | ~1.3k/hr (20s ping/pong) | ~0.7k/hr; ~0.3k/hr with item 11 (4 writes per pong) |
 | Active streaming | 7–44k/hr | roughly halved | a few hundred/hr |
 | Day like 2026-09-25 | 119k | ~40–60k | ~2–5k |
 
