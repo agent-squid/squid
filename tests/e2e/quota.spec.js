@@ -540,6 +540,63 @@ test('detached status fallback timeout finalizes active quota tracking', async (
   }
 });
 
+test('websocket turn records and shows its quota delta', async ({ page }) => {
+  await mockShell(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+  let quotaPct = 40;
+  await page.route('**/quota/provider/*', route => route.fulfill({
+    json: { status: 'ok', raw: quotaPct, used_percent: quotaPct },
+  }));
+  const msgQuotaCalls = [];
+  const sessionQuotaCalls = [];
+  await page.route('**/chat/*/quota-delta', route => {
+    msgQuotaCalls.push({ url: route.request().url(), body: route.request().postDataJSON() });
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.route('**/stats/quota-delta', route => {
+    sessionQuotaCalls.push(route.request().postDataJSON());
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.route('**/chat/10/status', route => route.fulfill({ json: {
+    id: 10,
+    role: 'assistant',
+    topic: 'default',
+    status: 'done',
+    content: 'hi there',
+    session_id: 'ws-session',
+    completed_at: '2026-09-25T12:00:00Z',
+    stats: { session_id: 'ws-session', input_tokens: 1, output_tokens: 2 },
+  } }));
+  await page.routeWebSocket('**/ws/v1', ws => {
+    ws.send(JSON.stringify({ v: 1, type: 'hello', payload: {} }));
+    ws.onMessage(message => {
+      const frame = JSON.parse(message);
+      if (frame.type === 'subscribe') {
+        ws.send(JSON.stringify({ v: 1, type: 'subscribed', payload: {} }));
+      } else if (frame.type === 'chat.start') {
+        ws.send(JSON.stringify({ v: 1, type: 'command.result', request_id: frame.request_id, payload: { ok: true, msg_id: 10 } }));
+        quotaPct = 42.5;
+        setTimeout(() => ws.send(JSON.stringify({
+          v: 1, type: 'chat.done', event_id: 1, msg_id: 10, scope: { topic: 'default' }, payload: {},
+        })), 50);
+      }
+    });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', 'hello');
+  await page.locator('#input').press('Enter');
+
+  await expect.poll(() => msgQuotaCalls.length).toBe(1);
+  expect(msgQuotaCalls[0].url).toContain('/chat/10/quota-delta');
+  expect(msgQuotaCalls[0].body).toEqual({ before: 40, after: 42.5 });
+  await expect.poll(() => sessionQuotaCalls.length).toBe(1);
+  expect(sessionQuotaCalls[0]).toEqual({ session_id: 'ws-session', before: 40, after: 42.5 });
+  await expect(page.locator('.msg.assistant.history-item[data-msg-id="10"] + .stats .stats-quota-delta'))
+    .toHaveText(/\+2\.5 pp/);
+  await expect.poll(() => page.evaluate(() => quotaState.anthropic?.activeCount || 0)).toBe(0);
+});
+
 test('terminal turn on a backend with no quota gauge records no fabricated quota delta', async ({ page }) => {
   await mockShell(page);
   // Anthropic has no `gauge` field at all here — "no quota concept for this

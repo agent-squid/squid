@@ -35,8 +35,12 @@ relay validates the identifier's format and stores it but does not compare it
 with a Worker-compiled client constant. The authenticated browser route returns
 that identifier. The stable bootstrap fetches only
 `/client/releases/<version>/manifest.json`, verifies its version, signature,
-revocation state, and content hashes, and then loads its assets. Failure renders
-a static non-command-capable panel.
+revocation state, and content hashes, and then loads its assets. When the
+requested release is missing, unavailable, or revoked, the bootstrap reloads once
+with the exact identifier the authenticated route currently returns for the
+host, which it then verifies in full; it never selects an older or cached
+release. Any other failure, including signature or hash failure, renders a
+static non-command-capable panel.
 
 Client identifiers use the project's accepted PEP 440 subset. The coordinated
 default release uses the AgentSquid package version; compatibility is approved

@@ -5397,8 +5397,12 @@ async function sendMessage(text, opts = {}) {
       const isBalanceMeter = isBalanceGauge(quotaBackend) && !usePct;
       const rawDiff = quotaAfter - quotaBefore;
       const d = Math.round((isBalanceMeter ? -rawDiff : rawDiff) * 10) / 10;
-      if (statsEl && d > 0) {
-        const deltaEl = statsEl.querySelector('.stats-quota-delta');
+      // The WebSocket path renders its footer via insertCompletedHistoryItem,
+      // not this closure's statsEl — look it up next to the stored bubble.
+      const footerEl = statsEl
+        || messages.querySelector(`.msg.assistant.history-item[data-msg-id="${msgId}"]`)?.nextElementSibling;
+      const deltaEl = footerEl?.querySelector('.stats-quota-delta');
+      if (deltaEl && d > 0) {
         deltaEl.textContent = `  ·  +${d} pp`;
         deltaEl.title = 'Observed account quota-meter change; not exact message usage';
       }
@@ -5964,7 +5968,14 @@ async function sendMessage(text, opts = {}) {
           content: '',
           status: 'pending',
         }, thinkingBubble, {
-          onStored: data => markSessionContextDelivered(data.session_id || data.stats?.session_id || null),
+          onStored: data => {
+            markSessionContextDelivered(data.session_id || data.stats?.session_id || null);
+            // The finally block skips finalizeQuotaTracking once detachedPolling
+            // is set, so the WS handoff must record this turn's quota delta.
+            lastSessionId = data.session_id || data.stats?.session_id || lastSessionId;
+            turnStatus = data.status;
+            finalizeQuotaTracking();
+          },
           onProcessing: startShellRunningStatus,
         });
         return { flowRunId, msgId };
