@@ -5976,6 +5976,9 @@ async function sendMessage(text, opts = {}) {
             turnStatus = data.status;
             finalizeQuotaTracking();
           },
+          // Paths that never reach onStored (status fetch failed, bubble gone,
+          // empty error) still finalize so quota tracking is released.
+          onSettled: finalizeQuotaTracking,
           onProcessing: startShellRunningStatus,
         });
         return { flowRunId, msgId };
@@ -7933,14 +7936,16 @@ function insertPendingHistoryItem(item) {
   return bubble;
 }
 
-async function replacePendingWithStoredItem(item, wipBubble, onStored = null) {
+// Quota untracking and onSettled run on every exit — including early returns
+// that skip onStored — so per-turn cleanup can't be stranded; callers only get
+// here once the turn has signalled completion and stop watching it after.
+async function replacePendingWithStoredItem(item, wipBubble, onStored = null, onSettled = null) {
   try {
     const res = await fetch(`/chat/${item.id}/status`);
     if (!res.ok || !wipBubble.parentNode) return;
     const data = await res.json();
     if (data.status !== 'done' && data.status !== 'error' && data.status !== 'cancelled') return;
     if (data.status === 'error' && !String(data.content || '').trim()) return;
-    untrackQuotaForTurn(item.id);
     onStored?.(data);
     // Removing a finished wip bubble that sits above the viewport (e.g. another
     // bubble is still streaming below where the user is reading) shrinks the
@@ -7959,7 +7964,10 @@ async function replacePendingWithStoredItem(item, wipBubble, onStored = null) {
     if (pinPanel.classList.contains('open')) renderPinPanel();
     refreshAllRevertButtons();
     if (isAtBottom()) scrollToBottom();
-  } catch {}
+  } catch {} finally {
+    untrackQuotaForTurn(item.id);
+    onSettled?.();
+  }
 }
 
 const _flowRunWatchers = new Set();
@@ -8496,7 +8504,7 @@ function isChatStatusTerminal(data) {
     || (data.status === 'error' && String(data.content || '').trim());
 }
 
-async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStored = null, onProcessing = null } = {}) {
+async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStored = null, onSettled = null, onProcessing = null } = {}) {
   if (item.source !== 'shell') trackQuotaForPendingTurn(item.id, item.topic, item.agent);
   const transportMode = forceSse ? 'sse' : await realtimeTransportMode;
   if (!wipBubble.isConnected) return;
@@ -8507,7 +8515,7 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
       if (live) live.textContent = 'WebSocket transport is unavailable in this browser.';
       return;
     }
-    pollPendingItem(item, wipBubble);
+    pollPendingItem(item, wipBubble, onStored, onSettled);
     return;
   }
 
@@ -8622,7 +8630,7 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
         if (transportMode === 'auto' && window.EventSource) {
           stop();
           pendingPollTimers.delete(wipBubble);
-          reconnectPendingItem(item, wipBubble, { forceSse: true, onStored });
+          reconnectPendingItem(item, wipBubble, { forceSse: true, onStored, onSettled });
         } else {
           statusBuf = 'WebSocket connection failed; retrying…';
           updatePreview();
@@ -8647,7 +8655,7 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
       clearTimeout(idleTimer);
       stop();
       pendingPollTimers.delete(wipBubble);
-      await replacePendingWithStoredItem(item, wipBubble, onStored);
+      await replacePendingWithStoredItem(item, wipBubble, onStored, onSettled);
     }
     pendingPollTimers.set(wipBubble, stop);
     return;
@@ -8678,7 +8686,7 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
     clearTimeout(idleTimer);
     es.close();
     pendingPollTimers.delete(wipBubble);
-    await replacePendingWithStoredItem(item, wipBubble, onStored);
+    await replacePendingWithStoredItem(item, wipBubble, onStored, onSettled);
   }
   async function checkIdleFallback() {
     if (closed) return;
@@ -8762,20 +8770,21 @@ async function reconnectPendingItem(item, wipBubble, { forceSse = false, onStore
     if (event.data) {
       if (live) live.innerHTML = `<span class="msg-error">${event.data}</span>`;
       updateThinkingHeightButton(wipBubble);
-      await replacePendingWithStoredItem(item, wipBubble, onStored);
+      await replacePendingWithStoredItem(item, wipBubble, onStored, onSettled);
       return;
     }
-    pollPendingItem(item, wipBubble);
+    pollPendingItem(item, wipBubble, onStored, onSettled);
   });
 }
 
-async function pollPendingItem(item, wipBubble) {
+async function pollPendingItem(item, wipBubble, onStored = null, onSettled = null) {
   const MAX_POLLS = 960;
   let count = 0;
   const timer = setInterval(async () => {
     if (!wipBubble.isConnected) {
       cancelPendingPoll(wipBubble);
       untrackQuotaForTurn(item.id);
+      onSettled?.();
       return;
     }
     count++;
@@ -8785,10 +8794,11 @@ async function pollPendingItem(item, wipBubble) {
       const data = await res.json();
       if (isChatStatusTerminal(data)) {
         cancelPendingPoll(wipBubble);
-        await replacePendingWithStoredItem(item, wipBubble);
+        await replacePendingWithStoredItem(item, wipBubble, onStored, onSettled);
       } else if (count >= MAX_POLLS) {
         cancelPendingPoll(wipBubble);
         untrackQuotaForTurn(item.id);
+        onSettled?.();
         const content = wipBubble.querySelector('.thinking-live');
         if (content) content.innerHTML += '<br><span class="msg-error">Timed out.</span>';
         updateThinkingHeightButton(wipBubble);

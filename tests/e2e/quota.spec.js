@@ -597,6 +597,44 @@ test('websocket turn records and shows its quota delta', async ({ page }) => {
   await expect.poll(() => page.evaluate(() => quotaState.anthropic?.activeCount || 0)).toBe(0);
 });
 
+test('websocket turn whose stored status cannot be read still finalizes quota tracking', async ({ page }) => {
+  await mockShell(page);
+  await page.route('**/config/realtime', route => route.fulfill({ json: { transport: 'websocket' } }));
+  let quotaPct = 40;
+  await page.route('**/quota/provider/*', route => route.fulfill({
+    json: { status: 'ok', raw: quotaPct, used_percent: quotaPct },
+  }));
+  const msgQuotaCalls = [];
+  await page.route('**/chat/*/quota-delta', route => {
+    msgQuotaCalls.push(route.request().postDataJSON());
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.route('**/chat/10/status', route => route.fulfill({ status: 500, body: 'boom' }));
+  await page.routeWebSocket('**/ws/v1', ws => {
+    ws.send(JSON.stringify({ v: 1, type: 'hello', payload: {} }));
+    ws.onMessage(message => {
+      const frame = JSON.parse(message);
+      if (frame.type === 'subscribe') {
+        ws.send(JSON.stringify({ v: 1, type: 'subscribed', payload: {} }));
+      } else if (frame.type === 'chat.start') {
+        ws.send(JSON.stringify({ v: 1, type: 'command.result', request_id: frame.request_id, payload: { ok: true, msg_id: 10 } }));
+        quotaPct = 41;
+        setTimeout(() => ws.send(JSON.stringify({
+          v: 1, type: 'chat.done', event_id: 1, msg_id: 10, scope: { topic: 'default' }, payload: {},
+        })), 50);
+      }
+    });
+  });
+
+  await page.goto('/');
+  await page.fill('#input', 'hello');
+  await page.locator('#input').press('Enter');
+
+  await expect.poll(() => msgQuotaCalls.length).toBe(1);
+  expect(msgQuotaCalls[0]).toEqual({ before: 40, after: 41 });
+  await expect.poll(() => page.evaluate(() => quotaState.anthropic?.activeCount || 0)).toBe(0);
+});
+
 test('terminal turn on a backend with no quota gauge records no fabricated quota delta', async ({ page }) => {
   await mockShell(page);
   // Anthropic has no `gauge` field at all here — "no quota concept for this
