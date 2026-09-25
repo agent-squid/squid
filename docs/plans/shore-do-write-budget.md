@@ -1,9 +1,11 @@
 # Plan: Shore Durable Object write budget
 
-**Status:** Implemented. Phases 1–3 are deployed (Shore `b89478c`, AgentSquid
-`v0.1.6rc12`). Phase 4 item 11 and Phase 5 items 12–14 are implemented. Two
-items are deferred: 10 (optional, no DO saving) and 15 (a billing decision).
-Re-measurement is pending: dev was at its 2026-09-25 quota when these shipped.
+**Status:** Implemented and released. Phases 1–3 shipped in Shore `b89478c`
+and AgentSquid `v0.1.6rc12`. Phase 4 item 11 and Phase 5 items 12–14 shipped
+in Shore `b62082c` and AgentSquid `v0.1.6rc13`. Two items are deferred: 10
+(optional, no DO saving) and 15 (a billing decision). Re-measurement is
+pending: dev was at its 2026-09-25 quota when these shipped. Replace the
+"Expected effect" estimates with a full day of observed data.
 
 Companion to [ADR-0039](../decisions/0039-remote-access-via-shore-relay.md)
 ("Traffic accounting and capacity forecast", "Receipt-chain scope and

@@ -570,6 +570,9 @@ reconnects, HTTP requests per page load and DAU, per-account/device usage,
 rate-limit rejections, error rates, and projected quota-exhaustion time. The
 Cloudflare dashboard and GraphQL Analytics API feed alerts; paid-plan budget
 alerts are supplementary and are not treated as a real-time circuit breaker.
+The first alert in place is the Shore `do-write-budget.yml` workflow. Every two
+hours it checks the account's daily Durable Object rows written against the 50%
+threshold below ([write budget plan](../plans/shore-do-write-budget.md), Phase 5).
 
 Apply both global and per-account/device/IP limits before an account Durable
 Object is invoked. Use daily quota thresholds with tested operational actions:

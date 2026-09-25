@@ -2456,6 +2456,19 @@ provisioning the production alert destination and credentials, and recording a
 restore drill witnessed by the archive custodian. None can be truthfully
 asserted by an isolated source-tree change, so 6.2 remains open.
 
+**Quota incident follow-up (2026-09-25):** dev exhausted the Workers Free
+limit of 100k Durable Object row writes per day. The
+[write budget plan](./shore-do-write-budget.md) records the remediation:
+- Idle-path write cuts.
+- Browser acks sent only when the cursor advances.
+- Receipts on browser→host frames only (ADR-0039 amendment), with no
+  per-receipt tip row and no outcome event after a successful forward.
+- A 45s device ping on the Shore path.
+- A CI write-budget test and a 50% rows-written alert workflow.
+
+This advances slice 3 (quota protection) and the alerting in slice 4. The
+production alert sink is still open.
+
 **Release-design follow-up (2026-09-23):** ADR-0050 now defines the selected
 private-R2 architecture, same-domain `/client/*` route, independent Shore
 source identity, immutable version lookup, explicit development head, bootstrap,

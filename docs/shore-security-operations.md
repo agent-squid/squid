@@ -41,7 +41,13 @@ production deployment still requires closing or explicitly reaccepting it.
 Relay and host events use the same request/transition ID and hash commitment.
 The relay chain contains prior hash, event ID, account/host/device/session IDs,
 a keyed pseudonymous source fingerprint, receipt time, ciphertext hash, and
-outcome. Raw IP, precise location, and full request headers are not retained.
+outcome. A receipted frame's pre-forward event is written with the receipt.
+Only a failed forward (`backpressure`, `send_failed`, `peer_offline`) adds a
+separate outcome event, so a receipted event with no later outcome was
+forwarded. Host-to-browser frames from hosts that send
+`x-shore-receipt-scope: browser_to_host` have no relay event; the host chain
+records the inbound request and decision that produced them (ADR-0039
+receipt-scope amendment). Raw IP, precise location, and full request headers are not retained.
 The host chain adds signed request ID, plaintext command hash,
 authorization decision, result class, host time, and prior host-event hash.
 Neither stores command text, response text, secrets, cookies, authorization
@@ -75,7 +81,8 @@ the relay checkpoint is transactionally bound to its B2 export cursor. New
 events continue from the independently stored chain tip. A failed, missing, or
 invalid archive acknowledgement leaves all pending rows intact. Operators must
 alert when export lag exceeds five minutes and monitor Durable Object stored
-bytes and daily row writes before free-tier limits are approached. SQLite is
+bytes and daily row writes before free-tier limits are approached. The Shore
+`do-write-budget.yml` workflow alerts at 50% of the daily row-write limit. SQLite is
 never treated as the 400-day archive.
 
 Loss, rollback, or corruption of the host audit SQLite database is an unknown
