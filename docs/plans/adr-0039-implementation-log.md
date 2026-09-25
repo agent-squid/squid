@@ -2562,6 +2562,15 @@ queued work, and recent ordered updates under the global read-only scope. The
 page exposes no mutation controls. Publication as a new immutable client
 version and the live dev integration drill remain deployment gates.
 
+**Exact-version upgrade handoff follow-up (2026-09-25):** when an upgraded host
+advertises a different already-published exact client version, authenticated
+route metadata now produces a typed update signal instead of a generic route
+failure. The open client checks on connection loss and every 30 seconds, stops
+its old session, and replaces its URL with the authenticated version before
+reloading through the signature/hash-verifying bootstrap. This covers both
+disconnected clients and old clients whose relay socket survives the host
+upgrade; malformed or unauthenticated metadata cannot trigger a switch.
+
 **Package/client release coordination follow-up (2026-09-24):** Squid's
 tag-driven release now dispatches Shore's existing client publisher after PyPI
 succeeds, using the same exact version and the reviewed Shore source SHA pinned
