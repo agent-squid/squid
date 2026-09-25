@@ -142,10 +142,11 @@ tip row); Squid `tests/test_shore_*.py`.
     It runs in CI with `npm test`.
 13. Done: the Shore workflow `do-write-budget.yml` runs every 2 hours and on
     demand. It executes `scripts/check-do-writes.mjs`, which sums today's UTC
-    `rowsWritten` and fails the run (GitHub notifies) at 50% of 100k. It needs
-    `CLOUDFLARE_ANALYTICS_API_TOKEN` (Account Analytics:Read) and
-    `CLOUDFLARE_ACCOUNT_ID` in the `shore-dev` environment. It can also run
-    locally with any token that has that scope.
+    `rowsWritten` and fails the run (GitHub notifies) at 50% of 100k. The query
+    is account-wide, and dev and prod share one Cloudflare account, so this
+    one job covers both. It uses the `shore-dev` `CLOUDFLARE_API_TOKEN`, which
+    has Account Analytics:Read, and can also run locally with any token that
+    has that scope.
 14. Done: `loadAuthenticatedShoreRoute` reports a 5xx from `/auth/security` as
     `shore_service_unavailable`, and the hosted client says the relay is having
     a problem and the host is not at fault.
