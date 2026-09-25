@@ -3180,14 +3180,15 @@ function matchingPromptHistory(value, limit = 8) {
 }
 
 function promptHistoryAutocompleteItems(entries) {
-  const currentRoute = normalizePromptHistoryRoute(currentPromptHistoryRoute()).toLowerCase();
+  // Show every routed entry's route, including the current one: previewing an
+  // entry applies its route, so an entry without one would inherit whatever
+  // route the previously previewed row switched to.
   return entries.map(ph => {
     const { route, prompt } = splitPromptHistoryEntry(ph);
     const promptText = prompt || ph;
     const routeKey = normalizePromptHistoryRoute(route);
     const displayRouteKey = promptHistoryDisplayRoute(routeKey);
-    const isDifferentRoute = !!(routeKey && routeKey.toLowerCase() !== currentRoute);
-    const routeHtml = isDifferentRoute ? _acRouteHtml(displayRouteKey) : '';
+    const routeHtml = routeKey ? _acRouteHtml(displayRouteKey) : '';
     return {
       label: `<span class="ac-history-prompt">${escapeHtml(truncate(promptText, 55))}</span>`,
       labelClass: 'ac-prompt-label',
@@ -13912,10 +13913,29 @@ function _acPreview() {
   } else if (item.routeTarget && item.previewApply) {
     applyRouteTarget(item.routeTarget);
   } else {
+    // A route-less history prompt belongs to the route navigation started
+    // from, not to the route an earlier previewed row applied.
+    if (item.deletePromptEntry) _acRestoreDraftChip();
     input.value = item.insert;
     input.setSelectionRange(item.insert.length, item.insert.length);
     resizeComposer();
   }
+}
+
+function _acRestoreDraftChip() {
+  if (promptDraftChip) {
+    setTopicChip(promptDraftChip.topic, promptDraftChip.agent, promptDraftChip.adhoc, promptDraftChip.lookback || 0, {
+      route: promptDraftChip.route,
+      chainTarget: promptDraftChip.chainTarget,
+      chainTargetFresh: promptDraftChip.chainTargetFresh,
+      chainOperator: promptDraftChip.chainOperator,
+      chainRounds: promptDraftChip.chainRounds,
+      chainTargetTopic: promptDraftChip.chainTargetTopic,
+      broadcastAgents: promptDraftChip.broadcastAgents,
+      flowOrigins: promptDraftChip.flowOrigins,
+    });
+  }
+  else clearTopicChip();
 }
 
 function _acRestoreDraft() {
@@ -13923,19 +13943,7 @@ function _acRestoreDraft() {
   hideAutocomplete();
   if (had) {
     input.value = promptDraft;
-    if (promptDraftChip) {
-      setTopicChip(promptDraftChip.topic, promptDraftChip.agent, promptDraftChip.adhoc, promptDraftChip.lookback || 0, {
-        route: promptDraftChip.route,
-        chainTarget: promptDraftChip.chainTarget,
-        chainTargetFresh: promptDraftChip.chainTargetFresh,
-        chainOperator: promptDraftChip.chainOperator,
-        chainRounds: promptDraftChip.chainRounds,
-        chainTargetTopic: promptDraftChip.chainTargetTopic,
-        broadcastAgents: promptDraftChip.broadcastAgents,
-        flowOrigins: promptDraftChip.flowOrigins,
-      });
-    }
-    else clearTopicChip();
+    _acRestoreDraftChip();
     promptDraft = '';
     promptDraftChip = null;
     resizeComposer();

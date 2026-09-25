@@ -26,8 +26,7 @@ test('typed prompt prefixes show unique routed history with the current route fi
   const items = page.locator('#autocomplete .ac-item');
   await expect(items).toHaveCount(3);
   await expect(page.locator('#autocomplete .ac-title')).toHaveText('Recent Prompts');
-  // same-route item has no route chip — identified by absence of .ac-route-btn
-  const currentRouteItem = page.locator('#autocomplete .ac-item:not(:has(.ac-route-btn))');
+  const currentRouteItem = page.locator('#autocomplete .ac-item', { hasText: '#squid@codex push the changes' });
   const olderRouteItem = page.locator('#autocomplete .ac-item', { hasText: '#squid@haiku! push the changes' });
   await expect(currentRouteItem).toBeVisible();
   await expect(page.locator('#autocomplete .ac-item', { hasText: '#other@codex push the changes' })).toBeVisible();
@@ -37,12 +36,12 @@ test('typed prompt prefixes show unique routed history with the current route fi
     const olderBox = await olderRouteItem.boundingBox();
     return currentBox && olderBox ? currentBox.y > olderBox.y : false;
   }).toBe(true);
-  await expect(page.locator('#autocomplete .ac-item.selected .ac-route-btn')).toHaveCount(0);
+  await expect(page.locator('#autocomplete .ac-item.selected .ac-route-btn')).toContainText('#squid@codex');
   await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('push the changes');
   await page.locator('#input').press('ArrowUp');
   await expect(page.locator('#autocomplete .ac-item.selected')).toContainText('#other@codex push the changes');
   await page.locator('#input').press('ArrowDown');
-  await expect(page.locator('#autocomplete .ac-item.selected .ac-route-btn')).toHaveCount(0);
+  await expect(page.locator('#autocomplete .ac-item.selected .ac-route-btn')).toContainText('#squid@codex');
   await expect(page.getByRole('button', { name: 'Close suggestions' })).toBeVisible();
   await expect.poll(async () => {
     const titleBox = await page.locator('#autocomplete .ac-title').boundingBox();
@@ -56,7 +55,7 @@ test('typed prompt prefixes show unique routed history with the current route fi
   await expect(page.locator('#topic-chip')).toContainText('#squid@haiku!');
 });
 
-test('different-route items show a route chip button; same-route items do not', async ({ page }) => {
+test('every routed item shows its route chip, including the current route', async ({ page }) => {
   await mockBackend(page);
   await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
     topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
@@ -65,16 +64,51 @@ test('different-route items show a route chip button; same-route items do not', 
 
   await page.fill('#input', 'push');
 
-  // same-route item has no route button
-  const sameRouteItem = page.locator('#autocomplete .ac-item:not(:has(.ac-route-btn))');
-  await expect(sameRouteItem).toBeVisible();
-  await expect(sameRouteItem.locator('.ac-route-btn')).toHaveCount(0);
+  await expect(page.locator('#autocomplete .ac-item')).toHaveCount(3);
+  await expect(page.locator('#autocomplete .ac-item:not(:has(.ac-route-btn))')).toHaveCount(0);
+  for (const route of ['#squid@codex', '#other@codex', '#squid@haiku!']) {
+    await expect(page.locator('#autocomplete .ac-item', { hasText: `${route} push` }).locator('.ac-route-btn')).toContainText(route);
+  }
+});
 
-  // different-route items each have a route button showing their slug
-  await expect(page.locator('#autocomplete .ac-item', { hasText: '#other@codex' }).locator('.ac-route-btn')).toBeVisible();
-  await expect(page.locator('#autocomplete .ac-item', { hasText: '#other@codex' }).locator('.ac-route-btn')).toContainText('#other@codex');
-  await expect(page.locator('#autocomplete .ac-item', { hasText: '#squid@haiku!' }).locator('.ac-route-btn')).toBeVisible();
-  await expect(page.locator('#autocomplete .ac-item', { hasText: '#squid@haiku!' }).locator('.ac-route-btn')).toContainText('#squid@haiku!');
+test('arrowing through recent prompts applies each prompt\'s own route', async ({ page }) => {
+  await mockBackend(page);
+  await page.unroute('**/prompts/recent**');
+  await page.route('**/prompts/recent**', r => r.fulfill({ json: { items: [
+    '#squid@codex! what is your model?',
+    'review before publish',
+    '#squid@claude! what is your model?',
+    '#squid@codex address the issues',
+  ] } }));
+  await page.addInitScript(() => localStorage.setItem('squid_sticky_chip', JSON.stringify({
+    topic: 'squid', agent: 'codex', adhoc: false, lookback: 0,
+  })));
+  await page.goto('/');
+
+  const chip = page.locator('#topic-chip');
+  const selected = page.locator('#autocomplete .ac-item.selected');
+  await page.locator('#input').press('ArrowUp');
+  await expect(selected).toContainText('what is your model?');
+  await expect(chip).toContainText('#squid@codex!');
+  // Up moves to older entries. A route-less entry keeps the route navigation
+  // started from, not the one the previous row applied.
+  const expectations = [
+    ['review before publish', '#squid@codex', '#squid@codex!'],
+    ['what is your model?', '#squid@claude!', '#squid@codex'],
+    ['address the issues', '#squid@codex', '#squid@claude'],
+  ];
+  for (const [text, route, stale] of expectations) {
+    await page.locator('#input').press('ArrowUp');
+    await expect(selected).toContainText(text);
+    await expect(chip).toContainText(route);
+    await expect(chip).not.toContainText(stale);
+  }
+  // Returning past the other-route row restores the current route's row.
+  await page.locator('#input').press('ArrowDown');
+  await expect(chip).toContainText('#squid@claude!');
+  await page.locator('#input').press('ArrowDown');
+  await expect(chip).toContainText('#squid@codex');
+  await expect(chip).not.toContainText('#squid@claude');
 });
 
 test('resubmitting a removed prompt restores it to autocomplete', async ({ page }) => {
@@ -423,9 +457,8 @@ test('default topic prompt history distinguishes agent routes', async ({ page })
 
   await page.fill('#input', 'compare');
 
-  const sameRouteItem = page.locator('#autocomplete .ac-item:not(:has(.ac-route-btn))', { hasText: 'compare models' });
-  await expect(sameRouteItem).toBeVisible();
-  await expect(sameRouteItem).not.toContainText('#default@agentB');
+  const sameRouteItem = page.locator('#autocomplete .ac-item', { hasText: '#default@agentB compare models' });
+  await expect(sameRouteItem.locator('.ac-route-btn')).toContainText('#default@agentB');
 
   const otherRouteItem = page.locator('#autocomplete .ac-item', { hasText: '#default@agentA compare models' });
   await expect(otherRouteItem.locator('.ac-route-btn')).toBeVisible();
@@ -445,9 +478,9 @@ test('adhoc prompt history route chips ignore lookback counts', async ({ page })
 
   await page.fill('#input', 'reuse');
 
-  const sameRouteItem = page.locator('#autocomplete .ac-item:not(:has(.ac-route-btn))', { hasText: 'reuse context' });
-  await expect(sameRouteItem).toBeVisible();
-  await expect(sameRouteItem).not.toContainText('#squid@codex');
+  const sameRouteItem = page.locator('#autocomplete .ac-item', { hasText: '#squid@codex! reuse context' });
+  await expect(sameRouteItem.locator('.ac-route-btn')).toContainText('#squid@codex!');
+  await expect(sameRouteItem.locator('.ac-route-btn')).not.toContainText('!2');
 
   const otherRouteItem = page.locator('#autocomplete .ac-item', { hasText: '#squid@haiku!' });
   await expect(otherRouteItem.locator('.ac-route-btn')).toBeVisible();
