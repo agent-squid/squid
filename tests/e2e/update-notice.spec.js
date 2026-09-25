@@ -61,6 +61,29 @@ test('hamburger, Settings, and Restart get a dot, and Settings explains restart 
   await expect(page.locator('#settings-update-cmd')).toContainText('pipx upgrade agentsquid');
 });
 
+test('Settings refreshes the running version each time the view opens', async ({ page }) => {
+  let version = '0.1.6rc8';
+  await mockApp(page, { version });
+  await page.unroute('**/health');
+  await page.route('**/health', r => r.fulfill({
+    json: {
+      status: 'ok', version,
+      updates: { install_on_restart: 'ask', can_install_on_restart: true },
+      harnesses: [], providers: {},
+    },
+  }));
+  await mockLatestVersion(page, '0.1.6rc9');
+
+  await page.goto('/');
+  await openSettings(page);
+  await expect(page.locator('#settings-version-info')).toHaveText('v0.1.6rc8');
+
+  version = '0.1.6rc9';
+  await page.evaluate(() => switchView('chat'));
+  await page.evaluate(() => switchView('settings'));
+  await expect(page.locator('#settings-version-info')).toHaveText('v0.1.6rc9');
+});
+
 test('manual update check is text-only on desktop and matches action button height', async ({ page }) => {
   await mockApp(page, { version: '0.1.1' });
   await mockLatestVersion(page, '0.1.1');

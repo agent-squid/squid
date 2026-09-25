@@ -267,6 +267,18 @@ function updateSettingsFromHealth(health) {
   renderSettingsUpdateNotice();
 }
 
+async function refreshSettingsHealth() {
+  try {
+    const res = await fetch('/health', { cache: 'no-store' });
+    if (!res.ok) return;
+    const health = await res.json();
+    updateSettingsFromHealth(health);
+    void checkForSquidUpdate(health.version);
+  } catch {
+    // Keep the last known version visible while the restarted server reconnects.
+  }
+}
+
 async function checkForSquidUpdate(currentVersion, { force = false } = {}) {
   if (!currentVersion) return { checked: false };
   const latest = await _fetchLatestSquidVersion({ force });
@@ -520,7 +532,10 @@ function switchView(name) {
   if (name === 'topics') loadTopicsView();
   if (name === 'stats') loadStats();
   if (name === 'agents') loadAgents();
-  if (name === 'settings') loadConfigYaml();
+  if (name === 'settings') {
+    void refreshSettingsHealth();
+    loadConfigYaml();
+  }
   if (name === 'flow') initFlowView();
 }
 
