@@ -176,6 +176,14 @@ envelope to the host outside `relay_delivery` and never accepts either wrapper
 from a client as an ordinary envelope. Pairing packets and zero-length lease
 heartbeats are never wrapped.
 
+Hosts that advertise `x-shore-receipt-scope: browser_to_host` on their
+authenticated upgrade receipt only browser-to-host envelopes (ADR-0039
+amendment, 2026-09-25). Shore relays their host-to-browser envelopes without a
+receipt, a `relay_receipt_ack`, or a per-frame audit event, and those envelopes
+never enter the receipt chain. Such a host must still accept and stage a
+`relay_receipt_ack` from a relay that predates the scope. Hosts without the
+header keep the bidirectional rules above.
+
 Hosts that advertise `x-shore-receipt-sync: 1` on their authenticated upgrade
 must synchronize before their receipt-enabled socket carries application or
 host-audit frames. The host sends its durable checkpoint as the canonical binary control frame

@@ -612,6 +612,7 @@ async def test_host_connection_signs_challenge_heartbeats_and_dispatches(monkeyp
         host_id=HOST, signing_key=host_signing, heartbeat_seconds=0.01)
     headers = await connection._connection_headers()
     assert headers["x-shore-required-client-version"] == "2.4.0rc1"
+    assert headers["x-shore-receipt-scope"] == "browser_to_host"
     proof = canonical({"challenge_id": CEREMONY, "host_id": HOST,
         "nonce": "challenge-nonce", "purpose": "websocket", "v": 1})
     from agent.shore_crypto import unb64url
@@ -864,7 +865,6 @@ async def test_receipt_mode_preserves_pairing_packets_and_relay_heartbeats(tmp_p
         await connection._serve(socket, asyncio.Event())
     assert handled == [pairing_packet]
     assert socket.sent == [b"pairing-response"]
-    assert connection._pending_receipt_envelopes == {}
 
 
 @pytest.mark.asyncio

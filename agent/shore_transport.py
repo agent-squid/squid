@@ -73,7 +73,6 @@ log = logging.getLogger(__name__)
 # (imported lazily from agent.server so there is one source of truth) --
 # this is only how often the sweep itself runs, not a protocol value.
 _PUSH_SWEEP_SECONDS = 5.0
-_MAX_PENDING_RECEIPTS = 256
 _PAIRING_REQUEST_TTL_SECONDS = 120.0
 _RECEIPTS_DISABLED_ORIGINS: frozenset[str] = frozenset()
 
@@ -624,7 +623,6 @@ class ShoreHostConnection:
         self.receipt_keys = self._load_receipt_keys(
             self._relay_origin(parsed), parsed.hostname,
         )
-        self._pending_receipt_envelopes: dict[str, bytes] = {}
         self._pending_audit_batch: AuditExportBatch | None = None
         self._pairing_outbound: asyncio.Queue[bytes] = asyncio.Queue(maxsize=20)
         base_path = parsed.path.rstrip("/")
@@ -818,6 +816,9 @@ class ShoreHostConnection:
         return {"x-shore-role": "host", "x-shore-host-id": self.host_id,
                 "x-shore-required-client-version": self.client_release_version,
                 "x-shore-receipt-sync": "1",
+                # ADR-0039: only browser->host envelopes are receipted; this
+                # host no longer expects relay_receipt_ack for its sends.
+                "x-shore-receipt-scope": "browser_to_host",
                 "x-shore-challenge-id": challenge["id"],
                 "x-shore-signature": b64url(self.signing_key.sign(proof))}
 
@@ -838,9 +839,6 @@ class ShoreHostConnection:
     async def _serve(self, socket: Any, stop: asyncio.Event) -> None:
         from .server import _realtime_notifier
 
-        # Acknowledgements belong to one authenticated socket. A reconnect
-        # cannot legitimately acknowledge bytes sent on its predecessor.
-        self._pending_receipt_envelopes.clear()
         last_sent = time.monotonic()
         receive = asyncio.create_task(socket.recv())
         generation = _realtime_notifier.generation
@@ -936,56 +934,27 @@ class ShoreHostConnection:
                                     last_sent = time.monotonic()
                                 continue
                             if wrapper.get("type") == "relay_receipt_ack" and set(wrapper) == {"v", "type", "receipt"}:
+                                # Only a Shore predating the browser_to_host
+                                # receipt scope still acknowledges host sends.
+                                # Its receipts share the host-scoped chain, so
+                                # stage them (signature and continuity checked)
+                                # to keep the tip contiguous.
                                 receipt_value = wrapper["receipt"]
-                                request_id = receipt_value.get("request_id") if isinstance(receipt_value, dict) else None
-                                pending = self._pending_receipt_envelopes.get(request_id) if isinstance(request_id, str) else None
-                                if pending is None:
-                                    try:
-                                        if await asyncio.to_thread(self.channel.audit.has_receipt, receipt_value):
-                                            # Stable acknowledgement retry: it
-                                            # was verified before the durable
-                                            # copy was accepted, so it is a
-                                            # no-op and must not regress tip.
-                                            continue
-                                    except Exception as exc:
-                                        raise ReceiptVerificationError("shore_audit_continuity_unavailable") from exc
-                                    # `_pending_receipt_envelopes` is in-memory
-                                    # only -- a process restart drops tracking
-                                    # for anything sent by the previous
-                                    # instance, so an ack for that earlier send
-                                    # has no local envelope left to cross-check.
-                                    # Treating that as fatal would permanently
-                                    # wedge the strictly-ordered relay_receipt
-                                    # tip behind this one unrecoverable gap
-                                    # (the same failure mode as an unstaged
-                                    # untrusted-device envelope, just from the
-                                    # host_to_browser side). Verify the
-                                    # receipt's signature and continuity on
-                                    # their own -- that's still full proof the
-                                    # relay itself authenticated it -- and
-                                    # stage it so the tip advances.
-                                    try:
-                                        orphaned = verify_relay_receipt(
-                                            receipt_value, None, host_id=self.host_id,
-                                            direction="host_to_browser", keys=self.receipt_keys,
-                                        )
-                                        await asyncio.to_thread(self.channel.audit.accept_receipt, orphaned)
-                                    except ReceiptVerificationError:
-                                        raise
-                                    except Exception as exc:
-                                        raise ReceiptVerificationError("shore_audit_continuity_unavailable") from exc
-                                    continue
-                                acknowledgement = verify_relay_receipt(
-                                    receipt_value, pending, host_id=self.host_id,
-                                    direction="host_to_browser", keys=self.receipt_keys,
-                                )
                                 try:
+                                    if await asyncio.to_thread(self.channel.audit.has_receipt, receipt_value):
+                                        continue
+                                except Exception as exc:
+                                    raise ReceiptVerificationError("shore_audit_continuity_unavailable") from exc
+                                try:
+                                    acknowledgement = verify_relay_receipt(
+                                        receipt_value, None, host_id=self.host_id,
+                                        direction="host_to_browser", keys=self.receipt_keys,
+                                    )
                                     await asyncio.to_thread(self.channel.audit.accept_receipt, acknowledgement)
                                 except ReceiptVerificationError:
                                     raise
                                 except Exception as exc:
                                     raise ReceiptVerificationError("shore_audit_continuity_unavailable") from exc
-                                self._pending_receipt_envelopes.pop(request_id, None)
                                 continue
                             if set(wrapper) != {"v", "type", "envelope", "receipt"} or wrapper.get("type") != "relay_delivery":
                                 raise ValueError
@@ -1189,17 +1158,4 @@ class ShoreHostConnection:
         return sent
 
     async def _send_application(self, socket: Any, envelope: bytes) -> None:
-        if self.receipt_keys:
-            try:
-                request_id = json.loads(envelope)["request_id"]
-                if not isinstance(request_id, str):
-                    raise ValueError
-            except Exception as exc:
-                raise ShoreProtocolError("shore_invalid_outbound_envelope") from exc
-            existing = self._pending_receipt_envelopes.get(request_id)
-            if existing is not None and existing != envelope:
-                raise ShoreProtocolError("shore_receipt_conflict")
-            if existing is None and len(self._pending_receipt_envelopes) >= _MAX_PENDING_RECEIPTS:
-                raise ShoreProtocolError("shore_receipt_backpressure")
-            self._pending_receipt_envelopes[request_id] = envelope
         await socket.send(envelope)

@@ -1,6 +1,9 @@
 # Plan: Shore Durable Object write budget
 
-**Status:** In progress. Phases 1–2 implemented; Phases 3–5 pending.
+**Status:** In progress. Phases 1–3 implemented and tested, not yet deployed or
+re-measured (Phase 3 needs a Shore deploy plus a Squid release that sends
+`x-shore-receipt-scope`; either may ship first). Phase 3 item 9 and Phases 4–5
+pending.
 
 Companion to [ADR-0039](../decisions/0039-remote-access-via-shore-relay.md)
 ("Traffic accounting and capacity forecast", "Receipt-chain scope and
@@ -75,7 +78,7 @@ rewritten.
 Verification: `browser/` vitest ("acks only when the applied cursor
 advances"). Ships with the next Shore web-client release.
 
-## Phase 3 — Receipt scope: browser→host only (ADR-0039 amendment)
+## Phase 3 — Receipt scope: browser→host only (ADR-0039 amendment, done)
 
 The largest remaining cut. Needs the ADR-0039 amendment below, a
 `shore-protocol-v1.md` change, and a security review note.
@@ -87,14 +90,21 @@ The largest remaining cut. Needs the ADR-0039 amendment below, a
 6. Host→browser envelopes carry no receipt and no per-frame Shore audit event.
    Without the second part the non-receipted branch still writes an audit event
    plus chain tip (`this.audit("relay_frame_received", …)`) for every frame.
-   The host's own audit records what it sent; E2E signatures prevent injection;
+   The host's audit records each receipted inbound request and its decision
+   (outbound frames are consequences of those); E2E signatures prevent injection;
    the browser cursor detects loss. Per-minute traffic metrics still account for
    volume.
 7. Remove `relay_receipt_ack`. Receipt sync covers the inbound chain only.
-8. Gate on a host capability (for example `x-shore-receipt-sync: 2`) so a host
-   that still expects outbound acks is not stalled during the version handoff.
-9. Revisit whether the pre-forward relay audit event can be folded into the
+8. Gated on the host header `x-shore-receipt-scope: browser_to_host`
+   (`Meta.inboundReceiptsOnly`), so a host that still expects outbound acks is
+   not stalled during the version handoff. The new host still stages acks from
+   an older Shore.
+9. Not done yet: revisit whether the pre-forward relay audit event can be folded into the
    receipt record, taking a receipted envelope from ~5 rows to ~2–3.
+
+Verification: Shore `npm test` ("relays host envelopes without receipt or audit
+when the host scopes receipts to browser_to_host" asserts no ack and no new
+`audit:`/`relay-receipt-*` keys); Squid `tests/test_shore_*.py`.
 
 ## Phase 4 — Squid host framing and ping interval
 

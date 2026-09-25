@@ -438,16 +438,22 @@ endpoint trustworthy or prevent denial of service.
   receipt with inbound frames and an acknowledgement receipt for outbound
   frames. A sender may retry the identical envelope/receipt pair by request ID;
   it must not allocate a second chain entry.
-- **Proposed amendment (2026-09-25, not yet in effect):** narrow the chain to
-  browser→host ordinary envelopes. Host→browser envelopes would carry no
-  receipt and no per-frame Shore audit event, and `relay_receipt_ack` would be
-  removed. The rule keys on the cleartext direction, not a sender-declared
-  flag, so a browser cannot opt a command out of receipting. Rationale: on
-  2026-09-25 per-envelope receipting in both directions drove about 7.5
-  Durable Object row writes per relayed message and exhausted the free-tier
-  daily write limit. The host's own audit already records what it sent. See
-  [Shore DO write budget plan](../plans/shore-do-write-budget.md), Phase 3.
-  Until accepted, the rules above remain normative.
+- **Amendment (2026-09-25, accepted):** the chain covers browser→host
+  ordinary envelopes only. Host→browser envelopes carry no receipt, no
+  `relay_receipt_ack`, and no per-frame Shore audit event (pre-forward or
+  outcome); per-minute traffic metrics still count them. The rule keys on the
+  cleartext direction, not a sender-declared flag, so a browser cannot opt a
+  command out of receipting. A host opts in with
+  `x-shore-receipt-scope: browser_to_host` on its authenticated upgrade; hosts
+  without it keep the bidirectional rules above until they upgrade, and an
+  opted-in host still accepts `relay_receipt_ack` from a Shore that predates
+  the amendment. Rationale: on 2026-09-25 per-envelope receipting in both
+  directions drove about 7.5 Durable Object row writes per relayed message and
+  exhausted the free-tier daily write limit. Host→browser frames cannot drive
+  host behavior; the host audit already records each receipted inbound request
+  and its decision, E2E signatures prevent injection, and the browser cursor
+  detects loss. See [Shore DO write budget plan](../plans/shore-do-write-budget.md),
+  Phase 3.
 - The host verifies the relay signature, envelope commitment, expected epoch,
   and link from its persisted tip before dispatch. Persisting the new tip and
   the pending host audit decision must be one local transaction. Ordered
