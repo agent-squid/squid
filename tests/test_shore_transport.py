@@ -142,11 +142,11 @@ def test_release_contains_independent_dev_and_production_receipt_pins(tmp_path, 
     production = ShoreHostConnection(channel, relay="https://agentsquid.ai",
         username="alice", host_id=HOST, signing_key=host_signing)
 
-    assert development.receipt_keys == {}
+    assert set(development.receipt_keys) == {1}
     assert set(production.receipt_keys) == {1}
 
 
-def test_receipt_bypass_is_scoped_to_canonical_dev_origin(tmp_path, monkeypatch):
+def test_canonical_dev_origin_enforces_release_pinned_receipts(tmp_path, monkeypatch):
     monkeypatch.setattr(
         shore_transport_mod, "PINNED_SHORE_RECEIPT_PUBLIC_KEYS_BY_ORIGIN",
         shore_receipt_mod.PINNED_SHORE_RECEIPT_PUBLIC_KEYS_BY_ORIGIN,
@@ -159,7 +159,7 @@ def test_receipt_bypass_is_scoped_to_canonical_dev_origin(tmp_path, monkeypatch)
     production = ShoreHostConnection(channel, relay="https://agentsquid.ai",
         username="alice", host_id=HOST, signing_key=host_signing)
 
-    assert development.receipt_keys == {}
+    assert set(development.receipt_keys) == {1}
     assert set(production.receipt_keys) == {1}
 
 

@@ -75,10 +75,7 @@ log = logging.getLogger(__name__)
 _PUSH_SWEEP_SECONDS = 5.0
 _MAX_PENDING_RECEIPTS = 256
 _PAIRING_REQUEST_TTL_SECONDS = 120.0
-# Temporary preproduction diagnostic: keep production receipt verification
-# mandatory while allowing dev.agentsquid.ai to use the original raw-envelope
-# wire format during receipt-chain fault isolation.
-_RECEIPTS_DISABLED_ORIGINS = frozenset({"https://dev.agentsquid.ai"})
+_RECEIPTS_DISABLED_ORIGINS: frozenset[str] = frozenset()
 
 
 @dataclass
