@@ -39,13 +39,15 @@ part of Shore v1 and MUST return 404 at the public Worker boundary.
 
 After authenticating a host WebSocket, the host sends a zero-length binary
 transport lease heartbeat whenever it has sent no other frame for 30 seconds.
-The relay consumes this frame, refreshes only that host socket's observed
-heartbeat deadline, and MUST NOT relay it. A browser sending a zero-length
-frame is closed with 1003. Lease heartbeats count toward the ordinary
-per-socket frame-rate limit and undergo lifetime, session, and generation
-checks before refreshing the deadline. This empty byte string is the complete
-wire vector for the transport control; it contains no application data and
-does not create a second application protocol.
+A browser sends the same zero-length heartbeat every 20 seconds while its
+socket is open. The relay consumes this frame, refreshes only that socket's
+observed heartbeat deadline (60 seconds for a host, 90 seconds for a browser,
+because a hidden tab may get only one timer wakeup per minute), and MUST NOT
+relay it. Heartbeats do not count toward the per-socket frame-rate limit and
+cost no Durable Object storage write; they still undergo lifetime, session,
+and generation checks before refreshing the deadline. This empty byte string
+is the complete wire vector for the transport control; it contains no
+application data and does not create a second application protocol.
 
 Every non-heartbeat WebSocket frame is a JSON object with exactly these fields:
 
@@ -277,19 +279,24 @@ layered on top of ADR-0040's own `ping`/`pong`/`slow_consumer` semantics
   envelope carrying `{"v":1,"type":"error","payload":{"code":"slow_consumer","resumable":true}}`,
   then clears that device's subscription state locally. No WebSocket close
   occurs and no other device's session is affected.
-- **Ping/pong liveness.** While a device holds an active subscription, the
-  host sends it a sealed `ping` envelope every 45 seconds. This is longer than
-  the direct path's 20-second `heartbeat_seconds` because every `pong` is a
-  receipted browser-to-host envelope, which costs Shore Durable Object writes.
-  It must stay below Shore's 60-second browser-socket heartbeat deadline,
-  because an idle tab's `pong` is its only frame. A device that has sent no
-  frame of any type (`ack`, `pong`, or a command) within two consecutive
-  intervals (90 seconds) is treated as no-longer-live: the host clears its
-  subscription state locally, the same as an overflow. The miss limit matches
-  the direct path; only the enforcement action differs (local state clear
-  instead of a WebSocket close, since the shared socket cannot be closed for
-  one device).
-- **Recovery.** Both cases leave the device's paired trust, capability grant,
+- **Liveness via relay presence, not ping/pong.** On the Shore path the host
+  does not ping devices: every `pong` would be a receipted browser-to-host
+  envelope (four Durable Object writes), so an idle open tab would cost ~320
+  writes per hour. Instead the browser keeps its socket alive with zero-length
+  transport heartbeats (above), and the relay reports disconnects. A host that
+  sends `x-shore-device-presence: 1` on its WebSocket upgrade receives the
+  relay-authored binary control frame
+  `{"v":1,"type":"device_offline","device_id":"<uuid>"}` (JCS) when a device's
+  last open browser socket closes or misses its heartbeat deadline, and in
+  reply to any `host_to_browser` envelope addressed to a device with no open
+  socket (which recovers a notice the host missed while detached). The host
+  clears that device's subscription state locally, the same as an overflow.
+  The relay rejects a browser frame of this type, so only the relay can send
+  it. Trusting it adds no relay power: the relay can already drop the
+  device's frames. A host that does not send the header gets no such frames.
+  A host still answers a device's `ping` with `pong`, and ignores a `pong`
+  from an older client.
+- **Recovery.** Overflow and `device_offline` both leave the device's paired trust, capability grant,
   and key epoch untouched — only the in-memory subscription is cleared. The
   device recovers by sending a fresh `subscribe` with its own last-applied
   cursor; the host's normal replay/snapshot/rollover decision

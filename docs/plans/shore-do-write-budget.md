@@ -127,13 +127,49 @@ tip row); Squid `tests/test_shore_*.py`.
     one envelope. After Phase 3 this saves bandwidth and CPU, not DO writes,
     and it would need a new batched frame type in `shore-protocol-v1.md`.
     Revisit only if relay bandwidth or frame-rate limits become the constraint.
-11. Done: the host pings each subscribed device every 45s on the Shore path
+11. Done, then superseded by Phase 4b: the host pinged each subscribed device every 45s on the Shore path
     (`_SHORE_DEVICE_PING_SECONDS`), not the direct path's 20s, and evicts it
     after 90s of silence. The upper bound is Shore's 60s browser-socket
     heartbeat deadline, because an idle tab's pong is its only frame; 60s would
     need a Shore deadline change and Shore to deploy first. An idle open tab
     drops from 180 to 80 receipted pongs/hr (~720 to ~320 writes/hr). Documented
     in `shore-protocol-v1.md` "Per-device push liveness and backpressure".
+
+## Phase 4b — Relay presence instead of device ping/pong (implemented, unreleased)
+
+Measured on `v0.1.6rc13` (2026-09-26, one user, one idle tab): ~200 rows/hr,
+about 5–8k rows per day per idle user, so ~13–20 idle users alone would
+exhaust the free tier. Almost all of it was item 11's pongs: 80/hr × 4 rows.
+A ping interval only scales that cost; the fix removes the frame.
+
+16. The browser client sends a zero-length transport heartbeat every 20s
+    (`SHORE_HEARTBEAT_INTERVAL_MS`). Shore now accepts it from browsers as
+    well as hosts: no storage write, no relay, not rate-limited. The browser
+    heartbeat window is 90s (host stays 60s) because hidden tabs may get only
+    one timer wakeup per minute.
+17. A host that sends `x-shore-device-presence: 1` gets a relay-authored
+    `{"v":1,"type":"device_offline","device_id":…}` frame when a device's last
+    open browser socket closes or misses its heartbeat, and in reply to a push
+    to a device with no open socket (recovers notices missed while the host
+    was detached). Shore rejects a browser frame of that type. Old hosts get
+    nothing (their receipt-mode parser would close on an unknown frame).
+18. The host (`agent/shore_transport.py`) sends the header, drops the device's
+    subscription on `device_offline`, and no longer pings devices or evicts
+    them on silence. It still answers a device `ping` and ignores `pong`.
+
+Expected: idle open tab ~0 writes/hr; per-user cost is ~4 rows per real
+browser→host action.
+
+Rollout order: deploy the Shore Worker, publish the web-client release with
+the heartbeat, then ship the Squid host pinned to that client release. A new
+host on an old Shore gets no `device_offline`; stale subscriptions then stay
+in memory until the device resubscribes (bounded by paired devices).
+
+Verification: Shore `npm test` ("device presence" suite; the write-budget test
+asserts 0 writes for browser heartbeats; the heartbeat test sends 150 browser
+heartbeats without a close); `browser/` vitest ("sends zero-length transport
+heartbeats while the socket is open"); Squid `tests/test_shore_transport.py`
+(`device_offline` handling, no ping/eviction in the push sweep, header).
 
 ## Phase 5 — Guardrails
 
@@ -159,7 +195,7 @@ tip row); Squid `tests/test_shore_*.py`.
 | | 2026-09-25 | After 1–2 | After 1–3 |
 | --- | --- | --- | --- |
 | Idle, no tab | ~250/hr | ~0–60/hr (socket alarm) | same |
-| Idle tab open | ~6.7k/hr | ~1.3k/hr (20s ping/pong) | ~0.7k/hr; ~0.3k/hr with item 11 (4 writes per pong) |
+| Idle tab open | ~6.7k/hr | ~1.3k/hr (20s ping/pong) | ~0.7k/hr; ~0.3k/hr with item 11 (4 writes per pong); ~0 with Phase 4b |
 | Active streaming | 7–44k/hr | roughly halved | a few hundred/hr |
 | Day like 2026-09-25 | 119k | ~40–60k | ~2–5k |
 

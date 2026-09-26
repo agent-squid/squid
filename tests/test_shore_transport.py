@@ -613,6 +613,7 @@ async def test_host_connection_signs_challenge_heartbeats_and_dispatches(monkeyp
     headers = await connection._connection_headers()
     assert headers["x-shore-required-client-version"] == "2.4.0rc1"
     assert headers["x-shore-receipt-scope"] == "browser_to_host"
+    assert headers["x-shore-device-presence"] == "1"
     proof = canonical({"challenge_id": CEREMONY, "host_id": HOST,
         "nonce": "challenge-nonce", "purpose": "websocket", "v": 1})
     from agent.shore_crypto import unb64url
@@ -1248,28 +1249,18 @@ async def test_push_sweep_survives_unexpected_error_and_isolates_other_devices(t
 
 
 @pytest.mark.asyncio
-async def test_push_sweep_evicts_on_ping_timeout(tmp_path, monkeypatch):
+async def test_push_sweep_never_pings_or_evicts_an_idle_device(tmp_path, monkeypatch):
+    # Every pong would be a receipted Shore envelope (Durable Object writes);
+    # disconnects arrive as Shore's device_offline instead.
     _fresh_stats_db(tmp_path, monkeypatch)
-    stats_db.insert_user_message("squid", "codex", "hello")
-
     host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
     browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
     channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
         host_signing=host_signing, host_agreement=host_agreement)
     await pair(channel, browser_signing, browser_agreement)
-
     request = browser_frame(browser_signing, browser_agreement, host_agreement.public_key(), 1,
                              "subscribe", {"scopes": [{"lifecycle": "global"}], "cursor": 0})
     await channel.handle(canonical(request), now_ms=NOW)
-    assert DEVICE in channel.sessions
-
-    # No frame of any kind (ack/pong/command) for two full heartbeat
-    # intervals is treated as no-longer-live and evicted locally -- the
-    # per-device equivalent of the direct path's heartbeat-timeout close.
-    # last_inbound_at is a time.monotonic() value (seconds), so this pushes
-    # it comfortably past the 90s (2 x 45s) Shore-path timeout.
-    channel.sessions[DEVICE].last_inbound_at -= 100
-
     connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
         host_id=HOST, signing_key=host_signing)
 
@@ -1277,36 +1268,63 @@ async def test_push_sweep_evicts_on_ping_timeout(tmp_path, monkeypatch):
         def __init__(self): self.sent = []
         async def send(self, value): self.sent.append(value)
 
-    await connection._push_sweep(Socket())
+    real_monotonic = time_module.monotonic
+    monkeypatch.setattr("agent.shore_transport.time.monotonic", lambda: real_monotonic() + 3600)
+    assert await connection._push_sweep(Socket()) == 0
+    assert DEVICE in channel.sessions
+
+
+async def _subscribed_connection(tmp_path, monkeypatch):
+    _fresh_stats_db(tmp_path, monkeypatch)
+    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=host_agreement)
+    await pair(channel, browser_signing, browser_agreement)
+    request = browser_frame(browser_signing, browser_agreement, host_agreement.public_key(), 1,
+                             "subscribe", {"scopes": [{"lifecycle": "global"}], "cursor": 0})
+    await channel.handle(canonical(request), now_ms=NOW)
+    assert DEVICE in channel.sessions
+    return channel, ShoreHostConnection(channel, relay="https://relay.example", username="alice",
+        host_id=HOST, signing_key=host_signing)
+
+
+def _one_frame_socket(frame: bytes):
+    class Socket:
+        def __init__(self): self.receives = 0; self.sent = []; self.closed = None
+        async def recv(self):
+            self.receives += 1
+            if self.receives == 1: return frame
+            raise asyncio.CancelledError
+        async def send(self, value): self.sent.append(value)
+        async def close(self, code, reason): self.closed = (code, reason)
+    return Socket()
+
+
+@pytest.mark.asyncio
+async def test_device_offline_from_shore_drops_the_subscription(tmp_path, monkeypatch):
+    channel, connection = await _subscribed_connection(tmp_path, monkeypatch)
+    # Handled before receipt-wrapper parsing, which closes the socket on an
+    # unknown frame.
+    connection.receipt_keys = {1: ed25519.Ed25519PrivateKey.generate().public_key()}
+    socket = _one_frame_socket(canonical({"v": 1, "type": "device_offline", "device_id": DEVICE}))
+    with pytest.raises(asyncio.CancelledError):
+        await connection._serve(socket, asyncio.Event())
+    assert socket.closed is None
     assert DEVICE not in channel.sessions
 
 
 @pytest.mark.asyncio
-async def test_push_sweep_pings_on_shore_interval(tmp_path, monkeypatch):
-    _fresh_stats_db(tmp_path, monkeypatch)
-    host_signing, host_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
-    browser_signing, browser_agreement = ed25519.Ed25519PrivateKey.generate(), x25519.X25519PrivateKey.generate()
-    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
-        host_signing=host_signing, host_agreement=host_agreement)
-    await pair(channel, browser_signing, browser_agreement)
-    request = browser_frame(browser_signing, browser_agreement, host_agreement.public_key(), 1,
-                             "subscribe", {"scopes": [{"lifecycle": "global"}], "cursor": 0})
-    await channel.handle(canonical(request), now_ms=NOW)
-    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
-        host_id=HOST, signing_key=host_signing)
-
-    class Socket:
-        def __init__(self): self.sent = []
-        async def send(self, value): self.sent.append(value)
-
-    session = channel.sessions[DEVICE]
-    # 40s of silence: past the direct path's 20s ping and 40s timeout, but
-    # neither pings nor evicts on the Shore path.
-    session.last_ping_at = session.last_inbound_at = time_module.monotonic() - 40
-    assert await connection._push_sweep(Socket()) == 0
+@pytest.mark.parametrize("frame", [
+    b'{"v":1, "type":"device_offline","device_id":"' + DEVICE.encode() + b'"}',
+    canonical({"v": 1, "type": "device_offline", "device_id": DEVICE, "extra": True}),
+    canonical({"v": 2, "type": "device_offline", "device_id": DEVICE}),
+])
+async def test_malformed_device_offline_keeps_the_subscription(tmp_path, monkeypatch, frame):
+    channel, connection = await _subscribed_connection(tmp_path, monkeypatch)
+    with pytest.raises(asyncio.CancelledError):
+        await connection._serve(_one_frame_socket(frame), asyncio.Event())
     assert DEVICE in channel.sessions
-    session.last_ping_at = time_module.monotonic() - 45
-    assert await connection._push_sweep(Socket()) == 1
 
 
 @pytest.mark.asyncio

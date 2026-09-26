@@ -67,17 +67,10 @@ def _client_release_version() -> str:
 log = logging.getLogger(__name__)
 
 # Per-device push sweep granularity: how often ShoreHostConnection._serve
-# checks subscribed devices for new events to push, pings due, and
-# ping-timeout eviction. Independent of the 30s relay transport lease
-# heartbeat and of the device ping interval below -- this is only how often
-# the sweep itself runs, not a protocol value.
+# checks subscribed devices for new events to push. Independent of the 30s
+# relay transport lease heartbeat -- this is only how often the sweep itself
+# runs, not a protocol value.
 _PUSH_SWEEP_SECONDS = 5.0
-# Device ping interval on the Shore path (docs/shore-protocol-v1.md "Per-device
-# push liveness and backpressure"). Longer than the direct path's 20s because
-# each browser pong is a receipted Shore envelope (Durable Object writes). It
-# must stay below Shore's 60s browser-socket heartbeat deadline, less one sweep
-# period and network slack: an idle tab's pong is its only frame.
-_SHORE_DEVICE_PING_SECONDS = 45.0
 _PAIRING_REQUEST_TTL_SECONDS = 120.0
 _RECEIPTS_DISABLED_ORIGINS: frozenset[str] = frozenset()
 
@@ -87,7 +80,7 @@ class _DeviceSession:
     """Live per-device subscription state, held only in memory.
 
     Cleared on unsubscribe, revocation, key-epoch mismatch, overflow
-    (`slow_consumer`), or ping-timeout -- never touches paired trust,
+    (`slow_consumer`), or Shore's `device_offline` -- never touches paired trust,
     granted capabilities, or the key epoch, so the device can always recover
     with a fresh `subscribe` (docs/shore-protocol-v1.md, "Per-device push
     liveness and backpressure").
@@ -96,8 +89,6 @@ class _DeviceSession:
     scopes: list[dict] = field(default_factory=list)
     cursor: int = 0
     last_acked_cursor: int = -1
-    last_ping_at: float = 0.0
-    last_inbound_at: float = 0.0
 
 
 def configured_host_connection(identity_dir: Path) -> "ShoreHostConnection | None":
@@ -479,14 +470,11 @@ class ShoreChannel:
         message_type = frame["type"]
         payload = frame["payload"]
         session = self._get_session(device_id)
-        now = time.monotonic()
         responses: list[dict[str, Any]] = []
 
         if message_type == "subscribe":
             session = self._get_or_create_session(device_id)
             session.scopes = payload["scopes"]
-            session.last_inbound_at = now
-            session.last_ping_at = now
             responses.append({"v": 1, "type": "subscribed", "payload": {"scopes": session.scopes}})
             requested_cursor = payload.get("cursor")
             if not isinstance(requested_cursor, int) or requested_cursor < 0:
@@ -537,14 +525,10 @@ class ShoreChannel:
             if session is not None:
                 acked = payload["event_id"]
                 session.last_acked_cursor = max(session.last_acked_cursor, min(acked, session.cursor))
-                session.last_inbound_at = now
         elif message_type == "ping":
             responses.append({"v": 1, "type": "pong", "payload": {}})
-            if session is not None:
-                session.last_inbound_at = now
-        elif message_type == "pong":
-            if session is not None:
-                session.last_inbound_at = now
+        # A `pong` needs no handling: the host no longer pings on the Shore
+        # path, and one from an older client is accepted and ignored.
         return responses
 
     @staticmethod
@@ -824,6 +808,10 @@ class ShoreHostConnection:
                 # ADR-0039: only browser->host envelopes are receipted; this
                 # host no longer expects relay_receipt_ack for its sends.
                 "x-shore-receipt-scope": "browser_to_host",
+                # Shore reports device disconnects (`device_offline`), so the
+                # host never pings a device: each pong would be a receipted
+                # envelope, several Durable Object writes per idle tab.
+                "x-shore-device-presence": "1",
                 "x-shore-challenge-id": challenge["id"],
                 "x-shore-signature": b64url(self.signing_key.sign(proof))}
 
@@ -874,7 +862,7 @@ class ShoreHostConnection:
 
                 if notified or time.monotonic() >= next_sweep_at:
                     # last_sent must only advance on an actual send -- an
-                    # empty sweep (no due pushes/pings) must not suppress the
+                    # empty sweep (no due pushes) must not suppress the
                     # transport lease heartbeat below.
                     if await self._push_sweep(socket):
                         last_sent = time.monotonic()
@@ -904,6 +892,15 @@ class ShoreHostConnection:
                         control = json.loads(message)
                     except (ValueError, TypeError, json.JSONDecodeError):
                         control = None
+                    if (isinstance(control, dict) and control.get("type") == "device_offline"
+                            and set(control) == {"v", "type", "device_id"} and control.get("v") == 1
+                            and isinstance(control.get("device_id"), str) and canonical(control) == message):
+                        # Shore-authored presence: the device has no open
+                        # socket left. Shore can already drop its frames, so
+                        # trusting this costs nothing; the device recovers
+                        # with a fresh `subscribe` when it reconnects.
+                        self.channel._drop_session(control["device_id"])
+                        continue
                     if isinstance(control, dict) and control.get("type") == "pairing_request":
                         try:
                             if canonical(control) != message:
@@ -1094,21 +1091,18 @@ class ShoreHostConnection:
             raise ReceiptVerificationError("shore_audit_continuity_unavailable") from exc
 
     async def _push_sweep(self, socket: Any) -> int:
-        """Push new events, due pings, and timeout evictions to every subscribed device.
+        """Push new events to every subscribed device.
 
-        One host socket multiplexes every paired device, so a slow or
-        unresponsive device is handled entirely in memory here -- an
-        application-level `slow_consumer`/ping-timeout equivalent, never a
-        WebSocket close, per docs/shore-protocol-v1.md's "Per-device push
-        liveness and backpressure". Overflow or timeout on one device never
-        touches another device's session. Returns how many frames were
+        One host socket multiplexes every paired device, so a slow device is
+        handled entirely in memory here -- an application-level
+        `slow_consumer`, never a WebSocket close, per docs/shore-protocol-v1.md's
+        "Per-device push liveness and backpressure". Overflow on one device
+        never touches another device's session. Disconnected devices are
+        dropped on Shore's `device_offline`, not by pinging them. Returns how many frames were
         actually sent, so the caller can tell a real send from a no-op sweep.
         """
-        from .server import (
-            _REALTIME_HEARTBEAT_MISS_LIMIT, _RealtimeSlowConsumer, _realtime_catchup,
-        )
+        from .server import _RealtimeSlowConsumer, _realtime_catchup
 
-        now = time.monotonic()
         now_ms = int(time.time() * 1000)
         sent = 0
         for device_id, session in self.channel._session_snapshot():
@@ -1118,10 +1112,6 @@ class ShoreHostConnection:
             if not trusted or trusted.key_epoch != self.channel.key_epoch:
                 self.channel._drop_session(device_id)
                 continue
-            if now - session.last_inbound_at > _SHORE_DEVICE_PING_SECONDS * _REALTIME_HEARTBEAT_MISS_LIMIT:
-                self.channel._drop_session(device_id)
-                continue
-
             outbound = self.channel._new_outbound()
             try:
                 session.cursor = await _realtime_catchup(
@@ -1151,14 +1141,6 @@ class ShoreHostConnection:
                 sealed = await asyncio.to_thread(self.channel._seal, trusted, frame, now_ms)
                 await self._send_application(socket, sealed)
                 sent += 1
-
-            if now - session.last_ping_at >= _SHORE_DEVICE_PING_SECONDS:
-                sealed = await asyncio.to_thread(
-                    self.channel._seal, trusted, {"v": 1, "type": "ping", "payload": {}}, now_ms,
-                )
-                await self._send_application(socket, sealed)
-                sent += 1
-                session.last_ping_at = now
         return sent
 
     async def _send_application(self, socket: Any, envelope: bytes) -> None:
