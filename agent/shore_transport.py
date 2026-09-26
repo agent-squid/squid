@@ -71,6 +71,10 @@ log = logging.getLogger(__name__)
 # relay transport lease heartbeat -- this is only how often the sweep itself
 # runs, not a protocol value.
 _PUSH_SWEEP_SECONDS = 5.0
+# Host audit batches are uploaded once the oldest unexported event is this old,
+# not after every handled frame: each ingested batch costs Shore two Durable
+# Object row writes. Well inside the five-minute export-lag threshold.
+_AUDIT_BATCH_DELAY_SECONDS = 60.0
 _PAIRING_REQUEST_TTL_SECONDS = 120.0
 _RECEIPTS_DISABLED_ORIGINS: frozenset[str] = frozenset()
 
@@ -839,7 +843,7 @@ class ShoreHostConnection:
         pairing_send = asyncio.create_task(self._pairing_outbound.get())
         next_sweep_at = time.monotonic() + _PUSH_SWEEP_SECONDS
         try:
-            if self.receipt_keys and await self._send_audit_batch(socket):
+            if self.receipt_keys and await self._send_audit_batch(socket, when_due=True):
                 last_sent = time.monotonic()
             while not stop.is_set():
                 now = time.monotonic()
@@ -865,6 +869,9 @@ class ShoreHostConnection:
                     # empty sweep (no due pushes) must not suppress the
                     # transport lease heartbeat below.
                     if await self._push_sweep(socket):
+                        last_sent = time.monotonic()
+                    if (self.receipt_keys and self._pending_audit_batch is None
+                            and await self._send_audit_batch(socket, when_due=True)):
                         last_sent = time.monotonic()
                     next_sweep_at = time.monotonic() + _PUSH_SWEEP_SECONDS
 
@@ -916,7 +923,7 @@ class ShoreHostConnection:
                                 raise ValueError
                             if wrapper.get("type") == "host_audit_batch_ack":
                                 await self._accept_audit_batch_ack(wrapper)
-                                if await self._send_audit_batch(socket):
+                                if await self._send_audit_batch(socket, when_due=True):
                                     last_sent = time.monotonic()
                                 continue
                             if set(wrapper) == {"v", "ceremony_id", "direction", "nonce", "ciphertext"}:
@@ -1026,12 +1033,11 @@ class ShoreHostConnection:
                         except Exception:
                             pass
                     last_sent = time.monotonic()
-                # The connection may have started with no pending audit data.
-                # A newly handled frame records audit events, so initiate the
-                # first batch here instead of waiting for a reconnect or an
-                # acknowledgement to a batch that was never sent.
+                # A handled frame records audit events; upload them once due.
+                # The push sweep above also checks, so an idle socket still
+                # uploads within about _AUDIT_BATCH_DELAY_SECONDS.
                 if (self.receipt_keys and self._pending_audit_batch is None
-                        and await self._send_audit_batch(socket)):
+                        and await self._send_audit_batch(socket, when_due=True)):
                     last_sent = time.monotonic()
         finally:
             receive.cancel()
@@ -1048,7 +1054,11 @@ class ShoreHostConnection:
             with suppress(Exception, asyncio.CancelledError):
                 await pairing_send
 
-    async def _send_audit_batch(self, socket: Any) -> bool:
+    async def _send_audit_batch(self, socket: Any, *, when_due: bool = False) -> bool:
+        if when_due:
+            lag_ms = await asyncio.to_thread(self.channel.audit.export_lag_ms)
+            if lag_ms < _AUDIT_BATCH_DELAY_SECONDS * 1000:
+                return False
         batch = await asyncio.to_thread(self.channel.audit.pending_export, limit=25)
         self._pending_audit_batch = batch
         if batch is None:

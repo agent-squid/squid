@@ -1,11 +1,14 @@
 # Plan: Shore Durable Object write budget
 
-**Status:** Implemented and released. Phases 1–3 shipped in Shore `b89478c`
-and AgentSquid `v0.1.6rc12`. Phase 4 item 11 and Phase 5 items 12–14 shipped
-in Shore `b62082c` and AgentSquid `v0.1.6rc13`. Two items are deferred: 10
-(optional, no DO saving) and 15 (a billing decision). Re-measurement is
-pending: dev was at its 2026-09-25 quota when these shipped. Replace the
-"Expected effect" estimates with a full day of observed data.
+**Status:** In progress. Phases 1–3 shipped in Shore `b89478c` and AgentSquid
+`v0.1.6rc12`. Phase 4 item 11 and Phase 5 items 12–14 shipped in Shore
+`b62082c` and AgentSquid `v0.1.6rc13`. Phase 4b shipped in AgentSquid
+`v0.1.6rc14`. Phase 4c shipped in Shore `2a57a95` and AgentSquid
+`v0.1.6rc19` (rc18 was pinned to the pre-4c client by mistake). Phase 4d is
+implemented, not yet released. Deferred: 10 (optional, no DO saving), 15 (a
+billing decision), and deriving the audit chain tip (see Phase 4d). Observed
+numbers are in "Measurements"; replace the "Expected effect" estimates with a
+full day of observed data.
 
 Companion to [ADR-0039](../decisions/0039-remote-access-via-shore-relay.md)
 ("Traffic accounting and capacity forecast", "Receipt-chain scope and
@@ -135,7 +138,7 @@ tip row); Squid `tests/test_shore_*.py`.
     drops from 180 to 80 receipted pongs/hr (~720 to ~320 writes/hr). Documented
     in `shore-protocol-v1.md` "Per-device push liveness and backpressure".
 
-## Phase 4b — Relay presence instead of device ping/pong (implemented, unreleased)
+## Phase 4b — Relay presence instead of device ping/pong (done)
 
 Measured on `v0.1.6rc13` (2026-09-26, one user, one idle tab): ~200 rows/hr,
 about 5–8k rows per day per idle user, so ~13–20 idle users alone would
@@ -171,7 +174,7 @@ heartbeats without a close); `browser/` vitest ("sends zero-length transport
 heartbeats while the socket is open"); Squid `tests/test_shore_transport.py`
 (`device_offline` handling, no ping/eviction in the push sweep, header).
 
-## Phase 4c — Write-free version poll (implemented, unreleased)
+## Phase 4c — Write-free version poll (done)
 
 Measured after Phase 4b (2026-09-26, idle tab): ~60–120 rows/hr. The hosted
 client's 30s version check called `/auth/security`, which rotates the CSRF
@@ -192,6 +195,44 @@ re-ran paired-device auth (~10 writes plus alarm cleanup, every 15 minutes).
 Verification: Shore `npm test` ("serves the route view of the security surface
 without a write"); `browser/` vitest ("does not recreate an expired session
 when restoration is disabled").
+
+## Phase 4d — Reconnect and active-path trims (implemented, unreleased)
+
+Maximize the free tier before relying on Workers Paid.
+
+21. Audit export and compaction run 180s after the first pending append
+    (`AUDIT_EXPORT_DELAY_MS`, was 30s): one cursor, alarm and retained-base
+    write per 3-minute window instead of per 30s. Still inside the five-minute
+    export-lag alert with room for one 5s retry.
+22. Traffic metrics persist at most once per 60s (`TRAFFIC_FLUSH_INTERVAL_MS`,
+    was 10s), and socket connections are counted in memory with frames
+    instead of a transaction per attach. Counts pending at eviction are lost;
+    they are capacity metrics, not evidence.
+23. Host-connect, host-audit-read and paired-device auth rate limits are kept
+    in memory (`TRANSIENT_RATE_KINDS`); login, magic-link consume, second
+    factor, registration, recovery and account deletion stay persisted.
+24. Host and device-auth challenges arm no cleanup alarm, and a used host
+    challenge is deleted instead of marked `used` (single use is unchanged:
+    a missing challenge fails). Unused expired challenges are swept by the
+    next alarm; expiry is checked on read.
+25. `scheduleSocketAlarm` skips `setAlarm`/`deleteAlarm` when the alarm would
+    not change.
+26. The Squid host uploads its audit batch once the oldest unexported event
+    is 60s old (`_AUDIT_BATCH_DELAY_SECONDS`), checked on each push sweep,
+    instead of after every handled frame. Each ingested batch is 2 Shore
+    writes.
+
+Measured with the storage-instrumented probe: a host reconnect went from 10
+writes to 4 (challenge put and delete, attach audit event and chain tip); a
+browser attach is the 2 audit writes plus the session it authenticated with.
+
+Not done, needs a design decision: deriving `audit-chain-tip` from the latest
+`audit:` entry (as `receiptTip` does) would save 1 write per audit event, but
+the stored tip is what detects tail truncation in `verifyAuditChain`.
+
+Verification: Shore `npm test` ("keeps a host reconnect to the challenge and
+the attach audit event"); Squid `tests/test_shore_transport.py`
+(`test_host_audit_batch_waits_until_oldest_event_is_due`).
 
 ## Phase 5 — Guardrails
 
@@ -223,3 +264,19 @@ when restoration is disabled").
 
 Re-measure with the GraphQL queries after each phase deploys and replace these
 estimates.
+
+## Measurements
+
+Cloudflare GraphQL `durableObjectsPeriodicGroups.rowsWritten`, `shore-dev`
+account (dev and prod share it), UTC.
+
+| When | Build | Rows written | Notes |
+| --- | --- | --- | --- |
+| 2026-09-25 (day) | before Phase 1 | 119,084 | Hit the free-tier limit |
+| 2026-09-25 18:00 (hour) | before Phase 1 | 43,869 | Active, 5,796 inbound messages |
+| 2026-09-26 04:00–05:00 (hours) | rc17 (Phase 4b) | 118, 90 | Idle host and tab; mostly 30s version poll and 15-min re-auth |
+| 2026-09-26 06:00 (hour) | rc18 → rc19 | 819 | Two deploys, releases, restarts, active chat |
+| 2026-09-26 00:00–06:33 | mixed | 3,730 | Day so far |
+
+Pending: a clean idle hour on rc19, then on the Phase 4d release.
+

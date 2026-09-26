@@ -368,6 +368,32 @@ async def test_host_audit_batch_cursor_advances_only_after_verified_ack(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_host_audit_batch_waits_until_oldest_event_is_due(tmp_path, monkeypatch):
+    host_signing = ed25519.Ed25519PrivateKey.generate()
+    channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
+        host_signing=host_signing, host_agreement=x25519.X25519PrivateKey.generate())
+    connection = ShoreHostConnection(channel, relay="https://relay.example", username="alice",
+        host_id=HOST, signing_key=host_signing)
+    connection.receipt_keys = {1: ed25519.Ed25519PrivateKey.generate().public_key()}
+
+    class Socket:
+        def __init__(self): self.sent = []
+        async def send(self, value): self.sent.append(value)
+
+    socket = Socket()
+    assert not await connection._send_audit_batch(socket, when_due=True)
+    channel.audit.record(request_id=CEREMONY, device_id=DEVICE, message_type="ping",
+        frame={"v": 1, "type": "ping", "payload": {}}, decision="granted", outcome="ok",
+        now_ms=int(time_module.time() * 1000))
+    assert not await connection._send_audit_batch(socket, when_due=True)
+    assert socket.sent == [] and connection._pending_audit_batch is None
+
+    monkeypatch.setattr(shore_transport_mod, "_AUDIT_BATCH_DELAY_SECONDS", 0.0)
+    assert await connection._send_audit_batch(socket, when_due=True)
+    assert len(socket.sent) == 1 and connection._pending_audit_batch is not None
+
+
+@pytest.mark.asyncio
 async def test_host_audit_batch_rejects_forged_ack_without_advancing_cursor(tmp_path):
     host_signing = ed25519.Ed25519PrivateKey.generate()
     channel = ShoreChannel(tmp_path, account_id=ACCOUNT, host_id=HOST,
