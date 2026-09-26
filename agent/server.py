@@ -128,7 +128,8 @@ init_db()
 
 # Rotate daily, keep a week of history — the log previously grew unbounded
 # (shell-appended by bin/start.sh with no timestamps, no cap).
-_LOG_DIR = _USER_CONFIG.parent / "logs"
+# SQUID_LOG_DIR lets the test suite keep its logs out of the real server.log.
+_LOG_DIR = Path(os.environ.get("SQUID_LOG_DIR") or _USER_CONFIG.parent / "logs")
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
 _log_handler = logging.handlers.TimedRotatingFileHandler(
     _LOG_DIR / "server.log", when="midnight", backupCount=7, encoding="utf-8", utc=True,

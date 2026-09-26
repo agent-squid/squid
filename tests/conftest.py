@@ -14,6 +14,9 @@ import pytest
 os.environ["SQUID_DB_PATH"] = os.path.join(
     tempfile.mkdtemp(prefix="squid-test-db-"), "squid.db"
 )
+# agent.server attaches its file log handler at import; keep test output
+# out of the real ~/.squid/logs/server.log.
+os.environ["SQUID_LOG_DIR"] = tempfile.mkdtemp(prefix="squid-test-logs-")
 
 
 @pytest.fixture(autouse=True)
