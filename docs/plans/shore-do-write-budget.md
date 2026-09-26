@@ -171,6 +171,28 @@ heartbeats without a close); `browser/` vitest ("sends zero-length transport
 heartbeats while the socket is open"); Squid `tests/test_shore_transport.py`
 (`device_offline` handling, no ping/eviction in the push sweep, header).
 
+## Phase 4c — Write-free version poll (implemented, unreleased)
+
+Measured after Phase 4b (2026-09-26, idle tab): ~60–120 rows/hr. The hosted
+client's 30s version check called `/auth/security`, which rotates the CSRF
+token (1 write per poll), and on the 401 after the 15-minute session expiry
+re-ran paired-device auth (~10 writes plus alarm cleanup, every 15 minutes).
+
+19. `GET /auth/security?view=route` returns only `accountId` and `host`, with
+    no CSRF rotation and no write. `loadAuthenticatedShoreRoute`,
+    `ensureAuthenticatedSession` and the bootstrap's `advertisedVersion` use it;
+    the security page still uses the full view.
+20. The client's version poll passes `restoreSession=false`: on 401 it skips
+    instead of recreating the session. The dashboard session still restores on
+    reconnect, and the client checks the version on every (re)subscribe.
+    Trade-off: once the session has expired, a host upgrade that keeps the
+    browser socket open is noticed at the next reconnect (at most the 1h
+    socket lifetime), not within 30s.
+
+Verification: Shore `npm test` ("serves the route view of the security surface
+without a write"); `browser/` vitest ("does not recreate an expired session
+when restoration is disabled").
+
 ## Phase 5 — Guardrails
 
 12. Done: Shore test "Durable Object write budget" instruments storage
