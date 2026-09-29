@@ -2694,7 +2694,7 @@ Object rows written, as a percentage of the daily limit, to a `quota-percent`
 KV key in a new `SHORE_CONTROL` namespace. It uses a separate token scoped to
 Workers KV Storage:Edit, which cannot deploy code. The Worker and account
 objects apply the higher of that reading and the manual `SHORE_QUOTA_PERCENT`,
-cached for a minute per isolate. KV rather than a Worker variable: a variable
+cached for five minutes per isolate (at most 288 KV reads per isolate per day). KV rather than a Worker variable: a variable
 change redeploys the Worker, which restarts Durable Objects and drops every
 relay socket. Only a well-formed reading for the current UTC day counts. A
 stale, malformed, or unreadable reading is ignored rather than failing closed,
@@ -2702,10 +2702,11 @@ so a bad measurement cannot switch Shore off, and the level resets with the
 quota at midnight. It covers DO rows written, the limit hit in practice, but not
 Worker requests. Evidence: unit tests for parsing and the higher-of rule, and a
 Worker test where a KV reading of 100% returns `503 shore_unavailable` for a new
-relay while yesterday's reading is ignored; all 201 Shore tests pass. Remaining:
-provision the namespace, binding, token, and variable (Shore degradation
-runbook, "Enabling the automatic level"); until then the Worker has no binding
-and the workflow logs a notice.
+relay while yesterday's reading is ignored; all 201 Shore tests pass. The `shore-control`
+namespace, both `wrangler.jsonc` bindings, and the `SHORE_CONTROL_NAMESPACE_ID`
+environment variable are provisioned (2026-09-29). Remaining: the KV-only
+`SHORE_CONTROL_KV_TOKEN` secret and a first published measurement (Shore
+degradation runbook, "Enabling the automatic level").
 
 #### 6.3 — Independent security review (action 3)
 
